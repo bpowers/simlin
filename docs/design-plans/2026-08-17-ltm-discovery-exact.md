@@ -97,10 +97,13 @@ useful, the failure case that must NOT happen.
 - **AC2.4** The fallback finds every loop the enumeration finds on the tests' small
   fixtures whose cycles are distinguishable by a shortest-path tree (logistic, cross-agg,
   module); discovery's semantic tests are parametrized over `Auto` and
-  `FallbackOnly(default weight)`. Where the fallback structurally differs, the difference
-  is pinned with its mechanism: a diamond whose two arms hold constant shares yields one
-  tree path per (seed, step) and so one arm (until the every-edge closure family below
-  is measured), and a stockless cycle is unreachable from stock seeds (AC1.3).
+  `FallbackOnly(default configuration)`. Where the fallback structurally differs, the
+  difference is pinned with its mechanism. Both anticipated differences were closed by
+  the Phase 3b measurements and are pinned in their new direction: a diamond's two arms
+  are both recovered (the every-edge closure family reaches the arm no single tree
+  expresses), and a stockless cycle is reached by the default seed policy while staying
+  unreachable from stock seeds alone (AC1.3) -- each arm pinned separately, so what the
+  wider setting buys is stated rather than assumed.
 - **AC3.1** `examples/ltm_discovery_bench` (release) reports World3 total discovery time
   under 1.0 s and C-LEARN under 0.2 s, with `enumeration_complete == true` on both;
   the numbers are recorded in this document's "Measured" section.
@@ -500,6 +503,103 @@ matters and never misses a dominant loop; World3's holds 150,827, and the
 same sample recovers almost none of the exact ranking. The fallback is a
 usable degradation for a sparse runtime graph and an explicit sample for a
 dense one, which is what `enumeration_complete == false` is there to say.
+
+After Phase 3b (release, Apple M-series under Asahi,
+`examples/ltm_fallback_eval` over the same simulated results, same reference
+and same statistics as the Phase 3 tables above). The fallback is configured
+on three axes -- weight, seed policy, and which cycles a completed pair of
+searches closes -- and the tables sweep them. Labels are
+`weight | seeds | closures`, where `log`/`rel`/`hop` are
+`ClampedLogAbs`/`RelativeLinkScore`/`HopCount`, `stock`/`+stockless`/`all-scc`
+are `Stocks`/`StocksAndStocklessSccs`/`AllSccNodes`, and
+`in-edge`/`every-edge` are `SeedInEdges`/`EveryEdge`.
+
+World3-03 (401 saved steps, 15 stocks, exact run 0.40 s, 200 reported loops;
+399 of 400 steps carry an active exact loop, with 42 distinct step-dominant
+loops):
+
+| weight \| seeds \| closures | time (s) | loops | recall@1 | recall@10 | recall@50 | recall@100 | recall@200 | step-dominant covered |
+|---|---|---|---|---|---|---|---|---|
+| log \| stock \| in-edge | 0.021 | 59 | 0.00 (0/1) | 0.10 (1/10) | 0.06 (3/50) | 0.03 (3/100) | 0.04 (7/200) | 0.10 (41/399) |
+| rel \| stock \| in-edge | 0.020 | 48 | 0.00 (0/1) | 0.10 (1/10) | 0.06 (3/50) | 0.03 (3/100) | 0.03 (6/200) | 0.10 (41/399) |
+| hop \| stock \| in-edge | 0.012 | 23 | 0.00 (0/1) | 0.00 (0/10) | 0.00 (0/50) | 0.00 (0/100) | 0.01 (3/200) | 0.02 (7/399) |
+| log \| stock \| every-edge | 0.141 | 200 | 0.00 (0/1) | 0.30 (3/10) | 0.18 (9/50) | 0.10 (10/100) | 0.12 (23/200) | 0.14 (55/399) |
+| rel \| stock \| every-edge | 0.133 | 200 | 0.00 (0/1) | 0.10 (1/10) | 0.12 (6/50) | 0.07 (7/100) | 0.10 (21/200) | 0.14 (55/399) |
+| hop \| stock \| every-edge | 0.086 | 147 | 0.00 (0/1) | 0.10 (1/10) | 0.06 (3/50) | 0.03 (3/100) | 0.04 (8/200) | 0.12 (46/399) |
+| log \| +stockless \| in-edge | 0.021 | 59 | 0.00 (0/1) | 0.10 (1/10) | 0.06 (3/50) | 0.03 (3/100) | 0.04 (7/200) | 0.10 (41/399) |
+| log \| +stockless \| every-edge | 0.141 | 200 | 0.00 (0/1) | 0.30 (3/10) | 0.18 (9/50) | 0.10 (10/100) | 0.12 (23/200) | 0.14 (55/399) |
+| log \| all-scc \| in-edge | 0.151 | 170 | 0.00 (0/1) | 0.10 (1/10) | 0.10 (5/50) | 0.06 (6/100) | 0.07 (14/200) | 0.13 (52/399) |
+| log \| all-scc \| every-edge | 1.031 | 200 | 0.00 (0/1) | 0.30 (3/10) | 0.26 (13/50) | 0.15 (15/100) | 0.16 (32/200) | 0.14 (56/399) |
+
+C-LEARN v77 (251 saved steps, 116 stocks, exact run 0.037 s, 153 reported
+loops; every step carries an active exact loop, with 2 distinct step-dominant
+loops -- the last recall column is over the 153 loops that exist):
+
+| weight \| seeds \| closures | time (s) | loops | recall@1 | recall@10 | recall@50 | recall@100 | recall@153 | step-dominant covered |
+|---|---|---|---|---|---|---|---|---|
+| log \| stock \| in-edge | 0.063 | 97 | 1.00 (1/1) | 0.70 (7/10) | 0.76 (38/50) | 0.67 (67/100) | 0.63 (97/153) | 1.00 (250/250) |
+| rel \| stock \| in-edge | 0.062 | 97 | 1.00 (1/1) | 0.70 (7/10) | 0.76 (38/50) | 0.67 (67/100) | 0.63 (97/153) | 1.00 (250/250) |
+| hop \| stock \| in-edge | 0.059 | 72 | 1.00 (1/1) | 0.70 (7/10) | 0.64 (32/50) | 0.47 (47/100) | 0.47 (72/153) | 1.00 (250/250) |
+| log \| stock \| every-edge | 0.148 | 150 | 1.00 (1/1) | 1.00 (10/10) | 1.00 (50/50) | 1.00 (100/100) | 0.98 (150/153) | 1.00 (250/250) |
+| rel \| stock \| every-edge | 0.147 | 146 | 1.00 (1/1) | 1.00 (10/10) | 1.00 (50/50) | 0.96 (96/100) | 0.95 (146/153) | 1.00 (250/250) |
+| hop \| stock \| every-edge | 0.133 | 139 | 1.00 (1/1) | 1.00 (10/10) | 0.94 (47/50) | 0.90 (90/100) | 0.90 (138/153) | 1.00 (250/250) |
+| log \| +stockless \| in-edge | 0.064 | 97 | 1.00 (1/1) | 0.70 (7/10) | 0.76 (38/50) | 0.67 (67/100) | 0.63 (97/153) | 1.00 (250/250) |
+| log \| +stockless \| every-edge | 0.150 | 150 | 1.00 (1/1) | 1.00 (10/10) | 1.00 (50/50) | 1.00 (100/100) | 0.98 (150/153) | 1.00 (250/250) |
+| log \| all-scc \| in-edge | 0.103 | 138 | 1.00 (1/1) | 0.70 (7/10) | 0.94 (47/50) | 0.94 (94/100) | 0.90 (138/153) | 1.00 (250/250) |
+| log \| all-scc \| every-edge | 0.488 | 153 | 1.00 (1/1) | 1.00 (10/10) | 1.00 (50/50) | 1.00 (100/100) | 1.00 (153/153) | 1.00 (250/250) |
+
+The chosen default is
+`FallbackConfig { weight: ClampedLogAbs, seeds: StocksAndStocklessSccs,
+closures: EveryEdge }`. Under it `examples/ltm_discovery_bench` reports a
+0.142 s fallback on World3 against a 0.398 s exact run and 0.148 s on C-LEARN
+against 0.037 s -- inside the constraint that the fallback cost at most half
+the exact World3 run and at most 0.2 s on either model. AC3.1 is unaffected:
+the `Auto` path still enumerates in 0.398 s and 0.037 s, complete on both.
+
+Reading the axes:
+
+- **Weight.** `ClampedLogAbs` weakly dominates the other two on every column
+  at BOTH closure settings, so the Phase 3 weight conclusion does not depend
+  on the closure choice. `HopCount`, the score-blind control, stays worst
+  everywhere, which is the result that says the score weighting is doing work
+  at all.
+- **Closures.** Closing on every edge is the lever. It is not a bigger sample
+  of the same kind: the in-edge family emits the minimum-weight cycle through
+  the SEED, and one shortest-path tree holds one route per node, so parallel
+  routes to the same node are unreachable however many seeds or steps are
+  swept; the every-edge family emits, for each edge both trees reach, the
+  minimum-weight cycle through the seed AND that edge -- the strength-weighted
+  analogue of edge coverage. World3's recall of the exact top-200 goes 7 -> 23
+  and its step-dominant coverage 41 -> 55 of 399; C-LEARN's goes 97 -> 150 of
+  153, with recall@1, @10, @50 and @100 all exactly 1.00.
+- **Seeds.** `StocksAndStocklessSccs` is measurement-neutral on both models --
+  every column matches `Stocks`, which is evidence that neither carries a
+  non-trivial SCC holding no stock -- and it closes AC1.3's gap by
+  construction rather than by luck: a cycle whose state hides in a module
+  level or a `PREVIOUS` lag between auxes has no stock to seed from, and one
+  representative per stockless component reaches it. What is NOT measured here
+  is its cost on a model that does carry such components; that cost is bounded
+  at one extra search pair per component per saved step. `AllSccNodes` did not
+  earn its place: with every-edge closures it costs 1.031 s on World3 -- 2.5x
+  the exact enumeration it stands in for -- for recall@200 of 32 against 23,
+  and with in-edge closures it costs 0.151 s for 14, worse per unit time than
+  stock-seeded every-edge's 23 at 0.141 s. It stays selectable and unused.
+- **The hop tie-break is unconditional.** Rows 1-3 above are directly
+  comparable to the After-Phase-3 tables (same harness, same models, same
+  weights, same in-edge closures; the tie-break is the only difference) and
+  every recall column is identical. It costs nothing measured, and what it
+  buys is inside the zero-weight plateau `ClampedLogAbs` creates: with a third
+  of a real graph's active links weighing exactly 0, many cycles tie, and the
+  tie-break decides among them on cycle length rather than on node numbering.
+
+**k-best via edge penalty was considered and not adopted.** World3's chosen
+strategy already reports the full 200-loop cap while spending 0.141 s of a
+~0.2 s budget, so a second penalized round does not fit inside the stated
+constraint. It is also no longer the obvious next lever: because the reported
+list is AT the cap, recall@200 is no longer bounded above by that list's
+length (the caveat the Phase 3 tables carried), so 23 of 200 is a genuine
+overlap measurement -- roughly 85x what a uniform 200-cycle sample of World3's
+150,827-cycle universe would be expected to hit.
 
 ---
 

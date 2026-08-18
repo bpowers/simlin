@@ -113,9 +113,9 @@ fn shortest_cycle(scratch: &mut FallbackScratch, seed: u32) -> Option<(f64, Vec<
     );
     let mut closings = Vec::new();
     scratch.collect_closings(seed, &mut closings);
-    let &(weight, from) = closings.first()?;
+    let &(weight, _hops, from) = closings.first()?;
     let mut path = Vec::new();
-    scratch.reconstruct_path(seed, from, &mut path);
+    scratch.write_forward_path(seed, from, &mut path);
     Some((weight, path))
 }
 
@@ -126,6 +126,37 @@ fn default_weight_is_clamped_log_abs() {
     // The design's starting formulation: the one arm that keeps Dijkstra's
     // non-negativity precondition without needing a per-target normalization.
     assert_eq!(FallbackWeight::DEFAULT, FallbackWeight::ClampedLogAbs);
+}
+
+/// The production strategy is the one `examples/ltm_fallback_eval` measured
+/// best, and each axis is pinned to the row that settled it.
+///
+/// The measurement, on World3 and C-LEARN against the exact enumeration:
+/// closing on every edge lifts World3's recall of the exact top-200 from 7 to
+/// 23 and C-LEARN's from 97 of 153 to 150, at 0.14 s and 0.15 s against a
+/// 0.40 s exact World3 run; seeding every node of the cyclic core reaches a
+/// little more still and costs 1.03 s on World3, which is more than the exact
+/// enumeration it stands in for, so it stays available and unused.
+#[test]
+fn default_config_is_the_measured_best() {
+    assert_eq!(
+        FallbackConfig::DEFAULT.weight,
+        FallbackWeight::ClampedLogAbs
+    );
+    assert_eq!(
+        FallbackConfig::DEFAULT.seeds,
+        FallbackSeeds::StocksAndStocklessSccs
+    );
+    assert_eq!(
+        FallbackConfig::DEFAULT.closures,
+        FallbackClosures::EveryEdge
+    );
+    // `with_weight` moves the weight and nothing else, which is what makes the
+    // harness's weight comparison a comparison of weights.
+    let rel = FallbackConfig::with_weight(FallbackWeight::RelativeLinkScore);
+    assert_eq!(rel.weight, FallbackWeight::RelativeLinkScore);
+    assert_eq!(rel.seeds, FallbackConfig::DEFAULT.seeds);
+    assert_eq!(rel.closures, FallbackConfig::DEFAULT.closures);
 }
 
 #[test]
@@ -382,6 +413,21 @@ fn dijkstra_min_cycle_matches_brute_force_on_random_graphs() {
 
 // --- Weight arms drive candidate selection --------------------------------
 
+/// The in-edge closure family under one named weight -- the configuration the
+/// three weight-preference tests below pin.
+///
+/// Explicit rather than `with_weight`, because those tests are about the ORDER
+/// a single shortest-path tree ranks its closures in, and the every-edge
+/// family (which the production default carries) emits by closing-edge source
+/// instead. Both orders are content-pure; only this one expresses the weight.
+fn in_edge_closures(weight: FallbackWeight) -> FallbackConfig {
+    FallbackConfig {
+        weight,
+        seeds: FallbackSeeds::Stocks,
+        closures: FallbackClosures::SeedInEdges,
+    }
+}
+
 /// Three cycles through one stock, arranged so that each weight formulation
 /// picks a different one:
 ///
@@ -410,7 +456,7 @@ fn clamped_log_abs_prefers_the_super_unit_path() {
     let out = sweep(
         &search,
         &results,
-        FallbackWeight::ClampedLogAbs,
+        in_edge_closures(FallbackWeight::ClampedLogAbs),
         None,
         &mut SystemClock,
     );
@@ -427,7 +473,7 @@ fn hop_count_prefers_the_shortest_path() {
     let out = sweep(
         &search,
         &results,
-        FallbackWeight::HopCount,
+        in_edge_closures(FallbackWeight::HopCount),
         None,
         &mut SystemClock,
     );
@@ -443,7 +489,7 @@ fn relative_link_score_prefers_the_largest_share_of_the_stocks_in_edges() {
     let out = sweep(
         &search,
         &results,
-        FallbackWeight::RelativeLinkScore,
+        in_edge_closures(FallbackWeight::RelativeLinkScore),
         None,
         &mut SystemClock,
     );
@@ -464,7 +510,7 @@ fn relative_link_score_prefers_the_largest_share_of_the_stocks_in_edges() {
     assert!(completed);
     let mut closings = Vec::new();
     scratch.collect_closings(s, &mut closings);
-    let weights: Vec<f64> = closings.iter().map(|&(w, _)| w).collect();
+    let weights: Vec<f64> = closings.iter().map(|&(w, _, _)| w).collect();
     let expected = [
         (14.5f64 / 10.0).ln(),
         (14.5f64 / 4.0).ln(),
@@ -510,7 +556,7 @@ fn emitted_cycles_are_elementary_and_simultaneously_active() {
     let out = sweep(
         &search,
         &results,
-        FallbackWeight::DEFAULT,
+        FallbackConfig::DEFAULT,
         None,
         &mut SystemClock,
     );
@@ -558,6 +604,470 @@ fn emitted_cycles_are_elementary_and_simultaneously_active() {
     }
 }
 
+// --- Search order: the hop tie-break --------------------------------------
+
+/// B1: among equally-weighted cycles the SHORTER one is preferred.
+///
+/// Under `ClampedLogAbs` every super-unit link weighs exactly 0, so a graph of
+/// them ties every route at weight 0 and the weight alone decides nothing --
+/// on World3 roughly a third of the active edges are in that plateau. The
+/// fixture makes node-id order and hop order disagree deliberately: the THREE
+/// node cycle closes through `ab` (node id 1) and the TWO node cycle through
+/// `zz` (node id 3), so a search ordered on `(weight, node)` would rank the
+/// long cycle first and one ordered on `(weight, hops, node)` ranks the short
+/// one first.
+#[test]
+fn equal_weight_cycles_are_ordered_by_hop_count_not_node_id() {
+    let (search, results) = fixture(
+        &[
+            ("aa", "ab", vec![2.0]),
+            ("ab", "s", vec![2.0]),
+            ("s", "aa", vec![2.0]),
+            ("s", "zz", vec![2.0]),
+            ("zz", "s", vec![2.0]),
+        ],
+        &["s"],
+    );
+    let (s, ab, zz) = (
+        node_id(&search, "s"),
+        node_id(&search, "ab"),
+        node_id(&search, "zz"),
+    );
+    assert!(
+        ab < zz,
+        "the long cycle must close through the lower node id"
+    );
+
+    let mut scratch = FallbackScratch::new(&search);
+    scratch.load_step(&search, &results, 1, FallbackWeight::ClampedLogAbs);
+    assert!(scratch.dijkstra_from(s, None, &mut SystemClock));
+    let mut closings = Vec::new();
+    scratch.collect_closings(s, &mut closings);
+    assert_eq!(
+        closings,
+        vec![(0.0, 2, zz), (0.0, 3, ab)],
+        "both cycles weigh 0; the two-hop one comes first"
+    );
+
+    let out = sweep(
+        &search,
+        &results,
+        in_edge_closures(FallbackWeight::ClampedLogAbs),
+        None,
+        &mut SystemClock,
+    );
+    assert_eq!(
+        named(&search, &out.paths),
+        vec![vec!["s", "zz"], vec!["s", "aa", "ab"]],
+        "the sweep emits a seed's closures cheapest first, and among equals \
+         shortest first"
+    );
+}
+
+// --- Every-edge closures --------------------------------------------------
+
+/// Every simple cycle through `seed`, as `(total weight, node path starting at
+/// the seed)`.
+///
+/// The oracle the every-edge closures are measured against: it enumerates
+/// simple paths directly over the same weighted step graph the search reads,
+/// sharing no code with the search itself.
+fn brute_force_cycles_through_seed(adj: &[Vec<WeightedEdge>], seed: u32) -> Vec<(f64, Vec<u32>)> {
+    fn walk(
+        adj: &[Vec<WeightedEdge>],
+        seed: u32,
+        node: u32,
+        on_path: &mut [bool],
+        path: &mut Vec<u32>,
+        acc: f64,
+        out: &mut Vec<(f64, Vec<u32>)>,
+    ) {
+        for edge in &adj[node as usize] {
+            if edge.node == seed {
+                out.push((acc + edge.weight, path.clone()));
+            } else if !on_path[edge.node as usize] {
+                on_path[edge.node as usize] = true;
+                path.push(edge.node);
+                walk(adj, seed, edge.node, on_path, path, acc + edge.weight, out);
+                path.pop();
+                on_path[edge.node as usize] = false;
+            }
+        }
+    }
+    let mut on_path = vec![false; adj.len()];
+    on_path[seed as usize] = true;
+    let mut path = vec![seed];
+    let mut out = Vec::new();
+    walk(adj, seed, seed, &mut on_path, &mut path, 0.0, &mut out);
+    out
+}
+
+/// Whether `cycle` (a node sequence, closing implicitly) traverses `from -> to`.
+fn cycle_has_edge(cycle: &[u32], from: u32, to: u32) -> bool {
+    (0..cycle.len()).any(|i| cycle[i] == from && cycle[(i + 1) % cycle.len()] == to)
+}
+
+/// The closures produced for one (seed, step) under `EveryEdge`, as node paths.
+fn every_edge_closures(scratch: &mut FallbackScratch, seed: u32) -> Vec<Vec<u32>> {
+    assert!(scratch.dijkstra_from(seed, None, &mut SystemClock));
+    assert!(scratch.dijkstra_to(seed, None, &mut SystemClock));
+    let mut dedup = CycleDedup::default();
+    let mut paths = Vec::new();
+    let mut cycle = Vec::new();
+    scratch.collect_every_edge_closures(seed, &mut cycle, &mut dedup, &mut paths);
+    paths
+}
+
+/// AC2.3 for the every-edge family, against the brute-force oracle on the same
+/// deterministic corpus the single-tree exactness test uses.
+///
+/// Two claims, and the first is the one that says what this closure family IS:
+/// every emitted cycle is, for at least one of its own edges, the
+/// minimum-weight simple cycle through the seed and that edge. That holds
+/// unconditionally -- a closure's weight is the sum of two shortest-path
+/// halves, which lower-bounds every simple cycle through the seed and its
+/// edge, and an emitted closure is itself such a cycle, so the bound is met.
+///
+/// The second is coverage: over the corpus most (edge, seed) pairs that have a
+/// simple cycle at all get one at the oracle's minimum. It is not all of them,
+/// and that is the family's stated boundary rather than a defect: when the two
+/// tree halves share a node the concatenation is not elementary and the
+/// candidate is skipped.
+#[test]
+fn every_edge_closures_are_minimum_weight_cycles_through_their_edge() {
+    let arms = [
+        FallbackWeight::ClampedLogAbs,
+        FallbackWeight::RelativeLinkScore,
+        FallbackWeight::HopCount,
+    ];
+    let names = ["n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7"];
+    let mut checked_cycles = 0usize;
+    let mut pairs_with_a_cycle = 0usize;
+    let mut pairs_covered = 0usize;
+
+    for seed_value in 1..=40u64 {
+        let mut rng = Lcg(seed_value);
+        let n = 3 + (rng.next_u32() % 6) as usize;
+        let density = 0.10 + 0.06 * ((seed_value % 6) as f64);
+        let mut edges: Vec<FixtureEdge> = Vec::new();
+        for from in 0..n {
+            for to in 0..n {
+                if from == to || rng.next_unit() > density {
+                    continue;
+                }
+                let score = (rng.next_unit() * 6.0 - 3.0).exp();
+                edges.push((names[from], names[to], vec![score]));
+            }
+        }
+        if edges.is_empty() {
+            continue;
+        }
+        let (search, results) = fixture(&edges, &["n0"]);
+        let seed = node_id(&search, "n0");
+        let mut scratch = FallbackScratch::new(&search);
+
+        for arm in arms {
+            scratch.load_step(&search, &results, 1, arm);
+            let oracle = brute_force_cycles_through_seed(&scratch.adj, seed);
+            let emitted = every_edge_closures(&mut scratch, seed);
+
+            for cycle in &emitted {
+                // Soundness: elementary, through the seed, over active edges.
+                let mut seen: Vec<u32> = cycle.clone();
+                seen.sort_unstable();
+                seen.dedup();
+                assert_eq!(seen.len(), cycle.len(), "{cycle:?} repeats a node");
+                assert!(cycle.contains(&seed), "{cycle:?} misses the seed");
+                let weight = path_weight(&scratch.adj, cycle);
+
+                // Optimality: minimal for at least one of its own edges.
+                let optimal_for_some_edge = (0..cycle.len()).any(|i| {
+                    let (u, w) = (cycle[i], cycle[(i + 1) % cycle.len()]);
+                    let best = oracle
+                        .iter()
+                        .filter(|(_, c)| cycle_has_edge(c, u, w))
+                        .map(|(weight, _)| *weight)
+                        .fold(f64::INFINITY, f64::min);
+                    (weight - best).abs() <= 1e-9 * best.abs().max(1.0)
+                });
+                assert!(
+                    optimal_for_some_edge,
+                    "graph {seed_value} arm {arm:?}: {cycle:?} at {weight} is not the \
+                     minimum-weight cycle through the seed and any of its own edges"
+                );
+                checked_cycles += 1;
+            }
+
+            // Coverage: how many (edge, seed) pairs the family reaches.
+            for u in 0..scratch.adj.len() as u32 {
+                for k in 0..scratch.adj[u as usize].len() {
+                    let w = scratch.adj[u as usize][k].node;
+                    let best = oracle
+                        .iter()
+                        .filter(|(_, c)| cycle_has_edge(c, u, w))
+                        .map(|(weight, _)| *weight)
+                        .fold(f64::INFINITY, f64::min);
+                    if !best.is_finite() {
+                        continue;
+                    }
+                    pairs_with_a_cycle += 1;
+                    let covered = emitted.iter().any(|c| {
+                        cycle_has_edge(c, u, w)
+                            && (path_weight(&scratch.adj, c) - best).abs()
+                                <= 1e-9 * best.abs().max(1.0)
+                    });
+                    if covered {
+                        pairs_covered += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        checked_cycles >= 100,
+        "corpus must actually emit closures ({checked_cycles} checked)"
+    );
+    assert!(
+        pairs_with_a_cycle >= 100,
+        "corpus must contain edges on cycles ({pairs_with_a_cycle})"
+    );
+    // The family is a strong sampler, not an enumeration: a closure whose two
+    // tree halves overlap is skipped, so coverage is high rather than total.
+    assert!(
+        pairs_covered * 4 >= pairs_with_a_cycle * 3,
+        "every-edge closures should cover most edge-and-seed pairs, covered \
+         {pairs_covered} of {pairs_with_a_cycle}"
+    );
+}
+
+/// The every-edge family is a SUPERSET of the seed-in-edge closures: the
+/// `w == seed` cases are exactly those, so nothing the cheap policy finds can
+/// be lost by turning the expensive one on.
+#[test]
+fn every_edge_closures_include_every_seed_in_edge_closure() {
+    let names = ["n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7"];
+    let mut compared = 0usize;
+    for seed_value in 1..=40u64 {
+        let mut rng = Lcg(seed_value);
+        let n = 3 + (rng.next_u32() % 6) as usize;
+        let density = 0.10 + 0.06 * ((seed_value % 6) as f64);
+        let mut edges: Vec<FixtureEdge> = Vec::new();
+        for from in 0..n {
+            for to in 0..n {
+                if from == to || rng.next_unit() > density {
+                    continue;
+                }
+                let score = (rng.next_unit() * 6.0 - 3.0).exp();
+                edges.push((names[from], names[to], vec![score]));
+            }
+        }
+        if edges.is_empty() {
+            continue;
+        }
+        let (search, results) = fixture(&edges, &["n0"]);
+        let cheap = sweep(
+            &search,
+            &results,
+            FallbackConfig {
+                closures: FallbackClosures::SeedInEdges,
+                ..FallbackConfig::DEFAULT
+            },
+            None,
+            &mut SystemClock,
+        );
+        let rich = sweep(
+            &search,
+            &results,
+            FallbackConfig {
+                closures: FallbackClosures::EveryEdge,
+                ..FallbackConfig::DEFAULT
+            },
+            None,
+            &mut SystemClock,
+        );
+        for path in &cheap.paths {
+            assert!(
+                rich.paths.iter().any(|p| is_same_cycle(path, p)),
+                "graph {seed_value}: every-edge closures dropped {path:?}"
+            );
+            compared += 1;
+        }
+    }
+    assert!(compared >= 20, "corpus must find cycles ({compared})");
+}
+
+/// AC2.4's diamond, re-measured: two parallel routes between the same pair of
+/// nodes are exactly what ONE shortest-path tree cannot express, and exactly
+/// what closing on every edge recovers -- the edge `y -> z` is closed by the
+/// tree path to `y` and the reverse tree path from `z`.
+#[test]
+fn every_edge_closures_recover_both_arms_of_a_diamond() {
+    let (search, results) = fixture(
+        &[
+            ("s", "x", vec![2.0]),
+            ("s", "y", vec![2.0]),
+            ("x", "z", vec![2.0]),
+            ("y", "z", vec![2.0]),
+            ("z", "s", vec![2.0]),
+        ],
+        &["s"],
+    );
+    let sets = |out: &FallbackOutcome| -> Vec<Vec<String>> {
+        let mut sets: Vec<Vec<String>> = named(&search, &out.paths)
+            .into_iter()
+            .map(|mut p| {
+                p.sort();
+                p
+            })
+            .collect();
+        sets.sort();
+        sets
+    };
+
+    let cheap = sweep(
+        &search,
+        &results,
+        FallbackConfig {
+            closures: FallbackClosures::SeedInEdges,
+            ..FallbackConfig::DEFAULT
+        },
+        None,
+        &mut SystemClock,
+    );
+    assert_eq!(
+        cheap.paths.len(),
+        1,
+        "one tree holds one route to `z`, so the seed's single in-edge closes \
+         one arm: {:?}",
+        named(&search, &cheap.paths)
+    );
+
+    let rich = sweep(
+        &search,
+        &results,
+        FallbackConfig {
+            closures: FallbackClosures::EveryEdge,
+            ..FallbackConfig::DEFAULT
+        },
+        None,
+        &mut SystemClock,
+    );
+    assert_eq!(
+        sets(&rich),
+        vec![
+            vec!["s".to_string(), "x".to_string(), "z".to_string()],
+            vec!["s".to_string(), "y".to_string(), "z".to_string()],
+        ],
+    );
+}
+
+// --- Seed policy ----------------------------------------------------------
+
+/// A stock cycle beside a cycle with no stock in it -- the shape of
+/// module-level state or a `PREVIOUS` lag between two auxes.
+fn stock_and_stockless_cycles() -> (IndexedSearch, Results) {
+    fixture(
+        &[
+            ("s", "f", vec![2.0]),
+            ("f", "s", vec![2.0]),
+            ("p", "q", vec![2.0]),
+            ("q", "p", vec![2.0]),
+        ],
+        &["s"],
+    )
+}
+
+/// Each seed policy is pinned on the one thing that separates it from its
+/// neighbour: whether a cycle touching no stock is reachable at all.
+#[test]
+fn the_seed_policy_decides_whether_a_stockless_cycle_is_reachable() {
+    let (search, results) = stock_and_stockless_cycles();
+    let stock_cycle = vec!["f".to_string(), "s".to_string()];
+    let stockless_cycle = vec!["p".to_string(), "q".to_string()];
+    let sets = |policy: FallbackSeeds| -> Vec<Vec<String>> {
+        let out = sweep(
+            &search,
+            &results,
+            FallbackConfig {
+                seeds: policy,
+                ..FallbackConfig::DEFAULT
+            },
+            None,
+            &mut SystemClock,
+        );
+        let mut sets: Vec<Vec<String>> = named(&search, &out.paths)
+            .into_iter()
+            .map(|mut p| {
+                p.sort();
+                p
+            })
+            .collect();
+        sets.sort();
+        sets
+    };
+
+    assert_eq!(
+        sets(FallbackSeeds::Stocks),
+        vec![stock_cycle.clone()],
+        "stock seeds reach no cycle that holds no stock"
+    );
+    assert_eq!(
+        sets(FallbackSeeds::StocksAndStocklessSccs),
+        vec![stock_cycle.clone(), stockless_cycle.clone()],
+        "one representative per stockless component closes that gap"
+    );
+    assert_eq!(
+        sets(FallbackSeeds::AllSccNodes),
+        vec![stock_cycle, stockless_cycle],
+        "seeding every node in the cyclic core reaches both"
+    );
+}
+
+/// The seed sets themselves, so the policies are pinned on WHICH nodes they
+/// search from and not only on what those searches happen to find. A node on
+/// no cycle at this step is never a seed under any policy -- a search from one
+/// can close nothing.
+#[test]
+fn each_seed_policy_selects_the_nodes_it_names() {
+    // `dead` sits outside every cycle, so no policy may seed it.
+    let (search, results) = fixture(
+        &[
+            ("s", "f", vec![2.0]),
+            ("f", "s", vec![2.0]),
+            ("p", "q", vec![2.0]),
+            ("q", "p", vec![2.0]),
+            ("s", "dead", vec![2.0]),
+        ],
+        &["s"],
+    );
+    let mut scratch = FallbackScratch::new(&search);
+    scratch.load_step(&search, &results, 1, FallbackWeight::DEFAULT);
+    let names_of = |scratch: &mut FallbackScratch, policy| -> Vec<String> {
+        let mut seeds = Vec::new();
+        scratch.collect_seeds(&search, policy, &mut seeds);
+        seeds
+            .iter()
+            .map(|&n| search.idents[n as usize].as_str().to_string())
+            .collect()
+    };
+
+    assert_eq!(names_of(&mut scratch, FallbackSeeds::Stocks), vec!["s"]);
+    // `p` is the lower-id node of the stockless component, so it represents it.
+    assert_eq!(
+        names_of(&mut scratch, FallbackSeeds::StocksAndStocklessSccs),
+        vec!["s", "p"],
+        "stocks first, then one representative per stockless component"
+    );
+    let mut all = names_of(&mut scratch, FallbackSeeds::AllSccNodes);
+    all.sort();
+    assert_eq!(
+        all,
+        vec!["f", "p", "q", "s"],
+        "every node in a non-trivial component, and nothing outside one"
+    );
+}
+
 // --- Self edges -----------------------------------------------------------
 
 #[test]
@@ -569,7 +1079,7 @@ fn a_stock_with_only_a_self_edge_yields_no_cycle() {
     let out = sweep(
         &search,
         &results,
-        FallbackWeight::DEFAULT,
+        FallbackConfig::DEFAULT,
         None,
         &mut SystemClock,
     );
@@ -590,7 +1100,7 @@ fn a_self_edge_inside_a_real_cycle_is_never_traversed() {
     let out = sweep(
         &search,
         &results,
-        FallbackWeight::DEFAULT,
+        FallbackConfig::DEFAULT,
         None,
         &mut SystemClock,
     );
@@ -614,7 +1124,7 @@ fn the_same_cycle_seen_from_two_stocks_is_emitted_once() {
     let out = sweep(
         &search,
         &results,
-        FallbackWeight::DEFAULT,
+        FallbackConfig::DEFAULT,
         None,
         &mut SystemClock,
     );
@@ -633,7 +1143,7 @@ fn the_same_cycle_seen_at_two_steps_is_emitted_once() {
     let out = sweep(
         &search,
         &results,
-        FallbackWeight::DEFAULT,
+        FallbackConfig::DEFAULT,
         None,
         &mut SystemClock,
     );
@@ -664,7 +1174,7 @@ fn opposite_direction_three_cycles_are_both_kept() {
     let out = sweep(
         &search,
         &results,
-        FallbackWeight::DEFAULT,
+        FallbackConfig::DEFAULT,
         None,
         &mut SystemClock,
     );
@@ -705,7 +1215,7 @@ fn an_already_expired_deadline_yields_no_paths() {
     let out = sweep(
         &search,
         &results,
-        FallbackWeight::DEFAULT,
+        FallbackConfig::DEFAULT,
         Some(deadline),
         &mut clock,
     );
@@ -726,7 +1236,7 @@ fn a_deadline_expiring_after_the_first_step_keeps_that_steps_cycles() {
     let out = sweep(
         &search,
         &results,
-        FallbackWeight::DEFAULT,
+        FallbackConfig::DEFAULT,
         Some(deadline),
         &mut clock,
     );
@@ -760,7 +1270,7 @@ fn a_deadline_expiring_between_seed_stocks_completes_no_step() {
     let out = sweep(
         &search,
         &results,
-        FallbackWeight::DEFAULT,
+        FallbackConfig::DEFAULT,
         Some(deadline),
         &mut clock,
     );
@@ -784,6 +1294,10 @@ fn a_deadline_expiring_inside_a_search_keeps_what_it_can_already_close() {
     // was reached but before it settled, which still closes `s -> a -> s`:
     // the parent tree is valid at every instant, so a truncated search returns
     // real loops rather than nothing.
+    //
+    // Pinned at the single-search closure family, because that is what makes
+    // the schedule three-place; the two-search family's own schedule is the
+    // next test.
     let _guard = DeadlinePopIntervalGuard::new(1);
     let (search, results) = two_step_fixture();
     let mut clock = ScriptedClock::new(4);
@@ -791,12 +1305,47 @@ fn a_deadline_expiring_inside_a_search_keeps_what_it_can_already_close() {
     let out = sweep(
         &search,
         &results,
-        FallbackWeight::DEFAULT,
+        in_edge_closures(FallbackWeight::DEFAULT),
         Some(deadline),
         &mut clock,
     );
     assert_eq!(
         clock.reads, 4,
+        "the read schedule this test is calibrated to"
+    );
+    assert!(out.truncated);
+    assert_eq!(out.steps_processed, 0, "step 1 never finished");
+    assert_eq!(named(&search, &out.paths), vec![vec!["s", "a"]]);
+}
+
+/// The every-edge family runs a SECOND search per seed, and it must run even
+/// when the first was cut short: the closures read a forward tree and a
+/// reverse tree together, and a reverse tree left over from the previous seed
+/// would splice two unrelated trees into a walk that is no cycle at all.
+///
+/// Reads here: step 1's top (1), the pre-search check (2), the forward
+/// search's two pops (3, 4 -- expiring at 4), then the reverse search's first
+/// pop (5), which sees the expiry and returns immediately. The reverse tree it
+/// leaves behind holds only the seed, which is enough to close `s -> a -> s`
+/// through the in-edge case.
+#[test]
+fn a_deadline_expiring_inside_a_search_still_runs_the_reverse_search() {
+    let _guard = DeadlinePopIntervalGuard::new(1);
+    let (search, results) = two_step_fixture();
+    let mut clock = ScriptedClock::new(4);
+    let deadline = clock.deadline();
+    let out = sweep(
+        &search,
+        &results,
+        FallbackConfig {
+            closures: FallbackClosures::EveryEdge,
+            ..FallbackConfig::DEFAULT
+        },
+        Some(deadline),
+        &mut clock,
+    );
+    assert_eq!(
+        clock.reads, 5,
         "the read schedule this test is calibrated to"
     );
     assert!(out.truncated);
@@ -810,7 +1359,7 @@ fn an_unbudgeted_sweep_never_reads_the_clock() {
     // Scripted to expire on its very first read: if the sweep ever consulted
     // it, the run would truncate immediately.
     let mut clock = ScriptedClock::new(1);
-    let out = sweep(&search, &results, FallbackWeight::DEFAULT, None, &mut clock);
+    let out = sweep(&search, &results, FallbackConfig::DEFAULT, None, &mut clock);
     assert_eq!(clock.reads, 0);
     assert!(!out.truncated);
     assert_eq!(out.steps_processed, 2);
@@ -830,8 +1379,27 @@ fn sweep_output_is_content_pure() {
         FallbackWeight::RelativeLinkScore,
         FallbackWeight::HopCount,
     ] {
-        let first = sweep(&search, &results, arm, None, &mut SystemClock);
-        let second = sweep(&search, &results, arm, None, &mut SystemClock);
+        let config = FallbackConfig::with_weight(arm);
+        let first = sweep(&search, &results, config, None, &mut SystemClock);
+        let second = sweep(&search, &results, config, None, &mut SystemClock);
+        let cheap_first = sweep(
+            &search,
+            &results,
+            in_edge_closures(arm),
+            None,
+            &mut SystemClock,
+        );
+        let cheap_second = sweep(
+            &search,
+            &results,
+            in_edge_closures(arm),
+            None,
+            &mut SystemClock,
+        );
+        assert_eq!(
+            cheap_first.paths, cheap_second.paths,
+            "{arm:?} in-edge closures are order-unstable"
+        );
         assert_eq!(first.paths, second.paths, "{arm:?} is order-unstable");
         assert_eq!(first.steps_processed, second.steps_processed);
         assert_eq!(first.truncated, second.truncated);
@@ -844,7 +1412,7 @@ fn an_empty_graph_sweeps_to_nothing() {
     let out = sweep(
         &search,
         &results,
-        FallbackWeight::DEFAULT,
+        FallbackConfig::DEFAULT,
         None,
         &mut SystemClock,
     );

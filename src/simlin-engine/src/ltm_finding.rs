@@ -57,7 +57,7 @@ use enum_gen::{
 // mounted here purely for the per-file line cap.
 #[path = "ltm_finding_fallback.rs"]
 mod fallback;
-pub use fallback::FallbackWeight;
+pub use fallback::{FallbackClosures, FallbackConfig, FallbackSeeds, FallbackWeight};
 
 // --- Types ---
 
@@ -2178,11 +2178,11 @@ pub enum CandidateGen {
     /// finishes within its budgets), the shortest-path fallback after it. The
     /// production default.
     Auto,
-    /// The shortest-path fallback only, under the named weight formulation --
-    /// how the evaluation harness measures a weight's recall against the exact
+    /// The shortest-path fallback only, under the named configuration -- how
+    /// the evaluation harness measures a strategy's recall against the exact
     /// enumeration, and how a test exercises the fallback's semantics without
     /// having to defeat the enumerator's budgets.
-    FallbackOnly(FallbackWeight),
+    FallbackOnly(FallbackConfig),
 }
 
 /// [`discover_loops_with_graph`] with the candidate generator pinned.
@@ -2461,14 +2461,14 @@ pub(crate) fn discover_loops_with_deadlines(
     }
 
     if !enumeration_complete {
-        // --- Fallback candidate generation: per (stock, step) shortest cycle
+        // --- Fallback candidate generation: per (seed, step) shortest cycles
         // (`ltm_finding_fallback.rs`). `CandidateGen::Auto` uses the default
-        // weight; `FallbackOnly` names its own.
-        let weight = match candidate_gen {
-            CandidateGen::Auto => FallbackWeight::DEFAULT,
-            CandidateGen::FallbackOnly(weight) => weight,
+        // configuration; `FallbackOnly` names its own.
+        let config = match candidate_gen {
+            CandidateGen::Auto => FallbackConfig::DEFAULT,
+            CandidateGen::FallbackOnly(config) => config,
         };
-        let outcome = fallback::sweep(&search, results, weight, deadlines.fallback, clock);
+        let outcome = fallback::sweep(&search, results, config, deadlines.fallback, clock);
         truncated = outcome.truncated;
         debug_assert!(
             outcome.truncated || outcome.steps_processed == step_count.saturating_sub(1),

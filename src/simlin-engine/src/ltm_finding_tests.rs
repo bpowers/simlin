@@ -2034,7 +2034,7 @@ fn discover_reducer_feedback(elems: &[&str], candidate_gen: CandidateGen) -> Dis
 fn discovery_recovers_cross_agg_loops_end_to_end() {
     for candidate_gen in [
         CandidateGen::Auto,
-        CandidateGen::FallbackOnly(FallbackWeight::DEFAULT),
+        CandidateGen::FallbackOnly(FallbackConfig::DEFAULT),
     ] {
         let result = discover_reducer_feedback(&["a", "b", "c"], candidate_gen);
         assert_eq!(
@@ -2533,7 +2533,7 @@ fn a_module_loop_contributes_its_override_mass_to_the_denominator() {
 fn a_module_loop_is_recovered_and_scored_alike_by_both_generators() {
     let (auto, _) = discover_multi_output_module_feedback(CandidateGen::Auto);
     let (fallback, _) =
-        discover_multi_output_module_feedback(CandidateGen::FallbackOnly(FallbackWeight::DEFAULT));
+        discover_multi_output_module_feedback(CandidateGen::FallbackOnly(FallbackConfig::DEFAULT));
     assert!(auto.enumeration_complete);
     assert!(!fallback.enumeration_complete);
 
@@ -3301,7 +3301,7 @@ fn enumeration_and_fallback_agree_on_a_simple_model() {
     let auto = discover_project(&project, CandidateGen::Auto);
     let fallback = discover_project(
         &project,
-        CandidateGen::FallbackOnly(FallbackWeight::DEFAULT),
+        CandidateGen::FallbackOnly(FallbackConfig::DEFAULT),
     );
 
     assert!(auto.enumeration_complete, "tiny model must enumerate fully");
@@ -3377,7 +3377,7 @@ fn a_previous_self_latch_is_not_reported_as_a_loop() {
     let auto = discover_project(&project, CandidateGen::Auto);
     let fallback = discover_project(
         &project,
-        CandidateGen::FallbackOnly(FallbackWeight::DEFAULT),
+        CandidateGen::FallbackOnly(FallbackConfig::DEFAULT),
     );
 
     assert!(auto.enumeration_complete);
@@ -3448,7 +3448,7 @@ fn staggered_activity_cycle_is_not_reported_by_either_generator() {
     let fallback = discover_with(
         &results,
         &ctx,
-        CandidateGen::FallbackOnly(FallbackWeight::DEFAULT),
+        CandidateGen::FallbackOnly(FallbackConfig::DEFAULT),
     );
     assert!(auto.enumeration_complete);
     for r in [&auto, &fallback] {
@@ -3480,7 +3480,7 @@ fn enumeration_budget_trip_falls_back_to_the_shortest_path_sweep() {
     ]);
     let pinned = discover_project(
         &project,
-        CandidateGen::FallbackOnly(FallbackWeight::DEFAULT),
+        CandidateGen::FallbackOnly(FallbackConfig::DEFAULT),
     );
 
     let _guard = EnumBudgetGuard::new(1, u64::MAX, u64::MAX);
@@ -3496,19 +3496,21 @@ fn enumeration_budget_trip_falls_back_to_the_shortest_path_sweep() {
     }
 }
 
-/// AC2.4's counter-row: a diamond -- two parallel paths sharing an entry stock
-/// and an exit aux -- is where the two generators legitimately DIFFER, and the
-/// difference is a property of the fallback's shape rather than a defect.
+/// AC2.4's diamond -- two parallel paths sharing an entry stock and an exit
+/// aux -- is the shape one shortest-path tree structurally cannot express: it
+/// holds ONE route per node, so of two parallel routes to the shared exit only
+/// the cheaper is a tree path, and the stock's single in-edge closes exactly
+/// one cycle.
 ///
-/// The enumerator emits both loops. The fallback runs one Dijkstra per (stock,
-/// step) and a shortest-path tree holds ONE path per node, so of two parallel
-/// routes to the shared exit only the cheaper is expressible, and the stock's
-/// single in-edge closes exactly one cycle. Here `x` carries the larger share
-/// of `z`'s change at every step, so it is that arm's loop that survives --
-/// deterministically, not by traversal accident, which is the whole reason the
-/// fallback is preferable to a work-capped sampler.
+/// Closing on EVERY edge rather than only the seed's in-edges is what recovers
+/// the sibling: the edge `y -> z` is closed by the forward tree path to `y`
+/// and the reverse tree path from `z`, neither of which needs `y` to lie on
+/// the forward route to `z`. Both generators therefore report both arms here.
+/// The per-family mechanism -- and that the cheap in-edge family still finds
+/// exactly one arm -- is pinned in `ltm_finding_fallback_tests.rs`'s
+/// `every_edge_closures_recover_both_arms_of_a_diamond`.
 #[test]
-fn a_diamond_is_enumerated_whole_and_sampled_by_the_fallback() {
+fn a_diamond_is_enumerated_whole_and_recovered_by_the_fallback() {
     let project = enum_test_project(vec![
         enum_stock("s", "100", &["f"], &[]),
         enum_aux("x", "s * 0.5"),
@@ -3558,19 +3560,13 @@ fn a_diamond_is_enumerated_whole_and_sampled_by_the_fallback() {
 
     let fallback = discover_project(
         &project,
-        CandidateGen::FallbackOnly(FallbackWeight::DEFAULT),
+        CandidateGen::FallbackOnly(FallbackConfig::DEFAULT),
     );
     assert!(!fallback.enumeration_complete);
     assert_eq!(
         node_sets(&fallback),
-        vec![vec![
-            "f".to_string(),
-            "s".to_string(),
-            "x".to_string(),
-            "z".to_string()
-        ]],
-        "one tree, one path per node: the fallback recovers the cheaper arm \
-         (`x`, which explains more of `z`) and not its sibling"
+        node_sets(&auto),
+        "closing on every edge recovers the arm no single tree expresses"
     );
 }
 
@@ -3578,13 +3574,14 @@ fn a_diamond_is_enumerated_whole_and_sampled_by_the_fallback() {
 /// step back -- is a real loop and enumeration reports it, in a Solo
 /// normalization group, ranked after every competing loop.
 ///
-/// It is the shape a stock-seeded generator structurally cannot reach, which
-/// is why the same fixture pins the fallback's silence: this is not a bug in
-/// the fallback but the boundary of what "seed from every stock" can see, and
-/// it is exactly why the enumeration is the primary path rather than an
-/// optimization of the old one.
+/// The fallback reaches it too, because its seed policy adds one node per
+/// non-trivial component holding no stock. A purely stock-seeded search cannot
+/// -- there is no stock on the cycle to start from -- which is what that
+/// policy exists to close, and this fixture pins both arms. The per-policy
+/// seed SETS are pinned in `ltm_finding_fallback_tests.rs`'s
+/// `each_seed_policy_selects_the_nodes_it_names`.
 #[test]
-fn a_stockless_two_node_cycle_is_enumeration_only_and_ranks_after_competing_loops() {
+fn a_stockless_two_node_cycle_is_found_by_both_generators_and_ranks_last() {
     let project = enum_test_project(vec![
         enum_stock("population", "100", &["births"], &["deaths"]),
         enum_flow("births", "population * 0.1"),
@@ -3639,12 +3636,27 @@ fn a_stockless_two_node_cycle_is_enumeration_only_and_ranks_after_competing_loop
 
     let fallback = discover_project(
         &project,
-        CandidateGen::FallbackOnly(FallbackWeight::DEFAULT),
+        CandidateGen::FallbackOnly(FallbackConfig::DEFAULT),
     );
     assert!(
-        !node_sets(&fallback).contains(&stockless),
-        "the fallback seeds from stocks, so a cycle through none of them is \
-         unreachable to it -- the difference the enumeration exists to close"
+        node_sets(&fallback).contains(&stockless),
+        "the default seed policy adds a representative of each stockless \
+         component, so the fallback reaches this cycle; got {:?}",
+        node_sets(&fallback)
+    );
+
+    // The stock-seeded arm is what cannot: same fixture, one knob moved, so
+    // what the wider policy buys is stated rather than assumed.
+    let stock_seeded = discover_project(
+        &project,
+        CandidateGen::FallbackOnly(FallbackConfig {
+            seeds: FallbackSeeds::Stocks,
+            ..FallbackConfig::DEFAULT
+        }),
+    );
+    assert!(
+        !node_sets(&stock_seeded).contains(&stockless),
+        "a cycle through no stock is unreachable from stock seeds"
     );
 }
 
@@ -4397,7 +4409,7 @@ fn a_cycle_active_at_only_one_step_is_found_by_both_generators() {
     let outcome = super::fallback::sweep(
         &search,
         &results,
-        FallbackWeight::DEFAULT,
+        FallbackConfig::DEFAULT,
         None,
         &mut SystemClock,
     );

@@ -6,12 +6,18 @@
 //! exact union-graph enumeration on real models
 //! (docs/design-plans/2026-08-17-ltm-discovery-exact.md, AC7.2).
 //!
-//! `examples/ltm_discovery_bench` answers "is each weight formulation fast
-//! enough to be a fallback"; this answers "which loops does it lose", which is
-//! what settles [`FallbackWeight::DEFAULT`]. For each model it simulates once,
-//! runs discovery under `CandidateGen::Auto` (asserting
-//! `enumeration_complete`, so the reference really is the exact path), and
-//! then re-runs discovery under each `FallbackWeight` over the SAME results.
+//! `examples/ltm_discovery_bench` answers "is each strategy fast enough to be
+//! a fallback"; this answers "which loops does it lose", which is what settles
+//! [`FallbackConfig::DEFAULT`]. For each model it simulates once, runs
+//! discovery under `CandidateGen::Auto` (asserting `enumeration_complete`, so
+//! the reference really is the exact path), and then re-runs discovery under
+//! each strategy over the SAME results.
+//!
+//! The strategy space has three axes -- the weight formulation, the seed
+//! policy, and which cycles a completed search closes -- and they are not
+//! independent: widening the seed set and closing on every edge both buy
+//! recall with time, and which trade is worth taking is a fact about real
+//! runtime graphs rather than something to argue from the shapes.
 //!
 //! **What the numbers establish.** The reference is the `Auto` run's REPORTED
 //! loop list: the retention survivors ranked competitive-first by mean
@@ -68,22 +74,120 @@ use simlin_engine::db::{
     model_element_causal_edges, model_ltm_variables, project_datamodel_dims,
     sync_from_datamodel_incremental,
 };
-use simlin_engine::ltm_finding::{CandidateGen, FallbackWeight, FoundLoop};
+use simlin_engine::ltm_finding::{
+    CandidateGen, FallbackClosures, FallbackConfig, FallbackSeeds, FallbackWeight, FoundLoop,
+};
 use simlin_engine::{canonicalize, open_vensim, open_xmile};
 
 /// Recall is reported at these prefix lengths of the exact ranked list.
 const RECALL_KS: [usize; 5] = [1, 10, 50, 100, 200];
 
-/// Every `FallbackWeight` arm, with the label used in the printed table.
+/// The strategies measured, with the label used in the printed table.
 ///
-/// Derived by hand from the enum's variant list rather than from a
-/// `strum`-style iterator, so adding an arm without adding it here shows up as
-/// a missing table row rather than as silently unmeasured behaviour.
-const WEIGHTS: [(&str, FallbackWeight); 3] = [
-    ("ClampedLogAbs", FallbackWeight::ClampedLogAbs),
-    ("RelativeLinkScore", FallbackWeight::RelativeLinkScore),
-    ("HopCount", FallbackWeight::HopCount),
+/// Derived by hand from the three enums' variant lists rather than from their
+/// full cross product: the weight axis is swept at the cheapest setting of the
+/// other two (rows 1-3, which is AC7.2's weight comparison), and the seed and
+/// closure axes are then swept at the best weight. A full cross product would
+/// be 18 rows of which most repeat the same comparison, and the expensive
+/// corners take minutes on World3.
+///
+/// Adding an enum arm without adding a row here shows up as a missing table
+/// row rather than as silently unmeasured behaviour.
+const STRATEGIES: [(&str, FallbackConfig); 10] = [
+    (
+        "log \\| stock \\| in-edge",
+        cfg(
+            FallbackWeight::ClampedLogAbs,
+            FallbackSeeds::Stocks,
+            FallbackClosures::SeedInEdges,
+        ),
+    ),
+    (
+        "rel \\| stock \\| in-edge",
+        cfg(
+            FallbackWeight::RelativeLinkScore,
+            FallbackSeeds::Stocks,
+            FallbackClosures::SeedInEdges,
+        ),
+    ),
+    (
+        "hop \\| stock \\| in-edge",
+        cfg(
+            FallbackWeight::HopCount,
+            FallbackSeeds::Stocks,
+            FallbackClosures::SeedInEdges,
+        ),
+    ),
+    (
+        "log \\| stock \\| every-edge",
+        cfg(
+            FallbackWeight::ClampedLogAbs,
+            FallbackSeeds::Stocks,
+            FallbackClosures::EveryEdge,
+        ),
+    ),
+    (
+        "rel \\| stock \\| every-edge",
+        cfg(
+            FallbackWeight::RelativeLinkScore,
+            FallbackSeeds::Stocks,
+            FallbackClosures::EveryEdge,
+        ),
+    ),
+    (
+        "hop \\| stock \\| every-edge",
+        cfg(
+            FallbackWeight::HopCount,
+            FallbackSeeds::Stocks,
+            FallbackClosures::EveryEdge,
+        ),
+    ),
+    (
+        "log \\| +stockless \\| in-edge",
+        cfg(
+            FallbackWeight::ClampedLogAbs,
+            FallbackSeeds::StocksAndStocklessSccs,
+            FallbackClosures::SeedInEdges,
+        ),
+    ),
+    (
+        "log \\| +stockless \\| every-edge",
+        cfg(
+            FallbackWeight::ClampedLogAbs,
+            FallbackSeeds::StocksAndStocklessSccs,
+            FallbackClosures::EveryEdge,
+        ),
+    ),
+    (
+        "log \\| all-scc \\| in-edge",
+        cfg(
+            FallbackWeight::ClampedLogAbs,
+            FallbackSeeds::AllSccNodes,
+            FallbackClosures::SeedInEdges,
+        ),
+    ),
+    (
+        "log \\| all-scc \\| every-edge",
+        cfg(
+            FallbackWeight::ClampedLogAbs,
+            FallbackSeeds::AllSccNodes,
+            FallbackClosures::EveryEdge,
+        ),
+    ),
 ];
+
+/// Spell a strategy without repeating the field names ten times.
+const fn cfg(
+    weight: FallbackWeight,
+    seeds: FallbackSeeds,
+    closures: FallbackClosures,
+) -> FallbackConfig {
+    FallbackConfig {
+        weight,
+        seeds,
+        closures,
+    }
+}
 
 /// The lexicographically minimal rotation of a cycle's node sequence.
 ///
@@ -282,7 +386,7 @@ fn eval_model(path: &str) {
     );
 
     // --- Header: one column per recall K, plus step-dominant coverage. ---
-    let mut header = String::from("| weight | time (s) | loops |");
+    let mut header = String::from("| weight \\| seeds \\| closures | time (s) | loops |");
     let mut rule = String::from("|---|---|---|");
     for k in RECALL_KS {
         header.push_str(&format!(" recall@{k} |"));
@@ -292,9 +396,9 @@ fn eval_model(path: &str) {
     rule.push_str("---|");
     println!("\n{header}\n{rule}");
 
-    for (label, weight) in WEIGHTS {
+    for (label, config) in STRATEGIES {
         let t0 = Instant::now();
-        let found = discover(CandidateGen::FallbackOnly(weight));
+        let found = discover(CandidateGen::FallbackOnly(config));
         let elapsed = t0.elapsed().as_secs_f64();
         assert!(
             !found.enumeration_complete,
@@ -302,7 +406,7 @@ fn eval_model(path: &str) {
         );
         let fallback_set: HashSet<Vec<String>> = found.loops.iter().map(loop_key).collect();
 
-        let mut row = format!("| `{label}` | {elapsed:.3} | {} |", found.loops.len());
+        let mut row = format!("| {label} | {elapsed:.3} | {} |", found.loops.len());
         for k in RECALL_KS {
             // K is a prefix of the exact ranked list; a model reporting fewer
             // than K exact loops has no top-K, and printing a recall over a

@@ -25,7 +25,7 @@ use simlin_engine::db::{
     model_element_causal_edges, model_ltm_variables, project_datamodel_dims,
     sync_from_datamodel_incremental,
 };
-use simlin_engine::ltm_finding::{CandidateGen, FallbackWeight};
+use simlin_engine::ltm_finding::{CandidateGen, FallbackConfig, FallbackWeight};
 use simlin_engine::{canonicalize, open_vensim, open_xmile};
 
 fn main() {
@@ -106,15 +106,19 @@ fn main() {
             ("enumeration (Auto)      ", CandidateGen::Auto),
             (
                 "fallback ClampedLogAbs  ",
-                CandidateGen::FallbackOnly(FallbackWeight::ClampedLogAbs),
+                CandidateGen::FallbackOnly(FallbackConfig::with_weight(
+                    FallbackWeight::ClampedLogAbs,
+                )),
             ),
             (
                 "fallback RelativeLink   ",
-                CandidateGen::FallbackOnly(FallbackWeight::RelativeLinkScore),
+                CandidateGen::FallbackOnly(FallbackConfig::with_weight(
+                    FallbackWeight::RelativeLinkScore,
+                )),
             ),
             (
                 "fallback HopCount       ",
-                CandidateGen::FallbackOnly(FallbackWeight::HopCount),
+                CandidateGen::FallbackOnly(FallbackConfig::with_weight(FallbackWeight::HopCount)),
             ),
         ];
         for (label, generator) in generators {
