@@ -171,6 +171,10 @@ pub fn preflight_serialize(
     project: &datamodel::Project,
     target: &SaveTarget,
 ) -> Result<(), PreflightRejection> {
+    // Deliberately not a no-op for the XMILE/JSON arms: their writers do
+    // not reject models today, but surfacing any future failure ahead of
+    // the merge is strictly better than after it, and the cost is one
+    // extra serialization per save.
     match serialize_project(project, target) {
         Ok(_) => Ok(()),
         Err(SaveDiskError::MdlSerialize(e)) => Err(PreflightRejection::Unrepresentable(

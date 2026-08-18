@@ -59,8 +59,18 @@ pub fn mdl_export_error_to_output(
     project: &datamodel::Project,
     err: &simlin_engine::Error,
 ) -> ErrorOutput {
-    let detail = err.details.as_deref().unwrap_or("MDL export failed");
-    mdl_export_output(project, detail)
+    let detail = err.details.as_deref().unwrap_or("export failed");
+    mdl_export_output(project, strip_mdl_export_lead_in(detail))
+}
+
+/// The engine's hard-error messages sometimes open with their own
+/// "MDL export ..." lead-in; `mdl_export_output` adds the wire prefix, so
+/// drop the engine's to avoid "MDL export: MDL export cannot ...".
+fn strip_mdl_export_lead_in(detail: &str) -> &str {
+    detail
+        .strip_prefix("MDL export: ")
+        .or_else(|| detail.strip_prefix("MDL export "))
+        .unwrap_or(detail)
 }
 
 fn mdl_export_output(project: &datamodel::Project, message: &str) -> ErrorOutput {
@@ -475,6 +485,35 @@ mod tests {
             assert_eq!(out.message, format!("MDL export: {}", w.message));
         }
         assert!(mdl_export_warnings_to_outputs(&project, &[]).is_empty());
+    }
+
+    /// The engine's own "MDL export ..." lead-in is stripped so the wire
+    /// prefix is not doubled; a message without one passes through, and a
+    /// missing detail gets a generic body.
+    #[test]
+    fn mdl_export_error_to_output_does_not_double_the_prefix() {
+        use simlin_engine::common::{ErrorCode, ErrorKind};
+        let project = build_empty_project();
+        let cases = [
+            (
+                Some("MDL export cannot faithfully reconstruct 1 macro"),
+                "MDL export: cannot faithfully reconstruct 1 macro",
+            ),
+            (Some("MDL export: something"), "MDL export: something"),
+            (
+                Some("MDL format supports only a single model"),
+                "MDL export: MDL format supports only a single model",
+            ),
+            (None, "MDL export: export failed"),
+        ];
+        for (detail, expected) in cases {
+            let err = simlin_engine::Error::new(
+                ErrorKind::Import,
+                ErrorCode::Generic,
+                detail.map(str::to_string),
+            );
+            assert_eq!(mdl_export_error_to_output(&project, &err).message, expected);
+        }
     }
 
     /// `preflight_export` is a four-way dispatch on `SourceFormat`; the three

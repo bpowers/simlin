@@ -17,8 +17,8 @@ use simlin_mcp_core::access::ProjectAccess;
 use simlin_mcp_core::errors::AccessError;
 use simlin_mcp_core::test_support::{TestFileSystemAccess, chain_scc_project_json};
 use simlin_mcp_core::tools::edit_model::{
-    EditModelInput, EditOperation, SetLoopNameInput, UpsertAuxiliaryInput, UpsertFlowInput,
-    UpsertStockInput, edit_model,
+    EditModelInput, EditOperation, RemoveVariableInput, SetLoopNameInput, UpsertAuxiliaryInput,
+    UpsertFlowInput, UpsertStockInput, edit_model,
 };
 use simlin_mcp_core::types::SourceFormat;
 
@@ -440,6 +440,55 @@ async fn mdl_set_loop_name_warns_that_the_name_was_dropped() {
     assert!(
         after.project.models[0].loop_metadata.is_empty(),
         "the reopened .mdl carries no loop metadata -- which is exactly why the warning exists"
+    );
+}
+
+/// A REAL save is pre-flighted too, not just a dry run: removing the binding
+/// aux of a multi-output macro invocation leaves a cluster the MDL writer
+/// cannot reconstruct, which is one of its hard errors. The edit must come
+/// back as a `Validation` error carrying the writer's verdict (`MDL export:`
+/// prefix), never a `WriteError` from an attempted save, and the file must
+/// be byte-identical -- the store was never asked to persist it. Moving the
+/// pre-flight inside the dry-run branch turns this test red.
+#[tokio::test]
+async fn mdl_real_save_of_an_unrepresentable_project_is_rejected_before_the_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("macro.mdl");
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/test-models/tests/macro_multi_output/test_macro_multi_output.mdl"
+        ),
+        &path,
+    )
+    .expect("copy fixture");
+    let original = std::fs::read(&path).unwrap();
+
+    let input = EditModelInput {
+        project_path: path.to_str().unwrap().to_string(),
+        model_name: None,
+        dry_run: None,
+        sim_specs: None,
+        operations: Some(vec![EditOperation::RemoveVariable(RemoveVariableInput {
+            name: "total".into(),
+        })]),
+    };
+    match edit_model(&TestFileSystemAccess, input).await {
+        Err(AccessError::Validation { errors }) => {
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.message.starts_with("MDL export:") && e.code == "generic"),
+                "the writer's verdict must be the validation error: {errors:?}"
+            );
+        }
+        Err(other) => panic!("expected Validation (pre-flight), got {other:?}"),
+        Ok(_) => panic!("an unrepresentable .mdl edit must be rejected"),
+    }
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        original,
+        "the rejected edit must not touch the file"
     );
 }
 

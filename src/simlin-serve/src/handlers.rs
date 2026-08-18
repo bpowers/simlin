@@ -658,10 +658,13 @@ pub enum SaveError {
     BadRequest(String),
     /// Path was outside the scan root or otherwise denied.
     Forbidden,
-    /// One or more new errors would be introduced by this edit. The list
-    /// only contains *new* errors (errors that already existed before this
-    /// save are filtered out so a save that fixes some errors without
-    /// introducing any new ones is accepted).
+    /// The edit is rejected on its content: either one or more new engine
+    /// errors would be introduced (the list only contains *new* errors --
+    /// errors that already existed before this save are filtered out so a
+    /// save that fixes some errors without introducing any new ones is
+    /// accepted), or the on-disk format's writer cannot hold the model
+    /// (the MDL writer's hard errors, reported with an `MDL export:`
+    /// prefix by the pre-flight step).
     Validation {
         errors: Vec<ValidationError>,
     },
@@ -722,18 +725,21 @@ impl IntoResponse for SaveError {
 ///    if this is its first touch; subsequent saves serve from memory.
 /// 4. Validate the incoming body against the baseline. JSON parse
 ///    failure -> 400; new errors introduced by the edit -> 422.
-/// 5. Re-canonicalize the validated `datamodel::Project` to JSON (so
+/// 5. Pre-flight the on-disk writer on the validated project
+///    (`writer::preflight_serialize`): a model the file's format cannot
+///    hold -> 422 naming the format's verdict, doc untouched.
+/// 6. Re-canonicalize the validated `datamodel::Project` to JSON (so
 ///    the doc tree always reflects the canonicalized form, regardless
 ///    of subtle drift in the incoming request).
-/// 6. Call `check_increment_and_merge` — under one registry-write-lock
+/// 7. Call `check_increment_and_merge` — under one registry-write-lock
 ///    acquisition this checks the optimistic-lock version, increments
 ///    it, and applies the new JSON into the doc. Stale version -> 409.
-/// 7. Outside the lock, serialize the merged doc state back to a
+/// 8. Outside the lock, serialize the merged doc state back to a
 ///    `datamodel::Project` and write it to disk in place with the
 ///    format-aware writer.
-/// 8. Refresh the registry mtime/size from the post-write stat.
-/// 9. Publish a `ProjectChanged { source: User }` event to subscribed
-///    WebSocket clients so other tabs can remount their editors.
+/// 9. Refresh the registry mtime/size from the post-write stat.
+/// 10. Publish a `ProjectChanged { source: User }` event to subscribed
+///     WebSocket clients so other tabs can remount their editors.
 ///
 /// The `invalidate_doc` stop-gap from Task 5 is removed: the doc is
 /// the post-save state by virtue of the merge in step 6.
