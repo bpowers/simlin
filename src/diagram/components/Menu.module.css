@@ -1,4 +1,9 @@
 .menuContent {
+  /* Portaled surface: it inherits from <body>, not the editor root, so pin the
+     typography a host without reset.css would otherwise leave to the page. */
+  font-family: var(--font-family-base);
+  font-size: 1rem;
+  line-height: 1.5;
   min-width: 120px;
   background-color: var(--color-surface);
   border-radius: 4px;

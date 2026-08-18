@@ -38,7 +38,11 @@
 }
 
 .snapshotImg {
+  /* Block (not the inline default) so no baseline gap opens under the image;
+     reset.css does this for every img, but a host may not load it. */
+  display: block;
   width: 100%;
+  max-width: 100%;
   object-fit: scale-down;
 }
 
@@ -272,6 +276,13 @@
   position: relative;
   box-sizing: border-box;
   overflow: hidden;
+  /* Typography is pinned here rather than inherited from <body>: reset.css
+     sets these on body, but a host that loads only theme.css (an editor
+     embedded in a page it does not own) has whatever the page uses. Same
+     computed values as the reset gives a full-page host. */
+  font-family: var(--font-family-base);
+  font-size: 1rem;
+  line-height: 1.5;
 }
 
 /* The root is focusable (tabindex=-1) purely so focus settles inside the
