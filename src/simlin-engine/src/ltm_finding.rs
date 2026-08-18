@@ -2712,6 +2712,21 @@ pub fn discover_loops_with_candidate_gen(
                 &is_module_node,
                 deadline,
             ) {
+                // The universe's denominators and the universe's circuit
+                // counts are two views of one enumerated set, built in one
+                // pass: a partition carrying mass with no circuit counted
+                // against it would mean the two had drifted apart, and every
+                // relative score normalized against that partition would be
+                // measured against a population nothing described.
+                debug_assert!(
+                    retention.partition_totals.keys().all(|part| retention
+                        .partition_circuit_counts
+                        .get(part)
+                        .is_some_and(|&n| n > 0)),
+                    "each partition carrying enumerated mass must carry the \
+                     count of circuits that produced it"
+                );
+
                 // Cross-agg stitching over the FULL enumerated set, with the
                 // same combinatorial core the DFS path uses below (GH #696).
                 // Stitching must see pre-retention circuits: a petal can fail

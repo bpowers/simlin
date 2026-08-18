@@ -624,19 +624,45 @@ pub(super) struct RetentionOutcome {
     /// over ALL enumerated circuits (NaN summands excluded, Inf kept),
     /// for `rank_and_filter`'s external-denominator path.
     pub partition_totals: HashMap<usize, Vec<f64>>,
+    /// Per-engine-internal-partition count of circuits in the enumerated
+    /// UNIVERSE -- retention non-survivors included. How much company a loop
+    /// has in its partition is a fact about the model, not about what cleared
+    /// a threshold, so this is the population the competing-vs-solo
+    /// classification is entitled to ask about.
+    pub partition_circuit_counts: HashMap<usize, usize>,
 }
 
-/// Streaming two-pass retention over the enumerated circuits.
+/// Single-pass retention over the enumerated circuits, with a confirm step.
 ///
-/// Pass 1 accumulates the per-partition per-step |score| totals; pass 2
-/// recomputes each circuit's series and keeps it iff its peak per-step
-/// relative contribution reaches [`MIN_CONTRIBUTION`] (`rank_and_filter`'s
-/// retention rule, applied with full-universe denominators), or it belongs to
-/// a Solo group and is ever active (its relative score is +/-1 by
-/// construction), or it traverses a module node (conservative: the override
-/// series may change its score). Nothing per-circuit larger than O(1) is
-/// retained for non-survivors, so the pass is safe at
-/// [`MAX_DISCOVERY_ENUM_CIRCUITS`] scale.
+/// A circuit is retained iff at some saved step its |score| is at least
+/// [`MIN_CONTRIBUTION`] of its partition's total |score| mass at that step
+/// (`rank_and_filter`'s rule, applied with full-universe denominators). That
+/// needs the FINAL totals, which the pass is still accumulating, so it is
+/// answered in two parts:
+///
+/// 1. **Pass** (every circuit): score it, add its mass into its partition's
+///    running total, and take `max_t |s(t)| / running_total(t)` -- the running
+///    total including the circuit's own mass, so the ratio is defined even for
+///    the first circuit of a partition. Because the running total only grows,
+///    that is an UPPER bound of the circuit's true peak share, and a circuit
+///    whose bound falls short is dropped without ever being scored again.
+/// 2. **Confirm** (only circuits whose bound clears the threshold): recompute
+///    the exact ratio against the final totals. The bound is loose for a
+///    circuit that arrives early -- the first circuit of a partition bounds at
+///    exactly 1.0 -- so this step is what makes the answer the retention rule
+///    rather than an approximation of it.
+///
+/// Two classes skip both. A circuit in a Solo group (no stock resolves to a
+/// partition) is its own denominator, so its relative score is +/-1 wherever
+/// it is active and "ever active" is the whole test -- which the enumerator
+/// guarantees, since a circuit is emitted only with a nonempty activity AND;
+/// the check that the AND is nonempty is kept as cheap defense in depth. And a
+/// module-traversing circuit is kept unconditionally, because its reported
+/// score may come from the per-exit-port override series rather than the raw
+/// product judged here.
+///
+/// Nothing per-circuit larger than O(1) is retained for non-survivors, so the
+/// pass is safe at [`MAX_DISCOVERY_ENUM_CIRCUITS`] scale.
 ///
 /// A step whose product is not a number -- a NaN link, or the `Inf * 0` a
 /// finite-overflow-then-zero circuit produces -- follows the engine's
@@ -653,65 +679,81 @@ pub(super) fn retain_circuits(
     let step_count = graph.step_count;
 
     let mut partition_totals: HashMap<usize, Vec<f64>> = HashMap::new();
+    let mut partition_circuit_counts: HashMap<usize, usize> = HashMap::new();
     let mut scratch = vec![0.0f64; step_count];
     let mut nan_mask = vec![false; step_count];
 
-    // Pass 1: per-partition totals (Solo circuits are their own denominator,
-    // so they need no shared accumulation).
+    let mut survivors: Vec<usize> = Vec::new();
+    let mut to_confirm: Vec<usize> = Vec::new();
+
     for ci in 0..candidates.len() {
         if deadline_expired(ci, deadline) {
             return None;
         }
         let rows = candidates.circuit(ci);
-        let Some(part) = circuit_partition(rows, graph, stock_partition_of_node) else {
+        let partition = circuit_partition(rows, graph, stock_partition_of_node);
+        if let Some(part) = partition {
+            *partition_circuit_counts.entry(part).or_insert(0) += 1;
+        }
+        let traverses_module = circuit_traverses_module(rows, graph, is_module_node);
+        if traverses_module {
+            survivors.push(ci);
+        }
+
+        let (lo, hi) = graph.active_window(candidates.activity_of(ci));
+        let Some(part) = partition else {
+            if !traverses_module && lo < hi {
+                survivors.push(ci);
+            }
             continue;
         };
-        let (lo, hi) = graph.active_window(candidates.activity_of(ci));
+
         score_steps(rows, graph, lo, &mut scratch[lo..hi], &mut nan_mask[lo..hi]);
         let totals = partition_totals
             .entry(part)
             .or_insert_with(|| vec![0.0; step_count]);
+        let mut bound = 0.0f64;
         for t in lo..hi {
-            if !nan_mask[t] {
-                totals[t] += scratch[t].abs();
+            if nan_mask[t] {
+                continue;
             }
+            let mass = scratch[t].abs();
+            totals[t] += mass;
+            if totals[t] > 0.0 {
+                // `max` drops a NaN ratio (`Inf / Inf` at a dominance
+                // inflection), which is right: the exact test rejects that step
+                // too, so ignoring it costs no survivor.
+                bound = bound.max(mass / totals[t]);
+            }
+        }
+        if !traverses_module && bound >= MIN_CONTRIBUTION {
+            to_confirm.push(ci);
         }
     }
 
-    // Pass 2: retention.
-    let mut survivors: Vec<usize> = Vec::new();
-    for ci in 0..candidates.len() {
-        if deadline_expired(ci, deadline) {
+    for (n, &ci) in to_confirm.iter().enumerate() {
+        if deadline_expired(n, deadline) {
             return None;
         }
         let rows = candidates.circuit(ci);
-        if circuit_traverses_module(rows, graph, is_module_node) {
-            survivors.push(ci);
-            continue;
-        }
+        let part = circuit_partition(rows, graph, stock_partition_of_node)
+            .expect("only partitioned circuits reach the confirm step");
         let (lo, hi) = graph.active_window(candidates.activity_of(ci));
         score_steps(rows, graph, lo, &mut scratch[lo..hi], &mut nan_mask[lo..hi]);
-        let keep = match circuit_partition(rows, graph, stock_partition_of_node) {
-            Some(part) => {
-                let totals = &partition_totals[&part];
-                (lo..hi).any(|t| {
-                    !nan_mask[t]
-                        && totals[t] > 0.0
-                        && scratch[t].abs() / totals[t] >= MIN_CONTRIBUTION
-                })
-            }
-            // Solo: relative score is +/-1 whenever active, which passes the
-            // retention threshold; "ever active" is the whole test.
-            None => (lo..hi).any(|t| !nan_mask[t] && scratch[t] != 0.0),
-        };
+        let totals = &partition_totals[&part];
+        let keep = (lo..hi).any(|t| {
+            !nan_mask[t] && totals[t] > 0.0 && scratch[t].abs() / totals[t] >= MIN_CONTRIBUTION
+        });
         if keep {
             survivors.push(ci);
         }
     }
+    survivors.sort_unstable();
 
     Some(RetentionOutcome {
         survivors,
         partition_totals,
+        partition_circuit_counts,
     })
 }
 

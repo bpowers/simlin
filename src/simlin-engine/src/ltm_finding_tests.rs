@@ -3887,6 +3887,125 @@ fn retention_totals_and_survivors_match_hand_computed_products() {
     );
 }
 
+/// Retention's pass-1 admission test is a BOUND, not the answer: it divides a
+/// circuit's mass by the partition total accumulated SO FAR, which for an
+/// early circuit is barely more than its own mass. That bound is deliberately
+/// loose in the safe direction (it never drops a circuit the exact test would
+/// keep), and the confirm step against the final totals is what turns it into
+/// the retention decision.
+///
+/// This fixture puts the negligible circuit FIRST, so its bound is 1.0 -- the
+/// most permissive value there is -- while its true share is 1e-8. A retention
+/// pass that trusted the bound would keep it.
+#[test]
+fn retention_confirms_a_circuit_whose_running_bound_overstates_its_share() {
+    // `a`'s out-edges are walked in offset order, so the tiny a<->c loop is
+    // emitted before the dominant a<->b one.
+    let link_offsets: Vec<LinkOffset> = vec![
+        ((Ident::new("a"), Ident::new("c")), 0),
+        ((Ident::new("c"), Ident::new("a")), 1),
+        ((Ident::new("a"), Ident::new("b")), 2),
+        ((Ident::new("b"), Ident::new("a")), 3),
+    ];
+    let n_offsets = 4;
+    let step_count = 2;
+    let mut data = vec![0.0f64; n_offsets * step_count];
+    data[n_offsets] = 1e-4; // a->c
+    data[n_offsets + 1] = 1e-4; // c->a  (product 1e-8)
+    data[n_offsets + 2] = 1.0; // a->b
+    data[n_offsets + 3] = 1.0; // b->a  (product 1.0)
+    let results = enum_results(n_offsets, step_count, data);
+    let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results);
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None);
+    assert!(candidates.complete);
+    assert_eq!(
+        activity
+            .circuit_nodes(candidates.circuit(0))
+            .iter()
+            .map(|&n| search.idents[n as usize].as_str().to_string())
+            .collect::<Vec<_>>(),
+        vec!["a".to_string(), "c".to_string()],
+        "the fixture only bites if the negligible circuit is emitted first"
+    );
+
+    let stock_partition: Vec<Option<usize>> = search
+        .idents
+        .iter()
+        .map(|id| (id.as_str() == "a").then_some(0))
+        .collect();
+    let no_modules = vec![false; search.idents.len()];
+    let outcome = super::enum_gen::retain_circuits(
+        &candidates,
+        &activity,
+        &stock_partition,
+        &no_modules,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        survivor_node_sets(&outcome, &candidates, &activity, &search),
+        vec![vec!["a".to_string(), "b".to_string()]],
+        "the confirm step drops the circuit its running bound admitted"
+    );
+}
+
+/// The universe circuit count per partition is over ALL enumerated circuits,
+/// retention non-survivors included -- it describes how much company a loop
+/// has in its partition, which is a fact about the model rather than about
+/// what survived a threshold.
+#[test]
+fn retention_counts_the_universe_circuits_per_partition() {
+    // Two partition-0 circuits (one of them far below the retention floor) and
+    // one Solo circuit, which belongs to no partition and is counted in none.
+    let link_offsets: Vec<LinkOffset> = vec![
+        ((Ident::new("a"), Ident::new("b")), 0),
+        ((Ident::new("b"), Ident::new("a")), 1),
+        ((Ident::new("a"), Ident::new("c")), 2),
+        ((Ident::new("c"), Ident::new("a")), 3),
+        ((Ident::new("d"), Ident::new("e")), 4),
+        ((Ident::new("e"), Ident::new("d")), 5),
+    ];
+    let n_offsets = 6;
+    let step_count = 2;
+    let mut data = vec![0.0f64; n_offsets * step_count];
+    data[n_offsets] = 1.0;
+    data[n_offsets + 1] = 1.0;
+    data[n_offsets + 2] = 1e-4;
+    data[n_offsets + 3] = 1e-4;
+    data[n_offsets + 4] = 0.5;
+    data[n_offsets + 5] = 0.5;
+    let results = enum_results(n_offsets, step_count, data);
+    let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
+    let activity = super::enum_gen::ActivityGraph::build(&search, &results);
+    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None);
+    let stock_partition: Vec<Option<usize>> = search
+        .idents
+        .iter()
+        .map(|id| (id.as_str() == "a").then_some(0))
+        .collect();
+    let no_modules = vec![false; search.idents.len()];
+    let outcome = super::enum_gen::retain_circuits(
+        &candidates,
+        &activity,
+        &stock_partition,
+        &no_modules,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        outcome.survivors.len(),
+        2,
+        "one partition loop plus the Solo"
+    );
+    assert_eq!(
+        outcome.partition_circuit_counts,
+        [(0usize, 2usize)].into_iter().collect::<HashMap<_, _>>(),
+        "both partition-0 circuits are counted, the dropped one included; the \
+         Solo circuit belongs to no partition"
+    );
+}
+
 /// AC4.1: a circuit whose running product overflows to `Inf` and then meets a
 /// `0` link has a NaN score at that step with no NaN link anywhere.
 ///
