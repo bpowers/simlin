@@ -19,8 +19,9 @@
 // until `releaseKernel()`, which delivers them in order -- a long-running cell.
 // The kernel handler applies the protocol: a `snapshot` whose base equals the
 // current revision is accepted (traits pushed in one hold_sync, then a
-// `saved` reply), otherwise `rejected`; an `oversize` report gets the warn
-// notice pysimlin sends (`_widget_core.oversize_notice`) and nothing else.
+// `saved` reply), otherwise `rejected`, and either reply echoes the request's
+// `id`; an `oversize` report gets the warn notice pysimlin sends
+// (`_widget_core.oversize_notice`) and nothing else.
 
 import type { AnyModel } from '../anywidget-model';
 import { MAX_SNAPSHOT_BYTES, formatSize } from '../widget-core';
@@ -188,11 +189,30 @@ export class FakeModel implements AnyModel {
     }
   }
 
+  /** Handle only the OLDEST queued inbound message; the kernel stays busy. */
+  releaseOne(): void {
+    const next = this.inbound.shift();
+    if (next !== undefined) {
+      this.handle(next);
+    }
+  }
+
   lastSnapshot(): { base: number; json: string } | undefined {
     for (let i = this.delivered.length - 1; i >= 0; i--) {
       const d = this.delivered[i];
       if (d.kind === 'custom' && d.content.type === 'snapshot') {
         return { base: d.content.base as number, json: d.content.json as string };
+      }
+    }
+    return undefined;
+  }
+
+  /** The `id` of the last snapshot the widget SENT (before transport). */
+  lastSentSnapshotId(): string | undefined {
+    for (let i = this.sent.length - 1; i >= 0; i--) {
+      const m = this.sent[i] as { type?: unknown; id?: unknown };
+      if (m.type === 'snapshot') {
+        return typeof m.id === 'string' ? m.id : undefined;
       }
     }
     return undefined;
@@ -240,14 +260,15 @@ export class FakeModel implements AnyModel {
     if (msg.content.type === 'snapshot') {
       const base = msg.content.base as number;
       const json = msg.content.json as string;
+      const id = msg.content.id;
       if (base !== this.kernel.revision || this.kernel.applyFails) {
-        this.kernelSend({ type: 'rejected', revision: this.kernel.revision });
+        this.kernelSend({ type: 'rejected', revision: this.kernel.revision, id });
         return;
       }
       this.kernel.revision += 1;
       this.kernel.projectJson = json;
       this.kernelPush({ project_json: json, revision: this.kernel.revision });
-      this.kernelSend({ type: 'saved', revision: this.kernel.revision });
+      this.kernelSend({ type: 'saved', revision: this.kernel.revision, id });
       return;
     }
     if (msg.content.type === 'oversize') {

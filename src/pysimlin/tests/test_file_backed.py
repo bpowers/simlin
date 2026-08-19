@@ -669,6 +669,36 @@ class TestInMemoryAndSaveAs:
         assert project.watching is False
         assert project._listeners == {}
 
+    def test_watch_true_racing_close_cannot_leave_a_watcher_alive(self, tmp_path: Path) -> None:
+        # close() detaches the watcher and marks the project closed in ONE
+        # locked step, and only then retires the old watcher outside the
+        # lock.  A watch(True) from another thread that lands in that window
+        # -- modelled deterministically by calling it from the retire step,
+        # the first moment close() runs with the lock released -- must see a
+        # closed project and refuse, not install a new poll thread that
+        # outlives the close.
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        project = Project.open(path, watch=True)
+        original_retire = Project._retire_watcher
+        racer: list[BaseException | None] = []
+
+        def retire_and_race(watcher: object) -> None:
+            try:
+                project.watch(True)
+                racer.append(None)
+            except SimlinRuntimeError as exc:
+                racer.append(exc)
+            original_retire(watcher)  # type: ignore[arg-type]
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(project, "_retire_watcher", retire_and_race)
+            project.close()
+        assert len(racer) == 1
+        assert isinstance(racer[0], SimlinRuntimeError)
+        assert project.watching is False
+        assert project._watcher is None
+        assert not any(t.name.startswith("simlin-watch:") for t in threading.enumerate())
+
 
 class TestConcurrency:
     def test_concurrent_edits_serialise_and_the_file_stays_valid(self, tmp_path: Path) -> None:
@@ -1622,3 +1652,243 @@ class TestModelProxies:
         aux = reopened.get_variable("room_temperature")
         assert isinstance(aux, Aux)
         assert aux.equation == "60"
+
+
+# ── read-only suffixes (.vpm, .proto) are read-only after open() too ────
+
+
+def _sketchless_mdl() -> bytes:
+    """teacup.mdl without its sketch section: a Vensim model an interactive
+    display must lay out before it can show anything."""
+    text = (FIXTURES / "teacup.mdl").read_text(encoding="utf-8")
+    body, marker, _sketch = text.partition("\\\\\\---///")
+    assert marker, "fixture drifted: no sketch section"
+    return body.encode("utf-8")
+
+
+def _read_only_fixture(tmp_path: Path, suffix: str) -> Path:
+    """A diagram-less model under a read-only suffix: ``.vpm`` holds MDL
+    text, ``.proto`` holds the protobuf encoding (both are what the reader
+    accepts)."""
+    if suffix == ".vpm":
+        path = tmp_path / "teacup.vpm"
+        path.write_bytes(_sketchless_mdl())
+    elif suffix == ".proto":
+        path = tmp_path / "teacup.proto"
+        path.write_bytes(
+            Project._from_bytes(_sketchless_mdl(), FileFormat.MDL).serialize_protobuf()
+        )
+    else:
+        raise AssertionError(suffix)
+    return path
+
+
+def _project(model: Model) -> Project:
+    project = model.project
+    assert project is not None
+    return project
+
+
+class TestReadOnlySuffixes:
+    """``resolve_write_format`` refuses ``.vpm``/``.proto`` targets; a project
+    OPENED from one must be just as read-only, or the first edit (or a
+    display laying out a sketch-less model) regenerates a packaged ``.vpm``
+    as plain MDL text or a ``.proto`` schema-named file as binary."""
+
+    @pytest.mark.parametrize("suffix", [".vpm", ".proto"])
+    def test_open_backs_without_write_permission(self, tmp_path: Path, suffix: str) -> None:
+        path = _read_only_fixture(tmp_path, suffix)
+        model = simlin.open(path, watch=False)
+        project = _project(model)
+        assert project.path == path
+        assert project.writable is False
+        assert model.writable is False
+        assert project.autosave is False
+        # An explicit request for autosave cannot be honoured for this path.
+        with pytest.raises(SimlinRuntimeError, match="save_as"):
+            project.autosave = True
+        assert project.autosave is False
+        project.autosave = False  # turning it off is always fine
+
+    @pytest.mark.parametrize("suffix", [".vpm", ".proto"])
+    def test_edits_stay_in_memory_and_save_refuses(self, tmp_path: Path, suffix: str) -> None:
+        path = _read_only_fixture(tmp_path, suffix)
+        before = path.read_bytes()
+        model = simlin.open(path, watch=False)
+        _add_aux(model)
+        assert model.revision == 1
+        assert model.dirty is True
+        assert model.get_variable("new_aux") is not None
+        assert path.read_bytes() == before
+        with pytest.raises(SimlinRuntimeError, match=r"save_as") as info:
+            model.save()
+        assert suffix in str(info.value)
+        assert ".mdl" in str(info.value) or ".stmx" in str(info.value)
+        with pytest.raises(SimlinRuntimeError, match=r"save_as"):
+            _project(model).save(force=True)
+        assert path.read_bytes() == before
+        assert model.dirty is True
+
+    @pytest.mark.parametrize("suffix", [".vpm", ".proto"])
+    def test_display_marks_dirty_instead_of_writing(self, tmp_path: Path, suffix: str) -> None:
+        # What a ModelWidget does before seeding: lay out a model that has no
+        # view.  On a read-only file that is a committed in-memory change,
+        # never a write.
+        path = _read_only_fixture(tmp_path, suffix)
+        before = path.read_bytes()
+        model = simlin.open(path, watch=False)
+        project = _project(model)
+        assert project._ensure_view("main") is True
+        assert model.revision == 1
+        assert model.dirty is True
+        assert path.read_bytes() == before
+        # And the widget's seed carries the layout: a view with elements.
+        doc = json.loads(project.serialize_json())
+        main = next(m for m in doc["models"] if m["name"] == "main")
+        assert main["views"][0]["elements"]
+
+    @pytest.mark.parametrize("suffix", [".vpm", ".proto"])
+    def test_save_as_to_a_writable_suffix_works_and_restores_autosave(
+        self, tmp_path: Path, suffix: str
+    ) -> None:
+        path = _read_only_fixture(tmp_path, suffix)
+        before = path.read_bytes()
+        model = simlin.open(path, watch=False)
+        project = _project(model)
+        _add_aux(model, "in_memory")
+        target = tmp_path / "teacup_out.mdl"
+        project.save_as(target)
+        assert project.path == target
+        assert project.writable is True
+        assert project.format == FileFormat.MDL
+        assert project.dirty is False
+        # The user never turned autosave off (open() forced it off for the
+        # read-only path), so the writable file autosaves from here on.
+        assert project.autosave is True
+        _add_aux(model, "after_save_as")
+        reopened = simlin.open(target, watch=False)
+        assert reopened.get_variable("in_memory") is not None
+        assert reopened.get_variable("after_save_as") is not None
+        assert path.read_bytes() == before
+
+    def test_autosave_false_on_open_stays_off_after_save_as(self, tmp_path: Path) -> None:
+        path = _read_only_fixture(tmp_path, ".vpm")
+        project = _project(simlin.open(path, autosave=False, watch=False))
+        project.save_as(tmp_path / "out.mdl")
+        assert project.autosave is False
+        assert project.writable is True
+
+    def test_explicit_format_save_as_to_a_read_only_suffix_is_writable(
+        self, tmp_path: Path
+    ) -> None:
+        # save_as(format=) is the documented override: the user chose to put
+        # MDL text under .vpm, so that path is theirs to write.
+        model = simlin.load(FIXTURES / "teacup.stmx")
+        project = _project(model)
+        target = tmp_path / "chosen.vpm"
+        project.save_as(target, format=FileFormat.MDL)
+        assert project.writable is True
+        assert project.autosave is True
+        _add_aux(model)
+        assert simlin.open(target, watch=False).get_variable("new_aux") is not None
+
+    def test_watching_a_read_only_file_still_picks_up_external_changes(
+        self, tmp_path: Path
+    ) -> None:
+        path = _read_only_fixture(tmp_path, ".vpm")
+        model = simlin.open(path, watch=False)
+        _watch_idle(model)
+        try:
+            path.write_bytes(
+                _sketchless_mdl().replace(b"Room Temperature=\n\t70", b"Room Temperature=\n\t65")
+            )
+            _poll(model)
+            assert model.revision == 1
+            assert model.get_variable("room_temperature").equation == "65"
+        finally:
+            _project(model).watch(False)
+
+    def test_in_memory_project_is_not_writable_and_autosave_waits_for_a_path(
+        self, tmp_path: Path
+    ) -> None:
+        # ``autosave`` reports the EFFECTIVE setting: nothing is written while
+        # there is no file, so it reads False in memory; the wish is kept and
+        # takes effect once save_as() supplies a writable file.
+        project = Project.new(name="p")
+        assert project.writable is False
+        assert project.autosave is False
+        project.autosave = False
+        project.autosave = True  # no path to refuse; meaningful for a later save_as()
+        assert project.autosave is False
+        project.save_as(tmp_path / "p.stmx")
+        assert project.writable is True
+        assert project.autosave is True
+
+
+# ── paths are anchored at open()/save_as(), not re-resolved per write ───
+
+
+class TestAbsolutePaths:
+    def test_open_with_a_relative_path_survives_chdir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(tmp_path)
+        model = simlin.open("teacup.stmx", watch=False)
+        assert model.path == path
+        assert model.path is not None
+        assert model.path.is_absolute()
+        monkeypatch.chdir(elsewhere)
+        _add_aux(model)
+        # Autosave wrote the file that was opened, not a new one under the CWD.
+        assert simlin.load(path).get_variable("new_aux") is not None
+        assert not (elsewhere / "teacup.stmx").exists()
+        assert model.dirty is False
+
+    def test_watcher_polls_the_opened_file_after_chdir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(tmp_path)
+        model = simlin.open("teacup.stmx", watch=False)
+        _watch_idle(model)
+        try:
+            monkeypatch.chdir(elsewhere)
+            _add_aux(simlin.open(path, watch=False), "external")
+            _poll(model)
+            assert model.revision == 1
+            assert model.get_variable("external") is not None
+            assert model.project is not None
+            assert model.project._watcher is not None
+            assert model.project._watcher.path == path
+        finally:
+            _project(model).watch(False)
+
+    def test_save_as_with_a_relative_path_adopts_the_absolute_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        model = simlin.load(FIXTURES / "teacup.stmx")
+        project = _project(model)
+        project.save_as("out.stmx")
+        assert project.path == tmp_path / "out.stmx"
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        _add_aux(model)
+        assert simlin.load(tmp_path / "out.stmx").get_variable("new_aux") is not None
+        assert not (elsewhere / "out.stmx").exists()
+
+    def test_symlinks_are_kept_as_given(self, tmp_path: Path) -> None:
+        # absolute(), not resolve(): `path` reports the name the user opened,
+        # anchored to the CWD of that moment; a symlinked model file is still
+        # reported under its link name.
+        real = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        link = tmp_path / "link.stmx"
+        link.symlink_to(real)
+        model = simlin.open(link, watch=False)
+        assert model.path == link

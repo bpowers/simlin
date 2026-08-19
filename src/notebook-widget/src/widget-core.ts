@@ -347,16 +347,35 @@ export function parseNoticeMessage(msg: unknown): Notice | null {
 // ---- snapshot protocol -------------------------------------------------------
 
 /**
+ * The id of one snapshot request: unique per VIEW (`viewToken`, minted once
+ * per mounted WidgetApp) and per request within it (`seq`). The kernel echoes
+ * it in the `saved`/`rejected` reply, and the shell resolves a save only on
+ * the reply carrying the id it sent. Correlation by id is what makes replies
+ * safe when one model has several views (the same ModelWidget displayed in
+ * two cells: every custom message reaches every view) and when a snapshot's
+ * slot is freed before its reply arrives (a kernel push remounted the Editor):
+ * a reply for a request no longer in flight matches nothing and is ignored,
+ * with no counting of "replies still owed" to keep in step with the wire.
+ */
+export function requestId(viewToken: string, seq: number): string {
+  return `${viewToken}:${seq}`;
+}
+
+/**
  * The widget -> kernel save message. The whole snapshot rides in a custom
  * message, never in a trait: ipywidgets allows ONE in-flight trait sync per
  * model and assign-merges the `patch` messages it buffers behind it, so
  * consecutive trait writes can reach the kernel collapsed into one (a burst
  * {S1,base n},{S2,base n+1},{S3,base n+2} arrives as {S1,base n},{S3,base
  * n+2} -- S2 lost, S3 rejected). Custom messages are queued in order and
- * never merged.
+ * never merged. `id` is the request id the reply must echo (`requestId`).
  */
-export function snapshotMessage(base: number, json: string): { type: 'snapshot'; base: number; json: string } {
-  return { type: 'snapshot', base, json };
+export function snapshotMessage(
+  id: string,
+  base: number,
+  json: string,
+): { type: 'snapshot'; id: string; base: number; json: string } {
+  return { type: 'snapshot', id, base, json };
 }
 
 // ---- snapshot size --------------------------------------------------------------
@@ -438,42 +457,58 @@ export function oversizeNotice(bytes: number, limit: number): Notice {
 /**
  * The kernel's answer to a snapshot: accepted at `revision`, rejected, or a
  * reply-typed message whose payload is unusable (`malformed`: a `saved` /
- * `rejected` with a missing or non-integer revision).
+ * `rejected` with a missing or non-integer revision). `id` is the request id
+ * the kernel echoed (`undefined` when it sent none or not a string); which
+ * in-flight snapshot a reply answers is decided by `replyIsFor`.
  */
 export type SaveReply =
-  | { kind: 'saved'; revision: number }
-  | { kind: 'rejected'; revision: number }
-  | { kind: 'malformed' };
+  | { kind: 'saved'; revision: number; id: string | undefined }
+  | { kind: 'rejected'; revision: number; id: string | undefined }
+  | { kind: 'malformed'; id: string | undefined };
 
 /**
  * Interpret a `msg:custom` delivery as a save reply. Anything that is not
  * reply-typed (wasm, notices, unknown types) is `null`. A reply-typed
  * message with a bad `revision` is `malformed`: the shell treats it as a
- * reject while a snapshot is in flight, because every snapshot gets exactly
- * one reply and ignoring a broken one would hang the Editor's save queue.
+ * reject when it answers the in-flight snapshot (`replyIsFor`), because every
+ * snapshot gets exactly one reply and ignoring a broken one would hang the
+ * Editor's save queue.
  */
 export function parseSaveReply(msg: unknown): SaveReply | null {
   if (!isRecord(msg) || (msg.type !== 'saved' && msg.type !== 'rejected')) {
     return null;
   }
+  const id = typeof msg.id === 'string' ? msg.id : undefined;
   if (typeof msg.revision !== 'number' || !Number.isInteger(msg.revision)) {
-    return { kind: 'malformed' };
+    return { kind: 'malformed', id };
   }
-  return { kind: msg.type, revision: msg.revision };
+  return { kind: msg.type, revision: msg.revision, id };
 }
 
 /**
- * The one snapshot the widget may have in flight: what it sent, and the
- * revision the kernel will hold if it accepts it (`base + 1`).
+ * The one snapshot the widget may have in flight: its request id, what it
+ * sent, and the revision the kernel will hold if it accepts it (`base + 1`).
  */
 export interface InFlightSnapshot {
+  id: string;
   json: string;
   base: number;
   expectedRevision: number;
 }
 
-export function inFlightFor(base: number, json: string): InFlightSnapshot {
-  return { json, base, expectedRevision: base + 1 };
+export function inFlightFor(id: string, base: number, json: string): InFlightSnapshot {
+  return { id, json, base, expectedRevision: base + 1 };
+}
+
+/**
+ * Whether `reply` answers `inFlight`: the kernel echoed exactly the id the
+ * request carried. A reply with another id, or none, is some other request's
+ * -- another view's of the same model, or one this view freed on a remount --
+ * and is ignored; a kernel that did not echo the id is in breach of the
+ * contract and its saves hang, which the kernel-side tests pin against.
+ */
+export function replyIsFor(inFlight: InFlightSnapshot, reply: SaveReply): boolean {
+  return reply.id !== undefined && reply.id === inFlight.id;
 }
 
 /** The (revision, project_json) pair the live Editor was seeded from. */
@@ -503,8 +538,10 @@ export type PushAction =
  * each event and it is idempotent: the same pair twice is `none`.
  *
  * With a snapshot in flight, a pair equal to (in-flight json, base + 1) is
- * the kernel having accepted it (obligation: an accept pushes the exact bytes
- * received and revision + 1). Everything else that differs from the seed is
+ * what the kernel accepting it would push (obligation: an accept pushes the
+ * exact bytes received and revision + 1) -- `own-ack`, though only the
+ * matching `saved` reply confirms it was this snapshot that was accepted (see
+ * WidgetApp's own-ack handling). Everything else that differs from the seed is
  * a kernel-side change and remounts -- including while a snapshot is in
  * flight, whose `rejected` reply then arrives; the reject path re-checks the
  * pair so a remount already done for the push is not done twice.

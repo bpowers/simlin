@@ -47,7 +47,7 @@ const CELLS = [
     '    p.upsert(simlin.Aux(name="from_python", equation="1"))',
     'print("REV", m.revision)',
   ],
-  ['print("REV", m.revision, sorted(m.get_var_names()))'],
+  ['print("REV", m.revision, sorted(m.get_var_names()))', 'print("SEL", m.selection)'],
 ];
 
 const SCRATCH_NOTEBOOK = 'scratch.ipynb';
@@ -363,6 +363,10 @@ test('pysimlin-widget.AC4.2: JupyterLab notebook edits a model file through the 
   expect(afterExternal).toContain("'external_writer'");
   expect(afterExternal).toContain("'from_python'");
   expect(afterExternal).toContain("'new_variable'");
+  // AC2.7, the other direction: the kernel pushes (the Python edit, the disk
+  // change) remounted the Editor, which starts with nothing selected, and the
+  // widget published that -- `m.selection` no longer names `new_variable`.
+  expect(afterExternal).toContain('SEL ()');
 
   // Kept as visual artifacts of the run (gitignored), not assertions.
   await page.screenshot({ path: path.join(__dirname, '.output', 'journey-notebook.png') });

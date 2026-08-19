@@ -261,13 +261,19 @@ describe('WidgetApp <-> model protocol', () => {
     expect(model.sent.filter((m) => (m as { type: string }).type === 'snapshot')).toHaveLength(2);
     expect(model.sent[model.sent.length - 1]).toEqual({
       type: 'snapshot',
+      id: model.lastSentSnapshotId(),
       base: 4,
       json: localJson('{"name":"disk"}', 1),
     });
+    // Each request carries its own id.
+    const ids = model.sent
+      .filter((m) => (m as { type: string }).type === 'snapshot')
+      .map((m) => (m as { id: string }).id);
+    expect(new Set(ids).size).toBe(2);
     // The kernel now handles both in order: the stale snapshot (base 3) is
-    // rejected -- that reply belongs to the freed slot and is consumed and
-    // ignored: no second remount, the seed stays at the kernel's state -- and
-    // the new one (base 4) is accepted.
+    // rejected -- that reply carries the freed snapshot's id, matches nothing
+    // in flight and is ignored: no second remount, the seed stays at the
+    // kernel's state -- and the new one (base 4) is accepted.
     await act(async () => {
       model.releaseKernel();
     });
@@ -299,6 +305,7 @@ describe('WidgetApp <-> model protocol', () => {
     model.busyKernel = true;
     await mount(model);
     fireEvent.click(screen.getByText('edit'));
+    const oldId = model.lastSentSnapshotId();
     const json1 = localJson(SEED, 1);
     act(() => {
       model.kernelPush({ project_json: json1, revision: 4 });
@@ -316,9 +323,9 @@ describe('WidgetApp <-> model protocol', () => {
     expect(mounts).toHaveLength(2);
     expect(mounts[1].props.initialProjectVersion).toBe(5);
     await waitFor(() => expect(mounts[0].saveResults).toEqual([undefined]));
-    // The late `saved` for the old snapshot: consumed, ignored.
+    // The late `saved` for the old snapshot (its id echoed): ignored.
     act(() => {
-      model.kernelSend({ type: 'saved', revision: 4 });
+      model.kernelSend({ type: 'saved', revision: 4, id: oldId });
     });
     expect(mounts).toHaveLength(2);
     // The seed is still (5, later): its own re-push is `none`...
@@ -376,7 +383,7 @@ describe('WidgetApp <-> model protocol', () => {
     fireEvent.click(screen.getByText('edit'));
     const json = localJson(SEED, 1);
     act(() => {
-      model.kernelSend({ type: 'saved', revision: 4 });
+      model.kernelSend({ type: 'saved', revision: 4, id: model.lastSentSnapshotId() });
     });
     await waitFor(() => expect(mounts[0].saveResults).toEqual([4]));
     expect(mounts).toHaveLength(1);
@@ -390,15 +397,138 @@ describe('WidgetApp <-> model protocol', () => {
     // covered by the first test; both leave exactly one mount.
   });
 
+  it('a reply that does not name the in-flight request is ignored: another id, or no id at all', async () => {
+    const model = new FakeModel(defaultState({ revision: 3 }));
+    model.busyKernel = true;
+    await mount(model);
+    fireEvent.click(screen.getByText('edit'));
+    const id = model.lastSentSnapshotId();
+    expect(id).toBeDefined();
+    await act(async () => {
+      model.kernelSend({ type: 'saved', revision: 4, id: `${id}-not-ours` });
+      model.kernelSend({ type: 'rejected', revision: 3, id: 'someone-else:1' });
+      model.kernelSend({ type: 'saved', revision: 4 });
+      model.kernelSend({ type: 'rejected', revision: 3 });
+    });
+    // Still in flight: none of those was the answer.
+    expect(mounts[0].saveResults).toEqual([]);
+    expect(mounts).toHaveLength(1);
+    // The real answer (the kernel echoing our id) resolves it.
+    await act(async () => {
+      model.releaseKernel();
+    });
+    await waitFor(() => expect(mounts[0].saveResults).toEqual([4]));
+  });
+
+  it('two views of one model (the same widget displayed twice) each resolve only their own replies', async () => {
+    // Every custom message reaches every view. View A and view B both edit
+    // against base 3 while the kernel is busy; the kernel accepts A's and
+    // rejects B's (stale). B's Editor is remounted by A's accept push (its
+    // in-flight save resolves undefined, slot freed) and B edits again with
+    // the new base BEFORE its own rejection arrives. Without request ids B
+    // would take A's `saved` as the reply owed to its freed snapshot and then
+    // its own late `rejected` as the answer to the NEW edit, resolving that
+    // save unsaved; with ids, each reply answers exactly the request it names.
+    // View B's snapshots are driven through onSave directly so its bytes
+    // differ from A's (the mock Editor would produce identical ones).
+    const model = new FakeModel(defaultState({ revision: 3 }));
+    model.busyKernel = true;
+    const a = await mount(model);
+    const b = await mount(model);
+    expect(mounts).toHaveLength(2);
+    fireEvent.click(screen.getAllByText('edit')[0]); // view A: snapshot A1 (base 3)
+    const idA1 = model.lastSentSnapshotId();
+    const saveB1 = mounts[1].props.onSave({ format: 'json', data: '{"name":"B1"}' }, 3);
+    const idB1 = model.lastSentSnapshotId();
+    expect(idA1).not.toBe(idB1);
+    // The kernel handles A1 only: accept -> push (4, jsonA) + saved{A1}.
+    await act(async () => {
+      model.releaseOne();
+    });
+    await waitFor(() => expect(mounts[0].saveResults).toEqual([4]));
+    // A: own-ack, live Editor kept. B: the push is a foreign change -> remount;
+    // B1's save resolved undefined, its slot freed.
+    await expect(saveB1).resolves.toBeUndefined();
+    expect(mounts).toHaveLength(3);
+    expect(b.el.querySelector('[data-initial-version="4"]')).not.toBeNull();
+    expect(a.el.querySelectorAll('[data-testid="editor-mock"]')).toHaveLength(1);
+    // B's new Editor edits against base 4 before B1's rejection arrives.
+    const saveB2 = mounts[2].props.onSave({ format: 'json', data: '{"name":"B2"}' }, 4);
+    const idB2 = model.lastSentSnapshotId();
+    expect(idB2).not.toBe(idB1);
+    expect(model.sent.filter((m) => (m as { type: string }).type === 'snapshot')).toHaveLength(3);
+    // Now B1: rejected{B1} (stale) -- it names no in-flight request (B has B2
+    // in flight, A nothing): ignored by both, no remount, B2 still waiting.
+    let b2Settled = false;
+    void saveB2.then(() => {
+      b2Settled = true;
+    });
+    await act(async () => {
+      model.releaseOne();
+    });
+    expect(mounts).toHaveLength(3);
+    expect(b2Settled).toBe(false);
+    // Then B2: accepted -> push (5, jsonB2) + saved{B2}. B: own-ack, resolves
+    // 5; A: foreign change -> remount (A had nothing in flight).
+    await act(async () => {
+      model.releaseOne();
+    });
+    await expect(saveB2).resolves.toBe(5);
+    expect(mounts).toHaveLength(4);
+    expect(mounts[0].saveResults).toEqual([4]);
+    expect(mounts[3].props.initialProjectVersion).toBe(5);
+    expect(mounts[3].props.initialProjectJson).toBe('{"name":"B2"}');
+    expect(model.kernel.revision).toBe(5);
+    a.cleanup();
+    b.cleanup();
+  });
+
+  it('two views sending byte-identical snapshots: the loser is remounted by its reject, not wedged by a false own-ack', async () => {
+    // A's accept pushes (4, bytes) that equal what B has in flight at base+1,
+    // so B classifies the push `own-ack` -- but the kernel then rejects B's
+    // (stale). Had B adopted the pushed pair as its seed on that own-ack, the
+    // reject would find the pair already seeded and remount nothing, leaving
+    // B's Editor acknowledged at 3 with every later save stale. The seed is
+    // adopted only on `saved`, so the reject remounts B on (4, bytes) and its
+    // next edit goes out with base 4.
+    const model = new FakeModel(defaultState({ revision: 3 }));
+    model.busyKernel = true;
+    await mount(model);
+    await mount(model);
+    const editButtons = screen.getAllByText('edit');
+    fireEvent.click(editButtons[0]); // A1: localJson(SEED, 1) at base 3
+    fireEvent.click(editButtons[1]); // B1: the SAME bytes at base 3
+    await act(async () => {
+      model.releaseOne(); // A1 accepted: push (4, bytes) + saved{A1}
+    });
+    await waitFor(() => expect(mounts[0].saveResults).toEqual([4]));
+    // B: own-ack (no remount), its save still in flight.
+    expect(mounts).toHaveLength(2);
+    expect(mounts[1].saveResults).toEqual([]);
+    await act(async () => {
+      model.releaseOne(); // B1 rejected (stale), id B1
+    });
+    await waitFor(() => expect(mounts[1].saveResults).toEqual([undefined]));
+    // The reject remounted B on the kernel's pair.
+    expect(mounts).toHaveLength(3);
+    expect(mounts[2].props.initialProjectVersion).toBe(4);
+    // B's next edit chains from 4 and is accepted.
+    model.busyKernel = false;
+    fireEvent.click(screen.getAllByText('edit')[1]);
+    await waitFor(() => expect(mounts[2].saveResults).toEqual([5]));
+    expect(model.lastSnapshot()?.base).toBe(4);
+  });
+
   it('a malformed reply while a snapshot is in flight is treated as a reject, not ignored', async () => {
-    // A kernel whose reply lost its revision (say a serialization bug): the
-    // reply still consumes the one answer the snapshot is owed.
+    // A kernel whose reply lost its revision (say a serialization bug) but
+    // still names the request: the reply consumes the one answer the snapshot
+    // is owed.
     const model = new FakeModel(defaultState({ revision: 3 }));
     model.busyKernel = true;
     await mount(model);
     fireEvent.click(screen.getByText('edit'));
     act(() => {
-      model.kernelSend({ type: 'saved' });
+      model.kernelSend({ type: 'saved', id: model.lastSentSnapshotId() });
     });
     // Resolved undefined (the controller's save queue is not stuck), no
     // trait moved so no remount, and the Editor keeps its local edit.
@@ -409,7 +539,12 @@ describe('WidgetApp <-> model protocol', () => {
     // not wedged waiting on the broken reply.
     fireEvent.click(screen.getByText('edit'));
     expect(model.sent.filter((m) => (m as { type: string }).type === 'snapshot')).toHaveLength(2);
-    expect(model.sent[model.sent.length - 1]).toEqual({ type: 'snapshot', base: 3, json: localJson(SEED, 2) });
+    expect(model.sent[model.sent.length - 1]).toEqual({
+      type: 'snapshot',
+      id: model.lastSentSnapshotId(),
+      base: 3,
+      json: localJson(SEED, 2),
+    });
   });
 
   it('a kernel-originated snapshot remounts the Editor on the new JSON and revision, exactly once', async () => {
@@ -764,6 +899,68 @@ describe('WidgetApp <-> model protocol', () => {
     expect(model.sets.filter((s) => s.key === 'selection')).toHaveLength(1);
     expect(model.lastSet('selection')).toEqual(['a', 'b']);
     expect(model.saveChangesCount).toBe(1);
+  });
+
+  it('a kernel push that remounts the Editor publishes an empty selection (the new Editor starts with none)', async () => {
+    // The Editor suppresses onSelectionChanged on its initial mount, so a
+    // remount on a kernel push would leave the trait -- and Model.selection
+    // -- naming whatever the OLD Editor had selected, possibly variables the
+    // push removed, while the UI shows nothing selected.
+    const model = new FakeModel(defaultState({ revision: 3 }));
+    await mount(model);
+    fireEvent.click(screen.getByText('select'));
+    act(() => {
+      rs.advanceTimersByTime(SELECTION_DEBOUNCE_MS);
+    });
+    expect(model.lastSet('selection')).toEqual(['a', 'b']);
+    act(() => {
+      model.kernelChange('{"name":"from-python"}');
+    });
+    expect(mounts).toHaveLength(2);
+    // Debounced like any selection change, so a burst of pushes is one sync.
+    expect(model.sets.filter((s) => s.key === 'selection')).toHaveLength(1);
+    act(() => {
+      rs.advanceTimersByTime(SELECTION_DEBOUNCE_MS);
+    });
+    expect(model.sets.filter((s) => s.key === 'selection')).toHaveLength(2);
+    expect(model.lastSet('selection')).toEqual([]);
+    expect(model.saveChangesCount).toBe(2);
+  });
+
+  it('a selection still pending when a remount lands is superseded by the empty one (never published stale)', async () => {
+    const model = new FakeModel(defaultState({ revision: 3 }));
+    await mount(model);
+    fireEvent.click(screen.getByText('select'));
+    // Debounce still running when the kernel pushes.
+    act(() => {
+      model.kernelChange('{"name":"from-python"}');
+    });
+    act(() => {
+      rs.advanceTimersByTime(SELECTION_DEBOUNCE_MS);
+    });
+    // Exactly one sync, and it carries the new Editor's (empty) selection,
+    // not the old Editor's pending one.
+    expect(model.sets.filter((s) => s.key === 'selection')).toEqual([{ key: 'selection', value: [] }]);
+  });
+
+  it('an own-ack push and an idempotent re-push do not touch the selection (no remount happened)', async () => {
+    const model = new FakeModel(defaultState({ revision: 3 }));
+    await mount(model);
+    fireEvent.click(screen.getByText('select'));
+    act(() => {
+      rs.advanceTimersByTime(SELECTION_DEBOUNCE_MS);
+    });
+    fireEvent.click(screen.getByText('edit'));
+    await waitFor(() => expect(mounts[0].saveResults).toEqual([4]));
+    act(() => {
+      model.kernelPush({ project_json: localJson(SEED, 1), revision: 4 });
+    });
+    act(() => {
+      rs.advanceTimersByTime(SELECTION_DEBOUNCE_MS);
+    });
+    expect(mounts).toHaveLength(1);
+    expect(model.sets.filter((s) => s.key === 'selection')).toHaveLength(1);
+    expect(model.lastSet('selection')).toEqual(['a', 'b']);
   });
 });
 

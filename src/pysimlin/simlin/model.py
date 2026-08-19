@@ -329,6 +329,14 @@ class Model:
         """Whether the containing project has unsaved changes."""
         return self._require_project().dirty
 
+    @property
+    def writable(self) -> bool:
+        """Whether the containing project can write its file (see
+        :attr:`Project.writable`): ``False`` in memory and under a read-only
+        suffix such as ``.vpm``, where edits stay in memory until
+        ``project.save_as()``."""
+        return self._require_project().writable
+
     def save(self, *, force: bool = False) -> None:
         """Save the containing project to its file (see :meth:`Project.save`;
         ``force=True`` overwrites a file another tool changed)."""

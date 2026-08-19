@@ -361,6 +361,36 @@ class TestSeedHasAView:
         assert len(on_disk["models"][0].get("views") or []) == 1
         assert [(e.source, e.revision) for e in events.events] == [("edit", 1)]
 
+    def test_viewless_read_only_suffix_lays_out_in_memory_and_still_edits(
+        self, tmp_path: Path, assets: WidgetAssets
+    ) -> None:
+        # A sketch-less .vpm (read as MDL) is opened without write permission:
+        # the display's layout is a committed change that stays in memory (the
+        # packaged file is never regenerated as MDL text), the widget seeds the
+        # laid-out project, and a browser edit is accepted the same way --
+        # dirty, file untouched, `saved` replied.
+        text = (FIXTURES / "teacup.mdl").read_text(encoding="utf-8")
+        body, marker, _ = text.partition("\\\\\\---///")
+        assert marker
+        path = tmp_path / "teacup.vpm"
+        path.write_text(body, encoding="utf-8")
+        before = path.read_bytes()
+        model = simlin.open(path, watch=False)
+        project = _project(model)
+        assert project.writable is False
+        w = _widget(model, assets)
+        assert w.revision == 1
+        assert self._views(w.project_json)[0]["elements"]
+        assert model.dirty is True
+        assert path.read_bytes() == before
+        _drain(w)
+        snapshot = _browser_shaped(project.serialize_json())
+        _from_browser(w, {"type": "snapshot", "base": 1, "json": snapshot})
+        assert model.revision == 2
+        assert model.dirty is True
+        assert path.read_bytes() == before
+        assert [c for k, c, _ in _sent(w) if k == "custom"] == [{"type": "saved", "revision": 2}]
+
     def test_empty_view_over_variables_is_laid_out(self, assets: WidgetAssets) -> None:
         # An empty view over a model that HAS variables is a blank editor
         # too (a JSON project written before its variables existed, or a
@@ -1013,13 +1043,41 @@ class TestExactlyOneReply:
         _drain(w)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            _from_browser(w, {"type": "snapshot", "base": base, "json": text})
+            _from_browser(w, {"type": "snapshot", "base": base, "json": text, "id": f"v:{arm}"})
         replies = [
             c for k, c, _ in _sent(w) if k == "custom" and c["type"] in ("saved", "rejected")
         ]
         assert len(replies) == 1
         assert type(replies[0]["revision"]) is int
         assert replies[0]["revision"] == model.revision
+        # The one reply names the request it answers, whichever arm produced it.
+        assert replies[0]["id"] == f"v:{arm}"
+
+    def test_accept_echoes_the_request_id_in_saved(
+        self, model: Model, model_path: Path, assets: WidgetAssets
+    ) -> None:
+        w = _widget(model, assets)
+        text = _snapshot_with(model_path, "x")
+        _drain(w)
+        _from_browser(w, {"type": "snapshot", "base": 0, "json": text, "id": "view-a:1"})
+        assert _sent(w) == [
+            ("update", {"project_json": text, "revision": 1}, None),
+            ("custom", {"type": "saved", "revision": 1, "id": "view-a:1"}, None),
+        ]
+
+    def test_stale_echoes_the_request_id_in_rejected(
+        self, model: Model, model_path: Path, assets: WidgetAssets
+    ) -> None:
+        w = _widget(model, assets)
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="kernel_side", equation="1"))
+        _drain(w)
+        _from_browser(
+            w,
+            {"type": "snapshot", "base": 0, "json": _snapshot_with(model_path, "x"), "id": "v:2"},
+        )
+        replies = [c for k, c, _ in _sent(w) if k == "custom" and c["type"] == "rejected"]
+        assert replies == [{"type": "rejected", "revision": 1, "id": "v:2"}]
 
     def test_state_update_leaves_before_saved(
         self, model: Model, model_path: Path, assets: WidgetAssets
@@ -1039,10 +1097,11 @@ class TestMalformed:
             {"type": "snapshot", "base": "0", "json": "{}"},
             {"type": "snapshot", "base": 0},
             {"type": "snapshot"},
+            {"type": "snapshot", "base": "0", "json": "{}", "id": "v:4"},
         ],
     )
     def test_malformed_snapshot_still_gets_exactly_one_rejected_reply(
-        self, model: Model, assets: WidgetAssets, content: object
+        self, model: Model, assets: WidgetAssets, content: dict[str, Any]
     ) -> None:
         w = _widget(model, assets)
         with model.edit() as (_, patch):
@@ -1052,7 +1111,12 @@ class TestMalformed:
             _from_browser(w, content)
         sent = _sent(w)
         assert [kind for kind, _, _ in sent] == ["custom", "custom"]
-        assert sent[0][1] == {"type": "rejected", "revision": 1}
+        expected: dict[str, Any] = {"type": "rejected", "revision": 1}
+        if "id" in content:
+            # The browser matches the reply to its request by id, so even a
+            # malformed snapshot's rejection must carry it.
+            expected["id"] = content["id"]
+        assert sent[0][1] == expected
         assert sent[1][1]["type"] == "notice"
         assert sent[1][1]["level"] == "warn"
         assert model.revision == 1

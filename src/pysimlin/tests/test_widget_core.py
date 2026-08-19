@@ -94,6 +94,25 @@ class TestParseIncoming:
             base=3, json="{}"
         )
 
+    def test_snapshot_request_id_is_carried_verbatim(self) -> None:
+        # The browser correlates replies by the id it sent; the kernel never
+        # interprets it, only echoes it -- whatever JSON value it is, so even
+        # a foreign client's oddly-typed id gets its reply back.
+        assert parse_incoming({"type": "snapshot", "base": 3, "json": "{}", "id": "v:1"}) == (
+            SnapshotRequest(base=3, json="{}", id="v:1")
+        )
+        assert parse_incoming({"type": "snapshot", "base": 3, "json": "{}", "id": 7}) == (
+            SnapshotRequest(base=3, json="{}", id=7)
+        )
+        assert parse_incoming({"type": "snapshot", "base": 3, "json": "{}", "id": None}) == (
+            SnapshotRequest(base=3, json="{}", id=None)
+        )
+
+    def test_malformed_snapshot_keeps_its_id_so_its_reply_can_be_matched(self) -> None:
+        message = parse_incoming({"type": "snapshot", "base": "3", "json": "{}", "id": "v:9"})
+        assert isinstance(message, MalformedSnapshot)
+        assert message.id == "v:9"
+
     def test_oversize(self) -> None:
         assert parse_incoming({"type": "oversize", "bytes": 9_000_000}) == OversizeReport(
             bytes=9_000_000
@@ -328,6 +347,30 @@ class TestPlanSnapshotReply:
         replies = [m for m in plan.messages if m["type"] in ("saved", "rejected")]
         assert len(replies) == 1
         assert type(replies[0]["revision"]) is int
+        # No id came in, none goes out.
+        assert "id" not in replies[0]
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            SnapshotOutcome(applied=True, revision=5),
+            SnapshotOutcome(applied=True, revision=5, error="disk full", write_failed=True),
+            SnapshotOutcome(applied=True, revision=5, error="IOLoop is closed"),
+            SnapshotOutcome(applied=False, revision=7),
+            SnapshotOutcome(applied=False, revision=4, error="bad json"),
+        ],
+    )
+    def test_every_arm_echoes_the_request_id(self, outcome: SnapshotOutcome) -> None:
+        # The browser resolves a save only on the reply naming its request
+        # (several views of one model all see every reply), so every arm's
+        # reply carries the id exactly as received.
+        request = SnapshotRequest(base=4, json='{"the":"snapshot"}', id="view:3")
+        plan = plan_snapshot_reply(request, outcome)
+        replies = [m for m in plan.messages if m["type"] in ("saved", "rejected")]
+        assert len(replies) == 1
+        assert replies[0]["id"] == "view:3"
+        # Notices are not replies and carry no id.
+        assert all("id" not in m for m in plan.messages if m["type"] == "notice")
 
 
 class TestIsOwnChange:

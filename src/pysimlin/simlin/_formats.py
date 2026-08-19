@@ -199,12 +199,8 @@ def resolve_write_format(path: _PathLike, format: FileFormat | None) -> FileForm
     if format is not None:
         return format
     p = Path(path)
-    if p.suffix.lower() in _READ_ONLY_SUFFIXES:
-        writable = ", ".join(sorted(WRITABLE_SUFFIXES))
-        raise SimlinRuntimeError(
-            f"{p.suffix} files can be read but not written; save to one of {writable} "
-            f"or pass format= explicitly"
-        )
+    if is_read_only_suffix(p):
+        raise SimlinRuntimeError(read_only_suffix_message(p))
     by_suffix = format_for_suffix(p)
     if by_suffix is None:
         raise ValueError(
@@ -212,6 +208,26 @@ def resolve_write_format(path: _PathLike, format: FileFormat | None) -> FileForm
             f"pass format= explicitly (one of {', '.join(f.name for f in FileFormat)})"
         )
     return by_suffix
+
+
+def is_read_only_suffix(path: _PathLike) -> bool:
+    """Whether ``path`` can be read but must never be written in place
+    (``.vpm``, ``.proto``; see the module docstring).  The one rule behind
+    :func:`resolve_write_format`'s refusal and ``Project.open()`` backing
+    such a file without write permission -- a project opened from a
+    ``.vpm`` must be exactly as unwritable as a ``save_as()`` to one."""
+    return Path(path).suffix.lower() in _READ_ONLY_SUFFIXES
+
+
+def read_only_suffix_message(path: _PathLike) -> str:
+    """The actionable text for a write refused because of ``path``'s
+    read-only suffix: what to ``save_as()`` instead."""
+    p = Path(path)
+    writable = ", ".join(sorted(WRITABLE_SUFFIXES))
+    return (
+        f"{p.suffix} files can be read but not written; save_as() a path ending in one of "
+        f"{writable} (or pass format= explicitly)"
+    )
 
 
 WRITABLE_SUFFIXES: frozenset[str] = (
@@ -224,6 +240,8 @@ __all__ = [
     "WRITABLE_SUFFIXES",
     "FileFormat",
     "format_for_suffix",
+    "is_read_only_suffix",
+    "read_only_suffix_message",
     "resolve_read_format",
     "resolve_write_format",
     "sniff_format",

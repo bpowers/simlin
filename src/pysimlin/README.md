@@ -276,6 +276,18 @@ ever true after a failed or refused write (disk full, permissions, or the
 conflict below): the write raises and the in-memory change is kept until a
 later `save()` succeeds.
 
+Two suffixes are read-only: `.vpm` (a packaged Vensim model, read as MDL
+text) and `.proto` (a schema suffix accepted for protobuf input). A model
+opened from one is backed without write permission -- `model.writable` is
+`False`, `autosave` is off and cannot be turned on for that path, edits (and
+the diagram layout a display adds to a sketch-less model) stay in memory
+with `dirty` set, and `save()` refuses -- so the packaged file is never
+regenerated as plain MDL or as a binary blob. `project.save_as("x.mdl")`
+keeps the changes and, since you never turned autosave off, autosaves from
+there on. The path you open is anchored to an absolute one at that moment
+(`model.path` reports it), so a later `%cd` or `os.chdir()` never moves
+where autosave writes or what is watched.
+
 `save()` never silently overwrites someone else's work. If the file changed
 on disk since the model last read or wrote it, `save()` raises and leaves
 both file and model as they are; `model.reload()` takes the on-disk version
