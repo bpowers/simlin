@@ -1755,6 +1755,10 @@ fn the_dedup_refuses_an_insert_that_would_exceed_the_path_node_budget() {
     dedup.nodes = MAX_FALLBACK_PATH_NODES - 2;
     assert!(dedup.insert_if_new(&[0, 1], &mut paths), "exactly fits");
     assert!(!dedup.is_full(&paths));
+    // A rotation of an already-kept cycle is identity, not storage: it is
+    // refused as a duplicate without spending the budget or marking full.
+    assert!(!dedup.insert_if_new(&[1, 0], &mut paths), "a duplicate");
+    assert!(!dedup.is_full(&paths), "a duplicate spends no budget");
     assert!(!dedup.insert_if_new(&[2, 3], &mut paths), "one node over");
     assert!(dedup.is_full(&paths));
     assert_eq!(paths.len(), 1);

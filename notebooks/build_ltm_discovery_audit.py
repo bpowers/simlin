@@ -1142,6 +1142,11 @@ else:
 raw_max = 0.0
 rel_max = 0.0
 raw_mismatched = []
+# Where one side is NaN and the other is not, the two disagree about score
+# AVAILABILITY, which a comparison over the jointly-finite steps alone would
+# silently skip; count those steps and fail the scores on any.
+mask_mismatch_steps = 0
+compared_steps = 0
 for d in dump["discovered"]:
     names = tuple(d["nodes"])
     k = names.index(min(names))
@@ -1152,7 +1157,9 @@ for d in dump["discovered"]:
 
     e_raw = np.array(decode_scores(d["scores"]), dtype=np.float64)
     p_raw = score[c]
+    mask_mismatch_steps += int((np.isnan(e_raw) != np.isnan(p_raw)).sum())
     both = (~np.isnan(e_raw)) & (~np.isnan(p_raw))
+    compared_steps += int(both.sum())
     if both.any():
         denom = np.maximum(np.abs(e_raw[both]), 1e-300)
         worst = float((np.abs(e_raw[both] - p_raw[both]) / denom).max())
@@ -1166,6 +1173,7 @@ for d in dump["discovered"]:
             tot = group_totals(g)
             p_rel = np.where(tot == 0.0, 0.0, p_raw / np.where(tot == 0.0, 1.0, tot))
             e_rel = np.array(decode_scores(d["rel_scores"]), dtype=np.float64)
+            mask_mismatch_steps += int((np.isnan(e_rel) != np.isnan(p_rel)).sum())
             both = (~np.isnan(e_rel)) & (~np.isnan(p_rel))
             if both.any():
                 rel_max = max(rel_max, float(np.abs(e_rel[both] - p_rel[both]).max()))
@@ -1173,6 +1181,8 @@ for d in dump["discovered"]:
 print(f"max relative difference in raw loop scores: {raw_max:.3e} "
       f"({len(raw_mismatched)} loops differ by more than 1e-9)")
 print(f"max |rel score| difference: {rel_max:.3e}")
+print(f"NaN-availability mismatches between engine and independent scores: "
+      f"{mask_mismatch_steps} steps (compared {compared_steps} jointly-finite steps)")
 if raw_mismatched:
     print("  loops whose reported score is NOT the raw product of their links "
           "(module-override series, or a genuine defect):")
@@ -1314,7 +1324,8 @@ for label, value in verdict_rows:
     print(f"{label}: {value}")
 
 exact_set = (len(not_in_universe) == 0 and overlap == len(engine_set))
-scores_exact = raw_max <= 1e-9 and rel_max <= 1e-9
+scores_exact = (raw_max <= 1e-9 and rel_max <= 1e-9
+                and mask_mismatch_steps == 0 and compared_steps > 0)
 # The two counts that expose an omission the set comparisons cannot: an
 # engine that dropped universe cycles below retention or outside the top-200
 # could still have every reported loop inside `cycle_of_key`, but its

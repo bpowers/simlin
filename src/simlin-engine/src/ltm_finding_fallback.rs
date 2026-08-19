@@ -1280,15 +1280,23 @@ impl CycleDedup {
     /// Append `cycle` to `paths` unless a rotation of it is already there or
     /// `paths` is already at `cap`. Returns whether it was newly inserted.
     fn insert_if_new(&mut self, cycle: &[u32], paths: &mut Vec<Vec<u32>>) -> bool {
-        if paths.len() >= self.cap || self.nodes + cycle.len() > MAX_FALLBACK_PATH_NODES {
+        if paths.len() >= self.cap {
             self.full = true;
             return false;
         }
+        // Identity before budget: a rediscovered cycle (the sweep finds the
+        // same cycle across steps and seeds routinely) costs no storage, so
+        // it must not spend the node budget's last slice and end the sweep
+        // early for candidates that would have fit.
         let bucket = self.buckets.entry(cycle_fingerprint(cycle)).or_default();
         if bucket
             .iter()
             .any(|&i| is_same_cycle(cycle, &paths[i as usize]))
         {
+            return false;
+        }
+        if self.nodes + cycle.len() > MAX_FALLBACK_PATH_NODES {
+            self.full = true;
             return false;
         }
         bucket.push(paths.len() as u32);

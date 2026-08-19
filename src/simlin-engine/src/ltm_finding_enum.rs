@@ -1034,9 +1034,19 @@ pub(super) fn enumerate_active_circuits(
                 }
 
                 if to == root {
+                    // Charge the circuit BEFORE copying it: one cycle can span
+                    // a large fraction of the graph, so the bound must hold
+                    // with the closing circuit included, not after it.
+                    let added = (edge_path.len() + 1 + 2 * words) as u64;
+                    if out.len() >= max_circuits || out.total_rows() as u64 + added > max_edge_rows
+                    {
+                        and_stack.truncate(base + words);
+                        out.complete = false;
+                        return out;
+                    }
                     out.push(&edge_path, row, &and_stack[base + words..]);
                     and_stack.truncate(base + words);
-                    if out.len() >= max_circuits || out.total_rows() as u64 > max_edge_rows {
+                    if out.len() >= max_circuits {
                         break 'dfs;
                     }
                 } else {
