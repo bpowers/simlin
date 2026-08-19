@@ -1042,6 +1042,13 @@ impl FallbackScratch {
                 let mut cursor = w;
                 let mut elementary = true;
                 while cursor != seed {
+                    // A tail hop is work like a closure scanned: one reverse
+                    // tail can be most of the graph, so the deadline must be
+                    // reachable from inside the walk, not only between edges.
+                    scanned = scanned.wrapping_add(1);
+                    if scanned & (check_interval - 1) == 0 && expired(deadline, clock) {
+                        return false;
+                    }
                     if self.path_mark[cursor as usize] == path_generation {
                         elementary = false;
                         break;

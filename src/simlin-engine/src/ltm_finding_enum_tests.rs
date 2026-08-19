@@ -2769,3 +2769,23 @@ fn the_mean_abs_statistic_stays_infinite_when_an_observation_is_infinite() {
         f64::INFINITY
     );
 }
+
+/// A stitched loop is charged against the enumeration's storage bound like
+/// any circuit: with no room left, `push_node_path` refuses (pushing nothing)
+/// so the caller treats the enumeration as incomplete rather than allocating
+/// past the bound.
+#[test]
+fn a_stitched_loop_over_the_storage_bound_is_refused() {
+    let (activity, _search) = two_triangles_and_a_self_edge();
+    let mut candidates =
+        super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
+    assert!(candidates.complete);
+    let before = candidates.len();
+    // The a->b->c triangle as a node path (ids 0,1,2 by interning order).
+    let _guard = EnumBudgetGuard::new(usize::MAX, u64::MAX, 1);
+    assert!(
+        !candidates.push_node_path(&[0, 1, 2], &activity),
+        "one row-equivalent of budget cannot hold a three-edge loop"
+    );
+    assert_eq!(candidates.len(), before, "nothing was pushed");
+}

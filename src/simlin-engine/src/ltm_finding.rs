@@ -2851,17 +2851,21 @@ pub(crate) fn discover_loops_with_deadlines(
             let (stitched, stitch_truncated) =
                 stitch_cross_agg_node_paths(&search, &petal_circuits);
             agg_recovery_truncated = stitch_truncated;
-            for seq in &stitched {
-                candidates.push_node_path(seq, &activity);
-            }
+            // Stitched loops are charged against the enumeration's storage
+            // bound like any circuit; an addition that would exceed it makes
+            // the enumeration incomplete (the fallback runs), never a larger
+            // allocation than the bound allows.
+            let stitching_over_budget = stitched
+                .iter()
+                .any(|seq| !candidates.push_node_path(seq, &activity));
             // Petal collection and stitching are bounded by the enumeration's
             // own budgets (the scan is one pass over the emitted rows, the
             // stitch by `cross_agg_loop_budget`), but a reducer-heavy universe
             // can still spend real time here before retention's first check;
             // read the clock once so an expired enumeration deadline yields to
             // the fallback with its share intact rather than after this work.
-            let stitching_expired =
-                !petal_circuits.is_empty() && expired(deadlines.enumeration, clock);
+            let stitching_expired = stitching_over_budget
+                || (!petal_circuits.is_empty() && expired(deadlines.enumeration, clock));
 
             if stitching_expired {
                 // Fall through to the fallback exactly as an incomplete

@@ -875,8 +875,20 @@ impl EnumeratedCandidates {
     /// have carried had it emitted the sequence itself; a sequence whose
     /// petals are never simultaneously active gets an empty AND and, like any
     /// circuit that banks no mass, is neither a survivor nor a universe member.
-    pub(super) fn push_node_path(&mut self, path: &[u32], graph: &ActivityGraph) {
+    ///
+    /// Charged against the same storage bound as an enumerated circuit
+    /// (`MAX_DISCOVERY_ENUM_EDGE_ROWS`, in row-equivalents): stitching reuses
+    /// each petal across many emitted subsets, so the stitched additions can
+    /// be a multiple of the petals' own rows. Returns `false` -- and pushes
+    /// nothing -- when the addition would exceed the bound; the caller then
+    /// treats the enumeration as incomplete and falls back.
+    pub(super) fn push_node_path(&mut self, path: &[u32], graph: &ActivityGraph) -> bool {
         let rows = path_edge_rows(path, graph);
+        let (_, _, max_rows) = enum_budgets();
+        let added = (rows.len() + 2 * self.words) as u64;
+        if self.total_rows() as u64 + added > max_rows {
+            return false;
+        }
         let mut and_bits = vec![u64::MAX; self.words];
         for &row in &rows {
             for (acc, bit) in and_bits.iter_mut().zip(graph.edge_bits(row)) {
@@ -885,6 +897,7 @@ impl EnumeratedCandidates {
         }
         let (open, closing) = rows.split_at(rows.len() - 1);
         self.push(open, closing[0], &and_bits);
+        true
     }
 
     pub(super) fn len(&self) -> usize {
