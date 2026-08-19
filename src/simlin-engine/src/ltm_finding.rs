@@ -428,6 +428,17 @@ pub fn link_score_offsets(
     parse_link_offsets(results, ltm_vars, dims, expansion)
 }
 
+/// The cross-aggregate stitching limits discovery applies: `(max petals per
+/// aggregate node, stitched-loop budget)`. Exposed for the audit instrument so
+/// an independent re-enumeration stitches under the SAME limits production
+/// does instead of re-stating them.
+pub fn cross_agg_stitching_limits() -> (usize, usize) {
+    (
+        crate::db::MAX_AGG_PETALS,
+        crate::db::cross_agg_loop_budget(),
+    )
+}
+
 /// The per-edge series discovery's candidate generators read for ACTIVITY --
 /// the recorded link score, NaN-shadow-repaired for a module-input edge by
 /// [`IndexedEdge::value_at`] (a module composite that is NaN or 0 where one of
@@ -2691,6 +2702,10 @@ pub(crate) fn discover_loops_with_deadlines(
     // statement: `Some(n)` iff the enumeration ran to completion and its
     // universe holds `n` circuits.
     let mut universe_loops: Option<usize> = None;
+    // Retained loops retention deliberately did not hand over for
+    // materialization (Solo loops past the strongest `max_loops()`), so the
+    // reported `retained_loops` still counts every loop that passed.
+    let mut retained_beyond_materialization: usize = 0;
     let mut agg_recovery_truncated = false;
     // Full-universe per-partition denominators and loop counts from the
     // enumeration path (`None` on the fallback path, where `rank_and_filter`
@@ -2841,6 +2856,7 @@ pub(crate) fn discover_loops_with_deadlines(
                 // trimmed-key dedup merged and minus anything that banked no
                 // mass; retention counts exactly that as it goes.
                 let universe_loop_count = retention.distinct_circuits;
+                retained_beyond_materialization = retention.solo_survivors_beyond_cap;
                 node_paths = survivors;
                 universe = Some(UniverseStats {
                     totals: retention.partition_totals,
@@ -3000,7 +3016,12 @@ pub(crate) fn discover_loops_with_deadlines(
         // Compute signed loop score at each timestep.
         // Time is derived from specs assuming evenly-spaced results at save_step intervals.
         let mut scores: Vec<(f64, f64)> = Vec::new();
-        let mut abs_score_sum = 0.0;
+        // Running (Welford) mean of |score| over the valid steps -- the same
+        // formula retention uses (`enum_gen::mean_abs_over_valid`), so a
+        // twin's representative and a Solo loop's rank are decided on the
+        // statistic the materialized loop reports, and a sum of large finite
+        // products cannot overflow where their mean is representable.
+        let mut abs_mean = 0.0f64;
         let mut valid_count = 0usize;
 
         for step in 0..step_count {
@@ -3022,20 +3043,19 @@ pub(crate) fn discover_loops_with_deadlines(
                 loop_score *= value;
             }
 
-            if has_nan {
+            // A NaN PRODUCT with no NaN link (`Inf * 0`) is excluded from the
+            // mean exactly as a NaN link is -- the same rule retention's
+            // product-derived NaN mask applies.
+            if has_nan || loop_score.is_nan() {
                 scores.push((time, f64::NAN));
             } else {
                 scores.push((time, loop_score));
-                abs_score_sum += loop_score.abs();
                 valid_count += 1;
+                abs_mean += (loop_score.abs() - abs_mean) / valid_count as f64;
             }
         }
 
-        let avg_abs_score = if valid_count > 0 {
-            abs_score_sum / valid_count as f64
-        } else {
-            0.0
-        };
+        let avg_abs_score = abs_mean;
 
         // Trim synthetic aggregate nodes out of the reported loop (AC4.2).
         // The loop scores above were computed from the un-trimmed `links`; the
@@ -3199,7 +3219,7 @@ pub(crate) fn discover_loops_with_deadlines(
         truncated,
         agg_recovery_truncated,
         enumeration_complete,
-        retained_loops: ranked.retained_loops,
+        retained_loops: ranked.retained_loops + retained_beyond_materialization,
         universe_loops,
         fallback_candidates,
     })

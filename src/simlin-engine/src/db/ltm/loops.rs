@@ -1527,7 +1527,7 @@ pub(crate) const MAX_CROSS_AGG_LOOPS: usize = 256;
 /// threshold anyway (each petal contributes ≥2 distinct nodes plus the
 /// shared agg to one SCC), so this is a conservative belt-and-suspenders;
 /// 8 matches the pre-#515 hard cap.
-const MAX_AGG_PETALS: usize = 8;
+pub(crate) const MAX_AGG_PETALS: usize = 8;
 
 #[cfg(test)]
 thread_local! {

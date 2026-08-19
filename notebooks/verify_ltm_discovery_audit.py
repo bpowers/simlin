@@ -136,6 +136,8 @@ def verify(path: Path) -> bool:
                 value_failures.append(line)
         if line.startswith("enumeration_complete:") and "True" not in line:
             value_failures.append(line)
+        if line.startswith("AUDIT VERDICT:") and "agg_recovery_truncated=False" not in line:
+            value_failures.append(line)
         if "cross-check" in line and "DISAGREE" in line:
             value_failures.append(line)
     if not verdict_pass:

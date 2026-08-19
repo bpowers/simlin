@@ -671,8 +671,12 @@ scores is the population the engine's denominators sum.
 AGG_PREFIX = "$\\u205altm\\u205aagg\\u205a"
 is_agg_node = [node_names[n].startswith(AGG_PREFIX) for n in range(NN)]
 U_FROM_ = [u for u, _ in U]
-MAX_AGG_PETALS = 16
-CROSS_AGG_LOOP_BUDGET = 10_000
+# The engine's own stitching caps, read from the dump rather than re-stated:
+# the smallest `MAX_AGG_PETALS` petals per aggregate node are considered, and
+# the model-wide stitched-loop budget stops the walk (at which point the
+# engine reports `agg_recovery_truncated`).
+MAX_AGG_PETALS = int(dump["max_agg_petals"])
+CROSS_AGG_LOOP_BUDGET = int(dump["cross_agg_loop_budget"])
 
 def nodes_of_rows(rws):
     return tuple(U_FROM_[r] for r in rws)
@@ -694,7 +698,10 @@ for rws in circuit_rows:
 
 stitched_seqs: list[tuple[int, ...]] = []
 emitted = 0
+budget_hit = False
 for a in sorted(petals_by_agg):
+    if budget_hit:
+        break
     petals = petals_by_agg[a]
     if len(petals) < 2:
         continue
@@ -719,6 +726,7 @@ for a in sorted(petals_by_agg):
         stitched_seqs.append(seq)
         emitted += 1
         if emitted >= CROSS_AGG_LOOP_BUDGET:
+            budget_hit = True   # the engine breaks out of EVERY aggregate here
             break
 
 # A stitched sequence's edges all exist in the union graph; append each as
@@ -733,7 +741,8 @@ for seq in stitched_seqs:
     n_stitched += 1
 n_cyc = len(circuit_rows)
 lens = np.array([len(c) for c in circuit_rows], dtype=np.int64)
-print(f"aggregate nodes with petals: {len(petals_by_agg)}; stitched cross-agg loops: {n_stitched}")
+print(f"aggregate nodes with petals: {len(petals_by_agg)}; stitched cross-agg loops: {n_stitched}"
+      f"{' (stitching budget hit)' if budget_hit else ''}")
 print(f"candidate universe (elementary cycles + stitched loops): {n_cyc}")
 """
     )
@@ -1315,14 +1324,20 @@ independent_universe = int(massy.sum())
 counts_agree = (analysis.universe_loops == independent_universe
                 and analysis.retained_loops == len(survivors))
 gap = total_steps - covered
-audit_pass = bool(analysis.enumeration_complete and exact_set and scores_exact
-                  and counts_agree)
+# Exactness also needs the cross-aggregate recovery to have finished: a
+# stitched universe clipped by its budget is reported via
+# `agg_recovery_truncated`, and an audit mirroring the same clipped walk would
+# otherwise agree with the engine about an inexact universe.
+agg_complete = not analysis.agg_recovery_truncated
+audit_pass = bool(analysis.enumeration_complete and agg_complete and exact_set
+                  and scores_exact and counts_agree)
 print(f"independent mass-bearing universe: {independent_universe} "
       f"(pysimlin universe_loops {analysis.universe_loops}); independent survivors "
       f"{len(survivors)} (pysimlin retained_loops {analysis.retained_loops}): "
       f"{'AGREE' if counts_agree else 'DISAGREE'}")
 print(f"AUDIT VERDICT: {'PASS' if audit_pass else 'FAIL'} "
-      f"(enumeration_complete={analysis.enumeration_complete}, exact_set={exact_set}, "
+      f"(enumeration_complete={analysis.enumeration_complete}, "
+      f"agg_recovery_truncated={analysis.agg_recovery_truncated}, exact_set={exact_set}, "
       f"scores_exact={scores_exact}, counts_agree={counts_agree})")
 display(Markdown(f\"\"\"
 ### Verdict

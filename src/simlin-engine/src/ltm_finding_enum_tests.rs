@@ -2709,3 +2709,44 @@ fn a_finite_partition_total_saturates_instead_of_overflowing_to_inf() {
     assert_eq!(outcome.survivors.len(), 2, "both loops keep a finite share");
     assert_eq!(outcome.partition_circuit_counts[&0], 2);
 }
+
+/// Retention keeps only the strongest `max_loops()` Solo loops for
+/// materialization, but every mass-bearing Solo loop PASSED retention, so the
+/// reported `retained_loops` counts them all: a capped stockless report reads
+/// `retained_loops > len(loops)`, not as the whole retained set.
+#[test]
+fn retained_loops_counts_the_solo_survivors_retention_did_not_materialize() {
+    let project = enum_test_project(vec![
+        enum_aux("a", "PREVIOUS(b, 1) * 0.5 + 1"),
+        enum_aux("b", "PREVIOUS(a, 0) * 0.5"),
+        enum_aux("c", "PREVIOUS(d, 1) * 0.4 + 1"),
+        enum_aux("d", "PREVIOUS(c, 0) * 0.4"),
+        enum_aux("e", "PREVIOUS(f, 1) * 0.3 + 1"),
+        enum_aux("f", "PREVIOUS(e, 0) * 0.3"),
+    ]);
+    let _guard = MaxLoopsGuard::new(2);
+    let auto = discover_project(&project, CandidateGen::Auto);
+    assert!(auto.enumeration_complete);
+    assert_eq!(
+        auto.universe_loops,
+        Some(3),
+        "three Solo loops in the universe"
+    );
+    assert_eq!(auto.loops.len(), 2, "the cap holds two");
+    assert_eq!(
+        auto.retained_loops, 3,
+        "all three passed retention; the cap, not retention, dropped the third"
+    );
+}
+
+/// The mean |score| statistic is a running mean: two finite values whose SUM
+/// overflows still have their representable mean, so twin representatives and
+/// Solo ranks are decided on strength rather than on an Inf-vs-Inf tie.
+#[test]
+fn the_mean_abs_statistic_does_not_overflow_where_the_sum_would() {
+    let series = [1e308f64, 1e308, 0.0];
+    let nan_mask = [false, false, true];
+    assert!((1e308f64 + 1e308f64).is_infinite());
+    let mean = super::enum_gen::mean_abs_over_valid(&series, &nan_mask);
+    assert_eq!(mean, 1e308);
+}

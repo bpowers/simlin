@@ -152,8 +152,8 @@ pub use ltm::{
 // The cross-agg petal-stitching core, shared with `crate::ltm_finding`'s
 // discovery-mode recovery (GH #696).
 pub(crate) use ltm::{
-    StitchPetal, collect_agg_petals, cross_agg_loop_budget, stitch_cross_agg_petals,
-    sub_model_output_ports,
+    MAX_AGG_PETALS, StitchPetal, collect_agg_petals, cross_agg_loop_budget,
+    stitch_cross_agg_petals, sub_model_output_ports,
 };
 // Test-only: the cross-agg loop-count budget override, so `ltm_finding`'s
 // discovery-mode truncation test can trip the budget with a tiny fixture

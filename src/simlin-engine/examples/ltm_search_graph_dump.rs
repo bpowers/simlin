@@ -24,6 +24,8 @@
 //!     "retained_loops": usize,
 //!     "truncated": bool,
 //!     "agg_recovery_truncated": bool,
+//!     "max_agg_petals": usize,        // production stitching caps, for the audit
+//!     "cross_agg_loop_budget": usize,
 //!     "discovered": [{"id": "...", "nodes": [...], "scores": [f64; N],
 //!                     "rel_scores": [f64; N], "partition": usize|null}, ...]
 //!   }
@@ -267,6 +269,11 @@ fn main() {
         "retained_loops": found.retained_loops,
         "truncated": found.truncated,
         "agg_recovery_truncated": found.agg_recovery_truncated,
+        // The stitching limits production applies, so an independent
+        // re-enumeration stitches under the SAME caps (max petals per
+        // aggregate node; stitched-loop budget) rather than re-stating them.
+        "max_agg_petals": simlin_engine::ltm_finding::cross_agg_stitching_limits().0,
+        "cross_agg_loop_budget": simlin_engine::ltm_finding::cross_agg_stitching_limits().1,
         "discovered": discovered,
     });
 

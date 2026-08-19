@@ -570,6 +570,14 @@ impl ActivityGraph {
         }
 
         let scc_of = tarjan_scc_of(&adj, n_nodes);
+        // The union-wide SCC pass is O(nodes + edges) with no check inside;
+        // charge it like any other phase and read the clock once after it
+        // when the graph alone is a check interval of work.
+        if n_nodes as u64 + edge_from.len() as u64 >= u64::from(DEADLINE_CHECK_INTERVAL)
+            && expired(deadline, clock)
+        {
+            return None;
+        }
         Some(ActivityGraph {
             adj,
             radj,
@@ -1049,6 +1057,12 @@ pub(super) struct RetentionOutcome {
     /// Indices into the enumerated circuit list that survive retention,
     /// ascending.
     pub survivors: Vec<usize>,
+    /// Mass-bearing Solo circuits that passed retention but are NOT in
+    /// `survivors`: retention keeps only the strongest `max_loops()` Solo loops
+    /// (the most the report can hold), and a caller's `retained_loops` must
+    /// still count these so a capped stockless report is not mistaken for the
+    /// whole retained set.
+    pub solo_survivors_beyond_cap: usize,
     /// Per-engine-internal-partition per-step totals `Sum_j |score_j[t]|`
     /// over ALL enumerated circuits (NaN summands excluded, Inf kept),
     /// for `rank_and_filter`'s external-denominator path.
@@ -1240,21 +1254,10 @@ pub(super) fn retain_circuits(
                 &mut nan_mask[..],
             );
             work.record(rows.len() as u64 * step_count as u64);
-            let mut sum = 0.0f64;
-            let mut valid = 0usize;
-            let mut any_mass = false;
-            for t in 0..step_count {
-                if nan_mask[t] {
-                    continue;
-                }
-                let mass = scratch[t].abs();
-                any_mass |= mass != 0.0;
-                sum += mass;
-                valid += 1;
-            }
+            let any_mass = (0..step_count).any(|t| !nan_mask[t] && scratch[t] != 0.0);
             if any_mass {
                 distinct_circuits += 1;
-                solo_ranked.push((sum / valid as f64, ci));
+                solo_ranked.push((mean_abs_over_valid(&scratch, &nan_mask), ci));
             }
             continue;
         };
@@ -1356,16 +1359,14 @@ pub(super) fn retain_circuits(
     // own content-key tie-break decides presentation later; retention only
     // has to keep every loop the ranking could report).
     solo_ranked.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    survivors.extend(
-        solo_ranked
-            .iter()
-            .take(super::max_loops())
-            .map(|&(_, ci)| ci),
-    );
+    let solo_kept = solo_ranked.len().min(super::max_loops());
+    let solo_survivors_beyond_cap = solo_ranked.len() - solo_kept;
+    survivors.extend(solo_ranked.iter().take(solo_kept).map(|&(_, ci)| ci));
     survivors.sort_unstable();
 
     Some(RetentionOutcome {
         survivors,
+        solo_survivors_beyond_cap,
         partition_totals,
         partition_circuit_counts,
         distinct_circuits,
@@ -1445,15 +1446,27 @@ fn raw_avg_abs_score(
         scratch,
         nan_mask,
     );
-    let mut sum = 0.0f64;
-    let mut valid = 0usize;
+    mean_abs_over_valid(scratch, nan_mask)
+}
+
+/// Mean of `|series[t]|` over the steps `nan_mask` does not exclude, as a
+/// running (Welford) mean rather than `sum / count`: a sum of large finite
+/// values can overflow to Inf while their mean is representable, and this
+/// statistic decides a twin's representative and a Solo loop's rank, where an
+/// Inf on both sides would hand the decision to circuit index instead of
+/// strength. `FoundLoop::avg_abs_score` uses the same formula so the two agree
+/// step for step.
+pub(super) fn mean_abs_over_valid(series: &[f64], nan_mask: &[bool]) -> f64 {
+    let mut mean = 0.0f64;
+    let mut n = 0usize;
     for (i, &is_nan) in nan_mask.iter().enumerate() {
-        if !is_nan {
-            sum += scratch[i].abs();
-            valid += 1;
+        if is_nan {
+            continue;
         }
+        n += 1;
+        mean += (series[i].abs() - mean) / n as f64;
     }
-    if valid > 0 { sum / valid as f64 } else { 0.0 }
+    mean
 }
 
 /// Decide, before either candidate's mass reaches a partition total, which

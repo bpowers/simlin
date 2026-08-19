@@ -77,7 +77,7 @@ pub(crate) use loops::read_slice_rows;
 // (`ltm_finding`, GH #696) so both enumerate exactly the same cross-agg loops.
 pub(crate) use loops::sub_model_output_ports;
 pub(crate) use loops::{
-    StitchPetal, collect_agg_petals, cross_agg_loop_budget, stitch_cross_agg_petals,
+    MAX_AGG_PETALS, StitchPetal, collect_agg_petals, cross_agg_loop_budget, stitch_cross_agg_petals,
 };
 pub(crate) use parse::scalarize_ltm_equation;
 pub(crate) use pinned::model_pinned_loops;
