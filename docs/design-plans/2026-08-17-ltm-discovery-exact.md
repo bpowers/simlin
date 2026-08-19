@@ -389,8 +389,15 @@ pathway-offset slices (charged before they are handed out; a refusal ends candid
 generation rather than returning an uncharged list), and every fallback kept path and
 stitched loop. A future `FoundLoop` is charged at what the candidate BECOMES -- the two
 step-count-long series plus, per node, the `Ident` path and the `Link` it materializes
-into -- not at its compact `u32` node ids alone. When the enumeration yields, its graph
-and candidate charge is released so the fallback is measured against the whole bound.
+into -- not at its compact `u32` node ids alone. The module-override cache charges a
+series before recomputing it (the recompute folds the pathway rows in place into one
+buffer) and a refusal is a distinct `OutOfMemory` answer that abandons the phase rather
+than masquerading as a decline. Cross-agg petal stitching streams the candidate paths
+into a collector that keeps only `MAX_AGG_PETALS + 1` petals per agg -- exactly enough to
+reproduce the unbounded stitcher's output and truncation flag -- charging each kept petal
+and the stitched output's upper bound before anything is built. When the enumeration
+yields, its graph and candidate charge is released so the fallback is measured against
+the whole bound.
 
 The module-pathway attach pass that precedes both generators runs under the caller's
 whole deadline (not the enumeration's share), because a partially attached graph reads
@@ -432,7 +439,10 @@ them. One meter makes a new allocating phase either charge or stand out in revie
 
 `DiscoveryResult { loops, partitions, truncated, agg_recovery_truncated,
 enumeration_complete }`. `enumeration_complete == false` means the fallback generated
-the candidates (a sample). Threaded to `ModelAnalysis`, `SimlinDiscoveryResult` (+
+the candidates (a sample) -- or that nothing ran at all: a run with no recorded link score
+on a model that has causal edges was not instrumented (LTM off, conveyor/queue), and
+discovery reports the unknown shape rather than certifying an empty universe; only an
+edgeless model is certified empty (`universe_loops == Some(0)`). Threaded to `ModelAnalysis`, `SimlinDiscoveryResult` (+
 `simlin.h`), pysimlin `Analysis`, MCP `ReadModelOutput`/`EditModelOutput` (always
 serialized, wire name `enumerationComplete`).
 

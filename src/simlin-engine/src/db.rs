@@ -153,7 +153,7 @@ pub use ltm::{
 // discovery-mode recovery (GH #696).
 pub(crate) use ltm::{
     MAX_AGG_PETALS, StitchPetal, collect_agg_petals, cross_agg_loop_budget,
-    stitch_cross_agg_petals, sub_model_output_ports,
+    stitch_cross_agg_petals, stitched_output_bound, sub_model_output_ports,
 };
 // Test-only: the cross-agg loop-count budget override, so `ltm_finding`'s
 // discovery-mode truncation test can trip the budget with a tiny fixture

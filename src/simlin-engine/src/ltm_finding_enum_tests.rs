@@ -2235,6 +2235,65 @@ fn hub_fan_out_discovery_inputs(
     (results, causal, stock_list(&["hub"]))
 }
 
+/// No recorded link score is two different facts. A model with causal edges
+/// and no score was not instrumented (LTM off, or a conveyor/queue model whose
+/// special-stock build does not participate in LTM): its universe is UNKNOWN,
+/// and discovery says nothing ran rather than certifying an empty universe.
+/// Only a model with no causal edge at all has an empty universe by
+/// construction, and only the enumeration path may say so.
+#[test]
+fn no_recorded_link_scores_is_unknown_unless_the_graph_has_no_edges() {
+    use crate::db::CausalEdgesResult;
+    let (mut results, causal, stocks) = hub_fan_out_discovery_inputs(3, 3);
+    // Strip the instrumentation: the same run, with no link-score columns.
+    results.offsets.clear();
+    let discover = |causal: &CausalGraph, candidate_gen: CandidateGen| {
+        discover_loops_with_candidate_gen(
+            &results,
+            causal,
+            &stocks,
+            &[],
+            &[],
+            &LinkExpansionContext::default(),
+            &SubModelOutputPorts::new(),
+            None,
+            candidate_gen,
+        )
+        .unwrap()
+    };
+
+    let found = discover(&causal, CandidateGen::Auto);
+    assert!(found.loops.is_empty());
+    assert!(
+        !found.enumeration_complete,
+        "edges with no scores: the universe is unknown, not empty"
+    );
+    assert_eq!(found.universe_loops, None);
+    assert_eq!(found.fallback_candidates, None, "no generator ran");
+    assert!(!found.truncated);
+
+    let edgeless = crate::db::causal_graph_from_edges(&CausalEdgesResult {
+        edges: HashMap::new(),
+        stocks: ["hub".to_string()].into_iter().collect(),
+        dynamic_modules: HashMap::new(),
+    });
+    let found = discover(&edgeless, CandidateGen::Auto);
+    assert!(
+        found.enumeration_complete,
+        "no edge: the universe is empty by construction"
+    );
+    assert_eq!(found.universe_loops, Some(0));
+    let found = discover(
+        &edgeless,
+        CandidateGen::FallbackOnly(FallbackConfig::DEFAULT),
+    );
+    assert!(
+        !found.enumeration_complete,
+        "only the enumeration path certifies"
+    );
+    assert_eq!(found.universe_loops, None);
+}
+
 /// `attach_module_pathways` stops the moment the pathway resolver declines
 /// (the memory meter refused a slot list) and reports `MemoryRefused`: no
 /// later edge is visited, so nothing past the refusal is retained either.

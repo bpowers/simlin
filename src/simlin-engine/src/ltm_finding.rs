@@ -91,6 +91,27 @@ type ModuleSeriesCache =
 /// exit pathway resolves.
 pub(crate) type ModuleOverrideEntry = Option<(Rc<Vec<f64>>, (usize, usize))>;
 
+/// What [`ModuleOverrideCache::series`] answers: a resolved override, a
+/// decline (the composite applies), or a memory refusal -- which is NEITHER of
+/// the first two and must never be read as a decline: scoring the edge on its
+/// composite where the override should apply is a wrong number, so a caller
+/// that sees it abandons the phase (retention yields to the fallback; a
+/// materialization drops the loop and reports the sample truncated).
+pub(crate) enum OverrideLookup {
+    Resolved(Rc<Vec<f64>>, (usize, usize)),
+    Declined,
+    OutOfMemory,
+}
+
+impl OverrideLookup {
+    fn from_entry(entry: &ModuleOverrideEntry) -> Self {
+        match entry {
+            Some((series, window)) => OverrideLookup::Resolved(Rc::clone(series), *window),
+            None => OverrideLookup::Declined,
+        }
+    }
+}
+
 /// Per-sub-model emitted LTM output-port set, keyed by the sub-model's
 /// canonical name. The discovery-mode per-exit-port recompute (GH #698) uses
 /// it to enumerate pathway indices against the SAME sorted port set the
@@ -2318,15 +2339,30 @@ fn recompute_module_input_edge_series_for(
     }
 
     // Per-step max-abs selection over the matching pathway series (mirroring
-    // the sub-model composite's selection, but restricted to the exit port).
-    let mut series: Option<Vec<f64>> = None;
-    for off in matching_offsets {
-        let candidate: Vec<f64> = (0..step_count)
-            .map(|step| results.data[step * results.step_size + off])
-            .collect();
-        series = max_abs_score_series(series, Some(candidate));
+    // the sub-model composite's selection, but restricted to the exit port),
+    // folded IN PLACE into one buffer read straight off the slab -- the
+    // footprint `ModuleOverrideCache::series` pre-charges -- with exactly
+    // `max_abs_score_series`'s per-step rule and operand order (the rule is
+    // not symmetric under NaN: a NaN later operand wins, a NaN earlier one
+    // loses), so the fold reads the same as the pairwise one did.
+    let mut offsets = matching_offsets.into_iter();
+    let first = offsets.next()?;
+    let mut series: Vec<f64> = (0..step_count)
+        .map(|step| results.data[step * results.step_size + first])
+        .collect();
+    for off in offsets {
+        for (step, slot) in series.iter_mut().enumerate() {
+            let candidate = results.data[step * results.step_size + off];
+            // `max_abs_score_series` keeps the earlier operand iff
+            // `a.abs() >= b.abs()`; spelled as the kept-operand test so a
+            // NaN on either side resolves exactly as it does there.
+            let keep_earlier = slot.abs() >= candidate.abs();
+            if !keep_earlier {
+                *slot = candidate;
+            }
+        }
     }
-    series
+    Some(series)
 }
 
 /// Links-slice adapter over [`recompute_module_input_edge_series_for`], kept
@@ -2540,7 +2576,7 @@ impl<'a> ModuleOverrideCache<'a> {
         from: &Ident<Canonical>,
         module: &Ident<Canonical>,
         exit_reader: &Ident<Canonical>,
-    ) -> ModuleOverrideEntry {
+    ) -> OverrideLookup {
         use crate::ltm::strip_subscript;
 
         let key = (
@@ -2549,9 +2585,18 @@ impl<'a> ModuleOverrideCache<'a> {
             Ident::<Canonical>::new(strip_subscript(exit_reader.as_str())),
         );
         if let Some(cached) = self.cache.get(&key) {
-            return cached.clone();
+            return OverrideLookup::from_entry(cached);
         }
-        let series = recompute_module_input_edge_series_for(
+        // The series is charged BEFORE it is allocated: the recompute folds
+        // the matching pathway rows into exactly one `step_count`-long buffer
+        // read straight off the results slab, so this is its whole footprint.
+        // A decline releases the charge; a resolved series keeps it, retained
+        // in the cache.
+        let bytes = self.step_count * std::mem::size_of::<f64>();
+        if !self.meter.charge(bytes) {
+            return OverrideLookup::OutOfMemory;
+        }
+        let entry = recompute_module_input_edge_series_for(
             self.causal_graph,
             self.results,
             &key.0,
@@ -2564,15 +2609,42 @@ impl<'a> ModuleOverrideCache<'a> {
             let window = active_window_of(&s);
             (Rc::new(s), window)
         });
-        let bytes = series
-            .as_ref()
-            .map_or(0, |(s, _)| s.len() * std::mem::size_of::<f64>());
-        if !self.meter.charge(bytes) {
-            // Over budget: answer without retaining. The next lookup of this
-            // key recomputes -- bounded work in exchange for bounded memory.
-            return series;
+        if entry.is_none() {
+            self.meter.release(bytes);
         }
-        self.cache.entry(key).or_insert(series).clone()
+        let entry = self.cache.entry(key).or_insert(entry);
+        OverrideLookup::from_entry(entry)
+    }
+
+    /// The links-slice twin of [`Self::series`] for an edge whose next link is
+    /// not spelled sequentially (`links[i+1].from != links[i].to` before
+    /// subscript stripping), answered uncached through
+    /// [`recompute_module_input_edge_series`] under the SAME pre-charge: the
+    /// one allocation is the series, charged before it exists and released
+    /// when the recompute declines. Kept on the caller's side as an `Rc`, so
+    /// the charge stays until discovery returns, like a cached entry's.
+    pub(crate) fn uncached_series(&self, links: &[Link], edge_idx: usize) -> OverrideLookup {
+        let bytes = self.step_count * std::mem::size_of::<f64>();
+        if !self.meter.charge(bytes) {
+            return OverrideLookup::OutOfMemory;
+        }
+        match recompute_module_input_edge_series(
+            self.causal_graph,
+            self.results,
+            links,
+            edge_idx,
+            self.step_count,
+            self.sub_model_output_ports,
+        ) {
+            Some(series) => {
+                let window = active_window_of(&series);
+                OverrideLookup::Resolved(Rc::new(series), window)
+            }
+            None => {
+                self.meter.release(bytes);
+                OverrideLookup::Declined
+            }
+        }
     }
 }
 
@@ -2617,19 +2689,78 @@ fn active_window_of(series: &[f64]) -> (usize, usize) {
 /// node paths for a universe-sized set. Occurrences rather than distinct aggs
 /// -- the two coincide for an elementary cycle, which never repeats a node,
 /// and every candidate either generator emits is elementary.
-fn stitch_cross_agg_node_paths(
+///
+/// Metered: the petal collection keeps a bounded number of petals per agg and
+/// charges each to `meter` as it goes (credited back here once they are
+/// stitched), and the stitched output is charged at its upper bound BEFORE it
+/// is built; that charge is returned as `output_charge` for the caller to
+/// release once it has consumed (or re-charged) the sequences. `None` means
+/// the meter refused somewhere and no stitching happened.
+fn stitch_cross_agg_node_paths<I, P>(
     search: &IndexedSearch,
-    candidate_paths: &[Vec<u32>],
-) -> (Vec<Vec<u32>>, bool) {
-    let petals_by_agg = crate::db::collect_agg_petals(candidate_paths, |id: &u32| {
-        search.idents[*id as usize].as_str()
-    });
-    let mut sorted: Vec<(&str, Vec<crate::db::StitchPetal<u32>>)> =
+    candidate_paths: I,
+    meter: &MemoryMeter,
+) -> Option<StitchedNodePaths>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<[u32]>,
+{
+    // What the kept petals currently hold on the meter; credited back once
+    // they are stitched (or the collection is abandoned).
+    let petal_bytes = std::cell::Cell::new(0usize);
+    let petals_by_agg = crate::db::collect_agg_petals(
+        candidate_paths,
+        |id: &u32| search.idents[*id as usize].as_str(),
+        &mut |bytes| {
+            let ok = meter.charge(bytes);
+            if ok {
+                petal_bytes.set(petal_bytes.get() + bytes);
+            }
+            ok
+        },
+        &mut |bytes| {
+            meter.release(bytes);
+            petal_bytes.set(petal_bytes.get() - bytes);
+        },
+    );
+    let Some(petals_by_agg) = petals_by_agg else {
+        meter.release(petal_bytes.get());
+        return None;
+    };
+    // Deterministic agg order by NAME (the exhaustive path's order too), so
+    // the loop budget clips the same aggs in both modes.
+    let mut sorted: Vec<(u32, Vec<crate::db::StitchPetal<u32>>)> =
         petals_by_agg.into_iter().collect();
-    sorted.sort_by(|a, b| a.0.cmp(b.0));
-    let (stitched, truncated_aggs) =
-        crate::db::stitch_cross_agg_petals(sorted, crate::db::cross_agg_loop_budget());
-    (stitched, !truncated_aggs.is_empty())
+    sorted.sort_by(|a, b| {
+        search.idents[a.0 as usize]
+            .as_str()
+            .cmp(search.idents[b.0 as usize].as_str())
+    });
+    let budget = crate::db::cross_agg_loop_budget();
+    let output_charge = crate::db::stitched_output_bound(&sorted, budget);
+    if !meter.charge(output_charge) {
+        meter.release(petal_bytes.get());
+        return None;
+    }
+    let (paths, truncated_aggs) = crate::db::stitch_cross_agg_petals(sorted, budget);
+    meter.release(petal_bytes.get());
+    Some(StitchedNodePaths {
+        paths,
+        truncated: !truncated_aggs.is_empty(),
+        output_charge,
+    })
+}
+
+/// [`stitch_cross_agg_node_paths`]'s answer.
+struct StitchedNodePaths {
+    /// The stitched loops, as node-id sequences starting at their agg.
+    paths: Vec<Vec<u32>>,
+    /// The model-wide loop budget or the per-agg petal cap clipped the
+    /// enumeration.
+    truncated: bool,
+    /// Bytes charged to the meter for `paths` (at their upper bound), for the
+    /// caller to release once it has consumed them.
+    output_charge: usize,
 }
 
 /// The `stitched` sequences whose canonical rotation is not already in
@@ -2841,18 +2972,26 @@ pub(crate) fn discover_loops_with_deadlines(
 
     let link_offsets = parse_link_offsets(results, ltm_vars, dims, expansion);
     if link_offsets.is_empty() {
+        // No link score was recorded. Discovery mode scores EVERY causal edge,
+        // so a model with any edge at all and no recorded score was not
+        // instrumented -- a run with LTM disabled, or a conveyor/queue model,
+        // whose special-stock build does not participate in LTM -- and its
+        // universe is UNKNOWN, not empty: nothing ran and the report says so
+        // (`enumeration_complete == false`, no universe, no sweep). Only a
+        // model with no causal edge has a universe that is empty by
+        // construction, and only the enumeration path may say even that.
+        let has_edges = causal_graph.edges.values().any(|tos| !tos.is_empty());
+        let certified_empty = enumeration_ran && !has_edges;
         return Ok(DiscoveryResult {
             loops: Vec::new(),
             partitions: Vec::new(),
             truncated: false,
             agg_recovery_truncated: false,
-            enumeration_complete: enumeration_ran,
+            enumeration_complete: certified_empty,
             retained_loops: 0,
-            // Discovery bails before either generator runs, so the universe
-            // is EMPTY rather than unknown -- and only the enumeration path
-            // may say so, keeping `universe_loops.is_some()` equal to
-            // `enumeration_complete` on every path out of this function.
-            universe_loops: enumeration_ran.then_some(0),
+            // `universe_loops.is_some()` equals `enumeration_complete` on
+            // every path out of this function.
+            universe_loops: certified_empty.then_some(0),
             // Neither generator ran.
             fallback_candidates: None,
         });
@@ -3009,13 +3148,25 @@ pub(crate) fn discover_loops_with_deadlines(
             // block (rather than captured by `move`) so the mutable borrow it
             // holds on the cache ends here, freeing the cache for
             // materialization to borrow again, unaliased, below.
-            let mut override_for = |from_node: u32, module_node: u32, next_node: u32| {
-                module_override_cache.series(
-                    &search.idents[from_node as usize],
-                    &search.idents[module_node as usize],
-                    &search.idents[next_node as usize],
-                )
-            };
+            // A memory refusal from the override cache is recorded here and
+            // read after retention: the circuit it answered was scored on
+            // its composite, which is the wrong number, so the whole pass is
+            // abandoned exactly as an expired deadline abandons it.
+            let override_oom = std::cell::Cell::new(false);
+            let mut override_for =
+                |from_node: u32, module_node: u32, next_node: u32| match module_override_cache
+                    .series(
+                        &search.idents[from_node as usize],
+                        &search.idents[module_node as usize],
+                        &search.idents[next_node as usize],
+                    ) {
+                    OverrideLookup::Resolved(series, window) => Some((series, window)),
+                    OverrideLookup::Declined => None,
+                    OverrideLookup::OutOfMemory => {
+                        override_oom.set(true);
+                        None
+                    }
+                };
             // Cross-agg stitching over the FULL enumerated set (GH #696), BEFORE
             // retention: a petal can fail retention while a stitched
             // combination passes, and a stitched loop is a candidate like any
@@ -3034,39 +3185,52 @@ pub(crate) fn discover_loops_with_deadlines(
             // count is taken off the edge rows via `edge_source` (O(1), no
             // allocation) so `circuit_nodes` -- which allocates a `Vec` -- is
             // called only for the circuits that pass the count test.
-            let petal_circuits: Vec<Vec<u32>> = if is_agg_node.contains(&true) {
-                (0..candidates.len())
-                    .filter(|&ci| {
-                        candidates
-                            .circuit(ci)
-                            .iter()
-                            .filter(|&&row| is_agg_node[activity.edge_source(row) as usize])
-                            .count()
-                            == 1
-                    })
-                    .map(|ci| activity.circuit_nodes(candidates.circuit(ci)))
-                    .collect()
-            } else {
-                Vec::new()
+            // The node paths are produced one at a time, by an iterator the
+            // collector consumes, so at no point is the universe's worth of
+            // them held at once; the collector keeps a bounded few per agg.
+            let has_agg_node = is_agg_node.contains(&true);
+            let petal_circuits = (0..candidates.len()).filter(|&ci| {
+                has_agg_node
+                    && candidates
+                        .circuit(ci)
+                        .iter()
+                        .filter(|&&row| is_agg_node[activity.edge_source(row) as usize])
+                        .count()
+                        == 1
+            });
+            let stitching_over_budget = match stitch_cross_agg_node_paths(
+                &search,
+                petal_circuits.map(|ci| activity.circuit_nodes(candidates.circuit(ci))),
+                &meter,
+            ) {
+                Some(stitched) => {
+                    agg_recovery_truncated = stitched.truncated;
+                    // Stitched loops are charged against the enumeration's
+                    // storage like any circuit; an addition that would exceed
+                    // it makes the enumeration incomplete (the fallback runs),
+                    // never a larger allocation than the bound allows. The
+                    // stitcher's own output charge is released once the
+                    // sequences have been pushed (or refused).
+                    let over = stitched
+                        .paths
+                        .iter()
+                        .any(|seq| !candidates.push_node_path(seq, &activity, &meter));
+                    meter.release(stitched.output_charge);
+                    over
+                }
+                // The meter refused the petal collection or the stitched
+                // output itself: nothing was stitched, and the enumeration
+                // cannot vouch for a complete universe.
+                None => true,
             };
-            let (stitched, stitch_truncated) =
-                stitch_cross_agg_node_paths(&search, &petal_circuits);
-            agg_recovery_truncated = stitch_truncated;
-            // Stitched loops are charged against the enumeration's storage
-            // bound like any circuit; an addition that would exceed it makes
-            // the enumeration incomplete (the fallback runs), never a larger
-            // allocation than the bound allows.
-            let stitching_over_budget = stitched
-                .iter()
-                .any(|seq| !candidates.push_node_path(seq, &activity, &meter));
             // Petal collection and stitching are bounded by the enumeration's
             // own budgets (the scan is one pass over the emitted rows, the
             // stitch by `cross_agg_loop_budget`), but a reducer-heavy universe
             // can still spend real time here before retention's first check;
             // read the clock once so an expired enumeration deadline yields to
             // the fallback with its share intact rather than after this work.
-            let stitching_expired = stitching_over_budget
-                || (!petal_circuits.is_empty() && expired(deadlines.enumeration, clock));
+            let stitching_expired =
+                stitching_over_budget || (has_agg_node && expired(deadlines.enumeration, clock));
 
             if stitching_expired {
                 // Fall through to the fallback exactly as an incomplete
@@ -3080,7 +3244,8 @@ pub(crate) fn discover_loops_with_deadlines(
                 &mut override_for,
                 deadlines.enumeration,
                 clock,
-            ) {
+            ) && !override_oom.get()
+            {
                 let survivors: Vec<Vec<u32>> = retention
                     .survivors
                     .iter()
@@ -3153,21 +3318,32 @@ pub(crate) fn discover_loops_with_deadlines(
         // (`pop[a] -> agg -> pop[b] -> agg -> pop[a]`) is structurally
         // unreachable to either, and exhaustive mode's petal stitching is what
         // recovers it in both.
-        let (stitched, stitch_truncated) = stitch_cross_agg_node_paths(&search, &outcome.paths);
-        agg_recovery_truncated = stitch_truncated;
-        let stitched = new_paths_by_rotation(&outcome.paths, stitched);
+        let stitched = stitch_cross_agg_node_paths(&search, outcome.paths.iter(), &meter);
         node_paths = outcome.paths;
-        // Each stitched loop is charged like a kept path (its node ids plus
-        // the series it will materialize); one that does not fit ends the
-        // additions, and the cross-aggregate recovery is reported incomplete.
-        for seq in stitched {
-            let bytes = std::mem::size_of_val::<[u32]>(&seq)
-                + materialized_loop_bytes(step_count, seq.len());
-            if !meter.charge(bytes) {
-                agg_recovery_truncated = true;
-                break;
+        match stitched {
+            Some(stitched) => {
+                agg_recovery_truncated = stitched.truncated;
+                let output_charge = stitched.output_charge;
+                let fresh = new_paths_by_rotation(&node_paths, stitched.paths);
+                // Each stitched loop is charged like a kept path (its node ids
+                // plus the series it will materialize); one that does not fit
+                // ends the additions, and the cross-aggregate recovery is
+                // reported incomplete. The stitcher's own output charge is
+                // released once the sequences are re-charged as kept paths.
+                for seq in fresh {
+                    let bytes = std::mem::size_of_val::<[u32]>(&seq)
+                        + materialized_loop_bytes(step_count, seq.len());
+                    if !meter.charge(bytes) {
+                        agg_recovery_truncated = true;
+                        break;
+                    }
+                    node_paths.push(seq);
+                }
+                meter.release(output_charge);
             }
-            node_paths.push(seq);
+            // The meter refused the petal collection or the stitched output:
+            // the cross-aggregate recovery did not happen.
+            None => agg_recovery_truncated = true,
         }
     }
 
@@ -3196,7 +3372,7 @@ pub(crate) fn discover_loops_with_deadlines(
     // Convert paths to FoundLoop objects with scores.
     let mut found_loops: Vec<FoundLoop> = Vec::new();
 
-    for path in &all_paths {
+    'paths: for path in &all_paths {
         // Convert path to links using CausalGraph. These links carry the
         // un-trimmed per-element path -- they map to the synthetic
         // `$⁚ltm⁚link_score⁚...` variables emitted during compilation, so the
@@ -3237,46 +3413,54 @@ pub(crate) fn discover_loops_with_deadlines(
         // already banked -- and memoizes across every loop, so an arrayed
         // loop through a module hits one cache entry per element rather than
         // re-enumerating the sub-model's pathway map per link.
-        let link_override_series: Vec<Option<Rc<Vec<f64>>>> = (0..links.len())
-            .map(|i| {
-                let n = links.len();
-                let next = &links[(i + 1) % n];
-                // Gate on the module instance before spelling a cache key: on
-                // a model with no modules -- most of them -- this is the only
-                // work the recompute costs per link.
-                let module_name =
-                    Ident::<Canonical>::new(crate::ltm::strip_subscript(links[i].to.as_str()));
-                // No module instance at `links[i].to` at all: the cache's own
-                // gate (`module_graph(&module_name)?`, inside the engine it
-                // calls) would decline for the identical reason, so answer
-                // `None` directly instead of re-stripping/re-interning the
-                // same names only to reach the same `?` immediately.
-                causal_graph.module_graph(&module_name)?;
-                if next.from != links[i].to {
-                    // A non-sequential link list has no exit port to read, and
-                    // the recompute declines it; that case is outside what the
-                    // cache's key spells (it assumes a sequential edge), so it
-                    // is answered uncached via the links-slice adapter rather
-                    // than the cache.
-                    return recompute_module_input_edge_series(
-                        causal_graph,
-                        results,
-                        &links,
-                        i,
-                        step_count,
-                        sub_model_output_ports,
-                    )
-                    .map(Rc::new);
+        let mut link_override_series: Vec<Option<Rc<Vec<f64>>>> = Vec::with_capacity(links.len());
+        for i in 0..links.len() {
+            let n = links.len();
+            let next = &links[(i + 1) % n];
+            // Gate on the module instance before spelling a cache key: on a
+            // model with no modules -- most of them -- this is the only work
+            // the recompute costs per link.
+            let module_name =
+                Ident::<Canonical>::new(crate::ltm::strip_subscript(links[i].to.as_str()));
+            // No module instance at `links[i].to` at all: the cache's own
+            // gate (`module_graph(&module_name)?`, inside the engine it
+            // calls) would decline for the identical reason, so answer
+            // `None` directly instead of re-stripping/re-interning the same
+            // names only to reach the same `?` immediately.
+            if causal_graph.module_graph(&module_name).is_none() {
+                link_override_series.push(None);
+                continue;
+            }
+            let lookup = if next.from != links[i].to {
+                // A link list not spelled sequentially is outside what the
+                // cache's key assumes, so it is answered uncached through the
+                // links-slice adapter (same pre-charge, same decline rule).
+                module_override_cache.uncached_series(&links, i)
+            } else {
+                // Materialization scores the full saved-step range regardless
+                // (it never restricts to a window), so only the series itself
+                // is needed here -- the cached active window exists for
+                // retention's benefit, not this call site's.
+                module_override_cache.series(&links[i].from, &module_name, &next.to)
+            };
+            match lookup {
+                OverrideLookup::Resolved(series, _window) => {
+                    link_override_series.push(Some(series))
                 }
-                // Materialization scores the full saved-step range
-                // regardless (it never restricts to a window), so only the
-                // series itself is needed here -- the cached active window
-                // exists for retention's benefit, not this call site's.
-                module_override_cache
-                    .series(&links[i].from, &module_name, &next.to)
-                    .map(|(series, _window)| series)
-            })
-            .collect();
+                OverrideLookup::Declined => link_override_series.push(None),
+                OverrideLookup::OutOfMemory => {
+                    // The override this loop's score needs does not fit the
+                    // bound; reporting it on the composite instead would be a
+                    // wrong number, so the loop is dropped and the report says
+                    // it is partial. (Unreachable on the enumeration path:
+                    // retention resolved -- and cached -- every module edge of
+                    // every survivor before materialization began.)
+                    debug_assert!(!enumeration_complete);
+                    truncated = true;
+                    continue 'paths;
+                }
+            }
+        }
 
         // Compute signed loop score at each timestep.
         // Time is derived from specs assuming evenly-spaced results at save_step intervals.

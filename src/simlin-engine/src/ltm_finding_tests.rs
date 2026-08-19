@@ -3261,6 +3261,36 @@ fn a_refused_pathway_slot_list_abandons_candidate_generation() {
 fn discover_multi_output_module_feedback(
     candidate_gen: CandidateGen,
 ) -> (DiscoveryResult, Results) {
+    let inputs = multi_output_module_feedback_inputs();
+    let result = discover_loops_with_candidate_gen(
+        &inputs.results,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+        &inputs.expansion,
+        &inputs.ports,
+        None,
+        candidate_gen,
+    )
+    .unwrap();
+    (result, inputs.results)
+}
+
+/// Everything discovery consumes for the multi-output module fixture, for
+/// tests that drive a single phase (the override cache) rather than the whole
+/// pipeline.
+struct ModuleFixtureInputs {
+    results: Results,
+    causal_graph: CausalGraph,
+    stocks: Vec<Ident<Canonical>>,
+    ltm_vars: Vec<LtmSyntheticVar>,
+    dims: Vec<crate::datamodel::Dimension>,
+    expansion: LinkExpansionContext,
+    ports: SubModelOutputPorts,
+}
+
+fn multi_output_module_feedback_inputs() -> ModuleFixtureInputs {
     use crate::datamodel::{self, Equation};
     use salsa::Setter;
 
@@ -3396,19 +3426,79 @@ fn discover_multi_output_module_feedback(
     let expansion = crate::analysis::build_link_expansion_context(&db, source_model, sp);
     let ports = crate::analysis::build_sub_model_output_ports(&db, sp);
 
-    let result = discover_loops_with_candidate_gen(
-        &results,
-        &causal_graph,
-        &stocks,
-        &ltm.vars,
-        dm_dims,
-        &expansion,
-        &ports,
-        None,
-        candidate_gen,
-    )
-    .unwrap();
-    (result, results)
+    ModuleFixtureInputs {
+        results,
+        causal_graph,
+        stocks,
+        ltm_vars: ltm.vars.clone(),
+        dims: dm_dims.clone(),
+        expansion,
+        ports,
+    }
+}
+
+/// The override cache charges a module-input edge's series to the meter
+/// BEFORE recomputing it (the recompute folds the pathway rows into exactly
+/// one `step_count`-long buffer, so that is its footprint): a meter one byte
+/// short answers `OutOfMemory` with nothing charged, a decline (no module at
+/// the edge) credits the charge straight back, and a resolved series keeps
+/// exactly its own bytes -- once, however many times it is asked for.
+#[test]
+fn the_override_cache_charges_a_series_before_recomputing_it() {
+    let inputs = multi_output_module_feedback_inputs();
+    let step_count = inputs.results.step_count;
+    let series_bytes = step_count * std::mem::size_of::<f64>();
+    let s: Ident<Canonical> = Ident::new("s");
+    let m: Ident<Canonical> = Ident::new("m");
+    let growth: Ident<Canonical> = Ident::new("growth");
+
+    {
+        let _guard = MemoryBudgetGuard::new(series_bytes - 1);
+        let meter = MemoryMeter::new();
+        let mut cache = ModuleOverrideCache::new(
+            &inputs.causal_graph,
+            &inputs.results,
+            &inputs.ports,
+            step_count,
+            &meter,
+        );
+        assert!(matches!(
+            cache.series(&s, &m, &growth),
+            OverrideLookup::OutOfMemory
+        ));
+        assert_eq!(meter.used(), 0, "a refused series charges nothing");
+    }
+    {
+        let meter = MemoryMeter::new();
+        let mut cache = ModuleOverrideCache::new(
+            &inputs.causal_graph,
+            &inputs.results,
+            &inputs.ports,
+            step_count,
+            &meter,
+        );
+        // `growth -> s` has no module at its target: declined, charge released.
+        assert!(matches!(
+            cache.series(&growth, &s, &m),
+            OverrideLookup::Declined
+        ));
+        assert_eq!(meter.used(), 0, "a decline releases the pre-charge");
+        // The real module edge resolves and keeps its series' bytes.
+        assert!(matches!(
+            cache.series(&s, &m, &growth),
+            OverrideLookup::Resolved(..)
+        ));
+        assert_eq!(meter.used(), series_bytes);
+        assert!(matches!(
+            cache.series(&s, &m, &growth),
+            OverrideLookup::Resolved(..)
+        ));
+        assert_eq!(
+            meter.used(),
+            series_bytes,
+            "a cache hit charges nothing more"
+        );
+    }
 }
 
 /// AC4.3: two enumerated circuits can trim to the SAME reported loop -- a
