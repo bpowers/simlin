@@ -914,7 +914,8 @@ class Project:
                 stands: an exception of any other type means nothing was
                 applied, so every failure past the commit point below must
                 be raised as this one or the widget would reply ``rejected``
-                for a change that is real and wedge its view.
+                for a change that is real, costing the view a remount (undo
+                history and any local edits since are lost) for nothing.
         """
         with self._file_lock:
             persist = self._autosave_effective_locked()
@@ -1032,7 +1033,8 @@ class Project:
                         f"simlin: {path} changed on disk but this project has unsaved "
                         f"local changes; keeping the in-memory model. Call reload() to "
                         f"take the on-disk version (discarding the local changes) or "
-                        f"save(force=True) to overwrite the file with them.",
+                        f"save(force=True) to overwrite the file with them (or save_as() "
+                        f"another path when this one cannot be written).",
                         path,
                     )
                     return

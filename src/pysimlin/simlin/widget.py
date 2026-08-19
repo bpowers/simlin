@@ -509,11 +509,10 @@ class ModelWidget(anywidget.AnyWidget):
         swallow, only to answer first).  Which reply follows obligation 5's
         logic: if the snapshot was applied before the failure (the revision
         moved), it is an ACCEPT -- the sent bytes are pushed at ``base + 1``
-        (best effort) and ``saved`` is sent -- because a ``rejected`` would
-        wedge the view: the browser's re-seed on a reject lands on the pair
-        it already holds (in the steady state the kernel's bytes equal the
-        sent bytes) and its acknowledged base stays one behind for good.  If
-        nothing was applied it is a reject at the current revision.  And if
+        (best effort) and ``saved`` is sent -- because a ``rejected`` there
+        costs the view a remount (undo history and any local edits since are
+        lost) for a change that is real.  If nothing was applied it is a
+        reject at the current revision.  And if
         the reply itself already went out (the failure was in a message
         after it, such as the warn notice), nothing more is sent: a second
         reply would be consumed by the browser's NEXT snapshot."""

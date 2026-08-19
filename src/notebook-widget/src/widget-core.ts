@@ -538,8 +538,10 @@ export type PushAction =
  * each event and it is idempotent: the same pair twice is `none`.
  *
  * With a snapshot in flight, a pair equal to (in-flight json, base + 1) is
- * the kernel having accepted it (obligation: an accept pushes the exact bytes
- * received and revision + 1). Everything else that differs from the seed is
+ * what the kernel accepting it would push (obligation: an accept pushes the
+ * exact bytes received and revision + 1) -- `own-ack`, though only the
+ * matching `saved` reply confirms it was this snapshot that was accepted (see
+ * WidgetApp's own-ack handling). Everything else that differs from the seed is
  * a kernel-side change and remounts -- including while a snapshot is in
  * flight, whose `rejected` reply then arrives; the reject path re-checks the
  * pair so a remount already done for the push is not done twice.

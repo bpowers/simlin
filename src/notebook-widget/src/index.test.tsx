@@ -404,7 +404,7 @@ describe('WidgetApp <-> model protocol', () => {
     fireEvent.click(screen.getByText('edit'));
     const id = model.lastSentSnapshotId();
     expect(id).toBeDefined();
-    act(() => {
+    await act(async () => {
       model.kernelSend({ type: 'saved', revision: 4, id: `${id}-not-ours` });
       model.kernelSend({ type: 'rejected', revision: 3, id: 'someone-else:1' });
       model.kernelSend({ type: 'saved', revision: 4 });
