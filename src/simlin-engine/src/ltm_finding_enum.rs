@@ -39,7 +39,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
 
-use super::{Clock, DEADLINE_CHECK_INTERVAL, IndexedSearch, MIN_CONTRIBUTION, expired, is_active};
+use super::{
+    Clock, DEADLINE_CHECK_INTERVAL, IndexedSearch, MIN_CONTRIBUTION, MemoryMeter, expired,
+    is_active,
+};
 use crate::results::Results;
 
 /// Closure consulted by [`score_steps`] whenever a circuit edge's target is a
@@ -266,61 +269,6 @@ impl DeadlineWorkTracker {
     }
 }
 
-/// Byte budget for the union graph's own storage: the contiguous per-edge
-/// score rows plus activity bitsets `ActivityGraph::build` copies out of the
-/// results slab, `union_edges x step_count x (8 B + 1 bit)`. The circuit and
-/// edge-row budgets bound the ENUMERATION; nothing else bounds this copy,
-/// which on a many-edge, many-saved-step model duplicates a large part of the
-/// resident results before a single circuit is considered. World3 is 258 x
-/// 401 x 8 B ~ 0.8 MB and C-LEARN ~6 MB; a 20,000-edge model saved at
-/// 100,000 steps would be 16 GB. Above this the build abandons and discovery
-/// takes the fallback, which reads scores straight from the results slab and
-/// whose own materialization is bounded by [`super::fallback`]'s
-/// byte-derived candidate cap.
-pub(super) const MAX_ACTIVITY_GRAPH_BYTES: usize = 512 * 1024 * 1024;
-
-#[cfg(test)]
-thread_local! {
-    /// Test-only override of [`MAX_ACTIVITY_GRAPH_BYTES`], scoped by an active
-    /// [`ActivityGraphBytesGuard`] so a two-edge fixture can trip the storage
-    /// budget instead of one large enough to trip the production constant.
-    static ACTIVITY_GRAPH_BYTES_OVERRIDE: std::cell::Cell<Option<usize>> =
-        const { std::cell::Cell::new(None) };
-}
-
-/// The effective union-graph storage budget.
-fn max_activity_graph_bytes() -> usize {
-    #[cfg(test)]
-    {
-        if let Some(b) = ACTIVITY_GRAPH_BYTES_OVERRIDE.with(|c| c.get()) {
-            return b;
-        }
-    }
-    MAX_ACTIVITY_GRAPH_BYTES
-}
-
-/// RAII guard (test-only) overriding [`max_activity_graph_bytes`] for the
-/// current thread; restores the previous value on drop.
-#[cfg(test)]
-pub(crate) struct ActivityGraphBytesGuard {
-    prev: Option<usize>,
-}
-
-#[cfg(test)]
-impl ActivityGraphBytesGuard {
-    pub(crate) fn new(bytes: usize) -> Self {
-        let prev = ACTIVITY_GRAPH_BYTES_OVERRIDE.with(|c| c.replace(Some(bytes)));
-        Self { prev }
-    }
-}
-
-#[cfg(test)]
-impl Drop for ActivityGraphBytesGuard {
-    fn drop(&mut self) {
-        ACTIVITY_GRAPH_BYTES_OVERRIDE.with(|c| c.set(self.prev));
-    }
-}
-
 /// The three enumeration budgets: circuits, edge-visits, emitted edge rows.
 type EnumBudgets = (usize, u64, u64);
 
@@ -471,6 +419,10 @@ pub(super) struct ActivityGraph {
     edge_from: Vec<u32>,
     /// Per-node strongly-connected-component id of the union graph.
     scc_of: Vec<u32>,
+    /// Bytes this graph charged to the discovery memory meter (rows, bitsets,
+    /// build scratch), for the caller to `release` when the graph is dropped
+    /// ahead of the fallback.
+    pub(super) charged_bytes: usize,
 }
 
 impl ActivityGraph {
@@ -489,6 +441,7 @@ impl ActivityGraph {
         results: &Results,
         deadline: Option<Instant>,
         clock: &mut dyn Clock,
+        meter: &MemoryMeter,
     ) -> Option<ActivityGraph> {
         let n_nodes = search.node_count();
         let step_count = results.step_count;
@@ -496,6 +449,15 @@ impl ActivityGraph {
         if expired(deadline, clock) {
             return None;
         }
+        // Per-edge cost: one score row plus one bitset. The scratch row and
+        // bitset below cost one edge's worth too, charged up front so a run
+        // whose single row is itself over the bound never allocates it.
+        let bytes_per_edge =
+            step_count * std::mem::size_of::<f64>() + words * std::mem::size_of::<u64>();
+        if !meter.charge(bytes_per_edge) {
+            return None;
+        }
+        let mut charged_bytes = bytes_per_edge;
         // Values this check interval has left. Decremented by every value
         // copied and refilled at each check, so the interval spans the same
         // work whether the graph is wide (many short edges) or deep (few long
@@ -506,13 +468,6 @@ impl ActivityGraph {
         let mut radj: Vec<Vec<u32>> = vec![Vec::new(); n_nodes];
         let mut bits: Vec<u64> = Vec::new();
         let mut series: Vec<f64> = Vec::new();
-        // Storage this build has committed to; the per-edge cost is one score
-        // row plus one bitset. Checked before each append so the copy never
-        // exceeds the budget by more than one edge.
-        let bytes_per_edge =
-            step_count * std::mem::size_of::<f64>() + words * std::mem::size_of::<u64>();
-        let byte_budget = max_activity_graph_bytes();
-        let mut bytes_committed = 0usize;
         let mut edge_from: Vec<u32> = Vec::new();
 
         let mut edge_bits = vec![0u64; words];
@@ -535,6 +490,7 @@ impl ActivityGraph {
                 while step < step_count {
                     if values_until_check == 0 {
                         if expired(deadline, clock) {
+                            meter.release(charged_bytes);
                             return None;
                         }
                         values_until_check = ACTIVITY_BUILD_DEADLINE_CHECK_VALUES;
@@ -564,13 +520,15 @@ impl ActivityGraph {
                     step = block_end;
                 }
                 if any {
-                    bytes_committed += bytes_per_edge;
-                    if bytes_committed > byte_budget {
-                        // The union graph would outgrow its storage budget;
-                        // abandon so discovery takes the fallback, which
-                        // reads the results slab in place.
+                    // Charged before the copy: a union graph that would
+                    // outgrow the discovery memory bound abandons here, and
+                    // discovery takes the fallback, which reads the results
+                    // slab in place.
+                    if !meter.charge(bytes_per_edge) {
+                        meter.release(charged_bytes);
                         return None;
                     }
+                    charged_bytes += bytes_per_edge;
                     let row = edge_from.len() as u32;
                     adj[from].push((edge.to, row));
                     radj[edge.to as usize].push(from as u32);
@@ -588,6 +546,7 @@ impl ActivityGraph {
         if n_nodes as u64 + edge_from.len() as u64 >= u64::from(DEADLINE_CHECK_INTERVAL)
             && expired(deadline, clock)
         {
+            meter.release(charged_bytes);
             return None;
         }
         Some(ActivityGraph {
@@ -599,6 +558,7 @@ impl ActivityGraph {
             step_count,
             edge_from,
             scc_of,
+            charged_bytes,
         })
     }
 
@@ -841,9 +801,14 @@ pub(super) struct EnumeratedCandidates {
     /// Words per activity bitset (matches the graph's).
     words: usize,
     /// `true` iff every branch was explored within the circuit/visit/edge-row
-    /// budgets and the deadline -- the emitted set is then provably the complete
-    /// ever-simultaneously-active cycle universe of the recorded series.
+    /// budgets, the memory bound, and the deadline -- the emitted set is then
+    /// provably the complete ever-simultaneously-active cycle universe of the
+    /// recorded series.
     pub complete: bool,
+    /// Bytes charged to the discovery memory meter for `rows`, `starts` and
+    /// `activity`, for the caller to `release` if the set is dropped ahead of
+    /// the fallback.
+    pub(super) charged_bytes: usize,
 }
 
 impl EnumeratedCandidates {
@@ -854,17 +819,40 @@ impl EnumeratedCandidates {
             activity: Vec::new(),
             words,
             complete: true,
+            charged_bytes: 0,
         }
     }
 
+    /// Bytes one circuit of `len` rows costs in this store: its rows, its
+    /// `starts` entry, and its activity bitset.
+    fn circuit_bytes(&self, len: usize) -> usize {
+        len * std::mem::size_of::<u32>()
+            + std::mem::size_of::<usize>()
+            + self.words * std::mem::size_of::<u64>()
+    }
+
     /// Append a circuit given the edge rows of its open path plus the row that
-    /// closes it, and the activity AND covering all of them.
-    fn push(&mut self, open_rows: &[u32], closing_row: u32, and_bits: &[u64]) {
+    /// closes it, and the activity AND covering all of them -- if it fits the
+    /// memory meter; `false` (nothing appended) otherwise.
+    #[must_use]
+    fn push(
+        &mut self,
+        open_rows: &[u32],
+        closing_row: u32,
+        and_bits: &[u64],
+        meter: &MemoryMeter,
+    ) -> bool {
         debug_assert_eq!(and_bits.len(), self.words);
+        let bytes = self.circuit_bytes(open_rows.len() + 1);
+        if !meter.charge(bytes) {
+            return false;
+        }
+        self.charged_bytes += bytes;
         self.rows.extend_from_slice(open_rows);
         self.rows.push(closing_row);
         self.starts.push(self.rows.len());
         self.activity.extend_from_slice(and_bits);
+        true
     }
 
     /// Append a loop given as a NODE path -- a stitched cross-agg sequence,
@@ -882,7 +870,12 @@ impl EnumeratedCandidates {
     /// be a multiple of the petals' own rows. Returns `false` -- and pushes
     /// nothing -- when the addition would exceed the bound; the caller then
     /// treats the enumeration as incomplete and falls back.
-    pub(super) fn push_node_path(&mut self, path: &[u32], graph: &ActivityGraph) -> bool {
+    pub(super) fn push_node_path(
+        &mut self,
+        path: &[u32],
+        graph: &ActivityGraph,
+        meter: &MemoryMeter,
+    ) -> bool {
         let rows = path_edge_rows(path, graph);
         let (_, _, max_rows) = enum_budgets();
         let added = (rows.len() + 2 * self.words) as u64;
@@ -896,8 +889,7 @@ impl EnumeratedCandidates {
             }
         }
         let (open, closing) = rows.split_at(rows.len() - 1);
-        self.push(open, closing[0], &and_bits);
-        true
+        self.push(open, closing[0], &and_bits, meter)
     }
 
     pub(super) fn len(&self) -> usize {
@@ -939,6 +931,7 @@ pub(super) fn enumerate_active_circuits(
     graph: &ActivityGraph,
     deadline: Option<Instant>,
     clock: &mut dyn Clock,
+    meter: &MemoryMeter,
 ) -> EnumeratedCandidates {
     let (max_circuits, max_visits, max_edge_rows) = enum_budgets();
     let visit_interval = enum_deadline_visit_interval();
@@ -1057,7 +1050,13 @@ pub(super) fn enumerate_active_circuits(
                         out.complete = false;
                         return out;
                     }
-                    out.push(&edge_path, row, &and_stack[base + words..]);
+                    if !out.push(&edge_path, row, &and_stack[base + words..], meter) {
+                        // The discovery memory bound is spent: incomplete,
+                        // like any other budget trip.
+                        and_stack.truncate(base + words);
+                        out.complete = false;
+                        return out;
+                    }
                     and_stack.truncate(base + words);
                     if out.len() >= max_circuits {
                         break 'dfs;

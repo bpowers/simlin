@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use super::super::{LinkOffset, ScriptedClock, SystemClock};
+use super::super::{LinkOffset, MemoryMeter, ScriptedClock, SystemClock};
 use super::*;
 use crate::common::{Canonical, Ident};
 use crate::results::{Method, Specs};
@@ -292,7 +292,14 @@ fn the_step_shift_is_the_largest_finite_active_score() {
 
     // Step 1: active finite scores are 4.0, 0.25 and 1.0; the infinite one is
     // excluded from the shift and weighs 0 itself.
-    scratch.load_step(&search, &results, 1, FallbackWeight::ShiftedLogAbs);
+    assert!(scratch.load_step(
+        &search,
+        &results,
+        1,
+        FallbackWeight::ShiftedLogAbs,
+        None,
+        &mut SystemClock
+    ));
     assert_eq!(scratch.step_max_finite, 4.0);
     let (s, a, b) = (
         node_id(&search, "s"),
@@ -311,7 +318,14 @@ fn the_step_shift_is_the_largest_finite_active_score() {
     assert!((weight_of(&scratch, a, s) - 16.0f64.ln()).abs() < 1e-12);
 
     // Step 2: `s->a` is inactive, so the maximum moves to 9.0.
-    scratch.load_step(&search, &results, 2, FallbackWeight::ShiftedLogAbs);
+    assert!(scratch.load_step(
+        &search,
+        &results,
+        2,
+        FallbackWeight::ShiftedLogAbs,
+        None,
+        &mut SystemClock
+    ));
     assert_eq!(scratch.step_max_finite, 9.0);
     assert_eq!(weight_of(&scratch, a, s), 0.0);
     assert!((weight_of(&scratch, s, b) - 9.0f64.ln()).abs() < 1e-12);
@@ -363,7 +377,14 @@ fn in_edge_sums_cover_only_the_steps_active_in_edges() {
         node_id(&search, "z"),
     );
 
-    scratch.load_step(&search, &results, 1, FallbackWeight::RelativeLinkScore);
+    assert!(scratch.load_step(
+        &search,
+        &results,
+        1,
+        FallbackWeight::RelativeLinkScore,
+        None,
+        &mut SystemClock
+    ));
     assert_eq!(
         scratch.in_sum[z as usize], 3.0,
         "the 0-score in-edge is out"
@@ -374,7 +395,14 @@ fn in_edge_sums_cover_only_the_steps_active_in_edges() {
         .expect("s->z is active at step 1");
     assert_eq!(sz.weight, 0.0);
 
-    scratch.load_step(&search, &results, 2, FallbackWeight::RelativeLinkScore);
+    assert!(scratch.load_step(
+        &search,
+        &results,
+        2,
+        FallbackWeight::RelativeLinkScore,
+        None,
+        &mut SystemClock
+    ));
     assert_eq!(scratch.in_sum[z as usize], 4.0);
     let sz = scratch.adj[s as usize]
         .iter()
@@ -501,7 +529,7 @@ fn dijkstra_min_cycle_matches_brute_force_on_random_graphs() {
         let mut scratch = FallbackScratch::new(&search, FallbackConfig::DEFAULT.tie_break);
 
         for arm in arms {
-            scratch.load_step(&search, &results, 1, arm);
+            assert!(scratch.load_step(&search, &results, 1, arm, None, &mut SystemClock));
             let expected = brute_force_min_cycle(&scratch.adj, seed);
             let found = shortest_cycle(&mut scratch, seed);
             match (expected, found) {
@@ -589,6 +617,7 @@ fn clamped_log_abs_prefers_the_super_unit_path() {
         in_edge_closures(FallbackWeight::ClampedLogAbs),
         None,
         &mut SystemClock,
+        &MemoryMeter::new(),
     );
     // Every cycle through the stock is proposed; the minimum comes first.
     assert_eq!(
@@ -606,6 +635,7 @@ fn hop_count_prefers_the_shortest_path() {
         in_edge_closures(FallbackWeight::HopCount),
         None,
         &mut SystemClock,
+        &MemoryMeter::new(),
     );
     assert_eq!(
         named(&search, &out.paths),
@@ -622,6 +652,7 @@ fn relative_link_score_prefers_the_largest_share_of_the_stocks_in_edges() {
         in_edge_closures(FallbackWeight::RelativeLinkScore),
         None,
         &mut SystemClock,
+        &MemoryMeter::new(),
     );
     assert_eq!(
         named(&search, &out.paths),
@@ -633,7 +664,14 @@ fn relative_link_score_prefers_the_largest_share_of_the_stocks_in_edges() {
     // a single determinant, so all non-closing hops are free and each cycle's
     // weight is just -ln(share) of its closing edge.
     let mut scratch = FallbackScratch::new(&search, FallbackConfig::DEFAULT.tie_break);
-    scratch.load_step(&search, &results, 1, FallbackWeight::RelativeLinkScore);
+    assert!(scratch.load_step(
+        &search,
+        &results,
+        1,
+        FallbackWeight::RelativeLinkScore,
+        None,
+        &mut SystemClock
+    ));
     let s = node_id(&search, "s");
     assert_eq!(scratch.in_sum[s as usize], 14.5);
     let completed = scratch.dijkstra_from(s, None, &mut SystemClock);
@@ -689,6 +727,7 @@ fn emitted_cycles_are_elementary_and_simultaneously_active() {
         FallbackConfig::DEFAULT,
         None,
         &mut SystemClock,
+        &MemoryMeter::new(),
     );
     assert!(!out.truncated);
     assert_eq!(out.steps_processed, 3);
@@ -769,7 +808,14 @@ fn equal_weight_cycles_are_ordered_by_hop_count_not_node_id() {
     );
 
     let mut scratch = FallbackScratch::new(&search, FallbackConfig::DEFAULT.tie_break);
-    scratch.load_step(&search, &results, 1, FallbackWeight::ClampedLogAbs);
+    assert!(scratch.load_step(
+        &search,
+        &results,
+        1,
+        FallbackWeight::ClampedLogAbs,
+        None,
+        &mut SystemClock
+    ));
     assert!(scratch.dijkstra_from(s, None, &mut SystemClock));
     let mut closings = Vec::new();
     scratch.collect_closings(s, &mut closings);
@@ -785,6 +831,7 @@ fn equal_weight_cycles_are_ordered_by_hop_count_not_node_id() {
         in_edge_closures(FallbackWeight::ClampedLogAbs),
         None,
         &mut SystemClock,
+        &MemoryMeter::new(),
     );
     assert_eq!(
         named(&search, &out.paths),
@@ -825,6 +872,7 @@ fn each_tie_break_arm_orders_equal_weight_cycles_its_own_way() {
             },
             None,
             &mut SystemClock,
+            &MemoryMeter::new(),
         );
         named(&search, &out.paths)
     };
@@ -875,6 +923,7 @@ fn the_tie_break_does_not_change_which_cycles_exist() {
                 },
                 None,
                 &mut SystemClock,
+                &MemoryMeter::new(),
             )
         };
         let hops = run(FallbackTieBreak::Hops);
@@ -942,7 +991,8 @@ fn cycle_has_edge(cycle: &[u32], from: u32, to: u32) -> bool {
 fn every_edge_closures(scratch: &mut FallbackScratch, seed: u32) -> Vec<Vec<u32>> {
     assert!(scratch.dijkstra_from(seed, None, &mut SystemClock));
     assert!(scratch.dijkstra_to(seed, None, &mut SystemClock));
-    let mut dedup = CycleDedup::default();
+    let meter = MemoryMeter::new();
+    let mut dedup = CycleDedup::new(usize::MAX, 0, &meter);
     let mut paths = Vec::new();
     let mut cycle = Vec::new();
     scratch.collect_every_edge_closures(
@@ -1001,7 +1051,7 @@ fn every_edge_closures_are_minimum_weight_cycles_through_their_edge() {
         let mut scratch = FallbackScratch::new(&search, FallbackConfig::DEFAULT.tie_break);
 
         for arm in arms {
-            scratch.load_step(&search, &results, 1, arm);
+            assert!(scratch.load_step(&search, &results, 1, arm, None, &mut SystemClock));
             let oracle = brute_force_cycles_through_seed(&scratch.adj, seed);
             let emitted = every_edge_closures(&mut scratch, seed);
 
@@ -1109,6 +1159,7 @@ fn every_edge_closures_include_every_seed_in_edge_closure() {
             },
             None,
             &mut SystemClock,
+            &MemoryMeter::new(),
         );
         let rich = sweep(
             &search,
@@ -1119,6 +1170,7 @@ fn every_edge_closures_include_every_seed_in_edge_closure() {
             },
             None,
             &mut SystemClock,
+            &MemoryMeter::new(),
         );
         for path in &cheap.paths {
             assert!(
@@ -1168,6 +1220,7 @@ fn every_edge_closures_recover_both_arms_of_a_diamond() {
         },
         None,
         &mut SystemClock,
+        &MemoryMeter::new(),
     );
     assert_eq!(
         cheap.paths.len(),
@@ -1186,6 +1239,7 @@ fn every_edge_closures_recover_both_arms_of_a_diamond() {
         },
         None,
         &mut SystemClock,
+        &MemoryMeter::new(),
     );
     assert_eq!(
         sets(&rich),
@@ -1229,6 +1283,7 @@ fn the_seed_policy_decides_whether_a_stockless_cycle_is_reachable() {
             },
             None,
             &mut SystemClock,
+            &MemoryMeter::new(),
         );
         let mut sets: Vec<Vec<String>> = named(&search, &out.paths)
             .into_iter()
@@ -1276,7 +1331,14 @@ fn each_seed_policy_selects_the_nodes_it_names() {
         &["s"],
     );
     let mut scratch = FallbackScratch::new(&search, FallbackConfig::DEFAULT.tie_break);
-    scratch.load_step(&search, &results, 1, FallbackWeight::DEFAULT);
+    assert!(scratch.load_step(
+        &search,
+        &results,
+        1,
+        FallbackWeight::DEFAULT,
+        None,
+        &mut SystemClock
+    ));
     let names_of = |scratch: &mut FallbackScratch, policy| -> Vec<String> {
         let mut seeds = Vec::new();
         scratch.collect_seeds(&search, policy, &mut seeds);
@@ -1316,6 +1378,7 @@ fn a_stock_with_only_a_self_edge_yields_no_cycle() {
         FallbackConfig::DEFAULT,
         None,
         &mut SystemClock,
+        &MemoryMeter::new(),
     );
     assert!(out.paths.is_empty());
     assert!(!out.truncated);
@@ -1337,11 +1400,19 @@ fn a_self_edge_inside_a_real_cycle_is_never_traversed() {
         FallbackConfig::DEFAULT,
         None,
         &mut SystemClock,
+        &MemoryMeter::new(),
     );
     assert_eq!(named(&search, &out.paths), vec![vec!["s", "a"]]);
     // The self edge is not in the step graph at all, so nothing can walk it.
     let mut scratch = FallbackScratch::new(&search, FallbackConfig::DEFAULT.tie_break);
-    scratch.load_step(&search, &results, 1, FallbackWeight::DEFAULT);
+    assert!(scratch.load_step(
+        &search,
+        &results,
+        1,
+        FallbackWeight::DEFAULT,
+        None,
+        &mut SystemClock
+    ));
     let a = node_id(&search, "a");
     assert!(scratch.adj[a as usize].iter().all(|e| e.node != a));
     assert!(scratch.rev[a as usize].iter().all(|e| e.node != a));
@@ -1361,6 +1432,7 @@ fn the_same_cycle_seen_from_two_stocks_is_emitted_once() {
         FallbackConfig::DEFAULT,
         None,
         &mut SystemClock,
+        &MemoryMeter::new(),
     );
     assert_eq!(named(&search, &out.paths), vec![vec!["s1", "s2"]]);
 }
@@ -1380,6 +1452,7 @@ fn the_same_cycle_seen_at_two_steps_is_emitted_once() {
         FallbackConfig::DEFAULT,
         None,
         &mut SystemClock,
+        &MemoryMeter::new(),
     );
     assert_eq!(out.steps_processed, 3);
     assert_eq!(named(&search, &out.paths), vec![vec!["s", "a"]]);
@@ -1411,6 +1484,7 @@ fn opposite_direction_three_cycles_are_both_kept() {
         FallbackConfig::DEFAULT,
         None,
         &mut SystemClock,
+        &MemoryMeter::new(),
     );
     let paths = named(&search, &out.paths);
     assert!(
@@ -1452,6 +1526,7 @@ fn an_already_expired_deadline_yields_no_paths() {
         FallbackConfig::DEFAULT,
         Some(deadline),
         &mut clock,
+        &MemoryMeter::new(),
     );
     assert!(out.truncated);
     assert_eq!(out.steps_processed, 0);
@@ -1473,6 +1548,7 @@ fn a_deadline_expiring_after_the_first_step_keeps_that_steps_cycles() {
         FallbackConfig::DEFAULT,
         Some(deadline),
         &mut clock,
+        &MemoryMeter::new(),
     );
     assert_eq!(
         clock.reads, 3,
@@ -1507,6 +1583,7 @@ fn a_deadline_expiring_between_seed_stocks_completes_no_step() {
         FallbackConfig::DEFAULT,
         Some(deadline),
         &mut clock,
+        &MemoryMeter::new(),
     );
     assert_eq!(
         clock.reads, 3,
@@ -1542,6 +1619,7 @@ fn a_deadline_expiring_inside_a_search_keeps_what_it_can_already_close() {
         in_edge_closures(FallbackWeight::DEFAULT),
         Some(deadline),
         &mut clock,
+        &MemoryMeter::new(),
     );
     assert_eq!(
         clock.reads, 4,
@@ -1577,6 +1655,7 @@ fn a_deadline_expiring_inside_a_search_still_runs_the_reverse_search() {
         },
         Some(deadline),
         &mut clock,
+        &MemoryMeter::new(),
     );
     assert_eq!(
         clock.reads, 5,
@@ -1593,7 +1672,14 @@ fn an_unbudgeted_sweep_never_reads_the_clock() {
     // Scripted to expire on its very first read: if the sweep ever consulted
     // it, the run would truncate immediately.
     let mut clock = ScriptedClock::new(1);
-    let out = sweep(&search, &results, FallbackConfig::DEFAULT, None, &mut clock);
+    let out = sweep(
+        &search,
+        &results,
+        FallbackConfig::DEFAULT,
+        None,
+        &mut clock,
+        &MemoryMeter::new(),
+    );
     assert_eq!(clock.reads, 0);
     assert!(!out.truncated);
     assert_eq!(out.steps_processed, 2);
@@ -1622,34 +1708,161 @@ fn a_tiny_candidate_budget_trips_and_keeps_only_what_fit() {
         in_edge_closures(FallbackWeight::ClampedLogAbs),
         None,
         &mut SystemClock,
+        &MemoryMeter::new(),
     );
     assert!(out.truncated);
     assert_eq!(out.steps_processed, 0, "the only step never finished");
     assert_eq!(named(&search, &out.paths), vec![vec!["s", "b", "c"]]);
 }
 
-/// The cap is the smaller of the count bound and the materialization byte
-/// budget: at World3's 401 saved steps the count binds (20,000 candidates is
-/// ~128 MB), while at 100,000 saved steps a fixed count would let the
-/// materialized series climb to ~32 GB, so the byte budget takes over and
-/// the cap falls with the run length. Never below one candidate.
+/// The count cap is a volume bound only; memory is bounded by the discovery
+/// meter, which a kept path charges at its node ids plus the series its
+/// `FoundLoop` will materialize. A meter too small for one such path refuses
+/// the first insert and the dedup reports itself full.
 #[test]
-fn the_candidate_cap_shrinks_with_the_saved_step_count() {
-    let per = |steps: usize| steps * BYTES_PER_MATERIALIZED_STEP;
-    assert_eq!(max_fallback_paths(401), MAX_FALLBACK_PATHS);
+fn a_kept_path_is_charged_to_the_memory_meter_with_its_future_series() {
+    let step_count = 401;
+    let series = super::super::materialized_loop_bytes(step_count);
+    let mut paths: Vec<Vec<u32>> = Vec::new();
+    let _guard = super::super::MemoryBudgetGuard::new(series + 2 * 4);
+    let meter = MemoryMeter::new();
+    let mut dedup = CycleDedup::new(usize::MAX, series, &meter);
+    assert!(dedup.insert_if_new(&[0, 1], &mut paths), "exactly fits");
+    assert_eq!(meter.used(), series + 8);
+    assert!(!dedup.is_full(&paths));
+    // A rotation of an already-kept cycle is identity, not storage: it is
+    // refused as a duplicate without spending the budget or marking full.
+    assert!(!dedup.insert_if_new(&[1, 0], &mut paths), "a duplicate");
+    assert!(!dedup.is_full(&paths), "a duplicate spends no budget");
+    assert!(!dedup.insert_if_new(&[2, 3], &mut paths), "over the meter");
+    assert!(dedup.is_full(&paths));
+    assert_eq!(paths.len(), 1);
+}
+
+/// The per-step graph rebuild reads the clock INSIDE its edge passes once the
+/// work since the last read spans `DEADLINE_CHECK_INTERVAL`: a rebuild over a
+/// very large active edge set is therefore cut short by an expired deadline
+/// rather than completing both passes and the Tarjan run first. The work
+/// counter is the caller's, so a budgeted rebuild below the interval reads
+/// nothing, and an unbudgeted one never reads at all.
+#[test]
+fn a_large_graph_rebuild_checks_the_deadline_inside_its_passes() {
+    let interval = super::super::DEADLINE_CHECK_INTERVAL as usize;
+    // A hub fanning out to `interval` distinct targets: pass 1 alone scans
+    // exactly one interval of adjacency entries, so the first in-pass check
+    // fires before pass 2 begins.
+    let names: Vec<String> = (0..interval).map(|i| format!("n{i}")).collect();
+    let edges: Vec<FixtureEdge> = names
+        .iter()
+        .map(|n| ("hub", n.as_str(), vec![1.0]))
+        .collect();
+    let (search, results) = fixture(&edges, &["hub"]);
+    let mut scratch = FallbackScratch::new(&search, FallbackConfig::DEFAULT.tie_break);
+
+    // Unbudgeted: no clock read at all, however large the graph.
+    let mut clock = ScriptedClock::new(1);
+    assert!(scratch.load_step(
+        &search,
+        &results,
+        1,
+        FallbackWeight::DEFAULT,
+        None,
+        &mut clock
+    ));
     assert_eq!(
-        max_fallback_paths(100_000),
-        MAX_FALLBACK_MATERIALIZATION_BYTES / per(100_000)
+        clock.reads, 0,
+        "an unbudgeted rebuild never reads the clock"
     );
-    assert!(max_fallback_paths(100_000) < MAX_FALLBACK_PATHS);
-    // The count and the byte budget swap roles exactly where the series of
-    // MAX_FALLBACK_PATHS candidates fill the budget.
-    let crossover =
-        MAX_FALLBACK_MATERIALIZATION_BYTES / (MAX_FALLBACK_PATHS * BYTES_PER_MATERIALIZED_STEP);
-    assert_eq!(max_fallback_paths(crossover), MAX_FALLBACK_PATHS);
-    assert!(max_fallback_paths(crossover + 1) < MAX_FALLBACK_PATHS);
-    assert_eq!(max_fallback_paths(usize::MAX / 32), 1, "never below one");
-    assert_eq!(max_fallback_paths(0), max_fallback_paths(1));
+
+    // Budgeted with the deadline already gone: the rebuild stops inside pass 1.
+    let mut clock = ScriptedClock::new(1);
+    let deadline = clock.deadline();
+    assert!(
+        !scratch.load_step(
+            &search,
+            &results,
+            1,
+            FallbackWeight::DEFAULT,
+            Some(deadline),
+            &mut clock
+        ),
+        "the in-pass check sees the expired deadline"
+    );
+    assert_eq!(clock.reads, 1, "exactly one in-pass read decided it");
+
+    // Budgeted with a live deadline: the check reads once and the rebuild
+    // completes, leaving the counter reset for the next step.
+    let mut clock = ScriptedClock::new(usize::MAX);
+    let deadline = clock.deadline();
+    assert!(scratch.load_step(
+        &search,
+        &results,
+        1,
+        FallbackWeight::DEFAULT,
+        Some(deadline),
+        &mut clock
+    ));
+    assert!(
+        clock.reads >= 1,
+        "a rebuild spanning the interval reads the clock"
+    );
+
+    // A small budgeted rebuild (below one interval of work) reads nothing.
+    let (small_search, small_results) =
+        fixture(&[("a", "b", vec![1.0]), ("b", "a", vec![1.0])], &["a"]);
+    let mut small = FallbackScratch::new(&small_search, FallbackConfig::DEFAULT.tie_break);
+    let mut clock = ScriptedClock::new(1);
+    let deadline = clock.deadline();
+    assert!(small.load_step(
+        &small_search,
+        &small_results,
+        1,
+        FallbackWeight::DEFAULT,
+        Some(deadline),
+        &mut clock
+    ));
+    assert_eq!(
+        clock.reads, 0,
+        "below one interval of work the rebuild reads no clock"
+    );
+    assert_eq!(
+        small.rebuild_work_since_check, 6,
+        "its work is carried to the next step: 2 entries in pass 1, 2 x 2 in pass 2"
+    );
+}
+
+/// The sweep reports a rebuild cut short by the deadline as truncated and
+/// searches nothing from the half-built step graph.
+#[test]
+fn a_sweep_whose_rebuild_expires_mid_pass_is_truncated() {
+    let interval = super::super::DEADLINE_CHECK_INTERVAL as usize;
+    let names: Vec<String> = (0..interval).map(|i| format!("n{i}")).collect();
+    let mut edges: Vec<FixtureEdge> = names
+        .iter()
+        .map(|n| ("hub", n.as_str(), vec![1.0]))
+        .collect();
+    // One real cycle the sweep would find if it searched.
+    edges.push(("n0", "hub", vec![1.0]));
+    let (search, results) = fixture(&edges, &["hub"]);
+    // Read 0 is the sweep's per-step check (live); read 1 is the in-rebuild
+    // check (expired).
+    let mut clock = ScriptedClock::new(2);
+    let deadline = clock.deadline();
+    let outcome = sweep(
+        &search,
+        &results,
+        FallbackConfig::DEFAULT,
+        Some(deadline),
+        &mut clock,
+        &MemoryMeter::new(),
+    );
+    assert!(outcome.truncated);
+    assert_eq!(outcome.steps_processed, 0);
+    assert!(
+        outcome.paths.is_empty(),
+        "nothing is searched from a half-built step graph"
+    );
+    assert_eq!(clock.reads, 2);
 }
 
 /// Under every-edge closures the scan itself stops at a full cap: once
@@ -1670,6 +1883,7 @@ fn a_full_candidate_cap_stops_the_every_edge_closure_scan() {
         },
         None,
         &mut SystemClock,
+        &MemoryMeter::new(),
     );
     assert!(out.truncated);
     assert_eq!(out.paths.len(), 1, "exactly the cap's worth is kept");
@@ -1688,6 +1902,7 @@ fn a_candidate_budget_with_headroom_leaves_the_sweep_untouched() {
         in_edge_closures(FallbackWeight::ClampedLogAbs),
         None,
         &mut SystemClock,
+        &MemoryMeter::new(),
     );
     assert!(!out.truncated);
     assert_eq!(out.steps_processed, 1);
@@ -1704,14 +1919,29 @@ fn sweep_output_is_content_pure() {
     let (search, results) = three_way_fixture();
     for arm in WEIGHT_ARMS {
         let config = FallbackConfig::with_weight(arm);
-        let first = sweep(&search, &results, config, None, &mut SystemClock);
-        let second = sweep(&search, &results, config, None, &mut SystemClock);
+        let first = sweep(
+            &search,
+            &results,
+            config,
+            None,
+            &mut SystemClock,
+            &MemoryMeter::new(),
+        );
+        let second = sweep(
+            &search,
+            &results,
+            config,
+            None,
+            &mut SystemClock,
+            &MemoryMeter::new(),
+        );
         let cheap_first = sweep(
             &search,
             &results,
             in_edge_closures(arm),
             None,
             &mut SystemClock,
+            &MemoryMeter::new(),
         );
         let cheap_second = sweep(
             &search,
@@ -1719,6 +1949,7 @@ fn sweep_output_is_content_pure() {
             in_edge_closures(arm),
             None,
             &mut SystemClock,
+            &MemoryMeter::new(),
         );
         assert_eq!(
             cheap_first.paths, cheap_second.paths,
@@ -1739,27 +1970,9 @@ fn an_empty_graph_sweeps_to_nothing() {
         FallbackConfig::DEFAULT,
         None,
         &mut SystemClock,
+        &MemoryMeter::new(),
     );
     assert!(out.paths.is_empty());
     assert!(!out.truncated);
     assert_eq!(out.steps_processed, 0);
-}
-
-/// The kept paths' node storage is bounded as well as their count: a dedup
-/// whose node budget is already spent refuses the next insert and reports
-/// itself full, so the sweep stops paying for candidates it cannot keep.
-#[test]
-fn the_dedup_refuses_an_insert_that_would_exceed_the_path_node_budget() {
-    let mut dedup = CycleDedup::new(usize::MAX);
-    let mut paths: Vec<Vec<u32>> = Vec::new();
-    dedup.nodes = MAX_FALLBACK_PATH_NODES - 2;
-    assert!(dedup.insert_if_new(&[0, 1], &mut paths), "exactly fits");
-    assert!(!dedup.is_full(&paths));
-    // A rotation of an already-kept cycle is identity, not storage: it is
-    // refused as a duplicate without spending the budget or marking full.
-    assert!(!dedup.insert_if_new(&[1, 0], &mut paths), "a duplicate");
-    assert!(!dedup.is_full(&paths), "a duplicate spends no budget");
-    assert!(!dedup.insert_if_new(&[2, 3], &mut paths), "one node over");
-    assert!(dedup.is_full(&paths));
-    assert_eq!(paths.len(), 1);
 }

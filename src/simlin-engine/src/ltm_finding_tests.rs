@@ -1746,9 +1746,20 @@ fn two_circuit_universe(weak_sibling: bool) -> UniverseStats {
     }
     let results = enum_results(n_offsets, step_count, data);
     let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
-    let activity = super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock)
-        .expect("an unbudgeted build never abandons");
-    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
+    let activity = super::enum_gen::ActivityGraph::build(
+        &search,
+        &results,
+        None,
+        &mut SystemClock,
+        &MemoryMeter::new(),
+    )
+    .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(
+        &activity,
+        None,
+        &mut SystemClock,
+        &MemoryMeter::new(),
+    );
     let stock_partition: Vec<Option<usize>> = search
         .idents
         .iter()
@@ -3472,9 +3483,20 @@ fn retention_dedup_key_matches_the_materialization_trim() {
     data[n_offsets + 2] = 10.0; // b -> a
     let results = enum_results(n_offsets, step_count, data);
     let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
-    let activity = super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock)
-        .expect("an unbudgeted build never abandons");
-    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
+    let activity = super::enum_gen::ActivityGraph::build(
+        &search,
+        &results,
+        None,
+        &mut SystemClock,
+        &MemoryMeter::new(),
+    )
+    .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(
+        &activity,
+        None,
+        &mut SystemClock,
+        &MemoryMeter::new(),
+    );
     assert!(candidates.complete);
     assert_eq!(
         candidates.len(),
@@ -3566,9 +3588,20 @@ fn retention_dedup_prevents_a_borderline_loop_from_being_dropped_by_an_inflated_
     data[n_offsets + 5] = 0.5; // c -> a    (product 0.25)
     let results = enum_results(n_offsets, step_count, data);
     let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
-    let activity = super::enum_gen::ActivityGraph::build(&search, &results, None, &mut SystemClock)
-        .expect("an unbudgeted build never abandons");
-    let candidates = super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock);
+    let activity = super::enum_gen::ActivityGraph::build(
+        &search,
+        &results,
+        None,
+        &mut SystemClock,
+        &MemoryMeter::new(),
+    )
+    .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(
+        &activity,
+        None,
+        &mut SystemClock,
+        &MemoryMeter::new(),
+    );
     assert!(candidates.complete);
     assert_eq!(
         candidates.len(),

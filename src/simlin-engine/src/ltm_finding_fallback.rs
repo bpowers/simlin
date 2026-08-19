@@ -66,7 +66,7 @@ use std::collections::{BinaryHeap, HashMap};
 use std::time::Instant;
 
 use super::{
-    Clock, DEADLINE_CHECK_INTERVAL, IndexedSearch, TarjanScratch, expired, is_active,
+    Clock, DEADLINE_CHECK_INTERVAL, IndexedSearch, MemoryMeter, TarjanScratch, expired, is_active,
     tarjan_scc_ids_into,
 };
 use crate::results::Results;
@@ -540,6 +540,9 @@ struct FallbackScratch {
     path_mark: Vec<u32>,
     /// Bumped once per forward tree path marked.
     path_generation: u32,
+    /// Adjacency entries `load_step` has scanned since it last read the clock,
+    /// carried across steps (see `load_step`).
+    rebuild_work_since_check: u64,
     heap: BinaryHeap<HeapEntry>,
 }
 
@@ -578,6 +581,7 @@ impl FallbackScratch {
             rev_generation: 0,
             path_mark: vec![0; n_nodes],
             path_generation: 0,
+            rebuild_work_since_check: 0,
             heap: BinaryHeap::new(),
         }
     }
@@ -589,17 +593,26 @@ impl FallbackScratch {
     /// "loop" is not a feedback loop in the SD sense, and the enumerator's
     /// contract says the same, so both generators agree on what a loop is.
     ///
-    /// Returns the work it did -- adjacency entries scanned across its two
-    /// edge passes and the Tarjan run -- so the caller can charge it against
-    /// the deadline schedule: on a very large active edge set this rebuild is
-    /// the most expensive thing between two clock reads.
+    /// The rebuild is charged to the deadline AS IT RUNS: `rebuild_work_since_check`
+    /// is the scratch's running count of adjacency entries scanned since the
+    /// last clock read (carried across steps so a long run of small rebuilds
+    /// still reads the clock once per interval), and each edge pass reads the
+    /// clock whenever that count reaches `DEADLINE_CHECK_INTERVAL`. The
+    /// Tarjan pass is one linear scan over the active edges between two
+    /// checks -- the same granularity the enumeration's per-root SCC has.
+    /// Returns `false` when the deadline expired mid-rebuild; the scratch is
+    /// then partially rebuilt and must not be searched.
     fn load_step(
         &mut self,
         search: &IndexedSearch,
         results: &Results,
         step: usize,
         weight: FallbackWeight,
-    ) -> u64 {
+        deadline: Option<Instant>,
+        clock: &mut dyn Clock,
+    ) -> bool {
+        let interval = u64::from(DEADLINE_CHECK_INTERVAL);
+        let work_since_check = &mut self.rebuild_work_since_check;
         let base = step * results.step_size;
         for row in self.adj.iter_mut() {
             row.clear();
@@ -621,9 +634,14 @@ impl FallbackScratch {
         // consulted it would divide by a zero nothing wrote -- a silent wrong
         // weight rather than a compile error. One indexed add per active edge
         // is not worth that coupling.
-        let mut work: u64 = 0;
         for (from, edges) in search.adj.iter().enumerate() {
-            work += edges.len() as u64;
+            *work_since_check += edges.len() as u64;
+            if *work_since_check >= interval {
+                *work_since_check = 0;
+                if expired(deadline, clock) {
+                    return false;
+                }
+            }
             for edge in edges {
                 if edge.to as usize == from {
                     continue;
@@ -651,7 +669,14 @@ impl FallbackScratch {
         // sources in ascending id order gives every `rev` row a content-pure
         // order, which the closing-edge tie-break below relies on.
         for from in 0..self.adj.len() {
-            work += 2 * self.adj[from].len() as u64; // weights, then the Tarjan scan
+            // Weights now, then the Tarjan scan below reads the same entries.
+            *work_since_check += 2 * self.adj[from].len() as u64;
+            if *work_since_check >= interval {
+                *work_since_check = 0;
+                if expired(deadline, clock) {
+                    return false;
+                }
+            }
             for k in 0..self.adj[from].len() {
                 let edge = self.adj[from][k];
                 let w = edge_weight(
@@ -681,7 +706,7 @@ impl FallbackScratch {
             &mut self.scc_ids,
             &mut self.scc_sizes,
         );
-        work
+        true
     }
 
     /// The seeds `policy` selects in the loaded step graph, in a content-pure
@@ -1138,22 +1163,15 @@ fn order_hops(tie_break: FallbackTieBreak, hops: u32) -> u32 {
 /// dedup thins it -- on a sufficiently dense or long-running model that grows
 /// without limit.
 ///
-/// This bounds MATERIALIZATION memory, not the candidate list's own footprint
-/// (which really is a few tens of MB even at the old 200,000 bound -- a few
-/// dozen `u32` node ids per cycle). Every one of `sweep`'s candidates is
-/// materialized into a `FoundLoop` carrying a `step_count`-long `Vec<(f64,
-/// f64)>` score series BEFORE retention has a chance to drop any of them
-/// (`ltm_finding.rs`'s materialization loop runs over `all_paths` in full),
-/// so the bound that actually matters is candidates x steps x 16 bytes. The
-/// effective cap is therefore the SMALLER of this count and
-/// [`MAX_FALLBACK_MATERIALIZATION_BYTES`] divided by the run's per-candidate
-/// series size (`max_fallback_paths(step_count)`): at 401 saved steps
-/// (World3's shape) 20,000 candidates is ~128 MB and the count binds; at
-/// 100,000 saved steps the byte budget binds instead and the cap falls to
-/// ~160 candidates -- a bounded, tolerable spike either way, where a fixed
-/// count alone would let a long run climb to tens of GB (the same
-/// multi-GB-cliff shape AC3.3's enumeration-side `MAX_DISCOVERY_ENUM_EDGE_ROWS`
-/// exists to prevent).
+/// Memory is bounded separately and uniformly: every kept path is charged to
+/// the discovery-wide [`super::MemoryMeter`] at its node ids plus the series its
+/// `FoundLoop` will materialize (`super::materialized_loop_bytes`), so a long
+/// run's cap falls with its saved-step count and a dense run's with its cycle
+/// lengths, under the one bound every other phase shares. This count is the
+/// remaining sanity bound on candidate VOLUME -- how many cycles a sample may
+/// propose at all -- kept because a sample of tens of thousands of cycles is
+/// no more informative than one of thousands once the report is capped at
+/// `MAX_LOOPS`.
 ///
 /// It is still sized with real headroom over what the corpus actually
 /// produces -- `examples/ltm_discovery_bench` measured 2,150 deduped
@@ -1171,15 +1189,6 @@ fn order_hops(tie_break: FallbackTieBreak, hops: u32) -> u32 {
 /// wall-clock-truncated sweep already reads.
 const MAX_FALLBACK_PATHS: usize = 20_000;
 
-/// Materialization budget for one fallback sweep's candidates, in bytes of
-/// `FoundLoop` score series (`step_count * 16 B` each). See
-/// [`MAX_FALLBACK_PATHS`] for why the count alone does not bound memory.
-const MAX_FALLBACK_MATERIALIZATION_BYTES: usize = 256 * 1024 * 1024;
-
-/// Bytes one materialized candidate's score series costs: `(f64, f64)` per
-/// saved step.
-const BYTES_PER_MATERIALIZED_STEP: usize = 16;
-
 #[cfg(test)]
 thread_local! {
     /// Test-only override of [`MAX_FALLBACK_PATHS`], scoped by an active
@@ -1190,20 +1199,17 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-/// The candidate-cycle budget for a sweep over `step_count` saved steps:
-/// the smaller of [`MAX_FALLBACK_PATHS`] and the count whose materialized
-/// series fit [`MAX_FALLBACK_MATERIALIZATION_BYTES`] (never below 1, so a
-/// pathologically long run still proposes something). A test-installed
-/// [`MaxFallbackPathsGuard`] override replaces both.
-fn max_fallback_paths(step_count: usize) -> usize {
+/// The candidate-cycle count cap for a sweep: [`MAX_FALLBACK_PATHS`] unless
+/// a test-installed [`MaxFallbackPathsGuard`] override replaces it. Memory is
+/// bounded by the meter, not by this count.
+fn max_fallback_paths() -> usize {
     #[cfg(test)]
     {
         if let Some(n) = MAX_FALLBACK_PATHS_OVERRIDE.with(|c| c.get()) {
             return n;
         }
     }
-    let per_candidate = step_count.max(1) * BYTES_PER_MATERIALIZED_STEP;
-    MAX_FALLBACK_PATHS.min((MAX_FALLBACK_MATERIALIZATION_BYTES / per_candidate).max(1))
+    MAX_FALLBACK_PATHS
 }
 
 /// RAII guard (test-only) overriding [`max_fallback_paths`] for the current
@@ -1250,36 +1256,28 @@ impl Drop for MaxFallbackPathsGuard {
 /// that turns "no more room" into `truncated`. `CycleDedup::default()` sets no
 /// cap (`usize::MAX`), which is what the unit tests below use when they are
 /// testing dedup semantics rather than the budget.
-struct CycleDedup {
+struct CycleDedup<'a> {
     /// fingerprint -> the indices into `paths` of the cycles carrying it.
     buckets: HashMap<u64, Vec<u32>>,
     cap: usize,
-    /// Node ids the kept paths hold so far, against [`MAX_FALLBACK_PATH_NODES`]:
-    /// the path cap bounds how many cycles are kept, not how long they are,
-    /// and 20,000 cycles of 50,000 nodes would be gigabytes of `u32` before
-    /// any series is materialized.
-    nodes: usize,
-    /// Set once either bound refused an insert; the sweep reads it as "the
-    /// candidate budget is spent".
+    /// Bytes one kept path will cost once materialized (its `FoundLoop`
+    /// series), charged together with its node ids to `meter` at insert time
+    /// so the bound sees the sample's full footprint.
+    series_bytes: usize,
+    /// The discovery memory meter every kept path is charged to.
+    meter: &'a MemoryMeter,
+    /// Set once the count cap or the memory meter refused an insert; the
+    /// sweep reads it as "the candidate budget is spent".
     full: bool,
 }
 
-/// Aggregate node-id storage the fallback's kept paths may hold (256 MB of
-/// `u32`); the companion of `MAX_FALLBACK_PATHS`, which bounds count only.
-const MAX_FALLBACK_PATH_NODES: usize = 64 * 1024 * 1024;
-
-impl Default for CycleDedup {
-    fn default() -> Self {
-        CycleDedup::new(usize::MAX)
-    }
-}
-
-impl CycleDedup {
-    fn new(cap: usize) -> Self {
+impl<'a> CycleDedup<'a> {
+    fn new(cap: usize, series_bytes: usize, meter: &'a MemoryMeter) -> Self {
         CycleDedup {
             buckets: HashMap::new(),
             cap,
-            nodes: 0,
+            series_bytes,
+            meter,
             full: false,
         }
     }
@@ -1302,12 +1300,14 @@ impl CycleDedup {
         {
             return false;
         }
-        if self.nodes + cycle.len() > MAX_FALLBACK_PATH_NODES {
+        if !self
+            .meter
+            .charge(std::mem::size_of_val(cycle) + self.series_bytes)
+        {
             self.full = true;
             return false;
         }
         bucket.push(paths.len() as u32);
-        self.nodes += cycle.len();
         paths.push(cycle.to_vec());
         if paths.len() >= self.cap {
             self.full = true;
@@ -1413,14 +1413,19 @@ pub(super) fn sweep(
     config: FallbackConfig,
     deadline: Option<Instant>,
     clock: &mut dyn Clock,
+    meter: &MemoryMeter,
 ) -> FallbackOutcome {
     let mut scratch = FallbackScratch::new(search, config.tie_break);
-    let cap = max_fallback_paths(results.step_count);
+    let cap = max_fallback_paths();
     // Dedup on the node-id cycle rather than on names. Within one
     // `IndexedSearch` the id <-> name map is a bijection, so these are the same
     // equivalence classes a name-keyed dedup would give, without allocating a
     // name vector per cycle.
-    let mut dedup = CycleDedup::new(cap);
+    let mut dedup = CycleDedup::new(
+        cap,
+        super::materialized_loop_bytes(results.step_count),
+        meter,
+    );
     let mut paths: Vec<Vec<u32>> = Vec::new();
     let mut closings: Vec<(f64, u32, u32)> = Vec::new();
     let mut cycle_buf: Vec<u32> = Vec::new();
@@ -1428,23 +1433,19 @@ pub(super) fn sweep(
     let mut steps_processed = 0usize;
     let mut truncated = false;
 
-    // Step-graph rebuild work since the last clock read: a rebuild over a very
-    // large active edge set is charged to the deadline like a search, read
-    // only once it alone spans a check interval (the production constant, so
-    // small fixtures' calibrated read schedules are undisturbed).
-    let mut rebuild_work_since_check: u64 = 0;
+    // The per-step rebuild is charged to the deadline like a search: it
+    // reads the clock inside its passes once the work since the last read
+    // (carried across steps on the scratch) spans a check interval -- the
+    // production constant, so small fixtures' calibrated read schedules are
+    // undisturbed.
     'steps: for step in 1..results.step_count {
         if expired(deadline, clock) {
             truncated = true;
             break 'steps;
         }
-        rebuild_work_since_check += scratch.load_step(search, results, step, config.weight);
-        if rebuild_work_since_check >= u64::from(DEADLINE_CHECK_INTERVAL) {
-            rebuild_work_since_check = 0;
-            if expired(deadline, clock) {
-                truncated = true;
-                break 'steps;
-            }
+        if !scratch.load_step(search, results, step, config.weight, deadline, clock) {
+            truncated = true;
+            break 'steps;
         }
         scratch.collect_seeds(search, config.seeds, &mut seeds);
 

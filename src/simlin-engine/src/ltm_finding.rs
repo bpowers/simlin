@@ -83,13 +83,6 @@ type LinkOffsetMap = HashMap<(Ident<Canonical>, Ident<Canonical>), usize>;
 /// alongside it; see `active_window_of`) so retention can bound a
 /// module-traversing circuit's scoring range by it instead of the full
 /// saved-step range.
-/// Aggregate byte budget for the module-override series a [`ModuleOverrideCache`]
-/// retains (one `step_count`-long `Vec<f64>` per distinct `(source, module,
-/// exit reader)`); past it a lookup still computes and returns its series but
-/// does not retain it, so a module-dense, many-step model trades memoization
-/// for recomputation instead of growing without bound.
-const MAX_MODULE_OVERRIDE_CACHE_BYTES: usize = 256 * 1024 * 1024;
-
 type ModuleSeriesCache =
     HashMap<(Ident<Canonical>, Ident<Canonical>, Ident<Canonical>), ModuleOverrideEntry>;
 
@@ -193,6 +186,116 @@ impl Drop for MaxLoopsGuard {
     fn drop(&mut self) {
         MAX_LOOPS_OVERRIDE.with(|c| c.set(self.prev));
     }
+}
+
+/// Memory discovery may commit across ALL of its phases -- the union graph's
+/// rows and bitsets (scratch included), the enumerated circuits, the module
+/// override cache's series and shared pathway slots, stitched loops on either
+/// path, the fallback's kept paths, and the materialized `FoundLoop` series --
+/// charged to one [`MemoryMeter`] so the bound is a single statement rather
+/// than one constant per allocation site. A phase that cannot fit yields:
+/// the activity build abandons, the enumeration reports incomplete, the
+/// fallback truncates, and discovery reports what ran. World3 commits ~65 MB
+/// (activity ~1.5 MB, ~150k circuits at ~6.3M rows plus bitsets ~35 MB, the
+/// 2,979 survivors' series ~29 MB at 401 saved steps); C-LEARN under 10 MB.
+pub(crate) const MAX_DISCOVERY_MEMORY_BYTES: usize = 768 * 1024 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only override of [`MAX_DISCOVERY_MEMORY_BYTES`], scoped by an
+    /// active [`MemoryBudgetGuard`], so tiny fixtures can trip every phase's
+    /// memory arm.
+    static MEMORY_BUDGET_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The effective discovery memory bound.
+fn max_discovery_memory_bytes() -> usize {
+    #[cfg(test)]
+    {
+        if let Some(b) = MEMORY_BUDGET_OVERRIDE.with(|c| c.get()) {
+            return b;
+        }
+    }
+    MAX_DISCOVERY_MEMORY_BYTES
+}
+
+/// RAII guard (test-only) overriding [`max_discovery_memory_bytes`] for the
+/// current thread; restores the previous value on drop.
+#[cfg(test)]
+pub(crate) struct MemoryBudgetGuard {
+    prev: Option<usize>,
+}
+
+#[cfg(test)]
+impl MemoryBudgetGuard {
+    pub(crate) fn new(bytes: usize) -> Self {
+        let prev = MEMORY_BUDGET_OVERRIDE.with(|c| c.replace(Some(bytes)));
+        Self { prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for MemoryBudgetGuard {
+    fn drop(&mut self) {
+        MEMORY_BUDGET_OVERRIDE.with(|c| c.set(self.prev));
+    }
+}
+
+/// The one memory bound every discovery phase charges its allocations to.
+///
+/// Interior mutability (`Cell`) so the meter can be shared by reference among
+/// phases that are otherwise borrowing each other mutably (retention borrows
+/// the override cache through a closure while the cache charges its own
+/// series). `charge` never allocates; a phase asks before it allocates and
+/// yields when refused. `release` credits memory a phase has dropped (the
+/// enumeration's graph and candidates before the fallback runs), so the
+/// fallback is measured against the same bound, not against what the
+/// abandoned attempt had used.
+pub(crate) struct MemoryMeter {
+    used: std::cell::Cell<usize>,
+    cap: usize,
+}
+
+impl MemoryMeter {
+    pub(crate) fn new() -> Self {
+        MemoryMeter {
+            used: std::cell::Cell::new(0),
+            cap: max_discovery_memory_bytes(),
+        }
+    }
+
+    /// Commit `bytes` if they fit; `false` (and nothing committed) otherwise.
+    #[must_use]
+    pub(crate) fn charge(&self, bytes: usize) -> bool {
+        let used = self.used.get();
+        match used.checked_add(bytes) {
+            Some(total) if total <= self.cap => {
+                self.used.set(total);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Credit `bytes` a phase has dropped.
+    pub(crate) fn release(&self, bytes: usize) {
+        self.used.set(self.used.get().saturating_sub(bytes));
+    }
+
+    /// Bytes currently committed.
+    #[cfg(test)]
+    pub(crate) fn used(&self) -> usize {
+        self.used.get()
+    }
+}
+
+/// Bytes one materialized `FoundLoop` costs for a run of `step_count` saved
+/// steps: its `(time, score)` series plus its relative-score series. Charged
+/// before materialization on both paths so the report's own storage is inside
+/// the discovery memory bound, not only the candidates'.
+pub(super) fn materialized_loop_bytes(step_count: usize) -> usize {
+    step_count * (std::mem::size_of::<(f64, f64)>() + std::mem::size_of::<f64>())
 }
 
 /// Prefix for link score synthetic variables
@@ -463,13 +566,21 @@ pub fn link_activity_series(
     sub_model_output_ports: &SubModelOutputPorts,
 ) -> Vec<Vec<f64>> {
     let mut search = IndexedSearch::build(link_offsets, stocks);
+    let meter = MemoryMeter::new();
     let mut cache = ModuleOverrideCache::new(
         causal_graph,
         results,
         sub_model_output_ports,
         results.step_count,
+        &meter,
     );
-    search.attach_module_pathways(&mut |from, to| cache.pathway_offsets(from, to));
+    // Unbudgeted: the attach pass reads no clock and cannot decline.
+    let attached = search.attach_module_pathways(
+        &mut |from, to| cache.pathway_offsets(from, to),
+        None,
+        &mut SystemClock,
+    );
+    debug_assert!(attached);
     // `IndexedSearch::build` keeps each node's edges in `link_offsets` order
     // and interns nodes in first-seen order, so walking the offsets and
     // looking each edge up by (from, to) reproduces the input order exactly.
@@ -1422,7 +1533,7 @@ struct IndexedSearch {
 /// Resolves the per-pathway result slots behind a `(from, to)` edge -- empty
 /// unless `to` is a module instance with a unique entry port fed by `from`
 /// (see [`ModuleOverrideCache::pathway_offsets`]).
-type ModulePathwayFn<'a> = dyn FnMut(&Ident<Canonical>, &Ident<Canonical>) -> Vec<usize> + 'a;
+type ModulePathwayFn<'a> = dyn FnMut(&Ident<Canonical>, &Ident<Canonical>) -> Rc<[usize]> + 'a;
 
 struct IndexedEdge {
     to: u32,
@@ -1434,7 +1545,7 @@ struct IndexedEdge {
     /// [`IndexedEdge::value_at`] see through that shadow so an edge (and any
     /// cycle through it) that a per-exit-port override can score is never
     /// read as inactive. Attached by [`IndexedSearch::attach_module_pathways`].
-    extra_offsets: Vec<usize>,
+    extra_offsets: Rc<[usize]>,
 }
 
 impl IndexedEdge {
@@ -1452,7 +1563,7 @@ impl IndexedEdge {
         }
         let mut best = composite;
         let mut best_abs = -1.0f64;
-        for &off in &self.extra_offsets {
+        for &off in self.extra_offsets.iter() {
             let v = results.data[base + off];
             if is_active(v) && v.abs() > best_abs {
                 best_abs = v.abs();
@@ -1607,7 +1718,7 @@ impl IndexedSearch {
             adj[from_id as usize].push(IndexedEdge {
                 to: to_id,
                 offset: *offset,
-                extra_offsets: Vec::new(),
+                extra_offsets: Rc::from(Vec::new()),
             });
         }
 
@@ -1644,14 +1755,30 @@ impl IndexedSearch {
     /// (empty for a non-module target or an ambiguous entry port); a module
     /// with no resolvable pathways keeps composite-only activity, exactly as
     /// its scoring keeps the composite when the recompute declines.
-    fn attach_module_pathways(&mut self, pathways: &mut ModulePathwayFn<'_>) {
+    ///
+    /// Each resolution can run the module's bounded-but-large internal pathway
+    /// DFS, so the pass reads `deadline` every `DEADLINE_CHECK_INTERVAL` edges
+    /// and returns `false` when it has expired (an unbudgeted call never reads
+    /// the clock); the caller then skips candidate generation entirely.
+    fn attach_module_pathways(
+        &mut self,
+        pathways: &mut ModulePathwayFn<'_>,
+        deadline: Option<Instant>,
+        clock: &mut dyn Clock,
+    ) -> bool {
+        let mut scanned: u32 = 0;
         for from in 0..self.adj.len() {
             for k in 0..self.adj[from].len() {
+                scanned = scanned.wrapping_add(1);
+                if scanned & (DEADLINE_CHECK_INTERVAL - 1) == 0 && expired(deadline, clock) {
+                    return false;
+                }
                 let to = self.adj[from][k].to;
                 let extra = pathways(&self.idents[from], &self.idents[to as usize]);
                 self.adj[from][k].extra_offsets = extra;
             }
         }
+        true
     }
 }
 
@@ -2242,6 +2369,11 @@ fn recompute_module_input_edge_series(
 /// operands, so an arrayed loop's per-element instances share one cache entry
 /// rather than re-enumerating the sub-model's pathway map once per element.
 /// One instance per discovery call.
+/// A module-input edge `(from, module)` with both endpoints' element subscripts
+/// stripped -- the key the pathway-offset cache shares across an arrayed loop's
+/// per-element instances.
+type ModuleEdgeKey = (Ident<Canonical>, Ident<Canonical>);
+
 pub(crate) struct ModuleOverrideCache<'a> {
     causal_graph: &'a CausalGraph,
     results: &'a Results,
@@ -2250,10 +2382,11 @@ pub(crate) struct ModuleOverrideCache<'a> {
     cache: ModuleSeriesCache,
     /// `(from, module)` -> every pathway slot behind that module-input edge,
     /// regardless of exit port (see [`Self::pathway_offsets`]).
-    pathway_cache: HashMap<(Ident<Canonical>, Ident<Canonical>), Vec<usize>>,
-    /// Bytes of series the cache currently retains, against
-    /// [`MAX_MODULE_OVERRIDE_CACHE_BYTES`].
-    retained_bytes: usize,
+    pathway_cache: HashMap<ModuleEdgeKey, Rc<[usize]>>,
+    /// The discovery-wide memory bound the retained series and pathway slots
+    /// are charged to; a series that does not fit is returned but not
+    /// retained (recomputation instead of growth).
+    meter: &'a MemoryMeter,
 }
 
 impl<'a> ModuleOverrideCache<'a> {
@@ -2262,6 +2395,7 @@ impl<'a> ModuleOverrideCache<'a> {
         results: &'a Results,
         sub_model_output_ports: &'a SubModelOutputPorts,
         step_count: usize,
+        meter: &'a MemoryMeter,
     ) -> Self {
         ModuleOverrideCache {
             causal_graph,
@@ -2270,7 +2404,7 @@ impl<'a> ModuleOverrideCache<'a> {
             step_count,
             cache: HashMap::new(),
             pathway_cache: HashMap::new(),
-            retained_bytes: 0,
+            meter,
         }
     }
 
@@ -2287,7 +2421,7 @@ impl<'a> ModuleOverrideCache<'a> {
         &mut self,
         from: &Ident<Canonical>,
         module: &Ident<Canonical>,
-    ) -> Vec<usize> {
+    ) -> Rc<[usize]> {
         use crate::ltm::{normalize_module_ref, strip_subscript};
         use crate::variable::Variable;
 
@@ -2296,7 +2430,7 @@ impl<'a> ModuleOverrideCache<'a> {
             Ident::<Canonical>::new(strip_subscript(module.as_str())),
         );
         if let Some(cached) = self.pathway_cache.get(&key) {
-            return cached.clone();
+            return Rc::clone(cached);
         }
         let resolve = || -> Option<Vec<usize>> {
             let module_graph = self.causal_graph.module_graph(&key.1)?;
@@ -2338,8 +2472,17 @@ impl<'a> ModuleOverrideCache<'a> {
                 .collect();
             Some(offsets)
         };
-        let offsets = resolve().unwrap_or_default();
-        self.pathway_cache.insert(key, offsets.clone());
+        let offsets: Rc<[usize]> = Rc::from(resolve().unwrap_or_default());
+        // One shared slot list per key: every array-expanded edge of the same
+        // (source, module) pair points at it, so the slots cost their size
+        // once rather than once per element edge. Charged to the meter; a
+        // refusal returns an uncached (but still correct) list.
+        if self
+            .meter
+            .charge(offsets.len() * std::mem::size_of::<usize>())
+        {
+            self.pathway_cache.insert(key, Rc::clone(&offsets));
+        }
         offsets
     }
 
@@ -2391,12 +2534,11 @@ impl<'a> ModuleOverrideCache<'a> {
         let bytes = series
             .as_ref()
             .map_or(0, |(s, _)| s.len() * std::mem::size_of::<f64>());
-        if self.retained_bytes + bytes > MAX_MODULE_OVERRIDE_CACHE_BYTES {
+        if !self.meter.charge(bytes) {
             // Over budget: answer without retaining. The next lookup of this
             // key recomputes -- bounded work in exchange for bounded memory.
             return series;
         }
-        self.retained_bytes += bytes;
         self.cache.entry(key).or_insert(series).clone()
     }
 }
@@ -2742,16 +2884,30 @@ pub(crate) fn discover_loops_with_deadlines(
     // module-traversing loop's score to different series. Built regardless
     // of whether the enumeration runs -- materialization needs it on the
     // fallback path too.
-    let mut module_override_cache =
-        ModuleOverrideCache::new(causal_graph, results, sub_model_output_ports, step_count);
+    // The one memory bound every phase below charges its allocations to.
+    let meter = MemoryMeter::new();
+    let mut module_override_cache = ModuleOverrideCache::new(
+        causal_graph,
+        results,
+        sub_model_output_ports,
+        step_count,
+        &meter,
+    );
 
     // Let both candidate generators read a module-input edge's activity
     // through its pathways rather than only its composite: the composite's
     // max-abs fold lets a NaN pathway shadow a finite one, and a cycle whose
     // per-exit-port override is finite there must not be dropped as inactive
     // before retention ever scores it (that shadow was this pipeline's one
-    // stated blind spot; `IndexedEdge::value_at` closes it).
-    search.attach_module_pathways(&mut |from, to| module_override_cache.pathway_offsets(from, to));
+    // stated blind spot; `IndexedEdge::value_at` closes it). The pass is
+    // charged to the ENUMERATION deadline (it precedes both generators); if
+    // that deadline has already gone, the fallback's own deadline decides
+    // whether anything still runs.
+    let pathways_attached = search.attach_module_pathways(
+        &mut |from, to| module_override_cache.pathway_offsets(from, to),
+        deadlines.enumeration,
+        clock,
+    );
 
     // --- Primary candidate generation: union-graph circuit enumeration ---
     // (docs/design-plans/2026-08-17-ltm-discovery-exact.md).
@@ -2776,9 +2932,12 @@ pub(crate) fn discover_loops_with_deadlines(
     // Every other circuit -- retention non-survivors included -- keeps its
     // raw enumerated product in the totals unmodified.
     if enumeration_ran
-        && let Some(activity) = ActivityGraph::build(&search, results, deadlines.enumeration, clock)
+        && pathways_attached
+        && let Some(activity) =
+            ActivityGraph::build(&search, results, deadlines.enumeration, clock, &meter)
     {
-        let mut candidates = enumerate_active_circuits(&activity, deadlines.enumeration, clock);
+        let mut candidates =
+            enumerate_active_circuits(&activity, deadlines.enumeration, clock, &meter);
         if candidates.complete {
             // Per-node metadata for the streaming retention passes.
             let stock_partition_of_node: Vec<Option<usize>> = search
@@ -2857,7 +3016,7 @@ pub(crate) fn discover_loops_with_deadlines(
             // allocation than the bound allows.
             let stitching_over_budget = stitched
                 .iter()
-                .any(|seq| !candidates.push_node_path(seq, &activity));
+                .any(|seq| !candidates.push_node_path(seq, &activity, &meter));
             // Petal collection and stitching are bounded by the enumeration's
             // own budgets (the scan is one pass over the emitted rows, the
             // stitch by `cross_agg_loop_budget`), but a reducer-heavy universe
@@ -2891,21 +3050,35 @@ pub(crate) fn discover_loops_with_deadlines(
                 // trimmed-key dedup merged and minus anything that banked no
                 // mass; retention counts exactly that as it goes.
                 let universe_loop_count = retention.distinct_circuits;
-                retained_beyond_materialization = retention.solo_survivors_beyond_cap;
-                node_paths = survivors;
-                universe = Some(UniverseStats {
-                    totals: retention.partition_totals,
-                    loop_counts: retention.partition_circuit_counts,
-                });
-                enumeration_complete = true;
-                universe_loops = Some(universe_loop_count);
+                // The report's own storage is charged before it is built: a
+                // survivor set whose materialized series would not fit the
+                // discovery memory bound is an enumeration this bound cannot
+                // carry to a report, so it yields to the (bounded) fallback and
+                // says so through `enumeration_complete`.
+                if meter.charge(survivors.len() * materialized_loop_bytes(step_count)) {
+                    retained_beyond_materialization = retention.solo_survivors_beyond_cap;
+                    node_paths = survivors;
+                    universe = Some(UniverseStats {
+                        totals: retention.partition_totals,
+                        loop_counts: retention.partition_circuit_counts,
+                    });
+                    enumeration_complete = true;
+                    universe_loops = Some(universe_loop_count);
+                }
             }
         }
+        if !enumeration_complete {
+            // The graph and the candidate store are dropped at the end of
+            // this block; credit their charge so the fallback is measured
+            // against the same bound rather than against the abandoned
+            // attempt's footprint.
+            meter.release(activity.charged_bytes + candidates.charged_bytes);
+        }
         // An incomplete enumeration (circuit budget, visit budget, edge-row
-        // budget, or deadline) falls through to the fallback with whatever
-        // wall-clock remains; the partial circuit list is discarded rather
-        // than merged, because it is biased by node-id root order and its
-        // per-partition totals are not the universe's.
+        // budget, memory bound, or deadline) falls through to the fallback
+        // with whatever wall-clock remains; the partial circuit list is
+        // discarded rather than merged, because it is biased by node-id root
+        // order and its per-partition totals are not the universe's.
     }
 
     if !enumeration_complete {
@@ -2916,7 +3089,7 @@ pub(crate) fn discover_loops_with_deadlines(
             CandidateGen::Auto => FallbackConfig::DEFAULT,
             CandidateGen::FallbackOnly(config) => config,
         };
-        let outcome = fallback::sweep(&search, results, config, deadlines.fallback, clock);
+        let outcome = fallback::sweep(&search, results, config, deadlines.fallback, clock, &meter);
         truncated = outcome.truncated;
         debug_assert!(
             outcome.truncated || outcome.steps_processed == step_count.saturating_sub(1),
@@ -2938,7 +3111,18 @@ pub(crate) fn discover_loops_with_deadlines(
         agg_recovery_truncated = stitch_truncated;
         let stitched = new_paths_by_rotation(&outcome.paths, stitched);
         node_paths = outcome.paths;
-        node_paths.extend(stitched);
+        // Each stitched loop is charged like a kept path (its node ids plus
+        // the series it will materialize); one that does not fit ends the
+        // additions, and the cross-aggregate recovery is reported incomplete.
+        for seq in stitched {
+            let bytes =
+                seq.len() * std::mem::size_of::<u32>() + materialized_loop_bytes(step_count);
+            if !meter.charge(bytes) {
+                agg_recovery_truncated = true;
+                break;
+            }
+            node_paths.push(seq);
+        }
     }
 
     let all_paths: Vec<Vec<Ident<Canonical>>> = node_paths

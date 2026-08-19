@@ -47,7 +47,7 @@ MARKERS = {
     "max |rel score| difference": "relative score agreement",
     "step-dominant coverage": "how often the dominant loop is reported",
     "AUDIT VERDICT": "the notebook's own machine-readable pass/fail predicate",
-    "NaN-availability mismatches": "engine and independent scores agree on where a score exists",
+    "finite/NaN/+Inf/-Inf class mismatches": "engine and independent scores agree on where a score exists and on the sign of any divergence",
 }
 
 
@@ -139,7 +139,7 @@ def verify(path: Path) -> bool:
             value_failures.append(line)
         if line.startswith("AUDIT VERDICT:") and "agg_recovery_truncated=False" not in line:
             value_failures.append(line)
-        m = re.match(r"NaN-availability mismatches between engine and independent scores: (\d+)", line)
+        m = re.match(r"finite/NaN/\+Inf/-Inf class mismatches between engine and independent scores: (\d+)", line)
         if m and int(m.group(1)) != 0:
             value_failures.append(line)
         if "cross-check" in line and "DISAGREE" in line:

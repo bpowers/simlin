@@ -1142,9 +1142,16 @@ else:
 raw_max = 0.0
 rel_max = 0.0
 raw_mismatched = []
-# Where one side is NaN and the other is not, the two disagree about score
-# AVAILABILITY, which a comparison over the jointly-finite steps alone would
-# silently skip; count those steps and fail the scores on any.
+# Every step is first compared by CLASS -- finite, NaN, +Inf, -Inf -- and a
+# step whose classes differ is a disagreement about score AVAILABILITY or
+# DIVERGENCE SIGN that the numeric tolerance below cannot see: a NaN on one
+# side skips the comparison, and +Inf against -Inf gives Inf/Inf = NaN, which
+# Python's max() would drop. Count those steps and fail the scores on any;
+# the numeric comparison then runs over the jointly-FINITE steps only.
+def nonfinite_class(x):
+    # 0 finite, 1 NaN, 2 +Inf, 3 -Inf
+    return np.where(np.isnan(x), 1, np.where(np.isposinf(x), 2, np.where(np.isneginf(x), 3, 0)))
+
 mask_mismatch_steps = 0
 compared_steps = 0
 for d in dump["discovered"]:
@@ -1157,8 +1164,8 @@ for d in dump["discovered"]:
 
     e_raw = np.array(decode_scores(d["scores"]), dtype=np.float64)
     p_raw = score[c]
-    mask_mismatch_steps += int((np.isnan(e_raw) != np.isnan(p_raw)).sum())
-    both = (~np.isnan(e_raw)) & (~np.isnan(p_raw))
+    mask_mismatch_steps += int((nonfinite_class(e_raw) != nonfinite_class(p_raw)).sum())
+    both = np.isfinite(e_raw) & np.isfinite(p_raw)
     compared_steps += int(both.sum())
     if both.any():
         denom = np.maximum(np.abs(e_raw[both]), 1e-300)
@@ -1173,15 +1180,15 @@ for d in dump["discovered"]:
             tot = group_totals(g)
             p_rel = np.where(tot == 0.0, 0.0, p_raw / np.where(tot == 0.0, 1.0, tot))
             e_rel = np.array(decode_scores(d["rel_scores"]), dtype=np.float64)
-            mask_mismatch_steps += int((np.isnan(e_rel) != np.isnan(p_rel)).sum())
-            both = (~np.isnan(e_rel)) & (~np.isnan(p_rel))
+            mask_mismatch_steps += int((nonfinite_class(e_rel) != nonfinite_class(p_rel)).sum())
+            both = np.isfinite(e_rel) & np.isfinite(p_rel)
             if both.any():
                 rel_max = max(rel_max, float(np.abs(e_rel[both] - p_rel[both]).max()))
 
 print(f"max relative difference in raw loop scores: {raw_max:.3e} "
       f"({len(raw_mismatched)} loops differ by more than 1e-9)")
 print(f"max |rel score| difference: {rel_max:.3e}")
-print(f"NaN-availability mismatches between engine and independent scores: "
+print(f"finite/NaN/+Inf/-Inf class mismatches between engine and independent scores: "
       f"{mask_mismatch_steps} steps (compared {compared_steps} jointly-finite steps)")
 if raw_mismatched:
     print("  loops whose reported score is NOT the raw product of their links "

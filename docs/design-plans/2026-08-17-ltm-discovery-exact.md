@@ -157,8 +157,9 @@ useful, the failure case that must NOT happen.
   performance work (pinned by a fixture-level test on a model with NaN and zero links,
   and by the World3 audit's survivor count).
 - **AC3.3** Enumeration memory is bounded by an explicit circuit-edge budget
-  (`MAX_DISCOVERY_ENUM_EDGE_ROWS`) rather than only a circuit count; a test with a tiny
-  override trips it and falls back.
+  (`MAX_DISCOVERY_ENUM_EDGE_ROWS`) rather than only a circuit count, and every
+  allocating phase charges ONE discovery-wide meter (`MAX_DISCOVERY_MEMORY_BYTES`);
+  tests with tiny overrides trip each and fall back.
 - **AC4.1** A circuit whose product overflows to Inf and then meets a 0 link (NaN
   product with no NaN link) contributes nothing to its partition's totals and cannot
   satisfy retention; the partition's other loops keep finite relative scores at that
@@ -343,16 +344,18 @@ sweeps in "Measured" below, not by the argument that motivated the starting poin
 - Candidate bound: `MAX_FALLBACK_PATHS` (20,000, checked at every dedup insert) caps
   how many distinct cycles one sweep may accumulate; a trip stops the sweep and reports
   `truncated`, the same signal a deadline expiry gives, since both mean the sweep did
-  not get to sample everything it would have. The bound is sized against
-  MATERIALIZATION memory, not the candidate list itself: every candidate the sweep
-  proposes is later materialized into a `FoundLoop` carrying a step-count-long series
-  before retention gets a chance to drop it, so the real cost is `candidates x steps x
-  16 B` -- `20,000 x 401 ~ 130 MB` on a World3-shaped model, with World3's own default
-  sweep proposing 2,150 candidates (~9x headroom under the bound).
-- Deadline sites: the clock is read at three bounded places -- once at the top of each
-  step, once before each seed's searches, and once per fixed pop interval inside a
-  search (so one seed whose component is most of the graph cannot overrun the budget on
-  its own). An unbudgeted sweep reads the clock nowhere.
+  not get to sample everything it would have. Memory is bounded separately, by the
+  discovery-wide meter (see "One memory bound" below): every kept path is charged at
+  its node ids plus the step-count-long series its `FoundLoop` will carry, because
+  every candidate the sweep proposes is materialized before retention gets a chance to
+  drop it -- `20,000 x 401 x 24 B ~ 190 MB` on a World3-shaped model, with World3's
+  own default sweep proposing 2,150 candidates.
+- Deadline sites: the clock is read at four bounded places -- once at the top of each
+  step, inside the step-graph rebuild whenever the adjacency entries scanned since the
+  last read span the check interval (so one very large rebuild is cut short mid-pass),
+  once before each seed's searches, and once per fixed pop interval inside a search (so
+  one seed whose component is most of the graph cannot overrun the budget on its own).
+  An unbudgeted sweep reads the clock nowhere.
 - What the sweep drops is CHARACTERIZABLE, not an artifact of sampling density: a cycle
   is reachable iff at some step, for some seed on it and some edge on it, it is the
   MINIMUM-WEIGHT cycle through both -- so the recall ceiling is an optimality
@@ -372,6 +375,25 @@ may spend at most `ENUM_BUDGET_FRACTION * B` (0.5); if they have not completed b
 the fallback runs with the remainder. Every phase reads the clock at bounded intervals
 (`ActivityGraph::build` per edge batch, the enumerator per visit batch, retention per
 circuit batch, the fallback per Dijkstra). An unbudgeted call never reads the clock.
+
+### One memory bound
+
+Discovery's allocations are charged to a single `MemoryMeter` capped at
+`MAX_DISCOVERY_MEMORY_BYTES` (768 MB). A phase asks before it allocates and yields when
+refused: the union graph's score rows and bitsets (scratch row included, so one
+oversized row is refused rather than allocated), each enumerated and stitched circuit's
+edge rows, the retention survivors' future `FoundLoop` series (charged before
+materialization -- an enumeration whose report would not fit yields to the fallback and
+reports `enumeration_complete == false`), the module-override cache's series and shared
+pathway-offset slices, and every fallback kept path and stitched loop. When the
+enumeration yields, its graph and candidate charge is released so the fallback is
+measured against the whole bound.
+
+Per-phase budgets were the design this replaced -- an activity-graph byte cap, a
+fallback materialization cap, a path-node cap, an override-cache cap -- and the review
+history is the argument against them: each bounded its own allocation in isolation, the
+phases' sum was unbounded, and every round found another allocation outside all of
+them. One meter makes a new allocating phase either charge or stand out in review.
 
 ### Ranking (`rank_and_filter`)
 
