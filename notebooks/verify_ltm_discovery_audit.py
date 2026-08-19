@@ -127,8 +127,8 @@ def verify(path: Path) -> bool:
         m = re.match(r"engine loops absent from the independent universe: (\d+)", line)
         if m and int(m.group(1)) != 0:
             value_failures.append(line)
-        m = re.match(r"reported-200 overlap: (\d+)/(\d+)", line)
-        if m and m.group(1) != m.group(2):
+        m = re.match(r"reported-200 overlap: (\d+)/(\d+).*sets equal: (True|False)", line)
+        if m and (m.group(1) != m.group(2) or m.group(3) != "True"):
             value_failures.append(line)
         for key in ("max relative difference in raw loop scores",
                     "max |rel score| difference"):

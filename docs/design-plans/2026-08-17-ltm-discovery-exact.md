@@ -382,12 +382,20 @@ Discovery's allocations are charged to a single `MemoryMeter` capped at
 `MAX_DISCOVERY_MEMORY_BYTES` (768 MB). A phase asks before it allocates and yields when
 refused: the union graph's score rows and bitsets (scratch row included, so one
 oversized row is refused rather than allocated), each enumerated and stitched circuit's
-edge rows, the retention survivors' future `FoundLoop` series (charged before
-materialization -- an enumeration whose report would not fit yields to the fallback and
-reports `enumeration_complete == false`), the module-override cache's series and shared
-pathway-offset slices, and every fallback kept path and stitched loop. When the
-enumeration yields, its graph and candidate charge is released so the fallback is
-measured against the whole bound.
+edge rows, the retention survivors' future `FoundLoop`s (charged before materialization
+-- an enumeration whose report would not fit yields to the fallback and reports
+`enumeration_complete == false`), the module-override cache's series and shared
+pathway-offset slices (charged before they are handed out; a refusal ends candidate
+generation rather than returning an uncharged list), and every fallback kept path and
+stitched loop. A future `FoundLoop` is charged at what the candidate BECOMES -- the two
+step-count-long series plus, per node, the `Ident` path and the `Link` it materializes
+into -- not at its compact `u32` node ids alone. When the enumeration yields, its graph
+and candidate charge is released so the fallback is measured against the whole bound.
+
+The module-pathway attach pass that precedes both generators runs under the caller's
+whole deadline (not the enumeration's share), because a partially attached graph reads
+some module-input edges as inactive and neither generator may search one; if the pass
+itself cannot finish, discovery reports an empty, truncated sample.
 
 Per-phase budgets were the design this replaced -- an activity-graph byte cap, a
 fallback materialization cap, a path-node cap, an override-cache cap -- and the review

@@ -1716,19 +1716,19 @@ fn a_tiny_candidate_budget_trips_and_keeps_only_what_fit() {
 }
 
 /// The count cap is a volume bound only; memory is bounded by the discovery
-/// meter, which a kept path charges at its node ids plus the series its
-/// `FoundLoop` will materialize. A meter too small for one such path refuses
-/// the first insert and the dedup reports itself full.
+/// meter, which a kept path charges at its node ids plus what its `FoundLoop`
+/// will materialize (series and per-node structure). A meter too small for one
+/// such path refuses the first insert and the dedup reports itself full.
 #[test]
 fn a_kept_path_is_charged_to_the_memory_meter_with_its_future_series() {
     let step_count = 401;
-    let series = super::super::materialized_loop_bytes(step_count);
+    let future = super::super::materialized_loop_bytes(step_count, 2);
     let mut paths: Vec<Vec<u32>> = Vec::new();
-    let _guard = super::super::MemoryBudgetGuard::new(series + 2 * 4);
+    let _guard = super::super::MemoryBudgetGuard::new(future + 2 * 4);
     let meter = MemoryMeter::new();
-    let mut dedup = CycleDedup::new(usize::MAX, series, &meter);
+    let mut dedup = CycleDedup::new(usize::MAX, step_count, &meter);
     assert!(dedup.insert_if_new(&[0, 1], &mut paths), "exactly fits");
-    assert_eq!(meter.used(), series + 8);
+    assert_eq!(meter.used(), future + 8);
     assert!(!dedup.is_full(&paths));
     // A rotation of an already-kept cycle is identity, not storage: it is
     // refused as a duplicate without spending the budget or marking full.

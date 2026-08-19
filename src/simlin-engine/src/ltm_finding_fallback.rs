@@ -1260,10 +1260,11 @@ struct CycleDedup<'a> {
     /// fingerprint -> the indices into `paths` of the cycles carrying it.
     buckets: HashMap<u64, Vec<u32>>,
     cap: usize,
-    /// Bytes one kept path will cost once materialized (its `FoundLoop`
-    /// series), charged together with its node ids to `meter` at insert time
-    /// so the bound sees the sample's full footprint.
-    series_bytes: usize,
+    /// Saved-step count of the run, so a kept path's future `FoundLoop`
+    /// (series plus per-node structure, `materialized_loop_bytes`) is charged
+    /// together with its node ids to `meter` at insert time and the bound sees
+    /// the sample's full footprint.
+    step_count: usize,
     /// The discovery memory meter every kept path is charged to.
     meter: &'a MemoryMeter,
     /// Set once the count cap or the memory meter refused an insert; the
@@ -1272,11 +1273,11 @@ struct CycleDedup<'a> {
 }
 
 impl<'a> CycleDedup<'a> {
-    fn new(cap: usize, series_bytes: usize, meter: &'a MemoryMeter) -> Self {
+    fn new(cap: usize, step_count: usize, meter: &'a MemoryMeter) -> Self {
         CycleDedup {
             buckets: HashMap::new(),
             cap,
-            series_bytes,
+            step_count,
             meter,
             full: false,
         }
@@ -1300,10 +1301,10 @@ impl<'a> CycleDedup<'a> {
         {
             return false;
         }
-        if !self
-            .meter
-            .charge(std::mem::size_of_val(cycle) + self.series_bytes)
-        {
+        if !self.meter.charge(
+            std::mem::size_of_val(cycle)
+                + super::materialized_loop_bytes(self.step_count, cycle.len()),
+        ) {
             self.full = true;
             return false;
         }
@@ -1421,11 +1422,7 @@ pub(super) fn sweep(
     // `IndexedSearch` the id <-> name map is a bijection, so these are the same
     // equivalence classes a name-keyed dedup would give, without allocating a
     // name vector per cycle.
-    let mut dedup = CycleDedup::new(
-        cap,
-        super::materialized_loop_bytes(results.step_count),
-        meter,
-    );
+    let mut dedup = CycleDedup::new(cap, results.step_count, meter);
     let mut paths: Vec<Vec<u32>> = Vec::new();
     let mut closings: Vec<(f64, u32, u32)> = Vec::new();
     let mut cycle_buf: Vec<u32> = Vec::new();

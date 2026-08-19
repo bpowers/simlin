@@ -3234,6 +3234,23 @@ fn a_module_loop_is_recovered_and_scored_alike_by_both_generators() {
     );
 }
 
+/// A module-input edge's pathway slot list is charged to the discovery meter
+/// BEFORE it is handed out; a refused charge ends the attach pass and, because
+/// a partially attached graph would read that edge as inactive where it is not,
+/// discovery runs neither generator: an empty, truncated report rather than a
+/// sample over a graph it could not finish building -- and nothing uncharged
+/// is retained on any edge.
+#[test]
+fn a_refused_pathway_slot_list_abandons_candidate_generation() {
+    let _guard = MemoryBudgetGuard::new(0);
+    let (found, _) = discover_multi_output_module_feedback(CandidateGen::Auto);
+    assert!(found.truncated);
+    assert!(!found.enumeration_complete);
+    assert!(found.loops.is_empty());
+    assert_eq!(found.fallback_candidates, None, "no sweep ran");
+    assert_eq!(found.universe_loops, None);
+}
+
 /// A stock whose growth runs through a sub-model with TWO output ports of
 /// different magnitudes: `pos` shares its change with a second input, so the
 /// `input_val -> pos` pathway carries less than the whole change, while

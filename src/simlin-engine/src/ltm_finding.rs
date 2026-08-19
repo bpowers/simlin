@@ -290,12 +290,21 @@ impl MemoryMeter {
     }
 }
 
-/// Bytes one materialized `FoundLoop` costs for a run of `step_count` saved
-/// steps: its `(time, score)` series plus its relative-score series. Charged
-/// before materialization on both paths so the report's own storage is inside
-/// the discovery memory bound, not only the candidates'.
-pub(super) fn materialized_loop_bytes(step_count: usize) -> usize {
-    step_count * (std::mem::size_of::<(f64, f64)>() + std::mem::size_of::<f64>())
+/// Bytes one materialized `FoundLoop` over `node_count` nodes costs for a run
+/// of `step_count` saved steps: its `(time, score)` series plus its
+/// relative-score series, and per node the structural representations a
+/// candidate path becomes on the way to the report -- the `Ident` path
+/// materialization builds and the `Link` (two `Ident`s and a polarity) the
+/// loop retains per edge. `Ident` is an interned `Arc`, so a clone is one
+/// pointer, not a string copy; the per-node term is still what makes a sample
+/// of many long cycles cost what it costs. Charged before materialization on
+/// both paths so the report's own storage is inside the discovery memory
+/// bound, not only the candidates'.
+pub(super) fn materialized_loop_bytes(step_count: usize, node_count: usize) -> usize {
+    let series = step_count * (std::mem::size_of::<(f64, f64)>() + std::mem::size_of::<f64>());
+    let structure = node_count
+        * (std::mem::size_of::<Ident<Canonical>>() + std::mem::size_of::<crate::ltm::Link>());
+    std::mem::size_of::<FoundLoop>() + series + structure
 }
 
 /// Prefix for link score synthetic variables
@@ -574,13 +583,14 @@ pub fn link_activity_series(
         results.step_count,
         &meter,
     );
-    // Unbudgeted: the attach pass reads no clock and cannot decline.
+    // Unbudgeted: the attach pass reads no clock, and a fresh meter at the
+    // full bound does not refuse a slot list.
     let attached = search.attach_module_pathways(
         &mut |from, to| cache.pathway_offsets(from, to),
         None,
         &mut SystemClock,
     );
-    debug_assert!(attached);
+    debug_assert_eq!(attached, AttachOutcome::Complete);
     // `IndexedSearch::build` keeps each node's edges in `link_offsets` order
     // and interns nodes in first-seen order, so walking the offsets and
     // looking each edge up by (from, to) reproduces the input order exactly.
@@ -1533,7 +1543,21 @@ struct IndexedSearch {
 /// Resolves the per-pathway result slots behind a `(from, to)` edge -- empty
 /// unless `to` is a module instance with a unique entry port fed by `from`
 /// (see [`ModuleOverrideCache::pathway_offsets`]).
-type ModulePathwayFn<'a> = dyn FnMut(&Ident<Canonical>, &Ident<Canonical>) -> Rc<[usize]> + 'a;
+type ModulePathwayFn<'a> =
+    dyn FnMut(&Ident<Canonical>, &Ident<Canonical>) -> Option<Rc<[usize]>> + 'a;
+
+/// How [`IndexedSearch::attach_module_pathways`] ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttachOutcome {
+    /// Every edge carries its pathway slots.
+    Complete,
+    /// The deadline expired part way; only a prefix of the edges is attached
+    /// and the graph must not be searched.
+    DeadlineExpired,
+    /// The memory meter refused a pathway slot list; the graph cannot be
+    /// completed within the discovery bound and must not be searched.
+    MemoryRefused,
+}
 
 struct IndexedEdge {
     to: u32,
@@ -1758,27 +1782,33 @@ impl IndexedSearch {
     ///
     /// Each resolution can run the module's bounded-but-large internal pathway
     /// DFS, so the pass reads `deadline` every `DEADLINE_CHECK_INTERVAL` edges
-    /// and returns `false` when it has expired (an unbudgeted call never reads
-    /// the clock); the caller then skips candidate generation entirely.
+    /// and stops when it has expired (an unbudgeted call never reads the
+    /// clock). `pathways` returning `None` means the memory meter refused the
+    /// slot list; the pass stops there too. Either way a partially attached
+    /// graph would read some module-input edges as inactive where they are
+    /// not, so the caller must skip BOTH candidate generators on anything but
+    /// [`AttachOutcome::Complete`].
     fn attach_module_pathways(
         &mut self,
         pathways: &mut ModulePathwayFn<'_>,
         deadline: Option<Instant>,
         clock: &mut dyn Clock,
-    ) -> bool {
+    ) -> AttachOutcome {
         let mut scanned: u32 = 0;
         for from in 0..self.adj.len() {
             for k in 0..self.adj[from].len() {
                 scanned = scanned.wrapping_add(1);
                 if scanned & (DEADLINE_CHECK_INTERVAL - 1) == 0 && expired(deadline, clock) {
-                    return false;
+                    return AttachOutcome::DeadlineExpired;
                 }
                 let to = self.adj[from][k].to;
-                let extra = pathways(&self.idents[from], &self.idents[to as usize]);
+                let Some(extra) = pathways(&self.idents[from], &self.idents[to as usize]) else {
+                    return AttachOutcome::MemoryRefused;
+                };
                 self.adj[from][k].extra_offsets = extra;
             }
         }
-        true
+        AttachOutcome::Complete
     }
 }
 
@@ -2421,7 +2451,7 @@ impl<'a> ModuleOverrideCache<'a> {
         &mut self,
         from: &Ident<Canonical>,
         module: &Ident<Canonical>,
-    ) -> Rc<[usize]> {
+    ) -> Option<Rc<[usize]>> {
         use crate::ltm::{normalize_module_ref, strip_subscript};
         use crate::variable::Variable;
 
@@ -2430,7 +2460,7 @@ impl<'a> ModuleOverrideCache<'a> {
             Ident::<Canonical>::new(strip_subscript(module.as_str())),
         );
         if let Some(cached) = self.pathway_cache.get(&key) {
-            return Rc::clone(cached);
+            return Some(Rc::clone(cached));
         }
         let resolve = || -> Option<Vec<usize>> {
             let module_graph = self.causal_graph.module_graph(&key.1)?;
@@ -2475,15 +2505,18 @@ impl<'a> ModuleOverrideCache<'a> {
         let offsets: Rc<[usize]> = Rc::from(resolve().unwrap_or_default());
         // One shared slot list per key: every array-expanded edge of the same
         // (source, module) pair points at it, so the slots cost their size
-        // once rather than once per element edge. Charged to the meter; a
-        // refusal returns an uncached (but still correct) list.
-        if self
+        // once rather than once per element edge. Charged to the meter BEFORE
+        // it is handed out: a refusal returns `None` rather than an uncharged
+        // list the caller would retain (and every later edge of the same key
+        // would recompute and retain again, outside the bound).
+        if !self
             .meter
-            .charge(offsets.len() * std::mem::size_of::<usize>())
+            .charge(std::mem::size_of_val::<[usize]>(&offsets))
         {
-            self.pathway_cache.insert(key, Rc::clone(&offsets));
+            return None;
         }
-        offsets
+        self.pathway_cache.insert(key, Rc::clone(&offsets));
+        Some(offsets)
     }
 
     /// The override series for the edge `from -> module` whose next hop reads
@@ -2899,15 +2932,24 @@ pub(crate) fn discover_loops_with_deadlines(
     // max-abs fold lets a NaN pathway shadow a finite one, and a cycle whose
     // per-exit-port override is finite there must not be dropped as inactive
     // before retention ever scores it (that shadow was this pipeline's one
-    // stated blind spot; `IndexedEdge::value_at` closes it). The pass is
-    // charged to the ENUMERATION deadline (it precedes both generators); if
-    // that deadline has already gone, the fallback's own deadline decides
-    // whether anything still runs.
-    let pathways_attached = search.attach_module_pathways(
+    // stated blind spot; `IndexedEdge::value_at` closes it). The pass is a
+    // prerequisite of BOTH generators, so it runs under the caller's whole
+    // deadline (`deadlines.fallback`) rather than the enumeration's share: a
+    // partially attached graph reads some module-input edges as inactive
+    // where they are not, so neither generator may search one, and stopping
+    // the pass at the enumeration's share would deny the fallback a graph it
+    // still had time to search. If the pass itself exhausts the deadline (or
+    // the memory meter refuses a slot list) there is no graph to search and
+    // discovery reports an empty, truncated sample.
+    let attach = search.attach_module_pathways(
         &mut |from, to| module_override_cache.pathway_offsets(from, to),
-        deadlines.enumeration,
+        deadlines.fallback,
         clock,
     );
+    let pathways_attached = attach == AttachOutcome::Complete;
+    if !pathways_attached {
+        truncated = true;
+    }
 
     // --- Primary candidate generation: union-graph circuit enumeration ---
     // (docs/design-plans/2026-08-17-ltm-discovery-exact.md).
@@ -3055,7 +3097,11 @@ pub(crate) fn discover_loops_with_deadlines(
                 // discovery memory bound is an enumeration this bound cannot
                 // carry to a report, so it yields to the (bounded) fallback and
                 // says so through `enumeration_complete`.
-                if meter.charge(survivors.len() * materialized_loop_bytes(step_count)) {
+                let report_bytes: usize = survivors
+                    .iter()
+                    .map(|nodes| materialized_loop_bytes(step_count, nodes.len()))
+                    .sum();
+                if meter.charge(report_bytes) {
                     retained_beyond_materialization = retention.solo_survivors_beyond_cap;
                     node_paths = survivors;
                     universe = Some(UniverseStats {
@@ -3081,7 +3127,7 @@ pub(crate) fn discover_loops_with_deadlines(
         // order and its per-partition totals are not the universe's.
     }
 
-    if !enumeration_complete {
+    if !enumeration_complete && pathways_attached {
         // --- Fallback candidate generation: per (seed, step) shortest cycles
         // (`ltm_finding_fallback.rs`). `CandidateGen::Auto` uses the default
         // configuration; `FallbackOnly` names its own.
@@ -3115,8 +3161,8 @@ pub(crate) fn discover_loops_with_deadlines(
         // the series it will materialize); one that does not fit ends the
         // additions, and the cross-aggregate recovery is reported incomplete.
         for seq in stitched {
-            let bytes =
-                seq.len() * std::mem::size_of::<u32>() + materialized_loop_bytes(step_count);
+            let bytes = std::mem::size_of_val::<[u32]>(&seq)
+                + materialized_loop_bytes(step_count, seq.len());
             if !meter.charge(bytes) {
                 agg_recovery_truncated = true;
                 break;

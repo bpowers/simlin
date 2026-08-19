@@ -2081,7 +2081,12 @@ fn enumeration_path_charges(results: &Results, ctx: &EnumTestCtx) -> (usize, usi
         super::enum_gen::enumerate_active_circuits(&activity, None, &mut SystemClock, &meter);
     assert!(candidates.complete);
     let circuits = meter.used() - graph;
-    let survivors = candidates.len() * super::materialized_loop_bytes(results.step_count);
+    let survivors = (0..candidates.len())
+        .map(|ci| {
+            let nodes = activity.circuit_nodes(candidates.circuit(ci));
+            super::materialized_loop_bytes(results.step_count, nodes.len())
+        })
+        .sum();
     (graph, circuits, survivors)
 }
 
@@ -2142,10 +2147,10 @@ fn an_abandoned_enumeration_releases_its_charge_to_the_fallback() {
     ]);
     let (results, ctx) = ltm_simulate(&project);
     let (graph, circuits, survivors) = enumeration_path_charges(&results, &ctx);
-    // What the fallback charges per kept path: its node ids plus the series
-    // it will materialize; the fixture's two loops are 2 nodes each.
+    // What the fallback charges per kept path: its node ids plus what it will
+    // materialize; the fixture's two loops are 2 nodes each.
     let per_path =
-        2 * std::mem::size_of::<u32>() + super::materialized_loop_bytes(results.step_count);
+        2 * std::mem::size_of::<u32>() + super::materialized_loop_bytes(results.step_count, 2);
     let fallback_needs = 2 * per_path;
     let bound = graph + circuits + survivors - 1;
     assert!(
@@ -2191,6 +2196,204 @@ fn a_memory_bound_too_small_for_one_kept_path_truncates_the_fallback() {
     assert!(auto.truncated, "the fallback could keep no path");
     assert!(auto.loops.is_empty());
     assert_eq!(auto.fallback_candidates, Some(0));
+}
+
+// --- Module-pathway attachment ----------------------------------------------
+
+/// A hub fanning out to `n_targets` nodes with one closing edge `n0 -> hub`,
+/// as the RESULTS discovery parses (link-score-named offsets) plus the matching
+/// causal graph -- so the pipeline can be driven end to end over a graph wide
+/// enough that the attach pass reaches its in-pass clock read
+/// (`DEADLINE_CHECK_INTERVAL` edges). Every edge is active at every saved step
+/// after step 0; the one cycle is `hub -> n0 -> hub`.
+fn hub_fan_out_discovery_inputs(
+    n_targets: usize,
+    step_count: usize,
+) -> (Results, CausalGraph, Vec<Ident<Canonical>>) {
+    use crate::db::CausalEdgesResult;
+    let mut names: Vec<(String, String)> = (0..n_targets)
+        .map(|i| ("hub".to_string(), format!("n{i}")))
+        .collect();
+    names.push(("n0".to_string(), "hub".to_string()));
+    let n_offsets = names.len();
+    let mut data = vec![0.0f64; n_offsets * step_count];
+    for slot in data.iter_mut().skip(n_offsets) {
+        *slot = 1.0;
+    }
+    let mut results = enum_results(n_offsets, step_count, data);
+    let mut edges: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
+    for (i, (from, to)) in names.iter().enumerate() {
+        let name = format!("$\u{205A}ltm\u{205A}link_score\u{205A}{from}\u{2192}{to}");
+        results.offsets.insert(Ident::new(&name), i);
+        edges.entry(from.clone()).or_default().insert(to.clone());
+    }
+    let causal = crate::db::causal_graph_from_edges(&CausalEdgesResult {
+        edges,
+        stocks: ["hub".to_string()].into_iter().collect(),
+        dynamic_modules: HashMap::new(),
+    });
+    (results, causal, stock_list(&["hub"]))
+}
+
+/// `attach_module_pathways` stops the moment the pathway resolver declines
+/// (the memory meter refused a slot list) and reports `MemoryRefused`: no
+/// later edge is visited, so nothing past the refusal is retained either.
+#[test]
+fn attach_module_pathways_stops_at_a_refused_slot_list() {
+    let (mut search, _results) = two_triangles_search_and_results();
+    let mut asked = 0usize;
+    let outcome = search.attach_module_pathways(
+        &mut |_from, _to| {
+            asked += 1;
+            if asked == 3 {
+                None
+            } else {
+                Some(Rc::from(vec![asked]))
+            }
+        },
+        None,
+        &mut SystemClock,
+    );
+    assert_eq!(outcome, super::AttachOutcome::MemoryRefused);
+    assert_eq!(
+        asked, 3,
+        "the pass stops at the refusal, asking nothing further"
+    );
+    let attached: usize = search
+        .adj
+        .iter()
+        .flatten()
+        .filter(|e| !e.extra_offsets.is_empty())
+        .count();
+    assert_eq!(attached, 2, "only the edges before the refusal carry slots");
+}
+
+/// The attach pass reads the clock every `DEADLINE_CHECK_INTERVAL` edges and
+/// reports `DeadlineExpired` when it has gone -- and never reads it when
+/// unbudgeted or below one interval of edges.
+#[test]
+fn attach_module_pathways_checks_the_deadline_at_the_shared_interval() {
+    let interval = DEADLINE_CHECK_INTERVAL as usize;
+    let (results, _causal, stocks) = hub_fan_out_discovery_inputs(interval, 2);
+    let offsets = super::link_score_offsets(&results, &[], &[], &LinkExpansionContext::default());
+    let mut search = IndexedSearch::build(&offsets, &stocks);
+    let empty = |_: &Ident<Canonical>, _: &Ident<Canonical>| Some(Rc::from(Vec::new()));
+
+    let mut clock = ScriptedClock::new(1);
+    assert_eq!(
+        search.attach_module_pathways(&mut { empty }, None, &mut clock),
+        super::AttachOutcome::Complete
+    );
+    assert_eq!(clock.reads, 0, "unbudgeted: no clock read");
+
+    let mut clock = ScriptedClock::new(1);
+    let deadline = clock.deadline();
+    assert_eq!(
+        search.attach_module_pathways(&mut { empty }, Some(deadline), &mut clock),
+        super::AttachOutcome::DeadlineExpired
+    );
+    assert_eq!(clock.reads, 1, "one in-pass read saw the expired deadline");
+
+    let mut clock = ScriptedClock::new(usize::MAX);
+    let deadline = clock.deadline();
+    assert_eq!(
+        search.attach_module_pathways(&mut { empty }, Some(deadline), &mut clock),
+        super::AttachOutcome::Complete
+    );
+    assert_eq!(clock.reads, 1, "a live deadline is read once per interval");
+
+    // Below one interval of edges a budgeted pass reads nothing.
+    let (mut small, _) = two_triangles_search_and_results();
+    let mut clock = ScriptedClock::new(1);
+    let deadline = clock.deadline();
+    assert_eq!(
+        small.attach_module_pathways(&mut { empty }, Some(deadline), &mut clock),
+        super::AttachOutcome::Complete
+    );
+    assert_eq!(clock.reads, 0);
+}
+
+/// The attach pass is a prerequisite of BOTH generators, so it runs under the
+/// caller's whole deadline, not the enumeration's share: with the enumeration
+/// share already spent and the caller's deadline live, the pass completes (one
+/// live in-pass read), the enumeration is then abandoned at its first check,
+/// and the fallback searches a FULLY attached graph and finds the loop. The
+/// read count is what pins which deadline the pass consulted: a pass under the
+/// enumeration share would have seen expiry at its one read and skipped the
+/// activity build's read entirely.
+#[test]
+fn the_attach_pass_runs_under_the_callers_deadline_not_the_enumerations_share() {
+    let (results, causal, stocks) =
+        hub_fan_out_discovery_inputs(DEADLINE_CHECK_INTERVAL as usize, 3);
+    let mut clock = ScriptedClock::new(usize::MAX);
+    let live = clock.deadline();
+    let spent = live - Duration::from_secs(3600);
+    let found = discover_loops_with_deadlines(
+        &results,
+        &causal,
+        &stocks,
+        &[],
+        &[],
+        &LinkExpansionContext::default(),
+        &SubModelOutputPorts::new(),
+        Deadlines {
+            enumeration: Some(spent),
+            fallback: Some(live),
+        },
+        CandidateGen::Auto,
+        &mut clock,
+    )
+    .unwrap();
+    assert!(
+        !found.enumeration_complete,
+        "the enumeration share was spent"
+    );
+    assert!(!found.truncated, "the fallback had the caller's deadline");
+    assert_eq!(found.loops.len(), 1, "hub -> n0 -> hub");
+    assert_eq!(found.fallback_candidates, Some(1));
+    // Read schedule: 1 = the attach pass's in-pass read (live, against the
+    // caller's deadline); 2 = the activity build's first check (expired,
+    // against the enumeration share); then the fallback's own bounded reads.
+    assert!(
+        clock.reads >= 3,
+        "attach read + build read + at least one fallback read; got {}",
+        clock.reads
+    );
+}
+
+/// When the attach pass itself exhausts the caller's deadline there is no
+/// fully attached graph to search: discovery reports an empty, TRUNCATED
+/// sample with no enumeration and no fallback sweep at all (a partially
+/// attached graph reads some module-input edges as inactive where they are
+/// not, so neither generator may search one).
+#[test]
+fn an_attach_pass_that_exhausts_the_deadline_yields_an_empty_truncated_report() {
+    let (results, causal, stocks) =
+        hub_fan_out_discovery_inputs(DEADLINE_CHECK_INTERVAL as usize, 3);
+    let mut clock = ScriptedClock::new(1);
+    let live = clock.deadline();
+    let found = discover_loops_with_deadlines(
+        &results,
+        &causal,
+        &stocks,
+        &[],
+        &[],
+        &LinkExpansionContext::default(),
+        &SubModelOutputPorts::new(),
+        Deadlines {
+            enumeration: Some(live),
+            fallback: Some(live),
+        },
+        CandidateGen::Auto,
+        &mut clock,
+    )
+    .unwrap();
+    assert_eq!(clock.reads, 1, "the attach pass's one read decided it");
+    assert!(found.truncated);
+    assert!(!found.enumeration_complete);
+    assert!(found.loops.is_empty());
+    assert_eq!(found.fallback_candidates, None, "no sweep ran");
+    assert_eq!(found.universe_loops, None);
 }
 
 /// The union graph's own storage (one score row plus one activity bitset per
@@ -2907,15 +3110,15 @@ fn a_module_input_edge_is_active_where_a_pathway_is_finite_under_a_nan_composite
     let attached = search.attach_module_pathways(
         &mut |from, to| {
             if *from == a && *to == b {
-                Rc::from(vec![2usize])
+                Some(Rc::from(vec![2usize]))
             } else {
-                Rc::from(Vec::new())
+                Some(Rc::from(Vec::new()))
             }
         },
         None,
         &mut SystemClock,
     );
-    assert!(attached);
+    assert_eq!(attached, super::AttachOutcome::Complete);
     let activity = super::enum_gen::ActivityGraph::build(
         &search,
         &results,

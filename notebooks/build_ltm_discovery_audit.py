@@ -1116,7 +1116,7 @@ print(f"engine loops absent from the independent universe: {len(not_in_universe)
 overlap = len(engine_set & py_top_set)
 print(f"reported-200 overlap: {overlap}/{len(engine_set)} of the engine's reported "
       f"loops are in the independent top-{MAX_LOOPS} "
-      f"(independent list holds {len(py_top_set)})")
+      f"(independent list holds {len(py_top_set)}; sets equal: {engine_set == py_top_set})")
 
 rank_of = {r["key"]: i for i, r in enumerate(ranked)}
 stat_of = {r["key"]: r for r in ranked}
@@ -1330,7 +1330,13 @@ verdict_rows = [
 for label, value in verdict_rows:
     print(f"{label}: {value}")
 
-exact_set = (len(not_in_universe) == 0 and overlap == len(engine_set))
+# SET EQUALITY, not containment: an engine that reported a strict subset of the
+# independent selection (one loop dropped, or a duplicate in its place -- the
+# duplicate is asserted away above) would still have every reported loop
+# inside the independent top-N, and the pre-cap `retained_loops` count cannot
+# see a post-cap omission.
+exact_set = (len(not_in_universe) == 0 and engine_set == py_top_set
+             and len(engine_keys) == len(engine_set))
 scores_exact = (raw_max <= 1e-9 and rel_max <= 1e-9
                 and mask_mismatch_steps == 0 and compared_steps > 0)
 # The two counts that expose an omission the set comparisons cannot: an
