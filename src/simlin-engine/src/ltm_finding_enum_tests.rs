@@ -2750,3 +2750,22 @@ fn the_mean_abs_statistic_does_not_overflow_where_the_sum_would() {
     let mean = super::enum_gen::mean_abs_over_valid(&series, &nan_mask);
     assert_eq!(mean, 1e308);
 }
+
+/// An infinite observation makes the mean |score| infinite rather than NaN:
+/// folding `Inf` into the running update would produce `Inf - Inf`, and a NaN
+/// on both sides of a comparison would hand a twin's representative or a Solo
+/// loop's rank to circuit order instead of to the divergent loop.
+#[test]
+fn the_mean_abs_statistic_stays_infinite_when_an_observation_is_infinite() {
+    let series = [1.0f64, f64::INFINITY, 2.0];
+    let nan_mask = [false, false, false];
+    assert_eq!(
+        super::enum_gen::mean_abs_over_valid(&series, &nan_mask),
+        f64::INFINITY
+    );
+    let series2 = [f64::INFINITY, f64::INFINITY];
+    assert_eq!(
+        super::enum_gen::mean_abs_over_valid(&series2, &[false, false]),
+        f64::INFINITY
+    );
+}

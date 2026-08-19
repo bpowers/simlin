@@ -83,6 +83,13 @@ type LinkOffsetMap = HashMap<(Ident<Canonical>, Ident<Canonical>), usize>;
 /// alongside it; see `active_window_of`) so retention can bound a
 /// module-traversing circuit's scoring range by it instead of the full
 /// saved-step range.
+/// Aggregate byte budget for the module-override series a [`ModuleOverrideCache`]
+/// retains (one `step_count`-long `Vec<f64>` per distinct `(source, module,
+/// exit reader)`); past it a lookup still computes and returns its series but
+/// does not retain it, so a module-dense, many-step model trades memoization
+/// for recomputation instead of growing without bound.
+const MAX_MODULE_OVERRIDE_CACHE_BYTES: usize = 256 * 1024 * 1024;
+
 type ModuleSeriesCache =
     HashMap<(Ident<Canonical>, Ident<Canonical>, Ident<Canonical>), ModuleOverrideEntry>;
 
@@ -2244,6 +2251,9 @@ pub(crate) struct ModuleOverrideCache<'a> {
     /// `(from, module)` -> every pathway slot behind that module-input edge,
     /// regardless of exit port (see [`Self::pathway_offsets`]).
     pathway_cache: HashMap<(Ident<Canonical>, Ident<Canonical>), Vec<usize>>,
+    /// Bytes of series the cache currently retains, against
+    /// [`MAX_MODULE_OVERRIDE_CACHE_BYTES`].
+    retained_bytes: usize,
 }
 
 impl<'a> ModuleOverrideCache<'a> {
@@ -2260,6 +2270,7 @@ impl<'a> ModuleOverrideCache<'a> {
             step_count,
             cache: HashMap::new(),
             pathway_cache: HashMap::new(),
+            retained_bytes: 0,
         }
     }
 
@@ -2377,6 +2388,15 @@ impl<'a> ModuleOverrideCache<'a> {
             let window = active_window_of(&s);
             (Rc::new(s), window)
         });
+        let bytes = series
+            .as_ref()
+            .map_or(0, |(s, _)| s.len() * std::mem::size_of::<f64>());
+        if self.retained_bytes + bytes > MAX_MODULE_OVERRIDE_CACHE_BYTES {
+            // Over budget: answer without retaining. The next lookup of this
+            // key recomputes -- bounded work in exchange for bounded memory.
+            return series;
+        }
+        self.retained_bytes += bytes;
         self.cache.entry(key).or_insert(series).clone()
     }
 }
@@ -2834,8 +2854,19 @@ pub(crate) fn discover_loops_with_deadlines(
             for seq in &stitched {
                 candidates.push_node_path(seq, &activity);
             }
+            // Petal collection and stitching are bounded by the enumeration's
+            // own budgets (the scan is one pass over the emitted rows, the
+            // stitch by `cross_agg_loop_budget`), but a reducer-heavy universe
+            // can still spend real time here before retention's first check;
+            // read the clock once so an expired enumeration deadline yields to
+            // the fallback with its share intact rather than after this work.
+            let stitching_expired =
+                !petal_circuits.is_empty() && expired(deadlines.enumeration, clock);
 
-            if let Some(retention) = retain_circuits(
+            if stitching_expired {
+                // Fall through to the fallback exactly as an incomplete
+                // enumeration does.
+            } else if let Some(retention) = retain_circuits(
                 &candidates,
                 &activity,
                 &stock_partition_of_node,
@@ -3023,6 +3054,7 @@ pub(crate) fn discover_loops_with_deadlines(
         // products cannot overflow where their mean is representable.
         let mut abs_mean = 0.0f64;
         let mut valid_count = 0usize;
+        let mut abs_any_inf = false;
 
         for step in 0..step_count {
             let time = results.specs.start + results.specs.save_step * (step as f64);
@@ -3050,12 +3082,16 @@ pub(crate) fn discover_loops_with_deadlines(
                 scores.push((time, f64::NAN));
             } else {
                 scores.push((time, loop_score));
-                valid_count += 1;
-                abs_mean += (loop_score.abs() - abs_mean) / valid_count as f64;
+                if loop_score.is_infinite() {
+                    abs_any_inf = true;
+                } else {
+                    valid_count += 1;
+                    abs_mean += (loop_score.abs() - abs_mean) / valid_count as f64;
+                }
             }
         }
 
-        let avg_abs_score = abs_mean;
+        let avg_abs_score = if abs_any_inf { f64::INFINITY } else { abs_mean };
 
         // Trim synthetic aggregate nodes out of the reported loop (AC4.2).
         // The loop scores above were computed from the un-trimmed `links`; the

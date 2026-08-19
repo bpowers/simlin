@@ -240,6 +240,18 @@ impl DeadlineWorkTracker {
         self.edge_steps_since_check += edge_steps;
     }
 
+    /// A closing check for work recorded after the last per-circuit check:
+    /// the final (or only) circuit can be arbitrarily large, and a deadline
+    /// that expired inside its scoring must not let the pass report success.
+    /// Reads the clock only when at least a full interval of work is pending.
+    fn check_pending(&mut self, deadline: Option<Instant>, clock: &mut dyn Clock) -> bool {
+        if self.edge_steps_since_check < retention_deadline_check_edge_steps() {
+            return false;
+        }
+        self.edge_steps_since_check = 0;
+        expired(deadline, clock)
+    }
+
     /// Whether a check is due for circuit `ci` (either trigger) and, if so,
     /// whether the deadline has expired. Resets the work accumulator whenever
     /// a check actually runs, regardless of which trigger fired it.
@@ -1358,6 +1370,9 @@ pub(super) fn retain_circuits(
     // Strongest Solo loops first, index order among exact ties (the ranking's
     // own content-key tie-break decides presentation later; retention only
     // has to keep every loop the ranking could report).
+    if work.check_pending(deadline, clock) {
+        return None;
+    }
     solo_ranked.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     let solo_kept = solo_ranked.len().min(super::max_loops());
     let solo_survivors_beyond_cap = solo_ranked.len() - solo_kept;
@@ -1459,14 +1474,23 @@ fn raw_avg_abs_score(
 pub(super) fn mean_abs_over_valid(series: &[f64], nan_mask: &[bool]) -> f64 {
     let mut mean = 0.0f64;
     let mut n = 0usize;
+    let mut any_inf = false;
     for (i, &is_nan) in nan_mask.iter().enumerate() {
         if is_nan {
             continue;
         }
+        let v = series[i].abs();
+        // An infinite observation makes the mean infinite; folding it into
+        // the running update would produce NaN (`Inf - Inf`) and hand the
+        // decision to circuit order instead of to the divergent loop.
+        if v.is_infinite() {
+            any_inf = true;
+            continue;
+        }
         n += 1;
-        mean += (series[i].abs() - mean) / n as f64;
+        mean += (v - mean) / n as f64;
     }
-    mean
+    if any_inf { f64::INFINITY } else { mean }
 }
 
 /// Decide, before either candidate's mass reaches a partition total, which
