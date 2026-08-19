@@ -87,6 +87,19 @@ class TestWithoutTheExtra:
         with pytest.raises(SimlinDependencyError, match=r"pysimlin\[notebook\]"):
             _ = simlin.ModelWidget
 
+    def test_star_import_works_without_the_extra(self, no_anywidget: None) -> None:
+        # ``from simlin import *`` walks ``__all__``; a lazily-exported name
+        # there would be resolved through ``__getattr__`` and raise on a
+        # base install.  ModelWidget is therefore NOT in ``__all__`` (with or
+        # without the extra); it stays reachable as ``simlin.ModelWidget``.
+        namespace: dict[str, Any] = {}
+        exec("from simlin import *", namespace)
+        assert "Model" in namespace
+        assert "Project" in namespace
+        assert "ModelWidget" not in namespace
+        assert "ModelWidget" not in simlin.__all__
+        assert not any(m in sys.modules and sys.modules[m] for m in BLOCKED)
+
     def test_display_degrades_to_svg_with_one_warning_and_the_hint_in_text_plain(
         self, no_anywidget: None
     ) -> None:

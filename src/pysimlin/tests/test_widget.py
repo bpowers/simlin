@@ -361,6 +361,36 @@ class TestSeedHasAView:
         assert len(on_disk["models"][0].get("views") or []) == 1
         assert [(e.source, e.revision) for e in events.events] == [("edit", 1)]
 
+    def test_viewless_read_only_suffix_lays_out_in_memory_and_still_edits(
+        self, tmp_path: Path, assets: WidgetAssets
+    ) -> None:
+        # A sketch-less .vpm (read as MDL) is opened without write permission:
+        # the display's layout is a committed change that stays in memory (the
+        # packaged file is never regenerated as MDL text), the widget seeds the
+        # laid-out project, and a browser edit is accepted the same way --
+        # dirty, file untouched, `saved` replied.
+        text = (FIXTURES / "teacup.mdl").read_text(encoding="utf-8")
+        body, marker, _ = text.partition("\\\\\\---///")
+        assert marker
+        path = tmp_path / "teacup.vpm"
+        path.write_text(body, encoding="utf-8")
+        before = path.read_bytes()
+        model = simlin.open(path, watch=False)
+        project = _project(model)
+        assert project.writable is False
+        w = _widget(model, assets)
+        assert w.revision == 1
+        assert self._views(w.project_json)[0]["elements"]
+        assert model.dirty is True
+        assert path.read_bytes() == before
+        _drain(w)
+        snapshot = _browser_shaped(project.serialize_json())
+        _from_browser(w, {"type": "snapshot", "base": 1, "json": snapshot})
+        assert model.revision == 2
+        assert model.dirty is True
+        assert path.read_bytes() == before
+        assert [c for k, c, _ in _sent(w) if k == "custom"] == [{"type": "saved", "revision": 2}]
+
     def test_empty_view_over_variables_is_laid_out(self, assets: WidgetAssets) -> None:
         # An empty view over a model that HAS variables is a blank editor
         # too (a JSON project written before its variables existed, or a

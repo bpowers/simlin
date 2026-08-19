@@ -68,7 +68,13 @@ from ._ffi import (
 from ._ffi import (
     serialize_mdl as _ffi_serialize_mdl,
 )
-from ._formats import FileFormat, resolve_read_format, resolve_write_format
+from ._formats import (
+    FileFormat,
+    is_read_only_suffix,
+    read_only_suffix_message,
+    resolve_read_format,
+    resolve_write_format,
+)
 from ._sync import ChangeEvent, SyncState
 from .errors import (
     ErrorDetail,
@@ -197,6 +203,17 @@ def _models_needing_a_layout_for_display(project_json: bytes) -> set[str]:
     return names
 
 
+def _anchor(path: _PathLike) -> Path:
+    """The absolute form of ``path`` as a project remembers it: anchored to
+    the CWD at the moment it is adopted (``open()``, ``save_as()``) so that a
+    later ``os.chdir()`` -- a notebook's ``%cd`` -- cannot retarget autosave,
+    the watcher, or the conflict check to a same-named file elsewhere.
+    ``absolute()`` rather than ``resolve()``: :attr:`Project.path` keeps
+    reporting the name the user gave (a symlinked model file stays under its
+    link name); only the anchor is added."""
+    return Path(path).absolute()
+
+
 def _read_model_file(path: Path) -> bytes:
     """Read a model file for :func:`simlin.load` / :meth:`Project.open`,
     turning the two ways a path can be wrong into ``SimlinImportError``."""
@@ -260,7 +277,12 @@ class Project:
     to the file, so :attr:`dirty` only becomes true when such a write fails
     (and clears once :meth:`save` succeeds).  A save never overwrites a
     change another tool made to the file since we last read or wrote it;
-    see :meth:`save`.
+    see :meth:`save`.  A file under a read-only suffix (``.vpm``, ``.proto``)
+    is opened WITHOUT write permission (:attr:`writable` is ``False``):
+    edits stay in memory, :meth:`save` refuses, and :meth:`save_as` to a
+    writable suffix is the way to keep them.  The path is anchored to an
+    absolute one when it is adopted, so a later ``os.chdir()`` (a notebook's
+    ``%cd``) never retargets autosave or the watcher.
     :meth:`watch` polls the file so changes made by other tools are loaded
     in place -- existing :class:`Model` handles keep working and see the
     new contents.  Subscribe with :meth:`on_change` to be told about every
@@ -278,13 +300,15 @@ class Project:
         path: _PathLike | None = None,
         format: FileFormat | None = None,
         autosave: bool = True,
+        writable: bool = True,
         disk_hash: str | None = None,
     ) -> None:
         """Initialize a Project from a C pointer.
 
         ``path``/``format``/``disk_hash`` describe the file the pointer was
-        loaded from (all ``None`` for an in-memory project); use
-        :meth:`open` rather than passing them by hand.
+        loaded from (all ``None`` for an in-memory project) and ``writable``
+        whether that file may be written in place (``False`` for a read-only
+        suffix); use :meth:`open` rather than passing them by hand.
         """
         if ptr == ffi.NULL:
             raise ValueError("Cannot create Project from NULL pointer")
@@ -296,8 +320,16 @@ class Project:
 
         # File-backing state, all guarded by _file_lock (see module docstring).
         self._file_lock = threading.RLock()
-        self._path: Path | None = Path(path) if path is not None else None
+        self._path: Path | None = _anchor(path) if path is not None else None
         self._format: FileFormat | None = format
+        # Whether _path may be written in place.  False for a read-only
+        # suffix (.vpm/.proto): the same rule resolve_write_format applies to
+        # save_as(), enforced here for every write the project itself makes
+        # (autosave, save(), a display's layout).  Meaningless without a path.
+        self._path_writable = bool(writable)
+        # The caller's autosave wish; effective only while the path is
+        # writable (``autosave`` reports the effective value), so a project
+        # opened from a .vpm autosaves once save_as() gives it a writable file.
         self._autosave = bool(autosave)
         self._sync = SyncState(disk_hash=disk_hash)
         self._listeners: dict[int, tuple[ChangeCallback, Dispatch | None]] = {}
@@ -367,7 +399,18 @@ class Project:
         The format is taken from the suffix (``.stmx``/``.xmile``/``.xml``
         XMILE, ``.mdl`` Vensim, ``.sd.json``/``.json`` JSON sniffed for
         native vs SD-AI, ``.pb`` protobuf) or, for an unknown suffix, from
-        the contents.  Saves regenerate the file in that same format.
+        the contents.  Saves regenerate the file in that same format.  A
+        relative ``path`` is anchored to the current directory now
+        (:attr:`path` is absolute), so a later ``os.chdir()`` does not move
+        where autosave writes or what is watched.
+
+        A read-only suffix (``.vpm``, a packaged Vensim model read as MDL
+        text; ``.proto``, a schema suffix accepted for protobuf input) is
+        opened without write permission: :attr:`writable` is ``False``,
+        :attr:`autosave` is off whatever was asked and cannot be turned on
+        for that path, every accepted change stays in memory
+        (:attr:`dirty`), :meth:`save` refuses, and :meth:`save_as` to a
+        writable suffix keeps the changes.  Watching still works.
 
         Args:
             path: The model file.
@@ -382,7 +425,7 @@ class Project:
                 cannot be determined.
             SimlinRuntimeError: if the engine cannot parse the file.
         """
-        p = Path(path)
+        p = _anchor(path)
         data = _read_model_file(p)
         fmt = resolve_read_format(p, data)
         project = cls(
@@ -390,6 +433,7 @@ class Project:
             path=p,
             format=fmt,
             autosave=autosave,
+            writable=not is_read_only_suffix(p),
             disk_hash=content_hash(data),
         )
         if watch:
@@ -427,14 +471,43 @@ class Project:
             return self._sync.dirty
 
     @property
-    def autosave(self) -> bool:
-        """Whether accepted changes are written to :attr:`path` immediately."""
+    def writable(self) -> bool:
+        """Whether this project can write its file: ``False`` for an
+        in-memory project (no path yet) and for a file under a read-only
+        suffix (``.vpm``, ``.proto``; see :meth:`open`).  While ``False``,
+        accepted changes stay in memory and :meth:`save` refuses; use
+        :meth:`save_as`."""
         with self._file_lock:
-            return self._autosave
+            return self._writable_locked()
+
+    def _writable_locked(self) -> bool:
+        return self._path is not None and self._path_writable
+
+    def _autosave_effective_locked(self) -> bool:
+        """Whether the next accepted change is written; caller holds
+        ``_file_lock``.  True only for a writable file the caller wants
+        autosaved -- an in-memory project or a read-only suffix never
+        persists, whatever was asked."""
+        return self._autosave and self._writable_locked()
+
+    @property
+    def autosave(self) -> bool:
+        """Whether accepted changes are written to :attr:`path` immediately.
+        Reports the effective setting: ``False`` for a file that cannot be
+        written (:attr:`writable`), however it was opened."""
+        with self._file_lock:
+            return self._autosave_effective_locked()
 
     @autosave.setter
     def autosave(self, enabled: bool) -> None:
         with self._file_lock:
+            if enabled and self._path is not None and not self._path_writable:
+                # Refused loudly rather than stored and ignored: the caller
+                # would otherwise believe edits are reaching a file that
+                # this project will never write.
+                raise SimlinRuntimeError(
+                    f"cannot autosave to {self._path}: " + read_only_suffix_message(self._path)
+                )
             self._autosave = bool(enabled)
 
     @property
@@ -456,8 +529,10 @@ class Project:
 
         Raises:
             SimlinRuntimeError: if the project has no path (use
-                :meth:`save_as`), or the file changed on disk and ``force``
-                is not set.
+                :meth:`save_as`), its path has a read-only suffix
+                (``.vpm``/``.proto``, also :meth:`save_as`; ``force`` does
+                not override this), or the file changed on disk and
+                ``force`` is not set.
             OSError: if the write fails; the in-memory project is kept and
                 :attr:`dirty` is unchanged.
         """
@@ -466,6 +541,10 @@ class Project:
                 raise SimlinRuntimeError(
                     "project has no file path; use save_as(path) to choose one"
                 )
+            if not self._path_writable:
+                raise SimlinRuntimeError(
+                    f"cannot save {self._path}: " + read_only_suffix_message(self._path)
+                )
             self._write_to(self._path, self._format, force=force)
 
     def save_as(self, path: _PathLike, format: FileFormat | None = None) -> None:
@@ -473,7 +552,12 @@ class Project:
 
         The format comes from ``format`` or, if omitted, the suffix of
         ``path``.  If the project was watching its previous file, it now
-        watches the new one.
+        watches the new one.  The new path is adopted in absolute form and
+        is writable from here on -- an explicit ``format`` is the documented
+        way to put, say, MDL text under a read-only suffix, and a path
+        chosen that way is the caller's to keep writing -- so a project
+        opened from a ``.vpm`` autosaves again after ``save_as("x.mdl")``
+        unless autosave was turned off.
 
         Saving to a *different* path never conflicts with changes to the
         current file; ``save_as`` to the current path behaves like
@@ -485,13 +569,14 @@ class Project:
                 ``.proto``) and no ``format`` is given.
             OSError: if the write fails; nothing is adopted.
         """
-        target = Path(path)
+        target = _anchor(path)
         fmt = resolve_write_format(target, format)
         old_watcher: FileWatcher | None = None
         with self._file_lock:
             self._write_to(target, fmt)
             self._path = target
             self._format = fmt
+            self._path_writable = True
             if self._watcher is not None:
                 old_watcher = self._watcher
                 self._watcher = self._start_watcher(target, old_watcher.interval)
@@ -786,7 +871,7 @@ class Project:
         autosave still bumps and notifies because the in-memory change is
         real; :attr:`dirty` stays ``True`` until a save succeeds.
         """
-        persist = self._path is not None and self._autosave
+        persist = self._autosave_effective_locked()
         decision, self._sync = _sync.decide(self._sync, _sync.LocalEdit(persist))
         assert isinstance(decision, _sync.Write | _sync.MarkDirty)
         self._invalidate_model_caches()
@@ -800,6 +885,7 @@ class Project:
         of the in-memory change before propagating it."""
         assert self._path is not None
         assert self._format is not None
+        assert self._path_writable
         try:
             self._write_to(self._path, self._format)
         except Exception as exc:
@@ -831,7 +917,7 @@ class Project:
                 for a change that is real and wedge its view.
         """
         with self._file_lock:
-            persist = self._path is not None and self._autosave
+            persist = self._autosave_effective_locked()
             decision, new_state = _sync.decide(
                 self._sync, _sync.WidgetSnapshot(base_revision, persist)
             )
@@ -1421,8 +1507,10 @@ class Project:
         otherwise this is :meth:`auto_layout` -- a committed change (revision
         bump, autosave when file-backed, subscribers notified with ``source ==
         "edit"``) -- and ``True``.  Note that for a file-backed project this
-        WRITES THE FILE on display, ``read_only`` widget or not: a sketch-less
-        ``.mdl`` is regenerated with a sketch the first time it is shown.  The
+        WRITES THE FILE on display (when autosaving and :attr:`writable`;
+        under a read-only suffix the layout stays in memory and the project
+        is ``dirty``), ``read_only`` widget or not: a sketch-less ``.mdl`` is
+        regenerated with a sketch the first time it is shown.  The
         check and the layout happen under ``_file_lock`` so a concurrent edit
         cannot slip between them.
 
@@ -1528,12 +1616,21 @@ class Project:
         Idempotent.  Unsaved changes are NOT written; call :meth:`save`
         first if you want them.
         """
-        self.watch(False)
+        # Detaching the watcher and marking the project closed happen in ONE
+        # locked step: a ``watch(True)`` on another thread then either runs
+        # before (and its watcher is the one detached here) or after (and is
+        # refused as closed) -- never in between, where it would install a
+        # poll thread that outlives the close.  The detached watcher is
+        # retired after the lock is released (it joins the poll thread,
+        # which may be waiting on this lock).
         with self._file_lock:
+            old_watcher = self._watcher
+            self._watcher = None
             self._listeners.clear()
             self._closed = True
             self._path = None
             self._format = None
+        self._retire_watcher(old_watcher)
         with self._lock:
             finalizer = getattr(self, "_finalizer", None)
             if finalizer and getattr(finalizer, "alive", False):

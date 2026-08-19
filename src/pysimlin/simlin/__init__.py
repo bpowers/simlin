@@ -72,7 +72,9 @@ from .types import (
 from .vdf import load_vdf
 
 if TYPE_CHECKING:
-    from .widget import ModelWidget
+    # The redundant alias keeps ``simlin.ModelWidget`` visible to type
+    # checkers as an explicit re-export while it stays out of ``__all__``.
+    from .widget import ModelWidget as ModelWidget
 
 
 def __getattr__(name: str) -> Any:
@@ -82,6 +84,8 @@ def __getattr__(name: str) -> Any:
     # and tests which never display a widget should not pay.
     # ``Model.widget()`` and displaying a model import it on demand the same
     # way; without the extra the import raises ``SimlinDependencyError``.
+    # It is deliberately NOT in ``__all__``: ``from simlin import *`` resolves
+    # every listed name, and a base install would raise on this one.
     if name == "ModelWidget":
         from ._widget_core import import_widget_module
 
@@ -198,7 +202,6 @@ __all__ = [
     "LtmMode",
     "Model",
     "ModelIssue",
-    "ModelWidget",
     "Module",
     "ModuleReference",
     "Partition",
