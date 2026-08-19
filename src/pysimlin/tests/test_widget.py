@@ -1043,13 +1043,41 @@ class TestExactlyOneReply:
         _drain(w)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            _from_browser(w, {"type": "snapshot", "base": base, "json": text})
+            _from_browser(w, {"type": "snapshot", "base": base, "json": text, "id": f"v:{arm}"})
         replies = [
             c for k, c, _ in _sent(w) if k == "custom" and c["type"] in ("saved", "rejected")
         ]
         assert len(replies) == 1
         assert type(replies[0]["revision"]) is int
         assert replies[0]["revision"] == model.revision
+        # The one reply names the request it answers, whichever arm produced it.
+        assert replies[0]["id"] == f"v:{arm}"
+
+    def test_accept_echoes_the_request_id_in_saved(
+        self, model: Model, model_path: Path, assets: WidgetAssets
+    ) -> None:
+        w = _widget(model, assets)
+        text = _snapshot_with(model_path, "x")
+        _drain(w)
+        _from_browser(w, {"type": "snapshot", "base": 0, "json": text, "id": "view-a:1"})
+        assert _sent(w) == [
+            ("update", {"project_json": text, "revision": 1}, None),
+            ("custom", {"type": "saved", "revision": 1, "id": "view-a:1"}, None),
+        ]
+
+    def test_stale_echoes_the_request_id_in_rejected(
+        self, model: Model, model_path: Path, assets: WidgetAssets
+    ) -> None:
+        w = _widget(model, assets)
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="kernel_side", equation="1"))
+        _drain(w)
+        _from_browser(
+            w,
+            {"type": "snapshot", "base": 0, "json": _snapshot_with(model_path, "x"), "id": "v:2"},
+        )
+        replies = [c for k, c, _ in _sent(w) if k == "custom" and c["type"] == "rejected"]
+        assert replies == [{"type": "rejected", "revision": 1, "id": "v:2"}]
 
     def test_state_update_leaves_before_saved(
         self, model: Model, model_path: Path, assets: WidgetAssets
@@ -1069,10 +1097,11 @@ class TestMalformed:
             {"type": "snapshot", "base": "0", "json": "{}"},
             {"type": "snapshot", "base": 0},
             {"type": "snapshot"},
+            {"type": "snapshot", "base": "0", "json": "{}", "id": "v:4"},
         ],
     )
     def test_malformed_snapshot_still_gets_exactly_one_rejected_reply(
-        self, model: Model, assets: WidgetAssets, content: object
+        self, model: Model, assets: WidgetAssets, content: dict[str, Any]
     ) -> None:
         w = _widget(model, assets)
         with model.edit() as (_, patch):
@@ -1082,7 +1111,12 @@ class TestMalformed:
             _from_browser(w, content)
         sent = _sent(w)
         assert [kind for kind, _, _ in sent] == ["custom", "custom"]
-        assert sent[0][1] == {"type": "rejected", "revision": 1}
+        expected: dict[str, Any] = {"type": "rejected", "revision": 1}
+        if "id" in content:
+            # The browser matches the reply to its request by id, so even a
+            # malformed snapshot's rejection must carry it.
+            expected["id"] = content["id"]
+        assert sent[0][1] == expected
         assert sent[1][1]["type"] == "notice"
         assert sent[1][1]["level"] == "warn"
         assert model.revision == 1

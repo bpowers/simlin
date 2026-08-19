@@ -74,7 +74,7 @@ interface HarnessWindow {
       saveChangesCount: number;
       wasmRequests: number;
       sent: unknown[];
-      snapshots: Array<{ base: number; json: string }>;
+      snapshots: Array<{ id: unknown; base: number; json: string }>;
       kernel: { revision: number; projectJson: string };
       kernelPush(patch: Record<string, unknown>): void;
       kernelSend(content: unknown): void;
@@ -210,6 +210,7 @@ test.describe('notebook widget bundle', () => {
         setKeys: m.sets.map((s) => s.key),
         json: last.json,
         base: last.base,
+        id: last.id,
         kernel: m.kernel,
         traitJson: m.state.project_json,
         traitRevision: m.state.revision,
@@ -221,6 +222,10 @@ test.describe('notebook widget bundle', () => {
     expect(parsed.models[0].auxiliaries.map((a) => a.name)).toContain('New Variable');
     expect(parsed.models[0].stocks.map((s) => s.name)).toContain('population');
     expect(saved.base).toBe(0);
+    // Every snapshot names itself; the fake kernel echoed the id in `saved`,
+    // which is what resolved this save (a reply without it is ignored).
+    expect(typeof saved.id).toBe('string');
+    expect(saved.id).not.toBe('');
     // The widget never writes the kernel-owned traits (only `selection`).
     expect(saved.setKeys.filter((k) => k !== 'selection')).toEqual([]);
     // Accepted: kernel state advanced and its traits carry our exact bytes.

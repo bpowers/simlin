@@ -15,7 +15,8 @@ The wire protocol these functions implement is Section 3 of
 ``docs/design-plans/2026-08-17-pysimlin-widget.md``: state travels as
 traits (``project_json``/``revision`` kernel-owned, ``selection``
 widget-owned), and every request or reply is a custom message
-(``wasm``, ``snapshot``, ``oversize``, ``saved``, ``rejected``, ``notice``).
+(``wasm``, ``snapshot``, ``oversize``, ``saved``, ``rejected``, ``notice``);
+a snapshot's ``id`` is echoed in its ``saved``/``rejected`` reply.
 """
 
 from __future__ import annotations
@@ -316,11 +317,17 @@ class WasmRequest:
 
 @dataclass(frozen=True)
 class SnapshotRequest:
-    """``{type:'snapshot', base, json}``: the browser edited the project from
-    revision ``base`` and offers the whole project as native JSON."""
+    """``{type:'snapshot', id, base, json}``: the browser edited the project
+    from revision ``base`` and offers the whole project as native JSON.
+    ``id`` is the browser's request id, echoed verbatim in the one reply
+    (``saved``/``rejected``) so the view that sent it -- and only that view,
+    when one model is displayed in several -- can match the reply to its
+    in-flight snapshot.  The kernel never interprets it: any JSON value is
+    carried back as received, and ``None`` (absent) echoes nothing."""
 
     base: int
     json: str
+    id: object | None = None
 
 
 @dataclass(frozen=True)
@@ -340,9 +347,11 @@ class MalformedSnapshot:
     """A ``{type:'snapshot'}`` whose ``base``/``json`` are missing or
     mistyped.  Still a snapshot as far as the browser is concerned: it is
     waiting for its one reply, so the shell answers ``rejected`` (nothing
-    was applied) plus a notice with ``reason``."""
+    was applied, ``id`` echoed so the reply is matched) plus a notice with
+    ``reason``."""
 
     reason: str
+    id: object | None = None
 
 
 @dataclass(frozen=True)
@@ -378,14 +387,18 @@ def parse_incoming(content: object) -> IncomingMessage:
     if kind == "snapshot":
         base = content.get("base")
         json_text = content.get("json")
+        request_id = content.get("id")
         if isinstance(base, bool) or not isinstance(base, int):
-            return MalformedSnapshot(f"snapshot 'base' must be an integer revision, got {base!r}")
+            return MalformedSnapshot(
+                f"snapshot 'base' must be an integer revision, got {base!r}", id=request_id
+            )
         if not isinstance(json_text, str):
             return MalformedSnapshot(
                 f"snapshot 'json' must be the project as a JSON string, got "
-                f"{type(json_text).__name__}"
+                f"{type(json_text).__name__}",
+                id=request_id,
             )
-        return SnapshotRequest(base=base, json=json_text)
+        return SnapshotRequest(base=base, json=json_text, id=request_id)
     if kind == "oversize":
         nbytes = content.get("bytes")
         if isinstance(nbytes, bool) or not isinstance(nbytes, int) or nbytes < 0:
@@ -403,12 +416,22 @@ def wasm_error_reply(error: str) -> dict[str, Any]:
     return {"type": "wasm", "error": error}
 
 
-def saved_message(revision: int) -> dict[str, Any]:
-    return {"type": "saved", "revision": revision}
+def _reply(kind: str, revision: int, request_id: object | None) -> dict[str, Any]:
+    message: dict[str, Any] = {"type": kind, "revision": revision}
+    if request_id is not None:
+        message["id"] = request_id
+    return message
 
 
-def rejected_message(revision: int) -> dict[str, Any]:
-    return {"type": "rejected", "revision": revision}
+def saved_message(revision: int, request_id: object | None = None) -> dict[str, Any]:
+    """``{type:'saved', revision, id?}``: ``request_id`` is the snapshot's
+    ``id`` echoed verbatim (omitted when the request carried none)."""
+    return _reply("saved", revision, request_id)
+
+
+def rejected_message(revision: int, request_id: object | None = None) -> dict[str, Any]:
+    """``{type:'rejected', revision, id?}``; see :func:`saved_message`."""
+    return _reply("rejected", revision, request_id)
 
 
 def notice_message(text: str, level: NoticeLevel = "info") -> dict[str, Any]:
@@ -476,10 +499,12 @@ def plan_snapshot_reply(request: SnapshotRequest, outcome: SnapshotOutcome) -> S
       are NOT touched (they already hold the authoritative state; a
       notification still queued behind this message pushes it), then
       ``rejected`` plus a warning notice.
+
+    Whichever arm, the reply echoes the request's ``id``.
     """
     if outcome.applied:
         accepted_revision = request.base + 1
-        messages: list[dict[str, Any]] = [saved_message(accepted_revision)]
+        messages: list[dict[str, Any]] = [saved_message(accepted_revision, request.id)]
         if outcome.error is not None and outcome.write_failed:
             messages.append(
                 notice_message(
@@ -509,7 +534,7 @@ def plan_snapshot_reply(request: SnapshotRequest, outcome: SnapshotOutcome) -> S
         )
     return SnapshotPlan(
         push=None,
-        messages=(rejected_message(outcome.revision), notice_message(text, "warn")),
+        messages=(rejected_message(outcome.revision, request.id), notice_message(text, "warn")),
     )
 
 

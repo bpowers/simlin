@@ -10,8 +10,9 @@
 // as a DataView buffer (exactly how ipywidgets hands binary buffers to
 // `msg:custom` listeners), and it handles `{type:'snapshot', base, json}` the
 // way pysimlin's ModelWidget must -- accept when base equals its revision
-// (push project_json + revision, then reply `saved`), else reply `rejected`
-// -- and records everything so the Playwright spec can assert on it.
+// (push project_json + revision, then reply `saved`), else reply `rejected`,
+// either reply echoing the request's `id` -- and records everything so the
+// Playwright spec can assert on it.
 export class FakeAnyModel {
   constructor(initialState, wasmUrl) {
     this.state = { ...initialState };
@@ -86,16 +87,16 @@ export class FakeAnyModel {
   send(content, _callbacks, _buffers) {
     this.sent.push(content);
     if (content && content.type === 'snapshot') {
-      this.snapshots.push({ base: content.base, json: content.json });
+      this.snapshots.push({ id: content.id, base: content.base, json: content.json });
       setTimeout(() => {
         if (content.base !== this.kernel.revision) {
-          this.trigger('msg:custom', { type: 'rejected', revision: this.kernel.revision }, []);
+          this.trigger('msg:custom', { type: 'rejected', revision: this.kernel.revision, id: content.id }, []);
           return;
         }
         this.kernel.revision += 1;
         this.kernel.projectJson = content.json;
         this.kernelPush({ project_json: content.json, revision: this.kernel.revision });
-        this.trigger('msg:custom', { type: 'saved', revision: this.kernel.revision }, []);
+        this.trigger('msg:custom', { type: 'saved', revision: this.kernel.revision, id: content.id }, []);
       }, 0);
       return;
     }

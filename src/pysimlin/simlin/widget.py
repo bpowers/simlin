@@ -8,8 +8,10 @@ kernel owns the model file; the browser owns interaction and undo history.
 Every discrete edit in the browser arrives here as a whole-project snapshot
 tagged with the revision it was edited from; the kernel accepts it through
 :meth:`Project._apply_snapshot` (which writes the file) or rejects it as
-stale, and every kernel-originated change (``edit()``, a reload from disk)
-is pushed back so the browser remounts on it.  Protocol: Section 3 of
+stale -- the one reply echoing the snapshot's ``id`` so the view that sent
+it matches it (one model displayed in several cells sees every reply in
+every view) -- and every kernel-originated change (``edit()``, a reload
+from disk) is pushed back so the browser remounts on it.  Protocol: Section 3 of
 ``docs/design-plans/2026-08-17-pysimlin-widget.md``; the pure decisions
 live in :mod:`simlin._widget_core`, this module executes them.
 
@@ -474,7 +476,7 @@ class ModelWidget(anywidget.AnyWidget):
                     RuntimeWarning,
                     stacklevel=2,
                 )
-                self.send(core.rejected_message(int(self._project.revision)))
+                self.send(core.rejected_message(int(self._project.revision), message.id))
                 self._notice(f"Your edit could not be applied: {reason}.", "warn")
             case Unrecognised(reason=reason):
                 warnings.warn(
@@ -553,7 +555,7 @@ class ModelWidget(anywidget.AnyWidget):
                 RuntimeWarning,
                 stacklevel=3,
             )
-        self.send(core.saved_message(revision))
+        self.send(core.saved_message(revision, request.id))
         self._notice(
             f"Your edit was applied, but the editor could not be told cleanly: {_describe(exc)}.",
             "warn",
@@ -575,7 +577,7 @@ class ModelWidget(anywidget.AnyWidget):
                 RuntimeWarning,
                 stacklevel=3,
             )
-        self.send(core.rejected_message(int(self._project.revision)))
+        self.send(core.rejected_message(int(self._project.revision), request.id))
         self._notice(f"Your edit could not be applied: {_describe(exc)}.", "warn")
 
     def _apply_and_reply(self, request: SnapshotRequest, progress: _SnapshotProgress) -> None:

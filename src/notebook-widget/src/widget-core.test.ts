@@ -18,6 +18,8 @@ import {
   parseSaveReply,
   parseWasmReply,
   readTraits,
+  replyIsFor,
+  requestId,
   resolveTheme,
   seedAfterSaved,
   snapshotMessage,
@@ -372,40 +374,72 @@ describe('parseNoticeMessage', () => {
 });
 
 describe('snapshot protocol', () => {
-  it('snapshotMessage carries base and the whole json', () => {
-    expect(snapshotMessage(4, '{"a":1}')).toEqual({ type: 'snapshot', base: 4, json: '{"a":1}' });
+  it('snapshotMessage carries the request id, base and the whole json', () => {
+    expect(snapshotMessage('v:1', 4, '{"a":1}')).toEqual({ type: 'snapshot', id: 'v:1', base: 4, json: '{"a":1}' });
   });
 
-  it('parseSaveReply accepts saved/rejected with an integer revision, nothing else', () => {
-    expect(parseSaveReply({ type: 'saved', revision: 5 })).toEqual({ kind: 'saved', revision: 5 });
-    expect(parseSaveReply({ type: 'rejected', revision: 4 })).toEqual({ kind: 'rejected', revision: 4 });
-    // Reply-typed but unusable: malformed, not ignored (it still consumes the
-    // one reply the in-flight snapshot is owed).
-    expect(parseSaveReply({ type: 'saved' })).toEqual({ kind: 'malformed' });
-    expect(parseSaveReply({ type: 'saved', revision: 1.5 })).toEqual({ kind: 'malformed' });
-    expect(parseSaveReply({ type: 'saved', revision: '5' })).toEqual({ kind: 'malformed' });
-    expect(parseSaveReply({ type: 'rejected', revision: null })).toEqual({ kind: 'malformed' });
+  it('requestId is unique per view token and per sequence number', () => {
+    expect(requestId('v', 1)).toBe('v:1');
+    expect(requestId('v', 1)).not.toBe(requestId('v', 2));
+    expect(requestId('v', 1)).not.toBe(requestId('w', 1));
+  });
+
+  it('parseSaveReply accepts saved/rejected with an integer revision, nothing else, and reads the echoed id', () => {
+    expect(parseSaveReply({ type: 'saved', revision: 5, id: 'v:1' })).toEqual({
+      kind: 'saved',
+      revision: 5,
+      id: 'v:1',
+    });
+    expect(parseSaveReply({ type: 'rejected', revision: 4, id: 'v:2' })).toEqual({
+      kind: 'rejected',
+      revision: 4,
+      id: 'v:2',
+    });
+    // No id, or a non-string id: the reply is parsed but answers nothing.
+    expect(parseSaveReply({ type: 'saved', revision: 5 })).toEqual({ kind: 'saved', revision: 5, id: undefined });
+    expect(parseSaveReply({ type: 'saved', revision: 5, id: 7 })).toEqual({
+      kind: 'saved',
+      revision: 5,
+      id: undefined,
+    });
+    // Reply-typed but unusable: malformed, not ignored (with the id it still
+    // consumes the one reply the in-flight snapshot is owed).
+    expect(parseSaveReply({ type: 'saved', id: 'v:1' })).toEqual({ kind: 'malformed', id: 'v:1' });
+    expect(parseSaveReply({ type: 'saved', revision: 1.5 })).toEqual({ kind: 'malformed', id: undefined });
+    expect(parseSaveReply({ type: 'saved', revision: '5' })).toEqual({ kind: 'malformed', id: undefined });
+    expect(parseSaveReply({ type: 'rejected', revision: null })).toEqual({ kind: 'malformed', id: undefined });
     expect(parseSaveReply({ type: 'notice', text: 'x' })).toBeNull();
     expect(parseSaveReply({ type: 'wasm' })).toBeNull();
     expect(parseSaveReply(null)).toBeNull();
     expect(parseSaveReply('saved')).toBeNull();
   });
 
-  it('inFlightFor expects base + 1', () => {
-    expect(inFlightFor(3, 'J')).toEqual({ json: 'J', base: 3, expectedRevision: 4 });
+  it('inFlightFor carries the id and expects base + 1', () => {
+    expect(inFlightFor('v:1', 3, 'J')).toEqual({ id: 'v:1', json: 'J', base: 3, expectedRevision: 4 });
+  });
+
+  it('replyIsFor matches on the echoed id only: another id, or none, answers nothing', () => {
+    const flight = inFlightFor('v:1', 3, 'J');
+    expect(replyIsFor(flight, { kind: 'saved', revision: 4, id: 'v:1' })).toBe(true);
+    expect(replyIsFor(flight, { kind: 'rejected', revision: 3, id: 'v:1' })).toBe(true);
+    expect(replyIsFor(flight, { kind: 'malformed', id: 'v:1' })).toBe(true);
+    expect(replyIsFor(flight, { kind: 'saved', revision: 4, id: 'v:2' })).toBe(false);
+    expect(replyIsFor(flight, { kind: 'saved', revision: 4, id: 'w:1' })).toBe(false);
+    expect(replyIsFor(flight, { kind: 'saved', revision: 4, id: undefined })).toBe(false);
+    expect(replyIsFor(flight, { kind: 'malformed', id: undefined })).toBe(false);
   });
 
   it('versionAfterReply resolves the saved revision, undefined on reject or malformed', () => {
-    expect(versionAfterReply({ kind: 'saved', revision: 7 })).toBe(7);
-    expect(versionAfterReply({ kind: 'rejected', revision: 6 })).toBeUndefined();
-    expect(versionAfterReply({ kind: 'malformed' })).toBeUndefined();
+    expect(versionAfterReply({ kind: 'saved', revision: 7, id: 'v:1' })).toBe(7);
+    expect(versionAfterReply({ kind: 'rejected', revision: 6, id: 'v:1' })).toBeUndefined();
+    expect(versionAfterReply({ kind: 'malformed', id: 'v:1' })).toBeUndefined();
   });
 
   it('seedAfterSaved is the in-flight bytes at the reported revision', () => {
-    expect(seedAfterSaved(inFlightFor(3, 'S1'), 4)).toEqual({ revision: 4, projectJson: 'S1' });
+    expect(seedAfterSaved(inFlightFor('v:1', 3, 'S1'), 4)).toEqual({ revision: 4, projectJson: 'S1' });
     // A kernel that reports a different revision than base+1 (it should not,
     // but the reply is authoritative): the seed follows the reply.
-    expect(seedAfterSaved(inFlightFor(3, 'S1'), 6)).toEqual({ revision: 6, projectJson: 'S1' });
+    expect(seedAfterSaved(inFlightFor('v:1', 3, 'S1'), 6)).toEqual({ revision: 6, projectJson: 'S1' });
   });
 
   describe('classifyPush', () => {
@@ -413,17 +447,17 @@ describe('snapshot protocol', () => {
 
     it('the seed pair again is none (second change event, idempotent re-push)', () => {
       expect(classifyPush(seed, null, seed)).toBe('none');
-      expect(classifyPush(seed, inFlightFor(3, 'S1'), seed)).toBe('none');
+      expect(classifyPush(seed, inFlightFor('v:1', 3, 'S1'), seed)).toBe('none');
     });
 
     it('the in-flight snapshot at base+1 is our own ack', () => {
-      expect(classifyPush(seed, inFlightFor(3, 'S1'), { revision: 4, projectJson: 'S1' })).toBe('own-ack');
+      expect(classifyPush(seed, inFlightFor('v:1', 3, 'S1'), { revision: 4, projectJson: 'S1' })).toBe('own-ack');
     });
 
     it('the in-flight json at any other revision is a kernel change (remount)', () => {
       // A disk change carrying the same bytes at a different revision is not
       // an ack of ours; the kernel decides via saved/rejected.
-      expect(classifyPush(seed, inFlightFor(3, 'S1'), { revision: 5, projectJson: 'S1' })).toBe('remount');
+      expect(classifyPush(seed, inFlightFor('v:1', 3, 'S1'), { revision: 5, projectJson: 'S1' })).toBe('remount');
     });
 
     it('a different pair with nothing in flight remounts (Python edit, disk reload)', () => {
@@ -434,7 +468,7 @@ describe('snapshot protocol', () => {
     });
 
     it('a different pair while a snapshot is in flight remounts (disk change raced our save)', () => {
-      expect(classifyPush(seed, inFlightFor(3, 'S1'), { revision: 4, projectJson: 'DISK' })).toBe('remount');
+      expect(classifyPush(seed, inFlightFor('v:1', 3, 'S1'), { revision: 4, projectJson: 'DISK' })).toBe('remount');
     });
   });
 });

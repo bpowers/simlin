@@ -27,6 +27,8 @@ import {
   parseNoticeMessage,
   parseSaveReply,
   readTraits,
+  replyIsFor,
+  requestId,
   resolveTheme,
   seedAfterSaved,
   snapshotMessage,
@@ -74,11 +76,11 @@ interface WidgetRefs {
   seed: EditorSeedPair;
   // At most one snapshot in flight (see handleSave); null between saves.
   inFlight: (InFlightSnapshot & { resolve: (version: number | undefined) => void }) | null;
-  // Replies the kernel still owes for snapshots whose slot was freed by a
-  // remount (see onKernelState). Kernel replies arrive in order, so the next
-  // `staleRepliesOwed` save replies belong to those snapshots, not to
-  // whatever the new Editor has in flight: each is consumed and ignored.
-  staleRepliesOwed: number;
+  // This view's half of every request id (`requestId`): minted once per
+  // mount, so two views of one model never send the same id, and the counter
+  // that makes each request's id unique within the view.
+  viewToken: string;
+  nextRequestSeq: number;
   // The live Editor's last committed viewport (`onViewportChange`), carried
   // into the next mount on a kernel-originated remount (see remountFrom). A pan
   // or zoom by itself is never saved, so without this every kernel push would
@@ -158,6 +160,22 @@ function stampShortcutSuppression(event: React.FocusEvent<HTMLElement>): void {
   }
 }
 
+/**
+ * A token no other view of the same model will mint: request ids are
+ * `${token}:${seq}`, and a collision between two views would let one consume
+ * the other's reply. `crypto.randomUUID` where the host has it (every
+ * supported notebook front-end; secure context or not in Chromium, Firefox
+ * and Safari), else random digits -- uniqueness within one page is all that is
+ * needed, not unguessability.
+ */
+function newViewToken(): string {
+  const c = globalThis.crypto;
+  if (c !== undefined && typeof c.randomUUID === 'function') {
+    return c.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 export function WidgetApp({ model, name }: { model: AnyModel; name: string }): React.ReactElement {
   const readModelTraits = React.useCallback((): WidgetTraits => readTraits((key) => model.get(key)), [model]);
 
@@ -184,7 +202,8 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
     disposed: false,
     seed: { revision: traits.revision, projectJson: traits.projectJson },
     inFlight: null,
-    staleRepliesOwed: 0,
+    viewToken: newViewToken(),
+    nextRequestSeq: 0,
     liveViewport: null,
     selectionTimer: null,
     noticeTimer: null,
@@ -266,9 +285,17 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
       const incoming = { revision: next.revision, projectJson: next.projectJson };
       const action = classifyPush(r.seed, r.inFlight, incoming);
       if (action === 'own-ack') {
-        // Our snapshot's state; the `saved` reply resolves the save. Adopt
-        // it as the seed so a later identical push is `none`, no remount.
-        r.seed = incoming;
+        // The state our in-flight snapshot would produce: keep the live
+        // Editor. The seed is NOT adopted here but on the `saved` reply: the
+        // pair says only that the kernel holds our bytes at base+1, not that
+        // it was OUR snapshot it accepted -- another view of the same model
+        // can send byte-identical bytes against the same base and win, after
+        // which our own reply is `rejected`; having adopted the pair, that
+        // reject would find nothing to remount (idempotent on the seed) and
+        // leave this Editor acknowledged at `base` with every later save
+        // stale. Left unadopted, the reject remounts on the kernel's pair (the
+        // Editor's version becomes base+1) and a repeat of this push
+        // classifies `own-ack` again, still no remount.
         return;
       }
       if (action === 'remount') {
@@ -276,15 +303,15 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
         // resolve its save undefined now (nothing may wait on a reply for a
         // mount that no longer exists) and free the slot, otherwise the NEW
         // Editor's first save would be refused as "one already in flight" and
-        // that edit would sit unsaved until a later edit. The kernel still
-        // owes exactly one reply for the freed snapshot; it is marked stale
-        // so onCustom consumes and ignores it -- it must neither remount
-        // (the push already did) nor adopt its (revision, json) as the seed,
-        // which would step the seed back behind the state we just remounted on.
+        // that edit would sit unsaved until a later edit. The reply the
+        // kernel still owes for the freed snapshot carries that snapshot's
+        // id, which no longer matches anything in flight, so onCustom ignores
+        // it -- it must neither remount (the push already did) nor adopt its
+        // (revision, json) as the seed, which would step the seed back behind
+        // the state we just remounted on.
         if (r.inFlight !== null) {
           const flight = r.inFlight;
           r.inFlight = null;
-          r.staleRepliesOwed += 1;
           flight.resolve(undefined);
         }
         remountFrom(incoming);
@@ -296,29 +323,24 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
     const onCustom = (...args: unknown[]): void => {
       const reply = parseSaveReply(args[0]);
       if (reply !== null) {
-        if (r.staleRepliesOwed > 0) {
-          // The reply for a snapshot whose Editor a kernel push already
-          // replaced (see onKernelState); replies arrive in order, so this
-          // one is that snapshot's, whatever the new Editor has in flight.
-          r.staleRepliesOwed -= 1;
-          return;
-        }
         const flight = r.inFlight;
-        if (flight === null) {
-          // A reply for a snapshot this view no longer tracks (another view of
-          // the same model, or a reply after unmount/abort resolved it): the
-          // traits already carry the authoritative state; nothing to do.
+        if (flight === null || !replyIsFor(flight, reply)) {
+          // Not an answer to what this view has in flight: another view's
+          // reply (every custom message reaches every view of the model), the
+          // reply owed to a snapshot whose slot a remount freed, or a reply
+          // after unmount/abort resolved the save. The traits already carry
+          // the authoritative state; nothing to do.
           return;
         }
         r.inFlight = null;
         if (reply.kind === 'saved') {
           // Adopt the accepted state as the seed NOW, before resolving and
           // independently of the kernel's trait push: if the push arrived
-          // first it classified `own-ack` and adopted the same pair; if it
-          // arrives later (a host that dispatches the custom message before
-          // applying the state update, or a kernel that sends `saved` early)
-          // it now classifies `none` instead of remounting and discarding
-          // local edits.
+          // first it classified `own-ack` (live Editor kept) and this is the
+          // confirmation that it was ours; if it arrives later (a host that
+          // dispatches the custom message before applying the state update,
+          // or a kernel that sends `saved` early) it now classifies `none`
+          // instead of remounting and discarding local edits.
           r.seed = seedAfterSaved(flight, reply.revision);
         } else {
           // Rejected -- or a malformed reply, which is treated as a reject
@@ -422,8 +444,10 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
         return Promise.resolve(undefined);
       }
       return new Promise<number | undefined>((resolve) => {
-        r.inFlight = { ...inFlightFor(currVersion, project.data), resolve };
-        model.send(snapshotMessage(currVersion, project.data));
+        r.nextRequestSeq += 1;
+        const id = requestId(r.viewToken, r.nextRequestSeq);
+        r.inFlight = { ...inFlightFor(id, currVersion, project.data), resolve };
+        model.send(snapshotMessage(id, currVersion, project.data));
       });
     },
     [model, readModelTraits, showNotice],
