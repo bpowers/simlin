@@ -904,11 +904,44 @@ class TestExactlyOneReply:
         self, model: Model, model_path: Path, assets: WidgetAssets
     ) -> None:
         # The change applied and the file was written; what failed was
-        # ``Project._notify`` -- here the widget's own dispatcher, the shape
-        # a closed kernel loop takes -- which the project raises as
-        # ``SimlinWriteError`` (applied but ...).  The reply is ``saved`` at
-        # base + 1 with the sent bytes pushed, plus a warn notice that names
-        # the error but not model.save(): there is nothing to retry.
+        # ``Project._notify`` (it reports subscriber failures as warnings
+        # itself, so this takes a bug there -- hence the monkeypatch), which
+        # the project raises as ``SimlinWriteError`` (applied but ...).  The
+        # reply is ``saved`` at base + 1 with the sent bytes pushed, plus a
+        # warn notice that names the error but not model.save(): there is
+        # nothing to retry.
+        w = _widget(model, assets)
+        text = _snapshot_with(model_path, "x")
+        _drain(w)
+
+        def boom(event: object) -> None:
+            raise RuntimeError("notify exploded")
+
+        with pytest.MonkeyPatch.context() as broken:
+            broken.setattr(_project(model), "_notify", boom)
+            with pytest.warns(RuntimeWarning, match="notify exploded"):
+                _from_browser(w, {"type": "snapshot", "base": 0, "json": text})
+        assert model.revision == 1
+        assert model.dirty is False
+        assert simlin.load(model_path).get_variable("x") is not None
+        sent = _sent(w)
+        assert [k for k, _, _ in sent] == ["update", "custom", "custom"]
+        assert sent[0][1] == {"project_json": text, "revision": 1}
+        assert sent[1][1] == {"type": "saved", "revision": 1}
+        notice = sent[2][1]
+        assert notice["type"] == "notice"
+        assert notice["level"] == "warn"
+        assert "notify exploded" in notice["text"]
+        assert "model.save()" not in notice["text"]
+
+    def test_a_dead_dispatcher_is_a_warning_not_a_failed_edit(
+        self, model: Model, model_path: Path, assets: WidgetAssets
+    ) -> None:
+        # The widget's own dispatcher raising synchronously (the shape a
+        # closed kernel loop takes) is reported by the project as a warning;
+        # the snapshot is applied and written, the reply is a plain
+        # ``saved``, and the browser gets no notice: nothing about ITS edit
+        # went wrong.
         def closed_loop(fn: Callable[[], None]) -> None:
             raise RuntimeError("IOLoop is closed")
 
@@ -921,14 +954,9 @@ class TestExactlyOneReply:
         assert model.dirty is False
         assert simlin.load(model_path).get_variable("x") is not None
         sent = _sent(w)
-        assert [k for k, _, _ in sent] == ["update", "custom", "custom"]
+        assert [k for k, _, _ in sent] == ["update", "custom"]
         assert sent[0][1] == {"project_json": text, "revision": 1}
         assert sent[1][1] == {"type": "saved", "revision": 1}
-        notice = sent[2][1]
-        assert notice["type"] == "notice"
-        assert notice["level"] == "warn"
-        assert "IOLoop is closed" in notice["text"]
-        assert "model.save()" not in notice["text"]
 
     @pytest.mark.parametrize("arm", ["before-apply", "after-apply"])
     def test_a_base_exception_still_gets_its_one_reply_then_propagates(
