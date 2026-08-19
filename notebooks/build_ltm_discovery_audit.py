@@ -1329,8 +1329,15 @@ gap = total_steps - covered
 # `agg_recovery_truncated`, and an audit mirroring the same clipped walk would
 # otherwise agree with the engine about an inexact universe.
 agg_complete = not analysis.agg_recovery_truncated
+# The coverage-aware cap GUARANTEES each step's dominant loop per competing
+# group a slot while the k=1 anchors fit the cap; when they do, a nonzero gap
+# is a defect in the selection, not a property of the cap, and the audit
+# must not pass over it. (When the anchors overflow the cap the guarantee is
+# explicitly conditional and the gap is reported, not asserted.)
+anchors_fit = sum(1 for d in depths if d == 1) <= MAX_LOOPS
+coverage_ok = (covered == total_steps) if anchors_fit else True
 audit_pass = bool(analysis.enumeration_complete and agg_complete and exact_set
-                  and scores_exact and counts_agree)
+                  and scores_exact and counts_agree and coverage_ok)
 print(f"independent mass-bearing universe: {independent_universe} "
       f"(pysimlin universe_loops {analysis.universe_loops}); independent survivors "
       f"{len(survivors)} (pysimlin retained_loops {analysis.retained_loops}): "
@@ -1338,7 +1345,8 @@ print(f"independent mass-bearing universe: {independent_universe} "
 print(f"AUDIT VERDICT: {'PASS' if audit_pass else 'FAIL'} "
       f"(enumeration_complete={analysis.enumeration_complete}, "
       f"agg_recovery_truncated={analysis.agg_recovery_truncated}, exact_set={exact_set}, "
-      f"scores_exact={scores_exact}, counts_agree={counts_agree})")
+      f"scores_exact={scores_exact}, counts_agree={counts_agree}, "
+      f"coverage_ok={coverage_ok} [k=1 anchors fit cap: {anchors_fit}])")
 display(Markdown(f\"\"\"
 ### Verdict
 

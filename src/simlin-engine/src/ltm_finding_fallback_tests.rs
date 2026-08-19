@@ -1744,3 +1744,18 @@ fn an_empty_graph_sweeps_to_nothing() {
     assert!(!out.truncated);
     assert_eq!(out.steps_processed, 0);
 }
+
+/// The kept paths' node storage is bounded as well as their count: a dedup
+/// whose node budget is already spent refuses the next insert and reports
+/// itself full, so the sweep stops paying for candidates it cannot keep.
+#[test]
+fn the_dedup_refuses_an_insert_that_would_exceed_the_path_node_budget() {
+    let mut dedup = CycleDedup::new(usize::MAX);
+    let mut paths: Vec<Vec<u32>> = Vec::new();
+    dedup.nodes = MAX_FALLBACK_PATH_NODES - 2;
+    assert!(dedup.insert_if_new(&[0, 1], &mut paths), "exactly fits");
+    assert!(!dedup.is_full(&paths));
+    assert!(!dedup.insert_if_new(&[2, 3], &mut paths), "one node over");
+    assert!(dedup.is_full(&paths));
+    assert_eq!(paths.len(), 1);
+}

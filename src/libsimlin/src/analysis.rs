@@ -962,16 +962,15 @@ unsafe fn discovery_to_ffi(
         });
     }
 
-    // An interior NUL folds to NULL (the compile-failure message is still
-    // conceptually present, just unreadable through this string) rather than
-    // failing the whole result -- mirroring `name`'s precedent above, and
-    // never reachable in practice: this is an engine-formatted diagnostic,
-    // not user-authored model text.
+    // The diagnostic can echo user-authored model text (a variable or
+    // equation string), which may carry an interior NUL; a NUL must not turn
+    // the sole "analysis never ran" signal into a NULL that reads as a
+    // successful empty sample, so it is replaced by U+FFFD before the
+    // C string is built -- the message stays readable and present.
     let analysis_error = analysis
         .analysis_error
         .as_deref()
-        .and_then(|s| CString::new(s).ok())
-        .map_or(ptr::null_mut(), |s| s.into_raw());
+        .map_or(ptr::null_mut(), |s| diagnostic_to_c_string(s).into_raw());
 
     let (loops, loop_count) = vec_into_raw_parts(c_loops);
     let (periods, period_count) = vec_into_raw_parts(c_periods);
@@ -2488,9 +2487,25 @@ pub(crate) fn parse_subscripted_loop_id(input: &str) -> Result<ParsedLoopId<'_>,
     Ok(ParsedLoopId { base, subscripts })
 }
 
+/// An engine diagnostic as a C string that is never lost: an interior NUL
+/// (possible when the message echoes user-authored model text) becomes U+FFFD
+/// rather than making the string unrepresentable, so a caller that reads
+/// `analysis_error == NULL` as "analysis ran" is never misled by a NUL.
+fn diagnostic_to_c_string(message: &str) -> CString {
+    CString::new(message.replace('\0', "\u{FFFD}"))
+        .expect("NUL bytes were replaced, so the message is a valid C string")
+}
+
 #[cfg(test)]
 mod parse_tests {
     use super::*;
+
+    #[test]
+    fn a_diagnostic_with_an_interior_nul_is_kept_rather_than_dropped() {
+        let c = diagnostic_to_c_string("bad var \0 name");
+        assert_eq!(c.to_str().unwrap(), "bad var \u{FFFD} name");
+        assert_eq!(diagnostic_to_c_string("plain").to_str().unwrap(), "plain");
+    }
 
     #[test]
     fn parses_bare_id() {

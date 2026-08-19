@@ -1006,7 +1006,7 @@ impl FallbackScratch {
         let check_interval = DEADLINE_CHECK_INTERVAL;
         let mut scanned: u32 = 0;
         for u in 0..self.adj.len() as u32 {
-            if paths.len() >= dedup.cap {
+            if dedup.is_full(paths) {
                 return false;
             }
             if self.scc_ids[u as usize] != seed_scc
@@ -1247,7 +1247,19 @@ struct CycleDedup {
     /// fingerprint -> the indices into `paths` of the cycles carrying it.
     buckets: HashMap<u64, Vec<u32>>,
     cap: usize,
+    /// Node ids the kept paths hold so far, against [`MAX_FALLBACK_PATH_NODES`]:
+    /// the path cap bounds how many cycles are kept, not how long they are,
+    /// and 20,000 cycles of 50,000 nodes would be gigabytes of `u32` before
+    /// any series is materialized.
+    nodes: usize,
+    /// Set once either bound refused an insert; the sweep reads it as "the
+    /// candidate budget is spent".
+    full: bool,
 }
+
+/// Aggregate node-id storage the fallback's kept paths may hold (256 MB of
+/// `u32`); the companion of `MAX_FALLBACK_PATHS`, which bounds count only.
+const MAX_FALLBACK_PATH_NODES: usize = 64 * 1024 * 1024;
 
 impl Default for CycleDedup {
     fn default() -> Self {
@@ -1260,13 +1272,16 @@ impl CycleDedup {
         CycleDedup {
             buckets: HashMap::new(),
             cap,
+            nodes: 0,
+            full: false,
         }
     }
 
     /// Append `cycle` to `paths` unless a rotation of it is already there or
     /// `paths` is already at `cap`. Returns whether it was newly inserted.
     fn insert_if_new(&mut self, cycle: &[u32], paths: &mut Vec<Vec<u32>>) -> bool {
-        if paths.len() >= self.cap {
+        if paths.len() >= self.cap || self.nodes + cycle.len() > MAX_FALLBACK_PATH_NODES {
+            self.full = true;
             return false;
         }
         let bucket = self.buckets.entry(cycle_fingerprint(cycle)).or_default();
@@ -1277,8 +1292,17 @@ impl CycleDedup {
             return false;
         }
         bucket.push(paths.len() as u32);
+        self.nodes += cycle.len();
         paths.push(cycle.to_vec());
+        if paths.len() >= self.cap {
+            self.full = true;
+        }
         true
+    }
+
+    /// Whether either budget (path count, path-node storage) is spent.
+    fn is_full(&self, paths: &[Vec<u32>]) -> bool {
+        self.full || paths.len() >= self.cap
     }
 }
 
@@ -1445,7 +1469,7 @@ pub(super) fn sweep(
                 truncated = true;
                 break 'steps;
             }
-            if paths.len() >= cap {
+            if dedup.is_full(&paths) {
                 // The candidate budget is spent: `dedup` is already refusing
                 // every further insert, so stopping here loses no candidate
                 // that a later seed or step would otherwise have contributed
