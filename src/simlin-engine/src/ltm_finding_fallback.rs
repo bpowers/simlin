@@ -588,13 +588,18 @@ impl FallbackScratch {
     /// node, so a self-edge can neither extend one nor be one: a one-variable
     /// "loop" is not a feedback loop in the SD sense, and the enumerator's
     /// contract says the same, so both generators agree on what a loop is.
+    ///
+    /// Returns the work it did -- adjacency entries scanned across its two
+    /// edge passes and the Tarjan run -- so the caller can charge it against
+    /// the deadline schedule: on a very large active edge set this rebuild is
+    /// the most expensive thing between two clock reads.
     fn load_step(
         &mut self,
         search: &IndexedSearch,
         results: &Results,
         step: usize,
         weight: FallbackWeight,
-    ) {
+    ) -> u64 {
         let base = step * results.step_size;
         for row in self.adj.iter_mut() {
             row.clear();
@@ -616,7 +621,9 @@ impl FallbackScratch {
         // consulted it would divide by a zero nothing wrote -- a silent wrong
         // weight rather than a compile error. One indexed add per active edge
         // is not worth that coupling.
+        let mut work: u64 = 0;
         for (from, edges) in search.adj.iter().enumerate() {
+            work += edges.len() as u64;
             for edge in edges {
                 if edge.to as usize == from {
                     continue;
@@ -644,6 +651,7 @@ impl FallbackScratch {
         // sources in ascending id order gives every `rev` row a content-pure
         // order, which the closing-edge tie-break below relies on.
         for from in 0..self.adj.len() {
+            work += 2 * self.adj[from].len() as u64; // weights, then the Tarjan scan
             for k in 0..self.adj[from].len() {
                 let edge = self.adj[from][k];
                 let w = edge_weight(
@@ -673,6 +681,7 @@ impl FallbackScratch {
             &mut self.scc_ids,
             &mut self.scc_sizes,
         );
+        work
     }
 
     /// The seeds `policy` selects in the loaded step graph, in a content-pure
@@ -1380,12 +1389,24 @@ pub(super) fn sweep(
     let mut steps_processed = 0usize;
     let mut truncated = false;
 
+    // Step-graph rebuild work since the last clock read: a rebuild over a very
+    // large active edge set is charged to the deadline like a search, read
+    // only once it alone spans a check interval (the production constant, so
+    // small fixtures' calibrated read schedules are undisturbed).
+    let mut rebuild_work_since_check: u64 = 0;
     'steps: for step in 1..results.step_count {
         if expired(deadline, clock) {
             truncated = true;
             break 'steps;
         }
-        scratch.load_step(search, results, step, config.weight);
+        rebuild_work_since_check += scratch.load_step(search, results, step, config.weight);
+        if rebuild_work_since_check >= u64::from(DEADLINE_CHECK_INTERVAL) {
+            rebuild_work_since_check = 0;
+            if expired(deadline, clock) {
+                truncated = true;
+                break 'steps;
+            }
+        }
         scratch.collect_seeds(search, config.seeds, &mut seeds);
 
         for &seed in &seeds {

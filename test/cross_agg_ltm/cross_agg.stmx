@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:simlin="https://simlin.com/XMILE/v1.0">
+    <header>
+        <name>cross-agg-ltm</name>
+        <vendor>Simlin</vendor>
+        <product version="0.1.0" lang="en">Simlin</product>
+    </header>
+    <sim_specs method="euler">
+        <start>0</start>
+        <stop>20</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <dimensions>
+        <dim name="Region">
+            <elem name="a"/>
+            <elem name="b"/>
+            <elem name="c"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <stock name="pop">
+                <element subscript="a">
+                    <eqn>100</eqn>
+                </element>
+                <element subscript="b">
+                    <eqn>200</eqn>
+                </element>
+                <element subscript="c">
+                    <eqn>300</eqn>
+                </element>
+                <inflow>growth</inflow>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </stock>
+            <flow name="growth">
+                <eqn>SUM(pop[*]) * 0.05</eqn>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </flow>
+        </variables>
+        <views>
+            <view>
+                <stock name="pop" x="300" y="200" label_side="top"/>
+                <flow name="growth" x="200" y="200" label_side="top">
+                    <pts>
+                        <pt x="120" y="200"/>
+                        <pt x="270" y="200"/>
+                    </pts>
+                </flow>
+            </view>
+        </views>
+    </model>
+</xmile>

@@ -12,7 +12,7 @@ and saves the dominance figure beside the notebook for a quick look.
 
     src/pysimlin/.venv/bin/python notebooks/verify_ltm_discovery_audit.py
 
-`--model clearn` or `--model wrld3` verifies one; the default verifies every
+`--model clearn`, `--model cross_agg` or `--model wrld3` verifies one; the default verifies every
 notebook the generator can produce. Exits non-zero on any failure.
 """
 
@@ -20,13 +20,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import re
 import sys
 from pathlib import Path
 
 import nbformat
 
 NOTEBOOKS_DIR = Path(__file__).resolve().parent
-MODELS = ("clearn", "wrld3")
+MODELS = ("clearn", "cross_agg", "wrld3")
 
 # Each key is a substring of a line the notebook prints, and its value names
 # the claim that line is the evidence for. These are the audit's load-bearing
@@ -45,6 +46,7 @@ MARKERS = {
     "max relative difference in raw loop scores": "raw score agreement",
     "max |rel score| difference": "relative score agreement",
     "step-dominant coverage": "how often the dominant loop is reported",
+    "AUDIT VERDICT": "the notebook's own machine-readable pass/fail predicate",
 }
 
 
@@ -109,7 +111,39 @@ def verify(path: Path) -> bool:
                 preview.write_bytes(base64.b64decode(out["data"]["image/png"]))
                 print(f"\nsaved {preview}")
 
-    ok = not (errors or missing or silent or figures == 0)
+    # Markers only prove the notebook still PRINTS its evidence; the values
+    # have to say what the verdict claims. The notebook emits one predicate
+    # line (`AUDIT VERDICT: PASS|FAIL (...)`) that folds enumeration
+    # completeness, set exactness, score agreement and the independent count
+    # equalities together; verification fails unless it reads PASS, and also
+    # re-checks the headline numbers it summarizes.
+    verdict_pass = False
+    value_failures: list[str] = []
+    all_text = "\n".join(marked_texts)
+    for line in all_text.splitlines():
+        if line.startswith("AUDIT VERDICT:"):
+            verdict_pass = "PASS" in line.split("(")[0]
+        m = re.match(r"engine loops absent from the independent universe: (\d+)", line)
+        if m and int(m.group(1)) != 0:
+            value_failures.append(line)
+        m = re.match(r"reported-200 overlap: (\d+)/(\d+)", line)
+        if m and m.group(1) != m.group(2):
+            value_failures.append(line)
+        for key in ("max relative difference in raw loop scores",
+                    "max |rel score| difference"):
+            m = re.match(re.escape(key) + r": ([0-9.e+-]+)", line)
+            if m and float(m.group(1)) > 1e-9:
+                value_failures.append(line)
+        if line.startswith("enumeration_complete:") and "True" not in line:
+            value_failures.append(line)
+        if "cross-check" in line and "DISAGREE" in line:
+            value_failures.append(line)
+    if not verdict_pass:
+        print("\nAUDIT VERDICT line missing or not PASS")
+    for f in value_failures:
+        print(f"VALUE CHECK FAILED: {f}")
+
+    ok = not (errors or missing or silent or figures == 0 or value_failures) and verdict_pass
     print("OK" if ok else "FAILED")
     return ok
 

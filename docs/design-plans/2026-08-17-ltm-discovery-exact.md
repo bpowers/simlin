@@ -500,6 +500,13 @@ with rationale or propose a change. Tests: AC7.3.
   the fixture test (`a_stockless_two_node_cycle_is_found_by_both_generators_and_ranks_last`),
   since the corpus cannot pin what it does not contain; the bench print is what keeps
   the "costs nothing" half of the claim honest as the corpus changes.
+- **Finite-overflow boundary**: a partition's per-step total is accumulated
+  saturating (capped at `f64::MAX` when a sum of FINITE masses would overflow), so
+  shares stay finite and the pipeline stays well-defined, but they are COMPRESSED
+  rather than exact past that point (loops scoring ~1e308 read as a larger share
+  than they hold). No model in the corpus comes within 1e290 of it; making totals
+  exact there would mean log-domain accumulation everywhere totals are read, which
+  is not worth its cost for a regime no recorded link-score series reaches.
 - **Determinism**: enumeration order is content-pure (node ids from insertion order of
   parsed offsets, which is sorted); the fallback's emitted set is order-independent
   after canonical-rotation dedup; ranking ties break on content keys.

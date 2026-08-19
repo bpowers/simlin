@@ -88,8 +88,9 @@ pub struct ReadModelOutput {
     /// cap truncated `loopDominance`. Above `loopDominance.len()` when the cap
     /// bound, which is the signal that the list is a coverage-aware SUBSET of
     /// the retained loops (each step's dominant loop per competing partition
-    /// is guaranteed a slot, the rest is filled by mean importance): presented
-    /// in importance order, but not a strict most-important-first prefix.
+    /// is guaranteed a slot while those fit the cap, the rest is filled by mean
+    /// importance): presented in importance order, but not a strict
+    /// most-important-first prefix.
     ///
     /// Always serialized, and not optional: every count this can carry is a
     /// real statement, `0` ("no loop cleared the filter") included, so there

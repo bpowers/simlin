@@ -32,7 +32,7 @@ Both paths are relative to the REPOSITORY ROOT; the subshell keeps the `cd`
 from leaking into the second command, where it would resolve the interpreter
 as `src/pysimlin/src/pysimlin/.venv/...` and fail before the generator starts.
 
-`--model clearn` or `--model wrld3` builds one; the default builds both.
+`--model clearn`, `--model cross_agg` or `--model wrld3` builds one; the default builds all three.
 Cargo's target directory is taken from `CARGO_TARGET_DIR` when set, so a
 worktree can share a prebuilt target with the main checkout.
 """
@@ -65,6 +65,17 @@ MODELS: dict[str, dict[str, str]] = {
             "variable-level SCC is why `MAX_LTM_SCC_NODES = 50` exists. Its "
             "*runtime* graph is the densest in the repo corpus, so it is where "
             "candidate generation either is exact or is a sample."
+        ),
+    },
+    "cross_agg": {
+        "rel_path": "test/cross_agg_ltm/cross_agg.stmx",
+        "title": "cross-agg reducer fixture",
+        "blurb": (
+            "A three-element stock whose growth reads `SUM(pop[*])`: the smallest "
+            "model on which the reducer machinery -- a synthetic aggregate node, "
+            "trimmed reported identities, and cross-aggregate loops stitched from "
+            "petals -- all fire. Its universe is seven loops (three petals, three "
+            "pair-stitched, one triple), small enough to check by hand."
         ),
     },
     "clearn": {
@@ -408,23 +419,33 @@ def nid(name: str) -> int:
 edge_index: dict[tuple[int, int], int] = {}
 pairs: list[tuple[int, int]] = []
 rows: list[list[float]] = []
+act_rows: list[list[float]] = []
 duplicate_pairs = 0
 for e in dump["edges"]:
     uv = (nid(e["from"]), nid(e["to"]))
     scores = decode_scores(e["scores"])
+    # Activity is read from the series discovery reads for ACTIVITY: for a
+    # module-input edge that is the NaN-shadow-repaired composite (dumped as
+    # `activity_scores` where it differs), while products use `scores` --
+    # exactly the split `IndexedEdge::value_at` makes in production.
+    act = decode_scores(e["activity_scores"]) if "activity_scores" in e else scores
     if uv in edge_index:
         duplicate_pairs += 1
         rows[edge_index[uv]] = scores  # last wins, as `link_offset_map` does
+        act_rows[edge_index[uv]] = act
     else:
         edge_index[uv] = len(pairs)
         pairs.append(uv)
         rows.append(scores)
+        act_rows.append(act)
 for s in dump["stocks"]:
     nid(s)
 NN = len(node_names)
 S_ALL = np.array(rows, dtype=np.float64)
+A_ALL = np.array(act_rows, dtype=np.float64)
+repaired_edges = int((S_ALL.view(np.uint64) != A_ALL.view(np.uint64)).any(axis=1).sum())
 
-active = ((S_ALL != 0.0) & np.isfinite(S_ALL)) | np.isinf(S_ALL)
+active = ((A_ALL != 0.0) & np.isfinite(A_ALL)) | np.isinf(A_ALL)
 ever_active = active[:, 1:].any(axis=1)
 self_edges = np.array([u == v for u, v in pairs])
 in_union = ever_active & ~self_edges
@@ -438,6 +459,7 @@ print(f"nodes {NN} | discovery edges {len(pairs)} (duplicate (from,to) pairs: "
 print(f"ever-active edges {int(ever_active.sum())}, of which self-edges "
       f"{int((ever_active & self_edges).sum())}")
 print(f"union graph: {len(U)} edges")
+print(f"module-input edges whose activity is read through the composite's NaN shadow: {repaired_edges}")
 print(f"active edges per step: {int(active[:, 1:].sum(axis=0).min())}.."
       f"{int(active[:, 1:].sum(axis=0).max())}")
 """
@@ -493,9 +515,11 @@ def tarjan_scc(adj_lists, n):
 
 adj: list[list[tuple[int, int]]] = [[] for _ in range(NN)]
 radj: list[list[int]] = [[] for _ in range(NN)]
+uedge_index: dict[tuple[int, int], int] = {}
 for row, (u, v) in enumerate(U):
     adj[u].append((v, row))
     radj[v].append(u)
+    uedge_index[(u, v)] = row
 
 scc_of, n_scc = tarjan_scc([[w for w, _ in adj[u]] for u in range(NN)], NN)
 scc_sizes = Counter(scc_of)
@@ -621,6 +645,96 @@ print(f"  enumerated in {enum_s:.1f}s over {visits} edge visits")
 if n_cyc:
     print(f"  length {lens.min()}..{lens.max()}, mean {lens.mean():.1f}; "
           f"total edge rows {int(lens.sum())}")
+"""
+    )
+
+    md(
+        """
+### Cross-aggregate loops are stitched from petals, as the engine does
+
+A feedback loop through a hoisted reducer can visit the synthetic aggregate node
+twice (`pop[a] -> agg -> growth[b] -> pop[b] -> agg -> growth[a] -> pop[a]`), so it
+is not an elementary cycle and no elementary-circuit enumeration emits it. The
+engine recovers these by **stitching**: every elementary cycle that visits exactly one
+aggregate node is a *petal*; for each aggregate, each subset of two or more petals
+with pairwise-disjoint internal node sets is one stitched loop, emitted once per
+subset (all cyclic orderings of a subset share one edge multiset and so one score).
+The stitched loops join the candidate set BEFORE retention. The cell below mirrors
+that rule -- petal priority by internal-set size then node-id sequence, subsets by
+cardinality then mask, one concatenation in priority order -- so the universe it
+scores is the population the engine's denominators sum.
+"""
+    )
+
+    code(
+        """
+AGG_PREFIX = "$\\u205altm\\u205aagg\\u205a"
+is_agg_node = [node_names[n].startswith(AGG_PREFIX) for n in range(NN)]
+U_FROM_ = [u for u, _ in U]
+MAX_AGG_PETALS = 16
+CROSS_AGG_LOOP_BUDGET = 10_000
+
+def nodes_of_rows(rws):
+    return tuple(U_FROM_[r] for r in rws)
+
+petals_by_agg: dict[int, list] = defaultdict(list)
+for rws in circuit_rows:
+    nodes = nodes_of_rows(rws)
+    aggs = [n for n in nodes if is_agg_node[n]]
+    if len(aggs) != 1:
+        continue
+    a = aggs[0]
+    k = nodes.index(a)
+    rotated = nodes[k:] + nodes[:k]
+    internal = frozenset(rotated[1:])
+    # Dedup on the rotation-invariant internal set, as the engine does.
+    if any(p[1] == internal for p in petals_by_agg[a]):
+        continue
+    petals_by_agg[a].append((rotated, internal))
+
+stitched_seqs: list[tuple[int, ...]] = []
+emitted = 0
+for a in sorted(petals_by_agg):
+    petals = petals_by_agg[a]
+    if len(petals) < 2:
+        continue
+    petals.sort(key=lambda p: (len(p[1]), p[0]))
+    petals = petals[:MAX_AGG_PETALS]
+    k = len(petals)
+    masks = sorted(range(1 << k), key=lambda m: (bin(m).count("1"), m))
+    for m in masks:
+        if bin(m).count("1") < 2:
+            continue
+        chosen = [i for i in range(k) if (m >> i) & 1]
+        union: set = set()
+        ok = True
+        for i in chosen:
+            if petals[i][1] & union:
+                ok = False
+                break
+            union |= petals[i][1]
+        if not ok:
+            continue
+        seq = tuple(n for i in chosen for n in petals[i][0])
+        stitched_seqs.append(seq)
+        emitted += 1
+        if emitted >= CROSS_AGG_LOOP_BUDGET:
+            break
+
+# A stitched sequence's edges all exist in the union graph; append each as
+# one more candidate (edge rows, wrapping), exactly as the engine pushes it.
+n_stitched = 0
+for seq in stitched_seqs:
+    rws = []
+    for i in range(len(seq)):
+        uv = (seq[i], seq[(i + 1) % len(seq)])
+        rws.append(uedge_index[uv])
+    circuit_rows.append(tuple(rws))
+    n_stitched += 1
+n_cyc = len(circuit_rows)
+lens = np.array([len(c) for c in circuit_rows], dtype=np.int64)
+print(f"aggregate nodes with petals: {len(petals_by_agg)}; stitched cross-agg loops: {n_stitched}")
+print(f"candidate universe (elementary cycles + stitched loops): {n_cyc}")
 """
     )
 
@@ -1192,7 +1306,24 @@ for label, value in verdict_rows:
 
 exact_set = (len(not_in_universe) == 0 and overlap == len(engine_set))
 scores_exact = raw_max <= 1e-9 and rel_max <= 1e-9
+# The two counts that expose an omission the set comparisons cannot: an
+# engine that dropped universe cycles below retention or outside the top-200
+# could still have every reported loop inside `cycle_of_key`, but its
+# universe_loops / retained_loops would then differ from the independent
+# mass-bearing universe and survivor counts.
+independent_universe = int(massy.sum())
+counts_agree = (analysis.universe_loops == independent_universe
+                and analysis.retained_loops == len(survivors))
 gap = total_steps - covered
+audit_pass = bool(analysis.enumeration_complete and exact_set and scores_exact
+                  and counts_agree)
+print(f"independent mass-bearing universe: {independent_universe} "
+      f"(pysimlin universe_loops {analysis.universe_loops}); independent survivors "
+      f"{len(survivors)} (pysimlin retained_loops {analysis.retained_loops}): "
+      f"{'AGREE' if counts_agree else 'DISAGREE'}")
+print(f"AUDIT VERDICT: {'PASS' if audit_pass else 'FAIL'} "
+      f"(enumeration_complete={analysis.enumeration_complete}, exact_set={exact_set}, "
+      f"scores_exact={scores_exact}, counts_agree={counts_agree})")
 display(Markdown(f\"\"\"
 ### Verdict
 

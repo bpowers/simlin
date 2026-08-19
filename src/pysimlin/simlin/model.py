@@ -616,7 +616,8 @@ class Model:
           before the report cap truncated ``loops``. When it exceeds
           ``len(loops)``, ``loops`` is a coverage-aware SUBSET of the retained
           set -- every step's dominant loop in each competing partition is
-          guaranteed a slot and the rest is filled by mean importance -- so
+          guaranteed a slot (while those dominant loops fit the cap) and the
+          rest is filled by mean importance -- so
           it is presented in importance order but is not a strict
           most-important-first prefix: an omitted loop can outrank a reported
           one that anchors a step.

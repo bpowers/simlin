@@ -520,9 +520,12 @@ class Analysis:
     cap truncated `loops`. Equal to ``len(loops)`` when the cap did not bind;
     larger when it did, which is the signal that `loops` is a coverage-aware
     SUBSET of the retained set: each step's dominant loop per competing
-    partition is guaranteed a slot and the remaining slots are filled by mean
-    importance, so `loops` is presented in importance order but is not a
-    strict most-important-first prefix."""
+    partition is guaranteed a slot while those dominant loops fit the cap
+    (when more than the cap's worth of distinct loops are step-dominant, the
+    strongest of them by mean importance are kept and the guarantee cannot
+    hold for the rest), and the remaining slots are filled by mean importance,
+    so `loops` is presented in importance order but is not a strict
+    most-important-first prefix."""
 
     universe_loops: int | None = None
     """How many DISTINCT loops' mass the discovery denominators sum -- the

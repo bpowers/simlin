@@ -428,6 +428,55 @@ pub fn link_score_offsets(
     parse_link_offsets(results, ltm_vars, dims, expansion)
 }
 
+/// The per-edge series discovery's candidate generators read for ACTIVITY --
+/// the recorded link score, NaN-shadow-repaired for a module-input edge by
+/// [`IndexedEdge::value_at`] (a module composite that is NaN or 0 where one of
+/// its pathway series is active reads as that pathway's max-abs value) -- for
+/// every edge in [`link_score_offsets`]' order. Identical to the recorded series
+/// except on module-input edges, where an audit that derived activity from the
+/// raw composite alone would drop cycles production enumerates. Exposed for the
+/// audit instrument (`examples/ltm_search_graph_dump.rs`) for the same reason the
+/// edge set is: it must consume what discovery consumes, never re-derive it.
+pub fn link_activity_series(
+    results: &Results,
+    causal_graph: &CausalGraph,
+    stocks: &[Ident<Canonical>],
+    link_offsets: &[LinkScoreOffset],
+    sub_model_output_ports: &SubModelOutputPorts,
+) -> Vec<Vec<f64>> {
+    let mut search = IndexedSearch::build(link_offsets, stocks);
+    let mut cache = ModuleOverrideCache::new(
+        causal_graph,
+        results,
+        sub_model_output_ports,
+        results.step_count,
+    );
+    search.attach_module_pathways(&mut |from, to| cache.pathway_offsets(from, to));
+    // `IndexedSearch::build` keeps each node's edges in `link_offsets` order
+    // and interns nodes in first-seen order, so walking the offsets and
+    // looking each edge up by (from, to) reproduces the input order exactly.
+    let id_of: HashMap<&Ident<Canonical>, usize> = search
+        .idents
+        .iter()
+        .enumerate()
+        .map(|(i, ident)| (ident, i))
+        .collect();
+    link_offsets
+        .iter()
+        .map(|((from, to), offset)| {
+            let from_id = id_of[from];
+            let to_id = id_of[to];
+            let edge = search.adj[from_id]
+                .iter()
+                .find(|e| e.to as usize == to_id && e.offset == *offset)
+                .expect("every offset is an edge");
+            (0..results.step_count)
+                .map(|s| edge.value_at(results, s * results.step_size))
+                .collect()
+        })
+        .collect()
+}
+
 fn parse_link_offsets(
     results: &Results,
     ltm_vars: &[LtmSyntheticVar],

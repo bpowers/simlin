@@ -312,13 +312,23 @@ fn loop_key(fl: &FoundLoop) -> Vec<String> {
 fn step_dominant_pairs(exact: &DiscoveryResult, step_count: usize) -> Vec<(usize, usize)> {
     let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, fl) in exact.loops.iter().enumerate() {
-        // Competing within the REPORTED set, mirroring what `rel_scores` was
-        // actually normalized against: a partition holding only one surviving
-        // loop has that loop's `rel_scores` pinned to +/-1 by construction
-        // (see the module doc), so it contributes no pairs.
-        if let Some(p) = fl.partition
-            && exact.partitions[p].loop_count >= 2
-        {
+        // Competing as the ENGINE classified it: `rel_scores` is normalized
+        // against the universe's mass, so a partition whose universe holds
+        // several loops leaves a reported loop's |rel| strictly inside (0, 1)
+        // at some step even when it is the partition's only reported member
+        // (retention or the cap dropped the others); a partition with a
+        // one-loop universe pins its loop to exactly +/-1 wherever active and
+        // contributes no pairs. Reading the universe off the scores rather
+        // than off `DiscoveredPartition::loop_count` (which counts RETURNED
+        // loops) keeps a strategy from looking better by missing exactly the
+        // steps where a lone survivor of a competing partition dominates.
+        let Some(p) = fl.partition else { continue };
+        let competing = exact.partitions[p].loop_count >= 2
+            || fl
+                .rel_scores
+                .iter()
+                .any(|r| r.is_finite() && r.abs() > 0.0 && r.abs() < 1.0);
+        if competing {
             groups.entry(p).or_default().push(i);
         }
     }

@@ -354,7 +354,8 @@ pub struct SimlinDiscoveryResult {
     /// reported-loop cap truncated `loops`.  Equal to `loop_count` when the
     /// cap did not bind, and above it when it did -- the signal that `loops`
     /// is a coverage-aware SUBSET of the loops worth reporting (each step's
-    /// dominant loop per competing partition is guaranteed a slot, the rest
+    /// dominant loop per competing partition is guaranteed a slot while those
+    /// dominant loops fit the cap, the rest
     /// is filled by mean importance): presented in importance order, but not
     /// a strict most-important-first prefix.
     pub retained_loops: usize,

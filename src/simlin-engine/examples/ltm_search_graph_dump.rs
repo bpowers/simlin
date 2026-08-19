@@ -184,17 +184,38 @@ fn main() {
     )
     .unwrap();
 
+    // The series discovery reads for ACTIVITY, which differs from the recorded
+    // series only on module-input edges (NaN-shadow repair through the
+    // pathway slots). Dumped as `activity_scores` only where it differs, so a
+    // consumer derives activity from it and products from `scores` -- exactly
+    // the split production makes.
+    let activity = simlin_engine::ltm_finding::link_activity_series(
+        &results,
+        &causal_graph,
+        &stocks,
+        &link_offsets,
+        &sub_model_ports,
+    );
     let edges: Vec<serde_json::Value> = link_offsets
         .iter()
-        .map(|((from, to), offset)| {
+        .zip(&activity)
+        .map(|(((from, to), offset), act)| {
             let scores: Vec<f64> = (0..results.step_count)
                 .map(|s| results.data[s * results.step_size + offset])
                 .collect();
-            serde_json::json!({
+            let differs = scores
+                .iter()
+                .zip(act)
+                .any(|(a, b)| a.to_bits() != b.to_bits());
+            let mut edge = serde_json::json!({
                 "from": from.as_str(),
                 "to": to.as_str(),
                 "scores": scores_to_json(&scores),
-            })
+            });
+            if differs {
+                edge["activity_scores"] = serde_json::Value::Array(scores_to_json(act));
+            }
+            edge
         })
         .collect();
 

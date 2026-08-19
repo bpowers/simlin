@@ -103,7 +103,12 @@ pub(super) const MAX_DISCOVERY_ENUM_VISITS: u64 = 100_000_000;
 /// of the graph, not of the budget (World3's is ~42, so its ~150k circuits
 /// carry ~6.3M rows). This is the memory bound the design promises -- 20M rows
 /// is 80 MB of `u32` -- and it equally bounds the retention pass, whose work is
-/// linear in emitted rows.
+/// linear in emitted rows. The budget is charged in ROW-EQUIVALENTS: each
+/// emitted circuit also stores its activity AND bitset (`ceil(step_count/64)`
+/// words of 8 bytes, i.e. two `u32` rows per word), so on a high-resolution
+/// run -- 100k saved steps is 1,563 words, 12.5 KB, per circuit -- the bitsets
+/// rather than the rows are what the bound has to see. World3 (401 steps, 7
+/// words per circuit) pays 14 row-equivalents per circuit on top of its 42.
 pub(super) const MAX_DISCOVERY_ENUM_EDGE_ROWS: u64 = 20_000_000;
 
 /// How many recorded values [`ActivityGraph::build`] may copy between
@@ -876,10 +881,11 @@ impl EnumeratedCandidates {
         &self.activity[i * self.words..][..self.words]
     }
 
-    /// Total emitted edge rows -- the quantity [`MAX_DISCOVERY_ENUM_EDGE_ROWS`]
-    /// bounds.
+    /// Total storage in `u32` row-equivalents -- the quantity
+    /// [`MAX_DISCOVERY_ENUM_EDGE_ROWS`] bounds: the emitted edge rows plus each
+    /// circuit's activity bitset at two row-equivalents per 8-byte word.
     fn total_rows(&self) -> usize {
-        self.rows.len()
+        self.rows.len() + self.activity.len() * 2
     }
 }
 
