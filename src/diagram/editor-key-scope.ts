@@ -78,27 +78,40 @@ export function editorOwnsKeyEvent(
 
 // ---- Shared last-active tracker -------------------------------------------
 //
-// One slot per JS realm: the Editor root that most recently saw a pointer
-// press or focus enter it (or its React-tree portals). Module state rather
-// than a DOM attribute because "active" is a relation between instances, not a
-// property of one; a document-level owner would need the same singleton.
+// One slot per PAGE: the Editor root that most recently saw a pointer press or
+// focus enter it (or its React-tree portals). Shared state rather than a DOM
+// attribute because "active" is a relation between instances, not a property
+// of one; and page-global (a `globalThis` property under a registry symbol)
+// rather than module-local because the instances sharing a page need not share
+// a copy of this module: a notebook loads the widget bundle once per displayed
+// widget (anywidget imports each from its own blob URL), so two Editors there
+// hold two copies of this file, and with a module-local slot each copy keeps
+// its own "last active" -- once both have been focused and focus falls to
+// <body>, both claim the key and Delete/undo land on both models. The symbol
+// comes from the realm-wide registry (`Symbol.for`), so every copy -- and
+// every build, if two pysimlin versions ever sit on one page -- reaches the
+// same slot; the slot's value is an Element or null and must stay that way, as
+// the other copies reading it may be older code.
 
-let activeRoot: Element | null = null;
+const ACTIVE_ROOT_SLOT = Symbol.for('@simlin/diagram:activeEditorRoot');
+
+// `globalThis` viewed as the holder of that one symbol-keyed property.
+const activeRootHost = globalThis as unknown as Record<typeof ACTIVE_ROOT_SLOT, Element | null | undefined>;
 
 /** Record pointer/focus activity inside `root`. */
 export function markActiveEditorRoot(root: Element): void {
-  activeRoot = root;
+  activeRootHost[ACTIVE_ROOT_SLOT] = root;
 }
 
 /** Forget `root` (on unmount) if it is the active one, so a key on <body> does
  *  not resolve to a dead instance -- or, worse, keep a live sibling from being
  *  the natural fallback until it is touched again. */
 export function releaseEditorRoot(root: Element): void {
-  if (activeRoot === root) {
-    activeRoot = null;
+  if (activeRootHost[ACTIVE_ROOT_SLOT] === root) {
+    activeRootHost[ACTIVE_ROOT_SLOT] = null;
   }
 }
 
 export function activeEditorRoot(): Element | null {
-  return activeRoot;
+  return activeRootHost[ACTIVE_ROOT_SLOT] ?? null;
 }
