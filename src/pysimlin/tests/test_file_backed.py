@@ -780,6 +780,38 @@ class TestOnChange:
         assert model.revision == 1
         assert model.get_variable("new_aux") is not None
 
+    def test_dispatcher_exception_is_a_warning_and_later_subscribers_still_hear(
+        self, tmp_path: Path
+    ) -> None:
+        # A dispatcher that raises synchronously (a closed kernel IO loop, a
+        # shut-down executor) is a dead subscriber, not a failed edit: the
+        # change is committed and written before delivery, so it is
+        # reported like a raising callback and the remaining subscribers
+        # are still notified.
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+
+        def closed_loop(fn: Callable[[], None]) -> None:
+            raise RuntimeError("IOLoop is closed")
+
+        never = _Events()
+        after = _Events()
+        model.project.on_change(never, dispatch=closed_loop)  # type: ignore[union-attr]
+        model.project.on_change(after)  # type: ignore[union-attr]
+        with pytest.warns(RuntimeWarning, match="IOLoop is closed"):
+            _add_aux(model)
+        assert model.revision == 1
+        assert model.dirty is False
+        assert simlin.load(path).get_variable("new_aux") is not None
+        assert never.events == []
+        assert after.events == [ChangeEvent("edit", 1)]
+        # Once per distinct message: the same dead loop does not warn again.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _add_aux(model, "again")
+        assert [str(w.message) for w in caught] == []
+        assert after.events == [ChangeEvent("edit", 1), ChangeEvent("edit", 2)]
+
     def test_callbacks_run_outside_the_project_locks(self, tmp_path: Path) -> None:
         # A listener that itself edits the project must not deadlock, and
         # nested edits are ordinary changes.
@@ -1412,11 +1444,14 @@ class TestSnapshotEdgeCases:
     ) -> None:
         # The exception type is what tells a caller "the change is real":
         # anything that raises AFTER the contents were replaced and the
-        # revision bumped -- here a subscriber dispatcher that fails (a
-        # closed kernel loop) -- surfaces as SimlinWriteError, not as the
-        # raw exception a caller would read as "nothing applied".  The file
-        # was written, so it is not a write failure and save() has nothing
-        # to retry.
+        # revision bumped -- here notifying subscribers -- surfaces as
+        # SimlinWriteError, not as the raw exception a caller would read as
+        # "nothing applied".  ``_notify`` itself turns subscriber failures
+        # into warnings, so the realistic way it raises is a warnings filter
+        # escalating those to errors (``python -W error``); that is the
+        # vehicle here, with a dispatcher that fails like a closed kernel
+        # loop.  The file was written, so it is not a write failure and
+        # save() has nothing to retry.
         path = _copy(FIXTURES / "teacup.stmx", tmp_path)
         project = Project.open(path, watch=False)
 
@@ -1427,9 +1462,11 @@ class TestSnapshotEdgeCases:
         scratch = simlin.load(path)
         _add_aux(scratch, "applied")
         snapshot = scratch.project.serialize_json()  # type: ignore[union-attr]
-        with pytest.raises(simlin.SimlinWriteError, match="IOLoop is closed") as excinfo:
-            project._apply_snapshot(snapshot, base_revision=0)
-        assert isinstance(excinfo.value.__cause__, RuntimeError)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(simlin.SimlinWriteError, match="IOLoop is closed") as excinfo:
+                project._apply_snapshot(snapshot, base_revision=0)
+        assert isinstance(excinfo.value.__cause__, RuntimeWarning)
         assert excinfo.value.revision == 1
         assert excinfo.value.write_failed is False
         assert project.revision == 1
@@ -1481,8 +1518,10 @@ class TestSnapshotEdgeCases:
             raise OSError("disk full")
 
         monkeypatch.setattr("simlin.project.atomic_write", fail)
-        with pytest.raises(simlin.SimlinWriteError, match="disk full") as excinfo:
-            project._apply_snapshot(snapshot, base_revision=0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(simlin.SimlinWriteError, match="disk full") as excinfo:
+                project._apply_snapshot(snapshot, base_revision=0)
         assert isinstance(excinfo.value.__cause__, OSError)
         assert excinfo.value.write_failed is True
         assert "IOLoop is closed" in str(excinfo.value)
@@ -1892,3 +1931,63 @@ class TestAbsolutePaths:
         link.symlink_to(real)
         model = simlin.open(link, watch=False)
         assert model.path == link
+
+    def test_saving_through_a_symlink_writes_the_target_and_keeps_the_link(
+        self, tmp_path: Path
+    ) -> None:
+        # `path` stays the link name, so every autosave goes through the
+        # link; the bytes must land in the file the link points to (the
+        # link itself staying a link), and the watcher -- which stats and
+        # reads through the link -- must see that write as our own echo.
+        real = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        link = tmp_path / "link.stmx"
+        link.symlink_to(real)
+        model = simlin.open(link, watch=False)
+        _watch_idle(model)
+        events = _Events()
+        _project(model).on_change(events)
+        try:
+            _add_aux(model)
+            assert model.path == link
+            assert link.is_symlink()
+            assert not real.is_symlink()
+            assert simlin.load(real).get_variable("new_aux") is not None
+            assert model.dirty is False
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                _poll(model)
+            assert events.sources == ["edit"], "our write through the link is an echo"
+
+            # An external write to the real file is a change seen through the link.
+            _add_aux(simlin.open(real, watch=False), "external")
+            _poll(model)
+            assert events.sources == ["edit", "disk"]
+            assert model.get_variable("external") is not None
+
+            # The save conflict check also reads through the link: an
+            # external write the watcher has not seen yet blocks the autosave.
+            _project(model).watch(False)
+            _add_aux(simlin.open(real, watch=False), "unseen")
+            with pytest.raises(SimlinRuntimeError, match="changed on disk"):
+                _add_aux(model, "local")
+            assert model.dirty is True
+            model.save(force=True)
+            assert link.is_symlink()
+            assert simlin.load(real).get_variable("local") is not None
+        finally:
+            _project(model).watch(False)
+
+    def test_saving_through_a_dangling_symlink_creates_its_target(self, tmp_path: Path) -> None:
+        # save_as onto a dangling link: the user named the link, so the file
+        # the link points to is created and the link keeps pointing at it.
+        target = tmp_path / "real.stmx"
+        link = tmp_path / "link.stmx"
+        link.symlink_to(target)
+        model = simlin.load(FIXTURES / "teacup.stmx")
+        _project(model).save_as(link)
+        assert model.path == link
+        assert link.is_symlink()
+        assert simlin.load(target).get_variable("teacup_temperature") is not None
+        _add_aux(model)
+        assert link.is_symlink()
+        assert simlin.load(target).get_variable("new_aux") is not None

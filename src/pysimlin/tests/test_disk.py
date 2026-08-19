@@ -96,6 +96,74 @@ class TestAtomicWrite:
         with pytest.raises(FileNotFoundError):
             atomic_write(tmp_path / "nope" / "m.stmx", b"x")
 
+    # Symlinks: a model opened through a link keeps the link as its path
+    # (it is the name the user gave), so every save goes through the link.
+    # ``os.replace`` onto the link itself would swap the link's directory
+    # entry for a regular file -- the link gone, the real file stale -- so
+    # the write must land on the link's final target.
+
+    def test_symlink_to_file_writes_the_target_and_keeps_the_link(self, tmp_path: Path) -> None:
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        real = real_dir / "m.stmx"
+        real.write_bytes(b"old")
+        link = tmp_path / "link.stmx"
+        link.symlink_to(real)
+        atomic_write(link, b"new")
+        assert link.is_symlink()
+        assert os.readlink(link) == str(real)
+        assert real.read_bytes() == b"new"
+        assert link.read_bytes() == b"new"
+        # The tempfile lives next to the target (same filesystem as the
+        # rename) and is gone; the link's directory is untouched.
+        assert [p.name for p in real_dir.iterdir()] == ["m.stmx"]
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["link.stmx", "real"]
+
+    def test_symlink_chain_writes_the_final_target(self, tmp_path: Path) -> None:
+        real = tmp_path / "m.stmx"
+        real.write_bytes(b"old")
+        middle = tmp_path / "middle.stmx"
+        middle.symlink_to(real)
+        link = tmp_path / "link.stmx"
+        link.symlink_to(middle)
+        atomic_write(link, b"new")
+        assert link.is_symlink()
+        assert middle.is_symlink()
+        assert not real.is_symlink()
+        assert real.read_bytes() == b"new"
+
+    def test_symlink_preserves_the_targets_mode(self, tmp_path: Path) -> None:
+        real = tmp_path / "m.stmx"
+        real.write_bytes(b"old")
+        real.chmod(0o640)
+        link = tmp_path / "link.stmx"
+        link.symlink_to(real)
+        atomic_write(link, b"new")
+        assert stat.S_IMODE(real.stat().st_mode) == 0o640
+
+    def test_dangling_symlink_creates_the_named_target(self, tmp_path: Path) -> None:
+        # The user named the link; what the link points to is the file they
+        # mean, so a missing target is created rather than the link replaced.
+        real = tmp_path / "missing.stmx"
+        link = tmp_path / "link.stmx"
+        link.symlink_to(real)
+        assert not link.exists()
+        atomic_write(link, b"new")
+        assert link.is_symlink()
+        assert real.read_bytes() == b"new"
+        assert link.read_bytes() == b"new"
+
+    def test_symlinked_directory_in_the_path(self, tmp_path: Path) -> None:
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        (real_dir / "m.stmx").write_bytes(b"old")
+        link_dir = tmp_path / "linkdir"
+        link_dir.symlink_to(real_dir, target_is_directory=True)
+        atomic_write(link_dir / "m.stmx", b"new")
+        assert link_dir.is_symlink()
+        assert (real_dir / "m.stmx").read_bytes() == b"new"
+        assert [p.name for p in real_dir.iterdir()] == ["m.stmx"]
+
 
 class _Recorder:
     """Records watcher deliveries; ``keep_going`` lets a test ask the

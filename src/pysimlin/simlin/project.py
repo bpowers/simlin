@@ -334,6 +334,10 @@ class Project:
         self._sync = SyncState(disk_hash=disk_hash)
         self._listeners: dict[int, tuple[ChangeCallback, Dispatch | None]] = {}
         self._next_listener_id = 0
+        # Subscriber failures already reported, by message: a dead
+        # dispatcher (closed kernel loop) or a buggy callback fails on every
+        # change, and one report per distinct failure is enough.
+        self._notify_warned: set[str] = set()
         self._watcher: FileWatcher | None = None
         self._closed = False
         # MDL lossiness messages already reported for this project (to_mdl).
@@ -697,9 +701,11 @@ class Project:
         ``dispatch`` to marshal the call elsewhere -- e.g. a Jupyter
         kernel's IO loop, ``dispatch=loop.call_soon_threadsafe`` -- in which
         case ``dispatch(fn)`` is invoked with a zero-argument callable.
-        Callbacks never run under a project lock, and an exception in one is
-        reported as a ``RuntimeWarning`` rather than propagating into the
-        edit or poll that triggered it.
+        Callbacks never run under a project lock, and an exception in one --
+        or in ``dispatch`` itself, e.g. a kernel loop that has since closed
+        -- is reported as a ``RuntimeWarning`` (once per distinct message)
+        rather than propagating into the edit or poll that triggered it; the
+        remaining subscribers are still notified.
 
         Because delivery happens after the lock is released, two changes
         racing on different threads may deliver their events out of
@@ -723,7 +729,14 @@ class Project:
         return unsubscribe
 
     def _notify(self, event: ChangeEvent) -> None:
-        """Deliver ``event`` to every subscriber, outside all locks."""
+        """Deliver ``event`` to every subscriber, outside all locks.
+
+        By the time this runs the change is committed (and autosaved), so a
+        subscriber failing -- its callback raising, or its ``dispatch``
+        raising synchronously because the loop it marshals to is closed --
+        is that subscriber's problem, not the edit's: it is reported as a
+        warning and delivery continues with the other subscribers.
+        """
         with self._file_lock:
             listeners = list(self._listeners.values())
         for callback, dispatch in listeners:
@@ -732,16 +745,27 @@ class Project:
                 try:
                     callback(event)
                 except Exception as exc:  # a listener must not break the edit
-                    warnings.warn(
-                        f"simlin: on_change callback {callback!r} raised: {exc!r}",
-                        RuntimeWarning,
-                        stacklevel=2,
+                    self._warn_subscriber_failure(
+                        f"simlin: on_change callback {callback!r} raised: {exc!r}"
                     )
 
             if dispatch is None:
                 deliver()
-            else:
+                continue
+            try:
                 dispatch(deliver)
+            except Exception as exc:  # a dead dispatcher must not break the edit
+                self._warn_subscriber_failure(
+                    f"simlin: on_change dispatch {dispatch!r} for {callback!r} raised: {exc!r}"
+                )
+
+    def _warn_subscriber_failure(self, message: str) -> None:
+        """Report a subscriber failure once per distinct message."""
+        with self._file_lock:
+            if message in self._notify_warned:
+                return
+            self._notify_warned.add(message)
+        warnings.warn(message, RuntimeWarning, stacklevel=3)
 
     # ── internal: writing ───────────────────────────────────────────────
 
@@ -908,8 +932,10 @@ class Project:
             SimlinWriteError: if the snapshot was applied (revision bumped)
                 but a step after that failed -- the autosave write
                 (``write_failed``; ``dirty`` stays set) or, less likely,
-                notifying subscribers (a dispatcher raising on a closed
-                kernel loop); ``__cause__`` is the underlying error.  The
+                notifying subscribers (``_notify`` turns subscriber failures
+                into warnings, so this takes a bug there or a warnings
+                filter escalating them); ``__cause__`` is the underlying
+                error.  The
                 type is what lets the caller tell the browser its edit
                 stands: an exception of any other type means nothing was
                 applied, so every failure past the commit point below must

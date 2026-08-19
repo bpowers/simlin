@@ -52,8 +52,17 @@ def atomic_write(path: _PathLike, data: bytes) -> None:
     target already exists its mode is copied so a save does not silently
     change a model file's permissions.  A failure at any step removes the
     tempfile and re-raises; the target is untouched.
+
+    Symlinks are written *through*: ``path`` is resolved to its final target
+    and the tempfile is created and renamed in that target's directory.
+    Renaming onto the link itself would replace the link's directory entry
+    with a regular file -- the link gone, the real file stale -- which is
+    exactly wrong for a project opened through a link (its ``path`` keeps
+    the link name, so every save comes this way).  A dangling link gets its
+    missing target created: the link is the name the user gave, and the
+    file it points to is the one they mean.
     """
-    target = Path(path)
+    target = Path(os.path.realpath(path))
     parent = target.parent
     for _ in range(16):
         tmp = parent / f".{target.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
