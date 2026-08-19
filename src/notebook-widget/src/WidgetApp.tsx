@@ -205,26 +205,53 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
     }, NOTICE_TIMEOUT_MS);
   }, []);
 
+  // The widget's one trait write: the Editor's selection, debounced (a
+  // box-select fires per drag frame) into one sync carrying the latest value.
+  // A pending value is superseded by a later call, which is what makes the
+  // remount path below safe to call with [] while a selection is pending.
+  const publishSelection = React.useCallback(
+    (idents: ReadonlyArray<string>): void => {
+      const r = refs.current;
+      if (r.selectionTimer !== null) {
+        clearTimeout(r.selectionTimer);
+      }
+      r.selectionTimer = setTimeout(() => {
+        r.selectionTimer = null;
+        model.set(TRAITS.selection, [...idents]);
+        model.save_changes();
+      }, SELECTION_DEBOUNCE_MS);
+    },
+    [model],
+  );
+
   // Remount the Editor on the kernel-authoritative pair. Idempotent on the
   // pair: a push and the `rejected` that follows it (or the two change events
   // of one hold_sync) remount once. The outgoing Editor's live viewport is
   // carried into the new mount unless the kernel change moved the stored one
   // itself (`viewportToCarry`, decided against the OUTGOING seed's text, i.e.
-  // the project the live Editor was mounted from).
-  const remountFrom = React.useCallback((pair: EditorSeedPair): void => {
-    const r = refs.current;
-    if (pair.revision === r.seed.revision && pair.projectJson === r.seed.projectJson) {
-      return;
-    }
-    const initialViewport = viewportToCarry(r.liveViewport, r.seed.projectJson, pair.projectJson);
-    r.seed = { revision: pair.revision, projectJson: pair.projectJson };
-    setSeed((prev) => ({
-      revision: pair.revision,
-      projectJson: pair.projectJson,
-      generation: prev.generation + 1,
-      initialViewport,
-    }));
-  }, []);
+  // the project the live Editor was mounted from). The new Editor starts with
+  // nothing selected and -- like every Editor -- does not report its initial
+  // selection, so the trait is told here: otherwise `selection` (and
+  // Model.selection) would keep naming what the replaced Editor had selected,
+  // possibly variables the push removed, while the UI shows none.
+  const remountFrom = React.useCallback(
+    (pair: EditorSeedPair): void => {
+      const r = refs.current;
+      if (pair.revision === r.seed.revision && pair.projectJson === r.seed.projectJson) {
+        return;
+      }
+      const initialViewport = viewportToCarry(r.liveViewport, r.seed.projectJson, pair.projectJson);
+      r.seed = { revision: pair.revision, projectJson: pair.projectJson };
+      setSeed((prev) => ({
+        revision: pair.revision,
+        projectJson: pair.projectJson,
+        generation: prev.generation + 1,
+        initialViewport,
+      }));
+      publishSelection([]);
+    },
+    [publishSelection],
+  );
 
   // Kernel pushes. Only the kernel writes `project_json` and `revision`, so
   // every change event on them is a kernel push. The two travel in ONE
@@ -408,21 +435,6 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
     refs.current.liveViewport = { modelName, viewBox: { ...viewport.viewBox }, zoom: viewport.zoom };
   }, []);
 
-  const handleSelectionChanged = React.useCallback(
-    (idents: ReadonlyArray<string>): void => {
-      const r = refs.current;
-      if (r.selectionTimer !== null) {
-        clearTimeout(r.selectionTimer);
-      }
-      r.selectionTimer = setTimeout(() => {
-        r.selectionTimer = null;
-        model.set(TRAITS.selection, [...idents]);
-        model.save_changes();
-      }, SELECTION_DEBOUNCE_MS);
-    },
-    [model],
-  );
-
   const theme = resolveTheme(traits.theme, hostTheme);
 
   return (
@@ -452,7 +464,7 @@ export function WidgetApp({ model, name }: { model: AnyModel; name: string }): R
           name={name}
           readOnlyMode={traits.readOnly}
           onSave={handleSave}
-          onSelectionChanged={handleSelectionChanged}
+          onSelectionChanged={publishSelection}
           onViewportChange={handleViewportChange}
           initialViewport={seed.initialViewport}
           portalContainer={wrapper}

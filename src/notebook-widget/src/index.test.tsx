@@ -765,6 +765,68 @@ describe('WidgetApp <-> model protocol', () => {
     expect(model.lastSet('selection')).toEqual(['a', 'b']);
     expect(model.saveChangesCount).toBe(1);
   });
+
+  it('a kernel push that remounts the Editor publishes an empty selection (the new Editor starts with none)', async () => {
+    // The Editor suppresses onSelectionChanged on its initial mount, so a
+    // remount on a kernel push would leave the trait -- and Model.selection
+    // -- naming whatever the OLD Editor had selected, possibly variables the
+    // push removed, while the UI shows nothing selected.
+    const model = new FakeModel(defaultState({ revision: 3 }));
+    await mount(model);
+    fireEvent.click(screen.getByText('select'));
+    act(() => {
+      rs.advanceTimersByTime(SELECTION_DEBOUNCE_MS);
+    });
+    expect(model.lastSet('selection')).toEqual(['a', 'b']);
+    act(() => {
+      model.kernelChange('{"name":"from-python"}');
+    });
+    expect(mounts).toHaveLength(2);
+    // Debounced like any selection change, so a burst of pushes is one sync.
+    expect(model.sets.filter((s) => s.key === 'selection')).toHaveLength(1);
+    act(() => {
+      rs.advanceTimersByTime(SELECTION_DEBOUNCE_MS);
+    });
+    expect(model.sets.filter((s) => s.key === 'selection')).toHaveLength(2);
+    expect(model.lastSet('selection')).toEqual([]);
+    expect(model.saveChangesCount).toBe(2);
+  });
+
+  it('a selection still pending when a remount lands is superseded by the empty one (never published stale)', async () => {
+    const model = new FakeModel(defaultState({ revision: 3 }));
+    await mount(model);
+    fireEvent.click(screen.getByText('select'));
+    // Debounce still running when the kernel pushes.
+    act(() => {
+      model.kernelChange('{"name":"from-python"}');
+    });
+    act(() => {
+      rs.advanceTimersByTime(SELECTION_DEBOUNCE_MS);
+    });
+    // Exactly one sync, and it carries the new Editor's (empty) selection,
+    // not the old Editor's pending one.
+    expect(model.sets.filter((s) => s.key === 'selection')).toEqual([{ key: 'selection', value: [] }]);
+  });
+
+  it('an own-ack push and an idempotent re-push do not touch the selection (no remount happened)', async () => {
+    const model = new FakeModel(defaultState({ revision: 3 }));
+    await mount(model);
+    fireEvent.click(screen.getByText('select'));
+    act(() => {
+      rs.advanceTimersByTime(SELECTION_DEBOUNCE_MS);
+    });
+    fireEvent.click(screen.getByText('edit'));
+    await waitFor(() => expect(mounts[0].saveResults).toEqual([4]));
+    act(() => {
+      model.kernelPush({ project_json: localJson(SEED, 1), revision: 4 });
+    });
+    act(() => {
+      rs.advanceTimersByTime(SELECTION_DEBOUNCE_MS);
+    });
+    expect(mounts).toHaveLength(1);
+    expect(model.sets.filter((s) => s.key === 'selection')).toHaveLength(1);
+    expect(model.lastSet('selection')).toEqual(['a', 'b']);
+  });
 });
 
 describe('viewport carried across a kernel-originated remount', () => {
