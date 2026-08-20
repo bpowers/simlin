@@ -2189,7 +2189,7 @@ fn test_two_a2a_subsystems_per_slot_rel_score_round_trips() {
 /// itself) and open it via the protobuf FFI, returning `(project, model)`.
 ///
 /// population[t] is a stock fed by `births = population * growth_rate`, so the
-/// strongest-path discovery finds a single reinforcing loop
+/// discovery finds a single reinforcing loop
 /// `population -> births -> population` with a non-trivial importance series.
 unsafe fn open_reinforcing_loop_model() -> (*mut SimlinProject, *mut SimlinModel) {
     let test_project = TestProject::new("main")
@@ -2333,15 +2333,67 @@ fn discover_loops_returns_loops_periods_and_importance() {
     }
 }
 
+/// AC6.1: the three completeness counters reach the C surface.
+///
+/// On an unbudgeted tiny model discovery is EXACT, so `enumeration_complete`
+/// is set, `universe_loops` names the enumerated candidate universe rather
+/// than the `-1` that means "the fallback sampled", and `retained_loops`
+/// equals `loop_count` because the 200-loop cap cannot bind on a model whose
+/// universe is a single cycle. The tripped arms are covered by
+/// `discover_loops_tiny_budget_truncates` (fallback) and by the engine's own
+/// `a_capped_run_reports_the_pre_cap_retained_count` (cap), which needs a
+/// test-only cap override this FFI does not expose.
+#[test]
+fn discover_loops_reports_enumeration_completeness() {
+    unsafe {
+        let (proj, model) = open_reinforcing_loop_model();
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let result = simlin_analyze_discover_loops(model, 0, &mut err);
+        assert!(err.is_null(), "discovery should not error");
+        assert!(!result.is_null());
+
+        let res = &*result;
+        assert!(
+            res.enumeration_complete,
+            "an unbudgeted run on a tiny model enumerates its whole universe"
+        );
+        // population -> births -> population is the model's only cycle.
+        assert_eq!(
+            res.universe_loops, 1,
+            "the universe is the single reinforcing cycle"
+        );
+        assert_eq!(res.loop_count, 1);
+        assert_eq!(
+            res.retained_loops, res.loop_count,
+            "nothing is capped away on a one-loop model"
+        );
+
+        simlin_free_discovery_result(result);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
 #[test]
 fn discover_loops_tiny_budget_truncates() {
     unsafe {
         // A goal-seeking (balancing) model over many saved timesteps. Values
         // stay bounded (population converges toward the goal), and the large
-        // step count makes the per-timestep discovery sweep reliably take well
-        // over a millisecond -- so a 1ms budget trips the per-step elapsed
-        // check and reports truncation. The budget is checked at the top of
-        // each step, so the sweep stops promptly rather than hanging.
+        // step count makes candidate generation reliably take well over a
+        // millisecond -- so a 1ms budget truncates rather than hanging.
+        //
+        // What the budget buys is split: the enumeration path gets half of it
+        // and copying 200k steps of per-edge score rows exceeds that on its
+        // own, so it is abandoned at the first block boundary past its half
+        // -- a block being a fixed number of VALUES, so one edge's long
+        // series is cut mid-copy rather than overrunning to the next edge.
+        // The shortest-path fallback then runs on the remainder and stops at
+        // the top of the first saved step it cannot afford. `truncated` is
+        // therefore the FALLBACK's verdict, and it is reachable only because
+        // the split leaves the fallback time to reach it -- an undivided
+        // budget would have been spent entirely inside the abandoned
+        // enumeration and the caller would get nothing at all.
         let test_project = TestProject::new("main")
             .with_sim_time(0.0, 200_000.0, 1.0)
             .stock("population", "10", &["adjustment"], &[], None)
@@ -2374,6 +2426,17 @@ fn discover_loops_tiny_budget_truncates() {
             res.truncated,
             "a 1ms budget on a 200k-step sweep must report truncated discovery"
         );
+        // The fallback generated whatever was found, so the report is a
+        // sample: it names no universe (`-1`, the sentinel that keeps
+        // "the fallback ran" distinct from "the universe is empty").
+        assert!(
+            !res.enumeration_complete,
+            "a budget the enumeration cannot meet reports an incomplete enumeration"
+        );
+        assert_eq!(
+            res.universe_loops, -1,
+            "a sampled report has no universe count"
+        );
 
         simlin_free_discovery_result(result);
         simlin_model_unref(model);
@@ -2392,6 +2455,103 @@ fn discover_loops_null_model_errors_without_panic() {
 
         // Freeing a null result is a no-op.
         simlin_free_discovery_result(ptr::null_mut());
+    }
+}
+
+/// A model that CANNOT be analyzed for LTM at all (GH #486: a non-Euler
+/// integration method with a stock in a feedback loop -- the flow-to-stock
+/// link-score formula assumes Euler stepping) must surface `analysis_error`
+/// non-NULL rather than returning a successful-looking empty/sampled result:
+/// `simlin_analyze_discover_loops` itself still succeeds (this is a
+/// STRUCTURAL fact about the model, not an FFI error), but the discovery
+/// result reports "analysis never ran" -- `enumeration_complete == false`
+/// AND `universe_loops == -1`, the SAME shape a genuinely sampled fallback
+/// run reports, which is exactly why `analysis_error` has to be the field a
+/// caller checks first.
+#[test]
+fn discover_loops_reports_analysis_error_when_ltm_never_ran() {
+    unsafe {
+        let test_project = TestProject::new("main")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .with_sim_method(simlin_engine::datamodel::SimMethod::RungeKutta4)
+            .stock("population", "100", &["births"], &[], None)
+            .flow("births", "population * 0.02", None);
+        let datamodel_project = test_project.build_datamodel();
+        let project = engine_serde::serialize(&datamodel_project).unwrap();
+        let mut buf = Vec::new();
+        project.encode(&mut buf).unwrap();
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let proj = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+        assert!(err.is_null());
+        assert!(!proj.is_null());
+        let mut err_model: *mut SimlinError = ptr::null_mut();
+        let model = simlin_project_get_model(proj, ptr::null(), &mut err_model);
+        assert!(err_model.is_null());
+        assert!(!model.is_null());
+
+        err = ptr::null_mut();
+        let result = simlin_analyze_discover_loops(model, 0, &mut err);
+        assert!(
+            err.is_null(),
+            "an unanalyzable model is a discovery RESULT, not an FFI error"
+        );
+        assert!(!result.is_null());
+
+        let res = &*result;
+        assert!(
+            !res.analysis_error.is_null(),
+            "RK4 + a stock in a loop cannot be compiled for LTM analysis"
+        );
+        let msg = CStr::from_ptr(res.analysis_error)
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            msg.contains("Euler"),
+            "analysis_error must reference the Euler assumption, got: {msg}"
+        );
+        assert_eq!(res.loop_count, 0, "analysis never reached candidates");
+        assert_eq!(res.period_count, 0);
+        assert_eq!(res.partition_count, 0);
+        assert_eq!(res.retained_loops, 0);
+        assert!(
+            !res.enumeration_complete,
+            "analysis never ran, so this is false by construction (not a \
+             genuine sample verdict)"
+        );
+        assert_eq!(
+            res.universe_loops, -1,
+            "the never-ran case reports the SAME -1 sentinel a sampled run \
+             would -- analysis_error is what distinguishes them"
+        );
+
+        simlin_free_discovery_result(result);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// The healthy-model control for the test above: a model LTM CAN analyze
+/// must leave `analysis_error` NULL.
+#[test]
+fn discover_loops_healthy_model_has_no_analysis_error() {
+    unsafe {
+        let (proj, model) = open_reinforcing_loop_model();
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let result = simlin_analyze_discover_loops(model, 0, &mut err);
+        assert!(err.is_null());
+        assert!(!result.is_null());
+
+        let res = &*result;
+        assert!(
+            res.analysis_error.is_null(),
+            "a healthy, analyzable model must not report analysis_error"
+        );
+
+        simlin_free_discovery_result(result);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
     }
 }
 
@@ -2582,7 +2742,7 @@ fn collapsed_macro_edge_carries_composite_score() {
             })
             .expect("composite level -> smoothed_level edge");
         // The composite edge through the macro carries a score series (the
-        // product/strongest-path path score), not a dropped/null one.
+        // product path score), not a dropped/null one.
         assert!(!through.score.is_null());
         assert!(through.score_len > 0);
         simlin_free_links(links_ptr);

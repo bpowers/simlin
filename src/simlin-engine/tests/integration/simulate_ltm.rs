@@ -422,12 +422,11 @@ fn discovery_arms_race_3party() {
     // Discovery mode
     let found = discover_loops_from_path(model_path);
 
-    // With per-stock reset, discovery finds all 8 loops: each stock
-    // starts with fresh per-node expansion budgets, so pairwise and
-    // three-way reinforcing loops are not starved by expansions consumed
-    // during earlier stocks' self-loop searches, and the
-    // canonical-rotation dedup retains both directions of the three-way
-    // loop as distinct paths.
+    // Discovery finds all 8: the union-graph enumeration emits every
+    // ever-simultaneously-active elementary cycle, so no loop can be
+    // starved by work spent on another, and the canonical-rotation dedup
+    // retains both directions of the three-way loop as distinct paths
+    // (issue #308).
     assert_eq!(
         found.len(),
         8,
@@ -472,15 +471,16 @@ fn discovery_decoupled_stocks() {
     let exhaustive_loops = model_detected_loops(&db, source_model, sync.project);
     // Discovery mode -- the decoupled stocks model has time-varying loop
     // activity where different loops activate at different timesteps,
-    // demonstrating why per-timestep discovery is necessary.
+    // demonstrating why discovery is decided per saved step.
     let found = discover_loops_from_path(model_path);
 
-    // The heuristic finds 2 of 3 loops: the self-loops for each stock.
-    // The cross-stock loop is missed because its two cross-links are
-    // never simultaneously nonzero at any saved timestep (stock_1->flow_2
-    // is active only around step 4, stock_2->flow_1 only at steps 6-10),
-    // so the per-step zero-edge-excluded search graph never contains the
-    // full cycle -- the "baton-passing" limitation tracked as GH #699.
+    // Discovery finds 2 of 3 loops: the self-loops for each stock. The
+    // cross-stock loop is missed because its two cross-links are never
+    // simultaneously nonzero at any saved timestep (stock_1->flow_2 is active
+    // only around step 4, stock_2->flow_1 only at steps 6-10), so the cycle's
+    // activity intersection is empty and it is outside the
+    // ever-simultaneously-active universe -- the "baton-passing" limitation
+    // tracked as GH #699.
     assert_eq!(
         found.len(),
         2,
@@ -4588,8 +4588,8 @@ fn test_mixed_loop_scalar_per_element_scores() {
 // AC7: Discovery mode on element-level graph
 //
 // These tests verify that discovery mode operates on the element-level graph,
-// finding element-specific loops post-simulation using strongest-path DFS
-// from element-level stocks.
+// finding element-specific loops post-simulation from the recorded
+// element-level link scores.
 // ============================================================================
 
 /// Run the full element-level discovery pipeline for an arrayed model.
@@ -8100,7 +8100,7 @@ fn test_no_duplicate_ltm_vars_with_agg_routed_and_direct_edge() {
 /// `update[r] = share[r] * pop[r] * c` -- the `* pop[r]` makes growth curved
 /// (a near-constant feedback flow has ~zero second-order differences, so the
 /// flow→stock link score -- and thus every loop score -- would vanish; the
-/// curvature keeps discovery's strongest-path scores non-degenerate). The
+/// curvature keeps discovery's loop scores non-degenerate). The
 /// reducer `SUM(pop[*])` is a subexpression, so Phase 5 hoists it into
 /// `$⁚ltm⁚agg⁚0`.
 fn build_heterogeneous_share_model(c: f64) -> simlin_engine::datamodel::Project {
@@ -8272,7 +8272,7 @@ fn test_agg_link_scores_heterogeneous_match_hand_calc() {
     }
 }
 
-/// AC4.7 / AC4.2: discovery mode (strongest-path) on the inlined-reducer model
+/// AC4.7 / AC4.2: discovery mode on the inlined-reducer model
 /// `share[r] = pop[r] / SUM(pop[*])`, `update[r] = share[r] * pop[r] * c`,
 /// `pop[r]` a stock fed by `update`.
 ///
@@ -8298,11 +8298,11 @@ fn test_agg_link_scores_heterogeneous_match_hand_calc() {
 ///    `pop[big] -> share[big] -> update[big] -> pop[big]`), so the loop's
 ///    *score* -- which factor terms it is a product of -- is what tells them
 ///    apart. (For this fixture the bare numerator link score `pop -> share`
-///    happens to evaluate to zero, so discovery's strongest path is the
+///    happens to evaluate to zero, so the surviving reported loop is the
 ///    aggregate one; a model with no SUM reducer would instead carry the
 ///    three-factor score.)
 ///
-/// Strongest-path discovery reports one loop per stock node, so a genuinely
+/// Discovery reports one loop per reported link cycle, so a genuinely
 /// *cross-element* loop (`pop[big] -> agg -> share[small] -> ... -> pop[small]
 /// -> agg -> share[big] -> ... -> pop[big]`) is never the reported winner for
 /// this fixture; the point being checked is that discovery's loop-finding is
@@ -8310,8 +8310,8 @@ fn test_agg_link_scores_heterogeneous_match_hand_calc() {
 /// then the aggregate node is hidden from the reported structure.
 ///
 /// Heterogeneous initial values (`pop[big] = 1000`, `pop[small] = 10`) keep the
-/// loop scores non-degenerate so discovery's DFS and the post-sim contribution
-/// filter both have a real run to work with.
+/// loop scores non-degenerate so discovery's candidate search and the post-sim
+/// contribution filter both have a real run to work with.
 #[test]
 fn test_discovery_loop_through_agg_scored_on_untrimmed_path() {
     let project = build_heterogeneous_share_model(0.01);
@@ -8438,14 +8438,15 @@ fn test_discovery_loop_through_agg_scored_on_untrimmed_path() {
     //
     // Both are real loops (the diagonal conflation `share = pop / SUM(pop[*])`
     // resolved by construction -- the numerator effect and the SUM effect are
-    // distinct loops). Discovery's strongest-path heuristic picks one per
-    // timestep, so we don't know a priori which it surfaced here; we assert
+    // distinct loops). The reported-cycle dedup keeps one representative --
+    // the two trim to the same reported link cycle -- so we don't know a
+    // priori which of the two score series survived here; we assert
     // the `loop_score` matches one of the two products, consistently across
     // steps, and that it is non-zero somewhere. (The "scored on the un-trimmed
     // aggregate path" invariant proper is exercised exhaustively by
     // `db::ltm_unified_tests::cross_element_loop_through_agg_is_recovered`,
     // where the aggregate-path loop is a Loop in its own right rather than a
-    // strongest-path candidate. Before GH #517 was fixed the bare-numerator
+    // deduped representative. Before GH #517 was fixed the bare-numerator
     // link score was identically `0.0` -- `pop / SUM(PREVIOUS(pop[*]))` -- so
     // only the aggregate path was ever non-zero and this test could pin it
     // directly; with the fix the numerator path is a live competitor.)
@@ -9361,11 +9362,12 @@ fn build_reducer_feedback_model(name: &str, elems: &[&str]) -> simlin_engine::da
 /// On the 3-element `growth[r] = SUM(pop[*]) * 0.05` repro, exhaustive mode
 /// emits 7 cross-element loops (3 single-petal + 3 disjoint-pair + 1 triple).
 /// Before the fix, discovery (the production `analyze_model` path) returned
-/// only the 3 single-petal loops because its DFS `visiting` set forbids
-/// revisiting the synthetic agg node. This cross-validates the discovered loop
-/// set against exhaustive on the SAME model: same count, and -- for the
-/// loops that traverse the agg -- a per-element loop-score series equal to the
-/// exhaustive loop_score variables (to within FP reassociation).
+/// only the 3 single-petal loops: both discovery generators emit ELEMENTARY
+/// cycles, which by definition never revisit the synthetic agg node. This
+/// cross-validates the discovered loop set against exhaustive on the SAME
+/// model: same count, and -- for the loops that traverse the agg -- a
+/// per-element loop-score series equal to the exhaustive loop_score variables
+/// (to within FP reassociation).
 #[test]
 fn discovery_recovers_cross_agg_loops_matches_exhaustive() {
     let elems = ["a", "b", "c"];
@@ -10170,9 +10172,9 @@ fn discovery_multi_output_loop_polarity_matches_exhaustive() {
         "exhaustive settled loop score should be positive (reinforcing), got {exhaustive_settled}"
     );
 
-    // Discovery: run the strongest-path search and find the loop through the
-    // module. Its settled signed score must have the same sign exhaustive
-    // reports, not the inverted one the composite tie-break produced.
+    // Discovery: run loop discovery and find the loop through the module. Its
+    // settled signed score must have the same sign exhaustive reports, not the
+    // inverted one the composite tie-break produced.
     let compiled = compile_ltm_discovery_incremental(&project);
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().expect("discovery simulation should run");
@@ -10637,7 +10639,7 @@ fn exhaustive_mixed_sign_balanced_loop_stays_undetermined() {
 /// path must agree on the Rux fixture -- same `MostlyReinforcing` label and
 /// the same dominance-ratio confidence. Both classify via
 /// `LoopPolarity::from_runtime_scores`; for this single-loop fixture the
-/// discovery strongest-path score series is the same per-step product of
+/// discovery score series is the same per-step product of
 /// link scores the exhaustive `loop_score` variable computes, so the two
 /// modes must not disagree about the same model.
 #[test]
@@ -10664,7 +10666,7 @@ fn discovery_rux_classification_matches_exhaustive() {
     );
     let exhaustive_confidence = exhaustive_loops[0].polarity_confidence;
 
-    // Discovery: run the strongest-path search over the discovery-mode sim.
+    // Discovery: run loop discovery over the discovery-mode sim.
     let compiled = compile_ltm_discovery_incremental(&project);
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().expect("discovery simulation should run");

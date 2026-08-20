@@ -4,28 +4,20 @@
 
 //! Unit tests for `ltm_finding.rs`, split out of the module body to keep the
 //! production file under the per-file line cap (mounted via `#[path]`).
+//!
+//! `ltm_finding_enum_tests.rs` is a SIBLING `#[path]` module (not a child of
+//! this one) holding the union-graph enumeration/retention test suite, split
+//! out for the same line-cap reason; a handful of fixture helpers are shared
+//! across the two-way split and re-exported `pub(super)` for it.
 
+use super::enum_tests::{
+    discover_project, enum_flow, enum_results, enum_stock, survivor_node_sets,
+};
 use super::*;
-use crate::common::canonicalize;
-
-/// Helper to build edges from tuples
-fn edges(tuples: &[(&str, &str, f64)]) -> Vec<(Ident<Canonical>, Ident<Canonical>, f64)> {
-    tuples
-        .iter()
-        .map(|(from, to, score)| (Ident::new(from), Ident::new(to), *score))
-        .collect()
-}
 
 /// Helper to build stock list from names
 fn stock_list(names: &[&str]) -> Vec<Ident<Canonical>> {
     names.iter().map(|n| Ident::new(n)).collect()
-}
-
-/// Helper to extract sorted node set from a path for comparison
-fn sorted_node_set(path: &[Ident<Canonical>]) -> Vec<String> {
-    let mut set: Vec<String> = path.iter().map(|id| id.as_str().to_string()).collect();
-    set.sort();
-    set
 }
 
 // --- collapse_synthetic_links ---
@@ -177,449 +169,6 @@ fn collapse_folds_two_disagreeing_structural_paths_to_unknown() {
     let edge = find_edge(&out, "a", "c").expect("a -> c composite");
     assert_eq!(edge.polarity, LinkPolarity::Unknown);
     assert!(edge.score.is_none());
-}
-
-// --- Test 1: SearchGraph construction ---
-
-#[test]
-fn test_search_graph_construction() {
-    let graph = SearchGraph::from_edges(
-        edges(&[
-            ("a", "b", 10.0),
-            ("a", "d", 100.0),
-            ("b", "c", 10.0),
-            ("c", "a", 10.0),
-            ("d", "c", 0.1),
-            ("d", "b", 100.0),
-        ]),
-        stock_list(&["a", "b", "c", "d"]),
-    );
-
-    // Verify adjacency list exists for all source nodes
-    assert!(graph.adj.contains_key(&*canonicalize("a")));
-    assert!(graph.adj.contains_key(&*canonicalize("b")));
-    assert!(graph.adj.contains_key(&*canonicalize("c")));
-    assert!(graph.adj.contains_key(&*canonicalize("d")));
-
-    // Verify edges are sorted by |score| descending
-    let a_edges = &graph.adj[&*canonicalize("a")];
-    assert_eq!(a_edges.len(), 2);
-    assert_eq!(a_edges[0].to.as_str(), "d"); // score 100
-    assert_eq!(a_edges[1].to.as_str(), "b"); // score 10
-
-    let d_edges = &graph.adj[&*canonicalize("d")];
-    assert_eq!(d_edges.len(), 2);
-    assert_eq!(d_edges[0].to.as_str(), "b"); // score 100
-    assert_eq!(d_edges[1].to.as_str(), "c"); // score 0.1
-
-    // Verify stocks
-    assert_eq!(graph.stocks.len(), 4);
-}
-
-// --- Test 2: Trivial loop ---
-
-#[test]
-fn test_trivial_loop() {
-    // Single stock with a flow forming one loop: stock -> flow -> stock
-    let graph = SearchGraph::from_edges(
-        edges(&[("stock", "flow", 1.0), ("flow", "stock", 1.0)]),
-        stock_list(&["stock"]),
-    );
-
-    let loops = graph.find_strongest_loops();
-    assert_eq!(loops.len(), 1, "Should find exactly one loop");
-
-    let loop_nodes = sorted_node_set(&loops[0]);
-    assert_eq!(loop_nodes, vec!["flow", "stock"]);
-}
-
-// --- Test 3: Figure 7 from the paper ---
-
-#[test]
-fn test_figure_7_paper() {
-    // Edges from the paper's Figure 7:
-    // a->b:10, a->d:100, b->c:10, c->a:10, d->c:0.1, d->b:100
-    // All nodes are stocks for this test.
-    let graph = SearchGraph::from_edges(
-        edges(&[
-            ("a", "b", 10.0),
-            ("a", "d", 100.0),
-            ("b", "c", 10.0),
-            ("c", "a", 10.0),
-            ("d", "c", 0.1),
-            ("d", "b", 100.0),
-        ]),
-        stock_list(&["a", "b", "c", "d"]),
-    );
-
-    let loops = graph.find_strongest_loops();
-
-    // The paper's Figure 7 demonstrates the original heuristic's failure
-    // mode: with `best_score` pruning, the strong path a->d sets scores
-    // that prune the weaker a->b entry, missing the a->b->c->a loop when
-    // searching from stock a (the paper recovers it via per-stock reset).
-    // With expansion-cap-bounded search, all three loops are found
-    // exhaustively -- the small-graph case is strictly more complete.
-    assert_eq!(
-        loops.len(),
-        3,
-        "Figure 7: should find all 3 loops, found {}",
-        loops.len()
-    );
-
-    let mut loop_sets: Vec<Vec<String>> = loops.iter().map(|l| sorted_node_set(l)).collect();
-    loop_sets.sort();
-    assert_eq!(
-        loop_sets,
-        vec![
-            vec!["a", "b", "c"],
-            vec!["a", "b", "c", "d"],
-            vec!["a", "c", "d"],
-        ],
-    );
-}
-
-// --- Test 4: per-stock search isolation ---
-
-#[test]
-fn test_per_stock_search_isolation() {
-    // Graph:
-    //   a -> x (score 1000)
-    //   x -> a (score 1000)  -- strong loop through a
-    //   b -> x (score 1)     -- weak path from b
-    //   x -> b (score 1)     -- weak path back
-    //
-    // Per-stock state isolation (the paper's per-stock `best_score`
-    // reset, here per-stock expansion-count reset): one stock's search
-    // must not limit loops reachable from another stock.
-    //
-    // TARGET=a: finds [a, x] (strong loop)
-    // TARGET=b: fresh expansion counts, finds [b, x] (weak loop)
-    let graph = SearchGraph::from_edges(
-        edges(&[
-            ("a", "x", 1000.0),
-            ("x", "a", 1000.0),
-            ("x", "b", 1.0),
-            ("b", "x", 1.0),
-        ]),
-        stock_list(&["a", "b"]),
-    );
-
-    let loops = graph.find_strongest_loops();
-
-    assert_eq!(
-        loops.len(),
-        2,
-        "Per-stock isolation should find both loops, found {}",
-        loops.len()
-    );
-
-    let mut loop_sets: Vec<Vec<String>> = loops.iter().map(|l| sorted_node_set(l)).collect();
-    loop_sets.sort();
-    assert_eq!(loop_sets, vec![vec!["a", "x"], vec!["b", "x"]]);
-}
-
-// --- Test 5: Loop deduplication ---
-
-#[test]
-fn test_loop_deduplication() {
-    // Stock a and stock b both participate in the same loop (a -> b -> a);
-    // the canonical-rotation dedup must report it only once even though
-    // both per-stock searches traverse it.
-    let graph = SearchGraph::from_edges(
-        edges(&[("a", "b", 1.0), ("b", "a", 1.0)]),
-        stock_list(&["a", "b"]),
-    );
-
-    let loops = graph.find_strongest_loops();
-
-    // Even though both stocks can reach the loop, deduplication should ensure
-    // it appears only once
-    assert_eq!(loops.len(), 1, "Same loop should appear only once");
-
-    let loop_nodes = sorted_node_set(&loops[0]);
-    assert_eq!(loop_nodes, vec!["a", "b"]);
-}
-
-/// Issue #308 regression test for `add_loop_if_unique`:
-/// the discovery DFS must keep both directions of a directed
-/// 3-cycle as distinct loops when they share a node set.
-///
-/// We exercise the helper directly so the dedup-key property is
-/// pinned independently of which paths the DFS happens to surface.
-/// Calling `add_loop_if_unique` with the two paths is a precise
-/// check that the dedup key distinguishes them.
-#[test]
-fn add_loop_if_unique_keeps_distinct_directed_three_cycles() {
-    let mut found_loops: Vec<Vec<Ident<Canonical>>> = Vec::new();
-    let mut seen: HashSet<Vec<String>> = HashSet::new();
-
-    let forward: Vec<Ident<Canonical>> = vec![Ident::new("a"), Ident::new("b"), Ident::new("c")];
-    let reverse: Vec<Ident<Canonical>> = vec![Ident::new("a"), Ident::new("c"), Ident::new("b")];
-
-    SearchGraph::add_loop_if_unique(&forward, &mut found_loops, &mut seen);
-    SearchGraph::add_loop_if_unique(&reverse, &mut found_loops, &mut seen);
-
-    assert_eq!(
-        found_loops.len(),
-        2,
-        "opposite-direction 3-cycles must be retained as distinct loops"
-    );
-    assert_eq!(found_loops[0], forward);
-    assert_eq!(found_loops[1], reverse);
-
-    // Calling again with a rotation of one of the existing cycles
-    // must still dedup (rotations of the same directed cycle
-    // canonicalize to the same key).
-    let forward_rotation: Vec<Ident<Canonical>> =
-        vec![Ident::new("b"), Ident::new("c"), Ident::new("a")];
-    SearchGraph::add_loop_if_unique(&forward_rotation, &mut found_loops, &mut seen);
-    assert_eq!(
-        found_loops.len(),
-        2,
-        "a rotation of an already-seen directed cycle must be deduped"
-    );
-}
-
-// --- Test 6: Empty graph ---
-
-#[test]
-fn test_no_edges() {
-    // Graph with stocks but no edges
-    let graph = SearchGraph::from_edges(vec![], stock_list(&["a", "b"]));
-    let loops = graph.find_strongest_loops();
-    assert!(loops.is_empty(), "Graph with no edges should have no loops");
-}
-
-// --- Test 7: Zero-score edges ---
-
-#[test]
-fn test_zero_score_edges() {
-    // A link with score 0 means the causal connection is inactive at this
-    // timestep: any loop through it has loop score exactly 0 here, so it
-    // is not a "loop that matters" at this step. Zero-score edges are
-    // therefore excluded from the per-step search graph (GH #647) -- on
-    // real models they are the overwhelming majority of edges, and
-    // traversing them is what made discovery wander the whole graph.
-    let graph = SearchGraph::from_edges(
-        edges(&[
-            ("a", "b", 0.0), // zero-score link: inactive at this step
-            ("b", "a", 10.0),
-        ]),
-        stock_list(&["a"]),
-    );
-
-    let loops = graph.find_strongest_loops();
-
-    assert!(
-        loops.is_empty(),
-        "a loop with a zero-score link is inactive at this step and not discovered here"
-    );
-}
-
-/// The flip side of `test_zero_score_edges`: a loop inactive at one step
-/// (zero-score link) is discovered at the step where all its links carry
-/// nonzero scores. Discovery runs at every sampled timestep, so per-step
-/// exclusion of inactive edges loses no loop that is ever simultaneously
-/// active at a sampled step. (Loops whose links are only ever active at
-/// different steps are missed -- GH #699.)
-#[test]
-fn test_inactive_loop_found_at_active_step() {
-    let mut offsets = HashMap::new();
-    offsets.insert(Ident::new("$⁚ltm⁚link_score⁚a→b"), 0usize);
-    offsets.insert(Ident::new("$⁚ltm⁚link_score⁚b→a"), 1usize);
-    let data = vec![
-        f64::NAN,
-        f64::NAN, // step 0 (skipped)
-        0.0,
-        10.0, // step 1: a->b inactive; loop not discoverable here
-        0.5,
-        10.0, // step 2: both links active; loop discovered
-    ];
-    let results = Results {
-        offsets,
-        data: data.into_boxed_slice(),
-        step_size: 2,
-        step_count: 3,
-        specs: crate::results::Specs {
-            start: 0.0,
-            stop: 2.0,
-            dt: 1.0,
-            save_step: 1.0,
-            method: crate::results::Method::Euler,
-            n_chunks: 3,
-        },
-        is_vensim: false,
-    };
-    let link_offsets = parse_link_offsets(&results, &[], &[], &LinkExpansionContext::default());
-    let stocks = stock_list(&["a"]);
-    let paths = indexed_all_paths(&results, &link_offsets, &stocks);
-    assert_eq!(
-        paths_as_strings(&paths),
-        vec![vec!["a".to_string(), "b".to_string()]],
-        "the loop must be discovered at the step where it is active"
-    );
-}
-
-// --- Test 8: NaN handling ---
-
-#[test]
-fn test_nan_handling() {
-    // NaN scores are treated as 0 -- the link is inactive at this step,
-    // so the loop through it is not discovered here (see
-    // `test_zero_score_edges`).
-    let graph = SearchGraph::from_edges(
-        edges(&[("a", "b", f64::NAN), ("b", "a", 10.0)]),
-        stock_list(&["a"]),
-    );
-
-    let loops = graph.find_strongest_loops();
-
-    assert!(
-        loops.is_empty(),
-        "NaN is treated as 0: the loop through it is inactive at this step"
-    );
-}
-
-// --- GH #647: SCC restriction and bounded re-expansion ---
-
-/// A large acyclic appendage hanging off a small cyclic core must not
-/// affect which loops are found: the DFS is restricted to each stock's
-/// SCC, and the appendage (reachable from the core, but with no path
-/// back) is outside every SCC.
-#[test]
-fn test_scc_restriction_preserves_core_loops() {
-    // Cyclic core: a -> b -> c -> a, plus the shortcut b -> a.
-    let mut typed_edges: Vec<(Ident<Canonical>, Ident<Canonical>, f64)> = edges(&[
-        ("a", "b", 2.0),
-        ("b", "c", 3.0),
-        ("c", "a", 4.0),
-        ("b", "a", 5.0),
-    ]);
-    // Acyclic appendage reachable from the core: c -> t0 -> t1 -> ... -> t9.
-    typed_edges.push((Ident::new("c"), Ident::new("t0"), 1.0));
-    for i in 0..9 {
-        typed_edges.push((
-            Ident::new(&format!("t{i}")),
-            Ident::new(&format!("t{}", i + 1)),
-            1.0,
-        ));
-    }
-
-    let graph = SearchGraph::from_edges(typed_edges, stock_list(&["a"]));
-    let loops = graph.find_strongest_loops();
-
-    let mut loop_sets: Vec<Vec<String>> = loops.iter().map(|l| sorted_node_set(l)).collect();
-    loop_sets.sort();
-    assert_eq!(
-        loop_sets,
-        vec![vec!["a", "b"], vec!["a", "b", "c"]],
-        "both core loops are found; the acyclic tail changes nothing"
-    );
-}
-
-/// A chain of "diamonds" with tied scores has exponentially many equal-
-/// score paths; without bounded re-expansion the DFS re-walks each
-/// diamond's subtree once per arriving path (2^k for k diamonds). The
-/// expansion cap bounds the work while the loop through the chain is
-/// still found.
-#[test]
-fn test_tied_score_diamond_chain_completes() {
-    // stock -> d0 -> {x0, y0} -> d1 -> {x1, y1} -> d2 -> ... -> d24 -> stock
-    // All scores 1.0 (the exact-tie case that defeats strict-less-than
-    // pruning). 24 diamonds = 2^24 = ~16.7M equal-score paths; without the
-    // cap this test would not complete in any reasonable time.
-    let n_diamonds = 24;
-    let mut names: Vec<String> = vec!["stock".to_string()];
-    let mut edge_list: Vec<(String, String, f64)> = Vec::new();
-    edge_list.push(("stock".to_string(), "d0".to_string(), 1.0));
-    for i in 0..n_diamonds {
-        let d = format!("d{i}");
-        let x = format!("x{i}");
-        let y = format!("y{i}");
-        let next = if i + 1 == n_diamonds {
-            "stock".to_string()
-        } else {
-            format!("d{}", i + 1)
-        };
-        edge_list.push((d.clone(), x.clone(), 1.0));
-        edge_list.push((d.clone(), y.clone(), 1.0));
-        edge_list.push((x.clone(), next.clone(), 1.0));
-        edge_list.push((y.clone(), next.clone(), 1.0));
-        names.push(d);
-        names.push(x);
-        names.push(y);
-    }
-
-    let typed_edges: Vec<(Ident<Canonical>, Ident<Canonical>, f64)> = edge_list
-        .iter()
-        .map(|(f, t, s)| (Ident::new(f), Ident::new(t), *s))
-        .collect();
-    let graph = SearchGraph::from_edges(typed_edges, stock_list(&["stock"]));
-
-    let loops = graph.find_strongest_loops();
-    // At least one loop through the diamond chain is found (each found
-    // loop picks one arm per diamond), and the search completes -- which
-    // is the property under test.
-    assert!(
-        !loops.is_empty(),
-        "the loop through the diamond chain must be found"
-    );
-    for l in &loops {
-        // Each loop visits the stock, every diamond head, and one arm per
-        // diamond: 1 + 2 * n_diamonds nodes.
-        assert_eq!(
-            l.len(),
-            2 * n_diamonds + 1,
-            "each loop traverses stock, every diamond head, and one arm per diamond"
-        );
-    }
-}
-
-// --- Additional edge case tests ---
-
-#[test]
-fn test_self_loop_found() {
-    // A self-loop (a -> a): check(a,1) sets visiting={a}, pushes a,
-    // then explores edge a->a: check(a, score) finds a IS visiting
-    // AND a=TARGET -> loop [a] is recorded.
-    let graph = SearchGraph::from_edges(edges(&[("a", "a", 5.0)]), stock_list(&["a"]));
-
-    let loops = graph.find_strongest_loops();
-    assert_eq!(loops.len(), 1, "Self-loop should be found");
-    assert_eq!(loops[0].len(), 1);
-    assert_eq!(loops[0][0].as_str(), "a");
-}
-
-#[test]
-fn test_two_separate_loops() {
-    // Two disconnected loops: a<->b and c<->d. Each lives in its own SCC,
-    // and each stock's search is confined to its own component, so both
-    // are found independently.
-    let graph = SearchGraph::from_edges(
-        edges(&[
-            ("a", "b", 1.0),
-            ("b", "a", 1.0),
-            ("c", "d", 1.0),
-            ("d", "c", 1.0),
-        ]),
-        stock_list(&["a", "c"]),
-    );
-
-    let loops = graph.find_strongest_loops();
-    assert_eq!(loops.len(), 2, "Should find two separate loops");
-}
-
-#[test]
-fn test_stocks_without_outbound_edges() {
-    // A stock that has no outbound edges shouldn't cause errors
-    let graph = SearchGraph::from_edges(
-        edges(&[("a", "b", 1.0), ("b", "a", 1.0)]),
-        stock_list(&["a", "c"]), // c has no edges
-    );
-
-    let loops = graph.find_strongest_loops();
-    assert_eq!(loops.len(), 1, "Should find the a-b loop, c is harmless");
 }
 
 #[test]
@@ -1487,7 +1036,7 @@ fn test_rank_and_filter_truncates_to_max_loops() {
 
     assert_eq!(loops.len(), CAP + EXCESS);
     let _guard = MaxLoopsGuard::new(CAP);
-    rank_and_filter(&mut loops, &partitions);
+    rank_and_filter(&mut loops, &partitions, None);
     assert_eq!(loops.len(), CAP, "Should truncate to the cap ({CAP})");
 }
 
@@ -1512,7 +1061,7 @@ fn test_rank_and_filter_removes_low_contribution() {
     ];
 
     let partitions = single_partition(&["stock_x"]);
-    rank_and_filter(&mut loops, &partitions);
+    rank_and_filter(&mut loops, &partitions, None);
 
     // Only the dominant loop should remain
     assert_eq!(
@@ -1556,7 +1105,7 @@ fn test_rank_and_filter_unpartitioned_loops_do_not_cross_normalize() {
         partitions: vec![],
         stock_partition: HashMap::new(),
     };
-    let meta = rank_and_filter(&mut loops, &partitions);
+    let meta = rank_and_filter(&mut loops, &partitions, None).partitions;
 
     assert_eq!(
         loops.len(),
@@ -1597,7 +1146,7 @@ fn test_rank_and_filter_preserves_score_ordering() {
     ];
 
     let partitions = single_partition(&["stock_x"]);
-    rank_and_filter(&mut loops, &partitions);
+    rank_and_filter(&mut loops, &partitions, None);
 
     // Within a SINGLE partition the relative-contribution ranking (GH #543)
     // and the raw-magnitude ranking coincide (the same denominator divides
@@ -1647,7 +1196,7 @@ fn test_rank_and_filter_retains_briefly_dominant_loop() {
 
     let partitions = single_partition(&["stock_x"]);
     let mut loops = vec![spike_loop, steady_loop];
-    rank_and_filter(&mut loops, &partitions);
+    rank_and_filter(&mut loops, &partitions, None);
 
     // Both loops should be retained: the spike loop has 100/(100+50) = 66.7%
     // contribution at step 50, well above MIN_CONTRIBUTION.
@@ -1655,128 +1204,6 @@ fn test_rank_and_filter_retains_briefly_dominant_loop() {
         loops.len(),
         2,
         "Briefly dominant loop should be retained by per-timestep filtering"
-    );
-}
-
-/// AC7.5: SearchGraph built from element-level LinkOffset entries reads the
-/// correct weight value from the correct result slot for each element.
-///
-/// A2A expansion maps `birth_rate→births` (with dimension Region = [nyc,
-/// boston, chicago]) to three element-level `LinkOffset` entries:
-///   `birth_rate[nyc]→births[nyc]`        at base_offset
-///   `birth_rate[boston]→births[boston]`  at base_offset + 1
-///   `birth_rate[chicago]→births[chicago]` at base_offset + 2
-///
-/// This test verifies that `SearchGraph::from_results` reads the value
-/// stored at `base_offset + element_index` for each element-level edge,
-/// not the value at `base_offset` for all of them. If the offset mapping
-/// were wrong, each edge would carry the same weight (the value at
-/// `base_offset`), and the assertions on per-element weights would fail.
-#[test]
-fn test_search_graph_from_results_element_level_weights() {
-    let base_offset = 10usize;
-
-    // Build a Results object: step_size large enough to hold all offsets.
-    // One timestep (step=0); distinct values at base_offset/+1/+2 so we
-    // can confirm each element-level edge reads its own result slot.
-    //   nyc=0.8, boston=0.3, chicago=0.5
-    let step_size = 20;
-    let step_count = 1;
-    let mut data = vec![0.0f64; step_size * step_count];
-    data[base_offset] = 0.8; // birth_rate[nyc]    -> births[nyc]    (element 0)
-    data[base_offset + 1] = 0.3; // birth_rate[boston] -> births[boston] (element 1)
-    data[base_offset + 2] = 0.5; // birth_rate[chicago]-> births[chicago](element 2)
-
-    let results = Results {
-        offsets: HashMap::new(), // from_results does not use offsets
-        data: data.into_boxed_slice(),
-        step_size,
-        step_count,
-        specs: crate::results::Specs {
-            start: 0.0,
-            stop: 0.0,
-            dt: 1.0,
-            save_step: 1.0,
-            method: crate::results::Method::Euler,
-            n_chunks: 1,
-        },
-        is_vensim: false,
-    };
-
-    // Element-level LinkOffset entries produced by expand_a2a_link_offsets
-    // for an A2A link score with three dimension elements.
-    let link_offsets: Vec<LinkOffset> = vec![
-        (
-            (Ident::new("birth_rate[nyc]"), Ident::new("births[nyc]")),
-            base_offset,
-        ),
-        (
-            (
-                Ident::new("birth_rate[boston]"),
-                Ident::new("births[boston]"),
-            ),
-            base_offset + 1,
-        ),
-        (
-            (
-                Ident::new("birth_rate[chicago]"),
-                Ident::new("births[chicago]"),
-            ),
-            base_offset + 2,
-        ),
-    ];
-
-    let stocks = vec![Ident::new("population[nyc]")];
-    let graph = SearchGraph::from_results(&results, 0, &link_offsets, &stocks);
-
-    // Each element-level edge must carry the value stored at its own slot.
-    // The SearchGraph adjacency list is keyed by the canonical "from" ident.
-    let nyc_key = canonicalize("birth_rate[nyc]");
-    let boston_key = canonicalize("birth_rate[boston]");
-    let chicago_key = canonicalize("birth_rate[chicago]");
-
-    let nyc_edges = graph.adj.get(&*nyc_key);
-    assert!(
-        nyc_edges.is_some(),
-        "birth_rate[nyc] should have an outbound edge"
-    );
-    let nyc_score = nyc_edges.unwrap()[0].score;
-    assert!(
-        (nyc_score - 0.8).abs() < 1e-10,
-        "birth_rate[nyc]->births[nyc] should have weight 0.8 (slot base_offset), got {nyc_score}"
-    );
-
-    let boston_edges = graph.adj.get(&*boston_key);
-    assert!(
-        boston_edges.is_some(),
-        "birth_rate[boston] should have an outbound edge"
-    );
-    let boston_score = boston_edges.unwrap()[0].score;
-    assert!(
-        (boston_score - 0.3).abs() < 1e-10,
-        "birth_rate[boston]->births[boston] should have weight 0.3 (slot base+1), got {boston_score}"
-    );
-
-    let chicago_edges = graph.adj.get(&*chicago_key);
-    assert!(
-        chicago_edges.is_some(),
-        "birth_rate[chicago] should have an outbound edge"
-    );
-    let chicago_score = chicago_edges.unwrap()[0].score;
-    assert!(
-        (chicago_score - 0.5).abs() < 1e-10,
-        "birth_rate[chicago]->births[chicago] should have weight 0.5 (slot base+2), got {chicago_score}"
-    );
-
-    // If all offsets pointed to base_offset+0 (wrong), all weights would
-    // be 0.8. Distinct values (0.8, 0.3, 0.5) make this bug visible.
-    assert!(
-        (nyc_score - boston_score).abs() > 1e-10,
-        "nyc and boston weights must differ; both being {nyc_score} indicates an offset bug"
-    );
-    assert!(
-        (boston_score - chicago_score).abs() > 1e-10,
-        "boston and chicago weights must differ; both being {boston_score} indicates an offset bug"
     );
 }
 
@@ -1835,7 +1262,7 @@ fn test_rank_and_filter_element_level_partitions() {
         .collect(),
     };
 
-    let partition_meta = rank_and_filter(&mut loops, &partitions);
+    let partition_meta = rank_and_filter(&mut loops, &partitions, None).partitions;
 
     // All 3 loops should be retained: Chicago's loop is 100% of its
     // partition's total, even though globally it's tiny.
@@ -1940,7 +1367,7 @@ fn test_rank_and_filter_543_partition_relative_ranking() {
     ];
 
     let partitions = two_partitions(&["stock_a"], &["stock_b"]);
-    rank_and_filter(&mut loops, &partitions);
+    rank_and_filter(&mut loops, &partitions, None);
 
     let order: Vec<f64> = loops.iter().map(|l| l.avg_abs_score).collect();
     // Relative ranking: b_dom (0.909) > a_big (0.7) > a_small (0.3) >
@@ -1989,7 +1416,7 @@ fn test_rank_and_filter_demotes_trivially_isolated_loops() {
     ];
 
     let partitions = two_partitions(&["stock_a"], &["stock_b"]);
-    let partition_meta = rank_and_filter(&mut loops, &partitions);
+    let partition_meta = rank_and_filter(&mut loops, &partitions, None).partitions;
 
     assert_eq!(loops.len(), 3, "all three loops clear MIN_CONTRIBUTION");
     let order: Vec<f64> = loops.iter().map(|l| l.avg_abs_score).collect();
@@ -2053,7 +1480,7 @@ fn test_rank_and_filter_543_truncation_keeps_partition_dominant() {
     // raw-magnitude truncation the survivors would have been a_big (700)
     // and a_small (300), dropping the partition-dominant b_dom.
     let _guard = MaxLoopsGuard::new(2);
-    rank_and_filter(&mut loops, &partitions);
+    rank_and_filter(&mut loops, &partitions, None);
 
     assert_eq!(loops.len(), 2, "cap of 2 retains exactly two loops");
     let mags: Vec<f64> = loops.iter().map(|l| l.avg_abs_score).collect();
@@ -2121,7 +1548,7 @@ fn test_rank_and_filter_truncation_drops_solo_loops_first() {
     // is dropped even though its raw magnitude (100) dwarfs the
     // competing loops'.
     let _guard = MaxLoopsGuard::new(3);
-    let partition_meta = rank_and_filter(&mut loops, &partitions);
+    let partition_meta = rank_and_filter(&mut loops, &partitions, None).partitions;
 
     assert_eq!(loops.len(), 3, "cap of 3 retains exactly three loops");
     let order: Vec<f64> = loops.iter().map(|l| l.avg_abs_score).collect();
@@ -2191,7 +1618,7 @@ fn test_rank_and_filter_310_partition_dominant_survives_cap() {
     // truncate-before-filter the survivor would have been a1 (magnitude
     // 900) and the partition-B loop would never have been seen.
     let _guard = MaxLoopsGuard::new(1);
-    rank_and_filter(&mut loops, &partitions);
+    rank_and_filter(&mut loops, &partitions, None);
 
     assert_eq!(loops.len(), 1, "cap of 1 retains exactly one loop");
     assert_eq!(
@@ -2233,8 +1660,8 @@ fn test_rank_and_filter_deterministic_under_permutation() {
     let mut order_b = build();
     order_b.reverse();
 
-    rank_and_filter(&mut order_a, &partitions);
-    rank_and_filter(&mut order_b, &partitions);
+    rank_and_filter(&mut order_a, &partitions, None);
+    rank_and_filter(&mut order_b, &partitions, None);
 
     // Same final ordering (by magnitude proxy), same ids, same partition
     // assignment, same retained set.
@@ -2273,7 +1700,7 @@ fn test_rank_and_filter_no_scores_still_attaches_partitions() {
     ];
 
     let partitions = two_partitions(&["stock_a"], &["stock_b"]);
-    let partition_meta = rank_and_filter(&mut loops, &partitions);
+    let partition_meta = rank_and_filter(&mut loops, &partitions, None).partitions;
 
     assert_eq!(loops.len(), 2);
     assert_eq!(partition_meta.len(), 2);
@@ -2288,69 +1715,663 @@ fn test_rank_and_filter_no_scores_still_attaches_partitions() {
     assert_eq!(partition_meta[1].loop_count, 1);
 }
 
-// --- IndexedSearch vs. SearchGraph equivalence oracle ---
-//
-// `discover_loops_with_graph` was optimized from a per-timestep
-// `SearchGraph` rebuild (Ident-keyed HashMaps, full-string hashing in the
-// DFS) to a once-built `IndexedSearch` over dense integer ids. The two
-// must discover *exactly* the same loop paths in the same first-seen order.
-// These tests lock that equivalence in by running both paths over a range
-// of synthetic graphs and comparing the resulting `all_paths` verbatim.
+// --- Universe-based competing classification (AC5.2) ---
 
-/// The original cross-step discovery loop, reproduced over the retained
-/// `SearchGraph` reference implementation. Returns the deduped `all_paths`
-/// in first-seen order, exactly as the pre-optimization
-/// `discover_loops_with_graph` body did.
-fn reference_all_paths(
-    results: &Results,
-    link_offsets: &[LinkOffset],
-    stocks: &[Ident<Canonical>],
-) -> Vec<Vec<Ident<Canonical>>> {
-    let mut all_paths: Vec<Vec<Ident<Canonical>>> = Vec::new();
-    let mut seen_sets: HashSet<Vec<String>> = HashSet::new();
-    for step in 1..results.step_count {
-        let graph = SearchGraph::from_results(results, step, link_offsets, stocks);
-        for path in graph.find_strongest_loops() {
-            let path_strings: Vec<String> = path.iter().map(|id| id.as_str().to_string()).collect();
-            let key = crate::ltm::canonical_rotation(&path_strings);
-            if seen_sets.insert(key) {
-                all_paths.push(path);
-            }
-        }
+/// The universe statistics of a two-circuit partition, derived through the
+/// production retention pass (`ActivityGraph` -> `enumerate_active_circuits`
+/// -> `retain_circuits`) rather than hand-built: `a <-> b` carries the mass
+/// and `a <-> c` is the sub-threshold sibling retention drops, so the universe
+/// holds two circuits and exactly one survives.
+///
+/// `weak_sibling` decides whether that second circuit is active at all, which
+/// is the only difference between a partition whose universe holds two loops
+/// and one whose universe holds one -- the two arms of AC5.2.
+fn two_circuit_universe(weak_sibling: bool) -> UniverseStats {
+    let link_offsets: Vec<LinkOffset> = vec![
+        ((Ident::new("a"), Ident::new("b")), 0),
+        ((Ident::new("b"), Ident::new("a")), 1),
+        ((Ident::new("a"), Ident::new("c")), 2),
+        ((Ident::new("c"), Ident::new("a")), 3),
+    ];
+    let n_offsets = 4;
+    let step_count = 2;
+    let mut data = vec![0.0f64; n_offsets * step_count];
+    data[n_offsets] = 1.0;
+    data[n_offsets + 1] = 1.0;
+    if weak_sibling {
+        // Product 1e-8 against a total of ~1: far below MIN_CONTRIBUTION, so
+        // this circuit is in the universe and out of the survivor set.
+        data[n_offsets + 2] = 1e-4;
+        data[n_offsets + 3] = 1e-4;
     }
-    all_paths
-}
-
-/// The optimized discovery loop in isolation (the integer-indexed path
-/// inside `discover_loops_with_graph`), returning the same `all_paths`.
-fn indexed_all_paths(
-    results: &Results,
-    link_offsets: &[LinkOffset],
-    stocks: &[Ident<Canonical>],
-) -> Vec<Vec<Ident<Canonical>>> {
-    let mut all_paths: Vec<Vec<Ident<Canonical>>> = Vec::new();
-    let mut seen_sets: HashSet<Vec<u32>> = HashSet::new();
-    let search = IndexedSearch::build(link_offsets, stocks);
-    let mut scratch = DfsScratch::new(&search);
-    for step in 1..results.step_count {
-        search.load_step_scores(results, step, &mut scratch);
-        search.discover_step(&mut scratch, &mut seen_sets, &mut all_paths);
-    }
-    all_paths
-}
-
-fn paths_as_strings(paths: &[Vec<Ident<Canonical>>]) -> Vec<Vec<String>> {
-    paths
+    let results = enum_results(n_offsets, step_count, data);
+    let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
+    let activity = super::enum_gen::ActivityGraph::build(
+        &search,
+        &results,
+        None,
+        &mut SystemClock,
+        &MemoryMeter::new(),
+    )
+    .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(
+        &activity,
+        None,
+        &mut SystemClock,
+        &MemoryMeter::new(),
+    );
+    let stock_partition: Vec<Option<usize>> = search
+        .idents
         .iter()
-        .map(|p| p.iter().map(|id| id.as_str().to_string()).collect())
+        .map(|id| (id.as_str() == "a").then_some(0))
+        .collect();
+    let no_modules = vec![false; search.idents.len()];
+    let no_agg_nodes = vec![false; search.idents.len()];
+    let outcome = super::enum_gen::retain_circuits(
+        &candidates,
+        &activity,
+        &stock_partition,
+        &no_modules,
+        &no_agg_nodes,
+        &mut |_, _, _| None,
+        None,
+        &mut SystemClock,
+    )
+    .expect("an unbudgeted retention pass never abandons");
+    UniverseStats {
+        totals: outcome.partition_totals,
+        loop_counts: outcome.partition_circuit_counts,
+    }
+}
+
+/// The one retention survivor of the `two_circuit_universe` fixture, as the
+/// `FoundLoop` materialization would build it: zero at step 0 (every link
+/// score's `TIME = INITIAL_TIME` arm) and the product 1.0 at step 1.
+fn universe_survivor_loop() -> FoundLoop {
+    make_found_loop_with_scores(
+        &[("a", "b"), ("b", "a")],
+        &["a"],
+        LoopPolarity::Reinforcing,
+        0.5,
+        vec![(0.0, 0.0), (1.0, 1.0)],
+    )
+}
+
+/// A loop whose stock resolves to no partition (a `NormGroup::Solo` group):
+/// its own denominator, so its relative score is 1.0 at every active step by
+/// construction, and its raw magnitude dwarfs the survivor's.
+pub(super) fn solo_group_loop(prefix: &str) -> FoundLoop {
+    let x = format!("{prefix}_x");
+    let y = format!("{prefix}_y");
+    make_found_loop_with_scores(
+        &[(x.as_str(), y.as_str()), (y.as_str(), x.as_str())],
+        &["unpartitioned_stock"],
+        LoopPolarity::Reinforcing,
+        100.0,
+        vec![(0.0, 100.0), (1.0, 100.0)],
+    )
+}
+
+/// AC5.2 arm (a): a partition whose UNIVERSE holds two ever-active circuits is
+/// competing even though only one of them survived retention.
+///
+/// The survivor's relative score is genuinely below 1.0 -- the dropped
+/// sibling's mass is in the denominator whether or not any loop reports it --
+/// so the "its relative score is +/-1 by construction, therefore it carries no
+/// information" reasoning behind the solo demotion does not apply to it, and
+/// it must not be demoted below a loop for which that reasoning DOES hold.
+#[test]
+fn a_universe_with_two_circuits_makes_its_lone_survivor_competing() {
+    let mut loops = vec![universe_survivor_loop(), solo_group_loop("solo")];
+    let partitions = single_partition(&["a"]);
+    let universe = two_circuit_universe(true);
+    assert_eq!(
+        universe.loop_counts.get(&0).copied(),
+        Some(2),
+        "the fixture's universe must hold two partition-0 circuits"
+    );
+
+    rank_and_filter(&mut loops, &partitions, Some(&universe));
+
+    assert_eq!(loops.len(), 2);
+    assert_eq!(
+        loops[0].loop_info.links[0].from.as_str(),
+        "a",
+        "the competing survivor ranks before the solo loop; got {:?}",
+        loops
+            .iter()
+            .map(|l| l.loop_info.links[0].from.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        loops[0].rel_scores[1] < 1.0,
+        "its relative score is measured against the whole universe's mass, \
+         so it is strictly below 1.0; got {}",
+        loops[0].rel_scores[1]
+    );
+}
+
+/// AC5.2 arm (b): a loop ALONE in its partition's universe is solo -- its
+/// relative score is +/-1 by construction, exactly as for a `NormGroup::Solo`
+/// loop, so it sorts among the solos and the magnitude tie-break orders it.
+#[test]
+fn a_universe_with_one_circuit_leaves_its_survivor_solo() {
+    let mut loops = vec![universe_survivor_loop(), solo_group_loop("solo")];
+    let partitions = single_partition(&["a"]);
+    let universe = two_circuit_universe(false);
+    assert_eq!(
+        universe.loop_counts.get(&0).copied(),
+        Some(1),
+        "the fixture's universe must hold one partition-0 circuit"
+    );
+
+    rank_and_filter(&mut loops, &partitions, Some(&universe));
+
+    assert_eq!(loops.len(), 2);
+    assert_eq!(
+        loops
+            .iter()
+            .find(|l| l.loop_info.links[0].from.as_str() == "a")
+            .map(|l| l.rel_scores[1]),
+        Some(1.0),
+        "alone in its universe, the loop IS its own denominator"
+    );
+    assert_eq!(
+        loops[0].loop_info.links[0].from.as_str(),
+        "solo_x",
+        "both loops are solo at mean_rel 1.0, so the raw-magnitude tie-break \
+         puts the bigger one first; got {:?}",
+        loops
+            .iter()
+            .map(|l| l.loop_info.links[0].from.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// AC5.2 arm (c): with no universe (the fallback path), competing is over the
+/// DISCOVERED set -- a sample has no universe to ask about, and the loops it
+/// found are the only population there is.
+#[test]
+fn the_fallback_path_classifies_competing_over_the_discovered_set() {
+    let partitions = single_partition(&["a"]);
+
+    // One discovered loop in partition 0: nothing else divides its
+    // denominator, so it is solo and the magnitude tie-break applies.
+    let mut alone = vec![universe_survivor_loop(), solo_group_loop("solo")];
+    rank_and_filter(&mut alone, &partitions, None);
+    assert_eq!(
+        alone[0].loop_info.links[0].from.as_str(),
+        "solo_x",
+        "a lone discovered partition loop is solo on the fallback path"
+    );
+
+    // A second discovered loop in the same partition: now they compete.
+    let sibling = make_found_loop_with_scores(
+        &[("a", "d"), ("d", "a")],
+        &["a"],
+        LoopPolarity::Reinforcing,
+        0.25,
+        vec![(0.0, 0.0), (1.0, 0.5)],
+    );
+    let mut competing = vec![universe_survivor_loop(), sibling, solo_group_loop("solo")];
+    rank_and_filter(&mut competing, &partitions, None);
+    let order: Vec<&str> = competing
+        .iter()
+        .map(|l| l.loop_info.links[0].from.as_str())
+        .collect();
+    assert_eq!(
+        order,
+        vec!["a", "a", "solo_x"],
+        "two discovered loops sharing a partition rank before the solo loop"
+    );
+}
+
+/// AC5.2 arm (d): a `NormGroup::Solo` loop is never competing, whatever the
+/// universe counts say. Its group is keyed by its own index, so no partition
+/// count can apply to it -- and its relative score really is +/-1 by
+/// construction, which is what the demotion is about.
+#[test]
+fn solo_group_loops_are_never_competing_under_universe_counts() {
+    let mut loops = vec![
+        solo_group_loop("aaa"),
+        universe_survivor_loop(),
+        solo_group_loop("zzz"),
+    ];
+    let partitions = single_partition(&["a"]);
+    let universe = two_circuit_universe(true);
+
+    rank_and_filter(&mut loops, &partitions, Some(&universe));
+
+    let order: Vec<&str> = loops
+        .iter()
+        .map(|l| l.loop_info.links[0].from.as_str())
+        .collect();
+    assert_eq!(
+        order,
+        vec!["a", "aaa_x", "zzz_x"],
+        "the competing partition loop ranks first and both Solo-group loops \
+         stay demoted behind it"
+    );
+}
+
+// --- Coverage-aware cap (AC5.1) ---
+
+/// A partition-`stock_a` loop carrying the given per-step score series, named
+/// so that the content-key tie-break follows the `name` argument's order.
+fn cap_fixture_loop(name: &str, scores: &[f64]) -> FoundLoop {
+    let from = format!("{name}_x");
+    let to = format!("{name}_y");
+    let series: Vec<(f64, f64)> = scores
+        .iter()
+        .enumerate()
+        .map(|(t, &s)| (t as f64, s))
+        .collect();
+    let avg = scores.iter().map(|s| s.abs()).sum::<f64>() / scores.len() as f64;
+    make_found_loop_with_scores(
+        &[(from.as_str(), to.as_str()), (to.as_str(), from.as_str())],
+        &["stock_a"],
+        LoopPolarity::Reinforcing,
+        avg,
+        series,
+    )
+}
+
+/// The loop names in the reported order, for readable assertions.
+fn reported_names(loops: &[FoundLoop]) -> Vec<String> {
+    loops
+        .iter()
+        .map(|l| {
+            l.loop_info.links[0]
+                .from
+                .as_str()
+                .trim_end_matches("_x")
+                .to_string()
+        })
         .collect()
 }
 
+/// A four-loop competing partition over ten steps whose LAST-ranked loop by
+/// mean relative score is the one that dominates the final step.
+///
+/// Steps 0-8: `l1` 10, `l2` 5, `l3` 2, `l4` 0 (total 17, `l1` dominant at
+/// 0.59). Step 9: `l4` spikes to 18 against a total of 35, taking 0.51 of the
+/// partition while `l1` holds 0.29. Mean relative scores rank
+/// `l1` (0.56) > `l2` (0.28) > `l3` (0.11) > `l4` (0.05).
+fn briefly_dominant_fixture() -> Vec<FoundLoop> {
+    let steady = |v: f64| -> Vec<f64> { vec![v; 10] };
+    let mut spike = vec![0.0; 10];
+    spike[9] = 18.0;
+    vec![
+        cap_fixture_loop("l1", &steady(10.0)),
+        cap_fixture_loop("l2", &steady(5.0)),
+        cap_fixture_loop("l3", &steady(2.0)),
+        cap_fixture_loop("l4", &spike),
+    ]
+}
+
+/// AC5.1 arm (i): under cap pressure the loop that DOMINATES some step keeps
+/// its slot even though it ranks last by mean relative score, and the reported
+/// order is still the mean-relative one.
+///
+/// Without this the report names `l1` and `l2` for every step, so a reader
+/// asking "what drove step 9" is told about a loop holding 29% of the
+/// partition while the loop holding 51% of it is not in the list at all.
+#[test]
+fn the_cap_keeps_each_steps_dominant_loop() {
+    let mut loops = briefly_dominant_fixture();
+    let partitions = single_partition(&["stock_a"]);
+
+    let _guard = MaxLoopsGuard::new(2);
+    rank_and_filter(&mut loops, &partitions, None);
+
+    assert_eq!(
+        reported_names(&loops),
+        vec!["l1", "l4"],
+        "the two anchors fill the cap, presented in mean-relative order \
+         (plain truncation would have reported l1 and l2)"
+    );
+}
+
+/// AC5.1 arm (vi): with no cap pressure the selection is the whole retained
+/// set in the unchanged mean-relative order -- anchoring adds membership only
+/// where the cap binds.
+#[test]
+fn an_uncapped_selection_is_the_plain_mean_relative_ranking() {
+    let mut loops = briefly_dominant_fixture();
+    let partitions = single_partition(&["stock_a"]);
+
+    rank_and_filter(&mut loops, &partitions, None);
+
+    assert_eq!(
+        reported_names(&loops),
+        vec!["l1", "l2", "l3", "l4"],
+        "every retained loop is reported, ranked by mean relative score"
+    );
+}
+
+/// AC5.1 arm (ii): `k` rises from 1 to 2 -- each of two steps' SECOND-strongest
+/// loop is anchored too -- because the resulting anchor set (4 loops) sits
+/// exactly AT [`ANCHOR_SHARE_OF_CAP`] of the cap (8 * 0.5 = 4): "at or under"
+/// takes the boundary.
+///
+/// Two dominance pairs (`l1`/`l2` at step 0, `l3`/`l4` at step 1) plus five
+/// low, non-anchoring fillers (`f1`..`f5`, strictly ranked by magnitude and
+/// never top-2 at either step) separate escalation from ordinary fill: with
+/// `k = 1` alone only `l1` and `l3` would anchor, leaving the runners-up
+/// `l2`/`l4` to compete with the fillers on mean-relative score alone --
+/// which they would still win (see the sibling non-escalating test for a
+/// fixture where they do not), so this fixture's `cap = 8` is chosen wide
+/// enough that escalating to `k = 2` is what determines the LAST reported
+/// slot: with escalation, `f5` (the weakest filler) is dropped in favor of
+/// nothing new -- the four anchors plus `f1`..`f4` exactly fill the cap.
+#[test]
+fn the_anchor_rank_rises_while_it_stays_within_the_anchor_share() {
+    let mut loops = vec![
+        cap_fixture_loop("l1", &[100.0, 0.0]),
+        cap_fixture_loop("l2", &[50.0, 0.0]),
+        cap_fixture_loop("l3", &[0.0, 100.0]),
+        cap_fixture_loop("l4", &[0.0, 50.0]),
+        cap_fixture_loop("f1", &[10.0, 10.0]),
+        cap_fixture_loop("f2", &[8.0, 8.0]),
+        cap_fixture_loop("f3", &[6.0, 6.0]),
+        cap_fixture_loop("f4", &[4.0, 4.0]),
+        cap_fixture_loop("f5", &[2.0, 2.0]),
+    ];
+    let partitions = single_partition(&["stock_a"]);
+
+    let _guard = MaxLoopsGuard::new(8);
+    rank_and_filter(&mut loops, &partitions, None);
+
+    assert_eq!(
+        reported_names(&loops),
+        vec!["l1", "l3", "l2", "l4", "f1", "f2", "f3", "f4"],
+        "k=2 anchors {{l1,l2,l3,l4}} (count 4, exactly half the cap of 8) and \
+         the remaining four slots go to the fillers in mean-relative order; \
+         f5, the weakest filler, is dropped"
+    );
+}
+
+/// AC5.1's new arm: the `k = 1` anchors alone already claim MORE than
+/// [`ANCHOR_SHARE_OF_CAP`] of the cap, so escalation to `k = 2` never even
+/// starts -- `count_at(2)` is a superset of `count_at(1)` and so exceeds the
+/// share bound too, but the code never has to check that: the loop's first
+/// candidate, `k = 2`, already fails.
+///
+/// This is the SAME fixture the (now superseded) unbounded-escalation
+/// behavior used to read as "k rises to 2, {{l1,l2,l4,l5}} exactly fills the
+/// cap" -- `l1`/`l3` anchor one step each (`count_at(1) == 2`, over half of
+/// `cap = 4`), so under the new rule `k` stays at 1 and the last slot goes to
+/// whichever non-anchor ranks highest by mean relative score (`l2`), not to
+/// `l4`'s own step-runner-up anchor.
+#[test]
+fn k_one_anchors_alone_over_half_the_cap_do_not_escalate() {
+    let steady = |v: f64| -> Vec<f64> { vec![v; 10] };
+    let spike = |v: f64| -> Vec<f64> {
+        let mut s = vec![0.0; 10];
+        s[9] = v;
+        s
+    };
+    let mut loops = vec![
+        cap_fixture_loop("l1", &steady(10.0)),
+        cap_fixture_loop("l2", &steady(5.0)),
+        cap_fixture_loop("l3", &steady(2.0)),
+        cap_fixture_loop("l4", &spike(18.0)),
+        cap_fixture_loop("l5", &spike(12.0)),
+    ];
+    let partitions = single_partition(&["stock_a"]);
+
+    let _guard = MaxLoopsGuard::new(4);
+    rank_and_filter(&mut loops, &partitions, None);
+
+    assert_eq!(
+        reported_names(&loops),
+        vec!["l1", "l2", "l3", "l4"],
+        "k=1 anchors {{l1,l4}} (count 2, already over half the cap of 4) so \
+         k never escalates to 2; the two remaining slots go to l2 and l3 in \
+         mean-relative order, and l5 -- l4's own step-9 runner-up, which the \
+         pre-share-bound rule anchored at k=2 -- is dropped"
+    );
+}
+
+/// AC5.1's pathological arm (iii): when the k=1 anchors alone outnumber the
+/// cap, the cap applies to the ANCHORS -- they are kept in the existing
+/// ranking order and everything else is dropped, the top-ranked loop included.
+///
+/// Three loops each dominate one of the three steps while `lb`, which
+/// dominates none, has the highest mean relative score. Reporting `lb` would
+/// cost a step its dominant loop, so under this pressure the coverage claim
+/// wins over the ranking claim -- and the report cannot cover every step
+/// either way, which is what makes the arm pathological rather than merely
+/// tight.
+#[test]
+fn more_anchors_than_the_cap_keeps_the_top_ranked_anchors() {
+    let mut loops = vec![
+        cap_fixture_loop("la", &[10.0, 0.0, 0.0]),
+        cap_fixture_loop("lb", &[4.0, 4.0, 4.0]),
+        cap_fixture_loop("lc", &[0.0, 10.0, 0.0]),
+        cap_fixture_loop("ld", &[0.0, 0.0, 10.0]),
+    ];
+    let partitions = single_partition(&["stock_a"]);
+
+    let _guard = MaxLoopsGuard::new(2);
+    rank_and_filter(&mut loops, &partitions, None);
+
+    assert_eq!(
+        reported_names(&loops),
+        vec!["la", "lc"],
+        "the three anchors are ranked among themselves and the first two \
+         kept; lb, the highest mean-relative loop and no step's dominant one, \
+         is dropped"
+    );
+}
+
+/// AC5.1 arm (iv): a solo loop never anchors. Its relative score is 1.0 at
+/// every active step by construction, so it is every step's "dominant" loop in
+/// its own group and anchoring it would guarantee a slot to the one class of
+/// loop that carries no information -- inverting the demotion.
+#[test]
+fn solo_loops_never_anchor_and_are_still_dropped_first() {
+    let mut loops = vec![
+        cap_fixture_loop("l1", &[10.0, 10.0, 10.0]),
+        cap_fixture_loop("l2", &[3.0, 3.0, 3.0]),
+        make_found_loop_with_scores(
+            &[("solo_x", "solo_y"), ("solo_y", "solo_x")],
+            &["unpartitioned_stock"],
+            LoopPolarity::Reinforcing,
+            100.0,
+            vec![(0.0, 100.0), (1.0, 100.0), (2.0, 100.0)],
+        ),
+    ];
+    let partitions = single_partition(&["stock_a"]);
+
+    let _guard = MaxLoopsGuard::new(2);
+    rank_and_filter(&mut loops, &partitions, None);
+
+    assert_eq!(
+        reported_names(&loops),
+        vec!["l1", "l2"],
+        "the competing pair fills the cap; were the solo loop anchored it \
+         would have taken l2's slot at k=1"
+    );
+}
+
+/// AC5.1 arm (v): the selected set, its order, and its ids are invariant under
+/// input permutation when anchoring decides membership -- the anchor scan
+/// visits groups through a `HashMap`, so this is what says the iteration order
+/// cannot reach the answer.
+#[test]
+fn anchor_selection_is_deterministic_under_permutation() {
+    let partitions = single_partition(&["stock_a"]);
+    let project = |loops: &[FoundLoop]| -> Vec<(String, String, Vec<f64>)> {
+        loops
+            .iter()
+            .map(|l| {
+                (
+                    l.loop_info.links[0].from.as_str().to_string(),
+                    l.loop_info.id.clone(),
+                    l.rel_scores.clone(),
+                )
+            })
+            .collect()
+    };
+
+    let mut forward = briefly_dominant_fixture();
+    let mut reversed = briefly_dominant_fixture();
+    reversed.reverse();
+
+    let _guard = MaxLoopsGuard::new(2);
+    rank_and_filter(&mut forward, &partitions, None);
+    rank_and_filter(&mut reversed, &partitions, None);
+
+    assert_eq!(reported_names(&forward), vec!["l1", "l4"]);
+    assert_eq!(
+        project(&forward),
+        project(&reversed),
+        "permuted input must yield the identical selection, order and ids"
+    );
+}
+
+/// AC5.1 arm (vii): a tie for a step's maximum anchors exactly one loop -- the
+/// one earlier in the ranking -- so a tie never spends two slots on one step.
+///
+/// Tested on [`select_reported`] directly because an exact float tie between
+/// two DIFFERENT loops' relative scores is the one input a fixture cannot
+/// arrange through `rank_and_filter` without also tying their mean relative
+/// scores and raw magnitudes, which would move the ranking the tie rule is
+/// defined against. The rows are the same triple `rank_truncate_and_id`
+/// builds -- (group, competing, `rel_scores`) -- and the end-to-end arms are
+/// pinned by the `rank_and_filter` tests above.
+#[test]
+fn a_tie_for_a_steps_maximum_anchors_the_earlier_ranked_loop() {
+    let group = NormGroup::Partition(0);
+    let tied_a = [0.4, 0.0];
+    let tied_b = [0.4, 0.0];
+    let late = [0.2, 1.0];
+    let rows = vec![
+        SelectionRow {
+            group,
+            competing: true,
+            rel: &tied_a,
+        },
+        SelectionRow {
+            group,
+            competing: true,
+            rel: &tied_b,
+        },
+        SelectionRow {
+            group,
+            competing: true,
+            rel: &late,
+        },
+    ];
+
+    assert_eq!(
+        anchor_ranks(&rows),
+        vec![1, 2, 1],
+        "row 0 holds step 0's maximum and row 1 is only its runner-up, \
+         despite carrying the identical score"
+    );
+    assert_eq!(
+        select_reported(&rows, 2),
+        vec![0, 2],
+        "the two k=1 anchors fill the cap; the tied runner-up is dropped"
+    );
+}
+
+/// A step no retained loop is active at anchors nobody: the partition's mass
+/// there, if any, belongs to loops outside the retained set, so no retained
+/// loop dominated it. Anchoring the ranking's head by default would hand a
+/// guaranteed slot to a loop on the evidence of a step it demonstrably did not
+/// drive -- which is what `steady` is here to catch, since it leads on mean
+/// relative score while dominating no step at all.
+#[test]
+fn a_step_with_no_active_loop_anchors_nobody() {
+    let group = NormGroup::Partition(0);
+    // Step 2 is dead for every loop: two score exactly zero there and the
+    // third's score is undefined (a NaN link somewhere in its product).
+    let steady = [0.4, 0.4, f64::NAN];
+    let early = [0.6, 0.0, 0.0];
+    let late = [0.0, 0.6, 0.0];
+    let rows = vec![
+        SelectionRow {
+            group,
+            competing: true,
+            rel: &steady,
+        },
+        SelectionRow {
+            group,
+            competing: true,
+            rel: &early,
+        },
+        SelectionRow {
+            group,
+            competing: true,
+            rel: &late,
+        },
+    ];
+
+    assert_eq!(
+        anchor_ranks(&rows),
+        vec![2, 1, 1],
+        "the two step-dominant loops anchor at k=1 and the steady leader only \
+         at k=2; the dead step adds nothing"
+    );
+    assert_eq!(
+        select_reported(&rows, 2),
+        vec![1, 2],
+        "the two genuine anchors fit the cap exactly, so the steady leader is \
+         dropped rather than the selection overflowing into its pathological \
+         arm"
+    );
+}
+
+/// Loops in DIFFERENT normalization groups never compete for the same step's
+/// anchor: dominance is a share of one denominator, and comparing shares of
+/// two different denominators is the cross-partition comparison the papers
+/// warn against (ref section 8). Each group anchors its own maximum.
+#[test]
+fn each_normalization_group_anchors_its_own_step_maximum() {
+    let big = [0.6, 0.6];
+    let small = [0.4, 0.4];
+    let other = [0.55, 0.55];
+    let rows = vec![
+        SelectionRow {
+            group: NormGroup::Partition(0),
+            competing: true,
+            rel: &big,
+        },
+        SelectionRow {
+            group: NormGroup::Partition(0),
+            competing: true,
+            rel: &small,
+        },
+        SelectionRow {
+            group: NormGroup::Partition(1),
+            competing: true,
+            rel: &other,
+        },
+    ];
+
+    assert_eq!(
+        anchor_ranks(&rows),
+        vec![1, 2, 1],
+        "partition 1's only loop anchors at k=1 despite scoring below \
+         partition 0's runner-up"
+    );
+    assert_eq!(
+        select_reported(&rows, 2),
+        vec![0, 2],
+        "one anchor per group fills the cap"
+    );
+}
+
+// --- Synthetic-graph fixtures ---
+
 /// Build a multi-step `Results` whose per-edge scores follow a deterministic
-/// pseudo-random sequence, so the per-timestep edge sort order (and thus the
-/// DFS traversal/pruning) varies across steps -- exercising the tie-breaking
-/// and score-dependent branches in both implementations.
-fn synthetic_results(n_offsets: usize, step_count: usize, seed: u64) -> Results {
+/// pseudo-random sequence, so each step's active edge set and its weights
+/// differ -- which is what makes a synthetic corpus exercise the
+/// activity-window and tie-breaking branches rather than one fixed graph.
+pub(super) fn synthetic_results(n_offsets: usize, step_count: usize, seed: u64) -> Results {
     let step_size = n_offsets;
     let mut data = vec![0.0f64; step_size * step_count];
     // Step 0 is all NaN (PREVIOUS values don't exist), matching production;
@@ -2395,103 +2416,6 @@ fn synthetic_results(n_offsets: usize, step_count: usize, seed: u64) -> Results 
             n_chunks: step_count,
         },
         is_vensim: false,
-    }
-}
-
-#[test]
-fn indexed_search_matches_reference_on_synthetic_graphs() {
-    // A fully-connected-ish 5-node graph plus a couple of disconnected
-    // nodes, several stocks, parallel edges, and a self-loop -- the shapes
-    // the unit tests above exercise individually, combined and stressed
-    // over many timesteps with varying scores.
-    let names = ["a", "b", "c", "d", "e", "f", "g"];
-    let mut edge_pairs: Vec<(&str, &str)> = Vec::new();
-    for &from in &names[..5] {
-        for &to in &names[..5] {
-            edge_pairs.push((from, to)); // includes self-loops
-        }
-    }
-    // A node ("g") that is only ever an edge target (no outbound edges)
-    // and a duplicate (parallel) edge to stress tie-breaking / dedup.
-    edge_pairs.push(("a", "g"));
-    edge_pairs.push(("a", "b")); // parallel to the existing a->b
-
-    let link_offsets: Vec<LinkOffset> = edge_pairs
-        .iter()
-        .enumerate()
-        .map(|(i, (from, to))| ((Ident::new(from), Ident::new(to)), i))
-        .collect();
-
-    // Stocks include a node with no incident edges ("f") to mirror the
-    // `test_stocks_without_outbound_edges` shape.
-    let stocks: Vec<Ident<Canonical>> =
-        ["a", "c", "e", "f"].iter().map(|s| Ident::new(s)).collect();
-
-    // Run several independent seeds so the per-step sort order (and the
-    // resulting traversal/pruning) varies widely.
-    for seed in [1u64, 7, 42, 1000, 999_983] {
-        let results = synthetic_results(link_offsets.len(), 40, seed);
-        let reference = reference_all_paths(&results, &link_offsets, &stocks);
-        let indexed = indexed_all_paths(&results, &link_offsets, &stocks);
-        // Guard against a vacuous pass: a future fixture edit that produced
-        // no loops would make the equality below trivially true.
-        assert!(
-            !reference.is_empty(),
-            "synthetic fixture must produce loops (seed {seed})"
-        );
-        assert_eq!(
-            paths_as_strings(&indexed),
-            paths_as_strings(&reference),
-            "IndexedSearch must discover the identical loop paths in the \
-                 identical first-seen order as the SearchGraph reference \
-                 (seed {seed})"
-        );
-    }
-}
-
-#[test]
-fn indexed_search_matches_reference_element_level_names() {
-    // Long element-level identifiers (the C-LEARN-style names whose string
-    // hashing the optimization eliminates) over a denser graph.
-    let names = [
-        "population[nyc]",
-        "births[nyc]",
-        "deaths[nyc]",
-        "population[boston]",
-        "births[boston]",
-        "migration_pressure[chicago]",
-    ];
-    let mut edge_pairs: Vec<(&str, &str)> = Vec::new();
-    for &from in &names {
-        for &to in &names {
-            if from != to {
-                edge_pairs.push((from, to));
-            }
-        }
-    }
-    let link_offsets: Vec<LinkOffset> = edge_pairs
-        .iter()
-        .enumerate()
-        .map(|(i, (from, to))| ((Ident::new(from), Ident::new(to)), i))
-        .collect();
-    let stocks: Vec<Ident<Canonical>> = ["population[nyc]", "population[boston]"]
-        .iter()
-        .map(|s| Ident::new(s))
-        .collect();
-
-    for seed in [3u64, 17, 55, 12_345] {
-        let results = synthetic_results(link_offsets.len(), 30, seed);
-        let reference = reference_all_paths(&results, &link_offsets, &stocks);
-        let indexed = indexed_all_paths(&results, &link_offsets, &stocks);
-        assert!(
-            !reference.is_empty(),
-            "element-level fixture must produce loops (seed {seed})"
-        );
-        assert_eq!(
-            paths_as_strings(&indexed),
-            paths_as_strings(&reference),
-            "element-level discovery must match the reference (seed {seed})"
-        );
     }
 }
 
@@ -2558,7 +2482,11 @@ fn discovery_graph_stats_reports_structure_and_scores() {
     offsets.insert(Ident::new("a"), 3usize);
 
     let data = vec![
-        // step 0 (skipped by discovery; NaNs)
+        // step 0: `sample_steps` below (`&[1, 2]`) never asks for it, so its
+        // value is never read either way. NaN here (rather than the literal
+        // `0` production actually emits for every link score at
+        // `TIME = INITIAL_TIME`) is a sentinel: an accidental read would
+        // propagate loudly instead of silently matching a plausible score.
         f64::NAN,
         f64::NAN,
         f64::NAN,
@@ -2632,94 +2560,6 @@ fn discovery_graph_stats_reports_structure_and_scores() {
     assert_eq!(s2.stocks_in_nonzero_core, 0);
 }
 
-// --- Mid-step deadline enforcement (the in-DFS budget check) ---
-
-/// Build an IndexedSearch over `a -> b -> c -> a` (single stock `a`) with
-/// every per-step edge score populated as 1.0, plus a scratch ready for
-/// `discover_step`. Bypasses `load_step_scores` so no `Results` is needed.
-fn cycle_search_and_scratch() -> (IndexedSearch, DfsScratch) {
-    let link_offsets: Vec<LinkOffset> = vec![
-        ((Ident::new("a"), Ident::new("b")), 0),
-        ((Ident::new("b"), Ident::new("c")), 1),
-        ((Ident::new("c"), Ident::new("a")), 2),
-    ];
-    let stocks = stock_list(&["a"]);
-    let search = IndexedSearch::build(&link_offsets, &stocks);
-    let mut scratch = DfsScratch::new(&search);
-    for (node, edges) in search.adj.iter().enumerate() {
-        scratch.step_adj[node] = edges
-            .iter()
-            .map(|e| StepEdge {
-                to: e.to,
-                score: 1.0,
-            })
-            .collect();
-    }
-    (search, scratch)
-}
-
-#[test]
-fn dfs_deadline_expires_mid_step() {
-    // On dense element-level graphs a SINGLE timestep's DFS can run for
-    // hours (GH #647), so the budget must be enforced inside the DFS, not
-    // only between timesteps. With an already-passed deadline and the
-    // visit counter seeded so the very first visit performs the
-    // (interval-amortized) clock check, the DFS must flag expiry and bail
-    // without recording the cycle. The counter seeding stands in for the
-    // thousands of visits a large graph would need to reach the check
-    // naturally -- per the test-budget policy, tests must not build
-    // fixtures big enough to trip production thresholds for real.
-    let (search, mut scratch) = cycle_search_and_scratch();
-    scratch.deadline = Some(Instant::now());
-    scratch.visit_count = DEADLINE_CHECK_INTERVAL - 1;
-
-    let mut seen: HashSet<Vec<u32>> = HashSet::new();
-    let mut paths: Vec<Vec<Ident<Canonical>>> = Vec::new();
-    search.discover_step(&mut scratch, &mut seen, &mut paths);
-
-    assert!(
-        scratch.deadline_expired,
-        "an expired deadline must be detected inside the step's DFS"
-    );
-    assert!(
-        paths.is_empty(),
-        "the DFS must unwind without recording loops once the deadline expired"
-    );
-}
-
-#[test]
-fn dfs_unexpired_deadline_still_finds_loops() {
-    // The deadline machinery must not suppress discovery: with no deadline
-    // the cycle is found, and with a far-future deadline (clock check
-    // exercised via the seeded counter) it is found too.
-    let (search, mut scratch) = cycle_search_and_scratch();
-    let mut seen: HashSet<Vec<u32>> = HashSet::new();
-    let mut paths: Vec<Vec<Ident<Canonical>>> = Vec::new();
-    search.discover_step(&mut scratch, &mut seen, &mut paths);
-    assert!(!scratch.deadline_expired);
-    assert_eq!(
-        paths_as_strings(&paths),
-        vec![vec!["a".to_string(), "b".to_string(), "c".to_string()]],
-        "the a -> b -> c cycle must be discovered on an unbudgeted run"
-    );
-
-    let (search2, mut scratch2) = cycle_search_and_scratch();
-    scratch2.deadline = Some(Instant::now() + Duration::from_secs(3600));
-    scratch2.visit_count = DEADLINE_CHECK_INTERVAL - 1;
-    let mut seen2: HashSet<Vec<u32>> = HashSet::new();
-    let mut paths2: Vec<Vec<Ident<Canonical>>> = Vec::new();
-    search2.discover_step(&mut scratch2, &mut seen2, &mut paths2);
-    assert!(
-        !scratch2.deadline_expired,
-        "a far-future deadline must not be reported as expired"
-    );
-    assert_eq!(
-        paths_as_strings(&paths2),
-        vec![vec!["a".to_string(), "b".to_string(), "c".to_string()]],
-        "the cycle must still be discovered when the deadline check fires but has not passed"
-    );
-}
-
 /// Compile an arrayed reducer-in-feedback model with LTM discovery enabled,
 /// simulate it, and run the full discovery pipeline. Uses the bare
 /// `causal_graph_from_element_edges` constructor (no module sub-graphs);
@@ -2731,7 +2571,7 @@ fn dfs_unexpired_deadline_still_finds_loops() {
 ///
 /// `growth[r] = SUM(pop[*]) * 0.05` over `elems`: one scalar synthetic agg,
 /// one petal per element, so the cross-agg recovery (GH #696) is exercised.
-fn discover_reducer_feedback(elems: &[&str]) -> DiscoveryResult {
+fn discover_reducer_feedback(elems: &[&str], candidate_gen: CandidateGen) -> DiscoveryResult {
     use crate::datamodel::{self, Equation, Variable};
     use salsa::Setter;
 
@@ -2825,7 +2665,7 @@ fn discover_reducer_feedback(elems: &[&str]) -> DiscoveryResult {
 
     // These fixtures contain no modules, so the per-exit-port recompute
     // never fires; an empty output-port map is correct.
-    discover_loops_with_graph(
+    discover_loops_with_candidate_gen(
         &results,
         &causal_graph,
         &stocks,
@@ -2834,46 +2674,76 @@ fn discover_reducer_feedback(elems: &[&str]) -> DiscoveryResult {
         &expansion,
         &SubModelOutputPorts::new(),
         None,
+        candidate_gen,
     )
     .unwrap()
 }
 
-/// GH #696: discovery stitches the per-element petals into cross-element
-/// loops. On the 3-element reducer-in-feedback model it recovers all 7
-/// (3 single-petal + 3 pair + 1 triple), and the flag is not raised when
-/// well under budget.
+/// GH #696 / AC2.4: discovery stitches the per-element petals into
+/// cross-element loops, and BOTH generators do it identically -- on the
+/// 3-element reducer-in-feedback model each recovers all 7 (3 single-petal +
+/// 3 pair + 1 triple), and the flag is not raised when well under budget.
+///
+/// The agreement is the point: the petals themselves are what the generators
+/// find differently, while the stitching that turns them into cross-element
+/// loops is one shared helper, so a divergence here would mean the two had
+/// grown separate combinatorics.
 #[test]
 fn discovery_recovers_cross_agg_loops_end_to_end() {
-    let result = discover_reducer_feedback(&["a", "b", "c"]);
-    assert_eq!(
-        result.loops.len(),
-        7,
-        "discovery must recover 3 single + 3 pair + 1 triple loops; got {:?}",
-        result
+    for candidate_gen in [
+        CandidateGen::Auto,
+        CandidateGen::FallbackOnly(FallbackConfig::DEFAULT),
+    ] {
+        let result = discover_reducer_feedback(&["a", "b", "c"], candidate_gen);
+        assert_eq!(
+            result.loops.len(),
+            7,
+            "{candidate_gen:?} must recover 3 single + 3 pair + 1 triple loops; got {:?}",
+            result
+                .loops
+                .iter()
+                .map(|l| l
+                    .loop_info
+                    .links
+                    .iter()
+                    .map(|k| k.from.as_str())
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !result.agg_recovery_truncated,
+            "a 3-petal model is well under the production budget"
+        );
+        // Loops of three distinct sizes appear (single-petal, pair, triple).
+        let sizes: HashSet<usize> = result
             .loops
             .iter()
-            .map(|l| l
-                .loop_info
-                .links
-                .iter()
-                .map(|k| k.from.as_str())
-                .collect::<Vec<_>>())
-            .collect::<Vec<_>>()
-    );
-    assert!(
-        !result.agg_recovery_truncated,
-        "a 3-petal model is well under the production budget"
-    );
-    // Loops of three distinct sizes appear (single-petal, pair, triple).
-    let sizes: HashSet<usize> = result
-        .loops
-        .iter()
-        .map(|l| l.loop_info.links.len())
-        .collect();
-    assert!(
-        sizes.contains(&2) && sizes.contains(&4) && sizes.contains(&6),
-        "expected loop link-counts 2/4/6; got {sizes:?}"
-    );
+            .map(|l| l.loop_info.links.len())
+            .collect();
+        assert!(
+            sizes.contains(&2) && sizes.contains(&4) && sizes.contains(&6),
+            "{candidate_gen:?}: expected loop link-counts 2/4/6; got {sizes:?}"
+        );
+        if candidate_gen == CandidateGen::Auto {
+            // `universe_loops` counts DISTINCT loops: the 3 single-petal
+            // circuits the enumerator found directly, plus the 4 stitched
+            // cross-agg loops (3 pair + 1 triple) added after retention --
+            // none of which are enumerated circuits in their own right, so
+            // they are not part of `retention.distinct_circuits` but ARE
+            // part of this count (see the field doc).
+            assert_eq!(
+                result.universe_loops,
+                Some(7),
+                "3 enumerated single-petal circuits + 4 stitched cross-agg \
+                 loops, matching the 7 reported here (no dedup twins and no \
+                 cap in this fixture, so the universe and the report agree)"
+            );
+            assert!(
+                result.universe_loops.unwrap() >= result.retained_loops,
+                "the universe can never undercount what actually got retained"
+            );
+        }
+    }
 }
 
 /// The cross-agg loop-count budget clips discovery's recovery and raises
@@ -2882,10 +2752,10 @@ fn discovery_recovers_cross_agg_loops_end_to_end() {
 #[test]
 fn discovery_cross_agg_recovery_respects_budget() {
     // Budget of 1 lets at most one stitched cross-agg loop through; the
-    // 3 single-petal elementary loops are emitted by the DFS regardless
+    // 3 single-petal elementary loops are candidates in their own right
     // (they are not stitched), so we expect 3 petals + 1 stitched = 4.
     let _guard = crate::db::AggLoopBudgetGuard::new(1);
-    let result = discover_reducer_feedback(&["a", "b", "c"]);
+    let result = discover_reducer_feedback(&["a", "b", "c"], CandidateGen::Auto);
     assert!(
         result.agg_recovery_truncated,
         "a budget of 1 must clip the 4 stitched loops and flag truncation"
@@ -3219,5 +3089,1276 @@ fn recompute_strips_element_subscripts_before_port_match() {
     assert!(
         settled > 0.0,
         "recomputed series follows the m·pos pathway (+); got {settled}. PR #705 r3353758167."
+    );
+}
+
+/// The share of a partition's universe mass that its REPORTED loops account
+/// for, at each saved step: `Sum_j |rel_score_j[t]|`.
+///
+/// A relative score is `score / partition_total`, so this sums to exactly 1.0
+/// at every active step precisely when the denominator is the sum of the
+/// reported loops' own |score| series -- which is the property the enumeration
+/// path's denominator corrections exist to maintain. Any circuit whose mass is
+/// in the total but whose score is not reported (because a duplicate
+/// representative was trimmed away, or because a module loop's raw composite
+/// product was banked instead of the override series it actually reports)
+/// shows up here as a shortfall.
+///
+/// Only meaningful when every universe circuit is reported, which the fixtures
+/// below assert directly.
+fn reported_mass_share_per_step(result: &DiscoveryResult) -> Vec<f64> {
+    let step_count = result.loops.first().map_or(0, |l| l.rel_scores.len());
+    (0..step_count)
+        .map(|t| {
+            result
+                .loops
+                .iter()
+                .map(|l| l.rel_scores[t].abs())
+                .sum::<f64>()
+        })
+        .collect()
+}
+
+/// AC4.2: a loop through a multi-output module reports the per-exit-port
+/// override series, not the raw product its module-input link contributes.
+/// That link's recorded score is the module COMPOSITE, which max-abs-selects
+/// across every output port of the module -- so on a module whose ports carry
+/// different magnitudes it is a different number entirely from the pathway the
+/// loop traverses. The mass such a loop puts into its partition's denominator
+/// has to be the mass it reports, or every loop in the partition is normalized
+/// against a total that includes a score nothing reports.
+#[test]
+fn a_module_loop_contributes_its_override_mass_to_the_denominator() {
+    let (result, results) = discover_multi_output_module_feedback(CandidateGen::Auto);
+
+    assert_eq!(
+        result.loops.len(),
+        2,
+        "the module growth loop and the decay loop; got {:?}",
+        result
+            .loops
+            .iter()
+            .map(|l| l
+                .loop_info
+                .links
+                .iter()
+                .map(|k| k.from.as_str())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    );
+    let module_loop = result
+        .loops
+        .iter()
+        .find(|l| l.loop_info.links.iter().any(|k| k.to.as_str() == "m"))
+        .expect("one reported loop runs through the module instance");
+
+    // The fixture only bites if the composite and the override really differ,
+    // so read the raw link scores the composite product would have used and
+    // check the reported score is not that.
+    let score_at = |from: &str, to: &str, step: usize| -> f64 {
+        let name = format!("$\u{205A}ltm\u{205A}link_score\u{205A}{from}\u{2192}{to}");
+        let offset = *results
+            .offsets
+            .get(&Ident::<Canonical>::new(&name))
+            .unwrap_or_else(|| panic!("missing link score {name}"));
+        results.data[step * results.step_size + offset]
+    };
+    let differs = (2..results.step_count).any(|step| {
+        let composite_product = score_at("s", "m", step)
+            * score_at("m", "growth", step)
+            * score_at("growth", "s", step);
+        let reported = module_loop.scores[step].1;
+        composite_product.is_finite()
+            && reported.is_finite()
+            && (composite_product.abs() - reported.abs()).abs() > 1e-9
+    });
+    assert!(
+        differs,
+        "the fixture must be one where the composite product and the reported \
+         override score differ; otherwise this test cannot tell the two \
+         denominators apart"
+    );
+
+    let shares = reported_mass_share_per_step(&result);
+    for (t, &share) in shares.iter().enumerate() {
+        if share == 0.0 {
+            continue;
+        }
+        assert!(
+            (share - 1.0).abs() < 1e-9,
+            "step {t}: the reported loops account for {share} of the \
+             partition's mass, so the denominator carries the module loop's \
+             raw composite product rather than the override series it reports"
+        );
+    }
+    assert!(
+        shares.iter().any(|&s| s > 0.0),
+        "the fixture must be active"
+    );
+}
+
+/// AC2.4's module row: both generators reach the module loop and the
+/// module-free loop, and both score the module loop off the SAME per-exit-port
+/// override series.
+///
+/// The scoring is downstream of candidate generation, so this is really a
+/// claim about the materialization pipeline being shared -- but it is the
+/// claim worth pinning, because a generator that reached the loop by a
+/// different node path would score it off the module composite instead and the
+/// polarity could flip (GH #698).
+#[test]
+fn a_module_loop_is_recovered_and_scored_alike_by_both_generators() {
+    let (auto, _) = discover_multi_output_module_feedback(CandidateGen::Auto);
+    let (fallback, _) =
+        discover_multi_output_module_feedback(CandidateGen::FallbackOnly(FallbackConfig::DEFAULT));
+    assert!(auto.enumeration_complete);
+    assert!(!fallback.enumeration_complete);
+
+    fn module_loop(r: &DiscoveryResult) -> &FoundLoop {
+        r.loops
+            .iter()
+            .find(|l| l.loop_info.links.iter().any(|k| k.to.as_str() == "m"))
+            .expect("one reported loop runs through the module instance")
+    }
+    assert_eq!(auto.loops.len(), 2);
+    assert_eq!(
+        fallback.loops.len(),
+        2,
+        "the stock's two in-edges close both cycles from a single Dijkstra tree"
+    );
+    assert_eq!(
+        module_loop(&auto).scores,
+        module_loop(&fallback).scores,
+        "the module loop's per-exit-port override series does not depend on \
+         which generator proposed the cycle"
+    );
+}
+
+/// A module-input edge's pathway slot list is charged to the discovery meter
+/// BEFORE it is handed out; a refused charge ends the attach pass and, because
+/// a partially attached graph would read that edge as inactive where it is not,
+/// discovery runs neither generator: an empty, truncated report rather than a
+/// sample over a graph it could not finish building -- and nothing uncharged
+/// is retained on any edge.
+#[test]
+fn a_refused_pathway_slot_list_abandons_candidate_generation() {
+    let _guard = MemoryBudgetGuard::new(0);
+    let (found, _) = discover_multi_output_module_feedback(CandidateGen::Auto);
+    assert!(found.truncated);
+    assert!(!found.enumeration_complete);
+    assert!(found.loops.is_empty());
+    assert_eq!(found.fallback_candidates, None, "no sweep ran");
+    assert_eq!(found.universe_loops, None);
+}
+
+/// A stock whose growth runs through a sub-model with TWO output ports of
+/// different magnitudes: `pos` shares its change with a second input, so the
+/// `input_val -> pos` pathway carries less than the whole change, while
+/// `neg` depends on `input_val` alone and carries all of it. The module
+/// composite therefore selects `neg`, while the loop -- which reads `pos` --
+/// is scored on the `pos` pathway. A second, module-free loop through the same
+/// stock puts both in one cycle partition.
+fn discover_multi_output_module_feedback(
+    candidate_gen: CandidateGen,
+) -> (DiscoveryResult, Results) {
+    let inputs = multi_output_module_feedback_inputs();
+    let result = discover_loops_with_candidate_gen(
+        &inputs.results,
+        &inputs.causal_graph,
+        &inputs.stocks,
+        &inputs.ltm_vars,
+        &inputs.dims,
+        &inputs.expansion,
+        &inputs.ports,
+        None,
+        candidate_gen,
+    )
+    .unwrap();
+    (result, inputs.results)
+}
+
+/// Everything discovery consumes for the multi-output module fixture, for
+/// tests that drive a single phase (the override cache) rather than the whole
+/// pipeline.
+struct ModuleFixtureInputs {
+    results: Results,
+    causal_graph: CausalGraph,
+    stocks: Vec<Ident<Canonical>>,
+    ltm_vars: Vec<LtmSyntheticVar>,
+    dims: Vec<crate::datamodel::Dimension>,
+    expansion: LinkExpansionContext,
+    ports: SubModelOutputPorts,
+}
+
+fn multi_output_module_feedback_inputs() -> ModuleFixtureInputs {
+    use crate::datamodel::{self, Equation};
+    use salsa::Setter;
+
+    let aux = |ident: &str, eqn: &str, is_input: bool| {
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation: Equation::Scalar(eqn.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat {
+                can_be_module_input: is_input,
+                ..datamodel::Compat::default()
+            },
+        })
+    };
+    let flow = |ident: &str, eqn: &str| {
+        datamodel::Variable::Flow(datamodel::Flow {
+            ident: ident.to_string(),
+            equation: Equation::Scalar(eqn.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        })
+    };
+
+    let passthrough = datamodel::Model {
+        name: "passthrough".to_string(),
+        sim_specs: None,
+        variables: vec![
+            aux("input_val", "0", true),
+            aux("other", "0", true),
+            aux("pos", "input_val * 0.02 + other", false),
+            aux("neg", "0 - input_val", false),
+        ],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    };
+    let main = datamodel::Model {
+        name: "main".to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "s".to_string(),
+                equation: Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["growth".to_string()],
+                outflows: vec!["decay".to_string()],
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
+            datamodel::Variable::Module(datamodel::Module {
+                ident: "m".to_string(),
+                model_name: "passthrough".to_string(),
+                documentation: String::new(),
+                references: vec![
+                    datamodel::ModuleReference {
+                        src: "s".to_string(),
+                        dst: "m.input_val".to_string(),
+                    },
+                    datamodel::ModuleReference {
+                        src: "drift".to_string(),
+                        dst: "m.other".to_string(),
+                    },
+                ],
+                units: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            flow("growth", "m.pos * 0.1"),
+            flow("decay", "s * 0.05"),
+            aux("drift", "TIME + 1", false),
+            aux("watcher", "m.neg", false),
+        ],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    };
+    let project = datamodel::Project {
+        name: "multi_output_module".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 6.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![main, passthrough],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
+    let sp = sync.project;
+    sp.set_ltm_enabled(&mut db).to(true);
+    sp.set_ltm_discovery_mode(&mut db).to(true);
+    let source_model = *sp.models(&db).get("main").unwrap();
+
+    let compiled = crate::db::compile_project_incremental(&db, sp, "main").unwrap();
+    let mut vm = crate::vm::Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let element_edges = crate::db::model_element_causal_edges(&db, source_model, sp);
+    let causal_graph = crate::db::causal_graph_from_element_edges_with_modules(
+        &db,
+        source_model,
+        sp,
+        element_edges,
+    );
+    let stocks: Vec<Ident<Canonical>> = element_edges
+        .stocks
+        .iter()
+        .map(|s| Ident::new(s.as_str()))
+        .collect();
+    let ltm = crate::db::model_ltm_variables(&db, source_model, sp);
+    let dm_dims = crate::db::project_datamodel_dims(&db, sp);
+    let expansion = crate::analysis::build_link_expansion_context(&db, source_model, sp);
+    let ports = crate::analysis::build_sub_model_output_ports(&db, sp);
+
+    ModuleFixtureInputs {
+        results,
+        causal_graph,
+        stocks,
+        ltm_vars: ltm.vars.clone(),
+        dims: dm_dims.clone(),
+        expansion,
+        ports,
+    }
+}
+
+/// The override cache charges a module-input edge's series to the meter
+/// BEFORE recomputing it (the recompute folds the pathway rows into exactly
+/// one `step_count`-long buffer, so that is its footprint): a meter one byte
+/// short answers `OutOfMemory` with nothing charged, a decline (no module at
+/// the edge) credits the charge straight back, and a resolved series keeps
+/// exactly its own bytes -- once, however many times it is asked for.
+#[test]
+fn the_override_cache_charges_a_series_before_recomputing_it() {
+    let inputs = multi_output_module_feedback_inputs();
+    let step_count = inputs.results.step_count;
+    let series_bytes = step_count * std::mem::size_of::<f64>();
+    let s: Ident<Canonical> = Ident::new("s");
+    let m: Ident<Canonical> = Ident::new("m");
+    let growth: Ident<Canonical> = Ident::new("growth");
+
+    {
+        let _guard = MemoryBudgetGuard::new(series_bytes - 1);
+        let meter = MemoryMeter::new();
+        let mut cache = ModuleOverrideCache::new(
+            &inputs.causal_graph,
+            &inputs.results,
+            &inputs.ports,
+            step_count,
+            &meter,
+        );
+        assert!(matches!(
+            cache.series(&s, &m, &growth),
+            OverrideLookup::OutOfMemory
+        ));
+        assert_eq!(meter.used(), 0, "a refused series charges nothing");
+    }
+    {
+        let meter = MemoryMeter::new();
+        let mut cache = ModuleOverrideCache::new(
+            &inputs.causal_graph,
+            &inputs.results,
+            &inputs.ports,
+            step_count,
+            &meter,
+        );
+        // `growth -> s` has no module at its target: declined, charge released.
+        assert!(matches!(
+            cache.series(&growth, &s, &m),
+            OverrideLookup::Declined
+        ));
+        assert_eq!(meter.used(), 0, "a decline releases the pre-charge");
+        // The real module edge resolves and keeps its series' bytes.
+        assert!(matches!(
+            cache.series(&s, &m, &growth),
+            OverrideLookup::Resolved(..)
+        ));
+        assert_eq!(meter.used(), series_bytes);
+        assert!(matches!(
+            cache.series(&s, &m, &growth),
+            OverrideLookup::Resolved(..)
+        ));
+        assert_eq!(
+            meter.used(),
+            series_bytes,
+            "a cache hit charges nothing more"
+        );
+    }
+}
+
+/// AC4.3: two enumerated circuits can trim to the SAME reported loop -- a
+/// direct `pop[d] -> share[d]` numerator reference and the
+/// `pop[d] -> $ltm:agg -> share[d]` reducer reference differ only in the
+/// synthetic aggregate node the report hides. Both are scored into the
+/// partition's universe total, and only one survives as the reported
+/// representative, so the dropped one's mass has to come back out of the
+/// denominator; otherwise every loop in the partition is normalized against
+/// mass no reported loop carries.
+#[test]
+fn a_trimmed_duplicate_circuit_leaves_no_mass_in_the_denominator() {
+    let result = discover_share_of_total_feedback(&["a", "b"]);
+    // Per element: the direct circuit and its agg-routed twin trim to one
+    // reported loop; the two agg petals additionally stitch into one
+    // cross-element loop. Five enumerated candidates, three reported.
+    assert_eq!(
+        result.loops.len(),
+        3,
+        "two per-element loops plus the stitched cross-element one; got {:?}",
+        result
+            .loops
+            .iter()
+            .map(|l| l
+                .loop_info
+                .links
+                .iter()
+                .map(|k| k.from.as_str())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        result.loops.iter().all(|l| l
+            .loop_info
+            .links
+            .iter()
+            .all(|k| !crate::ltm_agg::is_synthetic_agg_name(k.from.as_str()))),
+        "the reported loops are the trimmed form both circuits collapse onto"
+    );
+    assert_eq!(
+        result.retained_loops, 3,
+        "one survivor per reported cycle -- with retention's own trimmed-key \
+         dedup deciding the representative before either twin's mass reaches \
+         a partition total, the loser of each pair never reaches \
+         materialization at all, so there is no double-counted survivor for \
+         `retained_loops` to report"
+    );
+
+    let shares = reported_mass_share_per_step(&result);
+    for (t, &share) in shares.iter().enumerate() {
+        if share == 0.0 {
+            continue; // the partition is not yet active at this step
+        }
+        assert!(
+            (share - 1.0).abs() < 1e-9,
+            "step {t}: the reported loops account for {share} of the \
+             partition's mass, so the trimmed duplicates' mass is still in \
+             the denominator"
+        );
+    }
+    assert!(
+        shares.iter().any(|&s| s > 0.0),
+        "the fixture must have active steps"
+    );
+}
+
+/// `retain_circuits`' trimmed-key dedup (`ltm_finding_enum.rs`'s
+/// `dedup_trimmed_twins`, via `trimmed_circuit_key`) must group circuits
+/// under EXACTLY the identity `ltm_finding.rs`'s post-materialization
+/// `by_reported_cycle` dedup computes from the reported links
+/// (`trim_synthetic_aggs_from_loop_links` + `canonical_rotation` over each
+/// resulting link's `from`) -- not merely an equivalent-looking one. This
+/// drives both derivations from the SAME circuit (`a -> $agg -> b -> a`) and
+/// asserts their node sequences match, rather than trusting the argument in
+/// each function's doc comment.
+#[test]
+fn retention_dedup_key_matches_the_materialization_trim() {
+    let agg_name = crate::ltm_agg::synthetic_agg_name(0);
+    let link_offsets: Vec<LinkOffset> = vec![
+        ((Ident::new("a"), Ident::new(agg_name.as_str())), 0),
+        ((Ident::new(agg_name.as_str()), Ident::new("b")), 1),
+        ((Ident::new("b"), Ident::new("a")), 2),
+    ];
+    let n_offsets = 3;
+    let step_count = 2;
+    let mut data = vec![0.0f64; n_offsets * step_count];
+    data[n_offsets] = 5.0; // a -> agg
+    data[n_offsets + 1] = 4.0; // agg -> b
+    data[n_offsets + 2] = 10.0; // b -> a
+    let results = enum_results(n_offsets, step_count, data);
+    let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
+    let activity = super::enum_gen::ActivityGraph::build(
+        &search,
+        &results,
+        None,
+        &mut SystemClock,
+        &MemoryMeter::new(),
+    )
+    .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(
+        &activity,
+        None,
+        &mut SystemClock,
+        &MemoryMeter::new(),
+    );
+    assert!(candidates.complete);
+    assert_eq!(
+        candidates.len(),
+        1,
+        "one 3-node circuit through the agg node"
+    );
+
+    let is_agg_node: Vec<bool> = search
+        .idents
+        .iter()
+        .map(|id| crate::ltm_agg::is_synthetic_agg_name(id.as_str()))
+        .collect();
+    let key = super::enum_gen::trimmed_circuit_key(candidates.circuit(0), &activity, &is_agg_node);
+    let key_names: Vec<String> = key
+        .iter()
+        .map(|&n| search.idents[n as usize].as_str().to_string())
+        .collect();
+
+    // Independently derive the materialization side's trim over the SAME
+    // circuit's links -- no shared code path with `trimmed_circuit_key`.
+    let links = vec![
+        Link {
+            from: Ident::new("a"),
+            to: Ident::new(agg_name.as_str()),
+            polarity: crate::ltm::LinkPolarity::Positive,
+        },
+        Link {
+            from: Ident::new(agg_name.as_str()),
+            to: Ident::new("b"),
+            polarity: crate::ltm::LinkPolarity::Positive,
+        },
+        Link {
+            from: Ident::new("b"),
+            to: Ident::new("a"),
+            polarity: crate::ltm::LinkPolarity::Positive,
+        },
+    ];
+    let trimmed_links = trim_synthetic_aggs_from_loop_links(&links)
+        .expect("a two-real-node cycle survives trimming");
+    let materialization_names: Vec<String> = trimmed_links
+        .iter()
+        .map(|l| l.from.as_str().to_string())
+        .collect();
+    let materialization_key = crate::ltm::canonical_rotation(&materialization_names);
+
+    assert_eq!(
+        key_names, materialization_key,
+        "retention's trimmed-key dedup must group circuits under the exact \
+         same identity `by_reported_cycle` will later compute from the \
+         materialized links"
+    );
+}
+
+/// AC4.3 exactness: retention's trimmed-key dedup must decide the
+/// representative among a direct circuit and its hoisted-reducer twin
+/// BEFORE either candidate's mass reaches a partition total, not merely
+/// after materialization -- otherwise a third loop whose true share (against
+/// the corrected, single-representative total) clears `MIN_CONTRIBUTION`
+/// can still be dropped by retention's OWN threshold decision, which judges
+/// against the inflated (double-counted) pre-correction total and is never
+/// revisited for a non-survivor.
+///
+/// `a<->b` (direct, raw product 100 at the one active step) and
+/// `a -> $agg -> b -> a` (the hoisted-reducer twin, raw product 200) trim to
+/// the identical reported loop; the twin with the higher `raw_avg_abs_score`
+/// (200) must win, leaving `a<->c` (product 0.25) to be judged against a
+/// total of `200 + 0.25 = 200.25` (share ~0.1248%, RETAINED) rather than the
+/// uncorrected `100 + 200 + 0.25 = 300.25` (share ~0.0832%, DROPPED): both
+/// numbers straddle `MIN_CONTRIBUTION` (0.1%) by construction.
+#[test]
+fn retention_dedup_prevents_a_borderline_loop_from_being_dropped_by_an_inflated_total() {
+    let agg_name = crate::ltm_agg::synthetic_agg_name(0);
+    let link_offsets: Vec<LinkOffset> = vec![
+        ((Ident::new("a"), Ident::new("b")), 0),
+        ((Ident::new("b"), Ident::new("a")), 1),
+        ((Ident::new("a"), Ident::new(agg_name.as_str())), 2),
+        ((Ident::new(agg_name.as_str()), Ident::new("b")), 3),
+        ((Ident::new("a"), Ident::new("c")), 4),
+        ((Ident::new("c"), Ident::new("a")), 5),
+    ];
+    let n_offsets = 6;
+    let step_count = 2;
+    let mut data = vec![0.0f64; n_offsets * step_count];
+    data[n_offsets] = 10.0; // a -> b
+    data[n_offsets + 1] = 10.0; // b -> a  (shared closing edge; direct product 100)
+    data[n_offsets + 2] = 5.0; // a -> agg
+    data[n_offsets + 3] = 4.0; // agg -> b  (twin product 5*4*10 = 200)
+    data[n_offsets + 4] = 0.5; // a -> c
+    data[n_offsets + 5] = 0.5; // c -> a    (product 0.25)
+    let results = enum_results(n_offsets, step_count, data);
+    let search = IndexedSearch::build(&link_offsets, &stock_list(&["a"]));
+    let activity = super::enum_gen::ActivityGraph::build(
+        &search,
+        &results,
+        None,
+        &mut SystemClock,
+        &MemoryMeter::new(),
+    )
+    .expect("an unbudgeted build never abandons");
+    let candidates = super::enum_gen::enumerate_active_circuits(
+        &activity,
+        None,
+        &mut SystemClock,
+        &MemoryMeter::new(),
+    );
+    assert!(candidates.complete);
+    assert_eq!(
+        candidates.len(),
+        3,
+        "direct, agg twin, and the borderline loop"
+    );
+
+    let stock_partition: Vec<Option<usize>> = search
+        .idents
+        .iter()
+        .map(|id| (id.as_str() == "a").then_some(0))
+        .collect();
+    let no_modules = vec![false; search.idents.len()];
+    let is_agg_node: Vec<bool> = search
+        .idents
+        .iter()
+        .map(|id| crate::ltm_agg::is_synthetic_agg_name(id.as_str()))
+        .collect();
+    let outcome = super::enum_gen::retain_circuits(
+        &candidates,
+        &activity,
+        &stock_partition,
+        &no_modules,
+        &is_agg_node,
+        &mut |_, _, _| None,
+        None,
+        &mut SystemClock,
+    )
+    .unwrap();
+
+    let survivors = survivor_node_sets(&outcome, &candidates, &activity, &search);
+    assert!(
+        survivors.contains(&vec!["a".to_string(), "c".to_string()]),
+        "the borderline loop must survive against the corrected total: {survivors:?}"
+    );
+    assert_eq!(
+        survivors.len(),
+        2,
+        "the agg twin (higher raw_avg_abs_score) plus the borderline loop; \
+         the direct circuit lost the dedup and never reaches this pass at \
+         all: {survivors:?}"
+    );
+    assert!(
+        !survivors.contains(&vec!["a".to_string(), "b".to_string()]),
+        "the direct circuit is the dedup's LOSER (avg 50 < the twin's 100 \
+         over the full 2-step range) and must never be scored, confirmed, \
+         or counted: {survivors:?}"
+    );
+
+    let totals = &outcome.partition_totals[&0];
+    assert_eq!(
+        totals[1], 200.25,
+        "the total must hold exactly the winning twin's mass plus the \
+         borderline loop's -- not the direct circuit's on top"
+    );
+    assert_eq!(
+        outcome.partition_circuit_counts[&0], 2,
+        "the universe count must not include the dedup's loser either"
+    );
+    assert_eq!(
+        outcome.distinct_circuits, 2,
+        "3 enumerated circuits minus the 1 dropped twin"
+    );
+}
+
+/// AC5.2's dedup `-1` boundary: a partition whose UNIVERSE is exactly one
+/// reported loop plus its trimmed hoisted-reducer twin classifies Solo, not
+/// Competing.
+///
+/// `share[Region] = pop[Region] / SUM(pop[*])` over `{a, b}` gives `pop[a]`'s
+/// partition exactly two enumerated circuits when only `growth[a]` feeds back
+/// through `share[a]` -- a direct `pop[a] -> share[a]` numerator reference and
+/// the `pop[a] -> $ltm:agg -> share[a]` reducer reference (AC4.3) -- that trim
+/// to the SAME reported loop, so after the dedup `-1` correction the
+/// partition's universe count is 1, not 2. `growth[b]` is deliberately a flat
+/// constant, decoupled from `share`/`total` entirely: `pop[b]` still feeds the
+/// shared `SUM(pop[*])` (so `share[a]` is a genuinely time-varying ratio
+/// rather than the degenerate "one element, ratio always 1" case, which the
+/// link-score guard's "target didn't change" arm would zero out completely),
+/// but nothing closes a cycle back through `pop[b]` -- it never joins `pop[a]`'s
+/// SCC, so it cannot inflate that partition's count.
+///
+/// The magnitude of `pop[a]`'s own relative score cannot tell Solo from
+/// Competing apart: `subtract_reported_loop_from_counts` (the `-1`) touches
+/// only `loop_counts`, not `totals` -- the mass correction
+/// (`subtract_reported_mass_from_totals`) is the SEPARATE fix AC4.3 already
+/// pins -- so `pop[a]`'s relative score reads exactly `+-1` at every active
+/// step whether or not the `-1` correction runs. What the correction decides
+/// is RANK ORDER: `cmp_relative_importance` puts every competing loop ahead
+/// of every solo one regardless of `mean_rel`, so the only way to observe the
+/// classification is to put a genuinely competing loop with a real (non-1.0)
+/// mean relative score into the SAME discovery result and check which side of
+/// it `pop[a]`'s loop lands on. The `population`/`births`/`deaths` structure
+/// (`two_loop_logistic_project`'s pair, inlined here) is that competing loop:
+/// unrelated to `pop`/`share`/`growth`, so the two partitions are independent
+/// and the comparison is between real classifications rather than one
+/// partition swallowing the other. Without the `-1` correction, `pop[a]`'s
+/// wrongly-Competing loop (mean_rel exactly 1.0, the maximum possible) would
+/// rank ahead of both logistic loops instead of behind them.
+fn discover_solo_trimmed_duplicate_and_a_competing_loop() -> DiscoveryResult {
+    use crate::datamodel::{self, Equation, Variable};
+
+    let project = datamodel::Project {
+        name: "solo_dedup_boundary".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 5.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                // --- pop[a]'s solo-after-dedup partition; pop[b] a decoupled
+                // sibling that keeps SUM(pop[*]) genuinely time-varying
+                // without joining pop[a]'s cycle. ---
+                Variable::Stock(datamodel::Stock {
+                    ident: "pop".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        vec![
+                            ("a".to_string(), "100".to_string(), None, None),
+                            ("b".to_string(), "50".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["growth".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "share".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "pop[Region] / SUM(pop[*])".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "growth".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        vec![
+                            ("a".to_string(), "share[a] * 10 + 1".to_string(), None, None),
+                            // Flat and decoupled from share/total: pop[b]
+                            // still varies (keeping SUM(pop[*]) non-constant)
+                            // but never closes a cycle back through itself.
+                            ("b".to_string(), "5".to_string(), None, None),
+                        ],
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                // --- The genuinely competing, unrelated partition. ---
+                enum_stock("population", "100", &["births"], &["deaths"]),
+                enum_flow("births", "population * 0.1"),
+                enum_flow("deaths", "population * population * 0.0001"),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    discover_project(&project, CandidateGen::Auto)
+}
+
+#[test]
+fn a_solo_trimmed_duplicate_ranks_behind_a_competing_loop_despite_a_perfect_relative_score() {
+    let result = discover_solo_trimmed_duplicate_and_a_competing_loop();
+
+    // One loop per element/structure: pop[a]'s dedup pair trims to one
+    // reported loop, and the logistic pair contributes its births and
+    // deaths loops.
+    assert_eq!(
+        result.loops.len(),
+        3,
+        "one solo pop[a] loop plus the two competing logistic loops; got {:?}",
+        result
+            .loops
+            .iter()
+            .map(|l| l
+                .loop_info
+                .links
+                .iter()
+                .map(|k| k.from.as_str())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    );
+
+    // Identify each reported loop by whether any of its links touch the
+    // logistic structure -- not by `links[0].from` alone, since which node a
+    // reported cycle starts its link list at is a rotation detail, not a
+    // naming guarantee (`pop[a]`'s loop is reported starting from
+    // `share[a]`, not `pop`).
+    let is_logistic = |links: &[Link]| {
+        links
+            .iter()
+            .any(|l| ["births", "deaths", "population"].contains(&l.from.as_str()))
+    };
+    let (logistic, other): (Vec<usize>, Vec<usize>) =
+        (0..result.loops.len()).partition(|&i| is_logistic(&result.loops[i].loop_info.links));
+    assert_eq!(
+        logistic.len(),
+        2,
+        "both logistic loops must be reported; got {:?}",
+        result
+            .loops
+            .iter()
+            .map(|l| l
+                .loop_info
+                .links
+                .iter()
+                .map(|k| k.from.as_str())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        other.len(),
+        1,
+        "exactly one non-logistic (pop[a]) loop must be reported"
+    );
+    let pop_pos = other[0];
+    assert!(
+        logistic.iter().all(|&i| i < pop_pos),
+        "both competing logistic loops must rank ahead of pop[a]'s solo \
+         loop despite its mean relative score being the maximum possible \
+         (1.0, by construction): logistic at {logistic:?}, pop[a] at {pop_pos}"
+    );
+
+    // The magnitude check AC4.3 already pins (the mass correction, not the
+    // count correction): pop[a]'s own relative score is exactly 1.0 at every
+    // active step regardless of the `-1` fix, which is exactly why rank
+    // order -- not magnitude -- is the observable this test needs.
+    let pop_loop = &result.loops[pop_pos];
+    assert!(
+        pop_loop
+            .rel_scores
+            .iter()
+            .all(|&r| r == 0.0 || (r.abs() - 1.0).abs() < 1e-9),
+        "pop[a]'s relative score must be exactly +-1 at every active step: {:?}",
+        pop_loop.rel_scores
+    );
+}
+
+// AC5.2's dedup `+1` boundary -- a partition whose only OTHER universe member
+// is a stitched cross-agg loop, so adding it alone is what makes an
+// otherwise-solo partition competing -- is left UNCOVERED here; no natural
+// fixture in this suite isolates it, and building one is more than this nit
+// is worth. The reducer shape that produces a stitched loop
+// (`discover_reducer_feedback`, above) is symmetric: EVERY element of the
+// shared reducer gets its own single-petal circuit by construction
+// (`growth[r] = SUM(pop[*]) * 0.05` fans the agg's output back to every
+// element), so a partition that can receive a stitched second member always
+// already has >= 2 native petal circuits BEFORE stitching -- the `+1` only
+// ever pushes an already-competing partition further, never a solo one
+// across the line. Isolating the transition needs one element whose own
+// petal has no parent-level stock (so `circuit_partition` -- and therefore
+// `loop_counts` -- does not count it) sharing the SAME agg node as a genuine
+// stock-backed element, so the stitched combination is the first thing to
+// add that stock's partition to `loop_counts` a second time. An arrayed
+// reducer's elements are homogeneous by construction (one flow equation per
+// element, replicated), so a mixed stock/stockless element pair sharing one
+// `SUM(...)` is not a shape this fixture family can express without a
+// disproportionate new construction (most likely a per-element module
+// instantiation where only one element's instance carries state). The `+1`
+// addition itself is NOT unexercised, though: every reducer test above
+// (`discovery_recovers_cross_agg_loops_end_to_end`,
+// `a_trimmed_duplicate_circuit_leaves_no_mass_in_the_denominator`) drives it
+// on an already-competing partition, which is what a stitched loop's mass
+// (not just its count) landing anywhere but the partition's own total would
+// break.
+
+/// `share[d] = pop[d] / SUM(pop[*])` feeding growth back into `pop[d]`: the
+/// only shape that makes ONE reported loop out of TWO enumerated circuits,
+/// because `pop` is read both directly (the numerator) and through the
+/// hoisted reducer (the denominator), and the report hides the synthetic
+/// aggregate node that distinguishes them.
+fn discover_share_of_total_feedback(elems: &[&str]) -> DiscoveryResult {
+    use crate::datamodel::{self, Equation, Variable};
+    use salsa::Setter;
+
+    let project = datamodel::Project {
+        name: "share_of_total".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 5.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            elems.iter().map(|s| s.to_string()).collect(),
+        )],
+        units: vec![],
+        models: vec![datamodel::Model {
+            name: "main".to_string(),
+            sim_specs: None,
+            variables: vec![
+                Variable::Stock(datamodel::Stock {
+                    ident: "pop".to_string(),
+                    equation: Equation::Arrayed(
+                        vec!["Region".to_string()],
+                        elems
+                            .iter()
+                            .enumerate()
+                            .map(|(i, e)| {
+                                let init = 100.0 * (i as f64 + 1.0);
+                                (e.to_string(), format!("{init}"), None, None)
+                            })
+                            .collect(),
+                        None,
+                        false,
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    inflows: vec!["growth".to_string()],
+                    outflows: vec![],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Aux(datamodel::Aux {
+                    ident: "share".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "pop[Region] / SUM(pop[*])".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+                Variable::Flow(datamodel::Flow {
+                    ident: "growth".to_string(),
+                    equation: Equation::ApplyToAll(
+                        vec!["Region".to_string()],
+                        "share[Region] * 10 + 1".to_string(),
+                    ),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
+    let sp = sync.project;
+    sp.set_ltm_enabled(&mut db).to(true);
+    sp.set_ltm_discovery_mode(&mut db).to(true);
+    let source_model = *sp.models(&db).get("main").unwrap();
+
+    let compiled = crate::db::compile_project_incremental(&db, sp, "main").unwrap();
+    let mut vm = crate::vm::Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let element_edges = crate::db::model_element_causal_edges(&db, source_model, sp);
+    let causal_graph = crate::db::causal_graph_from_element_edges(element_edges);
+    let stocks: Vec<Ident<Canonical>> = element_edges
+        .stocks
+        .iter()
+        .map(|s| Ident::new(s.as_str()))
+        .collect();
+    let ltm = crate::db::model_ltm_variables(&db, source_model, sp);
+    let dm_dims = crate::db::project_datamodel_dims(&db, sp);
+    let expansion = crate::analysis::build_link_expansion_context(&db, source_model, sp);
+
+    discover_loops_with_graph(
+        &results,
+        &causal_graph,
+        &stocks,
+        &ltm.vars,
+        dm_dims,
+        &expansion,
+        &SubModelOutputPorts::new(),
+        None,
+    )
+    .unwrap()
+}
+
+/// The MODULE arm of the dedup mass correction, missing from the two AC4.2 /
+/// AC4.3 fixtures above: those cover a KEPT module loop (whose reported mass
+/// must be ADDED to the denominator) and a DROPPED non-module duplicate
+/// (whose raw mass must be SUBTRACTED). Neither covers a DROPPED module
+/// duplicate, whose mass must be left alone -- it never contributed any raw
+/// mass to begin with (`retain_circuits` skips module-traversing circuits
+/// entirely), so subtracting it would drive the partition's total negative.
+/// A regression that dropped the `if !*traverses_module` guard in
+/// `ltm_finding.rs`'s dedup-correction loop would do exactly that, and
+/// `rank_and_filter`'s `totals[i] > 0.0` guard would then silently blank
+/// every relative score in the partition at the affected steps.
+///
+/// `total = pop[a] / SUM(pop[*])` gives element `a` the same direct-plus-agg
+/// duplicate AC4.3 exercises (a direct `pop[a] -> total` numerator and a
+/// `pop[a] -> $ltm:agg -> total` denominator reference), but routes BOTH
+/// through the scalar module `m` before closing back to `pop[a]` via
+/// `growth[a]` -- so both enumerated circuits are module-traversing, and one
+/// of them is the dropped duplicate this test targets. Element `b` has no
+/// direct reference into `total` (only the agg one), so its loop is a
+/// single, non-duplicate module-traversing circuit -- extra coverage that the
+/// addition side still works alongside a dropped duplicate in the same
+/// partition.
+fn discover_module_loop_with_a_trimmed_duplicate() -> DiscoveryResult {
+    use crate::datamodel::{self, Equation, Variable};
+    use salsa::Setter;
+
+    let aux = |ident: &str, eqn: &str, is_input: bool| {
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation: Equation::Scalar(eqn.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat {
+                can_be_module_input: is_input,
+                ..datamodel::Compat::default()
+            },
+        })
+    };
+
+    let passthrough = datamodel::Model {
+        name: "passthrough".to_string(),
+        sim_specs: None,
+        variables: vec![aux("input_val", "0", true), aux("pos", "input_val", false)],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    };
+    let main = datamodel::Model {
+        name: "main".to_string(),
+        sim_specs: None,
+        variables: vec![
+            Variable::Stock(datamodel::Stock {
+                ident: "pop".to_string(),
+                // Asymmetric initial populations: `growth` applies the SAME
+                // absolute (not proportional) increment to both elements, so
+                // a symmetric start would keep `total` an exact CONSTANT --
+                // and the link-score guard's "target didn't change -> 0" arm
+                // would zero out every edge into it, collapsing the whole
+                // fixture to no active loops.
+                equation: Equation::Arrayed(
+                    vec!["Region".to_string()],
+                    vec![
+                        ("a".to_string(), "100".to_string(), None, None),
+                        ("b".to_string(), "50".to_string(), None, None),
+                    ],
+                    None,
+                    false,
+                ),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["growth".to_string()],
+                outflows: vec![],
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
+            aux("total", "pop[a] / SUM(pop[*])", false),
+            datamodel::Variable::Module(datamodel::Module {
+                ident: "m".to_string(),
+                model_name: "passthrough".to_string(),
+                documentation: String::new(),
+                references: vec![datamodel::ModuleReference {
+                    src: "total".to_string(),
+                    dst: "m.input_val".to_string(),
+                }],
+                units: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            Variable::Flow(datamodel::Flow {
+                ident: "growth".to_string(),
+                equation: Equation::ApplyToAll(
+                    vec!["Region".to_string()],
+                    "m.pos * 0.001".to_string(),
+                ),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
+        ],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    };
+    let project = datamodel::Project {
+        name: "dropped_module_duplicate".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 5.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        )],
+        units: vec![],
+        models: vec![main, passthrough],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
+    let sp = sync.project;
+    sp.set_ltm_enabled(&mut db).to(true);
+    sp.set_ltm_discovery_mode(&mut db).to(true);
+    let source_model = *sp.models(&db).get("main").unwrap();
+
+    let compiled = crate::db::compile_project_incremental(&db, sp, "main").unwrap();
+    let mut vm = crate::vm::Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    let results = vm.into_results();
+
+    let element_edges = crate::db::model_element_causal_edges(&db, source_model, sp);
+    let causal_graph = crate::db::causal_graph_from_element_edges_with_modules(
+        &db,
+        source_model,
+        sp,
+        element_edges,
+    );
+    let stocks: Vec<Ident<Canonical>> = element_edges
+        .stocks
+        .iter()
+        .map(|s| Ident::new(s.as_str()))
+        .collect();
+    let ltm = crate::db::model_ltm_variables(&db, source_model, sp);
+    let dm_dims = crate::db::project_datamodel_dims(&db, sp);
+    let expansion = crate::analysis::build_link_expansion_context(&db, source_model, sp);
+    let ports = crate::analysis::build_sub_model_output_ports(&db, sp);
+
+    discover_loops_with_candidate_gen(
+        &results,
+        &causal_graph,
+        &stocks,
+        &ltm.vars,
+        dm_dims,
+        &expansion,
+        &ports,
+        None,
+        CandidateGen::Auto,
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_dropped_module_duplicate_leaves_the_denominator_untouched() {
+    let result = discover_module_loop_with_a_trimmed_duplicate();
+
+    // Element a's direct+agg pair trims to one reported loop; element b's
+    // single agg-routed circuit reports as the other. Both traverse `m`.
+    assert_eq!(
+        result.loops.len(),
+        2,
+        "one reported loop per element, both through the module; got {:?}",
+        result
+            .loops
+            .iter()
+            .map(|l| l
+                .loop_info
+                .links
+                .iter()
+                .map(|k| k.from.as_str())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        result
+            .loops
+            .iter()
+            .all(|l| l.loop_info.links.iter().any(|k| k.to.as_str() == "m")),
+        "both reported loops must traverse the module instance"
+    );
+
+    // If the dedup-correction loop's `if !*traverses_module` guard were
+    // dropped, the dropped duplicate's reported mass (never added, since
+    // `retain_circuits` contributes no raw mass for a module-traversing
+    // circuit) would be subtracted anyway, driving the partition's total
+    // negative and every relative score's magnitude above 1. This is the
+    // same shared-partition invariant `reported_mass_share_per_step` checks
+    // in the sibling AC4.2/AC4.3 tests.
+    let shares = reported_mass_share_per_step(&result);
+    for (t, &share) in shares.iter().enumerate() {
+        if share == 0.0 {
+            continue;
+        }
+        assert!(
+            (share - 1.0).abs() < 1e-9,
+            "step {t}: the reported loops account for {share} of the \
+             partition's mass; a value above 1.0 means the dropped \
+             duplicate's mass was wrongly subtracted from a denominator it \
+             never contributed to"
+        );
+    }
+    assert!(
+        shares.iter().any(|&s| s > 0.0),
+        "the fixture must have active steps"
     );
 }

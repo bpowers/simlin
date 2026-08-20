@@ -1527,7 +1527,7 @@ pub(crate) const MAX_CROSS_AGG_LOOPS: usize = 256;
 /// threshold anyway (each petal contributes ≥2 distinct nodes plus the
 /// shared agg to one SCC), so this is a conservative belt-and-suspenders;
 /// 8 matches the pre-#515 hard cap.
-const MAX_AGG_PETALS: usize = 8;
+pub(crate) const MAX_AGG_PETALS: usize = 8;
 
 #[cfg(test)]
 thread_local! {
@@ -1597,6 +1597,7 @@ impl Drop for AggLoopBudgetGuard {
 /// arrayed synthetic agg that means the subscripted `$⁚ltm⁚agg⁚{n}[<elem>]`
 /// (so petals through `agg[a]` vs `agg[b]` go through *different* nodes and are
 /// correctly never combined; `is_synthetic_agg_name` recognizes both forms).
+#[derive(Clone, Debug)]
 pub(crate) struct StitchPetal<T> {
     /// `[agg, x_1, ..., x_m]` -- the agg followed by the m internal nodes.
     pub(crate) nodes: Vec<T>,
@@ -1798,8 +1799,16 @@ fn recover_cross_agg_loops(
     use crate::ltm::{LinkPolarity, Loop, LoopPolarity};
 
     // agg name -> its (deduped) petals (built as `&str`, then handed to the
-    // shared stitching core).
-    let petals_by_agg = collect_agg_petals(circuit_strs, |n| n);
+    // shared stitching core). Unmetered here: the exhaustive circuit list is
+    // already bounded by `MAX_LTM_CIRCUITS`, and the collector keeps at most
+    // `MAX_AGG_PETALS + 1` petals per agg regardless.
+    let petals_by_agg = collect_agg_petals(
+        circuit_strs.iter(),
+        |n: &&str| *n,
+        &mut |_| true,
+        &mut |_| {},
+    )
+    .expect("an unmetered collection never declines");
 
     // Deterministic agg iteration order so the budget clips reproducibly.
     let mut sorted: Vec<(&str, Vec<StitchPetal<&str>>)> = petals_by_agg.into_iter().collect();
@@ -1846,53 +1855,142 @@ fn recover_cross_agg_loops(
     (recovered, truncated_aggs)
 }
 
-/// Group elementary circuits' single-agg petals by their agg, deduped on the
-/// rotation-invariant internal node set.
+/// Group elementary circuits' single-agg petals by their agg, keeping per agg
+/// only the `MAX_AGG_PETALS + 1` smallest by the stitcher's priority.
 ///
-/// A circuit that visits exactly one synthetic agg node (Johnson / the
-/// discovery DFS emit simple cycles, so "one agg in the node list" means
-/// "visited once") is a *petal*: rotate it so the agg is first, and the rest
-/// is the petal's internal nodes. A circuit touching zero or two-plus distinct
-/// aggs is not a petal (the latter is already a complete cross-agg loop).
+/// A circuit that visits exactly one synthetic agg node (Johnson and both
+/// discovery generators emit simple cycles, so "one agg in the node list"
+/// means "visited once") is a *petal*: rotate it so the agg is first, and the
+/// rest is the petal's internal nodes. A circuit touching zero or two-plus
+/// distinct aggs is not a petal (the latter is already a complete cross-agg
+/// loop). Petals are deduped on the rotation-invariant internal node SET; the
+/// representative of a set is its smallest `nodes` sequence, so the result is
+/// a function of the circuit set and not of arrival order.
 ///
-/// `node_str` projects a circuit node `T` to its `&str` name so
-/// `is_synthetic_agg_name` (and the agg-key grouping) can run uniformly over
-/// both the exhaustive `&str` circuits and the discovery `Ident<Canonical>`
-/// paths. The returned petals carry the original `T` nodes.
-pub(crate) fn collect_agg_petals<'a, T, F>(
-    circuits: &'a [Vec<T>],
+/// Bounded on purpose: `stitch_cross_agg_petals` keeps an agg's
+/// `MAX_AGG_PETALS` smallest petals (flagging the agg truncated when there
+/// were more), so holding the `MAX_AGG_PETALS + 1` smallest here -- one more
+/// than the stitcher keeps, exactly so it can still see that there were more --
+/// yields the identical stitched loops and the identical truncation flags, at
+/// a per-agg footprint independent of how many single-agg circuits the
+/// candidate set holds. (Discovery's enumeration hands this function every
+/// union-graph circuit through a reducer; on a reducer-heavy universe that is
+/// the whole universe, and cloning it into petal structures before stitching
+/// could keep more than the candidate store itself did.) The streaming top-k
+/// is exact: a petal is in the answer iff fewer than `k` petals of distinct
+/// internal sets rank below it, and every comparison the stream makes is
+/// against kept petals that rank no higher than their sets' eventual
+/// representatives.
+///
+/// Each kept petal's storage is charged through `charge` (and credited back
+/// through `release` when it is displaced); a refused charge returns `None`
+/// and the caller treats recovery as not done. `node_str` projects a circuit
+/// node `T` to its `&str` name so `is_synthetic_agg_name` can run uniformly
+/// over the exhaustive `&str` circuits and the discovery node-id paths. The
+/// map is keyed by the agg NODE, in `T`.
+pub(crate) fn collect_agg_petals<T, I, P, F, S>(
+    circuits: I,
     node_str: F,
-) -> HashMap<&'a str, Vec<StitchPetal<T>>>
+    charge: &mut dyn FnMut(usize) -> bool,
+    release: &mut dyn FnMut(usize),
+) -> Option<HashMap<T, Vec<StitchPetal<T>>>>
 where
-    T: Clone + Eq + std::hash::Hash,
-    F: Fn(&'a T) -> &'a str,
+    T: Clone + Eq + std::hash::Hash + Ord,
+    I: IntoIterator<Item = P>,
+    P: AsRef<[T]>,
+    F: Fn(&T) -> S,
+    S: AsRef<str>,
 {
-    let mut petals_by_agg: HashMap<&'a str, Vec<StitchPetal<T>>> = HashMap::new();
+    let keep = MAX_AGG_PETALS + 1;
+    let mut petals_by_agg: HashMap<T, Vec<StitchPetal<T>>> = HashMap::new();
     for circuit in circuits {
-        let aggs: Vec<&'a str> = circuit
-            .iter()
-            .map(&node_str)
-            .filter(|n| crate::ltm_agg::is_synthetic_agg_name(n))
-            .collect();
-        if aggs.len() != 1 {
+        let circuit = circuit.as_ref();
+        let mut agg_pos: Option<usize> = None;
+        let mut agg_count = 0usize;
+        for (i, node) in circuit.iter().enumerate() {
+            if crate::ltm_agg::is_synthetic_agg_name(node_str(node).as_ref()) {
+                agg_count += 1;
+                agg_pos.get_or_insert(i);
+            }
+        }
+        if agg_count != 1 {
             continue;
         }
-        let agg = aggs[0];
-        let Some(pos) = circuit.iter().position(|n| node_str(n) == agg) else {
-            continue;
-        };
+        let pos = agg_pos.expect("one agg found");
         let n = circuit.len();
         let nodes: Vec<T> = (0..n).map(|j| circuit[(pos + j) % n].clone()).collect();
-        let internal: HashSet<T> = nodes[1..].iter().cloned().collect();
-        let entry = petals_by_agg.entry(agg).or_default();
-        // Dedup on the internal set (Johnson can emit rotations of the same
-        // simple cycle in some graphs; the internal set is rotation-invariant).
-        if entry.iter().any(|p| p.internal == internal) {
+        let entry = petals_by_agg.entry(nodes[0].clone()).or_default();
+        // Priority is (fewer internal nodes, then smaller `nodes`); `nodes`
+        // length is the internal count plus one, so the pair compares as
+        // (nodes.len(), nodes).
+        let ranks_before = |a: &Vec<T>, b: &Vec<T>| (a.len(), a) < (b.len(), b);
+        // Same internal set as a kept petal: keep whichever ranks first.
+        if let Some(k) = entry.iter().position(|p| {
+            p.internal.len() == nodes.len() - 1 && nodes[1..].iter().all(|x| p.internal.contains(x))
+        }) {
+            if ranks_before(&nodes, &entry[k].nodes) {
+                release(petal_bytes::<T>(entry[k].nodes.len()));
+                if !charge(petal_bytes::<T>(nodes.len())) {
+                    return None;
+                }
+                let internal: HashSet<T> = nodes[1..].iter().cloned().collect();
+                entry[k] = StitchPetal { nodes, internal };
+            }
             continue;
         }
+        if entry.len() >= keep {
+            // Full: displace the worst kept petal iff the new one ranks first.
+            let worst = (0..entry.len())
+                .max_by(|&a, &b| {
+                    (entry[a].nodes.len(), &entry[a].nodes)
+                        .cmp(&(entry[b].nodes.len(), &entry[b].nodes))
+                })
+                .expect("a full entry is non-empty");
+            if !ranks_before(&nodes, &entry[worst].nodes) {
+                continue;
+            }
+            release(petal_bytes::<T>(entry[worst].nodes.len()));
+            entry.swap_remove(worst);
+        }
+        if !charge(petal_bytes::<T>(nodes.len())) {
+            return None;
+        }
+        let internal: HashSet<T> = nodes[1..].iter().cloned().collect();
         entry.push(StitchPetal { nodes, internal });
     }
-    petals_by_agg
+    Some(petals_by_agg)
+}
+
+/// Bytes one kept petal of `len` nodes costs: its `nodes` vector plus its
+/// internal node set (hashed entries cost roughly two node-widths each with
+/// the table's control bytes and load factor).
+fn petal_bytes<T>(len: usize) -> usize {
+    len * std::mem::size_of::<T>() + len * (2 * std::mem::size_of::<T>() + 1)
+}
+
+/// An upper bound on what `stitch_cross_agg_petals` will emit over
+/// `petals_by_agg` under `budget`: at most `budget` sequences (and at most
+/// `2^MAX_AGG_PETALS` per agg), each no longer than the agg's `MAX_AGG_PETALS`
+/// smallest petals end to end. Lets a caller charge the output before it is
+/// built.
+pub(crate) fn stitched_output_bound<T, K>(
+    petals_by_agg: &[(K, Vec<StitchPetal<T>>)],
+    budget: usize,
+) -> usize {
+    let per_agg_cap = 1usize << MAX_AGG_PETALS;
+    let mut sequences = 0usize;
+    let mut longest = 0usize;
+    for (_, petals) in petals_by_agg {
+        if petals.len() < 2 {
+            continue;
+        }
+        sequences = sequences.saturating_add(per_agg_cap);
+        let mut lens: Vec<usize> = petals.iter().map(|p| p.nodes.len()).collect();
+        lens.sort_unstable();
+        let total: usize = lens.iter().take(MAX_AGG_PETALS).sum();
+        longest = longest.max(total);
+    }
+    sequences.min(budget) * longest * std::mem::size_of::<T>()
 }
 
 /// Polarity of one `source → agg` hop: the *discriminating* analysis of the

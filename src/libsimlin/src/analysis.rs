@@ -750,14 +750,14 @@ fn discovery_polarity(polarity: &str) -> SimlinLoopPolarity {
     }
 }
 
-/// Run strongest-path LTM loop discovery on a model and return the discovered
-/// loops (with per-step importance series), the dominant periods, and a
-/// truncation flag, as one `SimlinDiscoveryResult`.
+/// Run post-simulation LTM loop discovery on a model and return the
+/// discovered loops (with per-step importance series), the dominant periods,
+/// and a truncation flag, as one `SimlinDiscoveryResult`.
 ///
-/// `budget_ms` bounds the wall-clock time spent in discovery's per-timestep
-/// DFS sweep; `0` means unlimited.  When the budget elapses before discovery
-/// finishes, `truncated` is set and the returned loops/periods reflect only
-/// the timesteps processed so far.  Discovery on very large models can be
+/// `budget_ms` bounds the wall-clock time spent generating loop candidates;
+/// `0` means unlimited.  When the budget elapses before discovery finishes,
+/// `truncated` is set and the returned loops/periods reflect only the
+/// timesteps processed so far.  Discovery on very large models can be
 /// infeasibly slow (GH #647), so the budget lets callers bound it.
 ///
 /// This deliberately returns loops + periods + truncated together rather than
@@ -962,6 +962,16 @@ unsafe fn discovery_to_ffi(
         });
     }
 
+    // The diagnostic can echo user-authored model text (a variable or
+    // equation string), which may carry an interior NUL; a NUL must not turn
+    // the sole "analysis never ran" signal into a NULL that reads as a
+    // successful empty sample, so it is replaced by U+FFFD before the
+    // C string is built -- the message stays readable and present.
+    let analysis_error = analysis
+        .analysis_error
+        .as_deref()
+        .map_or(ptr::null_mut(), |s| diagnostic_to_c_string(s).into_raw());
+
     let (loops, loop_count) = vec_into_raw_parts(c_loops);
     let (periods, period_count) = vec_into_raw_parts(c_periods);
     let (partitions, partition_count) = vec_into_raw_parts(c_partitions);
@@ -975,6 +985,17 @@ unsafe fn discovery_to_ffi(
         partition_count,
         truncated: analysis.truncated,
         agg_recovery_truncated: analysis.agg_recovery_truncated,
+        enumeration_complete: analysis.enumeration_complete,
+        retained_loops: analysis.retained_loops,
+        // Saturating rather than the `-1`-on-overflow the `partition` fields
+        // use: here `-1` MEANS "the fallback ran", so an unrepresentable
+        // count must never spell it. A universe above `i64::MAX` circuits is
+        // unreachable (the enumerator's edge-row budget stops it many orders
+        // of magnitude earlier), so the arm is defensive.
+        universe_loops: analysis
+            .universe_loops
+            .map_or(-1, |n| i64::try_from(n).unwrap_or(i64::MAX)),
+        analysis_error,
     }))
 }
 
@@ -1020,6 +1041,7 @@ pub unsafe extern "C" fn simlin_free_discovery_result(result: *mut SimlinDiscove
             result.partition_count,
         ));
     }
+    drop_c_string(result.analysis_error);
 }
 
 /// Gets all causal links in a model
@@ -1113,7 +1135,7 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
 /// compilation failed before LTM could run), `Exhaustive` when every
 /// elementary circuit was enumerated, and `Discovery` when the model tripped
 /// the SCC-size gate (or discovery was requested directly) so loops are
-/// ranked by the per-timestep strongest-path heuristic.  The mode is captured
+/// found post-simulation from the recorded link scores.  The mode is captured
 /// at `simlin_sim_new` time, so it is available without running the
 /// simulation.
 ///
@@ -2465,9 +2487,25 @@ pub(crate) fn parse_subscripted_loop_id(input: &str) -> Result<ParsedLoopId<'_>,
     Ok(ParsedLoopId { base, subscripts })
 }
 
+/// An engine diagnostic as a C string that is never lost: an interior NUL
+/// (possible when the message echoes user-authored model text) becomes U+FFFD
+/// rather than making the string unrepresentable, so a caller that reads
+/// `analysis_error == NULL` as "analysis ran" is never misled by a NUL.
+fn diagnostic_to_c_string(message: &str) -> CString {
+    CString::new(message.replace('\0', "\u{FFFD}"))
+        .expect("NUL bytes were replaced, so the message is a valid C string")
+}
+
 #[cfg(test)]
 mod parse_tests {
     use super::*;
+
+    #[test]
+    fn a_diagnostic_with_an_interior_nul_is_kept_rather_than_dropped() {
+        let c = diagnostic_to_c_string("bad var \0 name");
+        assert_eq!(c.to_str().unwrap(), "bad var \u{FFFD} name");
+        assert_eq!(diagnostic_to_c_string("plain").to_str().unwrap(), "plain");
+    }
 
     #[test]
     fn parses_bare_id() {

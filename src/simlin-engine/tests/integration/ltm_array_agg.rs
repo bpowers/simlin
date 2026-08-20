@@ -6731,9 +6731,9 @@ fn gh769_fixed_index_into_disjoint_a2a_target_scores() {
 /// per-(row, full-target-element) names are a new producer of the
 /// element-in-name grammar on NON-reducer edges, so discovery's
 /// `parse_link_offsets` must resolve them symmetrically with the
-/// exhaustive surface (the #748/#698 lesson): the strongest-path search
-/// finds the real per-element circuits through row_sum and never invents a
-/// phantom cross-element pop→row_sum pathway.
+/// exhaustive surface (the #748/#698 lesson): discovery finds the real
+/// per-element circuits through row_sum and never invents a phantom
+/// cross-element pop→row_sum pathway.
 #[test]
 fn gh525_discovery_twin_parses_per_element_names() {
     let project = TestProject::new("gh525_discovery_twin")

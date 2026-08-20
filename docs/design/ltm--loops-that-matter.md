@@ -6,13 +6,15 @@ LTM method itself, see the [reference document](../reference/ltm--loops-that-mat
 
 ## Architecture Overview
 
-The implementation is split across three modules in `src/simlin-engine/src/`:
+The implementation is split across these modules in `src/simlin-engine/src/`:
 
 | Module | Responsibility |
 |--------|---------------|
 | `ltm.rs` | Causal graph construction, loop detection (Johnson's algorithm), static polarity analysis, cycle partitions |
 | `ltm_augment.rs` | Synthetic variable generation: link score and loop score equations |
-| `ltm_finding.rs` | Strongest-path loop discovery algorithm for models too large for exhaustive enumeration |
+| `ltm_finding.rs` | Post-simulation loop discovery for models too large for exhaustive enumeration: scoring, retention, ranking, and the cap |
+| `ltm_finding_enum.rs` | Discovery's exact candidate generator: union-graph elementary-circuit enumeration and its retention pass |
+| `ltm_finding_fallback.rs` | Discovery's shortest-path candidate generator, used when the enumeration cannot finish within its budgets or the caller's deadline |
 | `ltm_post.rs` | Post-simulation computation: normalizes loop scores into relative loop scores using the cycle-partition mapping produced during LTM compilation |
 
 The production entry point is the `model_ltm_variables` tracked function in
@@ -122,25 +124,31 @@ and average absolute score for ranking.
    variables for all causal edges (not just those in loops). Loop score variables
    are NOT generated at this stage.
 2. The augmented project is simulated normally (interpreter or VM).
-3. Post-simulation, `discover_loops()` (`ltm_finding.rs`) runs the strongest-path
-   algorithm at each saved timestep:
+3. Post-simulation, `discover_loops()` (`ltm_finding.rs`) generates candidate
+   cycles from the recorded series (see "Post-Simulation Loop Discovery"):
    - Parses link score variable names from `results.offsets` (`parse_link_offsets`)
-   - Builds a `SearchGraph` per timestep from the link score values
-     (`SearchGraph::from_results`)
-   - Runs the strongest-path DFS (`find_strongest_loops`)
-   - Collects unique loop paths across all timesteps
-4. Each discovered path is converted to a `FoundLoop` with signed loop scores
+     into the element-level edge set, and builds the integer-indexed topology
+     once (`IndexedSearch::build`)
+   - Builds the union-of-active-edges graph with its per-edge activity bitsets
+     and contiguous score rows (`ActivityGraph::build`)
+   - Enumerates every ever-simultaneously-active elementary cycle of that graph
+     (`enumerate_active_circuits`) -- the exact candidate universe -- or, when
+     the enumeration budgets or the caller's deadline trip, samples cycles with
+     the shortest-path fallback (`fallback::sweep`)
+4. Each candidate path is converted to a `FoundLoop` with signed loop scores
    computed at every timestep from the raw link score results. A loop edge
    `x → m` into a multi-output module is recomputed against the pathway ending
    at the exit port the loop traverses (the per-exit-port recompute, GH #698 --
    see "Passthrough composites and per-exit-port loop scoring"), so discovery
    and exhaustive agree on the loop's polarity
-5. Loops are filtered by `MIN_CONTRIBUTION` (0.1%) with partition-aware
-   thresholds, ranked competitive-first by mean partition-relative importance
-   (loops trivially alone in their cycle partition -- relative score +/-1 by
-   construction -- sort after all competing loops), truncated to `MAX_LOOPS`
-   (200), assigned deterministic IDs, and annotated with result-scoped
-   cycle-partition metadata (`rank_and_filter`; see "Ranking and Filtering")
+5. Loops are filtered by `MIN_CONTRIBUTION` (0.1%) against their partition's
+   whole-universe mass, ranked competitive-first by mean partition-relative
+   importance (loops trivially alone in their cycle partition -- relative score
+   +/-1 by construction -- sort after all competing loops), capped at
+   `MAX_LOOPS` (200) by a coverage-aware selection that guarantees each step's
+   dominant loop a slot, assigned deterministic IDs, and annotated with
+   result-scoped cycle-partition metadata (`rank_and_filter`; see "Ranking and
+   Filtering")
 
 ## Cycle Partitions
 
@@ -504,12 +512,14 @@ by `(loop_id, link_index)`; `Loop.links` is NOT rewritten (loop IDs derive from
 the link sequence and the FFI's id→score correspondence depends on it).
 
 **Discovery-mode per-exit-port recompute (GH #698)**: discovery mode emits NO
-loop-score vars (loops are ranked post-simulation by the strongest-path
-search), so there is no loop-score *equation* to override. The DFS still uses
-the composite for edge ordering and zero-exclusion (a zero composite implies
-all pathways zero, so no loop is lost). But the **post-simulation score
-recompute** -- which converts each discovered path into a `FoundLoop` by
-multiplying the per-step signed link scores -- now applies the SAME
+loop-score vars (loops are scored and ranked post-simulation from the recorded
+link-score series), so there is no loop-score *equation* to override. Candidate
+generation still reads the composite when it decides whether a module-input
+edge is active at a step (a composite that is 0 at every step does imply every
+per-port score is 0, so the zero case loses no loop; the NaN case is a stated
+boundary -- see "Honest boundaries"). But the **post-simulation score
+recompute** -- which converts each candidate path into a `FoundLoop` by
+multiplying the per-step signed link scores -- applies the SAME
 per-exit-port selection the exhaustive override applies: for a loop edge
 `x → m` whose next edge `m → y` identifies the exit port (the `m·port` `y`
 reads, or `y`'s matching `ModuleInput.src` when `y` is itself a module), it
@@ -781,7 +791,7 @@ surfaces handle it differently:
 
 - **Discovery (`analyze_model` / MCP / `simlin_analyze_discover_loops`)**: the
   `FoundLoop` path in `ltm_finding.rs` derives each loop's polarity directly
-  from `from_runtime_scores` over its discovered strongest-path score series
+  from `from_runtime_scores` over the loop's own per-step score series
   (falling back to the trimmed-chain structural polarity for an all-zero/NaN
   series). Fully reclassified.
 - **pysimlin `Run.loops`**: sources polarity / confidence / partition straight
@@ -820,154 +830,436 @@ evidence to override it.
 helper concatenates *all* element slots of an A2A loop into one sample set (so a
 loop that is reinforcing in one element and balancing in another classifies
 `Undetermined`). pysimlin `Run.loops` is built on this primitive, so it reports
-exactly this all-slots classification. Discovery uses one strongest-path scalar
-series per `FoundLoop`. The exhaustive (sim-bearing) and discovery surfaces thus
+exactly this all-slots classification. Discovery uses one scalar score series
+per `FoundLoop` (its links are element-level, so a discovered loop is always
+scalar). The exhaustive (sim-bearing) and discovery surfaces thus
 agree on scalar loops and differ only in how an A2A loop's element slots are
 reduced -- the exhaustive path now uses the all-slots reading rather than slot 0.
 
-## Strongest-Path Algorithm
+## Post-Simulation Loop Discovery
 
-The implementation in `ltm_finding.rs` follows Appendix I of Eberlein &
-Schoenberg (2020), with three scalability amendments (GH #647) that keep the
-per-timestep DFS tractable on large arrayed models. The production
-implementation is the integer-indexed `IndexedSearch` (topology built once,
-per-step scores reloaded into reusable scratch); the `Ident`-keyed
-`SearchGraph` is retained as a test-only oracle implementing the identical
-algorithm.
+Discovery mode finds the loops that matter *after* the simulation, from the
+recorded link-score series. The implementation is `ltm_finding.rs` plus two
+`#[path]`-mounted siblings (`ltm_finding_enum.rs`, `ltm_finding_fallback.rs`,
+split out for the per-file line cap only). The design plan
+`docs/design-plans/2026-08-17-ltm-discovery-exact.md` holds the measurement
+ledger this section summarizes.
 
-### SearchGraph (`ltm_finding.rs`)
+The pipeline has three stages, and only the first is lossy:
 
-Built per timestep from simulation results. Edges are sorted by absolute score
-descending (`from_edges`), providing the ~3x speedup described in the paper by
-making the first visit to each variable likely the strongest. NaN scores are
-treated as 0.
+```
+parse_link_offsets -> IndexedSearch::build      node ids, per-edge result slots
+      |
+      |  1. CANDIDATE GENERATION
+      +----> ActivityGraph::build -> enumerate_active_circuits   exact: the universe
+      |      or fallback::sweep                                  a sample
+      |
+      |  2. EXACT SCORING
+      +----> each candidate's per-step score = the product of its links'
+      |      recorded score series -- never an accumulated search estimate
+      |
+      |  3. RETAIN, RANK, CAP
+      `----> retain_circuits / rank_and_filter / select_reported -> FoundLoop list
+```
 
-### Core DFS (`check_outbound_uses` / `IndexedSearch::dfs`)
+The generator decides only WHICH cycles are proposed, never what they are
+worth, so switching generators cannot change a reported loop's scores. Which
+generator ran is reported as `DiscoveryResult::enumeration_complete`.
 
-The recursive search follows the paper's pseudocode structure, with the
-pruning mechanism replaced (see "Scalability Amendments" below):
+### The union graph and activity bitsets
 
-- **Cycle detection**: `visiting` set tracks nodes on the current DFS path. When
-  a visited node equals TARGET, a loop is recorded.
-- **Strongest-first ordering**: each node's edges are walked in descending
-  |score| order, so when work bounds bind, the strongest paths are the ones
-  already explored. (Accumulated path products are not tracked; loop scores
-  are recomputed exactly from the link-score series after discovery.)
-- **Per-stock isolation**: per-node expansion counts are reset at the start of
-  each stock's search (the role the paper's per-stock `best_score` reset
-  played -- Section 12.5), so one stock's search never limits loops reachable
-  from another stock.
-- **Deduplication**: `add_loop_if_unique` uses canonical edge-sequence
-  rotations to prevent recording the same loop twice.
+Because discovery runs after the simulation, the set of edges that ever carried
+signal is observable. `ActivityGraph::build` scans the results slab once and
+keeps every element-level causal edge whose recorded |link score| is
+active at one or more saved steps in `1..step_count` -- the **union graph** -- storing per
+edge:
 
-### Scalability Amendments (GH #647)
+- a word-packed **activity bitset** over saved steps, and
+- a contiguous copy of its signed per-step score series, so every later scoring
+  pass reads sequentially instead of striding the slab by `step_size`.
 
-The paper's pseudocode degenerates on large arrayed models -- on C-LEARN v77
-(element-level graph: ~4,700 nodes, ~20,500 edges) four timesteps of discovery
-did not complete in 10 minutes. Three amendments make it tractable; together
-they reduced full 251-step discovery to under a second:
+`is_active` is defined once (`ltm_finding.rs`) and read by both generators, so
+they cannot disagree about which cycles exist: a value is active when it is
+finite and nonzero, or infinite (a divergent link is real signal); only NaN and
+an exact zero are inactive. Step 0 is excluded from union membership and masked
+out of every activity test: every link-score equation's `TIME = INITIAL_TIME`
+guard arm is emitted as the literal constant `0`, so a cycle "active" only there
+is not a scorable loop. Self-edges are dropped at build time -- an elementary
+cycle never repeats a node, so a self-edge can neither be nor extend one, and a
+single variable referencing itself is not feedback in the SD sense (the same
+`circuit.len() > 1` contract exhaustive mode states).
 
-- **Zero-score edges are excluded from the per-step graph.** A loop containing
-  a zero-score (or NaN) link has loop score exactly 0 at this timestep, so it
-  is not a "loop that matters" here; if it ever matters, every link is nonzero
-  at the timestep where it does, and it is discoverable there. On C-LEARN ~94%
-  of edges are zero at any given step, and traversing them made the DFS wander
-  the whole graph.
-- **Each stock's DFS is restricted to its own strongly-connected component**
-  of the per-step nonzero-score subgraph (`tarjan_scc_ids`, computed once per
-  step). A path that leaves the SCC can never return to the target stock, so
-  the restriction loses no loops -- it only skips provably wasted exploration.
-  Stocks outside any multi-node SCC (and without a self-edge) are skipped
-  outright. On C-LEARN this confines each search to a <= 65-node component;
-  on WRLD3 the famous 166-node static SCC fragments into <= 7-node per-step
-  components.
-- **The paper's `best_score` pruning is replaced by a per-node expansion cap
-  scaled to component size** (`EXPANSION_BUDGET_PER_SEARCH / |SCC|`, min 1).
-  The paper's pruning fails in both directions on real models: exact score
-  ties (chains of single-input links score exactly 1.0) and super-unit scores
-  (|score| > 1 makes path products grow) defeat it -- every non-pruned
-  re-arrival re-explores the node's whole subtree, exponential in
-  parallel-path structures -- and when it *does* fire it silently drops
-  sibling loops whose entry path is weaker (the paper's Figure 7 failure
-  mode). The expansion cap inverts the trade-off: work is bounded at
-  `cap * SCC_edges` traversals per (stock, step) regardless of score
-  distribution, and components where the cap does not bind get genuinely
-  exhaustive enumeration -- every elementary cycle through the stock is
-  found, strictly more complete than the paper's heuristic *in that regime*.
-  The non-binding regime covers sparse components and dense ones up to
-  roughly 7 nodes; empirically the cap already binds on a complete digraph
-  of 8 nodes (~10% of its 16k elementary cycles missed), so dense components
-  in the 8+ node range are heuristic, not exhaustive.
+A loop's score is the product of its link scores, so it is nonzero at step `t`
+only if every one of its edges is active at `t`. The AND of a path's activity
+bitsets is therefore exactly the set of steps at which the path can score, and
+an empty AND is a proof that no extension of that path can ever score either.
+That single fact is what makes exact enumeration affordable and what bounds the
+scoring work afterwards (`ActivityGraph::active_window` restricts a circuit's
+scoring to the `[first, last]` step span of its AND -- a 5x reduction on
+World3).
 
-### Heuristic Nature
+### Exact enumeration (`ltm_finding_enum.rs`)
 
-For per-step components where the cap does not bind (sparse, or dense up to
-~K7) the search is exhaustive: every elementary cycle through each stock is
-found -- including the paper's Figure 7 case, where the original `best_score`
-pruning missed the strongest loop (`test_figure_7_paper` documents this).
+`enumerate_active_circuits` emits every elementary cycle of the union graph
+whose activity AND is nonempty -- exactly the **universe** of loops that can
+ever have a nonzero score, at saved-step resolution. It is a min-root
+Tiernan-style search: for each root in ascending node id, walk simple paths,
+maintaining the running AND, and emit a cycle when a path closes back on the
+root with a nonempty AND. Each cycle is emitted once, rooted at its minimum
+node id.
 
-When the cap binds the algorithm is heuristic: loops whose every entry path
-is reached only after the per-node budgets are consumed can be missed.
-Because each node's edges are explored in descending |score| order, the
-exploration priority is the *first edge's* score -- and a loop's strength is
-a product over all its links, NOT monotone in its first edge, so a strong
-loop entered only via a weak first edge can be dropped while a weaker loop
-entered via a strong edge is kept (the cap's own analogue of the paper's
-Figure 7 failure mode; an adversarial 4-node example: `a->w (10), a->x
-(0.01), w->x (0.0001), x->a (1)` with cap 1 keeps the 0.001-scoring loop
-through `w` and misses the 0.01-scoring direct loop). The mitigations mirror
-the paper's: (a) running the search at every timestep with different link
-scores (and therefore different edge orderings) tends to discover loops
-missed at other timesteps, and (b) per-stock budget resets mean different
-starting stocks can discover different loops. The papers' empirical
-evaluation shows that missed loops are consistently "siblings" of found
-loops, differing by only a few links.
+- **Per-root induced-subgraph SCC.** For root `r` only the nodes in `r`'s
+  strongly connected component *within the subgraph induced by nodes `>= r`*
+  (Johnson's `A_k`) are explorable. This is exact -- every cycle whose minimum
+  node is `r` lies entirely inside that component -- and it is what removes the
+  dead-end wandering that made two thirds of World3's descents fruitless.
+  Membership is stamped with a per-root generation counter, so a root costs only
+  the nodes it actually reaches.
+- **On-path blocking only, no Johnson unblocking.** The activity-bitset pruning
+  is path-dependent (whether a node is worth revisiting depends on the AND
+  carried into it), which breaks Johnson's blocked-set invariant. The induced
+  SCC recovers most of what unblocking would have bought.
+- **Edge-row emission.** A circuit is a sequence of `u32` edge rows (closing
+  edge included), stored compressed-row style in one flat array. A row indexes
+  both an activity bitset and a contiguous score series, so retention scores a
+  circuit with no `(from, to)` lookup and no per-circuit allocation. Node paths
+  are derived (`circuit_nodes`) only where a consumer needs one -- cross-agg
+  stitching and materialization.
+- **No per-visit allocation.** The running AND is written straight onto a stack
+  and truncated on prune, at any bitset width.
 
-Independent of the cap, the per-step zero-edge exclusion has its own
-completeness caveat (GH #699): a "baton-passing" loop whose links are each
-active over time but never all simultaneously nonzero at any *saved*
-timestep is invisible to discovery at every step, even though exhaustive
-mode reports it (`discovery_decoupled_stocks` demonstrates this on
-`test/decoupled_stocks`). Running discovery at saved timesteps rather than
-every dt (divergence 1 below, GH #309) widens the same window: a loop
-active only between save points is never sampled. Neither is a regression
-vs. the published per-step method, but "loses nothing" claims should be
-read as "loses no loop that is ever simultaneously active at a sampled
-step."
+Enumeration runs under four bounds: `MAX_DISCOVERY_ENUM_CIRCUITS` (1,000,000
+circuits), `MAX_DISCOVERY_ENUM_VISITS` (100M edge visits -- the circuit count
+alone does not bound work, since a graph can force long paths that rarely
+close), `MAX_DISCOVERY_ENUM_EDGE_ROWS` (20M rows, i.e. 80 MB, the memory bound
+-- cost scales with circuits times mean circuit length, and mean length is a
+property of the graph rather than of the budget), and the caller's deadline,
+checked at the first edge visit and every `DEADLINE_CHECK_INTERVAL` (8192)
+visits after it. Any trip returns `complete: false`, and the caller **discards
+the partial circuit list** rather than merging it: a partial enumeration is
+biased by node-id root order and its per-partition totals are not the universe's,
+so it can supply neither candidates nor denominators honestly. The fallback is
+the principled sample instead.
+
+### Retention against the universe (`retain_circuits`)
+
+A circuit is retained iff at some saved step its |score| is at least
+`MIN_CONTRIBUTION` (0.1%) of its cycle partition's total |score| mass at that
+step -- `rank_and_filter`'s rule, applied with full-universe denominators. The
+final totals are not known until the pass is over, so the decision is made in
+two parts:
+
+1. **Pass** (every circuit): score it over its active window, add its mass into
+   its partition's running total, and record
+   `max_t |s(t)| / running_total(t)`. The running total only grows, so that
+   ratio is an upper bound on the circuit's true peak share, and a circuit
+   falling short of it is dropped without ever being scored again.
+2. **Confirm** (only circuits whose bound clears the threshold): recompute the
+   exact ratio against the final totals.
+
+Two classes skip both tests. A circuit in a `NormGroup::Solo` group (no stock
+resolves to a parent-level partition) is its own denominator, so "ever active"
+is the whole test and the enumerator has already proved it. A module-traversing
+circuit is kept unconditionally and banks **no** raw mass, because what it
+reports is the per-exit-port override series rather than the raw product: the
+raw product multiplies in the module COMPOSITE, which max-abs-selects across all
+of the module's output ports, so the two series can differ by any factor. Its
+reported mass joins the denominators after materialization instead.
+
+The pass outputs the survivors, the per-partition per-step totals, and the
+per-partition circuit COUNT over the whole universe (retention non-survivors
+included). NaN handling comes from the finished product rather than from the
+links, which is what keeps an `Inf * 0` step -- NaN with no NaN link anywhere --
+out of the totals and unable to satisfy retention.
+
+**The exactness boundary.** The confirm step is exact against the totals this
+pass computes, which are not quite the totals the report is normalized against:
+after materialization, `ltm_finding.rs` adds each module-traversing loop's
+reported override mass and subtracts the mass of every duplicate representative
+the reported-cycle dedup discards. Only the subtraction can move a non-module
+circuit's outcome, and it can only LOWER a denominator -- so a circuit dropped
+here for falling short against the pre-correction total could, against the
+corrected one, have cleared the threshold, and having never been materialized it
+is never reconsidered. The error is bounded by the dropped duplicates' share of
+the partition's final mass, which is zero except in a partition holding a
+hoisted-reducer duplicate pathway.
+
+### Materialization and the two total corrections
+
+Cross-agg stitching (GH #696, via `stitch_cross_agg_node_paths` -- the one
+helper both generators' node paths go through) collects its petals from the
+FULL enumerated set rather than from the retention survivors -- a petal can fail retention while the
+stitched combination passes -- and its stitched sequences join the candidate set
+(deduped against the survivors by canonical rotation). Survivors plus stitched sequences are then
+materialized into `FoundLoop`s: links from the causal graph, the per-exit-port
+module override series (GH #698, memoized per `(module-input source, module
+instance, exit-port reader)`), the synthetic-agg trim, the exact per-step score
+product, and runtime polarity.
+
+Two distinct circuits can trim to the same *reported* loop (a direct reference
+and its hoisted-reducer twin differ only in the synthetic agg node the report
+hides). The dedup keeps the strongest representative, matching the composite
+link-score rule (ref 6.3). The universe totals are then corrected so that each
+distinct reported cycle contributes mass exactly once and by the series it
+actually reports: a module-traversing loop's materialized override mass is
+ADDED, and a dropped duplicate's raw mass is SUBTRACTED (along with its slot in
+the partition's loop count). Every other circuit -- retention non-survivors
+included -- keeps its raw enumerated product in the totals untouched.
+
+### The shortest-path fallback (`ltm_finding_fallback.rs`)
+
+When the enumeration cannot complete -- its budgets trip, or the caller's
+wall-clock budget expires (GH #647) -- candidates come from a shortest-path
+sweep instead. Its cost is `steps * seeds * E log V` with no cliff, so it is
+bounded before the work starts and interruptible between searches; and what it
+drops is characterizable rather than an artifact of traversal order, which is
+the standing requirement on anything that stands in for the exact enumeration.
+
+Per saved step `t in 1..step_count`: build that step's active adjacency and its
+reverse, weight every edge, compute the step's SCCs (a cycle lives inside one
+component, so each search is restricted to its seed's), then per seed run a
+forward Dijkstra from the seed and -- under the default closure policy -- a
+reverse Dijkstra into it. Both searches order routes on `(weight, hops)`.
+
+The strategy is a `FallbackConfig` on four axes. Each default was settled by
+`examples/ltm_fallback_eval` measuring recall against the exact enumeration on
+World3 and C-LEARN, not by argument; the sweep tables are in the design plan's
+"Measured" section.
+
+- **Weight** (`FallbackWeight::{ClampedLogAbs, RelativeLinkScore, HopCount,
+  ShiftedLogAbs}`, default `ClampedLogAbs`). Every arm must be non-negative,
+  because Dijkstra's optimality argument needs it and a super-unit link (gain
+  above 1 -- World3 carries 37-91 of them per step) is a NEGATIVE edge in raw
+  `-ln` space where no feasible Johnson potentials exist (a negative cycle there
+  is just a loop with gain > 1). `ClampedLogAbs` (`w = max(0, -ln|s|)`) is
+  therefore an UPPER bound on the true cost: it discards a super-unit link's
+  gain rather than expressing it, leaving a zero-weight plateau that the hop
+  tie-break resolves. `RelativeLinkScore` (`w = -ln(|s| / sum of |s| over the
+  target's active in-edges)`, ref 13.3) is non-negative without clamping.
+  `HopCount` (`w = 1`) is the score-blind control the others have to beat.
+  `ShiftedLogAbs` (`w = ln(step max finite |s|) - ln|s|`) keeps the gain the
+  clamp discards; it was measured and REJECTED -- the per-hop `ln(max)` term
+  dwarfs the product term on these models and the arm degenerates toward a hop
+  count -- and stays selectable as a documented negative result.
+- **Seeds** (`FallbackSeeds::{Stocks, StocksAndStocklessSccs, AllSccNodes}`,
+  default `StocksAndStocklessSccs`). Every SD feedback loop contains a stock, but
+  the runtime graph also carries cycles whose state hides in a module level or a
+  `PREVIOUS` lag between two auxes; one extra seed per stockless non-trivial SCC
+  reaches those. Seeding the whole cyclic core recovers a little more and costs
+  more than the exact enumeration it stands in for, so it stays selectable and
+  unused.
+- **Closures** (`FallbackClosures::{SeedInEdges, EveryEdge}`, default
+  `EveryEdge`). `SeedInEdges` closes only the seed's own in-edges, giving the
+  minimum-weight elementary cycle through the seed -- cheap, and narrow, since
+  one shortest-path tree holds one route per node and parallel routes collapse.
+  `EveryEdge` closes every edge `u -> w` inside the seed's component whose
+  source the forward tree reached and whose target the reverse tree reached,
+  giving `path(seed..u) + (u -> w) + path(w..seed)`: the minimum-weight cycle
+  through both the seed AND that edge, the strength-weighted analogue of edge
+  coverage. It is the lever that earns its cost. A closure whose two tree halves
+  share a node is not elementary and is SKIPPED rather than spliced -- a spliced
+  walk is no longer the minimum-weight cycle through its edge, so it would not
+  be the thing this policy claims to emit.
+- **Tie-break** (`FallbackTieBreak::{Hops, NodeId}`, default `Hops`). Under the
+  clamp's zero-weight plateau many routes tie exactly, and something has to
+  decide: fewer hops is a statement about the model, lower node id is the
+  measurement control. Measured recall-neutral on both models, so `Hops` is kept
+  for the more meaningful tie at no measured cost.
+
+Emitted cycles are deduped by a rotation-independent fingerprint over the
+cycle's directed edge SET (an elementary cycle is determined by that set), with
+bucket hits resolved by an exact rotation comparison -- so opposite-direction
+cycles over one node set stay distinct loops (GH #308) and the duplicates, which
+after the first few steps are nearly every candidate, cost no allocation. The
+candidate volume is bounded at `MAX_FALLBACK_PATHS` (200,000, checked at every
+dedup insert); a trip stops the sweep and reports `truncated`, the same signal a
+deadline expiry gives, since both mean the sweep did not get to sample
+everything it would have.
+
+**What the sweep drops, stated:** cycles through no seed at all (which the seed
+policy widens), and, for a given (seed, edge, step), every cycle but the
+cheapest. So the recall ceiling is an OPTIMALITY restriction -- which cycle wins
+the competition for a given seed and edge -- not a question of how much of the
+graph got visited. On the `ClampedLogAbs` plateau many cycles tie at that
+minimum and the sweep emits one per pair (the tie-break's choice) rather than
+the whole tied set, which is the unmeasured lever a k-best-under-ties extension
+would pull.
+
+**Deadline sites:** the clock is read at exactly three bounded places -- once at
+the top of each step, once before each seed's searches, and once per fixed pop
+interval inside a search, so one seed whose component is most of the graph
+cannot overrun the budget on its own. An unbudgeted sweep reads the clock
+nowhere.
+
+### The budget split
+
+A caller's wall-clock `budget` is split by `ENUM_BUDGET_FRACTION` (0.5): the
+enumeration path (`ActivityGraph::build`, `enumerate_active_circuits`,
+`retain_circuits`) must finish within half of it, and the fallback then runs
+against the caller's own expiry. The split exists because the two generators are
+sequential and only the second yields partial results -- an undivided budget is
+one the fallback never sees, spent entirely inside an enumeration that is then
+discarded for being incomplete. Every phase of both checks the deadline at a
+bounded interval; an unbudgeted call never reads the clock at all.
+
+The budget bounds candidate GENERATION, not the call. Materializing candidates
+into `FoundLoop`s and `rank_and_filter` both run to completion afterwards, so a
+budgeted run can exceed its budget by that tail (about a quarter of World3's
+discovery time) and still report `truncated == false`. Compilation and
+simulation are outside it too.
 
 ### Ranking and Filtering (`rank_and_filter`)
 
-After all timesteps are processed:
+Over the materialized loops:
 
-1. Filter by per-timestep relative contribution within partition: retain a loop
-   if at any single timestep its absolute score is >= `MIN_CONTRIBUTION` (0.1%)
-   of the partition-scoped total at that timestep. This partition-aware filtering
-   prevents globally negligible loops that are dominant in their own partition
-   from being incorrectly removed. Runs BEFORE the cap (GH #310).
-2. Rank **competitive-first** by partition-relative importance: loops that
-   share their cycle partition with at least one other discovered loop come
-   first, ordered by mean |relative loop score| over their active steps
-   (the literature's loop-inclusion measure, ref 13.3, GH #543); loops
-   trivially ALONE in their partition come after all competing loops. A solo
-   loop's relative score is exactly +/-1 at every active step *by
-   construction* (its own |score| is the whole denominator), so its perfect
-   mean carries zero discriminative information -- on real models (C-LEARN)
-   dozens of isolated two-variable stock-decay loops would otherwise pin the
-   top of the ranking above the loops that genuinely compete for dominance
-   in the model's giant component. Never-active (`NaN`) loops sort last.
-3. Truncate to `MAX_LOOPS` (200) in that order, so under cap pressure the
-   zero-information solo loops are dropped before any competing loop.
-4. Assign deterministic polarity-based IDs (`r1`, `b1`, etc.)
-5. Attach result-scoped cycle-partition metadata: each surviving loop's
-   `FoundLoop::partition` (a dense index assigned in first-appearance order
-   over the ranked list) plus `DiscoveryResult::partitions` (per partition:
-   element-level stock names and returned-loop count). Indices are
-   result-scoped -- the underlying SCC numbering renumbers on unrelated stock
-   adds/renames, so consumers needing durable identity key on the stock-name
-   set. The metadata flows through `analysis::ModelAnalysis::partitions`,
-   the FFI `SimlinDiscoveredPartition`, and pysimlin's
-   `Analysis.partitions` / `Loop.partition` so callers can group loops by
-   feedback subsystem (importance is only comparable within a partition).
+1. **Normalization groups.** A loop normalizes against its cycle partition, or
+   -- when its stocks resolve to no parent-level partition (a pure
+   module-internal or `PREVIOUS`-lagged loop) -- against its own
+   `NormGroup::Solo` group (GH #750). Unrelated unpartitioned loops must not
+   share a denominator or count as each other's competition.
+2. **Denominators.** On the enumeration path the per-partition per-step totals
+   are the universe's (`UniverseStats::totals`, corrected as above): a retention
+   non-survivor's mass is still in the denominator, matching exhaustive mode,
+   where the enumerated set IS the universe. On the fallback path there is no
+   universe to measure against, so the discovered set supplies its own totals.
+   `NaN` summands are excluded and `Inf` kept, mirroring
+   `ltm_post::denom_summand`.
+3. **Retention filter**, peak semantics: keep a loop if at ANY single step its
+   |score| is >= `MIN_CONTRIBUTION` (0.1%) of its group's total there. This runs
+   BEFORE any cap (GH #310), so a loop dominant in a small partition but
+   globally low-magnitude survives even though a truncate-before-filter
+   would drop it.
+   `DiscoveryResult::retained_loops` reports how many survived, read before the
+   cap.
+4. **Competing-vs-solo classification.** On the enumeration path a partition is
+   competing iff its UNIVERSE circuit count is >= 2, however many loops survived
+   retention or the cap -- sound precisely because every enumerated circuit is
+   ever-active by construction, so a co-member cannot be a phantom. On the
+   fallback path the discovered set is the only population there is.
+5. **Rank competitive-first** by mean |relative loop score| over each loop's
+   active steps (the literature's loop-inclusion measure, ref 13.3, GH #543),
+   with raw `avg_abs_score` breaking exact ties and a content key breaking
+   those. Loops trivially ALONE in their group come after ALL competing loops:
+   a solo loop's relative score is exactly +/-1 at every active step *by
+   construction*, so its perfect mean carries zero discriminative information,
+   and on real models dozens of isolated two-variable decay loops would
+   otherwise pin the top of the ranking. Never-active (`NaN`) loops sort last.
+   The mean is taken over active steps only ("delayed averaging", ref 13.3), so
+   a briefly-dominant loop is not penalized for the steps it sleeps through --
+   which is the loop the retention filter exists to keep.
+6. **Coverage-aware cap** (`select_reported`). Under `MAX_LOOPS` (200) pressure
+   membership is not a plain truncation. Every loop that is, at some step, the
+   |relative score| maximum within a COMPETING group is an **anchor** and keeps
+   its slot (`anchor_ranks`, `k = 1`), unconditionally -- so a
+   dominance-over-time reading never names the wrong loop for a step. `k` may
+   then rise to cover runners-up, bounded by `MAX_ANCHOR_K` (3) and taken only
+   while the enlarged anchor set stays at or under `ANCHOR_SHARE_OF_CAP` (one
+   half) of the cap, so the coverage guarantee can deepen but can never crowd
+   the ordinary ranking below half of a capped report. Remaining slots are
+   filled in ranking order. In the pathological case where the `k = 1` anchors
+   alone exceed the cap, the cap applies to the anchors, in ranking order: a
+   loop that dominates no step is a worse answer to "what drove this step" than
+   one that dominates a different step. Solo loops never anchor and are dropped
+   first. Presentation order is unchanged by any of this -- only membership.
+7. **IDs and partition metadata.** Deterministic polarity-based ids (`r1`,
+   `b1`, `u1`) are assigned in a content-key visitation order, so they do not
+   depend on discovery order. Each reported loop then carries a result-scoped
+   dense `FoundLoop::partition` index into `DiscoveryResult::partitions`
+   (per partition: element-level stock names and returned-loop count), in
+   first-appearance order over the final list. Those indices are result-scoped:
+   the underlying SCC numbering renumbers when stocks are added or renamed, so a
+   consumer needing durable identity keys on the stock-name set. The metadata
+   flows through `analysis::ModelAnalysis::partitions`, the FFI
+   `SimlinDiscoveredPartition`, and pysimlin's `Analysis.partitions` /
+   `Loop.partition`, so callers can group loops by feedback subsystem --
+   importance is only comparable within a partition.
+
+### What a caller can tell about completeness
+
+`DiscoveryResult` reports five things, each answering a different question:
+
+| field | question |
+|---|---|
+| `enumeration_complete` | Did the exact generator run AND finish? `false` means the candidates are the fallback's sample. A budget trip and a deadline expiry are deliberately not distinguished: the report is equally a sample either way. |
+| `universe_loops` | How many circuits the enumerated universe held. `Some` exactly when `enumeration_complete` (stitched cross-agg loops are combinations of circuits rather than circuits, so they are not counted). |
+| `fallback_candidates` | How many distinct cycles the sweep proposed, after dedup and before retention. `Some` exactly when the fallback ran -- the mirror of `universe_loops`. |
+| `retained_loops` | How many loops passed retention BEFORE the `MAX_LOOPS` cap: the only way to tell a capped prefix from the whole retained set. |
+| `truncated` | Whether the fallback sweep stopped early (deadline or candidate budget). Its loops cover only the steps it processed; the per-step series of the loops it DID find are complete, since each loop is rescored over every step once its path is known. |
+| `agg_recovery_truncated` | Whether cross-agg petal stitching hit its loop-count budget, so some reducer loops are absent (GH #696) -- structurally incomplete, distinct from the wall-clock signal. |
+
+Five of the six reach `analysis::ModelAnalysis`, and from there libsimlin,
+pysimlin, and the MCP read/edit outputs (`enumerationComplete` is always on the
+MCP wire, since its interesting value is `false` and an elided field would leave
+a client unable to tell an exact analysis from a sampled one).
+`fallback_candidates` stays engine-internal: it exists so the two generators'
+candidate VOLUMES are directly comparable in `examples/ltm_discovery_bench` and
+`examples/ltm_fallback_eval`, which is a measurement question rather than a
+caller's.
+
+### Measured shape
+
+Both figures below are release builds of `examples/ltm_discovery_bench` on the
+two models that drive this design; the design plan's "Measured" section is the
+ledger with the per-phase breakdowns and the fallback sweep tables.
+
+- **C-LEARN v77** (911 variables, ~26k LTM variables, 251 saved steps, 116
+  stocks): a union graph of ~3,000 edges holding **162** ever-simultaneously-
+  active cycles. Discovery completes in ~0.04 s, of which the phases *before*
+  candidate generation -- `parse_link_offsets` and the topology build -- are the
+  dominant cost; enumeration, retention, materialization and ranking together
+  are under 3 ms. 153 loops are reported and the cap does not bind.
+- **World3-03** (401 saved steps, 15 stocks): a union graph of 258 edges over
+  one 135-node SCC holding **150,827** ever-simultaneously-active cycles.
+  Discovery completes in ~0.4 s, dominated by enumeration, retention, and
+  `FoundLoop` materialization; 2,979 circuits survive retention and the cap
+  reports 200 of them.
+
+The gap between the two is this design's thesis as a measurement: a
+shortest-path sample recovers most of what matters on a sparse runtime graph
+(C-LEARN: every step's dominant loop, and nearly the whole exact ranking) and
+almost none of the exact ranking on a dense one (World3). That is what
+`enumeration_complete == false` exists to say.
+
+An independent pure-Python re-implementation of the enumerator, the scoring, the
+retention filter, and the ranking -- written from the design plan rather than
+translated from the Rust -- reproduces both models exactly, universe count,
+survivor count, reported list, and score series bit for bit
+(`notebooks/build_ltm_discovery_audit.py`, regenerable, gitignored output).
+
+### Honest boundaries
+
+Completeness is a claim about the *recorded* series at *saved-step* resolution,
+and three things sit outside it:
+
+- **Sub-save-step activity is invisible.** Discovery samples at `save_step`
+  rather than at every dt (GH #309, divergence 1 below), so a loop active only
+  between save points is never sampled. A "baton-passing" loop whose links are
+  each active over time but never all simultaneously active at a *saved* step is
+  likewise invisible to both generators, even though exhaustive mode reports it
+  (GH #699; `discovery_decoupled_stocks` demonstrates it on
+  `test/decoupled_stocks`). This is shared with the published per-step method.
+  Read "loses nothing" as "loses no loop that is ever simultaneously active at a
+  sampled step".
+- **A module-input edge's activity is read from the module composite.** The
+  composite max-abs-folds over the module's pathways as
+  `if ABS(a) >= ABS(b) then a else b`, and every comparison against NaN is
+  false, so a NaN pathway in the `b` position wins and the edge reads NaN --
+  inactive -- even when a finite pathway exists. A loop through such an edge is
+  then absent from the union graph, although the per-exit-port series it would
+  have reported is finite. The zero case is safe in the other direction: a
+  composite that is 0 at every step does imply every per-port score is 0.
+- **Stockless cycles are kept.** A 2+-node cycle carrying no stock -- state
+  hidden in a module level, or a `PREVIOUS` lag between two auxes -- is real
+  feedback and is reported, in its own `NormGroup::Solo` group ranked after
+  every competing loop. It never anchors under the cap, because a Solo loop's
+  relative score is +/-1 by construction and anchoring it would guarantee a slot
+  to the one class of loop that carries no comparative information. Neither
+  model in the corpus currently produces one (0 of C-LEARN's 153 and 0 of
+  World3's 200 reported loops have an empty stock list, under either generator,
+  as `examples/ltm_discovery_bench` prints), so the rule costs those two models
+  nothing and exists for the models that do; the fallback's default seed policy
+  (`StocksAndStocklessSccs`) is what keeps such a cycle reachable when the
+  enumeration cannot run, since no stock-seeded search can reach it.
 
 ## Array Support
 
@@ -1398,8 +1690,8 @@ halves are factored into the loop score (see "Aggregate Nodes").
 **Cross-agg loop recovery** (#515 exhaustive, #696 discovery). A cross-element
 feedback loop *through* an inlined reducer visits the (subscript-free, or for an
 arrayed agg `[<slot>]`-subscripted) agg node more than once, so neither Johnson
-(exhaustive) nor the strongest-path DFS (discovery) emits it directly -- both
-enumerate only elementary circuits. The recovery is shared: the combinatorial
+(exhaustive) nor either discovery candidate generator emits it directly -- all
+of them produce only elementary circuits. The recovery is shared: the combinatorial
 core `stitch_cross_agg_petals` reconstructs the loop from the agg-touching
 elementary "petals" (`agg → … → agg`), stitching each pairwise-disjoint petal
 subset of size ≥ 2 into ONE canonical loop -- the chosen petals concatenated
@@ -1449,18 +1741,24 @@ When `ltm_discovery_mode = true`, element-level discovery proceeds as:
    `[`-in-name single-passthrough branch unchanged -- the element / agg name is
    already in the variable name. A Bare/FixedIndex collision on the same
    expanded element key is broken Bare-first.
-3. The `SearchGraph` is built from these element-level link offsets. Element-level
+3. The candidate-generation topology (`IndexedSearch`, and the union graph
+   built over it) comes from these element-level link offsets. Element-level
    stocks (expanded from `model_element_causal_edges`, which routes inlined
-   reducers through their `$⁚ltm⁚agg⁚{n}` nodes) serve as DFS starting points.
-4. Each discovered path becomes its own `FoundLoop`; the synthetic agg nodes
+   reducers through their `$⁚ltm⁚agg⁚{n}` nodes) are the fallback's seed set,
+   and their cycle partitions are what every loop normalizes against.
+4. Each candidate path becomes its own `FoundLoop`; the synthetic agg nodes
    are trimmed from its node sequence by `trim_synthetic_aggs_from_loop_links`.
-   The discovery DFS only emits *elementary* element-graph circuits, so a
+   Both generators emit only *elementary* element-graph circuits, so a
    cross-element loop through an inlined reducer -- which visits the agg node
-   more than once and is therefore non-elementary (the `visiting` set forbids
-   any node revisit) -- is structurally unreachable by the search. Discovery
+   more than once and is therefore non-elementary -- is structurally
+   unreachable to either. Discovery
    recovers these by stitching, exactly as exhaustive mode does (GH #696):
-   after the per-step sweep, `discover_loops_with_graph` treats each discovered
-   single-agg path as a *petal* and feeds them to the SHARED combinatorial core
+   after candidate generation, `discover_loops_with_graph` treats each
+   single-agg candidate path as a *petal* and feeds them through
+   `stitch_cross_agg_node_paths` -- the one helper BOTH generators' node paths
+   go through, so a reducer model's recovered loops differ between them only
+   by the petals each found -- to the SHARED
+   combinatorial core
    `stitch_cross_agg_petals` (`src/db/ltm/loops.rs`) -- the same petal priority,
    pairwise-disjoint-internal-node rule, `MAX_AGG_PETALS` cap,
    one-canonical-loop-per-subset emission, and `cross_agg_loop_budget()` that
@@ -1478,9 +1776,9 @@ When `ltm_discovery_mode = true`, element-level discovery proceeds as:
    the recovery is post-simulation there is no salsa diagnostic accumulator to
    emit a `Warning` into, so the flag is the signal. (The shared core is narrow
    in the same way exhaustive's is: a petal is a circuit touching exactly one
-   agg once, so a single discovered path that already visits two distinct aggs
-   is a complete loop, not a petal -- it is emitted by the DFS directly when it
-   happens to be elementary.)
+   agg once, so a single candidate path that already visits two distinct aggs
+   is a complete loop, not a petal -- the generators emit it directly when it
+   is elementary.)
 
 ### Per-Slot Loop Score Equations
 
@@ -1511,8 +1809,10 @@ correct, and every other slot read a frozen ceteris-paribus partial and scored
 A modeler pins a loop by naming its variable set (the `SetLoopName` patch
 primitive, persisted as `LoopMetadata`; see LTM ref section 10). The engine
 then ALWAYS emits that loop's `loop_score` -- in both modes. In discovery mode
-this is the only way to score a specific loop, since the heuristic search
-emits no per-loop score variables at all.
+this is the only way to score a specific loop, since discovery emits no
+per-loop score variables at all -- and it is how a modeller keeps a named loop
+comparable across runs and parameter sweeps regardless of what candidate
+generation reported.
 
 `db/ltm/pinned.rs::model_pinned_loops` resolves each pin:
 
@@ -1561,7 +1861,9 @@ runs on such module-only roots at all.)
 In exhaustive mode, a scored pin loop whose variable-cycle rotation matches an
 enumerated loop is skipped (the enumerated loop already carries a correct
 score; the pin's name transfers onto it in `model_detected_loops`). In
-discovery mode nothing is enumerated, so every scored pin loop is emitted.
+discovery mode no loops are enumerated at COMPILE time (the loop universe is
+enumerated post-simulation, after the pins are already compiled), so every
+scored pin loop is emitted.
 Per-slot cycle partitions are registered through the same
 `partition_for_loop` resolution enumerated loops use, so post-simulation
 relative-score normalization (`ltm_post`) and the FFI's subscripted access
@@ -1579,14 +1881,21 @@ this has not been explored in the implementation.
 
 ### Performance on Very Large Models
 
-The strongest-path search runs at every saved timestep, restricted to each
-stock's per-step nonzero-score SCC with bounded per-node re-expansion (see
-"Scalability Amendments"). Per-step work is bounded by roughly
-`stocks_in_cycles * EXPANSION_BUDGET_PER_SEARCH * avg_degree` edge traversals
-regardless of model size; C-LEARN v77 (251 steps, ~20k element-level edges)
-completes the full discovery sweep in under 0.1s. The compile-time cost of
-generating and compiling the link-score instrumentation -- not the discovery
-DFS -- is now the dominant LTM cost on large models (GH #655 / #317).
+Discovery's cost is driven by the size of its candidate universe, which is a
+property of the runtime graph rather than of the variable count: C-LEARN v77
+(251 saved steps, ~21k element-level edges, ~26k LTM variables) holds 162
+ever-simultaneously-active cycles and completes discovery in ~0.04 s, of which
+the phases before candidate generation -- `parse_link_offsets` and the topology
+build -- are the larger part; World3-03 (401 steps, 428 edges) holds 150,827 and
+takes ~0.4 s, dominated by enumeration, retention, and `FoundLoop`
+materialization. A denser runtime graph than either is what the enumeration
+budgets and the caller's wall-clock budget exist for: past them, candidates come
+from the shortest-path fallback and `enumeration_complete` reports it.
+
+The compile-time cost of generating and compiling the link-score
+instrumentation -- not discovery -- remains the dominant LTM cost on large
+models (GH #655 / #317): C-LEARN's LTM compile is ~2.3 s and its LTM simulation
+~2.6 s against discovery's 0.04 s.
 
 ### Residual array carve-outs
 
@@ -1630,13 +1939,27 @@ cases remain deliberate carve-outs:
 
 ## Divergences from the Papers
 
-1. **Per-timestep vs. per-dt search**: The papers describe running the
-   strongest-path search at "every (or almost every) point in time," meaning each
-   DT step. The implementation runs at each saved timestep (determined by
-   `save_step` in sim specs), which may be coarser. This is an intentional
-   simplification that trades completeness for speed.
+1. **Per-timestep vs. per-dt sampling**: The papers describe searching at
+   "every (or almost every) point in time," meaning each DT step. The
+   implementation reads the recorded series at each saved timestep (determined
+   by `save_step` in sim specs), which may be coarser. This is an intentional
+   simplification that trades completeness for speed (GH #309).
 
-2. **Auto-flip on large SCCs, no composite-network pre-reduction**: The papers
+2. **Enumeration over the union graph, not a per-step search**: the papers
+   search for the strongest paths at each point in time and accumulate the
+   loops found. Discovery instead builds ONE union-of-active-edges graph over
+   all saved steps, with a per-edge activity bitset, and enumerates every
+   elementary cycle whose edges are simultaneously active at some step. That is
+   a superset relationship, not a different heuristic: the enumerated set is
+   provably every cycle a per-step search could have found at any step, so
+   discovery is exact where the papers' method samples. The shortest-path
+   fallback that stands in when the enumeration cannot finish is also not the
+   papers' `best_score` DFS -- it is a per-(seed, step) Dijkstra whose dropped
+   set is characterizable (for a given seed, edge and step it keeps the
+   minimum-weight cycle and drops the rest), which a per-node work bound is
+   not.
+
+3. **Auto-flip on large SCCs, no composite-network pre-reduction**: The papers
    describe a two-tier strategy in which models with fewer than ~1000 loops use
    exhaustive enumeration on a composite (max-score) network. The implementation
    does not build that composite pre-reduction: `ltm_enabled` runs exhaustive
@@ -1653,7 +1976,7 @@ cases remain deliberate carve-outs:
    `docs/design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md`
    for the measurements. (The legacy per-loop relative-score equation synthesis
    compounded this with an O(P^2) text blowup; moving the normalization
-   post-simulation -- divergence 5 below -- removed that factor from
+   post-simulation -- divergence 6 below -- removed that factor from
    augmentation cost.) Auto-flip emits a `CompilationDiagnostic` at
    `Warning` severity so callers can surface the fallback to users.
 
@@ -1669,7 +1992,7 @@ cases remain deliberate carve-outs:
    element-level expansion exceeds the budget becomes an invalid pin
    (reported, never silently scored).
 
-3. **Module handling**: The papers describe composite link scores for macros
+4. **Module handling**: The papers describe composite link scores for macros
    (DELAY, SMOOTH) but do not discuss module boundaries as an implementation
    concept. The Simlin implementation extends the macro approach to modules:
    internal graphs are built recursively, pathways are enumerated, and composite
@@ -1677,12 +2000,12 @@ cases remain deliberate carve-outs:
    module-internal stocks to loop stock lists) is an implementation-specific
    extension that enables correct cycle partitioning.
 
-4. **PREVIOUS is intrinsic**: The `PREVIOUS()` function used in link score
+5. **PREVIOUS is intrinsic**: The `PREVIOUS()` function used in link score
    equations is compiled as an intrinsic two-argument builtin. Unary syntax is
    desugared to `PREVIOUS(x, 0)`. LTM first-timestep behavior is handled
    explicitly with `TIME = INITIAL_TIME`.
 
-5. **Relative loop score formula and timing**: The implementation computes
+6. **Relative loop score formula and timing**: The implementation computes
    `loop_score / sum_of_abs_scores` with explicit division-by-zero protection
    (yielding 0 rather than NaN), while the papers present the formula without
    discussing this edge case. It also performs this normalization in a
@@ -1690,7 +2013,7 @@ cases remain deliberate carve-outs:
    synthesized compile-time equations, avoiding O(P^2) equation-text growth on
    models with very large same-partition loop sets (e.g. WRLD3).
 
-6. **Flow-to-stock numerator timing and `time_step` scaling**: The flow-to-stock
+7. **Flow-to-stock numerator timing and `time_step` scaling**: The flow-to-stock
    link score numerator uses `time_step * (PREVIOUS(flow) - PREVIOUS(PREVIOUS(flow)))`
    rather than the published bare `flow - PREVIOUS(flow)`. Two deliberate changes:
    - *1-DT shift*: in Euler integration, the flow at t-1 drove the stock change
@@ -1711,7 +2034,7 @@ cases remain deliberate carve-outs:
      an isolated loop scores +1.0 with the factor (4.0 without), and at dt=1
      the paper's Table 3 values (1.25 / -0.25) reproduce exactly.
 
-7. **Ceteris-paribus via AST transformation**: The papers describe re-evaluating
+8. **Ceteris-paribus via AST transformation**: The papers describe re-evaluating
    equations with current values of one input and previous values of all others.
    The implementation achieves this by parsing the equation into an AST,
    recursively transforming it to wrap non-excluded dependencies in `PREVIOUS()`,
@@ -1741,16 +2064,49 @@ cases remain deliberate carve-outs:
   property-based equivalence with the reference compile-time formula on
   synthetic loop-score matrices
 
-- **`ltm_finding.rs`**: SearchGraph construction and edge sorting, trivial loop,
-  Figure 7 from the paper (all loops found via cap-bounded exhaustive search),
-  per-stock search isolation, deduplication, empty graph, zero-score edges
-  (excluded per step; the loop is discovered at steps where it is active), NaN
-  handling, self-loops, disconnected components, stocks without outbound edges,
-  SCC restriction (acyclic appendages don't change results), tied-score
-  diamond-chain termination (bounded re-expansion), Tarjan SCC ids, discovery
-  graph stats, link offset parsing, ID assignment, rank-and-filter (truncation,
-  contribution filtering, ordering preservation, briefly dominant loop
-  retention, partition-aware filtering)
+- **`ltm_finding_tests.rs`** (the `#[cfg(test)]` sibling of `ltm_finding.rs`),
+  by family:
+  - *Enumerator*: a brute-force oracle over randomized synthetic graphs
+    (every ever-simultaneously-active cycle, compared set-for-set), each cycle
+    emitted exactly once, opposite-direction cycles kept distinct, a cycle
+    active at only one step, a `PREVIOUS` self-latch reported as no loop
+    (AC1.1), a staggered-activity cycle reported by neither generator
+    (GH #699), and one arm per enumeration budget reporting incomplete.
+  - *Retention*: hand-computed products and totals, the confirm step rescuing
+    a circuit whose running bound overstated its share, module and Solo
+    circuits kept, the `Inf * 0` product excluded from both totals and
+    retention (AC4.1), universe circuit counts per partition, and the
+    step-0 activity window.
+  - *Fallback parity*: both generators agree on a simple model, on a diamond
+    (both arms recovered), on a module loop, and on a stockless two-node cycle
+    that ranks last (AC1.3); an enumeration budget trip falls back and still
+    reports the same loops.
+  - *Deadlines*: one arm per phase (`ActivityGraph::build`,
+    `enumerate_active_circuits`, `retain_circuits`) for an already-expired
+    deadline, a mid-search expiry, and the never-reads-the-clock claim when
+    unbudgeted; plus the budget split itself.
+  - *Ranking and selection*: retention before the cap (GH #310), competitive-
+    first order, solo demotion and the magnitude tie-break, determinism under
+    permutation, universe-based competing classification (both arms, AC5.2),
+    and the coverage-aware cap (each step's dominant loop kept, `k`
+    escalation within the anchor share, anchors over the cap, ties, empty
+    steps, per-group maxima; AC5.1).
+  - *Counts and metadata*: universe/retained/fallback-candidate reporting,
+    module override mass in the denominator (AC4.2), the trimmed-duplicate
+    mass subtraction (AC4.3), cross-agg stitching end to end and its budget,
+    link offset parsing (every A2A/FixedIndex/per-element shape), ID
+    assignment, Tarjan SCC ids, and `discovery_graph_stats`.
+
+- **`ltm_finding_fallback_tests.rs`**: Dijkstra exactness against a brute-force
+  minimum-weight cycle on random graphs; one arm per weight formulation
+  (including the infinite-score arms and the step shift); each tie-break arm
+  and the proof that the tie-break changes order but not membership; the
+  every-edge closures (minimum-weight through their edge, superset of the
+  seed's in-edge closures, both arms of a diamond); each seed policy and what
+  a stockless cycle needs to be reachable; self-edge handling; rotation dedup
+  across seeds and steps; the deadline sites (already expired, between steps,
+  between seeds, inside a search, unbudgeted); the candidate budget; and
+  content-pure output.
 
 ### Salsa Pipeline Tests
 
@@ -1781,8 +2137,9 @@ All integration tests use `compile_project_incremental` + VM:
 - **`discovery_cross_validates_with_exhaustive`**: Cross-validates discovery against
   exhaustive enumeration on the logistic growth model
 
-- **`discovery_arms_race_3party`**: Tests the three-party arms race model from the
-  papers (7 exhaustive loops; discovery finds all 7 with per-stock reset)
+- **`discovery_arms_race_3party`**: Tests the three-party arms race model from
+  the papers (8 exhaustive loops -- both traversal directions of the three-way
+  cycle count, issue #308 -- and discovery finds all 8)
 
 - **`discovery_decoupled_stocks`**: Tests time-varying loop activation where
   different loops become active at different timesteps

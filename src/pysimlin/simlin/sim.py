@@ -427,7 +427,8 @@ class Sim:
             created with ``enable_ltm=False``, ``EXHAUSTIVE`` when every
             feedback loop was enumerated, or ``DISCOVERY`` when the model
             tripped the SCC-size gate (or discovery was requested directly)
-            so loops are ranked by the strongest-path heuristic.
+            so loops are found post-simulation from the recorded link
+            scores.
 
         Raises:
             SimlinRuntimeError: If the underlying query fails.

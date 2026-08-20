@@ -4,14 +4,14 @@
 
 //! LTM discovery-feasibility benchmark harness (GH #647).
 //!
-//! Runs the full LTM-discovery pipeline (compile, simulate, strongest-path
-//! discovery DFS) on a large model -- C-LEARN v77 by default -- with phase
-//! timing, so the per-stage cost and the discovery DFS feasibility can be
-//! measured against real link scores.
+//! Runs the full LTM-discovery pipeline (compile, simulate, discover) on a
+//! large model -- C-LEARN v77 by default -- with phase timing, so the
+//! per-stage cost and discovery's feasibility can be measured against real
+//! link scores.
 //!
 //! Environment:
 //!   CLEARN_MODEL            override the model path (.mdl, .stmx/.xmile)
-//!   CLEARN_SKIP_DISCOVERY   stop before the discovery DFS
+//!   CLEARN_SKIP_DISCOVERY   stop before loop discovery
 //!   CLEARN_DISCOVER_STEPS=N truncate discovery to the first N saved steps
 //!   CLEARN_CAP_SCORES       clamp |link score| <= 1 before discovery
 //!   CLEARN_GRAPH_STATS      report search-graph structure (nodes/edges/SCCs)
@@ -24,7 +24,7 @@ use std::time::Instant;
 use salsa::Setter;
 use simlin_engine::analysis::analyze_model;
 use simlin_engine::db::{
-    SimlinDb, causal_graph_from_element_edges, compile_project_incremental,
+    SimlinDb, causal_graph_from_element_edges_with_modules, compile_project_incremental,
     model_element_causal_edges, model_ltm_variables, project_datamodel_dims,
     sync_from_datamodel_incremental,
 };
@@ -66,8 +66,9 @@ fn main() {
     let canonical_name = canonicalize(root_name).into_owned();
 
     // Decompose the analyze_model pipeline so we can see whether the cost is in
-    // the LTM *simulation* (which the wasm backend could accelerate) or the
-    // strongest-path *discovery DFS* (pure Rust graph search, wasm-agnostic).
+    // the LTM *simulation* (which the wasm backend could accelerate) or in
+    // *discovery* (pure Rust graph search over the recorded scores,
+    // wasm-agnostic).
     source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
@@ -160,10 +161,10 @@ fn main() {
         }
     }
 
-    // Degenerate-workload guard: the strongest-path DFS prunes on link-score
-    // magnitude, so if the LTM link-score columns are all zero/NaN the discovery
-    // benchmark is meaningless. Count how many link-score columns carry at least
-    // one finite non-zero value across the run.
+    // Degenerate-workload guard: discovery searches only the edges that carry
+    // signal, so if the LTM link-score columns are all zero/NaN the benchmark is
+    // meaningless. Count how many link-score columns carry at least one finite
+    // non-zero value across the run.
     let mut link_cols = 0usize;
     let mut link_cols_nonzero = 0usize;
     let mut suspect_zero_cols: Vec<&str> = Vec::new();
@@ -235,7 +236,17 @@ fn main() {
     let element_edges = phase("build element causal graph", || {
         model_element_causal_edges(&db, source_model, source_project)
     });
-    let causal_graph = causal_graph_from_element_edges(element_edges);
+    // The PRODUCTION constructor (`analysis::analyze_model` calls the
+    // identical form): the bare `causal_graph_from_element_edges` leaves
+    // module sub-graphs and the variable map empty, silently disabling the
+    // discovery-mode per-exit-port pathway recompute (GH #698) on a
+    // module-bearing model like C-LEARN (SMOOTH/DELAY stdlib modules).
+    let causal_graph = causal_graph_from_element_edges_with_modules(
+        &db,
+        source_model,
+        source_project,
+        element_edges,
+    );
     let stocks: Vec<_> = element_edges
         .stocks
         .iter()
@@ -253,10 +264,10 @@ fn main() {
         ltm_vars.vars.len()
     );
 
-    // Search-graph structure / score-distribution diagnostics (GH #647): how
-    // big is the graph the per-timestep DFS must traverse, where is its cyclic
-    // core, and how do the per-step scores distribute relative to the pruning
-    // assumptions (products shrink along paths; few exact ties)?
+    // Runtime-graph structure / score-distribution diagnostics (GH #647): how
+    // big is the graph discovery must search, where is its cyclic core, and how
+    // do the per-step scores distribute -- in particular how many links are
+    // super-unit, which is what decides how a cycle weight must be formulated.
     if std::env::var("CLEARN_GRAPH_STATS").is_ok() {
         let last = results.step_count - 1;
         let sample_steps: Vec<usize> = vec![1, 5, last / 4, last / 2, 3 * last / 4, last]
@@ -302,12 +313,12 @@ fn main() {
                 s.stocks_in_nonzero_core,
             );
         }
-        println!("\n[CLEARN_GRAPH_STATS set: stopping before discovery DFS]");
+        println!("\n[CLEARN_GRAPH_STATS set: stopping before loop discovery]");
         return;
     }
 
     if std::env::var("CLEARN_SKIP_DISCOVERY").is_ok() {
-        println!("\n[CLEARN_SKIP_DISCOVERY set: stopping before discovery DFS]");
+        println!("\n[CLEARN_SKIP_DISCOVERY set: stopping before loop discovery]");
         return;
     }
 
@@ -329,11 +340,10 @@ fn main() {
 
     if std::env::var("CLEARN_CAP_SCORES").is_ok() {
         // Experiment: clamp every LTM link-score magnitude to <= 1 before
-        // discovery. The strongest-path DFS prunes via `score < best_score`,
-        // which assumes path-score products SHRINK as paths extend. Link scores
-        // > 1 (e.g. the ~5.2e7 macro-internal scores) make products GROW, which
-        // can defeat that pruning and cause the per-timestep blowup. If capping
-        // restores fast discovery, the pruning-defeat hypothesis holds.
+        // discovery. A super-unit link is a gain above 1, which is what makes a
+        // path product GROW rather than shrink -- the property that decides how
+        // the fallback's cycle weight has to be formulated, and the reason a
+        // raw `-log|score|` weight is not usable. Capping isolates its cost.
         let link_offs: Vec<usize> = results
             .offsets
             .iter()
@@ -357,9 +367,9 @@ fn main() {
 
     let sub_model_ports =
         simlin_engine::analysis::build_sub_model_output_ports(&db, source_project);
-    let found = phase("strongest-path discovery DFS", || {
-        // `budget: None` runs the full DFS to completion -- this harness exists
-        // to time the whole discovery sweep, so it must never truncate.
+    let found = phase("loop discovery", || {
+        // `budget: None` runs discovery to completion -- this harness exists to
+        // time the whole pipeline, so it must never truncate.
         simlin_engine::ltm_finding::discover_loops_with_graph(
             &results,
             &causal_graph,

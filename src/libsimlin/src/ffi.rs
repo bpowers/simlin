@@ -82,8 +82,8 @@ pub enum SimlinLinkPolarity {
 /// `Disabled` means the simulation was created without LTM (`enable_ltm =
 /// false`), so no loop enumeration ran. `Exhaustive` means every elementary
 /// circuit was enumerated (Johnson). `Discovery` means the model tripped the
-/// SCC-size gate (or discovery was requested directly) and loops are ranked
-/// by the per-timestep strongest-path heuristic instead. Without this signal
+/// SCC-size gate (or discovery was requested directly) and loops are found
+/// post-simulation from the recorded link scores instead. Without this signal
 /// a caller cannot tell why an LTM-enabled run produced empty or different
 /// loop results.
 #[repr(C)]
@@ -221,7 +221,7 @@ pub struct SimlinLinks {
     pub count: usize,
 }
 
-/// A single loop discovered via the strongest-path LTM discovery algorithm.
+/// A single loop found by post-simulation LTM loop discovery.
 ///
 /// This mirrors `SimlinLoop` but adds a per-timestep `importance` series.
 /// We do NOT reuse `SimlinLoop` (despite the score-on-loop suggestion in the
@@ -335,4 +335,68 @@ pub struct SimlinDiscoveryResult {
     /// that mirrors exhaustive mode's analogous salsa Warning, surfacing the
     /// completeness asymmetry that previously left discovery callers blind.
     pub agg_recovery_truncated: bool,
+    /// Non-zero when discovery's candidate generation was the union-graph
+    /// circuit enumeration AND it ran to completion: `loops` is then the
+    /// retention/ranking pipeline's selection from the PROVABLY COMPLETE set
+    /// of loops that can ever score, so discovery was exact rather than
+    /// heuristic (exact for cross-aggregate reducer loops too only while
+    /// `agg_recovery_truncated` is also false: those are stitched under their
+    /// own budget).  Zero means the shortest-path fallback generated the
+    /// candidates -- an explicit SAMPLE of the loop universe -- because the
+    /// enumeration's budgets or `budget_ms` did not allow it to finish.  Read
+    /// this before treating an absent loop as evidence the model has none.
+    ///
+    /// Meaningless (`false` by construction) when `analysis_error` is
+    /// non-NULL: analysis never reached candidate generation at all, so this
+    /// is not "a sample" in the sense above -- check `analysis_error` first.
+    pub enumeration_complete: bool,
+    /// How many loops passed discovery's retention filter, BEFORE the
+    /// reported-loop cap truncated `loops`.  Equal to `loop_count` when the
+    /// cap did not bind, and above it when it did -- the signal that `loops`
+    /// is a coverage-aware SUBSET of the loops worth reporting (each step's
+    /// dominant loop per competing partition is guaranteed a slot while those
+    /// dominant loops fit the cap, the rest
+    /// is filled by mean importance): presented in importance order, but not
+    /// a strict most-important-first prefix.
+    pub retained_loops: usize,
+    /// The size of the candidate universe: how many DISTINCT loops' mass the
+    /// discovery denominators sum -- the ever-simultaneously-active
+    /// elementary cycles the enumeration found, minus any non-representative
+    /// duplicate the retention pass merges into a single reported loop, plus
+    /// any cross-aggregate loop stitched together from disjoint elementary
+    /// pieces -- which is the population every reported loop's importance is
+    /// measured against.  `-1` when `enumeration_complete` is zero, since a
+    /// sampled report has no universe to describe; the two fields always
+    /// agree, and the sentinel keeps "the fallback ran" distinct from a
+    /// genuinely empty universe (`0`).  Also `-1` when `analysis_error` is
+    /// non-NULL (analysis never ran, so there is no universe of any kind).
+    pub universe_loops: i64,
+    /// Non-NULL when the model could not be compiled or analyzed for LTM at
+    /// all -- a malformed equation, an unresolved reference, or a hard
+    /// compile failure such as the non-Euler-integration-with-a-stock-loop
+    /// rejection (GH #486, which needs Euler stepping for its flow-to-stock
+    /// link-score formula).  When set, every OTHER field describes an
+    /// analysis that never started: `loops`/`periods`/`partitions` are
+    /// empty, `loop_count`/`period_count`/`partition_count`/`retained_loops`
+    /// are `0`, `enumeration_complete` is `false`, and `universe_loops` is
+    /// `-1` -- the SAME shape a genuinely sampled (fallback) run with zero
+    /// discovered loops would report, which is why `analysis_error` is the
+    /// field to check FIRST.  The three outcomes, in the order to test them:
+    ///
+    /// 1. **Never ran**: `analysis_error` non-NULL.  Nothing below is
+    ///    meaningful; the message names the compile failure.
+    /// 2. **Sampled**: `analysis_error` NULL, `enumeration_complete` is
+    ///    `false`.  `loops` is an explicit SAMPLE of the loop universe (the
+    ///    shortest-path fallback ran because the exact enumeration's budgets
+    ///    or the caller's `budget_ms` did not allow it to finish);
+    ///    `universe_loops` is `-1` here too, but for a different reason (a
+    ///    sample has no universe to describe, not that analysis never ran).
+    /// 3. **Exact**: `analysis_error` NULL, `enumeration_complete` is
+    ///    `true`.  `loops` is the retention/ranking selection from the
+    ///    PROVABLY COMPLETE candidate universe; `universe_loops` names that
+    ///    universe's size.
+    ///
+    /// Owned; freed alongside the rest of the result by
+    /// `simlin_free_discovery_result`.
+    pub analysis_error: *mut c_char,
 }

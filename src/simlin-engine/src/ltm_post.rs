@@ -80,8 +80,8 @@ impl NormGroup {
 /// or every member is `NaN` at a step, excluding it collapses the
 /// denominator to `0.0` and the SAFEDIV-0 guard yields `0.0` instead -- the
 /// lone-pin degeneracy documented on `compute_rel_loop_scores`.)  This
-/// matches the discovery path, which coerces a `NaN` link score to a
-/// non-contributing 0 (`ltm_finding::SearchGraph::from_edges`).
+/// matches the discovery path, where a `NaN` link score marks its edge
+/// inactive and contributes nothing.
 ///
 /// `+/-Inf` is deliberately NOT excluded: a raw loop score legitimately
 /// diverges at a dominance inflection (the link-score denominators go to
@@ -176,8 +176,8 @@ fn slot_partition(
 /// contributor, or every member is `NaN` at the step, excluding it leaves
 /// a `0.0` denominator and the SAFEDIV-0 guard yields `0.0` instead -- see
 /// the lone-pin degeneracy section below.)  This matches the discovery
-/// path's "a `NaN` link contributes nothing" rule
-/// (`ltm_finding::SearchGraph::from_edges`).  `+/-Inf` is deliberately
+/// path's "a `NaN` link contributes nothing" rule (a `NaN` score marks its
+/// edge inactive there).  `+/-Inf` is deliberately
 /// *kept* in the sum: a raw loop score legitimately diverges at a
 /// dominance inflection, so `Inf` is real signal -- it sends the
 /// dominated siblings to `0` and the dominant loop to `NaN` (`Inf/Inf`),
@@ -1610,7 +1610,7 @@ mod tests {
         // numerator is NaN keeps a NaN relative score (the honest "this
         // one loop is undefined here" signal).  This also matches the
         // discovery path's "NaN link contributes nothing" philosophy
-        // (`ltm_finding::SearchGraph::from_edges` coerces NaN -> 0).
+        // (a NaN score marks its edge inactive at that step).
         let nan = f64::NAN;
         let series_a = &[nan, 2.0][..];
         let series_b = &[1.0, 3.0][..];

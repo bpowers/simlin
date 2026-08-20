@@ -199,7 +199,7 @@ impl Drop for LtmCircuitBudgetGuard {
 /// element sequence is lex-smallest among all `n` rotations.  Element-
 /// wise comparison proceeds left-to-right; the first differing position
 /// decides.  In the elementary-cycle setting (no repeated nodes, which
-/// Johnson's and the discovery DFS both enforce) the lex-smallest
+/// Johnson's and both discovery generators enforce) the lex-smallest
 /// **starting element** alone determines the canonical rotation; the
 /// full-sequence comparison keeps the helper correct on hypothetical
 /// inputs with equal starting elements.

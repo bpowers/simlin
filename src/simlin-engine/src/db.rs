@@ -152,8 +152,8 @@ pub use ltm::{
 // The cross-agg petal-stitching core, shared with `crate::ltm_finding`'s
 // discovery-mode recovery (GH #696).
 pub(crate) use ltm::{
-    StitchPetal, collect_agg_petals, cross_agg_loop_budget, stitch_cross_agg_petals,
-    sub_model_output_ports,
+    MAX_AGG_PETALS, StitchPetal, collect_agg_petals, cross_agg_loop_budget,
+    stitch_cross_agg_petals, stitched_output_bound, sub_model_output_ports,
 };
 // Test-only: the cross-agg loop-count budget override, so `ltm_finding`'s
 // discovery-mode truncation test can trip the budget with a tiny fixture
@@ -460,25 +460,26 @@ pub struct LtmSyntheticVar {
 /// `model_ltm_variables` either enumerates every elementary circuit
 /// (Johnson, [`Exhaustive`](LtmMode::Exhaustive)) or, for models whose
 /// variable-level or cross-element SCC exceeds `ltm::MAX_LTM_SCC_NODES`
-/// (or when the caller requested discovery directly), falls back to the
-/// per-timestep strongest-path heuristic ([`Discovery`](LtmMode::Discovery)).
+/// (or when the caller requested discovery directly), falls back to
+/// post-simulation discovery over the recorded link scores
+/// ([`Discovery`](LtmMode::Discovery)).
 /// A user sees empty or different loop results in the two modes with no
 /// other signal; this enum is that signal, surfaced through the FFI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LtmMode {
     /// Exhaustive Johnson enumeration of every elementary circuit.
     Exhaustive,
-    /// Strongest-path discovery heuristic (the model tripped the SCC gate
-    /// or the caller explicitly requested discovery).
+    /// Post-simulation discovery over the recorded link scores (the model
+    /// tripped the SCC gate or the caller explicitly requested discovery).
     Discovery,
 }
 
 /// Result of LTM variable generation for a model.
 ///
 /// `mode` records whether loop enumeration ran exhaustively or auto-flipped
-/// (or was forced) to the discovery heuristic -- the only signal a caller has
-/// for telling the two apart, since the synthetic-variable output otherwise
-/// just looks empty or different.
+/// (or was forced) to post-simulation discovery -- the only signal a caller
+/// has for telling the two apart, since the synthetic-variable output
+/// otherwise just looks empty or different.
 ///
 /// `loop_partitions` maps each loop ID (as in `$⁚ltm⁚loop_score⁚{id}`) to
 /// its cycle-partition index **per slot**: length 1 for scalar/cross-element/

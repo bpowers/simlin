@@ -137,7 +137,7 @@ class ModelPatchBuilder:
         """Pin (name) a feedback loop by the variables forming its cycle.
 
         Pinning forces the LTM engine to ALWAYS score this loop, even in
-        discovery mode where the heuristic search might not surface it. The
+        discovery mode, whose reported list is capped and might not name it. The
         pinned loop then appears in ``model.loops`` / ``run.loops`` and its
         score is readable via ``Sim.get_relative_loop_score`` by the loop's
         ``pin{n}`` id. ``variables`` lists the loop's member variables (order
@@ -557,29 +557,70 @@ class Model:
         return tuple(partitions)
 
     def analyze(self, timeout: float | None = None) -> Analysis:
-        """Run strongest-path loop *discovery* on this model.
+        """Run post-simulation loop *discovery* on this model.
 
-        Discovery is the heuristic "Loops That Matter" algorithm: it finds the
-        feedback loops that drive behavior, even on large models where the
-        exhaustive structural enumeration behind ``Model.loops`` / ``Run.loops``
-        returns nothing (because such models auto-flip to discovery mode).
+        Discovery is the "Loops That Matter" analysis over the recorded link
+        scores: it finds the feedback loops that drive behavior, even on large
+        models where the exhaustive structural enumeration behind
+        ``Model.loops`` / ``Run.loops`` returns nothing (because such models
+        auto-flip to discovery mode).
 
         This is an EXPLICIT, opt-in call: ``Model.run()`` never triggers
         discovery, because discovery can be slow or even infeasible on very
-        large models. Pass a ``timeout`` to bound the wall-clock time spent in
-        discovery's per-timestep sweep; when it elapses before discovery
-        finishes, the returned :class:`Analysis` has ``truncated=True`` and its
-        ``loops`` / ``dominant_periods`` reflect only the work done so far.
+        large models. Pass a ``timeout`` to bound the wall-clock time spent
+        finding candidate loops; when it elapses before discovery finishes, the
+        returned :class:`Analysis` has ``truncated=True`` and its ``loops`` /
+        ``dominant_periods`` reflect only the work done so far.
 
         .. note::
-            The ``timeout`` bounds only the loop-discovery sweep itself. The
-            model must first be compiled with LTM instrumentation and simulated,
-            and that time is NOT counted against the timeout -- on large models
-            it can dominate the total wall-clock time of this call.
+            The ``timeout`` bounds only the search for candidate loops. The
+            model must first be compiled with LTM instrumentation and
+            simulated, and that time is NOT counted against the timeout -- on
+            large models it can dominate the total wall-clock time of this
+            call. Scoring and ranking the candidates the search proposed also
+            run after the timeout, so a call can outlast it.
 
         The analysis runs against the model's base configuration (no overrides
         or time-range changes); it compiles and simulates internally in LTM
         discovery mode.
+
+        How complete is the answer? Four fields on the result say so, and
+        they matter most on the large models discovery exists for. Check
+        them in this order -- the completeness fields are meaningless if
+        analysis never ran at all:
+
+        * ``analysis_error`` is non-``None`` when the model could not be
+          compiled/analyzed for LTM AT ALL (a malformed equation, an
+          unresolved reference, or a hard compile failure such as choosing a
+          non-Euler integration method on a model with a stock in a feedback
+          loop). When set, ``loops``/``dominant_periods``/``partitions`` are
+          empty, ``enumeration_complete`` is False, and ``universe_loops`` is
+          ``None`` -- the SAME shape a genuinely sampled analysis with zero
+          discovered loops would report, which is exactly why this is the
+          field to check first: "never ran" (``analysis_error`` set) and
+          "sampled, found nothing" (``analysis_error`` is ``None``,
+          ``enumeration_complete`` False) are different claims that look
+          identical everywhere else.
+        * ``enumeration_complete`` is True when the engine ENUMERATED every
+          loop that could ever score and picked from that whole set. The
+          report is exact when it is True AND ``agg_recovery_truncated`` is
+          False (cross-aggregate reducer loops are recovered under their own
+          budget). False means the budgets or the ``timeout`` cut the
+          enumeration short and a shortest-path fallback SAMPLED the model's
+          loops instead -- a loop missing from a sampled analysis is not
+          evidence the model lacks it.
+        * ``universe_loops`` is how many loops that enumerated universe held,
+          or ``None`` on a sampled analysis (which has no universe to report;
+          ``None`` and ``0`` are different claims).
+        * ``retained_loops`` is how many loops passed the importance filter
+          before the report cap truncated ``loops``. When it exceeds
+          ``len(loops)``, ``loops`` is a coverage-aware SUBSET of the retained
+          set -- every step's dominant loop in each competing partition is
+          guaranteed a slot (while those dominant loops fit the cap) and the
+          rest is filled by mean importance -- so
+          it is presented in importance order but is not a strict
+          most-important-first prefix: an omitted loop can outrank a reported
+          one that anchors a step.
 
         Args:
             timeout: Maximum seconds to spend in discovery, or ``None`` for no
@@ -587,13 +628,21 @@ class Model:
 
         Returns:
             An :class:`Analysis` with the discovered loops (each carrying its
-            importance ``behavior_time_series``), the dominant periods, and a
-            ``truncated`` flag.
+            importance ``behavior_time_series``), the dominant periods, a
+            ``truncated`` flag, and the completeness fields above.
+            ``truncated`` is True when candidate generation stopped before
+            covering every saved step -- because the ``timeout`` elapsed OR
+            because the shortest-path fallback hit its candidate cap (a
+            byte budget over materialized score series, which a long run
+            can reach with ``timeout=None``); in the second case a longer
+            timeout cannot change the result.
 
         Example:
             >>> analysis = model.analyze(timeout=5.0)
             >>> if analysis.truncated:
             ...     print("discovery hit the timeout; results are partial")
+            >>> if not analysis.enumeration_complete:
+            ...     print("loops below are a sample, not every loop")
             >>> for loop in analysis.loops:
             ...     print(loop.id, loop.average_importance())
         """
@@ -615,6 +664,9 @@ class Model:
             check_out_error(err_ptr, "Discover loops")
 
         if result_ptr == ffi.NULL:
+            # No result to describe: nothing ran, so nothing is claimed about
+            # completeness either (`enumeration_complete` False,
+            # `universe_loops` None -- the "no universe reported" value).
             return Analysis(loops=(), dominant_periods=(), truncated=False, partitions=())
 
         try:
@@ -679,12 +731,20 @@ class Model:
                     )
                 )
 
+            # `universe_loops` rides the FFI as an int64 with -1 meaning
+            # "the fallback sampled, so there is no universe" -- decoded back
+            # to None here so a caller never mistakes the sentinel for a count.
+            universe_loops = int(result_ptr.universe_loops)
             return Analysis(
                 loops=tuple(loops),
                 dominant_periods=tuple(periods),
                 truncated=bool(result_ptr.truncated),
                 agg_recovery_truncated=bool(result_ptr.agg_recovery_truncated),
                 partitions=tuple(partitions),
+                enumeration_complete=bool(result_ptr.enumeration_complete),
+                retained_loops=int(result_ptr.retained_loops),
+                universe_loops=None if universe_loops < 0 else universe_loops,
+                analysis_error=c_to_string(result_ptr.analysis_error),
             )
         finally:
             lib.simlin_free_discovery_result(result_ptr)
@@ -799,15 +859,15 @@ class Model:
         loops_structural = self.loops
 
         # Surface the discovery auto-flip: on models too large for exhaustive
-        # loop enumeration, LTM resolves to the strongest-path discovery
-        # heuristic, where run.loops contains only explicitly pinned loops.
+        # loop enumeration, LTM resolves to post-simulation discovery,
+        # where run.loops contains only explicitly pinned loops.
         # Without this warning an empty loop list is indistinguishable from
         # "this model has no feedback loops".
         if analyze_loops and not loops_structural and run.ltm_mode == "discovery":
             warnings.warn(
                 "this model is too large for exhaustive feedback-loop enumeration, "
                 "so LTM resolved to discovery mode and run.loops is empty. Use "
-                "Model.analyze(timeout=...) for heuristic loop discovery, or pin "
+                "Model.analyze(timeout=...) for post-simulation loop discovery, or pin "
                 "the loops you care about with set_loop_name() in model.edit() so "
                 "they are always scored.",
                 RuntimeWarning,

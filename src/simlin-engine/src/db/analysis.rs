@@ -2858,7 +2858,7 @@ fn detected_loop_from_loop(l: &crate::ltm::Loop, pin_name: &str) -> DetectedLoop
 /// "the loop's sign is not uniform across the array" reading). This is NOT
 /// the input construction discovery uses, so do not claim they agree:
 /// **discovery** (`ltm_finding`) classifies each `FoundLoop` from its own
-/// single strongest-path scalar score series.
+/// single scalar score series.
 ///
 /// Both sites share the *scalar* semantics (`from_runtime_scores`'s NaN/zero
 /// filter; all-positive -> Reinforcing, all-negative -> Balancing, mixed

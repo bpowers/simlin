@@ -48,8 +48,8 @@ class LtmMode(IntEnum):
     - ``EXHAUSTIVE`` (1): every elementary feedback circuit was enumerated
       (Johnson). Used for small models.
     - ``DISCOVERY`` (2): the model's causal graph exceeded the SCC-size gate
-      (or discovery was requested directly), so loops are ranked by the
-      per-timestep strongest-path heuristic instead of enumerated.
+      (or discovery was requested directly), so loops are found
+      post-simulation from the recorded link scores instead of enumerated.
 
     ``str(mode)`` yields the lowercase name (``"disabled"`` / ``"exhaustive"``
     / ``"discovery"``), which is what :attr:`Run.ltm_mode` returns.
@@ -434,16 +434,18 @@ class Loop:
 
 @dataclass(frozen=True)
 class Analysis:
-    """Result of strongest-path loop *discovery* (`Model.analyze`).
+    """Result of post-simulation loop *discovery* (`Model.analyze`).
 
-    Discovery is the heuristic "Loops That Matter" algorithm
-    (Eberlein & Schoenberg, 2020): instead of exhaustively enumerating every
-    feedback loop -- which is empty for large models that auto-flip to
-    discovery mode -- it finds the loops that drive behavior. Each discovered
-    `Loop` carries its `behavior_time_series` (the per-step importance series),
-    and `dominant_periods` records which loops dominate during each interval.
+    Discovery is the "Loops That Matter" analysis (Eberlein & Schoenberg,
+    2020) run over the recorded link scores: instead of exhaustively
+    enumerating every structural feedback loop -- which is empty for large
+    models that auto-flip to discovery mode -- it finds the loops that drive
+    behavior. Each discovered `Loop` carries its `behavior_time_series` (the
+    per-step importance series), and `dominant_periods` records which loops
+    dominate during each interval.
 
-    `truncated` is True when discovery hit its `timeout` before finishing, so
+    `truncated` is True when discovery stopped before covering every saved
+    step (its `timeout` elapsed, or the fallback's candidate cap tripped), so
     `loops`/`dominant_periods` may be partial. Discovery on very large models
     can be infeasibly slow, so `Model.analyze` is an explicit, opt-in,
     timeout-guarded call -- it is never run automatically by `Model.run`.
@@ -477,9 +479,12 @@ class Analysis:
     :attr:`Partition.loop_count` is above 1 to drop them."""
 
     truncated: bool = False
-    """True when the `timeout` elapsed before discovery finished, so
-    `loops`/`dominant_periods` may be partial. This is the wall-clock time
-    budget -- distinct from `agg_recovery_truncated`."""
+    """True when candidate generation stopped before covering every saved
+    step, so `loops`/`dominant_periods` may be partial: the `timeout` elapsed,
+    or the shortest-path fallback hit its candidate cap (a byte budget over
+    materialized score series, reachable on a long run even with no timeout
+    -- a longer timeout then cannot change the result). Distinct from
+    `agg_recovery_truncated`."""
 
     agg_recovery_truncated: bool = False
     """True when discovery's cross-element-through-aggregate loop recovery hit
@@ -494,3 +499,54 @@ class Analysis:
     the ranked loop list; result-scoped. Group loops by partition to present
     each feedback subsystem separately -- importance is only comparable
     within a partition."""
+
+    enumeration_complete: bool = False
+    """True when discovery ENUMERATED the whole candidate universe rather than
+    sampling it, so `loops` is the exact selection from every loop that can
+    ever score -- exact for cross-aggregate reducer loops too only while
+    `agg_recovery_truncated` is also False, since those are stitched under
+    their own budget. False means a shortest-path fallback generated the candidates
+    -- because the enumeration's budgets or the `timeout` did not allow it to
+    finish -- and `loops` is a SAMPLE. Check this before reading an absent
+    loop as evidence the model has none.
+
+    Also False -- by construction, not as a genuine sample verdict -- when
+    `analysis_error` is set: analysis never reached candidate generation at
+    all. Check `analysis_error` FIRST; a False here alone cannot distinguish
+    "sampled, found nothing" from "never ran"."""
+
+    retained_loops: int = 0
+    """How many loops passed discovery's importance filter, before the report
+    cap truncated `loops`. Equal to ``len(loops)`` when the cap did not bind;
+    larger when it did, which is the signal that `loops` is a coverage-aware
+    SUBSET of the retained set: each step's dominant loop per competing
+    partition is guaranteed a slot while those dominant loops fit the cap
+    (when more than the cap's worth of distinct loops are step-dominant, the
+    strongest of them by mean importance are kept and the guarantee cannot
+    hold for the rest), and the remaining slots are filled by mean importance,
+    so `loops` is presented in importance order but is not a strict
+    most-important-first prefix."""
+
+    universe_loops: int | None = None
+    """How many DISTINCT loops' mass the discovery denominators sum -- the
+    ever-simultaneously-active feedback loops the candidate universe holds,
+    minus any non-representative duplicate retention merges into a single
+    reported loop, plus any cross-aggregate loop stitched together from
+    disjoint elementary pieces -- the population each loop's importance is a
+    share of. None when `enumeration_complete` is False, since a sampled
+    analysis has no universe to report. None and 0 are different claims: 0
+    means the model genuinely has no scorable loop."""
+
+    analysis_error: str | None = None
+    """Set when the model could not be compiled or analyzed for LTM AT ALL --
+    a malformed equation, an unresolved reference, or a hard compile failure
+    such as picking a non-Euler integration method on a model with a stock in
+    a feedback loop (that link-score formula assumes Euler stepping). When
+    set, every other field describes an analysis that never STARTED: `loops`,
+    `dominant_periods`, and `partitions` are empty, `retained_loops` is 0,
+    `enumeration_complete` is False, and `universe_loops` is None -- the SAME
+    shape a genuinely SAMPLED analysis that happened to find zero loops would
+    report. This is why `analysis_error` is the field to check first: "never
+    ran" and "sampled, found nothing" are different claims that otherwise
+    look identical. `None` means analysis ran (exactly or as a sample;
+    consult `enumeration_complete` next)."""

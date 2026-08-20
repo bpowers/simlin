@@ -79,6 +79,31 @@ pub struct ModelAnalysis {
     /// wall-clock time budget); this is the structural-completeness signal that
     /// mirrors exhaustive mode's `LtmVariablesResult::agg_recovery_truncated`.
     pub agg_recovery_truncated: bool,
+    /// True when discovery's candidate generation was the union-graph circuit
+    /// enumeration and it completed: the loop candidates were provably the
+    /// full ever-simultaneously-active cycle universe of the recorded link
+    /// scores, so `loop_dominance` is the exact retention/ranking selection
+    /// rather than a heuristic sample. When false, either the shortest-path
+    /// fallback generated the candidates and `loop_dominance` is a sample, or
+    /// discovery never ran at all (`analysis_error` is set, or the model has
+    /// no LTM results) and `loop_dominance` is empty -- the two are told apart
+    /// by `analysis_error` and by whether any loops are present. See
+    /// [`crate::ltm_finding::DiscoveryResult::enumeration_complete`].
+    pub enumeration_complete: bool,
+    /// How many discovered loops passed discovery's retention filter, before
+    /// the reported-loop cap truncated `loop_dominance`. Equal to
+    /// `loop_dominance.len()` unless the cap bound; above it when it did,
+    /// which is the only way a caller learns the report is capped. See
+    /// [`crate::ltm_finding::DiscoveryResult::retained_loops`].
+    pub retained_loops: usize,
+    /// The number of DISTINCT loops whose mass the discovery denominators
+    /// sum in the candidate universe -- the ever-simultaneously-active
+    /// elementary cycles the enumerator found, corrected for retention-time
+    /// duplicate merging and cross-aggregate stitching -- or `None` when the
+    /// shortest-path fallback (which samples rather than enumerating)
+    /// generated the candidates. `Some` exactly when `enumeration_complete`.
+    /// See [`crate::ltm_finding::DiscoveryResult::universe_loops`].
+    pub universe_loops: Option<usize>,
 }
 
 /// Build a `json::Model` from the named model in a `datamodel::Project`, with
@@ -123,7 +148,7 @@ fn model_snapshot(project: &datamodel::Project, model_name: &str) -> Option<json
 /// `analysis_error == None`.
 ///
 /// `budget` optionally bounds the wall-clock time spent in loop discovery's
-/// per-timestep DFS sweep. Discovery on very large models can be infeasibly
+/// candidate generation. Discovery on very large models can be infeasibly
 /// slow (GH #647), so callers that want a bounded run pass `Some(duration)`;
 /// the returned `ModelAnalysis::truncated` reports whether the budget elapsed
 /// before discovery finished. `None` runs discovery to completion.
@@ -161,6 +186,9 @@ pub fn analyze_model(
             analysis_error: Some(msg),
             truncated: false,
             agg_recovery_truncated: false,
+            enumeration_complete: false,
+            retained_loops: 0,
+            universe_loops: None,
         });
     }
 
@@ -200,6 +228,9 @@ pub fn analyze_model(
             analysis_error,
             truncated: result.truncated,
             agg_recovery_truncated: result.agg_recovery_truncated,
+            enumeration_complete: result.enumeration_complete,
+            retained_loops: result.retained_loops,
+            universe_loops: result.universe_loops,
         }),
         None => Ok(ModelAnalysis {
             model: json_model,
@@ -210,6 +241,9 @@ pub fn analyze_model(
             analysis_error,
             truncated: false,
             agg_recovery_truncated: false,
+            enumeration_complete: false,
+            retained_loops: 0,
+            universe_loops: None,
         }),
     }
 }
@@ -290,6 +324,9 @@ struct PipelineResult {
     dominant_loops_by_period: Vec<DominantPeriod>,
     truncated: bool,
     agg_recovery_truncated: bool,
+    enumeration_complete: bool,
+    retained_loops: usize,
+    universe_loops: Option<usize>,
 }
 
 /// Run the full LTM discovery pipeline.
@@ -419,6 +456,9 @@ fn run_ltm_pipeline(
     let partitions = discovery.partitions;
     let truncated = discovery.truncated;
     let agg_recovery_truncated = discovery.agg_recovery_truncated;
+    let enumeration_complete = discovery.enumeration_complete;
+    let retained_loops = discovery.retained_loops;
+    let universe_loops = discovery.universe_loops;
 
     let time = build_time_array(&results);
 
@@ -445,6 +485,9 @@ fn run_ltm_pipeline(
         dominant_loops_by_period,
         truncated,
         agg_recovery_truncated,
+        enumeration_complete,
+        retained_loops,
+        universe_loops,
     }))
 }
 
@@ -1963,9 +2006,10 @@ mod tests {
     /// output `m·pos` feeding an arrayed reader (`growth[Region] = m·pos * 0.1`)
     /// emitted a single SCALAR `$⁚ltm⁚link_score⁚m→growth`, whose fragment could
     /// not compile and so read a constant 0, and a zero-scored edge is dropped
-    /// from the discovery search graph (`IndexedSearch::load_step_scores`) --
+    /// from the discovery search graph -- carrying no set bit in any saved
+    /// step's activity test (`ltm_finding_enum::ActivityGraph::build`) --
     /// taking every loop through it with it. `try_implicit_scalar_to_arrayed_link_scores`
-    /// now emits one score per target element, so the loops form.
+    /// emits one score per target element, so the loops form.
     ///
     /// TWO loops, not one, and not four: `m` is scalar, so every element of
     /// `growth` genuinely reads it, but each `growth[e]` feeds only `s[e]`, so

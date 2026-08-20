@@ -997,7 +997,8 @@ fn collect_agg_petals_groups_single_agg_circuits() {
         // A circuit with no agg -- ignored.
         vec!["x", "y"],
     ];
-    let map = super::collect_agg_petals(&circuits, |n| n);
+    let map = super::collect_agg_petals(circuits.iter(), |n: &&str| *n, &mut |_| true, &mut |_| {})
+        .expect("unmetered");
     let petals = map.get(agg).expect("agg group present");
     assert_eq!(
         petals.len(),
@@ -1006,6 +1007,165 @@ fn collect_agg_petals_groups_single_agg_circuits() {
     );
     for p in petals {
         assert_eq!(p.nodes[0], agg, "petal rotated to start at the agg");
+    }
+}
+
+/// The collector is bounded to `MAX_AGG_PETALS + 1` petals per agg and that
+/// bound is EXACT for the stitcher: stitching the bounded collection yields
+/// the same loops and the same truncation flag as stitching every petal --
+/// whatever order the circuits arrive in.
+#[test]
+fn collect_agg_petals_bounded_top_k_stitches_identically_to_the_full_set() {
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    // 12 petals of assorted lengths: more than the cap, with ties in length.
+    let mut circuits: Vec<Vec<&str>> = vec![
+        vec![agg, "a"],
+        vec![agg, "b"],
+        vec![agg, "c", "c2"],
+        vec![agg, "d"],
+        vec![agg, "e", "e2", "e3"],
+        vec![agg, "f"],
+        vec![agg, "g", "g2"],
+        vec![agg, "h"],
+        vec![agg, "i"],
+        vec![agg, "j", "j2", "j3", "j4"],
+        vec![agg, "k"],
+        vec![agg, "l", "l2"],
+    ];
+    let full: Vec<(&str, Vec<super::StitchPetal<&str>>)> =
+        vec![(agg, circuits.iter().map(|c| petal(c)).collect())];
+    let (full_stitched, full_truncated) = super::stitch_cross_agg_petals(full, 1024);
+    assert_eq!(
+        full_truncated,
+        vec![agg],
+        "12 petals exceed the per-agg cap"
+    );
+
+    for rotation in 0..circuits.len() {
+        circuits.rotate_left(1);
+        // A rotation of the circuit list changes arrival order only.
+        let _ = rotation;
+        let map =
+            super::collect_agg_petals(circuits.iter(), |n: &&str| *n, &mut |_| true, &mut |_| {})
+                .expect("unmetered");
+        let kept = &map[agg];
+        assert_eq!(
+            kept.len(),
+            super::MAX_AGG_PETALS + 1,
+            "one more than the stitcher keeps"
+        );
+        let bounded: Vec<(&str, Vec<super::StitchPetal<&str>>)> = vec![(agg, kept.clone())];
+        let (stitched, truncated) = super::stitch_cross_agg_petals(bounded, 1024);
+        assert_eq!(stitched, full_stitched);
+        assert_eq!(truncated, full_truncated);
+    }
+}
+
+/// Two petals over the same internal node SET (the two directions through the
+/// same nodes) are one petal to the stitcher; the representative is the
+/// smaller `nodes` sequence whichever arrives first, so the collection is a
+/// function of the circuit set rather than of arrival order.
+#[test]
+fn collect_agg_petals_picks_the_smallest_representative_of_an_internal_set() {
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    for circuits in [
+        vec![vec![agg, "x", "y"], vec![agg, "y", "x"]],
+        vec![vec![agg, "y", "x"], vec![agg, "x", "y"]],
+        // Rotations of both, not starting at the agg.
+        vec![vec!["y", "x", agg], vec!["x", "y", agg]],
+    ] {
+        let map =
+            super::collect_agg_petals(circuits.iter(), |n: &&str| *n, &mut |_| true, &mut |_| {})
+                .expect("unmetered");
+        let kept = &map[agg];
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].nodes, vec![agg, "x", "y"]);
+    }
+}
+
+/// Every kept petal is charged through `charge` and credited back through
+/// `release` when displaced, so what is held on the meter at the end is
+/// exactly the kept petals; a refused charge stops the collection with `None`.
+#[test]
+fn collect_agg_petals_charges_what_it_keeps_and_declines_when_refused() {
+    use std::cell::Cell;
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    // Twelve distinct petals in two length classes, so the cap displaces some.
+    let names: Vec<String> = (0..12).map(|i| format!("v{i}")).collect();
+    let circuits: Vec<Vec<&str>> = (0..12)
+        .map(|i| {
+            if i % 3 == 0 {
+                vec![agg, names[i].as_str(), "m"]
+            } else {
+                vec![agg, names[i].as_str()]
+            }
+        })
+        .collect();
+    let held = Cell::new(0isize);
+    let charged_total = Cell::new(0isize);
+    let map = super::collect_agg_petals(
+        circuits.iter(),
+        |n: &&str| *n,
+        &mut |b| {
+            held.set(held.get() + b as isize);
+            charged_total.set(charged_total.get() + b as isize);
+            true
+        },
+        &mut |b| held.set(held.get() - b as isize),
+    )
+    .expect("never refused");
+    let kept = &map[agg];
+    let kept_bytes: isize = kept
+        .iter()
+        .map(|p| {
+            let len = p.nodes.len();
+            (len * std::mem::size_of::<&str>() + len * (2 * std::mem::size_of::<&str>() + 1))
+                as isize
+        })
+        .sum();
+    assert_eq!(
+        held.get(),
+        kept_bytes,
+        "held == kept: displaced petals were credited back"
+    );
+    assert!(
+        charged_total.get() > held.get(),
+        "some petals were displaced along the way"
+    );
+
+    // A meter that refuses everything: `None`, and nothing remains held.
+    let held = Cell::new(0isize);
+    assert!(
+        super::collect_agg_petals(circuits.iter(), |n: &&str| *n, &mut |_| false, &mut |b| {
+            held.set(held.get() - b as isize)
+        })
+        .is_none()
+    );
+    assert_eq!(held.get(), 0);
+}
+
+/// `stitched_output_bound` bounds the stitcher's output for every petal
+/// configuration it could be asked about.
+#[test]
+fn stitched_output_bound_is_an_upper_bound_on_the_stitcher() {
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let petals: Vec<(&str, Vec<super::StitchPetal<&str>>)> = vec![(
+        agg,
+        vec![
+            petal(&[agg, "p1"]),
+            petal(&[agg, "p2", "q2"]),
+            petal(&[agg, "p3"]),
+            petal(&[agg, "p4", "q4", "r4"]),
+        ],
+    )];
+    for budget in [1usize, 2, 3, 7, 11, 1024] {
+        let bound = super::stitched_output_bound(&petals, budget);
+        let (stitched, _) = super::stitch_cross_agg_petals(petals.clone(), budget);
+        let actual: usize = stitched
+            .iter()
+            .map(|s| std::mem::size_of_val::<[&str]>(s))
+            .sum();
+        assert!(actual <= bound, "budget {budget}: {actual} > bound {bound}");
     }
 }
 

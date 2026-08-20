@@ -82,7 +82,8 @@ pub(crate) use loops::read_slice_rows;
 // (`ltm_finding`, GH #696) so both enumerate exactly the same cross-agg loops.
 pub(crate) use loops::sub_model_output_ports;
 pub(crate) use loops::{
-    StitchPetal, collect_agg_petals, cross_agg_loop_budget, stitch_cross_agg_petals,
+    MAX_AGG_PETALS, StitchPetal, collect_agg_petals, cross_agg_loop_budget,
+    stitch_cross_agg_petals, stitched_output_bound,
 };
 pub(crate) use parse::scalarize_ltm_equation;
 pub(crate) use pinned::model_pinned_loops;
@@ -1300,8 +1301,8 @@ pub fn model_ltm_variables(
              this scale would enumerate millions of circuits (see \
              docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md and \
              docs/design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md). \
-             Per-loop scores are ranked post-simulation via the \
-             strongest-path search; see \
+             Per-loop scores are found and ranked post-simulation from the \
+             recorded link scores; see \
              docs/design/ltm--loops-that-matter.md for the two-tier \
              strategy.",
             var_scc_size,
@@ -1438,7 +1439,8 @@ pub fn model_ltm_variables(
                  (MAX_LTM_CIRCUITS = {}).  The model's feedback structure is too \
                  dense for exhaustive per-loop scoring (circuit count grows \
                  super-exponentially with cycle density).  Per-loop scores are \
-                 ranked post-simulation via the strongest-path search; see \
+                 found and ranked post-simulation from the recorded link \
+                 scores; see \
                  docs/design/ltm--loops-that-matter.md for the two-tier \
                  strategy.",
                 crate::ltm::ltm_circuit_budget(),
@@ -1465,7 +1467,7 @@ pub fn model_ltm_variables(
                 "LTM analysis auto-switched from exhaustive to discovery mode: \
                  the cross-element / mixed slow-path subgraph's largest SCC has {} nodes, \
                  exceeding MAX_LTM_SCC_NODES = {}.  Per-loop scores are ranked \
-                 post-simulation via the strongest-path search; see \
+                 post-simulation from the recorded link scores; see \
                  docs/design/ltm--loops-that-matter.md for the two-tier strategy.",
                 tiered.slow_path_largest_scc,
                 crate::ltm::MAX_LTM_SCC_NODES,
@@ -1846,9 +1848,9 @@ pub fn model_ltm_variables(
     //
     // A modeler pins a loop by naming its variable set; the engine then ALWAYS
     // emits that loop's `loop_score`, regardless of mode. This is the whole
-    // point in discovery mode -- the heuristic search emits NO loop_score var
-    // for any loop, so a pinned loop is the only way to score a specific loop
-    // there. In exhaustive mode a pin usually duplicates an already-enumerated
+    // point in discovery mode -- loops are found after the simulation, so no
+    // loop_score var is emitted for any of them and a pinned loop is the only
+    // way to score a specific loop there. In exhaustive mode a pin usually duplicates an already-enumerated
     // loop, so we dedup against `loops` (by canonical variable-cycle rotation)
     // and skip re-emitting; the enumerated loop already carries a score under
     // its `r{n}`/`b{n}`/`u{n}` id.

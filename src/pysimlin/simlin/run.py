@@ -288,9 +288,9 @@ class Run:
         """The LTM loop-enumeration mode this run resolved to.
 
         Reports whether Loops That Matter enumerated every feedback loop
-        exhaustively (small models) or auto-flipped to the strongest-path
-        discovery heuristic (large models whose causal graph exceeds the
-        SCC-size gate). Without this signal an empty or unexpectedly small
+        exhaustively (small models) or auto-flipped to post-simulation
+        discovery (large models whose causal graph exceeds the SCC-size
+        gate). Without this signal an empty or unexpectedly small
         loop set is indistinguishable from a model that simply has few loops.
 
         Returns:
@@ -302,7 +302,7 @@ class Run:
         Example:
             >>> run = model.run()
             >>> if run.ltm_mode == "discovery":
-            ...     print("loops ranked heuristically; not exhaustively enumerated")
+            ...     print("loops found after simulation; not exhaustively enumerated")
         """
         if self._cached_ltm_mode is None:
             self._cached_ltm_mode = str(self._sim.get_ltm_mode())
