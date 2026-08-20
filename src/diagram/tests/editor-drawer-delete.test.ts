@@ -136,6 +136,16 @@ describe('Editor.getDrawer() delete wiring', () => {
     expect(capturedDrawerProps!.onDelete).toBeUndefined();
   });
 
+  test('forwards showHomeLink to the drawer, leaving the drawer default when unset', () => {
+    renderEditor(makeProps());
+    expect(capturedDrawerProps).toBeDefined();
+    expect(capturedDrawerProps!.showHomeLink).toBeUndefined();
+
+    capturedDrawerProps = undefined;
+    renderEditor(makeProps({ showHomeLink: false }));
+    expect(capturedDrawerProps!.showHomeLink).toBe(false);
+  });
+
   test('renders no drawer at all when embedded', () => {
     renderEditor(makeProps({ onDeleteProject: rs.fn(async () => {}), embedded: true }));
     expect(capturedDrawerProps).toBeUndefined();

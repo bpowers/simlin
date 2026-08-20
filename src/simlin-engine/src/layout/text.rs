@@ -39,10 +39,35 @@ pub fn estimate_text_width(text: &str) -> f64 {
         .sum()
 }
 
+/// The two-character sequence a view element name stores a line break as
+/// (a backslash followed by `n`). This is the storage form shared by every
+/// producer and consumer of multi-line labels: Stella-authored XMILE
+/// (`test/modules_hares_and_foxes/modules_hares_and_foxes.stmx` has
+/// `name="hares killed\nper lynx"`), the XMILE spec (section 3.2.2.1 makes
+/// `\n` the identifier escape for a newline; section 4.1 requires user text
+/// to use identifier escapes rather than `&#x0A`), the TS editor
+/// (`encodeNameNewlines` in `src/diagram/drawing/common.ts`), and both
+/// renderers (`diagram::common::display_name` / TS `displayName` decode it).
+/// A raw newline character must never be written into a name: an XML parser
+/// normalizes it to a space inside an attribute, silently dropping the break.
+pub const LABEL_LINE_BREAK: &str = "\\n";
+
+/// Split a stored label into its display lines, honoring both the stored
+/// [`LABEL_LINE_BREAK`] escape and a raw newline (which older JSON files and
+/// hand-built views may still carry).
+pub fn label_lines(label: &str) -> Vec<String> {
+    label
+        .replace(LABEL_LINE_BREAK, "\n")
+        .split('\n')
+        .map(str::to_string)
+        .collect()
+}
+
 /// Estimate the bounding box of a label placed relative to an element.
 ///
 /// Returns `(min_x, min_y, max_x, max_y)` in absolute coordinates.
-/// Uses `format_label_with_line_breaks` to determine line count and widths.
+/// Line count and widths come from [`label_lines`]; the text is measured
+/// as stored (underscores are not widened into spaces).
 pub fn estimate_label_bounds(
     text: &str,
     center_x: f64,
@@ -52,8 +77,8 @@ pub fn estimate_label_bounds(
     elem_height: f64,
 ) -> (f64, f64, f64, f64) {
     // Labels are already formatted with line breaks when ViewElements are
-    // created, so split directly on '\n' rather than re-formatting.
-    let lines: Vec<&str> = text.split('\n').collect();
+    // created, so split rather than re-format.
+    let lines = label_lines(text);
     let max_line_width = lines
         .iter()
         .map(|line| estimate_text_width(line))
@@ -112,12 +137,21 @@ pub fn estimate_label_bounds(
 ///
 /// Word boundaries are underscores (`_`) and spaces.  If the label contains no
 /// word boundaries it is returned unchanged.  The chosen separator character is
-/// replaced with a newline, producing exactly two lines.
+/// replaced with [`LABEL_LINE_BREAK`], producing exactly two lines.
+///
+/// A label that already carries a line break (in either the stored escape or
+/// raw-newline form) is returned unchanged: the modeler chose where it wraps,
+/// and adding a second break would produce a three-line label mixing the two
+/// forms.
 ///
 /// This matches the Go `formatLabelWithLineBreaks` behavior: SD variable names
 /// are typically snake_case or space-separated, and splitting near the middle
 /// produces the most balanced two-line label.
 pub fn format_label_with_line_breaks(label: &str) -> String {
+    if label.contains(LABEL_LINE_BREAK) || label.contains('\n') {
+        return label.to_string();
+    }
+
     let break_positions: Vec<usize> = label
         .char_indices()
         .filter(|(_, c)| *c == '_' || *c == ' ')
@@ -140,11 +174,12 @@ pub fn format_label_with_line_breaks(label: &str) -> String {
         }
     }
 
-    // Replace the chosen separator with a newline.  The separator character
-    // is always a single ASCII byte ('_' or ' '), so byte indexing is safe.
-    let mut result = String::with_capacity(label.len());
+    // Replace the chosen separator with the stored line break.  The separator
+    // character is always a single ASCII byte ('_' or ' '), so byte indexing
+    // is safe.
+    let mut result = String::with_capacity(label.len() + 1);
     result.push_str(&label[..best_pos]);
-    result.push('\n');
+    result.push_str(LABEL_LINE_BREAK);
     result.push_str(&label[best_pos + 1..]);
     result
 }
@@ -189,32 +224,60 @@ mod tests {
 
     #[test]
     fn test_format_label_line_breaks() {
-        assert_eq!(format_label_with_line_breaks("global_rate"), "global\nrate");
+        assert_eq!(
+            format_label_with_line_breaks("global_rate"),
+            "global\\nrate"
+        );
         assert_eq!(
             format_label_with_line_breaks("total_population"),
-            "total\npopulation"
+            "total\\npopulation"
         );
         assert_eq!(
             format_label_with_line_breaks("net_population_increase_rate"),
-            "net_population\nincrease_rate"
+            "net_population\\nincrease_rate"
         );
         assert_eq!(
             format_label_with_line_breaks("adoption from advertising"),
-            "adoption from\nadvertising"
+            "adoption from\\nadvertising"
         );
         assert_eq!(
             format_label_with_line_breaks("adoption_from word of mouth"),
-            "adoption_from\nword of mouth"
+            "adoption_from\\nword of mouth"
         );
         assert_eq!(
             format_label_with_line_breaks("fractional net increase rate"),
-            "fractional net\nincrease rate"
+            "fractional net\\nincrease rate"
         );
-        assert_eq!(format_label_with_line_breaks("a_b_c_d_e_f"), "a_b_c\nd_e_f");
+        assert_eq!(
+            format_label_with_line_breaks("a_b_c_d_e_f"),
+            "a_b_c\\nd_e_f"
+        );
         assert_eq!(
             format_label_with_line_breaks("short_veryverylongword"),
-            "short\nveryverylongword"
+            "short\\nveryverylongword"
         );
+    }
+
+    #[test]
+    fn test_format_label_keeps_existing_break() {
+        // A modeler-authored break (Stella's stored form) wins over the
+        // midpoint heuristic; a raw newline is honored the same way.
+        assert_eq!(
+            format_label_with_line_breaks("size of one\\ntime lynx harvest"),
+            "size of one\\ntime lynx harvest"
+        );
+        assert_eq!(
+            format_label_with_line_breaks("size of one\ntime lynx harvest"),
+            "size of one\ntime lynx harvest"
+        );
+    }
+
+    #[test]
+    fn test_label_lines_decodes_both_break_forms() {
+        assert_eq!(label_lines("a\\nb"), vec!["a", "b"]);
+        assert_eq!(label_lines("a\nb"), vec!["a", "b"]);
+        assert_eq!(label_lines("plain"), vec!["plain"]);
+        assert_eq!(label_lines(""), vec![""]);
     }
 
     #[test]
@@ -279,11 +342,11 @@ mod tests {
         // UTF-8 characters.
         assert_eq!(
             format_label_with_line_breaks("Bevölkerungs_wachstum"),
-            "Bevölkerungs\nwachstum"
+            "Bevölkerungs\\nwachstum"
         );
         assert_eq!(
             format_label_with_line_breaks("taux de_croissance"),
-            "taux de\ncroissance"
+            "taux de\\ncroissance"
         );
     }
 
@@ -291,7 +354,7 @@ mod tests {
     fn test_estimate_label_bounds_already_formatted() {
         // Labels are pre-formatted before being passed to estimate_label_bounds.
         // Passing an already-broken label must not re-break it into 3 lines.
-        let pre_formatted = "net_population\nincrease_rate";
+        let pre_formatted = "net_population\\nincrease_rate";
         let (_, min_y, _, max_y) =
             estimate_label_bounds(pre_formatted, 100.0, 50.0, LabelSide::Bottom, 18.0, 18.0);
         let height = max_y - min_y;

@@ -693,14 +693,101 @@ pub(crate) fn write_tag_start(writer: &mut Writer<XmlWriter>, tag_name: &str) ->
     write_tag_start_with_attrs(writer, tag_name, &[])
 }
 
+/// Write an attribute value as XMILE-escaped text: a raw newline becomes
+/// the identifier escape `\n`.
+///
+/// XMILE section 4.1 requires user-specified text (names, documentation,
+/// display objects) to spell non-printable characters with these escapes
+/// rather than character references, and section 3.2.2.1 defines them for
+/// identifiers. The datamodel stores NAMES in that already-escaped form
+/// (Stella files read as `hares killed\nper lynx`, two characters), so an
+/// existing backslash is written verbatim; only a raw newline is converted.
+/// Without this an XML parser's attribute-value normalization turns a raw
+/// newline into a space on read, silently losing the break.
+///
+/// Only the newline is escaped. A raw tab is left to that same
+/// normalization (it reads back as a space, which canonicalizes to `_`
+/// exactly as the JSON reader folds it), because neither the Rust nor the
+/// TS canonicalizer decodes a `\t` escape -- writing one would change the
+/// identifier on read.
+///
+/// The two FREE-TEXT attributes (`simlin:macro-invocation primary-doc`,
+/// `simlin:loop-metadata description`) keep raw text in the datamodel; their
+/// writers run [`encode_free_text_attribute`] first (which also escapes the
+/// backslash itself, so the pair is a fixpoint) and their readers
+/// [`decode_free_text_attribute`]. Identifier-carrying attributes need
+/// neither: the stored form IS the escape.
+///
+/// Every attribute the writer emits goes through here so the rule cannot be
+/// bypassed by a new call site that pushes onto `BytesStart` directly.
+pub(crate) fn push_attribute(elem: &mut BytesStart<'_>, key: &str, value: &str) {
+    if value.contains('\n') {
+        let escaped = value.replace('\n', "\\n");
+        elem.push_attribute((key, escaped.as_str()));
+    } else {
+        elem.push_attribute((key, value));
+    }
+}
+
+/// Encode a free-text attribute value (documentation, description) for
+/// XMILE: the datamodel's raw text becomes the spec's identifier escapes,
+/// `\` -> `\\` and newline -> `\n` (section 4.1: documentation "must use
+/// XMILE identifier escape sequences ... \n for newline ... and,
+/// necessarily, \\ for backslash"). Escaping the backslash is what makes
+/// write -> read a fixpoint: without it a doc containing the two characters
+/// `\n` (a Windows path, a regex, a mention of the escape itself) reads back
+/// as a newline, and a re-save of THAT is stable, so the corruption is
+/// silent. Pair with [`decode_free_text_attribute`]; apply ONLY to attributes
+/// whose datamodel field holds raw text -- names are stored already escaped
+/// and go through [`push_attribute`] verbatim.
+pub(crate) fn encode_free_text_attribute(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Decode a free-text attribute read from XMILE back to the datamodel's raw
+/// form: the inverse of [`encode_free_text_attribute`], one left-to-right
+/// pass so `\\n` is a backslash followed by `n`, never a newline. A
+/// backslash before any other character is kept verbatim (lenient: the spec
+/// forbids it, and dropping it would lose text).
+pub(crate) fn decode_free_text_attribute(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some('\\') => {
+                chars.next();
+                out.push('\\');
+            }
+            Some('n') => {
+                chars.next();
+                out.push('\n');
+            }
+            _ => out.push('\\'),
+        }
+    }
+    out
+}
+
 pub(crate) fn write_tag_start_with_attrs(
     writer: &mut Writer<XmlWriter>,
     tag_name: &str,
     attrs: &[(&str, &str)],
 ) -> Result<()> {
     let mut elem = BytesStart::new(tag_name);
-    for attr in attrs.iter() {
-        elem.push_attribute(*attr);
+    for (key, value) in attrs.iter() {
+        push_attribute(&mut elem, key, value);
     }
     writer.write_event(Event::Start(elem)).map_err(xml_error)
 }
@@ -721,8 +808,8 @@ pub(crate) fn write_tag_empty_with_attrs(
     attrs: &[(&str, &str)],
 ) -> Result<()> {
     let mut elem = BytesStart::new(tag_name);
-    for attr in attrs.iter() {
-        elem.push_attribute(*attr);
+    for (key, value) in attrs.iter() {
+        push_attribute(&mut elem, key, value);
     }
     writer.write_event(Event::Empty(elem)).map_err(xml_error)
 }
@@ -1164,14 +1251,14 @@ impl ToXml<XmlWriter> for SimSpecs {
     fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         let mut elem = BytesStart::new("sim_specs");
         if let Some(ref method) = self.method {
-            elem.push_attribute(("method", method.as_str()));
+            push_attribute(&mut elem, "method", method);
         }
         if let Some(ref time_units) = self.time_units {
-            elem.push_attribute(("time_units", time_units.as_str()));
+            push_attribute(&mut elem, "time_units", time_units);
         }
         if let Some(ref save_step) = self.save_step {
             let save_interval = format!("{save_step}");
-            elem.push_attribute(("isee:save_interval", save_interval.as_str()));
+            push_attribute(&mut elem, "isee:save_interval", &save_interval);
         }
         writer.write_event(Event::Start(elem)).map_err(xml_error)?;
 
@@ -1939,7 +2026,9 @@ fn test_xmile_roundtrips_loop_metadata() {
                     uids: vec![1, 2, 3],
                     deleted: false,
                     name: "growth loop".to_string(),
-                    description: "a reinforcing loop".to_string(),
+                    // Free text in an attribute: the raw newline is written
+                    // as the XMILE escape and must decode back on read.
+                    description: "a reinforcing loop\nspanning two lines".to_string(),
                 },
                 LoopMetadata {
                     uids: vec![4, 5],
@@ -1956,6 +2045,10 @@ fn test_xmile_roundtrips_loop_metadata() {
     };
 
     let xml = project_to_xmile(&project).unwrap();
+    assert!(
+        xml.contains(r#"description="a reinforcing loop\nspanning two lines""#),
+        "{xml}"
+    );
     let roundtripped = project_from_reader(&mut BufReader::new(xml.as_bytes())).unwrap();
 
     assert_eq!(
@@ -1966,7 +2059,7 @@ fn test_xmile_roundtrips_loop_metadata() {
     let lm0 = &roundtripped.models[0].loop_metadata[0];
     assert_eq!(lm0.uids, vec![1, 2, 3]);
     assert_eq!(lm0.name, "growth loop");
-    assert_eq!(lm0.description, "a reinforcing loop");
+    assert_eq!(lm0.description, "a reinforcing loop\nspanning two lines");
     assert!(!lm0.deleted);
 
     let lm1 = &roundtripped.models[0].loop_metadata[1];
@@ -1974,6 +2067,52 @@ fn test_xmile_roundtrips_loop_metadata() {
     assert_eq!(lm1.name, "decay loop");
     assert!(lm1.deleted);
     assert!(lm1.description.is_empty());
+
+    // The description is free text: a literal `\n` and a trailing backslash
+    // survive (the backslash is escaped on write, spec 4.1), and the second
+    // round trip is byte-stable.
+    let mut project = project;
+    project.models[0].loop_metadata[0].description =
+        "literal \\n stays; path C:\\new; ends in \\".to_string();
+    let xml = project_to_xmile(&project).unwrap();
+    assert!(
+        xml.contains(r#"description="literal \\n stays; path C:\\new; ends in \\""#),
+        "{xml}"
+    );
+    let rt = project_from_reader(&mut BufReader::new(xml.as_bytes())).unwrap();
+    assert_eq!(
+        rt.models[0].loop_metadata[0].description,
+        project.models[0].loop_metadata[0].description
+    );
+    assert_eq!(project_to_xmile(&rt).unwrap(), xml, "byte-stable");
+}
+
+/// The free-text escape pair over every arm of the decoder: `\\` and `\n`
+/// are the two escapes, a backslash before anything else is kept, and
+/// encode -> decode is the identity on arbitrary text.
+#[test]
+fn free_text_attribute_escapes_are_a_fixpoint() {
+    let cases: &[(&str, &str)] = &[
+        ("plain", "plain"),
+        ("two\nlines", "two\\nlines"),
+        ("literal \\n", "literal \\\\n"),
+        ("C:\\new", "C:\\\\new"),
+        ("ends in \\", "ends in \\\\"),
+        ("\\\n", "\\\\\\n"),
+        ("", ""),
+    ];
+    for (raw, encoded) in cases {
+        assert_eq!(encode_free_text_attribute(raw), *encoded, "encode {raw:?}");
+        assert_eq!(
+            decode_free_text_attribute(encoded),
+            *raw,
+            "decode {encoded:?}"
+        );
+    }
+    // Lenient decode: an escape the spec does not define is kept verbatim
+    // rather than dropped (files from other tools; older simlin wrote
+    // backslashes unescaped).
+    assert_eq!(decode_free_text_attribute("\\t \\x \\"), "\\t \\x \\");
 }
 
 #[cfg(test)]
@@ -2594,6 +2733,95 @@ mod macro_tests {
         );
     }
 
+    /// The invocation's `primary-doc` is FREE TEXT carried in an attribute:
+    /// the datamodel keeps raw newlines in documentation, the writer spells
+    /// them as the XMILE `\n` escape (spec 4.1), and the reader must decode
+    /// that escape back -- otherwise a multi-line doc reads back as a literal
+    /// backslash-n and every re-save doubles it.
+    #[test]
+    fn multi_output_invocation_multi_line_primary_doc_round_trips() {
+        let mut project = multi_output_macro_project();
+        let main = project
+            .models
+            .iter_mut()
+            .find(|m| m.name == "main")
+            .unwrap();
+        let doc = "first line\nsecond line";
+        for v in &mut main.variables {
+            if let Variable::Aux(a) = v
+                && a.ident == "total"
+            {
+                a.documentation = doc.to_string();
+            }
+        }
+
+        let xml = project_to_xmile(&project).expect("must serialize");
+        assert!(
+            xml.contains(r#"primary-doc="first line\nsecond line""#),
+            "the doc is written as the XMILE escape; got:\n{xml}"
+        );
+        let rt = project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("must re-import");
+        let main = rt.models.iter().find(|m| m.name == "main").unwrap();
+        let total = main
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "total")
+            .expect("total survives");
+        let Variable::Aux(total) = total else {
+            panic!("total is an aux");
+        };
+        assert_eq!(total.documentation, doc, "raw newline restored on read");
+
+        let xml2 = project_to_xmile(&rt).expect("must re-serialize");
+        let rt2 = project_from_reader(&mut BufReader::new(xml2.as_bytes())).unwrap();
+        assert_eq!(project_to_xmile(&rt2).unwrap(), xml2, "byte-stable");
+    }
+
+    /// The backslash itself is escaped in free text (spec 4.1: "necessarily,
+    /// \\ for backslash"), so a doc that CONTAINS the two characters `\n`,
+    /// or ends in a backslash, comes back as written instead of turning into
+    /// a newline on the first read -- write -> read must be a fixpoint, and
+    /// a doc that changed on the first round trip but is stable afterwards
+    /// is the silent kind of corruption.
+    #[test]
+    fn multi_output_invocation_primary_doc_with_backslashes_round_trips() {
+        let mut project = multi_output_macro_project();
+        let main = project
+            .models
+            .iter_mut()
+            .find(|m| m.name == "main")
+            .unwrap();
+        let doc = "see C:\\new\\notes; the escape is spelled \\n; trailing \\\nsecond line";
+        for v in &mut main.variables {
+            if let Variable::Aux(a) = v
+                && a.ident == "total"
+            {
+                a.documentation = doc.to_string();
+            }
+        }
+
+        let xml = project_to_xmile(&project).expect("must serialize");
+        assert!(
+            xml.contains(
+                r#"primary-doc="see C:\\new\\notes; the escape is spelled \\n; trailing \\\nsecond line""#
+            ),
+            "backslashes doubled, the newline escaped; got:\n{xml}"
+        );
+        let rt = project_from_reader(&mut BufReader::new(xml.as_bytes())).expect("must re-import");
+        let main = rt.models.iter().find(|m| m.name == "main").unwrap();
+        let Some(Variable::Aux(total)) = main.variables.iter().find(|v| v.get_ident() == "total")
+        else {
+            panic!("total is an aux");
+        };
+        assert_eq!(total.documentation, doc, "read is the inverse of write");
+        // Stability from the second serialization on, like the multi-line
+        // test above (the first pass reorders the macro's variables).
+        let xml2 = project_to_xmile(&rt).expect("must re-serialize");
+        assert!(xml2.contains(r#"the escape is spelled \\n;"#), "{xml2}");
+        let rt2 = project_from_reader(&mut BufReader::new(xml2.as_bytes())).unwrap();
+        assert_eq!(project_to_xmile(&rt2).unwrap(), xml2, "byte-stable");
+    }
+
     /// macros.AC4.4: a multi-output `:`-form `.mdl` survives a cross-format
     /// conversion `.mdl` -> datamodel -> `.xmile` -> datamodel.
     #[test]
@@ -2963,5 +3191,92 @@ mod options_tests {
         let project2 = project_from_reader(&mut BufReader::new(gen1.as_bytes())).expect("reparse");
         let gen2 = project_to_xmile(&project2).expect("re-serialize");
         assert_eq!(gen1, gen2, "second-generation write must be byte-identical");
+    }
+}
+
+#[cfg(test)]
+mod attribute_escape_tests {
+    use super::*;
+
+    fn write_empty_tag(attrs: &[(&str, &str)]) -> String {
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        write_tag_empty_with_attrs(&mut writer, "aux", attrs).unwrap();
+        String::from_utf8(writer.into_inner().into_inner()).unwrap()
+    }
+
+    /// Enumerates the arms of `push_attribute`: a raw newline becomes the
+    /// identifier escape; the stored (already-escaped) form is written
+    /// verbatim -- doubling its backslash would turn a line break into a
+    /// literal backslash-n on read; a raw tab and a plain value pass through
+    /// untouched.
+    #[test]
+    fn raw_control_characters_become_xmile_escapes() {
+        assert_eq!(
+            write_empty_tag(&[("name", "from\npython")]),
+            r#"<aux name="from\npython"/>"#
+        );
+        // A raw tab is left to XML attribute normalization (it becomes a
+        // space, which canonicalizes to `_` exactly as the JSON reader would
+        // fold it): neither the Rust nor the TS canonicalizer knows a `\t`
+        // escape, so writing one would change the identifier on read.
+        assert_eq!(write_empty_tag(&[("name", "a\tb")]), "<aux name=\"a\tb\"/>");
+        assert_eq!(
+            write_empty_tag(&[("name", "hares killed\\nper lynx")]),
+            r#"<aux name="hares killed\nper lynx"/>"#
+        );
+        assert_eq!(
+            write_empty_tag(&[("name", "plain_name")]),
+            r#"<aux name="plain_name"/>"#
+        );
+    }
+
+    /// A raw newline that reaches a name (older JSON files carry them) is
+    /// read back as the stored escape form -- the same identifier, still a
+    /// two-line label -- rather than as the space an XML parser's
+    /// attribute-value normalization would produce.
+    #[test]
+    fn raw_newline_name_round_trips_as_stored_escape() {
+        let mut project = crate::test_common::TestProject::new("p")
+            .aux("from\npython", "1", None)
+            .build_datamodel();
+        let model = project.models.first_mut().unwrap();
+        model.views = vec![datamodel::View::StockFlow(datamodel::StockFlow {
+            name: None,
+            elements: vec![datamodel::ViewElement::Aux(datamodel::view_element::Aux {
+                name: "from\npython".to_string(),
+                uid: 1,
+                x: 10.0,
+                y: 20.0,
+                label_side: datamodel::view_element::LabelSide::Bottom,
+                compat: None,
+            })],
+            view_box: datamodel::Rect::default(),
+            zoom: 1.0,
+            use_lettered_polarity: false,
+            font: None,
+            sketch_compat: None,
+        })];
+
+        let xml = project_to_xmile(&project).unwrap();
+        assert!(
+            !xml.contains("from\npython"),
+            "no raw newline in the document"
+        );
+        assert!(xml.contains(r#"name="from\npython""#), "{xml}");
+
+        let reread = project_from_reader(&mut std::io::Cursor::new(xml.as_bytes())).unwrap();
+        let model = reread.models.first().unwrap();
+        assert!(
+            model
+                .variables
+                .iter()
+                .any(|v| v.get_ident() == "from\\npython"),
+            "variable name reads back in the stored form"
+        );
+        let Some(datamodel::View::StockFlow(sf)) = model.views.first() else {
+            panic!("view survived");
+        };
+        let names: Vec<&str> = sf.elements.iter().filter_map(|e| e.get_name()).collect();
+        assert_eq!(names, vec!["from\\npython"]);
     }
 }

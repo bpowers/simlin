@@ -12,6 +12,7 @@
   "packageManager": "pnpm@10.6.0",
   "devDependencies": {
     "@playwright/test": "^1.58.1",
+    "@types/node": "^25.2.0",
     "@typescript/native": "npm:typescript@^7.0.2",
     "prettier": "^3.8.1",
     "ts-protoc-gen": "^0.15.0",
@@ -27,7 +28,7 @@
     "precommit": "pnpm js-needs-format && pnpm rust-needs-format && pnpm lint",
     "install-git-hooks": "cd .git/hooks && rm -f pre-commit && ln -s ../../scripts/pre-commit ./pre-commit",
     "lint": "pnpm rust-lint && pnpm -r --parallel run lint",
-    "tsc": "pnpm --filter @simlin/core --filter @simlin/diagram --filter @simlin/server --filter @simlin/app --filter @simlin/serve-web --parallel exec tsc --noEmit",
+    "tsc": "pnpm --filter @simlin/core --filter @simlin/diagram --filter @simlin/server --filter @simlin/app --filter @simlin/serve-web --filter @simlin/notebook-widget --parallel exec tsc --noEmit",
     "rust-lint": "cargo clippy",
     "start:firestore": "./scripts/start-emulators.sh",
     "start:backend": "pnpm --filter @simlin/server start:backend",
@@ -42,7 +43,7 @@
     "build:deploy-staging": "node scripts/build-deploy-staging.mjs",
     "start": "node src/server/lib",
     "test:scripts": "node --test scripts/tests/*.test.mjs",
-    "test": "pnpm test:scripts && pnpm --filter @simlin/core --filter @simlin/diagram --filter @simlin/engine --filter @simlin/app --filter @simlin/server --filter @simlin/serve-web --parallel run test",
+    "test": "pnpm test:scripts && pnpm --filter @simlin/core --filter @simlin/diagram --filter @simlin/engine --filter @simlin/app --filter @simlin/server --filter @simlin/serve-web --filter @simlin/notebook-widget --parallel run test",
     "test:ui": "playwright test",
     "test:ui:ui": "playwright test --ui"
   }

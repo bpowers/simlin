@@ -3642,8 +3642,23 @@ fn calculate_allowed_label_sides_for_stock(
     }
 }
 
-/// Apply optimal label placement based on connector angles.
+/// Apply optimal label placement based on connector angles to every named
+/// element. This is the full-layout pass; incremental layout uses
+/// [`optimize_labels_for`] so it never rewrites a pre-existing element's side.
 fn optimize_labels(state: &mut LayoutState, model: &datamodel::Model, metadata: &ComputedMetadata) {
+    optimize_labels_for(state, model, metadata, |_| true);
+}
+
+/// Apply optimal label placement to the named elements whose UID satisfies
+/// `should_place`. Elements it rejects keep their current `label_side`
+/// untouched, even though their positions still inform the placement of the
+/// elements it accepts (connector angles are computed from all positions).
+fn optimize_labels_for(
+    state: &mut LayoutState,
+    model: &datamodel::Model,
+    metadata: &ComputedMetadata,
+    should_place: impl Fn(i32) -> bool,
+) {
     let uid_to_ident: HashMap<i32, String> = model
         .variables
         .iter()
@@ -3666,6 +3681,7 @@ fn optimize_labels(state: &mut LayoutState, model: &datamodel::Model, metadata: 
         .elements
         .iter()
         .enumerate()
+        .filter(|(_, elem)| should_place(elem.get_uid()))
         .filter_map(|(i, elem)| match elem {
             ViewElement::Stock(stock) => {
                 let ident = uid_to_ident.get(&stock.uid)?;
@@ -3719,6 +3735,25 @@ fn optimize_labels(state: &mut LayoutState, model: &datamodel::Model, metadata: 
 
     for (i, side) in updates {
         match &mut state.elements[i] {
+            ViewElement::Stock(s) => s.label_side = side,
+            ViewElement::Flow(f) => f.label_side = side,
+            ViewElement::Aux(a) => a.label_side = side,
+            ViewElement::Module(m) => m.label_side = side,
+            _ => {}
+        }
+    }
+}
+
+/// Write `sides` back onto the named elements that carry those UIDs. Used by
+/// incremental layout after a flow is rebuilt with unchanged orientation
+/// (`create_flow_view_element` picks a default side) to reinstate the side
+/// the element had before the rebuild.
+fn restore_label_sides(state: &mut LayoutState, sides: &HashMap<i32, LabelSide>) {
+    for elem in &mut state.elements {
+        let Some(&side) = sides.get(&elem.get_uid()) else {
+            continue;
+        };
+        match elem {
             ViewElement::Stock(s) => s.label_side = side,
             ViewElement::Flow(f) => f.label_side = side,
             ViewElement::Aux(a) => a.label_side = side,
@@ -5026,34 +5061,26 @@ pub fn count_view_crossings(view: &datamodel::StockFlow) -> usize {
 }
 
 /// Assemble a [`datamodel::StockFlow`] from finalized layout state, copying
-/// metadata (name, zoom, font, sketch_compat) from `template`.
+/// metadata (name, view box, zoom, font, sketch_compat) from `template`.
 ///
-/// The view box is derived from the bounding box of `state.elements`; an
-/// empty or degenerate element set produces a zero-area default box.
+/// The view box is copied verbatim, never recomputed from the elements: the
+/// editor stores its viewport there (the pan offset and the canvas size it
+/// was last shown at, `Canvas.tsx` `getCanvasOffset`), and an incremental
+/// pass runs after every kernel/MCP edit of a diagram someone is looking
+/// at -- re-boxing it to the content bounds snaps their pan back and, when
+/// the size no longer matches the canvas, triggers the editor's
+/// proportional refit, so the diagram jumps on every "Updated from Python".
+/// Content that ends up outside the viewport is the editor's business (it
+/// re-centres an offscreen diagram on mount). Only a from-scratch layout
+/// synthesises a box.
 fn build_stock_flow_from_state(
     state: LayoutState,
-    config: &LayoutConfig,
     template: &datamodel::StockFlow,
 ) -> datamodel::StockFlow {
-    let (bmin_x, bmin_y, bmax_x, bmax_y) = compute_bounds(&state.elements, config);
-    let view_box = if !state.elements.is_empty() && bmin_x != f64::MAX {
-        // Account for elements at negative coordinates (e.g. from imported
-        // or hand-edited views preserved by incremental layout).
-        let vb_x = (bmin_x - DIAGRAM_ORIGIN_MARGIN).min(0.0);
-        let vb_y = (bmin_y - DIAGRAM_ORIGIN_MARGIN).min(0.0);
-        Rect {
-            x: vb_x,
-            y: vb_y,
-            width: bmax_x - vb_x + DIAGRAM_ORIGIN_MARGIN,
-            height: bmax_y - vb_y + DIAGRAM_ORIGIN_MARGIN,
-        }
-    } else {
-        Rect::default()
-    };
     datamodel::StockFlow {
         name: template.name.clone(),
         elements: state.elements,
-        view_box,
+        view_box: template.view_box.clone(),
         zoom: if template.zoom > 0.0 {
             template.zoom
         } else {
@@ -5080,8 +5107,16 @@ pub const LAYOUT_SEEDS: [u64; 4] = [42, 123, 456, 789];
 ///
 /// The `project` must already reflect the post-patch model state
 /// (i.e., `apply_patch` has been called). The `patch` is taken by
-/// reference so callers can inspect the operations; phase 6 adds
-/// `Clone` derives to enable this.
+/// reference so callers can inspect the operations.
+///
+/// Contract for elements the patch did not touch: position AND
+/// `label_side` are returned byte-for-byte. A label side is chosen only
+/// for elements created in this pass -- new variables, kind-changed or
+/// endpoint-changed rebuilds, and flows whose pipe orientation flipped.
+/// A flow rebuilt merely to slide along the same stock face keeps its
+/// side. The optimizer never revisits an existing side, even when a
+/// connector added by this patch now crosses the label: hand placement
+/// wins, and the human (or a full relayout) can move it.
 ///
 /// Composition:
 /// 1. Compute metadata for the post-patch model
@@ -5089,7 +5124,8 @@ pub const LAYOUT_SEEDS: [u64; 4] = [42, 123, 456, 789];
 /// 3. Process deletions and renames from the patch
 /// 4. Identify new elements, compute initial positions
 /// 5. Create view elements and settle via pinned SFDP
-/// 6. Diff connectors/clouds, polish labels and loop curvature
+/// 6. Diff connectors/clouds, place labels for this pass's elements,
+///    apply loop curvature
 /// 7. Build StockFlow from final state
 pub fn incremental_layout(
     old_view: &datamodel::StockFlow,
@@ -5382,6 +5418,11 @@ pub fn incremental_layout(
     // currently horizontal (or Right/Left to one that is vertical),
     // delete and rebuild it so its geometry matches.
     let mut flows_to_rebuild: Vec<String> = Vec::new();
+    // Label sides of flows rebuilt only to move along the same stock face:
+    // their pipe keeps its orientation, so the existing (possibly hand-placed)
+    // side stays valid and is restored after the rebuild. Flows whose
+    // orientation flips are rebuilt with a freshly chosen side instead.
+    let mut offset_rebuilt_label_sides: HashMap<String, LabelSide> = HashMap::new();
     for (flow_ident, attachment) in &incr_flow_attachments {
         // Skip flows that are new (they'll be created below)
         if new_elements.new_flows.contains(flow_ident) {
@@ -5445,6 +5486,7 @@ pub fn incremental_layout(
                             && (c - expected).abs() > 0.5
                         {
                             flows_to_rebuild.push(flow_ident.clone());
+                            offset_rebuilt_label_sides.insert(flow_ident.clone(), f.label_side);
                         }
                     }
                 }
@@ -5477,6 +5519,30 @@ pub fn incremental_layout(
         }
     }
 
+    // Every named element still standing at this point survived the patch
+    // untouched (or was merely renamed): its label side is pinned for the rest
+    // of the pass. Whatever gets created from here on -- new variables,
+    // kind-changed or endpoint-changed rebuilds, orientation-flipped flows --
+    // is absent from this snapshot and has its side chosen by
+    // `optimize_labels_for` below. Offset-only rebuilt flows are added back
+    // explicitly because they were just deleted but keep their orientation.
+    let mut pinned_label_sides: HashMap<i32, LabelSide> = state
+        .elements
+        .iter()
+        .filter_map(|elem| match elem {
+            ViewElement::Stock(s) => Some((s.uid, s.label_side)),
+            ViewElement::Flow(f) => Some((f.uid, f.label_side)),
+            ViewElement::Aux(a) => Some((a.uid, a.label_side)),
+            ViewElement::Module(m) => Some((m.uid, m.label_side)),
+            _ => None,
+        })
+        .collect();
+    for (flow_ident, side) in &offset_rebuilt_label_sides {
+        if let Some(uid) = state.uid_manager.get_uid(flow_ident) {
+            pinned_label_sides.insert(uid, *side);
+        }
+    }
+
     // Compute positions for rebuilt flows based on their attachment info,
     // falling back to the old position if the stock UID lookup fails.
     for flow_ident in &flows_to_rebuild {
@@ -5502,6 +5568,9 @@ pub fn incremental_layout(
         }
     }
 
+    restore_label_sides(&mut state, &pinned_label_sides);
+    let needs_label_placement = |uid: i32| !pinned_label_sides.contains_key(&uid);
+
     if new_elements.is_empty() {
         // No new elements and no settlement step, so rebuilt flows
         // already have correct geometry from create_flow_view_element.
@@ -5509,10 +5578,10 @@ pub fn incremental_layout(
         // imported flow endpoints elsewhere in the diagram.
         diff_connectors(&mut state, &metadata);
         diff_clouds(&mut state, &metadata);
-        optimize_labels(&mut state, model, &metadata);
+        optimize_labels_for(&mut state, model, &metadata, needs_label_placement);
         apply_loop_curvature(&mut state, &config, model, &metadata);
         validate_view_completeness(&state, model)?;
-        return Ok(build_stock_flow_from_state(state, &config, old_view));
+        return Ok(build_stock_flow_from_state(state, old_view));
     }
 
     let initial_positions = compute_new_element_positions(&state, &metadata, &new_elements);
@@ -5674,8 +5743,10 @@ pub fn incremental_layout(
     diff_connectors(&mut state, &metadata);
     diff_clouds(&mut state, &metadata);
 
-    // Step 8: Polish
-    optimize_labels(&mut state, model, &metadata);
+    // Step 8: Polish. Only elements created in this pass get a label side
+    // chosen; pinned elements keep theirs even if a new connector now runs
+    // through the label (hand placement wins; the human can move it).
+    optimize_labels_for(&mut state, model, &metadata, needs_label_placement);
     apply_loop_curvature(&mut state, &config, model, &metadata);
     // Guarantee flows stay orthogonal after re-snapping endpoints to moved
     // stocks (only rewrites pipes that actually went diagonal; hand-routed
@@ -5685,7 +5756,7 @@ pub fn incremental_layout(
     validate_view_completeness(&state, model)?;
 
     // Step 9: Build StockFlow
-    Ok(build_stock_flow_from_state(state, &config, old_view))
+    Ok(build_stock_flow_from_state(state, old_view))
 }
 
 /// Generate a complete stock-flow diagram layout for a model using a single

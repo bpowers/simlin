@@ -23,6 +23,7 @@ Does NOT check:
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -70,6 +71,24 @@ def resolve_path(ref: str, file_dir: Path, repo_root: Path) -> Path | None:
         return candidate
 
     return None
+
+
+def is_git_ignored(ref: str, file_dir: Path, repo_root: Path) -> bool:
+    """True when git would ignore ``ref`` (resolved like resolve_path does)."""
+    for base in (file_dir, repo_root):
+        candidate = (base / ref)
+        try:
+            rel = candidate.resolve().relative_to(repo_root.resolve())
+        except ValueError:
+            continue
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "check-ignore", "-q", "--", str(rel)],
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return True
+    return False
 
 
 def check_file(file_path: Path, repo_root: Path) -> list[str]:
@@ -137,6 +156,18 @@ def check_file(file_path: Path, repo_root: Path) -> list[str]:
             # Skip glob patterns
             if "*" in token:
                 continue
+            # Skip references INTO generated output directories (the same set
+            # the walker below refuses to descend into): a CLAUDE.md legitimately
+            # names its package's build artifact (`dist/widget.js`), and whether
+            # that file exists depends on what was last built in this checkout,
+            # not on whether the docs are correct.  Most such paths are also
+            # git-ignored and would be skipped by the is_git_ignored check
+            # below once resolution fails; this token check is the cheap,
+            # git-independent first line (a vendored `third_party/` tree is
+            # tracked, not ignored, and a shallow or partial checkout may
+            # not have the ignore rules the path relies on).
+            if any(part in GENERATED_DIRS for part in token.split()[0].split("/")[:-1]):
+                continue
             # Skip XML/XMILE tag tokens (e.g. `<overflow/>`, `<leak_integers/>`).
             # The trailing slash of a self-closing tag is not a path separator.
             if token.startswith("<") and token.endswith(">"):
@@ -145,10 +176,23 @@ def check_file(file_path: Path, repo_root: Path) -> list[str]:
             # check only the path portion before the first space
             path_to_check = token.split()[0] if " " in token else token
             if resolve_path(path_to_check, file_dir, repo_root) is None:
+                # A path git ignores is a build or runtime output (staged wheel
+                # assets, e2e logs); its presence depends on what was last run
+                # here, so a doc may name it without it existing.
+                if is_git_ignored(path_to_check, file_dir, repo_root):
+                    continue
                 line_num = content[:match.start()].count("\n") + 1
                 errors.append(f"{rel_path}:{line_num}: broken path reference '{token}'")
 
     return errors
+
+
+# Build outputs and vendored trees: never walked for CLAUDE.md files, and a
+# path reference into one of them is not checked for existence.
+GENERATED_DIRS = frozenset(
+    ("node_modules", "target", "build", "dist", "lib", "lib.browser", "lib.module",
+     "third_party", ".claude-scratch")
+)
 
 
 def main() -> int:
@@ -166,9 +210,7 @@ def main() -> int:
         # a tree that is actually fine.
         rel = claude_md.relative_to(repo_root)
         parts = rel.parts
-        if any(p in ("node_modules", "target", "build", "lib", "lib.browser", "lib.module",
-                     "third_party", ".claude-scratch")
-               for p in parts):
+        if any(p in GENERATED_DIRS for p in parts):
             continue
         # `.claude/worktrees` holds git-worktree checkouts -- complete copies of
         # the repo at other branches -- so their CLAUDE.md files reflect other

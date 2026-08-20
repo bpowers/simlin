@@ -353,6 +353,17 @@ Labels can be positioned relative to their element using the `LabelSide` propert
 - **'right'**: Right of element, left-aligned text
 - **'center'**: Centered on element (default for stocks/flows, overlays the element)
 
+### Label Side Ownership
+- **Chosen once**: the engine's layout picks an element's `labelSide` when it
+  creates the element (fresh layout, or a new/rebuilt element in an
+  incremental pass). After that the side belongs to whoever placed it.
+- **Incremental edits never move existing labels**: an `edit()`/MCP/widget
+  reload that adds or removes unrelated variables returns every untouched
+  element's position and `labelSide` byte-for-byte. A new connector may end
+  up running through a hand-placed label; that is accepted -- the human (or
+  a full relayout) moves it. See `incremental_layout` in
+  `src/simlin-engine/src/layout/mod.rs`.
+
 ### Label Layout Calculation
 
 **Constants**:
@@ -390,7 +401,16 @@ switch(side) {
 ```
 
 ### Multi-line Labels
-- Lines separated by '\n' character in the name string
+- **Stored form**: a line break in a name is the literal two-character
+  backslash-n (`\n`), the same escape Stella writes into XMILE `name`
+  attributes and the XMILE spec prescribes for user text (section 4.1). Both
+  the editor's rename/create paths (`encodeNameNewlines`) and the engine's
+  automatic layout (`format_label_with_line_breaks`) write this form; never
+  put a raw newline character into a name -- an XML parser normalizes it to
+  a space inside an attribute and the break is silently lost.
+- **Rendering**: `displayName()` decodes the escape (and leaves a raw newline
+  that an older JSON file may still carry) so `Label` splits on the actual
+  newline character
 - Line spacing: 14px between baselines
 - **Top-positioned labels**: Use reverse baseline - first line is positioned highest
 - **SVG tspan elements**: Each line rendered as separate tspan with dy offset
@@ -402,7 +422,7 @@ switch(side) {
 
 ### Display Name Processing
 - **Underscores to spaces**: `initial_inventory` → `initial inventory`
-- **Newline support**: `\n` in names creates multi-line labels
+- **Newline support**: the stored `\n` escape in names creates multi-line labels
 - Implemented by `displayName()` function
 
 ## Element Connections and Constraints
@@ -663,7 +683,7 @@ Each element type has specific hit testing:
 ### Naming Conventions
 1. **Canonical names**: Use underscores for word separation
 2. **Display names**: Automatically convert underscores to spaces
-3. **Line breaks**: Use \n for multi-line labels
+3. **Line breaks**: Use the two-character `\n` escape (not a raw newline) for multi-line labels
 4. **Length limits**: Keep under 30 characters per line
 
 ### UID Management

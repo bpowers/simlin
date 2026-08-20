@@ -150,7 +150,7 @@ fn uid_of(view: &datamodel::StockFlow, name_fragment: &str) -> i32 {
         .iter()
         .find(|e| {
             e.get_name()
-                .is_some_and(|n| n.replace(['\n', ' '], "_").contains(name_fragment))
+                .is_some_and(|n| canonicalize(n).contains(name_fragment))
         })
         .unwrap_or_else(|| panic!("element '{name_fragment}' not found"))
         .get_uid()

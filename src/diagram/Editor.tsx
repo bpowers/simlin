@@ -7,6 +7,7 @@ import * as React from 'react';
 import clsx from 'clsx';
 import TextField from './components/TextField';
 import Autocomplete, { type AutocompleteRenderInputParams } from './components/Autocomplete';
+import { PortalContainerContext } from './components/portal-container';
 import Snackbar from './components/Snackbar';
 import { ClearIcon, EditIcon } from './components/icons';
 import SpeedDial, { CloseReason, SpeedDialAction, SpeedDialIcon } from './components/SpeedDial';
@@ -62,12 +63,21 @@ import { Point, searchableName } from './drawing/common';
 import { computeFlowAttachment } from './flow-attach';
 import { applyGroupMovement } from './group-movement';
 import { detectUndoRedo, isEditableElement } from './keyboard-shortcuts';
+import {
+  EDITOR_ROOT_ATTRIBUTE,
+  activeEditorRoot,
+  editorOwnsKeyEvent,
+  markActiveEditorRoot,
+  releaseEditorRoot,
+} from './editor-key-scope';
 import { isStdlibModel } from './module-navigation';
 import { countModelInstances } from './module-details-utils';
 import { buildModuleReferencePayload } from './module-wiring';
 import { buildVariableRenameOps } from './rename-ops';
 import { BreadcrumbBar } from './BreadcrumbBar';
-import { ProjectController, type ProjectSnapshot, type EngineApi } from './project-controller';
+import { ProjectController, type ProjectSnapshot, type EngineApi, type Viewport } from './project-controller';
+
+export type { Viewport } from './project-controller';
 
 import styles from './Editor.module.css';
 // These must stay in sync with --panel-width-sm/-md/-lg in theme.css (and the
@@ -79,6 +89,12 @@ const SearchbarWidthLg = 480;
 // The effective right-panel width at the current viewport, mirroring the
 // media queries in Editor.module.css. Used by viewport-centering math, which
 // previously hardcoded one width and was wrong at the other breakpoints.
+// window.innerWidth is deliberately what is read here: the CSS breakpoints
+// are viewport media queries (they size the panel by how much room the USER
+// has, not by the editor's box), so this must evaluate the same quantity or
+// the centering math and the rendered panel would disagree in an embedded
+// editor narrower than the page. Only the panel's overflow CLAMP is
+// container-relative (calc(100% - 16px) in the stylesheets).
 function panelWidth(): number {
   if (typeof window === 'undefined') {
     return SearchbarWidthSm;
@@ -263,6 +279,45 @@ interface EditorPropsBase {
   // error in the confirmation dialog. Hosts without a deletable backing
   // project (the local file-backed viewer, embeds) leave this undefined.
   onDeleteProject?: () => Promise<void>;
+  // Whether the model-properties drawer shows its "Exit" link to "/" (the
+  // project list in the app and simlin-serve). Defaults to true. Hosts that
+  // embed the Editor in a page they own (a notebook cell) pass false: there is
+  // no route to go to, and the link would pushState on the host page. No
+  // router is required to mount the Editor either way.
+  showHomeLink?: boolean;
+  // Where the Editor's overlay surfaces (the model-properties drawer, dialogs,
+  // menus, the autocomplete listbox) render. Default: document.body, where
+  // they are viewport-level (position: fixed) -- right for hosts that own the
+  // page. A host that gives the Editor one box on a page it does not own (a
+  // notebook cell) passes that box: the surfaces render inside it and
+  // position against it (drawer from its left edge, dialogs centred in it),
+  // so the host's tokens / data-theme / shortcut-scoping attributes on the box
+  // reach them and a transformed page ancestor cannot displace them. The
+  // element must be positioned (it is the surfaces' containing block). See
+  // components/portal-container.ts.
+  portalContainer?: HTMLElement;
+  // Open the root model's first view at THIS viewport (pan offset + size and
+  // zoom) instead of the one stored in the project. Applied like a pan the user
+  // just made -- shown from the first frame, round-tripped to the engine as a
+  // view-only update, no undo entry, no save -- so the next saved edit
+  // persists it. For a host that remounts the Editor on new project bytes
+  // while the user is looking at it (the notebook widget on a kernel push): a
+  // pan or zoom is never persisted by itself (only the next edit's save
+  // carries it), so a remount on the stored bytes would silently reset the
+  // user's viewport; the host reads the live one through `onViewportChange`
+  // and hands it back here. Hosts that mount once per project (the app,
+  // simlin-serve) leave it unset. Ignored when the view is absent or the
+  // viewport is unusable (a non-finite coordinate, a non-positive zoom).
+  initialViewport?: Viewport;
+  // Fires from a post-commit effect with the model name and the COMMITTED
+  // viewport of the model being viewed whenever that viewport changes by value:
+  // once when the project first renders (the stored viewport, or
+  // `initialViewport`, or the mount-time fit), then on each settled pan/zoom/
+  // pinch/momentum coast, an idle resize, and module navigation (the child
+  // model's viewport, with its name). Never per gesture frame: the canvas owns
+  // the live viewport during a gesture and commits it once on settle. A
+  // content-equal republished view fires nothing.
+  onViewportChange?: (modelName: string, viewport: Viewport) => void;
 }
 
 export type EditorProps = EditorPropsBase & ProjectInputProps;
@@ -343,6 +398,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         p.inputFormat === 'protobuf'
           ? { format: 'protobuf', data: p.initialProjectBinary }
           : { format: 'json', data: p.initialProjectJson },
+      initialViewport: p.initialViewport,
       // The concrete engine Project/Model/Run structurally satisfy the
       // controller's EngineApi surface; cast through unknown to bridge the
       // nominal type difference.
@@ -436,6 +492,10 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   const latest = React.useRef<EditorLatest>(undefined as unknown as EditorLatest);
   latest.current = { props, state };
 
+  // The Editor's outermost element: the keyboard-scoping identity of this
+  // instance (see editor-key-scope.ts).
+  const rootRef = React.useRef<HTMLDivElement>(null);
+
   const errorKey = (err: Error): number => {
     let key = r.errorKeys.get(err);
     if (key === undefined) {
@@ -481,6 +541,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     // derived from the CURRENT prop on every render.
 
     document.addEventListener('keydown', handleKeyDown);
+    // Captured here (not read in the cleanup): React detaches refs before
+    // passive-effect cleanups run, so rootRef.current is null by then.
+    const root = rootRef.current;
 
     // Open the engine, then schedule the first sim run. The controller guards
     // its own dispose-races internally (see ProjectController.dispose), so no
@@ -502,6 +565,10 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       // setup above so a StrictMode mount/unmount/mount cycle builds a fresh
       // controller on remount and leaves nothing stuck.
       document.removeEventListener('keydown', handleKeyDown);
+      if (root) {
+        // A key on <body> must never resolve to an unmounted instance.
+        releaseEditorRoot(root);
+      }
 
       if (r.unsubscribe) {
         r.unsubscribe();
@@ -563,6 +630,53 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       onSelectionChanged(getSelectionIdents());
     }
   }, [state.selection]);
+
+  // ---- Post-commit effect: onViewportChange --------------------------------
+  // Report the committed viewport of the viewed model whenever it changes by
+  // VALUE (offset, size or zoom), including the first render that has a view.
+  // Keyed on the controller snapshot: every viewport commit -- a settled
+  // gesture's queueViewUpdate, the mount-time fit, an idle resize, module
+  // navigation's viewport restore -- publishes a new snapshot, and the
+  // prev-value ref keeps content-equal republishes (a content edit, a save
+  // acknowledgment) silent. The Canvas holds a gesture's live viewport locally
+  // and commits once on settle, so this never fires per frame.
+  // The last reported value, held as a flat record of its own (never the object
+  // handed to the host, which the host may keep or mutate).
+  const prevViewportRef = React.useRef<
+    { modelName: string; x: number; y: number; width: number; height: number; zoom: number } | undefined
+  >(undefined);
+  React.useEffect(() => {
+    const snapshot = state.controllerSnapshot;
+    const view = snapshot.project?.models.get(snapshot.modelName)?.views[0];
+    if (!view) {
+      return;
+    }
+    const cur = {
+      modelName: snapshot.modelName,
+      x: view.viewBox.x,
+      y: view.viewBox.y,
+      width: view.viewBox.width,
+      height: view.viewBox.height,
+      zoom: view.zoom,
+    };
+    const prev = prevViewportRef.current;
+    if (
+      prev &&
+      prev.modelName === cur.modelName &&
+      prev.x === cur.x &&
+      prev.y === cur.y &&
+      prev.width === cur.width &&
+      prev.height === cur.height &&
+      prev.zoom === cur.zoom
+    ) {
+      return;
+    }
+    prevViewportRef.current = cur;
+    latest.current.props.onViewportChange?.(cur.modelName, {
+      viewBox: { x: cur.x, y: cur.y, width: cur.width, height: cur.height },
+      zoom: cur.zoom,
+    });
+  }, [state.controllerSnapshot]);
 
   // ---- Post-commit effect: navResetSeq (componentDidUpdate part 2) ---------
   // When undo/redo restores a project that no longer contains the viewed model,
@@ -626,6 +740,15 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     if (p.embedded || isEditableElement(e.target)) {
       return;
     }
+    // Several Editors can share one document (a notebook with an Editor per
+    // cell). This listener is document-level, so it acts only when the event
+    // belongs to THIS instance: its target is inside our root, or focus is
+    // nowhere (<body>) and we are the instance that most recently saw pointer
+    // or focus activity. See editor-key-scope.ts for the full decision.
+    const root = rootRef.current;
+    if (!root || !editorOwnsKeyEvent(root, e.composedPath(), activeEditorRoot())) {
+      return;
+    }
 
     const action = detectUndoRedo(e);
     if (action) {
@@ -662,6 +785,55 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         void handleSelectionDelete();
       }
       return;
+    }
+  }, []);
+
+  // Pointer presses and focus entering this instance (including its portaled
+  // drawer/dialog/menus, which React routes through this tree) make it the
+  // target of the next key event that lands on <body>. Capture-phase handlers
+  // so a child that stops propagation (the Canvas does, on pointerdown) cannot
+  // hide the activity.
+  const handleActivity = React.useCallback((): void => {
+    const root = rootRef.current;
+    if (root) {
+      markActiveEditorRoot(root);
+    }
+  }, []);
+
+  // A pointer press anywhere inside the editor moves focus INTO it. Capture
+  // phase runs before the browser's own mousedown default action, so a press
+  // on a focusable target (a text field, a button) still ends with focus on
+  // that target; a press whose default is prevented (the Canvas prevents it
+  // on every pointerdown, so element clicks and drags never focus anything)
+  // leaves focus on the root -- inside the editor, never on the host page or
+  // <body>. Without this, clicking a variable in a notebook cell left focus on
+  // the notebook cell and the notebook's own shortcuts (`d d` deletes the
+  // CELL) fired instead of the Editor's; the mechanism is host-agnostic
+  // (see the keyboard scoping contract in CLAUDE.md). Only when focus is not
+  // already inside the editor: a press inside an editable while it is focused
+  // must not blur it (its blur commits), and moving focus root-ward for
+  // nothing would drop the caret.
+  const handlePointerDownCapture = React.useCallback((e: React.PointerEvent<HTMLDivElement>): void => {
+    handleActivity();
+    const root = rootRef.current;
+    if (!root) {
+      return;
+    }
+    const active = document.activeElement;
+    // Portaled surfaces (drawer, dialog, menu, listbox) are not DOM
+    // descendants of the root, so root.contains() says no for a press inside
+    // one; React routes the press through this tree, and the DOM path of the
+    // press tells whether the focused element is the pressed element or one
+    // of its ancestors -- the drawer panel is focused and the user presses a
+    // field inside it -- in which case focus is left where it is (the panel's
+    // own focus management owns it). <body>/<html> are on every path and
+    // count as focus nowhere.
+    const path = e.nativeEvent.composedPath();
+    const focusInsideEditor = active !== null && root.contains(active);
+    const focusIsPressedOrAncestor =
+      active !== null && active !== document.body && active !== document.documentElement && path.includes(active);
+    if (!focusInsideEditor && !focusIsPressedOrAncestor) {
+      root.focus({ preventScroll: true });
     }
   }, []);
 
@@ -1334,6 +1506,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
         // Sim specs are project content; the download stays available (it is
         // a read). Project-scoped like undo/redo: readOnlyMode, not isReadOnly.
         readOnly={!!latest.current.props.readOnlyMode}
+        showHomeLink={latest.current.props.showHomeLink}
       />
     );
   };
@@ -1426,6 +1599,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       <Canvas
         embedded={!!embedded}
         readOnly={readOnly}
+        // A carried viewport (a remounting host handing back the user's live
+        // framing) is not the offscreen-recovery case: never yank it back.
+        recenterOffscreenOnMount={latest.current.props.initialViewport === undefined}
         project={project}
         model={model}
         view={view}
@@ -2596,17 +2772,30 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   // the paint-order overlay (it does NOT lift the panel above the search bar).
   const sharedModelBannerInfo = getSharedModelBannerInfo();
 
+  // tabIndex={-1}: a click on non-focusable chrome inside the editor then
+  // settles focus on this root (the nearest focusable ancestor) rather than on
+  // <body>, so the key event that follows carries the root in its path. Not in
+  // the tab order; the outline is suppressed in Editor.module.css.
   return (
-    <div className={classNames}>
-      {getDrawer()}
-      {getDetails(sharedModelBannerInfo.visible)}
-      {getSearchBar()}
-      {getSharedModelBanner(sharedModelBannerInfo)}
-      {getCanvas()}
-      {getSnackbar()}
-      {getEditorControls()}
-      {getMetaActionsBar()}
-      {getSnapshot()}
-    </div>
+    <PortalContainerContext.Provider value={props.portalContainer ?? null}>
+      <div
+        ref={rootRef}
+        className={classNames}
+        tabIndex={-1}
+        {...{ [EDITOR_ROOT_ATTRIBUTE]: '' }}
+        onPointerDownCapture={handlePointerDownCapture}
+        onFocusCapture={handleActivity}
+      >
+        {getDrawer()}
+        {getDetails(sharedModelBannerInfo.visible)}
+        {getSearchBar()}
+        {getSharedModelBanner(sharedModelBannerInfo)}
+        {getCanvas()}
+        {getSnackbar()}
+        {getEditorControls()}
+        {getMetaActionsBar()}
+        {getSnapshot()}
+      </div>
+    </PortalContainerContext.Provider>
   );
 });

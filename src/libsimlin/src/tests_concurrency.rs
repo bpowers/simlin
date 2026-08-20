@@ -706,3 +706,107 @@ fn test_concurrent_patches_no_lost_update() {
         simlin_project_unref(proj);
     }
 }
+
+/// `simlin_project_replace_contents` must take `dst`'s datamodel lock BEFORE
+/// its db lock -- the order every other project entry point uses. This test
+/// pins that order: two projects replace each other in tight loops while
+/// other threads compile (with LTM), run, and collect diagnostics on both.
+/// Every one of those readers holds datamodel-then-db, so a replace that
+/// acquired them the other way round deadlocks against them within a few
+/// iterations, and the positive-wait join below fails the test instead of
+/// hanging it. Inverting the two `lock()` lines in `replace_contents` makes
+/// this test time out.
+#[test]
+fn test_replace_contents_lock_order_matches_readers() {
+    use std::sync::mpsc;
+    use std::sync::Arc;
+    use std::thread;
+
+    let base = TestProject::new("lock_order")
+        .with_sim_time(0.0, 10.0, 1.0)
+        .stock("population", "100", &["births"], &["deaths"], None)
+        .flow("births", "population * 0.02", None)
+        .flow("deaths", "population * 0.01", None)
+        .build_datamodel();
+    let a = open_project_from_datamodel(&base);
+    let b = open_project_from_datamodel(&base);
+
+    // Two replacers (a <- b, b <- a) + two reader threads per project.
+    let thread_count = 6;
+    unsafe {
+        for _ in 0..thread_count {
+            simlin_project_ref(a);
+            simlin_project_ref(b);
+        }
+    }
+    let (a_addr, b_addr) = (a as usize, b as usize);
+    let barrier = Arc::new(std::sync::Barrier::new(thread_count));
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+    let iterations = 100;
+
+    let mut handles = Vec::new();
+    for (dst_addr, src_addr) in [(a_addr, b_addr), (b_addr, a_addr)] {
+        let barrier = Arc::clone(&barrier);
+        let done_tx = done_tx.clone();
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            unsafe {
+                let dst = dst_addr as *mut SimlinProject;
+                let src = src_addr as *const SimlinProject;
+                for _ in 0..iterations {
+                    let mut err: *mut SimlinError = std::ptr::null_mut();
+                    simlin_project_replace_contents(dst, src, &mut err);
+                    assert!(err.is_null(), "replace_contents must not fail");
+                }
+                simlin_project_unref(dst);
+                simlin_project_unref(src as *mut SimlinProject);
+            }
+            let _ = done_tx.send(());
+        }));
+    }
+    for proj_addr in [a_addr, a_addr, b_addr, b_addr] {
+        let barrier = Arc::clone(&barrier);
+        let done_tx = done_tx.clone();
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            unsafe {
+                let proj = proj_addr as *mut SimlinProject;
+                for _ in 0..iterations {
+                    let mut err: *mut SimlinError = std::ptr::null_mut();
+                    let model = simlin_project_get_model(proj, std::ptr::null(), &mut err);
+                    assert!(err.is_null() && !model.is_null(), "get_model must succeed");
+                    err = std::ptr::null_mut();
+                    let sim = simlin_sim_new(model, true, &mut err);
+                    assert!(err.is_null() && !sim.is_null(), "sim_new must succeed");
+                    err = std::ptr::null_mut();
+                    simlin_sim_run_to_end(sim, &mut err);
+                    assert!(err.is_null(), "run_to_end must succeed");
+                    simlin_sim_unref(sim);
+                    simlin_model_unref(model);
+                    err = std::ptr::null_mut();
+                    let errors = simlin_project_get_errors(proj, &mut err);
+                    assert!(err.is_null());
+                    if !errors.is_null() {
+                        simlin_error_free(errors);
+                    }
+                }
+                simlin_project_unref(proj);
+            }
+            let _ = done_tx.send(());
+        }));
+    }
+    drop(done_tx);
+
+    for _ in 0..thread_count {
+        done_rx
+            .recv_timeout(POSITIVE_WAIT)
+            .expect("a thread did not finish: replace_contents deadlocked against a reader");
+    }
+    for handle in handles {
+        handle.join().expect("thread panicked");
+    }
+    unsafe {
+        simlin_project_unref(a);
+        simlin_project_unref(b);
+    }
+}

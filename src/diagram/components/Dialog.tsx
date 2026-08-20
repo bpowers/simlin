@@ -7,6 +7,7 @@ import * as RadixDialog from '@radix-ui/react-dialog';
 import clsx from 'clsx';
 
 import styles from './Dialog.module.css';
+import { usePortalContainer } from './portal-container';
 
 export interface DialogProps {
   open: boolean;
@@ -26,6 +27,10 @@ export interface DialogProps {
 export function Dialog(props: DialogProps): React.ReactElement {
   const { open, onClose, disableEscapeKeyDown, disableBackdropClick, className, style, children } = props;
   const ariaLabelledBy = props['aria-labelledby'];
+  // Viewport mode (document.body): overlay and content are fixed against the
+  // viewport. Contained mode (a host box): absolute inside it, so the overlay
+  // covers the box and the dialog centres in it -- see portal-container.ts.
+  const { container, contained } = usePortalContainer();
 
   return (
     <RadixDialog.Root
@@ -36,10 +41,10 @@ export function Dialog(props: DialogProps): React.ReactElement {
         }
       }}
     >
-      <RadixDialog.Portal>
-        <RadixDialog.Overlay className={styles.overlay} />
+      <RadixDialog.Portal container={container}>
+        <RadixDialog.Overlay className={clsx(styles.overlay, contained && styles.contained)} />
         <RadixDialog.Content
-          className={clsx(styles.content, className)}
+          className={clsx(styles.content, contained && styles.contained, className)}
           style={style}
           aria-labelledby={ariaLabelledBy}
           onEscapeKeyDown={(event) => {

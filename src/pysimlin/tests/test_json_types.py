@@ -1147,6 +1147,48 @@ class TestViewAndLoopOps:
             variables=["a"], name="n"
         )
 
+    def test_update_stock_flows_roundtrip(self) -> None:
+        from simlin.json_types import UpdateStockFlows
+
+        op = self._roundtrip_op(
+            UpdateStockFlows(ident="population", inflows=["births"], outflows=["deaths"])
+        )
+        assert op == UpdateStockFlows(ident="population", inflows=["births"], outflows=["deaths"])
+
+    def test_update_stock_flows_wire_shape_matches_engine(self) -> None:
+        # libsimlin patch.rs: {"type": "updateStockFlows", "payload":
+        # {"ident", "inflows", "outflows"}} -- pin the exact wire shape.
+        from simlin.json_types import UpdateStockFlows
+
+        wire = converter.unstructure(UpdateStockFlows(ident="s", inflows=[], outflows=["o"]))
+        assert wire == {
+            "type": "updateStockFlows",
+            "payload": {"ident": "s", "inflows": [], "outflows": ["o"]},
+        }
+
+    def test_every_engine_model_op_has_a_python_type(self) -> None:
+        # The engine's JsonModelOperation vocabulary (libsimlin/src/patch.rs);
+        # a new op there must land here too.
+        from simlin.json_types import JsonModelOperation
+
+        engine_ops = {
+            "upsertAux",
+            "upsertStock",
+            "upsertFlow",
+            "upsertModule",
+            "deleteVariable",
+            "renameVariable",
+            "upsertView",
+            "deleteView",
+            "updateStockFlows",
+            "setLoopName",
+        }
+        python_ops = set()
+        for cls in JsonModelOperation.__args__:  # type: ignore[attr-defined]
+            name = cls.__name__
+            python_ops.add(name[0].lower() + name[1:])
+        assert python_ops == engine_ops
+
     def test_unknown_model_op_type_rejected(self) -> None:
         from simlin.json_types import JsonModelOperation
 

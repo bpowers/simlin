@@ -1,0 +1,4 @@
+# Build outputs staged here by scripts/stage_widget_assets.py; see README.md.
+widget.js
+libsimlin-browser.wasm
+ASSETS.json

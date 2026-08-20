@@ -383,6 +383,7 @@ export interface JsonView {
   elements: JsonViewElement[];
   kind?: string;
   viewBox?: JsonRect;
+  /** Zoom factor (1.0 = 100%); omitted means 1.0. */
   zoom?: number;
   useLetteredPolarity?: boolean;
 }

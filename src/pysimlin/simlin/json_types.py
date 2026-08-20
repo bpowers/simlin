@@ -152,6 +152,7 @@ class View:
     elements: list[ViewElement] = field(default_factory=list)
     kind: str = ""
     view_box: Rect | None = None
+    # Zoom factor (1.0 = 100%, 2.0 = twice as big); 0.0 means the default of 1.0.
     zoom: float = 0.0
 
 
@@ -312,6 +313,20 @@ class DeleteView:
 
 
 @dataclass
+class UpdateStockFlows:
+    """Operation to replace a stock's inflow and outflow lists.
+
+    A targeted alternative to re-upserting the whole stock: only the flow
+    wiring changes, every other field of the stock is preserved by the
+    engine (``patch.rs::apply_update_stock_flows``).
+    """
+
+    ident: str
+    inflows: list[str] = field(default_factory=list)
+    outflows: list[str] = field(default_factory=list)
+
+
+@dataclass
 class SetLoopName:
     """Operation to pin (name) a feedback loop by its variable set.
 
@@ -344,6 +359,7 @@ JsonModelOperation = Union[
     RenameVariable,
     UpsertView,
     DeleteView,
+    UpdateStockFlows,
     SetLoopName,
 ]
 

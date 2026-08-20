@@ -1,0 +1,65 @@
+/* Widget-level chrome around the Editor: the loading/error placeholder and
+   the transient kernel notice. Everything else is the Editor's own CSS. */
+
+.host {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  /* The wrapper is the Editor's portalContainer: the drawer, dialogs, menus
+     and the autocomplete listbox render inside it (their z-indexes are in the
+     1200-1300 band) alongside the notice below (z 20). Isolating the stacking
+     context keeps that whole band local to the widget box: the surfaces stack
+     over the Editor's own chrome and never compete with the notebook page's
+     own layers by raw z-index. They are clipped to the box by overflow: hidden,
+     which is the intended containment. */
+  isolation: isolate;
+  border: 1px solid var(--color-border, #d6d6d6);
+  border-radius: 4px;
+  box-sizing: border-box;
+  font-family: Roboto, system-ui, sans-serif;
+}
+
+.placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  /* --color-text-muted is the theme.css token (light and dark values); the
+     fallback only matters if the scoped stylesheet failed to load. */
+  color: var(--color-text-muted, #6b6b6b);
+  font-size: 14px;
+  text-align: center;
+  white-space: pre-wrap;
+}
+
+.placeholderError {
+  color: var(--color-error, #c62828);
+}
+
+/* Bottom-centre, above the Editor's own snackbar viewport (bottom: 8px, 40px
+   toasts) so a kernel notice and an Editor error toast stack rather than
+   overlap, and above the tool dial FAB (bottom-left, 56px tall, top edge at
+   72px) so a notice that wraps to two lines in a narrow cell clears it; the
+   search bar and details drawer own the top of the box, so anywhere along
+   the top edge would cover "Find in Model". */
+.notice {
+  position: absolute;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100% - 32px);
+  text-align: center;
+  z-index: 20;
+  padding: 6px 12px;
+  border-radius: 4px;
+  background: rgba(33, 33, 33, 0.92);
+  color: #ffffff;
+  font-size: 13px;
+  pointer-events: none;
+}
+
+.noticeWarn {
+  background: var(--color-error, #c62828);
+}

@@ -1,3 +1,8 @@
+/* Overlay surfaces: fixed against the viewport when portaled to
+   document.body (the default), absolute inside the host box in contained
+   mode (.contained, from the Editor's portalContainer; see
+   portal-container.ts). Sizes are percentages of the containing block, not
+   viewport units, so the same rules serve both modes. */
 .overlay {
   background-color: var(--color-backdrop);
   position: fixed;
@@ -16,6 +21,11 @@
 }
 
 .content {
+  /* Portaled surface: it inherits from <body>, not the editor root, so pin the
+     typography a host without reset.css would otherwise leave to the page. */
+  font-family: var(--font-family-base);
+  font-size: 1rem;
+  line-height: 1.5;
   background-color: var(--color-surface);
   border-radius: 4px;
   box-shadow: var(--shadow-24);
@@ -23,9 +33,9 @@
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: 90vw;
+  width: 90%;
   max-width: 600px;
-  max-height: 85vh;
+  max-height: 85%;
   overflow-y: auto;
   z-index: 1300;
   animation: contentShow 150ms cubic-bezier(0.4, 0, 0.2, 1);
@@ -44,6 +54,10 @@
 
 .content:focus {
   outline: none;
+}
+
+.contained {
+  position: absolute;
 }
 
 .title {

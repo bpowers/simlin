@@ -1,0 +1,1993 @@
+"""File-backed projects: ``simlin.open()``, save/save_as/reload, autosave,
+revision/dirty tracking, change notification, and the disk watcher.
+
+Test names follow the design's acceptance criteria
+(``pysimlin-widget.AC1.n`` / ``AC3.n``) where one applies.
+
+"""
+
+from __future__ import annotations
+
+import gc
+import json
+import re
+import shutil
+import threading
+import time
+import warnings
+from dataclasses import replace
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+import pytest
+
+import simlin
+from simlin import (
+    Aux,
+    ChangeEvent,
+    Diagram,
+    FileFormat,
+    Flow,
+    Model,
+    Project,
+    SimlinImportError,
+    SimlinRuntimeError,
+    Stock,
+)
+from simlin._disk import _UNKNOWN, content_hash
+
+from .conftest import get_repo_root
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+FIXTURES = Path(__file__).parent / "fixtures"
+SDAI_FIXTURE = get_repo_root() / "test" / "sd-ai-simple.sd.json"
+
+# A watch interval long enough that the poll thread never fires on its own
+# during a test; the tests drive polls deterministically via poll_once().
+IDLE = 3600.0
+
+
+def _copy(src: Path, tmp_path: Path, name: str | None = None) -> Path:
+    dst = tmp_path / (name or src.name)
+    shutil.copyfile(src, dst)
+    return dst
+
+
+def _add_aux(model: Model, name: str = "new_aux", equation: str = "42") -> None:
+    with model.edit() as (_, patch):
+        patch.upsert(Aux(name=name, equation=equation))
+
+
+def _watch_idle(model: Model) -> None:
+    """Attach a watcher whose thread stays asleep; tests call poll_once()."""
+    project = model.project
+    assert project is not None
+    project.watch(True, interval=IDLE)
+
+
+def _poll(model: Model) -> None:
+    project = model.project
+    assert project is not None
+    watcher = project._watcher
+    assert watcher is not None
+    watcher.poll_once()
+
+
+class _Events:
+    def __init__(self) -> None:
+        self.events: list[ChangeEvent] = []
+        self.arrived = threading.Event()
+
+    def __call__(self, event: ChangeEvent) -> None:
+        self.events.append(event)
+        self.arrived.set()
+
+    @property
+    def sources(self) -> list[str]:
+        return [e.source for e in self.events]
+
+
+# ── AC1.1: open() ───────────────────────────────────────────────────────
+
+
+class TestOpen:
+    @pytest.mark.parametrize(
+        ("fixture", "expected"),
+        [
+            (FIXTURES / "teacup.stmx", FileFormat.XMILE),
+            (FIXTURES / "teacup.xmile", FileFormat.XMILE),
+            (FIXTURES / "teacup.mdl", FileFormat.MDL),
+            (Path(__file__).parent / "logistic-growth.sd.json", FileFormat.NATIVE_JSON),
+            (FIXTURES / "simple.json", FileFormat.NATIVE_JSON),
+            (SDAI_FIXTURE, FileFormat.SDAI_JSON),
+        ],
+    )
+    def test_ac1_1_open_sets_path_format_revision(
+        self, tmp_path: Path, fixture: Path, expected: FileFormat
+    ) -> None:
+        path = _copy(fixture, tmp_path)
+        model = simlin.open(path, watch=False)
+        assert isinstance(model, Model)
+        assert model.project is not None
+        assert model.project.path == Path(path)
+        assert model.path == Path(path)
+        assert model.project.format == expected
+        assert model.revision == 0
+        assert model.dirty is False
+        assert model.project.autosave is True
+        assert model.project.watching is False
+        assert len(model.get_var_names()) > 0
+
+    def test_ac1_1_xml_suffix_is_xmile(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.xmile", tmp_path, "teacup.xml")
+        model = simlin.open(path, watch=False)
+        assert model.project is not None
+        assert model.project.format == FileFormat.XMILE
+
+    def test_ac1_1_unknown_suffix_sniffs_content(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path, "teacup.model")
+        model = simlin.open(path, watch=False)
+        assert model.project is not None
+        assert model.project.format == FileFormat.XMILE
+
+    def test_ac1_1_unknown_suffix_unrecognisable_raises_naming_path(self, tmp_path: Path) -> None:
+        path = tmp_path / "mystery.dat"
+        path.write_bytes(b"\x00\x01 nothing recognisable")
+        with pytest.raises(SimlinImportError, match=r"mystery\.dat"):
+            simlin.open(path)
+
+    def test_missing_file_raises_import_error(self, tmp_path: Path) -> None:
+        with pytest.raises(SimlinImportError, match="not found"):
+            simlin.open(tmp_path / "absent.stmx")
+
+    def test_malformed_known_suffix_is_engine_error(self, tmp_path: Path) -> None:
+        # Same class simlin.load raises for a bad file: the engine's parse
+        # error, with the format-specific message.
+        path = tmp_path / "bad.stmx"
+        path.write_bytes(b"not xml at all")
+        with pytest.raises(SimlinRuntimeError, match="XMILE"):
+            simlin.open(path)
+
+    def test_open_accepts_str_and_watch_flag(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(str(path), watch=True)
+        project = model.project
+        assert project is not None
+        try:
+            assert project.watching is True
+            assert project.path == path
+        finally:
+            project.watch(False)
+        assert project.watching is False
+
+    def test_load_stays_in_memory(self, tmp_path: Path) -> None:
+        # AC1.6: load() keeps its semantics; the project has no path.
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.load(path)
+        assert model.path is None
+        assert model.project is not None
+        assert model.project.format is None
+        assert model.revision == 0
+
+    def test_load_reads_sdai_json(self) -> None:
+        # The table fixes load()'s missing SD-AI case: content-sniffed.
+        model = simlin.load(SDAI_FIXTURE)
+        assert "population" in {n.lower() for n in model.get_var_names()}
+
+    def test_load_unknown_suffix_unrecognisable_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "blob.dat"
+        path.write_bytes(b"\x00garbage")
+        with pytest.raises(SimlinImportError, match=r"blob\.dat"):
+            simlin.load(path)
+
+
+# ── AC1.2: edit() autosave / dirty / save() ─────────────────────────────
+
+
+class TestEditAutosave:
+    def test_ac1_2_xmile_edit_rewrites_file_in_xmile(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        before = path.read_bytes()
+        model = simlin.open(path, watch=False)
+        _add_aux(model)
+        assert model.revision == 1
+        assert model.dirty is False
+        after = path.read_bytes()
+        assert after != before
+        assert after.lstrip().startswith(b"<?xml")
+        assert b"<xmile" in after
+        assert b"new_aux" in after
+        reopened = simlin.load(path)
+        assert reopened.get_variable("new_aux") is not None
+
+    def test_ac1_2_native_json_edit_rewrites_pretty_json(self, tmp_path: Path) -> None:
+        path = _copy(Path(__file__).parent / "logistic-growth.sd.json", tmp_path)
+        model = simlin.open(path, watch=False)
+        _add_aux(model)
+        data = path.read_bytes()
+        doc = json.loads(data)
+        assert "models" in doc
+        names = {a["name"] for a in doc["models"][0]["auxiliaries"]}
+        assert "new_aux" in names
+        # Pretty-printed like simlin-serve / simlin-mcp-core write it.
+        assert data.startswith(b"{\n  ")
+        assert simlin.load(path).get_variable("new_aux") is not None
+
+    def test_ac1_2_sdai_json_edit_rewrites_sdai(self, tmp_path: Path) -> None:
+        path = _copy(SDAI_FIXTURE, tmp_path, "sdai.json")
+        model = simlin.open(path, watch=False)
+        assert model.project is not None
+        assert model.project.format == FileFormat.SDAI_JSON
+        _add_aux(model)
+        doc = json.loads(path.read_bytes())
+        assert "variables" in doc
+        assert "models" not in doc
+        assert any(v["name"] == "new_aux" for v in doc["variables"])
+        assert simlin.load(path).get_variable("new_aux") is not None
+
+    def test_ac1_2_protobuf_round_trip(self, tmp_path: Path) -> None:
+        source = simlin.load(FIXTURES / "teacup.stmx").project
+        assert source is not None
+        path = tmp_path / "teacup.pb"
+        source.save_as(path)
+        model = simlin.open(path, watch=False)
+        assert model.project is not None
+        assert model.project.format == FileFormat.PROTOBUF
+        _add_aux(model)
+        assert simlin.open(path, watch=False).get_variable("new_aux") is not None
+
+    def test_ac1_2_mdl_edit_rewrites_file_in_mdl_with_sketch(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.mdl", tmp_path)
+        model = simlin.open(path, watch=False)
+        _add_aux(model)
+        text = path.read_text()
+        # Vensim text uses display names ("new aux"); the sketch section must
+        # survive the rewrite and carry an element for the new variable.
+        assert re.search(r"^new[ _]aux\s*=", text, re.MULTILINE)
+        assert "Sketch information" in text
+        assert re.search(r"^10,\d+,new[ _]aux,", text, re.MULTILINE)
+        reopened = simlin.open(path, watch=False)
+        assert reopened.get_variable("new_aux") is not None
+        assert reopened.project is not None
+        assert reopened.project.format == FileFormat.MDL
+
+    def test_mdl_lossiness_warnings_fire_once_per_distinct_message(self, tmp_path: Path) -> None:
+        # teacup.stmx carries non-negative flags the MDL writer cannot
+        # express; a notebook autosaving an .mdl on every edit must not repeat
+        # that warning each time.
+        model = simlin.load(FIXTURES / "teacup.stmx")
+        path = tmp_path / "teacup.mdl"
+        with warnings.catch_warnings(record=True) as first:
+            warnings.simplefilter("always")
+            model.project.save_as(path)  # type: ignore[union-attr]
+        messages = [str(w.message) for w in first if w.category is RuntimeWarning]
+        assert messages, "fixture must trigger at least one lossiness warning"
+        assert len(messages) == len(set(messages))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _add_aux(model, "a1")
+            _add_aux(model, "a2")
+            model.project.to_mdl()  # type: ignore[union-attr]
+        # A different project has its own memory (the .mdl on disk has
+        # already lost the flags, so use the XMILE source again).
+        with pytest.warns(RuntimeWarning, match="Vensim export"):
+            simlin.load(FIXTURES / "teacup.stmx").project.to_mdl()  # type: ignore[union-attr]
+
+    def test_ac1_2_revision_increments_by_exactly_one_per_edit(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        for i in range(3):
+            _add_aux(model, f"aux_{i}")
+            assert model.revision == i + 1
+
+    def test_ac1_2_autosave_false_leaves_file_until_save(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        before = path.read_bytes()
+        model = simlin.open(path, autosave=False, watch=False)
+        _add_aux(model)
+        assert model.revision == 1
+        assert model.dirty is True
+        assert path.read_bytes() == before
+        model.save()
+        assert model.dirty is False
+        assert model.revision == 1, "save() writes; it is not a change"
+        assert path.read_bytes() != before
+        assert simlin.load(path).get_variable("new_aux") is not None
+
+    def test_autosave_is_a_live_switch(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        project = model.project
+        assert project is not None
+        project.autosave = False
+        _add_aux(model, "a")
+        assert model.dirty is True
+        project.autosave = True
+        _add_aux(model, "b")
+        assert model.dirty is False
+        assert simlin.load(path).get_variable("a") is not None
+
+    def test_rejected_edit_changes_nothing(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        before = path.read_bytes()
+        model = simlin.open(path, watch=False)
+        with pytest.raises(SimlinRuntimeError), model.edit() as (_, patch):
+            patch.upsert(Aux(name="broken", equation="no_such_var * 2"))
+        assert model.revision == 0
+        assert model.dirty is False
+        assert path.read_bytes() == before
+
+    def test_dry_run_edit_changes_nothing(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        before = path.read_bytes()
+        model = simlin.open(path, watch=False)
+        with model.edit(dry_run=True) as (_, patch):
+            patch.upsert(Aux(name="fine", equation="1"))
+        assert model.revision == 0
+        assert path.read_bytes() == before
+
+    def test_set_sim_specs_is_an_autosaved_change(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        base = model.base_case
+        model.project.set_sim_specs(stop=5.0)  # type: ignore[union-attr]
+        assert model.revision == 1
+        assert model.dirty is False
+        assert simlin.load(path).time_spec.stop == 5.0
+        # The cached base case must not survive a sim-spec change.
+        assert model.base_case is not base
+        assert model.base_case.results.index[-1] == 5.0
+
+    def test_auto_layout_is_an_autosaved_change(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        model.project.auto_layout()  # type: ignore[union-attr]
+        assert model.revision == 1
+        assert model.dirty is False
+
+    def test_save_failure_raises_and_keeps_change_dirty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        before = path.read_bytes()
+        model = simlin.open(path, watch=False)
+        events = _Events()
+        model.project.on_change(events)  # type: ignore[union-attr]
+
+        def fail(*args: object, **kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr("simlin.project.atomic_write", fail)
+        with pytest.raises(OSError, match="disk full"):
+            _add_aux(model)
+        # The in-memory change is real: revision advanced, listeners heard
+        # about it, the variable exists, and dirty says the file lags.
+        assert model.revision == 1
+        assert events.sources == ["edit"]
+        assert model.get_variable("new_aux") is not None
+        assert model.dirty is True
+        assert path.read_bytes() == before
+        with pytest.raises(OSError, match="disk full"):
+            model.save()
+        assert model.dirty is True
+        monkeypatch.undo()
+        model.save()
+        assert model.dirty is False
+        assert simlin.load(path).get_variable("new_aux") is not None
+
+
+# ── AC1.3: incremental layout ───────────────────────────────────────────
+
+
+def _view_positions(path: Path) -> dict[str, tuple[float, float]]:
+    """name -> (x, y) for the named elements of the first model's first view."""
+    project = simlin.load(path).project
+    assert project is not None
+    return _positions_of(project)
+
+
+def _positions_of(project: Project) -> dict[str, tuple[float, float]]:
+    """name -> (x, y) for the named elements of the first model's first view."""
+    doc = json.loads(project.serialize_json())
+    views = doc["models"][0].get("views") or []
+    assert views, "fixture must carry a view"
+    return {
+        e["name"]: (e["x"], e["y"])
+        for e in views[0]["elements"]
+        if "name" in e and e["type"] in ("stock", "flow", "aux", "module")
+    }
+
+
+def _view_geometry(path: Path) -> dict[str, tuple[float, float, str]]:
+    """name -> (x, y, labelSide) for the named elements of the first view."""
+    project = simlin.load(path).project
+    assert project is not None
+    doc = json.loads(project.serialize_json())
+    views = doc["models"][0].get("views") or []
+    assert views, "fixture must carry a view"
+    return {
+        e["name"]: (e["x"], e["y"], e["labelSide"])
+        for e in views[0]["elements"]
+        if "name" in e and e["type"] in ("stock", "flow", "aux", "module")
+    }
+
+
+class TestIncrementalLayout:
+    def test_ac1_3_unrelated_edit_keeps_every_existing_label_side(self, tmp_path: Path) -> None:
+        # Pin Room_Temperature's label on the right, as a widget user who
+        # dragged it there would have, and let the other three fall to the
+        # reader's defaults. Every one of them, not just the pinned one, must
+        # come back byte-identical after an edit that only adds an unrelated
+        # variable -- otherwise the next Python edit undoes the human's drag.
+        path = _copy(FIXTURES / "teacup.xmile", tmp_path)
+        unpinned = '<aux name="Room_Temperature" x="369" y="250"/>'
+        text = path.read_text()
+        assert unpinned in text, "fixture drifted: Room_Temperature element not found"
+        path.write_text(text.replace(unpinned, unpinned[:-2] + ' label_side="right"/>'))
+        before = _view_geometry(path)
+        assert before["Room_Temperature"][2] == "right"
+        assert len({g[2] for g in before.values()}) > 1, "fixture mixes label sides"
+        model = simlin.open(path, watch=False)
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="x", equation="1"))
+        after = _view_geometry(path)
+        assert "x" in after
+        for name, geometry in before.items():
+            assert after[name] == geometry, f"{name} changed during incremental layout"
+
+    def test_ac1_3_new_variable_gets_a_view_element_and_others_keep_positions(
+        self, tmp_path: Path
+    ) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        before = _view_positions(path)
+        assert before, "teacup.stmx has a diagram"
+        model = simlin.open(path, watch=False)
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="Insulation", equation="0.5"))
+        after = _view_positions(path)
+        assert "Insulation" in after
+        for name, xy in before.items():
+            assert after[name] == xy, f"{name} moved during incremental layout"
+
+    def test_ac1_3_model_without_view_gets_a_full_layout(self, tmp_path: Path) -> None:
+        project = Project.new(name="scratch")
+        path = tmp_path / "scratch.sd.json"
+        project.save_as(path)
+        model = project.get_model()
+        with model.edit() as (_, patch):
+            patch.upsert(Stock(name="population", initial_equation="50", inflows=["births"]))
+            patch.upsert(Flow(name="births", equation="population * rate"))
+            patch.upsert(Aux(name="rate", equation="0.1"))
+        positions = _view_positions(path)
+        assert set(positions) == {"population", "births", "rate"}
+
+    def test_ac1_3_incremental_layout_keeps_the_editor_viewport(self, tmp_path: Path) -> None:
+        # The view box is the editor's viewport (pan offset + canvas size),
+        # not the content bounds; a kernel-side edit that re-boxed it to the
+        # content would snap the human's pan back and make the diagram jump
+        # on every "Updated from Python".  Start from a panned, resized box
+        # no bounds computation would produce.
+        source = simlin.load(FIXTURES / "teacup.stmx").project
+        assert source is not None
+        doc = json.loads(source.serialize_json())
+        panned = {"x": -321.5, "y": 77.25, "width": 1234.0, "height": 567.0}
+        doc["models"][0]["views"][0]["viewBox"] = panned
+        path = tmp_path / "panned.sd.json"
+        path.write_text(json.dumps(doc))
+        model = simlin.open(path, watch=False)
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="Insulation", equation="0.5"))
+        after = json.loads(path.read_text())["models"][0]["views"][0]
+        assert after["viewBox"] == panned
+        assert any(e.get("name") == "Insulation" for e in after["elements"])
+
+    def test_deleted_variable_loses_its_element(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="Insulation", equation="0.5"))
+        assert "Insulation" in _view_positions(path)
+        with model.edit() as (_, patch):
+            patch.delete_variable("Insulation")
+        assert "Insulation" not in _view_positions(path)
+
+    def test_in_memory_edits_do_not_persist_a_layout(self) -> None:
+        # Documented contract (see test_rendering): a diagram is kept in step
+        # with the variables only when there is one to keep -- a model with a
+        # view, or any file-backed project.  A diagram-less in-memory model
+        # stays diagram-less until auto_layout() or a display asks for one.
+        project = Project.new(name="scratch")
+        model = project.get_model()
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="rate", equation="0.1"))
+        doc = json.loads(project.serialize_json())
+        assert doc["models"][0].get("views", []) == []
+
+    def test_in_memory_model_with_a_view_keeps_it_in_step(self) -> None:
+        # The other in-memory arm: a model that has a diagram (here, loaded
+        # from a file that carries one) gets the incremental layout, so a
+        # displayed in-memory model's editor shows the variables Python adds
+        # and nothing already placed moves.
+        model = simlin.load(FIXTURES / "teacup.stmx")
+        project = model.project
+        assert project is not None
+        assert project.path is None
+        before = _positions_of(project)
+        assert before, "teacup.stmx has a diagram"
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="Insulation", equation="0.5"))
+        after = _positions_of(project)
+        assert "Insulation" in after
+        for name, xy in before.items():
+            assert after[name] == xy, f"{name} moved during incremental layout"
+
+    def test_in_memory_view_only_edit_does_not_relayout(self) -> None:
+        model = simlin.load(FIXTURES / "teacup.stmx")
+        project = model.project
+        assert project is not None
+        before = _positions_of(project)
+        with model.edit() as (_, patch):
+            patch.set_loop_name("cooling", ["teacup_temperature", "heat_loss_to_room"])
+        assert _positions_of(project) == before
+
+    def test_view_only_edit_does_not_relayout(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        with model.edit() as (_, patch):
+            patch.set_loop_name("cooling", ["teacup_temperature", "heat_loss_to_room"])
+        assert model.revision == 1
+        assert _view_positions(path) == _view_positions(FIXTURES / "teacup.stmx")
+
+
+# ── AC1.5 / AC1.6: reload idempotence, in-memory projects, save_as ──────
+
+
+class TestInMemoryAndSaveAs:
+    def test_ac1_6_save_without_path_raises_clear_error(self) -> None:
+        project = Project.new(name="p")
+        with pytest.raises(SimlinRuntimeError, match="save_as"):
+            project.save()
+        with pytest.raises(SimlinRuntimeError, match="save_as"):
+            project.get_model().save()
+
+    def test_ac1_6_reload_without_path_raises(self) -> None:
+        project = Project.new(name="p")
+        with pytest.raises(SimlinRuntimeError, match="no file path"):
+            project.reload()
+
+    def test_ac1_6_watch_without_path_raises(self) -> None:
+        project = Project.new(name="p")
+        with pytest.raises(SimlinRuntimeError, match="save_as"):
+            project.watch(True)
+
+    def test_ac1_6_in_memory_edits_bump_revision_and_are_dirty(self) -> None:
+        project = Project.new(name="p")
+        model = project.get_model()
+        _add_aux(model)
+        assert model.revision == 1
+        assert model.dirty is True
+        assert model.path is None
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("m.stmx", FileFormat.XMILE),
+            ("m.xmile", FileFormat.XMILE),
+            ("m.sd.json", FileFormat.NATIVE_JSON),
+            ("m.json", FileFormat.NATIVE_JSON),
+            ("m.pb", FileFormat.PROTOBUF),
+        ],
+    )
+    def test_ac1_6_save_as_adopts_path_and_format(
+        self, tmp_path: Path, name: str, expected: FileFormat
+    ) -> None:
+        model = simlin.load(FIXTURES / "teacup.stmx")
+        project = model.project
+        assert project is not None
+        target = tmp_path / name
+        project.save_as(target)
+        assert project.path == target
+        assert project.format == expected
+        assert project.dirty is False
+        assert project.revision == 0
+        assert target.exists()
+        reopened = simlin.open(target, watch=False)
+        assert reopened.project is not None
+        assert reopened.project.format == expected
+        assert set(reopened.get_var_names()) == set(model.get_var_names())
+        # And it is now file-backed: the next edit autosaves there.
+        _add_aux(model)
+        assert simlin.open(target, watch=False).get_variable("new_aux") is not None
+
+    def test_ac1_6_save_as_mdl(self, tmp_path: Path) -> None:
+        model = simlin.load(FIXTURES / "teacup.stmx")
+        target = tmp_path / "teacup_out.mdl"
+        model.project.save_as(target)  # type: ignore[union-attr]
+        assert model.project.format == FileFormat.MDL  # type: ignore[union-attr]
+        reopened = simlin.open(target, watch=False)
+        assert set(reopened.get_var_names()) == set(model.get_var_names())
+
+    def test_m7_save_as_read_only_suffix_raises(self, tmp_path: Path) -> None:
+        project = simlin.load(FIXTURES / "teacup.stmx").project
+        assert project is not None
+        with pytest.raises(SimlinRuntimeError, match="read but not written"):
+            project.save_as(tmp_path / "teacup.vpm")
+        with pytest.raises(SimlinRuntimeError, match="read but not written"):
+            project.save_as(tmp_path / "teacup.proto")
+        assert project.path is None
+
+    def test_save_as_explicit_format_overrides_suffix(self, tmp_path: Path) -> None:
+        project = simlin.load(FIXTURES / "teacup.stmx").project
+        assert project is not None
+        target = tmp_path / "teacup.txt"
+        project.save_as(target, format=FileFormat.XMILE)
+        assert project.format == FileFormat.XMILE
+        assert target.read_bytes().lstrip().startswith(b"<?xml")
+
+    def test_save_as_unknown_suffix_without_format_raises(self, tmp_path: Path) -> None:
+        project = simlin.load(FIXTURES / "teacup.stmx").project
+        assert project is not None
+        with pytest.raises(ValueError, match="format="):
+            project.save_as(tmp_path / "teacup.txt")
+        assert project.path is None
+
+    def test_save_as_moves_the_watcher(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=True)
+        project = model.project
+        assert project is not None
+        try:
+            target = tmp_path / "moved.stmx"
+            project.save_as(target)
+            assert project.watching is True
+            assert project._watcher is not None
+            assert project._watcher.path == target
+        finally:
+            project.watch(False)
+
+    def test_ac1_5_reload_is_idempotent_when_unchanged(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        events = _Events()
+        model.project.on_change(events)  # type: ignore[union-attr]
+        assert model.reload() is False
+        _add_aux(model)
+        assert model.reload() is False, "our own write is not a change to reload"
+        assert model.revision == 1
+        assert events.sources == ["edit"]
+
+    def test_close_stops_watching_and_drops_listeners(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        project = Project.open(path)
+        events = _Events()
+        project.on_change(events)
+        assert project.watching is True
+        with project:
+            pass
+        assert project.watching is False
+        assert project._listeners == {}
+
+    def test_watch_true_racing_close_cannot_leave_a_watcher_alive(self, tmp_path: Path) -> None:
+        # close() detaches the watcher and marks the project closed in ONE
+        # locked step, and only then retires the old watcher outside the
+        # lock.  A watch(True) from another thread that lands in that window
+        # -- modelled deterministically by calling it from the retire step,
+        # the first moment close() runs with the lock released -- must see a
+        # closed project and refuse, not install a new poll thread that
+        # outlives the close.
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        project = Project.open(path, watch=True)
+        original_retire = Project._retire_watcher
+        racer: list[BaseException | None] = []
+
+        def retire_and_race(watcher: object) -> None:
+            try:
+                project.watch(True)
+                racer.append(None)
+            except SimlinRuntimeError as exc:
+                racer.append(exc)
+            original_retire(watcher)  # type: ignore[arg-type]
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(project, "_retire_watcher", retire_and_race)
+            project.close()
+        assert len(racer) == 1
+        assert isinstance(racer[0], SimlinRuntimeError)
+        assert project.watching is False
+        assert project._watcher is None
+        assert not any(t.name.startswith("simlin-watch:") for t in threading.enumerate())
+
+
+class TestConcurrency:
+    def test_concurrent_edits_serialise_and_the_file_stays_valid(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        events = _Events()
+        model.project.on_change(events)  # type: ignore[union-attr]
+        errors: list[BaseException] = []
+
+        def worker(k: int) -> None:
+            # Edits that raced another thread's commit are rejected as stale
+            # (their `current` snapshot no longer describes the model); the
+            # correct client response is to re-run the edit.
+            try:
+                for i in range(5):
+                    while True:
+                        try:
+                            _add_aux(model, f"t{k}_a{i}", str(i))
+                            break
+                        except SimlinRuntimeError as exc:
+                            if "changed during edit" not in str(exc):
+                                raise
+            except BaseException as exc:  # pragma: no cover - reported below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(k,)) for k in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+        assert model.revision == 20
+        assert sorted(e.revision for e in events.events) == list(range(1, 21))
+        assert model.dirty is False
+        reopened = simlin.load(path)
+        names = set(reopened.get_var_names())
+        assert {f"t{k}_a{i}" for k in range(4) for i in range(5)} <= names
+
+
+# ── on_change ───────────────────────────────────────────────────────────
+
+
+class TestOnChange:
+    def test_edit_fires_with_source_and_revision(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        events = _Events()
+        unsubscribe = model.project.on_change(events)  # type: ignore[union-attr]
+        _add_aux(model, "a")
+        _add_aux(model, "b")
+        assert events.events == [ChangeEvent("edit", 1), ChangeEvent("edit", 2)]
+        unsubscribe()
+        _add_aux(model, "c")
+        assert len(events.events) == 2
+        unsubscribe()  # idempotent
+
+    def test_dispatch_marshals_the_call(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        queued: list[Callable[[], None]] = []
+        events = _Events()
+        model.project.on_change(events, dispatch=queued.append)  # type: ignore[union-attr]
+        _add_aux(model)
+        assert events.events == [], "callback must not run until dispatched"
+        assert len(queued) == 1
+        queued[0]()
+        assert events.events == [ChangeEvent("edit", 1)]
+
+    def test_callback_exception_is_a_warning_not_an_edit_failure(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+
+        def bad(event: ChangeEvent) -> None:
+            raise RuntimeError("listener bug")
+
+        model.project.on_change(bad)  # type: ignore[union-attr]
+        with pytest.warns(RuntimeWarning, match="listener bug"):
+            _add_aux(model)
+        assert model.revision == 1
+        assert model.get_variable("new_aux") is not None
+
+    def test_dispatcher_exception_is_a_warning_and_later_subscribers_still_hear(
+        self, tmp_path: Path
+    ) -> None:
+        # A dispatcher that raises synchronously (a closed kernel IO loop, a
+        # shut-down executor) is a dead subscriber, not a failed edit: the
+        # change is committed and written before delivery, so it is
+        # reported like a raising callback and the remaining subscribers
+        # are still notified.
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+
+        def closed_loop(fn: Callable[[], None]) -> None:
+            raise RuntimeError("IOLoop is closed")
+
+        never = _Events()
+        after = _Events()
+        model.project.on_change(never, dispatch=closed_loop)  # type: ignore[union-attr]
+        model.project.on_change(after)  # type: ignore[union-attr]
+        with pytest.warns(RuntimeWarning, match="IOLoop is closed"):
+            _add_aux(model)
+        assert model.revision == 1
+        assert model.dirty is False
+        assert simlin.load(path).get_variable("new_aux") is not None
+        assert never.events == []
+        assert after.events == [ChangeEvent("edit", 1)]
+        # Once per distinct message: the same dead loop does not warn again.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _add_aux(model, "again")
+        assert [str(w.message) for w in caught] == []
+        assert after.events == [ChangeEvent("edit", 1), ChangeEvent("edit", 2)]
+
+    def test_callbacks_run_outside_the_project_locks(self, tmp_path: Path) -> None:
+        # A listener that itself edits the project must not deadlock, and
+        # nested edits are ordinary changes.
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        seen: list[int] = []
+
+        def follow_up(event: ChangeEvent) -> None:
+            seen.append(event.revision)
+            if event.revision == 1:
+                _add_aux(model, "from_listener")
+
+        model.project.on_change(follow_up)  # type: ignore[union-attr]
+        _add_aux(model, "first")
+        assert seen == [1, 2]
+        assert model.revision == 2
+
+
+# ── watcher wiring (echo suppression, unparsable content, dirty conflicts)
+
+
+class TestWatcherWiring:
+    def test_ac1_5_own_writes_are_echoes(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        _watch_idle(model)
+        events = _Events()
+        model.project.on_change(events)  # type: ignore[union-attr]
+        try:
+            _add_aux(model)
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                _poll(model)
+                _poll(model)
+            assert events.sources == ["edit"]
+            assert model.revision == 1
+        finally:
+            model.project.watch(False)  # type: ignore[union-attr]
+
+    def test_watch_is_idempotent_and_toggleable(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        project = Project.open(path, watch=False)
+        assert project.watching is False
+        project.watch(True, interval=IDLE)
+        first = project._watcher
+        project.watch(True, interval=IDLE)
+        assert project._watcher is first, "same path and interval reuses the watcher"
+        project.watch(True, interval=IDLE / 2)
+        assert project._watcher is not first, "a new interval restarts it"
+        project.watch(False)
+        assert project.watching is False
+        project.watch(False)
+
+    def test_external_change_while_dirty_is_held_back_with_one_warning(
+        self, tmp_path: Path
+    ) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, autosave=False, watch=False)
+        _watch_idle(model)
+        try:
+            _add_aux(model, "local_change")
+            assert model.dirty is True
+            external = FIXTURES / "teacup.xmile"
+            shutil.copyfile(external, path)
+            with pytest.warns(RuntimeWarning, match="unsaved local changes") as record:
+                _poll(model)
+            assert len(record) == 1
+            assert (record[0].filename, record[0].lineno) == (str(path), 0)
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                _poll(model)  # same bytes again: silent
+            assert model.revision == 1
+            assert model.get_variable("local_change") is not None
+            # save() refuses to clobber the external change; force=True
+            # resolves the conflict our way and the file now echoes us.
+            with pytest.raises(SimlinRuntimeError, match="changed on disk"):
+                model.save()
+            model.project.save(force=True)  # type: ignore[union-attr]
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                _poll(model)
+            assert content_hash(path.read_bytes()) == model.project._sync.disk_hash  # type: ignore[union-attr]
+        finally:
+            model.project.watch(False)  # type: ignore[union-attr]
+
+    def test_ac1_4_external_write_reloads_in_place(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        _watch_idle(model)
+        events = _Events()
+        model.project.on_change(events)  # type: ignore[union-attr]
+        try:
+            base = model.base_case
+            assert model.get_variable("Insulation") is None
+            # An external writer: a second, independent project edits the file.
+            other = simlin.open(path, watch=False)
+            with other.edit() as (_, patch):
+                patch.upsert(Aux(name="Insulation", equation="0.5"))
+            _poll(model)
+            assert model.revision == 1
+            assert events.events == [ChangeEvent("disk", 1)]
+            assert model.get_variable("Insulation") is not None, (
+                "the pre-existing Model handle must see the reloaded contents"
+            )
+            assert model.base_case is not base
+            assert "insulation" in model.run().results.columns
+            assert model.dirty is False
+        finally:
+            model.project.watch(False)  # type: ignore[union-attr]
+
+    def test_ac1_4_reload_invalidates_every_model_handle(self, tmp_path: Path) -> None:
+        # Several handles to the same model (get_model() called more than
+        # once) must all drop their cached base_case, not just the one that
+        # happens to trigger the reload.
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        project = Project.open(path, watch=False)
+        handles = [project.get_model() for _ in range(3)]
+        runs = [h.base_case for h in handles]
+        writer = simlin.open(path, watch=False)
+        writer.project.set_sim_specs(stop=writer.time_spec.stop / 2)  # type: ignore[union-attr]
+        assert handles[0].reload() is True
+        for handle, before in zip(handles, runs, strict=True):
+            assert handle.base_case is not before
+            assert handle.base_case.results.index[-1] == writer.time_spec.stop
+
+    def test_ac1_4_unparsable_content_keeps_last_known_good(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        _watch_idle(model)
+        try:
+            names = set(model.get_var_names())
+            path.write_bytes(b"<xmile>this is not a model")
+            with pytest.warns(RuntimeWarning, match="could not be loaded") as record:
+                _poll(model)
+            assert len(record) == 1
+            # Raised on the poll thread, where no user frame exists: the
+            # warning is located at the file it is about, not at an internal
+            # frame of project.py, and line 0 so no "source line" is quoted.
+            assert record[0].filename == str(path)
+            assert record[0].lineno == 0
+            assert str(path) in str(record[0].message)
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                _poll(model)  # same bad bytes: no second warning
+            assert model.revision == 0
+            assert set(model.get_var_names()) == names
+            # A subsequent valid write is picked up.
+            shutil.copyfile(FIXTURES / "teacup.xmile", path)
+            _poll(model)
+            assert model.revision == 1
+        finally:
+            model.project.watch(False)  # type: ignore[union-attr]
+
+    def test_ac1_4_reload_reads_external_change_and_is_then_idempotent(
+        self, tmp_path: Path
+    ) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        other = simlin.open(path, watch=False)
+        _add_aux(other, "from_other")
+        assert model.get_variable("from_other") is None
+        assert model.reload() is True
+        assert model.revision == 1
+        assert model.get_variable("from_other") is not None
+        assert model.reload() is False
+        assert model.revision == 1
+
+    def test_reload_over_dirty_discards_local_changes(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, autosave=False, watch=False)
+        _add_aux(model, "local_change")
+        assert model.reload() is True
+        assert model.get_variable("local_change") is None
+        assert model.dirty is False
+        assert model.revision == 2
+
+    def test_reload_unparsable_raises_and_keeps_project(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        names = set(model.get_var_names())
+        path.write_bytes(b"<xmile>nope")
+        with pytest.raises(SimlinRuntimeError):
+            model.reload()
+        assert set(model.get_var_names()) == names
+        assert model.revision == 0
+
+    def test_ac1_4_poll_thread_delivers_within_interval(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        project = model.project
+        assert project is not None
+        project.watch(True, interval=0.05)
+        events = _Events()
+        project.on_change(events)
+        try:
+            other = simlin.open(path, watch=False)
+            _add_aux(other, "external")
+            assert events.arrived.wait(5.0), "poll thread never reported the change"
+            assert events.events == [ChangeEvent("disk", 1)]
+            assert model.get_variable("external") is not None
+        finally:
+            project.watch(False)
+
+    def test_widget_snapshot_accept_and_reject(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        project = model.project
+        assert project is not None
+        events = _Events()
+        project.on_change(events)
+        # Build a snapshot the way a widget would: the whole project as
+        # native JSON, edited by adding a variable through the engine.
+        scratch = simlin.load(path)
+        _add_aux(scratch, "from_widget")
+        snapshot = scratch.project.serialize_json()  # type: ignore[union-attr]
+        assert project._apply_snapshot(snapshot, base_revision=0) is True
+        assert model.revision == 1
+        assert events.events == [ChangeEvent("widget", 1)]
+        assert model.get_variable("from_widget") is not None
+        assert simlin.load(path).get_variable("from_widget") is not None
+        # A stale snapshot (base 0, kernel is at 1) is rejected and not written.
+        before = path.read_bytes()
+        assert project._apply_snapshot(snapshot, base_revision=0) is False
+        assert model.revision == 1
+        assert path.read_bytes() == before
+
+
+# ── review findings: lifecycle, staleness, conflicts ────────────────────
+
+
+class TestWatcherLifecycle:
+    def test_i1_dropping_the_project_stops_the_thread_without_a_file_change(
+        self, tmp_path: Path
+    ) -> None:
+        # The thread must exit because the project is gone, not because a
+        # tick happened to run the weak-ref handler: let the first tick
+        # complete (so the handler path has already fired and returned True)
+        # and only then drop the project with the file idle.
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        baseline = {t.name for t in threading.enumerate()}
+        model = simlin.open(path, watch=False)
+        model.project.watch(True, interval=0.02)  # type: ignore[union-attr]
+        watcher = model.project._watcher  # type: ignore[union-attr]
+        assert watcher is not None
+        thread = watcher._thread
+        assert thread is not None
+        deadline = time.monotonic() + 5.0
+        while watcher._last_signature is _UNKNOWN and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert watcher._last_signature is not _UNKNOWN, "first tick never ran"
+        assert thread.is_alive()
+        del model
+        gc.collect()
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), "poll thread outlived its project"
+        assert {t.name for t in threading.enumerate()} - baseline == set()
+
+    def test_i2_watch_started_after_an_external_change_picks_it_up(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        other = simlin.open(path, watch=False)
+        _add_aux(other, "external")
+        _watch_idle(model)
+        try:
+            _poll(model)
+            assert model.get_variable("external") is not None
+            assert model.revision == 1
+        finally:
+            model.project.watch(False)  # type: ignore[union-attr]
+
+    def test_i2_watch_after_own_write_is_still_an_echo(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        _add_aux(model)
+        _watch_idle(model)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                _poll(model)
+            assert model.revision == 1
+        finally:
+            model.project.watch(False)  # type: ignore[union-attr]
+
+    def test_i5_stale_watcher_delivery_after_our_own_write_is_ignored(self, tmp_path: Path) -> None:
+        # The watcher read bytes X (an external edit) but blocked on the file
+        # lock while we wrote W (here: save(force=True), the one write that
+        # may legitimately overwrite an external change); when the handler
+        # finally runs, X is stale and must not be loaded over W.
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, autosave=False, watch=False)
+        _watch_idle(model)
+        project = model.project
+        assert project is not None
+        watcher = project._watcher
+        assert watcher is not None
+        try:
+            ext = simlin.open(path, watch=False)
+            _add_aux(ext, "from_ext")
+            stale = path.read_bytes()
+            _add_aux(model, "mine")
+            project.save(force=True)
+            watcher._handler(watcher, stale, content_hash(stale))
+            assert model.get_variable("mine") is not None
+            assert model.get_variable("from_ext") is None
+            assert model.revision == 1
+            assert model.dirty is False
+            # The next real tick sees our own bytes: an echo, nothing happens.
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                _poll(model)
+            assert model.revision == 1
+        finally:
+            project.watch(False)
+
+    def test_i5_delivery_from_a_watcher_retired_by_watch_false_is_ignored(
+        self, tmp_path: Path
+    ) -> None:
+        # Same path, so only the identity check (watcher is self._watcher)
+        # can reject it: an in-flight delivery from a stopped watcher must
+        # not load bytes the user asked us to stop watching for.
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        _watch_idle(model)
+        project = model.project
+        assert project is not None
+        retired = project._watcher
+        assert retired is not None
+        project.watch(False)
+        _add_aux(simlin.open(path, watch=False), "after_unwatch")
+        data = path.read_bytes()
+        retired._handler(retired, data, content_hash(data))
+        assert model.get_variable("after_unwatch") is None
+        assert model.revision == 0
+        # The change is still there for an explicit reload().
+        assert model.reload() is True
+        assert model.get_variable("after_unwatch") is not None
+
+    def test_i5_delivery_from_a_retired_watcher_is_ignored(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        _watch_idle(model)
+        project = model.project
+        assert project is not None
+        old = project._watcher
+        assert old is not None
+        try:
+            # save_as moves the watcher; the old one's path is no longer ours.
+            project.save_as(tmp_path / "moved.stmx")
+            ext = simlin.open(path, watch=False)
+            _add_aux(ext, "on_old_path")
+            data = path.read_bytes()
+            old._handler(old, data, content_hash(data))
+            assert model.get_variable("on_old_path") is None
+            assert model.revision == 0
+        finally:
+            project.watch(False)
+
+
+class TestSaveConflicts:
+    def test_model_save_passes_force_through(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, autosave=False, watch=False)
+        _add_aux(model, "local")
+        _add_aux(simlin.open(path, watch=False), "claude_wrote_this")
+        with pytest.raises(SimlinRuntimeError, match="changed on disk"):
+            model.save()
+        model.save(force=True)
+        assert model.dirty is False
+        assert simlin.load(path).get_variable("local") is not None
+
+    def test_i3_save_over_an_external_change_raises_unless_forced(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, autosave=False, watch=False)
+        _add_aux(model, "local")
+        ext = simlin.open(path, watch=False)
+        _add_aux(ext, "claude_wrote_this")
+        with pytest.raises(SimlinRuntimeError, match="changed on disk") as info:
+            model.save()
+        assert "reload()" in str(info.value)
+        assert "force=True" in str(info.value)
+        assert model.dirty is True
+        assert simlin.load(path).get_variable("claude_wrote_this") is not None
+        model.project.save(force=True)  # type: ignore[union-attr]
+        assert model.dirty is False
+        on_disk = simlin.load(path)
+        assert on_disk.get_variable("local") is not None
+        assert on_disk.get_variable("claude_wrote_this") is None
+
+    def test_i3_save_after_holdback_warning_also_raises(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, autosave=False, watch=False)
+        _watch_idle(model)
+        try:
+            _add_aux(model, "local")
+            ext = simlin.open(path, watch=False)
+            _add_aux(ext, "claude_wrote_this")
+            with pytest.warns(RuntimeWarning, match="unsaved local changes"):
+                _poll(model)
+            with pytest.raises(SimlinRuntimeError, match="changed on disk"):
+                model.save()
+            # reload() takes the on-disk version and clears the conflict.
+            assert model.reload() is True
+            assert model.get_variable("claude_wrote_this") is not None
+            assert model.get_variable("local") is None
+            model.save()  # nothing to write, and no conflict
+        finally:
+            model.project.watch(False)  # type: ignore[union-attr]
+
+    def test_i3_save_as_to_a_different_path_is_unaffected(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, autosave=False, watch=False)
+        _add_aux(model, "local")
+        _add_aux(simlin.open(path, watch=False), "claude_wrote_this")
+        model.project.save_as(tmp_path / "elsewhere.stmx")  # type: ignore[union-attr]
+        assert model.dirty is False
+        assert simlin.load(path).get_variable("claude_wrote_this") is not None
+
+    def test_i3_save_as_to_the_same_path_conflicts_like_save(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, autosave=False, watch=False)
+        _add_aux(model, "local")
+        _add_aux(simlin.open(path, watch=False), "claude_wrote_this")
+        with pytest.raises(SimlinRuntimeError, match="changed on disk"):
+            model.project.save_as(path)  # type: ignore[union-attr]
+
+    def test_i3_autosave_conflict_raises_from_edit_and_keeps_change(self, tmp_path: Path) -> None:
+        # With autosave on, an external write that slipped in unnoticed
+        # (no watcher) is detected by the autosave itself.
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        _add_aux(simlin.open(path, watch=False), "claude_wrote_this")
+        with pytest.raises(SimlinRuntimeError, match="changed on disk"):
+            _add_aux(model, "local")
+        assert model.revision == 1
+        assert model.dirty is True
+        assert model.get_variable("local") is not None
+        assert simlin.load(path).get_variable("claude_wrote_this") is not None
+
+    def test_save_recreates_a_deleted_file_without_a_conflict(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, autosave=False, watch=False)
+        _add_aux(model, "local")
+        path.unlink()
+        model.save()  # a missing file is not someone else's change
+        assert path.exists()
+        assert model.dirty is False
+        assert simlin.load(path).get_variable("local") is not None
+
+    def test_m2_failed_save_of_a_clean_project_stays_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+
+        def fail(*args: object, **kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr("simlin.project.atomic_write", fail)
+        with pytest.raises(OSError, match="disk full"):
+            model.save()
+        assert model.dirty is False
+
+
+class TestEditStaleness:
+    def test_i4_edit_spanning_a_reload_is_rejected(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        _watch_idle(model)
+        try:
+            ext = simlin.open(path, watch=False)
+
+            def stale_edit() -> None:
+                with model.edit() as (current, patch):
+                    with ext.edit() as (ext_current, ext_patch):
+                        room = ext_current["room temperature"]
+                        ext_patch.upsert(replace(room, equation="99"))
+                        ext_patch.upsert(Aux(name="claude", equation="1"))
+                    _poll(model)  # the reload lands mid-edit
+                    patch.upsert(replace(current["room temperature"], documentation="doc"))
+
+            with pytest.raises(SimlinRuntimeError, match=r"changed during edit.*0 -> 1"):
+                stale_edit()
+            # Nothing from the stale edit was applied; the reload stands.
+            assert model.revision == 1
+            room_after = model.get_variable("room_temperature")
+            assert isinstance(room_after, Aux)
+            assert room_after.equation == "99"
+            assert room_after.documentation != "doc"
+            assert model.get_variable("claude") is not None
+        finally:
+            model.project.watch(False)  # type: ignore[union-attr]
+
+    def test_i4_edit_spanning_another_edit_is_rejected(self, tmp_path: Path) -> None:
+        model = simlin.load(FIXTURES / "teacup.stmx")
+
+        def nested_edit() -> None:
+            with model.edit() as (_, patch):
+                _add_aux(model, "inner")
+                patch.upsert(Aux(name="outer", equation="1"))
+
+        with pytest.raises(SimlinRuntimeError, match="changed during edit"):
+            nested_edit()
+        assert model.get_variable("inner") is not None
+        assert model.get_variable("outer") is None
+        assert model.revision == 1
+
+    def test_i4_empty_edit_spanning_a_change_is_fine(self, tmp_path: Path) -> None:
+        # No ops means nothing to apply; a no-op block must not raise.
+        model = simlin.load(FIXTURES / "teacup.stmx")
+        with model.edit() as (_, _patch):
+            _add_aux(model, "inner")
+        assert model.revision == 1
+
+
+class TestBaseCaseCache:
+    def test_m5_base_case_computed_across_a_change_is_not_cached(self, tmp_path: Path) -> None:
+        model = simlin.load(FIXTURES / "teacup.stmx")
+        original_run = model.run
+
+        def run_and_edit(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            result = original_run(*args, **kwargs)
+            _add_aux(model, "during_run")
+            return result
+
+        model.run = run_and_edit  # type: ignore[method-assign]
+        stale = model.base_case
+        model.run = original_run  # type: ignore[method-assign]
+        assert model.base_case is not stale
+        assert "during_run" in model.base_case.results.columns
+
+    def test_edit_invalidates_base_case(self, tmp_path: Path) -> None:
+        model = simlin.load(FIXTURES / "teacup.stmx")
+        before = model.base_case
+        _add_aux(model)
+        assert model.base_case is not before
+        assert "new_aux" in model.base_case.results.columns
+
+
+class TestClosedProject:
+    def test_m6_close_clears_path_and_refuses_watch(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        project = Project.open(path, watch=False)
+        project.close()
+        assert project.path is None
+        assert project.watching is False
+        with pytest.raises(SimlinRuntimeError, match="closed"):
+            project.watch(True)
+        with pytest.raises(SimlinRuntimeError):
+            project.save()
+
+
+class TestSnapshotEdgeCases:
+    def test_m9_identical_snapshot_bumps_revision_exactly_once(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        project = Project.open(path, watch=False)
+        events = _Events()
+        project.on_change(events)
+        snapshot = project.serialize_json()
+        assert project._apply_snapshot(snapshot, base_revision=0) is True
+        assert project.revision == 1
+        assert events.events == [ChangeEvent("widget", 1)]
+
+    def test_snapshot_pair_is_read_under_one_lock(self, tmp_path: Path) -> None:
+        # The widget seeds and re-seeds the browser from _snapshot(); the
+        # contents and the revision must belong together even while another
+        # thread edits.  Hammer it: every pair observed must be one the
+        # project actually passed through (revision r <=> r auxes added).
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        project = model.project
+        assert project is not None
+        data, revision = project._snapshot()
+        assert revision == 0
+        assert data == project.serialize_json()
+        stop = threading.Event()
+        pairs: list[tuple[int, int]] = []
+
+        def read() -> None:
+            while not stop.is_set():
+                d, r = project._snapshot()  # type: ignore[union-attr]
+                auxes = json.loads(d)["models"][0].get("auxiliaries") or []
+                added = sum(1 for v in auxes if v["name"].startswith("aux_"))
+                pairs.append((r, added))
+
+        reader = threading.Thread(target=read)
+        reader.start()
+        try:
+            for i in range(20):
+                _add_aux(model, f"aux_{i}")
+        finally:
+            stop.set()
+            reader.join()
+        assert pairs
+        assert all(r == added for r, added in pairs), pairs
+
+    def test_snapshot_write_failure_is_a_distinct_error_after_applying(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The widget must tell "applied but unwritten" (the browser's edit
+        # stands; reply saved + warn) from "not applied" (reply rejected).
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        project = Project.open(path, watch=False)
+        events = _Events()
+        project.on_change(events)
+        scratch = simlin.load(path)
+        _add_aux(scratch, "unsaved")
+        snapshot = scratch.project.serialize_json()  # type: ignore[union-attr]
+
+        def fail(*args: object, **kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr("simlin.project.atomic_write", fail)
+        with pytest.raises(simlin.SimlinWriteError, match="disk full") as excinfo:
+            project._apply_snapshot(snapshot, base_revision=0)
+        assert isinstance(excinfo.value.__cause__, OSError)
+        assert excinfo.value.revision == 1
+        assert project.revision == 1
+        assert project.dirty is True
+        assert events.events == [ChangeEvent("widget", 1)]
+        assert project.get_model().get_variable("unsaved") is not None
+        # A parse failure is NOT a SimlinWriteError: nothing was applied.
+        with pytest.raises(SimlinRuntimeError) as parse_exc:
+            project._apply_snapshot(b"{", base_revision=1)
+        assert not isinstance(parse_exc.value, simlin.SimlinWriteError)
+        assert project.revision == 1
+        assert excinfo.value.write_failed is True
+
+    def test_snapshot_failure_after_the_commit_is_a_write_error_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The exception type is what tells a caller "the change is real":
+        # anything that raises AFTER the contents were replaced and the
+        # revision bumped -- here notifying subscribers -- surfaces as
+        # SimlinWriteError, not as the raw exception a caller would read as
+        # "nothing applied".  ``_notify`` itself turns subscriber failures
+        # into warnings, so the realistic way it raises is a warnings filter
+        # escalating those to errors (``python -W error``); that is the
+        # vehicle here, with a dispatcher that fails like a closed kernel
+        # loop.  The file was written, so it is not a write failure and
+        # save() has nothing to retry.
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        project = Project.open(path, watch=False)
+
+        def closed_loop(fn: object) -> None:
+            raise RuntimeError("IOLoop is closed")
+
+        project.on_change(lambda event: None, dispatch=closed_loop)
+        scratch = simlin.load(path)
+        _add_aux(scratch, "applied")
+        snapshot = scratch.project.serialize_json()  # type: ignore[union-attr]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(simlin.SimlinWriteError, match="IOLoop is closed") as excinfo:
+                project._apply_snapshot(snapshot, base_revision=0)
+        assert isinstance(excinfo.value.__cause__, RuntimeWarning)
+        assert excinfo.value.revision == 1
+        assert excinfo.value.write_failed is False
+        assert project.revision == 1
+        assert project.dirty is False
+        assert simlin.load(path).get_variable("applied") is not None
+
+    def test_snapshot_failure_inside_the_commit_bookkeeping_is_a_write_error_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The other post-commit step, under the lock: a bug there is still
+        # "applied but ..." (the revision has moved), and the lock is
+        # released on the way out so the project keeps working.
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        project = Project.open(path, watch=False)
+        scratch = simlin.load(path)
+        _add_aux(scratch, "applied")
+        snapshot = scratch.project.serialize_json()  # type: ignore[union-attr]
+
+        def boom(*args: object) -> None:
+            raise RuntimeError("cache bookkeeping bug")
+
+        monkeypatch.setattr(project, "_invalidate_model_caches", boom)
+        with pytest.raises(simlin.SimlinWriteError, match="cache bookkeeping bug") as excinfo:
+            project._apply_snapshot(snapshot, base_revision=0)
+        assert excinfo.value.revision == 1
+        assert excinfo.value.write_failed is False
+        assert project.revision == 1
+        monkeypatch.undo()
+        assert project._apply_snapshot(snapshot, base_revision=1) is True
+
+    def test_snapshot_write_and_notify_both_failing_reports_the_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Both post-commit steps failing: the write failure is the one with
+        # a remedy (dirty; save() retries), so it is the cause and the flag,
+        # and the second failure rides in the message.
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        project = Project.open(path, watch=False)
+
+        def closed_loop(fn: object) -> None:
+            raise RuntimeError("IOLoop is closed")
+
+        project.on_change(lambda event: None, dispatch=closed_loop)
+        scratch = simlin.load(path)
+        _add_aux(scratch, "unsaved")
+        snapshot = scratch.project.serialize_json()  # type: ignore[union-attr]
+
+        def fail(*args: object, **kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr("simlin.project.atomic_write", fail)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(simlin.SimlinWriteError, match="disk full") as excinfo:
+                project._apply_snapshot(snapshot, base_revision=0)
+        assert isinstance(excinfo.value.__cause__, OSError)
+        assert excinfo.value.write_failed is True
+        assert "IOLoop is closed" in str(excinfo.value)
+        assert project.revision == 1
+        assert project.dirty is True
+
+    def test_m9_unparsable_snapshot_leaves_revision_unchanged(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        before = path.read_bytes()
+        project = Project.open(path, watch=False)
+        with pytest.raises(SimlinRuntimeError):
+            project._apply_snapshot(b'{"models": [{"name": 5}]}', base_revision=0)
+        assert project.revision == 0
+        assert project.dirty is False
+        assert path.read_bytes() == before
+
+    def test_m9_format_follows_a_reload_that_flips_native_and_sdai(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "simple.json", tmp_path)
+        project = Project.open(path, watch=False)
+        assert project.format == FileFormat.NATIVE_JSON
+        shutil.copyfile(SDAI_FIXTURE, path)
+        assert project.reload() is True
+        assert project.format == FileFormat.SDAI_JSON
+        _add_aux(project.get_model())
+        assert "variables" in json.loads(path.read_bytes())
+        shutil.copyfile(FIXTURES / "simple.json", path)
+        assert project.reload() is True
+        assert project.format == FileFormat.NATIVE_JSON
+
+    def test_m3_unknown_format_bad_bytes_warn_once(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "simple.json", tmp_path)
+        model = simlin.open(path, watch=False)
+        _watch_idle(model)
+        try:
+            path.write_text('{"neither": 1}')
+            with pytest.warns(RuntimeWarning, match="could not be loaded") as record:
+                _poll(model)
+            assert len(record) == 1
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                _poll(model)
+                # Even a re-touch of the same bad content stays quiet.
+                path.write_text('{"neither": 1}')
+                _poll(model)
+        finally:
+            model.project.watch(False)  # type: ignore[union-attr]
+
+    @pytest.mark.parametrize("arm", ["edit", "auto_layout", "widget", "disk", "reload"])
+    def test_m9_notify_runs_with_no_project_lock_held(self, tmp_path: Path, arm: str) -> None:
+        # Every _notify call site: a listener that touches the project (or
+        # is marshalled onto another thread that does) must not deadlock.
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        _watch_idle(model)
+        project = model.project
+        assert project is not None
+        results: list[tuple[str, bool]] = []
+
+        def probe(event: ChangeEvent) -> None:
+            def try_locks() -> None:
+                got_file = project._file_lock.acquire(blocking=False)
+                if got_file:
+                    project._file_lock.release()
+                got_ptr = project._lock.acquire(blocking=False)
+                if got_ptr:
+                    project._lock.release()
+                results.append((event.source, got_file and got_ptr))
+
+            t = threading.Thread(target=try_locks)
+            t.start()
+            t.join()
+
+        project.on_change(probe)
+        try:
+            match arm:
+                case "edit":
+                    _add_aux(model)
+                    expected = "edit"
+                case "auto_layout":
+                    project.auto_layout("main")
+                    expected = "edit"
+                case "widget":
+                    project._apply_snapshot(project.serialize_json(), base_revision=0)
+                    expected = "widget"
+                case "disk":
+                    _add_aux(simlin.open(path, watch=False), "ext")
+                    _poll(model)
+                    expected = "disk"
+                case "reload":
+                    _add_aux(simlin.open(path, watch=False), "ext")
+                    assert project.reload() is True
+                    expected = "reload"
+                case _:
+                    raise AssertionError(arm)
+        finally:
+            project.watch(False)
+        assert results == [(expected, True)]
+
+
+class TestOpenOnDirectory:
+    def test_m10_open_and_load_on_a_directory_raise_import_error(self, tmp_path: Path) -> None:
+        with pytest.raises(SimlinImportError, match="not a file"):
+            simlin.open(tmp_path)
+        with pytest.raises(SimlinImportError, match="not a file"):
+            simlin.load(tmp_path)
+
+
+# ── AC3: read-only display ──────────────────────────────────────────────
+
+
+class TestDiagram:
+    def test_ac3_1_diagram_repr_svg_is_engine_svg(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        diagram = model.diagram()
+        assert isinstance(diagram, Diagram)
+        svg = diagram._repr_svg_()
+        assert svg.lstrip().startswith("<svg") or "<svg" in svg[:200]
+        assert svg == model.project.render_svg_string()  # type: ignore[union-attr]
+        assert diagram._repr_mimebundle_() == {"image/svg+xml": svg}
+        assert model._svg_mimebundle() == {"image/svg+xml": svg}
+
+    def test_ac3_1_model_without_view_renders_transient_layout(self) -> None:
+        project = Project.new(name="scratch")
+        model = project.get_model()
+        _add_aux(model, "lonely", "1")
+        svg = model.diagram()._repr_svg_()
+        assert "<svg" in svg
+        assert "lonely" in svg
+        doc = json.loads(project.serialize_json())
+        assert doc["models"][0].get("views", []) == [], "diagram() persists nothing"
+
+    def test_diagram_reflects_edits(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        assert "Insulation" not in model.diagram().svg
+        with model.edit() as (_, patch):
+            patch.upsert(Aux(name="Insulation", equation="0.5"))
+        assert "Insulation" in model.diagram().svg
+
+    def test_selection_defaults_empty_and_is_settable(self, tmp_path: Path) -> None:
+        model = simlin.load(FIXTURES / "teacup.stmx")
+        assert model.selection == ()
+        model.selection = ["teacup_temperature"]
+        assert model.selection == ("teacup_temperature",)
+
+
+class TestModelProxies:
+    def test_unattached_model_proxies_raise(self, tmp_path: Path) -> None:
+        # Model(ptr) without a project is a legacy construction path; the
+        # proxies must fail loudly rather than dereference None.
+        model = simlin.load(FIXTURES / "teacup.stmx")
+        model._project = None
+        with pytest.raises(SimlinRuntimeError, match="not attached"):
+            _ = model.path
+        with pytest.raises(SimlinRuntimeError, match="not attached"):
+            model.diagram()
+
+    def test_edit_replace_round_trip_through_open(self, tmp_path: Path) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        model = simlin.open(path, watch=False)
+        room = model.get_variable("room_temperature")
+        assert isinstance(room, Aux)
+        with model.edit() as (current, patch):
+            patch.upsert(replace(current[room.name], equation="60"))
+        reopened = simlin.open(path, watch=False)
+        aux = reopened.get_variable("room_temperature")
+        assert isinstance(aux, Aux)
+        assert aux.equation == "60"
+
+
+# ── read-only suffixes (.vpm, .proto) are read-only after open() too ────
+
+
+def _sketchless_mdl() -> bytes:
+    """teacup.mdl without its sketch section: a Vensim model an interactive
+    display must lay out before it can show anything."""
+    text = (FIXTURES / "teacup.mdl").read_text(encoding="utf-8")
+    body, marker, _sketch = text.partition("\\\\\\---///")
+    assert marker, "fixture drifted: no sketch section"
+    return body.encode("utf-8")
+
+
+def _read_only_fixture(tmp_path: Path, suffix: str) -> Path:
+    """A diagram-less model under a read-only suffix: ``.vpm`` holds MDL
+    text, ``.proto`` holds the protobuf encoding (both are what the reader
+    accepts)."""
+    if suffix == ".vpm":
+        path = tmp_path / "teacup.vpm"
+        path.write_bytes(_sketchless_mdl())
+    elif suffix == ".proto":
+        path = tmp_path / "teacup.proto"
+        path.write_bytes(
+            Project._from_bytes(_sketchless_mdl(), FileFormat.MDL).serialize_protobuf()
+        )
+    else:
+        raise AssertionError(suffix)
+    return path
+
+
+def _project(model: Model) -> Project:
+    project = model.project
+    assert project is not None
+    return project
+
+
+class TestReadOnlySuffixes:
+    """``resolve_write_format`` refuses ``.vpm``/``.proto`` targets; a project
+    OPENED from one must be just as read-only, or the first edit (or a
+    display laying out a sketch-less model) regenerates a packaged ``.vpm``
+    as plain MDL text or a ``.proto`` schema-named file as binary."""
+
+    @pytest.mark.parametrize("suffix", [".vpm", ".proto"])
+    def test_open_backs_without_write_permission(self, tmp_path: Path, suffix: str) -> None:
+        path = _read_only_fixture(tmp_path, suffix)
+        model = simlin.open(path, watch=False)
+        project = _project(model)
+        assert project.path == path
+        assert project.writable is False
+        assert model.writable is False
+        assert project.autosave is False
+        # An explicit request for autosave cannot be honoured for this path.
+        with pytest.raises(SimlinRuntimeError, match="save_as"):
+            project.autosave = True
+        assert project.autosave is False
+        project.autosave = False  # turning it off is always fine
+
+    @pytest.mark.parametrize("suffix", [".vpm", ".proto"])
+    def test_edits_stay_in_memory_and_save_refuses(self, tmp_path: Path, suffix: str) -> None:
+        path = _read_only_fixture(tmp_path, suffix)
+        before = path.read_bytes()
+        model = simlin.open(path, watch=False)
+        _add_aux(model)
+        assert model.revision == 1
+        assert model.dirty is True
+        assert model.get_variable("new_aux") is not None
+        assert path.read_bytes() == before
+        with pytest.raises(SimlinRuntimeError, match=r"save_as") as info:
+            model.save()
+        assert suffix in str(info.value)
+        assert ".mdl" in str(info.value) or ".stmx" in str(info.value)
+        with pytest.raises(SimlinRuntimeError, match=r"save_as"):
+            _project(model).save(force=True)
+        assert path.read_bytes() == before
+        assert model.dirty is True
+
+    @pytest.mark.parametrize("suffix", [".vpm", ".proto"])
+    def test_display_marks_dirty_instead_of_writing(self, tmp_path: Path, suffix: str) -> None:
+        # What a ModelWidget does before seeding: lay out a model that has no
+        # view.  On a read-only file that is a committed in-memory change,
+        # never a write.
+        path = _read_only_fixture(tmp_path, suffix)
+        before = path.read_bytes()
+        model = simlin.open(path, watch=False)
+        project = _project(model)
+        assert project._ensure_view("main") is True
+        assert model.revision == 1
+        assert model.dirty is True
+        assert path.read_bytes() == before
+        # And the widget's seed carries the layout: a view with elements.
+        doc = json.loads(project.serialize_json())
+        main = next(m for m in doc["models"] if m["name"] == "main")
+        assert main["views"][0]["elements"]
+
+    @pytest.mark.parametrize("suffix", [".vpm", ".proto"])
+    def test_save_as_to_a_writable_suffix_works_and_restores_autosave(
+        self, tmp_path: Path, suffix: str
+    ) -> None:
+        path = _read_only_fixture(tmp_path, suffix)
+        before = path.read_bytes()
+        model = simlin.open(path, watch=False)
+        project = _project(model)
+        _add_aux(model, "in_memory")
+        target = tmp_path / "teacup_out.mdl"
+        project.save_as(target)
+        assert project.path == target
+        assert project.writable is True
+        assert project.format == FileFormat.MDL
+        assert project.dirty is False
+        # The user never turned autosave off (open() forced it off for the
+        # read-only path), so the writable file autosaves from here on.
+        assert project.autosave is True
+        _add_aux(model, "after_save_as")
+        reopened = simlin.open(target, watch=False)
+        assert reopened.get_variable("in_memory") is not None
+        assert reopened.get_variable("after_save_as") is not None
+        assert path.read_bytes() == before
+
+    def test_autosave_false_on_open_stays_off_after_save_as(self, tmp_path: Path) -> None:
+        path = _read_only_fixture(tmp_path, ".vpm")
+        project = _project(simlin.open(path, autosave=False, watch=False))
+        project.save_as(tmp_path / "out.mdl")
+        assert project.autosave is False
+        assert project.writable is True
+
+    def test_explicit_format_save_as_to_a_read_only_suffix_is_writable(
+        self, tmp_path: Path
+    ) -> None:
+        # save_as(format=) is the documented override: the user chose to put
+        # MDL text under .vpm, so that path is theirs to write.
+        model = simlin.load(FIXTURES / "teacup.stmx")
+        project = _project(model)
+        target = tmp_path / "chosen.vpm"
+        project.save_as(target, format=FileFormat.MDL)
+        assert project.writable is True
+        assert project.autosave is True
+        _add_aux(model)
+        assert simlin.open(target, watch=False).get_variable("new_aux") is not None
+
+    def test_watching_a_read_only_file_still_picks_up_external_changes(
+        self, tmp_path: Path
+    ) -> None:
+        path = _read_only_fixture(tmp_path, ".vpm")
+        model = simlin.open(path, watch=False)
+        _watch_idle(model)
+        try:
+            path.write_bytes(
+                _sketchless_mdl().replace(b"Room Temperature=\n\t70", b"Room Temperature=\n\t65")
+            )
+            _poll(model)
+            assert model.revision == 1
+            assert model.get_variable("room_temperature").equation == "65"
+        finally:
+            _project(model).watch(False)
+
+    def test_in_memory_project_is_not_writable_and_autosave_waits_for_a_path(
+        self, tmp_path: Path
+    ) -> None:
+        # ``autosave`` reports the EFFECTIVE setting: nothing is written while
+        # there is no file, so it reads False in memory; the wish is kept and
+        # takes effect once save_as() supplies a writable file.
+        project = Project.new(name="p")
+        assert project.writable is False
+        assert project.autosave is False
+        project.autosave = False
+        project.autosave = True  # no path to refuse; meaningful for a later save_as()
+        assert project.autosave is False
+        project.save_as(tmp_path / "p.stmx")
+        assert project.writable is True
+        assert project.autosave is True
+
+
+# ── paths are anchored at open()/save_as(), not re-resolved per write ───
+
+
+class TestAbsolutePaths:
+    def test_open_with_a_relative_path_survives_chdir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(tmp_path)
+        model = simlin.open("teacup.stmx", watch=False)
+        assert model.path == path
+        assert model.path is not None
+        assert model.path.is_absolute()
+        monkeypatch.chdir(elsewhere)
+        _add_aux(model)
+        # Autosave wrote the file that was opened, not a new one under the CWD.
+        assert simlin.load(path).get_variable("new_aux") is not None
+        assert not (elsewhere / "teacup.stmx").exists()
+        assert model.dirty is False
+
+    def test_watcher_polls_the_opened_file_after_chdir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(tmp_path)
+        model = simlin.open("teacup.stmx", watch=False)
+        _watch_idle(model)
+        try:
+            monkeypatch.chdir(elsewhere)
+            _add_aux(simlin.open(path, watch=False), "external")
+            _poll(model)
+            assert model.revision == 1
+            assert model.get_variable("external") is not None
+            assert model.project is not None
+            assert model.project._watcher is not None
+            assert model.project._watcher.path == path
+        finally:
+            _project(model).watch(False)
+
+    def test_save_as_with_a_relative_path_adopts_the_absolute_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        model = simlin.load(FIXTURES / "teacup.stmx")
+        project = _project(model)
+        project.save_as("out.stmx")
+        assert project.path == tmp_path / "out.stmx"
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        _add_aux(model)
+        assert simlin.load(tmp_path / "out.stmx").get_variable("new_aux") is not None
+        assert not (elsewhere / "out.stmx").exists()
+
+    def test_symlinks_are_kept_as_given(self, tmp_path: Path) -> None:
+        # absolute(), not resolve(): `path` reports the name the user opened,
+        # anchored to the CWD of that moment; a symlinked model file is still
+        # reported under its link name.
+        real = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        link = tmp_path / "link.stmx"
+        link.symlink_to(real)
+        model = simlin.open(link, watch=False)
+        assert model.path == link
+
+    def test_saving_through_a_symlink_writes_the_target_and_keeps_the_link(
+        self, tmp_path: Path
+    ) -> None:
+        # `path` stays the link name, so every autosave goes through the
+        # link; the bytes must land in the file the link points to (the
+        # link itself staying a link), and the watcher -- which stats and
+        # reads through the link -- must see that write as our own echo.
+        real = _copy(FIXTURES / "teacup.stmx", tmp_path)
+        link = tmp_path / "link.stmx"
+        link.symlink_to(real)
+        model = simlin.open(link, watch=False)
+        _watch_idle(model)
+        events = _Events()
+        _project(model).on_change(events)
+        try:
+            _add_aux(model)
+            assert model.path == link
+            assert link.is_symlink()
+            assert not real.is_symlink()
+            assert simlin.load(real).get_variable("new_aux") is not None
+            assert model.dirty is False
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                _poll(model)
+            assert events.sources == ["edit"], "our write through the link is an echo"
+
+            # An external write to the real file is a change seen through the link.
+            _add_aux(simlin.open(real, watch=False), "external")
+            _poll(model)
+            assert events.sources == ["edit", "disk"]
+            assert model.get_variable("external") is not None
+
+            # The save conflict check also reads through the link: an
+            # external write the watcher has not seen yet blocks the autosave.
+            _project(model).watch(False)
+            _add_aux(simlin.open(real, watch=False), "unseen")
+            with pytest.raises(SimlinRuntimeError, match="changed on disk"):
+                _add_aux(model, "local")
+            assert model.dirty is True
+            model.save(force=True)
+            assert link.is_symlink()
+            assert simlin.load(real).get_variable("local") is not None
+        finally:
+            _project(model).watch(False)
+
+    def test_saving_through_a_dangling_symlink_creates_its_target(self, tmp_path: Path) -> None:
+        # save_as onto a dangling link: the user named the link, so the file
+        # the link points to is created and the link keeps pointing at it.
+        target = tmp_path / "real.stmx"
+        link = tmp_path / "link.stmx"
+        link.symlink_to(target)
+        model = simlin.load(FIXTURES / "teacup.stmx")
+        _project(model).save_as(link)
+        assert model.path == link
+        assert link.is_symlink()
+        assert simlin.load(target).get_variable("teacup_temperature") is not None
+        _add_aux(model)
+        assert link.is_symlink()
+        assert simlin.load(target).get_variable("new_aux") is not None

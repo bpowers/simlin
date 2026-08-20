@@ -38,9 +38,12 @@ export type JsonProjectData = {
   data: string;
 };
 
+// Mirror of `simlin-serve::handlers::SaveResponse`. `warnings` is the
+// on-disk writer's non-fatal lossiness list (today only Vensim `.mdl`
+// produces any); the server elides the field entirely when it is empty.
 export type SaveResponse = {
   version: number;
-  path: string;
+  warnings?: ReadonlyArray<ServerValidationError>;
 };
 
 // `format` is the subset of ProjectFormat the server's create endpoint

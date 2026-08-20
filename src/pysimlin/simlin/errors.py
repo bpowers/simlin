@@ -155,3 +155,46 @@ class SimlinImportError(SimlinError):
     """Exception raised when importing a model fails."""
 
     pass
+
+
+class SimlinWriteError(SimlinRuntimeError):
+    """A change was applied to the in-memory project (its revision advanced)
+    but a step after that failed.
+
+    Raised by :meth:`Project._apply_snapshot` so a caller can tell "applied
+    but ..." from "not applied" without inspecting the project: the type
+    alone says the change is real, whatever failed afterwards.  ``revision``
+    is the revision the change produced and ``__cause__`` the underlying
+    error.  ``write_failed`` says whether that step was the autosave write
+    -- the project is then ``dirty`` and ``save()`` retries -- as opposed to
+    a later one (notifying subscribers) after the file was written, where
+    there is nothing to retry.
+    """
+
+    def __init__(self, message: str, revision: int, *, write_failed: bool = True):
+        super().__init__(message)
+        self.revision = revision
+        self.write_failed = write_failed
+
+
+class SimlinDependencyError(SimlinError, ImportError):
+    """An optional dependency this feature needs is not installed.
+
+    The notebook editor (:meth:`simlin.Model.widget`, displaying a model)
+    needs the ``notebook`` extra -- ``pip install "pysimlin[notebook]"`` --
+    which a bare ``pip install pysimlin`` deliberately leaves out so
+    scripts and servers that never display a model do not carry the
+    anywidget/ipywidgets chain.  Also an :class:`ImportError`, so code that
+    guards optional imports with ``except ImportError`` keeps working.  The
+    message carries the install line for the running host.
+    """
+
+
+class SimlinAssetError(SimlinError):
+    """A file that ships inside the pysimlin package -- the notebook widget's
+    JS module or engine wasm -- is missing or cannot be delivered.
+
+    Raised when a :class:`simlin.ModelWidget` is created (displaying a
+    model), never on ``import simlin``; the message names the file and how
+    to get it.
+    """

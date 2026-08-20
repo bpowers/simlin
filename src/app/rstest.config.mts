@@ -42,7 +42,7 @@ export default defineConfig({
         alias: {
           // Trailing `$` is an exact match, so specific entries precede prefixes.
           '@simlin/engine/internal/wasm$': path.join(engineSrc, 'internal/wasm.node.ts'),
-          '@simlin/engine/internal/backend-factory$': path.join(engineSrc, 'backend-factory.node.ts'),
+          '@simlin/engine/internal/backend-factory$': path.join(engineSrc, 'backend-factory.direct.ts'),
           '@simlin/engine$': path.join(engineSrc, 'index.ts'),
           // Bare `@simlin/core` would otherwise resolve the directory through its
           // package.json "main", i.e. back to lib/.

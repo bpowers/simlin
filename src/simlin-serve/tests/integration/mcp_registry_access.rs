@@ -179,7 +179,8 @@ async fn mcp_save_increments_version_and_updates_doc() {
     let new_version = access
         .save(&abs, &edited, opened.source_format, Some(0))
         .await
-        .expect("save");
+        .expect("save")
+        .version;
     assert_eq!(new_version, 1);
 
     // Re-opening sees the new version and the new equation.
@@ -220,7 +221,8 @@ async fn mcp_save_broadcasts_project_changed_with_agent_source() {
     let new_version = access
         .save(&abs, &edited, opened.source_format, Some(0))
         .await
-        .expect("save");
+        .expect("save")
+        .version;
     assert_eq!(new_version, 1);
 
     let event = await_event(&mut rx, |_msg| true).await;
@@ -290,7 +292,8 @@ async fn browser_save_and_mcp_save_are_both_observable_in_the_loro_doc() {
     let mcp_version = access
         .save(&abs, &edited, opened.source_format, None)
         .await
-        .expect("mcp save");
+        .expect("mcp save")
+        .version;
     assert_eq!(mcp_version, 2);
 
     // 3) Final state: both edits are present.
@@ -336,7 +339,8 @@ async fn mcp_save_first_then_browser_save_both_observable_in_loro_doc() {
     let mcp_version = access
         .save(&abs, &mcp_edited, opened.source_format, Some(0))
         .await
-        .expect("mcp save");
+        .expect("mcp save")
+        .version;
     assert_eq!(mcp_version, 1);
 
     // 2) Browser save: rename the project to "via-browser-second".
@@ -566,6 +570,80 @@ async fn create_writes_xmile_for_stmx_extension() {
     assert_eq!(meta.version, 0);
 }
 
+/// The `.mdl` arm of create: the file is written as Vensim text (the same
+/// writer the save path uses), the registry entry is `Mdl`, and the text
+/// re-parses.
+#[tokio::test]
+async fn create_writes_vensim_text_for_mdl_extension() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let abs = canonical_root.join("fresh.mdl");
+    let state = build_state(canonical_root.clone());
+
+    let access = RegistryAccess::new(state.clone());
+    let project = minimal_project("mdl-creation");
+    access
+        .create(&abs, &project, SourceFormat::Mdl)
+        .await
+        .expect("create");
+
+    let text = fs::read_to_string(&abs).expect("read created file");
+    // Vensim text: the encoding marker and the .Control section, not JSON
+    // or XML.
+    assert!(
+        text.starts_with("{UTF-8}") && text.contains(".Control"),
+        "an .mdl is Vensim text: {text}"
+    );
+    simlin_engine::open_vensim(&text).expect("created .mdl parses");
+
+    let meta = state.registry.get(&abs).expect("registry holds entry");
+    assert_eq!(meta.format, ProjectFormat::Mdl);
+    assert_eq!(meta.version, 0);
+}
+
+/// Every path create accepts is one discovery would list, and vice versa:
+/// the two consult the same table (`discovery::format_for_path`), so a
+/// file this server writes never becomes one it cannot see.
+#[tokio::test]
+async fn create_format_table_is_discoverys() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let state = build_state(canonical_root.clone());
+    let access = RegistryAccess::new(state.clone());
+    let project = minimal_project("table");
+    for (name, expected) in [
+        ("a.sd.json", Some(ProjectFormat::SdJson)),
+        ("b.stmx", Some(ProjectFormat::Stmx)),
+        ("c.xmile", Some(ProjectFormat::Xmile)),
+        ("d.xml", Some(ProjectFormat::Xmile)),
+        ("e.mdl", Some(ProjectFormat::Mdl)),
+        ("f.MDL", Some(ProjectFormat::Mdl)),
+        ("g.json", None),
+        ("h.txt", None),
+        ("i", None),
+    ] {
+        let abs = canonical_root.join(name);
+        assert_eq!(
+            simlin_serve::discovery::format_for_path(&abs),
+            expected,
+            "discovery's answer for {name}"
+        );
+        let result = access
+            .create(&abs, &project, SourceFormat::NativeJson)
+            .await;
+        match expected {
+            Some(format) => {
+                result.unwrap_or_else(|e| panic!("create {name} must succeed: {e:?}"));
+                assert_eq!(state.registry.get(&abs).expect("entry").format, format);
+            }
+            None => {
+                assert!(result.is_err(), "create {name} must be refused");
+                assert!(!abs.exists(), "a refused create writes nothing");
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn create_rejects_existing_file() {
     let temp = TempDir::new().expect("tempdir");
@@ -619,48 +697,159 @@ async fn create_broadcasts_project_changed_with_agent_source_and_version_zero() 
     }
 }
 
+/// An MCP save of a `.mdl` rewrites the `.mdl` itself as Vensim text: the
+/// entry stays keyed on the `.mdl`, its format stays `Mdl`, the version
+/// advances, no sibling file appears, and the file reparses with the edit.
 #[tokio::test]
-async fn mcp_save_for_mdl_writes_sidecar_and_leaves_mdl_unchanged() {
+async fn mcp_save_for_mdl_rewrites_the_mdl_in_place() {
     let temp = TempDir::new().expect("tempdir");
     let canonical_root = temp.path().canonicalize().expect("canon root");
     let mdl_abs = copy_fixture("teacup.mdl", &canonical_root);
     let original_mdl_bytes = fs::read(&mdl_abs).expect("read original mdl");
-    let sidecar_abs = canonical_root.join("teacup.sd.json");
     let state = build_state(canonical_root.clone());
     seed_registry(&state, &mdl_abs, ProjectFormat::Mdl);
 
     let access = RegistryAccess::new(state.clone());
     let opened = access.open(&mdl_abs).await.expect("open mdl");
-    // .mdl reads come back as XMILE-shaped projects.
-    assert_eq!(opened.source_format, SourceFormat::Xmile);
+    assert_eq!(opened.source_format, SourceFormat::Mdl);
 
     let edited = rewrite_first_aux_equation(&opened.project, "77");
-    let new_version = access
+    let outcome = access
         .save(&mdl_abs, &edited, opened.source_format, Some(0))
         .await
         .expect("mcp save mdl");
-    assert_eq!(new_version, 1);
+    assert_eq!(outcome.version, 1);
+    assert!(
+        outcome.warnings.is_empty(),
+        "a Vensim-expressible edit carries no export warnings: {:?}",
+        outcome.warnings
+    );
 
-    // The original .mdl must be byte-untouched.
     let post_mdl_bytes = fs::read(&mdl_abs).expect("read post mdl");
-    assert_eq!(
+    assert_ne!(
         post_mdl_bytes, original_mdl_bytes,
-        ".mdl file must not be modified by an MCP-driven save"
+        ".mdl must be rewritten in place"
     );
-    // The sidecar must exist.
+    let text = String::from_utf8(post_mdl_bytes).expect("utf8");
     assert!(
-        sidecar_abs.is_file(),
-        "sidecar .sd.json must be created on save"
+        text.starts_with("{UTF-8}"),
+        "rewritten file must be MDL text"
     );
-    // The registry must now point at the sidecar, not the .mdl.
+    let reparsed = simlin_engine::open_vensim(&text).expect("rewritten .mdl parses");
+    let first_aux_eq = reparsed.models[0]
+        .variables
+        .iter()
+        .find_map(|v| match v {
+            simlin_engine::datamodel::Variable::Aux(a) => Some(&a.equation),
+            _ => None,
+        })
+        .expect("an aux");
+    assert_eq!(
+        *first_aux_eq,
+        simlin_engine::datamodel::Equation::Scalar("77".to_string())
+    );
+
     assert!(
-        state.registry.get(&mdl_abs).is_none(),
-        "registry must drop the .mdl entry"
+        !canonical_root.join("teacup.sd.json").exists(),
+        "no sidecar may be created"
     );
-    let sidecar_meta = state
+    let meta = state
         .registry
-        .get(&sidecar_abs)
-        .expect("registry must hold sidecar entry");
-    assert_eq!(sidecar_meta.format, ProjectFormat::SdJson);
-    assert_eq!(sidecar_meta.version, 1);
+        .get(&mdl_abs)
+        .expect("registry must keep the .mdl entry");
+    assert_eq!(meta.format, ProjectFormat::Mdl);
+    assert_eq!(meta.version, 1);
+}
+
+/// The MDL writer's lossiness channel reaches the MCP save outcome: an
+/// edit Vensim cannot express (a non-negative flow) still writes, and the
+/// degradation is reported on `SaveOutcome::warnings` -- the same field
+/// `edit_model` appends to its response.
+#[tokio::test]
+async fn mcp_save_for_mdl_reports_export_lossiness_as_warnings() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let mdl_abs = copy_fixture("teacup.mdl", &canonical_root);
+    let state = build_state(canonical_root.clone());
+    seed_registry(&state, &mdl_abs, ProjectFormat::Mdl);
+
+    let access = RegistryAccess::new(state.clone());
+    let opened = access.open(&mdl_abs).await.expect("open mdl");
+    let mut edited = opened.project.clone();
+    let flow = edited.models[0]
+        .variables
+        .iter_mut()
+        .find_map(|v| match v {
+            simlin_engine::datamodel::Variable::Flow(f) => Some(f),
+            _ => None,
+        })
+        .expect("teacup has a flow");
+    flow.compat.non_negative = true;
+
+    let outcome = access
+        .save(&mdl_abs, &edited, opened.source_format, Some(0))
+        .await
+        .expect("a lossy MDL export must still succeed");
+    assert_eq!(outcome.version, 1);
+    assert!(
+        outcome
+            .warnings
+            .iter()
+            .any(|w| w.message.starts_with("MDL export:") && w.message.contains("non-negative")),
+        "the dropped non-negative flag must be reported: {:?}",
+        outcome.warnings
+    );
+    let text = fs::read_to_string(&mdl_abs).expect("read mdl");
+    simlin_engine::open_vensim(&text).expect("degraded .mdl still parses");
+}
+
+/// Same pre-flight rule as the HTTP handler: an MCP save of a project the
+/// `.mdl` cannot hold is an `AccessError::Validation` naming the invariant,
+/// the registry version stays 0, the doc still holds the original state,
+/// and a representable save at version 0 then succeeds.
+#[tokio::test]
+async fn mcp_save_for_mdl_rejects_an_unrepresentable_project_before_the_merge() {
+    let temp = TempDir::new().expect("tempdir");
+    let canonical_root = temp.path().canonicalize().expect("canon root");
+    let mdl_abs = copy_fixture("teacup.mdl", &canonical_root);
+    let original_mdl_bytes = fs::read(&mdl_abs).expect("read original mdl");
+    let state = build_state(canonical_root.clone());
+    seed_registry(&state, &mdl_abs, ProjectFormat::Mdl);
+
+    let access = RegistryAccess::new(state.clone());
+    let opened = access.open(&mdl_abs).await.expect("open mdl");
+    let mut two_models = opened.project.clone();
+    let mut second = two_models.models[0].clone();
+    second.name = "second".to_string();
+    two_models.models.push(second);
+
+    match access
+        .save(&mdl_abs, &two_models, opened.source_format, Some(0))
+        .await
+    {
+        Err(simlin_mcp_core::errors::AccessError::Validation { errors }) => {
+            assert_eq!(errors.len(), 1);
+            assert_eq!(errors[0].code, "generic");
+            assert_eq!(errors[0].kind, "model");
+            assert!(
+                errors[0].message.starts_with("MDL export:")
+                    && errors[0].message.contains("single model"),
+                "{errors:?}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+
+    assert_eq!(state.registry.get(&mdl_abs).unwrap().version, 0);
+    let reopened = access.open(&mdl_abs).await.expect("reopen");
+    assert_eq!(reopened.version, 0);
+    assert_eq!(reopened.project.models.len(), 1, "doc must be untouched");
+    assert_eq!(fs::read(&mdl_abs).unwrap(), original_mdl_bytes);
+
+    let edited = rewrite_first_aux_equation(&opened.project, "77");
+    let outcome = access
+        .save(&mdl_abs, &edited, opened.source_format, Some(0))
+        .await
+        .expect("a representable save at version 0 still lands");
+    assert_eq!(outcome.version, 1);
 }

@@ -99,7 +99,7 @@ describe('EditorHost', () => {
     expect(fetchMock.mock.calls[0][0]).toBe('/api/projects/sub%20dir/has%20space.xmile');
   });
 
-  test('renders the .mdl sidecar banner when serving from .mdl (AC3.3)', async () => {
+  test('serves an .mdl like any other format: an editable Editor and no format notice (AC3.3)', async () => {
     const response: GetProjectResponse = {
       json: '{}',
       version: 0,
@@ -110,7 +110,8 @@ describe('EditorHost', () => {
     render(<EditorHost path="population.mdl" />);
 
     await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
-    expect(screen.getByText(/sidecar/i)).not.toBeNull();
+    expect(EditorMock.lastProps?.readOnlyMode).toBeUndefined();
+    expect(screen.queryByRole('note')).toBeNull();
   });
 
   test('renders an error banner on fetch failure', async () => {
@@ -142,7 +143,7 @@ describe('EditorHost', () => {
       .mockResolvedValueOnce({
         ok: true,
         status: 200,
-        json: async () => ({ version: 1, path: 'teacup.stmx' }),
+        json: async () => ({ version: 1 }),
       });
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 
@@ -170,7 +171,8 @@ describe('EditorHost', () => {
     });
   });
 
-  test('onSave invokes onPathRedirect when the server returns a different path', async () => {
+  test('shows the writer warnings a save returns, and clears them when the next save is clean', async () => {
+    // 1) initial GET, 2) POST returns lossiness warnings, 3) POST returns none.
     const fetchMock = rs
       .fn()
       .mockResolvedValueOnce({
@@ -185,55 +187,48 @@ describe('EditorHost', () => {
       .mockResolvedValueOnce({
         ok: true,
         status: 200,
-        json: async () => ({ version: 1, path: 'population.sd.json' }),
-      });
-    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
-
-    const onPathRedirect = rs.fn();
-    render(<EditorHost path="population.mdl" onPathRedirect={onPathRedirect} />);
-
-    await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
-
-    const onSave = EditorMock.lastProps?.onSave;
-    const projectData: JsonProjectData = { format: 'json', data: '{}' };
-    await act(async () => {
-      await onSave?.(projectData, 0);
-    });
-
-    expect(onPathRedirect).toHaveBeenCalledTimes(1);
-    expect(onPathRedirect).toHaveBeenCalledWith('population.sd.json');
-  });
-
-  test('onSave does not invoke onPathRedirect when the server keeps the same path', async () => {
-    const fetchMock = rs
-      .fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
         json: async () => ({
-          json: '{}',
-          version: 0,
-          source_format: 'stmx',
+          version: 1,
+          warnings: [
+            {
+              code: 'generic',
+              message: "MDL export: 'heat loss' is marked non-negative; the flag was dropped on export",
+              modelName: 'main',
+              kind: 'model',
+            },
+          ],
         }),
       })
       .mockResolvedValueOnce({
         ok: true,
         status: 200,
-        json: async () => ({ version: 1, path: 'teacup.stmx' }),
+        json: async () => ({ version: 2 }),
       });
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 
-    const onPathRedirect = rs.fn();
-    render(<EditorHost path="teacup.stmx" onPathRedirect={onPathRedirect} />);
+    render(<EditorHost path="population.mdl" />);
 
     await waitFor(() => expect(EditorMock.lastProps).not.toBeNull());
+    expect(screen.queryByRole('note')).toBeNull();
 
     const onSave = EditorMock.lastProps?.onSave;
+    const projectData: JsonProjectData = { format: 'json', data: '{}' };
+    let result: number | undefined;
     await act(async () => {
-      await onSave?.({ format: 'json', data: '{}' }, 0);
+      result = await onSave?.(projectData, 0);
     });
+    // The save succeeded -- warnings never fail it -- and the notice names
+    // the degraded construct.
+    expect(result).toBe(1);
+    const note = screen.getByRole('note');
+    expect(note.textContent).toMatch(/MDL export/);
+    expect(note.textContent).toMatch(/non-negative/);
 
-    expect(onPathRedirect).not.toHaveBeenCalled();
+    await act(async () => {
+      result = await onSave?.(projectData, 1);
+    });
+    expect(result).toBe(2);
+    expect(screen.queryByRole('note')).toBeNull();
   });
 
   test('on 409, refetches GET, invokes onConflict with the latest state, and throws a friendly error (AC3.6)', async () => {
@@ -318,6 +313,19 @@ describe('EditorHost', () => {
               variableName: 'loop',
               kind: 'equation',
             },
+            // Model-scoped (no variable): a sim-spec problem.
+            {
+              code: 'bad_simspecs',
+              message: 'dt must be positive',
+              modelName: 'main',
+              kind: 'simulation',
+            },
+            // Project-scoped: neither.
+            {
+              code: 'no_models',
+              message: 'project has no models',
+              kind: 'project',
+            },
           ],
         }),
       });
@@ -343,6 +351,10 @@ describe('EditorHost', () => {
     expect(msg).toContain('circular_dependency');
     expect(msg).toContain('loop');
     expect(msg).toContain('depends on itself');
+    // A model-scoped error names the model, not "(unknown)"; only an error
+    // with neither scope falls back to it.
+    expect(msg).toContain(' - bad_simspecs: model main: dt must be positive');
+    expect(msg).toContain(' - no_models: (unknown): project has no models');
   });
 
   test('on 422 with no details, throws a generic save-failed error', async () => {
@@ -474,7 +486,7 @@ describe('EditorHost', () => {
       .mockResolvedValueOnce({
         ok: true,
         status: 200,
-        json: async () => ({ version: 1, path: 'teacup.stmx' }),
+        json: async () => ({ version: 1 }),
       });
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 

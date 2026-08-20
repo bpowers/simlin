@@ -1,4 +1,4 @@
-.PHONY: all build test clean install dev lint type-check
+.PHONY: all build test clean install dev lint type-check assets check-assets e2e export-check
 
 # Build the libsimlin library. mimalloc: the engine compile path is
 # allocation-heavy and mimalloc roughly halves allocator time on native builds
@@ -6,7 +6,17 @@
 build-lib:
 	cd ../libsimlin && cargo build --release --features mimalloc
 
-# Build the Python package
+# Stage the notebook widget's assets (widget.js + libsimlin-browser.wasm +
+# ASSETS.json) into simlin/_widget/. Builds the TypeScript workspace first;
+# `python scripts/stage_widget_assets.py --no-build` restages without it.
+assets:
+	python3 scripts/stage_widget_assets.py
+
+# Verify the staged assets are complete and match their manifest.
+check-assets:
+	python3 scripts/stage_widget_assets.py --check
+
+# Build the Python package (build_wheels.py stages the widget assets itself)
 build: build-lib
 	uv run python scripts/build_wheels.py
 
@@ -27,6 +37,25 @@ lint:
 type-check:
 	uv run mypy simlin
 
+# The JupyterLab journey (Playwright, e2e/): launches jupyter lab from this
+# venv, so the e2e extra must be installed alongside dev; --inexact keeps
+# whatever else the venv holds (a plain `uv sync --extra dev` elsewhere prunes
+# jupyterlab again, and this re-adds it). Needs the CFFI extension built, the
+# widget assets staged in simlin/_widget/, and Playwright's chromium; see
+# e2e/playwright.config.ts for the environment variables.
+e2e:
+	uv sync --inexact --extra dev --extra e2e
+	../../node_modules/.bin/tsc -p e2e/tsconfig.json
+	../../node_modules/.bin/playwright test -c e2e/playwright.config.ts
+
+# Static-export check of the example notebook: execute it headless with
+# nbconvert (from this venv, so the e2e extra is synced the same way) and
+# assert the display cell exports as the widget when the widget state is
+# stored and as the SVG diagram when it is not (scripts/check_notebook_export.py).
+export-check:
+	uv sync --inexact --extra dev --extra e2e
+	uv run python scripts/check_notebook_export.py examples/notebook_editor.ipynb --output-dir e2e/.output/export
+
 # Format code
 format:
 	uv run ruff format simlin tests
@@ -35,7 +64,8 @@ format:
 # Clean build artifacts
 clean:
 	rm -rf build dist *.egg-info .venv
-	rm -rf simlin/_ffi.*.so simlin/_ffi.*.pyd
+	rm -rf simlin/_clib.*.so simlin/_clib.*.pyd
+	rm -f simlin/_widget/widget.js simlin/_widget/libsimlin-browser.wasm simlin/_widget/ASSETS.json
 	rm -rf .pytest_cache .mypy_cache
 	find . -type d -name __pycache__ -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete

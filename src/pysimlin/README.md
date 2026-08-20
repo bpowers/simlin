@@ -11,6 +11,10 @@ Python bindings for [Simlin](https://simlin.com), a system dynamics simulation e
   dominance shifts
 - Inspect model structure: variables, equations, causal links, feedback loops
 - Edit models, or build them from scratch, through a transactional context manager
+- Open a model file with `simlin.open()`: edits save back to the file in its
+  own format, and changes other tools make to the file are picked up
+- Display a model in a notebook cell to edit its diagram interactively; the
+  editor writes to the model file and follows changes made to it
 - Import Vensim `.vdf` binary output as DataFrames
 - Generate SVG and PNG diagrams of the model's structure
 - Full type hints
@@ -18,8 +22,16 @@ Python bindings for [Simlin](https://simlin.com), a system dynamics simulation e
 ## Installation
 
 ```bash
-pip install pysimlin
+pip install pysimlin                # simulate, analyze, edit, render diagrams
+pip install "pysimlin[notebook]"    # + the interactive editor in notebook cells
 ```
+
+The `notebook` extra adds [anywidget](https://anywidget.dev) (and through it
+ipywidgets/IPython) -- a couple of dozen packages that a script, an MCP
+server, or a CI install which never displays a model does not need, which
+is why the bare install leaves them out. Without it everything else works;
+displaying a model shows the static SVG diagram plus a warning with the
+install line, and `model.widget()` raises `SimlinDependencyError`.
 
 The distribution is named `pysimlin`; the importable package is `simlin`:
 
@@ -28,7 +40,7 @@ import simlin
 ```
 
 Requires Python 3.11+ on macOS (ARM64) or Linux (ARM64, x86_64). Depends on
-numpy, pandas, and cffi.
+numpy, pandas, cffi, and cattrs; the `notebook` extra adds anywidget.
 
 ## Quick Start
 
@@ -92,7 +104,9 @@ did.
 
 Every model is also a diagram. `render_svg()` draws the stock-and-flow
 structure, computing a layout automatically for a model that doesn't
-already carry one (`render_png()` is the bitmap sibling):
+already carry one (`render_png()` is the bitmap sibling; in a notebook,
+`model.diagram()` shows the same picture inline; nothing is persisted --
+`project.auto_layout()` writes a layout into the model):
 
 ```python
 from pathlib import Path
@@ -114,8 +128,15 @@ Complete, runnable programs live in
   alters behavior.
 - [`population_model.py`](https://github.com/bpowers/simlin/blob/main/src/pysimlin/examples/population_model.py)
   builds a model from scratch and validates the shape of its output.
+- [`notebook_editor.ipynb`](https://github.com/bpowers/simlin/blob/main/src/pysimlin/examples/notebook_editor.ipynb)
+  opens a model file in a notebook, edits it in the interactive editor and
+  from Python, and follows a change made by another tool -- the workflow for
+  collaborating on a model with Claude Code.
+- [`colab_quickstart.ipynb`](https://github.com/bpowers/simlin/blob/main/src/pysimlin/examples/colab_quickstart.ipynb)
+  is the same in Google Colab: `%pip install "pysimlin[notebook]"`, build and open a model,
+  display the editor, simulate.
 
-Both run in CI on every commit.
+All of them run in CI on pull requests and pushes to `main` (the Colab notebook's `%pip` cell excepted).
 
 ## API Reference
 
@@ -130,11 +151,15 @@ extension:
 
 <!-- pysimlin-test: skip -->
 ```python
-model = simlin.load("model.stmx")   # XMILE (.stmx, .xmile, .xml)
-model = simlin.load("model.mdl")    # Vensim
-model = simlin.load("model.json")   # Simlin JSON
-project = model.project             # the containing Project
+model = simlin.load("model.stmx")     # XMILE (.stmx, .xmile, .xml)
+model = simlin.load("model.mdl")      # Vensim
+model = simlin.load("model.sd.json")  # Simlin JSON (SD-AI JSON is detected by content)
+project = model.project               # the containing Project
 ```
+
+`load()` reads the file into memory. `simlin.open()` takes the same files
+but keeps the model attached to the file, writing edits back and noticing
+external changes; see [Editing and Saving Models](#editing-and-saving-models).
 
 To start from nothing, create a project with `simlin.Project.new()` and add
 variables with `model.edit()`, as in Quick Start.
@@ -196,6 +221,217 @@ with model.edit() as (current, patch):
     stock = current["population"]
     patch.upsert(replace(stock, outflows=[*stock.outflows, "harvest"]))
 ```
+
+### Editing and Saving Models
+
+`simlin.load()` reads a file into memory; `simlin.open()` keeps the model
+attached to its file. A file-backed model knows its `path` and format
+(XMILE for `.stmx`/`.xmile`, Vensim for `.mdl`, Simlin JSON for `.sd.json`),
+and every accepted edit is written straight back to that file, in that
+format, with an atomic tempfile-and-rename write. `revision` counts accepted
+changes; `dirty` says whether the file lags the in-memory model. To give an
+in-memory project a file, `save_as()` it first (the suffix picks the format):
+
+```python
+import tempfile
+from pathlib import Path
+
+workdir = Path(tempfile.mkdtemp())
+model_path = workdir / "logistic-growth.stmx"
+project.save_as(model_path)
+
+model = simlin.open(model_path)
+print(model.path.name, model.revision, model.dirty)   # logistic-growth.stmx 0 False
+
+with model.edit() as (current, patch):
+    patch.upsert(replace(current["max_growth_rate"], equation="0.1"))
+
+print(model.revision, model.dirty)   # 1 False: already written back to disk
+print(simlin.load(model_path).get_variable("max_growth_rate").equation)   # 0.1
+```
+
+A variable added through `edit()` also gets a diagram element (existing
+elements keep their positions) whenever there is a diagram to keep in step,
+for two reasons: on any file-backed model, so the saved file stays openable
+and draws correctly in Simlin, Stella, or `model.diagram()`; and on an
+in-memory model that has a view -- one you displayed, or laid out with
+`project.auto_layout()` -- so an editor showing it keeps up with what Python
+adds. An in-memory model built from scratch has no view until you display it
+or call `project.auto_layout()`; `model.diagram()` draws it with a transient
+layout either way.
+
+Every write regenerates the whole file from the in-memory model; it is not
+a byte-preserving edit of what was there. For XMILE and Simlin JSON that is
+the same document. For Vensim `.mdl` the file is re-emitted from Simlin's
+model, so the first save of a Vensim-authored file shows a whole-file diff:
+formatting is normalised, identifier casing is normalised, spaces
+in unit names become `_`, and constructs Simlin does not carry are dropped:
+unit ranges such as `[0,?]` silently, a non-negativity flag or a discrete
+lookup with a `RuntimeWarning` (once per distinct message per project).
+Keep the original under version control if that diff matters.
+
+Pass `autosave=False` to batch changes: edits then set `dirty` and stay in
+memory until `model.save()`. With autosave on (the default), `dirty` is only
+ever true after a failed or refused write (disk full, permissions, or the
+conflict below): the write raises and the in-memory change is kept until a
+later `save()` succeeds.
+
+Two suffixes are read-only: `.vpm` (a packaged Vensim model, read as MDL
+text) and `.proto` (a schema suffix accepted for protobuf input). A model
+opened from one is backed without write permission -- `model.writable` is
+`False`, `autosave` is off and cannot be turned on for that path, edits (and
+the diagram layout a display adds to a sketch-less model) stay in memory
+with `dirty` set, and `save()` refuses -- so the packaged file is never
+regenerated as plain MDL or as a binary blob. `project.save_as("x.mdl")`
+keeps the changes and, since you never turned autosave off, autosaves from
+there on. The path you open is anchored to an absolute one at that moment
+(`model.path` reports it), so a later `%cd` or `os.chdir()` never moves
+where autosave writes or what is watched.
+
+`save()` never silently overwrites someone else's work. If the file changed
+on disk since the model last read or wrote it, `save()` raises and leaves
+both file and model as they are; `model.reload()` takes the on-disk version
+(discarding local changes) and `model.project.save(force=True)` overwrites
+it with yours. Likewise an `edit()` block whose model changed underneath it
+(a reload from disk landed, or another thread edited) is rejected unapplied
+-- re-run the block against the current contents.
+
+The file is the shared truth between you and any other tool that edits it,
+such as Claude Code rewriting equations in the file, or the `simlin` MCP
+server. By default an opened model polls its file every half second (a
+plain stdlib thread; pass `watch=False` to disable, `model.project.watch()`
+to control it): an external change is loaded in place, `revision`
+advances, cached results such as `base_case` are dropped, and the next
+`model.run()` reflects it. Your own saves are recognised by content hash
+and never round-trip as external changes; a file rewritten with unparsable
+contents is not loaded (a `RuntimeWarning` names the problem and the last
+good model stays); `model.reload()` forces a re-read and returns whether
+anything changed. Subscribe to all of this with `on_change`:
+
+```python
+def announce(event):
+    print(f"revision {event.revision} from {event.source}")   # edit | widget | disk | reload
+
+unsubscribe = model.project.on_change(announce)
+with model.edit() as (_, patch):
+    patch.upsert(Aux(name="observed_growth", equation="net_growth / population"))
+unsubscribe()
+```
+
+`model.reload()` returns `False` here -- the file holds exactly what we
+wrote:
+
+```python
+print(model.reload())   # False
+```
+
+### Interactive Editing in Notebooks
+
+A model displayed as a cell's value is the Simlin diagram editor, live.
+`pip install "pysimlin[notebook]"` is all it needs: the editor and its
+engine ship inside the wheel as an [anywidget](https://anywidget.dev), so
+there is no extension to install and no sidecar process (anywidget rather
+than a homegrown stack because it is what makes one widget render on every
+host: VS Code's kernel needs `import ipywidgets`, marimo needs
+`anywidget.AnyWidget`). Without the extra a displayed model shows its SVG
+diagram and a `RuntimeWarning` with the install line in the displaying
+cell's output; the model's plain-text repr in the same output carries the
+line too (Python shows a given warning once per source location, so a
+re-run of the same cell may not repeat it). It is verified on JupyterLab 4
+(an automated browser journey runs in CI on pull requests and pushes to `main`) and expected to work
+wherever anywidget does -- Notebook 7, VS Code, Google Colab, marimo --
+with the checklist and the honest status of each host in
+[`docs/notebook-hosts.md`](https://github.com/bpowers/simlin/blob/main/src/pysimlin/docs/notebook-hosts.md)
+([`examples/colab_quickstart.ipynb`](https://github.com/bpowers/simlin/blob/main/src/pysimlin/examples/colab_quickstart.ipynb)
+is the two-minute Colab start; Colab itself is not yet verified -- if the
+editor does not appear there, set `SIMLIN_WIDGET_ASSET=inline` before
+`import simlin` and please report which worked). Static renderers get the
+SVG diagram in the same output. Displaying a model that has no diagram yet
+(one built from scratch with `edit()`, or a sketch-less `.mdl`) lays it out
+first -- a committed change like `project.auto_layout()`, so `revision`
+advances and a file-backed project WRITES THE FILE with the layout, even
+for a `read_only=True` display: a Vensim `.mdl` without a sketch is
+regenerated with one the first time it is shown.
+
+<!-- pysimlin-test: skip -->
+```python
+model            # the last expression in a cell: shows the editor
+
+widget = model.widget(height=500, theme="dark")   # or keep a handle
+display(widget)
+```
+
+The file on disk is the single source of truth, so every collaborator sees
+the same model:
+
+- Each edit made in the editor (a new variable, an equation, a moved
+  element) is written to `model.path` in its own format as soon as the
+  kernel handles it -- immediately, even while a long cell runs, on
+  ipykernel 7 (JupyterLab 4.4+); when the current cell finishes on older
+  kernels -- and always before the next cell runs; `model.revision`
+  advances and `model.run()` reflects it.
+- `model.edit()` in a cell updates the editor in place with a short
+  "Updated from Python" notice; an external write to the file (Claude Code
+  editing it, the `simlin` MCP server, `git checkout`) does the same with
+  "Updated on disk", and `model.reload()` with "Reloaded from disk". The
+  editor's undo history resets on such remounts (its own edits never
+  remount).
+- The same model displayed in two cells stays consistent: an edit in one
+  appears in the other.
+- An edit made against a version the kernel has since moved past is
+  rejected with a notice and never written; the editor reloads from the
+  current model. If an edit is applied but the file cannot be written
+  (disk full, permissions), the editor keeps it, a notice says so, and
+  `model.dirty` is set until `model.save()` succeeds.
+- `model.selection` is the tuple of variable names selected in the editor,
+  so a cell can ask what the human is looking at:
+
+```python
+print(model.selection)   # () until something is selected in a displayed editor
+```
+
+`on_change` subscribers see editor saves as `source == "widget"`. With
+`read_only=True` the editor shows the diagram without accepting edits;
+`theme` is `"auto"` (follow the notebook), `"light"`, or `"dark"`.
+
+Practical notes:
+
+- **Widget lifetime.** Each display creates a kernel-side widget that stays
+  subscribed to the model until it is closed (`widget.close()`, or
+  `simlin.ModelWidget.close_all()`, which closes every model editor and no
+  other widget); re-running a display cell leaves the previous one alive,
+  which is harmless but worth knowing in long sessions.
+- **Reopening a notebook.** JupyterLab shows "model not found" in place of
+  a widget when a notebook is reopened without a running kernel or saved
+  widget state; re-run the display cell. Hosts that save widget state into
+  the notebook file (Colab does by default; JupyterLab does not) store the
+  widget's JS module, about 1.5 MB, per displayed widget.
+- **Static export.** The SVG in the same output is what nbconvert, GitHub,
+  or a viewer without a kernel shows -- whenever the notebook carries no
+  saved widget state. Plainly: the DEFAULT `jupyter nbconvert --to html
+  --execute` stores that state and exports the widget itself, which in the
+  exported page has no kernel to ask for its engine and so shows "Loading
+  the Simlin engine..." and then a timeout message, not the diagram; pass
+  `--ExecutePreprocessor.store_widget_state=False` to get the SVG diagram
+  in the export (`make export-check` in `src/pysimlin` exercises both arms).
+- **Asset delivery.** If the saved-state size is a concern, or the
+  front-end cannot receive binary comm messages, set `SIMLIN_WIDGET_ASSET`
+  **before** `import simlin`: `inline` embeds the engine wasm into the
+  module (works everywhere, largest output), or an `http(s)://` URL loads
+  the module from a server you run.
+- **Very large models** display but cannot be edited from the editor: each
+  edit travels browser-to-kernel as the whole project in JSON, and a Jupyter
+  server drops websocket messages above 10 MiB (tornado's
+  `websocket_max_message_size`) by closing the connection. The editor
+  therefore refuses to send an edit whose snapshot, as it rides in the
+  message (JSON-escaped), exceeds 8 MiB (`model.widget(max_snapshot_bytes=...)`
+  sets the cap) with the notice "Edit not saved: the model is too large for
+  the notebook connection ..." instead of hanging, and displaying such a
+  model emits a `RuntimeWarning` up front. For scale, C-LEARN (911
+  variables) is 1.4 MiB. Editing from Python is unaffected. To edit models
+  that large in the editor, raise both limits:
+  `jupyter lab --ServerApp.tornado_settings='{"websocket_max_message_size": 104857600}'`
+  and `max_snapshot_bytes` at or below about 80% of that.
 
 ### Running Simulations
 
@@ -424,7 +660,9 @@ xmile_bytes = project.to_xmile()        # XMILE XML
 json_bytes = project.serialize_json()   # Simlin JSON
 ```
 
-Write the bytes to a file to save the model (`.stmx` for XMILE).
+To save to a file, prefer `project.save_as(path)` (or `save()` on a
+file-backed project): it picks the format from the suffix and writes
+atomically.
 
 ### Error Handling
 

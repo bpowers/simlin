@@ -6,9 +6,9 @@
 
 //! Integration tests for `POST /api/projects/{*path}`. Covers
 //! version-check + validation (Subcomponent A) plus the format-aware
-//! disk-write paths (Subcomponent B): XMILE in-place overwrite,
-//! `.sd.json` sidecar creation for `.mdl` requests, and the
-//! `.mdl`-untouched invariant.
+//! disk-write paths (Subcomponent B): XMILE in-place overwrite, Vensim
+//! `.mdl` in-place overwrite (regenerated MDL text, lossiness reported as
+//! `warnings`), and `.sd.json` in-place overwrite.
 
 use std::fs;
 use std::path::PathBuf;
@@ -110,6 +110,42 @@ async fn get_canonical_json(state: AppState, uri: &str) -> (u64, String) {
     )
 }
 
+/// Set the equation of the auxiliary whose canonical ident is `ident` in a
+/// canonical-JSON project string, returning the mutated string. The
+/// `.mdl` tests edit an equation rather than the project name because
+/// Vensim has no project-name field to observe a rewrite through.
+fn set_aux_equation(json_body: &str, ident: &str, equation: &str) -> String {
+    let mut value: Value = serde_json::from_str(json_body).expect("parse canonical json");
+    let auxes = value["models"][0]["auxiliaries"]
+        .as_array_mut()
+        .expect("model has auxiliaries");
+    let aux = auxes
+        .iter_mut()
+        .find(|a| simlin_engine::canonicalize(a["name"].as_str().unwrap_or("")).as_ref() == ident)
+        .unwrap_or_else(|| panic!("no auxiliary '{ident}' in {json_body}"));
+    aux["equation"] = Value::String(equation.to_string());
+    serde_json::to_string(&value).expect("reserialize")
+}
+
+/// The equation of the auxiliary `ident` in an on-disk `.mdl`, read back
+/// through the engine's Vensim parser.
+fn mdl_aux_equation(mdl_path: &std::path::Path, ident: &str) -> String {
+    let text = fs::read_to_string(mdl_path).expect("read mdl");
+    let project = simlin_engine::open_vensim(&text).expect("rewritten .mdl parses as Vensim");
+    let var = project.models[0]
+        .variables
+        .iter()
+        .find(|v| v.get_ident() == ident)
+        .unwrap_or_else(|| panic!("no variable '{ident}' in rewritten .mdl"));
+    match var {
+        simlin_engine::datamodel::Variable::Aux(a) => match &a.equation {
+            simlin_engine::datamodel::Equation::Scalar(eq) => eq.clone(),
+            other => panic!("expected scalar equation, got {other:?}"),
+        },
+        other => panic!("expected aux, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn ok_with_matching_version_increments_registry() {
     let dir = TempDir::new().unwrap();
@@ -142,7 +178,10 @@ async fn ok_with_matching_version_increments_registry() {
     );
     let response = parse_body(&response_bytes);
     assert_eq!(response["version"].as_u64(), Some(1));
-    assert_eq!(response["path"].as_str(), Some("teacup.stmx"));
+    assert!(
+        response.get("warnings").is_none(),
+        "a lossless XMILE save carries no warnings: {response}"
+    );
 
     // The XMILE file has been overwritten in place. The new content must
     // parse back to a Project semantically equivalent to the input.
@@ -333,11 +372,14 @@ async fn missing_path_returns_404() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-/// AC3.4: Saving an edit to a `.mdl` file writes a sibling
-/// `<basename>.sd.json` and leaves the original `.mdl` untouched.
-/// Also exercises the SaveResponse path-rewrite to the sidecar.
+/// Saving an edit to a `.mdl` file rewrites the `.mdl` itself as
+/// regenerated Vensim text (sketch included) that parses back with the
+/// edit applied; no sibling file is created.  (This supersedes the
+/// server-rewrite design's AC3.4/AC3.5, which specified an `.sd.json`
+/// sidecar; see the crate CLAUDE.md "every format is read from and written
+/// to its own file".)
 #[tokio::test]
-async fn save_mdl_creates_sidecar_and_does_not_modify_mdl() {
+async fn save_mdl_rewrites_the_mdl_in_place_with_edits() {
     let dir = TempDir::new().unwrap();
     let mdl_abs = copy_fixture("teacup.mdl", dir.path());
     let canonical_root = dir.path().canonicalize().unwrap();
@@ -346,12 +388,15 @@ async fn save_mdl_creates_sidecar_and_does_not_modify_mdl() {
     seed_registry(&state, &mdl_canonical, ProjectFormat::Mdl);
 
     let pre_mdl_bytes = fs::read(&mdl_canonical).unwrap();
+    assert_eq!(mdl_aux_equation(&mdl_canonical, "room_temperature"), "70");
 
-    // GET first so we have a canonical-JSON body to send back.
+    // GET first so we have a canonical-JSON body to send back, then edit
+    // one equation so the rewrite is observable.
     let (version, json_body) = get_canonical_json(state.clone(), "/api/projects/teacup.mdl").await;
     assert_eq!(version, 0);
+    let mutated = set_aux_equation(&json_body, "room_temperature", "75");
 
-    let body = serde_json::json!({"json": &json_body, "version": 0}).to_string();
+    let body = serde_json::json!({"json": mutated, "version": 0}).to_string();
     let (status, response_bytes) = fetch(
         state.clone(),
         "POST",
@@ -365,42 +410,43 @@ async fn save_mdl_creates_sidecar_and_does_not_modify_mdl() {
         "body: {}",
         String::from_utf8_lossy(&response_bytes)
     );
-
-    // The response path now points at the sidecar so the SPA can update
-    // its URL state to follow the redirect.
     let response = parse_body(&response_bytes);
     assert_eq!(response["version"].as_u64(), Some(1));
-    assert_eq!(response["path"].as_str(), Some("teacup.sd.json"));
-
-    // The .mdl file is byte-identical to before the save.
-    let post_mdl_bytes = fs::read(&mdl_canonical).unwrap();
-    assert_eq!(
-        pre_mdl_bytes, post_mdl_bytes,
-        ".mdl must not be modified by a sidecar write"
+    assert!(
+        response.get("warnings").is_none(),
+        "a Vensim-expressible edit carries no warnings: {response}"
     );
 
-    // The sidecar exists alongside the .mdl with valid JSON content.
-    let sidecar_path = canonical_root.join("teacup.sd.json");
-    assert!(sidecar_path.is_file(), "sidecar must be created on save");
-    let sidecar_bytes = fs::read(&sidecar_path).unwrap();
-    let _: simlin_engine::json::Project =
-        serde_json::from_slice(&sidecar_bytes).expect("sidecar parses as json::Project");
+    // The .mdl itself changed, is still Vensim text with its sketch, and
+    // parses back with the edit applied.
+    let post_mdl_bytes = fs::read(&mdl_canonical).unwrap();
+    assert_ne!(
+        pre_mdl_bytes, post_mdl_bytes,
+        ".mdl must be rewritten in place"
+    );
+    let text = String::from_utf8(post_mdl_bytes).unwrap();
+    assert!(
+        text.starts_with("{UTF-8}"),
+        "rewritten file must be MDL text"
+    );
+    assert!(
+        text.contains("Sketch information"),
+        "sketch must survive the rewrite"
+    );
+    assert_eq!(mdl_aux_equation(&mdl_canonical, "room_temperature"), "75");
+
+    assert!(
+        !canonical_root.join("teacup.sd.json").exists(),
+        "no sidecar may be created by an .mdl save"
+    );
 }
 
-/// AC3.5: After a save creates the sidecar, GET on the original `.mdl`
-/// path returns the sidecar's content (Phase 1 read-side preference,
-/// re-verified end-to-end).
+/// The MDL writer's lossiness channel reaches the HTTP response: an edit
+/// that marks a flow non-negative (Vensim has no equation-text form for
+/// the flag) still saves, and the 200 body's `warnings` names the
+/// dropped construct with the `MDL export:` prefix.
 #[tokio::test]
-async fn stale_tab_save_to_mdl_after_sidecar_returns_409() {
-    // Two-tab race: Tab A saves the .mdl path, which redirects to a fresh
-    // .sd.json sidecar at version 1 and removes the .mdl registry entry.
-    // Tab B holds stale state (still believes the .mdl is at version 0)
-    // and POSTs to /api/projects/foo.mdl with version=0. Without
-    // sidecar-preference at save-resolve time, the handler's
-    // ensure_or_get re-creates a .mdl entry at version 0; the version
-    // check passes (0 == 0); the stale edit silently overwrites the
-    // newer sidecar content. The principled fix is the same disk-side
-    // sidecar-preference rule the read path applies.
+async fn save_mdl_reports_export_lossiness_as_warnings_and_still_writes() {
     let dir = TempDir::new().unwrap();
     let mdl_abs = copy_fixture("teacup.mdl", dir.path());
     let canonical_root = dir.path().canonicalize().unwrap();
@@ -408,13 +454,152 @@ async fn stale_tab_save_to_mdl_after_sidecar_returns_409() {
     let state = build_state(canonical_root.clone());
     seed_registry(&state, &mdl_canonical, ProjectFormat::Mdl);
 
-    // Tab A: drive the canonical save flow that creates the sidecar at v1.
+    let (_, json_body) = get_canonical_json(state.clone(), "/api/projects/teacup.mdl").await;
+    let mut value: Value = serde_json::from_str(&json_body).unwrap();
+    let flow = value["models"][0]["flows"]
+        .as_array_mut()
+        .and_then(|f| f.first_mut())
+        .expect("teacup has a flow");
+    flow["compat"] = serde_json::json!({"nonNegative": true});
+    let mutated = serde_json::to_string(&value).unwrap();
+
+    let body = serde_json::json!({"json": mutated, "version": 0}).to_string();
+    let (status, response_bytes) = fetch(
+        state.clone(),
+        "POST",
+        "/api/projects/teacup.mdl",
+        Body::from(body),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a lossy MDL export must still succeed; body: {}",
+        String::from_utf8_lossy(&response_bytes)
+    );
+    let response = parse_body(&response_bytes);
+    assert_eq!(response["version"].as_u64(), Some(1));
+    let warnings = response["warnings"]
+        .as_array()
+        .expect("lossy save must carry warnings");
+    assert!(
+        warnings.iter().any(|w| {
+            w["message"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("MDL export:") && m.contains("non-negative"))
+        }),
+        "the dropped non-negative flag must be reported: {warnings:?}"
+    );
+    for w in warnings {
+        assert_eq!(w["code"].as_str(), Some("generic"));
+        assert_eq!(w["kind"].as_str(), Some("model"));
+    }
+
+    // The write landed and the file still parses as Vensim.
+    let text = fs::read_to_string(&mdl_canonical).unwrap();
+    simlin_engine::open_vensim(&text).expect("degraded .mdl still parses");
+}
+
+/// A project Vensim structurally cannot hold (here: a second model) is
+/// rejected as 422 with the violated invariant named, BEFORE the registry
+/// doc is merged: the version stays 0, a re-GET still serves the original
+/// state, the `.mdl` on disk is untouched, and the next valid save at
+/// version 0 succeeds -- the entry was never left holding an unsaveable
+/// merge.
+#[tokio::test]
+async fn save_mdl_rejects_an_unrepresentable_project_before_the_merge() {
+    let dir = TempDir::new().unwrap();
+    let mdl_abs = copy_fixture("teacup.mdl", dir.path());
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let mdl_canonical = mdl_abs.canonicalize().unwrap();
+    let state = build_state(canonical_root.clone());
+    seed_registry(&state, &mdl_canonical, ProjectFormat::Mdl);
+    let pre_mdl_bytes = fs::read(&mdl_canonical).unwrap();
+
+    let (_, json_body) = get_canonical_json(state.clone(), "/api/projects/teacup.mdl").await;
+    let mut value: Value = serde_json::from_str(&json_body).unwrap();
+    let mut second = value["models"][0].clone();
+    second["name"] = Value::String("second".to_string());
+    value["models"].as_array_mut().unwrap().push(second);
+    let two_models = serde_json::to_string(&value).unwrap();
+
+    let body = serde_json::json!({"json": two_models, "version": 0}).to_string();
+    let (status, response_bytes) = fetch(
+        state.clone(),
+        "POST",
+        "/api/projects/teacup.mdl",
+        Body::from(body),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "an unrepresentable .mdl save is a validation failure; body: {}",
+        String::from_utf8_lossy(&response_bytes)
+    );
+    let response = parse_body(&response_bytes);
+    assert_eq!(response["error"].as_str(), Some("validation_failed"));
+    let details = response["details"].as_array().expect("details");
+    assert_eq!(details.len(), 1);
+    assert_eq!(details[0]["code"].as_str(), Some("generic"));
+    assert_eq!(details[0]["kind"].as_str(), Some("model"));
+    assert!(
+        details[0]["message"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("MDL export:") && m.contains("single model")),
+        "the invariant must be named: {details:?}"
+    );
+
+    // Registry untouched: version 0, doc still the original single model.
+    assert_eq!(state.registry.get(&mdl_canonical).unwrap().version, 0);
+    let (version, after_json) = get_canonical_json(state.clone(), "/api/projects/teacup.mdl").await;
+    assert_eq!(version, 0);
+    let after: Value = serde_json::from_str(&after_json).unwrap();
+    assert_eq!(after["models"].as_array().unwrap().len(), 1);
+    assert_eq!(fs::read(&mdl_canonical).unwrap(), pre_mdl_bytes);
+
+    // The entry is still saveable: a representable edit at version 0 lands.
+    let body = serde_json::json!({
+        "json": set_aux_equation(&json_body, "room_temperature", "75"),
+        "version": 0,
+    })
+    .to_string();
+    let (status, response_bytes) = fetch(
+        state.clone(),
+        "POST",
+        "/api/projects/teacup.mdl",
+        Body::from(body),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&response_bytes)
+    );
+    assert_eq!(parse_body(&response_bytes)["version"].as_u64(), Some(1));
+}
+
+/// Optimistic locking applies to `.mdl` like any other format: a second
+/// tab that never observed the first tab's save POSTs a stale version and
+/// gets 409, and the `.mdl` on disk keeps the first tab's edit.
+#[tokio::test]
+async fn stale_tab_save_to_mdl_returns_409_and_keeps_the_first_edit() {
+    let dir = TempDir::new().unwrap();
+    let mdl_abs = copy_fixture("teacup.mdl", dir.path());
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let mdl_canonical = mdl_abs.canonicalize().unwrap();
+    let state = build_state(canonical_root.clone());
+    seed_registry(&state, &mdl_canonical, ProjectFormat::Mdl);
+
     let (_, body_text) = get_canonical_json(state.clone(), "/api/projects/teacup.mdl").await;
-    let mut tab_a_value: Value = serde_json::from_str(&body_text).unwrap();
-    tab_a_value["name"] = Value::String("tab-A-saved".to_string());
-    let tab_a_body =
-        serde_json::json!({"json": serde_json::to_string(&tab_a_value).unwrap(), "version": 0})
-            .to_string();
+
+    // Tab A: version 0 -> 1.
+    let tab_a_body = serde_json::json!({
+        "json": set_aux_equation(&body_text, "room_temperature", "75"),
+        "version": 0,
+    })
+    .to_string();
     let (status, _) = fetch(
         state.clone(),
         "POST",
@@ -424,14 +609,12 @@ async fn stale_tab_save_to_mdl_after_sidecar_returns_409() {
     .await;
     assert_eq!(status, StatusCode::OK, "tab A's first save must succeed");
 
-    // Tab B: has never observed Tab A's save. Saves to the .mdl path with
-    // a stale version=0. The sidecar exists on disk at version 1; the
-    // optimistic-lock check must run against the sidecar entry and reject.
-    let mut tab_b_value: Value = serde_json::from_str(&body_text).unwrap();
-    tab_b_value["name"] = Value::String("tab-B-stale".to_string());
-    let tab_b_body =
-        serde_json::json!({"json": serde_json::to_string(&tab_b_value).unwrap(), "version": 0})
-            .to_string();
+    // Tab B: still believes the .mdl is at version 0.
+    let tab_b_body = serde_json::json!({
+        "json": set_aux_equation(&body_text, "room_temperature", "80"),
+        "version": 0,
+    })
+    .to_string();
     let (status, response_bytes) = fetch(
         state.clone(),
         "POST",
@@ -442,24 +625,21 @@ async fn stale_tab_save_to_mdl_after_sidecar_returns_409() {
     assert_eq!(
         status,
         StatusCode::CONFLICT,
-        "stale .mdl save must surface 409 against the sidecar's current version; body: {}",
+        "stale .mdl save must surface 409; body: {}",
         String::from_utf8_lossy(&response_bytes)
     );
 
-    // The sidecar still has Tab A's content — Tab B's stale edit must
-    // not have landed.
-    let sidecar_canonical = canonical_root.join("teacup.sd.json");
-    let sidecar_bytes = fs::read(&sidecar_canonical).unwrap();
-    let sidecar_json: Value = serde_json::from_slice(&sidecar_bytes).unwrap();
     assert_eq!(
-        sidecar_json["name"].as_str(),
-        Some("tab-A-saved"),
-        "sidecar must still hold Tab A's saved content"
+        mdl_aux_equation(&mdl_canonical, "room_temperature"),
+        "75",
+        ".mdl must still hold Tab A's edit"
     );
 }
 
+/// After a save, GET on the `.mdl` path serves the saved state, still as
+/// `mdl`: the file the request named is the project, before and after.
 #[tokio::test]
-async fn after_sidecar_save_get_mdl_returns_sidecar_content() {
+async fn after_mdl_save_get_returns_the_saved_state_as_mdl() {
     let dir = TempDir::new().unwrap();
     let mdl_abs = copy_fixture("teacup.mdl", dir.path());
     let canonical_root = dir.path().canonicalize().unwrap();
@@ -468,11 +648,7 @@ async fn after_sidecar_save_get_mdl_returns_sidecar_content() {
     seed_registry(&state, &mdl_canonical, ProjectFormat::Mdl);
 
     let (_, json_body) = get_canonical_json(state.clone(), "/api/projects/teacup.mdl").await;
-    // Mutate the project name so the second GET reflects the saved
-    // change rather than just the parsed-from-mdl baseline.
-    let mut json_value: serde_json::Value = serde_json::from_str(&json_body).expect("parse json");
-    json_value["name"] = serde_json::Value::String("post-save-name".to_string());
-    let mutated = serde_json::to_string(&json_value).unwrap();
+    let mutated = set_aux_equation(&json_body, "room_temperature", "75");
 
     let body = serde_json::json!({"json": mutated, "version": 0}).to_string();
     let (status, _) = fetch(
@@ -484,8 +660,6 @@ async fn after_sidecar_save_get_mdl_returns_sidecar_content() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    // GET the .mdl path: the sidecar takes precedence, so the response
-    // reflects the saved name.
     let (status, response_bytes) = fetch(
         state.clone(),
         "GET",
@@ -495,14 +669,19 @@ async fn after_sidecar_save_get_mdl_returns_sidecar_content() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let response = parse_body(&response_bytes);
-    assert_eq!(
-        response["source_format"].as_str(),
-        Some("sd_json"),
-        "after the sidecar exists, GET serves it as sd_json"
-    );
-    let inner_json: serde_json::Value =
-        serde_json::from_str(response["json"].as_str().unwrap()).unwrap();
-    assert_eq!(inner_json["name"].as_str(), Some("post-save-name"));
+    assert_eq!(response["source_format"].as_str(), Some("mdl"));
+    assert_eq!(response["version"].as_u64(), Some(1));
+    let inner: Value = serde_json::from_str(response["json"].as_str().unwrap()).unwrap();
+    let room = inner["models"][0]["auxiliaries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| {
+            simlin_engine::canonicalize(a["name"].as_str().unwrap_or("")).as_ref()
+                == "room_temperature"
+        })
+        .expect("room temperature aux");
+    assert_eq!(room["equation"].as_str(), Some("75"));
 }
 
 /// After a successful save, the registry's snapshot for the written
@@ -580,10 +759,10 @@ async fn registry_metadata_is_refreshed_after_save() {
     let _ = pre_size;
 }
 
-/// Idempotence: a second save (using the next version) must continue
-/// to write only to the sidecar; the .mdl stays untouched.
+/// A second save continues in place: the version advances 1 -> 2 at the
+/// same `.mdl` path, and still no sibling file appears.
 #[tokio::test]
-async fn second_save_after_sidecar_writes_only_to_sidecar() {
+async fn second_mdl_save_advances_the_version_and_stays_in_place() {
     let dir = TempDir::new().unwrap();
     let mdl_abs = copy_fixture("teacup.mdl", dir.path());
     let canonical_root = dir.path().canonicalize().unwrap();
@@ -591,11 +770,13 @@ async fn second_save_after_sidecar_writes_only_to_sidecar() {
     let state = build_state(canonical_root.clone());
     seed_registry(&state, &mdl_canonical, ProjectFormat::Mdl);
 
-    let pre_mdl_bytes = fs::read(&mdl_canonical).unwrap();
     let (_, json_body) = get_canonical_json(state.clone(), "/api/projects/teacup.mdl").await;
 
-    // First save: creates the sidecar.
-    let body0 = serde_json::json!({"json": &json_body, "version": 0}).to_string();
+    let body0 = serde_json::json!({
+        "json": set_aux_equation(&json_body, "room_temperature", "75"),
+        "version": 0,
+    })
+    .to_string();
     let (status0, _) = fetch(
         state.clone(),
         "POST",
@@ -605,18 +786,18 @@ async fn second_save_after_sidecar_writes_only_to_sidecar() {
     .await;
     assert_eq!(status0, StatusCode::OK);
 
-    // Second save: the sidecar is now source-of-truth. The version is now
-    // 1 (previous response said so), and the request URL stays at the
-    // sidecar path so we don't hit a 404 — the .mdl key was redirected.
-    let (sidecar_version, sidecar_json) =
-        get_canonical_json(state.clone(), "/api/projects/teacup.sd.json").await;
-    assert_eq!(sidecar_version, 1);
+    let (version1, json1) = get_canonical_json(state.clone(), "/api/projects/teacup.mdl").await;
+    assert_eq!(version1, 1);
 
-    let body1 = serde_json::json!({"json": sidecar_json, "version": 1}).to_string();
+    let body1 = serde_json::json!({
+        "json": set_aux_equation(&json1, "room_temperature", "80"),
+        "version": 1,
+    })
+    .to_string();
     let (status1, response_bytes) = fetch(
         state.clone(),
         "POST",
-        "/api/projects/teacup.sd.json",
+        "/api/projects/teacup.mdl",
         Body::from(body1),
     )
     .await;
@@ -626,13 +807,14 @@ async fn second_save_after_sidecar_writes_only_to_sidecar() {
         "body: {}",
         String::from_utf8_lossy(&response_bytes)
     );
-
-    // Final invariants: .mdl untouched, sidecar present, sidecar version 2.
-    let post_mdl_bytes = fs::read(&mdl_canonical).unwrap();
-    assert_eq!(pre_mdl_bytes, post_mdl_bytes);
     let response = parse_body(&response_bytes);
     assert_eq!(response["version"].as_u64(), Some(2));
-    assert_eq!(response["path"].as_str(), Some("teacup.sd.json"));
+
+    assert_eq!(mdl_aux_equation(&mdl_canonical, "room_temperature"), "80");
+    assert!(
+        !canonical_root.join("teacup.sd.json").exists(),
+        "no sidecar may appear on any .mdl save"
+    );
 }
 
 /// Regression: GET /api/projects triggers scan_into_registry on every
@@ -935,8 +1117,9 @@ async fn create_new_rejects_traversal_name() {
 }
 
 /// `POST /api/projects/new` enforces the design's "Mdl/Xmile are not
-/// formats for fresh files" rule. Mdl is read-only; Xmile is preserved
-/// for existing files only.
+/// formats for fresh files" rule: both are read and written in place once
+/// a file exists, but new files are authored in the canonical formats
+/// (`stmx`, `sd_json`).
 #[tokio::test]
 async fn create_new_rejects_mdl_and_xmile_formats() {
     let dir = TempDir::new().unwrap();

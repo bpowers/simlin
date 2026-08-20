@@ -144,6 +144,31 @@ export interface EngineRunApi {
 }
 
 /**
+ * A view's viewport: the pan offset and pixel size the canvas shows
+ * (`StockFlowView.viewBox`) and its zoom factor (`StockFlowView.zoom`, 1.0 =
+ * 100%). The pair a host carries across a remount (see
+ * `ProjectControllerConfig.initialViewport` and the Editor's
+ * `onViewportChange`).
+ */
+export interface Viewport {
+  readonly viewBox: Rect;
+  readonly zoom: number;
+}
+
+/** True when the viewport can be applied: every coordinate finite, zoom positive. */
+export function isUsableViewport(viewport: Viewport): boolean {
+  const { viewBox, zoom } = viewport;
+  return (
+    Number.isFinite(viewBox.x) &&
+    Number.isFinite(viewBox.y) &&
+    Number.isFinite(viewBox.width) &&
+    Number.isFinite(viewBox.height) &&
+    Number.isFinite(zoom) &&
+    zoom > 0
+  );
+}
+
+/**
  * Configuration injected by the host (the Editor). The two `open*` factories
  * isolate the controller from the concrete `EngineProject` static methods so
  * it can be unit-tested against a fake engine. `onError` surfaces transient
@@ -155,6 +180,18 @@ export interface ProjectControllerConfig {
   readonly input:
     | { readonly format: 'protobuf'; readonly data: Readonly<Uint8Array> }
     | { readonly format: 'json'; readonly data: string };
+  // When set, the root model's first view opens with THIS viewport in place of
+  // the one stored in the project. The override is applied before the first
+  // snapshot is published (the canvas never renders the stored viewport) and
+  // round-tripped to the engine as a view-only update -- no undo entry, no
+  // save -- so it is on the same footing as a pan the user just made: the next
+  // saved edit persists it, until then it is presentation. A host that
+  // remounts the Editor on new project bytes (the notebook widget on a kernel
+  // push) uses this to keep the user's live pan/zoom, which a pan alone never
+  // persists (`queueViewUpdate` does not save) and a remount on the stored
+  // bytes would otherwise reset. Ignored when the view is absent or the
+  // viewport is unusable (a non-finite coordinate, a non-positive zoom).
+  readonly initialViewport?: Viewport;
   readonly openProtobuf: (data: Uint8Array) => Promise<EngineApi>;
   readonly openJson: (data: string) => Promise<EngineApi>;
   readonly save: (
@@ -268,6 +305,31 @@ const EMPTY_CACHED_ERRORS: CachedErrorDetails = {
   simError: undefined,
   modelErrors: [],
 };
+
+/**
+ * Replace `modelName`'s first view's viewport with `viewport` (when given and
+ * usable). Returns the (possibly unchanged) project and the replaced view, or
+ * `view: undefined` when nothing was applied -- the model or its view is absent,
+ * no override was given, or the override is unusable.
+ */
+function withInitialViewport(
+  project: Project,
+  modelName: string,
+  viewport: Viewport | undefined,
+): { project: Project; view: StockFlowView | undefined } {
+  if (viewport === undefined || !isUsableViewport(viewport)) {
+    return { project, view: undefined };
+  }
+  const model = project.models.get(modelName);
+  const stored = model?.views[0];
+  if (model === undefined || stored === undefined) {
+    return { project, view: undefined };
+  }
+  const view: StockFlowView = { ...stored, viewBox: { ...viewport.viewBox }, zoom: viewport.zoom };
+  const views = [...model.views];
+  views[0] = view;
+  return { project: { ...project, models: mapSet(project.models, modelName, { ...model, views }) }, view };
+}
 
 /** The result of a navigation method, describing the UI consequences the
  * Editor must apply (selection restoration, panel/tool resets). Viewport
@@ -473,6 +535,9 @@ export class ProjectController {
       return;
     }
 
+    // The view the host's viewport override was spliced into, to be
+    // round-tripped to the engine once the project is published.
+    let overriddenView: StockFlowView | undefined;
     try {
       this.engine = engine;
 
@@ -480,7 +545,11 @@ export class ProjectController {
       const json = JSON.parse(await engine.serializeJson(undefined, true)) as JsonProject;
       // No live view exists on first open, so the engine-serialized view IS the
       // rendered view -- compute connector annotations directly against it.
-      const project = await this.attachConnectorErrors(await this.updateVariableErrors(projectFromJson(json)));
+      // The host's viewport override is spliced in first, so the FIRST published
+      // snapshot already carries it and the canvas never renders (or fits) the
+      // stored viewport for a frame.
+      const opened = withInitialViewport(projectFromJson(json), this.modelName, this.config.initialViewport);
+      const project = await this.attachConnectorErrors(await this.updateVariableErrors(opened.project));
 
       if (this.disposed) {
         this.engine = undefined;
@@ -493,11 +562,23 @@ export class ProjectController {
         this.project = project;
         this.notify();
       });
+      overriddenView = opened.view;
     } catch (e: unknown) {
       this.engine = undefined;
       await this.disposeOrphanedEngine(engine);
       const err = getErrorDetails(e);
       this.reportError(`opening the project failed: ${err.message ?? 'Unknown error'}`);
+      return;
+    }
+
+    if (overriddenView !== undefined) {
+      // Bring the engine's copy of the view in line with the override -- the
+      // same view-only round-trip a settled pan makes (no history, no save), so
+      // a later content edit's snapshot carries this viewport. Outside the
+      // try above on purpose: the project is already published, and a failure
+      // here is a view-update failure (reported by queueViewUpdate itself), not
+      // a failed open that should tear the engine down.
+      await this.queueViewUpdate(overriddenView);
     }
   }
 

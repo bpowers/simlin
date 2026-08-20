@@ -184,6 +184,25 @@ fn sd_json_with_two_stocks(s1_eq: &str, s2_eq: &str) -> String {
     .to_string()
 }
 
+const TEACUP_MDL_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/teacup.mdl");
+
+/// The `room_temperature` equation in a canonical-JSON project value, as
+/// the doc exports it. The `.mdl` tests observe edits through this aux
+/// because Vensim has no project-name field to observe them through.
+fn room_temperature_equation(project_json: &serde_json::Value) -> String {
+    project_json["models"][0]["auxiliaries"]
+        .as_array()
+        .expect("auxiliaries")
+        .iter()
+        .find(|a| {
+            simlin_engine::canonicalize(a["name"].as_str().unwrap_or("")).as_ref()
+                == "room_temperature"
+        })
+        .and_then(|a| a["equation"].as_str())
+        .expect("room temperature aux")
+        .to_string()
+}
+
 /// AC4.2: external `.sd.json` mutation triggers a `ProjectChanged` event
 /// with `source: Disk`. The merged in-memory doc reflects the disk state.
 #[tokio::test]
@@ -442,26 +461,43 @@ async fn invalid_json_disk_write_does_not_merge() {
     shutdown.notify_waiters();
 }
 
-/// Sidecar-override case: a `.mdl` event is ignored when a sibling
-/// `.sd.json` exists (sidecar is canonical). Watcher must not parse the
-/// `.mdl`, must not broadcast.
+/// An external edit to a `.mdl` merges the `.mdl` and broadcasts for the
+/// `.mdl`, exactly like any other format -- even when a same-stem
+/// `.sd.json` sits next to it (the on-disk trace of an earlier release's
+/// sidecar write). The two are independent projects: the `.sd.json`
+/// entry is untouched by the `.mdl` event.
 #[tokio::test]
-async fn mdl_event_ignored_when_sidecar_exists() {
+async fn mdl_disk_edit_merges_the_mdl_regardless_of_a_same_stem_sd_json() {
     let dir = TempDir::new().expect("tempdir");
-    let mdl = dir.path().join("model.mdl");
-    let sidecar = dir.path().join("model.sd.json");
-    std::fs::write(&mdl, b"{UTF-8}\n\nplaceholder=1\n  ~\n  ~|\n").expect("write mdl");
-    std::fs::write(&sidecar, sd_json("from-sidecar")).expect("write sidecar");
-    let sidecar_canonical = sidecar.canonicalize().expect("canonicalize sidecar");
+    let mdl = dir.path().join("teacup.mdl");
+    std::fs::copy(TEACUP_MDL_FIXTURE, &mdl).expect("copy teacup.mdl");
+    let sd_json_path = dir.path().join("teacup.sd.json");
+    std::fs::write(&sd_json_path, sd_json("independent")).expect("write sd.json");
+    let mdl_canonical = mdl.canonicalize().expect("canonicalize mdl");
+    let sd_json_canonical = sd_json_path.canonicalize().expect("canonicalize sd.json");
 
     let state = build_state(dir.path());
-    let initial_sidecar_bytes = std::fs::read(&sidecar_canonical).expect("read sidecar");
+    let initial_mdl_bytes = std::fs::read(&mdl_canonical).expect("read mdl");
     seed_registry(
         &state,
-        &sidecar_canonical,
-        ProjectFormat::SdJson,
-        content_hash(&initial_sidecar_bytes),
+        &mdl_canonical,
+        ProjectFormat::Mdl,
+        content_hash(&initial_mdl_bytes),
     );
+    seed_registry(
+        &state,
+        &sd_json_canonical,
+        ProjectFormat::SdJson,
+        content_hash(sd_json("independent").as_bytes()),
+    );
+    // Hydrate the .mdl doc so the merge has a baseline to compare against.
+    let before = state
+        .registry
+        .get_or_init_doc(&mdl_canonical)
+        .expect("hydrate")
+        .export_canonical_json()
+        .expect("export");
+    assert_eq!(room_temperature_equation(&before), "70");
     let mut rx = state.events.subscribe();
 
     let shutdown: ShutdownSignal = Arc::new(Notify::new());
@@ -472,19 +508,39 @@ async fn mdl_event_ignored_when_sidecar_exists() {
         .await
         .expect("watcher becomes ready");
 
-    // Touch the .mdl file. Sidecar exists -> the event must be ignored.
-    tokio::fs::write(&mdl, b"{UTF-8}\n\nupdated_value=2\n  ~\n  ~|\n")
-        .await
-        .expect("touch mdl");
+    // External edit in Vensim syntax: Room Temperature 70 -> 75.
+    let original = String::from_utf8(initial_mdl_bytes).expect("utf8");
+    let edited = original.replacen("Room Temperature=\n\t70", "Room Temperature=\n\t75", 1);
+    assert_ne!(edited, original, "fixture must contain the expected line");
+    tokio::fs::write(&mdl, edited).await.expect("write mdl");
 
-    watcher_barrier(&state.root, &mut sightings)
+    let event = await_disk_event(&mut rx, OS_EVENT_TIMEOUT)
         .await
-        .expect("watcher processes the mdl write");
-
-    let no_event = await_disk_event(&mut rx, POST_BARRIER_SETTLE).await;
-    if let Some(ev) = no_event {
-        panic!("mdl event with sidecar present must not produce a Disk broadcast; got: {ev:?}");
+        .expect("mdl edit must produce a Disk broadcast");
+    match event {
+        WsMessage::ProjectChanged { path, version, .. } => {
+            assert_eq!(path, "teacup.mdl", "the broadcast names the .mdl");
+            assert_eq!(version, 1);
+        }
+        other => panic!("expected ProjectChanged, got {other:?}"),
     }
+
+    let after = state
+        .registry
+        .get_or_init_doc(&mdl_canonical)
+        .expect("doc")
+        .export_canonical_json()
+        .expect("export");
+    assert_eq!(room_temperature_equation(&after), "75", "disk edit merged");
+
+    let sd_json_entry = state
+        .registry
+        .get(&sd_json_canonical)
+        .expect("sd.json entry");
+    assert_eq!(
+        sd_json_entry.version, 0,
+        "the same-stem .sd.json is a separate project and must be untouched"
+    );
 
     shutdown.notify_waiters();
 }
@@ -714,22 +770,17 @@ async fn save_handler_atomic_write_does_not_produce_disk_source_event() {
     shutdown.notify_waiters();
 }
 
-/// .mdl-save echo-suppression: when a save's commit_write lands a fresh
-/// `.sd.json` next to its `.mdl` source, the watcher must echo-suppress
-/// against the primed placeholder. Without `prime_sidecar_echo_hash`, the
-/// watcher's lookup-by-sidecar-path finds nothing (or a stale
-/// scanner-inserted entry), falls into the merge path, and broadcasts a
-/// spurious `ProjectChanged{Disk}` for content the server itself just
-/// wrote. The principled fix establishes the sidecar placeholder ahead
-/// of the OS-visible write so the lookup short-circuits.
+/// An `.mdl` save rewrites the `.mdl` in place through the same primed
+/// echo-suppression path every format uses: the watcher sees the save's
+/// own atomic_write land on the `.mdl`, matches the primed hash, and stays
+/// silent; the version is exactly 1 and no sibling file appears.
 #[tokio::test]
-async fn primed_sidecar_placeholder_echo_suppresses_post_save_watcher_event() {
+async fn mdl_save_rewrites_in_place_and_echo_suppresses_its_own_watcher_event() {
     let dir = TempDir::new().expect("tempdir");
     let canonical_root = dir.path().canonicalize().expect("canon root");
-    let mdl_path = canonical_root.join("model.mdl");
-    let sidecar_path = canonical_root.join("model.sd.json");
-    let mdl_bytes = b"{UTF-8}\n\nfoo=1\n  ~\n  ~|\n".to_vec();
-    std::fs::write(&mdl_path, &mdl_bytes).expect("write mdl");
+    let mdl_path = canonical_root.join("teacup.mdl");
+    std::fs::copy(TEACUP_MDL_FIXTURE, &mdl_path).expect("copy teacup.mdl");
+    let mdl_bytes = std::fs::read(&mdl_path).expect("read mdl");
 
     let state = build_state(dir.path());
     seed_registry(
@@ -748,34 +799,72 @@ async fn primed_sidecar_placeholder_echo_suppresses_post_save_watcher_event() {
         .await
         .expect("watcher becomes ready");
 
-    // Mimic the save handler's pre-write priming: prime both the .mdl
-    // source key (legacy: in case anything still keys lookups there) and
-    // the sidecar placeholder (the new fix). The placeholder is what the
-    // watcher's lookup will hit when commit_write fires the OS event.
-    let sidecar_content = sd_json("after-mdl-save");
-    let sidecar_hash = content_hash(sidecar_content.as_bytes());
-    state.registry.prime_echo_hash(&mdl_path, sidecar_hash);
-    state
-        .registry
-        .prime_sidecar_echo_hash(&mdl_path, sidecar_path.clone(), sidecar_hash)
-        .expect("prime sidecar placeholder");
+    // Drive a save via the HTTP layer at the .mdl path: GET the canonical
+    // JSON, edit one equation, POST it back at version 0.
+    let router = build_router(state.clone());
+    let get = Request::builder()
+        .method("GET")
+        .uri("/api/projects/teacup.mdl")
+        .header("host", format!("127.0.0.1:{TEST_UI_PORT}"))
+        .body(Body::empty())
+        .expect("build request");
+    let response = router.clone().oneshot(get).await.expect("GET");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+        .await
+        .expect("body");
+    let got: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let mut project: serde_json::Value =
+        serde_json::from_str(got["json"].as_str().expect("json string")).expect("project");
+    let aux = project["models"][0]["auxiliaries"]
+        .as_array_mut()
+        .expect("auxiliaries")
+        .iter_mut()
+        .find(|a| {
+            simlin_engine::canonicalize(a["name"].as_str().unwrap_or("")).as_ref()
+                == "room_temperature"
+        })
+        .expect("room temperature aux");
+    aux["equation"] = serde_json::Value::String("75".to_string());
 
-    // Mimic commit_write: the kernel emits a Create event for the
-    // freshly-written .sd.json. The placeholder we just primed is what
-    // makes the watcher's echo-suppression check succeed.
-    simlin_engine::io::atomic_write(&sidecar_path, sidecar_content.as_bytes())
-        .expect("atomic_write sidecar");
+    let body = serde_json::json!({
+        "json": serde_json::to_string(&project).expect("reserialize"),
+        "version": 0,
+    });
+    let post = Request::builder()
+        .method("POST")
+        .uri("/api/projects/teacup.mdl")
+        .header("host", format!("127.0.0.1:{TEST_UI_PORT}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("build request");
+    let response = router.oneshot(post).await.expect("POST save");
+    assert_eq!(response.status(), StatusCode::OK, "save must return 200");
 
-    // A Disk event surviving the barrier would mean echo-suppression failed —
-    // the exact bug the placeholder closes.
+    // A Disk event surviving the barrier would mean the save's own write on
+    // the .mdl was not echo-suppressed.
     watcher_barrier(&state.root, &mut sightings)
         .await
-        .expect("watcher processes the sidecar write");
+        .expect("watcher processes the save's write");
 
     let no_disk_event = await_disk_event(&mut rx, POST_BARRIER_SETTLE).await;
     if let Some(ev) = no_disk_event {
-        panic!("primed sidecar write must echo-suppress; got: {ev:?}");
+        panic!("the .mdl save's own write must echo-suppress; got: {ev:?}");
     }
+
+    let entry = state.registry.get(&mdl_path).expect("mdl entry");
+    assert_eq!(entry.version, 1, "version must be exactly 1 after the save");
+    assert_eq!(entry.format, ProjectFormat::Mdl);
+    assert!(
+        !canonical_root.join("teacup.sd.json").exists(),
+        "no sidecar may be created"
+    );
+    let text = std::fs::read_to_string(&mdl_path).expect("read mdl");
+    assert!(
+        text.starts_with("{UTF-8}"),
+        "the .mdl must still be Vensim text"
+    );
+    assert!(text.contains("75"), "the edit must be on disk");
 
     shutdown.notify_waiters();
 }

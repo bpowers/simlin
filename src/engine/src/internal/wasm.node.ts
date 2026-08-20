@@ -2,27 +2,35 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-// WASM module loading and access
+// WASM module loading and access (Node build).
+//
+// Defaults to reading the full `core/libsimlin.wasm` from disk; also accepts
+// filesystem paths, `file://`/http(s) URLs, raw bytes, or a precompiled
+// module. The shared singleton and instantiation logic live in
+// ./wasm-runtime.ts; this file only resolves the source.
 
-export type WasmSource = string | URL | ArrayBuffer | Uint8Array;
-export type WasmSourceProvider = WasmSource | (() => WasmSource | Promise<WasmSource>);
+import {
+  ensureInitializedWith,
+  instantiate,
+  instantiateFromSource,
+  isInitialized,
+  isUrl,
+  resolveSourceProvider,
+  type WasmSource,
+  type WasmSourceProvider,
+} from './wasm-runtime';
 
-export interface WasmConfig {
-  source?: WasmSourceProvider;
-}
-
-let wasmInstance: WebAssembly.Instance | null = null;
-let wasmMemory: WebAssembly.Memory | null = null;
-let initPromise: Promise<void> | null = null;
-let wasmSourceOverride: WasmSourceProvider | null = null;
-
-/**
- * Check if a string looks like a URL (http://, https://, or file://)
- * @internal Exported for testing
- */
-export function isUrl(path: string): boolean {
-  return path.startsWith('http://') || path.startsWith('https://') || path.startsWith('file://');
-}
+export {
+  clearPanicMessage,
+  configureWasm,
+  getExports,
+  getMemory,
+  getPanicMessage,
+  isInitialized,
+  isUrl,
+  reset,
+} from './wasm-runtime';
+export type { WasmConfig, WasmSource, WasmSourceProvider } from './wasm-runtime';
 
 function isFileUrl(path: string): boolean {
   return path.startsWith('file://');
@@ -41,6 +49,13 @@ async function getDefaultNodeWasmPath(): Promise<string> {
   return path.join(__dirname, '..', '..', 'core', 'libsimlin.wasm');
 }
 
+function getLocationHref(): string | undefined {
+  if (typeof globalThis === 'undefined' || !('location' in globalThis)) {
+    return undefined;
+  }
+  return (globalThis as { location?: Location }).location?.href;
+}
+
 function getDefaultBrowserWasmUrl(): string {
   if (typeof document !== 'undefined') {
     const currentScript = document.currentScript;
@@ -55,21 +70,6 @@ function getDefaultBrowserWasmUrl(): string {
     return new URL('core/libsimlin.wasm', locationHref).toString();
   }
   return './core/libsimlin.wasm';
-}
-
-function getLocationHref(): string | undefined {
-  if (typeof globalThis === 'undefined' || !('location' in globalThis)) {
-    return undefined;
-  }
-  return (globalThis as { location?: Location }).location?.href;
-}
-
-async function resolveWasmSource(source?: WasmSourceProvider): Promise<WasmSource> {
-  const provider = source ?? wasmSourceOverride;
-  if (provider !== undefined && provider !== null) {
-    return typeof provider === 'function' ? await provider() : provider;
-  }
-  return isNode() ? await getDefaultNodeWasmPath() : getDefaultBrowserWasmUrl();
 }
 
 /**
@@ -87,92 +87,30 @@ export async function loadFileNode(pathOrUrl: string | URL): Promise<ArrayBuffer
 /**
  * Initialize the WASM module.
  * Must be called before any other functions.
- * @param wasmPathOrBuffer - Either a path/URL to the WASM file, or an ArrayBuffer/Uint8Array containing the WASM binary.
- *                           In browsers, paths are fetched as URLs. In Node.js, filesystem paths are read directly.
+ * @param wasmPathOrBuffer - A path/URL to the WASM file, the WASM binary as an
+ *                           ArrayBuffer/Uint8Array, or a precompiled
+ *                           `WebAssembly.Module`. In browsers, paths are
+ *                           fetched as URLs. In Node.js, filesystem paths are
+ *                           read directly. Defaults to `core/libsimlin.wasm`.
  */
 export async function init(wasmPathOrBuffer?: WasmSourceProvider): Promise<void> {
-  if (wasmInstance !== null) {
-    return; // Already initialized
+  if (isInitialized()) {
+    return;
   }
 
-  const resolvedSource = await resolveWasmSource(wasmPathOrBuffer);
-  let buffer: ArrayBuffer;
+  const resolved: WasmSource =
+    (await resolveSourceProvider(wasmPathOrBuffer)) ??
+    (isNode() ? await getDefaultNodeWasmPath() : getDefaultBrowserWasmUrl());
 
-  if (resolvedSource instanceof ArrayBuffer) {
-    buffer = resolvedSource;
-  } else if (resolvedSource instanceof Uint8Array) {
-    // Copy to a new ArrayBuffer to handle SharedArrayBuffer case
-    const copy = new Uint8Array(resolvedSource.length);
-    copy.set(resolvedSource);
-    buffer = copy.buffer;
-  } else {
-    const pathOrUrl = resolvedSource instanceof URL ? resolvedSource.toString() : resolvedSource;
-
+  if (typeof resolved === 'string' || resolved instanceof URL) {
+    const pathOrUrl = resolved instanceof URL ? resolved.toString() : resolved;
     if (isNode() && (isFileUrl(pathOrUrl) || !isUrl(pathOrUrl))) {
       const fileTarget = isFileUrl(pathOrUrl) ? new URL(pathOrUrl) : pathOrUrl;
-      buffer = await loadFileNode(fileTarget);
-    } else {
-      const response = await fetch(pathOrUrl);
-      if (!response.ok) {
-        throw new Error(`Failed to load WASM from ${pathOrUrl}: ${response.status} ${response.statusText}`);
-      }
-      buffer = await response.arrayBuffer();
+      await instantiate(await loadFileNode(fileTarget));
+      return;
     }
   }
-
-  const module = await WebAssembly.compile(buffer);
-
-  // Create memory - libsimlin manages its own memory
-  wasmMemory = new WebAssembly.Memory({ initial: 256, maximum: 16384 });
-
-  // Instantiate with imports
-  wasmInstance = await WebAssembly.instantiate(module, {
-    env: {
-      memory: wasmMemory,
-    },
-  });
-
-  // The WASM module may export its own memory
-  const exports = wasmInstance.exports;
-  if (exports.memory instanceof WebAssembly.Memory) {
-    wasmMemory = exports.memory;
-  }
-
-  // Install the Rust panic hook so panic messages are captured in a
-  // global buffer rather than silently lost to `unreachable` traps.
-  const initFn = exports.simlin_init as (() => void) | undefined;
-  if (initFn) {
-    initFn();
-  }
-}
-
-/**
- * Get the raw WASM exports.
- * @throws Error if WASM is not initialized
- */
-export function getExports(): WebAssembly.Exports {
-  if (wasmInstance === null) {
-    throw new Error('WASM not initialized. Call Project.open() or ready() first.');
-  }
-  return wasmInstance.exports;
-}
-
-/**
- * Get the WASM memory instance.
- * @throws Error if WASM is not initialized
- */
-export function getMemory(): WebAssembly.Memory {
-  if (wasmMemory === null) {
-    throw new Error('WASM not initialized. Call Project.open() or ready() first.');
-  }
-  return wasmMemory;
-}
-
-/**
- * Check if the WASM module is initialized.
- */
-export function isInitialized(): boolean {
-  return wasmInstance !== null;
+  await instantiateFromSource(resolved);
 }
 
 /**
@@ -183,79 +121,6 @@ export function isInitialized(): boolean {
  * @param wasmSource - Optional WASM source or provider. Defaults to auto-detected
  *                     runtime settings for Node.js and browsers.
  */
-export async function ensureInitialized(wasmSource?: WasmSourceProvider): Promise<void> {
-  if (wasmInstance !== null) {
-    return;
-  }
-
-  if (initPromise !== null) {
-    await initPromise;
-    return;
-  }
-
-  initPromise = init(wasmSource);
-  try {
-    await initPromise;
-  } finally {
-    initPromise = null;
-  }
-}
-
-export function configureWasm(config: WasmConfig = {}): void {
-  if (wasmInstance !== null || initPromise !== null) {
-    throw new Error('WASM already initialized');
-  }
-  wasmSourceOverride = config.source ?? null;
-}
-
-/**
- * Retrieve the last Rust panic message from the WASM global buffer.
- * Returns null if no panic has been recorded or WASM is not initialized.
- *
- * Call this after catching a `RuntimeError: unreachable` to get the
- * actual panic text (file, line, message) instead of just "unreachable".
- */
-export function getPanicMessage(): string | null {
-  if (wasmInstance === null || wasmMemory === null) {
-    return null;
-  }
-  const fn = wasmInstance.exports.simlin_get_panic_message as (() => number) | undefined;
-  if (!fn) {
-    return null;
-  }
-  const ptr = fn();
-  if (ptr === 0) {
-    return null;
-  }
-  // Read null-terminated UTF-8 string from WASM memory
-  const view = new Uint8Array(wasmMemory.buffer);
-  let end = ptr;
-  const limit = Math.min(ptr + 8192, view.length);
-  while (end < limit && view[end] !== 0) {
-    end++;
-  }
-  return new TextDecoder().decode(view.slice(ptr, end));
-}
-
-/**
- * Clear the stored panic message.
- */
-export function clearPanicMessage(): void {
-  if (wasmInstance === null) {
-    return;
-  }
-  const fn = wasmInstance.exports.simlin_clear_panic_message as (() => void) | undefined;
-  if (fn) {
-    fn();
-  }
-}
-
-/**
- * Reset the WASM state (for testing).
- */
-export function reset(): void {
-  wasmInstance = null;
-  wasmMemory = null;
-  initPromise = null;
-  wasmSourceOverride = null;
+export function ensureInitialized(wasmSource?: WasmSourceProvider): Promise<void> {
+  return ensureInitializedWith(init, wasmSource);
 }

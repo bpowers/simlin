@@ -7,6 +7,7 @@ import ReactDOM from 'react-dom';
 import clsx from 'clsx';
 
 import styles from './Menu.module.css';
+import { anchoredOffsets, overlayBoxFor, overlayPosition, usePortalContainer } from './portal-container';
 
 export interface MenuProps {
   anchorEl: HTMLElement | null;
@@ -83,6 +84,11 @@ export function Menu(props: MenuProps): React.ReactElement {
   const align = anchorOrigin?.horizontal === 'right' ? 'end' : 'start';
 
   const anchorRect = useAnchorRect(anchorEl, open);
+  // Viewport mode (document.body): the menu is fixed at the anchor's viewport
+  // coordinates. Contained mode (a host box): absolute inside the box, offset
+  // from the box's own edges -- see portal-container.ts. The re-measure that
+  // useAnchorRect does on scroll/resize covers the box moving too.
+  const target = usePortalContainer();
   const contentRef = React.useRef<HTMLDivElement>(null);
   // True while a focus move is one the other handlers already own -- a pointer
   // press (handled by the pointerdown listener) or Escape's focus-restore -- so
@@ -212,20 +218,24 @@ export function Menu(props: MenuProps): React.ReactElement {
     onClose();
   };
 
-  // Position the content as a fixed overlay derived directly from the live
-  // anchor rect -- top/bottom from the vertical origin, left/right from the
-  // horizontal one -- so we never need to measure the menu's own size.
-  const contentStyle: React.CSSProperties = { position: 'fixed', zIndex: 1300, ...style };
-  if (anchorRect) {
+  // Position the content as an overlay derived directly from the live anchor
+  // rect -- top/bottom from the vertical origin, left/right from the
+  // horizontal one -- so we never need to measure the menu's own size. The
+  // offsets are measured from the overlay box (viewport or host box), so the
+  // same numbers serve fixed and absolute positioning.
+  const position = overlayPosition(target);
+  const offsets = anchorRect ? anchoredOffsets(anchorRect, overlayBoxFor(target)) : undefined;
+  const contentStyle: React.CSSProperties = { position, zIndex: 1300, ...style };
+  if (offsets) {
     if (side === 'bottom') {
-      contentStyle.top = anchorRect.bottom;
+      contentStyle.top = offsets.top;
     } else {
-      contentStyle.bottom = window.innerHeight - anchorRect.top;
+      contentStyle.bottom = offsets.bottom;
     }
     if (align === 'start') {
-      contentStyle.left = anchorRect.left;
+      contentStyle.left = offsets.left;
     } else {
-      contentStyle.right = window.innerWidth - anchorRect.right;
+      contentStyle.right = offsets.right;
     }
   }
 
@@ -237,9 +247,9 @@ export function Menu(props: MenuProps): React.ReactElement {
       <span
         aria-haspopup="menu"
         style={{
-          position: 'fixed',
-          top: anchorRect?.bottom ?? 0,
-          left: anchorRect?.left ?? 0,
+          position,
+          top: offsets?.top ?? 0,
+          left: offsets?.left ?? 0,
           width: anchorRect?.width ?? 0,
           height: 0,
           pointerEvents: 'none',
@@ -259,7 +269,7 @@ export function Menu(props: MenuProps): React.ReactElement {
         </div>
       )}
     </>,
-    document.body,
+    target.container,
   );
 }
 

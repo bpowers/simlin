@@ -79,7 +79,7 @@
    bar at ANY width. It can't: the bar spans y 8..(8 + --searchbar-height) and
    the banner starts below that line. jsdom cannot test layout, so the
    width-by-width math lives here (banner width = min(max-content, 520px,
-   100% - 16px), centered; bar width = min(--panel-width-*, 100vw - 16px),
+   100% - 16px), centered; bar width = min(--panel-width-*, 100% - 16px),
    anchored right: 8px; x-ranges below, banner strictly lower in all cases):
      320px:  banner x 8..312    bar x 8..312     (same x-range, separated in y)
      768px:  banner x 124..644  bar x 401..760   (x overlap, separated in y)

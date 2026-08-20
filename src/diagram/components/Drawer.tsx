@@ -8,6 +8,7 @@ import ReactDOM from 'react-dom';
 import clsx from 'clsx';
 
 import styles from './Drawer.module.css';
+import { usePortalContainer } from './portal-container';
 
 interface DrawerProps {
   open: boolean;
@@ -39,10 +40,12 @@ export default function Drawer(props: DrawerProps): React.ReactElement {
       if (document.activeElement !== panelRef.current) {
         previousActiveElement.current = document.activeElement;
       }
-      panelRef.current?.focus();
+      // preventScroll: in contained mode the sheet lives inside a host box on
+      // a page that may be scrolled (a notebook); focusing must not jump it.
+      panelRef.current?.focus({ preventScroll: true });
     } else {
       if (previousActiveElement.current instanceof HTMLElement) {
-        previousActiveElement.current.focus();
+        previousActiveElement.current.focus({ preventScroll: true });
       }
       previousActiveElement.current = null;
     }
@@ -71,10 +74,10 @@ export default function Drawer(props: DrawerProps): React.ReactElement {
 
         if (event.shiftKey && document.activeElement === firstElement) {
           event.preventDefault();
-          lastElement.focus();
+          lastElement.focus({ preventScroll: true });
         } else if (!event.shiftKey && document.activeElement === lastElement) {
           event.preventDefault();
-          firstElement.focus();
+          firstElement.focus({ preventScroll: true });
         }
       }
     };
@@ -87,16 +90,22 @@ export default function Drawer(props: DrawerProps): React.ReactElement {
     onClose();
   };
 
+  // Viewport mode (document.body): the backdrop and sheet are fixed against
+  // the viewport. Contained mode (a host box): they are absolute inside it, so
+  // the sheet slides in from the box's left edge and the backdrop covers the
+  // box -- see portal-container.ts.
+  const { container, contained } = usePortalContainer();
+
   const content = (
     <>
       <div
-        className={clsx(styles.backdrop, !open && styles.backdropHidden)}
+        className={clsx(styles.backdrop, contained && styles.contained, !open && styles.backdropHidden)}
         onClick={handleBackdropClick}
         aria-hidden="true"
       />
       <div
         ref={panelRef}
-        className={clsx(styles.panel, !open && styles.panelHidden)}
+        className={clsx(styles.panel, contained && styles.contained, !open && styles.panelHidden)}
         role="dialog"
         aria-modal="true"
         tabIndex={-1}
@@ -106,5 +115,5 @@ export default function Drawer(props: DrawerProps): React.ReactElement {
     </>
   );
 
-  return ReactDOM.createPortal(content, document.body);
+  return ReactDOM.createPortal(content, container);
 }

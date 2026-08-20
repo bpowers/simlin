@@ -5,12 +5,13 @@
 # `src/engine/build.sh` runs `wasm-opt -O3` IN PLACE over `core/*.wasm`, which
 # is the file the TypeScript tests load -- so "did wasm-opt run" and "was the
 # optimized bundle executed under test" are the same question. Everywhere else
-# deliberately answers no: both of `ci.yaml`'s build steps set
+# deliberately answers no: all three of `ci.yaml`'s build steps (the deploy
+# assembly, the notebook-widget assets for pysimlin-e2e, the serve SPA) set
 # DISABLE_WASM_OPT=1 (the pass is multi-minute and a PR gate does not need
-# release-quality WASM), and `scripts/pre-commit` does the same. Only
-# `ts-release.yml` installs binaryen at all, and by then the artifact is being
-# published. This job is what keeps that gap from reaching a release. See
-# GH #1019.
+# release-quality WASM), and `scripts/pre-commit` does the same. Only the
+# release workflows (`ts-release.yml`, `release.yml`'s widget-assets job)
+# install binaryen at all, and by then the artifact is being published. This
+# job is what keeps that gap from reaching a release. See GH #1019.
 #
 # It is path-filtered to the sources that can change the emitted WASM, which is
 # why it lives in its own workflow rather than as a job in `ci.yaml`: GitHub
@@ -49,10 +50,10 @@ name: WASM optimized-bundle check
       # DISABLE_WASM_OPT=1, so a toolchain bump would otherwise reach a release
       # without either blob having been optimized once.
       - 'rust-toolchain.toml'
-      # This lane and ts-release.yml are the installer's only consumers, and
-      # ts-release runs on tags and manual dispatch -- so a version bump, a
-      # changed asset name or a dead URL would otherwise first surface DURING
-      # an npm release.
+      # This lane, ts-release.yml and release.yml are the installer's only
+      # consumers, and the release workflows run on tags and manual dispatch
+      # -- so a version bump, a changed asset name or a dead URL would
+      # otherwise first surface DURING an npm or pysimlin release.
       - 'scripts/install-binaryen.sh'
       - '.github/workflows/wasm-opt.yml'
   pull_request:
@@ -70,10 +71,10 @@ name: WASM optimized-bundle check
       # DISABLE_WASM_OPT=1, so a toolchain bump would otherwise reach a release
       # without either blob having been optimized once.
       - 'rust-toolchain.toml'
-      # This lane and ts-release.yml are the installer's only consumers, and
-      # ts-release runs on tags and manual dispatch -- so a version bump, a
-      # changed asset name or a dead URL would otherwise first surface DURING
-      # an npm release.
+      # This lane, ts-release.yml and release.yml are the installer's only
+      # consumers, and the release workflows run on tags and manual dispatch
+      # -- so a version bump, a changed asset name or a dead URL would
+      # otherwise first surface DURING an npm or pysimlin release.
       - 'scripts/install-binaryen.sh'
       - '.github/workflows/wasm-opt.yml'
 

@@ -72,6 +72,16 @@ describe('ModelPropertiesDrawer', () => {
       expect(onDelete).toHaveBeenCalledTimes(1);
     });
 
+    test('showHomeLink=false renders no Exit link (a host with no "/" to go home to)', () => {
+      // A notebook or other embedding host has no page route for the Editor
+      // to navigate to; the link would pushState on the host page. The rest
+      // of the drawer (close, download, sim specs) is unaffected.
+      renderDrawer({ showHomeLink: false });
+      expect(screen.queryByRole('link', { name: /exit/i })).toBeNull();
+      expect(screen.getByRole('button', { name: /close/i })).not.toBeNull();
+      expect(screen.getByRole('button', { name: /download model/i })).not.toBeNull();
+    });
+
     test('the Exit affordance is a single link, not a button nested in an anchor', () => {
       // The old markup wrapped an IconButton (<button>) inside the router
       // Link's <a> -- invalid interactive content that assistive tech

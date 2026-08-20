@@ -209,7 +209,7 @@ const RI_BELT_N_SLATS: u32 = 1;
 ///
 /// When `ltm_enabled` is true, the synthesized `$⁚ltm⁚*` link/loop score
 /// variables are included in the emitted layout and blob. `ltm_discovery_mode`
-/// flips the same flag `simlin_project_enable_ltm` sets on a `SimlinProject`,
+/// flips the same flag `simlin_sim_new(.., enable_ltm=true)` sets on a project,
 /// but locally for this compile only. Neither flag reaches the special-stock
 /// branch: that path compiles a separate, always-`ltm_enabled == false`
 /// `SourceProject` (a documented degradation, `queues.md` §10).

@@ -12,34 +12,35 @@
 
 //! Format-aware write paths for the save handler.
 //!
-//! XMILE in-place writes use `simlin_engine::to_xmile` (byte-stable for
-//! round-trips, see `simlin-engine/tests/integration/simulate.rs`) plus the
-//! `simlin_engine::io::atomic_write` primitive (sibling tempfile + rename).
-//! `.sd.json` writes use `serde_json::to_string_pretty` for git-friendly
-//! line-oriented diffs.
+//! Every format is rewritten in place in its own format. XMILE uses
+//! `simlin_engine::to_xmile` (byte-stable for round-trips, see
+//! `simlin-engine/tests/integration/simulate.rs`); Vensim `.mdl` uses
+//! `simlin_engine::to_mdl_with_warnings` (regenerated MDL text including the
+//! sketch, with the constructs Vensim cannot express written in their closest
+//! form and reported on `WriteOutcome::warnings`); `.sd.json` uses
+//! `serde_json::to_string_pretty` for git-friendly line-oriented diffs. All
+//! land through the `simlin_engine::io::atomic_write` primitive (sibling
+//! tempfile + rename).
 
 use std::path::{Path, PathBuf};
 
 use simlin_engine::datamodel;
+use simlin_mcp_core::types::{
+    ErrorOutput, mdl_export_error_to_output, mdl_export_warnings_to_outputs,
+};
 
-use crate::path_resolution::sidecar_for_mdl;
 use crate::registry::ProjectFormat;
 
 /// Where a save should land on disk and how to format the bytes.
 ///
-/// `InPlaceXmile` overwrites the original `.stmx`/`.xmile` file with
-/// regenerated XMILE. `SidecarJson` is the `.mdl` path: we never modify
-/// the `.mdl`; the new state lands in a sibling `.sd.json` that becomes
-/// source-of-truth on subsequent reads (the GET handler already prefers
-/// the sidecar when both exist). `SdJson` overwrites an existing
-/// `.sd.json` directly (no `.mdl` involved).
+/// Every arm overwrites the file the request named: `InPlaceXmile` with
+/// regenerated XMILE (`.stmx`/`.xmile`), `InPlaceMdl` with regenerated
+/// Vensim text (`.mdl`), and `SdJson` with pretty-printed native JSON
+/// (`.sd.json`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SaveTarget {
     InPlaceXmile(PathBuf),
-    SidecarJson {
-        mdl_path: PathBuf,
-        sidecar_path: PathBuf,
-    },
+    InPlaceMdl(PathBuf),
     SdJson(PathBuf),
 }
 
@@ -48,6 +49,10 @@ pub enum SaveTarget {
 #[derive(Debug)]
 pub enum SaveDiskError {
     XmileSerialize(simlin_engine::Error),
+    /// The MDL writer's hard errors: a project Vensim structurally cannot
+    /// hold (more than one non-macro model, an ordinary Module variable).
+    /// Degraded-but-representable constructs are warnings, not this.
+    MdlSerialize(simlin_engine::Error),
     JsonSerialize(serde_json::Error),
     Io {
         path: PathBuf,
@@ -59,6 +64,7 @@ impl std::fmt::Display for SaveDiskError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SaveDiskError::XmileSerialize(e) => write!(f, "XMILE serialize: {e:?}"),
+            SaveDiskError::MdlSerialize(e) => write!(f, "MDL serialize: {e}"),
             SaveDiskError::JsonSerialize(e) => write!(f, "JSON serialize: {e}"),
             SaveDiskError::Io { path, source } => {
                 write!(f, "write {}: {source}", path.display())
@@ -70,38 +76,33 @@ impl std::fmt::Display for SaveDiskError {
 impl std::error::Error for SaveDiskError {}
 
 /// Pure dispatch from `(absolute_path, source_format)` to the
-/// `SaveTarget` describing where the bytes go and in which format.
-///
-/// The `.mdl` sidecar name comes from [`sidecar_for_mdl`] rather than a
-/// local copy of the rule: the write target and the GET handler's
-/// sidecar-preference lookup must agree exactly, or a save would land in
-/// a path the next read wouldn't pick up.
+/// `SaveTarget` describing which writer renders the bytes. Every format
+/// writes back to `absolute_path` itself.
 pub fn resolve_save_target(absolute_path: &Path, source_format: ProjectFormat) -> SaveTarget {
     match source_format {
         ProjectFormat::Stmx | ProjectFormat::Xmile => {
             SaveTarget::InPlaceXmile(absolute_path.to_path_buf())
         }
-        ProjectFormat::Mdl => {
-            let sidecar_path = sidecar_for_mdl(absolute_path);
-            SaveTarget::SidecarJson {
-                mdl_path: absolute_path.to_path_buf(),
-                sidecar_path,
-            }
-        }
+        ProjectFormat::Mdl => SaveTarget::InPlaceMdl(absolute_path.to_path_buf()),
         ProjectFormat::SdJson => SaveTarget::SdJson(absolute_path.to_path_buf()),
     }
 }
 
-/// Outcome of a successful disk write: the path that landed on disk plus
-/// the exact byte sequence that was written. The caller hashes those
-/// bytes for echo-suppression on the file watcher's ingestion path
-/// (Phase 4); without the bytes here, the handler would either re-serialize
-/// (work duplication, possible drift) or re-read the file (TOCTOU window
-/// against the watcher's own event).
+/// Outcome of a successful serialization: the path that will land on disk,
+/// the exact byte sequence to write, and any non-fatal lossiness warnings
+/// the writer raised (only the MDL writer has any today). The caller hashes
+/// the bytes for echo-suppression on the file watcher's ingestion path;
+/// without the bytes here, the handler would either re-serialize (work
+/// duplication, possible drift) or re-read the file (TOCTOU window against
+/// the watcher's own event).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteOutcome {
     pub path: PathBuf,
     pub bytes: Vec<u8>,
+    /// Constructs the on-disk format could not express, written in their
+    /// closest representable form. Same wire shape as the save handler's
+    /// validation errors so the SPA and MCP can render them uniformly.
+    pub warnings: Vec<ErrorOutput>,
 }
 
 /// Serialize `project` to the byte representation implied by `target`
@@ -121,13 +122,16 @@ pub fn serialize_project(
             Ok(WriteOutcome {
                 path: path.clone(),
                 bytes: xmile.into_bytes(),
+                warnings: Vec::new(),
             })
         }
-        SaveTarget::SidecarJson { sidecar_path, .. } => {
-            let json_str = render_pretty_json(project)?;
+        SaveTarget::InPlaceMdl(path) => {
+            let (text, warnings) = simlin_engine::to_mdl_with_warnings(project)
+                .map_err(SaveDiskError::MdlSerialize)?;
             Ok(WriteOutcome {
-                path: sidecar_path.clone(),
-                bytes: json_str.into_bytes(),
+                path: path.clone(),
+                bytes: text.into_bytes(),
+                warnings: mdl_export_warnings_to_outputs(project, &warnings),
             })
         }
         SaveTarget::SdJson(path) => {
@@ -135,8 +139,48 @@ pub fn serialize_project(
             Ok(WriteOutcome {
                 path: path.clone(),
                 bytes: json_str.into_bytes(),
+                warnings: Vec::new(),
             })
         }
+    }
+}
+
+/// Why a pre-flight serialization rejected a save. `Unrepresentable` is
+/// the format's own verdict on the model (today: the MDL writer's hard
+/// errors -- a project Vensim structurally cannot hold) and is a client
+/// error to render as a validation failure; `Internal` is anything else
+/// the writer can raise and is a server error.
+#[derive(Debug)]
+pub enum PreflightRejection {
+    Unrepresentable(ErrorOutput),
+    Internal(SaveDiskError),
+}
+
+/// Run the writer for `target` on `project` and discard the bytes.
+///
+/// Both save paths (HTTP `save_project`, MCP `RegistryAccess::save`) call
+/// this on the validated incoming project BEFORE `check_increment_and_merge`,
+/// so a model the on-disk format cannot hold is rejected while the registry
+/// doc is still untouched. Without it the merge would land first, the
+/// serialization would fail second, and the entry would sit at a version
+/// whose state can never reach disk (and every later save of that entry
+/// would fail the same way). The post-merge `serialize_project` still
+/// renders the bytes that are written -- from the merged doc, which is
+/// what the file must reflect.
+pub fn preflight_serialize(
+    project: &datamodel::Project,
+    target: &SaveTarget,
+) -> Result<(), PreflightRejection> {
+    // Deliberately not a no-op for the XMILE/JSON arms: their writers do
+    // not reject models today, but surfacing any future failure ahead of
+    // the merge is strictly better than after it, and the cost is one
+    // extra serialization per save.
+    match serialize_project(project, target) {
+        Ok(_) => Ok(()),
+        Err(SaveDiskError::MdlSerialize(e)) => Err(PreflightRejection::Unrepresentable(
+            mdl_export_error_to_output(project, &e),
+        )),
+        Err(other) => Err(PreflightRejection::Internal(other)),
     }
 }
 
@@ -211,14 +255,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_target_for_mdl_returns_sidecar_pair() {
+    fn resolve_target_for_mdl_returns_in_place_mdl() {
         let target = resolve_save_target(Path::new("/tmp/foo/bar.mdl"), ProjectFormat::Mdl);
         assert_eq!(
             target,
-            SaveTarget::SidecarJson {
-                mdl_path: PathBuf::from("/tmp/foo/bar.mdl"),
-                sidecar_path: PathBuf::from("/tmp/foo/bar.sd.json"),
-            }
+            SaveTarget::InPlaceMdl(PathBuf::from("/tmp/foo/bar.mdl"))
         );
     }
 
@@ -296,65 +337,161 @@ mod tests {
         }
     }
 
-    #[test]
-    fn save_sidecar_json_writes_to_sidecar_and_leaves_mdl_alone() {
-        let dir = TempDir::new().unwrap();
-        let mdl_path = dir.path().join("model.mdl");
-        let sidecar_path = dir.path().join("model.sd.json");
-
-        // Write a stub .mdl content; the writer must not touch it.
-        let original_mdl_bytes = b"{UTF-8}\n\nplaceholder=1\n  ~\n  ~|\n";
-        fs::write(&mdl_path, original_mdl_bytes).unwrap();
-
-        let target = SaveTarget::SidecarJson {
-            mdl_path: mdl_path.clone(),
-            sidecar_path: sidecar_path.clone(),
-        };
-        let project = empty_project();
-        let outcome = write_through_pipeline(&project, &target).expect("write succeeds");
-        assert_eq!(
-            outcome.path, sidecar_path,
-            "writer must return the sidecar path"
-        );
-
-        // The .mdl file must be byte-identical to what we wrote.
-        let post_mdl = fs::read(&mdl_path).unwrap();
-        assert_eq!(
-            post_mdl,
-            original_mdl_bytes.as_ref(),
-            ".mdl file must not be modified by a sidecar write"
-        );
-
-        // The sidecar must contain valid JSON that round-trips back to the
-        // input project.
-        let sidecar_bytes = fs::read(&sidecar_path).unwrap();
-        let json_project: simlin_engine::json::Project =
-            serde_json::from_slice(&sidecar_bytes).expect("sidecar parses");
-        let reparsed: datamodel::Project = json_project.into();
-        assert_eq!(reparsed.name, project.name);
-        assert_eq!(reparsed.models.len(), project.models.len());
+    fn load_teacup_mdl_project() -> datamodel::Project {
+        let mdl_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("teacup.mdl");
+        let contents = fs::read_to_string(&mdl_path).unwrap_or_else(|e| {
+            panic!("read fixture {}: {e}", mdl_path.display());
+        });
+        simlin_engine::open_vensim(&contents).expect("teacup.mdl parses")
     }
 
+    /// An `.mdl` save overwrites the `.mdl` itself with regenerated Vensim
+    /// text (sketch included) that the MDL reader parses back to the same
+    /// variables and view elements; no sibling file appears.
     #[test]
-    fn save_sidecar_json_writes_pretty_printed_content() {
-        // Pretty-print is the design choice for git-friendliness; if it
-        // ever silently switches to compact, this test catches the drift.
+    fn save_in_place_mdl_rewrites_vensim_text_that_round_trips() {
         let dir = TempDir::new().unwrap();
-        let mdl_path = dir.path().join("model.mdl");
-        let sidecar_path = dir.path().join("model.sd.json");
-        fs::write(&mdl_path, b"placeholder").unwrap();
+        let target_path = dir.path().join("teacup.mdl");
+        fs::write(&target_path, b"{UTF-8}\n\nplaceholder=1\n  ~\n  ~|\n").unwrap();
+        let target = SaveTarget::InPlaceMdl(target_path.clone());
+        let project = load_teacup_mdl_project();
 
-        let target = SaveTarget::SidecarJson {
-            mdl_path,
-            sidecar_path: sidecar_path.clone(),
+        let outcome = write_through_pipeline(&project, &target).expect("write succeeds");
+        assert_eq!(
+            outcome.path, target_path,
+            "writer must target the .mdl itself"
+        );
+        assert!(
+            outcome.warnings.is_empty(),
+            "teacup.mdl is fully Vensim-expressible: {:?}",
+            outcome.warnings
+        );
+        assert!(
+            !dir.path().join("teacup.sd.json").exists(),
+            "no sidecar may be created"
+        );
+
+        let bytes = fs::read(&target_path).unwrap();
+        assert_eq!(outcome.bytes, bytes);
+        let text = std::str::from_utf8(&bytes).unwrap();
+        assert!(text.starts_with("{UTF-8}"), "file must be MDL text");
+        assert!(
+            text.contains("Sketch information"),
+            "sketch must be written"
+        );
+
+        let reparsed = simlin_engine::open_vensim(text).expect("reparses as Vensim");
+        let names = |p: &datamodel::Project| -> Vec<String> {
+            let mut v: Vec<String> = p.models[0]
+                .variables
+                .iter()
+                .map(|v| v.get_ident().to_string())
+                .collect();
+            v.sort();
+            v
         };
-        let project = empty_project();
-        write_through_pipeline(&project, &target).unwrap();
+        assert_eq!(names(&reparsed), names(&project));
+        let element_count = |p: &datamodel::Project| -> usize {
+            p.models[0]
+                .views
+                .iter()
+                .map(|v| match v {
+                    datamodel::View::StockFlow(sf) => sf.elements.len(),
+                })
+                .sum()
+        };
+        assert!(element_count(&project) > 0, "fixture must carry a sketch");
+        assert_eq!(element_count(&reparsed), element_count(&project));
+    }
 
-        let bytes = fs::read(&sidecar_path).unwrap();
-        let s = std::str::from_utf8(&bytes).unwrap();
-        // Pretty JSON contains newlines + indentation; compact would not.
-        assert!(s.contains('\n'), "sidecar must be pretty-printed");
+    /// The MDL writer's lossiness channel reaches the outcome: a project
+    /// carrying a construct Vensim cannot express (a non-negative flow,
+    /// which the SPA can set through `compat.nonNegative`) still writes,
+    /// and the degradation is reported as an `MDL export:` warning rather
+    /// than a failure.
+    #[test]
+    fn save_in_place_mdl_reports_lossiness_as_warnings_and_still_writes() {
+        let dir = TempDir::new().unwrap();
+        let target_path = dir.path().join("teacup.mdl");
+        let target = SaveTarget::InPlaceMdl(target_path.clone());
+        let mut project = load_teacup_mdl_project();
+        let flow = project.models[0]
+            .variables
+            .iter_mut()
+            .find_map(|v| match v {
+                datamodel::Variable::Flow(f) => Some(f),
+                _ => None,
+            })
+            .expect("teacup has a flow");
+        flow.compat.non_negative = true;
+
+        let outcome = write_through_pipeline(&project, &target).expect("lossy write succeeds");
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|w| w.message.starts_with("MDL export:")),
+            "the dropped non-negative flag must be reported: {:?}",
+            outcome.warnings
+        );
+        assert!(target_path.is_file(), "the write must still land");
+        let text = fs::read_to_string(&target_path).unwrap();
+        simlin_engine::open_vensim(&text).expect("degraded output still parses");
+    }
+
+    /// `preflight_serialize` maps the writer's verdicts for the save paths:
+    /// a representable project passes, a project Vensim structurally cannot
+    /// hold is `Unrepresentable` with the wire `ErrorOutput` shape, and a
+    /// lossless format never rejects.
+    #[test]
+    fn preflight_serialize_rejects_only_the_unrepresentable() {
+        let target = SaveTarget::InPlaceMdl(PathBuf::from("/nonexistent/x.mdl"));
+        preflight_serialize(&load_teacup_mdl_project(), &target).expect("representable");
+
+        let mut two = empty_project();
+        let mut second = two.models[0].clone();
+        second.name = "second".to_string();
+        two.models.push(second);
+        match preflight_serialize(&two, &target) {
+            Err(PreflightRejection::Unrepresentable(out)) => {
+                assert_eq!(out.code, "generic");
+                assert_eq!(out.kind, "model");
+                assert!(out.message.starts_with("MDL export:"), "{out:?}");
+            }
+            other => panic!("expected Unrepresentable, got {other:?}"),
+        }
+        // The pre-flight never touches disk: the target's parent does not exist.
+        assert!(!Path::new("/nonexistent/x.mdl").exists());
+
+        preflight_serialize(
+            &two,
+            &SaveTarget::SdJson(PathBuf::from("/nonexistent/x.sd.json")),
+        )
+        .expect("JSON holds any project");
+    }
+
+    /// The writer's hard errors fail the save: Vensim has no representation
+    /// for a multi-model project, so writing one to `.mdl` is an
+    /// `MdlSerialize` error and nothing lands on disk.
+    #[test]
+    fn save_in_place_mdl_fails_for_a_multi_model_project_without_writing() {
+        let dir = TempDir::new().unwrap();
+        let target_path = dir.path().join("two.mdl");
+        let target = SaveTarget::InPlaceMdl(target_path.clone());
+        let mut project = empty_project();
+        let mut second = project.models[0].clone();
+        second.name = "second".to_string();
+        project.models.push(second);
+
+        let err = write_through_pipeline(&project, &target).unwrap_err();
+        assert!(
+            matches!(err, SaveDiskError::MdlSerialize(_)),
+            "expected MdlSerialize, got {err:?}"
+        );
+        assert!(!target_path.exists(), "a failed serialize must not write");
     }
 
     #[test]

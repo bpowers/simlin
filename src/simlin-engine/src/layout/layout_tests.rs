@@ -5899,3 +5899,6 @@ fn test_layout_single_outflow_still_horizontal() {
 
 #[path = "layout_review_tests.rs"]
 mod review_tests;
+
+#[path = "layout_label_tests.rs"]
+mod label_tests;

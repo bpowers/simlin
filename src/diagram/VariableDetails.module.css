@@ -1,10 +1,14 @@
 .card {
-  /* Clamp to the viewport on narrow screens (anchored right:8px). */
-  width: min(var(--panel-width-sm), calc(100vw - 16px));
+  /* Sized by the details slot it fills (Editor.module.css .varDetails carries
+     the panel width and the height cap; see the comment there for why they
+     cannot live here). Belt and braces: a flex item whose overflow is not
+     visible already has an automatic minimum size of 0, so overflow-y: auto
+     below is what lets it shrink to the slot's cap and scroll; the explicit
+     min-height keeps that true if the overflow rule ever changes. */
+  min-height: 0;
   /* Match .searchBar: both must compute as border-box so their edges align
      regardless of whether the global reset is present in the host bundle. */
   box-sizing: border-box;
-  max-height: calc(100vh - 18px);
   overflow-y: auto;
   scrollbar-gutter: stable;
   border-radius: 4px;
@@ -14,18 +18,6 @@
      flips dark. */
   color: var(--color-text-primary);
   box-shadow: var(--shadow-1);
-}
-
-@media (min-width: 900px) and (max-width: 1199.95px) {
-  .card {
-    width: min(var(--panel-width-md), calc(100vw - 16px));
-  }
-}
-
-@media (min-width: 1200px) {
-  .card {
-    width: min(var(--panel-width-lg), calc(100vw - 16px));
-  }
 }
 
 /* Clears the 48px search/breadcrumb bar overlaying the top of this slot. */

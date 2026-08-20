@@ -214,12 +214,18 @@ PIPELINE_PIDS+=($PID_A)
     # the coverage this gives up.
     #
     # The variable belongs HERE and not in src/engine/build.sh or
-    # package.json.  Six callers run `pnpm build`; the four that are not CI
-    # (scripts/deploy-web.sh, scripts/deploy-web-staged.sh, and the release
-    # workflows) must keep the optimized artifact, because the browser bundle
-    # is download-size-dominated -- the same reason .cargo/config.toml forces
-    # opt-level=z on wasm32.  Flipping the default would route through all of
-    # them and ship a 24% larger bundle (5.00MB -> 6.20MB) to every user.
+    # package.json.  Only the PR gates skip the pass: this hook and the
+    # three build steps in .github/workflows/ci.yaml (the deploy assembly,
+    # the notebook-widget assets for pysimlin-e2e, the serve SPA).  Every
+    # other caller of an engine build must keep the optimized artifact --
+    # scripts/deploy-web.sh, scripts/deploy-web-staged.sh, ts-release.yml,
+    # serve-release.yml, release.yml's widget-assets job (which runs
+    # src/pysimlin/scripts/stage_widget_assets.py --require-opt, refusing a
+    # raw wasm), and wasm-opt.yml, whose whole point is that blob -- because
+    # the browser bundle is download-size-dominated, the same reason
+    # .cargo/config.toml forces opt-level=z on wasm32.  Flipping the default
+    # would route through all of them and ship a 24% larger bundle (5.00MB ->
+    # 6.20MB) to every user.
     echo "[ts] Building..."
     DISABLE_WASM_OPT=1 pnpm build
 

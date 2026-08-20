@@ -117,8 +117,9 @@ impl<A: ProjectAccess> SimlinMcpServer<A> {
             Upsert replaces the full variable definition; omitted optional fields \
             default to empty. Use ReadModel first to get current state, then \
             include all fields you want to preserve. \
-            Note: Vensim .mdl files are read-only -- use ReadModel to inspect them, \
-            then CreateModel to start a new .sd.json file you can edit."
+            The file is rewritten in place in its own format (XMILE, Vensim .mdl, \
+            or Simlin JSON); constructs Vensim cannot express are written in \
+            their closest form and reported in the result's warnings."
     )]
     async fn edit_model(
         &self,
@@ -132,9 +133,10 @@ impl<A: ProjectAccess> SimlinMcpServer<A> {
 
     #[tool(
         name = "CreateModel",
-        description = "Create a new empty system dynamics model file. \
-            Produces a Simlin JSON file at the given path with a single \
-            \"main\" model and the specified simulation specs."
+        description = "Create a new empty system dynamics model file with a single \
+            \"main\" model and the specified simulation specs. The extension picks \
+            the format: .stmx/.xmile write XMILE, .mdl writes Vensim, anything else \
+            (.sd.json by convention) writes Simlin JSON."
     )]
     async fn create_model(
         &self,

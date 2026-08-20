@@ -174,10 +174,16 @@ function makeProps(overrides: Partial<EditorProps> = {}): EditorProps {
   } as EditorProps;
 }
 
+// The Editor's document-level shortcut listener only acts for the instance that
+// most recently saw pointer/focus activity inside it (editor-key-scope.ts), so a
+// test that selects through the Canvas contract (bypassing real pointer events)
+// presses inside the root once, as the user's canvas click would have.
 function renderEditor(props: EditorProps = makeProps()): void {
+  let container!: HTMLElement;
   act(() => {
-    render(React.createElement(Editor, props));
+    container = render(React.createElement(Editor, props)).container;
   });
+  fireEvent.pointerDown(container.firstElementChild as HTMLElement);
 }
 
 const toolSelected = (title: string): boolean => screen.getByLabelText(title).getAttribute('data-selected') === 'true';

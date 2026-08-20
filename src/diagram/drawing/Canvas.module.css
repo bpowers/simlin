@@ -3,6 +3,12 @@
   width: 100%;
 }
 
+/* The container takes focus after a click (see focusCanvas) but is not an
+   interactive control, so it never draws a focus ring. */
+.canvasContainer:focus {
+  outline: none;
+}
+
 .simlinCanvas {
   height: 100%;
   width: 100%;

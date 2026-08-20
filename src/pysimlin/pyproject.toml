@@ -1,5 +1,7 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel", "cffi>=1.15.0", "setuptools-scm>=8.0"]
+# setuptools >= 70.1 ships bdist_wheel itself, which setup.py subclasses to
+# guard the widget assets (no separate `wheel` requirement).
+requires = ["setuptools>=70.1", "cffi>=1.15.0", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -42,6 +44,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The notebook editor (simlin.widget.ModelWidget, displaying a model in a
+# cell). Optional on purpose: anywidget's chain (ipywidgets, traitlets,
+# IPython, ...) is a couple of dozen packages that scripts, MCP servers, and
+# CI installs which never display a model should not carry. Without it,
+# `import simlin` and everything else works; `Model.widget()` raises
+# SimlinDependencyError with the install line and displaying a model shows
+# the SVG diagram plus a warning. anywidget (not a homegrown stack) because
+# it is what makes the same widget render on JupyterLab, Notebook 7, VS
+# Code (whose kernel needs `import ipywidgets`), Colab, and marimo (which
+# needs anywidget.AnyWidget).
+notebook = [
+    "anywidget>=0.9",
+]
 test = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
@@ -51,12 +66,18 @@ test = [
 ]
 dev = [
     "pysimlin[test]",
+    # The widget tests (tests/test_widget.py) drive the real ModelWidget
+    # through a recording comm; tests/test_widget_optional.py covers the
+    # extra's ABSENCE by blocking the import.
+    "pysimlin[notebook]",
     "mypy>=1.5.0",
     "ruff>=0.8.0",
     "pandas-stubs>=2.0.0",
     "types-cffi>=1.16.0",
     "types-setuptools",
     "build>=1.0.0",
+    # setup.py's packaging guard is exercised directly by the test suite.
+    "setuptools>=70.1",
 ]
 # Everything the repo-level notebooks/ build scripts need on top of dev:
 # building and executing the .ipynb (nbformat/nbclient/ipykernel), rendering
@@ -70,6 +91,15 @@ notebooks = [
     "matplotlib>=3.8",
     "pillow>=10.0",
 ]
+# The JupyterLab the Playwright journey (e2e/) launches. Kept out of dev:
+# jupyterlab pulls in ~80 packages that unit tests, lint, and type checking
+# never import. It must live in THIS venv (not `uv run --with jupyterlab`,
+# whose ephemeral prefix hides the anywidget/ipywidgets labextensions that
+# ship under this venv's share/jupyter).
+e2e = [
+    "pysimlin[notebook]",
+    "jupyterlab>=4.3",
+]
 
 [project.urls]
 Homepage = "https://github.com/bpowers/simlin"
@@ -82,7 +112,17 @@ packages = ["simlin"]
 package-dir = {"" = "."}
 
 [tool.setuptools.package-data]
-simlin = ["py.typed", "*.pyi"]
+# _widget/ holds the notebook widget's JS module and engine wasm (build
+# outputs of src/notebook-widget staged by scripts/stage_widget_assets.py,
+# which also writes ASSETS.json; see simlin/_widget/README.md).
+simlin = [
+    "py.typed",
+    "*.pyi",
+    "_widget/*.js",
+    "_widget/*.wasm",
+    "_widget/ASSETS.json",
+    "_widget/README.md",
+]
 
 [tool.mypy]
 python_version = "3.11"

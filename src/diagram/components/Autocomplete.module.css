@@ -5,7 +5,13 @@
 }
 
 .listbox {
-  position: absolute;
+  /* Portaled surface: it inherits from <body>, not the editor root, so pin the
+     typography a host without reset.css would otherwise leave to the page. */
+  font-family: var(--font-family-base);
+  font-size: 1rem;
+  line-height: 1.5;
+  /* position (fixed in viewport mode, absolute in a host box) and the offsets
+     are inline, computed from the input's rect -- see portal-container.ts. */
   z-index: 1300;
   background: var(--color-surface);
   /* This popup is portaled, so it can't inherit a foreground from the editor

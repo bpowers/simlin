@@ -1,3 +1,10 @@
+/* Overlay surfaces: fixed against the viewport when portaled to
+   document.body (the default), absolute inside the host box in contained
+   mode (.contained, set by the component from the Editor's portalContainer;
+   see portal-container.ts). Everything else about them is mode-neutral:
+   inset/top/left/bottom offsets and percentages resolve against whichever
+   containing block the position establishes, so no other rule may use
+   viewport units. */
 .backdrop {
   position: fixed;
   top: 0;
@@ -16,6 +23,11 @@
 }
 
 .panel {
+  /* Portaled surface: it inherits from <body>, not the editor root, so pin the
+     typography a host without reset.css would otherwise leave to the page. */
+  font-family: var(--font-family-base);
+  font-size: 1rem;
+  line-height: 1.5;
   position: fixed;
   top: 0;
   left: 0;
@@ -29,6 +41,15 @@
   transform: translateX(0);
   visibility: visible;
   transition: transform 225ms cubic-bezier(0, 0, 0.2, 1);
+  /* A sheet never spans its whole overlay area: the 48px strip of backdrop
+     it leaves exposed is what keeps tap-outside-to-dismiss reachable (a
+     320px phone, or a narrow host box, gets a 272px sheet). Percent of the
+     containing block, so it holds in both modes. */
+  max-width: calc(100% - 48px);
+}
+
+.contained {
+  position: absolute;
 }
 
 .panelHidden {

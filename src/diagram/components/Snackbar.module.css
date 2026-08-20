@@ -1,5 +1,7 @@
 .toastViewport {
-  position: fixed;
+  /* Absolute, not fixed: toasts anchor to the bottom of the positioned editor
+     root, so an embedded editor's toasts stay in its box. */
+  position: absolute;
   bottom: 8px;
   left: 50%;
   transform: translateX(-50%);

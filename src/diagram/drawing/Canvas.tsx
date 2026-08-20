@@ -50,6 +50,7 @@ import {
 } from './common';
 import { Connector, ConnectorProps, computeLinkCreationArc } from './Connector';
 import { EditableLabel } from './EditableLabel';
+import { CanvasRenderContext, EXPORT_LABEL_FILTER_ID, type CanvasRenderContextValue } from './canvas-render-context';
 import { Flow, flowBounds } from './Flow';
 import { applyGroupMovement } from '../group-movement';
 import { growEndpointDrag, growInCreationFlow } from '../flow-attach';
@@ -65,6 +66,7 @@ import {
   centerOffsetForBounds,
   isDiagramOffscreen,
   isMomentumDone,
+  isRenderableZoom,
   momentumOffsetAt,
   pinchOffset,
   pinchZoom,
@@ -223,6 +225,14 @@ export interface CanvasProps {
   // editor a label double-click opens -- which would otherwise LOOK editable
   // while the eventual onRenameVariable commit silently no-ops (issue #935).
   readOnly?: boolean;
+  // Whether the mount-time offscreen re-center (issue #52) may run for this
+  // mount. Default true. A host that opened the view at a viewport it carried
+  // from a previous mount (the Editor's `initialViewport`: the user's own
+  // pan, or the fit the previous mount already applied) passes false: that
+  // framing is what the user is looking at, so a diagram they panned
+  // offscreen must not be yanked back by the remount. A viewport that came
+  // from data keeps the safety net.
+  recenterOffscreenOnMount?: boolean;
   project: Project;
   model: Model;
   view: StockFlowView;
@@ -394,6 +404,27 @@ interface LatestState {
 export const Canvas = React.memo(function Canvas(props: CanvasProps): React.ReactElement {
   const svgRef = React.useRef<HTMLDivElement | null>(null);
 
+  // The label-halo filter id (see canvas-render-context.ts). Interactive
+  // canvases each get their own: the halo's flood colour is a theme token that
+  // resolves in the filter's OWN ancestor chain, so a shared id would paint one
+  // Editor's halos in another Editor's theme when two sit on one page (two
+  // notebook cells with different `theme` traits). The export path keeps the
+  // fixed id the Rust renderer emits. NOT React.useId: that is unique only
+  // within one React root, and the notebook widget mounts one root -- from its
+  // own copy of React -- per cell, so two cells both get `_r_1_`; `url(#id)`
+  // resolves document-wide to the first match, which is exactly the cross-theme
+  // leak this id exists to prevent. A random suffix drawn once per mount is
+  // unique across roots and React copies alike (interactive canvases are never
+  // server-rendered, so there is nothing to hydrate against).
+  const [labelHaloId] = React.useState(() => `label-halo-${Math.random().toString(36).slice(2, 10)}`);
+  const renderContext = React.useMemo<CanvasRenderContextValue>(
+    () =>
+      props.embedded
+        ? { embedded: true, labelFilterId: EXPORT_LABEL_FILTER_ID }
+        : { embedded: false, labelFilterId: labelHaloId },
+    [props.embedded, labelHaloId],
+  );
+
   // ---- Discrete + continuous state (formerly CanvasState) -----------------
   const [interaction, setInteraction] = React.useState<InteractionState>(idleState);
   const [editingName, setEditingName] = React.useState<Array<Descendant>>([]);
@@ -541,7 +572,17 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   // own in-progress viewport.
   const getCanvasOffset = (): Readonly<Point> => latest.current.liveViewport ?? latest.current.props.view.viewBox;
 
-  const getCanvasZoom = (): number => latest.current.liveViewport?.zoom ?? latest.current.props.view.zoom;
+  // The STORED zoom, healed: a value outside the renderable range (unset 0, or
+  // a file that recorded a percentage where a factor belongs) is read as 1 so
+  // that no gesture threshold, commit, or transform ever consumes it raw. The
+  // mount-time fit persists the healed value; until the host reflects it,
+  // every read here still sees a sane number.
+  const getViewZoom = (): number => {
+    const zoom = latest.current.props.view.zoom;
+    return isRenderableZoom(zoom) ? zoom : 1;
+  };
+
+  const getCanvasZoom = (): number => latest.current.liveViewport?.zoom ?? getViewZoom();
 
   // Push the live viewport to the controller exactly once and clear it. This is
   // the single settle-time commit shared by every gesture tail (pan release with
@@ -659,15 +700,24 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     return screenToCanvasPoint(x, y, zoom);
   };
 
+  // Move focus onto the canvas after a click. An <svg> can't take focus, so
+  // the focus target is the container div that svgRef points at (tabindex=-1;
+  // Canvas.module.css suppresses its focus ring). Focus must land INSIDE the
+  // editor, never merely leave the previous element: a text field the user
+  // was typing in still blurs (its blur commits), and the key events that
+  // follow carry the editor in their path, so the Editor's keyboard scoping
+  // resolves them to this instance directly and hosts that gate their own
+  // shortcuts on the event target (JupyterLab's data-lm-suppress-shortcuts,
+  // walked up from the focused element) see them land in the editor's
+  // subtree; focus left
+  // on <body> would instead route the key by the last-active instance.
+  // preventScroll: a host page (notebook) may scroll; focusing must not jump it.
+  // No fallback for a missing container: both callers -- clearPointerState
+  // (pointer release / click settle) and the name-edit commit/cancel path,
+  // which is reached from the keyboard too -- run on a rendered canvas, where
+  // svgRef is always attached.
   const focusCanvas = (): void => {
-    // an SVG element can't actually be focused.  Instead, blur any _other_
-    // focused element.
-    if (typeof document !== 'undefined' && document && document.activeElement) {
-      const activeElement = document.activeElement;
-      if ('blur' in activeElement && typeof activeElement.blur === 'function') {
-        activeElement.blur();
-      }
-    }
+    svgRef.current?.focus({ preventScroll: true });
   };
 
   const getNewVariableName = (base: string): string => {
@@ -1315,7 +1365,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     const showDetails = shouldShowVariableDetails(
       r.selectionCenterOffset !== undefined,
       latest.current.moveDelta,
-      latest.current.props.view.zoom,
+      getViewZoom(),
       isDraggingArrowhead(latest.current.interaction),
       isDraggingSource(latest.current.interaction),
       latest.current.interaction.mode === 'movingLabel',
@@ -1329,7 +1379,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     // deferred fields now live in the movingSelection union variant.
     const interactionNow = latest.current.interaction;
     if (interactionNow.mode === 'movingSelection' && interactionNow.deferredSingleSelectUid !== undefined) {
-      const didDrag = isDrag(latest.current.moveDelta, latest.current.props.view.zoom);
+      const didDrag = isDrag(latest.current.moveDelta, getViewZoom());
       const newSel = resolveDeferredSelection(interactionNow.deferredSingleSelectUid, didDrag);
       // Collapse the group selection to the pressed element on a no-drag
       // pointer-up (Figma-style). Name editing is NOT entered from here: a
@@ -1386,7 +1436,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
           // A sub-threshold pointer wobble during a click is not a drag: don't
           // nudge the element. shouldShowVariableDetails (which applies the
           // same threshold) will open the details panel for it instead.
-          if (isDragMovement(delta, latest.current.props.view.zoom)) {
+          if (isDragMovement(delta, getViewZoom())) {
             latest.current.props.onMoveSelection(delta, arcPoint, getDraggingSegmentIndex(interactionNow));
           }
         } else {
@@ -1407,10 +1457,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
           } else if (element.type === 'flow') {
             // don't create a flow stacked on top of 2 clouds due to a misclick
             // (a click that wobbled a pixel is still a misclick, not a drag)
-            if (
-              !isDragMovement(latest.current.moveDelta, latest.current.props.view.zoom) &&
-              latest.current.inCreation
-            ) {
+            if (!isDragMovement(latest.current.moveDelta, getViewZoom()) && latest.current.inCreation) {
               clearPointerState();
               return;
             }
@@ -2576,7 +2623,11 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     const svgHeight = svgElement.clientHeight;
 
     const viewBox = latest.current.props.view.viewBox;
-    let zoom = latest.current.props.view.zoom;
+    // getViewZoom already heals an out-of-range stored zoom to 1; the raw value
+    // is only consulted to decide that the healed one must be PERSISTED
+    // (through onViewBoxChange below), so the model is fixed on first open.
+    const storedZoom = latest.current.props.view.zoom;
+    const zoom = getViewZoom();
 
     let shouldUpdate = false;
     const prevBounds = viewBox;
@@ -2587,8 +2638,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       viewBox.height !== svgHeight ||
       !isFinite(viewBox.x) ||
       !isFinite(viewBox.y) ||
-      !isFinite(zoom) ||
-      zoom < 0.2
+      !isRenderableZoom(storedZoom)
     ) {
       shouldUpdate = true;
     }
@@ -2596,10 +2646,6 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     if (shouldUpdate) {
       let x = 0;
       let y = 0;
-
-      if (!isFinite(zoom) || zoom < 0.2) {
-        zoom = 1;
-      }
 
       // on a new diagram we won't have an initial bounds, but we should
       // still set the width/height
@@ -2696,14 +2742,15 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   // This runs at most once per mount (the `offscreenChecked` latch): it must not
   // fight a later user pan or an external viewport change, and module drill-in
   // (same Canvas instance -- see the latch's comment) manages its own viewport.
-  // "Idle" here matches the resize handler's convention (`!liveViewport`): while
+  // A host that carried the viewport in from a previous mount opts out
+  // (`recenterOffscreenOnMount === false`, see the prop). "Idle" here matches the resize handler's convention (`!liveViewport`): while
   // a gesture owns the live viewport the check waits, so it never yanks the view
   // out from under an in-flight pan/pinch/coast. The commit goes through
   // `onViewBoxChange` directly -- the same view-only, non-undo path the idle
   // resize uses -- so the host persists it once with no history entry. Zoom is
   // deliberately left unchanged (scope kept tight to re-centering).
   React.useEffect(() => {
-    if (r.offscreenChecked || props.embedded || liveViewport) {
+    if (r.offscreenChecked || props.embedded || props.recenterOffscreenOnMount === false || liveViewport) {
       return;
     }
     if (!svgSize || svgSize.width <= 0 || svgSize.height <= 0) {
@@ -2724,7 +2771,7 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
     }
 
     const offset = props.view.viewBox;
-    const zoom = props.view.zoom;
+    const zoom = getViewZoom();
     if (!isDiagramOffscreen(bounds, offset, zoom, svgSize)) {
       return;
     }
@@ -2837,8 +2884,9 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
       viewBox = `${left} ${top} ${width} ${height}`;
     }
   } else {
-    const liveZoom = getCanvasZoom();
-    const zoom = liveZoom >= 0.2 ? liveZoom : 1;
+    // getCanvasZoom heals an out-of-range stored zoom, so nothing is ever drawn
+    // at, say, 200x because a file recorded a percentage where a factor belongs.
+    const zoom = getCanvasZoom();
     const offset = getCanvasOffset();
 
     transform = `matrix(${zoom} 0 0 ${zoom} ${offset.x * zoom} ${offset.y * zoom})`;
@@ -2854,8 +2902,50 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
   // event handlers read them after render returns (getElementByUid and the
   // pointer callbacks resolve connector ends / persist the dragged-link arc).
 
+  // The label halo: each label's glyphs dilated and blurred into a soft
+  // backing plate at 85% opacity, so a label stays legible where it crosses a
+  // connector or a flow. Two variants of one filter, differing only in where
+  // the plate's colour comes from (see canvas-render-context.ts):
+  //  - export: a colour matrix that forces every pixel to literal white -- the
+  //    standalone SVG has no tokens, and this markup is byte-identical to the
+  //    Rust renderer's;
+  //  - interactive: an feFlood whose colour is the `--color-white` token (the
+  //    same token every canvas primitive uses for its fill: white in light
+  //    mode, dark in a dark host), composited `in` the blurred alpha. `in`
+  //    multiplies the flood's alpha by the blur's, exactly what the matrix's
+  //    alpha row does, so light mode renders pixel-for-pixel as before. Filter
+  //    primitives cannot read `var()` from presentation attributes in every
+  //    engine, so the colour is set as a CSS property (`style`), which they can.
+  const labelHaloFilter = renderContext.embedded ? (
+    <filter id={renderContext.labelFilterId} x="-50%" y="-50%" width="200%" height="200%">
+      <feMorphology operator="dilate" radius="4" />
+      <feGaussianBlur stdDeviation="2" />
+      <feColorMatrix
+        type="matrix"
+        values="0 0 0 0 1
+                          0 0 0 0 1
+                          0 0 0 0 1
+                          0 0 0 0.85 0"
+      />
+      <feComposite operator="over" in="SourceGraphic" />
+    </filter>
+  ) : (
+    <filter id={renderContext.labelFilterId} x="-50%" y="-50%" width="200%" height="200%">
+      <feMorphology operator="dilate" radius="4" />
+      <feGaussianBlur stdDeviation="2" result="plate" />
+      <feFlood style={{ floodColor: 'var(--color-white)' }} floodOpacity={0.85} />
+      <feComposite operator="in" in2="plate" />
+      <feComposite operator="over" in="SourceGraphic" />
+    </filter>
+  );
+
   return (
-    <div style={{ height: '100%', width: '100%' }} ref={svgRef} className={`${styles.canvas} simlin-canvas`}>
+    <div
+      style={{ height: '100%', width: '100%' }}
+      ref={svgRef}
+      className={`${styles.canvas} ${styles.canvasContainer} simlin-canvas`}
+      tabIndex={-1}
+    >
       <svg
         viewBox={viewBox}
         preserveAspectRatio="xMinYMin"
@@ -2865,24 +2955,13 @@ export const Canvas = React.memo(function Canvas(props: CanvasProps): React.Reac
         onPointerCancel={handlePointerCancel}
         onPointerUp={handlePointerCancel}
       >
-        <defs>
-          <filter id="labelBackground" x="-50%" y="-50%" width="200%" height="200%">
-            <feMorphology operator="dilate" radius="4" />
-            <feGaussianBlur stdDeviation="2" />
-            <feColorMatrix
-              type="matrix"
-              values="0 0 0 0 1
-                          0 0 0 0 1
-                          0 0 0 0 1
-                          0 0 0 0.85 0"
-            />
-            <feComposite operator="over" in="SourceGraphic" />
-          </filter>
-        </defs>
-        <g transform={transform}>
-          {zLayers}
-          {dragRect}
-        </g>
+        <defs>{labelHaloFilter}</defs>
+        <CanvasRenderContext.Provider value={renderContext}>
+          <g transform={transform}>
+            {zLayers}
+            {dragRect}
+          </g>
+        </CanvasRenderContext.Provider>
       </svg>
       {overlay}
     </div>
