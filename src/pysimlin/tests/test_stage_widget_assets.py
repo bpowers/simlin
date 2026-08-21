@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -19,10 +20,18 @@ import pytest
 from .conftest import get_repo_root
 
 if TYPE_CHECKING:
-    from pathlib import Path
     from types import ModuleType
 
 SCRIPT = get_repo_root() / "src" / "pysimlin" / "scripts" / "stage_widget_assets.py"
+PACKAGE_DIR = SCRIPT.parent.parent / "simlin"
+
+
+def _testing_an_installed_wheel() -> bool:
+    """Is the ``simlin`` under test an installed wheel rather than the package
+    directory of this checkout?"""
+    import simlin
+
+    return Path(simlin.__file__).resolve().parent != PACKAGE_DIR.resolve()
 
 
 @pytest.fixture(scope="module")
@@ -366,16 +375,19 @@ class TestSetupPyGuard:
 
     @pytest.fixture
     def setup_module(self, monkeypatch: pytest.MonkeyPatch) -> ModuleType:
-        # setup.py subclasses setuptools' own bdist_wheel, which setuptools
-        # only grew in 70.1 (the dev extra's pin). "setuptools imports" is
-        # therefore the wrong condition: an environment testing an installed
-        # wheel can carry a much older setuptools -- actions/setup-python
-        # bundles 65.5.0 -- where the import setup.py performs raises. Skip on
-        # exactly that import; the pure guard is covered above regardless.
-        pytest.importorskip(
-            "setuptools.command.bdist_wheel",
-            reason="setuptools >= 70.1 (dev extra) is needed to load setup.py",
-        )
+        # setup.py belongs to the checkout, not to the wheel, and loading it
+        # runs setup() -- which needs the build environment the dev extra and
+        # `make build` provide: setuptools >= 70.1 (setup.py subclasses
+        # setuptools' own bdist_wheel, which older versions do not carry) and,
+        # since cffi_modules makes cffi import simlin/_ffi_build.py, a built
+        # libsimlin.a. Guard on the one fact that decides all of them rather
+        # than on each build input in turn: which inputs an environment
+        # happens to supply varies per runner image (actions/setup-python
+        # bundles setuptools for 3.11 but not for 3.12+), so enumerating them
+        # makes every future build input a new way for this to fail in a job
+        # that cannot fix it. The pure guard is covered above regardless.
+        if _testing_an_installed_wheel():
+            pytest.skip("setup.py is loadable only from a built source checkout")
         setup_py = SCRIPT.parent.parent / "setup.py"
         monkeypatch.setattr(sys, "argv", ["setup.py", "--name"])
         monkeypatch.chdir(setup_py.parent)
