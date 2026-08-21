@@ -109,7 +109,7 @@ jobs:
         uses: pypa/cibuildwheel@v3.3.1
         env:
           CIBW_BUILD: cp311-* cp312-* cp313-* cp314-*
-          CIBW_SKIP: pp* *-musllinux*
+          CIBW_SKIP: "*-musllinux*"
           CIBW_ARCHS_MACOS: arm64
           CIBW_ARCHS_LINUX: x86_64 aarch64
           CIBW_BEFORE_ALL: |
@@ -205,13 +205,12 @@ jobs:
           # The notebook extra: the asset probe below constructs a
           # ModelWidget and the test suite drives it (a bare wheel install
           # is covered by tests/test_widget_optional.py, which blocks the
-          # import). Extras on a local wheel path: pip accepts
-          # "path[extra]", so this spells the extra that way.
-          uv pip install --system "${WHEEL}[notebook]"
-
-          # Install test dependencies explicitly (the test extra's pins live in pyproject; kept in step by hand)
-          echo "Installing test dependencies..."
-          uv pip install --system "pytest>=7.0.0" "pytest-cov>=4.0.0" "hypothesis>=6.100.0" "jsonschema>=4.20.0"
+          # import). The test extra brings pytest and friends; taking it from
+          # the wheel's own metadata rather than re-pinning it here is what
+          # keeps this job in step with pyproject when a test grows a new
+          # dependency. Extras on a local wheel path: pip accepts
+          # "path[extra]", so this spells them that way.
+          uv pip install --system "${WHEEL}[notebook,test]"
 
           # Debug: Check if the module was installed correctly
           echo "Checking installed package..."

@@ -309,53 +309,63 @@ The memory testing framework ensures that pysimlin properly manages C resources 
 
 ## Release Process
 
-### Version Bumping
+### Versioning
 
-Update version in:
-- `pyproject.toml`
-- `simlin/__init__.py`
+There is no version to bump by hand: `pyproject.toml` declares
+`dynamic = ["version"]` and setuptools-scm derives it from the
+`pysimlin-v<version>` git tag (`tag_regex` in `[tool.setuptools_scm]`).
+`simlin.__version__` reads that back out of the installed distribution's
+metadata.
 
-### Building for Release
+### Cutting a release
 
-1. **Local Testing**:
+1. **Dry-run the release workflow.** `.github/workflows/release.yml` also
+   accepts `workflow_dispatch`, and its `publish` job is gated on
+   `refs/tags/`, so a manual run exercises the whole pipeline -- widget
+   assets, cibuildwheel, and the wheel test matrix -- without uploading
+   anything:
+
    ```bash
-   make clean
-   make build
-   make test
+   gh workflow run release.yml --ref main
    ```
 
-2. **Build All Platform Wheels**:
-   - Use the GitHub Actions workflow (`.github/workflows/release.yml`, run by
-     `scripts/release-pysimlin.sh`'s tag): its `widget-assets` job builds the
-     notebook widget assets ONCE on ubuntu (`stage_widget_assets.py
-     --require-opt`) and uploads them; every `build-wheels` runner downloads
-     that artifact into `simlin/_widget/` and re-verifies it before
-     cibuildwheel, so all platform wheels carry identical assets; `test-wheels`
-     runs `scripts/check_wheel_assets.py` over the wheels (present, non-empty,
-     manifest-consistent, identical across wheels) and `--installed` against
-     the installed wheel (`Project.new().main_model.widget()` constructs)
-   - Or build on each platform manually
+   This is worth the ~45 minutes. The `test-wheels` matrix runs the suite
+   against an *installed wheel* in an environment that is not the dev venv
+   (no `uv sync`, whatever `actions/setup-python` happens to bundle), so it
+   can fail on a tree where `make test` is green.
 
-3. **Test Wheels**:
-   ```bash
-   python3 scripts/check_wheel_assets.py dist/pysimlin-*.whl
-   uv pip install dist/pysimlin-*.whl
-   python -c "import simlin; print(simlin.__version__)"
-   ```
+2. **Tag.** `scripts/release-pysimlin.sh <version>` builds and stages the
+   widget assets as a preflight (`SKIP_ASSET_PREFLIGHT=1` opts out), creates
+   the `pysimlin-v<version>` tag on the current commit, then commits the
+   `src/simlin-mcp/pysimlin.version` bump on top. The tag has to precede that
+   commit: simlin-mcp's `pysimlin_version_matches_latest_tag` test requires
+   the matching tag to exist, and it is the tagged commit that setuptools-scm
+   turns into the wheel's version.
 
-### Publishing to PyPI
+3. **Push.** `git push origin main pysimlin-v<version>`. The tag triggers
+   `release.yml`; this time `publish` runs and uploads `wheelhouse/*.whl` to
+   PyPI with `pypa/gh-action-pypi-publish`.
 
-1. **Test PyPI** (optional):
-   ```bash
-   twine upload --repository testpypi dist/*
-   ```
+### What the workflow does
 
-2. **Production PyPI**:
-   ```bash
-   twine upload dist/*
-   ```
+- `widget-assets` builds the notebook widget ONCE on ubuntu
+  (`stage_widget_assets.py --require-opt`) and uploads `widget.js`,
+  `libsimlin-browser.wasm`, and `ASSETS.json`. Every `build-wheels` runner
+  downloads that one artifact into `simlin/_widget/` and re-verifies it
+  before cibuildwheel, so all platform wheels carry byte-identical assets.
+- `test-wheels` runs `scripts/check_wheel_assets.py` over the wheels
+  (present, non-empty, manifest-consistent, identical across wheels) and
+  `--installed` against the installed wheel
+  (`Project.new().main_model.widget()` constructs), then the pytest suite
+  from the checkout against that wheel.
 
-Or use GitHub Actions workflow triggered by tags.
+### Checking a wheel by hand
+
+```bash
+python3 scripts/check_wheel_assets.py dist/pysimlin-*.whl
+uv pip install dist/pysimlin-*.whl
+python -c "import simlin; print(simlin.__version__)"
+```
 
 ## Platform Support
 

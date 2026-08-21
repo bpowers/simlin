@@ -366,11 +366,15 @@ class TestSetupPyGuard:
 
     @pytest.fixture
     def setup_module(self, monkeypatch: pytest.MonkeyPatch) -> ModuleType:
-        # setuptools is a build-time dependency (in the dev extra), absent when
-        # the suite runs against an installed wheel; the pure guard is covered
-        # above regardless.
+        # setup.py subclasses setuptools' own bdist_wheel, which setuptools
+        # only grew in 70.1 (the dev extra's pin). "setuptools imports" is
+        # therefore the wrong condition: an environment testing an installed
+        # wheel can carry a much older setuptools -- actions/setup-python
+        # bundles 65.5.0 -- where the import setup.py performs raises. Skip on
+        # exactly that import; the pure guard is covered above regardless.
         pytest.importorskip(
-            "setuptools", reason="setuptools (dev extra) is needed to load setup.py"
+            "setuptools.command.bdist_wheel",
+            reason="setuptools >= 70.1 (dev extra) is needed to load setup.py",
         )
         setup_py = SCRIPT.parent.parent / "setup.py"
         monkeypatch.setattr(sys, "argv", ["setup.py", "--name"])
