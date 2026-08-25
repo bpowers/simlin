@@ -10,7 +10,10 @@ Checks:
     which the root CLAUDE.md's comment standards ban (they go stale
     immediately and are rebase-conflict magnets).
 
-Paths are resolved relative to the file's directory first, then repo root.
+Paths are resolved relative to the file's directory first, then that
+directory's `src/` (the conventional source root of a crate or package, so a
+crate's CLAUDE.md can name `db/query.rs` rather than `src/db/query.rs`), then
+repo root.
 
 Does NOT check:
   - Bare filenames in backticks without `/` (e.g. `Canvas.tsx`)
@@ -51,6 +54,15 @@ def blank_inline_code_spans(content: str) -> str:
     return re.sub(r"`[^`\n]+`", lambda m: " " * len(m.group(0)), content)
 
 
+def relative_bases(file_dir: Path, repo_root: Path) -> tuple[Path, ...]:
+    """Directories a relative reference is tried against, in order: the file's
+    own directory, its `src/` subdirectory (the conventional source root of a
+    crate or package, so a crate's CLAUDE.md can say `db/query.rs`), then the
+    repo root.  `resolve_path` and `is_git_ignored` both read this list so an
+    existence check and an ignore check always agree on what a reference names."""
+    return (file_dir, file_dir / "src", repo_root)
+
+
 def resolve_path(ref: str, file_dir: Path, repo_root: Path) -> Path | None:
     """Try to resolve a path reference, returning the resolved Path or None."""
     # Strip leading / which means repo-root-relative
@@ -60,23 +72,18 @@ def resolve_path(ref: str, file_dir: Path, repo_root: Path) -> Path | None:
             return candidate
         return None
 
-    # Try relative to the file's directory first
-    candidate = file_dir / ref
-    if candidate.exists():
-        return candidate
-
-    # Try relative to repo root
-    candidate = repo_root / ref
-    if candidate.exists():
-        return candidate
+    for base in relative_bases(file_dir, repo_root):
+        candidate = base / ref
+        if candidate.exists():
+            return candidate
 
     return None
 
 
 def is_git_ignored(ref: str, file_dir: Path, repo_root: Path) -> bool:
     """True when git would ignore ``ref`` (resolved like resolve_path does)."""
-    for base in (file_dir, repo_root):
-        candidate = (base / ref)
+    for base in relative_bases(file_dir, repo_root):
+        candidate = base / ref
         try:
             rel = candidate.resolve().relative_to(repo_root.resolve())
         except ValueError:
