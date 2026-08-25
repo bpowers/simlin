@@ -29,6 +29,7 @@
 
 - [tech-debt.md](tech-debt.md) -- Known technical debt items with measurement commands
 - [design-plans/](design-plans/) -- Design plans (architecture and phasing for major efforts)
+  - [design-plans/2026-08-25-compiler-unification.md](design-plans/2026-08-25-compiler-unification.md) -- Engine compiler de-duplication: one fragment compiler (`lower_fragment`/`DepShape`), one `BuiltinFn::signature` table, one temp allocator and materialization pass, one `DimMatcher`, structured `DepRef`s, one `Variable`, assembly single-ownership, a pure parse with AST-carried captures replacing text-synthesized helpers, Stage0/Stage1 memo removal; 8 phases with a measured ledger
   - [design-plans/2026-08-17-pysimlin-widget.md](design-plans/2026-08-17-pysimlin-widget.md) -- pysimlin file-backed models + anywidget in-notebook editor (file on disk as sync authority)
   - [design-plans/2026-04-05-server-rewrite.md](design-plans/2026-04-05-server-rewrite.md) -- Local-first `simlin-serve` binary: filesystem-backed editor + in-process MCP
   - [design-plans/2026-04-25-ltm-per-ref-elem-graph.md](design-plans/2026-04-25-ltm-per-ref-elem-graph.md) -- Per-reference element causal graph: classify each AST reference by access shape, emit truthful per-reference element edges (includes a post-Phases-1-5 measurement postscript)
