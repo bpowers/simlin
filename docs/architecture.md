@@ -126,4 +126,4 @@ Treat these as generated output unless the task explicitly targets them:
 
 ## XMILE Specification
 
-The XMILE interchange format spec is at `docs/xmile-v1.0.html`. It covers simulation concepts, array/subscript notation, XML structure, and equation syntax. Consult it when adding engine functionality.
+The XMILE interchange format spec is at `docs/reference/xmile-v1.0.html`. It covers simulation concepts, array/subscript notation, XML structure, and equation syntax. Consult it when adding engine functionality.
