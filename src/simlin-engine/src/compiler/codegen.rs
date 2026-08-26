@@ -14,6 +14,7 @@ use crate::bytecode::{
 use crate::common::{Canonical, ErrorCode, ErrorKind, Ident, Result, canonicalize};
 use crate::dimensions::Dimension;
 use crate::sim_err;
+use crate::snapshot_arg::{SnapshotAccess, SnapshotArg, SnapshotIndex};
 use crate::vm::{DT_OFF, FINAL_TIME_OFF, INITIAL_TIME_OFF, TIME_OFF};
 
 use super::dimensions::UnaryOp;
@@ -87,19 +88,84 @@ enum SnapshotPosition {
     IterationBody,
 }
 
+/// Reduce a LOWERED `PREVIOUS`/`INIT` argument to the form
+/// [`SnapshotArg::access`] decides over.
+///
+/// The lowering has already resolved every index it can, so the classification
+/// reads straight off the shape: a bare reference is whole storage, a
+/// `StaticSubscript` is storage with `view.dims.len()` dimensions still
+/// standing (a dynamic index never produces one -- it lowers to
+/// `Expr::Subscript`), and nothing else references one variable's storage at
+/// all.
+///
+/// `builtins_visitor::BuiltinVisitor::snapshot_arg` is the twin over the
+/// SOURCE argument. Both feed the one rule, so the parse's capture decision and
+/// the two codegen routes below cannot disagree about which shapes are
+/// addressable (GH #568's class).
+pub(crate) fn lowered_snapshot_arg(arg: &Expr) -> SnapshotArg {
+    match arg {
+        Expr::Var(_, _) => SnapshotArg::whole(),
+        Expr::StaticSubscript(_, view, _) => {
+            SnapshotArg::subscripted(view.dims.iter().map(|_| SnapshotIndex::SpansDimension))
+        }
+        _ => SnapshotArg::not_storage(),
+    }
+}
+
 /// The single slot a `LoadPrev`/`LoadInitial` can address, if `arg` resolved to
 /// one: a scalar variable (`Expr::Var`), or an array reference whose subscripts
 /// collapsed the view to one element (`arr[Dim.elem]`, `arr[2]`).
 ///
 /// This is the ARRAY route's negation as well as the scalar route's predicate
-/// (`Compiler::snapshot_static_view`), so the two partition the argument shapes.
+/// (`Compiler::snapshot_static_view`), so the two partition the argument
+/// shapes -- and the partition is [`SnapshotAccess`] rather than a second
+/// statement of it here.
 fn static_slot(arg: &Expr) -> Option<VarRef> {
+    if lowered_snapshot_arg(arg).access() != SnapshotAccess::Slot {
+        return None;
+    }
     match arg {
         Expr::Var(var, _) => Some(var.clone()),
-        Expr::StaticSubscript(base, view, _) if view.dims.is_empty() => {
-            Some(base.offset_by(view.offset))
-        }
+        Expr::StaticSubscript(base, view, _) => Some(base.offset_by(view.offset)),
+        // `SnapshotAccess::Slot` is produced for exactly the two shapes above;
+        // this arm is the loud-safe restatement of that, not a live one.
         _ => None,
+    }
+}
+
+/// The loud refusal for a `PREVIOUS`/`INIT` argument
+/// [`SnapshotArg::access`] says addresses no storage.
+///
+/// Kept as one function because [`Compiler::snapshot_static_view`] needs it in
+/// two positions, and because both messages must stay refusals rather than
+/// approximations: reading one element's snapshot and broadcasting it where an
+/// array was written is a plausible array of wrong numbers.
+fn refuse_unaddressable_snapshot(arg: &Expr) -> crate::Error {
+    match arg {
+        // A temp has no snapshot: nothing copies `temp_storage` into
+        // `prev_values`, so a computed array's previous value is simply not
+        // recorded anywhere.
+        Expr::TempArray(_, _, _) => crate::Error::new(
+            ErrorKind::Simulation,
+            ErrorCode::NotSimulatable,
+            Some(
+                "PREVIOUS/INIT of a computed array has no snapshot to read: only \
+                 a stored variable's values are captured each step"
+                    .to_string(),
+            ),
+        ),
+        // Everything else is an expression that `find_expr_array_view` gave a
+        // shape but that did not lower to a view over storage -- there is no
+        // snapshot of an expression either.
+        other => crate::Error::new(
+            ErrorKind::Simulation,
+            ErrorCode::NotSimulatable,
+            Some(format!(
+                "PREVIOUS/INIT used where an array is required needs a \
+                 statically resolvable array reference, got {:?}",
+                std::mem::discriminant(other)
+            )),
+        ),
     }
 }
 
@@ -643,6 +709,14 @@ impl<'module> Compiler<'module> {
             );
         }
 
+        // Which shapes address storage at all is `SnapshotArg::access`, shared
+        // with the scalar route above and with the parse's capture decision.
+        // The refusals BELOW this gate are the other kind: an argument that does
+        // address storage but whose reading here would be wrong anyway.
+        if lowered_snapshot_arg(arg).access() == SnapshotAccess::Capture {
+            return Err(refuse_unaddressable_snapshot(arg));
+        }
+
         match arg {
             Expr::StaticSubscript(base, view, _) if super::view_repeats_a_dimension(view) => {
                 // A source naming one dimension twice (`matrix[d,d]`) has no
@@ -652,8 +726,9 @@ impl<'module> Compiler<'module> {
                 // `compiler::view_repeats_a_dimension`). The array route is new
                 // with GH #995: `VECTOR SORT ORDER(PREVIOUS(matrix[d,d]), 1)`
                 // did not compile at the merge base, and letting it compile here
-                // buys a plausible array of wrong numbers. Refuse it, exactly as
-                // the temp and non-view arms below do. The DIRECT spelling
+                // buys a plausible array of wrong numbers. Refuse it, exactly
+                // as the gate above refuses a shape that addresses no storage.
+                // The DIRECT spelling
                 // (`VECTOR SORT ORDER(matrix[d,d], 1)`) is untouched: it
                 // compiles at the merge base, to those same wrong numbers, and
                 // fixing that is a pre-existing defect in the projection rather
@@ -678,26 +753,10 @@ impl<'module> Compiler<'module> {
                     self.array_view_to_snapshot_static(base, &view, region),
                 ))
             }
-            // A temp has no snapshot: nothing copies `temp_storage` into
-            // `prev_values`, so a computed array's previous value is simply not
-            // recorded anywhere. Everything else here is an expression that
-            // `find_expr_array_view` gave a shape but that did not lower to a
-            // view over storage -- there is no snapshot of an expression either.
-            // Both are loud rather than approximated.
-            Expr::TempArray(_, _, _) => sim_err!(
-                NotSimulatable,
-                "PREVIOUS/INIT of a computed array has no snapshot to read: only \
-                 a stored variable's values are captured each step"
-                    .to_string()
-            ),
-            other => sim_err!(
-                NotSimulatable,
-                format!(
-                    "PREVIOUS/INIT used where an array is required needs a \
-                     statically resolvable array reference, got {:?}",
-                    std::mem::discriminant(other)
-                )
-            ),
+            // The gate above returned every shape that addresses no storage, so
+            // this arm is the loud-safe restatement of that partition rather
+            // than a live one.
+            other => Err(refuse_unaddressable_snapshot(other)),
         }
     }
 

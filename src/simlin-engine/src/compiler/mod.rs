@@ -30,6 +30,12 @@ use crate::variable::{VarKind, Variable};
 
 // Re-exports for crate-internal API
 pub(crate) use self::codegen::ModuleCtx;
+/// Codegen's classification of a lowered `PREVIOUS`/`INIT` argument, for the
+/// agreement test that checks it against the parse's classification of the
+/// same call (`db::prev_init_tests`). Exported alone rather than by opening
+/// `codegen`, which has no other crate-wide consumer.
+#[cfg(test)]
+pub(crate) use self::codegen::lowered_snapshot_arg;
 pub(crate) use self::context::Context;
 use self::context::DimensionRefs;
 pub(crate) use self::expr::{BuiltinFn, Expr, SubscriptIndex, Table, VarRef};

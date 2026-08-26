@@ -17,6 +17,7 @@ use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
 use crate::module_functions::{
     MacroRegistry, ModuleFunctionDescriptor, is_renamed_builtin_macro_collision, stdlib_descriptor,
 };
+use crate::snapshot_arg::{SnapshotAccess, SnapshotArg, SnapshotIndex};
 use crate::{datamodel, eqn_err};
 
 /// An empty registry used when no project macros are in scope (e.g. the
@@ -594,6 +595,10 @@ impl<'a> BuiltinVisitor<'a> {
     /// indices leave at least one dimension standing, and where every index is
     /// either that or statically resolvable (GH #995)?
     ///
+    /// This is the `View` arm of [`BuiltinVisitor::snapshot_arg`], named
+    /// separately because the substitution site reads it as a question about
+    /// the argument's shape rather than about the capture decision.
+    ///
     /// Such an argument is passed through to lowering untouched: no per-element
     /// substitution, and no synthesized capture helper. That is what lets an
     /// array-valued `PREVIOUS`/`INIT` exist at all, and it puts the decision in
@@ -605,21 +610,51 @@ impl<'a> BuiltinVisitor<'a> {
     /// exists; the helper path cannot hold it either, since a scalar
     /// `Equation::Scalar` helper holding `vals[*]` does not compile.
     ///
-    /// The scalar routing is unchanged for every other shape: an all-static
-    /// subscript still substitutes and compiles to `LoadPrev`/`LoadInitial`
-    /// against a fixed slot, and anything with a dynamic index still gets its
-    /// capture helper (which is also what gives a dynamic index the correct
-    /// lagged semantics).
+    /// Every other shape takes the scalar routing: an all-static subscript
+    /// substitutes and compiles to `LoadPrev`/`LoadInitial` against a fixed
+    /// slot, and anything with a dynamic index gets a capture helper (which is
+    /// also what gives a dynamic index the correct lagged semantics).
     fn arg_is_array_shaped(&self, arg: &Expr0) -> bool {
+        self.snapshot_arg(arg).access() == SnapshotAccess::View
+    }
+
+    /// Classify one subscript index for the shared `PREVIOUS`/`INIT` predicate.
+    ///
+    /// Spanning is asked BEFORE staticness because a name can satisfy both --
+    /// an active apply-to-all dimension that some *other* dimension also
+    /// declares as an element -- and what such an index leaves standing is what
+    /// the reference means. [`SnapshotArg::subscripted`] carries the same
+    /// precedence for the fold; the two must agree.
+    fn classify_snapshot_index(&self, idx: &IndexExpr0) -> SnapshotIndex {
+        if self.index_spans_a_dimension(idx) {
+            SnapshotIndex::SpansDimension
+        } else if self.index_is_static(idx) {
+            SnapshotIndex::Static
+        } else {
+            SnapshotIndex::Dynamic
+        }
+    }
+
+    /// Reduce a source `PREVIOUS`/`INIT` argument to the form
+    /// [`SnapshotArg::access`] decides over, so this parse-time capture
+    /// decision and codegen's direct-read decision cannot drift apart -- the
+    /// GH #568 failure class, where the dependency graph and the bytecode
+    /// disagree about what a variable reads.
+    ///
+    /// A module-backed base classifies as `not_storage`, which is stricter than
+    /// codegen: codegen's `static_slot` accepts an `m·port` reference like any
+    /// other variable, so the capture this synthesizes for one is redundant.
+    /// The redundancy is preserved deliberately -- dropping it removes slots and
+    /// fragments, which is an artifact-shape change with its own ledger row.
+    fn snapshot_arg(&self, arg: &Expr0) -> SnapshotArg {
         match arg {
-            Expr0::Subscript(id, indices, _) => {
-                !self.is_module_backed_ident(id)
-                    && indices.iter().any(|i| self.index_spans_a_dimension(i))
-                    && indices
-                        .iter()
-                        .all(|i| self.index_is_static(i) || self.index_spans_a_dimension(i))
+            Expr0::Var(ident, _) if !self.is_module_backed_ident(ident) => SnapshotArg::whole(),
+            Expr0::Subscript(id, indices, _) if !self.is_module_backed_ident(id) => {
+                SnapshotArg::subscripted(
+                    indices.iter().map(|idx| self.classify_snapshot_index(idx)),
+                )
             }
-            _ => false,
+            _ => SnapshotArg::not_storage(),
         }
     }
 
@@ -1268,16 +1303,14 @@ impl<'a> BuiltinVisitor<'a> {
                     // helper either: it resolves statically too, just to a VIEW
                     // over the argument's storage rather than to a single slot
                     // (codegen's `snapshot_static_view`).
-                    let needs_temp_arg = match &arg0 {
-                        Var(ident, _) => self.is_module_backed_ident(ident),
-                        Subscript(id, indices, _) => {
-                            self.is_module_backed_ident(id)
-                                || !indices.iter().all(|idx| {
-                                    self.index_is_static(idx) || self.index_spans_a_dimension(idx)
-                                })
-                        }
-                        _ => true,
-                    };
+                    //
+                    // `snapshot_arg` reduces the argument to the form
+                    // `SnapshotArg::access` decides over -- the same rule
+                    // codegen's `static_slot`/`snapshot_static_view` apply to
+                    // the LOWERED argument, stated once so the two cannot
+                    // drift.
+                    let needs_temp_arg =
+                        self.snapshot_arg(&arg0).access() == SnapshotAccess::Capture;
                     let arg0 = if needs_temp_arg {
                         // `make_temp_arg` returns the reference expression for
                         // the synthesized helper: a bare `Var` for a scalar

@@ -664,15 +664,17 @@ pub fn model_implicit_var_info(
 /// **This narrowing is partial, and the limitation is pinned, not merely
 /// noted.** It makes an added `PREVIOUS`/`INIT` helper tight. It does NOT make
 /// an added *module-instantiating* helper (`SMTH1`, `DELAY`, a user sub-model)
-/// tight, because two further whole-model dependencies survive on that path
-/// and neither is a projection away: `project.models(db)` changes when the
-/// implicit `stdlib⁚smth1` model is spliced into the project, and
+/// tight, and exactly one whole-model dependency is why:
 /// `model_module_ident_context` is an INTERNED handle whose value changes when
-/// the module-ident set grows -- which gives every variable's parse a new
-/// cache key, and a new key cannot backdate at all. Both outcomes are asserted
-/// by `implicit_helper_add_is_tight_but_module_helper_add_is_not`, so the day
+/// the model's module-ident set grows, which gives every variable's parse a
+/// new cache key -- and a new key cannot backdate at all. No projection
+/// substitutes for deleting it: the set is genuinely whole-model, and it is a
+/// key as well as a read. Both outcomes are asserted by
+/// `implicit_helper_add_is_tight_but_module_helper_add_is_not`, so the day
 /// someone fixes the module-ident cache key that test reds rather than
-/// silently over-delivering.
+/// silently over-delivering; the cause is isolated by
+/// `module_helper_add_saturates_only_through_the_module_ident_context`, which
+/// measures every tracked query rather than the fragment compilers alone.
 #[salsa::tracked(returns(clone))]
 pub(crate) fn model_implicit_var_by_name(
     db: &dyn Db,

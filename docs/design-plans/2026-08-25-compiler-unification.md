@@ -721,14 +721,13 @@ decisions taken on it:
 - A synthesized helper is printed to text at two sites and re-parsed at seven;
   its name is its identity at twenty-one. Captures carry the argument as an
   AST subtree with positional identity `(parent, id)`.
-- AC3.1 needs more than the parse key: the fragment compilers cloned a
-  whole-model module map whose value changed whenever an implicit module
-  instance was added. Phase 3 deleted that map (no fragment reads a whole-model
-  module map; module shapes come from `model_shape` per sub-model), so chunk
-  7.4 starts with a salsa execution-count probe of the pinning test to find
-  what still re-executes, whose stated cause (1) --
-  `project.models` changing on a stdlib splice -- is inconsistent with
-  `db/sync.rs` splicing stdlib models on every sync.
+- AC3.1 needs the parse key and nothing else. The two other causes on the
+  record are gone or were never real: the whole-model module map the fragment
+  compilers cloned was deleted with Phase 3 (module shapes come from
+  `model_shape` per sub-model), and `project.models` changing on a stdlib
+  splice does not happen at all, since `db/sync.rs` splices every stdlib model
+  on every sync. Chunk 7.1's execution-count probe measured both, and the
+  remedy is stated under "Phase 7.1 probe" below.
 - The runlist contract a capture reproduces: a PREVIOUS capture is a flows-only
   unit with no edge from its parent in either phase; an INIT capture is seeded
   into initials through `all_init_referenced`, keeps the parent->capture
@@ -742,7 +741,9 @@ decisions taken on it:
   `model_dependency_graph` in this plan.
 
 Phase 7 is therefore executed as: 7.1 the execution-count probe and the single
-D1/D3 predicate as a projection; 7.2 captures for PREVIOUS/INIT with today's
+D1/D3 predicate (a plain function, not a projection: the parse still decides
+and the dep stage still reads the parsed helper list, so no projection removes
+a whole-model read); 7.2 captures for PREVIOUS/INIT with today's
 capture set, names, and walk order held fixed (the goldens are the defect
 detector); 7.3a stdlib `ImplicitModule` with per-element expansion and shared
 `n`; 7.3b macros, passthrough, and GH #554; 7.4 deletion of `ModuleIdentContext`
@@ -751,10 +752,135 @@ the captures D1 synthesizes for `PREVIOUS(module-call aux)` and
 `PREVIOUS(m·scalar_port)` (redundant: codegen's `static_slot` already accepts
 `m·port`, and a stdlib-call aux is a one-slot scalar) and refusing a bare
 `PREVIOUS(sub)` of an explicit module loudly; generalising the D3 bare-element
-rule from the LTM path to user equations; taking INIT captures out of the flows
+rule from the LTM path to user equations, together with the QUALIFIED-element
+form `PREVIOUS(vals[Dim.elem])`, which captures unless the qualified dimension
+is among the variable's own declared dimensions or their map chains, because
+the parse narrows its dimensions context to those (measured in chunk 7.1,
+"Phase 7.1 predicate");
+taking INIT captures out of the flows
 runlist; keeping `ApplyToAll` instead of rewriting to `Arrayed` for an
 apply-to-all body that merely contains `PREVIOUS`/`INIT` (D14); and hoisting
 `DELAYN`'s duplicated input argument once.
+
+**Phase 7.1 probe.** The execution-count probe chunk 7.1 owed AC3.1 is
+`db::exec_probe::ProbedDb`: a `SimlinDb` built over salsa storage carrying an
+event callback, which records every `EventKind::WillExecute` database key and
+reports query name -> `(bodies run, distinct keys)` over a measured region. It
+counts every tracked query at once, where `db::fragment_compile`'s
+`note_fragment_execution` counts the four fragment compilers by instrumenting
+their bodies; both are needed, because only the second says WHICH variable
+recompiled. What the probe establishes about
+`implicit_helper_add_is_tight_but_module_helper_add_is_not`'s two edits, on the
+model `k = 3`, `probe = k * 2`:
+
+| query | plain `PREVIOUS` helper added | `SMTH1` added |
+|---|---:|---:|
+| `parse_source_variable_with_module_context` | 1 | 13 |
+| `variable_direct_dependencies` | 1 | 13 |
+| `compile_var_fragment` | 1 | 8 |
+| `compile_implicit_var_fragment` | 1 | 2 |
+| `model_variable_by_name` | 2 | 9 |
+| `var_runlist_membership` | 3 | 8 |
+| `model_module_ident_context` | 1 | 3 |
+| `model_implicit_var_info` / `model_implicit_var_by_name` | 1 / 1 | 2 / 2 |
+| `model_dependency_graph`, `compute_layout`, `assemble_module`, `model_flows_invariant`, `implicit_var_runlist_membership` | 1 each | 2 each |
+| `variable_dimensions`, `variable_size`, `variable_relevant_dimensions`, `source_var_is_table_only` | 1 each | 6 each |
+| `model_shape`, `model_ltm_implicit_var_info` | 0 | 1 each |
+| `project_module_graph`, `assemble_simulation` | 1 each | 1 each |
+
+Every count is one execution per distinct key. The control region -- an
+identical re-sync -- runs nothing at all in either case, so the numbers are the
+edit's.
+
+The `SMTH1` column is two different things added together, and the distinction
+is what 7.4 needs. Five of the eight `compile_var_fragment` runs and ten of the
+thirteen parses are the `stdlib⁚smth1` template compiling for the first time
+(its five variables, parsed under the two contexts assembly demands for it: the
+model's own and the per-instance one widened by the instance's module-input
+names), along with `model_shape` and the second `compute_layout` /
+`assemble_module`. That is a new sub-model, not saturation. The saturation
+proper is `k` and `probe`: two fragments and two parses that should have been
+reused (the added `smoothed` itself is new work).
+
+**One cause, and it is not the one the pinning test named.** Two experiments
+isolate it, both in
+`module_helper_add_saturates_only_through_the_module_ident_context`:
+
+- Adding a plain aux to a model that ALREADY instantiates a module -- stdlib
+  template compiled, instance wired -- is completely tight: one fragment, one
+  parse.
+- Adding a SECOND `SMTH1` to that same model re-parses and recompiles `k`,
+  `probe` and the first `smoothed`, while the `stdlib⁚smth1` template's own
+  variables do not recompile at all.
+
+So the module instance, the wired ports and the spliced template are all
+innocent; growing the model's module-ident set is the whole cause.
+`model_module_ident_context` derives that set from `model.variables(db)`, mints
+a new interned `ModuleIdentContext` when it grows, and that handle is both a
+KEY of `parse_source_variable_with_module_context` and `variable_direct_dependencies`
+and a VALUE read inside `explicit_fragment_input`, `build_var_info` and
+`model_implicit_var_info`. A changed key cannot backdate -- there is no prior
+memo to compare against.
+
+Both of the other causes on the record are gone or were never real. The
+whole-`model_module_map` clone the investigation named is gone: Phase 3 deleted
+that query, and it appears in neither column. `project.models(db)` changing is
+not a cause and never was: `db::sync` splices every stdlib model on every sync
+and calls `set_models` only on a changed map, so `stdlib⁚smth1` is in the map
+from the first sync of a project that never mentions it, and the probe asserts
+the map is identical across both edits.
+
+Classified against the remedies AC3.1 has: fixed by the parse-key rule --
+`parse_source_variable_with_module_context`, `variable_direct_dependencies`,
+`compile_var_fragment` and `model_implicit_var_info` for `k`/`probe`, all four
+through the single `ModuleIdentContext` edge. Fixed by a projection -- nothing;
+the projections AC3.1 needs (`var_runlist_membership`,
+`model_implicit_var_by_name`, `model_variable_by_name`) are already in place and
+already backdate, which is why `var_runlist_membership` runs eight times and
+recompiles nothing. Inherent -- the new sub-model's first compile, and the
+per-model queries of the edited model itself. **So 7.4 needs exactly one thing
+for AC3.1 to flip: delete `ModuleIdentContext`, from the parse key and from
+every caller that derives it (the eleven `model_module_ident_context` call
+sites and the empty-context twins, which is chunk 7.4's list). No new
+projection is warranted.**
+
+**Phase 7.1 predicate.** `snapshot_arg::SnapshotArg::access` is the one
+statement of what `PREVIOUS`/`INIT` can read directly: a reference into one
+variable's storage whose every index resolves before the run is a `Slot` when
+the indices pin one element and a `View` when a dimension is left standing;
+everything else is a `Capture`. `BuiltinVisitor::snapshot_arg` classifies the
+source `Expr0` argument into it (replacing `needs_temp_arg` and
+`arg_is_array_shaped`, which is the `View` arm) and `codegen::lowered_snapshot_arg`
+classifies the lowered `Expr` (feeding `static_slot` and
+`Compiler::snapshot_static_view`), so the parse's capture decision and
+codegen's direct-read decision cannot drift -- the GH #568 class. Codegen keeps
+its three refusals of an argument that IS addressable (a view naming one
+dimension twice, an array-valued `PREVIOUS` with a non-default fallback, an
+array-valued call in a scalar position outside an iteration): those are
+questions about what the reference means where it sits, not about whether it
+addresses storage.
+
+`db::prev_init_tests::every_prev_init_argument_shape_agrees_between_the_parse_and_codegen`
+derives its rows from both replaced rule sets and reads every verdict through
+production. It records four shapes where the two sides classify the same
+argument differently. Three are the parse being STRICTER -- a capture where
+codegen would have read the slot directly, so wasted slots and fragments rather
+than wrong numbers -- and each is a 7.5 item: `PREVIOUS(module-call aux)` (D1);
+a bare element index, `PREVIOUS(vals[e1])` (D3); and a QUALIFIED element index
+`PREVIOUS(vals[Dim.elem])` in a **scalar** user equation. The last is worth its own line: the qualified form is documented as
+folding to a constant regardless of context, but the branch of `index_is_static`
+that recognizes it needs the qualified dimension in `dimensions_ctx`, and the
+parse narrows that context to the variable's own relevant dimensions and their
+map chains (a dimension edit must not re-parse every unrelated variable) --
+empty for a scalar -- so the same argument captures in a scalar equation, or in
+an apply-to-all over an unrelated dimension, and does not in an apply-to-all
+over `Dim`. The fourth runs the other way: `PREVIOUS(arr)` for
+an arrayed `arr` in a scalar position, where the parse calls a bare name whole
+storage because `Expr0` carries no arity and codegen refuses the array-valued
+read. That one costs nothing -- the equation is ill-typed with or without the
+`PREVIOUS` (`x = arr` refuses too, with a different message) and the refusal is
+loud -- and it closes the same way the other three do, by giving the decision
+the dimensions, which is what moving it to lowering does.
 
 **Phase 1 semantic divergences.** Making the signature table the one statement
 of per-builtin facts changed how four edge shapes compile. None occurs in the
@@ -1217,3 +1343,4 @@ hash is not available to it.
 | 4 | `engine: one Variable shape and a borrowed parse input` | 8.799 G (median of 5; range 8.794-8.804), -1.67% against the Phase 3 tree re-measured in the same session (8.949 G, median of 5, range 8.938-8.951; interleaved pairs -1.68 / -1.69 / -1.69 / -1.50 / -1.64%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: every count above, the 371 names and 7 modules, the full opcode histogram and the post-fusion stream counts -- both `bytecode_profile` blocks are byte-identical; same channel and flags as the baseline row. The saving is deleted per-parse work: `datamodel_variable_from_source` rebuilt and deep-cloned a kind-tagged `datamodel::Variable` (equation, gf, units, flow lists, module references, compat) on every parse of every variable, and `parse_var` then cloned the equation again out of it; the parse now reads a borrowed `VariableSource<'_>` over the salsa inputs. `Variable` is one struct over a `VarKind` enum, so `model::lower_variable` maps over `kind` instead of hand-copying 9-11 fields per variant, and the five repeated fields are stated once. Twins retired: one `paren_if_necessary` over a shallow `NodeShape` classification shared by `print_eqn` and both LaTeX printers, one `render_latex` walker over a `LatexTier` trait replacing `latex_eqn`/`latex_eqn_expr0`/`latex_eqn_expr0_annotated`, one `is_lookup_only(eqn, gf)` replacing `variable::var_is_lookup_only` + `db::source_var_is_table_only`'s body, one `SourceVariableFields::from_datamodel` behind `db/sync.rs`'s fresh and incremental paths, and `NamedDimension::index_of` for callers already holding an `Ident<Canonical>`. One re-assembly of a kind-tagged `datamodel::Variable` survives, outside every parse path: `db::macro_registry::macro_body_variable`, whose consumer `MacroRegistry::build` walks whole `datamodel::Model`s. One corrected shape, not in the corpus: a per-element table holder over a zero-element dimension is lookup-only on the parse side too, so layout and `Var::new` agree (Additional Considerations, "Phase 4 semantic divergences"). Otherwise no semantic divergence: the engine suite (lib 5655, integration 767), the 12-repeat determinism suites and every fragment/LTM golden are green with no regeneration |
 | 6a | `engine: one axis matcher and a decomposed subscript arm` | 8.819 G (median of 5; range 8.816-8.829), -1.5% against the seeded tree (Phase 3 staged on `1373f6f3`) re-measured in the same session (8.942 G, median of 5, range 8.939-8.952; interleaved pairs -1.54 / -1.38 / -1.66%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: every count above, the 371 names and 7 modules, the full opcode histogram and the post-fusion stream counts -- both `bytecode_profile` blocks byte-identical; same channel and flags as the baseline row. The saving is deleted per-reference work, none of it output-bearing: `compiler::subscript` and `lower_from_expr3`'s dimension-as-value arm re-`canonicalize`d (and so re-interned) already-canonical dimension names once per subscript and once per candidate active dimension, and the Subscript arm ran two independent searches over the active dimensions -- one to decide whether an axis matched by name and a second to find which -- where the allocation now answers both once. `dimensions::match_axes` replaces seven matchers (`allocate_implicit_axes_partial` and `allocate_implicit_axes`, `match_dimensions_with_mapping`, `find_dimension_reordering`, `Expr2::can_all_match` and `find_matching_dimension` under `unify_dims_with_names`, `view_contains`/`named_dims`) and five inline searches in `compiler/context.rs` and `compiler/subscript.rs` -- the twelve rows of `axis_match_tests`. `allocate_implicit_axes_partial` and `allocate_implicit_axes` survive as the two projections of it that the LTM augmenter (`ltm_augment_post_transform.rs`) and `get_implicit_subscripts` call, so the matching is what was replaced, not the entry points; the Subscript arm is five named steps; `lower`/`lower_preserving_dimensions` are one function under `DimensionRefs`. Differential sweep of a pre-change and a post-change CLI over all 509 models under `test/`: 397 byte-identical, 110 refused identically, and the only movers were `subscript_transposition` (its transposed `output2` moves from all-NaN to exactly Vensim's `109, 1090, 109, 141, -13`) plus two models that flip between the same two outputs on BOTH binaries (GH #859, an importer nondeterminism this change does not touch). Ten divergences, pinned -- eight shapes whose compile changed and two rungs deliberately withheld (Additional Considerations, "Phase 6a semantic divergences") |
 | 5b | `engine: diagnostics keep their message from parse to collection` | 8.829 G (median of 5; range 8.827-8.841), +0.36% against the Phase 4 tree re-measured in the same session (8.798 G, median of 5, range 8.791-8.802; interleaved pairs +0.44 / +0.32 / +0.28 / +0.49 / +0.38%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: both `bytecode_profile` blocks are byte-identical, including the full opcode histogram, the post-fusion stream counts, the 371 names and 7 modules; same channel and flags as the baseline row. This phase changes diagnostics, not codegen, so the delta is cost rather than saving: `EquationError` grew an `Option<String>` from 8 to 32 bytes, and it is the error type of every `EquationResult` in the AST-lowering path and the element type of `Variable::errors`, which is cloned per parse. Under the one-percent bar the plan sets for recording rather than investigating; a perf pass follows this branch. Diagnostics on the `test/` corpus: the same 501 rows with the same per-code distribution, of which 409 now carry a payload where 209 did (`unknown_builtin` 0 -> 96, `unknown_dependency` 0 -> 48, `mismatched_dimensions` 0 -> 14, `generic` 0 -> 10, `bad_builtin_args` 0 -> 6, `array_reference_needs_explicit_subscripts` 0 -> 5, `empty_equation` 0 -> 18 of 58, `bad_binary_op_in_units` 0 -> 3). 372 of the 409 are a SENTENCE; the other 37 are a bare identifier, which is what their raising site had -- `empty_equation` (18), `mismatched_dimensions` (14) and `array_reference_needs_explicit_subscripts` (5), all raised in `compiler/mod.rs` and `compiler/context.rs`, which Phase 6(b) rewrites and which the sentences should follow. The 92 that remain payload-less are the parse stage (45), whose reason is the source snippet every Rust surface now renders from the span, plus three sites in files Phase 6a/6b own (43) and one (`db/dep_graph.rs`'s `cycle_diagnostic`, 4) that has no reason in hand. One deliberately re-baselined pin and three named divergences (Additional Considerations, "Phase 5b semantic divergences"), which also record the two places a reason still stops: the web app's equation arm (GH #1030) and the bare-identifier payloads above. The CLI renders through `collect_formatted_errors`, so the parse row's "the snippet IS the reason" rule now holds on every Rust surface -- libsimlin, both MCP servers and the CLI. The engine suite (lib 5661, integration 767), the CLI suite (9), the 12-repeat determinism suites, every fragment/LTM golden with no regeneration, and one capped `cargo test --workspace` are green; `cbindgen` reproduces `simlin.h` unchanged |
+| 7.1 | `engine: one predicate for a direct PREVIOUS read` | 8.689 G (median of 5; range 8.685-8.698), -0.01% against the seeded tree (`6cf3660b`) re-measured in the same session (8.690 G, median of 5, range 8.679-8.692; interleaved pairs +0.10 / -0.03 / +0.07 / -0.05 / +0.02%), inside the channel's noise floor and not investigated | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: the whole `bytecode_profile` block is byte-identical in both modes -- every count above, the 371 names and 7 modules, the full opcode histogram, the post-fusion stream counts and the fused-binop table; same channel and flags as the baseline row. A refactor plus a probe, so no saving is expected or found. `snapshot_arg::SnapshotArg::access` is now the one statement of what `PREVIOUS`/`INIT` addresses directly, called by `BuiltinVisitor::snapshot_arg` over the source argument (replacing `needs_temp_arg` and `arg_is_array_shaped`) and by `codegen::lowered_snapshot_arg` over the lowered one (feeding `static_slot` and `Compiler::snapshot_static_view`); `db::exec_probe::ProbedDb` counts every tracked query's executions from salsa's own events. Differential sweep of a base-tree and a working-tree CLI over all 509 models under `test/`, each run twice per binary: 396 byte-identical, 110 refused identically, and the only three models whose output is not identical are `subscript_transposition`, `arrays_cname` and `arrays_varname`, each of which flips between exactly the same TWO outputs on BOTH binaries (GH #859, an importer nondeterminism; resampled 12x per binary per model, which is what separates a flip from a move -- two samples per binary does not). No model moved. Four parse-vs-codegen divergences recorded, none of them introduced here and none changing an artifact (Additional Considerations, "Phase 7.1 predicate"); the probe's findings, including that `ModuleIdentContext` is the sole remaining cause of AC3.1's loose case, are under "Phase 7.1 probe" |

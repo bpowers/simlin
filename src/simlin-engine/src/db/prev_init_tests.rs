@@ -566,3 +566,387 @@ fn test_ltm_bare_element_subscripts_no_helpers() {
         "only the flow-to-stock nested-PREVIOUS helpers may remain; unexpected: {non_flow_to_stock:?}"
     );
 }
+
+use crate::snapshot_arg::SnapshotAccess;
+
+/// One `PREVIOUS`/`INIT` argument shape, and what each of the two decisions
+/// `snapshot_arg::SnapshotArg::access` states for it.
+struct AgreementRow {
+    /// Which arm of the parse's old rule and of codegen's old rule this row
+    /// covers, so the table can be read back against both enumerations.
+    covers: &'static str,
+    /// True when the equation is apply-to-all over `d` (`out[d] = ..`), false
+    /// when it is a scalar aux (`lagged = ..`).
+    a2a: bool,
+    equation: &'static str,
+    /// Does the parse synthesize a capture helper for the argument?
+    captures: bool,
+    /// What codegen makes of the argument AS WRITTEN: the lowered form of that
+    /// argument, which for a capture row is the helper's own lowered body --
+    /// the helper equation IS the argument. `None` when the model does not
+    /// compile at all, so codegen never classifies anything.
+    codegen: Option<SnapshotAccess>,
+    /// Why the two differ, when they do. Every one is the parse being STRICTER
+    /// than codegen (a capture where a direct read would have worked) except
+    /// where the note says otherwise; none is a direct read codegen refuses to
+    /// address, which is the direction that would produce wrong numbers.
+    divergence: Option<&'static str>,
+}
+
+/// The parse's capture decision and codegen's direct-read decision are one
+/// rule ([`crate::snapshot_arg::SnapshotArg::access`]), and this table is what
+/// says so shape by shape.
+///
+/// Rows are derived from BOTH of the rule sets that statement replaced:
+///
+/// * the parse's, `BuiltinVisitor`'s `needs_temp_arg`/`arg_is_array_shaped` --
+///   a `Var` whose base is or is not module-backed, a `Subscript` whose every
+///   index is static / leaves a dimension standing / is dynamic, and the
+///   catch-all for anything that is not a reference;
+/// * codegen's, `static_slot` plus `Compiler::snapshot_static_view` -- an
+///   `Expr::Var`, a `StaticSubscript` that collapsed to one element, a
+///   `StaticSubscript` with dimensions standing, and the refusals.
+///
+/// Every fixture goes through production: the capture decision is read from
+/// `model_implicit_var_info` (the parse the compiler actually memoizes) and
+/// the classification from `db::var_fragment::explicit_fragment_input` /
+/// `db::fragment_compile::implicit_fragment_input` plus
+/// `compiler::fragment::lower_fragment` (the lowering codegen actually
+/// receives). Nothing here hand-builds an argument.
+///
+/// **Arms this table does not cover, and where they are covered instead.**
+///
+/// * A `Subscript` whose BASE is module-backed. It shares the identical
+///   `is_module_backed_ident` test with the `Var` row below, and a module
+///   output port that can be subscripted needs an explicit sub-model, which
+///   `TestProject` does not build. The module-backed base is pinned by
+///   `model::test_previous_module_input_var_uses_helper_rewrite` and
+///   `db::ltm_tests::test_ltm_previous_module_var_uses_helper_rewrite`.
+/// * An index that is BOTH `SpansDimension` and `Static` -- a name that is an
+///   active apply-to-all dimension and also an element of some other
+///   dimension. No corpus model reaches it: the branch of `index_is_static`
+///   that accepts a bare name at all needs the model's variable-name set,
+///   which only the LTM parse supplies, so only an LTM synthetic whose
+///   iterated dimension's name is also another dimension's element could
+///   (`ltm_augment::wrap_non_matching_in_previous` wraps such a reference
+///   without normalizing it); spans-first is what the replaced code did. The
+///   precedence is stated once in `SnapshotArg::subscripted` and pinned by its
+///   own test there, over the classified-index alphabet that is that
+///   function's actual domain.
+/// * Codegen's `Expr::TempArray` and residual refusals. They are unreachable
+///   because the parse captures every non-storage argument first -- which is
+///   what the capture rows below establish, by showing the helper's own
+///   lowered body is the shape codegen would otherwise have seen.
+#[test]
+fn every_prev_init_argument_shape_agrees_between_the_parse_and_codegen() {
+    use crate::compiler::fragment::lower_fragment;
+    use crate::compiler::{BuiltinFn, Expr, lowered_snapshot_arg};
+    use crate::db::fragment_compile::implicit_fragment_input;
+    use crate::test_common::TestProject;
+
+    let rows = [
+        AgreementRow {
+            covers: "visitor: Var, base not module-backed. codegen: Expr::Var",
+            a2a: false,
+            equation: "PREVIOUS(k, 0)",
+            captures: false,
+            codegen: Some(SnapshotAccess::Slot),
+            divergence: None,
+        },
+        AgreementRow {
+            covers: "visitor: Var, base module-backed. codegen: Expr::Var",
+            a2a: false,
+            equation: "PREVIOUS(smoothed, 0)",
+            captures: true,
+            codegen: Some(SnapshotAccess::Slot),
+            divergence: Some(
+                "the parse treats a stdlib-call aux as module-backed, but the call is \
+                 rewritten to a reference to a separate module instance and the aux \
+                 keeps one slot, so codegen addresses it like any other variable. The \
+                 capture is redundant; dropping it removes a slot and a fragment, which \
+                 is an artifact change with its own ledger row",
+            ),
+        },
+        AgreementRow {
+            covers: "visitor: Subscript, numeric index. codegen: collapsed StaticSubscript",
+            a2a: false,
+            equation: "PREVIOUS(vals[2], 0)",
+            captures: false,
+            codegen: Some(SnapshotAccess::Slot),
+            divergence: None,
+        },
+        AgreementRow {
+            covers: "visitor: Subscript, qualified dimension.element, SCALAR parse. \
+                     codegen: collapsed StaticSubscript",
+            a2a: false,
+            equation: "PREVIOUS(vals[d.e2], 0)",
+            captures: true,
+            codegen: Some(SnapshotAccess::Slot),
+            divergence: Some(
+                "a qualified `dimension.element` index folds to a constant regardless of \
+                 context, but the branch of `index_is_static` that recognizes one needs \
+                 the qualified dimension in `dimensions_ctx`, and the parse narrows that \
+                 context to the variable's own relevant dimensions and their map chains \
+                 -- empty for a SCALAR variable (a dimension edit must not re-parse every \
+                 unrelated variable). So the same argument captures here and does not in \
+                 the apply-to-all row below, whose own dimension is the qualified one",
+            ),
+        },
+        AgreementRow {
+            covers: "visitor: Subscript, qualified dimension.element, A2A parse. \
+                     codegen: collapsed StaticSubscript",
+            a2a: true,
+            equation: "PREVIOUS(vals[d.e2], 0)",
+            captures: false,
+            codegen: Some(SnapshotAccess::Slot),
+            divergence: None,
+        },
+        AgreementRow {
+            covers: "visitor: Subscript, bare element name. codegen: collapsed StaticSubscript",
+            a2a: false,
+            equation: "PREVIOUS(vals[e1], 0)",
+            captures: true,
+            codegen: Some(SnapshotAccess::Slot),
+            divergence: Some(
+                "XMILE lets an element name shadow a variable name, so without the \
+                 model's variable-name set the parse cannot tell `vals[e1]` from a \
+                 dynamic index through a variable named `e1` and captures \
+                 conservatively. Lowering knows `vals`' declared dimensions and \
+                 resolves the element, so codegen sees a fixed slot. Generalizing the \
+                 LTM path's rule to user equations removes the capture and changes the \
+                 artifact",
+            ),
+        },
+        AgreementRow {
+            covers: "visitor: Subscript, dynamic index. codegen: Expr::Subscript",
+            a2a: false,
+            equation: "PREVIOUS(vals[idx], 0)",
+            captures: true,
+            codegen: Some(SnapshotAccess::Capture),
+            divergence: None,
+        },
+        AgreementRow {
+            covers: "visitor: Subscript, index leaves a dimension standing. \
+                     codegen: StaticSubscript with dims",
+            a2a: true,
+            equation: "VECTOR SORT ORDER(PREVIOUS(vals[d]), 1)",
+            captures: false,
+            codegen: Some(SnapshotAccess::View),
+            divergence: None,
+        },
+        AgreementRow {
+            covers: "visitor: Subscript over the iterated dimension in a SCALAR position, \
+                     substituted per element. codegen: collapsed StaticSubscript",
+            a2a: true,
+            equation: "PREVIOUS(vals[d], 0)",
+            captures: false,
+            codegen: Some(SnapshotAccess::Slot),
+            divergence: None,
+        },
+        AgreementRow {
+            covers: "visitor: the catch-all, an argument that is no reference at all. \
+                     codegen: Expr::Op2",
+            a2a: false,
+            equation: "PREVIOUS(k * 2, 0)",
+            captures: true,
+            codegen: Some(SnapshotAccess::Capture),
+            divergence: None,
+        },
+        AgreementRow {
+            covers: "INIT twin of the bare-variable row",
+            a2a: false,
+            equation: "INIT(k)",
+            captures: false,
+            codegen: Some(SnapshotAccess::Slot),
+            divergence: None,
+        },
+        AgreementRow {
+            covers: "INIT twin of the catch-all row",
+            a2a: false,
+            equation: "INIT(k * 2)",
+            captures: true,
+            codegen: Some(SnapshotAccess::Capture),
+            divergence: None,
+        },
+        AgreementRow {
+            covers: "INIT twin of the per-element A2A row",
+            a2a: true,
+            equation: "INIT(vals[d])",
+            captures: false,
+            codegen: Some(SnapshotAccess::Slot),
+            divergence: None,
+        },
+        AgreementRow {
+            covers: "visitor: Var, base not module-backed but ARRAYED. codegen: refuses",
+            a2a: false,
+            equation: "PREVIOUS(vals, 0)",
+            captures: false,
+            codegen: None,
+            divergence: Some(
+                "the only row where the parse is the LOOSER of the two, and it is a \
+                 difference of information rather than of rule: over `Expr0` a bare \
+                 name has no arity, so the parse calls it whole storage, while lowering \
+                 knows `vals` is three slots and codegen refuses an array-valued \
+                 PREVIOUS in a scalar position. The equation is ill-typed with or \
+                 without the PREVIOUS -- `lagged = vals` refuses too, with `an array of \
+                 shape [3] is used where a single value is required` -- so the refusal \
+                 is loud, no artifact exists to differ, and closing it means giving the \
+                 decision the dimensions, which is what moving it to lowering does",
+            ),
+        },
+    ];
+
+    // Every argument of every `PREVIOUS`/`INIT` reachable from one lowered
+    // expression, in walk order.
+    fn snapshot_args<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+        match expr {
+            Expr::App(builtin, _) => {
+                if let BuiltinFn::Previous(arg, _) | BuiltinFn::Init(arg) = builtin {
+                    out.push(arg.as_ref());
+                }
+                for arg in builtin.args() {
+                    snapshot_args(arg, out);
+                }
+            }
+            Expr::Op1(_, r, _) => snapshot_args(r, out),
+            Expr::Op2(_, l, r, _) => {
+                snapshot_args(l, out);
+                snapshot_args(r, out);
+            }
+            Expr::If(c, t, f, _) => {
+                snapshot_args(c, out);
+                snapshot_args(t, out);
+                snapshot_args(f, out);
+            }
+            Expr::AssignCurr(_, inner)
+            | Expr::AssignNext(_, inner)
+            | Expr::AssignTemp(_, inner, _) => snapshot_args(inner, out),
+            _ => {}
+        }
+    }
+
+    for row in &rows {
+        let target = if row.a2a { "out" } else { "lagged" };
+        let tp = {
+            let base = TestProject::new("prev_init_agreement")
+                .with_sim_time(0.0, 2.0, 1.0)
+                .named_dimension("d", &["e1", "e2", "e3"])
+                .array_with_ranges("vals[d]", vec![("e1", "30"), ("e2", "10"), ("e3", "20")])
+                .scalar_aux("k", "3")
+                .aux("idx", "1 + MIN(TIME, 1)", None)
+                .aux("smoothed", "SMTH1(k, 2)", None);
+            if row.a2a {
+                base.array_aux("out[d]", row.equation)
+            } else {
+                base.aux(target, row.equation, None)
+            }
+        };
+        let what = row.covers;
+        let eqn = row.equation;
+
+        // The parse the compiler memoizes, not a re-derivation.
+        let dm = tp.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &dm);
+        let model = sync.models["main"].source;
+        let target_var = model.variables(&db)[target];
+        let helpers: Vec<&ImplicitVarMeta> = model_implicit_var_info(&db, model, sync.project)
+            .values()
+            .filter(|meta| meta.parent_source_var == target_var)
+            .collect();
+        assert_eq!(
+            !helpers.is_empty(),
+            row.captures,
+            "{what}: `{eqn}` -- capture-helper expectation"
+        );
+
+        // Codegen's classification of the SAME argument. For a capture row the
+        // argument is the helper's equation, so lowering the helper is what
+        // shows the shape codegen would have been handed without the capture.
+        let observed: Vec<SnapshotAccess> = if row.captures {
+            helpers
+                .iter()
+                .flat_map(|meta| {
+                    let input = implicit_fragment_input(&db, meta, model, sync.project, &[])
+                        .unwrap_or_else(|_| panic!("{what}: helper must build a fragment input"));
+                    lower_fragment(&input, false)
+                        .unwrap_or_else(|_| panic!("{what}: helper must lower"))
+                        .ast
+                        .iter()
+                        .map(|expr| match expr {
+                            Expr::AssignCurr(_, inner) => lowered_snapshot_arg(inner).access(),
+                            other => lowered_snapshot_arg(other).access(),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        } else if row.codegen.is_none() {
+            // The model refuses, so nothing is lowered to classify; the
+            // refusal itself is the assertion.
+            assert!(
+                tp.compile_incremental().is_err(),
+                "{what}: `{eqn}` -- the row says the model does not compile"
+            );
+            Vec::new()
+        } else {
+            let mut found = Vec::new();
+            let exprs = crate::db::var_noninitial_lowered_exprs(&db, model, sync.project, target);
+            for expr in &exprs {
+                snapshot_args(expr, &mut found);
+            }
+            assert!(
+                !found.is_empty(),
+                "{what}: `{eqn}` -- no PREVIOUS/INIT survived lowering to classify"
+            );
+            found
+                .iter()
+                .map(|arg| lowered_snapshot_arg(arg).access())
+                .collect()
+        };
+        if let Some(expected) = row.codegen {
+            assert!(
+                !observed.is_empty() && observed.iter().all(|a| *a == expected),
+                "{what}: `{eqn}` -- codegen classification, expected all {expected:?}, \
+                 got {observed:?}"
+            );
+        }
+
+        // The agreement itself, in both directions: a synthesized capture's
+        // argument is one codegen would not have addressed, and a direct read
+        // is one it does address. The exceptions are enumerated, not hidden.
+        match (row.codegen, row.divergence) {
+            // Codegen classified the argument, so the two verdicts compare.
+            (Some(codegen), None) => assert_eq!(
+                row.captures,
+                codegen == SnapshotAccess::Capture,
+                "{what}: `{eqn}` -- the parse and codegen must agree on a row with no \
+                 recorded divergence"
+            ),
+            (Some(codegen), Some(why)) => assert_ne!(
+                row.captures,
+                codegen == SnapshotAccess::Capture,
+                "{what}: `{eqn}` -- this row records a divergence that no longer \
+                 exists, so the record is stale: {why}"
+            ),
+            // The model does not compile, so there is no classification to
+            // compare: the divergence IS the refusal, which the compilability
+            // assertion below pins. Such a row must not also capture -- a
+            // capture would have handed codegen a slot and it would compile.
+            (None, Some(_)) => assert!(
+                !row.captures,
+                "{what}: `{eqn}` -- a refusing row cannot also synthesize a capture"
+            ),
+            (None, None) => {
+                panic!("{what}: `{eqn}` -- a row whose model does not compile must record why")
+            }
+        }
+
+        // Whatever the parse produced, codegen accepted it: no row leaves a
+        // PREVIOUS/INIT that the emitter refuses, except the one that says so.
+        assert_eq!(
+            tp.compile_incremental().is_ok(),
+            row.codegen.is_some(),
+            "{what}: `{eqn}` -- compilability"
+        );
+    }
+}

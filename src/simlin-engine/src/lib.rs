@@ -89,6 +89,7 @@ mod rk_integration_tests;
 #[cfg(test)]
 mod round_builtin_tests;
 pub mod serde;
+mod snapshot_arg;
 #[path = "stdlib.gen.rs"]
 mod stdlib;
 pub mod systems;

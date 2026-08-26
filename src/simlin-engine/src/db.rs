@@ -46,6 +46,10 @@ mod dep_graph;
 pub(crate) use dep_graph::var_noninitial_lowered_exprs;
 #[cfg(test)]
 mod element_graph_proptest;
+// Salsa execution counting for incrementality tests: which tracked queries ran
+// a body over a measured region, from salsa's own `WillExecute` events.
+#[cfg(test)]
+mod exec_probe;
 mod invariance;
 pub(crate) use invariance::model_flows_invariant;
 // `pub(crate)` (not private-to-`db`) so the Track-A classifier-agreement gate,
@@ -299,6 +303,19 @@ pub(crate) struct StdlibModels {
 
 #[salsa::db]
 impl salsa::Database for SimlinDb {}
+
+#[cfg(test)]
+impl SimlinDb {
+    /// A db over caller-supplied salsa storage, so a test can attach an event
+    /// callback (`db::exec_probe`). Every other field takes its `Default`,
+    /// which is what `SimlinDb::default()` gives them too.
+    pub(crate) fn with_storage(storage: salsa::Storage<Self>) -> Self {
+        SimlinDb {
+            storage,
+            ..Default::default()
+        }
+    }
+}
 
 impl SimlinDb {
     /// Sync a datamodel into the db, automatically reusing internal state for
