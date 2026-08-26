@@ -27,6 +27,8 @@ mod array_operand_materialization_tests;
 #[cfg(test)]
 mod array_tests;
 mod ast;
+#[cfg(test)]
+mod builtin_signature_tests;
 pub mod builtins;
 mod builtins_visitor;
 mod bytecode;

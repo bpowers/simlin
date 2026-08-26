@@ -823,8 +823,8 @@ impl<'module> Compiler<'module> {
                             // process-killing panic (#363, GH #541/#525). The
                             // Option unwrap stays a hard unwrap: an index that
                             // lowered to no value-producing opcode (`Ok(None)` --
-                            // only an `EvalModule` or a non-iteration `TempArray`)
-                            // is a genuine compiler invariant violation, never
+                            // only a statement node, see `walk_expr`) is a
+                            // genuine compiler invariant violation, never
                             // reachable from a real subscript index.
                             self.walk_expr(expr)?.unwrap();
                             self.push(SymbolicOpcode::ViewSubscriptDynamic {
@@ -877,6 +877,16 @@ impl<'module> Compiler<'module> {
         Ok(curr.finish())
     }
 
+    /// Emit the bytecode for one expression.
+    ///
+    /// `Ok(Some(()))` means the expression left one value on the stack, which
+    /// is what every operand position consumes (and unwraps). `Ok(None)` is
+    /// the statement nodes -- `EvalModule`, `AssignCurr`, `AssignNext`,
+    /// `AssignTemp` -- which leave nothing and appear only at the top level
+    /// of a variable's lowered expression list, never as an operand. An array
+    /// value in a single-value position is an `Err`, not an `Ok(None)`: the
+    /// `TempArray` arm refuses it outside an iteration body, so the operand
+    /// sites inherit the refusal through `?` and none of them decides it.
     fn walk_expr(&mut self, expr: &Expr) -> Result<Option<()>> {
         let result = match expr {
             Expr::Const(value, _) => {
@@ -963,12 +973,25 @@ impl<'module> Compiler<'module> {
                     self.push(SymbolicOpcode::LoadIterViewAt { offset });
                     Some(())
                 } else {
-                    // Outside iteration - push temp view for subsequent operations (like SUM)
-                    let static_view = self.array_view_to_static_temp(*id, view);
-                    let view_id = self.add_static_view(static_view);
-                    self.push(SymbolicOpcode::PushStaticView { view_id });
-                    // Note: caller (like array builtin) will use and pop this view
-                    None
+                    // A temp array outside an iteration body is an array value
+                    // in a position that consumes one value: the whole
+                    // right-hand side of a scalar (`s = LOOKUP(g, t)` with a
+                    // per-element `g`), an operand (`ABS(LOOKUP(g, t))`,
+                    // `LOOKUP(g, t) + 1`), or an element's right-hand side in
+                    // an apply-to-all equation that leaves an axis of the
+                    // table free. Every legitimate array consumer reads its
+                    // operand through `walk_expr_as_view`, so nothing that
+                    // reaches this arm could use a pushed view, and this is
+                    // the one place the shape is refused: the operand sites
+                    // propagate the `Err` rather than each guarding against a
+                    // missing stack value.
+                    return sim_err!(
+                        NotSimulatable,
+                        format!(
+                            "an array of shape {:?} is used where a single value is required",
+                            view.dims
+                        )
+                    );
                 }
             }
             Expr::TempArrayElement(id, _view, idx, _) => {
@@ -1284,7 +1307,16 @@ impl<'module> Compiler<'module> {
                     _ => {}
                 }
 
-                match builtin {
+                // What each builtin compiles TO is per-variant semantics and
+                // stays enumerated here: the fixed-slot globals and constants,
+                // the array reducers (one opcode each), VECTOR SELECT, the
+                // array-producing builtins (an `AssignTemp`-only shape), and
+                // the `Apply` family with the VM function implementing each.
+                // How many operands an `Apply` takes is not: its arguments are
+                // pushed in call order below, and the three builtins whose
+                // trailing operand the source may omit get the default the VM
+                // reads in that position.
+                let func = match builtin {
                     BuiltinFn::Time
                     | BuiltinFn::TimeStep
                     | BuiltinFn::StartTime
@@ -1299,10 +1331,13 @@ impl<'module> Compiler<'module> {
                         self.push(SymbolicOpcode::LoadGlobalVar { off });
                         return Ok(Some(()));
                     }
+                    // Emitted by the early returns above.
                     BuiltinFn::Lookup(_, _, _)
                     | BuiltinFn::LookupForward(_, _, _)
                     | BuiltinFn::LookupBackward(_, _, _)
-                    | BuiltinFn::IsModuleInput(_, _) => unreachable!(),
+                    | BuiltinFn::IsModuleInput(_, _)
+                    | BuiltinFn::Previous(_, _)
+                    | BuiltinFn::Init(_) => unreachable!(),
                     BuiltinFn::Inf | BuiltinFn::Pi => {
                         let lit = match builtin {
                             BuiltinFn::Inf => f64::INFINITY,
@@ -1313,103 +1348,20 @@ impl<'module> Compiler<'module> {
                         self.push(SymbolicOpcode::LoadConstant { id });
                         return Ok(Some(()));
                     }
-                    BuiltinFn::Abs(a)
-                    | BuiltinFn::Arccos(a)
-                    | BuiltinFn::Arcsin(a)
-                    | BuiltinFn::Arctan(a)
-                    | BuiltinFn::Cos(a)
-                    | BuiltinFn::Exp(a)
-                    | BuiltinFn::Int(a)
-                    | BuiltinFn::Ln(a)
-                    | BuiltinFn::Log10(a)
-                    | BuiltinFn::Round(a)
-                    | BuiltinFn::Sign(a)
-                    | BuiltinFn::Sin(a)
-                    | BuiltinFn::Sqrt(a)
-                    | BuiltinFn::Tan(a) => {
-                        // No operand padding: `Apply` pops exactly
-                        // `BuiltinId::arity()`, which for this family is 1.
-                        self.walk_expr(a)?.unwrap();
+                    BuiltinFn::Max(a, None) => {
+                        return self.emit_array_reduce(a, SymbolicOpcode::ArrayMax {});
                     }
-                    BuiltinFn::Step(a, b) => {
-                        self.walk_expr(a)?.unwrap();
-                        self.walk_expr(b)?.unwrap();
+                    BuiltinFn::Min(a, None) => {
+                        return self.emit_array_reduce(a, SymbolicOpcode::ArrayMin {});
                     }
-                    BuiltinFn::Max(a, b) => {
-                        if let Some(b) = b {
-                            self.walk_expr(a)?.unwrap();
-                            self.walk_expr(b)?.unwrap();
-                        } else {
-                            return self.emit_array_reduce(a, SymbolicOpcode::ArrayMax {});
-                        }
+                    BuiltinFn::Size(arg) => {
+                        return self.emit_array_reduce(arg, SymbolicOpcode::ArraySize {});
                     }
-                    BuiltinFn::Min(a, b) => {
-                        if let Some(b) = b {
-                            self.walk_expr(a)?.unwrap();
-                            self.walk_expr(b)?.unwrap();
-                        } else {
-                            return self.emit_array_reduce(a, SymbolicOpcode::ArrayMin {});
-                        }
+                    BuiltinFn::Stddev(arg) => {
+                        return self.emit_array_reduce(arg, SymbolicOpcode::ArrayStddev {});
                     }
-                    BuiltinFn::Quantum(a, b) => {
-                        self.walk_expr(a)?.unwrap();
-                        self.walk_expr(b)?.unwrap();
-                    }
-                    BuiltinFn::Pulse(a, b, c) => {
-                        self.walk_expr(a)?.unwrap();
-                        self.walk_expr(b)?.unwrap();
-                        if c.is_some() {
-                            self.walk_expr(c.as_ref().unwrap())?.unwrap()
-                        } else {
-                            let id = self.curr_code.intern_literal(0.0);
-                            self.push(SymbolicOpcode::LoadConstant { id });
-                        };
-                    }
-                    BuiltinFn::Ramp(a, b, c) => {
-                        self.walk_expr(a)?.unwrap();
-                        self.walk_expr(b)?.unwrap();
-                        if c.is_some() {
-                            self.walk_expr(c.as_ref().unwrap())?.unwrap()
-                        } else {
-                            // A 2-arg RAMP defaults its end time to `final_time`,
-                            // which lives at the fixed absolute slot
-                            // FINAL_TIME_OFF (an implicit global, not a body
-                            // variable). It must be read with LoadGlobalVar -- an
-                            // absolute-slot load with no `module_off` relocation --
-                            // exactly like BuiltinFn::FinalTime. A module-relative
-                            // LoadVar happens to alias `final_time` only at the
-                            // root model (where slot 3 IS final_time); inside a
-                            // submodule it reads an unrelated body slot (or drops
-                            // the fragment when that slot has no symbolic mapping).
-                            self.push(SymbolicOpcode::LoadGlobalVar {
-                                off: FINAL_TIME_OFF as u16,
-                            });
-                        };
-                    }
-                    BuiltinFn::SafeDiv(a, b, c) => {
-                        self.walk_expr(a)?.unwrap();
-                        self.walk_expr(b)?.unwrap();
-                        // The optional third arg is an arbitrary user expression
-                        // (e.g. a `PREVIOUS(...)` the LTM partial path emits), so
-                        // its lowering can fail recoverably; propagate via `?`
-                        // rather than unwrapping (matching `a`/`b` above). A `.map`
-                        // closure can't carry `?`, so walk it before the match.
-                        let c = match c {
-                            Some(c) => {
-                                self.walk_expr(c)?.unwrap();
-                                Some(())
-                            }
-                            None => None,
-                        };
-                        if c.is_none() {
-                            let id = self.curr_code.intern_literal(0.0);
-                            self.push(SymbolicOpcode::LoadConstant { id });
-                        }
-                    }
-                    BuiltinFn::Sshape(a, b, c) => {
-                        self.walk_expr(a)?.unwrap();
-                        self.walk_expr(b)?.unwrap();
-                        self.walk_expr(c)?.unwrap();
+                    BuiltinFn::Sum(arg) => {
+                        return self.emit_array_reduce(arg, SymbolicOpcode::ArraySum {});
                     }
                     BuiltinFn::Mean(args) => {
                         if args.len() == 1 {
@@ -1451,21 +1403,6 @@ impl<'module> Compiler<'module> {
                         self.push(SymbolicOpcode::Op2 { op: Op2::Div });
                         return Ok(Some(()));
                     }
-                    BuiltinFn::Rank(_, _) => {
-                        return sim_err!(
-                            TodoArrayBuiltin,
-                            "array-producing builtin outside AssignTemp context".to_owned()
-                        );
-                    }
-                    BuiltinFn::Size(arg) => {
-                        return self.emit_array_reduce(arg, SymbolicOpcode::ArraySize {});
-                    }
-                    BuiltinFn::Stddev(arg) => {
-                        return self.emit_array_reduce(arg, SymbolicOpcode::ArrayStddev {});
-                    }
-                    BuiltinFn::Sum(arg) => {
-                        return self.emit_array_reduce(arg, SymbolicOpcode::ArraySum {});
-                    }
                     BuiltinFn::VectorSelect(sel, expr, max_val, action, _err) => {
                         self.walk_expr_as_view(sel)?;
                         self.walk_expr_as_view(expr)?;
@@ -1476,15 +1413,12 @@ impl<'module> Compiler<'module> {
                         self.push(SymbolicOpcode::PopView {});
                         return Ok(Some(()));
                     }
-                    BuiltinFn::Previous(_, _) | BuiltinFn::Init(_) => {
-                        unreachable!(
-                            "Previous/Init builtins should be handled before reaching BuiltinId dispatch"
-                        );
-                    }
-                    // Normally routed through AssignTemp by A2A hoisting.
-                    // Reached here when the equation wasn't hoisted (e.g.,
-                    // mixed builtin types in an Arrayed equation).
-                    BuiltinFn::VectorElmMap(_, _)
+                    // Array-producing builtins write a temp through an opcode
+                    // of their own and are emitted only from an `AssignTemp`
+                    // (below). Reached here when the equation wasn't hoisted
+                    // (e.g., mixed builtin types in an Arrayed equation).
+                    BuiltinFn::Rank(_, _)
+                    | BuiltinFn::VectorElmMap(_, _)
                     | BuiltinFn::VectorSortOrder(_, _)
                     | BuiltinFn::AllocateAvailable(_, _, _)
                     | BuiltinFn::AllocateByPriority(_, _, _, _, _) => {
@@ -1493,27 +1427,18 @@ impl<'module> Compiler<'module> {
                             "array-producing builtin outside AssignTemp context".to_owned()
                         );
                     }
-                };
-                let func = match builtin {
-                    BuiltinFn::Lookup(_, _, _)
-                    | BuiltinFn::LookupForward(_, _, _)
-                    | BuiltinFn::LookupBackward(_, _, _) => unreachable!(),
                     BuiltinFn::Abs(_) => BuiltinId::Abs,
                     BuiltinFn::Arccos(_) => BuiltinId::Arccos,
                     BuiltinFn::Arcsin(_) => BuiltinId::Arcsin,
                     BuiltinFn::Arctan(_) => BuiltinId::Arctan,
                     BuiltinFn::Cos(_) => BuiltinId::Cos,
                     BuiltinFn::Exp(_) => BuiltinId::Exp,
-                    BuiltinFn::Inf => BuiltinId::Inf,
                     BuiltinFn::Int(_) => BuiltinId::Int,
                     BuiltinFn::Round(_) => BuiltinId::Round,
-                    BuiltinFn::IsModuleInput(_, _) => unreachable!(),
                     BuiltinFn::Ln(_) => BuiltinId::Ln,
                     BuiltinFn::Log10(_) => BuiltinId::Log10,
-                    BuiltinFn::Max(_, _) => BuiltinId::Max,
-                    BuiltinFn::Mean(_) => unreachable!(),
-                    BuiltinFn::Min(_, _) => BuiltinId::Min,
-                    BuiltinFn::Pi => BuiltinId::Pi,
+                    BuiltinFn::Max(_, Some(_)) => BuiltinId::Max,
+                    BuiltinFn::Min(_, Some(_)) => BuiltinId::Min,
                     BuiltinFn::Pulse(_, _, _) => BuiltinId::Pulse,
                     BuiltinFn::Quantum(_, _) => BuiltinId::Quantum,
                     BuiltinFn::Ramp(_, _, _) => BuiltinId::Ramp,
@@ -1524,40 +1449,41 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::Sqrt(_) => BuiltinId::Sqrt,
                     BuiltinFn::Step(_, _) => BuiltinId::Step,
                     BuiltinFn::Tan(_) => BuiltinId::Tan,
-                    // handled above; we exit early
-                    BuiltinFn::Time
-                    | BuiltinFn::TimeStep
-                    | BuiltinFn::StartTime
-                    | BuiltinFn::FinalTime => unreachable!(),
-                    BuiltinFn::Rank(_, _) => {
-                        return sim_err!(
-                            TodoArrayBuiltin,
-                            "array-producing builtin outside AssignTemp context".to_owned()
-                        );
-                    }
-                    // Previous/Init are handled by the early-return path at the top
-                    // of walk_builtin (LoadPrev/LoadInitial opcodes). Reaching here
-                    // would be a logic error.
-                    BuiltinFn::Previous(_, _) | BuiltinFn::Init(_) => {
-                        unreachable!(
-                            "Previous/Init builtins should be handled before reaching BuiltinId dispatch"
-                        );
-                    }
-                    // handled above; we exit early
-                    BuiltinFn::Size(_)
-                    | BuiltinFn::Stddev(_)
-                    | BuiltinFn::Sum(_)
-                    | BuiltinFn::VectorSelect(_, _, _, _, _) => unreachable!(),
-                    BuiltinFn::VectorElmMap(_, _)
-                    | BuiltinFn::VectorSortOrder(_, _)
-                    | BuiltinFn::AllocateAvailable(_, _, _)
-                    | BuiltinFn::AllocateByPriority(_, _, _, _, _) => {
-                        return sim_err!(
-                            TodoArrayBuiltin,
-                            "array-producing builtin outside AssignTemp context".to_owned()
-                        );
-                    }
                 };
+
+                // Operands in call order. `Apply` pops exactly
+                // `BuiltinId::arity()` of them, so nothing is padded. An
+                // operand is an arbitrary user expression (e.g. a
+                // `PREVIOUS(...)` the LTM partial path emits), so its lowering
+                // can fail recoverably; propagate via `?` rather than
+                // unwrapping the `Result`.
+                for arg in builtin.args() {
+                    self.walk_expr(arg)?.unwrap();
+                }
+                // An omitted trailing operand takes the value the VM reads in
+                // that position: `PULSE`'s width and `SAFEDIV`'s
+                // divide-by-zero result default to 0, and a 2-arg `RAMP` ends
+                // at `final_time`, which lives at the fixed absolute slot
+                // FINAL_TIME_OFF (an implicit global, not a body variable). It
+                // must be read with LoadGlobalVar -- an absolute-slot load with
+                // no `module_off` relocation -- exactly like
+                // BuiltinFn::FinalTime. A module-relative LoadVar happens to
+                // alias `final_time` only at the root model (where slot 3 IS
+                // final_time); inside a submodule it reads an unrelated body
+                // slot (or drops the fragment when that slot has no symbolic
+                // mapping).
+                match builtin {
+                    BuiltinFn::Pulse(_, _, None) | BuiltinFn::SafeDiv(_, _, None) => {
+                        let id = self.curr_code.intern_literal(0.0);
+                        self.push(SymbolicOpcode::LoadConstant { id });
+                    }
+                    BuiltinFn::Ramp(_, _, None) => {
+                        self.push(SymbolicOpcode::LoadGlobalVar {
+                            off: FINAL_TIME_OFF as u16,
+                        });
+                    }
+                    _ => {}
+                }
 
                 self.push(SymbolicOpcode::Apply { func });
                 Some(())
@@ -1642,6 +1568,13 @@ impl<'module> Compiler<'module> {
                         literal_id: id,
                     });
                 } else {
+                    // An array-valued right-hand side (a `TempArray` outside an
+                    // iteration, which `s = LOOKUP(g, TIME)` with a per-element
+                    // `g` lowers to) is refused by the `TempArray` arm, so the
+                    // `Err` propagates here and the fragment's compile reports
+                    // it against this variable. The Option is then a compiler
+                    // invariant: only a statement node leaves no value, and a
+                    // statement is never a right-hand side.
                     self.walk_expr(rhs)?.unwrap();
                     self.push(SymbolicOpcode::AssignCurr { var: dst.clone() });
                 }
@@ -1932,7 +1865,11 @@ impl<'module> Compiler<'module> {
                             views.push(static_view);
                         }
                     }
-                    Ok(None) => self.collect_builtin_views(builtin, views, seen),
+                    Ok(None) => {
+                        for arg in builtin.args() {
+                            self.collect_iter_source_views_impl(arg, views, seen);
+                        }
+                    }
                     Err(_) => {}
                 }
             }
@@ -1948,97 +1885,6 @@ impl<'module> Compiler<'module> {
             | Expr::AssignNext(_, _)
             | Expr::AssignTemp(_, _, _)
             | Expr::EvalModule(_, _, _, _) => {}
-        }
-    }
-
-    fn collect_builtin_views(
-        &mut self,
-        builtin: &BuiltinFn,
-        views: &mut Vec<SymbolicStaticView>,
-        seen: &mut std::collections::HashSet<SymbolicStaticView>,
-    ) {
-        use crate::builtins::BuiltinFn::*;
-        match builtin {
-            Lookup(a, b, _) | LookupForward(a, b, _) | LookupBackward(a, b, _) => {
-                self.collect_iter_source_views_impl(a, views, seen);
-                self.collect_iter_source_views_impl(b, views, seen);
-            }
-            Abs(a) | Arccos(a) | Arcsin(a) | Arctan(a) | Cos(a) | Exp(a) | Int(a) | Ln(a)
-            | Log10(a) | Round(a) | Sign(a) | Sin(a) | Sqrt(a) | Tan(a) => {
-                self.collect_iter_source_views_impl(a, views, seen);
-            }
-            Max(a, opt_b) | Min(a, opt_b) => {
-                self.collect_iter_source_views_impl(a, views, seen);
-                if let Some(b) = opt_b {
-                    self.collect_iter_source_views_impl(b, views, seen);
-                }
-            }
-            Mean(exprs) => {
-                for e in exprs {
-                    self.collect_iter_source_views_impl(e, views, seen);
-                }
-            }
-            Quantum(a, b) => {
-                self.collect_iter_source_views_impl(a, views, seen);
-                self.collect_iter_source_views_impl(b, views, seen);
-            }
-            Pulse(a, b, opt_c) | Ramp(a, b, opt_c) | SafeDiv(a, b, opt_c) => {
-                self.collect_iter_source_views_impl(a, views, seen);
-                self.collect_iter_source_views_impl(b, views, seen);
-                if let Some(c) = opt_c {
-                    self.collect_iter_source_views_impl(c, views, seen);
-                }
-            }
-            Sshape(a, b, c) => {
-                self.collect_iter_source_views_impl(a, views, seen);
-                self.collect_iter_source_views_impl(b, views, seen);
-                self.collect_iter_source_views_impl(c, views, seen);
-            }
-            Step(a, b) => {
-                self.collect_iter_source_views_impl(a, views, seen);
-                self.collect_iter_source_views_impl(b, views, seen);
-            }
-            // Array builtins with single argument
-            Sum(a) | Stddev(a) | Size(a) => {
-                self.collect_iter_source_views_impl(a, views, seen);
-            }
-            Rank(a, direction) => {
-                self.collect_iter_source_views_impl(a, views, seen);
-                self.collect_iter_source_views_impl(direction, views, seen);
-            }
-            VectorSelect(a, b, c, d, e) => {
-                self.collect_iter_source_views_impl(a, views, seen);
-                self.collect_iter_source_views_impl(b, views, seen);
-                self.collect_iter_source_views_impl(c, views, seen);
-                self.collect_iter_source_views_impl(d, views, seen);
-                self.collect_iter_source_views_impl(e, views, seen);
-            }
-            VectorElmMap(a, b) | VectorSortOrder(a, b) => {
-                self.collect_iter_source_views_impl(a, views, seen);
-                self.collect_iter_source_views_impl(b, views, seen);
-            }
-            AllocateAvailable(a, b, c) => {
-                self.collect_iter_source_views_impl(a, views, seen);
-                self.collect_iter_source_views_impl(b, views, seen);
-                self.collect_iter_source_views_impl(c, views, seen);
-            }
-            AllocateByPriority(a, b, c, d, e) => {
-                self.collect_iter_source_views_impl(a, views, seen);
-                self.collect_iter_source_views_impl(b, views, seen);
-                self.collect_iter_source_views_impl(c, views, seen);
-                self.collect_iter_source_views_impl(d, views, seen);
-                self.collect_iter_source_views_impl(e, views, seen);
-            }
-            // Scalar lag/initial builtins
-            Previous(a, b) => {
-                self.collect_iter_source_views_impl(a, views, seen);
-                self.collect_iter_source_views_impl(b, views, seen);
-            }
-            Init(a) => {
-                self.collect_iter_source_views_impl(a, views, seen);
-            }
-            // Constants/no-arg builtins
-            Inf | Pi | Time | TimeStep | StartTime | FinalTime | IsModuleInput(_, _) => {}
         }
     }
 

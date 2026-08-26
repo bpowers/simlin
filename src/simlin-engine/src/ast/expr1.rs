@@ -5,7 +5,7 @@
 use crate::ast::expr0::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
 use crate::ast::literal::Literal;
 pub use crate::builtins::Loc;
-use crate::builtins::{BuiltinFn, UntypedBuiltinFn};
+use crate::builtins::{BuiltinFn, BuiltinSig, UntypedBuiltinFn};
 use crate::common::{Canonical, EquationResult, Ident};
 use crate::eqn_err;
 use crate::model::ScopeStage0;
@@ -71,6 +71,21 @@ pub enum Expr1 {
     If(Box<Expr1>, Box<Expr1>, Box<Expr1>, Loc),
 }
 
+/// The next positional argument of a call whose arity
+/// [`BuiltinSig::accepts_arity`] has already admitted, so a required position
+/// is always present.
+fn required(args: &mut std::vec::IntoIter<Expr1>) -> Box<Expr1> {
+    Box::new(
+        args.next()
+            .unwrap_or_else(|| unreachable!("arity was checked against the builtin's signature")),
+    )
+}
+
+/// The next positional argument if the call spelled it.
+fn optional(args: &mut std::vec::IntoIter<Expr1>) -> Option<Box<Expr1>> {
+    args.next().map(Box::new)
+}
+
 impl Expr1 {
     /// Lower a parsed `Expr0` into an `Expr1`, by REFERENCE.
     ///
@@ -89,224 +104,122 @@ impl Expr1 {
             Expr0::App(UntypedBuiltinFn(id, orig_args), loc) => {
                 let loc = *loc;
                 let args: EquationResult<Vec<Expr1>> = orig_args.iter().map(Expr1::from).collect();
-                let mut args = args?;
+                let args = args?;
 
-                macro_rules! check_arity {
-                    ($builtin_fn:tt, 0) => {{
-                        if !args.is_empty() {
-                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
-                        }
-
-                        BuiltinFn::$builtin_fn
-                    }};
-                    ($builtin_fn:tt, 1) => {{
-                        if args.len() != 1 {
-                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
-                        }
-
-                        let a = args.remove(0);
-                        BuiltinFn::$builtin_fn(Box::new(a))
-                    }};
-                    ($builtin_fn:tt, 2) => {{
-                        if args.len() != 2 {
-                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
-                        }
-
-                        let b = args.remove(1);
-                        let a = args.remove(0);
-                        BuiltinFn::$builtin_fn(Box::new(a), Box::new(b))
-                    }};
-                    ($builtin_fn:tt, 1, 2) => {{
-                        if args.len() == 1 {
-                            let a = args.remove(0);
-                            BuiltinFn::$builtin_fn(Box::new(a), None)
-                        } else if args.len() == 2 {
-                            let b = args.remove(1);
-                            let a = args.remove(0);
-                            BuiltinFn::$builtin_fn(Box::new(a), Some(Box::new(b)))
-                        } else {
-                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
-                        }
-                    }};
-                    ($builtin_fn:tt, 3) => {{
-                        if args.len() != 3 {
-                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
-                        }
-
-                        let c = args.remove(2);
-                        let b = args.remove(1);
-                        let a = args.remove(0);
-                        BuiltinFn::$builtin_fn(Box::new(a), Box::new(b), Box::new(c))
-                    }};
-                    ($builtin_fn:tt, 1, 3) => {{
-                        if args.len() == 1 {
-                            let a = args.remove(0);
-                            BuiltinFn::$builtin_fn(Box::new(a), None)
-                        } else if args.len() == 2 {
-                            let b = args.remove(1);
-                            let a = args.remove(0);
-                            BuiltinFn::$builtin_fn(Box::new(a), Some((Box::new(b), None)))
-                        } else if args.len() == 3 {
-                            let c = args.remove(2);
-                            let b = args.remove(1);
-                            let a = args.remove(0);
-                            BuiltinFn::$builtin_fn(
-                                Box::new(a),
-                                Some((Box::new(b), Some(Box::new(c)))),
-                            )
-                        } else {
-                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
-                        }
-                    }};
-                    ($builtin_fn:tt, 2, 3) => {{
-                        if args.len() == 2 {
-                            let b = args.remove(1);
-                            let a = args.remove(0);
-                            BuiltinFn::$builtin_fn(Box::new(a), Box::new(b), None)
-                        } else if args.len() == 3 {
-                            let c = args.remove(2);
-                            let b = args.remove(1);
-                            let a = args.remove(0);
-                            BuiltinFn::$builtin_fn(Box::new(a), Box::new(b), Some(Box::new(c)))
-                        } else {
-                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
-                        }
-                    }};
+                let Some(sig) = BuiltinSig::by_name(id.as_str()) else {
+                    // TODO: this could be a table reference, array reference,
+                    //       or module instantiation according to 3.3.2 of the spec
+                    return eqn_err!(UnknownBuiltin, loc.start, loc.end);
+                };
+                // The signature is the one statement of each builtin's arity;
+                // once it admits the call, the destructuring below is
+                // positional and infallible.
+                if !sig.accepts_arity(args.len()) {
+                    return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
                 }
-
-                let builtin = match id.as_str() {
-                    "lookup" => {
-                        if args.len() == 2 {
-                            BuiltinFn::Lookup(
-                                Box::new(args[0].clone()),
-                                Box::new(args[1].clone()),
-                                loc,
-                            )
-                        } else {
-                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
-                        }
-                    }
+                let mut args = args.into_iter();
+                let builtin = match sig.name {
+                    "lookup" => BuiltinFn::Lookup(required(&mut args), required(&mut args), loc),
                     "lookup_forward" => {
-                        if args.len() == 2 {
-                            BuiltinFn::LookupForward(
-                                Box::new(args[0].clone()),
-                                Box::new(args[1].clone()),
-                                loc,
-                            )
-                        } else {
-                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
-                        }
+                        BuiltinFn::LookupForward(required(&mut args), required(&mut args), loc)
                     }
                     "lookup_backward" => {
-                        if args.len() == 2 {
-                            BuiltinFn::LookupBackward(
-                                Box::new(args[0].clone()),
-                                Box::new(args[1].clone()),
-                                loc,
-                            )
-                        } else {
-                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
-                        }
+                        BuiltinFn::LookupBackward(required(&mut args), required(&mut args), loc)
                     }
-                    "mean" => BuiltinFn::Mean(args),
-                    "abs" => check_arity!(Abs, 1),
-                    "arccos" => check_arity!(Arccos, 1),
-                    "arcsin" => check_arity!(Arcsin, 1),
-                    "arctan" => check_arity!(Arctan, 1),
-                    "cos" => check_arity!(Cos, 1),
-                    "exp" => check_arity!(Exp, 1),
-                    "inf" => check_arity!(Inf, 0),
-                    "int" => check_arity!(Int, 1),
-                    "ismoduleinput" => {
-                        if let Some(Expr1::Var(ident, loc)) = args.first() {
-                            BuiltinFn::IsModuleInput(ident.to_string(), *loc)
-                        } else {
-                            return eqn_err!(ExpectedIdent, loc.start, loc.end);
+                    "abs" => BuiltinFn::Abs(required(&mut args)),
+                    "arccos" => BuiltinFn::Arccos(required(&mut args)),
+                    "arcsin" => BuiltinFn::Arcsin(required(&mut args)),
+                    "arctan" => BuiltinFn::Arctan(required(&mut args)),
+                    "cos" => BuiltinFn::Cos(required(&mut args)),
+                    "exp" => BuiltinFn::Exp(required(&mut args)),
+                    "inf" => BuiltinFn::Inf,
+                    "int" => BuiltinFn::Int(required(&mut args)),
+                    // The one argument is an identifier, kept as text rather
+                    // than lowered as an expression.
+                    "ismoduleinput" => match args.next() {
+                        Some(Expr1::Var(ident, loc)) => {
+                            BuiltinFn::IsModuleInput(ident.to_string(), loc)
                         }
+                        _ => return eqn_err!(ExpectedIdent, loc.start, loc.end),
+                    },
+                    "ln" => BuiltinFn::Ln(required(&mut args)),
+                    "log10" => BuiltinFn::Log10(required(&mut args)),
+                    "max" => BuiltinFn::Max(required(&mut args), optional(&mut args)),
+                    "mean" => BuiltinFn::Mean(args.collect()),
+                    "min" => BuiltinFn::Min(required(&mut args), optional(&mut args)),
+                    "pi" => BuiltinFn::Pi,
+                    "pulse" => BuiltinFn::Pulse(
+                        required(&mut args),
+                        required(&mut args),
+                        optional(&mut args),
+                    ),
+                    "quantum" => BuiltinFn::Quantum(required(&mut args), required(&mut args)),
+                    "ramp" => BuiltinFn::Ramp(
+                        required(&mut args),
+                        required(&mut args),
+                        optional(&mut args),
+                    ),
+                    "round" => BuiltinFn::Round(required(&mut args)),
+                    "safediv" => BuiltinFn::SafeDiv(
+                        required(&mut args),
+                        required(&mut args),
+                        optional(&mut args),
+                    ),
+                    "sign" => BuiltinFn::Sign(required(&mut args)),
+                    "sin" => BuiltinFn::Sin(required(&mut args)),
+                    "sshape" => BuiltinFn::Sshape(
+                        required(&mut args),
+                        required(&mut args),
+                        required(&mut args),
+                    ),
+                    "sqrt" => BuiltinFn::Sqrt(required(&mut args)),
+                    "step" => BuiltinFn::Step(required(&mut args), required(&mut args)),
+                    "tan" => BuiltinFn::Tan(required(&mut args)),
+                    "time" => BuiltinFn::Time,
+                    "time_step" => BuiltinFn::TimeStep,
+                    "initial_time" => BuiltinFn::StartTime,
+                    "final_time" => BuiltinFn::FinalTime,
+                    "rank" => BuiltinFn::Rank(required(&mut args), required(&mut args)),
+                    "size" => BuiltinFn::Size(required(&mut args)),
+                    "stddev" => BuiltinFn::Stddev(required(&mut args)),
+                    "sum" => BuiltinFn::Sum(required(&mut args)),
+                    "vector_select" => BuiltinFn::VectorSelect(
+                        required(&mut args),
+                        required(&mut args),
+                        required(&mut args),
+                        required(&mut args),
+                        required(&mut args),
+                    ),
+                    "vector_elm_map" => {
+                        BuiltinFn::VectorElmMap(required(&mut args), required(&mut args))
                     }
-                    "ln" => check_arity!(Ln, 1),
-                    "log10" => check_arity!(Log10, 1),
-                    "max" => check_arity!(Max, 1, 2),
-                    "min" => check_arity!(Min, 1, 2),
-                    "pi" => check_arity!(Pi, 0),
-                    "pulse" => check_arity!(Pulse, 2, 3),
-                    "quantum" => check_arity!(Quantum, 2),
-                    "ramp" => check_arity!(Ramp, 2, 3),
-                    "round" => check_arity!(Round, 1),
-                    "safediv" => check_arity!(SafeDiv, 2, 3),
-                    "sign" => check_arity!(Sign, 1),
-                    "sin" => check_arity!(Sin, 1),
-                    "sshape" => check_arity!(Sshape, 3),
-                    "sqrt" => check_arity!(Sqrt, 1),
-                    "step" => check_arity!(Step, 2),
-                    "tan" => check_arity!(Tan, 1),
-                    "time" => check_arity!(Time, 0),
-                    "time_step" | "dt" => check_arity!(TimeStep, 0),
-                    "initial_time" | "starttime" => check_arity!(StartTime, 0),
-                    "final_time" | "stoptime" => check_arity!(FinalTime, 0),
-                    "rank" => check_arity!(Rank, 2),
-                    "size" => check_arity!(Size, 1),
-                    "stddev" => check_arity!(Stddev, 1),
-                    "sum" => check_arity!(Sum, 1),
-                    "vector_select" => {
-                        if args.len() != 5 {
-                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
-                        }
-                        let e = args.remove(4);
-                        let d = args.remove(3);
-                        let c = args.remove(2);
-                        let b = args.remove(1);
-                        let a = args.remove(0);
-                        BuiltinFn::VectorSelect(
-                            Box::new(a),
-                            Box::new(b),
-                            Box::new(c),
-                            Box::new(d),
-                            Box::new(e),
-                        )
+                    "vector_sort_order" => {
+                        BuiltinFn::VectorSortOrder(required(&mut args), required(&mut args))
                     }
-                    "vector_elm_map" => check_arity!(VectorElmMap, 2),
-                    "vector_sort_order" => check_arity!(VectorSortOrder, 2),
-                    "allocate_available" => check_arity!(AllocateAvailable, 3),
-                    "allocate_by_priority" => {
-                        if args.len() != 5 {
-                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
-                        }
-                        let e = args.remove(4);
-                        let d = args.remove(3);
-                        let c = args.remove(2);
-                        let b = args.remove(1);
-                        let a = args.remove(0);
-                        BuiltinFn::AllocateByPriority(
-                            Box::new(a),
-                            Box::new(b),
-                            Box::new(c),
-                            Box::new(d),
-                            Box::new(e),
-                        )
-                    }
+                    "allocate_available" => BuiltinFn::AllocateAvailable(
+                        required(&mut args),
+                        required(&mut args),
+                        required(&mut args),
+                    ),
+                    "allocate_by_priority" => BuiltinFn::AllocateByPriority(
+                        required(&mut args),
+                        required(&mut args),
+                        required(&mut args),
+                        required(&mut args),
+                        required(&mut args),
+                    ),
                     // Unary PREVIOUS(x) desugars to PREVIOUS(x, 0).
                     // builtins_visitor may have already added the fallback
                     // at Expr0 level, so both 1-arg and 2-arg forms are valid.
                     "previous" => {
-                        if args.len() == 1 {
-                            let a = args.remove(0);
-                            let zero = Expr1::Const("0".to_string(), Literal::new(0.0), loc);
-                            BuiltinFn::Previous(Box::new(a), Box::new(zero))
-                        } else if args.len() == 2 {
-                            let b = args.remove(1);
-                            let a = args.remove(0);
-                            BuiltinFn::Previous(Box::new(a), Box::new(b))
-                        } else {
-                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
-                        }
+                        let a = required(&mut args);
+                        let fallback = optional(&mut args).unwrap_or_else(|| {
+                            Box::new(Expr1::Const("0".to_string(), Literal::new(0.0), loc))
+                        });
+                        BuiltinFn::Previous(a, fallback)
                     }
-                    "init" => check_arity!(Init, 1),
-                    _ => {
-                        // TODO: this could be a table reference, array reference,
-                        //       or module instantiation according to 3.3.2 of the spec
-                        return eqn_err!(UnknownBuiltin, loc.start, loc.end);
-                    }
+                    "init" => BuiltinFn::Init(required(&mut args)),
+                    other => unreachable!("builtin {other} has a signature but no constructor"),
                 };
                 Expr1::App(builtin, loc)
             }
@@ -346,137 +259,7 @@ impl Expr1 {
                 }
             }
             Expr1::App(func, loc) => {
-                let func = match func {
-                    BuiltinFn::Inf => BuiltinFn::Inf,
-                    BuiltinFn::Pi => BuiltinFn::Pi,
-                    BuiltinFn::Time => BuiltinFn::Time,
-                    BuiltinFn::TimeStep => BuiltinFn::TimeStep,
-                    BuiltinFn::StartTime => BuiltinFn::StartTime,
-                    BuiltinFn::FinalTime => BuiltinFn::FinalTime,
-                    BuiltinFn::Abs(a) => BuiltinFn::Abs(Box::new(a.constify_dimensions(scope))),
-                    BuiltinFn::Arccos(a) => {
-                        BuiltinFn::Arccos(Box::new(a.constify_dimensions(scope)))
-                    }
-                    BuiltinFn::Arcsin(a) => {
-                        BuiltinFn::Arcsin(Box::new(a.constify_dimensions(scope)))
-                    }
-                    BuiltinFn::Arctan(a) => {
-                        BuiltinFn::Arctan(Box::new(a.constify_dimensions(scope)))
-                    }
-                    BuiltinFn::Cos(a) => BuiltinFn::Cos(Box::new(a.constify_dimensions(scope))),
-                    BuiltinFn::Exp(a) => BuiltinFn::Exp(Box::new(a.constify_dimensions(scope))),
-                    BuiltinFn::Int(a) => BuiltinFn::Int(Box::new(a.constify_dimensions(scope))),
-                    BuiltinFn::Ln(a) => BuiltinFn::Ln(Box::new(a.constify_dimensions(scope))),
-                    BuiltinFn::Log10(a) => BuiltinFn::Log10(Box::new(a.constify_dimensions(scope))),
-                    BuiltinFn::Round(a) => BuiltinFn::Round(Box::new(a.constify_dimensions(scope))),
-                    BuiltinFn::Sign(a) => BuiltinFn::Sign(Box::new(a.constify_dimensions(scope))),
-                    BuiltinFn::Sin(a) => BuiltinFn::Sin(Box::new(a.constify_dimensions(scope))),
-                    BuiltinFn::Sqrt(a) => BuiltinFn::Sqrt(Box::new(a.constify_dimensions(scope))),
-                    BuiltinFn::Tan(a) => BuiltinFn::Tan(Box::new(a.constify_dimensions(scope))),
-                    BuiltinFn::Mean(args) => BuiltinFn::Mean(
-                        args.into_iter()
-                            .map(|arg| arg.constify_dimensions(scope))
-                            .collect(),
-                    ),
-                    BuiltinFn::Max(a, b) => BuiltinFn::Max(
-                        Box::new(a.constify_dimensions(scope)),
-                        b.map(|expr| Box::new(expr.constify_dimensions(scope))),
-                    ),
-                    BuiltinFn::Min(a, b) => BuiltinFn::Min(
-                        Box::new(a.constify_dimensions(scope)),
-                        b.map(|expr| Box::new(expr.constify_dimensions(scope))),
-                    ),
-                    BuiltinFn::Step(a, b) => BuiltinFn::Step(
-                        Box::new(a.constify_dimensions(scope)),
-                        Box::new(b.constify_dimensions(scope)),
-                    ),
-                    BuiltinFn::IsModuleInput(id, loc) => BuiltinFn::IsModuleInput(id, loc),
-                    BuiltinFn::Lookup(table_expr, index_expr, loc) => BuiltinFn::Lookup(
-                        Box::new(table_expr.constify_dimensions(scope)),
-                        Box::new(index_expr.constify_dimensions(scope)),
-                        loc,
-                    ),
-                    BuiltinFn::LookupForward(table_expr, index_expr, loc) => {
-                        BuiltinFn::LookupForward(
-                            Box::new(table_expr.constify_dimensions(scope)),
-                            Box::new(index_expr.constify_dimensions(scope)),
-                            loc,
-                        )
-                    }
-                    BuiltinFn::LookupBackward(table_expr, index_expr, loc) => {
-                        BuiltinFn::LookupBackward(
-                            Box::new(table_expr.constify_dimensions(scope)),
-                            Box::new(index_expr.constify_dimensions(scope)),
-                            loc,
-                        )
-                    }
-                    BuiltinFn::Quantum(a, b) => BuiltinFn::Quantum(
-                        Box::new(a.constify_dimensions(scope)),
-                        Box::new(b.constify_dimensions(scope)),
-                    ),
-                    BuiltinFn::Pulse(a, b, c) => BuiltinFn::Pulse(
-                        Box::new(a.constify_dimensions(scope)),
-                        Box::new(b.constify_dimensions(scope)),
-                        c.map(|arg| Box::new(arg.constify_dimensions(scope))),
-                    ),
-                    BuiltinFn::Ramp(a, b, c) => BuiltinFn::Ramp(
-                        Box::new(a.constify_dimensions(scope)),
-                        Box::new(b.constify_dimensions(scope)),
-                        c.map(|arg| Box::new(arg.constify_dimensions(scope))),
-                    ),
-                    BuiltinFn::SafeDiv(a, b, c) => BuiltinFn::SafeDiv(
-                        Box::new(a.constify_dimensions(scope)),
-                        Box::new(b.constify_dimensions(scope)),
-                        c.map(|arg| Box::new(arg.constify_dimensions(scope))),
-                    ),
-                    BuiltinFn::Sshape(a, b, c) => BuiltinFn::Sshape(
-                        Box::new(a.constify_dimensions(scope)),
-                        Box::new(b.constify_dimensions(scope)),
-                        Box::new(c.constify_dimensions(scope)),
-                    ),
-                    BuiltinFn::Rank(a, direction) => BuiltinFn::Rank(
-                        Box::new(a.constify_dimensions(scope)),
-                        Box::new(direction.constify_dimensions(scope)),
-                    ),
-                    BuiltinFn::Size(a) => BuiltinFn::Size(Box::new(a.constify_dimensions(scope))),
-                    BuiltinFn::Stddev(a) => {
-                        BuiltinFn::Stddev(Box::new(a.constify_dimensions(scope)))
-                    }
-                    BuiltinFn::Sum(a) => BuiltinFn::Sum(Box::new(a.constify_dimensions(scope))),
-                    BuiltinFn::VectorSelect(a, b, c, d, e) => BuiltinFn::VectorSelect(
-                        Box::new(a.constify_dimensions(scope)),
-                        Box::new(b.constify_dimensions(scope)),
-                        Box::new(c.constify_dimensions(scope)),
-                        Box::new(d.constify_dimensions(scope)),
-                        Box::new(e.constify_dimensions(scope)),
-                    ),
-                    BuiltinFn::VectorElmMap(a, b) => BuiltinFn::VectorElmMap(
-                        Box::new(a.constify_dimensions(scope)),
-                        Box::new(b.constify_dimensions(scope)),
-                    ),
-                    BuiltinFn::VectorSortOrder(a, b) => BuiltinFn::VectorSortOrder(
-                        Box::new(a.constify_dimensions(scope)),
-                        Box::new(b.constify_dimensions(scope)),
-                    ),
-                    BuiltinFn::AllocateAvailable(a, b, c) => BuiltinFn::AllocateAvailable(
-                        Box::new(a.constify_dimensions(scope)),
-                        Box::new(b.constify_dimensions(scope)),
-                        Box::new(c.constify_dimensions(scope)),
-                    ),
-                    BuiltinFn::AllocateByPriority(a, b, c, d, e) => BuiltinFn::AllocateByPriority(
-                        Box::new(a.constify_dimensions(scope)),
-                        Box::new(b.constify_dimensions(scope)),
-                        Box::new(c.constify_dimensions(scope)),
-                        Box::new(d.constify_dimensions(scope)),
-                        Box::new(e.constify_dimensions(scope)),
-                    ),
-                    BuiltinFn::Previous(a, b) => BuiltinFn::Previous(
-                        Box::new(a.constify_dimensions(scope)),
-                        Box::new(b.constify_dimensions(scope)),
-                    ),
-                    BuiltinFn::Init(a) => BuiltinFn::Init(Box::new(a.constify_dimensions(scope))),
-                };
-                Expr1::App(func, loc)
+                Expr1::App(func.map(|arg| arg.constify_dimensions(scope)), loc)
             }
             Expr1::Subscript(id, args, loc) => Expr1::Subscript(
                 id,
@@ -505,5 +288,110 @@ impl Expr1 {
 impl Default for Expr1 {
     fn default() -> Self {
         Expr1::Const("0.0".to_string(), Literal::new(0.0), Loc::default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::{ErrorCode, RawIdent};
+
+    fn const0(n: usize) -> Expr0 {
+        Expr0::Const(n.to_string(), Literal::new(n as f64), Loc::default())
+    }
+
+    fn call(name: &str, args: Vec<Expr0>) -> EquationResult<Expr1> {
+        Expr1::from(&Expr0::App(
+            UntypedBuiltinFn(name.to_string(), args),
+            Loc::default(),
+        ))
+    }
+
+    /// The constructor admits exactly the arities each signature declares, and
+    /// the node it builds reports the argument count the call spelled. Rows
+    /// are every signature in the table at every admitted arity (a variadic
+    /// one up to four), plus one below and one above the range.
+    #[test]
+    fn constructor_admits_exactly_the_signatures_arity_range() {
+        for sig in BuiltinSig::ALL {
+            let min = sig.min_args as usize;
+            let max = sig.max_args.map_or(min.max(1) + 3, |m| m as usize);
+            let ident_arg = sig.arg_kinds.contains(&crate::builtins::ArgKind::Ident);
+            for n in min..=max {
+                let args: Vec<Expr0> = if ident_arg {
+                    (0..n)
+                        .map(|_| Expr0::Var(RawIdent::new("x".to_string()), Loc::default()))
+                        .collect()
+                } else {
+                    (1..=n).map(const0).collect()
+                };
+                let built = call(sig.name, args)
+                    .unwrap_or_else(|e| panic!("{}({n} args) must construct, got {e:?}", sig.name));
+                let Expr1::App(builtin, _) = built else {
+                    panic!("{}: expected an App", sig.name)
+                };
+                assert!(
+                    std::ptr::eq(builtin.signature(), sig),
+                    "{}: signature",
+                    sig.name
+                );
+                // `PREVIOUS(x)` desugars to `PREVIOUS(x, 0)`, so the node holds
+                // one argument more than a one-argument call spelled.
+                let expected_exprs = if sig.name == "previous" {
+                    2
+                } else {
+                    n - usize::from(ident_arg)
+                };
+                assert_eq!(
+                    builtin.args().len(),
+                    expected_exprs,
+                    "{}({n} args): expression argument count",
+                    sig.name
+                );
+                for alias in sig.aliases {
+                    let aliased = call(alias, (1..=n).map(const0).collect()).unwrap();
+                    let Expr1::App(aliased, _) = aliased else {
+                        unreachable!()
+                    };
+                    assert!(std::ptr::eq(aliased.signature(), sig), "alias {alias}");
+                }
+            }
+            if min > 0 {
+                let err = call(sig.name, (1..min).map(const0).collect()).unwrap_err();
+                assert_eq!(err.code, ErrorCode::BadBuiltinArgs, "{}: too few", sig.name);
+            }
+            if let Some(max) = sig.max_args {
+                let too_many = (1..=max as usize + 1).map(const0).collect();
+                let err = call(sig.name, too_many).unwrap_err();
+                assert_eq!(
+                    err.code,
+                    ErrorCode::BadBuiltinArgs,
+                    "{}: too many",
+                    sig.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_names_and_non_identifier_module_input_args_are_rejected() {
+        assert_eq!(
+            call("lookupz", vec![const0(1)]).unwrap_err().code,
+            ErrorCode::UnknownBuiltin
+        );
+        assert_eq!(
+            call("ismoduleinput", vec![const0(1)]).unwrap_err().code,
+            ErrorCode::ExpectedIdent
+        );
+    }
+
+    #[test]
+    fn unary_previous_desugars_to_a_zero_fallback() {
+        let Expr1::App(BuiltinFn::Previous(_, fallback), _) =
+            call("previous", vec![const0(7)]).unwrap()
+        else {
+            panic!("expected PREVIOUS")
+        };
+        assert!(matches!(*fallback, Expr1::Const(_, value, _) if value == Literal::new(0.0)));
     }
 }

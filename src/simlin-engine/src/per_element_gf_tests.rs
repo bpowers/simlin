@@ -1155,3 +1155,181 @@ fn extract_tables_non_sorted_declared_order_lands_by_dimension_index() {
          order (A=2000, M=3000, Z=1000); got {ys:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A BARE per-element table reference -- `LOOKUP(g, time)` with no subscript on
+// the arrayed table holder `g` -- resolves under pass 0 exactly as a bare
+// arrayed VARIABLE reference does (`Context::make_dimension_subscripts`,
+// reached through `BuiltinFn::map_ref` in `Context::lower_pass0`): an axis the
+// enclosing apply-to-all equation iterates is pinned to the active element,
+// and every other axis is a wildcard the consumer iterates. The rows below pin
+// that rule for the table position of the LOOKUP family; the explicitly
+// subscripted spelling (`LOOKUP(g[COP], time)`) is the tests above. The
+// justification is structural -- one resolution rule for every bare arrayed
+// reference, table or not -- and makes no claim about Vensim or Stella. The
+// fixtures are Vensim-syntax lookup-only tables, the shape the MDL importer
+// produces for a per-element table holder.
+// ---------------------------------------------------------------------------
+
+const BARE_TABLE_SIM_SPECS: &str =
+    "INITIAL TIME = 0 ~~|\nFINAL TIME = 1 ~~|\nSAVEPER = 1 ~~|\nTIME STEP = 1 ~~|\n";
+
+/// A 1-D per-element table `g[COP]` whose three tables read 100, 200, 300 at
+/// `time = 1`, followed by the caller's consumer equation(s).
+fn one_dim_table_model(consumers: &str) -> datamodel::Project {
+    let body = format!(
+        "COP: a, b, c ~~|\n\
+         g[a]( (0,0),(1,100) ) ~~|\n\
+         g[b]( (0,0),(1,200) ) ~~|\n\
+         g[c]( (0,0),(1,300) ) ~~|\n\
+         {consumers}"
+    );
+    probe_mdl(&body)
+}
+
+/// A 2-D per-element table `g[COP, ROW]` whose four tables read 10, 20, 30, 40
+/// at `time = 1` (row-major: `[a,p] [a,q] [b,p] [b,q]`).
+fn two_dim_table_model(consumers: &str) -> datamodel::Project {
+    let body = format!(
+        "COP: a, b ~~|\n\
+         ROW: p, q ~~|\n\
+         g[a,p]( (0,0),(1,10) ) ~~|\n\
+         g[a,q]( (0,0),(1,20) ) ~~|\n\
+         g[b,p]( (0,0),(1,30) ) ~~|\n\
+         g[b,q]( (0,0),(1,40) ) ~~|\n\
+         {consumers}"
+    );
+    probe_mdl(&body)
+}
+
+fn probe_mdl(body: &str) -> datamodel::Project {
+    crate::open_vensim(&format!("{{UTF-8}}\n{body}{BARE_TABLE_SIM_SPECS}"))
+        .expect("the probe MDL parses")
+}
+
+/// The t=1 values of `var`'s elements, in key order (`var[a]`, `var[a,p]`,
+/// ...: ascending element order for these fixtures).
+fn final_values_in_key_order(project: &datamodel::Project, var: &str) -> Vec<(String, f64)> {
+    let values: std::collections::BTreeMap<String, f64> =
+        simulate_final_values(project, var).into_iter().collect();
+    values.into_iter().collect()
+}
+
+fn assert_elements(project: &datamodel::Project, var: &str, expected: &[(&str, f64)]) {
+    let got = final_values_in_key_order(project, var);
+    let got_view: Vec<(&str, f64)> = got.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+    assert_eq!(
+        got_view,
+        expected.to_vec(),
+        "{var}: per-element values at t=1"
+    );
+}
+
+/// `out[COP] = LOOKUP(g, time)` over a 1-D table: the bare `g` is `g[COP]`, so
+/// each element applies its own table.
+#[test]
+fn bare_one_dim_table_in_a_matching_a2a_equation_applies_each_elements_table() {
+    let project = one_dim_table_model("out[COP] = LOOKUP(g, Time) ~~|\n");
+    assert_elements(
+        &project,
+        "out",
+        &[("out[a]", 100.0), ("out[b]", 200.0), ("out[c]", 300.0)],
+    );
+}
+
+/// `cell[COP, ROW] = LOOKUP(g, time)` over a 2-D table: both axes are pinned by
+/// the enclosing element, so each cell applies its own table.
+#[test]
+fn bare_two_dim_table_in_a_matching_a2a_equation_applies_each_cells_table() {
+    let project = two_dim_table_model("cell[COP,ROW] = LOOKUP(g, Time) ~~|\n");
+    assert_elements(
+        &project,
+        "cell",
+        &[
+            ("cell[a,p]", 10.0),
+            ("cell[a,q]", 20.0),
+            ("cell[b,p]", 30.0),
+            ("cell[b,q]", 40.0),
+        ],
+    );
+}
+
+/// `out[COP] = SUM(LOOKUP(g, time))` over a 2-D table: `COP` is pinned to the
+/// element and `ROW` is the wildcard the reducer iterates, so each element sums
+/// ITS row (`[a]`: 10 + 20, `[b]`: 30 + 40) -- the same row a bare arrayed
+/// variable `v[COP, ROW]` yields under `SUM(v)` in this equation.
+#[test]
+fn bare_two_dim_table_under_a_reducer_sums_the_elements_own_row() {
+    let project = two_dim_table_model("out[COP] = SUM(LOOKUP(g, Time)) ~~|\n");
+    assert_elements(&project, "out", &[("out[a]", 30.0), ("out[b]", 70.0)]);
+}
+
+/// An array-valued per-element table apply in a position that consumes ONE
+/// value has no meaning and is REFUSED with a diagnostic attributed to the
+/// variable, never emitted. The rule has one owner: codegen's `TempArray` arm
+/// (`compiler::codegen::Compiler::walk_expr`) refuses a temp array outside an
+/// iteration body, and every operand site inherits the refusal through `?`
+/// (an `unwrap` on a missing stack value there is a process abort under
+/// `panic = abort`). The rows are a sample of the consumers the apply can land
+/// in -- the whole right-hand side, an `Apply` operand, an `Op2` operand, an
+/// `IF` condition, an n-ary `MEAN` operand, and the per-element right-hand side
+/// of an apply-to-all equation over a 2-D table (each element's apply is the
+/// element's whole `ROW` row). The other consumers (an `Op1` operand, an `IF`
+/// branch, a lookup index, a subscript index) reach the same arm through the
+/// same `?`; a subscript index is not rowed only because Vensim has no
+/// expression subscripts, so the MDL fixtures these rows share cannot spell it.
+#[test]
+fn array_valued_table_apply_assigned_to_one_slot_is_refused_not_aborted() {
+    use crate::db::{DiagnosticError, DiagnosticSeverity, collect_all_diagnostics};
+
+    let rows = [
+        (one_dim_table_model("s = ABS(LOOKUP(g, Time)) ~~|\n"), "s"),
+        (one_dim_table_model("s = LOOKUP(g, Time) ~~|\n"), "s"),
+        (one_dim_table_model("s = LOOKUP(g, Time) + 1 ~~|\n"), "s"),
+        (
+            one_dim_table_model("s = IF THEN ELSE(LOOKUP(g, Time) > 0, 1, 0) ~~|\n"),
+            "s",
+        ),
+        (
+            one_dim_table_model("s = MEAN(LOOKUP(g, Time), 1) ~~|\n"),
+            "s",
+        ),
+        (
+            two_dim_table_model("out[COP] = LOOKUP(g, Time) ~~|\n"),
+            "out",
+        ),
+        (
+            two_dim_table_model("out[COP] = ABS(LOOKUP(g, Time)) ~~|\n"),
+            "out",
+        ),
+    ];
+    for (project, var) in rows {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        assert!(
+            compile_project_incremental(&db, sync.project, "main").is_err(),
+            "{var}: an array used as one value must not compile"
+        );
+        let diagnostics = collect_all_diagnostics(&db, sync.project);
+        let attributed: Vec<String> = diagnostics
+            .iter()
+            .filter(|d| d.severity == DiagnosticSeverity::Error)
+            .map(|d| format!("{:?} on {:?}", d.error, d.variable))
+            .collect();
+        // The refusal is the `TempArray` arm's, carried verbatim in the
+        // assembly diagnostic, and lands on the variable -- not some other
+        // error that happens to make the model fail to compile.
+        assert!(
+            diagnostics.iter().any(|d| {
+                d.severity == DiagnosticSeverity::Error
+                    && d.variable.as_deref() == Some(var)
+                    && matches!(
+                        &d.error,
+                        DiagnosticError::Assembly(reason)
+                            if reason.contains("where a single value is required")
+                    )
+            }),
+            "{var}: the refusal must be attributed to the variable; errors: {attributed:?}"
+        );
+    }
+}

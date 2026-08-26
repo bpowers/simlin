@@ -3742,7 +3742,6 @@ fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
         BuiltinId::Arctan => a.atan(),
         BuiltinId::Cos => a.cos(),
         BuiltinId::Exp => a.exp(),
-        BuiltinId::Inf => f64::INFINITY,
         BuiltinId::Int => a.floor(),
         BuiltinId::Ln => a.ln(),
         BuiltinId::Log10 => a.log10(),
@@ -3760,7 +3759,6 @@ fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
                 b
             }
         }
-        BuiltinId::Pi => std::f64::consts::PI,
         BuiltinId::Quantum => {
             let x = a;
             let q = b;
@@ -4175,18 +4173,6 @@ mod apply_tests {
             let got = apply(BuiltinId::Round, 0.0, 1.0, input, 0.0, 0.0);
             crate::test_common::assert_round_case(input, got, expected, "vm-apply");
         }
-    }
-
-    #[test]
-    fn apply_pi() {
-        let result = apply(BuiltinId::Pi, 0.0, 1.0, 0.0, 0.0, 0.0);
-        assert!((result - std::f64::consts::PI).abs() < 1e-15);
-    }
-
-    #[test]
-    fn apply_inf() {
-        let result = apply(BuiltinId::Inf, 0.0, 1.0, 0.0, 0.0, 0.0);
-        assert!(result.is_infinite() && result > 0.0);
     }
 
     #[test]

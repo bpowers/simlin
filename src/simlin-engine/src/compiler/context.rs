@@ -24,6 +24,7 @@ use super::subscript::{
     IndexOp, Subscript3Config, ViewBuildConfig, ViewBuildResult, build_view_from_ops,
     normalize_subscripts3,
 };
+use crate::builtins::ArgKind;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy)]
@@ -594,10 +595,11 @@ impl Context<'_> {
                 bounds.clone(),
                 *loc,
             ),
-            ast::Expr2::App(builtin, bounds, loc) => {
-                let new_builtin = self.lower_pass0_builtin(builtin);
-                ast::Expr2::App(new_builtin, bounds.clone(), *loc)
-            }
+            ast::Expr2::App(builtin, bounds, loc) => ast::Expr2::App(
+                builtin.map_ref(|arg| self.lower_pass0(arg)),
+                bounds.clone(),
+                *loc,
+            ),
         }
     }
 
@@ -737,131 +739,6 @@ impl Context<'_> {
             ast::IndexExpr2::Wildcard(_)
             | ast::IndexExpr2::StarRange(_, _)
             | ast::IndexExpr2::DimPosition(_, _) => expr.clone(),
-        }
-    }
-
-    /// Recursively process builtin function arguments
-    fn lower_pass0_builtin(
-        &self,
-        builtin: &crate::builtins::BuiltinFn<ast::Expr2>,
-    ) -> crate::builtins::BuiltinFn<ast::Expr2> {
-        use crate::builtins::BuiltinFn::*;
-        match builtin {
-            // Single expression argument
-            Abs(e) => Abs(Box::new(self.lower_pass0(e))),
-            Arccos(e) => Arccos(Box::new(self.lower_pass0(e))),
-            Arcsin(e) => Arcsin(Box::new(self.lower_pass0(e))),
-            Arctan(e) => Arctan(Box::new(self.lower_pass0(e))),
-            Cos(e) => Cos(Box::new(self.lower_pass0(e))),
-            Exp(e) => Exp(Box::new(self.lower_pass0(e))),
-            Int(e) => Int(Box::new(self.lower_pass0(e))),
-            Ln(e) => Ln(Box::new(self.lower_pass0(e))),
-            Log10(e) => Log10(Box::new(self.lower_pass0(e))),
-            Round(e) => Round(Box::new(self.lower_pass0(e))),
-            Sign(e) => Sign(Box::new(self.lower_pass0(e))),
-            Sin(e) => Sin(Box::new(self.lower_pass0(e))),
-            Sqrt(e) => Sqrt(Box::new(self.lower_pass0(e))),
-            Tan(e) => Tan(Box::new(self.lower_pass0(e))),
-
-            // Array builtins with single expression
-            Size(e) => Size(Box::new(self.lower_pass0(e))),
-            Stddev(e) => Stddev(Box::new(self.lower_pass0(e))),
-            Sum(e) => Sum(Box::new(self.lower_pass0(e))),
-
-            // Two expression arguments with optional second
-            Max(a, b) => Max(
-                Box::new(self.lower_pass0(a)),
-                b.as_ref().map(|e| Box::new(self.lower_pass0(e))),
-            ),
-            Min(a, b) => Min(
-                Box::new(self.lower_pass0(a)),
-                b.as_ref().map(|e| Box::new(self.lower_pass0(e))),
-            ),
-
-            // Two required expression arguments
-            Step(a, b) => Step(Box::new(self.lower_pass0(a)), Box::new(self.lower_pass0(b))),
-
-            // Three expression arguments (last optional)
-            Quantum(a, b) => Quantum(Box::new(self.lower_pass0(a)), Box::new(self.lower_pass0(b))),
-            Pulse(a, b, c) => Pulse(
-                Box::new(self.lower_pass0(a)),
-                Box::new(self.lower_pass0(b)),
-                c.as_ref().map(|e| Box::new(self.lower_pass0(e))),
-            ),
-            Ramp(a, b, c) => Ramp(
-                Box::new(self.lower_pass0(a)),
-                Box::new(self.lower_pass0(b)),
-                c.as_ref().map(|e| Box::new(self.lower_pass0(e))),
-            ),
-            SafeDiv(a, b, c) => SafeDiv(
-                Box::new(self.lower_pass0(a)),
-                Box::new(self.lower_pass0(b)),
-                c.as_ref().map(|e| Box::new(self.lower_pass0(e))),
-            ),
-            Sshape(a, b, c) => Sshape(
-                Box::new(self.lower_pass0(a)),
-                Box::new(self.lower_pass0(b)),
-                Box::new(self.lower_pass0(c)),
-            ),
-
-            // Vec of expressions
-            Mean(exprs) => Mean(exprs.iter().map(|e| self.lower_pass0(e)).collect()),
-
-            // Lookup with string table name + expression
-            Lookup(name, e, loc) => Lookup(name.clone(), Box::new(self.lower_pass0(e)), *loc),
-            LookupForward(name, e, loc) => {
-                LookupForward(name.clone(), Box::new(self.lower_pass0(e)), *loc)
-            }
-            LookupBackward(name, e, loc) => {
-                LookupBackward(name.clone(), Box::new(self.lower_pass0(e)), *loc)
-            }
-
-            Rank(e, direction) => Rank(
-                Box::new(self.lower_pass0(e)),
-                Box::new(self.lower_pass0(direction)),
-            ),
-
-            // 0-arity builtins (no expressions to transform)
-            Inf => Inf,
-            Pi => Pi,
-            Time => Time,
-            TimeStep => TimeStep,
-            StartTime => StartTime,
-            FinalTime => FinalTime,
-
-            // IsModuleInput has string + loc, no Expr
-            IsModuleInput(name, loc) => IsModuleInput(name.clone(), *loc),
-
-            VectorSelect(a, b, c, d, e) => VectorSelect(
-                Box::new(self.lower_pass0(a)),
-                Box::new(self.lower_pass0(b)),
-                Box::new(self.lower_pass0(c)),
-                Box::new(self.lower_pass0(d)),
-                Box::new(self.lower_pass0(e)),
-            ),
-            VectorElmMap(a, b) => {
-                VectorElmMap(Box::new(self.lower_pass0(a)), Box::new(self.lower_pass0(b)))
-            }
-            VectorSortOrder(a, b) => {
-                VectorSortOrder(Box::new(self.lower_pass0(a)), Box::new(self.lower_pass0(b)))
-            }
-            AllocateAvailable(a, b, c) => AllocateAvailable(
-                Box::new(self.lower_pass0(a)),
-                Box::new(self.lower_pass0(b)),
-                Box::new(self.lower_pass0(c)),
-            ),
-            AllocateByPriority(a, b, c, d, e) => AllocateByPriority(
-                Box::new(self.lower_pass0(a)),
-                Box::new(self.lower_pass0(b)),
-                Box::new(self.lower_pass0(c)),
-                Box::new(self.lower_pass0(d)),
-                Box::new(self.lower_pass0(e)),
-            ),
-            // Single expression builtins replacing stdlib modules
-            Previous(a, b) => {
-                Previous(Box::new(self.lower_pass0(a)), Box::new(self.lower_pass0(b)))
-            }
-            Init(e) => Init(Box::new(self.lower_pass0(e))),
         }
     }
 
@@ -2230,203 +2107,43 @@ impl Context<'_> {
     }
 
     /// Lower a BuiltinFn<Expr3> to BuiltinFn (i.e., BuiltinFn<Expr>).
-    /// Handles array builtins that need preserve_wildcards_for_iteration.
+    ///
+    /// Which context lowers each argument is the table's `ArgKind`. A
+    /// reducer's array operand (`Array { whole: false }`) keeps wildcards for
+    /// iteration while an active-dimension reference still pins its axis, so
+    /// `SUM(matrix[DimA, *])` sums one row per element. A vector builtin's
+    /// array operand (`Array { whole: true }`) also promotes active-dimension
+    /// references back to wildcards, so `vals[DimA]` inside
+    /// `VECTOR SORT ORDER` keeps its full array view. A scalar, and a lookup's
+    /// table reference, lower in the enclosing context.
     fn lower_builtin_expr3(
         &self,
         builtin: &crate::builtins::BuiltinFn<Expr3>,
     ) -> Result<BuiltinFn> {
-        use crate::builtins::BuiltinFn as BFn;
-        Ok(match builtin {
-            BFn::Lookup(table_expr, index_expr, loc) => BuiltinFn::Lookup(
-                Box::new(self.lower_from_expr3(table_expr)?),
-                Box::new(self.lower_from_expr3(index_expr)?),
-                *loc,
-            ),
-            BFn::LookupForward(table_expr, index_expr, loc) => BuiltinFn::LookupForward(
-                Box::new(self.lower_from_expr3(table_expr)?),
-                Box::new(self.lower_from_expr3(index_expr)?),
-                *loc,
-            ),
-            BFn::LookupBackward(table_expr, index_expr, loc) => BuiltinFn::LookupBackward(
-                Box::new(self.lower_from_expr3(table_expr)?),
-                Box::new(self.lower_from_expr3(index_expr)?),
-                *loc,
-            ),
-            BFn::Abs(a) => BuiltinFn::Abs(Box::new(self.lower_from_expr3(a)?)),
-            BFn::Arccos(a) => BuiltinFn::Arccos(Box::new(self.lower_from_expr3(a)?)),
-            BFn::Arcsin(a) => BuiltinFn::Arcsin(Box::new(self.lower_from_expr3(a)?)),
-            BFn::Arctan(a) => BuiltinFn::Arctan(Box::new(self.lower_from_expr3(a)?)),
-            BFn::Cos(a) => BuiltinFn::Cos(Box::new(self.lower_from_expr3(a)?)),
-            BFn::Exp(a) => BuiltinFn::Exp(Box::new(self.lower_from_expr3(a)?)),
-            BFn::Inf => BuiltinFn::Inf,
-            BFn::Int(a) => BuiltinFn::Int(Box::new(self.lower_from_expr3(a)?)),
-            BFn::Round(a) => BuiltinFn::Round(Box::new(self.lower_from_expr3(a)?)),
-            BFn::IsModuleInput(id, loc) => BuiltinFn::IsModuleInput(id.clone(), *loc),
-            BFn::Ln(a) => BuiltinFn::Ln(Box::new(self.lower_from_expr3(a)?)),
-            BFn::Log10(a) => BuiltinFn::Log10(Box::new(self.lower_from_expr3(a)?)),
-            BFn::Max(a, b) => {
-                if b.is_none() {
-                    // Single-arg array Max: preserve wildcards for iteration
-                    let a = self.with_preserved_wildcards().lower_from_expr3(a)?;
-                    BuiltinFn::Max(Box::new(a), None)
-                } else {
-                    // Two-arg scalar Max
-                    let a = Box::new(self.lower_from_expr3(a)?);
-                    let b = Some(Box::new(self.lower_from_expr3(b.as_ref().unwrap())?));
-                    BuiltinFn::Max(a, b)
-                }
+        let mut whole_ctx: Option<Context<'_>> = None;
+        let mut lowered = builtin.try_map_ref_with_kinds(|arg, kind| match kind {
+            ArgKind::Array { whole: false } => {
+                self.with_preserved_wildcards().lower_from_expr3(arg)
             }
-            BFn::Mean(args) => {
-                // Mean can be used with arrays - preserve wildcards
-                let ctx = self.with_preserved_wildcards();
-                let args = args
-                    .iter()
-                    .map(|arg| ctx.lower_from_expr3(arg))
-                    .collect::<Result<Vec<Expr>>>();
-                BuiltinFn::Mean(args?)
-            }
-            BFn::Min(a, b) => {
-                if b.is_none() {
-                    // Single-arg array Min: preserve wildcards for iteration
-                    let a = self.with_preserved_wildcards().lower_from_expr3(a)?;
-                    BuiltinFn::Min(Box::new(a), None)
-                } else {
-                    // Two-arg scalar Min
-                    let a = Box::new(self.lower_from_expr3(a)?);
-                    let b = Some(Box::new(self.lower_from_expr3(b.as_ref().unwrap())?));
-                    BuiltinFn::Min(a, b)
-                }
-            }
-            BFn::Pi => BuiltinFn::Pi,
-            BFn::Quantum(a, b) => BuiltinFn::Quantum(
-                Box::new(self.lower_from_expr3(a)?),
-                Box::new(self.lower_from_expr3(b)?),
-            ),
-            BFn::Pulse(a, b, c) => {
-                let c = match c {
-                    Some(c) => Some(Box::new(self.lower_from_expr3(c)?)),
-                    None => None,
-                };
-                BuiltinFn::Pulse(
-                    Box::new(self.lower_from_expr3(a)?),
-                    Box::new(self.lower_from_expr3(b)?),
-                    c,
-                )
-            }
-            BFn::Ramp(a, b, c) => {
-                let c = match c {
-                    Some(c) => Some(Box::new(self.lower_from_expr3(c)?)),
-                    None => None,
-                };
-                BuiltinFn::Ramp(
-                    Box::new(self.lower_from_expr3(a)?),
-                    Box::new(self.lower_from_expr3(b)?),
-                    c,
-                )
-            }
-            BFn::SafeDiv(a, b, c) => {
-                let c = match c {
-                    Some(c) => Some(Box::new(self.lower_from_expr3(c)?)),
-                    None => None,
-                };
-                BuiltinFn::SafeDiv(
-                    Box::new(self.lower_from_expr3(a)?),
-                    Box::new(self.lower_from_expr3(b)?),
-                    c,
-                )
-            }
-            BFn::Sign(a) => BuiltinFn::Sign(Box::new(self.lower_from_expr3(a)?)),
-            BFn::Sin(a) => BuiltinFn::Sin(Box::new(self.lower_from_expr3(a)?)),
-            BFn::Sshape(a, b, c) => BuiltinFn::Sshape(
-                Box::new(self.lower_from_expr3(a)?),
-                Box::new(self.lower_from_expr3(b)?),
-                Box::new(self.lower_from_expr3(c)?),
-            ),
-            BFn::Sqrt(a) => BuiltinFn::Sqrt(Box::new(self.lower_from_expr3(a)?)),
-            BFn::Step(a, b) => BuiltinFn::Step(
-                Box::new(self.lower_from_expr3(a)?),
-                Box::new(self.lower_from_expr3(b)?),
-            ),
-            BFn::Tan(a) => BuiltinFn::Tan(Box::new(self.lower_from_expr3(a)?)),
-            BFn::Time => BuiltinFn::Time,
-            BFn::TimeStep => BuiltinFn::TimeStep,
-            BFn::StartTime => BuiltinFn::StartTime,
-            BFn::FinalTime => BuiltinFn::FinalTime,
-            BFn::Rank(arr, direction) => {
-                let ctx = self.with_vector_builtin_wildcards();
-                let lowered_arr = Box::new(ctx.lower_from_expr3(arr)?);
-                let lowered_direction = Box::new(self.lower_from_expr3(direction)?);
-                BuiltinFn::Rank(lowered_arr, lowered_direction)
-            }
-            BFn::Size(a) => {
-                // Preserve wildcards for array iteration
-                let a = self.with_preserved_wildcards().lower_from_expr3(a)?;
-                BuiltinFn::Size(Box::new(a))
-            }
-            BFn::Stddev(a) => {
-                let a = self.with_preserved_wildcards().lower_from_expr3(a)?;
-                BuiltinFn::Stddev(Box::new(a))
-            }
-            BFn::Sum(a) => {
-                let a = self.with_preserved_wildcards().lower_from_expr3(a)?;
-                BuiltinFn::Sum(Box::new(a))
-            }
-            BFn::VectorSelect(sel, expr, max_val, action, err) => {
-                let ctx = self.with_vector_builtin_wildcards();
-                BuiltinFn::VectorSelect(
-                    Box::new(ctx.lower_from_expr3(sel)?),
-                    Box::new(ctx.lower_from_expr3(expr)?),
-                    Box::new(self.lower_from_expr3(max_val)?),
-                    Box::new(self.lower_from_expr3(action)?),
-                    Box::new(self.lower_from_expr3(err)?),
-                )
-            }
-            BFn::VectorElmMap(src, offs) => {
-                let ctx = self.with_vector_builtin_wildcards();
-                BuiltinFn::VectorElmMap(
-                    Box::new(ctx.lower_from_expr3(src)?),
-                    Box::new(ctx.lower_from_expr3(offs)?),
-                )
-            }
-            BFn::VectorSortOrder(arr, dir) => {
-                let ctx = self.with_vector_builtin_wildcards();
-                BuiltinFn::VectorSortOrder(
-                    Box::new(ctx.lower_from_expr3(arr)?),
-                    Box::new(self.lower_from_expr3(dir)?),
-                )
-            }
-            BFn::AllocateAvailable(req, pp, avail) => {
-                let ctx = self.with_vector_builtin_wildcards();
-                let lowered_req = ctx.lower_from_expr3(req)?;
-                // The pp argument needs the full 2D array (requester_dim x XPriority).
-                // In Vensim, pp[region, ptype] means "priority_vector starting from ptype",
-                // but ALLOCATE AVAILABLE reads all 4 XPriority columns for each requester.
-                // Lower pp normally, then expand any single-element-collapsed dimensions
-                // back to full wildcards by replacing the view with a full-array view.
-                let lowered_pp = ctx.lower_from_expr3(pp)?;
-                let lowered_pp = self.expand_pp_view_for_allocate(pp, lowered_pp)?;
-                BuiltinFn::AllocateAvailable(
-                    Box::new(lowered_req),
-                    Box::new(lowered_pp),
-                    Box::new(self.lower_from_expr3(avail)?),
-                )
-            }
-            BFn::AllocateByPriority(req, priority, size, width, supply) => {
-                let ctx = self.with_vector_builtin_wildcards();
-                BuiltinFn::AllocateByPriority(
-                    Box::new(ctx.lower_from_expr3(req)?),
-                    Box::new(ctx.lower_from_expr3(priority)?),
-                    Box::new(self.lower_from_expr3(size)?),
-                    Box::new(self.lower_from_expr3(width)?),
-                    Box::new(self.lower_from_expr3(supply)?),
-                )
-            }
-            BFn::Previous(a, b) => BuiltinFn::Previous(
-                Box::new(self.lower_from_expr3(a)?),
-                Box::new(self.lower_from_expr3(b)?),
-            ),
-            BFn::Init(a) => BuiltinFn::Init(Box::new(self.lower_from_expr3(a)?)),
-        })
+            ArgKind::Array { whole: true } => whole_ctx
+                .get_or_insert_with(|| self.with_vector_builtin_wildcards())
+                .lower_from_expr3(arg),
+            ArgKind::Scalar | ArgKind::Table => self.lower_from_expr3(arg),
+            ArgKind::Ident => unreachable!("an identifier payload is not an expression argument"),
+        })?;
+        // ALLOCATE AVAILABLE reads all four XPriority columns for each
+        // requester, while the Vensim convention spells the argument collapsed
+        // (`pp[region, ptype]` means "the priority vector starting from
+        // ptype"), so the lowered profile is re-expanded to the variable's
+        // full requester x XPriority array.
+        if let (
+            crate::builtins::BuiltinFn::AllocateAvailable(_, pp, _),
+            BuiltinFn::AllocateAvailable(_, lowered_pp, _),
+        ) = (builtin, &mut lowered)
+        {
+            self.expand_pp_view_for_allocate(pp, lowered_pp)?;
+        }
+        Ok(lowered)
     }
 
     /// For ALLOCATE AVAILABLE's pp argument, ensure the full variable array
@@ -2435,37 +2152,34 @@ impl Context<'_> {
     /// all XPriority columns for each requester.  If lowering produced a
     /// StaticSubscript that collapsed some dimensions (e.g. only region but
     /// not XPriority), replace it with a full-variable view.
-    fn expand_pp_view_for_allocate(&self, expr3: &Expr3, lowered: Expr) -> Result<Expr> {
+    fn expand_pp_view_for_allocate(&self, expr3: &Expr3, lowered: &mut Expr) -> Result<()> {
         // Only expand if the lowered expression is a subscripted variable
         // with fewer dimensions than the full variable.
-        let (current_view, loc) = match &lowered {
-            Expr::StaticSubscript(_, view, loc) => (Some(view), *loc),
-            Expr::Var(_, loc) => (None, *loc),
-            _ => return Ok(lowered),
+        let (current_ndims, loc) = match &*lowered {
+            Expr::StaticSubscript(_, view, loc) => (view.dims.len(), *loc),
+            Expr::Var(_, loc) => (0, *loc),
+            _ => return Ok(()),
         };
 
         // Find the variable identifier from the Expr3 to look up full dimensions
         let var_ident = match expr3 {
             Expr3::Subscript(id, _, _, _) => id,
             Expr3::Var(id, _, _) => id,
-            _ => return Ok(lowered),
+            _ => return Ok(()),
         };
 
         let metadata = match self.get_metadata(var_ident) {
             Ok(m) => m,
-            Err(_) => return Ok(lowered),
+            Err(_) => return Ok(()),
         };
 
         let full_dims = match metadata.var.get_dimensions() {
             Some(d) => d,
-            None => return Ok(lowered),
+            None => return Ok(()),
         };
 
-        let full_ndims = full_dims.len();
-        let current_ndims = current_view.map(|v| v.dims.len()).unwrap_or(0);
-
-        if current_ndims >= full_ndims {
-            return Ok(lowered);
+        if current_ndims >= full_dims.len() {
+            return Ok(());
         }
 
         // The view has fewer dimensions than the full variable -- some were
@@ -2479,7 +2193,8 @@ impl Context<'_> {
         let dim_sizes: Vec<usize> = full_dims.iter().map(|d| d.len()).collect();
         let dim_names: Vec<String> = full_dims.iter().map(|d| d.name().to_string()).collect();
         let view = ArrayView::contiguous_with_names(dim_sizes, dim_names);
-        Ok(Expr::StaticSubscript(base, view, loc))
+        *lowered = Expr::StaticSubscript(base, view, loc);
+        Ok(())
     }
 
     /// Lower an IndexExpr3 to SubscriptIndex for dynamic subscript handling.

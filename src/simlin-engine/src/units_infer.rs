@@ -603,6 +603,8 @@ impl UnitInferer<'_> {
 
                 Units::Explicit(units)
             }
+            // Per-variant semantics: each builtin's unit rule -- which argument
+            // carries the result's units, which constraints its arguments share.
             Expr2::App(builtin, _, _) => match builtin {
                 BuiltinFn::Inf | BuiltinFn::Pi => Units::Constant,
                 BuiltinFn::Time

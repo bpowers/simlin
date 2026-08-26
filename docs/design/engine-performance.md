@@ -56,6 +56,14 @@ across six independent build+run pairs of identical source:
 | cycles, quiet machine | 1.65% | 1.7 sigma |
 | cycles, machine under load | 9.9%–11% | 0.24 sigma |
 
+Those floors are the C-LEARN *run* on the Ryzen test machine. The whole-process
+*compile* measurement the compiler-unification ledger uses
+(`CLEARN_PROFILE=compile CLEARN_COMPILE_ITERS=5 perf stat -e instructions`, a
+single binary, Apple M-series) has a wider instruction-channel floor: 0.13%
+across nine identical-binary runs, so a compile delta under ~0.15% is
+unresolved there and needs interleaved A/B pairs with every run on one side
+landing on one side of every run on the other.
+
 So a few-percent effect is resolved by one build pair on the instruction
 channel and is **not** resolvable on the cycles channel without a deliberate
 protocol. Reaching for multi-build A/Bs to establish an instruction-count

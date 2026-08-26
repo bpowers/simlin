@@ -599,13 +599,11 @@ pub(crate) enum BuiltinId {
     Arctan,
     Cos,
     Exp,
-    Inf,
     Int,
     Ln,
     Log10,
     Max,
     Min,
-    Pi,
     Pulse,
     Quantum,
     Ramp,
@@ -635,8 +633,8 @@ impl BuiltinId {
     /// arm names -- and the match is exhaustive with no `_`, so a new builtin
     /// cannot be added without deciding its arity here.
     ///
-    /// `Inf`/`Pi` are 0: codegen returns early for both (they lower to a
-    /// `LoadConstant`), so no `Apply` opcode carrying them is ever emitted.
+    /// `INF` and `PI` have no id: they lower to a `LoadConstant`, so no
+    /// `Apply` opcode ever carries them.
     /// The three genuinely-3-operand builtins whose LAST operand is optional in
     /// the source language stay 3, because codegen substitutes a real value
     /// rather than a pad: `PULSE`'s third defaults to `0` and `apply` reads it,
@@ -660,7 +658,6 @@ impl BuiltinId {
             | BuiltinId::Tan => 1,
             BuiltinId::Max | BuiltinId::Min | BuiltinId::Quantum | BuiltinId::Step => 2,
             BuiltinId::Pulse | BuiltinId::Ramp | BuiltinId::SafeDiv | BuiltinId::Sshape => 3,
-            BuiltinId::Inf | BuiltinId::Pi => 0,
         }
     }
 }
@@ -4073,11 +4070,9 @@ mod tests {
             (BuiltinId::Ramp, 3),
             (BuiltinId::SafeDiv, 3),
             (BuiltinId::Sshape, 3),
-            (BuiltinId::Inf, 0),
-            (BuiltinId::Pi, 0),
         ];
-        // 24 = every variant of BuiltinId. A new builtin must add a row.
-        assert_eq!(rows.len(), 24);
+        // 22 = every variant of BuiltinId. A new builtin must add a row.
+        assert_eq!(rows.len(), 22);
         for (id, want) in rows {
             assert_eq!(id.arity(), *want, "arity of {id:?}");
         }

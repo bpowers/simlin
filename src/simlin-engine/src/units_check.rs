@@ -71,6 +71,8 @@ impl UnitEvaluator<'_> {
 
                 Ok(Units::Explicit(units.clone()))
             }
+            // Per-variant semantics: each builtin's unit rule -- which argument
+            // carries the result's units, which are unconstrained inputs.
             Expr2::App(builtin, _, _) => {
                 match builtin {
                     BuiltinFn::Inf | BuiltinFn::Pi => Ok(Units::Constant),

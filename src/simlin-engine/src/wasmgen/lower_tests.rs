@@ -1996,12 +1996,6 @@ fn apply_pulse_across_intervals() {
 }
 
 #[test]
-fn apply_inf_pi() {
-    assert_apply_exact(BuiltinId::Inf, 0.0, 0.0, 0.0, 0.0, 1.0, f64::INFINITY);
-    assert_apply_exact(BuiltinId::Pi, 0.0, 0.0, 0.0, 0.0, 1.0, std::f64::consts::PI);
-}
-
-#[test]
 fn apply_inside_if_does_not_clobber_condition() {
     // An `Apply` in an If arm shares the function with the condition local;
     // the dedicated apply locals must not collide. `ABS` has arity 1, so

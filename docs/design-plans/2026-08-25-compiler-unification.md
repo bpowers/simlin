@@ -29,7 +29,7 @@ consumer of the unified machinery, never as a special case left behind.
 Out of scope, deliberately: a reference evaluator for `compiler::Expr`
 (revisit after this work lands -- the previous one was churn to maintain;
 golden `test/` outputs remain the oracle), and loop-form lowering of
-apply-to-all equations (filed as its own GitHub issue; sequenced after this
+apply-to-all equations (GH #1025; sequenced after this
 branch).
 
 ## Definition of Done
@@ -182,21 +182,46 @@ lists are directional and finalized by the implementing teammate.
 **Builtin table (`builtins.rs`, Phase 1).**
 
 ```rust
-pub enum ArgKind { Scalar, Array, Table, Ident }       // how a position participates in array lowering
-pub enum ResultKind { Scalar, Elementwise, Array }    // Array = needs a temp (VECTOR*, RANK, ALLOCATE*)
+pub enum ArgKind { Scalar, Array { whole: bool }, Table, Ident }  // how a position participates in array lowering
+pub enum ResultKind { Scalar, Elementwise, Array { shape_from: u8 } } // Array = a temp sized by argument `shape_from`
 pub enum Invariance { Pure, TimeDependent, Lagged, Snapshot }
-pub struct BuiltinSig { name, min_args, max_args, arg_kinds: &'static [ArgKind],
-                        result: ResultKind, reducer: bool, invariance: Invariance }
+pub struct BuiltinSig { name, aliases: &'static [&'static str], min_args: u8, max_args: Option<u8>,
+                        arg_kinds: &'static [ArgKind], unary_reduces: bool,
+                        result: ResultKind, invariance: Invariance }
+impl BuiltinSig { pub const ALL: [&'static BuiltinSig; 44]; pub fn by_name(&str) -> Option<&'static BuiltinSig>;
+                  pub fn accepts_arity(&self, n: usize) -> bool }
 impl<E> BuiltinFn<E> {
     pub fn signature(&self) -> &'static BuiltinSig;
+    pub fn name(&self) -> &'static str;                  // signature().name
     pub fn args(&self) -> SmallVec<[&E; 5]>;
     pub fn args_mut(&mut self) -> SmallVec<[&mut E; 5]>;
+    pub fn is_unary_reduction(&self) -> bool;            // unary_reduces && one argument
+    pub fn arg_kinds(&self) -> SmallVec<[ArgKind; 5]>;   // aligned with args(); applies the unary-reduction rule
+    pub fn args_with_kinds(&self) -> impl Iterator<Item = (&E, ArgKind)>;
+    pub fn result_kind(&self) -> ResultKind;
+    pub fn has_array_operand(&self) -> bool;
+    pub fn try_map / map (self, f), try_map_ref / map_ref (&self, f), map_with_kinds, try_map_ref_with_kinds
 }
 ```
 
-The existing `map`/`try_map`/`for_each_expr_ref` stay and are implemented via
-`args_mut`. `BuiltinId::arity()` (`bytecode.rs`) is the precedent and keeps
-its role for the VM's 24 scalar builtins.
+`Array { whole }` distinguishes a vector builtin's operand (read whole,
+independent of the enclosing apply-to-all element) from a reducer's (the
+enclosing element pins the axes it names). `unary_reduces` states that the
+one-argument `MAX`/`MIN`/`MEAN` reduce an array (XMILE 3.7.1.3: `MAX(A)`
+"extends MAX(x, y)", `MEAN(A)` is `SUM(A)/SIZE(A)`); the n-ary forms are
+Simlin's scalar rule -- section 3.5's `MAX(x, y)`/`MIN(x, y)` and Stella's
+scalar n-ary `MEAN` (`test/test-models/tests/builtin_mean/builtin_mean.stmx`)
+-- and the spec's mixed `MAX(A, 0)` ("2: any mix of arrays and scalars") is
+not implemented (GH #1026). `arg_kinds()`/`result_kind()` apply the rule to
+the value at hand, which is why they are methods on the call rather than
+fields. `max_args: None` is the variadic `MEAN`; `Ident` is `isModuleInput`'s
+identifier payload, which counts in the source arity but is not an argument
+expression. `try_map`/`try_map_ref` are one macro body expanded by value and by
+reference (the rebuild changes the expression type, so it cannot be written
+over `args_mut`); `args`/`args_mut` are likewise one body; `for_each_expr_ref`
+and `walk_builtin_expr` read `args()`. `BuiltinId::arity()` (`bytecode.rs`) is
+the precedent and keeps its role for the VM's 22 `Apply` builtins (`INF` and
+`PI` lower to `LoadConstant` and carry no id).
 
 **Fragment input (`db/var_fragment.rs` -> `compiler/`, Phase 3).**
 
@@ -554,6 +579,46 @@ default if unanswered is to keep it compiling and narrow its surface.
 decisions and their new homes is appended here by the Phase 7 teammate before
 code moves. (Placeholder until then.)
 
+**Phase 1 semantic divergences.** Making the signature table the one statement
+of per-builtin facts changed how four edge shapes compile. None occurs in the
+corpus (C-LEARN artifacts are identical); each is pinned:
+
+1. A bare arrayed LOOKUP table reference (`LOOKUP(g, t)` with a per-element
+   `g`) resolves under pass 0 exactly as a bare arrayed variable does: the
+   enclosing apply-to-all element pins the axes it iterates and every other
+   axis is a wildcard. So `out[COP] = LOOKUP(g, t)` over `g[COP]` and
+   `cell[COP,ROW] = LOOKUP(g, t)` over `g[COP,ROW]` apply each element's own
+   table (both were process aborts), and `out[COP] = SUM(LOOKUP(g, t))` over
+   `g[COP,ROW]` sums the element's row (was the sum of the whole table). An
+   array-valued apply assigned to one slot (`s = LOOKUP(g, t)`) is refused
+   with a diagnostic (was a process abort). Pinned by
+   `per_element_gf_tests::bare_one_dim_table_in_a_matching_a2a_equation_applies_each_elements_table`,
+   `bare_two_dim_table_in_a_matching_a2a_equation_applies_each_cells_table`,
+   `bare_two_dim_table_under_a_reducer_sums_the_elements_own_row`, and
+   `array_valued_table_apply_assigned_to_one_slot_is_refused_not_aborted`.
+2. Every position of an n-ary `MEAN` is `ArgKind::Scalar`, so an array-shaped
+   operand is refused (was a process abort in the scalar-mean emitter) and
+   `MEAN(a[@1], b[@2])` lowers exactly as `MAX(a[@1], b[@2])` does (was
+   uncompilable). Pinned by
+   `builtin_signature_tests::n_ary_mean_over_array_operands_is_refused_not_aborted`
+   and `n_ary_mean_lowers_its_operands_as_scalars_like_n_ary_max`.
+3. `RANK`'s array argument is `Array { whole: true }` like
+   `VECTOR SORT ORDER`'s, so it opens the `Expr2` dimension-union gate:
+   `out[X,Y] = RANK(a[*] + b[*], 1)` compiles (was `MismatchedDimensions`),
+   and the incomparable apply-to-all spelling is refused exactly as the
+   `VECTOR SORT ORDER` twin is. Pinned by
+   `builtin_signature_tests::rank_accepts_the_cross_dimension_operand_vector_sort_order_accepts`
+   and `rank_and_vector_sort_order_refuse_the_same_incomparable_a2a_operand`.
+   The same fact closes a pre-existing divergence between the LTM pass-1 gate
+   (`db/ltm/compile.rs`) and Pass 1 itself: the gate classified `RANK` as
+   non-decomposing while Pass 1 decomposed its argument (GH #995), so an LTM
+   fragment embedding `RANK(<computed array>, d)` took the unscoped lower.
+   Pinned by `pass1_gate_covers_each_decomposition_builtin`.
+4. `ISMODULEINPUT` spelled with zero or two arguments is `BadBuiltinArgs`
+   (was `ExpectedIdent`, and silently accepted with the second argument
+   dropped). Pinned by
+   `ast::expr1::tests::constructor_admits_exactly_the_signatures_arity_range`.
+
 **Risks.** Phase 6(b) and Phase 7 are the two places where artifact shape
 changes are expected; both rely on the corpus as oracle and must report opcode
 and temp deltas in the ledger. Phase 7 changes salsa keying; the determinism
@@ -562,8 +627,11 @@ suites and the execution-count tests are the guard.
 ## Measured
 
 Ledger rows are appended by each phase's teammate. Every compile-cost number
-is retired instructions unless the row says otherwise.
+is retired instructions unless the row says otherwise. A phase row names its
+commit by subject line: the row is written before the commit exists, so the
+hash is not available to it.
 
 | phase | commit | cold compile Ir | slots | opcodes (flow / stock / init) | literals / GFs / temps / views | notes |
 |---|---|---:|---:|---|---|---|
-| baseline | `867f2e63` | (Phase 1 records) | | | | release, `opt-level=3`, mimalloc |
+| baseline | `867f2e63` | 10.788 G (median of 9; range 10.778-10.791) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | retired instructions, `perf stat -e instructions` (user space, whole process: parse, one measured compile, five `CLEARN_COMPILE_ITERS` compiles, one VM run), `CLEARN_PROFILE=compile`; release `opt-level=3` + LTO, mimalloc; 371 names, 7 modules; 1174 initials |
+| 1 | `engine: one signature table of per-builtin facts` | 10.753 G (median of 4; range 10.748-10.755), -0.30% (interleaved pairs -0.34 / -0.28 / -0.34%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN: every count above, the 371 names and 7 modules, and the full opcode histogram; same channel and flags as the baseline row; the saving is `try_map_ref` lowering `Expr2` builtins without cloning them; four edge-shape divergences, pinned (Additional Considerations, "Phase 1 semantic divergences") |

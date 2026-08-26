@@ -2,7 +2,28 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+//! The typed builtin-function AST node and the one table of per-builtin facts.
+//!
+//! [`BuiltinFn::signature`] is the single statement of what each builtin IS --
+//! its name and aliases, its source arity, how each argument position takes
+//! part in array lowering ([`ArgKind`]), the shape of its result
+//! ([`ResultKind`]) and how its value relates to simulation time
+//! ([`Invariance`]). [`BuiltinFn::args`] / [`BuiltinFn::args_mut`] give every
+//! consumer a uniform view of the argument expressions, so a pass that only
+//! needs "visit every argument" or "which positions are arrays" reads the table
+//! instead of enumerating the variants. The exhaustive matches that remain
+//! elsewhere in the crate each encode per-variant semantics (which opcode,
+//! which unit rule, which argument shapes the result) and say so.
+//!
+//! `BuiltinId::arity()` in `bytecode.rs` is the VM-side twin of this table for
+//! the 22 builtins that execute through `Opcode::Apply`.
+
 use std::fmt;
+use std::sync::LazyLock;
+
+use smallvec::SmallVec;
+
+use crate::common::IdentMap;
 
 /// Loc describes a location in an equation by the starting point and ending point.
 /// Equations are strings typed by humans for a single variable -- u16 is long enough.
@@ -126,154 +147,829 @@ pub enum BuiltinFn<Expr> {
     Init(Box<Expr>),
 }
 
-impl<Expr> BuiltinFn<Expr> {
-    pub fn name(&self) -> &'static str {
-        use BuiltinFn::*;
-        match self {
-            Lookup(_, _, _) => "lookup",
-            LookupForward(_, _, _) => "lookup_forward",
-            LookupBackward(_, _, _) => "lookup_backward",
-            Abs(_) => "abs",
-            Arccos(_) => "arccos",
-            Arcsin(_) => "arcsin",
-            Arctan(_) => "arctan",
-            Cos(_) => "cos",
-            Exp(_) => "exp",
-            Inf => "inf",
-            Int(_) => "int",
-            IsModuleInput(_, _) => "ismoduleinput",
-            Ln(_) => "ln",
-            Log10(_) => "log10",
-            Max(_, _) => "max",
-            Mean(_) => "mean",
-            Min(_, _) => "min",
-            Pi => "pi",
-            Pulse(_, _, _) => "pulse",
-            Quantum(_, _) => "quantum",
-            Ramp(_, _, _) => "ramp",
-            Round(_) => "round",
-            SafeDiv(_, _, _) => "safediv",
-            Sign(_) => "sign",
-            Sshape(_, _, _) => "sshape",
-            Sin(_) => "sin",
-            Sqrt(_) => "sqrt",
-            Step(_, _) => "step",
-            Tan(_) => "tan",
-            Time => "time",
-            TimeStep => "time_step",
-            StartTime => "initial_time",
-            FinalTime => "final_time",
-            // array only builtins
-            Rank(_, _) => "rank",
-            Size(_) => "size",
-            Stddev(_) => "stddev",
-            Sum(_) => "sum",
-            VectorSelect(_, _, _, _, _) => "vector_select",
-            VectorElmMap(_, _) => "vector_elm_map",
-            VectorSortOrder(_, _) => "vector_sort_order",
-            AllocateAvailable(_, _, _) => "allocate_available",
-            AllocateByPriority(_, _, _, _, _) => "allocate_by_priority",
-            // builtins replacing stdlib modules
-            Previous(_, _) => "previous",
-            Init(_) => "init",
-        }
+/// How one argument position takes part in array lowering.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ArgKind {
+    /// A scalar value, evaluated once per element of the enclosing equation.
+    Scalar,
+    /// An array the builtin consumes as one operand: Pass 1
+    /// (`ast::expr3::Pass1Context`) materializes a computed expression in this
+    /// position into a temp, the post-lowering materializer
+    /// (`compiler::array_operand`) does the same for what Pass 1 could not
+    /// see, codegen reads the position as a view, and `Expr2` lowering lets
+    /// sub-expressions inside it union disjoint named dimensions
+    /// (`SUM(a[*] + h[*])` over `a[DimA]` and `h[DimC]` is a cross-product
+    /// sum).
+    ///
+    /// `whole` says how an apply-to-all element reference inside the operand
+    /// resolves. `true`: the builtin reads the argument's entire storage
+    /// regardless of the enclosing element, so `vals[D]` in an equation over
+    /// `D` is promoted back to the full axis (`VECTOR SORT ORDER`, `RANK`,
+    /// `VECTOR ELM MAP`, `VECTOR SELECT`, `ALLOCATE *`). `false`: the
+    /// enclosing element pins the axes it names and the builtin iterates the
+    /// rest, so `SUM(matrix[D, *])` in an equation over `D` sums one row per
+    /// element (the reducers).
+    Array { whole: bool },
+    /// The graphical-function identity of a `LOOKUP` family call: a reference
+    /// to the gf-bearing variable, laid out at compile time, not a runtime
+    /// value. The stages treat it as follows, and a stage added later (the
+    /// Phase 6 materializer among them) inherits the same rule:
+    ///
+    /// - pass 0 (`Context::lower_pass0`) resolves a BARE arrayed table
+    ///   reference exactly as it resolves a bare arrayed variable -- the
+    ///   enclosing apply-to-all element pins the axes it iterates and every
+    ///   other axis becomes a wildcard (`make_dimension_subscripts`), so
+    ///   `out[COP] = LOOKUP(g, t)` over `g[COP]` applies each element's table
+    ///   and `out[COP] = SUM(LOOKUP(g, t))` over `g[COP, ROW]` sums the
+    ///   element's row (pinned in `per_element_gf_tests`);
+    /// - Pass 1 (`ast::expr3::Pass1Context`) neither rewrites the position nor
+    ///   reads an apply-to-all reference out of it; its one table-aware step is
+    ///   the arrayed-GF apply decomposition, which reads the table's bounds;
+    /// - `Context::lower_builtin_expr3` lowers it in the enclosing context;
+    /// - `compiler::array_operand::materialize_view_operands` leaves it alone
+    ///   (a temp carries no graphical functions);
+    /// - codegen reads the table's base off the lowered reference
+    ///   (`extract_table_info`, `arrayed_lookup_table_info`);
+    /// - dependency and causal walkers see it as
+    ///   [`BuiltinContents::LookupTable`], a non-edge.
+    Table,
+    /// `isModuleInput(x)`'s payload: a bare identifier the parser keeps as a
+    /// `String`, never an expression. It counts toward the source arity but
+    /// yields no entry from [`BuiltinFn::args`] or [`BuiltinFn::arg_kinds`].
+    Ident,
+}
+
+/// The shape of a builtin's result, as the apply-to-all hoister and the array
+/// materializer read it.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ResultKind {
+    /// One number: the reducers, `VECTOR SELECT`, the lookups, the nullaries.
+    Scalar,
+    /// The join of its argument shapes: an elementwise builtin is applied
+    /// inside a `BeginIter` body, so its result has whatever shape its
+    /// arguments carry.
+    Elementwise,
+    /// An array a dedicated opcode writes into a temp (`VECTOR ELM MAP`,
+    /// `VECTOR SORT ORDER`, `RANK`, `ALLOCATE *`); `shape_from` is the
+    /// position of the argument whose view sizes that temp.
+    Array { shape_from: u8 },
+}
+
+/// How a builtin's value relates to simulation time, read by the
+/// run-invariance classifier (`compiler::invariance`) and by the dt-time
+/// dependency walk that feeds it (`db::assemble::collect_expr_refs`).
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Invariance {
+    /// A pure function of its arguments -- invariant iff every argument is.
+    /// The fixed time globals `DT`/`INITIAL TIME`/`FINAL TIME` are here too:
+    /// they have no arguments and do not change across a run.
+    Pure,
+    /// Varies with time even when every argument is constant: `TIME`,
+    /// `PULSE`, `RAMP`, `STEP`.
+    TimeDependent,
+    /// Reads the previous step's snapshot (`PREVIOUS`): variant whatever its
+    /// argument is, and the argument is not a dt-time read of the variable.
+    Lagged,
+    /// Reads the initial-values snapshot (`INIT`): invariant whatever its
+    /// argument is, because that buffer is frozen after the initials phase,
+    /// so the argument is not a dt-time dependency.
+    Snapshot,
+}
+
+/// Everything the compiler knows about one builtin function that is not the
+/// argument expressions themselves. One `static` per [`BuiltinFn`] variant,
+/// reached through [`BuiltinFn::signature`] and listed in
+/// [`BuiltinSig::ALL`].
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+pub struct BuiltinSig {
+    /// The canonical lowercase name, as the lexer produces it and as
+    /// [`BuiltinFn::name`] reports it.
+    pub name: &'static str,
+    /// Other spellings the parser accepts for the same builtin.
+    pub aliases: &'static [&'static str],
+    /// The fewest arguments a call may spell (the source arity; an
+    /// [`ArgKind::Ident`] position counts).
+    pub min_args: u8,
+    /// The most arguments a call may spell; `None` for a variadic builtin.
+    pub max_args: Option<u8>,
+    /// One kind per position of the call as written, up to `max_args`. A
+    /// variadic builtin lists one kind, which every position takes. For a
+    /// builtin whose one-argument form is a reduction (`unary_reduces`) these
+    /// are the kinds of the n-ary form; [`BuiltinFn::arg_kinds`] applies the
+    /// reduction rule for the value at hand.
+    pub arg_kinds: &'static [ArgKind],
+    /// The one-argument form is an array reduction: its single argument is
+    /// `ArgKind::Array { whole: false }` and its result `ResultKind::Scalar`,
+    /// whatever `arg_kinds` and `result` say for the n-ary form. XMILE v1.0
+    /// section 3.7.1.3 defines `MAX(A)` / `MIN(A)` this way ("extends
+    /// MAX(x, y)") and `MEAN(A)` as `SUM(A)/SIZE(A)`; the n-ary forms HERE are
+    /// the scalar `MAX(x, y)` / `MIN(x, y)` of section 3.5 and Stella's scalar
+    /// mean of the arguments. The spec's mixed form -- 3.7.1.3's second
+    /// parameter "any mix of arrays and scalars", `MAX(A, 0)` reducing over `A`
+    /// and `0` -- is not implemented (GH #1026).
+    pub unary_reduces: bool,
+    /// The shape of the result of the n-ary form (see `unary_reduces`).
+    pub result: ResultKind,
+    pub invariance: Invariance,
+}
+
+const SCALAR: ArgKind = ArgKind::Scalar;
+/// A reducer's operand: the enclosing apply-to-all element pins its axes.
+const REDUCED: ArgKind = ArgKind::Array { whole: false };
+/// A vector builtin's operand: read whole, independent of the enclosing element.
+const WHOLE: ArgKind = ArgKind::Array { whole: true };
+
+const fn sig(
+    name: &'static str,
+    min_args: u8,
+    max_args: Option<u8>,
+    arg_kinds: &'static [ArgKind],
+    result: ResultKind,
+    invariance: Invariance,
+) -> BuiltinSig {
+    BuiltinSig {
+        name,
+        aliases: &[],
+        min_args,
+        max_args,
+        arg_kinds,
+        unary_reduces: false,
+        result,
+        invariance,
+    }
+}
+
+/// A one-argument elementwise function of a scalar.
+const fn unary_math(name: &'static str) -> BuiltinSig {
+    sig(
+        name,
+        1,
+        Some(1),
+        &[SCALAR],
+        ResultKind::Elementwise,
+        Invariance::Pure,
+    )
+}
+
+/// A one-argument array reduction to a scalar.
+const fn reducer(name: &'static str) -> BuiltinSig {
+    sig(
+        name,
+        1,
+        Some(1),
+        &[REDUCED],
+        ResultKind::Scalar,
+        Invariance::Pure,
+    )
+}
+
+/// A fixed time global: no arguments, one value for the whole run.
+const fn time_global(name: &'static str, aliases: &'static [&'static str]) -> BuiltinSig {
+    BuiltinSig {
+        name,
+        aliases,
+        min_args: 0,
+        max_args: Some(0),
+        arg_kinds: &[],
+        unary_reduces: false,
+        result: ResultKind::Scalar,
+        invariance: Invariance::Pure,
+    }
+}
+
+static LOOKUP: BuiltinSig = sig(
+    "lookup",
+    2,
+    Some(2),
+    &[ArgKind::Table, SCALAR],
+    ResultKind::Scalar,
+    Invariance::Pure,
+);
+static LOOKUP_FORWARD: BuiltinSig = sig(
+    "lookup_forward",
+    2,
+    Some(2),
+    &[ArgKind::Table, SCALAR],
+    ResultKind::Scalar,
+    Invariance::Pure,
+);
+static LOOKUP_BACKWARD: BuiltinSig = sig(
+    "lookup_backward",
+    2,
+    Some(2),
+    &[ArgKind::Table, SCALAR],
+    ResultKind::Scalar,
+    Invariance::Pure,
+);
+static ABS: BuiltinSig = unary_math("abs");
+static ARCCOS: BuiltinSig = unary_math("arccos");
+static ARCSIN: BuiltinSig = unary_math("arcsin");
+static ARCTAN: BuiltinSig = unary_math("arctan");
+static COS: BuiltinSig = unary_math("cos");
+static EXP: BuiltinSig = unary_math("exp");
+static INF: BuiltinSig = sig("inf", 0, Some(0), &[], ResultKind::Scalar, Invariance::Pure);
+static INT: BuiltinSig = unary_math("int");
+static IS_MODULE_INPUT: BuiltinSig = sig(
+    "ismoduleinput",
+    1,
+    Some(1),
+    &[ArgKind::Ident],
+    ResultKind::Scalar,
+    Invariance::Pure,
+);
+static LN: BuiltinSig = unary_math("ln");
+static LOG10: BuiltinSig = unary_math("log10");
+static MAX: BuiltinSig = BuiltinSig {
+    name: "max",
+    aliases: &[],
+    min_args: 1,
+    max_args: Some(2),
+    arg_kinds: &[SCALAR, SCALAR],
+    unary_reduces: true,
+    result: ResultKind::Elementwise,
+    invariance: Invariance::Pure,
+};
+/// n-ary `MEAN` is Stella's scalar mean of its arguments. XMILE v1.0 defines
+/// only the one-argument array mean (section 3.7.1.3); the n-ary form's ground
+/// truth is in-repo: `test/test-models/tests/builtin_mean/builtin_mean.stmx`
+/// (Stella Professional 1.9.4) evaluates `MEAN(1, 2, ..., 9, TIME)` and its
+/// Stella-produced `output.tab` gives 4.6 at `TIME = 1`, and
+/// `test/modules2/modules2.xmile` (Stella Architect 2.0) uses a two-argument
+/// `MEAN`. Codegen sums the arguments as scalars and divides, so the result is
+/// `Scalar` at every arity (never the elementwise join an n-ary `MAX` has).
+static MEAN: BuiltinSig = BuiltinSig {
+    name: "mean",
+    aliases: &[],
+    min_args: 0,
+    max_args: None,
+    arg_kinds: &[SCALAR],
+    unary_reduces: true,
+    result: ResultKind::Scalar,
+    invariance: Invariance::Pure,
+};
+static MIN: BuiltinSig = BuiltinSig {
+    name: "min",
+    aliases: &[],
+    min_args: 1,
+    max_args: Some(2),
+    arg_kinds: &[SCALAR, SCALAR],
+    unary_reduces: true,
+    result: ResultKind::Elementwise,
+    invariance: Invariance::Pure,
+};
+static PI: BuiltinSig = sig("pi", 0, Some(0), &[], ResultKind::Scalar, Invariance::Pure);
+static PULSE: BuiltinSig = sig(
+    "pulse",
+    2,
+    Some(3),
+    &[SCALAR, SCALAR, SCALAR],
+    ResultKind::Elementwise,
+    Invariance::TimeDependent,
+);
+static QUANTUM: BuiltinSig = sig(
+    "quantum",
+    2,
+    Some(2),
+    &[SCALAR, SCALAR],
+    ResultKind::Elementwise,
+    Invariance::Pure,
+);
+static RAMP: BuiltinSig = sig(
+    "ramp",
+    2,
+    Some(3),
+    &[SCALAR, SCALAR, SCALAR],
+    ResultKind::Elementwise,
+    Invariance::TimeDependent,
+);
+static ROUND: BuiltinSig = unary_math("round");
+static SAFEDIV: BuiltinSig = sig(
+    "safediv",
+    2,
+    Some(3),
+    &[SCALAR, SCALAR, SCALAR],
+    ResultKind::Elementwise,
+    Invariance::Pure,
+);
+static SIGN: BuiltinSig = unary_math("sign");
+static SSHAPE: BuiltinSig = sig(
+    "sshape",
+    3,
+    Some(3),
+    &[SCALAR, SCALAR, SCALAR],
+    ResultKind::Elementwise,
+    Invariance::Pure,
+);
+static SIN: BuiltinSig = unary_math("sin");
+static SQRT: BuiltinSig = unary_math("sqrt");
+static STEP: BuiltinSig = sig(
+    "step",
+    2,
+    Some(2),
+    &[SCALAR, SCALAR],
+    ResultKind::Elementwise,
+    Invariance::TimeDependent,
+);
+static TAN: BuiltinSig = unary_math("tan");
+static TIME: BuiltinSig = sig(
+    "time",
+    0,
+    Some(0),
+    &[],
+    ResultKind::Scalar,
+    Invariance::TimeDependent,
+);
+static TIME_STEP: BuiltinSig = time_global("time_step", &["dt"]);
+static INITIAL_TIME: BuiltinSig = time_global("initial_time", &["starttime"]);
+static FINAL_TIME: BuiltinSig = time_global("final_time", &["stoptime"]);
+static RANK: BuiltinSig = sig(
+    "rank",
+    2,
+    Some(2),
+    &[WHOLE, SCALAR],
+    ResultKind::Array { shape_from: 0 },
+    Invariance::Pure,
+);
+static SIZE: BuiltinSig = reducer("size");
+static STDDEV: BuiltinSig = reducer("stddev");
+static SUM: BuiltinSig = reducer("sum");
+static VECTOR_SELECT: BuiltinSig = sig(
+    "vector_select",
+    5,
+    Some(5),
+    &[WHOLE, WHOLE, SCALAR, SCALAR, SCALAR],
+    ResultKind::Scalar,
+    Invariance::Pure,
+);
+static VECTOR_ELM_MAP: BuiltinSig = sig(
+    "vector_elm_map",
+    2,
+    Some(2),
+    &[WHOLE, WHOLE],
+    ResultKind::Array { shape_from: 1 },
+    Invariance::Pure,
+);
+static VECTOR_SORT_ORDER: BuiltinSig = sig(
+    "vector_sort_order",
+    2,
+    Some(2),
+    &[WHOLE, SCALAR],
+    ResultKind::Array { shape_from: 0 },
+    Invariance::Pure,
+);
+static ALLOCATE_AVAILABLE: BuiltinSig = sig(
+    "allocate_available",
+    3,
+    Some(3),
+    &[WHOLE, WHOLE, SCALAR],
+    ResultKind::Array { shape_from: 0 },
+    Invariance::Pure,
+);
+static ALLOCATE_BY_PRIORITY: BuiltinSig = sig(
+    "allocate_by_priority",
+    5,
+    Some(5),
+    &[WHOLE, WHOLE, SCALAR, SCALAR, SCALAR],
+    ResultKind::Array { shape_from: 0 },
+    Invariance::Pure,
+);
+/// `PREVIOUS(x)` is spelled with one argument and desugared to
+/// `PREVIOUS(x, 0)` by `Expr1` lowering, so the typed node always carries two.
+static PREVIOUS: BuiltinSig = sig(
+    "previous",
+    1,
+    Some(2),
+    &[SCALAR, SCALAR],
+    ResultKind::Elementwise,
+    Invariance::Lagged,
+);
+static INIT: BuiltinSig = sig(
+    "init",
+    1,
+    Some(1),
+    &[SCALAR],
+    ResultKind::Elementwise,
+    Invariance::Snapshot,
+);
+
+impl BuiltinSig {
+    /// Every signature, one per [`BuiltinFn`] variant, in declaration order.
+    pub const ALL: [&'static BuiltinSig; 44] = [
+        &LOOKUP,
+        &LOOKUP_FORWARD,
+        &LOOKUP_BACKWARD,
+        &ABS,
+        &ARCCOS,
+        &ARCSIN,
+        &ARCTAN,
+        &COS,
+        &EXP,
+        &INF,
+        &INT,
+        &IS_MODULE_INPUT,
+        &LN,
+        &LOG10,
+        &MAX,
+        &MEAN,
+        &MIN,
+        &PI,
+        &PULSE,
+        &QUANTUM,
+        &RAMP,
+        &ROUND,
+        &SAFEDIV,
+        &SIGN,
+        &SSHAPE,
+        &SIN,
+        &SQRT,
+        &STEP,
+        &TAN,
+        &TIME,
+        &TIME_STEP,
+        &INITIAL_TIME,
+        &FINAL_TIME,
+        &RANK,
+        &SIZE,
+        &STDDEV,
+        &SUM,
+        &VECTOR_SELECT,
+        &VECTOR_ELM_MAP,
+        &VECTOR_SORT_ORDER,
+        &ALLOCATE_AVAILABLE,
+        &ALLOCATE_BY_PRIORITY,
+        &PREVIOUS,
+        &INIT,
+    ];
+
+    /// The signature a (lowercased) source name or alias denotes.
+    ///
+    /// The name half of the table is stated once, in the signatures; this is
+    /// an index over [`Self::ALL`] built on first use, because the parse path
+    /// looks every call up here (once per builtin application per variable
+    /// parse) and a scan of the table would cost it more than the typed node
+    /// it builds.
+    pub fn by_name(name: &str) -> Option<&'static BuiltinSig> {
+        static BY_NAME: LazyLock<IdentMap<&'static str, &'static BuiltinSig>> =
+            LazyLock::new(|| {
+                BuiltinSig::ALL
+                    .iter()
+                    .flat_map(|sig| {
+                        std::iter::once(sig.name)
+                            .chain(sig.aliases.iter().copied())
+                            .map(move |name| (name, *sig))
+                    })
+                    .collect()
+            });
+        BY_NAME.get(name).copied()
     }
 
-    /// Transform all expression arguments in this builtin using the provided function.
-    /// Returns an error if any transformation fails.
-    pub fn try_map<F, E2, Err>(self, mut f: F) -> std::result::Result<BuiltinFn<E2>, Err>
-    where
-        F: FnMut(Expr) -> std::result::Result<E2, Err>,
-    {
+    /// Whether a call spelled with `n` arguments is well-formed.
+    pub fn accepts_arity(&self, n: usize) -> bool {
+        n >= self.min_args as usize && self.max_args.is_none_or(|max| n <= max as usize)
+    }
+}
+
+/// The argument expressions of a builtin, in call order, as shared or mutable
+/// references. One body serves both: `$iter` is `iter` or `iter_mut` for the
+/// variadic `Mean`, and the optional `mut` token selects `&**a` or `&mut **a`
+/// for the boxed positions.
+macro_rules! builtin_args {
+    ($builtin:expr, $iter:ident $(, $m:tt)?) => {{
         use BuiltinFn::*;
-        Ok(match self {
-            Lookup(table_expr, index_expr, loc) => {
-                Lookup(Box::new(f(*table_expr)?), Box::new(f(*index_expr)?), loc)
+        let mut out = SmallVec::new();
+        match $builtin {
+            Lookup(a, b, _) | LookupForward(a, b, _) | LookupBackward(a, b, _) => {
+                out.push(&$($m)? **a);
+                out.push(&$($m)? **b);
             }
-            LookupForward(table_expr, index_expr, loc) => {
-                LookupForward(Box::new(f(*table_expr)?), Box::new(f(*index_expr)?), loc)
+            Abs(a) | Arccos(a) | Arcsin(a) | Arctan(a) | Cos(a) | Exp(a) | Int(a) | Ln(a)
+            | Log10(a) | Round(a) | Sign(a) | Sin(a) | Sqrt(a) | Tan(a) | Size(a) | Stddev(a)
+            | Sum(a) | Init(a) => out.push(&$($m)? **a),
+            Inf | Pi | Time | TimeStep | StartTime | FinalTime | IsModuleInput(_, _) => {}
+            Max(a, b) | Min(a, b) => {
+                out.push(&$($m)? **a);
+                if let Some(b) = b {
+                    out.push(&$($m)? **b);
+                }
             }
-            LookupBackward(table_expr, index_expr, loc) => {
-                LookupBackward(Box::new(f(*table_expr)?), Box::new(f(*index_expr)?), loc)
+            Mean(args) => {
+                for a in args.$iter() {
+                    out.push(a);
+                }
             }
-            Abs(a) => Abs(Box::new(f(*a)?)),
-            Arccos(a) => Arccos(Box::new(f(*a)?)),
-            Arcsin(a) => Arcsin(Box::new(f(*a)?)),
-            Arctan(a) => Arctan(Box::new(f(*a)?)),
-            Cos(a) => Cos(Box::new(f(*a)?)),
-            Exp(a) => Exp(Box::new(f(*a)?)),
+            Pulse(a, b, c) | Ramp(a, b, c) | SafeDiv(a, b, c) => {
+                out.push(&$($m)? **a);
+                out.push(&$($m)? **b);
+                if let Some(c) = c {
+                    out.push(&$($m)? **c);
+                }
+            }
+            Quantum(a, b) | Step(a, b) | Rank(a, b) | VectorElmMap(a, b) | VectorSortOrder(a, b)
+            | Previous(a, b) => {
+                out.push(&$($m)? **a);
+                out.push(&$($m)? **b);
+            }
+            Sshape(a, b, c) | AllocateAvailable(a, b, c) => {
+                out.push(&$($m)? **a);
+                out.push(&$($m)? **b);
+                out.push(&$($m)? **c);
+            }
+            VectorSelect(a, b, c, d, e) | AllocateByPriority(a, b, c, d, e) => {
+                out.push(&$($m)? **a);
+                out.push(&$($m)? **b);
+                out.push(&$($m)? **c);
+                out.push(&$($m)? **d);
+                out.push(&$($m)? **e);
+            }
+        }
+        out
+    }};
+}
+
+/// Rebuild a builtin of one expression type from a builtin of another, calling
+/// `$f` on every argument. One body serves the by-value and by-reference
+/// forms: `$arg`/`$opt`/`$many` say how a required, optional, or variadic
+/// position is passed to `$f`, and `$copy`/`$clone` how a `Loc` or the
+/// `IsModuleInput` identifier crosses over.
+macro_rules! builtin_rebuild {
+    ($builtin:expr, $f:ident, $arg:ident, $opt:ident, $many:ident, $copy:ident, $clone:ident) => {{
+        use BuiltinFn::*;
+        match $builtin {
+            Lookup(a, b, loc) => Lookup($arg!($f, a), $arg!($f, b), $copy!(loc)),
+            LookupForward(a, b, loc) => LookupForward($arg!($f, a), $arg!($f, b), $copy!(loc)),
+            LookupBackward(a, b, loc) => LookupBackward($arg!($f, a), $arg!($f, b), $copy!(loc)),
+            Abs(a) => Abs($arg!($f, a)),
+            Arccos(a) => Arccos($arg!($f, a)),
+            Arcsin(a) => Arcsin($arg!($f, a)),
+            Arctan(a) => Arctan($arg!($f, a)),
+            Cos(a) => Cos($arg!($f, a)),
+            Exp(a) => Exp($arg!($f, a)),
             Inf => Inf,
-            Int(a) => Int(Box::new(f(*a)?)),
-            IsModuleInput(id, loc) => IsModuleInput(id, loc),
-            Ln(a) => Ln(Box::new(f(*a)?)),
-            Log10(a) => Log10(Box::new(f(*a)?)),
-            Max(a, b) => Max(
-                Box::new(f(*a)?),
-                b.map(|b| f(*b)).transpose()?.map(Box::new),
-            ),
-            Mean(args) => Mean(
-                args.into_iter()
-                    .map(&mut f)
-                    .collect::<std::result::Result<_, _>>()?,
-            ),
-            Min(a, b) => Min(
-                Box::new(f(*a)?),
-                b.map(|b| f(*b)).transpose()?.map(Box::new),
-            ),
+            Int(a) => Int($arg!($f, a)),
+            IsModuleInput(id, loc) => IsModuleInput($clone!(id), $copy!(loc)),
+            Ln(a) => Ln($arg!($f, a)),
+            Log10(a) => Log10($arg!($f, a)),
+            Max(a, b) => Max($arg!($f, a), $opt!($f, b)),
+            Mean(args) => Mean($many!($f, args)),
+            Min(a, b) => Min($arg!($f, a), $opt!($f, b)),
             Pi => Pi,
-            Pulse(a, b, c) => Pulse(
-                Box::new(f(*a)?),
-                Box::new(f(*b)?),
-                c.map(|c| f(*c)).transpose()?.map(Box::new),
-            ),
-            Quantum(a, b) => Quantum(Box::new(f(*a)?), Box::new(f(*b)?)),
-            Ramp(a, b, c) => Ramp(
-                Box::new(f(*a)?),
-                Box::new(f(*b)?),
-                c.map(|c| f(*c)).transpose()?.map(Box::new),
-            ),
-            Round(a) => Round(Box::new(f(*a)?)),
-            SafeDiv(a, b, c) => SafeDiv(
-                Box::new(f(*a)?),
-                Box::new(f(*b)?),
-                c.map(|c| f(*c)).transpose()?.map(Box::new),
-            ),
-            Sign(a) => Sign(Box::new(f(*a)?)),
-            Sshape(a, b, c) => Sshape(Box::new(f(*a)?), Box::new(f(*b)?), Box::new(f(*c)?)),
-            Sin(a) => Sin(Box::new(f(*a)?)),
-            Sqrt(a) => Sqrt(Box::new(f(*a)?)),
-            Step(a, b) => Step(Box::new(f(*a)?), Box::new(f(*b)?)),
-            Tan(a) => Tan(Box::new(f(*a)?)),
+            Pulse(a, b, c) => Pulse($arg!($f, a), $arg!($f, b), $opt!($f, c)),
+            Quantum(a, b) => Quantum($arg!($f, a), $arg!($f, b)),
+            Ramp(a, b, c) => Ramp($arg!($f, a), $arg!($f, b), $opt!($f, c)),
+            Round(a) => Round($arg!($f, a)),
+            SafeDiv(a, b, c) => SafeDiv($arg!($f, a), $arg!($f, b), $opt!($f, c)),
+            Sign(a) => Sign($arg!($f, a)),
+            Sshape(a, b, c) => Sshape($arg!($f, a), $arg!($f, b), $arg!($f, c)),
+            Sin(a) => Sin($arg!($f, a)),
+            Sqrt(a) => Sqrt($arg!($f, a)),
+            Step(a, b) => Step($arg!($f, a), $arg!($f, b)),
+            Tan(a) => Tan($arg!($f, a)),
             Time => Time,
             TimeStep => TimeStep,
             StartTime => StartTime,
             FinalTime => FinalTime,
-            Rank(a, direction) => Rank(Box::new(f(*a)?), Box::new(f(*direction)?)),
-            Size(a) => Size(Box::new(f(*a)?)),
-            Stddev(a) => Stddev(Box::new(f(*a)?)),
-            Sum(a) => Sum(Box::new(f(*a)?)),
+            Rank(a, b) => Rank($arg!($f, a), $arg!($f, b)),
+            Size(a) => Size($arg!($f, a)),
+            Stddev(a) => Stddev($arg!($f, a)),
+            Sum(a) => Sum($arg!($f, a)),
             VectorSelect(a, b, c, d, e) => VectorSelect(
-                Box::new(f(*a)?),
-                Box::new(f(*b)?),
-                Box::new(f(*c)?),
-                Box::new(f(*d)?),
-                Box::new(f(*e)?),
+                $arg!($f, a),
+                $arg!($f, b),
+                $arg!($f, c),
+                $arg!($f, d),
+                $arg!($f, e),
             ),
-            VectorElmMap(a, b) => VectorElmMap(Box::new(f(*a)?), Box::new(f(*b)?)),
-            VectorSortOrder(a, b) => VectorSortOrder(Box::new(f(*a)?), Box::new(f(*b)?)),
+            VectorElmMap(a, b) => VectorElmMap($arg!($f, a), $arg!($f, b)),
+            VectorSortOrder(a, b) => VectorSortOrder($arg!($f, a), $arg!($f, b)),
             AllocateAvailable(a, b, c) => {
-                AllocateAvailable(Box::new(f(*a)?), Box::new(f(*b)?), Box::new(f(*c)?))
+                AllocateAvailable($arg!($f, a), $arg!($f, b), $arg!($f, c))
             }
             AllocateByPriority(a, b, c, d, e) => AllocateByPriority(
-                Box::new(f(*a)?),
-                Box::new(f(*b)?),
-                Box::new(f(*c)?),
-                Box::new(f(*d)?),
-                Box::new(f(*e)?),
+                $arg!($f, a),
+                $arg!($f, b),
+                $arg!($f, c),
+                $arg!($f, d),
+                $arg!($f, e),
             ),
-            Previous(a, b) => Previous(Box::new(f(*a)?), Box::new(f(*b)?)),
-            Init(a) => Init(Box::new(f(*a)?)),
-        })
+            Previous(a, b) => Previous($arg!($f, a), $arg!($f, b)),
+            Init(a) => Init($arg!($f, a)),
+        }
+    }};
+}
+
+// The by-value spellings for `builtin_rebuild!`: arguments are moved out of
+// their boxes and `Loc`s / identifiers are moved through.
+macro_rules! rebuild_arg_owned {
+    ($f:ident, $a:ident) => {
+        Box::new($f(*$a)?)
+    };
+}
+macro_rules! rebuild_opt_owned {
+    ($f:ident, $a:ident) => {
+        match $a {
+            Some(a) => Some(Box::new($f(*a)?)),
+            None => None,
+        }
+    };
+}
+macro_rules! rebuild_many_owned {
+    ($f:ident, $a:ident) => {
+        $a.into_iter()
+            .map(&mut $f)
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+}
+macro_rules! rebuild_pass_owned {
+    ($a:ident) => {
+        $a
+    };
+}
+
+// The by-reference spellings: arguments are borrowed, `Loc`s copied and the
+// identifier cloned.
+macro_rules! rebuild_arg_borrowed {
+    ($f:ident, $a:ident) => {
+        Box::new($f(&**$a)?)
+    };
+}
+macro_rules! rebuild_opt_borrowed {
+    ($f:ident, $a:ident) => {
+        match $a {
+            Some(a) => Some(Box::new($f(&**a)?)),
+            None => None,
+        }
+    };
+}
+macro_rules! rebuild_many_borrowed {
+    ($f:ident, $a:ident) => {
+        $a.iter()
+            .map(&mut $f)
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+}
+macro_rules! rebuild_copy_borrowed {
+    ($a:ident) => {
+        *$a
+    };
+}
+macro_rules! rebuild_clone_borrowed {
+    ($a:ident) => {
+        $a.clone()
+    };
+}
+
+impl<Expr> BuiltinFn<Expr> {
+    /// The per-builtin facts for this call. Every consumer that needs a fact
+    /// about a builtin -- rather than its arguments -- reads it here.
+    pub fn signature(&self) -> &'static BuiltinSig {
+        use BuiltinFn::*;
+        match self {
+            Lookup(_, _, _) => &LOOKUP,
+            LookupForward(_, _, _) => &LOOKUP_FORWARD,
+            LookupBackward(_, _, _) => &LOOKUP_BACKWARD,
+            Abs(_) => &ABS,
+            Arccos(_) => &ARCCOS,
+            Arcsin(_) => &ARCSIN,
+            Arctan(_) => &ARCTAN,
+            Cos(_) => &COS,
+            Exp(_) => &EXP,
+            Inf => &INF,
+            Int(_) => &INT,
+            IsModuleInput(_, _) => &IS_MODULE_INPUT,
+            Ln(_) => &LN,
+            Log10(_) => &LOG10,
+            Max(_, _) => &MAX,
+            Mean(_) => &MEAN,
+            Min(_, _) => &MIN,
+            Pi => &PI,
+            Pulse(_, _, _) => &PULSE,
+            Quantum(_, _) => &QUANTUM,
+            Ramp(_, _, _) => &RAMP,
+            Round(_) => &ROUND,
+            SafeDiv(_, _, _) => &SAFEDIV,
+            Sign(_) => &SIGN,
+            Sshape(_, _, _) => &SSHAPE,
+            Sin(_) => &SIN,
+            Sqrt(_) => &SQRT,
+            Step(_, _) => &STEP,
+            Tan(_) => &TAN,
+            Time => &TIME,
+            TimeStep => &TIME_STEP,
+            StartTime => &INITIAL_TIME,
+            FinalTime => &FINAL_TIME,
+            Rank(_, _) => &RANK,
+            Size(_) => &SIZE,
+            Stddev(_) => &STDDEV,
+            Sum(_) => &SUM,
+            VectorSelect(_, _, _, _, _) => &VECTOR_SELECT,
+            VectorElmMap(_, _) => &VECTOR_ELM_MAP,
+            VectorSortOrder(_, _) => &VECTOR_SORT_ORDER,
+            AllocateAvailable(_, _, _) => &ALLOCATE_AVAILABLE,
+            AllocateByPriority(_, _, _, _, _) => &ALLOCATE_BY_PRIORITY,
+            Previous(_, _) => &PREVIOUS,
+            Init(_) => &INIT,
+        }
+    }
+
+    /// The canonical lowercase name of this builtin.
+    pub fn name(&self) -> &'static str {
+        self.signature().name
+    }
+
+    /// The argument expressions, in call order. An `IsModuleInput`'s
+    /// identifier is not an expression and is absent; an absent optional
+    /// trailing argument is absent.
+    pub fn args(&self) -> SmallVec<[&Expr; 5]> {
+        builtin_args!(self, iter)
+    }
+
+    /// [`Self::args`], mutably.
+    pub fn args_mut(&mut self) -> SmallVec<[&mut Expr; 5]> {
+        builtin_args!(self, iter_mut, mut)
+    }
+
+    /// Whether this call is the one-argument reduction form of a builtin
+    /// whose n-ary form is scalar (`MAX(A)`, `MIN(A)`, `MEAN(A)`).
+    pub fn is_unary_reduction(&self) -> bool {
+        self.signature().unary_reduces && self.args().len() == 1
+    }
+
+    /// One [`ArgKind`] per entry of [`Self::args`], aligned with it.
+    pub fn arg_kinds(&self) -> SmallVec<[ArgKind; 5]> {
+        let sig = self.signature();
+        let n = self.args().len();
+        if sig.unary_reduces && n == 1 {
+            return smallvec::smallvec![REDUCED];
+        }
+        // A variadic builtin lists one kind; every position takes it.
+        let tail = sig.arg_kinds.last().copied().unwrap_or(ArgKind::Scalar);
+        sig.arg_kinds
+            .iter()
+            .copied()
+            .filter(|kind| *kind != ArgKind::Ident)
+            .chain(std::iter::repeat(tail))
+            .take(n)
+            .collect()
+    }
+
+    /// [`Self::args`] paired with [`Self::arg_kinds`].
+    pub fn args_with_kinds(&self) -> impl Iterator<Item = (&Expr, ArgKind)> {
+        self.args().into_iter().zip(self.arg_kinds())
+    }
+
+    /// The shape of this call's result (see [`ResultKind`]).
+    pub fn result_kind(&self) -> ResultKind {
+        if self.is_unary_reduction() {
+            ResultKind::Scalar
+        } else {
+            self.signature().result
+        }
+    }
+
+    /// Whether any argument position is an array operand.
+    pub fn has_array_operand(&self) -> bool {
+        self.arg_kinds()
+            .iter()
+            .any(|kind| matches!(kind, ArgKind::Array { .. }))
+    }
+
+    /// Transform all expression arguments in this builtin using the provided function.
+    /// Returns an error if any transformation fails. Arguments are visited in
+    /// call order, the order [`Self::args`] reports.
+    pub fn try_map<F, E2, Err>(self, mut f: F) -> std::result::Result<BuiltinFn<E2>, Err>
+    where
+        F: FnMut(Expr) -> std::result::Result<E2, Err>,
+    {
+        Ok(builtin_rebuild!(
+            self,
+            f,
+            rebuild_arg_owned,
+            rebuild_opt_owned,
+            rebuild_many_owned,
+            rebuild_pass_owned,
+            rebuild_pass_owned
+        ))
+    }
+
+    /// [`Self::try_map`] over a borrowed builtin: builds a new builtin of
+    /// another expression type from references to this one's arguments,
+    /// without cloning them first.
+    pub fn try_map_ref<F, E2, Err>(&self, mut f: F) -> std::result::Result<BuiltinFn<E2>, Err>
+    where
+        F: FnMut(&Expr) -> std::result::Result<E2, Err>,
+    {
+        Ok(builtin_rebuild!(
+            self,
+            f,
+            rebuild_arg_borrowed,
+            rebuild_opt_borrowed,
+            rebuild_many_borrowed,
+            rebuild_copy_borrowed,
+            rebuild_clone_borrowed
+        ))
     }
 
     /// Transform all expression arguments in this builtin using the provided function.
@@ -286,6 +982,46 @@ impl<Expr> BuiltinFn<Expr> {
             .unwrap()
     }
 
+    /// Infallible version of [`Self::try_map_ref`].
+    pub fn map_ref<F, E2>(&self, mut f: F) -> BuiltinFn<E2>
+    where
+        F: FnMut(&Expr) -> E2,
+    {
+        self.try_map_ref(|e| Ok::<_, std::convert::Infallible>(f(e)))
+            .unwrap()
+    }
+
+    /// [`Self::map`], handing each argument its [`ArgKind`].
+    pub fn map_with_kinds<F, E2>(self, mut f: F) -> BuiltinFn<E2>
+    where
+        F: FnMut(Expr, ArgKind) -> E2,
+    {
+        let mut kinds = self.arg_kinds().into_iter();
+        self.map(|e| {
+            let kind = kinds
+                .next()
+                .unwrap_or_else(|| unreachable!("map visits exactly the positions args() reports"));
+            f(e, kind)
+        })
+    }
+
+    /// [`Self::try_map_ref`], handing each argument its [`ArgKind`].
+    pub fn try_map_ref_with_kinds<F, E2, Err>(
+        &self,
+        mut f: F,
+    ) -> std::result::Result<BuiltinFn<E2>, Err>
+    where
+        F: FnMut(&Expr, ArgKind) -> std::result::Result<E2, Err>,
+    {
+        let mut kinds = self.arg_kinds().into_iter();
+        self.try_map_ref(|e| {
+            let kind = kinds
+                .next()
+                .unwrap_or_else(|| unreachable!("map visits exactly the positions args() reports"));
+            f(e, kind)
+        })
+    }
+
     /// Zero every `Loc` this builtin carries ITSELF -- the three lookup forms
     /// and `IsModuleInput` are the only variants with one. Argument
     /// expressions are untouched; a caller normalizing a whole tree strips
@@ -295,7 +1031,6 @@ impl<Expr> BuiltinFn<Expr> {
     /// variants are bound whole through one or-pattern) so a new
     /// `Loc`-carrying variant is a compile error here rather than a silently
     /// retained source position.
-    /// NOTE: keep variant coverage in sync with `try_map` above.
     pub(crate) fn strip_own_locs(self) -> Self {
         use BuiltinFn::*;
         match self {
@@ -346,101 +1081,21 @@ impl<Expr> BuiltinFn<Expr> {
         }
     }
 
-    /// Call a closure on each expression argument by reference.
-    /// NOTE: keep variant coverage in sync with `try_map` above.
+    /// Call a closure on each expression argument by reference, in call order.
     pub fn for_each_expr_ref<F>(&self, mut f: F)
     where
         F: FnMut(&Expr),
     {
-        use BuiltinFn::*;
-        match self {
-            Lookup(a, b, _) | LookupForward(a, b, _) | LookupBackward(a, b, _) => {
-                f(a);
-                f(b);
-            }
-            Abs(a) | Arccos(a) | Arcsin(a) | Arctan(a) | Cos(a) | Exp(a) | Int(a) | Ln(a)
-            | Log10(a) | Round(a) | Sign(a) | Sin(a) | Sqrt(a) | Tan(a) | Size(a) | Stddev(a)
-            | Sum(a) | Init(a) => f(a),
-            Previous(a, b) => {
-                f(a);
-                f(b);
-            }
-            Inf | Pi | Time | TimeStep | StartTime | FinalTime | IsModuleInput(_, _) => {}
-            Max(a, b) | Min(a, b) => {
-                f(a);
-                if let Some(b) = b {
-                    f(b);
-                }
-            }
-            Mean(args) => {
-                for a in args {
-                    f(a);
-                }
-            }
-            Quantum(a, b) => {
-                f(a);
-                f(b);
-            }
-            Pulse(a, b, c) | Ramp(a, b, c) | SafeDiv(a, b, c) => {
-                f(a);
-                f(b);
-                if let Some(c) = c {
-                    f(c);
-                }
-            }
-            Sshape(a, b, c) => {
-                f(a);
-                f(b);
-                f(c);
-            }
-            Step(a, b) => {
-                f(a);
-                f(b);
-            }
-            Rank(a, direction) => {
-                f(a);
-                f(direction);
-            }
-            VectorSelect(a, b, c, d, e) => {
-                f(a);
-                f(b);
-                f(c);
-                f(d);
-                f(e);
-            }
-            VectorElmMap(a, b) | VectorSortOrder(a, b) => {
-                f(a);
-                f(b);
-            }
-            AllocateAvailable(a, b, c) => {
-                f(a);
-                f(b);
-                f(c);
-            }
-            AllocateByPriority(a, b, c, d, e) => {
-                f(a);
-                f(b);
-                f(c);
-                f(d);
-                f(e);
-            }
+        for arg in self.args() {
+            f(arg);
         }
     }
 }
 
+/// Whether a (lowercased) name or alias denotes a builtin that takes no
+/// arguments.
 pub fn is_0_arity_builtin_fn(name: &str) -> bool {
-    matches!(
-        name,
-        "inf"
-            | "pi"
-            | "time"
-            | "time_step"
-            | "dt"
-            | "initial_time"
-            | "starttime"
-            | "final_time"
-            | "stoptime"
-    )
+    BuiltinSig::by_name(name).is_some_and(|sig| sig.max_args == Some(0))
 }
 
 /// ASCII case-insensitive, allocation-free variant of [`is_0_arity_builtin_fn`].
@@ -448,8 +1103,10 @@ pub fn is_0_arity_builtin_fn(name: &str) -> bool {
 /// The 0-arity builtin names are all ASCII, so a name containing any non-ASCII
 /// byte cannot match, and ASCII case-folding yields the same membership verdict
 /// as Unicode lowercasing for this fixed ASCII set. Used on the hot parse path
-/// (`Expr0::reify_0_arity_builtins`), which previously allocated a `String` via
-/// `to_lowercase()` for *every* variable reference just to test membership.
+/// (`Expr0::reify_0_arity_builtins`), which runs for *every* variable reference
+/// and so tests membership against this short fixed list rather than scanning
+/// [`BuiltinSig::ALL`]; `nullary_name_list_matches_the_signature_table` pins
+/// the list to the table.
 pub fn is_0_arity_builtin_fn_ci(name: &str) -> bool {
     const NAMES: [&str; 9] = [
         "inf",
@@ -480,52 +1137,9 @@ pub(crate) fn is_stdlib_module_function(func_name: &str) -> bool {
         || crate::stdlib::MODEL_NAMES.contains(&func_name)
 }
 
+/// Whether a (lowercased) name or alias denotes a builtin function.
 pub fn is_builtin_fn(name: &str) -> bool {
-    is_0_arity_builtin_fn(name)
-        || matches!(
-            name,
-            // scalar builtins
-            "lookup"
-        | "lookup_forward"
-        | "lookup_backward"
-        | "abs"
-        | "arccos"
-        | "arcsin"
-        | "arctan"
-        | "cos"
-        | "exp"
-        | "int"
-        | "ismoduleinput"
-        | "ln"
-        | "log10"
-        | "max"
-        | "mean"
-        | "min"
-        | "pulse"
-        | "quantum"
-        | "ramp"
-        | "round"
-        | "safediv"
-        | "sign"
-        | "sin"
-        | "sshape"
-        | "sqrt"
-        | "step"
-        | "tan"
-        // array-only builtins
-        | "rank"
-        | "size"
-        | "stddev"
-        | "sum"
-        | "vector_select"
-        | "vector_elm_map"
-        | "vector_sort_order"
-        | "allocate_available"
-        | "allocate_by_priority"
-        // builtins replacing stdlib modules
-        | "previous"
-        | "init"
-        )
+    BuiltinSig::by_name(name).is_some()
 }
 
 pub(crate) enum BuiltinContents<'a, Expr> {
@@ -539,334 +1153,537 @@ pub(crate) enum BuiltinContents<'a, Expr> {
     /// dependency/causal walkers must treat this as a non-edge (a table
     /// reference imposes no runtime data dependency); printing and
     /// source-location walkers treat it like any other argument expression.
+    /// This is [`ArgKind::Table`] as a walker sees it.
     LookupTable(&'a Expr),
 }
 
+/// Visit a builtin's contents in call order: the `IsModuleInput` identifier as
+/// [`BuiltinContents::Ident`], a lookup's table position as
+/// [`BuiltinContents::LookupTable`], and every other argument as
+/// [`BuiltinContents::Expr`].
 pub(crate) fn walk_builtin_expr<'a, Expr, F>(builtin: &'a BuiltinFn<Expr>, mut cb: F)
 where
     F: FnMut(BuiltinContents<'a, Expr>),
 {
-    match builtin {
-        BuiltinFn::Inf
-        | BuiltinFn::Pi
-        | BuiltinFn::Time
-        | BuiltinFn::TimeStep
-        | BuiltinFn::StartTime
-        | BuiltinFn::FinalTime => {}
-        BuiltinFn::IsModuleInput(id, loc) => cb(BuiltinContents::Ident(id, *loc)),
-        BuiltinFn::Lookup(table_expr, index_expr, _loc)
-        | BuiltinFn::LookupForward(table_expr, index_expr, _loc)
-        | BuiltinFn::LookupBackward(table_expr, index_expr, _loc) => {
-            cb(BuiltinContents::LookupTable(table_expr));
-            cb(BuiltinContents::Expr(index_expr));
-        }
-        BuiltinFn::Abs(a)
-        | BuiltinFn::Arccos(a)
-        | BuiltinFn::Arcsin(a)
-        | BuiltinFn::Arctan(a)
-        | BuiltinFn::Cos(a)
-        | BuiltinFn::Exp(a)
-        | BuiltinFn::Int(a)
-        | BuiltinFn::Ln(a)
-        | BuiltinFn::Log10(a)
-        | BuiltinFn::Round(a)
-        | BuiltinFn::Sign(a)
-        | BuiltinFn::Sin(a)
-        | BuiltinFn::Sqrt(a)
-        | BuiltinFn::Tan(a)
-        | BuiltinFn::Size(a)
-        | BuiltinFn::Stddev(a)
-        | BuiltinFn::Sum(a)
-        | BuiltinFn::Init(a) => cb(BuiltinContents::Expr(a)),
-        BuiltinFn::Previous(a, b) => {
-            cb(BuiltinContents::Expr(a));
-            cb(BuiltinContents::Expr(b));
-        }
-        BuiltinFn::Mean(args) => {
-            args.iter().for_each(|a| cb(BuiltinContents::Expr(a)));
-        }
-        BuiltinFn::Step(a, b) => {
-            cb(BuiltinContents::Expr(a));
-            cb(BuiltinContents::Expr(b));
-        }
-        BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
-            cb(BuiltinContents::Expr(a));
-            if let Some(b) = b {
-                cb(BuiltinContents::Expr(b));
-            }
-        }
-        BuiltinFn::Quantum(a, b) => {
-            cb(BuiltinContents::Expr(a));
-            cb(BuiltinContents::Expr(b));
-        }
-        BuiltinFn::Pulse(a, b, c) | BuiltinFn::Ramp(a, b, c) | BuiltinFn::SafeDiv(a, b, c) => {
-            cb(BuiltinContents::Expr(a));
-            cb(BuiltinContents::Expr(b));
-            if let Some(c) = c {
-                cb(BuiltinContents::Expr(c))
-            }
-        }
-        BuiltinFn::Sshape(a, b, c) => {
-            cb(BuiltinContents::Expr(a));
-            cb(BuiltinContents::Expr(b));
-            cb(BuiltinContents::Expr(c));
-        }
-        BuiltinFn::Rank(a, direction) => {
-            cb(BuiltinContents::Expr(a));
-            cb(BuiltinContents::Expr(direction));
-        }
-        BuiltinFn::VectorSelect(a, b, c, d, e) => {
-            cb(BuiltinContents::Expr(a));
-            cb(BuiltinContents::Expr(b));
-            cb(BuiltinContents::Expr(c));
-            cb(BuiltinContents::Expr(d));
-            cb(BuiltinContents::Expr(e));
-        }
-        BuiltinFn::VectorElmMap(a, b) | BuiltinFn::VectorSortOrder(a, b) => {
-            cb(BuiltinContents::Expr(a));
-            cb(BuiltinContents::Expr(b));
-        }
-        BuiltinFn::AllocateAvailable(a, b, c) => {
-            cb(BuiltinContents::Expr(a));
-            cb(BuiltinContents::Expr(b));
-            cb(BuiltinContents::Expr(c));
-        }
-        BuiltinFn::AllocateByPriority(a, b, c, d, e) => {
-            cb(BuiltinContents::Expr(a));
-            cb(BuiltinContents::Expr(b));
-            cb(BuiltinContents::Expr(c));
-            cb(BuiltinContents::Expr(d));
-            cb(BuiltinContents::Expr(e));
+    if let BuiltinFn::IsModuleInput(id, loc) = builtin {
+        cb(BuiltinContents::Ident(id, *loc));
+    }
+    for (arg, kind) in builtin.args().into_iter().zip(builtin.arg_kinds()) {
+        match kind {
+            ArgKind::Table => cb(BuiltinContents::LookupTable(arg)),
+            ArgKind::Scalar | ArgKind::Array { .. } => cb(BuiltinContents::Expr(arg)),
+            ArgKind::Ident => unreachable!("an identifier payload is not an expression argument"),
         }
     }
 }
 
-/// `name()` and `is_builtin_fn` are two halves of one table, and this pins them
-/// as an ENUMERATION rather than a sample: every `BuiltinFn` variant is built
-/// below, and the `_`-less match makes a newly added variant a COMPILE error
-/// until it is listed. The assertions are properties (a name is non-empty, and
-/// every name `name()` can emit is one `is_builtin_fn` accepts) rather than a
-/// transcription of the match arms, so this cannot rot into a copy of the code
-/// under test.
-#[test]
-fn every_builtin_variant_names_itself_and_is_recognized() {
+#[cfg(test)]
+mod tests {
+    use super::*;
+
     type Builtin = BuiltinFn<i32>;
-    fn b() -> Box<i32> {
-        Box::new(0)
+
+    /// One value of EVERY variant, with distinct, ascending argument values so
+    /// argument ORDER is observable. The `_`-less match below makes a newly
+    /// added variant a compile error here until it is listed.
+    fn every_variant() -> Vec<Builtin> {
+        fn b(n: i32) -> Box<i32> {
+            Box::new(n)
+        }
+        let all = vec![
+            Builtin::Lookup(b(1), b(2), Loc::new(1, 2)),
+            Builtin::LookupForward(b(1), b(2), Loc::new(1, 2)),
+            Builtin::LookupBackward(b(1), b(2), Loc::new(1, 2)),
+            Builtin::Abs(b(1)),
+            Builtin::Arccos(b(1)),
+            Builtin::Arcsin(b(1)),
+            Builtin::Arctan(b(1)),
+            Builtin::Cos(b(1)),
+            Builtin::Exp(b(1)),
+            Builtin::Inf,
+            Builtin::Int(b(1)),
+            Builtin::IsModuleInput("x".to_string(), Loc::new(1, 2)),
+            Builtin::Ln(b(1)),
+            Builtin::Log10(b(1)),
+            Builtin::Max(b(1), None),
+            Builtin::Mean(vec![1, 2, 3]),
+            Builtin::Min(b(1), None),
+            Builtin::Pi,
+            Builtin::Pulse(b(1), b(2), None),
+            Builtin::Quantum(b(1), b(2)),
+            Builtin::Ramp(b(1), b(2), None),
+            Builtin::Round(b(1)),
+            Builtin::SafeDiv(b(1), b(2), None),
+            Builtin::Sign(b(1)),
+            Builtin::Sshape(b(1), b(2), b(3)),
+            Builtin::Sin(b(1)),
+            Builtin::Sqrt(b(1)),
+            Builtin::Step(b(1), b(2)),
+            Builtin::Tan(b(1)),
+            Builtin::Time,
+            Builtin::TimeStep,
+            Builtin::StartTime,
+            Builtin::FinalTime,
+            Builtin::Rank(b(1), b(2)),
+            Builtin::Size(b(1)),
+            Builtin::Stddev(b(1)),
+            Builtin::Sum(b(1)),
+            Builtin::VectorSelect(b(1), b(2), b(3), b(4), b(5)),
+            Builtin::VectorElmMap(b(1), b(2)),
+            Builtin::VectorSortOrder(b(1), b(2)),
+            Builtin::AllocateAvailable(b(1), b(2), b(3)),
+            Builtin::AllocateByPriority(b(1), b(2), b(3), b(4), b(5)),
+            Builtin::Previous(b(1), b(2)),
+            Builtin::Init(b(1)),
+        ];
+        for v in &all {
+            match v {
+                Builtin::Lookup(..)
+                | Builtin::LookupForward(..)
+                | Builtin::LookupBackward(..)
+                | Builtin::Abs(..)
+                | Builtin::Arccos(..)
+                | Builtin::Arcsin(..)
+                | Builtin::Arctan(..)
+                | Builtin::Cos(..)
+                | Builtin::Exp(..)
+                | Builtin::Inf
+                | Builtin::Int(..)
+                | Builtin::IsModuleInput(..)
+                | Builtin::Ln(..)
+                | Builtin::Log10(..)
+                | Builtin::Max(..)
+                | Builtin::Mean(..)
+                | Builtin::Min(..)
+                | Builtin::Pi
+                | Builtin::Pulse(..)
+                | Builtin::Quantum(..)
+                | Builtin::Ramp(..)
+                | Builtin::Round(..)
+                | Builtin::SafeDiv(..)
+                | Builtin::Sign(..)
+                | Builtin::Sshape(..)
+                | Builtin::Sin(..)
+                | Builtin::Sqrt(..)
+                | Builtin::Step(..)
+                | Builtin::Tan(..)
+                | Builtin::Time
+                | Builtin::TimeStep
+                | Builtin::StartTime
+                | Builtin::FinalTime
+                | Builtin::Rank(..)
+                | Builtin::Size(..)
+                | Builtin::Stddev(..)
+                | Builtin::Sum(..)
+                | Builtin::VectorSelect(..)
+                | Builtin::VectorElmMap(..)
+                | Builtin::VectorSortOrder(..)
+                | Builtin::AllocateAvailable(..)
+                | Builtin::AllocateByPriority(..)
+                | Builtin::Previous(..)
+                | Builtin::Init(..) => {}
+            }
+        }
+        all
     }
 
-    let all: Vec<Builtin> = vec![
-        Builtin::Lookup(b(), b(), Loc::default()),
-        Builtin::LookupForward(b(), b(), Loc::default()),
-        Builtin::LookupBackward(b(), b(), Loc::default()),
-        Builtin::Abs(b()),
-        Builtin::Arccos(b()),
-        Builtin::Arcsin(b()),
-        Builtin::Arctan(b()),
-        Builtin::Cos(b()),
-        Builtin::Exp(b()),
-        Builtin::Inf,
-        Builtin::Int(b()),
-        Builtin::IsModuleInput("x".to_string(), Loc::default()),
-        Builtin::Ln(b()),
-        Builtin::Log10(b()),
-        Builtin::Max(b(), None),
-        Builtin::Mean(vec![]),
-        Builtin::Min(b(), None),
-        Builtin::Pi,
-        Builtin::Pulse(b(), b(), None),
-        Builtin::Quantum(b(), b()),
-        Builtin::Ramp(b(), b(), None),
-        Builtin::Round(b()),
-        Builtin::SafeDiv(b(), b(), None),
-        Builtin::Sign(b()),
-        Builtin::Sshape(b(), b(), b()),
-        Builtin::Sin(b()),
-        Builtin::Sqrt(b()),
-        Builtin::Step(b(), b()),
-        Builtin::Tan(b()),
-        Builtin::Time,
-        Builtin::TimeStep,
-        Builtin::StartTime,
-        Builtin::FinalTime,
-        Builtin::Rank(b(), b()),
-        Builtin::Size(b()),
-        Builtin::Stddev(b()),
-        Builtin::Sum(b()),
-        Builtin::VectorSelect(b(), b(), b(), b(), b()),
-        Builtin::VectorElmMap(b(), b()),
-        Builtin::VectorSortOrder(b(), b()),
-        Builtin::AllocateAvailable(b(), b(), b()),
-        Builtin::AllocateByPriority(b(), b(), b(), b(), b()),
-        Builtin::Previous(b(), b()),
-        Builtin::Init(b()),
-    ];
+    /// The optional-trailing-argument and n-ary forms of the variants whose
+    /// shape varies with arity, so both forms of every such variant are
+    /// exercised.
+    fn arity_variants() -> Vec<Builtin> {
+        fn b(n: i32) -> Box<i32> {
+            Box::new(n)
+        }
+        vec![
+            Builtin::Max(b(1), Some(b(2))),
+            Builtin::Min(b(1), Some(b(2))),
+            Builtin::Mean(vec![]),
+            Builtin::Mean(vec![1]),
+            Builtin::Pulse(b(1), b(2), Some(b(3))),
+            Builtin::Ramp(b(1), b(2), Some(b(3))),
+            Builtin::SafeDiv(b(1), b(2), Some(b(3))),
+        ]
+    }
 
-    // No `_` arm: this is what turns "every variant is covered" into a property
-    // the compiler checks rather than a claim the row count implies.
-    for v in &all {
-        match v {
-            Builtin::Lookup(..)
-            | Builtin::LookupForward(..)
-            | Builtin::LookupBackward(..)
-            | Builtin::Abs(..)
-            | Builtin::Arccos(..)
-            | Builtin::Arcsin(..)
-            | Builtin::Arctan(..)
-            | Builtin::Cos(..)
-            | Builtin::Exp(..)
-            | Builtin::Inf
-            | Builtin::Int(..)
-            | Builtin::IsModuleInput(..)
-            | Builtin::Ln(..)
-            | Builtin::Log10(..)
-            | Builtin::Max(..)
-            | Builtin::Mean(..)
-            | Builtin::Min(..)
-            | Builtin::Pi
-            | Builtin::Pulse(..)
-            | Builtin::Quantum(..)
-            | Builtin::Ramp(..)
-            | Builtin::Round(..)
-            | Builtin::SafeDiv(..)
-            | Builtin::Sign(..)
-            | Builtin::Sshape(..)
-            | Builtin::Sin(..)
-            | Builtin::Sqrt(..)
-            | Builtin::Step(..)
-            | Builtin::Tan(..)
-            | Builtin::Time
-            | Builtin::TimeStep
-            | Builtin::StartTime
-            | Builtin::FinalTime
-            | Builtin::Rank(..)
-            | Builtin::Size(..)
-            | Builtin::Stddev(..)
-            | Builtin::Sum(..)
-            | Builtin::VectorSelect(..)
-            | Builtin::VectorElmMap(..)
-            | Builtin::VectorSortOrder(..)
-            | Builtin::AllocateAvailable(..)
-            | Builtin::AllocateByPriority(..)
-            | Builtin::Previous(..)
-            | Builtin::Init(..) => {}
+    fn arg_values(v: &Builtin) -> Vec<i32> {
+        v.args().into_iter().copied().collect()
+    }
+
+    /// compiler-unification.AC2.1: every variant agrees with its signature.
+    ///
+    /// The rows are the enumeration itself (`every_variant`, plus the
+    /// alternate arities), and the assertions are properties of the table and
+    /// the accessors rather than a transcription of either: the argument
+    /// view, the rebuilders, and the kinds all report the same positions in
+    /// the same order, and the source arity admits what the node holds.
+    #[test]
+    fn compiler_unification_ac2_1_every_variant_agrees_with_its_signature() {
+        let mut rows = every_variant();
+        let n_variants = rows.len();
+        rows.extend(arity_variants());
+
+        for v in &rows {
+            let sig = v.signature();
+            let name = sig.name;
+            let args = arg_values(v);
+            let n_ident = sig
+                .arg_kinds
+                .iter()
+                .filter(|k| **k == ArgKind::Ident)
+                .count();
+
+            // Source arity admits what the node holds.
+            assert!(
+                sig.accepts_arity(args.len() + n_ident),
+                "{name}: {} expression args + {n_ident} ident args lie outside [{}, {:?}]",
+                args.len(),
+                sig.min_args,
+                sig.max_args
+            );
+            assert!(
+                sig.min_args as usize <= sig.max_args.map_or(usize::MAX, |m| m as usize),
+                "{name}: min_args exceeds max_args"
+            );
+
+            // args() yields the operands in declaration order: every row is
+            // built with ascending values 1..=n.
+            assert_eq!(
+                args,
+                (1..=args.len() as i32).collect::<Vec<_>>(),
+                "{name}: args() order"
+            );
+
+            // args() and args_mut() see the same expressions in the same order.
+            let mut mutable = v.clone();
+            let mutable_args: Vec<i32> = mutable.args_mut().into_iter().map(|x| *x).collect();
+            assert_eq!(args, mutable_args, "{name}: args_mut disagrees with args");
+
+            // for_each_expr_ref, map and try_map_ref all visit args() in order.
+            let mut visited = Vec::new();
+            v.for_each_expr_ref(|x| visited.push(*x));
+            assert_eq!(args, visited, "{name}: for_each_expr_ref order");
+            let mut mapped_order = Vec::new();
+            let round_trip = v.clone().map(|x| {
+                mapped_order.push(x);
+                x
+            });
+            assert_eq!(&round_trip, v, "{name}: map(identity) is not the identity");
+            assert_eq!(args, mapped_order, "{name}: map visit order");
+            let by_ref: Result<Builtin, ()> = v.try_map_ref(|x| Ok(*x));
+            assert_eq!(
+                by_ref.as_ref(),
+                Ok(v),
+                "{name}: try_map_ref(copy) is not a copy"
+            );
+            let kinds_seen: Vec<ArgKind> = {
+                let mut seen = Vec::new();
+                let _ = v.clone().map_with_kinds(|x, k| {
+                    seen.push(k);
+                    x
+                });
+                seen
+            };
+            assert_eq!(
+                kinds_seen,
+                v.arg_kinds().to_vec(),
+                "{name}: map_with_kinds hands out kinds in a different order"
+            );
+
+            // One kind per expression argument, none of them Ident.
+            let kinds = v.arg_kinds();
+            assert_eq!(
+                kinds.len(),
+                args.len(),
+                "{name}: arg_kinds is not aligned with args"
+            );
+            assert!(
+                kinds.iter().all(|k| *k != ArgKind::Ident),
+                "{name}: an identifier payload surfaced as an expression argument"
+            );
+            assert_eq!(
+                v.args_with_kinds().count(),
+                args.len(),
+                "{name}: args_with_kinds is not aligned with args"
+            );
+
+            // A reduction has exactly one argument and it is the reduced array.
+            if v.is_unary_reduction() {
+                assert!(
+                    sig.unary_reduces && args.len() == 1,
+                    "{name}: reduction shape"
+                );
+                assert_eq!(kinds.to_vec(), vec![ArgKind::Array { whole: false }]);
+                assert_eq!(v.result_kind(), ResultKind::Scalar);
+            } else {
+                assert_eq!(v.result_kind(), sig.result, "{name}: n-ary result kind");
+            }
+
+            // An array-producing builtin takes its shape from an array position.
+            if let ResultKind::Array { shape_from } = v.result_kind() {
+                let from = shape_from as usize;
+                assert!(
+                    from < kinds.len(),
+                    "{name}: shape_from past the last argument"
+                );
+                assert!(
+                    matches!(kinds[from], ArgKind::Array { .. }),
+                    "{name}: shape_from names a non-array position"
+                );
+            }
+            assert_eq!(
+                v.has_array_operand(),
+                kinds.iter().any(|k| matches!(k, ArgKind::Array { .. })),
+                "{name}: has_array_operand"
+            );
+
+            // The name half of the table round-trips through the lookup.
+            assert_eq!(v.name(), name);
+            assert!(
+                std::ptr::eq(BuiltinSig::by_name(name).unwrap(), sig),
+                "{name}: by_name(name) is a different signature"
+            );
+            for alias in sig.aliases {
+                assert!(
+                    std::ptr::eq(BuiltinSig::by_name(alias).unwrap(), sig),
+                    "{name}: alias {alias} resolves elsewhere"
+                );
+            }
+            assert!(is_builtin_fn(name));
+            assert_eq!(
+                is_0_arity_builtin_fn(name),
+                sig.max_args == Some(0),
+                "{name}: is_0_arity_builtin_fn"
+            );
+
+            // walk_builtin_expr reports the same positions, classified by kind.
+            let mut walked = Vec::new();
+            walk_builtin_expr(v, |c| match c {
+                BuiltinContents::Ident(id, _) => walked.push(format!("ident:{id}")),
+                BuiltinContents::Expr(e) => walked.push(format!("expr:{e}")),
+                BuiltinContents::LookupTable(e) => walked.push(format!("table:{e}")),
+            });
+            let expected: Vec<String> = {
+                let mut exp = Vec::new();
+                if let Builtin::IsModuleInput(id, _) = v {
+                    exp.push(format!("ident:{id}"));
+                }
+                for (arg, kind) in v.args_with_kinds() {
+                    let tag = if kind == ArgKind::Table {
+                        "table"
+                    } else {
+                        "expr"
+                    };
+                    exp.push(format!("{tag}:{arg}"));
+                }
+                exp
+            };
+            assert_eq!(walked, expected, "{name}: walk_builtin_expr contents");
+        }
+
+        // The table is exactly the enumeration: one signature per variant,
+        // each reached by exactly one variant, with distinct names.
+        assert_eq!(BuiltinSig::ALL.len(), n_variants);
+        let mut seen = std::collections::BTreeSet::new();
+        for v in every_variant() {
+            assert!(
+                BuiltinSig::ALL
+                    .iter()
+                    .any(|s| std::ptr::eq(*s, v.signature())),
+                "{}: signature missing from ALL",
+                v.name()
+            );
+            assert!(
+                seen.insert(v.name()),
+                "two variants share the name {:?}",
+                v.name()
+            );
+        }
+        for sig in BuiltinSig::ALL {
+            for alias in sig.aliases {
+                assert!(seen.insert(alias), "alias {alias:?} collides with a name");
+            }
+        }
+
+        assert!(!is_builtin_fn("lookupz"));
+        assert!(!is_0_arity_builtin_fn("lookup"));
+        assert!(is_0_arity_builtin_fn("time"));
+    }
+
+    /// The fixed list behind `is_0_arity_builtin_fn_ci` is exactly the set of
+    /// nullary names and aliases the table declares.
+    #[test]
+    fn nullary_name_list_matches_the_signature_table() {
+        let from_table: std::collections::BTreeSet<&str> = BuiltinSig::ALL
+            .iter()
+            .filter(|sig| sig.max_args == Some(0))
+            .flat_map(|sig| std::iter::once(sig.name).chain(sig.aliases.iter().copied()))
+            .collect();
+        let all_names: Vec<&str> = BuiltinSig::ALL
+            .iter()
+            .flat_map(|sig| std::iter::once(sig.name).chain(sig.aliases.iter().copied()))
+            .collect();
+        for name in &all_names {
+            assert_eq!(
+                is_0_arity_builtin_fn_ci(name),
+                from_table.contains(name),
+                "{name}: the case-insensitive list disagrees with the table"
+            );
+            assert_eq!(
+                is_0_arity_builtin_fn_ci(&name.to_uppercase()),
+                from_table.contains(name),
+                "{name}: uppercase"
+            );
+        }
+        assert_eq!(from_table.len(), 9, "the fixed list has 9 entries");
+    }
+
+    #[test]
+    fn test_is_0_arity_builtin_fn_ci() {
+        assert!(is_0_arity_builtin_fn_ci("Time"));
+        assert!(is_0_arity_builtin_fn_ci("Final_Time"));
+        assert!(!is_0_arity_builtin_fn_ci("lookup"));
+        assert!(!is_0_arity_builtin_fn_ci("times"));
+        assert!(!is_0_arity_builtin_fn_ci(""));
+        // A non-ASCII name can never match (every builtin name is ASCII).
+        assert!(!is_0_arity_builtin_fn_ci("pï"));
+
+        // Equivalent to to_lowercase() + is_0_arity_builtin_fn for any ASCII input,
+        // which is the behavior the hot-path caller relies on.
+        for s in [
+            "TIME",
+            "Pi",
+            "Dt",
+            "Final_Time",
+            "STOPTIME",
+            "foo",
+            "lookuptable",
+            "timestep",
+        ] {
+            assert_eq!(
+                is_0_arity_builtin_fn_ci(s),
+                is_0_arity_builtin_fn(&s.to_lowercase()),
+                "ci/lowercase mismatch for {s}"
+            );
         }
     }
 
-    let mut seen = std::collections::BTreeSet::new();
-    for v in &all {
-        let name = v.name();
-        assert!(!name.is_empty(), "a variant reported an empty name");
-        assert!(
-            is_builtin_fn(name),
-            "name() emits {name:?} but is_builtin_fn rejects it"
-        );
-        assert!(seen.insert(name), "two variants share the name {name:?}");
+    #[test]
+    fn accepts_arity_is_the_closed_source_range() {
+        assert!(!MAX.accepts_arity(0));
+        assert!(MAX.accepts_arity(1));
+        assert!(MAX.accepts_arity(2));
+        assert!(!MAX.accepts_arity(3));
+        assert!(MEAN.accepts_arity(0));
+        assert!(MEAN.accepts_arity(17));
+        assert!(INF.accepts_arity(0));
+        assert!(!INF.accepts_arity(1));
     }
 
-    assert!(!is_builtin_fn("lookupz"));
-    assert!(!is_0_arity_builtin_fn("lookup"));
-    assert!(is_0_arity_builtin_fn("time"));
-}
-
-#[test]
-fn test_is_0_arity_builtin_fn_ci() {
-    const NAMES: [&str; 9] = [
-        "inf",
-        "pi",
-        "time",
-        "time_step",
-        "dt",
-        "initial_time",
-        "starttime",
-        "final_time",
-        "stoptime",
-    ];
-    for name in NAMES {
-        assert!(is_0_arity_builtin_fn_ci(name), "lowercase {name}");
-        assert!(
-            is_0_arity_builtin_fn_ci(&name.to_uppercase()),
-            "uppercase {name}"
-        );
+    #[test]
+    fn test_map() {
+        // Test that map correctly transforms expression types
+        let builtin: BuiltinFn<i32> = BuiltinFn::Abs(Box::new(42));
+        let mapped: BuiltinFn<String> = builtin.map(|x| x.to_string());
+        assert_eq!(mapped.name(), "abs");
+        if let BuiltinFn::Abs(x) = mapped {
+            assert_eq!(*x, "42");
+        } else {
+            panic!("expected Abs variant");
+        }
     }
-    assert!(is_0_arity_builtin_fn_ci("Time"));
-    assert!(is_0_arity_builtin_fn_ci("Final_Time"));
-    assert!(!is_0_arity_builtin_fn_ci("lookup"));
-    assert!(!is_0_arity_builtin_fn_ci("times"));
-    assert!(!is_0_arity_builtin_fn_ci(""));
-    // A non-ASCII name can never match (every builtin name is ASCII).
-    assert!(!is_0_arity_builtin_fn_ci("pï"));
 
-    // Equivalent to to_lowercase() + is_0_arity_builtin_fn for any ASCII input,
-    // which is the behavior the hot-path caller relies on.
-    for s in [
-        "TIME",
-        "Pi",
-        "Dt",
-        "Final_Time",
-        "STOPTIME",
-        "foo",
-        "lookuptable",
-        "timestep",
-    ] {
+    #[test]
+    fn test_map_0_arity() {
+        // Test that 0-arity builtins work with map
+        let builtin: BuiltinFn<i32> = BuiltinFn::Time;
+        let mapped: BuiltinFn<String> = builtin.map(|x| x.to_string());
+        assert!(matches!(mapped, BuiltinFn::Time));
+    }
+
+    #[test]
+    fn test_try_map_success() {
+        let builtin: BuiltinFn<i32> = BuiltinFn::Max(Box::new(10), Some(Box::new(20)));
+        let result: Result<BuiltinFn<i64>, &str> = builtin.try_map(|x| Ok(x as i64 * 2));
+        assert!(result.is_ok());
+        if let Ok(BuiltinFn::Max(a, Some(b))) = result {
+            assert_eq!(*a, 20);
+            assert_eq!(*b, 40);
+        } else {
+            panic!("expected Max variant with two args");
+        }
+    }
+
+    #[test]
+    fn test_try_map_failure() {
+        let builtin: BuiltinFn<i32> = BuiltinFn::Abs(Box::new(42));
+        let result: Result<BuiltinFn<i64>, &str> = builtin.try_map(|_| Err("error"));
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "error");
+    }
+
+    #[test]
+    fn try_map_ref_stops_at_the_first_failure() {
+        let builtin: BuiltinFn<i32> = BuiltinFn::Mean(vec![1, 2, 3]);
+        let mut calls = 0;
+        let result: Result<BuiltinFn<i32>, i32> = builtin.try_map_ref(|x| {
+            calls += 1;
+            if *x == 2 { Err(*x) } else { Ok(*x) }
+        });
+        assert_eq!(result, Err(2));
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn test_map_mean_vec() {
+        // Test that Mean with Vec<Expr> is correctly transformed
+        let builtin: BuiltinFn<i32> = BuiltinFn::Mean(vec![1, 2, 3]);
+        let mapped: BuiltinFn<i32> = builtin.map(|x| x * 10);
+        if let BuiltinFn::Mean(args) = mapped {
+            assert_eq!(args, vec![10, 20, 30]);
+        } else {
+            panic!("expected Mean variant");
+        }
+    }
+
+    /// The arity-polymorphic variants change kind and result with their
+    /// argument count: the one-argument form is XMILE 3.7.1.3's array
+    /// reduction (`MAX(A)` "extends MAX(x, y)", `MEAN(A)`), the n-ary form is
+    /// Simlin's scalar rule -- section 3.5's `MAX(x, y)` / `MIN(x, y)` and
+    /// Stella's n-ary `MEAN`; the spec's mixed `MAX(A, 0)` is not implemented
+    /// (GH #1026).
+    #[test]
+    fn unary_reduction_forms_are_reduced_arrays_and_n_ary_forms_are_scalars() {
+        let one = BuiltinFn::<i32>::Max(Box::new(1), None);
+        assert!(one.is_unary_reduction());
         assert_eq!(
-            is_0_arity_builtin_fn_ci(s),
-            is_0_arity_builtin_fn(&s.to_lowercase()),
-            "ci/lowercase mismatch for {s}"
+            one.arg_kinds().to_vec(),
+            vec![ArgKind::Array { whole: false }]
         );
-    }
-}
+        assert_eq!(one.result_kind(), ResultKind::Scalar);
 
-#[test]
-fn test_map() {
-    // Test that map correctly transforms expression types
-    let builtin: BuiltinFn<i32> = BuiltinFn::Abs(Box::new(42));
-    let mapped: BuiltinFn<String> = builtin.map(|x| x.to_string());
-    assert_eq!(mapped.name(), "abs");
-    if let BuiltinFn::Abs(x) = mapped {
-        assert_eq!(*x, "42");
-    } else {
-        panic!("expected Abs variant");
-    }
-}
+        let two = BuiltinFn::<i32>::Max(Box::new(1), Some(Box::new(2)));
+        assert!(!two.is_unary_reduction());
+        assert_eq!(
+            two.arg_kinds().to_vec(),
+            vec![ArgKind::Scalar, ArgKind::Scalar]
+        );
+        assert_eq!(two.result_kind(), ResultKind::Elementwise);
 
-#[test]
-fn test_map_0_arity() {
-    // Test that 0-arity builtins work with map
-    let builtin: BuiltinFn<i32> = BuiltinFn::Time;
-    let mapped: BuiltinFn<String> = builtin.map(|x| x.to_string());
-    assert!(matches!(mapped, BuiltinFn::Time));
-}
+        let mean1 = BuiltinFn::<i32>::Mean(vec![1]);
+        assert!(mean1.is_unary_reduction());
+        assert_eq!(
+            mean1.arg_kinds().to_vec(),
+            vec![ArgKind::Array { whole: false }]
+        );
 
-#[test]
-fn test_try_map_success() {
-    let builtin: BuiltinFn<i32> = BuiltinFn::Max(Box::new(10), Some(Box::new(20)));
-    let result: Result<BuiltinFn<i64>, &str> = builtin.try_map(|x| Ok(x as i64 * 2));
-    assert!(result.is_ok());
-    if let Ok(BuiltinFn::Max(a, Some(b))) = result {
-        assert_eq!(*a, 20);
-        assert_eq!(*b, 40);
-    } else {
-        panic!("expected Max variant with two args");
-    }
-}
+        let mean3 = BuiltinFn::<i32>::Mean(vec![1, 2, 3]);
+        assert!(!mean3.is_unary_reduction());
+        assert_eq!(mean3.arg_kinds().to_vec(), vec![ArgKind::Scalar; 3]);
+        assert_eq!(mean3.result_kind(), ResultKind::Scalar);
 
-#[test]
-fn test_try_map_failure() {
-    let builtin: BuiltinFn<i32> = BuiltinFn::Abs(Box::new(42));
-    let result: Result<BuiltinFn<i64>, &str> = builtin.try_map(|_| Err("error"));
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err(), "error");
-}
-
-#[test]
-fn test_map_mean_vec() {
-    // Test that Mean with Vec<Expr> is correctly transformed
-    let builtin: BuiltinFn<i32> = BuiltinFn::Mean(vec![1, 2, 3]);
-    let mapped: BuiltinFn<i32> = builtin.map(|x| x * 10);
-    if let BuiltinFn::Mean(args) = mapped {
-        assert_eq!(args, vec![10, 20, 30]);
-    } else {
-        panic!("expected Mean variant");
+        // A one-argument builtin that is not a reduction keeps its kind.
+        let abs = BuiltinFn::<i32>::Abs(Box::new(1));
+        assert!(!abs.is_unary_reduction());
+        assert_eq!(abs.arg_kinds().to_vec(), vec![ArgKind::Scalar]);
     }
 }

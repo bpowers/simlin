@@ -2696,14 +2696,6 @@ fn emit_apply(func: BuiltinId, ctx: &EmitCtx, f: &mut Function) {
             get(f, c);
             f.instruction(&Ins::Call(ctx.helpers.pulse));
         }
-
-        // ── Constants ─────────────────────────────────────────────────────
-        BuiltinId::Inf => {
-            f.instruction(&f64_const(f64::INFINITY));
-        }
-        BuiltinId::Pi => {
-            f.instruction(&f64_const(std::f64::consts::PI));
-        }
     }
 }
 

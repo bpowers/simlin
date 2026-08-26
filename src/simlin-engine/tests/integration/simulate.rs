@@ -151,6 +151,7 @@ corpus_tests! {
     tests_model_doc => "test/test-models/tests/model_doc/model_doc.xmile",
     tests_number_handling_test_number_handling => "test/test-models/tests/number_handling/test_number_handling.xmile",
     tests_parentheses_test_parens => "test/test-models/tests/parentheses/test_parens.xmile",
+    tests_pi_test_pi => "test/test-models/tests/pi/test_pi.xmile",
     tests_reference_capitalization_test_reference_capitalization => "test/test-models/tests/reference_capitalization/test_reference_capitalization.xmile",
     tests_smooth_and_stock_test_smooth_and_stock => "test/test-models/tests/smooth_and_stock/test_smooth_and_stock.xmile",
     tests_sqrt_test_sqrt => "test/test-models/tests/sqrt/test_sqrt.xmile",

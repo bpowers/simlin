@@ -683,240 +683,41 @@ impl Expr2 {
                 Expr2::Var(id, array_bounds, loc)
             }
             Expr1::App(builtin_fn, loc) => {
-                use BuiltinFn::*;
-                let builtin = match builtin_fn {
-                    Lookup(table_expr, index_expr, loc) => Lookup(
-                        Box::new(Expr2::from(*table_expr, ctx)?),
-                        Box::new(Expr2::from(*index_expr, ctx)?),
-                        loc,
-                    ),
-                    LookupForward(table_expr, index_expr, loc) => LookupForward(
-                        Box::new(Expr2::from(*table_expr, ctx)?),
-                        Box::new(Expr2::from(*index_expr, ctx)?),
-                        loc,
-                    ),
-                    LookupBackward(table_expr, index_expr, loc) => LookupBackward(
-                        Box::new(Expr2::from(*table_expr, ctx)?),
-                        Box::new(Expr2::from(*index_expr, ctx)?),
-                        loc,
-                    ),
-                    Abs(e) => Abs(Box::new(Expr2::from(*e, ctx)?)),
-                    Round(e) => Round(Box::new(Expr2::from(*e, ctx)?)),
-                    Arccos(e) => Arccos(Box::new(Expr2::from(*e, ctx)?)),
-                    Arcsin(e) => Arcsin(Box::new(Expr2::from(*e, ctx)?)),
-                    Arctan(e) => Arctan(Box::new(Expr2::from(*e, ctx)?)),
-                    Cos(e) => Cos(Box::new(Expr2::from(*e, ctx)?)),
-                    Exp(e) => Exp(Box::new(Expr2::from(*e, ctx)?)),
-                    Inf => Inf,
-                    Int(e) => Int(Box::new(Expr2::from(*e, ctx)?)),
-                    IsModuleInput(s, loc) => IsModuleInput(s, loc),
-                    Ln(e) => Ln(Box::new(Expr2::from(*e, ctx)?)),
-                    Log10(e) => Log10(Box::new(Expr2::from(*e, ctx)?)),
-                    Max(e1, e2) => {
-                        // When MAX has a single argument (e2 is None), it behaves as an array
-                        // reduction (finding the maximum of all elements in the array),
-                        // so we allow cross-dimension unions.
-                        let is_array_reduction = e2.is_none();
-                        let prev = if is_array_reduction {
-                            ctx.set_allow_dimension_union(true)
-                        } else {
-                            false
-                        };
-                        let result = Max(
-                            Box::new(Expr2::from(*e1, ctx)?),
-                            e2.map(|e| Expr2::from(*e, ctx)).transpose()?.map(Box::new),
-                        );
-                        if is_array_reduction {
-                            ctx.set_allow_dimension_union(prev);
-                        }
-                        result
-                    }
-                    Mean(exprs) => {
-                        // When MEAN has a single argument, it behaves as an array reduction
-                        // (averaging all elements in the array), so we allow cross-dimension unions.
-                        // With multiple arguments, it's a scalar mean and doesn't need the flag.
-                        let is_array_reduction = exprs.len() == 1;
-                        let prev = if is_array_reduction {
-                            ctx.set_allow_dimension_union(true)
-                        } else {
-                            false
-                        };
-                        let exprs: EquationResult<Vec<Expr2>> =
-                            exprs.into_iter().map(|e| Expr2::from(e, ctx)).collect();
-                        if is_array_reduction {
-                            ctx.set_allow_dimension_union(prev);
-                        }
-                        Mean(exprs?)
-                    }
-                    Min(e1, e2) => {
-                        // When MIN has a single argument (e2 is None), it behaves as an array
-                        // reduction (finding the minimum of all elements in the array),
-                        // so we allow cross-dimension unions.
-                        let is_array_reduction = e2.is_none();
-                        let prev = if is_array_reduction {
-                            ctx.set_allow_dimension_union(true)
-                        } else {
-                            false
-                        };
-                        let result = Min(
-                            Box::new(Expr2::from(*e1, ctx)?),
-                            e2.map(|e| Expr2::from(*e, ctx)).transpose()?.map(Box::new),
-                        );
-                        if is_array_reduction {
-                            ctx.set_allow_dimension_union(prev);
-                        }
-                        result
-                    }
-                    Pi => Pi,
-                    Quantum(e1, e2) => Quantum(
-                        Box::new(Expr2::from(*e1, ctx)?),
-                        Box::new(Expr2::from(*e2, ctx)?),
-                    ),
-                    Pulse(e1, e2, e3) => Pulse(
-                        Box::new(Expr2::from(*e1, ctx)?),
-                        Box::new(Expr2::from(*e2, ctx)?),
-                        e3.map(|e| Expr2::from(*e, ctx)).transpose()?.map(Box::new),
-                    ),
-                    Ramp(e1, e2, e3) => Ramp(
-                        Box::new(Expr2::from(*e1, ctx)?),
-                        Box::new(Expr2::from(*e2, ctx)?),
-                        e3.map(|e| Expr2::from(*e, ctx)).transpose()?.map(Box::new),
-                    ),
-                    SafeDiv(e1, e2, e3) => SafeDiv(
-                        Box::new(Expr2::from(*e1, ctx)?),
-                        Box::new(Expr2::from(*e2, ctx)?),
-                        e3.map(|e| Expr2::from(*e, ctx)).transpose()?.map(Box::new),
-                    ),
-                    Sign(e) => Sign(Box::new(Expr2::from(*e, ctx)?)),
-                    Sshape(e1, e2, e3) => Sshape(
-                        Box::new(Expr2::from(*e1, ctx)?),
-                        Box::new(Expr2::from(*e2, ctx)?),
-                        Box::new(Expr2::from(*e3, ctx)?),
-                    ),
-                    Sin(e) => Sin(Box::new(Expr2::from(*e, ctx)?)),
-                    Sqrt(e) => Sqrt(Box::new(Expr2::from(*e, ctx)?)),
-                    Step(e1, e2) => Step(
-                        Box::new(Expr2::from(*e1, ctx)?),
-                        Box::new(Expr2::from(*e2, ctx)?),
-                    ),
-                    Tan(e) => Tan(Box::new(Expr2::from(*e, ctx)?)),
-                    Time => Time,
-                    TimeStep => TimeStep,
-                    StartTime => StartTime,
-                    FinalTime => FinalTime,
-                    Rank(e, direction) => Rank(
-                        Box::new(Expr2::from(*e, ctx)?),
-                        Box::new(Expr2::from(*direction, ctx)?),
-                    ),
-                    Size(e) => {
-                        // Special case: SIZE(DimensionName) returns the element count of the dimension.
-                        // This is used by Vensim's ELMCOUNT function (converted to SIZE in XMILE).
-                        //
-                        // Note: The XMILE spec (section 3.7.1) states that dimension names "must be
-                        // distinct from model variables names within the whole-model." Therefore, we
-                        // don't need to disambiguate between a dimension and variable with the same
-                        // name - that's an invalid model per the spec. We check dimension names first,
-                        // which is the sensible default since SIZE(array_var) can use SIZE(arr[*])
-                        // syntax for explicit array sizing.
-                        if let Expr1::Var(ref id, loc) = *e
-                            && ctx.is_dimension_name(id.as_str())
-                        {
-                            // Convert SIZE(DimName) to a constant
-                            let dim_name = CanonicalDimensionName::from(id);
-                            if let Some(len) = ctx.get_dimension_len(&dim_name) {
-                                // Return a constant expression with the dimension size
-                                return Ok(Expr2::Const(
-                                    len.to_string(),
-                                    Literal::new(len as f64),
-                                    loc,
-                                ));
-                            }
-                            // If we can't find the dimension length, fall through to normal processing
-                            // which will produce an appropriate error
-                        }
-                        // Normal case: SIZE(array_expression)
-                        // Array reduction builtins allow cross-dimension unions
-                        let prev = ctx.set_allow_dimension_union(true);
-                        let result = Size(Box::new(Expr2::from(*e, ctx)?));
-                        ctx.set_allow_dimension_union(prev);
-                        result
-                    }
-                    Stddev(e) => {
-                        // Array reduction builtin - allow cross-dimension unions
-                        let prev = ctx.set_allow_dimension_union(true);
-                        let result = Stddev(Box::new(Expr2::from(*e, ctx)?));
-                        ctx.set_allow_dimension_union(prev);
-                        result
-                    }
-                    Sum(e) => {
-                        // Array reduction builtin - allow cross-dimension unions
-                        // This enables expressions like SUM(a[*]+h[*]) where a[DimA] and h[DimC]
-                        // have different dimensions, producing a cross-product sum.
-                        let prev = ctx.set_allow_dimension_union(true);
-                        let result = Sum(Box::new(Expr2::from(*e, ctx)?));
-                        ctx.set_allow_dimension_union(prev);
-                        result
-                    }
-                    VectorSelect(sel, expr, max_val, action, err) => {
-                        let prev = ctx.set_allow_dimension_union(true);
-                        let result = VectorSelect(
-                            Box::new(Expr2::from(*sel, ctx)?),
-                            Box::new(Expr2::from(*expr, ctx)?),
-                            Box::new(Expr2::from(*max_val, ctx)?),
-                            Box::new(Expr2::from(*action, ctx)?),
-                            Box::new(Expr2::from(*err, ctx)?),
-                        );
-                        ctx.set_allow_dimension_union(prev);
-                        result
-                    }
-                    VectorElmMap(src, offs) => {
-                        let prev = ctx.set_allow_dimension_union(true);
-                        let result = VectorElmMap(
-                            Box::new(Expr2::from(*src, ctx)?),
-                            Box::new(Expr2::from(*offs, ctx)?),
-                        );
-                        ctx.set_allow_dimension_union(prev);
-                        result
-                    }
-                    VectorSortOrder(arr, dir) => {
-                        let prev = ctx.set_allow_dimension_union(true);
-                        let result = VectorSortOrder(
-                            Box::new(Expr2::from(*arr, ctx)?),
-                            Box::new(Expr2::from(*dir, ctx)?),
-                        );
-                        ctx.set_allow_dimension_union(prev);
-                        result
-                    }
-                    AllocateAvailable(req, pp, avail) => {
-                        let prev = ctx.set_allow_dimension_union(true);
-                        let result = AllocateAvailable(
-                            Box::new(Expr2::from(*req, ctx)?),
-                            Box::new(Expr2::from(*pp, ctx)?),
-                            Box::new(Expr2::from(*avail, ctx)?),
-                        );
-                        ctx.set_allow_dimension_union(prev);
-                        result
-                    }
-                    AllocateByPriority(req, priority, size, width, supply) => {
-                        let prev = ctx.set_allow_dimension_union(true);
-                        let result = AllocateByPriority(
-                            Box::new(Expr2::from(*req, ctx)?),
-                            Box::new(Expr2::from(*priority, ctx)?),
-                            Box::new(Expr2::from(*size, ctx)?),
-                            Box::new(Expr2::from(*width, ctx)?),
-                            Box::new(Expr2::from(*supply, ctx)?),
-                        );
-                        ctx.set_allow_dimension_union(prev);
-                        result
-                    }
-                    Previous(a, b) => Previous(
-                        Box::new(Expr2::from(*a, ctx)?),
-                        Box::new(Expr2::from(*b, ctx)?),
-                    ),
-                    Init(e) => Init(Box::new(Expr2::from(*e, ctx)?)),
-                };
+                // SIZE(DimensionName) returns the element count of the dimension.
+                // This is used by Vensim's ELMCOUNT function (converted to SIZE in XMILE).
+                //
+                // Note: The XMILE spec (section 3.7.1) states that dimension names "must be
+                // distinct from model variables names within the whole-model." Therefore, we
+                // don't need to disambiguate between a dimension and variable with the same
+                // name - that's an invalid model per the spec. We check dimension names first,
+                // which is the sensible default since SIZE(array_var) can use SIZE(arr[*])
+                // syntax for explicit array sizing. A dimension whose length the context
+                // cannot report falls through to normal processing, which produces the
+                // appropriate error.
+                if let BuiltinFn::Size(arg) = &builtin_fn
+                    && let Expr1::Var(id, var_loc) = &**arg
+                    && ctx.is_dimension_name(id.as_str())
+                    && let Some(len) = ctx.get_dimension_len(&CanonicalDimensionName::from(id))
+                {
+                    return Ok(Expr2::Const(
+                        len.to_string(),
+                        Literal::new(len as f64),
+                        *var_loc,
+                    ));
+                }
+                // Inside an array operand (`ArgKind::Array`: the reducers' and
+                // the vector builtins' array positions) sub-expressions may
+                // union disjoint named dimensions -- `SUM(a[*] + h[*])` over
+                // `a[DimA]` and `h[DimC]` is a cross-product sum -- so the
+                // union gate is open while such a call's arguments lower.
+                let allow_union = builtin_fn.has_array_operand();
+                let prev = allow_union.then(|| ctx.set_allow_dimension_union(true));
+                let lowered = builtin_fn.try_map(|e| Expr2::from(e, ctx));
+                if let Some(prev) = prev {
+                    ctx.set_allow_dimension_union(prev);
+                }
                 // TODO: Handle array sources for builtin functions that return arrays
-                Expr2::App(builtin, None, loc)
+                Expr2::App(lowered?, None, loc)
             }
             Expr1::Subscript(id, args, loc) => {
                 let args: EquationResult<Vec<IndexExpr2>> =

@@ -22,12 +22,13 @@
 //! variable up by the name the reference carries, and share this walk, so they
 //! classify identically.
 //!
-//! The walk is **exhaustive** over every `Expr` and `BuiltinFn` variant with
-//! explicit arms and is **default-variant**: anything not positively recognized
-//! as invariant is variant, and a future new `Expr`/`BuiltinFn` variant is a
-//! compile error here rather than a silent misclassification.
+//! The walk is **exhaustive** over every `Expr` variant with explicit arms and
+//! is **default-variant**: anything not positively recognized as invariant is
+//! variant, and a future new `Expr` variant is a compile error here rather than
+//! a silent misclassification. A builtin's class is its signature's
+//! `Invariance`, so adding a builtin means stating its class in the table.
 
-use crate::builtins::BuiltinFn;
+use crate::builtins::{BuiltinFn, Invariance};
 
 use super::expr::{Expr, SubscriptIndex, VarRef};
 
@@ -149,70 +150,24 @@ where
 
 /// Returns true iff a builtin application is run-invariant.
 ///
-/// Exhaustive over every `BuiltinFn` variant. Default-variant: a builtin is
-/// invariant only if it is a fixed time-global, `INIT(x)` (always invariant --
-/// the init buffer is frozen after the initials phase), a graphical-function
-/// lookup with an invariant index, or a pure function whose every argument is
-/// invariant. `TIME`, `PULSE`/`RAMP`/`STEP` (time-dependent even with constant
-/// args), and `PREVIOUS` (reads `prev_values`) are variant.
+/// Decided by the signature's `Invariance`: a `Pure` builtin is invariant iff
+/// every argument is (a graphical-function lookup's table holder and index
+/// among them; the fixed time globals and nullary constants trivially);
+/// `INIT(x)` is invariant for ANY `x` -- the init buffer is frozen after the
+/// initials phase, so its argument is deliberately NOT walked; `TIME`,
+/// `PULSE`/`RAMP`/`STEP` (time-dependent even with constant args) and
+/// `PREVIOUS` (reads `prev_values`) are variant whatever their arguments.
 fn builtin_is_invariant<F>(builtin: &BuiltinFn<Expr>, classify_ref: &F) -> bool
 where
     F: Fn(&VarRef) -> RefClass,
 {
-    use BuiltinFn::*;
-    // Walk a slice of subexpressions, all of which must be invariant.
-    let all = |args: &[&Expr]| args.iter().all(|e| expr_is_invariant(e, classify_ref));
-    match builtin {
-        // Fixed time-globals and nullary constants.
-        Inf | Pi | TimeStep | StartTime | FinalTime | IsModuleInput(_, _) => true,
-
-        // TIME is the canonical variant builtin.
-        Time => false,
-
-        // INIT(x) of ANY x is invariant: the initial-values buffer is frozen
-        // after the initials phase. The argument is NOT walked (deliberately).
-        Init(_) => true,
-
-        // PREVIOUS reads prev_values -- variant regardless of its argument.
-        Previous(_, _) => false,
-
-        // Time-dependent builtins: variant even with constant arguments.
-        Pulse(_, _, _) | Ramp(_, _, _) | Step(_, _) => false,
-
-        // Graphical-function lookups: the tables are static. Invariant iff the
-        // table holder (arg 1) and the index (arg 2) are both invariant.
-        Lookup(table, index, _)
-        | LookupForward(table, index, _)
-        | LookupBackward(table, index, _) => all(&[table, index]),
-
-        // Pure scalar builtins of invariant arguments.
-        Abs(a) | Arccos(a) | Arcsin(a) | Arctan(a) | Cos(a) | Exp(a) | Int(a) | Ln(a)
-        | Log10(a) | Round(a) | Sign(a) | Sin(a) | Sqrt(a) | Tan(a) => all(&[a]),
-        Max(a, b) | Min(a, b) => {
-            expr_is_invariant(a, classify_ref)
-                && b.as_ref()
-                    .is_none_or(|b| expr_is_invariant(b, classify_ref))
-        }
-        Mean(args) => args.iter().all(|e| expr_is_invariant(e, classify_ref)),
-        Quantum(a, b) => all(&[a, b]),
-        SafeDiv(a, b, c) => {
-            expr_is_invariant(a, classify_ref)
-                && expr_is_invariant(b, classify_ref)
-                && c.as_ref()
-                    .is_none_or(|c| expr_is_invariant(c, classify_ref))
-        }
-        Sshape(a, b, c) => all(&[a, b, c]),
-
-        // Array reducers of invariant arguments.
-        Size(a) | Stddev(a) | Sum(a) => all(&[a]),
-
-        // Array-producing builtins of invariant arguments. Pure (their result
-        // is a deterministic function of their inputs), so an all-invariant
-        // argument walk makes them invariant.
-        Rank(a, b) => all(&[a, b]),
-        VectorElmMap(a, b) | VectorSortOrder(a, b) => all(&[a, b]),
-        AllocateAvailable(a, b, c) => all(&[a, b, c]),
-        VectorSelect(a, b, c, d, e) | AllocateByPriority(a, b, c, d, e) => all(&[a, b, c, d, e]),
+    match builtin.signature().invariance {
+        Invariance::Pure => builtin
+            .args()
+            .into_iter()
+            .all(|e| expr_is_invariant(e, classify_ref)),
+        Invariance::Snapshot => true,
+        Invariance::TimeDependent | Invariance::Lagged => false,
     }
 }
 

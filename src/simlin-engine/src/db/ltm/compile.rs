@@ -580,11 +580,10 @@ struct LoweredLtmVariable {
 /// must be sound against `ast::expr3`'s Pass-1 decomposition set -- NOT
 /// the agg-hoistable reducer set (`ltm_agg::reducer_kind_from_name`),
 /// which differs: `SIZE` is never hoisted into an agg (its link score is
-/// constant 0) yet Pass-1 decomposes its argument exactly like `SUM`'s
-/// (and `RANK` -- recognized as array-valued and routed through its own LTM
-/// agg path post-GH #776 -- is never Pass-1-decomposed either). Deriving the
-/// original (text-scan)
-/// gate from
+/// constant 0) yet Pass-1 decomposes its argument exactly like `SUM`'s, and
+/// `RANK` -- array-valued, routed through its own LTM agg path (GH #776) --
+/// has a Pass-1-decomposed array argument too (`ArgKind::Array`, GH #995).
+/// Deriving the original (text-scan) gate from
 /// the wrong set silently stubbed any fragment embedding
 /// `SIZE(<array expression>)` -- the demonstrated GH #738 round-2
 /// regression, pinned by
@@ -606,19 +605,19 @@ fn ast_contains_pass1_decomposition_site(ast: &crate::ast::Ast<crate::ast::Expr2
 
 /// Expression-level walk for [`ast_contains_pass1_decomposition_site`].
 ///
-/// Sound BY CONSTRUCTION: the builtin match below is exhaustive (no
-/// wildcard arm), with the `true` arms mirroring exactly the places
-/// `ast::expr3` decomposes an argument into an `AssignTemp`:
-/// `transform_builtin_inner`'s `maybe_decompose_array_arg_inner` calls
-/// (`SUM` / `MEAN` (every arg, any arity) / `STDDEV` / `SIZE` / 1-arg
-/// `MIN` / 1-arg `MAX` / `VECTOR SELECT` / `VECTOR ELM MAP` /
-/// `VECTOR SORT ORDER` / `ALLOCATE AVAILABLE` / `ALLOCATE BY PRIORITY`)
-/// plus `transform_inner`'s arrayed-GF apply decomposition (a
+/// Sound BY CONSTRUCTION: a Pass-1 decomposition site is a builtin with a
+/// non-scalar argument position in the signature table
+/// (`BuiltinFn::arg_kinds`) -- an array operand, which
+/// `transform_builtin_inner`'s `maybe_decompose_array_arg_inner` turns into an
+/// `AssignTemp` (`SUM` / 1-arg `MEAN` / `STDDEV` / `SIZE` / 1-arg `MIN` / 1-arg
+/// `MAX` / `RANK` / `VECTOR SELECT` / `VECTOR ELM MAP` / `VECTOR SORT ORDER` /
+/// `ALLOCATE AVAILABLE` / `ALLOCATE BY PRIORITY`), or a lookup's table
+/// position, which `transform_inner`'s arrayed-GF apply decomposition reads (a
 /// LOOKUP-family call whose *table* operand carries multi-element bounds;
-/// flagged for every lookup since the table's arrayedness is exactly what
-/// the recovered bounds determine). Adding a `BuiltinFn` variant fails
-/// compilation HERE, forcing the author to classify it against Pass-1 --
-/// the loud-divergence guard the retired text-scan lacked.
+/// flagged for every lookup since the table's arrayedness is exactly what the
+/// recovered bounds determine). Pass 1 reads the same kinds, so the gate
+/// cannot drift from it, and a new `BuiltinFn` variant is classified in the
+/// table or fails to compile there.
 /// `pass1_gate_covers_each_decomposition_builtin` pins the classification.
 ///
 /// The one bounds consumer deliberately NOT gated on is the non-A2A Op2
@@ -631,7 +630,6 @@ fn ast_contains_pass1_decomposition_site(ast: &crate::ast::Ast<crate::ast::Expr2
 /// (pre-GH #738) lowering.
 fn expr_contains_pass1_decomposition_site(expr: &crate::ast::Expr2) -> bool {
     use crate::ast::{Expr2, IndexExpr2};
-    use crate::builtins::BuiltinFn;
     match expr {
         Expr2::Const(..) | Expr2::Var(..) => false,
         Expr2::Subscript(_, indices, _, _) => indices.iter().any(|idx| match idx {
@@ -645,72 +643,20 @@ fn expr_contains_pass1_decomposition_site(expr: &crate::ast::Expr2) -> bool {
             | IndexExpr2::DimPosition(_, _) => false,
         }),
         Expr2::App(builtin, _, _) => {
-            let is_decomposition_site = match builtin {
-                // `transform_builtin_inner`'s decomposition sites.
-                BuiltinFn::Sum(_)
-                | BuiltinFn::Stddev(_)
-                | BuiltinFn::Size(_)
-                | BuiltinFn::Mean(_)
-                | BuiltinFn::Min(_, None)
-                | BuiltinFn::Max(_, None)
-                | BuiltinFn::VectorSelect(_, _, _, _, _)
-                | BuiltinFn::VectorElmMap(_, _)
-                | BuiltinFn::VectorSortOrder(_, _)
-                | BuiltinFn::AllocateAvailable(_, _, _)
-                | BuiltinFn::AllocateByPriority(_, _, _, _, _) => true,
-                // `transform_inner`'s arrayed-GF apply decomposition.
-                BuiltinFn::Lookup(_, _, _)
-                | BuiltinFn::LookupForward(_, _, _)
-                | BuiltinFn::LookupBackward(_, _, _) => true,
-                // Non-decomposing: 2-arg MIN/MAX are scalar element-wise ops,
-                // and RANK's arguments are transformed but never decomposed
-                // (`expr3.rs`'s Rank arm calls `transform_inner`, not
-                // `maybe_decompose_array_arg_inner`).
-                BuiltinFn::Min(_, Some(_)) | BuiltinFn::Max(_, Some(_)) | BuiltinFn::Rank(_, _) => {
-                    false
-                }
-                BuiltinFn::Abs(_)
-                | BuiltinFn::Arccos(_)
-                | BuiltinFn::Arcsin(_)
-                | BuiltinFn::Arctan(_)
-                | BuiltinFn::Cos(_)
-                | BuiltinFn::Exp(_)
-                | BuiltinFn::Inf
-                | BuiltinFn::Int(_)
-                | BuiltinFn::IsModuleInput(_, _)
-                | BuiltinFn::Ln(_)
-                | BuiltinFn::Log10(_)
-                | BuiltinFn::Pi
-                | BuiltinFn::Pulse(_, _, _)
-                | BuiltinFn::Quantum(_, _)
-                | BuiltinFn::Ramp(_, _, _)
-                | BuiltinFn::Round(_)
-                | BuiltinFn::SafeDiv(_, _, _)
-                | BuiltinFn::Sign(_)
-                | BuiltinFn::Sshape(_, _, _)
-                | BuiltinFn::Sin(_)
-                | BuiltinFn::Sqrt(_)
-                | BuiltinFn::Step(_, _)
-                | BuiltinFn::Tan(_)
-                | BuiltinFn::Time
-                | BuiltinFn::TimeStep
-                | BuiltinFn::StartTime
-                | BuiltinFn::FinalTime
-                | BuiltinFn::Previous(_, _)
-                | BuiltinFn::Init(_) => false,
-            };
-            if is_decomposition_site {
+            use crate::builtins::ArgKind;
+            if builtin
+                .arg_kinds()
+                .iter()
+                .any(|kind| !matches!(kind, ArgKind::Scalar))
+            {
                 return true;
             }
             // A decomposition site can hide anywhere in a non-decomposing
             // builtin's arguments (`ABS(SUM(a[*] * 2))`).
-            let mut found = false;
-            builtin.for_each_expr_ref(|e| {
-                if !found {
-                    found = expr_contains_pass1_decomposition_site(e);
-                }
-            });
-            found
+            builtin
+                .args()
+                .into_iter()
+                .any(expr_contains_pass1_decomposition_site)
         }
         Expr2::Op1(_, e, _, _) => expr_contains_pass1_decomposition_site(e),
         Expr2::Op2(_, l, r, _, _) => {
@@ -2968,11 +2914,11 @@ mod pass1_gate_tests {
     /// The guard test tying the gate to Pass-1's decomposition set
     /// (`ast::expr3::Pass1Context::transform_builtin_inner` /
     /// `transform_inner`'s arrayed-GF apply): every builtin Pass-1
-    /// decomposes must flag the gate, and the documented non-decomposing
-    /// near-misses (RANK, 2-arg MIN/MAX) must not flag it on their own.
-    /// The exhaustive (no-wildcard) match in the gate is the compile-time
-    /// half of this guard -- a new `BuiltinFn` variant fails to build
-    /// until classified -- while this test pins the classification of the
+    /// decomposes must flag the gate, and the non-decomposing near-misses
+    /// (n-ary MEAN, 2-arg MIN/MAX) must not flag it on their own. The
+    /// signature table is the compile-time half of this guard -- a new
+    /// `BuiltinFn` variant fails to build until its argument kinds are
+    /// stated there -- while this test pins the classification of the
     /// existing variants so a refactor cannot silently flip one (the
     /// round-2 GH #738 regression was exactly such a divergence: the gate
     /// was derived from the agg-hoistable reducer set, which omits SIZE).
@@ -2981,7 +2927,6 @@ mod pass1_gate_tests {
         let decomposing: Vec<(&str, BuiltinFn<Expr2>)> = vec![
             ("sum", BuiltinFn::Sum(c())),
             ("mean_1arg", BuiltinFn::Mean(vec![*c()])),
-            ("mean_2arg", BuiltinFn::Mean(vec![*c(), *c()])),
             ("stddev", BuiltinFn::Stddev(c())),
             ("size", BuiltinFn::Size(c())),
             ("min_1arg", BuiltinFn::Min(c(), None)),
@@ -3017,8 +2962,16 @@ mod pass1_gate_tests {
             );
         }
 
+        let decomposing_rank = app(BuiltinFn::Rank(c(), c()));
+        assert!(
+            expr_contains_pass1_decomposition_site(&decomposing_rank),
+            "RANK's array argument decomposes like VECTOR SORT ORDER's"
+        );
+
+        // n-ary MEAN is the scalar mean of its arguments (every position is
+        // `ArgKind::Scalar`), so it is not a decomposition site on its own.
         let non_decomposing: Vec<(&str, BuiltinFn<Expr2>)> = vec![
-            ("rank", BuiltinFn::Rank(c(), c())),
+            ("mean_2arg", BuiltinFn::Mean(vec![*c(), *c()])),
             ("min_2arg", BuiltinFn::Min(c(), Some(c()))),
             ("max_2arg", BuiltinFn::Max(c(), Some(c()))),
             ("abs", BuiltinFn::Abs(c())),

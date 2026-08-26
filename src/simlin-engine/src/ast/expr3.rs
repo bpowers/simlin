@@ -6,7 +6,7 @@ use crate::ast::array_view::ArrayView;
 use crate::ast::expr0::{BinaryOp, UnaryOp};
 use crate::ast::expr2::{ArrayBounds, Expr2, IndexExpr2};
 use crate::ast::literal::Literal;
-use crate::builtins::{BuiltinFn, Loc};
+use crate::builtins::{ArgKind, BuiltinFn, Loc};
 use crate::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, EquationResult, Ident,
 };
@@ -174,77 +174,12 @@ impl Expr3 {
             Expr3::Const(_, _, _) => false,
             Expr3::Var(_, _, _) => false,
             Expr3::App(builtin, _, _) => {
-                use crate::builtins::BuiltinFn::*;
-                match builtin {
-                    Lookup(_, e, _)
-                    | LookupForward(_, e, _)
-                    | LookupBackward(_, e, _)
-                    | Abs(e)
-                    | Arccos(e)
-                    | Arcsin(e)
-                    | Arctan(e)
-                    | Cos(e)
-                    | Exp(e)
-                    | Int(e)
-                    | Ln(e)
-                    | Log10(e)
-                    | Round(e)
-                    | Sign(e)
-                    | Sin(e)
-                    | Sqrt(e)
-                    | Tan(e)
-                    | Size(e)
-                    | Stddev(e)
-                    | Sum(e)
-                    | Init(e) => e.references_a2a_dimension(),
-                    Previous(a, b) => a.references_a2a_dimension() || b.references_a2a_dimension(),
-                    Max(a, b) | Min(a, b) => {
-                        a.references_a2a_dimension()
-                            || b.as_ref().is_some_and(|e| e.references_a2a_dimension())
-                    }
-                    Mean(exprs) => exprs.iter().any(|e| e.references_a2a_dimension()),
-                    Pulse(a, b, c) | Ramp(a, b, c) | SafeDiv(a, b, c) => {
-                        a.references_a2a_dimension()
-                            || b.references_a2a_dimension()
-                            || c.as_ref().is_some_and(|e| e.references_a2a_dimension())
-                    }
-                    Sshape(a, b, c) => {
-                        a.references_a2a_dimension()
-                            || b.references_a2a_dimension()
-                            || c.references_a2a_dimension()
-                    }
-                    Quantum(a, b) | Step(a, b) => {
-                        a.references_a2a_dimension() || b.references_a2a_dimension()
-                    }
-                    Rank(e, direction) => {
-                        e.references_a2a_dimension() || direction.references_a2a_dimension()
-                    }
-                    VectorSelect(a, b, c, d, e) => {
-                        a.references_a2a_dimension()
-                            || b.references_a2a_dimension()
-                            || c.references_a2a_dimension()
-                            || d.references_a2a_dimension()
-                            || e.references_a2a_dimension()
-                    }
-                    VectorElmMap(a, b) | VectorSortOrder(a, b) => {
-                        a.references_a2a_dimension() || b.references_a2a_dimension()
-                    }
-                    AllocateAvailable(a, b, c) => {
-                        a.references_a2a_dimension()
-                            || b.references_a2a_dimension()
-                            || c.references_a2a_dimension()
-                    }
-                    AllocateByPriority(a, b, c, d, e) => {
-                        a.references_a2a_dimension()
-                            || b.references_a2a_dimension()
-                            || c.references_a2a_dimension()
-                            || d.references_a2a_dimension()
-                            || e.references_a2a_dimension()
-                    }
-                    Inf | Pi | Time | TimeStep | StartTime | FinalTime | IsModuleInput(_, _) => {
-                        false
-                    }
-                }
+                // A lookup's table position is a graphical-function identity
+                // resolved at lowering (`ArgKind::Table`), not a value this
+                // walk reads an apply-to-all reference out of.
+                builtin
+                    .args_with_kinds()
+                    .any(|(arg, kind)| kind != ArgKind::Table && arg.references_a2a_dimension())
             }
             Expr3::Subscript(_, indices, _, _) => {
                 indices.iter().any(|idx| idx.references_a2a_dimension())
@@ -417,7 +352,7 @@ impl Expr3 {
             }
 
             Expr2::App(builtin, bounds, loc) => {
-                let lowered_builtin = builtin.clone().try_map(|e| Expr3::from_expr2(&e, ctx))?;
+                let lowered_builtin = builtin.try_map_ref(|e| Expr3::from_expr2(e, ctx))?;
                 Ok(Expr3::App(lowered_builtin, bounds.clone(), *loc))
             }
 
@@ -745,295 +680,29 @@ impl<'a> Pass1Context<'a> {
     }
 
     /// Transform a builtin function, returning (result, has_a2a_ref).
+    ///
+    /// Which positions decompose is the table's `ArgKind`: an array operand
+    /// goes through `maybe_decompose_array_arg_inner` (so `SUM(vals[*] * 2)`
+    /// and `RANK(vals[*] * 2, 1)` both get a temp for the computed array), a
+    /// scalar is transformed in place, and a lookup's table position is a
+    /// graphical-function identity that is neither rewritten nor read for an
+    /// apply-to-all reference -- its subscripts resolve at lowering, where
+    /// codegen reads the table's base.
     fn transform_builtin_inner(&mut self, builtin: BuiltinFn<Expr3>) -> (BuiltinFn<Expr3>, bool) {
-        use crate::builtins::BuiltinFn::*;
-
-        match builtin {
-            // Array reduction builtins - may need decomposition
-            Sum(arg) => {
-                let (new_arg, has_a2a) = self.maybe_decompose_array_arg_inner(*arg);
-                (Sum(Box::new(new_arg)), has_a2a)
-            }
-            Mean(args) => {
-                let mut has_a2a = false;
-                let new_args: Vec<_> = args
-                    .into_iter()
-                    .map(|e| {
-                        let (new_e, e_has_a2a) = self.maybe_decompose_array_arg_inner(e);
-                        has_a2a = has_a2a || e_has_a2a;
-                        new_e
-                    })
-                    .collect();
-                (Mean(new_args), has_a2a)
-            }
-            Stddev(arg) => {
-                let (new_arg, has_a2a) = self.maybe_decompose_array_arg_inner(*arg);
-                (Stddev(Box::new(new_arg)), has_a2a)
-            }
-            Size(arg) => {
-                let (new_arg, has_a2a) = self.maybe_decompose_array_arg_inner(*arg);
-                (Size(Box::new(new_arg)), has_a2a)
-            }
-            // Min/Max with single arg are array reductions
-            Min(arg, None) => {
-                let (new_arg, has_a2a) = self.maybe_decompose_array_arg_inner(*arg);
-                (Min(Box::new(new_arg), None), has_a2a)
-            }
-            Max(arg, None) => {
-                let (new_arg, has_a2a) = self.maybe_decompose_array_arg_inner(*arg);
-                (Max(Box::new(new_arg), None), has_a2a)
-            }
-
-            // Two-arg Min/Max are scalar operations - just recurse
-            Min(a, Some(b)) => {
-                let (new_a, a_has_a2a) = self.transform_inner(*a);
-                let (new_b, b_has_a2a) = self.transform_inner(*b);
-                (
-                    Min(Box::new(new_a), Some(Box::new(new_b))),
-                    a_has_a2a || b_has_a2a,
-                )
-            }
-            Max(a, Some(b)) => {
-                let (new_a, a_has_a2a) = self.transform_inner(*a);
-                let (new_b, b_has_a2a) = self.transform_inner(*b);
-                (
-                    Max(Box::new(new_a), Some(Box::new(new_b))),
-                    a_has_a2a || b_has_a2a,
-                )
-            }
-
-            // Other builtins - recurse into arguments
-            Lookup(id, e, loc) => {
-                let (new_e, has_a2a) = self.transform_inner(*e);
-                (Lookup(id, Box::new(new_e), loc), has_a2a)
-            }
-            LookupForward(id, e, loc) => {
-                let (new_e, has_a2a) = self.transform_inner(*e);
-                (LookupForward(id, Box::new(new_e), loc), has_a2a)
-            }
-            LookupBackward(id, e, loc) => {
-                let (new_e, has_a2a) = self.transform_inner(*e);
-                (LookupBackward(id, Box::new(new_e), loc), has_a2a)
-            }
-            Abs(e) => {
-                let (new_e, has_a2a) = self.transform_inner(*e);
-                (Abs(Box::new(new_e)), has_a2a)
-            }
-            Arccos(e) => {
-                let (new_e, has_a2a) = self.transform_inner(*e);
-                (Arccos(Box::new(new_e)), has_a2a)
-            }
-            Arcsin(e) => {
-                let (new_e, has_a2a) = self.transform_inner(*e);
-                (Arcsin(Box::new(new_e)), has_a2a)
-            }
-            Arctan(e) => {
-                let (new_e, has_a2a) = self.transform_inner(*e);
-                (Arctan(Box::new(new_e)), has_a2a)
-            }
-            Cos(e) => {
-                let (new_e, has_a2a) = self.transform_inner(*e);
-                (Cos(Box::new(new_e)), has_a2a)
-            }
-            Exp(e) => {
-                let (new_e, has_a2a) = self.transform_inner(*e);
-                (Exp(Box::new(new_e)), has_a2a)
-            }
-            Int(e) => {
-                let (new_e, has_a2a) = self.transform_inner(*e);
-                (Int(Box::new(new_e)), has_a2a)
-            }
-            Round(e) => {
-                let (new_e, has_a2a) = self.transform_inner(*e);
-                (Round(Box::new(new_e)), has_a2a)
-            }
-            Ln(e) => {
-                let (new_e, has_a2a) = self.transform_inner(*e);
-                (Ln(Box::new(new_e)), has_a2a)
-            }
-            Log10(e) => {
-                let (new_e, has_a2a) = self.transform_inner(*e);
-                (Log10(Box::new(new_e)), has_a2a)
-            }
-            Sign(e) => {
-                let (new_e, has_a2a) = self.transform_inner(*e);
-                (Sign(Box::new(new_e)), has_a2a)
-            }
-            Sin(e) => {
-                let (new_e, has_a2a) = self.transform_inner(*e);
-                (Sin(Box::new(new_e)), has_a2a)
-            }
-            Sqrt(e) => {
-                let (new_e, has_a2a) = self.transform_inner(*e);
-                (Sqrt(Box::new(new_e)), has_a2a)
-            }
-            Tan(e) => {
-                let (new_e, has_a2a) = self.transform_inner(*e);
-                (Tan(Box::new(new_e)), has_a2a)
-            }
-            Step(a, b) => {
-                let (new_a, a_has_a2a) = self.transform_inner(*a);
-                let (new_b, b_has_a2a) = self.transform_inner(*b);
-                (
-                    Step(Box::new(new_a), Box::new(new_b)),
-                    a_has_a2a || b_has_a2a,
-                )
-            }
-            Quantum(a, b) => {
-                let (new_a, a_has_a2a) = self.transform_inner(*a);
-                let (new_b, b_has_a2a) = self.transform_inner(*b);
-                (
-                    Quantum(Box::new(new_a), Box::new(new_b)),
-                    a_has_a2a || b_has_a2a,
-                )
-            }
-            Pulse(a, b, c) => {
-                let (new_a, a_has_a2a) = self.transform_inner(*a);
-                let (new_b, b_has_a2a) = self.transform_inner(*b);
-                let (new_c, c_has_a2a) = match c {
-                    Some(e) => {
-                        let (new_e, has_a2a) = self.transform_inner(*e);
-                        (Some(Box::new(new_e)), has_a2a)
-                    }
-                    None => (None, false),
-                };
-                (
-                    Pulse(Box::new(new_a), Box::new(new_b), new_c),
-                    a_has_a2a || b_has_a2a || c_has_a2a,
-                )
-            }
-            Ramp(a, b, c) => {
-                let (new_a, a_has_a2a) = self.transform_inner(*a);
-                let (new_b, b_has_a2a) = self.transform_inner(*b);
-                let (new_c, c_has_a2a) = match c {
-                    Some(e) => {
-                        let (new_e, has_a2a) = self.transform_inner(*e);
-                        (Some(Box::new(new_e)), has_a2a)
-                    }
-                    None => (None, false),
-                };
-                (
-                    Ramp(Box::new(new_a), Box::new(new_b), new_c),
-                    a_has_a2a || b_has_a2a || c_has_a2a,
-                )
-            }
-            SafeDiv(a, b, c) => {
-                let (new_a, a_has_a2a) = self.transform_inner(*a);
-                let (new_b, b_has_a2a) = self.transform_inner(*b);
-                let (new_c, c_has_a2a) = match c {
-                    Some(e) => {
-                        let (new_e, has_a2a) = self.transform_inner(*e);
-                        (Some(Box::new(new_e)), has_a2a)
-                    }
-                    None => (None, false),
-                };
-                (
-                    SafeDiv(Box::new(new_a), Box::new(new_b), new_c),
-                    a_has_a2a || b_has_a2a || c_has_a2a,
-                )
-            }
-            Sshape(a, b, c) => {
-                let (new_a, a_has_a2a) = self.transform_inner(*a);
-                let (new_b, b_has_a2a) = self.transform_inner(*b);
-                let (new_c, c_has_a2a) = self.transform_inner(*c);
-                (
-                    Sshape(Box::new(new_a), Box::new(new_b), Box::new(new_c)),
-                    a_has_a2a || b_has_a2a || c_has_a2a,
-                )
-            }
-            // RANK's first argument is an ARRAY the opcode reads as a view,
-            // exactly like VectorSortOrder's -- so it decomposes through
-            // `maybe_decompose_array_arg_inner` like all five of its siblings
-            // below. Recursing with the plain `transform_inner` left
-            // `RANK(vals[*] * 2, 1)` as an un-viewable `Op2` for codegen to
-            // reject, while the identical VECTOR SORT ORDER spelling compiled
-            // (GH #995).
-            Rank(e, direction) => {
-                let (new_e, e_has_a2a) = self.maybe_decompose_array_arg_inner(*e);
-                let (new_direction, direction_has_a2a) = self.transform_inner(*direction);
-                (
-                    Rank(Box::new(new_e), Box::new(new_direction)),
-                    e_has_a2a || direction_has_a2a,
-                )
-            }
-
-            VectorSelect(sel, expr, max_val, action, err) => {
-                let (new_sel, sel_a2a) = self.maybe_decompose_array_arg_inner(*sel);
-                let (new_expr, expr_a2a) = self.maybe_decompose_array_arg_inner(*expr);
-                let (new_max, max_a2a) = self.transform_inner(*max_val);
-                let (new_act, act_a2a) = self.transform_inner(*action);
-                let (new_err, err_a2a) = self.transform_inner(*err);
-                (
-                    VectorSelect(
-                        Box::new(new_sel),
-                        Box::new(new_expr),
-                        Box::new(new_max),
-                        Box::new(new_act),
-                        Box::new(new_err),
-                    ),
-                    sel_a2a || expr_a2a || max_a2a || act_a2a || err_a2a,
-                )
-            }
-            VectorElmMap(src, offs) => {
-                let (new_src, src_a2a) = self.maybe_decompose_array_arg_inner(*src);
-                let (new_offs, offs_a2a) = self.maybe_decompose_array_arg_inner(*offs);
-                (
-                    VectorElmMap(Box::new(new_src), Box::new(new_offs)),
-                    src_a2a || offs_a2a,
-                )
-            }
-            VectorSortOrder(arr, dir) => {
-                let (new_arr, arr_a2a) = self.maybe_decompose_array_arg_inner(*arr);
-                let (new_dir, dir_a2a) = self.transform_inner(*dir);
-                (
-                    VectorSortOrder(Box::new(new_arr), Box::new(new_dir)),
-                    arr_a2a || dir_a2a,
-                )
-            }
-            AllocateAvailable(req, pp, avail) => {
-                let (new_req, req_a2a) = self.maybe_decompose_array_arg_inner(*req);
-                let (new_pp, pp_a2a) = self.maybe_decompose_array_arg_inner(*pp);
-                let (new_avail, avail_a2a) = self.transform_inner(*avail);
-                (
-                    AllocateAvailable(Box::new(new_req), Box::new(new_pp), Box::new(new_avail)),
-                    req_a2a || pp_a2a || avail_a2a,
-                )
-            }
-            AllocateByPriority(req, priority, size, width, supply) => {
-                let (new_req, req_a2a) = self.maybe_decompose_array_arg_inner(*req);
-                let (new_priority, priority_a2a) = self.maybe_decompose_array_arg_inner(*priority);
-                let (new_size, size_a2a) = self.transform_inner(*size);
-                let (new_width, width_a2a) = self.transform_inner(*width);
-                let (new_supply, supply_a2a) = self.transform_inner(*supply);
-                (
-                    AllocateByPriority(
-                        Box::new(new_req),
-                        Box::new(new_priority),
-                        Box::new(new_size),
-                        Box::new(new_width),
-                        Box::new(new_supply),
-                    ),
-                    req_a2a || priority_a2a || size_a2a || width_a2a || supply_a2a,
-                )
-            }
-            Previous(a, b) => {
-                let (new_a, a_has_a2a) = self.transform_inner(*a);
-                let (new_b, b_has_a2a) = self.transform_inner(*b);
-                (
-                    Previous(Box::new(new_a), Box::new(new_b)),
-                    a_has_a2a || b_has_a2a,
-                )
-            }
-            Init(e) => {
-                let (new_e, has_a2a) = self.transform_inner(*e);
-                (Init(Box::new(new_e)), has_a2a)
-            }
-
-            // 0-arity builtins - no A2A refs
-            Inf | Pi | Time | TimeStep | StartTime | FinalTime | IsModuleInput(_, _) => {
-                (builtin, false)
-            }
-        }
+        let mut has_a2a = false;
+        let transformed = builtin.map_with_kinds(|arg, kind| {
+            let (arg, arg_has_a2a) = match kind {
+                ArgKind::Array { .. } => self.maybe_decompose_array_arg_inner(arg),
+                ArgKind::Scalar => self.transform_inner(arg),
+                ArgKind::Table => (arg, false),
+                ArgKind::Ident => {
+                    unreachable!("an identifier payload is not an expression argument")
+                }
+            };
+            has_a2a |= arg_has_a2a;
+            arg
+        });
+        (transformed, has_a2a)
     }
 
     /// Check if an array argument needs decomposition and decompose if so.

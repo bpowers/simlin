@@ -42,8 +42,10 @@
 //! `find_expr_array_view` recognises -- or a nested array-producing builtin).
 //!
 //! **The collapse.** Position and shape are decided by two separate, singly
-//! implemented pieces of code -- one `match` over `BuiltinFn` naming the view
-//! positions, and one shared `materialize_view_operand` that all of them call.
+//! implemented pieces of code -- the signature table's `ArgKind::Array`
+//! positions (`BuiltinFn::arg_kinds`, which `materialize_view_operands`
+//! reads), and one shared `materialize_view_operand` that every such position
+//! goes through.
 //! So the matrix is covered as a cross rather than as a full product: *every*
 //! position is exercised with one computed shape (an `Op2`) plus its
 //! already-compiling control, and *every* shape is exercised at one position
@@ -511,10 +513,10 @@ fn allocate_positions() {
 }
 
 /// The one view position the materializer deliberately declines, plus the two
-/// arms that decline for a reason other than the position. The reasons live on
-/// the arms in `compiler::array_operand::materialize_view_operands`; what is
-/// pinned here is that each still fails loudly, or keeps its existing meaning,
-/// rather than compiling to something wrong.
+/// shapes that decline for a reason other than the position. The reasons live
+/// in `compiler::array_operand::materialize_view_operands`; what is pinned
+/// here is that each still fails loudly, or keeps its existing meaning, rather
+/// than compiling to something wrong.
 ///
 /// The arrayed graphical-function table has no row: it is not constructible as
 /// a computed expression from the equation language. `Lookup`'s table argument

@@ -17,6 +17,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use crate::ast::{ArrayView, Ast, BinaryOp, Loc};
+use crate::builtins::{ArgKind, ResultKind};
 #[cfg(test)]
 use crate::bytecode::CompiledModule;
 use crate::common::{Canonical, CanonicalElementName, Ident, Result};
@@ -1179,18 +1180,12 @@ fn hoist_nested_array_builtins_in_scalar(main_expr: Expr, exprs: &mut Vec<Expr>)
 }
 
 /// Check if an expression is an array-producing builtin that needs whole-array
-/// evaluation rather than per-element scalar evaluation.
+/// evaluation rather than per-element scalar evaluation
+/// (`ResultKind::Array`: a dedicated opcode writes the result into a temp).
 fn is_array_producing_builtin(expr: &Expr) -> bool {
     matches!(
         expr,
-        Expr::App(
-            BuiltinFn::VectorElmMap(_, _)
-                | BuiltinFn::VectorSortOrder(_, _)
-                | BuiltinFn::Rank(_, _)
-                | BuiltinFn::AllocateAvailable(_, _, _)
-                | BuiltinFn::AllocateByPriority(_, _, _, _, _),
-            _
-        )
+        Expr::App(builtin, _) if matches!(builtin.result_kind(), ResultKind::Array { .. })
     )
 }
 
@@ -1427,94 +1422,50 @@ fn named_dims(view: &ArrayView) -> Option<Vec<(&str, usize)>> {
 /// `IF wide[e,d] > 0 THEN a[d] ELSE b[d]` does vary over `e` and the iteration
 /// evaluating it has to as well.
 ///
-/// Written as an exhaustive match with no `_` arm over `BuiltinFn` so a new
-/// builtin is a compile error here rather than a silently unshaped operand.
+/// A builtin's shape comes from its signature's `ResultKind` (an
+/// array-producing builtin's `shape_from` argument, every argument of an
+/// elementwise one, nothing for a scalar-valued one), so a new builtin is
+/// classified in the table rather than silently unshaped here. The one
+/// per-variant arm is `PREVIOUS`/`INIT`: a snapshot read has the shape of its
+/// lagged argument only, never of the fallback.
 fn collect_expr_array_views(expr: &Expr, out: &mut Vec<ArrayView>) {
     match expr {
         Expr::StaticSubscript(_, view, _) | Expr::TempArray(_, view, _) => out.push(view.clone()),
         Expr::App(builtin, _) => match builtin {
-            BuiltinFn::VectorElmMap(_, offset) => collect_expr_array_views(offset, out),
-            BuiltinFn::VectorSortOrder(arr, _) | BuiltinFn::Rank(arr, _) => {
-                collect_expr_array_views(arr, out)
-            }
-            BuiltinFn::AllocateAvailable(req, _, _)
-            | BuiltinFn::AllocateByPriority(req, _, _, _, _) => collect_expr_array_views(req, out),
-            // Elementwise scalar builtins: applied per iteration inside a
-            // `BeginIter` body, so their result has the shape of whichever
-            // argument carries one -- every one of them, for the join; the
-            // first, for `find_expr_array_view`, matching the `Op2` rule below.
-            //
-            // Deliberately absent: `Mean` (variadic -- its single-argument
-            // form is a REDUCTION to a scalar, not elementwise), the reducers
-            // (`Sum`/`Size`/`Stddev` and one-argument `Min`/`Max`, also
-            // scalar-valued), `VectorSelect` (scalar-valued), the `Lookup`
-            // family (`LookupArray`'s shape is the TABLE array's, which this
-            // would have to reach through the gf registry), and the 0-arity
-            // builtins. Their ARGUMENTS are not walked either: a reducer
-            // collapses whatever it reads to one number, so
-            // `vals[d] + SUM(wide[*,*])` is `[d]`-shaped and a walk that let
-            // `wide`'s view through would widen the temp to a shape the
-            // operand does not have.
-            //
             // `PREVIOUS`/`INIT` DO carry a shape (GH #995): codegen reads an
             // array-valued one as its argument's view over a snapshot buffer,
-            // so the result has exactly the argument's shape -- and an argument
-            // that collapsed to a single element yields none, which is what
-            // keeps a scalar `PREVIOUS(s)` broadcasting instead of reshaping
-            // the operand around it.
+            // so the result has exactly the lagged argument's shape -- and an
+            // argument that collapsed to a single element yields none, which is
+            // what keeps a scalar `PREVIOUS(s)` broadcasting instead of
+            // reshaping the operand around it. The fallback is per-call scalar
+            // state and never shapes the result.
             BuiltinFn::Previous(a, _) | BuiltinFn::Init(a) => collect_expr_array_views(a, out),
-            BuiltinFn::Abs(e)
-            | BuiltinFn::Arccos(e)
-            | BuiltinFn::Arcsin(e)
-            | BuiltinFn::Arctan(e)
-            | BuiltinFn::Cos(e)
-            | BuiltinFn::Exp(e)
-            | BuiltinFn::Int(e)
-            | BuiltinFn::Ln(e)
-            | BuiltinFn::Log10(e)
-            | BuiltinFn::Round(e)
-            | BuiltinFn::Sign(e)
-            | BuiltinFn::Sin(e)
-            | BuiltinFn::Sqrt(e)
-            | BuiltinFn::Tan(e) => collect_expr_array_views(e, out),
-            // Two-argument MIN/MAX are the scalar (elementwise) forms; the
-            // one-argument forms are array reductions and yield no array.
-            BuiltinFn::Min(a, Some(b)) | BuiltinFn::Max(a, Some(b)) => {
-                collect_expr_array_views(a, out);
-                collect_expr_array_views(b, out);
-            }
-            BuiltinFn::Min(_, None) | BuiltinFn::Max(_, None) => {}
-            BuiltinFn::Quantum(a, b) | BuiltinFn::Step(a, b) => {
-                collect_expr_array_views(a, out);
-                collect_expr_array_views(b, out);
-            }
-            BuiltinFn::Sshape(a, b, c) => {
-                collect_expr_array_views(a, out);
-                collect_expr_array_views(b, out);
-                collect_expr_array_views(c, out);
-            }
-            BuiltinFn::Pulse(a, b, c) | BuiltinFn::Ramp(a, b, c) | BuiltinFn::SafeDiv(a, b, c) => {
-                collect_expr_array_views(a, out);
-                collect_expr_array_views(b, out);
-                if let Some(c) = c.as_ref() {
-                    collect_expr_array_views(c, out);
+            other => match other.result_kind() {
+                // An array-producing builtin takes its shape from one
+                // argument: VECTOR ELM MAP's offsets, VECTOR SORT ORDER's and
+                // RANK's array, the ALLOCATEs' requests.
+                ResultKind::Array { shape_from } => {
+                    collect_expr_array_views(other.args()[shape_from as usize], out)
                 }
-            }
-            BuiltinFn::Lookup(_, _, _)
-            | BuiltinFn::LookupForward(_, _, _)
-            | BuiltinFn::LookupBackward(_, _, _)
-            | BuiltinFn::Mean(_)
-            | BuiltinFn::Sum(_)
-            | BuiltinFn::Size(_)
-            | BuiltinFn::Stddev(_)
-            | BuiltinFn::VectorSelect(_, _, _, _, _)
-            | BuiltinFn::IsModuleInput(_, _)
-            | BuiltinFn::Inf
-            | BuiltinFn::Pi
-            | BuiltinFn::Time
-            | BuiltinFn::TimeStep
-            | BuiltinFn::StartTime
-            | BuiltinFn::FinalTime => {}
+                // Elementwise scalar builtins: applied per iteration inside a
+                // `BeginIter` body, so their result has the shape of whichever
+                // argument carries one -- every one of them, for the join.
+                ResultKind::Elementwise => {
+                    for arg in other.args() {
+                        collect_expr_array_views(arg, out);
+                    }
+                }
+                // Scalar-valued: `Mean` (its single-argument form is a
+                // REDUCTION to a scalar and its n-ary form a scalar mean), the
+                // reducers, `VectorSelect`, the `Lookup` family (`LookupArray`'s
+                // shape is the TABLE array's, which this would have to reach
+                // through the gf registry), and the 0-arity builtins. Their
+                // ARGUMENTS are not walked either: a reducer collapses whatever
+                // it reads to one number, so `vals[d] + SUM(wide[*,*])` is
+                // `[d]`-shaped and a walk that let `wide`'s view through would
+                // widen the temp to a shape the operand does not have.
+                ResultKind::Scalar => {}
+            },
         },
         Expr::Op1(_, inner, _) => collect_expr_array_views(inner, out),
         Expr::Op2(_, lhs, rhs, _) => {
@@ -1654,15 +1605,11 @@ fn find_max_temp_id(expr: &Expr) -> Option<u32> {
         .into_iter()
         .flatten()
         .max(),
-        Expr::App(builtin, _) => {
-            let mut max_id = None;
-            builtin.for_each_expr_ref(|e| {
-                if let Some(id) = find_max_temp_id(e) {
-                    max_id = Some(max_id.map_or(id, |m: u32| m.max(id)));
-                }
-            });
-            max_id
-        }
+        Expr::App(builtin, _) => builtin
+            .args()
+            .into_iter()
+            .filter_map(find_max_temp_id)
+            .max(),
         Expr::Subscript(_, indices, _, _) => {
             let mut max_id = None;
             for idx in indices {
@@ -1706,7 +1653,10 @@ fn contains_array_producing_builtin(expr: &Expr) -> bool {
                 || contains_array_producing_builtin(t)
                 || contains_array_producing_builtin(f)
         }
-        Expr::App(builtin, _) => builtin_contains_array_producing(builtin),
+        Expr::App(builtin, _) => builtin
+            .args()
+            .into_iter()
+            .any(contains_array_producing_builtin),
         _ => false,
     }
 }
@@ -1787,16 +1737,6 @@ mod exprs_contain_array_producing_builtin_tests {
     fn does_not_flag_empty_list() {
         assert!(!exprs_contain_array_producing_builtin(&[]));
     }
-}
-
-fn builtin_contains_array_producing(builtin: &BuiltinFn) -> bool {
-    let mut found = false;
-    builtin.for_each_expr_ref(|e| {
-        if !found && contains_array_producing_builtin(e) {
-            found = true;
-        }
-    });
-    found
 }
 
 /// Replace array-producing builtins in an expression tree with
@@ -1926,272 +1866,33 @@ fn replace_nested_builtins_for_element(
             loc,
         ),
         // Descend into builtin arguments while preserving whether each argument
-        // expects a scalar element or a full array value.
+        // expects a scalar element or a full array value: an array operand
+        // (`ArgKind::Array`) is consumed whole and the scalar positions beside
+        // it per element; a builtin with no array operand passes the enclosing
+        // mode through to every argument.
         Expr::App(builtin, loc) => {
             let scalar_child_mode = arg_mode.scalar_child_mode();
-            let rewritten = match builtin {
-                BuiltinFn::Sum(arg) => {
-                    BuiltinFn::Sum(Box::new(replace_nested_builtins_for_element(
-                        *arg,
+            let rewritten = if builtin.has_array_operand() {
+                builtin.map_with_kinds(|sub_expr, kind| {
+                    let mode = match kind {
+                        ArgKind::Array { .. } => NestedBuiltinArgMode::ArrayValue,
+                        ArgKind::Scalar | ArgKind::Table => scalar_child_mode,
+                        ArgKind::Ident => {
+                            unreachable!("an identifier payload is not an expression argument")
+                        }
+                    };
+                    replace_nested_builtins_for_element(
+                        sub_expr,
                         var_idx,
                         var_view,
                         temp_id,
                         hoisted,
                         collect_hoisted,
-                        NestedBuiltinArgMode::ArrayValue,
-                    )))
-                }
-                BuiltinFn::Stddev(arg) => {
-                    BuiltinFn::Stddev(Box::new(replace_nested_builtins_for_element(
-                        *arg,
-                        var_idx,
-                        var_view,
-                        temp_id,
-                        hoisted,
-                        collect_hoisted,
-                        NestedBuiltinArgMode::ArrayValue,
-                    )))
-                }
-                BuiltinFn::Size(arg) => {
-                    BuiltinFn::Size(Box::new(replace_nested_builtins_for_element(
-                        *arg,
-                        var_idx,
-                        var_view,
-                        temp_id,
-                        hoisted,
-                        collect_hoisted,
-                        NestedBuiltinArgMode::ArrayValue,
-                    )))
-                }
-                BuiltinFn::Max(arg, None) => BuiltinFn::Max(
-                    Box::new(replace_nested_builtins_for_element(
-                        *arg,
-                        var_idx,
-                        var_view,
-                        temp_id,
-                        hoisted,
-                        collect_hoisted,
-                        NestedBuiltinArgMode::ArrayValue,
-                    )),
-                    None,
-                ),
-                BuiltinFn::Min(arg, None) => BuiltinFn::Min(
-                    Box::new(replace_nested_builtins_for_element(
-                        *arg,
-                        var_idx,
-                        var_view,
-                        temp_id,
-                        hoisted,
-                        collect_hoisted,
-                        NestedBuiltinArgMode::ArrayValue,
-                    )),
-                    None,
-                ),
-                BuiltinFn::Mean(args) if args.len() == 1 => {
-                    let mut it = args.into_iter();
-                    let arg = it.next().expect("Mean(args) len checked");
-                    BuiltinFn::Mean(vec![replace_nested_builtins_for_element(
-                        arg,
-                        var_idx,
-                        var_view,
-                        temp_id,
-                        hoisted,
-                        collect_hoisted,
-                        NestedBuiltinArgMode::ArrayValue,
-                    )])
-                }
-                BuiltinFn::Rank(arg, direction) => BuiltinFn::Rank(
-                    Box::new(replace_nested_builtins_for_element(
-                        *arg,
-                        var_idx,
-                        var_view,
-                        temp_id,
-                        hoisted,
-                        collect_hoisted,
-                        NestedBuiltinArgMode::ArrayValue,
-                    )),
-                    Box::new(replace_nested_builtins_for_element(
-                        *direction,
-                        var_idx,
-                        var_view,
-                        temp_id,
-                        hoisted,
-                        collect_hoisted,
-                        scalar_child_mode,
-                    )),
-                ),
-                BuiltinFn::VectorSelect(selection, expr, max_value, action, error_handling) => {
-                    BuiltinFn::VectorSelect(
-                        Box::new(replace_nested_builtins_for_element(
-                            *selection,
-                            var_idx,
-                            var_view,
-                            temp_id,
-                            hoisted,
-                            collect_hoisted,
-                            NestedBuiltinArgMode::ArrayValue,
-                        )),
-                        Box::new(replace_nested_builtins_for_element(
-                            *expr,
-                            var_idx,
-                            var_view,
-                            temp_id,
-                            hoisted,
-                            collect_hoisted,
-                            NestedBuiltinArgMode::ArrayValue,
-                        )),
-                        Box::new(replace_nested_builtins_for_element(
-                            *max_value,
-                            var_idx,
-                            var_view,
-                            temp_id,
-                            hoisted,
-                            collect_hoisted,
-                            scalar_child_mode,
-                        )),
-                        Box::new(replace_nested_builtins_for_element(
-                            *action,
-                            var_idx,
-                            var_view,
-                            temp_id,
-                            hoisted,
-                            collect_hoisted,
-                            scalar_child_mode,
-                        )),
-                        Box::new(replace_nested_builtins_for_element(
-                            *error_handling,
-                            var_idx,
-                            var_view,
-                            temp_id,
-                            hoisted,
-                            collect_hoisted,
-                            scalar_child_mode,
-                        )),
+                        mode,
                     )
-                }
-                BuiltinFn::VectorElmMap(source, offsets) => BuiltinFn::VectorElmMap(
-                    Box::new(replace_nested_builtins_for_element(
-                        *source,
-                        var_idx,
-                        var_view,
-                        temp_id,
-                        hoisted,
-                        collect_hoisted,
-                        NestedBuiltinArgMode::ArrayValue,
-                    )),
-                    Box::new(replace_nested_builtins_for_element(
-                        *offsets,
-                        var_idx,
-                        var_view,
-                        temp_id,
-                        hoisted,
-                        collect_hoisted,
-                        NestedBuiltinArgMode::ArrayValue,
-                    )),
-                ),
-                BuiltinFn::VectorSortOrder(array_expr, direction_expr) => {
-                    BuiltinFn::VectorSortOrder(
-                        Box::new(replace_nested_builtins_for_element(
-                            *array_expr,
-                            var_idx,
-                            var_view,
-                            temp_id,
-                            hoisted,
-                            collect_hoisted,
-                            NestedBuiltinArgMode::ArrayValue,
-                        )),
-                        Box::new(replace_nested_builtins_for_element(
-                            *direction_expr,
-                            var_idx,
-                            var_view,
-                            temp_id,
-                            hoisted,
-                            collect_hoisted,
-                            scalar_child_mode,
-                        )),
-                    )
-                }
-                BuiltinFn::AllocateAvailable(requests, profile, avail) => {
-                    BuiltinFn::AllocateAvailable(
-                        Box::new(replace_nested_builtins_for_element(
-                            *requests,
-                            var_idx,
-                            var_view,
-                            temp_id,
-                            hoisted,
-                            collect_hoisted,
-                            NestedBuiltinArgMode::ArrayValue,
-                        )),
-                        Box::new(replace_nested_builtins_for_element(
-                            *profile,
-                            var_idx,
-                            var_view,
-                            temp_id,
-                            hoisted,
-                            collect_hoisted,
-                            NestedBuiltinArgMode::ArrayValue,
-                        )),
-                        Box::new(replace_nested_builtins_for_element(
-                            *avail,
-                            var_idx,
-                            var_view,
-                            temp_id,
-                            hoisted,
-                            collect_hoisted,
-                            scalar_child_mode,
-                        )),
-                    )
-                }
-                BuiltinFn::AllocateByPriority(requests, priority, size, width, supply) => {
-                    BuiltinFn::AllocateByPriority(
-                        Box::new(replace_nested_builtins_for_element(
-                            *requests,
-                            var_idx,
-                            var_view,
-                            temp_id,
-                            hoisted,
-                            collect_hoisted,
-                            NestedBuiltinArgMode::ArrayValue,
-                        )),
-                        Box::new(replace_nested_builtins_for_element(
-                            *priority,
-                            var_idx,
-                            var_view,
-                            temp_id,
-                            hoisted,
-                            collect_hoisted,
-                            NestedBuiltinArgMode::ArrayValue,
-                        )),
-                        Box::new(replace_nested_builtins_for_element(
-                            *size,
-                            var_idx,
-                            var_view,
-                            temp_id,
-                            hoisted,
-                            collect_hoisted,
-                            scalar_child_mode,
-                        )),
-                        Box::new(replace_nested_builtins_for_element(
-                            *width,
-                            var_idx,
-                            var_view,
-                            temp_id,
-                            hoisted,
-                            collect_hoisted,
-                            scalar_child_mode,
-                        )),
-                        Box::new(replace_nested_builtins_for_element(
-                            *supply,
-                            var_idx,
-                            var_view,
-                            temp_id,
-                            hoisted,
-                            collect_hoisted,
-                            scalar_child_mode,
-                        )),
-                    )
-                }
-                other => other.map(|sub_expr| {
+                })
+            } else {
+                builtin.map(|sub_expr| {
                     replace_nested_builtins_for_element(
                         sub_expr,
                         var_idx,
@@ -2201,7 +1902,7 @@ fn replace_nested_builtins_for_element(
                         collect_hoisted,
                         arg_mode,
                     )
-                }),
+                })
             };
             Expr::App(rewritten, loc)
         }
@@ -2986,7 +2687,9 @@ fn extract_temp_sizes(expr: &Expr, temp_sizes_map: &mut HashMap<u32, usize>) {
         }
         Expr::StaticSubscript(_, _, _) => {}
         Expr::App(builtin, _) => {
-            extract_temp_sizes_from_builtin(builtin, temp_sizes_map);
+            for arg in builtin.args() {
+                extract_temp_sizes(arg, temp_sizes_map);
+            }
         }
         Expr::EvalModule(_, _, _, args) => {
             for arg in args {
@@ -3008,107 +2711,6 @@ fn extract_temp_sizes(expr: &Expr, temp_sizes_map: &mut HashMap<u32, usize>) {
         }
         Expr::AssignCurr(_, inner) | Expr::AssignNext(_, inner) => {
             extract_temp_sizes(inner, temp_sizes_map);
-        }
-    }
-}
-
-/// Extract temp sizes from builtin function arguments.
-fn extract_temp_sizes_from_builtin(builtin: &BuiltinFn, temp_sizes_map: &mut HashMap<u32, usize>) {
-    match builtin {
-        BuiltinFn::Lookup(_, expr, _)
-        | BuiltinFn::LookupForward(_, expr, _)
-        | BuiltinFn::LookupBackward(_, expr, _)
-        | BuiltinFn::Abs(expr)
-        | BuiltinFn::Arccos(expr)
-        | BuiltinFn::Arcsin(expr)
-        | BuiltinFn::Arctan(expr)
-        | BuiltinFn::Cos(expr)
-        | BuiltinFn::Exp(expr)
-        | BuiltinFn::Int(expr)
-        | BuiltinFn::Ln(expr)
-        | BuiltinFn::Log10(expr)
-        | BuiltinFn::Round(expr)
-        | BuiltinFn::Sign(expr)
-        | BuiltinFn::Sin(expr)
-        | BuiltinFn::Size(expr)
-        | BuiltinFn::Sqrt(expr)
-        | BuiltinFn::Stddev(expr)
-        | BuiltinFn::Sum(expr)
-        | BuiltinFn::Tan(expr) => {
-            extract_temp_sizes(expr, temp_sizes_map);
-        }
-        BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
-            extract_temp_sizes(a, temp_sizes_map);
-            if let Some(b) = b {
-                extract_temp_sizes(b, temp_sizes_map);
-            }
-        }
-        BuiltinFn::Mean(args) => {
-            for arg in args {
-                extract_temp_sizes(arg, temp_sizes_map);
-            }
-        }
-        BuiltinFn::Quantum(a, b) => {
-            extract_temp_sizes(a, temp_sizes_map);
-            extract_temp_sizes(b, temp_sizes_map);
-        }
-        BuiltinFn::Pulse(a, b, c) | BuiltinFn::Ramp(a, b, c) | BuiltinFn::SafeDiv(a, b, c) => {
-            extract_temp_sizes(a, temp_sizes_map);
-            extract_temp_sizes(b, temp_sizes_map);
-            if let Some(c) = c {
-                extract_temp_sizes(c, temp_sizes_map);
-            }
-        }
-        BuiltinFn::Sshape(a, b, c) => {
-            extract_temp_sizes(a, temp_sizes_map);
-            extract_temp_sizes(b, temp_sizes_map);
-            extract_temp_sizes(c, temp_sizes_map);
-        }
-        BuiltinFn::Rank(a, direction) => {
-            extract_temp_sizes(a, temp_sizes_map);
-            extract_temp_sizes(direction, temp_sizes_map);
-        }
-        BuiltinFn::Step(a, b) => {
-            extract_temp_sizes(a, temp_sizes_map);
-            extract_temp_sizes(b, temp_sizes_map);
-        }
-        BuiltinFn::VectorSelect(a, b, c, d, e) => {
-            extract_temp_sizes(a, temp_sizes_map);
-            extract_temp_sizes(b, temp_sizes_map);
-            extract_temp_sizes(c, temp_sizes_map);
-            extract_temp_sizes(d, temp_sizes_map);
-            extract_temp_sizes(e, temp_sizes_map);
-        }
-        BuiltinFn::VectorElmMap(a, b) | BuiltinFn::VectorSortOrder(a, b) => {
-            extract_temp_sizes(a, temp_sizes_map);
-            extract_temp_sizes(b, temp_sizes_map);
-        }
-        BuiltinFn::AllocateAvailable(a, b, c) => {
-            extract_temp_sizes(a, temp_sizes_map);
-            extract_temp_sizes(b, temp_sizes_map);
-            extract_temp_sizes(c, temp_sizes_map);
-        }
-        BuiltinFn::AllocateByPriority(a, b, c, d, e) => {
-            extract_temp_sizes(a, temp_sizes_map);
-            extract_temp_sizes(b, temp_sizes_map);
-            extract_temp_sizes(c, temp_sizes_map);
-            extract_temp_sizes(d, temp_sizes_map);
-            extract_temp_sizes(e, temp_sizes_map);
-        }
-        BuiltinFn::Inf
-        | BuiltinFn::Pi
-        | BuiltinFn::Time
-        | BuiltinFn::TimeStep
-        | BuiltinFn::StartTime
-        | BuiltinFn::FinalTime
-        | BuiltinFn::IsModuleInput(_, _) => {}
-        // Scalar lag/initial builtins
-        BuiltinFn::Previous(a, b) => {
-            extract_temp_sizes(a, temp_sizes_map);
-            extract_temp_sizes(b, temp_sizes_map);
-        }
-        BuiltinFn::Init(expr) => {
-            extract_temp_sizes(expr, temp_sizes_map);
         }
     }
 }

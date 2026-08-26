@@ -52,10 +52,10 @@
 //! compile" report as a bug in this pass:
 //!
 //! * An operand only materializes if [`super::find_expr_array_view`] can
-//!   derive a shape for it. That function's `App` arm is an exhaustive match
-//!   naming exactly which builtins propagate an array shape; the ones that do
-//!   not (the reducers, `VECTOR SELECT`, the `Lookup` family) are listed there
-//!   with the reason.
+//!   derive a shape for it. That function's `App` arm reads each builtin's
+//!   `ResultKind` to decide which arguments propagate an array shape; the ones
+//!   that propagate none (the reducers, `VECTOR SELECT`, the `Lookup` family)
+//!   are explained there.
 //! * That shape is the JOIN of every array in the operand -- the view they all
 //!   broadcast into -- so an operand mixing INCOMPARABLE shapes (`row[e]` and
 //!   `col[d]`, neither containing the other) has none, and declines. The union
@@ -95,6 +95,7 @@
 //!   whose fix belongs in the projection rather than here.
 
 use crate::ast::ArrayView;
+use crate::builtins::ArgKind;
 use crate::compiler::expr::{BuiltinFn, Expr, SubscriptIndex};
 
 /// Rewrite `exprs` so every array operand codegen reads as a view actually is
@@ -189,149 +190,80 @@ fn rewrite(expr: Expr, next_temp_id: &mut u32, hoisted: &mut Vec<Expr>) -> Expr 
     }
 }
 
-/// The single enumeration of view-requiring operand positions, derived from
-/// codegen's `walk_expr_as_view` call sites. Written as an exhaustive match
-/// with no `_` arm so a new `BuiltinFn` variant is a compile error here rather
-/// than a silently unconsidered position.
+/// Materialize every view-requiring operand position: the table's
+/// `ArgKind::Array` positions, which are exactly the positions codegen reads
+/// through `walk_expr_as_view` (the reducers' argument, `VECTOR SELECT`'s two
+/// arrays, the array-producing builtins' array arguments), minus the one
+/// position below that is deliberately left alone. A lookup's table
+/// (`ArgKind::Table`) is read as a view too, but it must name a whole
+/// *variable*: codegen resolves it to a `base_gf` by ident
+/// (`arrayed_lookup_table_info`), and a temp has no graphical functions
+/// attached to it. n-ary `MEAN` has no array position -- it averages scalars --
+/// so `MEAN(a * b)` over two scalars passes through untouched while the
+/// single-argument `MEAN(matrix[E,*] * 2)` materializes like every other
+/// reducer.
 fn materialize_view_operands(
     builtin: BuiltinFn,
     next_temp_id: &mut u32,
     hoisted: &mut Vec<Expr>,
 ) -> BuiltinFn {
-    use crate::builtins::BuiltinFn::*;
-    let mut mat = |arg: Box<Expr>| materialize_view_operand(arg, next_temp_id, hoisted);
-    match builtin {
-        // `emit_array_reduce`: pushes the argument as a view unconditionally.
-        Sum(a) => Sum(mat(a)),
-        Size(a) => Size(mat(a)),
-        Stddev(a) => Stddev(mat(a)),
-        // One-argument MIN/MAX are the array reductions; the two-argument
-        // forms are scalar and take no view.
-        Min(a, b) => match b {
-            None => Min(mat(a), None),
-            Some(b) => Min(a, Some(b)),
-        },
-        Max(a, b) => match b {
-            None => Max(mat(a), None),
-            Some(b) => Max(a, Some(b)),
-        },
-
-        // The scalar-reducing selector and the five array-producing opcodes.
-        VectorSelect(sel, values, max_val, action, err) => {
-            VectorSelect(mat(sel), mat(values), max_val, action, err)
-        }
-        // Materializing an ELM MAP *source* deliberately changes which storage
-        // the mapping ranges over, and the choice is this: the temp.
-        //
-        // The rule for a VARIABLE source is DOCUMENTED and ground-truthed. The
-        // Vensim reference page for VECTOR ELM MAP (retrieved 2026-08-02) says
-        // the function "returns the value of the variable that is offset from
-        // vec by the specified amount", and that an offset "outside the range of
-        // the variable" yields `:NA:`; its multi-subscript example spells the
-        // offset as a flat index over the whole variable
-        // (`(sub-1)*ELMCOUNT(tub)*ELMCOUNT(gub) + ...`). Real Vensim output
-        // agrees: in `test/sdeverywhere/models/vector/`,
-        // `f[DimA,DimB] = VECTOR ELM MAP(d[DimA,B1], a[DimA])` prints
-        // `1,1,5,5,6,6`, and `f[A2,B1] = 5 = d[A2,B2]` -- the mapping read past
-        // its own `B1` slice into the next row. `vm_vector_elm_map.rs`
-        // implements exactly that with a `source_is_full_array` test: a strict
-        // slice keeps a per-element base and can read across rows, a full
-        // contiguous source has `base_i == 0`.
-        //
-        // A COMPUTED source is a Simlin EXTENSION, and it is now settled that
-        // it is one. Vensim rejects the shape outright -- run in Vensim DSS on
-        // 2026-08-04, `vensim-probes/elm_map_computed_source.mdl` refuses to
-        // simulate with "Argument 1 to function VECTOR ELM MAP must be a normal
-        // variable". So there is no Vensim behaviour to match here, and the
-        // question is not "which rule does Vensim use" but "what shall this mean
-        // in Simlin".
-        //
-        // It means the HELPER-EQUIVALENT thing: an inline expression behaves
-        // exactly as the same values pre-assigned to a named variable, which is
-        // the spelling that IS legal Vensim. A materialized operand is a fresh
-        // contiguous temp and so is full-array by construction, which confines
-        // the mapping to the computed array -- exactly what
-        // `VECTOR ELM MAP(helper[A1], offs)` does when `helper` holds those
-        // values. That definition is deliberate and no longer provisional; the
-        // temp has no "rest of the variable" to run into, so nothing else is
-        // even expressible. Pinned by
-        // `array_operand_materialization_tests::materializing_an_elm_map_source_confines_the_mapping_to_the_temp`.
-        VectorElmMap(source, offsets) => VectorElmMap(mat(source), mat(offsets)),
-        VectorSortOrder(array, direction) => VectorSortOrder(mat(array), direction),
-        Rank(array, direction) => Rank(mat(array), direction),
-        // ALLOCATE AVAILABLE's priority-profile argument is deliberately NOT
-        // materialized. Its view is rewritten during lowering by
-        // `context::Context::expand_pp_view_for_allocate`, which re-expands a
-        // collapsed reference such as `pp[D,1]` back to the variable's full
-        // requester x XPriority array because the allocator always reads all
-        // four profile columns. That helper only understands a direct variable
-        // reference, so a computed profile array has no defined shape here:
-        // materializing `pp[D,1] + adj[D,1]` would silently hand the VM a
-        // one-column-per-requester temp. Leaving it alone keeps the loud
-        // codegen rejection instead.
-        AllocateAvailable(requests, profiles, available) => {
-            AllocateAvailable(mat(requests), profiles, available)
-        }
-        AllocateByPriority(requests, priorities, size, width, supply) => {
-            AllocateByPriority(mat(requests), mat(priorities), size, width, supply)
-        }
-
-        // An arrayed graphical-function apply reads its table as a view, but
-        // the table must name a whole *variable*: codegen resolves it to a
-        // `base_gf` by ident (`arrayed_lookup_table_info`), and a temp has no
-        // graphical functions attached to it.
-        Lookup(_, _, _) | LookupForward(_, _, _) | LookupBackward(_, _, _) => builtin,
-        // MEAN is the one reduce that is variadic. Only its single-argument
-        // form is an array reduction and only that form reaches
-        // `emit_array_reduce`; the multi-argument form averages scalars and
-        // has no view position at all. Codegen's `Mean` arm matches the four
-        // view shapes and emits a plain scalar `walk_expr` otherwise -- which
-        // is right for `MEAN(a * b)` over two scalars, and is why a
-        // scalar-shaped argument must keep passing through untouched. That
-        // fallback is NOT a licence to leave an array-shaped argument alone:
-        // `MEAN(matrix[E,*] * 2)` reaches the fallback, emits a scalar walk
-        // over an array expression, and fails to compile. `mat` declines
-        // anything with no derivable array view, so the scalar form is
-        // unaffected and the array form now agrees with every other reducer.
-        Mean(args) => {
-            if args.len() == 1 {
-                Mean(args.into_iter().map(|a| *mat(Box::new(a))).collect())
-            } else {
-                Mean(args)
+    // ALLOCATE AVAILABLE's priority-profile argument is deliberately NOT
+    // materialized. Its view is rewritten during lowering by
+    // `context::Context::expand_pp_view_for_allocate`, which re-expands a
+    // collapsed reference such as `pp[D,1]` back to the variable's full
+    // requester x XPriority array because the allocator always reads all
+    // four profile columns. That helper only understands a direct variable
+    // reference, so a computed profile array has no defined shape here:
+    // materializing `pp[D,1] + adj[D,1]` would silently hand the VM a
+    // one-column-per-requester temp. Leaving it alone keeps the loud
+    // codegen rejection instead.
+    let exempt_profile = matches!(builtin, BuiltinFn::AllocateAvailable(_, _, _));
+    // Materializing an ELM MAP *source* deliberately changes which storage
+    // the mapping ranges over, and the choice is this: the temp.
+    //
+    // The rule for a VARIABLE source is DOCUMENTED and ground-truthed. The
+    // Vensim reference page for VECTOR ELM MAP (retrieved 2026-08-02) says
+    // the function "returns the value of the variable that is offset from
+    // vec by the specified amount", and that an offset "outside the range of
+    // the variable" yields `:NA:`; its multi-subscript example spells the
+    // offset as a flat index over the whole variable
+    // (`(sub-1)*ELMCOUNT(tub)*ELMCOUNT(gub) + ...`). Real Vensim output
+    // agrees: in `test/sdeverywhere/models/vector/`,
+    // `f[DimA,DimB] = VECTOR ELM MAP(d[DimA,B1], a[DimA])` prints
+    // `1,1,5,5,6,6`, and `f[A2,B1] = 5 = d[A2,B2]` -- the mapping read past
+    // its own `B1` slice into the next row. `vm_vector_elm_map.rs`
+    // implements exactly that with a `source_is_full_array` test: a strict
+    // slice keeps a per-element base and can read across rows, a full
+    // contiguous source has `base_i == 0`.
+    //
+    // A COMPUTED source is a Simlin EXTENSION. Vensim rejects the shape
+    // outright -- run in Vensim DSS on 2026-08-04,
+    // `vensim-probes/elm_map_computed_source.mdl` refuses to simulate with
+    // "Argument 1 to function VECTOR ELM MAP must be a normal variable". So
+    // there is no Vensim behaviour to match here, and the question is not
+    // "which rule does Vensim use" but "what shall this mean in Simlin".
+    //
+    // It means the HELPER-EQUIVALENT thing: an inline expression behaves
+    // exactly as the same values pre-assigned to a named variable, which is
+    // the spelling that IS legal Vensim. A materialized operand is a fresh
+    // contiguous temp and so is full-array by construction, which confines
+    // the mapping to the computed array -- exactly what
+    // `VECTOR ELM MAP(helper[A1], offs)` does when `helper` holds those
+    // values. That definition is deliberate; the temp has no "rest of the
+    // variable" to run into, so nothing else is even expressible. Pinned by
+    // `array_operand_materialization_tests::materializing_an_elm_map_source_confines_the_mapping_to_the_temp`.
+    let mut position = 0usize;
+    builtin.map_with_kinds(|arg, kind| {
+        let is_profile = exempt_profile && position == 1;
+        position += 1;
+        match kind {
+            ArgKind::Array { .. } if !is_profile => {
+                materialize_view_operand(arg, next_temp_id, hoisted)
             }
+            ArgKind::Array { .. } | ArgKind::Scalar | ArgKind::Table => arg,
+            ArgKind::Ident => unreachable!("an identifier payload is not an expression argument"),
         }
-
-        // No view-requiring operand.
-        other @ (Abs(_)
-        | Arccos(_)
-        | Arcsin(_)
-        | Arctan(_)
-        | Cos(_)
-        | Exp(_)
-        | Round(_)
-        | Inf
-        | Int(_)
-        | IsModuleInput(_, _)
-        | Ln(_)
-        | Log10(_)
-        | Pi
-        | Pulse(_, _, _)
-        | Quantum(_, _)
-        | Ramp(_, _, _)
-        | SafeDiv(_, _, _)
-        | Sign(_)
-        | Sshape(_, _, _)
-        | Sin(_)
-        | Sqrt(_)
-        | Step(_, _)
-        | Tan(_)
-        | Time
-        | TimeStep
-        | StartTime
-        | FinalTime
-        | Previous(_, _)
-        | Init(_)) => other,
-    }
+    })
 }
 
 /// Move `operand` into a temp of its own and return the `TempArray` reference
@@ -343,10 +275,10 @@ fn materialize_view_operands(
 /// than over `curr` (GH #995, [`is_snapshot_view`]). Materializing it would
 /// spend a temp to copy an array that codegen can address directly.
 fn materialize_view_operand(
-    operand: Box<Expr>,
+    operand: Expr,
     next_temp_id: &mut u32,
     hoisted: &mut Vec<Expr>,
-) -> Box<Expr> {
+) -> Expr {
     if is_view(&operand) {
         return operand;
     }
@@ -357,8 +289,9 @@ fn materialize_view_operand(
     // what makes `small[d] + wide[e,d]` and `wide[e,d] + small[d]` the same
     // array (`super::find_expr_array_view`). `None` covers both "no shape" and
     // "two shapes neither of which contains the other"; declining leaves the
-    // operand for codegen to reject, exactly as the two deliberately
-    // unmaterialized positions above do, rather than guessing an axis order.
+    // operand for codegen to reject, exactly as the deliberately
+    // unmaterialized profile position above does, rather than guessing an
+    // axis order.
     let Some(source_view) = super::find_expr_array_view(&operand) else {
         return operand;
     };
@@ -392,8 +325,8 @@ fn materialize_view_operand(
     let loc = operand.get_loc();
     let temp_id = *next_temp_id;
     *next_temp_id += 1;
-    hoisted.push(Expr::AssignTemp(temp_id, operand, view.clone()));
-    Box::new(Expr::TempArray(temp_id, view, loc))
+    hoisted.push(Expr::AssignTemp(temp_id, Box::new(operand), view.clone()));
+    Expr::TempArray(temp_id, view, loc)
 }
 
 /// True when `expr` is an array-valued `PREVIOUS`/`INIT` -- a fifth view shape

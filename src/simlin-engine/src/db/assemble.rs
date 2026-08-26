@@ -423,9 +423,10 @@ pub(crate) struct VarFragmentResult {
 /// expression (as opposed to the init expression, which must not pollute the
 /// dep_names set).
 ///
-/// The walk is exhaustive over every `Expr`/`BuiltinFn` variant.
+/// The walk is exhaustive over every `Expr` variant; a builtin's arguments
+/// are walked or skipped by its signature's `Invariance` class.
 fn collect_expr_refs(exprs: &[crate::compiler::Expr], out: &mut HashSet<Ident<Canonical>>) {
-    use crate::builtins::BuiltinFn;
+    use crate::builtins::Invariance;
     use crate::compiler::Expr;
     use crate::compiler::expr::SubscriptIndex;
 
@@ -479,112 +480,21 @@ fn collect_expr_refs(exprs: &[crate::compiler::Expr], out: &mut HashSet<Ident<Ca
                 }
             }
 
-            // Builtins: walk every argument expression.
-            Expr::App(builtin, _) => match builtin {
-                BuiltinFn::Inf
-                | BuiltinFn::Pi
-                | BuiltinFn::Time
-                | BuiltinFn::TimeStep
-                | BuiltinFn::StartTime
-                | BuiltinFn::FinalTime
-                | BuiltinFn::IsModuleInput(_, _) => {}
-
-                BuiltinFn::Lookup(table, index, _)
-                | BuiltinFn::LookupForward(table, index, _)
-                | BuiltinFn::LookupBackward(table, index, _) => {
-                    walk(table, out);
-                    walk(index, out);
-                }
-
-                // Init(a): the initial-values buffer is frozen after the
-                // initials phase -- `INIT(dynamic_var)` is run-invariant
-                // regardless of what `a` references. Do NOT recurse into `a`
-                // (mirroring `builtin_is_invariant` which returns `true`
-                // without walking the argument).
-                BuiltinFn::Init(_) => {}
-
-                // Previous is already variant (caught by locally_pure), but
-                // we still avoid recursing into its argument so the walk stays
-                // consistent with the invariance classifier's treatment.
-                BuiltinFn::Previous(_, _) => {}
-
-                BuiltinFn::Abs(a)
-                | BuiltinFn::Arccos(a)
-                | BuiltinFn::Arcsin(a)
-                | BuiltinFn::Arctan(a)
-                | BuiltinFn::Cos(a)
-                | BuiltinFn::Exp(a)
-                | BuiltinFn::Int(a)
-                | BuiltinFn::Ln(a)
-                | BuiltinFn::Log10(a)
-                | BuiltinFn::Round(a)
-                | BuiltinFn::Sign(a)
-                | BuiltinFn::Sin(a)
-                | BuiltinFn::Sqrt(a)
-                | BuiltinFn::Tan(a)
-                | BuiltinFn::Size(a)
-                | BuiltinFn::Stddev(a)
-                | BuiltinFn::Sum(a) => walk(a, out),
-
-                BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
-                    walk(a, out);
-                    if let Some(b) = b {
-                        walk(b, out);
-                    }
-                }
-                BuiltinFn::SafeDiv(a, b, c) => {
-                    walk(a, out);
-                    walk(b, out);
-                    if let Some(c) = c {
-                        walk(c, out);
-                    }
-                }
-                BuiltinFn::Step(a, b) | BuiltinFn::Quantum(a, b) => {
-                    walk(a, out);
-                    walk(b, out);
-                }
-                BuiltinFn::Pulse(a, b, c) => {
-                    walk(a, out);
-                    walk(b, out);
-                    if let Some(c) = c {
-                        walk(c, out);
-                    }
-                }
-                BuiltinFn::Ramp(a, b, c) => {
-                    walk(a, out);
-                    walk(b, out);
-                    if let Some(c) = c {
-                        walk(c, out);
-                    }
-                }
-                BuiltinFn::Sshape(a, b, c) => {
-                    walk(a, out);
-                    walk(b, out);
-                    walk(c, out);
-                }
-                BuiltinFn::Mean(args) => {
-                    for arg in args {
+            // Builtins: walk every argument expression, except where the
+            // builtin's invariance class says the argument is not a dt-time
+            // read. `INIT(a)`: the initial-values buffer is frozen after the
+            // initials phase -- `INIT(dynamic_var)` is run-invariant
+            // regardless of what `a` references, so `a` is NOT a dependency
+            // here (mirroring `builtin_is_invariant`, which returns `true`
+            // without walking the argument). `PREVIOUS` is already variant
+            // (caught by `locally_pure`), and its argument is skipped for the
+            // same consistency with the invariance classifier.
+            Expr::App(builtin, _) => match builtin.signature().invariance {
+                Invariance::Snapshot | Invariance::Lagged => {}
+                Invariance::Pure | Invariance::TimeDependent => {
+                    for arg in builtin.args() {
                         walk(arg, out);
                     }
-                }
-                BuiltinFn::Rank(a, b)
-                | BuiltinFn::VectorElmMap(a, b)
-                | BuiltinFn::VectorSortOrder(a, b) => {
-                    walk(a, out);
-                    walk(b, out);
-                }
-                BuiltinFn::AllocateAvailable(a, b, c) => {
-                    walk(a, out);
-                    walk(b, out);
-                    walk(c, out);
-                }
-                BuiltinFn::VectorSelect(a, b, c, d, e)
-                | BuiltinFn::AllocateByPriority(a, b, c, d, e) => {
-                    walk(a, out);
-                    walk(b, out);
-                    walk(c, out);
-                    walk(d, out);
-                    walk(e, out);
                 }
             },
         }

@@ -4675,26 +4675,21 @@ fn classify_builtin_if_references_source(
     builtin: &crate::builtins::BuiltinFn<crate::ast::Expr2>,
     source_ident: &str,
 ) -> Option<(ReducerKind, &'static str, Expr0)> {
-    use crate::builtins::BuiltinFn;
-
     let kind = crate::ltm_agg::reducer_kind(builtin)?;
 
     // The recognized-reducer set is exactly `SUM`/`MEAN`/`MIN`/`MAX`/`STDDEV`/
     // `RANK`/`SIZE`, and in each the reduced array is the first argument.
-    // (`for_each_expr_ref` can't be used here -- it doesn't tie the yielded
-    // reference's lifetime to the borrow of `builtin`.)
-    let (array_arg, upper): (&crate::ast::Expr2, &'static str) = match builtin {
-        BuiltinFn::Sum(arg) => (arg, "SUM"),
-        BuiltinFn::Mean(args) => (args.first()?, "MEAN"),
-        BuiltinFn::Min(arg, _) => (arg, "MIN"),
-        BuiltinFn::Max(arg, _) => (arg, "MAX"),
-        BuiltinFn::Stddev(arg) => (arg, "STDDEV"),
-        BuiltinFn::Rank(arg, _) => (arg, "RANK"),
-        BuiltinFn::Size(arg) => (arg, "SIZE"),
-        other => unreachable!(
-            "reducer_kind admitted a non-reducer builtin: {}",
-            other.name()
-        ),
+    let array_arg: &crate::ast::Expr2 = *builtin.args().first()?;
+    // The spelling the synthesized equation text writes for the call.
+    let upper: &'static str = match builtin.name() {
+        "sum" => "SUM",
+        "mean" => "MEAN",
+        "min" => "MIN",
+        "max" => "MAX",
+        "stddev" => "STDDEV",
+        "rank" => "RANK",
+        "size" => "SIZE",
+        other => unreachable!("reducer_kind admitted a non-reducer builtin: {other}"),
     };
 
     let canonical_source = canonicalize(source_ident);

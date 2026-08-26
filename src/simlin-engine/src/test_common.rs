@@ -864,7 +864,7 @@ impl TestProject {
     }
 
     /// Sync the datamodel into a salsa DB and collect all diagnostics.
-    fn diagnostics_incremental(&self) -> Vec<crate::db::Diagnostic> {
+    pub(crate) fn diagnostics_incremental(&self) -> Vec<crate::db::Diagnostic> {
         let datamodel = self.build_datamodel();
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
