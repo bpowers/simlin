@@ -1447,6 +1447,8 @@ mod prev_init_tests;
 #[cfg(test)]
 mod stages_tests;
 #[cfg(test)]
+mod temp_allocation_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod variable_dimensions_tests;

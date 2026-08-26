@@ -3,10 +3,12 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::collections::BTreeSet;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::ast::{
     self, ArrayView, BinaryOp, Expr3, Expr3LowerContext, IndexExpr3, Loc, Pass1Context,
+    TempAllocator,
 };
 use crate::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, ErrorCode, ErrorKind, Ident, IdentMap,
@@ -161,6 +163,14 @@ pub(crate) struct Context<'a> {
     /// (VectorSortOrder, VectorElmMap, etc.) but NOT for array reducers (SUM,
     /// MEAN, etc.) where ActiveDimRef should resolve to a concrete offset.
     pub(crate) promote_active_dim_ref: bool,
+    /// The fragment's temp allocator. [`Context::new`] creates one per
+    /// fragment (one `compiler::Var::new` call) and every context derived from
+    /// it -- per-element, wildcard-preserving, transposed -- shares it, so each
+    /// temp a lowering step materializes is drawn from one sequence. The ids
+    /// are dense by construction, and distinct except across the elements of
+    /// one plain apply-to-all or arrayed equation, which share a range
+    /// (`TempAllocator::element_scopes`).
+    pub(crate) temps: Rc<TempAllocator>,
 }
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -203,6 +213,7 @@ impl Context<'_> {
             is_initial,
             preserve_wildcards_for_iteration: false,
             promote_active_dim_ref: false,
+            temps: Rc::new(TempAllocator::default()),
         }
     }
 
@@ -219,6 +230,7 @@ impl Context<'_> {
             is_initial: self.is_initial,
             preserve_wildcards_for_iteration: self.preserve_wildcards_for_iteration,
             promote_active_dim_ref: self.promote_active_dim_ref,
+            temps: Rc::clone(&self.temps),
         }
     }
 
@@ -764,8 +776,8 @@ impl Context<'_> {
         // Pass 1: temp decomposition for complex array expressions
         // Use A2A context when available to resolve dimension references
         let mut pass1_ctx = match (&self.active_dimension, &self.active_subscript) {
-            (Some(dims), Some(subs)) => Pass1Context::with_a2a_context(dims, subs),
-            _ => Pass1Context::new(),
+            (Some(dims), Some(subs)) => Pass1Context::with_a2a_context(dims, subs, &self.temps),
+            _ => Pass1Context::new(&self.temps),
         };
         let transformed = pass1_ctx.transform(expr3);
         let assignments = pass1_ctx.take_assignments();
@@ -802,7 +814,7 @@ impl Context<'_> {
 
         // Use Pass1Context WITHOUT A2A context so Dimension references
         // are preserved (not resolved to concrete element indices).
-        let mut pass1_ctx = Pass1Context::new();
+        let mut pass1_ctx = Pass1Context::new(&self.temps);
         let transformed = pass1_ctx.transform(expr3);
         let assignments = pass1_ctx.take_assignments();
 
@@ -1063,6 +1075,7 @@ impl Context<'_> {
             is_initial: self.is_initial,
             preserve_wildcards_for_iteration: true,
             promote_active_dim_ref: false,
+            temps: Rc::clone(&self.temps),
         }
     }
 
@@ -1080,6 +1093,7 @@ impl Context<'_> {
             is_initial: self.is_initial,
             preserve_wildcards_for_iteration: true,
             promote_active_dim_ref: true,
+            temps: Rc::clone(&self.temps),
         }
     }
 

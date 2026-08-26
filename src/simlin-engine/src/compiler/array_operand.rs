@@ -94,18 +94,21 @@
 //!   `array_operand_materialization_tests::a_repeated_dimension_read_directly_is_a_pre_existing_residual`,
 //!   whose fix belongs in the projection rather than here.
 
-use crate::ast::ArrayView;
+use crate::ast::{ArrayView, TempAllocator};
 use crate::builtins::ArgKind;
 use crate::compiler::expr::{BuiltinFn, Expr, SubscriptIndex};
 
 /// Rewrite `exprs` so every array operand codegen reads as a view actually is
 /// one, splicing an `AssignTemp` in front of the expression that needs it.
 ///
-/// Temp ids continue past the highest one the fragment already uses, so the
-/// new temps cannot collide with the per-element ids the apply-to-all hoister
-/// assigns (which restart at 0 for each `lower()` call and are remapped there).
-pub(super) fn materialize_computed_array_operands(exprs: Vec<Expr>) -> Vec<Expr> {
-    let mut next_temp_id = super::next_available_temp_id(&exprs);
+/// `temps` is the fragment's allocator. Every element scope the lowering
+/// opened has ended by the time this runs, so each id it issues lies above
+/// every temp the lowered code writes: a materialized temp spliced into an
+/// element's code can never alias the element's own, still-live temps.
+pub(super) fn materialize_computed_array_operands(
+    exprs: Vec<Expr>,
+    temps: &TempAllocator,
+) -> Vec<Expr> {
     let mut out: Vec<Expr> = Vec::with_capacity(exprs.len());
     for expr in exprs {
         // Hoisted assignments are emitted immediately before the expression
@@ -113,51 +116,44 @@ pub(super) fn materialize_computed_array_operands(exprs: Vec<Expr>) -> Vec<Expr>
         // materialization's temp is always written before the outer one that
         // consumes it.
         let mut hoisted = Vec::new();
-        let expr = rewrite(expr, &mut next_temp_id, &mut hoisted);
+        let expr = rewrite(expr, temps, &mut hoisted);
         out.extend(hoisted);
         out.push(expr);
     }
     out
 }
 
-fn rewrite(expr: Expr, next_temp_id: &mut u32, hoisted: &mut Vec<Expr>) -> Expr {
+fn rewrite(expr: Expr, temps: &TempAllocator, hoisted: &mut Vec<Expr>) -> Expr {
     match expr {
         Expr::App(builtin, loc) => {
             // Bottom-up: an operand that is itself a builtin call is rewritten
             // (and, if it needs it, materialized) before this level looks at
             // it, so a nested array-producing builtin arrives here as a
             // `TempArray` rather than as an un-viewable `App`.
-            let builtin = builtin.map(|arg| rewrite(arg, next_temp_id, hoisted));
-            Expr::App(
-                materialize_view_operands(builtin, next_temp_id, hoisted),
-                loc,
-            )
+            let builtin = builtin.map(|arg| rewrite(arg, temps, hoisted));
+            Expr::App(materialize_view_operands(builtin, temps, hoisted), loc)
         }
-        Expr::Op1(op, inner, loc) => {
-            Expr::Op1(op, Box::new(rewrite(*inner, next_temp_id, hoisted)), loc)
-        }
+        Expr::Op1(op, inner, loc) => Expr::Op1(op, Box::new(rewrite(*inner, temps, hoisted)), loc),
         Expr::Op2(op, lhs, rhs, loc) => Expr::Op2(
             op,
-            Box::new(rewrite(*lhs, next_temp_id, hoisted)),
-            Box::new(rewrite(*rhs, next_temp_id, hoisted)),
+            Box::new(rewrite(*lhs, temps, hoisted)),
+            Box::new(rewrite(*rhs, temps, hoisted)),
             loc,
         ),
         Expr::If(cond, then_expr, else_expr, loc) => Expr::If(
-            Box::new(rewrite(*cond, next_temp_id, hoisted)),
-            Box::new(rewrite(*then_expr, next_temp_id, hoisted)),
-            Box::new(rewrite(*else_expr, next_temp_id, hoisted)),
+            Box::new(rewrite(*cond, temps, hoisted)),
+            Box::new(rewrite(*then_expr, temps, hoisted)),
+            Box::new(rewrite(*else_expr, temps, hoisted)),
             loc,
         ),
         Expr::Subscript(base, indices, bounds, loc) => {
             let indices = indices
                 .into_iter()
                 .map(|idx| match idx {
-                    SubscriptIndex::Single(e) => {
-                        SubscriptIndex::Single(rewrite(e, next_temp_id, hoisted))
-                    }
+                    SubscriptIndex::Single(e) => SubscriptIndex::Single(rewrite(e, temps, hoisted)),
                     SubscriptIndex::Range(start, end) => SubscriptIndex::Range(
-                        rewrite(start, next_temp_id, hoisted),
-                        rewrite(end, next_temp_id, hoisted),
+                        rewrite(start, temps, hoisted),
+                        rewrite(end, temps, hoisted),
                     ),
                 })
                 .collect();
@@ -168,17 +164,17 @@ fn rewrite(expr: Expr, next_temp_id: &mut u32, hoisted: &mut Vec<Expr>) -> Expr 
             model_name,
             input_set,
             args.into_iter()
-                .map(|arg| rewrite(arg, next_temp_id, hoisted))
+                .map(|arg| rewrite(arg, temps, hoisted))
                 .collect(),
         ),
         Expr::AssignCurr(dst, rhs) => {
-            Expr::AssignCurr(dst, Box::new(rewrite(*rhs, next_temp_id, hoisted)))
+            Expr::AssignCurr(dst, Box::new(rewrite(*rhs, temps, hoisted)))
         }
         Expr::AssignNext(dst, rhs) => {
-            Expr::AssignNext(dst, Box::new(rewrite(*rhs, next_temp_id, hoisted)))
+            Expr::AssignNext(dst, Box::new(rewrite(*rhs, temps, hoisted)))
         }
         Expr::AssignTemp(id, rhs, view) => {
-            Expr::AssignTemp(id, Box::new(rewrite(*rhs, next_temp_id, hoisted)), view)
+            Expr::AssignTemp(id, Box::new(rewrite(*rhs, temps, hoisted)), view)
         }
         leaf @ (Expr::Const(_, _)
         | Expr::Var(_, _)
@@ -204,7 +200,7 @@ fn rewrite(expr: Expr, next_temp_id: &mut u32, hoisted: &mut Vec<Expr>) -> Expr 
 /// reducer.
 fn materialize_view_operands(
     builtin: BuiltinFn,
-    next_temp_id: &mut u32,
+    temps: &TempAllocator,
     hoisted: &mut Vec<Expr>,
 ) -> BuiltinFn {
     // ALLOCATE AVAILABLE's priority-profile argument is deliberately NOT
@@ -257,9 +253,7 @@ fn materialize_view_operands(
         let is_profile = exempt_profile && position == 1;
         position += 1;
         match kind {
-            ArgKind::Array { .. } if !is_profile => {
-                materialize_view_operand(arg, next_temp_id, hoisted)
-            }
+            ArgKind::Array { .. } if !is_profile => materialize_view_operand(arg, temps, hoisted),
             ArgKind::Array { .. } | ArgKind::Scalar | ArgKind::Table => arg,
             ArgKind::Ident => unreachable!("an identifier payload is not an expression argument"),
         }
@@ -274,11 +268,7 @@ fn materialize_view_operands(
 /// `StaticSubscript` is: it already IS a view, over a snapshot buffer rather
 /// than over `curr` (GH #995, [`is_snapshot_view`]). Materializing it would
 /// spend a temp to copy an array that codegen can address directly.
-fn materialize_view_operand(
-    operand: Expr,
-    next_temp_id: &mut u32,
-    hoisted: &mut Vec<Expr>,
-) -> Expr {
+fn materialize_view_operand(operand: Expr, temps: &TempAllocator, hoisted: &mut Vec<Expr>) -> Expr {
     if is_view(&operand) {
         return operand;
     }
@@ -323,8 +313,7 @@ fn materialize_view_operand(
     };
 
     let loc = operand.get_loc();
-    let temp_id = *next_temp_id;
-    *next_temp_id += 1;
+    let temp_id = temps.alloc();
     hoisted.push(Expr::AssignTemp(temp_id, Box::new(operand), view.clone()));
     Expr::TempArray(temp_id, view, loc)
 }

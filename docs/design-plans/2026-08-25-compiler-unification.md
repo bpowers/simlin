@@ -543,7 +543,10 @@ plus design observations; the same implementer fixes; a fresh re-reviewer
 checks the prior findings and the fixes; when there are no material findings
 the implementer commits through the pre-commit hook (never `--no-verify`) and
 the lead confirms the commit in `git log`. Read-only audits may run in
-parallel with an implementer; two implementers never edit one checkout.
+parallel with an implementer; two implementers never edit one checkout. A
+phase that claims identical semantics also builds the pre-change commit from
+`git archive` into the scratchpad and runs both CLIs on hand-written probe
+models covering the shapes the corpus lacks, diffing the simulation output.
 
 **Teammate standing rules** (inline in every prompt): TDD; derive test rows
 from the enumeration and name uncovered arms; fixtures must be what
@@ -619,6 +622,29 @@ corpus (C-LEARN artifacts are identical); each is pinned:
    dropped). Pinned by
    `ast::expr1::tests::constructor_admits_exactly_the_signatures_arity_range`.
 
+**Phase 2a semantic divergences.** Making temp ids final when issued changed
+how one arrayed shape compiles. It does not occur in the corpus (C-LEARN
+artifacts are identical); it is pinned:
+
+1. In an arrayed (EXCEPT / per-element) equation, an arm that is *not* the
+   hoisting arm -- the EXCEPT default beside a hoisting override, or an
+   explicit override beside a hoisting first element -- and whose expression
+   holds a Pass 1 temp beside its own hoisted builtin (`SUM(vals[*] * 2) +
+   SUM(RANK(bump[*], 1))` beside an arm `SUM(RANK(vals[*], 1))`) read the
+   *other* arm's hoist through that temp: the arm's Pass 1 pre-expression was
+   emitted once, renumbered past the ids already taken, while the main
+   expression came from a second lowering that still numbered its temp 0, the
+   id of the hoisting arm's hoist. `out[d]` with that default and override
+   gave `[6, 12, 12]` (`6 + 6`) where the same expression as a scalar gives
+   `126` (`120 + 6`). With one allocator per fragment the pre-expression and
+   the main expression come from one lowering and name one id, so the arm
+   reads its own operand: `[6, 126, 126]`. Pinned, with the expected values
+   derived from the builtins' rules, by
+   `db::temp_allocation_tests::default_arm_beside_a_hoisting_override_reads_its_own_pass1_temp`,
+   `explicit_arm_beside_a_hoisting_arm_reads_its_own_pass1_temp`,
+   `default_arm_with_two_pass1_temps_reads_both_of_its_own`, and the 2-D
+   `two_d_override_beside_a_hoisting_default_reads_its_own_pass1_temp`.
+
 **Risks.** Phase 6(b) and Phase 7 are the two places where artifact shape
 changes are expected; both rely on the corpus as oracle and must report opcode
 and temp deltas in the ledger. Phase 7 changes salsa keying; the determinism
@@ -635,3 +661,4 @@ hash is not available to it.
 |---|---|---:|---:|---|---|---|
 | baseline | `867f2e63` | 10.788 G (median of 9; range 10.778-10.791) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | retired instructions, `perf stat -e instructions` (user space, whole process: parse, one measured compile, five `CLEARN_COMPILE_ITERS` compiles, one VM run), `CLEARN_PROFILE=compile`; release `opt-level=3` + LTO, mimalloc; 371 names, 7 modules; 1174 initials |
 | 1 | `engine: one signature table of per-builtin facts` | 10.753 G (median of 4; range 10.748-10.755), -0.30% (interleaved pairs -0.34 / -0.28 / -0.34%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN: every count above, the 371 names and 7 modules, and the full opcode histogram; same channel and flags as the baseline row; the saving is `try_map_ref` lowering `Expr2` builtins without cloning them; four edge-shape divergences, pinned (Additional Considerations, "Phase 1 semantic divergences") |
+| 2a | `engine: one temp allocator per variable lowering` | 10.349 G (median of 5; range 10.345-10.353), -3.78% against the Phase 1 commit re-measured in the same session (10.756 G, median of 5, range 10.747-10.759; interleaved pairs -3.75 / -3.78 / -3.74%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN: every count above, the 371 names and 7 modules, the full opcode histogram and the post-fusion stream counts; temp numbering identical on every checked-in fragment golden (no regeneration); same channel and flags as the baseline row. The saving is deleted reconciliation work: the operand materializer walked every fragment's whole expression list into a `HashMap` to find the next free id, the arrayed path lowered every element twice (once to classify, once to keep), the shared-hoist paths re-lowered every element a second time to replay its temp ids, and every re-lowered element tree was walked twice more to shift and re-scan its ids. One corrected shape, not in the corpus: an arrayed arm that is not the hoisting arm and holds a Pass 1 temp beside its own hoist read another arm's hoist through that temp at the Phase 1 commit and reads its own operand on this one (Additional Considerations, "Phase 2a semantic divergences"). Every other probe -- the engine suite, the determinism suites, and hand-written models covering nested hoists, EXCEPT arms in XMILE and MDL, 2-D apply-to-all with reducers, the Phase 1 per-element GF shapes, and the pre-existing refusal of an array-producing builtin inside operand arithmetic -- simulates byte-identically on the pre-change and post-change CLIs |

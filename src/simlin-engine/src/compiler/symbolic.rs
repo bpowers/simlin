@@ -1205,7 +1205,8 @@ pub(crate) fn resolve_static_view(
         // layer, where the concrete program is produced (#583 is the real fix:
         // the id namespace is too small for a per-element hoist over a few
         // hundred elements). The write-side narrowing is deliberately left
-        // unguarded; see the module note on this in the crate's CLAUDE.md.
+        // unguarded; the temp bullet under "Standing invariants of the
+        // compiler" in the crate's CLAUDE.md states the rule.
         SymStaticViewBase::Temp(id) => {
             if *id > TempId::MAX as u32 {
                 return Err(format!(

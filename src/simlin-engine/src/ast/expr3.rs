@@ -12,6 +12,7 @@ use crate::common::{
 };
 use crate::dimensions::Dimension;
 use crate::eqn_err;
+use std::cell::Cell;
 
 /// Index expression for Expr3 subscripts.
 ///
@@ -434,6 +435,126 @@ impl Expr3 {
 }
 
 // ============================================================================
+// Temp allocation
+// ============================================================================
+
+/// Issues the temp-array ids of one fragment -- one variable's one phase, the
+/// unit `compiler::Var::new` lowers.
+///
+/// An id is final when issued; nothing downstream renumbers it. The sequence
+/// is 0-based per fragment because assembly's `FragmentMerger` max-merges
+/// fragment temp `t` onto shared slot `t` when it concatenates sequential
+/// fragments (`TempStrategy::Recycle`). Every lowering step that materializes
+/// an array into a temp -- Pass 1 decomposition, the apply-to-all and arrayed
+/// hoisters, the computed-operand materializer -- draws from the fragment's
+/// one allocator, which is what makes the ids dense and distinct without any
+/// reconciliation between steps.
+///
+/// Two scoping operations refine the plain counter:
+///
+/// * [`Self::element_scopes`]: an apply-to-all or arrayed equation that hoists
+///   nothing evaluates its elements one after another, and each element's
+///   temps are dead before the next element runs, so the elements share one
+///   id range. This is the recycling `FragmentMerger` performs across
+///   fragments, one level down, and it is what keeps a 300-element reducer
+///   equation at one temp slot rather than 300 (the bytecode `TempId` is a
+///   `u8`).
+/// * [`Self::discard_since`]: a lowering taken only to classify an equation
+///   (does its lowered form contain an array-producing builtin? does it vary
+///   with the active element?) is inspected and dropped; forgetting its ids
+///   keeps the retained sequence dense.
+///
+/// `count()` is the number of distinct ids the fragment has issued and kept,
+/// which is the length of its `temp_sizes` table.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Default)]
+pub struct TempAllocator {
+    /// The id the next `alloc` returns.
+    next: Cell<u32>,
+    /// One past the highest id issued and kept.
+    count: Cell<u32>,
+}
+
+/// A position in a [`TempAllocator`]'s sequence, taken with
+/// [`TempAllocator::mark`] and handed back to
+/// [`TempAllocator::discard_since`].
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy)]
+pub struct TempMark {
+    next: u32,
+    count: u32,
+}
+
+impl TempAllocator {
+    /// The next id in the current scope.
+    pub fn alloc(&self) -> u32 {
+        let id = self.next.get();
+        self.next.set(id + 1);
+        if id + 1 > self.count.get() {
+            self.count.set(id + 1);
+        }
+        id
+    }
+
+    /// The number of distinct ids issued and kept: the fragment's temp count.
+    pub fn count(&self) -> u32 {
+        self.count.get()
+    }
+
+    /// The current position, for a later [`Self::discard_since`].
+    pub fn mark(&self) -> TempMark {
+        TempMark {
+            next: self.next.get(),
+            count: self.count.get(),
+        }
+    }
+
+    /// Forget every id issued since `mark`. The caller has dropped everything
+    /// it lowered in between, so the ids that lowering consumed are reissued
+    /// to whatever is lowered next.
+    pub fn discard_since(&self, mark: TempMark) {
+        self.next.set(mark.next);
+        self.count.set(mark.count);
+    }
+
+    /// Begin a run of element scopes sharing one id range; see
+    /// [`ElementScopes`].
+    pub fn element_scopes(&self) -> ElementScopes<'_> {
+        ElementScopes {
+            temps: self,
+            start: self.next.get(),
+        }
+    }
+}
+
+/// One id range shared by the sequential element lowerings of one equation.
+///
+/// [`Self::begin_element`] rewinds the allocator to the range's start, so the
+/// next element reuses the ids the previous one consumed. Dropping the guard
+/// moves the allocator past every id any element used: a pass that later
+/// splices temps into the element code (the computed-operand materializer)
+/// then aliases none of them, while each element's own temps stay live only
+/// until that element's assignment.
+#[must_use]
+pub struct ElementScopes<'a> {
+    temps: &'a TempAllocator,
+    start: u32,
+}
+
+impl ElementScopes<'_> {
+    /// Rewind to the shared range's start for the next element.
+    pub fn begin_element(&self) {
+        self.temps.next.set(self.start);
+    }
+}
+
+impl Drop for ElementScopes<'_> {
+    fn drop(&mut self) {
+        self.temps.next.set(self.temps.count.get());
+    }
+}
+
+// ============================================================================
 // Pass 1: Temp Array Decomposition (Expr3 → Expr3)
 // ============================================================================
 //
@@ -454,14 +575,17 @@ impl Expr3 {
 //   → (inner SUM evaluated first, then outer decomposed)
 
 /// Context for pass 1 temp decomposition.
-/// Tracks temp ID allocation across the transformation.
+///
+/// Temp ids come from the fragment's [`TempAllocator`], shared with every
+/// other step of the same lowering that materializes a temp, so a Pass 1 temp
+/// can never collide with a hoisted or materialized one.
 ///
 /// When A2A context is provided (active_dimensions and active_subscripts),
 /// Dimension and DimPosition references can be resolved to concrete values,
 /// enabling decomposition of expressions that would otherwise be deferred.
 pub struct Pass1Context<'a> {
-    /// Counter for allocating temp array IDs
-    next_temp_id: u32,
+    /// The fragment's allocator.
+    temps: &'a TempAllocator,
     /// Accumulated AssignTemp expressions (prepended to result)
     temp_assignments: Vec<Expr3>,
     /// Active dimensions for A2A context (None if not in A2A evaluation)
@@ -473,9 +597,9 @@ pub struct Pass1Context<'a> {
 impl<'a> Pass1Context<'a> {
     /// Create a new pass 1 context without A2A information.
     /// Dimension and DimPosition references will block decomposition.
-    pub fn new() -> Self {
+    pub fn new(temps: &'a TempAllocator) -> Self {
         Self {
-            next_temp_id: 0,
+            temps,
             temp_assignments: Vec::new(),
             active_dimensions: None,
             active_subscripts: None,
@@ -487,9 +611,10 @@ impl<'a> Pass1Context<'a> {
     pub fn with_a2a_context(
         active_dimensions: &'a [Dimension],
         active_subscripts: &'a [CanonicalElementName],
+        temps: &'a TempAllocator,
     ) -> Self {
         Self {
-            next_temp_id: 0,
+            temps,
             temp_assignments: Vec::new(),
             active_dimensions: Some(active_dimensions),
             active_subscripts: Some(active_subscripts),
@@ -498,9 +623,7 @@ impl<'a> Pass1Context<'a> {
 
     /// Allocate a new temp array ID
     fn allocate_temp_id(&mut self) -> u32 {
-        let id = self.next_temp_id;
-        self.next_temp_id += 1;
-        id
+        self.temps.alloc()
     }
 
     /// Take the accumulated temp assignments
@@ -999,12 +1122,6 @@ fn arrayed_gf_apply_view(builtin: &BuiltinFn<Expr3>) -> Option<(Vec<usize>, Opti
         Some((dims, dim_names))
     } else {
         None
-    }
-}
-
-impl Default for Pass1Context<'_> {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -1624,6 +1741,81 @@ mod tests {
     }
 
     // =========================================================================
+    // TempAllocator
+    // =========================================================================
+
+    #[test]
+    fn alloc_issues_dense_ids_and_counts_them() {
+        let temps = TempAllocator::default();
+        assert_eq!(temps.count(), 0);
+        assert_eq!(temps.alloc(), 0);
+        assert_eq!(temps.alloc(), 1);
+        assert_eq!(temps.alloc(), 2);
+        assert_eq!(temps.count(), 3);
+    }
+
+    #[test]
+    fn discard_since_reissues_the_ids_a_dropped_lowering_took() {
+        let temps = TempAllocator::default();
+        assert_eq!(temps.alloc(), 0);
+        assert_eq!(temps.alloc(), 1);
+        let mark = temps.mark();
+        assert_eq!(temps.alloc(), 2);
+        assert_eq!(temps.alloc(), 3);
+        assert_eq!(temps.count(), 4);
+        temps.discard_since(mark);
+        assert_eq!(temps.count(), 2, "the discarded ids are not counted");
+        assert_eq!(
+            temps.alloc(),
+            2,
+            "the next lowering takes the first discarded id"
+        );
+        assert_eq!(temps.count(), 3);
+    }
+
+    #[test]
+    fn element_scopes_share_one_range_and_end_above_every_element() {
+        let temps = TempAllocator::default();
+        assert_eq!(temps.alloc(), 0);
+        {
+            let scopes = temps.element_scopes();
+            scopes.begin_element();
+            assert_eq!((temps.alloc(), temps.alloc()), (1, 2));
+            scopes.begin_element();
+            assert_eq!(
+                temps.alloc(),
+                1,
+                "the second element reuses the first's ids"
+            );
+            scopes.begin_element();
+            assert_eq!((temps.alloc(), temps.alloc(), temps.alloc()), (1, 2, 3));
+            assert_eq!(temps.count(), 4, "count is the widest element's extent");
+        }
+        assert_eq!(
+            temps.alloc(),
+            4,
+            "after the scopes end, ids continue above every element's"
+        );
+        assert_eq!(temps.count(), 5);
+    }
+
+    #[test]
+    fn discard_since_forgets_element_scopes_taken_after_the_mark() {
+        let temps = TempAllocator::default();
+        let mark = temps.mark();
+        {
+            let scopes = temps.element_scopes();
+            scopes.begin_element();
+            assert_eq!((temps.alloc(), temps.alloc()), (0, 1));
+            scopes.begin_element();
+            assert_eq!(temps.alloc(), 0);
+        }
+        temps.discard_since(mark);
+        assert_eq!(temps.count(), 0);
+        assert_eq!(temps.alloc(), 0);
+    }
+
+    // =========================================================================
     // Pass 1 Tests
     // =========================================================================
 
@@ -1648,7 +1840,8 @@ mod tests {
 
         let sum_expr = Expr3::App(BuiltinFn::Sum(Box::new(subscript)), None, Loc::new(0, 10));
 
-        let mut ctx = Pass1Context::new();
+        let temps = TempAllocator::default();
+        let mut ctx = Pass1Context::new(&temps);
         let result = ctx.transform(sum_expr.clone());
         let assignments = ctx.take_assignments();
 
@@ -1700,7 +1893,8 @@ mod tests {
             Loc::new(0, 15),
         );
 
-        let mut ctx = Pass1Context::new();
+        let temps = TempAllocator::default();
+        let mut ctx = Pass1Context::new(&temps);
         let result = ctx.transform(sum_expr);
         let assignments = ctx.take_assignments();
 
@@ -1763,7 +1957,8 @@ mod tests {
 
         let sum_expr = Expr3::App(BuiltinFn::Sum(Box::new(add_expr)), None, Loc::new(0, 20));
 
-        let mut ctx = Pass1Context::new();
+        let temps = TempAllocator::default();
+        let mut ctx = Pass1Context::new(&temps);
         let result = ctx.transform(sum_expr);
         let assignments = ctx.take_assignments();
 
@@ -1832,7 +2027,8 @@ mod tests {
         // SUM(SUM(inner[*]) + outer[*])
         let outer_sum = Expr3::App(BuiltinFn::Sum(Box::new(add_expr)), None, Loc::new(0, 20));
 
-        let mut ctx = Pass1Context::new();
+        let temps = TempAllocator::default();
+        let mut ctx = Pass1Context::new(&temps);
         let result = ctx.transform(outer_sum);
         let assignments = ctx.take_assignments();
 
@@ -1928,7 +2124,8 @@ mod tests {
             Loc::new(0, 25),
         );
 
-        let mut ctx = Pass1Context::new();
+        let temps = TempAllocator::default();
+        let mut ctx = Pass1Context::new(&temps);
         let result = ctx.transform(total);
         let assignments = ctx.take_assignments();
 
@@ -2031,7 +2228,8 @@ mod tests {
 
         let sum_expr = Expr3::App(BuiltinFn::Sum(Box::new(if_expr)), None, Loc::new(0, 35));
 
-        let mut ctx = Pass1Context::new();
+        let temps = TempAllocator::default();
+        let mut ctx = Pass1Context::new(&temps);
         let result = ctx.transform(sum_expr);
         let assignments = ctx.take_assignments();
 
@@ -2078,7 +2276,8 @@ mod tests {
 
         let sum_expr = Expr3::App(BuiltinFn::Sum(Box::new(add_expr)), None, Loc::new(0, 15));
 
-        let mut ctx = Pass1Context::new();
+        let temps = TempAllocator::default();
+        let mut ctx = Pass1Context::new(&temps);
         let result = ctx.transform(sum_expr);
         let assignments = ctx.take_assignments();
 
@@ -2170,7 +2369,8 @@ mod tests {
         // SUM((arr[*] + 1) * (arr2[*] - 1))
         let sum_expr = Expr3::App(BuiltinFn::Sum(Box::new(mul_expr)), None, Loc::new(0, 30));
 
-        let mut ctx = Pass1Context::new();
+        let temps = TempAllocator::default();
+        let mut ctx = Pass1Context::new(&temps);
         let result = ctx.transform(sum_expr);
         let assignments = ctx.take_assignments();
 
@@ -2251,7 +2451,9 @@ mod tests {
             CanonicalElementName::from_raw("2"), // Col = 2
         ];
 
-        let mut ctx = Pass1Context::with_a2a_context(&active_dimensions, &active_subscripts);
+        let temps = TempAllocator::default();
+        let mut ctx =
+            Pass1Context::with_a2a_context(&active_dimensions, &active_subscripts, &temps);
         let result = ctx.transform(sum_expr);
         let assignments = ctx.take_assignments();
 
@@ -2313,7 +2515,8 @@ mod tests {
         let sum_expr = Expr3::App(BuiltinFn::Sum(Box::new(add_expr)), None, Loc::new(0, 20));
 
         // NO A2A context
-        let mut ctx = Pass1Context::new();
+        let temps = TempAllocator::default();
+        let mut ctx = Pass1Context::new(&temps);
         let result = ctx.transform(sum_expr);
         let assignments = ctx.take_assignments();
 
@@ -2374,7 +2577,9 @@ mod tests {
             CanonicalElementName::from_raw("2"), // y = 2
         ];
 
-        let mut ctx = Pass1Context::with_a2a_context(&active_dimensions, &active_subscripts);
+        let temps = TempAllocator::default();
+        let mut ctx =
+            Pass1Context::with_a2a_context(&active_dimensions, &active_subscripts, &temps);
         let result = ctx.transform(sum_expr);
         let assignments = ctx.take_assignments();
 
@@ -2527,7 +2732,9 @@ mod tests {
         let active_dimensions = vec![row_dim];
         let active_subscripts = vec![CanonicalElementName::from_raw("2")]; // Row = 2
 
-        let mut ctx = Pass1Context::with_a2a_context(&active_dimensions, &active_subscripts);
+        let temps = TempAllocator::default();
+        let mut ctx =
+            Pass1Context::with_a2a_context(&active_dimensions, &active_subscripts, &temps);
         let result = ctx.transform(sum_expr);
         let assignments = ctx.take_assignments();
 

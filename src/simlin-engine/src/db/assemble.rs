@@ -697,16 +697,24 @@ pub(crate) fn compile_phase_to_per_var_bytecodes_reporting(
         return Err("nothing to emit: the phase lowered to zero expressions".to_string());
     }
 
-    // Extract temp sizes from expressions
+    // Extract temp sizes from expressions. The table is indexed by id and
+    // sized by the number of distinct ids, which is only right for dense ids;
+    // lowering guarantees density (every id the fragment's `TempAllocator`
+    // issues and keeps is written, and `Var::new` debug-asserts it), so a gap
+    // here is a defect upstream and is refused rather than dropped.
     let mut temp_sizes_map: HashMap<u32, usize> = HashMap::new();
     for expr in exprs {
         crate::compiler::extract_temp_sizes_pub(expr, &mut temp_sizes_map);
     }
     let mut temp_sizes: Vec<usize> = vec![0; temp_sizes_map.len()];
     for (id, size) in &temp_sizes_map {
-        if (*id as usize) < temp_sizes.len() {
-            temp_sizes[*id as usize] = *size;
-        }
+        let slot = temp_sizes.get_mut(*id as usize).ok_or_else(|| {
+            format!(
+                "temp ids are not dense: temp {id} is written but the fragment defines only {} temps",
+                temp_sizes_map.len()
+            )
+        })?;
+        *slot = *size;
     }
 
     // A fragment is one variable's one phase, so the whole phase goes in the
