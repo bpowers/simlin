@@ -628,7 +628,6 @@ pub(crate) fn fragment_emit_ctx<'a>(
     var_sizes: &'a PerVarSizes,
     tables: &'a HashMap<Ident<Canonical>, Vec<crate::compiler::Table>>,
     dimensions: &'a [crate::dimensions::Dimension],
-    dimensions_ctx: &'a crate::dimensions::DimensionsContext,
 ) -> crate::compiler::ModuleCtx<'a> {
     crate::compiler::ModuleCtx {
         ident: model_name,
@@ -640,7 +639,6 @@ pub(crate) fn fragment_emit_ctx<'a>(
         var_sizes,
         tables,
         dimensions,
-        dimensions_ctx,
     }
 }
 
@@ -662,9 +660,8 @@ pub(crate) fn fragment_emit_ctx<'a>(
 /// `base` is the phase-INVARIANT half of the emission context, built once
 /// per variable by the caller: its `runlist_flows`/`temp_sizes` are ignored
 /// (this function fills both in per phase), and everything else -- the
-/// fragment's `var_sizes` and `tables`, the project-global
-/// `dimensions`/`dimensions_ctx`, and the module-input set -- is borrowed for
-/// the call and never cloned.
+/// fragment's `var_sizes` and `tables`, the project-global `dimensions`, and
+/// the module-input set -- is borrowed for the call and never cloned.
 ///
 /// What comes back is codegen's output verbatim: it is already symbolic, so
 /// there is nothing between emission and the salsa-cached fragment.
@@ -967,7 +964,6 @@ fn var_phase_symbolic_fragment_memo(
         &var_sizes,
         &tables,
         converted_dims,
-        dim_context,
     );
     compile_phase_to_per_var_bytecodes(&base_ctx, &var.ast)
 }
@@ -1924,9 +1920,7 @@ pub fn assemble_module<'db>(
         graphical_functions: merged.graphical_functions,
         module_decls: merged.module_decls,
         static_views: merged.static_views,
-        arrays: vec![],
         dimensions: dim_infos,
-        subdim_relations: vec![],
         names: dim_names,
         temp_offsets: merged.temp_offsets,
         temp_total_size: merged.temp_total_size,

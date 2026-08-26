@@ -97,11 +97,11 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 
 - **Component**: simlin-engine
 - **Severity**: low
-- **Description**: `#[allow(dead_code)]` attributes scattered through simlin-engine. The count is dominated by the sixteen `SymbolicOpcode` variants codegen never constructs (superseded incremental view-stack/broadcast opcodes whose retirement -- together with their `Opcode` twins, VM arms, and wasm arms -- is sequenced as its own change; see symbolic.rs), plus expr3 variants and methods reserved for pass 2.
+- **Description**: `#[allow(dead_code)]` attributes scattered through simlin-engine: expr3 variants and methods reserved for pass 2, retained-for-discoverability registry fields in `wasmgen`, and assorted test-only constructors. `SymbolicOpcode` carries none: every variant is one `Compiler` constructs, and the dead-code lint (denied under clippy) is what keeps it that way.
 - **Measure**: `rg '#\[allow\(dead_code\)\]' --type rust src/simlin-engine/src/ -c`
-- **Count**: 69 occurrences across 28 files (as of 2026-08-08)
+- **Count**: 48 occurrences across 26 files (as of 2026-08-25)
 - **Owner**: unassigned
-- **Last reviewed**: 2026-08-08
+- **Last reviewed**: 2026-08-25
 
 ### 13. Ignored Rust Tests
 

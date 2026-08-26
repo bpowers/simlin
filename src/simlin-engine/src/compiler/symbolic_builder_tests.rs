@@ -448,38 +448,6 @@ fn test_peephole_fusion_inside_loop_body() {
 }
 
 #[test]
-fn test_peephole_jump_offset_recalculation_next_broadcast() {
-    // Same as above but with NextBroadcastOrJump
-    let mut bc = SymbolicByteCode {
-        code: vec![
-            SymbolicOpcode::LoadConstant { id: 0 },                // 0
-            SymbolicOpcode::AssignCurr { var: v(0) },              // 1
-            SymbolicOpcode::LoadVar { var: v(1) },                 // 2 (jump target)
-            SymbolicOpcode::NextBroadcastOrJump { jump_back: -1 }, // 3, target=2
-            SymbolicOpcode::Ret,                                   // 4
-        ],
-        literals: vec![1.0],
-    };
-    bc.peephole_optimize();
-
-    // 0+1 fuse -> AssignConstCurr at new PC 0
-    // 2 -> new PC 1 (jump target)
-    // 3 -> new PC 2
-    // 4 -> new PC 3
-    assert_eq!(bc.code.len(), 4);
-    assert!(matches!(bc.code[0], SymbolicOpcode::AssignConstCurr { .. }));
-    assert_eq!(bc.code[1], SymbolicOpcode::LoadVar { var: v(1) });
-    match &bc.code[2] {
-        SymbolicOpcode::NextBroadcastOrJump { jump_back } => {
-            // new PC 2, target should be new PC 1
-            assert_eq!(*jump_back, -1, "jump_back should be -1");
-        }
-        _ => panic!("expected NextBroadcastOrJump"),
-    }
-    assert!(matches!(bc.code[3], SymbolicOpcode::Ret));
-}
-
-#[test]
 fn test_peephole_no_fusion_when_patterns_dont_match() {
     // Op2 followed by something other than AssignCurr
     let mut bc = SymbolicByteCode {

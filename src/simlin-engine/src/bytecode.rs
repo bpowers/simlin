@@ -73,7 +73,10 @@ pub enum LookupMode {
 // ============================================================================
 
 /// Runtime dimension information stored in ByteCodeContext.
-/// Used for dynamic array operations like star ranges and broadcasting.
+///
+/// Read by the `LoadIterViewAt` broadcast path (VM and wasm), which matches a
+/// source view's axes to the iteration's by dimension id and falls back to
+/// size for indexed dimensions (`dimensions::match_dimensions_two_pass`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DimensionInfo {
     /// Index into names table for this dimension's name
@@ -87,7 +90,6 @@ pub struct DimensionInfo {
     pub element_name_ids: SmallVec<[NameId; 8]>,
 }
 
-#[allow(dead_code)]
 impl DimensionInfo {
     /// Create a new indexed dimension (elements are 1..size)
     pub fn indexed(name_id: NameId, size: u16) -> Self {
@@ -107,54 +109,6 @@ impl DimensionInfo {
             size,
             is_indexed: false,
             element_name_ids,
-        }
-    }
-}
-
-/// Subdimension relationship for star ranges like `*:SubDim`.
-/// Describes which parent indices a subdimension maps to.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SubdimensionRelation {
-    /// Index of parent dimension in dimensions table
-    pub parent_dim_id: DimId,
-    /// Index of child (sub)dimension in dimensions table
-    pub child_dim_id: DimId,
-    /// Which parent indices this subdimension maps to (0-based)
-    /// e.g., [0, 2, 3] means subdim elements map to parent indices 0, 2, 3
-    pub parent_offsets: SmallVec<[u16; 16]>,
-    /// Optimization flag: if true, parent_offsets form a contiguous range
-    pub is_contiguous: bool,
-    /// If contiguous, the starting offset in the parent
-    pub start_offset: u16,
-}
-
-// Production builds a `SubdimensionRelation` by struct literal
-// (`compiler::codegen`); these two constructors have test callers only.
-#[cfg(test)]
-impl SubdimensionRelation {
-    /// Create a contiguous subdimension relation (elements form a range)
-    pub fn contiguous(parent_dim_id: DimId, child_dim_id: DimId, start: u16, count: u16) -> Self {
-        let parent_offsets: SmallVec<[u16; 16]> = (start..start + count).collect();
-        SubdimensionRelation {
-            parent_dim_id,
-            child_dim_id,
-            parent_offsets,
-            is_contiguous: true,
-            start_offset: start,
-        }
-    }
-
-    /// Create a sparse subdimension relation (elements at arbitrary positions)
-    pub fn sparse(parent_dim_id: DimId, child_dim_id: DimId, offsets: SmallVec<[u16; 16]>) -> Self {
-        // Check if actually contiguous
-        let is_contiguous = offsets.windows(2).all(|w| w[1] == w[0] + 1);
-        let start_offset = offsets.first().copied().unwrap_or(0);
-        SubdimensionRelation {
-            parent_dim_id,
-            child_dim_id,
-            parent_offsets: offsets,
-            is_contiguous,
-            start_offset,
         }
     }
 }
@@ -251,17 +205,6 @@ impl RuntimeView {
         }
     }
 
-    /// Create a new contiguous view for a temp array
-    pub fn for_temp(
-        temp_id: TempId,
-        dims: SmallVec<[u16; 4]>,
-        dim_ids: SmallVec<[DimId; 4]>,
-    ) -> Self {
-        let mut view = Self::for_var(temp_id as u32, dims, dim_ids);
-        view.storage = ViewStorage::Temp;
-        view
-    }
-
     /// Create an invalid view (for out-of-bounds subscripts)
     #[allow(dead_code)]
     pub fn invalid() -> Self {
@@ -338,7 +281,7 @@ impl RuntimeView {
     }
 
     /// Shape equality (dims + dim_ids) for the per-element iteration fast
-    /// path in `LoadIterViewTop` / `LoadIterViewAt`.
+    /// path in `LoadIterViewAt`.
     ///
     /// Semantically identical to `self.dims == other.dims && self.dim_ids ==
     /// other.dim_ids`, but hand-rolled: SmallVec's slice PartialEq lowers to
@@ -450,17 +393,6 @@ impl RuntimeView {
         }
     }
 
-    /// Apply a range subscript [start:end) to a dimension
-    pub fn apply_range(&mut self, dim_idx: usize, start: u16, end: u16) {
-        debug_assert!(dim_idx < self.dims.len());
-        debug_assert!(start < end && end <= self.dims[dim_idx]);
-
-        // Adjust offset for start
-        self.offset += start as u32 * self.strides[dim_idx] as u32;
-        // Adjust dimension size
-        self.dims[dim_idx] = end - start;
-    }
-
     /// Apply a range subscript with bounds checking using 1-based indices.
     ///
     /// Handles invalid ranges gracefully:
@@ -548,46 +480,6 @@ impl RuntimeView {
         indices.reverse();
 
         self.flat_offset(&indices)
-    }
-
-    /// Apply a sparse subscript (star range) to a dimension
-    pub fn apply_sparse(&mut self, dim_idx: usize, parent_offsets: SmallVec<[u16; 16]>) {
-        debug_assert!(dim_idx < self.dims.len());
-
-        // Update dimension size
-        self.dims[dim_idx] = parent_offsets.len() as u16;
-
-        // Add sparse mapping
-        self.sparse.push(RuntimeSparseMapping {
-            dim_index: dim_idx as u8,
-            parent_offsets,
-        });
-    }
-
-    /// Apply a sparse subscript (star range) and update the dimension ID.
-    /// Used for star ranges like `*:SubDim` where the view's dimension should
-    /// be relabeled with the subdimension ID for proper broadcast matching.
-    pub fn apply_sparse_with_dim_id(
-        &mut self,
-        dim_idx: usize,
-        parent_offsets: SmallVec<[u16; 16]>,
-        new_dim_id: DimId,
-    ) {
-        self.apply_sparse(dim_idx, parent_offsets);
-        // Update the dimension ID to the subdimension
-        self.dim_ids[dim_idx] = new_dim_id;
-    }
-
-    /// Transpose the view (reverse dimensions and strides)
-    pub fn transpose(&mut self) {
-        self.dims.reverse();
-        self.strides.reverse();
-        self.dim_ids.reverse();
-        // Also need to renumber sparse dim_indices
-        let n = self.dims.len();
-        for s in &mut self.sparse {
-            s.dim_index = (n - 1 - s.dim_index as usize) as u8;
-        }
     }
 }
 
@@ -692,8 +584,8 @@ pub(crate) enum Op2 {
 /// - Module operations (EvalModule, LoadModuleInput)
 /// - Assignment (AssignCurr, and the fused BinOpAssignNext for stock updates)
 /// - Builtins and lookups (Apply, Lookup)
-/// - Array view stack operations (PushStaticView, ViewSubscript*, etc.)
-/// - Array iteration (BeginIter, LoadIterElement, etc.)
+/// - Array view stack operations (PushStaticView, PushVarViewDirect, ViewSubscriptDynamic, ...)
+/// - Array iteration (BeginIter, LoadIterViewAt, StoreIterElement, ...)
 /// - Array reductions (ArraySum, ArrayMax, etc.)
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy, PartialEq)]
@@ -1200,13 +1092,6 @@ pub(crate) enum Opcode {
     // =========================================================================
 
     // === VIEW STACK: Building views dynamically ===
-    /// Push a view for a temp array onto the view stack.
-    /// The dim_list_id references a (n_dims, [DimId; 4]) entry in ByteCodeContext.dim_lists.
-    PushTempView {
-        temp_id: TempId,
-        dim_list_id: DimListId,
-    },
-
     /// Push a pre-computed static view onto the view stack.
     PushStaticView {
         view_id: ViewId,
@@ -1220,24 +1105,12 @@ pub(crate) enum Opcode {
         dim_list_id: DimListId,
     },
 
-    /// Apply single-element subscript with constant index to top view.
-    /// Removes one dimension from the view.
-    ViewSubscriptConst {
-        dim_idx: u8,
-        index: u16,
-    },
-
     /// Apply single-element subscript with dynamic index (from arithmetic stack).
-    /// Removes one dimension from the view.
+    /// Removes one dimension from the view. Every constant subscript is baked
+    /// into the `PushStaticView` geometry at compile time, so this is the one
+    /// subscript transform the view stack performs at run time.
     ViewSubscriptDynamic {
         dim_idx: u8,
-    },
-
-    /// Apply range subscript [start:end) to a dimension with static bounds.
-    ViewRange {
-        dim_idx: u8,
-        start: u16,
-        end: u16,
     },
 
     /// Apply range subscript with dynamic bounds (from stack).
@@ -1247,37 +1120,14 @@ pub(crate) enum Opcode {
         dim_idx: u8,
     },
 
-    /// Apply star range (*:subdim) using subdimension relation.
-    /// Converts dimension to sparse iteration.
-    ViewStarRange {
-        dim_idx: u8,
-        subdim_relation_id: u16,
-    },
-
-    /// Apply wildcard [*] - keeps dimension as-is (explicit no-op for clarity).
-    ViewWildcard {
-        dim_idx: u8,
-    },
-
-    /// Transpose the top view (reverse dims and strides).
-    ViewTranspose {},
-
     /// Pop and discard the top view from view stack.
     PopView {},
-
-    /// Duplicate the top view on the view stack.
-    DupView {},
 
     // === TEMP ARRAY ACCESS ===
     /// Load single element from temp array with constant index.
     LoadTempConst {
         temp_id: TempId,
         index: u16,
-    },
-
-    /// Load single element from temp array with dynamic index (from stack).
-    LoadTempDynamic {
-        temp_id: TempId,
     },
 
     // === ITERATION ===
@@ -1289,26 +1139,13 @@ pub(crate) enum Opcode {
         has_write_temp: bool,
     },
 
-    /// Load element at current iteration position from the iteration source.
-    /// Pushes value onto arithmetic stack.
-    LoadIterElement {},
-
-    /// Load element at current iteration position from a temp array.
-    LoadIterTempElement {
-        temp_id: TempId,
-    },
-
-    /// Load element from top view at current iteration index.
-    /// Unlike LoadIterElement, this uses the view currently on top of view_stack,
-    /// not the view captured when BeginIter was called.
-    /// This allows loading from multiple different source arrays in a single iteration loop.
-    LoadIterViewTop {},
-
-    /// Load element at current iteration position from view at stack offset.
-    /// Like LoadIterViewTop but accesses a specific view on the stack by offset.
-    /// offset=1 means top of stack, offset=2 means second from top, etc.
-    /// This allows views to be pushed before the loop and accessed inside without
-    /// repeated push/pop operations per iteration.
+    /// Load the element at the current iteration position from the view at
+    /// `offset` on the view stack: offset=1 is the top, offset=2 the one
+    /// beneath it, and so on. The source views are pushed once before the loop
+    /// and read inside it without per-iteration push/pop; a source whose
+    /// dimensions differ from the iteration view's is broadcast by dimension
+    /// id (`dimensions::match_dimensions_two_pass`), and an out-of-range or
+    /// unmatched element pushes NaN.
     LoadIterViewAt {
         offset: u8,
     },
@@ -1411,33 +1248,6 @@ pub(crate) enum Opcode {
     AllocateByPriority {
         write_temp_id: TempId,
     },
-
-    // === BROADCASTING ITERATION ===
-    // For operations like A[DimA, DimB] * B[DimA] where dims must match by name.
-    /// Begin broadcast iteration over multiple source views.
-    /// Expects n_sources views on the view stack.
-    /// Result dimensions computed from dimension name matching.
-    BeginBroadcastIter {
-        n_sources: u8,
-        dest_temp_id: TempId,
-    },
-
-    /// Load element from source view at broadcast-computed index.
-    /// source_idx is 0-based index into the source views (0 = deepest on stack).
-    LoadBroadcastElement {
-        source_idx: u8,
-    },
-
-    /// Store result to current broadcast position and advance.
-    StoreBroadcastElement {},
-
-    /// Check if broadcast done; if not, jump backward.
-    NextBroadcastOrJump {
-        jump_back: PcOffset,
-    },
-
-    /// End broadcast iteration, clean up.
-    EndBroadcastIter {},
 }
 
 impl Opcode {
@@ -1446,9 +1256,7 @@ impl Opcode {
     /// by the peephole optimizer or other passes.
     fn jump_offset(&self) -> Option<PcOffset> {
         match self {
-            Opcode::NextIterOrJump { jump_back } | Opcode::NextBroadcastOrJump { jump_back } => {
-                Some(*jump_back)
-            }
+            Opcode::NextIterOrJump { jump_back } => Some(*jump_back),
             _ => None,
         }
     }
@@ -1456,9 +1264,7 @@ impl Opcode {
     /// Mutably borrow the jump offset, if this opcode is a backward jump.
     fn jump_offset_mut(&mut self) -> Option<&mut PcOffset> {
         match self {
-            Opcode::NextIterOrJump { jump_back } | Opcode::NextBroadcastOrJump { jump_back } => {
-                Some(jump_back)
-            }
+            Opcode::NextIterOrJump { jump_back } => Some(jump_back),
             _ => None,
         }
     }
@@ -1467,8 +1273,8 @@ impl Opcode {
     /// Used by `ByteCode::max_stack_depth` to statically validate that compiled
     /// bytecode cannot overflow the fixed-size VM stack.
     ///
-    /// Opcodes that only affect the view stack, iter stack, or broadcast stack
-    /// return (0, 0) since they don't touch the arithmetic stack.
+    /// Opcodes that only affect the view stack or the iter stack return
+    /// (0, 0) since they don't touch the arithmetic stack.
     fn stack_effect(&self) -> (u8, u8) {
         match self {
             // Arithmetic: pop 2, push 1
@@ -1604,16 +1410,9 @@ impl Opcode {
             | Opcode::AssignStackConstNext { .. } => (1, 0),
 
             // View stack ops don't touch arithmetic stack
-            Opcode::PushTempView { .. }
-            | Opcode::PushStaticView { .. }
+            Opcode::PushStaticView { .. }
             | Opcode::PushVarViewDirect { .. }
-            | Opcode::ViewSubscriptConst { .. }
-            | Opcode::ViewRange { .. }
-            | Opcode::ViewStarRange { .. }
-            | Opcode::ViewWildcard { .. }
-            | Opcode::ViewTranspose {}
-            | Opcode::PopView {}
-            | Opcode::DupView {} => (0, 0),
+            | Opcode::PopView {} => (0, 0),
 
             // Dynamic subscript/range ops pop from arithmetic stack
             Opcode::ViewSubscriptDynamic { .. } => (1, 0),
@@ -1621,15 +1420,11 @@ impl Opcode {
 
             // Temp array access
             Opcode::LoadTempConst { .. } => (0, 1),
-            Opcode::LoadTempDynamic { .. } => (1, 1), // pops index, pushes value
 
             // Iteration: BeginIter/EndIter don't touch arithmetic stack
             Opcode::BeginIter { .. } | Opcode::EndIter {} => (0, 0),
-            // LoadIter* push 1 element
-            Opcode::LoadIterElement {}
-            | Opcode::LoadIterTempElement { .. }
-            | Opcode::LoadIterViewTop {}
-            | Opcode::LoadIterViewAt { .. } => (0, 1),
+            // The iteration body load pushes 1 element
+            Opcode::LoadIterViewAt { .. } => (0, 1),
             // StoreIterElement pops 1 value
             Opcode::StoreIterElement {} => (1, 0),
             // NextIter doesn't touch arithmetic stack
@@ -1657,12 +1452,6 @@ impl Opcode {
             Opcode::AllocateAvailable { .. } => (1, 0),
             // AllocateByPriority pops 2 scalars (width, supply) from the stack
             Opcode::AllocateByPriority { .. } => (2, 0),
-
-            // Broadcasting
-            Opcode::BeginBroadcastIter { .. } | Opcode::EndBroadcastIter {} => (0, 0),
-            Opcode::LoadBroadcastElement { .. } => (0, 1),
-            Opcode::StoreBroadcastElement {} => (1, 0),
-            Opcode::NextBroadcastOrJump { .. } => (0, 0),
         }
     }
 
@@ -1743,24 +1532,13 @@ impl Opcode {
             Opcode::AssignStackVarNext { .. } => "AssignStackVarNext",
             Opcode::AssignStackConstCurr { .. } => "AssignStackConstCurr",
             Opcode::AssignStackConstNext { .. } => "AssignStackConstNext",
-            Opcode::PushTempView { .. } => "PushTempView",
             Opcode::PushStaticView { .. } => "PushStaticView",
             Opcode::PushVarViewDirect { .. } => "PushVarViewDirect",
-            Opcode::ViewSubscriptConst { .. } => "ViewSubscriptConst",
             Opcode::ViewSubscriptDynamic { .. } => "ViewSubscriptDynamic",
-            Opcode::ViewRange { .. } => "ViewRange",
             Opcode::ViewRangeDynamic { .. } => "ViewRangeDynamic",
-            Opcode::ViewStarRange { .. } => "ViewStarRange",
-            Opcode::ViewWildcard { .. } => "ViewWildcard",
-            Opcode::ViewTranspose {} => "ViewTranspose",
             Opcode::PopView {} => "PopView",
-            Opcode::DupView {} => "DupView",
             Opcode::LoadTempConst { .. } => "LoadTempConst",
-            Opcode::LoadTempDynamic { .. } => "LoadTempDynamic",
             Opcode::BeginIter { .. } => "BeginIter",
-            Opcode::LoadIterElement {} => "LoadIterElement",
-            Opcode::LoadIterTempElement { .. } => "LoadIterTempElement",
-            Opcode::LoadIterViewTop {} => "LoadIterViewTop",
             Opcode::LoadIterViewAt { .. } => "LoadIterViewAt",
             Opcode::StoreIterElement {} => "StoreIterElement",
             Opcode::NextIterOrJump { .. } => "NextIterOrJump",
@@ -1778,11 +1556,6 @@ impl Opcode {
             Opcode::LookupArray { .. } => "LookupArray",
             Opcode::AllocateAvailable { .. } => "AllocateAvailable",
             Opcode::AllocateByPriority { .. } => "AllocateByPriority",
-            Opcode::BeginBroadcastIter { .. } => "BeginBroadcastIter",
-            Opcode::LoadBroadcastElement { .. } => "LoadBroadcastElement",
-            Opcode::StoreBroadcastElement {} => "StoreBroadcastElement",
-            Opcode::NextBroadcastOrJump { .. } => "NextBroadcastOrJump",
-            Opcode::EndBroadcastIter {} => "EndBroadcastIter",
         }
     }
 }
@@ -1800,12 +1573,6 @@ pub struct ModuleDeclaration {
     /// need separate compiled modules (the ModuleInput offsets differ).
     pub(crate) input_set: BTreeSet<Ident<Canonical>>,
     pub(crate) off: usize, // offset within the parent module
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
-pub struct ArrayDefinition {
-    pub(crate) dimensions: Vec<usize>,
 }
 
 /// A static array view for compile-time known subscripts.
@@ -1897,14 +1664,10 @@ pub struct ByteCodeContext {
     pub(crate) graphical_functions: Vec<Vec<(f64, f64)>>,
     /// Module declarations for nested modules
     pub(crate) modules: Vec<ModuleDeclaration>,
-    /// Legacy array definitions (deprecated, use dimensions instead)
-    pub(crate) arrays: Vec<ArrayDefinition>,
 
-    // === New array support fields ===
+    // === Array support fields ===
     /// Dimension information table (indexed by DimId)
     pub(crate) dimensions: Vec<DimensionInfo>,
-    /// Subdimension relationships for star ranges
-    pub(crate) subdim_relations: Vec<SubdimensionRelation>,
     /// Interned names table (dimension names, element names)
     pub(crate) names: Vec<String>,
     /// Pre-computed static views (indexed by ViewId)
@@ -1929,8 +1692,7 @@ impl ByteCodeContext {
         self.static_views.get(id as usize)
     }
 
-    /// Get a dim list entry by ID. Read by the VM's `PushTempView` /
-    /// `PushVarViewDirect` arms.
+    /// Get a dim list entry by ID. Read by the VM's `PushVarViewDirect` arm.
     ///
     /// Panics on out-of-bounds ID, which is intentional: IDs are only produced
     /// by `add_dim_list` during compilation, so an invalid ID indicates a
@@ -1973,12 +1735,6 @@ impl ByteCodeContext {
     /// Get dimension info by ID.
     pub fn get_dimension(&self, id: DimId) -> Option<&DimensionInfo> {
         self.dimensions.get(id as usize)
-    }
-
-    /// Add a subdimension relation and return its index.
-    pub fn add_subdim_relation(&mut self, relation: SubdimensionRelation) -> u16 {
-        self.subdim_relations.push(relation);
-        (self.subdim_relations.len() - 1) as u16
     }
 
     /// Add a static view and return its ViewId.
@@ -2640,7 +2396,7 @@ mod tests {
 
     #[test]
     fn test_max_stack_depth_with_iteration() {
-        // Iteration body: LoadIterElement, StoreIterElement -- each iteration
+        // Iteration body: LoadIterViewAt, StoreIterElement -- each iteration
         // pushes 1 and pops 1, so peak depth within loop is 1
         let bc = ByteCode {
             literals: vec![],
@@ -2649,7 +2405,7 @@ mod tests {
                     write_temp_id: 0,
                     has_write_temp: true,
                 },
-                Opcode::LoadIterElement {},
+                Opcode::LoadIterViewAt { offset: 1 },
                 Opcode::StoreIterElement {},
                 Opcode::NextIterOrJump { jump_back: -2 },
                 Opcode::EndIter {},
@@ -2687,9 +2443,6 @@ mod tests {
         let iter_jump = Opcode::NextIterOrJump { jump_back: -5 };
         assert_eq!(iter_jump.jump_offset(), Some(-5));
 
-        let broadcast_jump = Opcode::NextBroadcastOrJump { jump_back: -3 };
-        assert_eq!(broadcast_jump.jump_offset(), Some(-3));
-
         assert_eq!(Opcode::Ret.jump_offset(), None);
         assert_eq!((Opcode::Op2 { op: Op2::Add }).jump_offset(), None);
         assert_eq!((Opcode::LoadVar { off: 0 }).jump_offset(), None);
@@ -2707,9 +2460,10 @@ mod tests {
     #[test]
     fn test_opcode_size() {
         use std::mem::size_of;
-        // Large inline arrays ([DimId; 4]) moved to a side table, so
-        // the largest variant payload is now ViewRange (u8 + u16 + u16 = 5 bytes)
-        // or Lookup (u8 + u16 + u8 = 4 bytes). With discriminant, expect 8 bytes.
+        // Every payload fits in 6 bytes (the widest are the 3 x u16
+        // three-address fused forms; view shapes live in side tables indexed
+        // by id), so with the discriminant the opcode is 8 bytes, the width
+        // the VM's dispatch loop counts on.
         let size = size_of::<Opcode>();
         assert!(size <= 8, "Opcode size {} exceeds 8 bytes", size);
         eprintln!("Opcode size: {} bytes", size);
@@ -2736,40 +2490,6 @@ mod tests {
         assert_eq!(dim.size, 3);
         assert!(!dim.is_indexed);
         assert_eq!(dim.element_name_ids, element_ids);
-    }
-
-    // =========================================================================
-    // SubdimensionRelation Tests
-    // =========================================================================
-
-    #[test]
-    fn test_subdim_relation_contiguous() {
-        let rel = SubdimensionRelation::contiguous(0, 1, 2, 3);
-        assert_eq!(rel.parent_dim_id, 0);
-        assert_eq!(rel.child_dim_id, 1);
-        assert_eq!(rel.parent_offsets.as_slice(), &[2, 3, 4]);
-        assert!(rel.is_contiguous);
-        assert_eq!(rel.start_offset, 2);
-    }
-
-    #[test]
-    fn test_subdim_relation_sparse() {
-        let offsets: SmallVec<[u16; 16]> = smallvec::smallvec![0, 2, 5];
-        let rel = SubdimensionRelation::sparse(0, 1, offsets);
-        assert_eq!(rel.parent_dim_id, 0);
-        assert_eq!(rel.child_dim_id, 1);
-        assert_eq!(rel.parent_offsets.as_slice(), &[0, 2, 5]);
-        assert!(!rel.is_contiguous);
-        assert_eq!(rel.start_offset, 0);
-    }
-
-    #[test]
-    fn test_subdim_relation_sparse_actually_contiguous() {
-        // [1, 2, 3] is contiguous
-        let offsets: SmallVec<[u16; 16]> = smallvec::smallvec![1, 2, 3];
-        let rel = SubdimensionRelation::sparse(0, 1, offsets);
-        assert!(rel.is_contiguous);
-        assert_eq!(rel.start_offset, 1);
     }
 
     // =========================================================================
@@ -2817,16 +2537,6 @@ mod tests {
     }
 
     #[test]
-    fn test_runtime_view_for_temp() {
-        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![5];
-        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0];
-        let view = RuntimeView::for_temp(3, dims, dim_ids);
-
-        assert_eq!(view.base_off, 3);
-        assert_eq!(view.storage, ViewStorage::Temp);
-    }
-
-    #[test]
     fn test_runtime_view_flat_offset_1d() {
         let dims: SmallVec<[u16; 4]> = smallvec::smallvec![5];
         let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0];
@@ -2871,8 +2581,9 @@ mod tests {
         let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0, 1];
         let mut view = RuntimeView::for_var(0, dims, dim_ids);
 
-        // Apply range to first dimension: arr[1:3, *]
-        view.apply_range(0, 1, 3);
+        // Apply a range to the first dimension: arr[2:3, *] in 1-based
+        // inclusive source terms is 0-based [1, 3).
+        assert!(view.apply_range_checked(0, 2, 3));
 
         assert_eq!(view.dims.as_slice(), &[2, 4]); // First dim now size 2
         assert_eq!(view.offset, 4); // 1 * stride[0] = 1 * 4 = 4
@@ -2994,20 +2705,49 @@ mod tests {
         assert_eq!(view.dims.as_slice(), &[0]); // Empty dimension
     }
 
+    /// A 1-D view selecting `parent_offsets` of a parent dimension -- the
+    /// shape a star-range view has at run time. Production builds it along
+    /// one chain: `compiler/subscript.rs` turns `IndexOp::SparseRange` into a
+    /// `SparseInfo { dim_index: output_dim_idx }` on the `ArrayView`,
+    /// `codegen::array_view_to_static_in` copies that into the static view's
+    /// `RuntimeSparseMapping`, `symbolic::resolve_static_view` resolves the
+    /// base, and `StaticArrayView::to_runtime_view` produces this literal.
+    fn sparse_1d_view(parent_offsets: &[u16]) -> RuntimeView {
+        RuntimeView {
+            base_off: 0,
+            storage: ViewStorage::Curr,
+            dims: smallvec::smallvec![parent_offsets.len() as u16],
+            strides: smallvec::smallvec![1],
+            offset: 0,
+            sparse: smallvec::smallvec![RuntimeSparseMapping {
+                dim_index: 0,
+                parent_offsets: SmallVec::from_slice(parent_offsets),
+            }],
+            dim_ids: smallvec::smallvec![0],
+            is_valid: true,
+        }
+    }
+
+    /// The row-major 3x4 view with its axes swapped -- the shape a transposed
+    /// static view takes: dims and strides reversed, `offset` untouched.
+    fn transposed_3x4_view() -> RuntimeView {
+        RuntimeView {
+            base_off: 0,
+            storage: ViewStorage::Curr,
+            dims: smallvec::smallvec![4, 3],
+            strides: smallvec::smallvec![1, 4],
+            offset: 0,
+            sparse: SmallVec::new(),
+            dim_ids: smallvec::smallvec![1, 0],
+            is_valid: true,
+        }
+    }
+
     #[test]
-    fn test_runtime_view_apply_sparse() {
-        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![5];
-        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0];
-        let mut view = RuntimeView::for_var(0, dims, dim_ids);
-
-        // Apply sparse subscript: elements at indices 0, 2, 4
-        let offsets: SmallVec<[u16; 16]> = smallvec::smallvec![0, 2, 4];
-        view.apply_sparse(0, offsets);
-
+    fn test_runtime_view_sparse_is_not_contiguous() {
+        // Elements at parent indices 0, 2, 4.
+        let view = sparse_1d_view(&[0, 2, 4]);
         assert_eq!(view.dims.as_slice(), &[3]); // 3 sparse elements
-        assert_eq!(view.sparse.len(), 1);
-        assert_eq!(view.sparse[0].dim_index, 0);
-        assert_eq!(view.sparse[0].parent_offsets.as_slice(), &[0, 2, 4]);
         assert!(!view.is_contiguous());
     }
 
@@ -3097,97 +2837,57 @@ mod tests {
 
     #[test]
     fn test_dense_linear_start_leading_range_slice() {
-        // arr[1:3, *] of a 5x4: rows 1..3 are adjacent, one dense run of 8
-        // starting at flat 4.
+        // arr[2:3, *] (1-based inclusive) of a 5x4: rows 1..3 are adjacent,
+        // one dense run of 8 starting at flat 4.
         let dims: SmallVec<[u16; 4]> = smallvec::smallvec![5, 4];
         let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0, 1];
         let mut view = RuntimeView::for_var(0, dims, dim_ids);
-        view.apply_range(0, 1, 3);
+        assert!(view.apply_range_checked(0, 2, 3));
         assert!(!view.is_contiguous());
         assert_dense_linear(&view, 4);
     }
 
     #[test]
     fn test_dense_linear_start_inner_range_slice_is_not_linear() {
-        // arr[*, 1:3] of a 3x4: each row contributes 2 adjacent elements but
-        // the rows are 4 apart -- NOT one dense run.
+        // arr[*, 2:3] (1-based inclusive) of a 3x4: each row contributes 2
+        // adjacent elements but the rows are 4 apart -- NOT one dense run.
         let dims: SmallVec<[u16; 4]> = smallvec::smallvec![3, 4];
         let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0, 1];
         let mut view = RuntimeView::for_var(0, dims, dim_ids);
-        view.apply_range(1, 1, 3);
+        assert!(view.apply_range_checked(1, 2, 3));
         assert_eq!(view.dense_linear_start(), None);
     }
 
     #[test]
     fn test_dense_linear_start_transposed_is_not_linear() {
-        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![3, 4];
-        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0, 1];
-        let mut view = RuntimeView::for_var(0, dims, dim_ids);
-        view.transpose();
+        let view = transposed_3x4_view();
         assert_eq!(view.dense_linear_start(), None);
     }
 
     #[test]
     fn test_dense_linear_start_sparse_is_not_linear() {
-        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![5];
-        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0];
-        let mut view = RuntimeView::for_var(0, dims, dim_ids);
-        let offsets: SmallVec<[u16; 16]> = smallvec::smallvec![0, 2, 4];
-        view.apply_sparse(0, offsets);
+        let view = sparse_1d_view(&[0, 2, 4]);
         assert_eq!(view.dense_linear_start(), None);
     }
 
     #[test]
     fn test_runtime_view_flat_offset_sparse() {
-        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![5];
-        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0];
-        let mut view = RuntimeView::for_var(0, dims, dim_ids);
-
-        // Apply sparse subscript: elements at indices 0, 2, 4
-        let offsets: SmallVec<[u16; 16]> = smallvec::smallvec![0, 2, 4];
-        view.apply_sparse(0, offsets);
-
-        // Now indices 0, 1, 2 in the sparse view map to 0, 2, 4 in parent
+        // Elements at parent indices 0, 2, 4: indices 0, 1, 2 in the sparse
+        // view map to 0, 2, 4 in the parent.
+        let view = sparse_1d_view(&[0, 2, 4]);
         assert_eq!(view.flat_offset(&[0]), 0);
         assert_eq!(view.flat_offset(&[1]), 2);
         assert_eq!(view.flat_offset(&[2]), 4);
     }
 
     #[test]
-    fn test_runtime_view_transpose() {
-        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![3, 4];
-        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0, 1];
-        let mut view = RuntimeView::for_var(0, dims, dim_ids);
-
-        view.transpose();
-
-        assert_eq!(view.dims.as_slice(), &[4, 3]);
-        assert_eq!(view.strides.as_slice(), &[1, 4]); // Reversed
-        assert_eq!(view.dim_ids.as_slice(), &[1, 0]); // Reversed
-    }
-
-    #[test]
-    fn test_runtime_view_transpose_flat_offset() {
-        // Original 2x3 matrix:
-        // [0, 1, 2]
-        // [3, 4, 5]
-        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![2, 3];
-        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0, 1];
-        let mut view = RuntimeView::for_var(0, dims, dim_ids);
-
-        // Before transpose: [1, 2] -> 1*3 + 2 = 5
-        assert_eq!(view.flat_offset(&[1, 2]), 5);
-
-        view.transpose();
-
-        // After transpose (now 3x2):
-        // Transposed matrix is:
-        // [0, 3]
-        // [1, 4]
-        // [2, 5]
-        // Position [2, 1] should give us 5 (bottom right)
-        // With reversed strides [1, 3]: 2*1 + 1*3 = 5
-        assert_eq!(view.flat_offset(&[2, 1]), 5);
+    fn test_runtime_view_transposed_flat_offset() {
+        // The row-major 3x4 has element [r, c] at flat r*4 + c; its transpose
+        // (dims [4, 3], strides [1, 4]) has [c, r] at the same slot.
+        let view = transposed_3x4_view();
+        assert_eq!(view.flat_offset(&[2, 1]), 2 + 4);
+        assert_eq!(view.flat_offset(&[3, 2]), 3 + 8);
+        assert_eq!(view.size(), 12);
     }
 
     // =========================================================================
@@ -3282,20 +2982,6 @@ mod tests {
     }
 
     #[test]
-    fn test_context_subdim_relations() {
-        let mut ctx = ByteCodeContext::default();
-
-        let rel = SubdimensionRelation::contiguous(0, 1, 2, 3);
-        let rel_id = ctx.add_subdim_relation(rel);
-
-        assert_eq!(rel_id, 0);
-        assert_eq!(
-            ctx.subdim_relations[0].parent_offsets.as_slice(),
-            &[2, 3, 4]
-        );
-    }
-
-    #[test]
     fn test_runtime_view_is_valid() {
         // Views created with constructors should be valid
         let dims: SmallVec<[u16; 4]> = smallvec::smallvec![3, 4];
@@ -3344,25 +3030,6 @@ mod tests {
         let result = view.apply_single_subscript_checked(0, 6);
         assert!(!result);
         assert!(!view.is_valid);
-    }
-
-    #[test]
-    fn test_runtime_view_apply_sparse_with_dim_id() {
-        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![5];
-        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0]; // Parent dim id = 0
-        let mut view = RuntimeView::for_var(0, dims, dim_ids);
-
-        // Apply sparse with child dim id = 1
-        let parent_offsets: SmallVec<[u16; 16]> = smallvec::smallvec![1, 3, 4];
-        view.apply_sparse_with_dim_id(0, parent_offsets, 1);
-
-        // Dimension ID should be updated to child dim id
-        assert_eq!(view.dim_ids[0], 1);
-        // Size should be reduced to sparse count
-        assert_eq!(view.dims[0], 3);
-        // Should have sparse mapping
-        assert_eq!(view.sparse.len(), 1);
-        assert_eq!(view.sparse[0].parent_offsets.as_slice(), &[1, 3, 4]);
     }
 
     // =========================================================================

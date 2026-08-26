@@ -10,13 +10,13 @@
 //! runtime `view_stack` (`crate::vm`).
 //!
 //! The VM resolves every array access through a runtime stack of [`RuntimeView`]s
-//! built and transformed by the `Push*View` / `View*` opcodes. Because every
-//! static view's geometry (base offset, dims, strides, offset, sparsity,
-//! storage region) is known at compile time, the wasm emitter maintains a *compile-time*
-//! stack of [`ViewDesc`]s instead, mirroring the static parts of `RuntimeView`
-//! field-for-field and reproducing the `RuntimeView::apply_*` transforms in
-//! `apply_*` here. Element addressing then routes through a single source of
-//! truth -- [`ViewDesc::element_addr`] -- so Tasks 2-4 and Phase 6 all address
+//! built by the `Push*View` opcodes and narrowed by the dynamic `View*`
+//! subscripts. Because every static view's geometry (base offset, dims,
+//! strides, offset, sparsity, storage region) is known at compile time, the
+//! wasm emitter maintains a *compile-time* stack of [`ViewDesc`]s instead,
+//! mirroring the static parts of `RuntimeView` field-for-field. Element
+//! addressing then routes through a single source of truth --
+//! [`ViewDesc::element_addr`] -- so Tasks 2-4 and Phase 6 all address
 //! elements identically to the VM's `flat_offset` / `offset_for_iter_index`.
 //!
 //! [`RuntimeView`]: crate::bytecode::RuntimeView
@@ -147,10 +147,9 @@ impl ViewDesc {
         }
     }
 
-    /// Build a contiguous view over a full variable/temp array from a dim-list
-    /// (the `(n_dims, sizes)` for `PushVarViewDirect`, or dim sizes resolved
-    /// from `ctx.dimensions` for `PushTempView`). Strides are
-    /// row-major, built right-to-left, exactly as `RuntimeView::for_var`.
+    /// Build a contiguous view over a full variable array from a dim-list (the
+    /// `(n_dims, sizes)` for `PushVarViewDirect`). Strides are row-major, built
+    /// right-to-left, exactly as `RuntimeView::for_var`.
     pub fn contiguous(base_off: u32, base: ViewBase, dims: Vec<u16>, dim_ids: Vec<u16>) -> Self {
         let mut strides = Vec::with_capacity(dims.len());
         let mut stride = 1i32;
@@ -195,40 +194,12 @@ impl ViewDesc {
         true
     }
 
-    /// Apply a single-element subscript at `dim_idx` (0-based index), dropping
-    /// that dimension. Exactly mirrors `RuntimeView::apply_single_subscript`:
-    /// a sparse dim's index is first remapped through `parent_offsets` (and the
-    /// mapping removed), the resolved index is folded into `offset`, the
-    /// dimension is removed, and later sparse mappings shift down by one.
-    pub fn apply_single_subscript(&mut self, dim_idx: usize, index: u16) {
-        let actual_index =
-            if let Some(pos) = self.sparse.iter().position(|s| s.dim_index == dim_idx) {
-                let parent_idx = self.sparse[pos].parent_offsets[index as usize];
-                self.sparse.remove(pos);
-                parent_idx
-            } else {
-                index
-            };
-
-        self.offset += actual_index as u32 * self.strides[dim_idx] as u32;
-
-        self.dims.remove(dim_idx);
-        self.strides.remove(dim_idx);
-        self.dim_ids.remove(dim_idx);
-
-        for s in &mut self.sparse {
-            if s.dim_index > dim_idx {
-                s.dim_index -= 1;
-            }
-        }
-    }
-
     /// Remove `dim_idx` for a *dynamic* single subscript (Task 4): drop the
     /// dimension/stride/dim_id and return that dimension's stride, leaving the
     /// (runtime) offset contribution to the caller's `runtime_off_local` rather
     /// than the compile-time `offset`. This is the runtime-index analogue of
-    /// `apply_single_subscript`: the *shape* change (which dim is collapsed) is
-    /// compile-time, only the offset addend is runtime.
+    /// `RuntimeView::apply_single_subscript`: the *shape* change (which dim is
+    /// collapsed) is compile-time, only the offset addend is runtime.
     ///
     /// Returns `None` if the dim is out of range or sparse. A sparse dynamic
     /// subscript would need a runtime `parent_offsets` table lookup, but the
@@ -264,39 +235,6 @@ impl ViewDesc {
     /// against), or `None` if out of range.
     pub fn dim_at(&self, dim_idx: usize) -> Option<u16> {
         self.dims.get(dim_idx).copied()
-    }
-
-    /// Apply a `[start:end)` range (0-based) to `dim_idx`
-    /// (`RuntimeView::apply_range`): fold the start into `offset` and shrink the
-    /// dimension to `end - start`.
-    pub fn apply_range(&mut self, dim_idx: usize, start: u16, end: u16) {
-        self.offset += start as u32 * self.strides[dim_idx] as u32;
-        self.dims[dim_idx] = end - start;
-    }
-
-    /// Apply a star-range (sparse) at `dim_idx`
-    /// (`RuntimeView::apply_sparse_with_dim_id`): the dimension's size becomes
-    /// the number of parent offsets, a sparse mapping is recorded, and the
-    /// dim id is relabeled to the subdimension for broadcast matching.
-    pub fn apply_sparse(&mut self, dim_idx: usize, parent_offsets: Vec<u16>, new_dim_id: u16) {
-        self.dims[dim_idx] = parent_offsets.len() as u16;
-        self.sparse.push(SparseDim {
-            dim_index: dim_idx,
-            parent_offsets,
-        });
-        self.dim_ids[dim_idx] = new_dim_id;
-    }
-
-    /// Transpose the view (`RuntimeView::transpose`): reverse dims/strides/
-    /// dim_ids and renumber the sparse `dim_index`es to `n-1-dim_index`.
-    pub fn transpose(&mut self) {
-        self.dims.reverse();
-        self.strides.reverse();
-        self.dim_ids.reverse();
-        let n = self.dims.len();
-        for s in &mut self.sparse {
-            s.dim_index = n - 1 - s.dim_index;
-        }
     }
 
     /// The flat element offset (within the base array, in slots) for a flat
@@ -338,9 +276,9 @@ impl ViewDesc {
     /// The flat element offset (in slots) for an explicit multi-dimensional
     /// index, mirroring `RuntimeView::flat_offset`: `offset + Σ idx_k *
     /// strides[k]`, with a sparse dimension's index first remapped through its
-    /// `parent_offsets`. The broadcast paths below build the multi-dim index
-    /// themselves (rather than from a flat iteration index), so they route
-    /// through this rather than [`flat_element_offset`](Self::flat_element_offset).
+    /// `parent_offsets`. The broadcast path below builds the multi-dim index
+    /// itself (rather than from a flat iteration index), so it routes through
+    /// this rather than [`flat_element_offset`](Self::flat_element_offset).
     pub fn flat_offset_for_indices(&self, indices: &[u16]) -> usize {
         let mut flat = self.offset as usize;
         for (i, &idx) in indices.iter().enumerate() {
@@ -356,7 +294,7 @@ impl ViewDesc {
 
     /// Decompose a flat iteration index into per-dimension indices in row-major
     /// order (last dim varies fastest), mirroring the VM's iteration-index
-    /// decomposition in `LoadIterViewTop` / `reduce_view` / `increment_indices`.
+    /// decomposition in `LoadIterViewAt` / `reduce_view` / `increment_indices`.
     ///
     /// Shared with `vector.rs` (VectorElmMap's sliced-source projection walks the
     /// same row-major order), so it is `pub(crate)` rather than private.
@@ -374,9 +312,9 @@ impl ViewDesc {
 
     /// The flat element offset (in slots) for reading `self` as the *source* of
     /// an iteration whose output geometry is `iter` at flat index `current`,
-    /// reproducing the VM's `LoadIterViewTop` / `LoadIterViewAt` broadcast
-    /// (`vm.rs:1946-2182`). Returns `None` when the VM would push NaN: a smaller
-    /// source than the iteration, or a dimension that does not match.
+    /// reproducing the VM's `LoadIterViewAt` broadcast. Returns `None` when the
+    /// VM would push NaN: a smaller source than the iteration, or a dimension
+    /// that does not match.
     ///
     /// Fast path (source dims/dim_ids equal the iteration's): the simple
     /// `offset_for_iter_index(current)` read, bounds-checked against the source
@@ -623,70 +561,77 @@ mod tests {
         assert_flat_matches_vm(&dense(0, &[3, 4]));
     }
 
-    #[test]
-    fn subscript_const_drops_dim_like_vm() {
-        // 2x3 matrix; subscript dim 0 to index 1 -> a 1-D row at offset 3.
-        let mut d = dense(0, &[2, 3]);
-        let mut rv = to_runtime_view(&d);
-        d.apply_single_subscript(0, 1);
-        rv.apply_single_subscript(0, 1);
-        assert_eq!(d.offset, rv.offset);
-        assert_eq!(d.dims.as_slice(), rv.dims.as_slice());
-        assert_eq!(d.strides.as_slice(), rv.strides.as_slice());
-        assert_flat_matches_vm(&d);
+    /// A `StaticArrayView` with the given geometry over `curr`, the form
+    /// codegen bakes every constant subscript, range, star range and transpose
+    /// into (`compiler::subscript` normalizes them into one view; the VM reads
+    /// it back through `to_runtime_view`).
+    fn static_view(
+        dims: &[u16],
+        strides: &[i32],
+        offset: u32,
+        sparse: &[(u8, &[u16])],
+    ) -> StaticArrayView {
+        StaticArrayView {
+            base_off: 0,
+            storage: ViewStorage::Curr,
+            dims: SmallVec::from_slice(dims),
+            strides: SmallVec::from_slice(strides),
+            offset,
+            sparse: sparse
+                .iter()
+                .map(|(dim_index, parent_offsets)| RuntimeSparseMapping {
+                    dim_index: *dim_index,
+                    parent_offsets: SmallVec::from_slice(parent_offsets),
+                })
+                .collect(),
+            dim_ids: SmallVec::from_slice(&vec![0u16; dims.len()]),
+        }
     }
 
+    /// Baked static-view geometries, addressed by the descriptor and by the
+    /// VM's own `StaticArrayView::to_runtime_view` element for element: a row
+    /// slice (`arr[2, *]`), a range (`arr[2:4]`), a transpose (`arr'`), a
+    /// star range (`arr[*:Sub]`), and a star range with another axis fixed.
+    /// Not rowed: a transpose applied on top of a star range
+    /// (`compiler/context.rs` can produce it through `ArrayView::transpose`);
+    /// it is tracked separately as a pre-existing defect.
     #[test]
-    fn range_matches_vm() {
-        // [1:4) of a 5-element dim: offset 1, dim 3.
-        let mut d = dense(0, &[5]);
-        d.apply_range(0, 1, 4);
-        assert_eq!(d.offset, 1);
-        assert_eq!(d.dims, vec![3]);
-        assert_flat_matches_vm(&d);
-    }
-
-    #[test]
-    fn transpose_matches_vm() {
-        let mut d = dense(0, &[2, 3]);
-        let mut rv = to_runtime_view(&d);
-        d.transpose();
-        rv.transpose();
-        assert_eq!(d.dims.as_slice(), rv.dims.as_slice());
-        assert_eq!(d.strides.as_slice(), rv.strides.as_slice());
-        assert!(
-            !d.is_contiguous(),
-            "a transposed 2x3 view is non-contiguous"
-        );
-        assert_flat_matches_vm(&d);
-    }
-
-    #[test]
-    fn star_range_sparse_matches_vm() {
-        // A 1-D dim of 4, star-ranged to parent offsets [1, 3].
-        let mut d = dense(0, &[4]);
-        let mut rv = to_runtime_view(&d);
-        d.apply_sparse(0, vec![1, 3], 1);
-        rv.apply_sparse_with_dim_id(0, SmallVec::from_slice(&[1, 3]), 1);
-        assert_eq!(d.dims, vec![2]);
-        assert_flat_matches_vm(&d);
-        // The two selected elements map to parent flat offsets 1 and 3.
-        assert_eq!(d.flat_element_offset(0), 1);
-        assert_eq!(d.flat_element_offset(1), 3);
-    }
-
-    #[test]
-    fn subscript_then_renumbers_sparse_like_vm() {
-        // A 2-D view [3,4] with a sparse mapping on dim 1; subscript dim 0 must
-        // shift the sparse dim_index down to 0, matching the VM.
-        let mut d = dense(0, &[3, 4]);
-        d.apply_sparse(1, vec![0, 2], 5); // sparse on dim 1 -> dim 1 size 2
-        let mut rv = to_runtime_view(&d);
-        d.apply_single_subscript(0, 1);
-        rv.apply_single_subscript(0, 1);
-        assert_eq!(d.sparse.len(), 1);
-        assert_eq!(d.sparse[0].dim_index, rv.sparse[0].dim_index as usize);
-        assert_flat_matches_vm(&d);
+    fn static_view_geometries_address_like_vm() {
+        let cases: [(&str, StaticArrayView); 5] = [
+            ("row slice of a 2x3", static_view(&[3], &[1], 3, &[])),
+            ("range [1, 4) of a 5", static_view(&[3], &[1], 1, &[])),
+            ("transposed 2x3", static_view(&[3, 2], &[1, 3], 0, &[])),
+            (
+                "star range of a 4",
+                static_view(&[2], &[1], 0, &[(0, &[1, 3])]),
+            ),
+            (
+                "row 1 of a 3x4, star range on the columns",
+                static_view(&[2], &[1], 4, &[(0, &[0, 2])]),
+            ),
+        ];
+        for (label, sv) in &cases {
+            let d = ViewDesc::from_static(sv);
+            let rv = sv.to_runtime_view(0);
+            assert_eq!(d.size(), rv.size(), "{label}: size");
+            assert_eq!(d.is_contiguous(), rv.is_contiguous(), "{label}: contiguity");
+            for i in 0..d.size() {
+                assert_eq!(
+                    d.flat_element_offset(i),
+                    rv.offset_for_iter_index(i),
+                    "{label}: element {i}"
+                );
+            }
+        }
+        // The transposed and sparse views are the non-contiguous ones; the two
+        // star-range views select parent flat offsets directly.
+        assert!(!ViewDesc::from_static(&cases[2].1).is_contiguous());
+        let star = ViewDesc::from_static(&cases[3].1);
+        assert_eq!(star.flat_element_offset(0), 1);
+        assert_eq!(star.flat_element_offset(1), 3);
+        let star_row = ViewDesc::from_static(&cases[4].1);
+        assert_eq!(star_row.flat_element_offset(0), 4);
+        assert_eq!(star_row.flat_element_offset(1), 6);
     }
 
     /// Every [`ViewBase`] arm's region, its `module_off` verdict, and its
@@ -841,11 +786,11 @@ mod tests {
     }
 
     /// Cross-check `iter_broadcast_offset` against a from-scratch reimplementation
-    /// of the VM's `LoadIterViewTop` broadcast over a `RuntimeView`, for a
+    /// of the VM's `LoadIterViewAt` broadcast over a `RuntimeView`, for a
     /// transpose-broadcast case (iter [DimA,DimB], source [DimB] -- the source's
     /// single dim matches the iteration's *second* axis by dim-id).
     #[test]
-    fn iter_broadcast_offset_matches_vm_loaditerviewtop() {
+    fn iter_broadcast_offset_matches_vm_loaditerviewat() {
         let ctx = ctx_indexed_dims(2, 0); // sizes overwritten below
         // Rebuild with distinct sizes: DimA=2 (id 0), DimB=4 (id 1).
         let mut ctx2 = ByteCodeContext::default();

@@ -417,9 +417,8 @@ slice-fold fast path in `reduce_view` (same row-major order, bit-identical
 reductions). `vector_elm_map` (168 sites on C-LEARN, the largest
 `flat_offset` caller at ~4% of the run) hoists the offset view's addressing
 out of its per-element loop. `RuntimeView::same_shape()` replaces the
-SmallVec `PartialEq` in `LoadIterViewTop`/`LoadIterViewAt` (an out-of-line
-memcmp per element per site, ~2% of the run) with a branchless ≤4-wide
-compare.
+SmallVec `PartialEq` in `LoadIterViewAt` (an out-of-line memcmp per element
+per site, ~2% of the run) with a branchless ≤4-wide compare.
 
 **Cumulative round 2: C-LEARN run 151 -> ~137 ms (−9%).** Both rounds
 together (vs. the 342 ms pre-round-1 baseline, different machine): the
@@ -524,12 +523,12 @@ per-channel floors and the null-control rule.
 
 ### R4. `RuntimeView` allocation + `flat_offset` (~20% of post-win run)
 
-`PushTempView`/`PushVarViewDirect` rebuild `SmallVec`s (dims, strides, dim_ids)
-on every execution; `flat_offset` (10.3%) recomputes row-major offsets per
-element. For arrayed models this is now the #2 run cost. (This item was written
-when a third opcode, `PushVarView`, shared the cost; it was deleted in GH #964's
-stage 2 as unemittable by codegen, which is part (a) of the proposal below
-already realized for the whole-array case.)
+`PushVarViewDirect` rebuilds `SmallVec`s (dims, strides, dim_ids) on every
+execution; `flat_offset` (10.3%) recomputes row-major offsets per element. For
+arrayed models this is now the #2 run cost. (`PushVarViewDirect` is the base
+of a dynamic subscript, the one view shape that cannot be precomputed; every
+whole-array and constant-subscript view already takes the `PushStaticView`
+path, which is part (a) of the proposal below realized for those shapes.)
 
 Proposal: (a) push more views through the compile-time `PushStaticView` path
 (precomputed `StaticArrayView`) and store dynamic view descriptors in the

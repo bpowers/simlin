@@ -2059,14 +2059,13 @@ fn compile_simulation_all_reducers_match_vm() {
 
 // ── Phase 5 Task 3: BeginIter iteration loops (end-to-end) ────────────
 //
-// The broadcasting `LoadIterViewAt` path (source dims != iter dims) and the
-// standalone `BeginBroadcastIter` family are not reachable through the
-// current production codegen (an A2A elementwise op is scalar-unrolled, and a
-// mismatched-dim reducer argument fails the engine's own dimension check), so
-// those are pinned directly against the VM by hand-built-bytecode unit tests
-// in `lower.rs` (`iter_loop_*` / `broadcast_iter_*`). The two reachable
-// shapes -- a hoisted same-dim reducer loop and the deferred transpose
-// reducer -- are covered end-to-end here.
+// The broadcasting `LoadIterViewAt` path (source dims != iter dims) is not
+// reachable through production codegen (an A2A elementwise op is
+// scalar-unrolled, and a mismatched-dim reducer argument fails the engine's
+// own dimension check), so it is pinned directly against the VM by
+// hand-built-bytecode unit tests in `lower.rs` (`iter_loop_*`). The two
+// reachable shapes -- a hoisted same-dim reducer loop and the deferred
+// transpose reducer -- are covered end-to-end here.
 
 /// `SUM(2 * source[3:5] + 1)`: the elementwise expression is hoisted into an
 /// `AssignTemp` `BeginIter` loop (codegen.rs:1183-1378), then `SUM` reduces

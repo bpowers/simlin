@@ -2063,13 +2063,13 @@ fn max_condition_depth_counts_nesting() {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// Phase 5 Task 1: temp-element reads (LoadTempConst / LoadTempDynamic)
+// Phase 5 Task 1: temp-element reads (LoadTempConst)
 //
 // The compile-time view-descriptor stack + the static view ops' addressing
 // are pinned directly against the VM's `RuntimeView` in `views.rs`'s unit
-// tests (no wasm or reducer needed); here the LoadTemp opcodes -- which read
-// `temp_storage` and produce a value on the arithmetic stack -- are run under
-// DLR-FT to confirm the emitted reads hit the temp region the VM addresses.
+// tests (no wasm or reducer needed); here `LoadTempConst` -- which reads
+// `temp_storage` and produces a value on the arithmetic stack -- is run under
+// DLR-FT to confirm the emitted read hits the temp region the VM addresses.
 // ════════════════════════════════════════════════════════════════════════
 
 // Region base for the temp-storage reads: well past `next_base` (4096) so it
@@ -2102,55 +2102,18 @@ fn load_temp_const_reads_temp_storage() {
     assert_eq!(got, 42.0);
 }
 
-#[test]
-fn load_temp_dynamic_reads_temp_storage() {
-    // LoadTempDynamic{temp_id:0} pops a runtime index (floor) and reads
-    // temp_storage[temp_offsets[0] + index]. Push index 3 via a constant.
-    let mut context = ByteCodeContext::default();
-    context.set_temp_info(vec![0], 5);
-    let ctx = ctx_with_arrays(&context);
-    let code = vec![
-        Opcode::LoadConstant { id: 0 }, // index = 3.0
-        Opcode::LoadTempDynamic { temp_id: 0 },
-    ];
-    let seed = vec![(u64::from(TEMP_BASE) + 3 * 8, 77.0)];
-    let got = run(&bc(vec![3.0], code), &ctx, true, 0, &seed, None);
-    assert_eq!(got, 77.0);
-}
-
-#[test]
-fn load_temp_dynamic_floors_fractional_index() {
-    // The VM does `stack.pop().floor() as usize`; index 2.9 -> slot 2.
-    let mut context = ByteCodeContext::default();
-    context.set_temp_info(vec![0], 4);
-    let ctx = ctx_with_arrays(&context);
-    let code = vec![
-        Opcode::LoadConstant { id: 0 },
-        Opcode::LoadTempDynamic { temp_id: 0 },
-    ];
-    let seed = vec![(u64::from(TEMP_BASE) + 2 * 8, 13.0)];
-    let got = run(&bc(vec![2.9], code), &ctx, true, 0, &seed, None);
-    assert_eq!(got, 13.0);
-}
-
 // ════════════════════════════════════════════════════════════════════════
 // Phase 5 Task 2: array reducers (Sum/Max/Min/Mean/Stddev/Size)
 //
 // These run the emitted reducers under DLR-FT and assert the result matches
 // the VM's own addressing oracle (`RuntimeView::flat_offset`, via
 // `StaticArrayView::to_runtime_view`) folded per the matching VM reducer arm
-// (`vm.rs:2216-2309`). The view transform opcodes the production codegen does
-// not emit directly (it bakes constant subscripts into one `PushStaticView`)
-// are exercised here on a full-array `PushStaticView` base so each `apply_*`
-// is reduced
-// over and checked against the VM. Reuses `TEMP_BASE` / `ctx_with_arrays`
-// from the Task 1 section above.
+// (`vm.rs:2216-2309`). Codegen bakes every constant subscript into one
+// `PushStaticView`, so the reducers run over static views of every geometry.
+// Reuses `TEMP_BASE` / `ctx_with_arrays` from the Task 1 section above.
 // ════════════════════════════════════════════════════════════════════════
 
-use crate::bytecode::{
-    DimensionInfo, RuntimeSparseMapping, RuntimeView, StaticArrayView, SubdimensionRelation,
-    ViewStorage,
-};
+use crate::bytecode::{DimensionInfo, RuntimeSparseMapping, StaticArrayView, ViewStorage};
 use smallvec::SmallVec;
 
 fn seed_run(base_byte: u64, values: &[f64]) -> Vec<(u64, f64)> {
@@ -2361,213 +2324,6 @@ fn static_temp_view_honors_temp_offset() {
     let seed = seed_run(u64::from(TEMP_BASE), &[9.0, 9.0, 9.0, 9.0, 2.0, 5.0]);
     let got = run(&bc(vec![], code), &ctx, true, 0, &seed, None);
     assert_eq!(got, 7.0, "temp view must start at temp_offsets[temp_id]");
-}
-
-// ── Task 1: view transform opcodes (mirror RuntimeView::apply_*) ──────
-//
-// Build a full var view, apply one transform, reduce, and compare to the VM's
-// RuntimeView with the same transform applied. Production codegen bakes these
-// transforms into a single `PushStaticView`, so the base view here is a
-// `PushStaticView` too -- carrying the same real `DimId`s the VM oracle's
-// `RuntimeView::for_var` is built with, which a `PushVarViewDirect` base
-// (dim_ids all zero) would not.
-
-/// A `ByteCodeContext` with a single dimension of `size` (DimId 0), plus the
-/// dim-list `[DimId 0]` some transform opcodes resolve against.
-fn ctx_one_dim(size: u16) -> ByteCodeContext {
-    let mut context = ByteCodeContext::default();
-    let name_id = context.intern_name("D");
-    context.add_dimension(DimensionInfo::indexed(name_id, size));
-    context.add_dim_list(1, [0, 0, 0, 0]);
-    context
-}
-
-/// A full contiguous view over `curr` slots `0..product(dims)` whose shape is
-/// `context`'s dim-list 0, resolved through `context.dimensions` -- i.e. the
-/// view `RuntimeView::for_var(0, dims, dim_ids)` describes. A context may
-/// declare dimensions the view does not span (a star-range's child dim), so
-/// the dim-list, not the dimension table, is what defines the view.
-fn full_var_view(context: &ByteCodeContext) -> StaticArrayView {
-    let (n_dims, dim_ids) = context.get_dim_list(0);
-    let dim_ids: Vec<u16> = dim_ids[..n_dims as usize].to_vec();
-    let dims: Vec<u16> = dim_ids
-        .iter()
-        .map(|&id| {
-            context
-                .get_dimension(id)
-                .expect("dim-list 0 must reference declared dimensions")
-                .size
-        })
-        .collect();
-    let mut view = dense_view(0, &dims);
-    view.dim_ids = dim_ids.into_iter().collect();
-    view
-}
-
-/// Run `PushStaticView(full var view) ; <transforms> ; <reduce> ; PopView`.
-fn run_var_view_reduce(
-    context: &ByteCodeContext,
-    transforms: &[Opcode],
-    reduce: Opcode,
-    data: &[f64],
-) -> f64 {
-    let mut context = context.clone();
-    let view_id = context.add_static_view(full_var_view(&context));
-    let ctx = ctx_with_arrays(&context);
-    let mut code = vec![Opcode::PushStaticView { view_id }];
-    code.extend_from_slice(transforms);
-    code.push(reduce);
-    code.push(Opcode::PopView {});
-    run(&bc(vec![], code), &ctx, true, 0, &seed_run(0, data), None)
-}
-
-#[test]
-fn view_subscript_const_drops_dim_matches_vm() {
-    // A 2x3 matrix; subscript dim 0 to index 1 (0-based) -> row 1: cells
-    // data[3], data[4], data[5]. Mirror with RuntimeView.
-    let mut context = ByteCodeContext::default();
-    let name_d = context.intern_name("D");
-    context.add_dimension(DimensionInfo::indexed(name_d, 2));
-    let name_e = context.intern_name("E");
-    context.add_dimension(DimensionInfo::indexed(name_e, 3));
-    context.add_dim_list(2, [0, 1, 0, 0]); // [DimId 0 (size2), DimId 1 (size3)]
-    let data = [11.0, 12.0, 13.0, 21.0, 22.0, 23.0];
-
-    let got = run_var_view_reduce(
-        &context,
-        &[Opcode::ViewSubscriptConst {
-            dim_idx: 0,
-            index: 1,
-        }],
-        Opcode::ArraySum {},
-        &data,
-    );
-    // VM oracle: build the same RuntimeView and apply the same subscript.
-    let mut rv = RuntimeView::for_var(
-        0,
-        SmallVec::from_slice(&[2, 3]),
-        SmallVec::from_slice(&[0, 1]),
-    );
-    rv.apply_single_subscript(0, 1);
-    let want: f64 = (0..rv.size())
-        .map(|i| {
-            let n = rv.dims.len();
-            let mut idx: SmallVec<[u16; 4]> = smallvec::smallvec![0; n];
-            let mut rem = i;
-            for d in (0..n).rev() {
-                idx[d] = (rem % rv.dims[d] as usize) as u16;
-                rem /= rv.dims[d] as usize;
-            }
-            data[rv.base_off as usize + rv.flat_offset(&idx)]
-        })
-        .sum();
-    assert_eq!(got, want);
-    assert_eq!(got, 21.0 + 22.0 + 23.0);
-}
-
-#[test]
-fn view_range_matches_vm() {
-    // 1-D dim of 5; ViewRange [1:4) keeps indices 1,2,3 -> data[1..4].
-    let context = ctx_one_dim(5);
-    let data = [1.0, 2.0, 3.0, 4.0, 5.0];
-    let got = run_var_view_reduce(
-        &context,
-        &[Opcode::ViewRange {
-            dim_idx: 0,
-            start: 1,
-            end: 4,
-        }],
-        Opcode::ArraySum {},
-        &data,
-    );
-    assert_eq!(got, 2.0 + 3.0 + 4.0);
-}
-
-#[test]
-fn view_wildcard_is_noop() {
-    // ViewWildcard leaves the dimension as-is: the sum is the full array.
-    let context = ctx_one_dim(4);
-    let data = [1.0, 2.0, 3.0, 4.0];
-    let got = run_var_view_reduce(
-        &context,
-        &[Opcode::ViewWildcard { dim_idx: 0 }],
-        Opcode::ArraySum {},
-        &data,
-    );
-    assert_eq!(got, 10.0);
-}
-
-#[test]
-fn view_transpose_then_reduce_matches_vm() {
-    // 2x3 matrix; transpose to 3x2 then sum (order-independent but exercises
-    // the stride/dim reversal addressing).
-    let mut context = ByteCodeContext::default();
-    let name_d = context.intern_name("D");
-    context.add_dimension(DimensionInfo::indexed(name_d, 2));
-    let name_e = context.intern_name("E");
-    context.add_dimension(DimensionInfo::indexed(name_e, 3));
-    context.add_dim_list(2, [0, 1, 0, 0]);
-    let data = [11.0, 12.0, 13.0, 21.0, 22.0, 23.0];
-    let got = run_var_view_reduce(
-        &context,
-        &[Opcode::ViewTranspose {}],
-        Opcode::ArraySum {},
-        &data,
-    );
-    assert_eq!(got, 11.0 + 12.0 + 13.0 + 21.0 + 22.0 + 23.0);
-}
-
-#[test]
-fn view_star_range_sparse_matches_vm() {
-    // A 1-D parent dim of 4; a star-range via a subdim relation selecting
-    // parent offsets [1, 3] -> sum of data[1] + data[3].
-    let mut context = ByteCodeContext::default();
-    let name_p = context.intern_name("P");
-    context.add_dimension(DimensionInfo::indexed(name_p, 4));
-    let name_s = context.intern_name("S");
-    context.add_dimension(DimensionInfo::indexed(name_s, 2)); // child dim
-    context.add_dim_list(1, [0, 0, 0, 0]); // parent dim list
-    context.add_subdim_relation(SubdimensionRelation::sparse(
-        0,
-        1,
-        SmallVec::from_slice(&[1, 3]),
-    ));
-    let data = [5.0, 6.0, 7.0, 8.0];
-    let got = run_var_view_reduce(
-        &context,
-        &[Opcode::ViewStarRange {
-            dim_idx: 0,
-            subdim_relation_id: 0,
-        }],
-        Opcode::ArraySum {},
-        &data,
-    );
-    assert_eq!(got, 6.0 + 8.0);
-}
-
-#[test]
-fn dup_view_then_reduce_matches_single() {
-    // DupView duplicates the top descriptor; reducing the dup gives the same
-    // result as reducing the original (and the original stays on the stack).
-    let context = ctx_one_dim(3);
-    let data = [2.0, 3.0, 5.0];
-    let got = run_var_view_reduce(&context, &[Opcode::DupView {}], Opcode::ArraySum {}, &data);
-    assert_eq!(got, 10.0);
-    // The duplicate must leave the stack balanced for the trailing PopView;
-    // a second PopView would underflow, so add one more here to drain the
-    // dup and confirm both pops succeed.
-    let mut context = context.clone();
-    let view_id = context.add_static_view(full_var_view(&context));
-    let ctx = ctx_with_arrays(&context);
-    let code = vec![
-        Opcode::PushStaticView { view_id },
-        Opcode::DupView {},
-        Opcode::ArraySum {},
-        Opcode::PopView {}, // pop dup
-        Opcode::PopView {}, // pop original
-    ];
-    let got2 = run(&bc(vec![], code), &ctx, true, 0, &seed_run(0, &data), None);
-    assert_eq!(got2, 10.0);
 }
 
 // ── Task 2: each reducer vs an explicit VM-mirrored oracle ────────────
@@ -2975,65 +2731,6 @@ fn iter_loop_elementwise_writes_temp_like_vm() {
 }
 
 #[test]
-fn iter_loop_load_iter_element_reads_captured_view() {
-    // out_temp[i] = iter_view[i] (the captured view *is* the iteration view).
-    // Here the captured view is the OUTPUT temp itself, so seed the temp and
-    // copy it to itself -- a degenerate but faithful LoadIterElement check.
-    // Use a separate source temp captured as the iter view instead: push a
-    // source temp view, BeginIter captures it, LoadIterElement reads it, and
-    // StoreIterElement writes the *same* temp's slots (write_temp == source).
-    let mut context = ByteCodeContext::default();
-    context.set_temp_info(vec![0], 3);
-    let src = context.add_static_view(temp_view(0, &[3]));
-    let code = vec![
-        Opcode::PushStaticView { view_id: src },
-        Opcode::BeginIter {
-            write_temp_id: 0,
-            has_write_temp: true,
-        },
-        Opcode::LoadIterElement {},
-        Opcode::LoadConstant { id: 0 },
-        Opcode::Op2 { op: Op2::Add },
-        Opcode::StoreIterElement {},
-        Opcode::NextIterOrJump { jump_back: -4 },
-        Opcode::EndIter {},
-        Opcode::PopView {},
-    ];
-    // temp 0 = [1, 2, 3]; each += 5 in place -> [6, 7, 8].
-    let seed = seed_run(u64::from(TEMP_BASE), &[1.0, 2.0, 3.0]);
-    let temps = run_and_read_temps(&context, code, vec![5.0], &seed, 3);
-    assert_eq!(temps, vec![6.0, 7.0, 8.0]);
-}
-
-#[test]
-fn iter_loop_load_iter_temp_element_reads_temp() {
-    // out_temp1[i] = temp0[i] + 100, reading temp0 via LoadIterTempElement and
-    // writing temp1. temp_offsets = [0, 3]: temp0 in slots 0..3, temp1 in 3..6.
-    let mut context = ByteCodeContext::default();
-    context.set_temp_info(vec![0, 3], 6);
-    let out_view = context.add_static_view(temp_view(1, &[3])); // temp 1
-    let code = vec![
-        Opcode::PushStaticView { view_id: out_view },
-        Opcode::BeginIter {
-            write_temp_id: 1,
-            has_write_temp: true,
-        },
-        Opcode::LoadIterTempElement { temp_id: 0 },
-        Opcode::LoadConstant { id: 0 },
-        Opcode::Op2 { op: Op2::Add },
-        Opcode::StoreIterElement {},
-        Opcode::NextIterOrJump { jump_back: -4 },
-        Opcode::EndIter {},
-        Opcode::PopView {},
-    ];
-    // temp0 = [7, 8, 9] in slots 0..3.
-    let seed = seed_run(u64::from(TEMP_BASE), &[7.0, 8.0, 9.0]);
-    // Read 6 temp slots: temp1 is slots 3..6.
-    let temps = run_and_read_temps(&context, code, vec![100.0], &seed, 6);
-    assert_eq!(&temps[3..6], &[107.0, 108.0, 109.0]);
-}
-
-#[test]
 fn iter_loop_broadcast_smaller_source_matches_vm() {
     // out_temp[A,B] = mat[A,B] + vec[A]: the iteration view is 2-D [A(2),B(3)]
     // (dim_ids [0,1]); `vec` is 1-D [A(2)] (dim_id 0), broadcast along B. This
@@ -3094,8 +2791,8 @@ fn iter_loop_broadcast_smaller_source_matches_vm() {
 #[test]
 fn iter_loop_smaller_source_same_shape_writes_nan() {
     // The iteration is over 4 elements but the source view (same dim_ids) has
-    // only 3: the VM's `LoadIterViewTop`/`LoadIterViewAt` fast path returns
-    // NaN past the source size (`vm.rs:1972`). Element 3 must be NaN.
+    // only 3: the VM's `LoadIterViewAt` fast path returns NaN past the source
+    // size. Element 3 must be NaN.
     let mut context = ByteCodeContext::default();
     context.set_temp_info(vec![0], 4);
     let out_view = context.add_static_view(temp_view(0, &[4]));
@@ -3180,7 +2877,7 @@ fn iter_loop_zero_size_writes_nothing() {
             write_temp_id: 0,
             has_write_temp: true,
         },
-        Opcode::LoadIterElement {},
+        Opcode::LoadIterViewAt { offset: 1 },
         Opcode::StoreIterElement {},
         Opcode::NextIterOrJump { jump_back: -2 },
         Opcode::EndIter {},
@@ -3190,59 +2887,6 @@ fn iter_loop_zero_size_writes_nothing() {
     let seed = seed_run(u64::from(TEMP_BASE), &[42.0]);
     let temps = run_and_read_temps(&context, code, vec![], &seed, 1);
     assert_eq!(temps, vec![42.0], "an empty iteration writes nothing");
-}
-
-// ── Broadcast iteration family (BeginBroadcastIter..EndBroadcastIter) ──
-//
-// Not emitted by current codegen, but lowered for completeness and pinned
-// against the VM's `BeginBroadcastIter`/`LoadBroadcastElement` arms
-// (`vm.rs:2314-2421`) here. The result geometry is the union of the source
-// dim_ids; a 2-D and a 1-D source broadcast into the 2-D result.
-
-#[test]
-fn broadcast_iter_unions_dims_like_vm() {
-    // dest[A,B] = mat[A,B] * vec[A]: BeginBroadcastIter with two sources
-    // (mat 2-D dim_ids [0,1], vec 1-D dim_id 0). The result unions to
-    // dim_ids [0,1] (dims [2,3]); vec broadcasts along B.
-    let mut context = ByteCodeContext::default();
-    context.set_temp_info(vec![0], 6);
-    let na = context.intern_name("A");
-    context.add_dimension(DimensionInfo::indexed(na, 2)); // id 0
-    let nb = context.intern_name("B");
-    context.add_dimension(DimensionInfo::indexed(nb, 3)); // id 1
-    let mat = context.add_static_view(dense_view_ids(0, &[2, 3], &[0, 1]));
-    let vec_v = context.add_static_view(dense_view_ids(6, &[2], &[0]));
-    let code = vec![
-        // Push the two sources (deepest-first): mat then vec.
-        Opcode::PushStaticView { view_id: mat },
-        Opcode::PushStaticView { view_id: vec_v },
-        Opcode::BeginBroadcastIter {
-            n_sources: 2,
-            dest_temp_id: 0,
-        },
-        Opcode::LoadBroadcastElement { source_idx: 0 }, // mat
-        Opcode::LoadBroadcastElement { source_idx: 1 }, // vec
-        Opcode::Op2 { op: Op2::Mul },
-        Opcode::StoreBroadcastElement {},
-        Opcode::NextBroadcastOrJump { jump_back: -4 },
-        Opcode::EndBroadcastIter {},
-        Opcode::PopView {},
-        Opcode::PopView {},
-    ];
-    // mat[a,b] = a*10 + b -> [0,1,2, 10,11,12]; vec[a] = a+1 -> [1, 2].
-    let mut seed = seed_run(0, &[0.0, 1.0, 2.0, 10.0, 11.0, 12.0]);
-    seed.extend(seed_run(6 * 8, &[1.0, 2.0]));
-    let temps = run_and_read_temps(&context, code, vec![], &seed, 6);
-    // dest[a,b] = mat[a,b] * vec[a].
-    let expected = [
-        0.0 * 1.0,
-        1.0 * 1.0,
-        2.0 * 1.0,
-        10.0 * 2.0,
-        11.0 * 2.0,
-        12.0 * 2.0,
-    ];
-    assert_eq!(temps, expected);
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -3525,8 +3169,8 @@ fn view_dyn_in_range_row_reduces_like_vm() {
 // ════════════════════════════════════════════════════════════════════════
 // IMPORTANT (review feedback): full-unrolling has a documented size cap.
 //
-// Reducers, `BeginIter`, and `BeginBroadcastIter` all unroll fully at compile
-// time. `EmitState::charge_unroll` bounds the cumulative element count per
+// Reducers and `BeginIter` both unroll fully at compile time.
+// `EmitState::charge_unroll` bounds the cumulative element count per
 // function at `MAX_UNROLL_UNITS`, returning `Unsupported` (so the model falls
 // back to the VM) before any oversized body is emitted. These check the cap
 // directly via `emit_bytecode`, asserting an over-budget program is rejected

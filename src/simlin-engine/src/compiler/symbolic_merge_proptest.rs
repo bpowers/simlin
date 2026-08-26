@@ -538,10 +538,6 @@ fn blank_resource_ids(op: &SymbolicOpcode) -> SymbolicOpcode {
             n_inputs: *n_inputs,
         },
         SymbolicOpcode::PushStaticView { .. } => SymbolicOpcode::PushStaticView { view_id: 0 },
-        SymbolicOpcode::PushTempView { .. } => SymbolicOpcode::PushTempView {
-            temp_id: 0,
-            dim_list_id: 0,
-        },
         SymbolicOpcode::PushVarViewDirect { var, .. } => SymbolicOpcode::PushVarViewDirect {
             var: var.clone(),
             dim_list_id: 0,
@@ -550,20 +546,10 @@ fn blank_resource_ids(op: &SymbolicOpcode) -> SymbolicOpcode {
             temp_id: 0,
             index: *index,
         },
-        SymbolicOpcode::LoadTempDynamic { .. } => SymbolicOpcode::LoadTempDynamic { temp_id: 0 },
         SymbolicOpcode::BeginIter { has_write_temp, .. } => SymbolicOpcode::BeginIter {
             write_temp_id: 0,
             has_write_temp: *has_write_temp,
         },
-        SymbolicOpcode::LoadIterTempElement { .. } => {
-            SymbolicOpcode::LoadIterTempElement { temp_id: 0 }
-        }
-        SymbolicOpcode::BeginBroadcastIter { n_sources, .. } => {
-            SymbolicOpcode::BeginBroadcastIter {
-                n_sources: *n_sources,
-                dest_temp_id: 0,
-            }
-        }
         SymbolicOpcode::VectorElmMap {
             full_source_len, ..
         } => SymbolicOpcode::VectorElmMap {
@@ -585,13 +571,6 @@ fn blank_resource_ids(op: &SymbolicOpcode) -> SymbolicOpcode {
         }
 
         // ── carry no resource id ────────────────────────────────────────
-        //
-        // `ViewStarRange::subdim_relation_id` indexes `subdim_relations`, which
-        // the fragment path never populates (`assemble_module` sets it to
-        // `vec![]`) and codegen never emits the opcode, so there is nothing to
-        // renumber and nothing this file can pin. Recorded here rather than
-        // silently grouped: if that opcode is ever revived, it becomes a sixth
-        // renumberable resource and belongs in the arm above.
         SymbolicOpcode::Op2 { .. }
         | SymbolicOpcode::Not { .. }
         | SymbolicOpcode::LoadVar { .. }
@@ -608,17 +587,9 @@ fn blank_resource_ids(op: &SymbolicOpcode) -> SymbolicOpcode {
         | SymbolicOpcode::Apply { .. }
         | SymbolicOpcode::BinOpAssignCurr { .. }
         | SymbolicOpcode::BinOpAssignNext { .. }
-        | SymbolicOpcode::ViewSubscriptConst { .. }
         | SymbolicOpcode::ViewSubscriptDynamic { .. }
-        | SymbolicOpcode::ViewRange { .. }
         | SymbolicOpcode::ViewRangeDynamic { .. }
-        | SymbolicOpcode::ViewStarRange { .. }
-        | SymbolicOpcode::ViewWildcard { .. }
-        | SymbolicOpcode::ViewTranspose { .. }
         | SymbolicOpcode::PopView { .. }
-        | SymbolicOpcode::DupView { .. }
-        | SymbolicOpcode::LoadIterElement { .. }
-        | SymbolicOpcode::LoadIterViewTop { .. }
         | SymbolicOpcode::LoadIterViewAt { .. }
         | SymbolicOpcode::StoreIterElement { .. }
         | SymbolicOpcode::NextIterOrJump { .. }
@@ -629,11 +600,7 @@ fn blank_resource_ids(op: &SymbolicOpcode) -> SymbolicOpcode {
         | SymbolicOpcode::ArrayMean { .. }
         | SymbolicOpcode::ArrayStddev { .. }
         | SymbolicOpcode::ArraySize { .. }
-        | SymbolicOpcode::VectorSelect { .. }
-        | SymbolicOpcode::LoadBroadcastElement { .. }
-        | SymbolicOpcode::StoreBroadcastElement { .. }
-        | SymbolicOpcode::NextBroadcastOrJump { .. }
-        | SymbolicOpcode::EndBroadcastIter { .. } => op.clone(),
+        | SymbolicOpcode::VectorSelect { .. } => op.clone(),
     }
 }
 
@@ -714,8 +681,7 @@ fn denote(op: &SymbolicOpcode, tables: &ResourceTables<'_>) -> Result<Denotation
             )?;
             d.static_views.push(tables.static_views[i].clone());
         }
-        SymbolicOpcode::PushTempView { dim_list_id, .. }
-        | SymbolicOpcode::PushVarViewDirect { dim_list_id, .. } => {
+        SymbolicOpcode::PushVarViewDirect { dim_list_id, .. } => {
             let i = index(
                 *dim_list_id,
                 tables.base.dim_lists,
@@ -1073,15 +1039,11 @@ fn temp_uses(code: &[SymbolicOpcode], views: &[SymbolicStaticView]) -> Vec<(usiz
         .enumerate()
         .filter_map(|(pc, op)| {
             let id: u32 = match op {
-                SymbolicOpcode::PushTempView { temp_id, .. }
-                | SymbolicOpcode::LoadTempConst { temp_id, .. }
-                | SymbolicOpcode::LoadTempDynamic { temp_id }
-                | SymbolicOpcode::LoadIterTempElement { temp_id } => *temp_id as u32,
+                SymbolicOpcode::LoadTempConst { temp_id, .. } => *temp_id as u32,
                 SymbolicOpcode::BeginIter {
                     write_temp_id,
                     has_write_temp: true,
                 } => *write_temp_id as u32,
-                SymbolicOpcode::BeginBroadcastIter { dest_temp_id, .. } => *dest_temp_id as u32,
                 SymbolicOpcode::VectorElmMap { write_temp_id, .. }
                 | SymbolicOpcode::VectorSortOrder { write_temp_id }
                 | SymbolicOpcode::Rank { write_temp_id }

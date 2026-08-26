@@ -323,48 +323,23 @@ fn render_opcode(op: &SymbolicOpcode, literals: &[f64]) -> String {
         SymbolicOpcode::BinOpAssignNext { op, var } => {
             format!("BinOpAssignNext {op:?} {}", render_var_ref(var))
         }
-        SymbolicOpcode::PushTempView {
-            temp_id,
-            dim_list_id,
-        } => format!("PushTempView temp={temp_id} dim_list={dim_list_id}"),
         SymbolicOpcode::PushStaticView { view_id } => format!("PushStaticView view={view_id}"),
         SymbolicOpcode::PushVarViewDirect { var, dim_list_id } => format!(
             "PushVarViewDirect {} dim_list={dim_list_id}",
             render_var_ref(var)
         ),
-        SymbolicOpcode::ViewSubscriptConst { dim_idx, index } => {
-            format!("ViewSubscriptConst dim={dim_idx} index={index}")
-        }
         SymbolicOpcode::ViewSubscriptDynamic { dim_idx } => {
             format!("ViewSubscriptDynamic dim={dim_idx}")
         }
-        SymbolicOpcode::ViewRange {
-            dim_idx,
-            start,
-            end,
-        } => format!("ViewRange dim={dim_idx} start={start} end={end}"),
         SymbolicOpcode::ViewRangeDynamic { dim_idx } => format!("ViewRangeDynamic dim={dim_idx}"),
-        SymbolicOpcode::ViewStarRange {
-            dim_idx,
-            subdim_relation_id,
-        } => format!("ViewStarRange dim={dim_idx} subdim_relation={subdim_relation_id}"),
-        SymbolicOpcode::ViewWildcard { dim_idx } => format!("ViewWildcard dim={dim_idx}"),
-        SymbolicOpcode::ViewTranspose {} => "ViewTranspose".to_string(),
         SymbolicOpcode::PopView {} => "PopView".to_string(),
-        SymbolicOpcode::DupView {} => "DupView".to_string(),
         SymbolicOpcode::LoadTempConst { temp_id, index } => {
             format!("LoadTempConst temp={temp_id} index={index}")
         }
-        SymbolicOpcode::LoadTempDynamic { temp_id } => format!("LoadTempDynamic temp={temp_id}"),
         SymbolicOpcode::BeginIter {
             write_temp_id,
             has_write_temp,
         } => format!("BeginIter write_temp={write_temp_id} has_write_temp={has_write_temp}"),
-        SymbolicOpcode::LoadIterElement {} => "LoadIterElement".to_string(),
-        SymbolicOpcode::LoadIterTempElement { temp_id } => {
-            format!("LoadIterTempElement temp={temp_id}")
-        }
-        SymbolicOpcode::LoadIterViewTop {} => "LoadIterViewTop".to_string(),
         SymbolicOpcode::LoadIterViewAt { offset } => format!("LoadIterViewAt offset={offset}"),
         SymbolicOpcode::StoreIterElement {} => "StoreIterElement".to_string(),
         SymbolicOpcode::NextIterOrJump { jump_back } => {
@@ -401,18 +376,6 @@ fn render_opcode(op: &SymbolicOpcode, literals: &[f64]) -> String {
         SymbolicOpcode::AllocateByPriority { write_temp_id } => {
             format!("AllocateByPriority write_temp={write_temp_id}")
         }
-        SymbolicOpcode::BeginBroadcastIter {
-            n_sources,
-            dest_temp_id,
-        } => format!("BeginBroadcastIter n_sources={n_sources} dest_temp={dest_temp_id}"),
-        SymbolicOpcode::LoadBroadcastElement { source_idx } => {
-            format!("LoadBroadcastElement source={source_idx}")
-        }
-        SymbolicOpcode::StoreBroadcastElement {} => "StoreBroadcastElement".to_string(),
-        SymbolicOpcode::NextBroadcastOrJump { jump_back } => {
-            format!("NextBroadcastOrJump jump_back={jump_back}")
-        }
-        SymbolicOpcode::EndBroadcastIter {} => "EndBroadcastIter".to_string(),
     }
 }
 

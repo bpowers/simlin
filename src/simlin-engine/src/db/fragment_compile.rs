@@ -206,7 +206,6 @@ pub fn compile_var_fragment<'db>(
         &var_sizes,
         &tables,
         converted_dims,
-        dim_context,
     );
     // Emit one phase, and make a CODEGEN rejection attributable.
     //
@@ -1142,7 +1141,6 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
         &var_sizes,
         &tables,
         converted_dims,
-        dim_context,
     );
     if why.is_some() {
         match crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting(&base_ctx, &var.ast)

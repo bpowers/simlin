@@ -9,8 +9,7 @@ use smallvec::SmallVec;
 use crate::ast::{ArrayView, BinaryOp};
 use crate::bytecode::{
     BuiltinId, DimId, DimListId, DimensionInfo, GraphicalFunctionId, LookupMode, ModuleId,
-    ModuleInputOffset, NameId, Op2, RuntimeSparseMapping, SubdimensionRelation, TempId,
-    VariableOffset, ViewId,
+    ModuleInputOffset, NameId, Op2, RuntimeSparseMapping, TempId, VariableOffset, ViewId,
 };
 use crate::common::{Canonical, ErrorCode, ErrorKind, Ident, Result, canonicalize};
 use crate::dimensions::Dimension;
@@ -70,7 +69,6 @@ pub(crate) struct ModuleCtx<'a> {
     pub(crate) var_sizes: &'a VarSizes,
     pub(crate) tables: &'a HashMap<Ident<Canonical>, Vec<Table>>,
     pub(crate) dimensions: &'a [Dimension],
-    pub(crate) dimensions_ctx: &'a crate::dimensions::DimensionsContext,
 }
 
 impl<'a> ModuleCtx<'a> {
@@ -180,7 +178,6 @@ pub(super) struct Compiler<'module> {
     curr_code: SymbolicByteCodeBuilder,
     // Array support fields
     pub(super) dimensions: Vec<DimensionInfo>,
-    pub(super) subdim_relations: Vec<SubdimensionRelation>,
     names: Vec<String>,
     /// Hash index over `names` so interning is O(1) amortized. The compiler
     /// runs once per per-variable fragment (tens of thousands of times on
@@ -247,7 +244,6 @@ impl<'module> Compiler<'module> {
             table_base_ids,
             curr_code: SymbolicByteCodeBuilder::default(),
             dimensions: vec![],
-            subdim_relations: vec![],
             names: vec![],
             name_ids: Default::default(),
             static_views: vec![],
@@ -263,9 +259,6 @@ impl<'module> Compiler<'module> {
     /// This populates:
     /// - `names`: interned dimension and element names
     /// - `dimensions`: DimensionInfo for each dimension
-    ///
-    /// Note: Subdimension relations are populated lazily via `get_or_add_subdim_relation`
-    /// when ViewStarRange bytecode is emitted, rather than pre-computing all pairs.
     fn populate_dimension_metadata(&mut self) {
         for dim in self.module.dimensions {
             let dim_name = dim.name();
@@ -317,61 +310,6 @@ impl<'module> Compiler<'module> {
             element_name_ids: SmallVec::new(),
         });
         dim_id
-    }
-
-    /// Look up or add a subdimension relation between child and parent dimensions.
-    /// Returns Some(subdim_relation_id) if child is a subdimension of parent,
-    /// or None if no relationship exists.
-    ///
-    /// This method is called lazily when ViewStarRange bytecode is emitted,
-    /// rather than pre-computing all possible relations.
-    #[allow(dead_code)]
-    pub(super) fn get_or_add_subdim_relation(
-        &mut self,
-        child_dim_name: &crate::common::CanonicalDimensionName,
-        parent_dim_name: &crate::common::CanonicalDimensionName,
-    ) -> Option<u16> {
-        // First, find the DimIds for child and parent
-        let child_dim_id = self.find_dim_id_by_name(child_dim_name.as_str())?;
-        let parent_dim_id = self.find_dim_id_by_name(parent_dim_name.as_str())?;
-
-        // Check if this relation already exists
-        for (idx, rel) in self.subdim_relations.iter().enumerate() {
-            if rel.child_dim_id == child_dim_id && rel.parent_dim_id == parent_dim_id {
-                return Some(idx as u16);
-            }
-        }
-
-        // Look up the relation from DimensionsContext
-        let relation = self
-            .module
-            .dimensions_ctx
-            .get_subdimension_relation(child_dim_name, parent_dim_name)?;
-
-        // Convert and add to subdim_relations
-        let parent_offsets: SmallVec<[u16; 16]> =
-            relation.parent_offsets.iter().map(|&x| x as u16).collect();
-        let is_contiguous = relation.is_contiguous();
-        let start_offset = relation.start_offset() as u16;
-
-        let rel_id = self.subdim_relations.len() as u16;
-        self.subdim_relations.push(SubdimensionRelation {
-            parent_dim_id,
-            child_dim_id,
-            parent_offsets,
-            is_contiguous,
-            start_offset,
-        });
-
-        Some(rel_id)
-    }
-
-    /// Find a DimId by dimension name, returns None if not found.
-    #[allow(dead_code)]
-    fn find_dim_id_by_name(&self, dim_name: &str) -> Option<DimId> {
-        let name_id = *self.name_ids.get(dim_name)?;
-        let dim_idx = self.dimensions.iter().position(|d| d.name_id == name_id)?;
-        Some(dim_idx as DimId)
     }
 
     /// Add a static view and return its ViewId
@@ -1939,9 +1877,7 @@ impl<'module> Compiler<'module> {
             graphical_functions: self.graphical_functions,
             module_decls: self.module_decls,
             static_views: self.static_views,
-            arrays: vec![],
             dimensions: self.dimensions,
-            subdim_relations: self.subdim_relations,
             names: self.names,
             temp_offsets,
             temp_total_size,
@@ -2006,7 +1942,6 @@ mod tests {
         inputs: std::collections::BTreeSet<Ident<Canonical>>,
         var_sizes: VarSizes,
         tables: HashMap<Ident<Canonical>, Vec<Table>>,
-        dimensions_ctx: crate::dimensions::DimensionsContext,
     }
 
     impl EmptyCtxOwner {
@@ -2016,7 +1951,6 @@ mod tests {
                 inputs: Default::default(),
                 var_sizes: HashMap::new(),
                 tables: HashMap::new(),
-                dimensions_ctx: Default::default(),
             }
         }
 
@@ -2046,7 +1980,6 @@ mod tests {
                 var_sizes: &self.var_sizes,
                 tables: &self.tables,
                 dimensions: &[],
-                dimensions_ctx: &self.dimensions_ctx,
             }
         }
     }

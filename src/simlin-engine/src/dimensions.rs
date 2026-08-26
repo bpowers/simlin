@@ -1159,7 +1159,7 @@ impl DimensionsContext {
 /// # Note
 ///
 /// This algorithm is shared between the VM (for runtime broadcasting in
-/// `LoadIterViewTop`) and the compiler (for implicit subscript resolution).
+/// `LoadIterViewAt`) and the compiler (for implicit subscript resolution).
 /// If you modify this logic, ensure both usages remain correct.
 pub fn match_dimensions_two_pass(
     source_ids: &[u16],

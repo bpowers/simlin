@@ -2517,7 +2517,6 @@ pub struct Module {
     pub(crate) var_sizes: VarSizes,
     pub(crate) tables: HashMap<Ident<Canonical>, Vec<Table>>,
     pub(crate) dimensions: Vec<Dimension>,
-    pub(crate) dimensions_ctx: DimensionsContext,
 }
 
 #[cfg(test)]
@@ -2729,7 +2728,6 @@ impl Module {
             var_sizes: &self.var_sizes,
             tables: &self.tables,
             dimensions: &self.dimensions,
-            dimensions_ctx: &self.dimensions_ctx,
         }
     }
 
@@ -2899,7 +2897,6 @@ impl Module {
             var_sizes,
             tables,
             dimensions: converted_dims,
-            dimensions_ctx: project.dimensions_ctx.clone(),
         })
     }
 }

@@ -47,37 +47,6 @@ struct IterState {
     current: usize,
     /// Total number of elements to iterate
     size: usize,
-    /// Pre-computed flat offsets for sparse iteration (None if contiguous)
-    flat_offsets: Option<Vec<usize>>,
-}
-
-/// Info about how one source maps to the broadcast result dimensions.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
-struct BroadcastSourceInfo {
-    /// Index into view_stack for this source
-    view_stack_idx: usize,
-    /// For each result dimension, which source dimension it maps to.
-    /// -1 means this source doesn't have this dimension (broadcast).
-    dim_map: SmallVec<[i8; 4]>,
-}
-
-/// State for broadcast iteration over multiple sources.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
-struct BroadcastState {
-    /// Info for each source
-    sources: SmallVec<[BroadcastSourceInfo; 2]>,
-    /// Destination temp array ID
-    dest_temp_id: TempId,
-    /// Result dimensions (sizes)
-    result_dims: SmallVec<[u16; 4]>,
-    /// Current multi-dimensional indices in result
-    result_indices: SmallVec<[u16; 4]>,
-    /// Current flat index in result
-    current: usize,
-    /// Total result size
-    size: usize,
 }
 
 pub(crate) const TIME_OFF: usize = 0;
@@ -339,7 +308,6 @@ pub struct Vm {
     stack: Stack,
     view_stack: Vec<RuntimeView>,
     iter_stack: Vec<IterState>,
-    broadcast_stack: Vec<BroadcastState>,
     // Maps absolute offset -> all bytecode locations containing that constant's literal.
     // Used by set_value to find and mutate the right literals, and for validation.
     constant_info: HashMap<usize, Vec<BytecodeLocation>>,
@@ -567,7 +535,6 @@ struct EvalState<'a> {
     temp_storage: &'a mut [f64],
     view_stack: &'a mut Vec<RuntimeView>,
     iter_stack: &'a mut Vec<IterState>,
-    broadcast_stack: &'a mut Vec<BroadcastState>,
     // Snapshot of curr[] after t=0 initials; used by LoadInitial opcode.
     initial_values: &'a [f64],
     // Snapshot of curr[] taken after stocks but before the time advance
@@ -851,7 +818,6 @@ impl Vm {
             stack: Stack::new(),
             view_stack: Vec::with_capacity(4),
             iter_stack: Vec::with_capacity(2),
-            broadcast_stack: Vec::with_capacity(1),
             constant_info: sim.cached_constant_info,
             original_literals: HashMap::new(),
             initial_values: vec![0.0; n_slots].into_boxed_slice(),
@@ -975,7 +941,6 @@ impl Vm {
 
         self.view_stack.clear();
         self.iter_stack.clear();
-        self.broadcast_stack.clear();
 
         // Split RK scratch buffers before borrowing other fields for EvalState.
         // For Euler these are empty slices (zero cost).
@@ -988,7 +953,6 @@ impl Vm {
             temp_storage: &mut self.temp_storage,
             view_stack: &mut self.view_stack,
             iter_stack: &mut self.iter_stack,
-            broadcast_stack: &mut self.broadcast_stack,
             initial_values: &self.initial_values,
             prev_values: &mut self.prev_values,
             // Tells LoadPrev to return the fallback until the first
@@ -1497,7 +1461,6 @@ impl Vm {
         self.stack.clear();
         self.view_stack.clear();
         self.iter_stack.clear();
-        self.broadcast_stack.clear();
         self.rk_scratch.fill(0.0);
         self.prev_values_valid = false;
     }
@@ -1598,14 +1561,12 @@ impl Vm {
 
         self.view_stack.clear();
         self.iter_stack.clear();
-        self.broadcast_stack.clear();
 
         let mut state = EvalState {
             stack: &mut self.stack,
             temp_storage: &mut self.temp_storage,
             view_stack: &mut self.view_stack,
             iter_stack: &mut self.iter_stack,
-            broadcast_stack: &mut self.broadcast_stack,
             // During initials, LoadInitial falls back to curr[] (which IS the
             // initial value being computed). The snapshot hasn't been captured yet.
             initial_values: &self.initial_values,
@@ -1658,7 +1619,6 @@ impl Vm {
                 temp_storage: &mut self.temp_storage,
                 view_stack: &mut self.view_stack,
                 iter_stack: &mut self.iter_stack,
-                broadcast_stack: &mut self.broadcast_stack,
                 initial_values: &self.initial_values,
                 prev_values: &mut self.prev_values,
                 use_prev_fallback: true,
@@ -1769,7 +1729,6 @@ impl Vm {
                 temp_storage: &mut self.temp_storage,
                 view_stack: &mut self.view_stack,
                 iter_stack: &mut self.iter_stack,
-                broadcast_stack: &mut self.broadcast_stack,
                 initial_values: &self.initial_values,
                 prev_values: &mut self.prev_values,
                 use_prev_fallback: true,
@@ -1993,7 +1952,6 @@ impl Vm {
         let mut temp_storage = &mut *state.temp_storage;
         let mut view_stack = &mut *state.view_stack;
         let mut iter_stack = &mut *state.iter_stack;
-        let mut broadcast_stack = &mut *state.broadcast_stack;
         let initial_values = state.initial_values;
         let mut prev_values = &mut *state.prev_values;
         let use_prev_fallback = state.use_prev_fallback;
@@ -2155,7 +2113,6 @@ impl Vm {
                         temp_storage,
                         view_stack,
                         iter_stack,
-                        broadcast_stack,
                         initial_values,
                         prev_values,
                         use_prev_fallback,
@@ -2196,7 +2153,6 @@ impl Vm {
                         temp_storage: ts,
                         view_stack: vs,
                         iter_stack: is_,
-                        broadcast_stack: bs,
                         initial_values: _,
                         prev_values: pv,
                         use_prev_fallback: _,
@@ -2205,7 +2161,6 @@ impl Vm {
                     temp_storage = ts;
                     view_stack = vs;
                     iter_stack = is_;
-                    broadcast_stack = bs;
                     prev_values = pv;
                 }
                 Opcode::AssignCurr { off } => {
@@ -2578,20 +2533,6 @@ impl Vm {
                 // =========================================================
                 // VIEW STACK OPERATIONS
                 // =========================================================
-                Opcode::PushTempView {
-                    temp_id,
-                    dim_list_id,
-                } => {
-                    let (n_dims, dim_ids) = context.get_dim_list(*dim_list_id);
-                    let n = n_dims as usize;
-                    let dims: SmallVec<[u16; 4]> = (0..n)
-                        .map(|i| context.dimensions[dim_ids[i] as usize].size)
-                        .collect();
-                    let dim_id_vec: SmallVec<[DimId; 4]> = dim_ids[..n].iter().copied().collect();
-                    let view = RuntimeView::for_temp(*temp_id, dims, dim_id_vec);
-                    view_stack.push(view);
-                }
-
                 Opcode::PushStaticView { view_id } => {
                     let static_view = &context.static_views[*view_id as usize];
                     view_stack.push(static_view.to_runtime_view(module_off as u32));
@@ -2613,11 +2554,6 @@ impl Vm {
                     view_stack.push(view);
                 }
 
-                Opcode::ViewSubscriptConst { dim_idx, index } => {
-                    let view = view_stack.last_mut().unwrap();
-                    view.apply_single_subscript(*dim_idx as usize, *index);
-                }
-
                 Opcode::ViewSubscriptDynamic { dim_idx } => {
                     // XMILE uses 1-based indexing; validate bounds and convert to 0-based
                     let index_1based = stack.pop().floor() as u16;
@@ -2625,15 +2561,6 @@ impl Vm {
                     // apply_single_subscript_checked validates bounds and sets is_valid=false
                     // if out of bounds, allowing subsequent reads to return NaN
                     view.apply_single_subscript_checked(*dim_idx as usize, index_1based);
-                }
-
-                Opcode::ViewRange {
-                    dim_idx,
-                    start,
-                    end,
-                } => {
-                    let view = view_stack.last_mut().unwrap();
-                    view.apply_range(*dim_idx as usize, *start, *end);
                 }
 
                 Opcode::ViewRangeDynamic { dim_idx } => {
@@ -2645,37 +2572,8 @@ impl Vm {
                     view.apply_range_checked(*dim_idx as usize, start_1based, end_1based);
                 }
 
-                Opcode::ViewStarRange {
-                    dim_idx,
-                    subdim_relation_id,
-                } => {
-                    let rel = &context.subdim_relations[*subdim_relation_id as usize];
-                    let view = view_stack.last_mut().unwrap();
-                    // Use apply_sparse_with_dim_id to update the dim_id to the child
-                    // (subdimension) so broadcasting matches correctly
-                    view.apply_sparse_with_dim_id(
-                        *dim_idx as usize,
-                        rel.parent_offsets.clone(),
-                        rel.child_dim_id,
-                    );
-                }
-
-                Opcode::ViewWildcard { dim_idx: _ } => {
-                    // Wildcard is a no-op - dimension stays as-is
-                }
-
-                Opcode::ViewTranspose {} => {
-                    let view = view_stack.last_mut().unwrap();
-                    view.transpose();
-                }
-
                 Opcode::PopView {} => {
                     view_stack.pop();
-                }
-
-                Opcode::DupView {} => {
-                    let top = view_stack.last().unwrap().clone();
-                    view_stack.push(top);
                 }
 
                 // =========================================================
@@ -2687,13 +2585,6 @@ impl Vm {
                     stack.push(value);
                 }
 
-                Opcode::LoadTempDynamic { temp_id } => {
-                    let index = stack.pop().floor() as usize;
-                    let temp_off = context.temp_offsets[*temp_id as usize];
-                    let value = temp_storage[temp_off + index];
-                    stack.push(value);
-                }
-
                 // =========================================================
                 // ITERATION
                 // =========================================================
@@ -2701,29 +2592,11 @@ impl Vm {
                     write_temp_id,
                     has_write_temp,
                 } => {
-                    let view = view_stack.last().unwrap();
-                    let size = view.size();
-
-                    // Pre-compute flat offsets for iteration. A dense linear
-                    // run (contiguous, or an offset slice like `arr[2, *]`)
-                    // needs no precompute: LoadIterElement's direct path
-                    // computes `view.offset + current`, which is exactly
-                    // `dense_linear_start() + current`.
-                    let flat_offsets = if view.dense_linear_start().is_some() {
-                        None
-                    } else {
-                        // Need to pre-compute all flat offsets
-                        let mut offsets = Vec::with_capacity(size);
-                        let dims = &view.dims;
-                        let n_dims = dims.len();
-                        let mut indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; n_dims];
-
-                        for _ in 0..size {
-                            offsets.push(view.flat_offset(&indices));
-                            increment_indices(&mut indices, dims);
-                        }
-                        Some(offsets)
-                    };
+                    // The iteration view gives the loop its element count; the
+                    // body's element reads (`LoadIterViewAt`) address their
+                    // own source views by the iteration index, and its writes
+                    // (`StoreIterElement`) land in the dense write temp.
+                    let size = view_stack.last().unwrap().size();
 
                     iter_stack.push(IterState {
                         view_stack_idx: view_stack.len() - 1,
@@ -2734,170 +2607,23 @@ impl Vm {
                         },
                         current: 0,
                         size,
-                        flat_offsets,
                     });
                 }
 
-                Opcode::LoadIterElement {} => {
-                    let iter_state = iter_stack.last().unwrap();
-                    let view = &view_stack[iter_state.view_stack_idx];
-
-                    // Return NaN for invalid views (e.g., out-of-bounds subscript)
-                    if !view.is_valid {
-                        stack.push(f64::NAN);
-                    } else {
-                        let flat_off = if let Some(ref offsets) = iter_state.flat_offsets {
-                            offsets[iter_state.current]
-                        } else {
-                            // Dense linear run: flat offset = dense_linear_start()
-                            // + current, and dense_linear_start() == view.offset.
-                            view.offset as usize + iter_state.current
-                        };
-
-                        let value = Self::read_view_element(
-                            view,
-                            flat_off,
-                            regions!(),
-                            temp_storage,
-                            context,
-                        );
-                        stack.push(value);
-                    }
-                }
-
-                Opcode::LoadIterTempElement { temp_id } => {
-                    let iter_state = iter_stack.last().unwrap();
-                    let temp_off = context.temp_offsets[*temp_id as usize];
-                    let value = temp_storage[temp_off + iter_state.current];
-                    stack.push(value);
-                }
-
-                Opcode::LoadIterViewTop {} => {
-                    // Load from the view on TOP of view_stack (not iter_state's view)
-                    // using the current iteration index from iter_state.
-                    // This allows loading from multiple different source arrays in one loop.
-                    //
-                    // Supports broadcasting: if source has fewer dimensions than iteration,
-                    // uses dim_ids to match dimensions and broadcasts along missing axes.
-                    //
-                    // For indexed dimensions of the same size but different dim_ids,
-                    // uses positional matching as a fallback.
-                    //
-                    // Returns NaN for out-of-bounds access (when source is smaller than iteration).
-                    let iter_state = iter_stack.last().unwrap();
-                    let source_view = view_stack.last().unwrap();
-
-                    if !source_view.is_valid {
-                        stack.push(f64::NAN);
-                    } else {
-                        // Get the iteration view (output dimensions)
-                        let iter_view = &view_stack[iter_state.view_stack_idx];
-
-                        // Fast path: if dimensions match exactly, use simple offset calculation
-                        let result = if source_view.same_shape(iter_view) {
-                            // Bounds check: if source is smaller than iteration, return NaN
-                            if iter_state.current >= source_view.size() {
-                                None
-                            } else {
-                                Some(source_view.offset_for_iter_index(iter_state.current))
-                            }
-                        } else {
-                            // Broadcasting path: source has different dimensions
-                            // 1. Decompose iteration index into multi-dimensional indices
-                            let iter_dims = &iter_view.dims;
-                            let mut iter_indices: SmallVec<[u16; 4]> = SmallVec::new();
-                            let mut remaining = iter_state.current;
-
-                            for &dim in iter_dims.iter().rev() {
-                                iter_indices.push((remaining % dim as usize) as u16);
-                                remaining /= dim as usize;
-                            }
-                            iter_indices.reverse();
-
-                            // 2. Pre-compute which dimensions are indexed
-                            let source_is_indexed: SmallVec<[bool; 4]> = source_view
-                                .dim_ids
-                                .iter()
-                                .map(|&dim_id| {
-                                    context
-                                        .dimensions
-                                        .get(dim_id as usize)
-                                        .is_some_and(|d| d.is_indexed)
-                                })
-                                .collect();
-                            let iter_is_indexed: SmallVec<[bool; 4]> = iter_view
-                                .dim_ids
-                                .iter()
-                                .map(|&dim_id| {
-                                    context
-                                        .dimensions
-                                        .get(dim_id as usize)
-                                        .is_some_and(|d| d.is_indexed)
-                                })
-                                .collect();
-
-                            // 3. Use shared two-pass dimension matching algorithm
-                            let source_to_iter = match_dimensions_two_pass(
-                                &source_view.dim_ids,
-                                &source_view.dims,
-                                &source_is_indexed,
-                                &iter_view.dim_ids,
-                                &iter_view.dims,
-                                &iter_is_indexed,
-                            );
-
-                            // 4. Build source indices from mapping
-                            let mut source_indices: SmallVec<[u16; 4]> =
-                                SmallVec::with_capacity(source_view.dims.len());
-                            let mut out_of_bounds = false;
-
-                            for (src_dim_pos, mapped_iter_pos) in source_to_iter.iter().enumerate()
-                            {
-                                if let Some(iter_pos) = mapped_iter_pos {
-                                    let idx = iter_indices[*iter_pos];
-                                    // Bounds check for this dimension
-                                    if idx >= source_view.dims[src_dim_pos] {
-                                        out_of_bounds = true;
-                                        break;
-                                    }
-                                    source_indices.push(idx);
-                                } else {
-                                    // No matching dimension found - this is a compiler bug
-                                    // or dimension mismatch. Return NaN.
-                                    out_of_bounds = true;
-                                    break;
-                                }
-                            }
-
-                            if out_of_bounds {
-                                None
-                            } else {
-                                // 5. Compute flat offset using source view
-                                Some(source_view.flat_offset(&source_indices))
-                            }
-                        };
-
-                        if let Some(flat_off) = result {
-                            let value = Self::read_view_element(
-                                source_view,
-                                flat_off,
-                                regions!(),
-                                temp_storage,
-                                context,
-                            );
-                            stack.push(value);
-                        } else {
-                            // Out of bounds or no matching dimension - return NaN
-                            stack.push(f64::NAN);
-                        }
-                    }
-                }
-
                 Opcode::LoadIterViewAt { offset } => {
-                    // Like LoadIterViewTop but accesses a view at a specific stack offset.
-                    // offset=1 means top of stack, offset=2 means second from top, etc.
-                    // This allows views to be pushed before the loop and accessed inside
-                    // without repeated push/pop operations per iteration.
+                    // Read the view at a stack offset (1 = top, 2 = second from
+                    // top, ...) at the current iteration index. The source views
+                    // are pushed once before the loop and read inside it without
+                    // per-iteration push/pop.
+                    //
+                    // Supports broadcasting: if the source has fewer dimensions
+                    // than the iteration, its axes are matched to the iteration's
+                    // by dim_id and it is broadcast along the missing axes. For
+                    // indexed dimensions of the same size but different dim_ids,
+                    // positional matching is the fallback.
+                    //
+                    // Returns NaN for out-of-bounds access (when the source is
+                    // smaller than the iteration) and for an unmatched dimension.
                     let iter_state = iter_stack.last().unwrap();
                     let source_view_idx = view_stack.len() - *offset as usize;
                     let source_view = &view_stack[source_view_idx];
@@ -3139,137 +2865,6 @@ impl Vm {
                 Opcode::ArraySize {} => {
                     let view = view_stack.last().unwrap();
                     stack.push(view.size() as f64);
-                }
-
-                // =========================================================
-                // BROADCASTING ITERATION
-                // =========================================================
-                Opcode::BeginBroadcastIter {
-                    n_sources,
-                    dest_temp_id,
-                } => {
-                    let n = *n_sources as usize;
-
-                    // Collect source views and their view stack indices
-                    let source_indices: SmallVec<[usize; 4]> =
-                        (view_stack.len() - n..view_stack.len()).collect();
-
-                    // Compute result dimensions by unioning all source dim_ids
-                    // We iterate over all dimensions from all sources and build a map
-                    let mut result_dim_ids: SmallVec<[DimId; 4]> = SmallVec::new();
-                    let mut result_dims: SmallVec<[u16; 4]> = SmallVec::new();
-
-                    for &idx in &source_indices {
-                        let view = &view_stack[idx];
-                        for (d, &dim_id) in view.dim_ids.iter().enumerate() {
-                            if !result_dim_ids.contains(&dim_id) {
-                                result_dim_ids.push(dim_id);
-                                result_dims.push(view.dims[d]);
-                            }
-                        }
-                    }
-
-                    // For each source, compute dim_map: result dim index -> source dim index (or -1)
-                    let mut sources: SmallVec<[BroadcastSourceInfo; 2]> = SmallVec::new();
-                    for &idx in &source_indices {
-                        let view = &view_stack[idx];
-                        let mut dim_map: SmallVec<[i8; 4]> = SmallVec::new();
-
-                        for &result_dim_id in &result_dim_ids {
-                            // Find this dim_id in the source
-                            if let Some(pos) =
-                                view.dim_ids.iter().position(|&id| id == result_dim_id)
-                            {
-                                dim_map.push(pos as i8);
-                            } else {
-                                dim_map.push(-1); // Broadcast: source doesn't have this dim
-                            }
-                        }
-
-                        sources.push(BroadcastSourceInfo {
-                            view_stack_idx: idx,
-                            dim_map,
-                        });
-                    }
-
-                    // Compute total size
-                    let size = result_dims.iter().map(|&d| d as usize).product();
-
-                    broadcast_stack.push(BroadcastState {
-                        sources,
-                        dest_temp_id: *dest_temp_id,
-                        result_dims,
-                        result_indices: smallvec::smallvec![0; result_dim_ids.len()],
-                        current: 0,
-                        size,
-                    });
-                }
-
-                Opcode::LoadBroadcastElement { source_idx } => {
-                    let bc_state = broadcast_stack.last().unwrap();
-                    let source_info = &bc_state.sources[*source_idx as usize];
-                    let view = &view_stack[source_info.view_stack_idx];
-
-                    // Return NaN for invalid views
-                    if !view.is_valid {
-                        stack.push(f64::NAN);
-                    } else {
-                        // Map result indices to source indices
-                        let mut source_indices: SmallVec<[u16; 4]> = SmallVec::new();
-                        for (result_dim, &src_dim) in source_info.dim_map.iter().enumerate() {
-                            if src_dim >= 0 {
-                                // This result dimension maps to source dimension src_dim
-                                // But we need to put it in the source's dimension order
-                                source_indices.push(bc_state.result_indices[result_dim]);
-                            }
-                        }
-
-                        // Reorder source_indices according to source's original dim order
-                        let mut ordered_source_indices: SmallVec<[u16; 4]> =
-                            smallvec::smallvec![0; view.dims.len()];
-                        for (result_dim, &src_dim) in source_info.dim_map.iter().enumerate() {
-                            if src_dim >= 0 {
-                                ordered_source_indices[src_dim as usize] =
-                                    bc_state.result_indices[result_dim];
-                            }
-                        }
-
-                        let flat_off = view.flat_offset(&ordered_source_indices);
-
-                        let value = Self::read_view_element(
-                            view,
-                            flat_off,
-                            regions!(),
-                            temp_storage,
-                            context,
-                        );
-                        stack.push(value);
-                    }
-                }
-
-                Opcode::StoreBroadcastElement {} => {
-                    let value = stack.pop();
-                    let bc_state = broadcast_stack.last().unwrap();
-                    let temp_off = context.temp_offsets[bc_state.dest_temp_id as usize];
-                    temp_storage[temp_off + bc_state.current] = value;
-                }
-
-                Opcode::NextBroadcastOrJump { jump_back } => {
-                    let bc_state = broadcast_stack.last_mut().unwrap();
-                    bc_state.current += 1;
-
-                    if bc_state.current < bc_state.size {
-                        increment_indices(&mut bc_state.result_indices, &bc_state.result_dims);
-
-                        // Jump backward to loop start
-                        pc = (pc as isize + *jump_back as isize) as usize;
-                        continue; // Skip pc increment
-                    }
-                    // else: iteration done, continue to next opcode
-                }
-
-                Opcode::EndBroadcastIter {} => {
-                    broadcast_stack.pop();
                 }
 
                 // =========================================================
@@ -5248,9 +4843,7 @@ mod reduce_view_tests {
         ByteCodeContext {
             graphical_functions: vec![],
             modules: vec![],
-            arrays: vec![],
             dimensions: vec![],
-            subdim_relations: vec![],
             names: vec![],
             static_views: vec![],
             temp_offsets: vec![],
@@ -5317,14 +4910,15 @@ mod reduce_view_tests {
     // must keep taking the general per-element path. --
     #[test]
     fn reduce_view_inner_range_slice() {
-        // A 3x4 array at base 0; view = arr[*, 1:3) -> columns 1,2 of each row.
+        // A 3x4 array at base 0; view = arr[*, 2:3] (1-based inclusive, the
+        // form `ViewRangeDynamic` applies) -> columns 1,2 of each row.
         let curr: Vec<f64> = (0..12).map(|i| i as f64).collect();
         let temp: [f64; 0] = [];
         let ctx = empty_context();
         let dims: SmallVec<[u16; 4]> = smallvec::smallvec![3, 4];
         let dim_ids: SmallVec<[u16; 4]> = smallvec::smallvec![0, 1];
         let mut view = RuntimeView::for_var(0, dims, dim_ids);
-        view.apply_range(1, 1, 3);
+        assert!(view.apply_range_checked(1, 2, 3));
         assert_eq!(view.dense_linear_start(), None);
 
         // elements: 1,2, 5,6, 9,10

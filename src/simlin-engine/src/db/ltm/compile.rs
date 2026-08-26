@@ -1679,7 +1679,6 @@ pub(crate) fn compile_ltm_equation_fragment(
         &var_sizes,
         &tables,
         converted_dims,
-        dim_context,
     );
     let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
         compile_phase_to_per_var_bytecodes(&base_ctx, exprs)
@@ -2771,7 +2770,6 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         &var_sizes,
         &tables,
         converted_dims,
-        dim_context,
     );
     let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
         compile_phase_to_per_var_bytecodes(&base_ctx, exprs)

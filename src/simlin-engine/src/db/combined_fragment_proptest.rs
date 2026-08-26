@@ -290,15 +290,11 @@ fn temp_uses(code: &[SymbolicOpcode], views: &[SymbolicStaticView]) -> Vec<(usiz
         .enumerate()
         .filter_map(|(pc, op)| {
             let id: u32 = match op {
-                SymbolicOpcode::PushTempView { temp_id, .. }
-                | SymbolicOpcode::LoadTempConst { temp_id, .. }
-                | SymbolicOpcode::LoadTempDynamic { temp_id }
-                | SymbolicOpcode::LoadIterTempElement { temp_id } => *temp_id as u32,
+                SymbolicOpcode::LoadTempConst { temp_id, .. } => *temp_id as u32,
                 SymbolicOpcode::BeginIter {
                     write_temp_id,
                     has_write_temp: true,
                 } => *write_temp_id as u32,
-                SymbolicOpcode::BeginBroadcastIter { dest_temp_id, .. } => *dest_temp_id as u32,
                 SymbolicOpcode::VectorElmMap { write_temp_id, .. }
                 | SymbolicOpcode::VectorSortOrder { write_temp_id }
                 | SymbolicOpcode::Rank { write_temp_id }

@@ -154,37 +154,14 @@ pub(crate) enum SymbolicOpcode {
     },
 
     // === ARRAY VIEW STACK ===
-    // ── Opcodes codegen does not emit ────────────────────────────────────
     //
-    // The sixteen variants carrying `#[allow(dead_code)]` in this enum are ones
-    // `Compiler` never constructs, which -- now that codegen emits symbolic
-    // opcodes directly -- the dead-code lint proves rather than merely
-    // suggests: `Compiler` is the ONLY producer of a `SymbolicOpcode`, and
-    // `resolve_opcode` is the only producer of an `Opcode`, so a symbolic
-    // variant nothing constructs is a program the compiler cannot express.
-    // They are the superseded halves of two schemes: incremental view-stack
-    // construction (`ViewSubscriptConst`/`ViewRange`/`ViewStarRange`/
-    // `ViewWildcard`/`ViewTranspose`/`DupView`/`PushTempView`/
-    // `LoadTempDynamic`/`LoadIter{Element,TempElement,ViewTop}`), which
-    // precomputed `PushStaticView` views replaced, and broadcast iteration
-    // (`*BroadcastIter*`/`*BroadcastElement`/`NextBroadcastOrJump`), which
-    // `BeginIter` replaced.
-    //
-    // They are NOT deleted here, deliberately. Each also has an `Opcode`
-    // twin with a VM execution arm and a wasm-backend lowering arm (~149
-    // sites plus their tests), so removing them is a change to the VM
-    // instruction set and the wasm parity harness -- a different subsystem,
-    // with a different risk profile, that would swamp this change's review
-    // surface. The broadcast family in particular reads as a half-landed
-    // feature, so retiring it is a product call rather than a cleanup.
-    // Sequenced as its own change; the evidence it needs is exactly this
-    // lint, so it does not need the empirical probe GH #964's earlier
-    // opcode deletions did.
-    #[allow(dead_code)]
-    PushTempView {
-        temp_id: TempId,
-        dim_list_id: DimListId,
-    },
+    // Every variant in this enum is one `Compiler` constructs. `Compiler`
+    // (through its `SymbolicByteCodeBuilder`, which builds the fused
+    // superinstructions) is the ONLY producer of a `SymbolicOpcode` and
+    // `resolve_opcode` the only producer of an `Opcode`, so a symbolic variant
+    // nothing constructs is a program the compiler cannot express -- and the
+    // dead-code lint, which clippy denies, is what keeps such a variant out:
+    // never `allow` it here.
     PushStaticView {
         view_id: ViewId,
     },
@@ -192,46 +169,18 @@ pub(crate) enum SymbolicOpcode {
         var: SymVarRef,
         dim_list_id: DimListId,
     },
-    #[allow(dead_code)]
-    ViewSubscriptConst {
-        dim_idx: u8,
-        index: u16,
-    },
     ViewSubscriptDynamic {
         dim_idx: u8,
-    },
-    #[allow(dead_code)]
-    ViewRange {
-        dim_idx: u8,
-        start: u16,
-        end: u16,
     },
     ViewRangeDynamic {
         dim_idx: u8,
     },
-    #[allow(dead_code)]
-    ViewStarRange {
-        dim_idx: u8,
-        subdim_relation_id: u16,
-    },
-    #[allow(dead_code)]
-    ViewWildcard {
-        dim_idx: u8,
-    },
-    #[allow(dead_code)]
-    ViewTranspose {},
     PopView {},
-    #[allow(dead_code)]
-    DupView {},
 
     // === TEMP ARRAY ACCESS (unchanged) ===
     LoadTempConst {
         temp_id: TempId,
         index: u16,
-    },
-    #[allow(dead_code)]
-    LoadTempDynamic {
-        temp_id: TempId,
     },
 
     // === ITERATION (unchanged) ===
@@ -239,14 +188,6 @@ pub(crate) enum SymbolicOpcode {
         write_temp_id: TempId,
         has_write_temp: bool,
     },
-    #[allow(dead_code)]
-    LoadIterElement {},
-    #[allow(dead_code)]
-    LoadIterTempElement {
-        temp_id: TempId,
-    },
-    #[allow(dead_code)]
-    LoadIterViewTop {},
     LoadIterViewAt {
         offset: u8,
     },
@@ -291,25 +232,6 @@ pub(crate) enum SymbolicOpcode {
     AllocateByPriority {
         write_temp_id: TempId,
     },
-
-    // === BROADCASTING ITERATION (unchanged) ===
-    #[allow(dead_code)]
-    BeginBroadcastIter {
-        n_sources: u8,
-        dest_temp_id: TempId,
-    },
-    #[allow(dead_code)]
-    LoadBroadcastElement {
-        source_idx: u8,
-    },
-    #[allow(dead_code)]
-    StoreBroadcastElement {},
-    #[allow(dead_code)]
-    NextBroadcastOrJump {
-        jump_back: PcOffset,
-    },
-    #[allow(dead_code)]
-    EndBroadcastIter {},
 }
 
 /// Symbolic version of `ByteCode`. Contains the literal pool (unchanged)
@@ -390,9 +312,7 @@ pub(crate) struct SymbolicCompiledModule {
     pub module_decls: Vec<SymbolicModuleDecl>,
     pub static_views: Vec<SymbolicStaticView>,
     // Unchanged context fields
-    pub arrays: Vec<crate::bytecode::ArrayDefinition>,
     pub dimensions: Vec<crate::bytecode::DimensionInfo>,
-    pub subdim_relations: Vec<crate::bytecode::SubdimensionRelation>,
     pub names: Vec<String>,
     pub temp_offsets: Vec<usize>,
     pub temp_total_size: usize,
@@ -582,8 +502,7 @@ impl SymbolicOpcode {
     /// segment.
     pub(crate) fn jump_offset(&self) -> Option<PcOffset> {
         match self {
-            SymbolicOpcode::NextIterOrJump { jump_back }
-            | SymbolicOpcode::NextBroadcastOrJump { jump_back } => Some(*jump_back),
+            SymbolicOpcode::NextIterOrJump { jump_back } => Some(*jump_back),
             _ => None,
         }
     }
@@ -591,8 +510,7 @@ impl SymbolicOpcode {
     /// Mutably borrow the jump offset, if this opcode is a backward jump.
     fn jump_offset_mut(&mut self) -> Option<&mut PcOffset> {
         match self {
-            SymbolicOpcode::NextIterOrJump { jump_back }
-            | SymbolicOpcode::NextBroadcastOrJump { jump_back } => Some(jump_back),
+            SymbolicOpcode::NextIterOrJump { jump_back } => Some(jump_back),
             _ => None,
         }
     }
@@ -979,53 +897,20 @@ pub(crate) fn resolve_opcode(
             elem: *elem,
             mode: *mode,
         }),
-        SymbolicOpcode::PushTempView {
-            temp_id,
-            dim_list_id,
-        } => Ok(Opcode::PushTempView {
-            temp_id: *temp_id,
-            dim_list_id: *dim_list_id,
-        }),
         SymbolicOpcode::PushStaticView { view_id } => {
             Ok(Opcode::PushStaticView { view_id: *view_id })
         }
-        SymbolicOpcode::ViewSubscriptConst { dim_idx, index } => Ok(Opcode::ViewSubscriptConst {
-            dim_idx: *dim_idx,
-            index: *index,
-        }),
         SymbolicOpcode::ViewSubscriptDynamic { dim_idx } => {
             Ok(Opcode::ViewSubscriptDynamic { dim_idx: *dim_idx })
         }
-        SymbolicOpcode::ViewRange {
-            dim_idx,
-            start,
-            end,
-        } => Ok(Opcode::ViewRange {
-            dim_idx: *dim_idx,
-            start: *start,
-            end: *end,
-        }),
         SymbolicOpcode::ViewRangeDynamic { dim_idx } => {
             Ok(Opcode::ViewRangeDynamic { dim_idx: *dim_idx })
         }
-        SymbolicOpcode::ViewStarRange {
-            dim_idx,
-            subdim_relation_id,
-        } => Ok(Opcode::ViewStarRange {
-            dim_idx: *dim_idx,
-            subdim_relation_id: *subdim_relation_id,
-        }),
-        SymbolicOpcode::ViewWildcard { dim_idx } => Ok(Opcode::ViewWildcard { dim_idx: *dim_idx }),
-        SymbolicOpcode::ViewTranspose {} => Ok(Opcode::ViewTranspose {}),
         SymbolicOpcode::PopView {} => Ok(Opcode::PopView {}),
-        SymbolicOpcode::DupView {} => Ok(Opcode::DupView {}),
         SymbolicOpcode::LoadTempConst { temp_id, index } => Ok(Opcode::LoadTempConst {
             temp_id: *temp_id,
             index: *index,
         }),
-        SymbolicOpcode::LoadTempDynamic { temp_id } => {
-            Ok(Opcode::LoadTempDynamic { temp_id: *temp_id })
-        }
         SymbolicOpcode::BeginIter {
             write_temp_id,
             has_write_temp,
@@ -1033,11 +918,6 @@ pub(crate) fn resolve_opcode(
             write_temp_id: *write_temp_id,
             has_write_temp: *has_write_temp,
         }),
-        SymbolicOpcode::LoadIterElement {} => Ok(Opcode::LoadIterElement {}),
-        SymbolicOpcode::LoadIterTempElement { temp_id } => {
-            Ok(Opcode::LoadIterTempElement { temp_id: *temp_id })
-        }
-        SymbolicOpcode::LoadIterViewTop {} => Ok(Opcode::LoadIterViewTop {}),
         SymbolicOpcode::LoadIterViewAt { offset } => Ok(Opcode::LoadIterViewAt { offset: *offset }),
         SymbolicOpcode::StoreIterElement {} => Ok(Opcode::StoreIterElement {}),
         SymbolicOpcode::NextIterOrJump { jump_back } => Ok(Opcode::NextIterOrJump {
@@ -1110,21 +990,6 @@ pub(crate) fn resolve_opcode(
         SymbolicOpcode::AllocateByPriority { write_temp_id } => Ok(Opcode::AllocateByPriority {
             write_temp_id: *write_temp_id,
         }),
-        SymbolicOpcode::BeginBroadcastIter {
-            n_sources,
-            dest_temp_id,
-        } => Ok(Opcode::BeginBroadcastIter {
-            n_sources: *n_sources,
-            dest_temp_id: *dest_temp_id,
-        }),
-        SymbolicOpcode::LoadBroadcastElement { source_idx } => Ok(Opcode::LoadBroadcastElement {
-            source_idx: *source_idx,
-        }),
-        SymbolicOpcode::StoreBroadcastElement {} => Ok(Opcode::StoreBroadcastElement {}),
-        SymbolicOpcode::NextBroadcastOrJump { jump_back } => Ok(Opcode::NextBroadcastOrJump {
-            jump_back: *jump_back,
-        }),
-        SymbolicOpcode::EndBroadcastIter {} => Ok(Opcode::EndBroadcastIter {}),
     }
 }
 
@@ -1296,9 +1161,7 @@ pub(crate) fn resolve_module(
         context: Arc::new(ByteCodeContext {
             graphical_functions: sym.graphical_functions.clone(),
             modules: module_decls,
-            arrays: sym.arrays.clone(),
             dimensions: sym.dimensions.clone(),
-            subdim_relations: sym.subdim_relations.clone(),
             names: sym.names.clone(),
             static_views,
             temp_offsets: sym.temp_offsets.clone(),
@@ -1884,24 +1747,13 @@ impl SymbolicOpcode {
             | SymbolicOpcode::AssignConstCurr { .. }
             | SymbolicOpcode::BinOpAssignCurr { .. }
             | SymbolicOpcode::BinOpAssignNext { .. }
-            | SymbolicOpcode::PushTempView { .. }
             | SymbolicOpcode::PushStaticView { .. }
             | SymbolicOpcode::PushVarViewDirect { .. }
-            | SymbolicOpcode::ViewSubscriptConst { .. }
             | SymbolicOpcode::ViewSubscriptDynamic { .. }
-            | SymbolicOpcode::ViewRange { .. }
             | SymbolicOpcode::ViewRangeDynamic { .. }
-            | SymbolicOpcode::ViewStarRange { .. }
-            | SymbolicOpcode::ViewWildcard { .. }
-            | SymbolicOpcode::ViewTranspose { .. }
             | SymbolicOpcode::PopView { .. }
-            | SymbolicOpcode::DupView { .. }
             | SymbolicOpcode::LoadTempConst { .. }
-            | SymbolicOpcode::LoadTempDynamic { .. }
             | SymbolicOpcode::BeginIter { .. }
-            | SymbolicOpcode::LoadIterElement { .. }
-            | SymbolicOpcode::LoadIterTempElement { .. }
-            | SymbolicOpcode::LoadIterViewTop { .. }
             | SymbolicOpcode::LoadIterViewAt { .. }
             | SymbolicOpcode::StoreIterElement { .. }
             | SymbolicOpcode::NextIterOrJump { .. }
@@ -1917,12 +1769,7 @@ impl SymbolicOpcode {
             | SymbolicOpcode::VectorSortOrder { .. }
             | SymbolicOpcode::Rank { .. }
             | SymbolicOpcode::AllocateAvailable { .. }
-            | SymbolicOpcode::AllocateByPriority { .. }
-            | SymbolicOpcode::BeginBroadcastIter { .. }
-            | SymbolicOpcode::LoadBroadcastElement { .. }
-            | SymbolicOpcode::StoreBroadcastElement { .. }
-            | SymbolicOpcode::NextBroadcastOrJump { .. }
-            | SymbolicOpcode::EndBroadcastIter { .. } => None,
+            | SymbolicOpcode::AllocateByPriority { .. } => None,
         }
     }
 }
@@ -2658,13 +2505,6 @@ pub(crate) fn renumber_opcode(
         SymbolicOpcode::PushStaticView { view_id } => SymbolicOpcode::PushStaticView {
             view_id: checked_add_u16(*view_id, view_off, "ViewId")?,
         },
-        SymbolicOpcode::PushTempView {
-            temp_id,
-            dim_list_id,
-        } => SymbolicOpcode::PushTempView {
-            temp_id: checked_add_u8(*temp_id, temp_off_u8, "TempId")?,
-            dim_list_id: checked_add_u16(*dim_list_id, dl_off, "DimListId")?,
-        },
         SymbolicOpcode::PushVarViewDirect { var, dim_list_id } => {
             SymbolicOpcode::PushVarViewDirect {
                 var: var.clone(),
@@ -2675,25 +2515,12 @@ pub(crate) fn renumber_opcode(
             temp_id: checked_add_u8(*temp_id, temp_off_u8, "TempId")?,
             index: *index,
         },
-        SymbolicOpcode::LoadTempDynamic { temp_id } => SymbolicOpcode::LoadTempDynamic {
-            temp_id: checked_add_u8(*temp_id, temp_off_u8, "TempId")?,
-        },
         SymbolicOpcode::BeginIter {
             write_temp_id,
             has_write_temp,
         } => SymbolicOpcode::BeginIter {
             write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
             has_write_temp: *has_write_temp,
-        },
-        SymbolicOpcode::LoadIterTempElement { temp_id } => SymbolicOpcode::LoadIterTempElement {
-            temp_id: checked_add_u8(*temp_id, temp_off_u8, "TempId")?,
-        },
-        SymbolicOpcode::BeginBroadcastIter {
-            n_sources,
-            dest_temp_id,
-        } => SymbolicOpcode::BeginBroadcastIter {
-            n_sources: *n_sources,
-            dest_temp_id: checked_add_u8(*dest_temp_id, temp_off_u8, "TempId")?,
         },
         SymbolicOpcode::VectorElmMap {
             write_temp_id,
@@ -3420,9 +3247,7 @@ mod tests {
             graphical_functions: vec![],
             module_decls: vec![],
             static_views: vec![],
-            arrays: vec![],
             dimensions: vec![],
-            subdim_relations: vec![],
             names: vec![],
             temp_offsets: vec![],
             temp_total_size: 0,
@@ -3847,7 +3672,10 @@ mod tests {
 
     #[test]
     fn test_renumber_opcode_temp_offset_overflow() {
-        let op = SymbolicOpcode::LoadTempDynamic { temp_id: 0 };
+        let op = SymbolicOpcode::LoadTempConst {
+            temp_id: 0,
+            index: 0,
+        };
         let err = renumber_opcode(&op, 0, &[], 0, 0, 300, 0).unwrap_err();
         assert!(
             err.contains("TempId capacity"),
@@ -3901,7 +3729,10 @@ mod tests {
     #[test]
     fn test_renumber_opcode_at_boundary() {
         // u8::MAX = 255, so temp_off=255 should succeed
-        let op = SymbolicOpcode::LoadTempDynamic { temp_id: 0 };
+        let op = SymbolicOpcode::LoadTempConst {
+            temp_id: 0,
+            index: 0,
+        };
         assert!(renumber_opcode(&op, 0, &[], 0, 0, 255, 0).is_ok());
 
         // A GF base remapped to 255 (the last valid GraphicalFunctionId)
@@ -4596,7 +4427,10 @@ mod tests {
     #[test]
     fn test_renumber_opcode_u8_addition_overflow() {
         // temp_off=200 fits in u8, but base temp_id=100 + 200 = 300 overflows u8
-        let op = SymbolicOpcode::LoadTempDynamic { temp_id: 100 };
+        let op = SymbolicOpcode::LoadTempConst {
+            temp_id: 100,
+            index: 0,
+        };
         let err = renumber_opcode(&op, 0, &[], 0, 0, 200, 0).unwrap_err();
         assert!(
             err.contains("overflow"),

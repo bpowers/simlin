@@ -824,22 +824,13 @@ fn emitter_refuses_a_non_dense_temp_id() {
     use crate::ast::{ArrayView, Loc};
     use crate::compiler::VarRef;
     use crate::db::assemble::{compile_phase_to_per_var_bytecodes_reporting, fragment_emit_ctx};
-    use crate::dimensions::DimensionsContext;
 
     let model_name = Ident::new("main");
     let inputs: BTreeSet<Ident<Canonical>> = BTreeSet::new();
     let var_sizes = crate::compiler::VarSizes::new();
     let tables = std::collections::HashMap::new();
     let dimensions: Vec<crate::dimensions::Dimension> = Vec::new();
-    let dimensions_ctx = DimensionsContext::default();
-    let base = fragment_emit_ctx(
-        &model_name,
-        &inputs,
-        &var_sizes,
-        &tables,
-        &dimensions,
-        &dimensions_ctx,
-    );
+    let base = fragment_emit_ctx(&model_name, &inputs, &var_sizes, &tables, &dimensions);
     let view = ArrayView::contiguous(vec![2]);
     // Temp 1 is written and read; temp 0 is never written.
     let exprs = vec![

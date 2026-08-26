@@ -105,12 +105,11 @@ Indexed dimensions (e.g., numeric dimensions like `Periods(5)`) can use position
 - All expression types: `StaticSubscript`, `TempArray`, `TempArrayElement`, `AssignTemp`
 
 #### Bytecode VM
-- View stack operations: `PushStaticView`, `PushTempView`, `PushVarViewDirect`
-- View manipulation: `ViewSubscriptConst/Dynamic`, `ViewRange/Dynamic`, `ViewStarRange`, `ViewWildcard`, `ViewTranspose`
-- Iteration: `BeginIter`, `LoadIterElement`, `StoreIterElement`, `NextIterOrJump`, `EndIter`
+- View stack operations: `PushStaticView` (a view whose constant subscripts, ranges, star ranges and transposes codegen baked into its geometry), `PushVarViewDirect` (the base for a dynamic subscript), `PopView`
+- Dynamic view manipulation: `ViewSubscriptDynamic`, `ViewRangeDynamic`
+- Iteration: `BeginIter`, `LoadIterViewAt` (broadcasting a lower-dimensional source by dimension id), `StoreIterElement`, `NextIterOrJump`, `EndIter`
 - Reductions: `ArraySum`, `ArrayMax`, `ArrayMin`, `ArrayMean`, `ArrayStddev`, `ArraySize`
-- Broadcasting: `BeginBroadcastIter`, `LoadBroadcastElement`, `StoreBroadcastElement`
-- Sparse iteration support via pre-computed flat offsets
+- Sparse (star-range) views iterate through their `RuntimeSparseMapping`
 
 #### Array Builtins
 - `SUM(array)` - Sum all elements

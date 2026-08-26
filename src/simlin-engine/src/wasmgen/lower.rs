@@ -263,7 +263,7 @@ pub(crate) struct EmitCtx<'a> {
     pub module_fn_index: &'a HashMap<(crate::vm::ModuleKey, StepPart), u32>,
     /// The module instance's `ByteCodeContext`, holding the compile-time array
     /// tables the view opcodes reference by index (`static_views`, `dim_lists`,
-    /// `dimensions`, `subdim_relations`, `temp_offsets`) *and* the `modules`
+    /// `dimensions`, `temp_offsets`) *and* the `modules`
     /// declaration table the `EvalModule` arm resolves child keys from. This is
     /// the *per-instance* context (Phase 7): each instance's functions are emitted
     /// with its own context, so an `EvalModule`'s `ctx.modules[id]` and the array
@@ -1074,8 +1074,8 @@ fn slot_byte_offset(chunk_base: u32, off: u16) -> u64 {
 }
 
 /// Emit-time analogue of the VM's per-`eval_bytecode` mutable state
-/// (`vm.rs:1277-1288`): the compile-time view stack, the iteration / broadcast
-/// contexts, and the condition-register stack pointer. Threaded through
+/// (`vm.rs:1277-1288`): the compile-time view stack, the iteration contexts,
+/// and the condition-register stack pointer. Threaded through
 /// [`emit_ops`] so an unrolled iteration body can be re-emitted at each
 /// compile-time index without re-deriving the view stack.
 struct EmitState {
@@ -1092,8 +1092,6 @@ struct EmitState {
     /// `current` field is the compile-time iteration index the unroller is
     /// emitting (Task 3).
     iter_stack: Vec<IterCtx>,
-    /// Active broadcast-iteration contexts (`BeginBroadcastIter`, Task 3).
-    broadcast_stack: Vec<BroadcastCtx>,
     /// The legacy scalar dynamic-subscript accumulator (`PushSubscriptIndex` /
     /// `LoadSubscript`, Task 4), mirroring the VM's `subscript_index` +
     /// `subscript_index_valid` (`vm.rs:1287-1288`). Cleared by each
@@ -1105,8 +1103,8 @@ struct EmitState {
     next_i32_local: u32,
     /// Cumulative count of unrolled element-emit "units" for the function being
     /// lowered, checked against [`MAX_UNROLL_UNITS`] (see [`EmitState::charge_unroll`]).
-    /// Every full unroll -- a reducer fold, a `BeginIter`/`BeginBroadcastIter`
-    /// body re-emission -- charges its iteration count here. Nested iterations
+    /// Every full unroll -- a reducer fold, a `BeginIter` body re-emission --
+    /// charges its iteration count here. Nested iterations
     /// multiply naturally: an inner site is reached once per outer iteration, so
     /// each inner charge already reflects the outer multiplier. When the running
     /// total would exceed the cap, lowering aborts with `Unsupported` (the caller
@@ -1116,12 +1114,12 @@ struct EmitState {
 }
 
 /// Upper bound on the cumulative number of unrolled element-emit "units" per
-/// wasm function (one reducer-fold element, or one `BeginIter`/`BeginBroadcastIter`
-/// body re-emission, is one unit).
+/// wasm function (one reducer-fold element, or one `BeginIter` body
+/// re-emission, is one unit).
 ///
 /// Every array reducer and iteration loop is fully unrolled at compile time
 /// (each element address becomes a wasm constant -- see [`emit_reduce_fold`] and
-/// the `BeginIter`/`BeginBroadcastIter` arms). Without a bound, a large arrayed
+/// the `BeginIter` arm). Without a bound, a large arrayed
 /// model -- especially nested iterations whose counts multiply -- could emit a
 /// function body exceeding what wasm engines accept (V8, for instance, caps a
 /// single function near ~7.6 MB of bytecode; the spec's 4 GiB ceiling is
@@ -1201,22 +1199,6 @@ struct IterCtx {
     current: usize,
 }
 
-/// One active broadcast-iteration context (`BeginBroadcastIter`, Task 3),
-/// mirroring the VM's `BroadcastState` (`vm.rs:68-81`) but with the result
-/// geometry + per-source dim maps resolved at compile time.
-struct BroadcastCtx {
-    /// Per source (deepest-first): the source view and its `dim_map` (one entry
-    /// per result dimension; `Some(src_dim)` or `None` for a broadcast axis).
-    sources: Vec<(ViewDesc, Vec<Option<usize>>)>,
-    /// Destination temp id for `StoreBroadcastElement`.
-    dest_temp_id: u8,
-    /// Result dimension sizes (the union of all sources' dims, first-encounter
-    /// order), used to decompose `current` into per-result-dim indices.
-    result_dims: Vec<u16>,
-    /// The compile-time result index currently being emitted.
-    current: usize,
-}
-
 /// Lower one opcode program. Value-producing opcodes leave their f64 result on
 /// the wasm operand stack; the assignment opcodes emit a store and leave the
 /// stack empty, exactly as the VM's stack-machine arms do. `Ret` is a no-op
@@ -1230,7 +1212,6 @@ pub(crate) fn emit_bytecode(
         cond_sp: 0,
         view_stack: Vec::new(),
         iter_stack: Vec::new(),
-        broadcast_stack: Vec::new(),
         subscript: SubscriptAccum::default(),
         next_i32_local: ctx.extra_i32_local_base,
         unroll_units: 0,
@@ -1483,27 +1464,13 @@ fn emit_ops(
                 })?;
                 state.view_stack.push(ViewDesc::from_static(view));
             }
-            // `PushTempView` builds a full contiguous view over a temp array
-            // (`vm.rs:1757`).
-            Opcode::PushTempView {
-                temp_id,
-                dim_list_id,
-            } => {
-                let (dims, dim_ids) = resolve_dim_list_dims(ctx, *dim_list_id)?;
-                state.view_stack.push(ViewDesc::contiguous(
-                    u32::from(*temp_id),
-                    ViewBase::Temp,
-                    dims,
-                    dim_ids,
-                ));
-            }
             // `PushVarViewDirect` builds a contiguous view from raw dim sizes
             // (dim_ids all 0), the base for a dynamic subscript. Its base is
             // module-relative -- the VM folds the runtime `module_off` in -- and
             // so is `PushStaticView`'s, whose `base_off` comes from the
             // fragment's own model layout (`StaticArrayView::to_runtime_view`
-            // adds the same addend). `PushTempView` is the only one that
-            // addresses `temp_storage` with no `module_off` at all.
+            // adds the same addend). A temp-backed static view is the only one
+            // that addresses `temp_storage` with no `module_off` at all.
             Opcode::PushVarViewDirect {
                 base_off,
                 dim_list_id,
@@ -1518,54 +1485,14 @@ fn emit_ops(
                 ));
             }
 
-            // ── View-stack transforms (Phase 5 Task 1) ────────────────────
-            Opcode::ViewSubscriptConst { dim_idx, index } => {
-                view_top_mut(&mut state.view_stack)?
-                    .apply_single_subscript(*dim_idx as usize, *index);
-            }
-            Opcode::ViewRange {
-                dim_idx,
-                start,
-                end,
-            } => {
-                view_top_mut(&mut state.view_stack)?.apply_range(*dim_idx as usize, *start, *end);
-            }
-            Opcode::ViewStarRange {
-                dim_idx,
-                subdim_relation_id,
-            } => {
-                let rel = ctx
-                    .ctx
-                    .subdim_relations
-                    .get(*subdim_relation_id as usize)
-                    .ok_or_else(|| {
-                        WasmGenError::Unsupported(format!(
-                            "wasmgen: ViewStarRange subdim_relation_id {subdim_relation_id} \
-                             out of range"
-                        ))
-                    })?;
-                let parent_offsets = rel.parent_offsets.to_vec();
-                let child_dim_id = rel.child_dim_id;
-                view_top_mut(&mut state.view_stack)?.apply_sparse(
-                    *dim_idx as usize,
-                    parent_offsets,
-                    child_dim_id,
-                );
-            }
-            // `ViewWildcard` is a no-op in the VM (`vm.rs:1839`): the dimension
-            // stays as-is.
-            Opcode::ViewWildcard { dim_idx: _ } => {}
-            Opcode::ViewTranspose {} => {
-                view_top_mut(&mut state.view_stack)?.transpose();
-            }
+            // ── View-stack pop (Phase 5 Task 1) ───────────────────────────
+            // Every constant subscript, range, star range and transpose is
+            // baked into the `PushStaticView` geometry by codegen, so the only
+            // compile-time transforms are the two dynamic ones below.
             Opcode::PopView {} => {
                 state.view_stack.pop().ok_or_else(|| {
                     WasmGenError::Unsupported("wasmgen: PopView on empty view stack".to_string())
                 })?;
-            }
-            Opcode::DupView {} => {
-                let top = view_top(&state.view_stack)?.clone();
-                state.view_stack.push(top);
             }
 
             // ── Dynamic view subscript (Phase 5 Task 4) ───────────────────
@@ -1582,8 +1509,8 @@ fn emit_ops(
             // range, which yields a runtime *size*. The unrolled element
             // addressing here folds every address at compile time, so a runtime
             // range cannot be expressed; returning `Unsupported` keeps such a
-            // model `Skipped`. A literal range is constant-folded by codegen into
-            // the static `ViewRange` arm, so this is only reached by a true
+            // model `Skipped`. A literal range is baked by codegen into the
+            // `PushStaticView` geometry, so this is only reached by a true
             // runtime range.
             Opcode::ViewRangeDynamic { dim_idx } => {
                 return Err(WasmGenError::Unsupported(format!(
@@ -1612,11 +1539,6 @@ fn emit_ops(
                 f.instruction(&Instruction::I32Const(0));
                 f.instruction(&Instruction::F64Load(memarg(addr)));
             }
-            // `temp_storage[temp_offsets[temp_id] + index]` with a runtime index
-            // (`vm.rs:1866`): the VM does `stack.pop().floor() as usize`.
-            Opcode::LoadTempDynamic { temp_id } => {
-                emit_load_temp_dynamic(ctx, *temp_id, f)?;
-            }
 
             // ── Array reducers (Phase 5 Task 2) ───────────────────────────
             // Reduce over the TOP view descriptor (the production pattern is
@@ -1644,33 +1566,10 @@ fn emit_ops(
                 emit_array_reduce(op, &view, ctx, f)?;
             }
 
-            // ── Body element reads inside an unrolled iteration (Task 3) ───
-            // Each reads view element `current` (the compile-time iteration index
-            // the unroller set on the active iter context) and pushes the f64.
-            Opcode::LoadIterElement {} => {
-                let iter = state.iter_stack.last().ok_or_else(|| {
-                    WasmGenError::Unsupported(
-                        "wasmgen: LoadIterElement outside an iteration".to_string(),
-                    )
-                })?;
-                // The iteration view is also the source: read element `current`.
-                let view = iter.iter_view.clone();
-                let current = iter.current;
-                emit_view_element_load(&view, current, ctx, f)?;
-            }
-            // `temp_storage[temp_offsets[temp_id] + current]` (`vm.rs:1939`).
-            Opcode::LoadIterTempElement { temp_id } => {
-                let current = current_iter_index(state)?;
-                let addr = temp_element_byte_addr(ctx, *temp_id, current as u32)?;
-                f.instruction(&Instruction::I32Const(0));
-                f.instruction(&Instruction::F64Load(memarg(addr)));
-            }
-            // Read `view_stack.last()` at `current`, broadcasting against the
-            // iteration view (`vm.rs:1946`). `LoadIterViewAt{offset}` reads
-            // `view_stack[len-offset]` instead (`vm.rs:2068`).
-            Opcode::LoadIterViewTop {} => {
-                emit_load_iter_view(state, 1, ctx, f)?;
-            }
+            // ── Body element read inside an unrolled iteration (Task 3) ────
+            // Reads `view_stack[len - offset]` at `current` (the compile-time
+            // iteration index the unroller set on the active iter context),
+            // broadcasting against the iteration view, and pushes the f64.
             Opcode::LoadIterViewAt { offset } => {
                 emit_load_iter_view(state, *offset as usize, ctx, f)?;
             }
@@ -1711,7 +1610,7 @@ fn emit_ops(
                     None
                 };
                 let size = iter_view.size();
-                let (body, end_pc) = iter_span(code, pc, IterKind::Iter)?;
+                let (body, end_pc) = iter_span(code, pc)?;
                 // Re-emitting the body once per element is `size` units of
                 // unrolling; charge it before the loop so an over-budget model is
                 // rejected without materializing the oversized body. Nested
@@ -1737,55 +1636,6 @@ fn emit_ops(
             Opcode::NextIterOrJump { .. } | Opcode::EndIter {} => {
                 return Err(WasmGenError::Unsupported(
                     "wasmgen: NextIterOrJump/EndIter without a matching BeginIter".to_string(),
-                ));
-            }
-
-            // ── Broadcast iteration (Task 3): unroll over the union geometry ──
-            // `BeginBroadcastIter` unions the `n_sources` views' dim_ids into the
-            // result geometry, building a per-source dim map (`vm.rs:2314`); the
-            // body is then unrolled over the result size, mirroring
-            // `LoadBroadcastElement` / `StoreBroadcastElement`.
-            Opcode::BeginBroadcastIter {
-                n_sources,
-                dest_temp_id,
-            } => {
-                let bctx = build_broadcast_ctx(state, *n_sources as usize, *dest_temp_id)?;
-                let size: usize = bctx.result_dims.iter().map(|&d| d as usize).product();
-                let (body, end_pc) = iter_span(code, pc, IterKind::Broadcast)?;
-                // Same unroll accounting as `BeginIter`: the body is re-emitted
-                // once per element of the broadcast result geometry.
-                state.charge_unroll(size)?;
-                for current in 0..size {
-                    state.broadcast_stack.push(BroadcastCtx {
-                        sources: bctx.sources.clone(),
-                        dest_temp_id: bctx.dest_temp_id,
-                        result_dims: bctx.result_dims.clone(),
-                        current,
-                    });
-                    emit_ops(body, literals, ctx, state, f)?;
-                    state.broadcast_stack.pop();
-                }
-                pc = end_pc;
-                continue;
-            }
-            Opcode::LoadBroadcastElement { source_idx } => {
-                emit_load_broadcast_element(state, *source_idx as usize, ctx, f)?;
-            }
-            Opcode::StoreBroadcastElement {} => {
-                let bc_ctx = state.broadcast_stack.last().ok_or_else(|| {
-                    WasmGenError::Unsupported(
-                        "wasmgen: StoreBroadcastElement outside a broadcast iteration".to_string(),
-                    )
-                })?;
-                let dest_temp_id = bc_ctx.dest_temp_id;
-                let current = bc_ctx.current;
-                emit_store_iter_element(ctx, dest_temp_id, current, f)?;
-            }
-            Opcode::NextBroadcastOrJump { .. } | Opcode::EndBroadcastIter {} => {
-                return Err(WasmGenError::Unsupported(
-                    "wasmgen: NextBroadcastOrJump/EndBroadcastIter without a matching \
-                     BeginBroadcastIter"
-                        .to_string(),
                 ));
             }
 
@@ -1945,51 +1795,17 @@ impl EmitState {
     }
 }
 
-/// The compile-time iteration index of the innermost active iteration context,
-/// erroring on a body opcode that appeared outside any iteration.
-fn current_iter_index(state: &EmitState) -> Result<usize, WasmGenError> {
-    state.iter_stack.last().map(|it| it.current).ok_or_else(|| {
-        WasmGenError::Unsupported("wasmgen: iteration body opcode outside an iteration".to_string())
-    })
-}
-
-/// Which structured iteration the body span belongs to: a `BeginIter` loop or a
-/// `BeginBroadcastIter` loop. Each has its own begin/next/end opcode triple, but
-/// the well-nested span scan is identical.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum IterKind {
-    Iter,
-    Broadcast,
-}
-
-/// Given the `pc` of a `BeginIter` / `BeginBroadcastIter`, return the body slice
-/// (the opcodes after the begin, up to but excluding its `NextIterOrJump` /
-/// `NextBroadcastOrJump`) and the pc *after* the matching `EndIter` /
-/// `EndBroadcastIter` (where the outer loop resumes).
+/// Given the `pc` of a `BeginIter`, return the body slice (the opcodes after
+/// the begin, up to but excluding its `NextIterOrJump`) and the pc *after* the
+/// matching `EndIter` (where the outer loop resumes).
 ///
 /// The span is well-nested (codegen always emits `begin .. next .. end`), so a
-/// nested loop of the *same* kind is skipped by depth tracking: `begin` raises
-/// the depth and `end` lowers it; the matching `next` is the one at depth 0.
-/// A loop of the *other* kind cannot appear inside (codegen never interleaves
-/// the two families), but its begin/end would not affect this kind's depth, and
-/// its `next` is not this kind's `next`, so the scan is still correct.
-fn iter_span(
-    code: &[Opcode],
-    begin_pc: usize,
-    kind: IterKind,
-) -> Result<(&[Opcode], usize), WasmGenError> {
-    let is_begin = |op: &Opcode| match kind {
-        IterKind::Iter => matches!(op, Opcode::BeginIter { .. }),
-        IterKind::Broadcast => matches!(op, Opcode::BeginBroadcastIter { .. }),
-    };
-    let is_next = |op: &Opcode| match kind {
-        IterKind::Iter => matches!(op, Opcode::NextIterOrJump { .. }),
-        IterKind::Broadcast => matches!(op, Opcode::NextBroadcastOrJump { .. }),
-    };
-    let is_end = |op: &Opcode| match kind {
-        IterKind::Iter => matches!(op, Opcode::EndIter {}),
-        IterKind::Broadcast => matches!(op, Opcode::EndBroadcastIter {}),
-    };
+/// nested loop is skipped by depth tracking: `begin` raises the depth and `end`
+/// lowers it; the matching `next` is the one at depth 0.
+fn iter_span(code: &[Opcode], begin_pc: usize) -> Result<(&[Opcode], usize), WasmGenError> {
+    let is_begin = |op: &Opcode| matches!(op, Opcode::BeginIter { .. });
+    let is_next = |op: &Opcode| matches!(op, Opcode::NextIterOrJump { .. });
+    let is_end = |op: &Opcode| matches!(op, Opcode::EndIter {});
 
     let body_start = begin_pc + 1;
     let mut depth = 0usize;
@@ -2005,8 +1821,8 @@ fn iter_span(
                 break;
             }
         } else if is_end(op) {
-            // `end` closes the most recent nested `begin` of this kind. The
-            // outermost (depth-0) `end` is reached only *after* our `next`, so a
+            // `end` closes the most recent nested `begin`. The outermost
+            // (depth-0) `end` is reached only *after* our `next`, so a
             // saturating decrement is safe.
             depth = depth.saturating_sub(1);
         }
@@ -2025,11 +1841,11 @@ fn iter_span(
     Ok((&code[body_start..body_end], end_idx + 1))
 }
 
-/// Lower `LoadIterViewTop` (`stack_offset == 1`) / `LoadIterViewAt { offset }`:
-/// read `view_stack[len - stack_offset]` at the innermost iteration's `current`,
-/// broadcasting against the captured iteration view (`vm.rs:1946-2182`). An
-/// invalid source view, a source smaller than the iteration, or an unmatched
-/// dimension pushes NaN, exactly as the VM does.
+/// Lower `LoadIterViewAt { offset }`: read `view_stack[len - stack_offset]` at
+/// the innermost iteration's `current`, broadcasting against the captured
+/// iteration view (the VM's `LoadIterViewAt` arm). An invalid source view, a
+/// source smaller than the iteration, or an unmatched dimension pushes NaN,
+/// exactly as the VM does.
 fn emit_load_iter_view(
     state: &EmitState,
     stack_offset: usize,
@@ -2037,11 +1853,11 @@ fn emit_load_iter_view(
     f: &mut Function,
 ) -> Result<(), WasmGenError> {
     let iter = state.iter_stack.last().ok_or_else(|| {
-        WasmGenError::Unsupported("wasmgen: LoadIterView* outside an iteration".to_string())
+        WasmGenError::Unsupported("wasmgen: LoadIterViewAt outside an iteration".to_string())
     })?;
     if stack_offset == 0 || stack_offset > state.view_stack.len() {
         return Err(WasmGenError::Unsupported(
-            "wasmgen: LoadIterView* stack offset out of range".to_string(),
+            "wasmgen: LoadIterViewAt stack offset out of range".to_string(),
         ));
     }
     let source = &state.view_stack[state.view_stack.len() - stack_offset];
@@ -2057,7 +1873,7 @@ fn emit_load_iter_view(
 }
 
 /// Store the f64 already on the wasm stack into `temp_storage[temp_offsets[
-/// temp_id] + index]` (the `StoreIterElement` / `StoreBroadcastElement` write).
+/// temp_id] + index]` (the `StoreIterElement` write).
 /// `f64.store` wants `[addr_i32, value_f64]`, so park the value in the scratch
 /// local, push the constant address, then reload the value.
 fn emit_store_iter_element(
@@ -2072,99 +1888,6 @@ fn emit_store_iter_element(
     f.instruction(&Instruction::LocalGet(ctx.scratch_local));
     f.instruction(&Instruction::F64Store(memarg(addr)));
     Ok(())
-}
-
-/// Build the compile-time broadcast context for a `BeginBroadcastIter`,
-/// mirroring the VM's `BeginBroadcastIter` arm (`vm.rs:2314-2373`): union the
-/// `n_sources` deepest views' dim_ids into the result geometry (first-encounter
-/// order), then build each source's `dim_map` (result dim -> source dim, or
-/// `None` for a broadcast axis).
-fn build_broadcast_ctx(
-    state: &EmitState,
-    n_sources: usize,
-    dest_temp_id: u8,
-) -> Result<BroadcastCtx, WasmGenError> {
-    if n_sources == 0 || n_sources > state.view_stack.len() {
-        return Err(WasmGenError::Unsupported(
-            "wasmgen: BeginBroadcastIter source count out of range".to_string(),
-        ));
-    }
-    let base = state.view_stack.len() - n_sources;
-    let sources_slice = &state.view_stack[base..];
-
-    // Result dim ids/sizes: the union over all sources, first-encounter order.
-    let mut result_dim_ids: Vec<u16> = Vec::new();
-    let mut result_dims: Vec<u16> = Vec::new();
-    for view in sources_slice {
-        for (d, &dim_id) in view.dim_ids.iter().enumerate() {
-            if !result_dim_ids.contains(&dim_id) {
-                result_dim_ids.push(dim_id);
-                result_dims.push(view.dims[d]);
-            }
-        }
-    }
-
-    // Per source: dim_map[result_dim] = Some(src_dim) by exact dim-id match, else
-    // None (the source broadcasts along that axis).
-    let mut sources: Vec<(ViewDesc, Vec<Option<usize>>)> = Vec::with_capacity(n_sources);
-    for view in sources_slice {
-        let dim_map: Vec<Option<usize>> = result_dim_ids
-            .iter()
-            .map(|&rid| view.dim_ids.iter().position(|&id| id == rid))
-            .collect();
-        sources.push((view.clone(), dim_map));
-    }
-
-    Ok(BroadcastCtx {
-        sources,
-        dest_temp_id,
-        result_dims,
-        current: 0,
-    })
-}
-
-/// Lower `LoadBroadcastElement { source_idx }`, mirroring the VM
-/// (`vm.rs:2375-2414`): decompose the broadcast `current` into per-result-dim
-/// indices, scatter them into the source's dimension order through its
-/// `dim_map`, then read the source element. An invalid source view pushes NaN.
-fn emit_load_broadcast_element(
-    state: &EmitState,
-    source_idx: usize,
-    ctx: &EmitCtx,
-    f: &mut Function,
-) -> Result<(), WasmGenError> {
-    let bc_ctx = state.broadcast_stack.last().ok_or_else(|| {
-        WasmGenError::Unsupported(
-            "wasmgen: LoadBroadcastElement outside a broadcast iteration".to_string(),
-        )
-    })?;
-    let (source, dim_map) = bc_ctx.sources.get(source_idx).ok_or_else(|| {
-        WasmGenError::Unsupported(
-            "wasmgen: LoadBroadcastElement source_idx out of range".to_string(),
-        )
-    })?;
-
-    // Decompose the result `current` into per-result-dim indices (row-major).
-    let n_result = bc_ctx.result_dims.len();
-    let mut result_indices = vec![0u16; n_result];
-    let mut remaining = bc_ctx.current;
-    for d in (0..n_result).rev() {
-        let dim = bc_ctx.result_dims[d] as usize;
-        result_indices[d] = (remaining % dim) as u16;
-        remaining /= dim;
-    }
-
-    // Scatter into the source's dimension order: ordered[src_dim] =
-    // result_indices[result_dim] for each mapped axis (`vm.rs:2395-2402`).
-    let mut ordered = vec![0u16; source.dims.len()];
-    for (result_dim, mapped) in dim_map.iter().enumerate() {
-        if let Some(src_dim) = mapped {
-            ordered[*src_dim] = result_indices[result_dim];
-        }
-    }
-    let flat = source.flat_offset_for_indices(&ordered);
-    let source = source.clone();
-    emit_view_offset_load(&source, flat, ctx, f)
 }
 
 /// Lower `ViewSubscriptDynamic { dim_idx }` (Task 4): pop the 1-based runtime
@@ -2821,37 +2544,6 @@ fn view_top_mut(view_stack: &mut [ViewDesc]) -> Result<&mut ViewDesc, WasmGenErr
     })
 }
 
-/// Resolve a dim-list id to `(dim sizes, dim ids)` for `PushTempView`:
-/// each entry is a `DimId`, and the size comes from
-/// `ctx.dimensions[DimId].size` (`vm.rs:1745`).
-fn resolve_dim_list_dims(
-    ctx: &EmitCtx,
-    dim_list_id: u16,
-) -> Result<(Vec<u16>, Vec<u16>), WasmGenError> {
-    let (n_dims, dim_ids) = ctx
-        .ctx
-        .dim_lists
-        .get(dim_list_id as usize)
-        .map(|(n, ids)| (*n as usize, *ids))
-        .ok_or_else(|| {
-            WasmGenError::Unsupported(format!("wasmgen: dim_list_id {dim_list_id} out of range"))
-        })?;
-    let mut dims = Vec::with_capacity(n_dims);
-    for &dim_id in dim_ids.iter().take(n_dims) {
-        let size = ctx
-            .ctx
-            .dimensions
-            .get(dim_id as usize)
-            .map(|d| d.size)
-            .ok_or_else(|| {
-                WasmGenError::Unsupported(format!("wasmgen: DimId {dim_id} out of range"))
-            })?;
-        dims.push(size);
-    }
-    let dim_id_vec = dim_ids[..n_dims].to_vec();
-    Ok((dims, dim_id_vec))
-}
-
 /// Resolve a dim-list id to its raw dimension sizes for `PushVarViewDirect`,
 /// where each entry is a literal dimension size, not a `DimId` (`vm.rs:1780`).
 /// The caller supplies the view's `dim_ids` itself (all zero -- this view is the
@@ -2917,29 +2609,6 @@ pub(crate) fn emit_fill_temp_nan(
     Ok(())
 }
 
-/// Lower `LoadTempDynamic { temp_id }`: pop a runtime index (the VM does
-/// `stack.pop().floor() as usize`), compute the temp element address, and load.
-///
-/// The address is `temp_storage_base + temp_offsets[temp_id]*8 + index*8`; the
-/// constant base/offset ride in the `memarg.offset`, so only `index*8` is
-/// computed at runtime. `i32.trunc_sat_f64_s` of `floor(index)` reproduces the
-/// VM's `floor() as usize` for a non-negative in-range index.
-fn emit_load_temp_dynamic(
-    ctx: &EmitCtx,
-    temp_id: u8,
-    f: &mut Function,
-) -> Result<(), WasmGenError> {
-    use Instruction as Ins;
-    let base = temp_element_byte_addr(ctx, temp_id, 0)?;
-    // index (f64, on top) -> floor -> i32 -> *8 (byte stride)
-    f.instruction(&Ins::F64Floor);
-    f.instruction(&Ins::I32TruncSatF64S);
-    f.instruction(&Ins::I32Const(SLOT_SIZE as i32));
-    f.instruction(&Ins::I32Mul);
-    f.instruction(&Ins::F64Load(memarg(base)));
-    Ok(())
-}
-
 /// Push the f64 value of view element `iter_idx` onto the wasm stack, reading
 /// from the byte address [`ViewDesc::element_addr`] computes. This is the single
 /// element-read primitive the reducers (Task 2) and -- for static/temp/var
@@ -2968,8 +2637,8 @@ pub(crate) fn emit_view_element_load(
 }
 
 /// Push the f64 value of the view element at an *already-computed* flat slot
-/// offset (the broadcast paths -- `LoadIterViewTop` / `LoadBroadcastElement` --
-/// build the flat offset themselves rather than from an iteration index).
+/// offset (the `LoadIterViewAt` broadcast path builds the flat offset itself
+/// rather than from an iteration index).
 fn emit_view_offset_load(
     desc: &ViewDesc,
     flat: usize,
