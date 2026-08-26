@@ -252,11 +252,11 @@ impl IndexExpr3 {
                 // Note: dim is None when either:
                 // 1. The variable is a scalar (CantSubscriptScalar)
                 // 2. The subscript position exceeds the dimension count (caught by caller)
-                let dim = dim.ok_or(crate::common::EquationError {
-                    start: loc.start,
-                    end: loc.end,
-                    code: crate::common::ErrorCode::CantSubscriptScalar,
-                })?;
+                let dim = dim.ok_or(crate::common::EquationError::new(
+                    crate::common::ErrorCode::CantSubscriptScalar,
+                    loc.start,
+                    loc.end,
+                ))?;
                 // Convert wildcard to star range with the parent dimension name.
                 // For indexed dimensions like Dim(5), this becomes StarRange("dim").
                 // For named dimensions like Cities{Boston,NYC,LA}, this becomes StarRange("cities").

@@ -847,7 +847,12 @@ pub(crate) fn get_dimensions(
             // its every element name) into one canonicalize plus a hash probe.
             match dimensions.get_by_raw_name(name) {
                 Some(dim) => Ok(dim.clone()),
-                None => eqn_err!(BadDimensionName, 0, 0),
+                None => eqn_err!(
+                    BadDimensionName,
+                    0,
+                    0,
+                    format!("'{name}' is not a declared dimension")
+                ),
             }
         })
         .collect()
@@ -1179,11 +1184,15 @@ where
                                     // wrote, so the code should say what went
                                     // wrong. Two helpers really do claim one
                                     // name here.
-                                    errors.push(EquationError {
-                                        start: 0,
-                                        end: 0,
-                                        code: ErrorCode::DuplicateVariable,
-                                    });
+                                    errors.push(EquationError::detailed(
+                                        ErrorCode::DuplicateVariable,
+                                        0,
+                                        0,
+                                        format!(
+                                            "two different synthesized helpers both claim the \
+                                             name '{ident}'"
+                                        ),
+                                    ));
                                 }
                                 None => {
                                     implicit_index.insert(ident, implicit_vars.len());
@@ -1208,11 +1217,7 @@ where
                 // it never reaches this empty-equation branch.) Only a flow and
                 // an aux can carry a `gf`, so its presence IS the kind test.
                 if errors.is_empty() && !is_initial && !v.can_be_module_input && v.gf.is_none() {
-                    errors.push(EquationError {
-                        start: 0,
-                        end: 0,
-                        code: ErrorCode::EmptyEquation,
-                    })
+                    errors.push(EquationError::new(ErrorCode::EmptyEquation, 0, 0))
                 }
                 None
             }

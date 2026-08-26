@@ -780,12 +780,7 @@ impl TestProject {
                     DiagnosticError::Unit(UnitError::ConsistencyError(_, _, details)) => {
                         details.clone().unwrap_or_default()
                     }
-                    DiagnosticError::Unit(UnitError::DefinitionError(err, details)) => {
-                        match details {
-                            Some(s) => format!("{err} -- {s}"),
-                            None => format!("{err}"),
-                        }
-                    }
+                    DiagnosticError::Unit(UnitError::DefinitionError(err)) => format!("{err}"),
                     DiagnosticError::Unit(UnitError::InferenceError { details, .. }) => {
                         details.clone().unwrap_or_default()
                     }
@@ -842,7 +837,7 @@ impl TestProject {
                     DiagnosticError::Equation(eq_err) => eq_err.code,
                     DiagnosticError::Model(err) => err.code,
                     DiagnosticError::Unit(unit_err) => match unit_err {
-                        UnitError::DefinitionError(eq_err, _) => eq_err.code,
+                        UnitError::DefinitionError(eq_err) => eq_err.code,
                         UnitError::ConsistencyError(code, _, _) => *code,
                         UnitError::InferenceError { code, .. } => *code,
                     },
@@ -891,7 +886,7 @@ impl TestProject {
         let has_unit_mismatch = diagnostics.iter().any(|d| {
             if let DiagnosticError::Unit(unit_err) = &d.error {
                 let code = match unit_err {
-                    UnitError::DefinitionError(eq_err, _) => eq_err.code,
+                    UnitError::DefinitionError(eq_err) => eq_err.code,
                     UnitError::ConsistencyError(code, _, _) => *code,
                     UnitError::InferenceError { code, .. } => *code,
                 };

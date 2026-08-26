@@ -1155,7 +1155,10 @@ fn lowering_failure_reason(input: &FragmentInput<'_>, err: &crate::common::Error
             "could not be lowered: {}",
             lowered_errs
                 .iter()
-                .map(|e| format!("{:?} at {}..{}", e.code, e.start, e.end))
+                .map(|e| match &e.details {
+                    Some(reason) => format!("{:?} at {}..{}: {reason}", e.code, e.start, e.end),
+                    None => format!("{:?} at {}..{}", e.code, e.start, e.end),
+                })
                 .collect::<Vec<_>>()
                 .join("; ")
         )

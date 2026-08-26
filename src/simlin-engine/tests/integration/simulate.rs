@@ -6318,11 +6318,7 @@ fn macro_attributable_classifier_separates_macro_from_nonmacro() {
         .clone();
 
     let eq = |code: ErrorCode| {
-        DiagnosticError::Equation(simlin_engine::common::EquationError {
-            start: 0,
-            end: 0,
-            code,
-        })
+        DiagnosticError::Equation(simlin_engine::common::EquationError::new(code, 0, 0))
     };
     let model_err =
         |code: ErrorCode| DiagnosticError::Model(Error::new(ErrorKind::Model, code, None));

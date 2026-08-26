@@ -30,7 +30,8 @@ use simlin_engine::db::{
     sync_from_datamodel_incremental,
 };
 use simlin_engine::errors::{
-    FormattedError, FormattedErrorKind, FormattedErrors, format_diagnostic, format_simulation_error,
+    FormattedError, FormattedErrorKind, FormattedErrors, collect_formatted_errors,
+    format_simulation_error,
 };
 use simlin_engine::prost::Message;
 use simlin_engine::{Error, ErrorCode, Result, Results, build_sim, datamodel, project_io, serde};
@@ -439,6 +440,12 @@ fn report_formatted_errors(formatted: &FormattedErrors) {
 /// Collect diagnostics from the salsa accumulator path and convert them
 /// to the same `FormattedErrors` structure the CLI has always used.
 ///
+/// The datamodel is what makes a diagnostic legible in a terminal:
+/// `collect_formatted_errors` renders the offending equation with the span
+/// underlined. Without it a parse error prints as a bare `unrecognized_eof` --
+/// the one class of error whose whole reason IS the span, so it would be the
+/// one class the CLI could never explain.
+///
 /// `FormattedErrors::push` owns the severity rule, so an advisory `Warning`
 /// (a conveyor's LTM-degraded notice, a unit mismatch) is reported to the user
 /// but never raises `has_model_errors` / `has_variable_errors`.
@@ -446,16 +453,13 @@ fn collect_diagnostics_as_formatted(
     db: &SimlinDb,
     source_project: SourceProject,
     sync_state: &PersistentSyncState,
+    project: &DatamodelProject,
 ) -> FormattedErrors {
     // Trigger compilation so that diagnostics are accumulated
     let _ = compile_project_incremental(db, source_project, "main");
     let sync = sync_state.to_sync_result();
     let diagnostics = collect_all_diagnostics(db, sync.project);
-    let mut formatted = FormattedErrors::default();
-    for diag in &diagnostics {
-        formatted.push(format_diagnostic(diag));
-    }
-    formatted
+    collect_formatted_errors(&diagnostics, project)
 }
 
 fn run_simulation(
@@ -498,7 +502,7 @@ fn handle_simulation_error(err: &Error, formatted: &FormattedErrors) {
 fn run_datamodel_with_errors(project: &DatamodelProject) -> Results {
     let mut db = SimlinDb::default();
     let sync_state = sync_from_datamodel_incremental(&mut db, project, None);
-    let formatted = collect_diagnostics_as_formatted(&db, sync_state.project, &sync_state);
+    let formatted = collect_diagnostics_as_formatted(&db, sync_state.project, &sync_state, project);
     report_formatted_errors(&formatted);
     match run_simulation(&mut db, sync_state.project, project, "main") {
         Ok(results) => results,
@@ -538,7 +542,7 @@ fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
         // LTM-enabled project is the one whose diagnostics the user wants.
         set_project_ltm_enabled(&mut db, source_project, true);
 
-        let formatted = collect_diagnostics_as_formatted(&db, source_project, &sync_state);
+        let formatted = collect_diagnostics_as_formatted(&db, source_project, &sync_state, project);
         report_formatted_errors(&formatted);
 
         match run_simulation(&mut db, source_project, project, "main") {
@@ -938,10 +942,11 @@ mod open_vensim_model_tests {
     }
 }
 
-/// GH #919: an advisory `Warning` must print as a warning and must not be
-/// counted as a model/variable error.
+/// What the CLI actually prints for a diagnostic: the severity word (GH #919 --
+/// an advisory `Warning` must not read as a compilation failure) and the source
+/// snippet that makes the reason legible.
 #[cfg(test)]
-mod severity_reporting_tests {
+mod diagnostic_reporting_tests {
     use super::*;
 
     /// Run the CLI's diagnostic pass exactly as `simulate(.., enable_ltm)` does,
@@ -953,7 +958,7 @@ mod severity_reporting_tests {
         if enable_ltm {
             set_project_ltm_enabled(&mut db, source_project, true);
         }
-        collect_diagnostics_as_formatted(&db, source_project, &sync_state)
+        collect_diagnostics_as_formatted(&db, source_project, &sync_state, project)
     }
 
     fn messages(formatted: &FormattedErrors) -> Vec<String> {
@@ -1021,6 +1026,29 @@ mod severity_reporting_tests {
         assert!(
             formatted.has_variable_errors,
             "an Error-severity diagnostic raises the variable-error flag"
+        );
+    }
+
+    /// A parse error's whole reason is the text under its span -- the raising
+    /// site writes no sentence, because the snippet IS the sentence. So the CLI
+    /// must render the snippet: the snippet-free formatter prints
+    /// `unrecognized_eof` and nothing a modeler can act on.
+    #[test]
+    fn a_parse_error_prints_the_equation_it_could_not_parse() {
+        let project = simlin_engine::test_common::TestProject::new("cli-parse")
+            .aux("bad", "1 +", None)
+            .build_datamodel();
+
+        let formatted = cli_diagnostics(&project, false);
+        let messages = messages(&formatted);
+        let parse_message = messages
+            .iter()
+            .find(|m| m.contains("unrecognized_eof"))
+            .unwrap_or_else(|| panic!("expected a parse diagnostic: {messages:?}"));
+        assert_eq!(
+            parse_message.lines().next(),
+            Some("    1 +"),
+            "the parse error must lead with the equation it could not parse: {parse_message:?}"
         );
     }
 

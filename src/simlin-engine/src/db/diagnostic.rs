@@ -1214,7 +1214,7 @@ pub fn collect_all_diagnostics(db: &SimlinDb, project: SourceProject) -> Vec<Dia
             all.push(Diagnostic {
                 model: String::new(),
                 variable: Some(unit_name.clone()),
-                error: DiagnosticError::Unit(UnitError::DefinitionError(eq_err.clone(), None)),
+                error: DiagnosticError::Unit(UnitError::DefinitionError(eq_err.clone())),
                 severity: DiagnosticSeverity::Error,
             });
         }

@@ -604,10 +604,13 @@ impl Context<'_> {
         let normalized = self.lower_pass0(expr);
 
         // Expr3: wildcard resolution and dimension detection.
+        // Carry the reason across, never the span: an `Error` renders its
+        // `details` to the user as prose, and a span rendered as prose ("Error
+        // at 8:10") displaces the sentence the raising site wrote.
         let expr3 = Expr3::from_expr2(&normalized, self).map_err(|e| Error {
             kind: ErrorKind::Model,
             code: e.code,
-            details: Some(format!("Error at {}:{}", e.start, e.end)),
+            details: e.details,
         })?;
 
         // Pass 1: temp decomposition. The apply-to-all context is exactly what

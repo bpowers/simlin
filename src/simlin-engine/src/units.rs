@@ -327,11 +327,30 @@ impl Context {
         let dup_err = |name: &str| {
             (
                 name.to_owned(),
-                vec![EquationError {
-                    start: 0,
-                    end: 0,
-                    code: ErrorCode::DuplicateUnit,
-                }],
+                vec![EquationError::detailed(
+                    ErrorCode::DuplicateUnit,
+                    0,
+                    0,
+                    format!("unit '{name}' is declared more than once, with conflicting meanings"),
+                )],
+            )
+        };
+
+        // The alias loops below are a DIFFERENT conflict from `dup_err`'s: the
+        // unit being declared is declared exactly once, and it is the ALIAS it
+        // claims that another unit already claimed. Saying "declared more than
+        // once" of the unit sends the modeler to the wrong declaration.
+        let alias_err = |alias: &str, unit_name: &str, owner: &str| {
+            (
+                unit_name.to_owned(),
+                vec![EquationError::detailed(
+                    ErrorCode::DuplicateUnit,
+                    0,
+                    0,
+                    format!(
+                        "alias '{alias}' of unit '{unit_name}' is already an alias of unit '{owner}'"
+                    ),
+                )],
             )
         };
 
@@ -348,7 +367,7 @@ impl Context {
                     }
                     Entry::Occupied(e) => {
                         if e.get() != &unit_name {
-                            unit_errors.push(dup_err(&unit_name));
+                            unit_errors.push(alias_err(e.key(), &unit_name, e.get()));
                         }
                     }
                 }
@@ -401,25 +420,28 @@ impl Context {
 
         /// Resolve one equation-bearing unit against the context built so
         /// far, registering its unit map (or recording errors).
+        ///
+        /// `context` is the annotation for anything that goes wrong here: a
+        /// unit-definition diagnostic names no variable and carries no source
+        /// text, so without it a rejected declaration reaches the modeler as a
+        /// bare `no_app_in_units` with nothing to look at.
         fn resolve_equation_unit(
             ctx: &mut Context,
             unit_errors: &mut Vec<(String, Vec<EquationError>)>,
             dup_err: &dyn Fn(&str) -> (String, Vec<EquationError>),
             unit_name: &str,
             ast: &Option<Expr0>,
+            context: &str,
         ) {
             let unit_components: UnitMap = match ast {
                 Some(ast) => match build_unit_components(ctx, ast) {
                     Ok(unit_components) => unit_components,
+                    // The error is carried whole -- span, code and reason --
+                    // and annotated: a span-less copy of its own code leaves
+                    // the modeler a bare `no_app_in_units` with no offset into
+                    // the equation and nothing to read.
                     Err(err) => {
-                        unit_errors.push((
-                            unit_name.to_owned(),
-                            vec![EquationError {
-                                start: 0,
-                                end: 0,
-                                code: err.code,
-                            }],
-                        ));
+                        unit_errors.push((unit_name.to_owned(), vec![err.in_context(context)]));
                         return;
                     }
                 },
@@ -472,6 +494,9 @@ impl Context {
         struct PendingUnit {
             name: String,
             ast: Option<Expr0>,
+            /// The annotation every error out of this declaration carries.
+            /// Built here because Phase B holds no `Unit` to build it from.
+            context: String,
         }
         let mut pending: Vec<PendingUnit> = Vec::new();
         for unit in units.iter().filter(|unit| unit.equation.is_some()) {
@@ -484,20 +509,38 @@ impl Context {
                     }
                     Entry::Occupied(e) => {
                         if e.get() != &unit_name {
-                            unit_errors.push(dup_err(&unit_name));
+                            unit_errors.push(alias_err(e.key(), &unit_name, e.get()));
                         }
                     }
                 }
             }
 
-            let eqn = &join_multiword_unit_names(unit.equation.as_ref().unwrap());
+            let declaration = unit.equation.as_ref().unwrap();
+            // Annotate with the offending declaration, as `parse_units` does
+            // for a variable's own units string: the diagnostic names the unit
+            // but nothing else shows the text that failed. It rides on
+            // `PendingUnit` so the RESOLUTION errors Phase B raises out of the
+            // same declaration are annotated identically -- the two halves of
+            // one failure, one of which lexes and one of which does not.
+            let context = format!(
+                "in the declaration of unit '{}': '{declaration}'",
+                unit.name
+            );
+            let eqn = &join_multiword_unit_names(declaration);
             match Expr0::new(eqn, LexerType::Units) {
                 Ok(ast) => pending.push(PendingUnit {
                     name: unit_name,
                     ast,
+                    context,
                 }),
                 Err(errors) => {
-                    unit_errors.push((unit_name.clone(), errors));
+                    unit_errors.push((
+                        unit_name.clone(),
+                        errors
+                            .into_iter()
+                            .map(|err| err.in_context(&context))
+                            .collect(),
+                    ));
                 }
             }
         }
@@ -522,7 +565,14 @@ impl Context {
                     deferred.push(p);
                     continue;
                 }
-                resolve_equation_unit(&mut ctx, &mut unit_errors, &dup_err, &p.name, &p.ast);
+                resolve_equation_unit(
+                    &mut ctx,
+                    &mut unit_errors,
+                    &dup_err,
+                    &p.name,
+                    &p.ast,
+                    &p.context,
+                );
                 unresolved.remove(&p.name);
                 progressed = true;
             }
@@ -532,7 +582,14 @@ impl Context {
             if !progressed {
                 // Circular definitions: degrade to in-order resolution.
                 for p in deferred {
-                    resolve_equation_unit(&mut ctx, &mut unit_errors, &dup_err, &p.name, &p.ast);
+                    resolve_equation_unit(
+                        &mut ctx,
+                        &mut unit_errors,
+                        &dup_err,
+                        &p.name,
+                        &p.ast,
+                        &p.context,
+                    );
                 }
                 break;
             }
@@ -733,11 +790,11 @@ pub fn parse_units(
         if let Some(expr) = Expr0::new(&unit_eqn_joined, LexerType::Units).map_err(|errors| {
             errors
                 .into_iter()
-                .map(|err| UnitError::DefinitionError(err, Some(context())))
+                .map(|err| UnitError::DefinitionError(err.in_context(context())))
                 .collect::<Vec<UnitError>>()
         })? {
             let result = build_unit_components(ctx, &expr)
-                .map_err(|err| vec![UnitError::DefinitionError(err, Some(context()))])?;
+                .map_err(|err| vec![UnitError::DefinitionError(err.in_context(context()))])?;
             Ok(Some(result))
         } else {
             Ok(None)

@@ -131,18 +131,18 @@ impl<'input> Parser<'input> {
         if self.peek_kind() == Some(expected) {
             Ok(self.advance().unwrap())
         } else if let Some((start, _, end)) = self.peek() {
-            Err(EquationError {
-                start: *start as u16,
-                end: *end as u16,
-                code: ErrorCode::UnrecognizedToken,
-            })
+            Err(EquationError::new(
+                ErrorCode::UnrecognizedToken,
+                *start as u16,
+                *end as u16,
+            ))
         } else {
             let pos = self.eof_position();
-            Err(EquationError {
-                start: pos as u16,
-                end: (pos + 1) as u16,
-                code: ErrorCode::UnrecognizedEof,
-            })
+            Err(EquationError::new(
+                ErrorCode::UnrecognizedEof,
+                pos as u16,
+                (pos + 1) as u16,
+            ))
         }
     }
 
@@ -171,11 +171,11 @@ impl<'input> Parser<'input> {
 
         // Check for extra tokens after the expression
         if let Some((start, _, end)) = self.peek() {
-            return Err(EquationError {
-                start: *start as u16,
-                end: *end as u16,
-                code: ErrorCode::ExtraToken,
-            });
+            return Err(EquationError::new(
+                ErrorCode::ExtraToken,
+                *start as u16,
+                *end as u16,
+            ));
         }
 
         Ok(Some(expr))
@@ -566,11 +566,11 @@ impl<'input> Parser<'input> {
                             Literal::new(n),
                             Loc::new(lpos, rpos),
                         )),
-                        Err(_) => Err(EquationError {
-                            start: lpos as u16,
-                            end: rpos as u16,
-                            code: ErrorCode::ExpectedNumber,
-                        }),
+                        Err(_) => Err(EquationError::new(
+                            ErrorCode::ExpectedNumber,
+                            lpos as u16,
+                            rpos as u16,
+                        )),
                     }
                 } else {
                     unreachable!()
@@ -600,19 +600,19 @@ impl<'input> Parser<'input> {
             }
             Some(_) => {
                 let (start, _, end) = self.peek().unwrap();
-                Err(EquationError {
-                    start: *start as u16,
-                    end: *end as u16,
-                    code: ErrorCode::UnrecognizedToken,
-                })
+                Err(EquationError::new(
+                    ErrorCode::UnrecognizedToken,
+                    *start as u16,
+                    *end as u16,
+                ))
             }
             None => {
                 let pos = self.eof_position();
-                Err(EquationError {
-                    start: pos as u16,
-                    end: (pos + 1) as u16,
-                    code: ErrorCode::UnrecognizedEof,
-                })
+                Err(EquationError::new(
+                    ErrorCode::UnrecognizedEof,
+                    pos as u16,
+                    (pos + 1) as u16,
+                ))
             }
         }
     }
@@ -695,18 +695,18 @@ impl<'input> Parser<'input> {
 
                     // Error: *: must be followed by identifier
                     if let Some((start, _, end)) = self.peek() {
-                        return Err(EquationError {
-                            start: *start as u16,
-                            end: *end as u16,
-                            code: ErrorCode::UnrecognizedToken,
-                        });
+                        return Err(EquationError::new(
+                            ErrorCode::UnrecognizedToken,
+                            *start as u16,
+                            *end as u16,
+                        ));
                     } else {
                         let pos = self.eof_position();
-                        return Err(EquationError {
-                            start: pos as u16,
-                            end: (pos + 1) as u16,
-                            code: ErrorCode::UnrecognizedEof,
-                        });
+                        return Err(EquationError::new(
+                            ErrorCode::UnrecognizedEof,
+                            pos as u16,
+                            (pos + 1) as u16,
+                        ));
                     }
                 }
 
@@ -726,11 +726,11 @@ impl<'input> Parser<'input> {
                                 return Ok(IndexExpr0::DimPosition(n, Loc::new(lpos, rpos)));
                             }
                             Err(_) => {
-                                return Err(EquationError {
-                                    start: lpos as u16,
-                                    end: rpos as u16,
-                                    code: ErrorCode::ExpectedInteger,
-                                });
+                                return Err(EquationError::new(
+                                    ErrorCode::ExpectedInteger,
+                                    lpos as u16,
+                                    rpos as u16,
+                                ));
                             }
                         }
                     }
@@ -738,18 +738,18 @@ impl<'input> Parser<'input> {
 
                 // Error: @ must be followed by integer
                 if let Some((start, _, end)) = self.peek() {
-                    Err(EquationError {
-                        start: *start as u16,
-                        end: *end as u16,
-                        code: ErrorCode::ExpectedInteger,
-                    })
+                    Err(EquationError::new(
+                        ErrorCode::ExpectedInteger,
+                        *start as u16,
+                        *end as u16,
+                    ))
                 } else {
                     let pos = self.eof_position();
-                    Err(EquationError {
-                        start: pos as u16,
-                        end: (pos + 1) as u16,
-                        code: ErrorCode::ExpectedInteger,
-                    })
+                    Err(EquationError::new(
+                        ErrorCode::ExpectedInteger,
+                        pos as u16,
+                        (pos + 1) as u16,
+                    ))
                 }
             }
 

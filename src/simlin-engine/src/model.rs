@@ -227,7 +227,12 @@ pub(crate) fn resolve_module_input<'a>(
 
     let dst_stripped = dst.as_str().strip_prefix(&input_prefix);
     if dst_stripped.is_none() {
-        return eqn_err!(BadModuleInputDst, 0, 0);
+        return eqn_err!(
+            BadModuleInputDst,
+            0,
+            0,
+            format!("'{dst}' is not an input of the module being instantiated")
+        );
     }
     let dst = Ident::new(dst_stripped.unwrap());
 
@@ -239,7 +244,12 @@ pub(crate) fn resolve_module_input<'a>(
 
     match resolve_relative(models, parent_model_name, src.as_str()) {
         Some(_) => Ok(Some(ModuleInput { src, dst })),
-        None => eqn_err!(BadModuleInputSrc, 0, 0),
+        None => eqn_err!(
+            BadModuleInputSrc,
+            0,
+            0,
+            format!("'{src}' is not a variable of model '{parent_model_name}'")
+        ),
     }
 }
 

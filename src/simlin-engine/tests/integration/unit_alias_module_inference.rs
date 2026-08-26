@@ -35,7 +35,9 @@ fn diag_details(d: &Diagnostic) -> String {
         DiagnosticError::Unit(UnitError::InferenceError {
             details: Some(s), ..
         }) => s.clone(),
-        DiagnosticError::Unit(UnitError::DefinitionError(_, Some(s))) => s.clone(),
+        DiagnosticError::Unit(UnitError::DefinitionError(e)) => {
+            e.details.clone().unwrap_or_default()
+        }
         DiagnosticError::Unit(other) => format!("{:?}", other),
         DiagnosticError::Model(e) => e.details.as_deref().unwrap_or("").to_string(),
         _ => String::new(),

@@ -472,7 +472,11 @@ pub(crate) fn explicit_fragment_input<'db>(
             None if qualified => {}
             None => {
                 // Neither a source variable nor an implicit helper: an unknown
-                // dependency. Point the error at the reference site.
+                // dependency. Point the error at the reference site, and name
+                // the reference: the span alone leaves a reader of a rename or
+                // a deletion guessing which of several names went missing, and
+                // the diagnostic's `variable` is the REFERRING variable, not
+                // this one.
                 let loc = parsed
                     .variable
                     .ast()
@@ -481,11 +485,12 @@ pub(crate) fn explicit_fragment_input<'db>(
                 return ExplicitFragment::Fatal {
                     unit_diags,
                     fatal_diags: vec![diagnostic(DiagnosticError::Equation(
-                        crate::common::EquationError {
-                            start: loc.start,
-                            end: loc.end,
-                            code: crate::common::ErrorCode::UnknownDependency,
-                        },
+                        crate::common::EquationError::detailed(
+                            crate::common::ErrorCode::UnknownDependency,
+                            loc.start,
+                            loc.end,
+                            format!("'{head}' is not a variable of model '{model_name}'"),
+                        ),
                     ))],
                 };
             }

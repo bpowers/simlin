@@ -915,6 +915,70 @@ variables and the `ModelStage0` oracle, neither of which is ever a conveyor.
 states it; `variable_source_producers_agree_for_every_source_variable_kind`
 pins that everything else agrees, one row per `SourceVariableKind`.
 
+**Phase 5b semantic divergences.** Giving `EquationError` a `details` field
+changed no compiled artifact (C-LEARN's `bytecode_profile` blocks are
+byte-identical plain and under `CLEARN_LTM=1`) and added or removed no
+diagnostic: the `test/` corpus reports the same 501 rows with the same
+per-code distribution before and after. What changed is the TEXT on 200 of
+them -- 209 rows carried a payload before, 409 after. Of those 409, 372 are a
+SENTENCE and 37 are a bare identifier (see "where the reason stops" below).
+Three of the changes are user-visible enough to name:
+
+1. An equation diagnostic's summary line gains a ` -- {reason}` tail wherever a
+   reason exists, matching the shape the unit arms already used
+   (`format_equation_error` and `format_diagnostic` both compose it through the
+   one `errors::code_and_reason`). One test pinned the old text and is
+   deliberately re-baselined: `errors::tests::equation_error_formats_snippet`,
+   which now reads `unknown_dependency -- 'bogus' is not a variable of model
+   'main'` and additionally pins `FormattedError::details`. No other golden or
+   snapshot pins diagnostic text, and there was no `GOLDEN MISMATCH` in the
+   suite.
+2. A unit-definition error raised while RESOLVING a unit equation
+   (`units::resolve_equation_unit`) now carries the offset inside that equation
+   and the declaration it came from. It used to be re-stamped as a span-less
+   copy of its own `ErrorCode`, discarding both. The offset is inert on this
+   path -- these diagnostics name no model, so
+   `format_diagnostic_with_datamodel` finds no datamodel variable and renders no
+   snippet -- which is exactly why the declaration text has to ride in the
+   reason: `no_app_in_units` on its own points at nothing the modeler can see.
+   Both arms of a rejected declaration are annotated identically, the one that
+   fails to lex and the one that fails to resolve, and both are rows of
+   `every_diagnostic_stage_keeps_its_message`.
+3. The CLI renders diagnostics through `collect_formatted_errors` rather than
+   the snippet-free `format_diagnostic`, so it prints the offending equation
+   with the span underlined. This is what makes the parse row's rule ("a parse
+   error writes no reason, because the snippet IS the reason") true on every
+   Rust surface rather than on three of four: libsimlin (through
+   `format_diagnostic_with_datamodel`), both MCP servers (through
+   `simlin-mcp-core`) and the CLI all render the snippet. The CLI's
+   `a_parse_error_prints_the_equation_it_could_not_parse` pins it.
+
+The FFI and TypeScript boundaries did not move. `SimlinErrorDetail` already had
+a `details` field, fed from `FormattedError::details`, and
+`src/engine/src/internal/types.ts` already mirrored it; the `Equation` arm was
+simply always passing `None`. `cbindgen` reproduces `src/libsimlin/simlin.h`
+byte for byte, and the numbered `SimlinErrorCode` enum is untouched.
+
+**Where the reason stops.** Two boundaries, both of them outside this phase's
+files:
+
+- *The web app.* An equation reason reaches the FFI and every Rust surface, and
+  no further: `src/diagram/project-controller.ts` builds a core `EquationError`
+  from `{code, startOffset, endOffset}` and drops `details`, the core type
+  (`src/core/datamodel.ts`) has no field to hold it, and
+  `src/diagram/VariableDetails.tsx` renders `errorCodeDescription(code)`. Unit
+  errors already carry `details` through the same path, so the fix is the
+  equation arm catching up (GH #1030).
+- *Bare-identifier payloads.* 37 of the 409 corpus rows carry an identifier
+  rather than a sentence, because that is what their raising site had:
+  `sim_err!(EmptyEquation, var.ident())` in `compiler/mod.rs` (18 rows,
+  rendering `empty_equation -- hare_density`), `sim_err!(MismatchedDimensions,
+  id)` in `compiler/context.rs` (14 rows), and
+  `sim_err!(ArrayReferenceNeedsExplicitSubscripts, ident)` in the same file (5
+  rows). An identifier is more than a bare code and less than an explanation.
+  Those two files are Phase 6(b)'s to rewrite, and the sentences belong in that
+  rewrite rather than ahead of it: the sites move.
+
 **Phase 6a semantic divergences.** Making `dimensions::match_axes` the one
 axis-matching precedence, and fixing GH #1027, changed how eight shapes
 compile and deliberately WITHHELD two rungs that the plan's original "union of
@@ -1152,3 +1216,4 @@ hash is not available to it.
 | 3 | `engine: one fragment compiler over dependency shapes` | 8.974 G (median of 5; range 8.971-8.977), -13.3% against the Phase 2c tree re-measured in the same session (10.347 G, median of 5, range 10.337-10.356; interleaved pairs -13.31 / -13.20 / -13.23 / -13.22 / -13.24%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN: every count above, the 371 names and 7 modules, the full opcode histogram and the post-fusion stream counts -- the plain `bytecode_profile` block is byte-identical, and so is the LTM one (30123 slots, 908377 / 1477 / 28514 opcodes, 16741 literals, 441 temps, 2866 views); same channel and flags as the baseline row. The saving is deleted per-fragment work, none of it output-bearing: the explicit emitter lowers only the phases the variable's runlist membership admits (it lowered both phases of every variable and discarded the ungated one -- ~400 initial-phase lowerings on C-LEARN); an implicit helper builds its `FragmentInput` once instead of re-running the parse -> lower -> dependency-walk prologue once per gated phase; a sub-model's shape is one memoized `model_shape` per model instead of a stub symbol table rebuilt, arena and all, inside every fragment that reads the module; and no fragment clones `model_module_map`. One corrected shape, not in the corpus: a stdlib call whose hoisted argument reads a module output compiles and simulates (Additional Considerations, "Phase 3 semantic divergences"). The engine suite (lib 5656, integration 767), the wasm parity corpus, the 12-repeat determinism suites and every fragment/LTM golden are green with no regeneration |
 | 4 | `engine: one Variable shape and a borrowed parse input` | 8.799 G (median of 5; range 8.794-8.804), -1.67% against the Phase 3 tree re-measured in the same session (8.949 G, median of 5, range 8.938-8.951; interleaved pairs -1.68 / -1.69 / -1.69 / -1.50 / -1.64%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: every count above, the 371 names and 7 modules, the full opcode histogram and the post-fusion stream counts -- both `bytecode_profile` blocks are byte-identical; same channel and flags as the baseline row. The saving is deleted per-parse work: `datamodel_variable_from_source` rebuilt and deep-cloned a kind-tagged `datamodel::Variable` (equation, gf, units, flow lists, module references, compat) on every parse of every variable, and `parse_var` then cloned the equation again out of it; the parse now reads a borrowed `VariableSource<'_>` over the salsa inputs. `Variable` is one struct over a `VarKind` enum, so `model::lower_variable` maps over `kind` instead of hand-copying 9-11 fields per variant, and the five repeated fields are stated once. Twins retired: one `paren_if_necessary` over a shallow `NodeShape` classification shared by `print_eqn` and both LaTeX printers, one `render_latex` walker over a `LatexTier` trait replacing `latex_eqn`/`latex_eqn_expr0`/`latex_eqn_expr0_annotated`, one `is_lookup_only(eqn, gf)` replacing `variable::var_is_lookup_only` + `db::source_var_is_table_only`'s body, one `SourceVariableFields::from_datamodel` behind `db/sync.rs`'s fresh and incremental paths, and `NamedDimension::index_of` for callers already holding an `Ident<Canonical>`. One re-assembly of a kind-tagged `datamodel::Variable` survives, outside every parse path: `db::macro_registry::macro_body_variable`, whose consumer `MacroRegistry::build` walks whole `datamodel::Model`s. One corrected shape, not in the corpus: a per-element table holder over a zero-element dimension is lookup-only on the parse side too, so layout and `Var::new` agree (Additional Considerations, "Phase 4 semantic divergences"). Otherwise no semantic divergence: the engine suite (lib 5655, integration 767), the 12-repeat determinism suites and every fragment/LTM golden are green with no regeneration |
 | 6a | `engine: one axis matcher and a decomposed subscript arm` | 8.819 G (median of 5; range 8.816-8.829), -1.5% against the seeded tree (Phase 3 staged on `1373f6f3`) re-measured in the same session (8.942 G, median of 5, range 8.939-8.952; interleaved pairs -1.54 / -1.38 / -1.66%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: every count above, the 371 names and 7 modules, the full opcode histogram and the post-fusion stream counts -- both `bytecode_profile` blocks byte-identical; same channel and flags as the baseline row. The saving is deleted per-reference work, none of it output-bearing: `compiler::subscript` and `lower_from_expr3`'s dimension-as-value arm re-`canonicalize`d (and so re-interned) already-canonical dimension names once per subscript and once per candidate active dimension, and the Subscript arm ran two independent searches over the active dimensions -- one to decide whether an axis matched by name and a second to find which -- where the allocation now answers both once. `dimensions::match_axes` replaces seven matchers (`allocate_implicit_axes_partial` and `allocate_implicit_axes`, `match_dimensions_with_mapping`, `find_dimension_reordering`, `Expr2::can_all_match` and `find_matching_dimension` under `unify_dims_with_names`, `view_contains`/`named_dims`) and five inline searches in `compiler/context.rs` and `compiler/subscript.rs` -- the twelve rows of `axis_match_tests`. `allocate_implicit_axes_partial` and `allocate_implicit_axes` survive as the two projections of it that the LTM augmenter (`ltm_augment_post_transform.rs`) and `get_implicit_subscripts` call, so the matching is what was replaced, not the entry points; the Subscript arm is five named steps; `lower`/`lower_preserving_dimensions` are one function under `DimensionRefs`. Differential sweep of a pre-change and a post-change CLI over all 509 models under `test/`: 397 byte-identical, 110 refused identically, and the only movers were `subscript_transposition` (its transposed `output2` moves from all-NaN to exactly Vensim's `109, 1090, 109, 141, -13`) plus two models that flip between the same two outputs on BOTH binaries (GH #859, an importer nondeterminism this change does not touch). Ten divergences, pinned -- eight shapes whose compile changed and two rungs deliberately withheld (Additional Considerations, "Phase 6a semantic divergences") |
+| 5b | `engine: diagnostics keep their message from parse to collection` | 8.829 G (median of 5; range 8.827-8.841), +0.36% against the Phase 4 tree re-measured in the same session (8.798 G, median of 5, range 8.791-8.802; interleaved pairs +0.44 / +0.32 / +0.28 / +0.49 / +0.38%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: both `bytecode_profile` blocks are byte-identical, including the full opcode histogram, the post-fusion stream counts, the 371 names and 7 modules; same channel and flags as the baseline row. This phase changes diagnostics, not codegen, so the delta is cost rather than saving: `EquationError` grew an `Option<String>` from 8 to 32 bytes, and it is the error type of every `EquationResult` in the AST-lowering path and the element type of `Variable::errors`, which is cloned per parse. Under the one-percent bar the plan sets for recording rather than investigating; a perf pass follows this branch. Diagnostics on the `test/` corpus: the same 501 rows with the same per-code distribution, of which 409 now carry a payload where 209 did (`unknown_builtin` 0 -> 96, `unknown_dependency` 0 -> 48, `mismatched_dimensions` 0 -> 14, `generic` 0 -> 10, `bad_builtin_args` 0 -> 6, `array_reference_needs_explicit_subscripts` 0 -> 5, `empty_equation` 0 -> 18 of 58, `bad_binary_op_in_units` 0 -> 3). 372 of the 409 are a SENTENCE; the other 37 are a bare identifier, which is what their raising site had -- `empty_equation` (18), `mismatched_dimensions` (14) and `array_reference_needs_explicit_subscripts` (5), all raised in `compiler/mod.rs` and `compiler/context.rs`, which Phase 6(b) rewrites and which the sentences should follow. The 92 that remain payload-less are the parse stage (45), whose reason is the source snippet every Rust surface now renders from the span, plus three sites in files Phase 6a/6b own (43) and one (`db/dep_graph.rs`'s `cycle_diagnostic`, 4) that has no reason in hand. One deliberately re-baselined pin and three named divergences (Additional Considerations, "Phase 5b semantic divergences"), which also record the two places a reason still stops: the web app's equation arm (GH #1030) and the bare-identifier payloads above. The CLI renders through `collect_formatted_errors`, so the parse row's "the snippet IS the reason" rule now holds on every Rust surface -- libsimlin, both MCP servers and the CLI. The engine suite (lib 5661, integration 767), the CLI suite (9), the 12-repeat determinism suites, every fragment/LTM golden with no regeneration, and one capped `cargo test --workspace` are green; `cbindgen` reproduces `simlin.h` unchanged |

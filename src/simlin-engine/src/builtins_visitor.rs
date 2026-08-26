@@ -102,7 +102,15 @@ fn rewrite_alias_module_call(
         return Ok((func, args));
     }
     if args.len() < 3 || args.len() > 4 {
-        return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
+        return eqn_err!(
+            BadBuiltinArgs,
+            loc.start,
+            loc.end,
+            format!(
+                "{func} takes 3 or 4 arguments, but {} were given",
+                args.len()
+            )
+        );
     }
 
     let mut it = args.into_iter();
@@ -112,14 +120,26 @@ fn rewrite_alias_module_call(
     let init = it.next();
 
     let Some(order) = parse_module_order_arg(&order_expr) else {
-        return eqn_err!(UnknownBuiltin, loc.start, loc.end);
+        return eqn_err!(
+            UnknownBuiltin,
+            loc.start,
+            loc.end,
+            format!("{func}'s order argument must be the literal 1 or 3")
+        );
     };
     let rewritten_name = match (func.as_str(), order) {
         ("delayn", 1) => "delay1",
         ("delayn", 3) => "delay3",
         ("smthn", 1) => "smth1",
         ("smthn", 3) => "smth3",
-        _ => return eqn_err!(UnknownBuiltin, loc.start, loc.end),
+        _ => {
+            return eqn_err!(
+                UnknownBuiltin,
+                loc.start,
+                loc.end,
+                format!("{func} of order {order} is not supported; use order 1 or 3")
+            );
+        }
     };
 
     let init_expr = init.unwrap_or_else(|| input.clone());
@@ -230,7 +250,12 @@ fn dedup_vars_by_ident(
             Some(_) => {
                 // Same name, different content: a synthesized-helper id
                 // collision the per-path suffix rules must prevent.
-                return eqn_err!(Generic, 0, 0);
+                return eqn_err!(
+                    Generic,
+                    0,
+                    0,
+                    format!("two different synthesized helpers both claim the name '{ident}'")
+                );
             }
             None => {
                 seen.insert(ident, v.clone());
@@ -990,7 +1015,16 @@ impl<'a> BuiltinVisitor<'a> {
         if descriptor.is_macro && args.len() != descriptor.parameter_ports.len() {
             // Macro arity is strict; the span covers the whole call so the
             // diagnostic identifies the macro in context (macros.AC5.1).
-            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
+            return eqn_err!(
+                BadBuiltinArgs,
+                loc.start,
+                loc.end,
+                format!(
+                    "macro {func} takes exactly {} argument(s), but {} were given",
+                    descriptor.parameter_ports.len(),
+                    args.len()
+                )
+            );
         }
 
         // In A2A context, add subscript suffix to module name for uniqueness
@@ -1278,7 +1312,12 @@ impl<'a> BuiltinVisitor<'a> {
                 // stdlib spec (e.g. `systems_*`) if a user equation ever
                 // references them.
                 let Some(descriptor) = stdlib_descriptor(&func) else {
-                    return eqn_err!(UnknownBuiltin, loc.start, loc.end);
+                    return eqn_err!(
+                        UnknownBuiltin,
+                        loc.start,
+                        loc.end,
+                        format!("'{func}' is not a known function")
+                    );
                 };
                 return self.expand_module_function(&descriptor, &func, args, loc);
             }

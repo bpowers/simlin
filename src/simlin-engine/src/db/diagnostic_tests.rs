@@ -2854,7 +2854,7 @@ fn unit_definition_diagnostics(diags: &[Diagnostic]) -> Vec<&Diagnostic> {
         .filter(|d| {
             matches!(
                 &d.error,
-                DiagnosticError::Unit(crate::common::UnitError::DefinitionError(_, _))
+                DiagnosticError::Unit(crate::common::UnitError::DefinitionError(_))
             )
         })
         .collect()
@@ -3243,5 +3243,425 @@ fn codegen_rejection_in_the_initials_phase_is_attributable_too() {
     assert!(
         carries_reason,
         "an initials-phase codegen rejection must name 'lvl' and carry its reason; got: {diags:?}"
+    );
+}
+
+// ---- DoD 8: a diagnostic keeps the reason its raising site had ----
+
+/// The `ErrorCode` a diagnostic reports, whatever variant holds it -- the same
+/// projection `libsimlin::patch::diagnostic_to_error_code` makes.
+fn diagnostic_code(d: &Diagnostic) -> crate::common::ErrorCode {
+    match &d.error {
+        DiagnosticError::Equation(e) => e.code,
+        DiagnosticError::Model(e) => e.code,
+        DiagnosticError::Unit(u) => match u {
+            crate::common::UnitError::DefinitionError(e) => e.code,
+            crate::common::UnitError::ConsistencyError(code, _, _) => *code,
+            crate::common::UnitError::InferenceError { code, .. } => *code,
+        },
+        DiagnosticError::Assembly(_) => crate::common::ErrorCode::NotSimulatable,
+    }
+}
+
+/// Extract the human-readable reason a diagnostic carries, whatever variant
+/// holds it. This is the projection every consumer of a `Diagnostic` reads --
+/// `errors::format_diagnostic` fills `FormattedError::details` from exactly
+/// these fields, and libsimlin hands that string to the FFI -- so a test that
+/// reads it is testing the channel users actually see.
+fn diagnostic_reason(d: &Diagnostic) -> Option<String> {
+    match &d.error {
+        DiagnosticError::Equation(e) => e.details.clone(),
+        DiagnosticError::Model(e) => e.details.clone(),
+        DiagnosticError::Unit(u) => match u {
+            crate::common::UnitError::DefinitionError(e) => e.details.clone(),
+            crate::common::UnitError::ConsistencyError(_, _, d) => d.clone(),
+            crate::common::UnitError::InferenceError { details, .. } => details.clone(),
+        },
+        DiagnosticError::Assembly(msg) => Some(msg.clone()),
+    }
+}
+
+/// Every stage that can put an error into `collect_all_diagnostics` hands on
+/// the reason the raising site had.
+///
+/// The rows are the ENUMERATION of error-producing stages, in pipeline order,
+/// as `db/var_fragment.rs`'s module docs and `db/fragment_compile.rs` lay them
+/// out. Each row is a whole project driven through the production diagnostic
+/// path (`collect_all_diagnostics`), never a hand-built `Diagnostic`:
+///
+///  1. **parse** -- the lexer/parser errors `Expr0::new` returns, carried on
+///     `Variable::errors`. These are code-only BY DESIGN: the reason for a
+///     parse failure is the text under `start..end`, which
+///     `errors::format_equation_error` renders as a source snippet, so a
+///     raising site writes `details` only when the reason is NOT in the span.
+///     The row pins that the span is real and no reason is fabricated.
+///  2. **unit definition (project)** -- a `<units>` declaration the project
+///     rejects, emitted by `collect_all_diagnostics` from
+///     `project_units_context_result`. Two arms, one row each: the declaration
+///     does not LEX (`units::Context::new`'s Phase A), or it lexes and does not
+///     RESOLVE (`units::resolve_equation_unit`). Both name the unit and neither
+///     shows the declaration anywhere else, so both must carry its text.
+///  3. **unit string (variable)** -- a variable's own malformed `units`,
+///     carried on `Variable::unit_errors` and replayed as a NON-fatal
+///     diagnostic by `compile_var_fragment`.
+///  4. **AST lowering** -- `lower_ast` (`Expr1::from` / `Expr2::from`), whose
+///     errors land on the LOWERED variable and are read by
+///     `explicit_fragment_input`'s lowering gate.
+///  5. **dependency resolution** -- `explicit_fragment_input`'s own gates: a
+///     name that resolves to neither a variable nor an implicit helper.
+///  6. **fragment compile** -- `lower_fragment`'s `Err(Error)`, replayed by
+///     `accumulate_var_compile_error`. This is the `From<Error>` path, and the
+///     `Error`'s `details` is the reason.
+///  7. **assembly / codegen refusal** -- `DiagnosticError::Assembly`, whose
+///     payload IS a message.
+///
+/// Stage 6's twin for a whole-variable table-build failure (`BadTable`) rides
+/// `DiagnosticError::Model` and is covered by row 6's sibling
+/// `test_ac2_2_bad_table_error`; the LTM emitters' `Assembly` rows are covered
+/// by `db::ltm` tests.
+#[test]
+fn every_diagnostic_stage_keeps_its_message() {
+    use crate::common::ErrorCode;
+    use crate::test_common::TestProject;
+
+    // (stage, project, code the row is about, the substring its reason must
+    // contain -- None means "this stage writes no reason, by design")
+    struct Row {
+        stage: &'static str,
+        project: datamodel::Project,
+        code: ErrorCode,
+        reason_contains: Option<&'static str>,
+    }
+
+    let unit_project = |project_name: &str, unit_name: &str, equation: &str| {
+        let mut tp = TestProject::new(project_name);
+        tp.units.push(datamodel::Unit {
+            name: unit_name.to_string(),
+            equation: Some(equation.to_string()),
+            disabled: false,
+            aliases: vec![],
+        });
+        tp.aux("a", "1", None).build_datamodel()
+    };
+
+    let rows = vec![
+        Row {
+            stage: "1. parse",
+            project: TestProject::new("parse")
+                .aux("bad", "1 +", None)
+                .build_datamodel(),
+            code: ErrorCode::UnrecognizedEof,
+            reason_contains: None,
+        },
+        Row {
+            stage: "2. unit definition (project), lex arm",
+            project: unit_project("bad_unit_lex", "widget", "!!!"),
+            code: ErrorCode::UnrecognizedToken,
+            reason_contains: Some("!!!"),
+        },
+        Row {
+            // Lexes cleanly, then `build_unit_components` refuses: a unit
+            // equation is a product of names and powers, never a call.
+            stage: "2. unit definition (project), resolve arm",
+            project: unit_project("bad_unit_resolve", "gadget", "foo(1)"),
+            code: ErrorCode::NoAppInUnits,
+            reason_contains: Some("foo(1)"),
+        },
+        Row {
+            stage: "3. unit string (variable)",
+            project: TestProject::new("bad_var_units")
+                .aux("a", "1", Some("bad units here!!!"))
+                .build_datamodel(),
+            code: ErrorCode::UnrecognizedToken,
+            reason_contains: Some("bad units here!!!"),
+        },
+        Row {
+            stage: "4. AST lowering",
+            project: TestProject::new("unknown_builtin")
+                .aux("bad", "BOGUSFN(1)", None)
+                .build_datamodel(),
+            code: ErrorCode::UnknownBuiltin,
+            reason_contains: Some("bogusfn"),
+        },
+        Row {
+            stage: "5. dependency resolution",
+            project: TestProject::new("unknown_dep")
+                .aux("bad", "1 + nowhere_var", None)
+                .build_datamodel(),
+            code: ErrorCode::UnknownDependency,
+            reason_contains: Some("nowhere_var"),
+        },
+        Row {
+            stage: "6. fragment compile",
+            // An apply-to-all over `e` reading an array declared over `d`:
+            // every whole-variable gate passes, and `lower_fragment` refuses
+            // while allocating the reference's implicit axes
+            // (`Context::get_implicit_subscripts`), naming the variable whose
+            // axes it could not match.
+            project: TestProject::new("incomparable_axes")
+                .named_dimension("d", &["e1", "e2"])
+                .named_dimension("e", &["f1", "f2", "f3"])
+                .array_const("arr[d]", 1.0)
+                .array_aux("bad[e]", "arr + 1")
+                .build_datamodel(),
+            code: ErrorCode::MismatchedDimensions,
+            reason_contains: Some("arr"),
+        },
+        Row {
+            stage: "7. assembly / codegen refusal",
+            // The shape `codegen_rejection_in_the_initials_phase_is_
+            // attributable_too` uses: codegen declines to emit the initials
+            // phase of `lvl`.
+            project: TestProject::new("codegen_refusal")
+                .named_dimension("d", &["e1", "e2", "e3"])
+                .indexed_dimension("xp", 4)
+                .array_const("request[d]", 10.0)
+                .array_const("pp[d,xp]", 1.0)
+                .array_const("pp_bump[d,xp]", 0.0)
+                .scalar_const("supply", 35.0)
+                .array_stock(
+                    "lvl[d]",
+                    "allocate_available(request[d], pp[d,1] + pp_bump[d,1], supply)",
+                    &[],
+                    &[],
+                    None,
+                )
+                .build_datamodel(),
+            code: ErrorCode::NotSimulatable,
+            reason_contains: Some("lvl"),
+        },
+    ];
+
+    for row in rows {
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &row.project);
+        let diags = collect_all_diagnostics(&db, sync.project);
+        let matching: Vec<&Diagnostic> = diags
+            .iter()
+            .filter(|d| diagnostic_code(d) == row.code)
+            .collect();
+        assert!(
+            !matching.is_empty(),
+            "{}: expected a {:?} diagnostic; got: {diags:#?}",
+            row.stage,
+            row.code
+        );
+        match row.reason_contains {
+            Some(needle) => {
+                assert!(
+                    matching
+                        .iter()
+                        .any(|d| diagnostic_reason(d).is_some_and(|r| r.contains(needle))),
+                    "{}: a {:?} diagnostic must carry a reason containing {needle:?}; got: {:#?}",
+                    row.stage,
+                    row.code,
+                    matching
+                        .iter()
+                        .map(|d| diagnostic_reason(d))
+                        .collect::<Vec<_>>()
+                );
+            }
+            None => {
+                assert!(
+                    matching.iter().all(|d| diagnostic_reason(d).is_none()),
+                    "{}: the parse stage writes no reason (the source snippet is the reason); \
+                     got: {:#?}",
+                    row.stage,
+                    matching
+                        .iter()
+                        .map(|d| diagnostic_reason(d))
+                        .collect::<Vec<_>>()
+                );
+                assert!(
+                    matching.iter().any(|d| matches!(
+                        &d.error,
+                        DiagnosticError::Equation(e) if e.end > e.start
+                    )),
+                    "{}: a parse diagnostic must carry a real span, since the span IS its \
+                     reason; got: {:#?}",
+                    row.stage,
+                    matching
+                );
+            }
+        }
+    }
+}
+
+/// A span is never rendered to the user as prose.
+///
+/// `details` is the sentence a raising site wrote, and it is what
+/// `format_diagnostic` appends after the code and what the FFI hands a GUI. A
+/// lowering rejection that has no sentence must therefore pass `None` along:
+/// stamping `"Error at 8:10"` in its place shows the modeler byte offsets into
+/// a string they never see, and displaces any real reason the site did write.
+///
+/// Rows are the two `Expr3::from_expr2` rejections a modeler can reach through
+/// `Context::lower`. `Context::lower_preserving_dimensions` holds the same
+/// mapping for the same reason; it is not reachable with a row here, because it
+/// re-lowers an AST `lower` has already accepted (`compiler::mod`'s
+/// array-producing-builtin path), so the two are changed and read together.
+#[test]
+fn a_lowering_rejection_never_renders_its_span_as_prose() {
+    use crate::common::ErrorCode;
+    use crate::test_common::TestProject;
+
+    // (variable, its equation, the code the lowering raises)
+    let rows = [
+        // Two subscripts against a one-dimensional array.
+        ("toomany", "arr[e1, e2]", ErrorCode::MismatchedDimensions),
+        // A wildcard against a variable that has no dimensions to range over.
+        ("wild", "s[*]", ErrorCode::CantSubscriptScalar),
+    ];
+
+    for (var, equation, code) in rows {
+        let datamodel = TestProject::new("lowering_rejection")
+            .named_dimension("d", &["e1", "e2"])
+            .scalar_const("s", 1.0)
+            .array_const("arr[d]", 1.0)
+            .array_aux(&format!("{var}[d]"), equation)
+            .build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let diags = collect_all_diagnostics(&db, sync.project);
+        let formatted = crate::errors::collect_formatted_errors(&diags, &datamodel);
+
+        let err = formatted
+            .errors
+            .iter()
+            .find(|e| e.code == code)
+            .unwrap_or_else(|| panic!("{var}: expected a {code:?} error: {formatted:#?}"));
+        for rendered in [err.message.as_deref(), err.details.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            assert!(
+                !rendered.contains("Error at"),
+                "{var}: a span must not reach the user as prose; got {rendered:?}"
+            );
+        }
+        assert!(
+            err.message
+                .as_deref()
+                .is_some_and(|m| m.contains(&format!("variable '{var}'"))),
+            "{var}: the diagnostic must still name the variable; got {:?}",
+            err.message
+        );
+    }
+}
+
+/// A `duplicate_unit` diagnostic names the declaration the modeler must go and
+/// change.
+///
+/// The two conflicts share a code but not a subject: one unit name declared
+/// twice with different meanings is about the NAME, while two units claiming
+/// one alias is about the ALIAS -- and the unit that loses the race is declared
+/// exactly once, so telling the modeler it was "declared more than once" sends
+/// them to a declaration that is fine.
+///
+/// Rows are both `alias_err` sites -- the alias loop over prime units and its
+/// twin over equation-bearing units (`Context::new`'s Phase A) -- plus one of
+/// the four `dup_err` sites, the registration conflict in Phase B. The other
+/// three `dup_err` sites (step 1's registration conflict, and the two checks
+/// for a primary name that is already another unit's alias) say the same
+/// sentence about the same subject, the unit they name; what has to stay
+/// separate, and what these rows keep separate, is the ALIAS subject from the
+/// NAME subject.
+#[test]
+fn a_duplicate_unit_diagnostic_names_the_declaration_that_conflicts() {
+    use crate::common::ErrorCode;
+    use crate::test_common::TestProject;
+
+    let unit = |name: &str, equation: Option<&str>, aliases: &[&str]| datamodel::Unit {
+        name: name.to_string(),
+        equation: equation.map(|e| e.to_string()),
+        disabled: false,
+        aliases: aliases.iter().map(|a| a.to_string()).collect(),
+    };
+
+    // (site, the project's units, the reason the diagnostic must carry)
+    let rows = vec![
+        (
+            "alias collision, prime units",
+            vec![
+                unit("Person", None, &["People"]),
+                unit("Cow", None, &["People"]),
+            ],
+            "alias 'people' of unit 'cow' is already an alias of unit 'person'",
+        ),
+        (
+            "alias collision, equation-bearing units",
+            vec![
+                unit("Person", None, &["People"]),
+                unit("Cow", Some("Person"), &["People"]),
+            ],
+            "alias 'people' of unit 'cow' is already an alias of unit 'person'",
+        ),
+        (
+            "one name, two meanings",
+            vec![
+                unit("Person", None, &[]),
+                unit("Cow", None, &[]),
+                unit("Gizmo", Some("Person"), &[]),
+                unit("Gizmo", Some("Cow"), &[]),
+            ],
+            "unit 'gizmo' is declared more than once, with conflicting meanings",
+        ),
+    ];
+
+    for (site, units, reason) in rows {
+        let mut tp = TestProject::new("duplicate_units");
+        tp.units = units;
+        let datamodel = tp.aux("a", "1", None).build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let diags = collect_all_diagnostics(&db, sync.project);
+
+        let reasons: Vec<Option<String>> = diags
+            .iter()
+            .filter(|d| diagnostic_code(d) == ErrorCode::DuplicateUnit)
+            .map(diagnostic_reason)
+            .collect();
+        assert!(
+            reasons.iter().any(|r| r.as_deref() == Some(reason)),
+            "{site}: expected the reason {reason:?}; got {reasons:#?} (all: {diags:#?})"
+        );
+    }
+}
+
+/// The reason a raising site wrote reaches the user-facing rendering, not just
+/// the structured `Diagnostic`: `errors::format_diagnostic_with_datamodel`
+/// puts it in `FormattedError::details` (what the GUI and the libsimlin FFI
+/// `SimlinErrorDetail::details` field read) and in `message` (what the CLI
+/// prints).
+#[test]
+fn a_diagnostics_reason_reaches_the_formatted_error() {
+    use crate::test_common::TestProject;
+
+    let datamodel = TestProject::new("unknown_dep")
+        .aux("bad", "1 + nowhere_var", None)
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let diags = collect_all_diagnostics(&db, sync.project);
+    let formatted = crate::errors::collect_formatted_errors(&diags, &datamodel);
+
+    let err = formatted
+        .errors
+        .iter()
+        .find(|e| e.code == crate::common::ErrorCode::UnknownDependency)
+        .unwrap_or_else(|| panic!("expected an UnknownDependency FormattedError: {formatted:#?}"));
+    assert!(
+        err.details
+            .as_deref()
+            .is_some_and(|d| d.contains("nowhere_var")),
+        "FormattedError::details must name the dependency; got {:?}",
+        err.details
+    );
+    assert!(
+        err.message
+            .as_deref()
+            .is_some_and(|m| m.contains("nowhere_var")),
+        "the printed message must name the dependency; got {:?}",
+        err.message
     );
 }

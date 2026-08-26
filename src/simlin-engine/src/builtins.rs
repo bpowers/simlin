@@ -630,6 +630,23 @@ impl BuiltinSig {
     pub fn accepts_arity(&self, n: usize) -> bool {
         n >= self.min_args as usize && self.max_args.is_none_or(|max| n <= max as usize)
     }
+
+    /// The accepted arity as a noun phrase for a diagnostic ("2 arguments",
+    /// "1 or 2 arguments", "2 to 4 arguments", "at least 1 argument"). Reads
+    /// the same two fields `accepts_arity` does, so the message a rejected
+    /// call carries cannot describe a different range than the one that
+    /// rejected it; the noun agrees with the last number the phrase names, so
+    /// no caller has to spell "argument(s)".
+    pub fn arity_phrase(&self) -> String {
+        let (last, range) = match self.max_args {
+            None => (self.min_args, format!("at least {}", self.min_args)),
+            Some(max) if max == self.min_args => (max, max.to_string()),
+            Some(max) if max == self.min_args + 1 => (max, format!("{} or {max}", self.min_args)),
+            Some(max) => (max, format!("{} to {max}", self.min_args)),
+        };
+        let plural = if last == 1 { "" } else { "s" };
+        format!("{range} argument{plural}")
+    }
 }
 
 /// The argument expressions of a builtin, in call order, as shared or mutable
@@ -1563,6 +1580,58 @@ mod tests {
                 is_0_arity_builtin_fn_ci(s),
                 is_0_arity_builtin_fn(&s.to_lowercase()),
                 "ci/lowercase mismatch for {s}"
+            );
+        }
+    }
+
+    /// Rows are the four arms of `BuiltinSig::arity_phrase`, each spelled once
+    /// with a plural and (where the arm can name 1 as its last number) once
+    /// with a singular, since the noun is chosen from that number. The second
+    /// loop derives coverage from the table rather than asserting it: every
+    /// signature in `BuiltinSig::ALL` must land in an arm a row names, so a new
+    /// builtin whose arity shape none of these covers fails here instead of
+    /// silently rendering as something else.
+    #[test]
+    fn arity_phrase_covers_every_shape_in_the_signature_table() {
+        let shape = |min: u8, max: Option<u8>| -> String {
+            BuiltinSig {
+                min_args: min,
+                max_args: max,
+                ..ABS
+            }
+            .arity_phrase()
+        };
+        // (arm, min, max, rendering)
+        let rows: [(&str, u8, Option<u8>, &str); 6] = [
+            ("variadic", 0, None, "at least 0 arguments"),
+            ("variadic", 1, None, "at least 1 argument"),
+            ("exact", 2, Some(2), "2 arguments"),
+            ("exact", 1, Some(1), "1 argument"),
+            ("one optional", 1, Some(2), "1 or 2 arguments"),
+            ("a range", 2, Some(4), "2 to 4 arguments"),
+        ];
+        for (arm, min, max, expected) in rows {
+            assert_eq!(shape(min, max), expected, "{arm}");
+        }
+
+        for sig in BuiltinSig::ALL {
+            let arm = match sig.max_args {
+                None => "variadic",
+                Some(max) if max == sig.min_args => "exact",
+                Some(max) if max == sig.min_args + 1 => "one optional",
+                Some(_) => "a range",
+            };
+            assert!(
+                rows.iter().any(|(row_arm, _, _, _)| *row_arm == arm),
+                "{}'s arity shape ({}, {:?}) is an arm no row above covers",
+                sig.name,
+                sig.min_args,
+                sig.max_args
+            );
+            assert!(
+                !sig.arity_phrase().is_empty(),
+                "{} must render an arity phrase",
+                sig.name
             );
         }
     }

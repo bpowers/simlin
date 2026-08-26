@@ -59,11 +59,7 @@ pub enum Token<'input> {
 }
 
 fn error<T>(code: ErrorCode, start: usize, end: usize) -> Result<T, EquationError> {
-    Err(EquationError {
-        start: start as u16,
-        end: end as u16,
-        code,
-    })
+    Err(EquationError::new(code, start as u16, end as u16))
 }
 
 pub type Spanned<T> = (usize, T, usize);

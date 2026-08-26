@@ -66,11 +66,14 @@ pub struct FormattedError {
     /// The bare human-readable reason, without the source snippet or the
     /// model/variable summary line that `message` carries (e.g. "the equation
     /// computes to units 'people', but the variable's specified units are
-    /// 'person'"). `message` is formatted
-    /// for terminal output; GUI consumers that already show the variable in
-    /// context render this instead. Populated for unit errors (inference
-    /// errors always synthesize one via `unit_inference_reason`) and for
-    /// model-level errors whose `Error.details` is set; None elsewhere.
+    /// 'person'"). `message` is formatted for terminal output; GUI consumers
+    /// that already show the variable in context render this instead.
+    ///
+    /// Populated whenever the diagnostic carries one: from `Error::details`,
+    /// from `EquationError::details`, and from the `UnitError` variants
+    /// (inference errors always synthesize one via `unit_inference_reason`).
+    /// `None` when the raising site had nothing to add beyond the code and the
+    /// span -- a parse error, whose reason IS the snippet.
     pub details: Option<String>,
 }
 
@@ -127,6 +130,18 @@ pub fn format_simulation_error(model_name: &str, error: &Error) -> FormattedErro
     }
 }
 
+/// The trailing `": {code}"` / `": {code} -- {reason}"` of a summary line.
+///
+/// One helper, so the equation and unit arms cannot drift on how a reason is
+/// joined to its code -- the joiner is the ` -- ` every summary in this module
+/// uses.
+fn code_and_reason(code: ErrorCode, details: Option<&str>) -> String {
+    match details {
+        Some(details) => format!("{code} -- {details}"),
+        None => code.to_string(),
+    }
+}
+
 fn format_equation_error(
     model_name: &str,
     var_name: &str,
@@ -140,7 +155,7 @@ fn format_equation_error(
     let summary = format!(
         "{} in model '{model_name}' variable '{var_name}': {}",
         severity_word(severity),
-        error.code
+        code_and_reason(error.code, error.details.as_deref())
     );
     let message = combine_snippet_and_summary(snippet, summary);
     FormattedError {
@@ -153,7 +168,7 @@ fn format_equation_error(
         kind: FormattedErrorKind::Variable,
         severity,
         unit_error_kind: None,
-        details: None,
+        details: error.details.clone(),
     }
 }
 
@@ -231,20 +246,14 @@ fn format_unit_error(
 ) -> FormattedError {
     let word = severity_word(severity);
     match error {
-        UnitError::DefinitionError(eq_error, details) => {
+        UnitError::DefinitionError(eq_error) => {
             let snippet = var
                 .and_then(|v| v.get_units())
                 .map(|units| format_snippet(units, eq_error.start, eq_error.end));
-            let summary = match details {
-                Some(details) => format!(
-                    "units {word} in model '{model_name}' variable '{var_name}': {} -- {}",
-                    eq_error.code, details
-                ),
-                None => format!(
-                    "units {word} in model '{model_name}' variable '{var_name}': {}",
-                    eq_error.code
-                ),
-            };
+            let summary = format!(
+                "units {word} in model '{model_name}' variable '{var_name}': {}",
+                code_and_reason(eq_error.code, eq_error.details.as_deref())
+            );
             FormattedError {
                 code: eq_error.code,
                 message: combine_snippet_and_summary(snippet, summary),
@@ -255,7 +264,7 @@ fn format_unit_error(
                 kind: FormattedErrorKind::Units,
                 severity,
                 unit_error_kind: Some(UnitErrorKind::Definition),
-                details: details.clone(),
+                details: eq_error.details.clone(),
             }
         }
         UnitError::ConsistencyError(code, loc, details) => {
@@ -351,7 +360,7 @@ pub fn format_diagnostic(diag: &db::Diagnostic) -> FormattedError {
                 severity_word(severity),
                 diag.model,
                 var_name,
-                err.code
+                code_and_reason(err.code, err.details.as_deref())
             );
             FormattedError {
                 code: err.code,
@@ -363,7 +372,7 @@ pub fn format_diagnostic(diag: &db::Diagnostic) -> FormattedError {
                 kind: FormattedErrorKind::Variable,
                 severity,
                 unit_error_kind: None,
-                details: None,
+                details: err.details.clone(),
             }
         }
         DiagnosticError::Model(err) => {
@@ -539,9 +548,16 @@ mod tests {
         assert_eq!(lines.next().unwrap(), "        ~~~~~");
         assert_eq!(
             lines.next().unwrap(),
-            "error in model 'main' variable 'bad': unknown_dependency"
+            "error in model 'main' variable 'bad': unknown_dependency -- \
+             'bogus' is not a variable of model 'main'"
         );
         assert!(lines.next().is_none());
+        // The reason is also available on its own, for a consumer that renders
+        // the variable itself and wants only the sentence.
+        assert_eq!(
+            error.details.as_deref(),
+            Some("'bogus' is not a variable of model 'main'")
+        );
     }
 
     #[test]
@@ -856,11 +872,11 @@ mod tests {
             severity,
         };
         vec![
-            arm(DiagnosticError::Equation(EquationError {
-                start: 0,
-                end: 1,
-                code: ErrorCode::UnknownDependency,
-            })),
+            arm(DiagnosticError::Equation(EquationError::new(
+                ErrorCode::UnknownDependency,
+                0,
+                1,
+            ))),
             arm(DiagnosticError::Model(CommonError {
                 kind: ErrorKind::Model,
                 code: ErrorCode::ConveyorLtmDegraded,
@@ -972,11 +988,7 @@ mod tests {
         let rows: Vec<ArmRow> = vec![
             (
                 "equation",
-                DiagnosticError::Equation(EquationError {
-                    start: 4,
-                    end: 9,
-                    code: ErrorCode::UnknownDependency,
-                }),
+                DiagnosticError::Equation(EquationError::new(ErrorCode::UnknownDependency, 4, 9)),
                 ErrorCode::UnknownDependency,
                 FormattedErrorKind::Variable,
                 None,
@@ -1011,14 +1023,12 @@ mod tests {
             ),
             (
                 "unit definition",
-                DiagnosticError::Unit(UnitError::DefinitionError(
-                    EquationError {
-                        start: 0,
-                        end: 3,
-                        code: ErrorCode::UnitDefinitionErrors,
-                    },
-                    Some("parse error".to_string()),
-                )),
+                DiagnosticError::Unit(UnitError::DefinitionError(EquationError::detailed(
+                    ErrorCode::UnitDefinitionErrors,
+                    0,
+                    3,
+                    "parse error",
+                ))),
                 ErrorCode::UnitDefinitionErrors,
                 FormattedErrorKind::Units,
                 Some(UnitErrorKind::Definition),
@@ -1099,11 +1109,7 @@ mod tests {
         use crate::db::{Diagnostic, DiagnosticError};
 
         let arms = [
-            DiagnosticError::Equation(EquationError {
-                start: 0,
-                end: 5,
-                code: ErrorCode::EmptyEquation,
-            }),
+            DiagnosticError::Equation(EquationError::new(ErrorCode::EmptyEquation, 0, 5)),
             DiagnosticError::Unit(UnitError::ConsistencyError(
                 ErrorCode::UnitMismatch,
                 Loc::new(0, 1),

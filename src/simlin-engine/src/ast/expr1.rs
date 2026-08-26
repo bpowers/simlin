@@ -109,13 +109,39 @@ impl Expr1 {
                 let Some(sig) = BuiltinSig::by_name(id.as_str()) else {
                     // TODO: this could be a table reference, array reference,
                     //       or module instantiation according to 3.3.2 of the spec
-                    return eqn_err!(UnknownBuiltin, loc.start, loc.end);
+                    return eqn_err!(
+                        UnknownBuiltin,
+                        loc.start,
+                        loc.end,
+                        format!("'{}' is not a known function", id.as_str())
+                    );
                 };
                 // The signature is the one statement of each builtin's arity;
                 // once it admits the call, the destructuring below is
                 // positional and infallible.
                 if !sig.accepts_arity(args.len()) {
-                    return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
+                    // Name the function the way the CALL spells it, not the
+                    // signature's canonical name: a modeler who wrote `DT` is
+                    // not helped by a message about `time_step`. The parser
+                    // has already lowercased the name (and joined a multi-word
+                    // one with `_`), so the display uppercases it -- the
+                    // spelling XMILE v1.0 uses for every function it defines
+                    // (3.3.2 `ABS(x)`, the tables in 3.5).
+                    let given = if args.len() == 1 {
+                        "1 was".to_string()
+                    } else {
+                        format!("{} were", args.len())
+                    };
+                    return eqn_err!(
+                        BadBuiltinArgs,
+                        loc.start,
+                        loc.end,
+                        format!(
+                            "{} takes {}, but {given} given",
+                            id.as_str().to_uppercase(),
+                            sig.arity_phrase()
+                        )
+                    );
                 }
                 let mut args = args.into_iter();
                 let builtin = match sig.name {
@@ -140,7 +166,14 @@ impl Expr1 {
                         Some(Expr1::Var(ident, loc)) => {
                             BuiltinFn::IsModuleInput(ident.to_string(), loc)
                         }
-                        _ => return eqn_err!(ExpectedIdent, loc.start, loc.end),
+                        _ => {
+                            return eqn_err!(
+                                ExpectedIdent,
+                                loc.start,
+                                loc.end,
+                                "ISMODULEINPUT's argument must be a variable name"
+                            );
+                        }
                     },
                     "ln" => BuiltinFn::Ln(required(&mut args)),
                     "log10" => BuiltinFn::Log10(required(&mut args)),
@@ -370,6 +403,30 @@ mod tests {
                     sig.name
                 );
             }
+        }
+    }
+
+    /// The reason a rejected call carries is a sentence a modeler can act on:
+    /// it names the function the way the CALL spelled it (an alias stays the
+    /// alias), and its two numbers agree with their nouns.
+    ///
+    /// Rows cover both directions of the `given` agreement and both directions
+    /// of the arity phrase's; `builtins::tests::arity_phrase_covers_every_
+    /// shape_in_the_signature_table` covers the phrase's four shapes.
+    #[test]
+    fn a_rejected_call_says_what_it_takes_and_what_it_was_given() {
+        // (spelling, argument count, expected reason)
+        let rows = [
+            ("abs", 2, "ABS takes 1 argument, but 2 were given"),
+            ("pulse", 1, "PULSE takes 2 or 3 arguments, but 1 was given"),
+            // `dt` is an ALIAS of the `time_step` signature: the message must
+            // answer with the name the modeler typed, not the canonical one.
+            ("dt", 1, "DT takes 0 arguments, but 1 was given"),
+        ];
+        for (name, argc, expected) in rows {
+            let err = call(name, (1..=argc).map(const0).collect()).unwrap_err();
+            assert_eq!(err.code, ErrorCode::BadBuiltinArgs, "{name}");
+            assert_eq!(err.details.as_deref(), Some(expected), "{name}");
         }
     }
 

@@ -42,11 +42,8 @@ fn test_err_inner(input: &str, expected: (&str, ErrorCode), lexer_type: LexerTyp
     let (expected_span, expected_code) = expected;
     let expected_start = expected_span.find('~').unwrap();
     let expected_end = expected_span.rfind('~').unwrap() + 1;
-    let expected_err = EquationError {
-        start: expected_start as u16,
-        end: expected_end as u16,
-        code: expected_code,
-    };
+    let expected_err =
+        EquationError::new(expected_code, expected_start as u16, expected_end as u16);
     assert_eq!(Err(expected_err), token);
 }
 

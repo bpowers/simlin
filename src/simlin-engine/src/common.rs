@@ -719,20 +719,76 @@ pub struct EquationError {
     pub start: u16,
     pub end: u16,
     pub code: ErrorCode,
+    /// The human-readable reason, when the code and the span do not already
+    /// carry it.
+    ///
+    /// `ErrorCode` names the CLASS of failure and `start..end` points at the
+    /// offending text, which `errors::format_equation_error` renders as a
+    /// source snippet -- so a parse error needs no reason: the snippet IS the
+    /// reason. A site writes `details` when the reason is NOT visible in the
+    /// span: the name that did not resolve, the arity a call missed, the
+    /// identifier a lowering could not shape. Whatever is written here reaches
+    /// the user unchanged, through `Diagnostic` -> `FormattedError::details`
+    /// -> the FFI's `SimlinErrorDetail::details`.
+    pub details: Option<String>,
+}
+
+impl EquationError {
+    /// An error whose code and span say everything there is to say.
+    pub fn new(code: ErrorCode, start: u16, end: u16) -> Self {
+        EquationError {
+            start,
+            end,
+            code,
+            details: None,
+        }
+    }
+
+    /// An error carrying the reason its raising site had in hand.
+    pub fn detailed(code: ErrorCode, start: u16, end: u16, details: impl Into<String>) -> Self {
+        EquationError {
+            start,
+            end,
+            code,
+            details: Some(details.into()),
+        }
+    }
+
+    /// Add `context` to whatever reason this error already carries.
+    ///
+    /// Composing rather than replacing is what lets an ANNOTATING layer -- the
+    /// unit-string parse, which tags every error out of one `<units>` string
+    /// with that string -- run over a producer that may or may not have written
+    /// its own reason, without either one silently winning.
+    pub fn in_context(mut self, context: impl fmt::Display) -> Self {
+        self.details = Some(match self.details {
+            Some(reason) => format!("{reason} ({context})"),
+            None => context.to_string(),
+        });
+        self
+    }
 }
 
 impl fmt::Display for EquationError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}:{}:{}", self.start, self.end, self.code)
+        match self.details {
+            Some(ref details) => {
+                write!(f, "{}:{}:{} -- {details}", self.start, self.end, self.code)
+            }
+            None => write!(f, "{}:{}:{}", self.start, self.end, self.code),
+        }
     }
 }
 
 impl From<Error> for EquationError {
+    /// An `Error` has no span, so the result is span-less; its `details` is the
+    /// whole reason `Error` carries one and rides across unchanged.
     fn from(err: Error) -> Self {
         EquationError {
             code: err.code,
             start: 0,
             end: 0,
+            details: err.details,
         }
     }
 }
@@ -2902,7 +2958,11 @@ mod identifier_part_iterator_tests {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum UnitError {
-    DefinitionError(EquationError, Option<String>),
+    /// A syntax error in a `<units>` string. The reason rides on the
+    /// `EquationError` itself, like every other error this crate raises --
+    /// `ConsistencyError` and `InferenceError` carry their own only because
+    /// neither has an `EquationError` to put it on.
+    DefinitionError(EquationError),
     ConsistencyError(ErrorCode, Loc, Option<String>),
     /// For inference errors that may span multiple variables.
     /// Each source is (variable_identifier, optional_location_in_that_equation).
@@ -2916,13 +2976,7 @@ pub enum UnitError {
 impl fmt::Display for UnitError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            UnitError::DefinitionError(err, details) => {
-                if let Some(details) = details {
-                    write!(f, "unit definition:{err} -- {details}")
-                } else {
-                    write!(f, "unit definition:{err}")
-                }
-            }
+            UnitError::DefinitionError(err) => write!(f, "unit definition:{err}"),
             UnitError::ConsistencyError(err, loc, details) => {
                 if let Some(details) = details {
                     write!(f, "unit consistency:{loc}:{err} -- {details}")
@@ -2974,20 +3028,19 @@ macro_rules! eprintln(
     }}
 );
 
+/// `Err` of an `EquationError` at `start..end`. The four-argument form carries
+/// the reason the raising site had in hand; the three-argument form is for a
+/// failure the code and the span already describe (see `EquationError::details`).
 #[macro_export]
 macro_rules! eqn_err(
     ($code:tt, $start:expr, $end:expr) => {{
         use $crate::common::{EquationError, ErrorCode};
-        Err(EquationError{ start: $start, end: $end, code: ErrorCode::$code})
-    }}
-);
-
-#[macro_export]
-macro_rules! var_eqn_err(
-    ($ident:expr, $code:tt, $start:expr, $end:expr) => {{
+        Err(EquationError::new(ErrorCode::$code, $start, $end))
+    }};
+    ($code:tt, $start:expr, $end:expr, $details:expr) => {{
         use $crate::common::{EquationError, ErrorCode};
-        Err(($ident, EquationError{ start: $start, end: $end, code: ErrorCode::$code}))
-    }}
+        Err(EquationError::detailed(ErrorCode::$code, $start, $end, $details))
+    }};
 );
 
 #[macro_export]

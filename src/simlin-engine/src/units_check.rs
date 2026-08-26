@@ -648,14 +648,12 @@ pub fn check(
                             );
                             errors.push((
                                 Ident::new(var.ident()),
-                                DefinitionError(
-                                    EquationError {
-                                        code: ErrorCode::UnitMismatch,
-                                        start: 0,
-                                        end: 0,
-                                    },
-                                    Some(details),
-                                ),
+                                DefinitionError(EquationError::detailed(
+                                    ErrorCode::UnitMismatch,
+                                    0,
+                                    0,
+                                    details,
+                                )),
                             ));
                         }
                     }
@@ -736,9 +734,10 @@ pub fn check(
             ConsistencyError(code, _loc, details) => {
                 (*code as u32, details.clone().unwrap_or_default())
             }
-            DefinitionError(eq_err, details) => {
-                (eq_err.code as u32, details.clone().unwrap_or_default())
-            }
+            DefinitionError(eq_err) => (
+                eq_err.code as u32,
+                eq_err.details.clone().unwrap_or_default(),
+            ),
             UnitError::InferenceError { code, details, .. } => {
                 (*code as u32, details.clone().unwrap_or_default())
             }
