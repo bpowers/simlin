@@ -654,44 +654,13 @@ impl TestProject {
 }
 
 /// Methods for tests that inspect the compiler's intermediate results rather
-/// than simulation values. `#[cfg(test)]` because they reach into crate-private
-/// per-variable lowering that the `test-support` feature does not export.
+/// than simulation values, and that reach into crate-private per-variable
+/// lowering the `test-support` feature does not export -- hence `#[cfg(test)]`.
+/// A method whose result is expressible in public types belongs in the
+/// un-gated impl below, so the integration tests can assert on it without a
+/// second copy.
 #[cfg(test)]
 impl TestProject {
-    /// The `Error`-severity salsa diagnostics of this project, as
-    /// `(location, code)` pairs in emission order.
-    ///
-    /// `location` is `model.variable` for a variable-attributed diagnostic, the
-    /// model name for a model-level one, and `"project"` for the project-level
-    /// ones (the macro-registry build error and the unit definition errors,
-    /// which name no model). A test that must pin WHICH variable a refusal lands
-    /// on reads this rather than [`TestProject::assert_compile_error_vm`], which
-    /// accepts the code anywhere in the project.
-    pub fn error_diagnostics(&self) -> Vec<(String, ErrorCode)> {
-        self.diagnostics_incremental()
-            .iter()
-            .filter(|d| d.severity == DiagnosticSeverity::Error)
-            .map(|d| {
-                let location = match (d.model.as_str(), d.variable.as_deref()) {
-                    ("", _) => "project".to_string(),
-                    (model, Some(var)) => format!("{model}.{var}"),
-                    (model, None) => model.to_string(),
-                };
-                let code = match &d.error {
-                    DiagnosticError::Equation(eq_err) => eq_err.code,
-                    DiagnosticError::Model(err) => err.code,
-                    DiagnosticError::Unit(unit_err) => match unit_err {
-                        UnitError::DefinitionError(eq_err, _) => eq_err.code,
-                        UnitError::ConsistencyError(code, _, _) => *code,
-                        UnitError::InferenceError { code, .. } => *code,
-                    },
-                    DiagnosticError::Assembly(_) => ErrorCode::NotSimulatable,
-                };
-                (location, code)
-            })
-            .collect()
-    }
-
     /// The production-lowered flow-phase expressions of the `main` model's
     /// `var_name`: one `Expr` per element of an arrayed equation, preceded by
     /// any temps the lowering hoisted.
@@ -848,6 +817,40 @@ impl TestProject {
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
         collect_all_diagnostics(&db, sync.project)
+    }
+
+    /// The `Error`-severity salsa diagnostics of this project, as
+    /// `(location, code)` pairs in emission order.
+    ///
+    /// `location` is `model.variable` for a variable-attributed diagnostic, the
+    /// model name for a model-level one, and `"project"` for the project-level
+    /// ones (the macro-registry build error and the unit definition errors,
+    /// which name no model). A test that must pin WHICH variable a refusal lands
+    /// on reads this rather than [`TestProject::assert_compile_error_vm`], which
+    /// accepts the code anywhere in the project.
+    pub fn error_diagnostics(&self) -> Vec<(String, ErrorCode)> {
+        self.diagnostics_incremental()
+            .iter()
+            .filter(|d| d.severity == DiagnosticSeverity::Error)
+            .map(|d| {
+                let location = match (d.model.as_str(), d.variable.as_deref()) {
+                    ("", _) => "project".to_string(),
+                    (model, Some(var)) => format!("{model}.{var}"),
+                    (model, None) => model.to_string(),
+                };
+                let code = match &d.error {
+                    DiagnosticError::Equation(eq_err) => eq_err.code,
+                    DiagnosticError::Model(err) => err.code,
+                    DiagnosticError::Unit(unit_err) => match unit_err {
+                        UnitError::DefinitionError(eq_err, _) => eq_err.code,
+                        UnitError::ConsistencyError(code, _, _) => *code,
+                        UnitError::InferenceError { code, .. } => *code,
+                    },
+                    DiagnosticError::Assembly(_) => ErrorCode::NotSimulatable,
+                };
+                (location, code)
+            })
+            .collect()
     }
 
     /// Assert that incremental compilation produces the expected error code.

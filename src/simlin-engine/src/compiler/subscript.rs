@@ -3,8 +3,10 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use crate::ast::{ArrayView, Expr3, IndexExpr3, SparseInfo};
-use crate::common::{CanonicalElementName, ErrorCode, ErrorKind, Result, canonicalize};
-use crate::dimensions::{Dimension, DimensionsContext};
+use crate::common::{CanonicalDimensionName, CanonicalElementName, ErrorCode, ErrorKind, Result};
+use crate::dimensions::{
+    Axis, Dimension, DimensionsContext, DirectMappingsOnly, axes_of, match_axes_partial,
+};
 use crate::{Error, sim_err};
 
 /// Represents a subscript operation after parsing but before view construction.
@@ -14,8 +16,16 @@ use crate::{Error, sim_err};
 #[derive(Clone, PartialEq)]
 pub(crate) enum IndexOp {
     /// Range subscript with start and end (0-based, end exclusive).
-    /// Example: `arr[2:5]` becomes `Range(1, 5)` (converted from 1-based)
-    Range(usize, usize),
+    /// Example: `arr[2:5]` becomes `Range { start: 1, end: 5, .. }`.
+    Range {
+        start: usize,
+        end: usize,
+        /// The dimension the resulting axis ranges over, when the range came
+        /// from a star range over a CONTIGUOUS subdimension (`arr[*:Sub]`) or
+        /// over an indexed one. `None` for literal bounds (`arr[2:5]`), whose
+        /// axis is a slice of the parent and keeps the parent's name.
+        axis: Option<CanonicalDimensionName>,
+    },
     /// Single element access (0-based index).
     /// Example: `arr[3]` becomes `Single(2)` (converted from 1-based)
     Single(usize),
@@ -26,8 +36,13 @@ pub(crate) enum IndexOp {
     /// Example: `arr[@2]` references dimension at position 1
     DimPosition(usize),
     /// Sparse (non-contiguous) range for subdimension iteration.
-    /// Contains parent offsets to iterate (e.g., [0, 2] for elements at indices 0 and 2)
-    SparseRange(Vec<usize>),
+    SparseRange {
+        /// Parent offsets to iterate (e.g. `[0, 2]` for elements at indices 0
+        /// and 2).
+        parent_offsets: Vec<usize>,
+        /// The subdimension the resulting axis ranges over.
+        axis: CanonicalDimensionName,
+    },
     /// Reference to an active A2A dimension by index.
     /// Used when a dimension name appears as a subscript in A2A context
     ActiveDimRef(usize),
@@ -70,6 +85,40 @@ pub(crate) struct Subscript3Config<'a> {
     pub(crate) active_dimension: Option<&'a [Dimension]>,
 }
 
+impl Subscript3Config<'_> {
+    /// The declared dimension `name` denotes, if the model has one.
+    ///
+    /// A `dimensions::Dimension`'s name is canonical by construction and so is
+    /// every identifier reaching this module, so the comparison is between two
+    /// canonical strings and neither side needs re-canonicalizing.
+    fn dimension_named(&self, name: &str) -> Option<&Dimension> {
+        self.all_dimensions.iter().find(|d| d.name() == name)
+    }
+
+    /// The position in the active apply-to-all dimensions that a subscript
+    /// naming the dimension `name` reads, or `None` outside an apply-to-all
+    /// body or when no active axis corresponds.
+    ///
+    /// The correspondence is [`crate::dimensions::match_axes_partial`], the
+    /// engine's one axis-matching precedence, over the single named axis.
+    /// Only the DIRECT declared mappings are admitted, because the element
+    /// this resolves to is `build_view_from_ops`'s `ActiveDimRef` arm reading
+    /// the active element off the source axis.
+    fn active_dim_ref(&self, name: &str) -> Option<usize> {
+        let active_dims = self.active_dimension?;
+        let source = [Axis::named(name, 0)];
+        match_axes_partial(
+            &source,
+            &axes_of(active_dims),
+            &DirectMappingsOnly(self.dimensions_ctx),
+        )
+        .into_iter()
+        .next()
+        .flatten()
+        .map(|(active_idx, _)| active_idx)
+    }
+}
+
 /// Normalize IndexExpr3 subscripts to IndexOp operations.
 ///
 /// Returns Some(ops) if all subscripts can be converted statically,
@@ -95,51 +144,53 @@ pub(crate) fn normalize_subscripts3(
 
         let op = match arg {
             IndexExpr3::StarRange(subdim_name, _) => {
-                // Check if this is the full dimension (from wildcard conversion in pass 0)
-                if subdim_name.as_str() == parent_name.as_str() {
-                    // Full dimension - treat as Wildcard
+                // Pass 0 converts a bare `*` into a star range over the axis's
+                // own dimension, which is the whole axis.
+                if subdim_name == parent_name {
                     IndexOp::Wildcard
+                } else if let Some(Dimension::Indexed(_, size)) =
+                    config.dimension_named(subdim_name.as_str())
+                {
+                    // `*:IndexedDim` desugars to `[1:SIZE(IndexedDim)]`.
+                    IndexOp::Range {
+                        start: 0,
+                        end: *size as usize,
+                        axis: Some(subdim_name.clone()),
+                    }
                 } else {
-                    // Check if subdim_name refers to an indexed dimension.
-                    // For indexed dimensions, *:IndexedDim desugars to [1:SIZE(IndexedDim)],
-                    // which is Range(0, size) in 0-based internal representation.
-                    let subdim_canonical = canonicalize(subdim_name.as_str());
-                    let indexed_dim_size = config.all_dimensions.iter().find_map(|d| {
-                        if *canonicalize(d.name()) == *subdim_canonical {
-                            if let Dimension::Indexed(_, size) = d {
-                                Some(*size as usize)
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
+                    let relation = config
+                        .dimensions_ctx
+                        .get_subdimension_relation(subdim_name, parent_name)?;
+
+                    // The resulting axis ranges over the SUBDIMENSION, not the
+                    // parent, and is named for it. `ast::Expr2`'s bounds for
+                    // the same reference say the same thing, and a temp the
+                    // reference is materialized into is matched to its source
+                    // view by dimension id -- so naming this axis for the
+                    // parent leaves the two disagreeing and every element of
+                    // the temp reads NaN.
+                    if relation.is_contiguous() {
+                        let start = relation.start_offset();
+                        IndexOp::Range {
+                            start,
+                            end: start + relation.parent_offsets.len(),
+                            axis: Some(subdim_name.clone()),
                         }
-                    });
-
-                    if let Some(size) = indexed_dim_size {
-                        // Indexed subdimension - desugar to range [0, size) (0-based)
-                        IndexOp::Range(0, size)
                     } else {
-                        // Named subdimension - look up relationship
-                        let relation = config
-                            .dimensions_ctx
-                            .get_subdimension_relation(subdim_name, parent_name)?;
-
-                        if relation.is_contiguous() {
-                            let start = relation.start_offset();
-                            let end = start + relation.parent_offsets.len();
-                            IndexOp::Range(start, end)
-                        } else {
-                            IndexOp::SparseRange(relation.parent_offsets.clone())
+                        IndexOp::SparseRange {
+                            parent_offsets: relation.parent_offsets.clone(),
+                            axis: subdim_name.clone(),
                         }
                     }
                 }
             }
 
             // StaticRange - already has 0-based indices from Expr2->Expr3 lowering
-            IndexExpr3::StaticRange(start_0based, end_0based, _) => {
-                IndexOp::Range(*start_0based, *end_0based)
-            }
+            IndexExpr3::StaticRange(start_0based, end_0based, _) => IndexOp::Range {
+                start: *start_0based,
+                end: *end_0based,
+                axis: None,
+            },
 
             IndexExpr3::Range(start_expr, end_expr, _) => {
                 // Dynamic range - try to resolve both bounds to constants
@@ -165,7 +216,11 @@ pub(crate) fn normalize_subscripts3(
                 let start_idx = resolve_to_index(start_expr)?;
                 let end_idx = resolve_to_index(end_expr)?;
                 // end_idx is inclusive in the source, but we need exclusive for the range
-                IndexOp::Range(start_idx, end_idx + 1)
+                IndexOp::Range {
+                    start: start_idx,
+                    end: end_idx + 1,
+                    axis: None,
+                }
             }
 
             IndexExpr3::DimPosition(pos, _) => {
@@ -184,68 +239,20 @@ pub(crate) fn normalize_subscripts3(
                         IndexOp::Single(idx)
                     }
                     Expr3::Var(ident, _, _) => {
-                        // First check if it's a named dimension element (takes priority)
-                        // Use O(1) hash lookup instead of linear search
-                        let element_idx = if let Dimension::Named(_, named_dim) = parent_dim {
-                            named_dim.get_element_index(ident.as_str())
-                        } else {
-                            None
-                        };
-
-                        if let Some(idx) = element_idx {
+                        // An ELEMENT of this axis takes priority over a
+                        // like-named dimension (`dimensions::resolve_axis_index_name`).
+                        if let Dimension::Named(_, named_dim) = parent_dim
+                            && let Some(idx) = named_dim.get_element_index(ident.as_str())
+                        {
                             IndexOp::Single(idx)
-                        } else if let Dimension::Indexed(dim_name, size) = parent_dim {
-                            // For indexed dimensions, check if ident is "DimName.Index" format
-                            let expected_prefix = format!("{}.", dim_name.as_str());
-                            if ident.as_str().starts_with(&expected_prefix) {
-                                if let Ok(idx) =
-                                    ident.as_str()[expected_prefix.len()..].parse::<usize>()
-                                {
-                                    // Validate the index is within bounds (1-based)
-                                    let size_usize = *size as usize;
-                                    if idx >= 1 && idx <= size_usize {
-                                        IndexOp::Single(idx - 1) // Convert to 0-based
-                                    } else {
-                                        return None;
-                                    }
-                                } else {
-                                    return None;
-                                }
-                            } else {
-                                // Check for dimension name (A2A reference)
-                                let is_dim_name = config
-                                    .all_dimensions
-                                    .iter()
-                                    .any(|d| &*canonicalize(d.name()) == ident.as_str());
-
-                                if is_dim_name {
-                                    let active_dims = config.active_dimension?;
-                                    let active_idx = active_dims.iter().position(|ad| {
-                                        &*canonicalize(ad.name()) == ident.as_str()
-                                    })?;
-                                    IndexOp::ActiveDimRef(active_idx)
-                                } else {
-                                    return None;
-                                }
-                            }
+                        } else if let Some(idx) = indexed_element_index(parent_dim, ident.as_str())?
+                        {
+                            IndexOp::Single(idx)
+                        } else if config.dimension_named(ident.as_str()).is_some() {
+                            IndexOp::ActiveDimRef(config.active_dim_ref(ident.as_str())?)
                         } else {
-                            // Not an element - check if it's a dimension name (A2A reference)
-                            let is_dim_name = config
-                                .all_dimensions
-                                .iter()
-                                .any(|d| d.name() == ident.as_str());
-
-                            if is_dim_name {
-                                // It's a dimension name - find matching active dimension
-                                let active_dims = config.active_dimension?;
-                                let active_idx = active_dims
-                                    .iter()
-                                    .position(|ad| ad.name() == ident.as_str())?;
-                                IndexOp::ActiveDimRef(active_idx)
-                            } else {
-                                // Not a known element or dimension - need dynamic handling
-                                return None;
-                            }
+                            // Not a known element or dimension - need dynamic handling
+                            return None;
                         }
                     }
                     _ => return None,
@@ -253,37 +260,15 @@ pub(crate) fn normalize_subscripts3(
             }
 
             IndexExpr3::Dimension(name, _) => {
-                // First check if the name matches an element of the parent dimension.
-                // An element name that happens to match a dimension name should be
-                // resolved as an element, not as an A2A dimension reference.
-                // Use O(1) hash lookup instead of linear search.
+                // An ELEMENT of this axis takes priority over a like-named
+                // dimension, exactly as in the `Expr` arm above.
                 if let Dimension::Named(_, named_dim) = parent_dim
                     && let Some(idx) = named_dim.get_element_index(name.as_str())
                 {
-                    operations.push(IndexOp::Single(idx));
-                    continue;
+                    IndexOp::Single(idx)
+                } else {
+                    IndexOp::ActiveDimRef(config.active_dim_ref(name.as_str())?)
                 }
-
-                // A2A dimension reference - need to find matching active dimension.
-                // Check by name first, then by dimension mapping.
-                let active_dims = config.active_dimension?;
-                // Both sides are already canonical -- `name` is a
-                // `CanonicalDimensionName` and a `dimensions::Dimension`'s name
-                // is one by construction -- so neither needs re-canonicalizing
-                // or re-interning to be compared or looked up.
-                let active_idx = active_dims
-                    .iter()
-                    .position(|ad| ad.name() == name.as_str())
-                    .or_else(|| {
-                        // Try dimension mapping in both directions (handles
-                        // multi-target dimensions correctly).
-                        active_dims.iter().position(|ad| {
-                            let active_canonical = ad.canonical_name();
-                            config.dimensions_ctx.has_mapping_to(name, active_canonical)
-                                || config.dimensions_ctx.has_mapping_to(active_canonical, name)
-                        })
-                    })?;
-                IndexOp::ActiveDimRef(active_idx)
             }
         };
 
@@ -291,6 +276,42 @@ pub(crate) fn normalize_subscripts3(
     }
 
     Some(operations)
+}
+
+/// The 0-based element index `ident` names on an INDEXED axis, whose elements
+/// are spelled `DimName.Index` with a 1-based index.
+///
+/// `Ok(None)` -- spelled here as `Some(None)` so the caller's `?` reports the
+/// unrecoverable case -- means the axis is not indexed or the identifier is not
+/// in that form; `None` means it is, but names no element of the axis, which no
+/// static view can express.
+fn indexed_element_index(parent_dim: &Dimension, ident: &str) -> Option<Option<usize>> {
+    let Dimension::Indexed(dim_name, size) = parent_dim else {
+        return Some(None);
+    };
+    let Some(index_text) = ident.strip_prefix(&format!("{}.", dim_name.as_str())) else {
+        return Some(None);
+    };
+    let idx = index_text.parse::<usize>().ok()?;
+    if idx >= 1 && idx <= *size as usize {
+        Some(Some(idx - 1))
+    } else {
+        None
+    }
+}
+
+/// The name of the view axis an operation over input dimension `i` produces:
+/// the dimension the operation ranges over when it names one, otherwise the
+/// input axis's own dimension.
+fn axis_name(axis: Option<&CanonicalDimensionName>, config: &ViewBuildConfig, i: usize) -> String {
+    if let Some(axis) = axis {
+        return axis.as_str().to_string();
+    }
+    config
+        .dims
+        .get(i)
+        .map(|d| d.name().to_string())
+        .unwrap_or_default()
 }
 
 /// Build an ArrayView from normalized IndexOp operations.
@@ -318,7 +339,7 @@ pub(crate) fn build_view_from_ops(
                 single_indices.push(*idx);
                 offset_adjustment += idx * orig_strides[i] as usize;
             }
-            IndexOp::Range(start, end) => {
+            IndexOp::Range { start, end, .. } => {
                 // Validate bounds
                 if *end > orig_dims[i] || *start >= *end {
                     return sim_err!(Generic, format!("Invalid range bounds for dimension {}", i));
@@ -341,7 +362,7 @@ pub(crate) fn build_view_from_ops(
                 dim_mapping.push(Some(*pos));
                 single_indices.push(0); // Will be resolved at runtime in A2A context
             }
-            IndexOp::SparseRange(parent_offsets) => {
+            IndexOp::SparseRange { parent_offsets, .. } => {
                 // Validate all parent offsets are in bounds
                 for &off in parent_offsets {
                     if off >= orig_dims[i] {
@@ -416,15 +437,10 @@ pub(crate) fn build_view_from_ops(
             IndexOp::Single(_) => {
                 // Dimension is removed, don't add to output
             }
-            IndexOp::Range(start, end) => {
+            IndexOp::Range { start, end, axis } => {
                 new_dims.push(end - start);
                 new_strides.push(orig_strides[i]);
-                // Preserve dimension name from input dimension
-                if i < config.dims.len() {
-                    new_dim_names.push(config.dims[i].name().to_string());
-                } else {
-                    new_dim_names.push(String::new());
-                }
+                new_dim_names.push(axis_name(axis.as_ref(), config, i));
                 output_dim_idx += 1;
             }
             IndexOp::Wildcard => {
@@ -450,7 +466,10 @@ pub(crate) fn build_view_from_ops(
                 }
                 output_dim_idx += 1;
             }
-            IndexOp::SparseRange(parent_offsets) => {
+            IndexOp::SparseRange {
+                parent_offsets,
+                axis,
+            } => {
                 // Dimension size is the number of sparse elements
                 new_dims.push(parent_offsets.len());
                 new_strides.push(orig_strides[i]);
@@ -458,13 +477,7 @@ pub(crate) fn build_view_from_ops(
                     dim_index: output_dim_idx,
                     parent_offsets: parent_offsets.clone(),
                 });
-                // For sparse ranges (subdimensions), use the subdimension name
-                // TODO: This should ideally use the subdimension name, not parent
-                if i < config.dims.len() {
-                    new_dim_names.push(config.dims[i].name().to_string());
-                } else {
-                    new_dim_names.push(String::new());
-                }
+                new_dim_names.push(axis_name(Some(axis), config, i));
                 output_dim_idx += 1;
             }
             IndexOp::ActiveDimRef(_) => {

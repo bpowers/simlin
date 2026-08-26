@@ -14,13 +14,14 @@ use crate::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, ErrorCode, ErrorKind, Ident, IdentMap,
     Result, canonicalize,
 };
-use crate::dimensions::{Dimension, DimensionsContext};
+use crate::dimensions::{
+    Axis, AxisMatch, Dimension, DimensionsContext, DirectMappingsOnly, SubdimensionRelations,
+    axes_of, match_axes_partial,
+};
 use crate::variable::{VarKind, Variable};
 use crate::{Error, sim_err};
 
-use super::dimensions::{
-    UnaryOp, allocate_implicit_axes, find_dimension_reordering, match_dimensions_with_mapping,
-};
+use super::dimensions::{UnaryOp, allocate_implicit_axes, axis_reordering};
 use super::expr::{BuiltinFn, Expr, SubscriptIndex, VarRef};
 use super::fragment::{DepKind, DepShape, ModelShape};
 use super::subscript::{
@@ -28,6 +29,22 @@ use super::subscript::{
     normalize_subscripts3,
 };
 use crate::builtins::ArgKind;
+
+/// What Pass 1 does with a subscript that names an active apply-to-all
+/// dimension, the one axis on which [`Context::lower`]'s two callers differ.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum DimensionRefs {
+    /// Fold it to the active element's index, so an expression that would
+    /// otherwise be deferred can be decomposed into temps here.
+    Resolve,
+    /// Leave it as an `IndexExpr3::Dimension`, so
+    /// [`super::subscript::normalize_subscripts3`] turns it into an
+    /// `IndexOp::ActiveDimRef` that an array-producing builtin's
+    /// wildcard-preserving context can promote back to a whole axis. What an
+    /// `Ast::Arrayed` equation containing `VECTOR ELM MAP`,
+    /// `VECTOR SORT ORDER` or a sibling needs.
+    Preserve,
+}
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
@@ -476,26 +493,31 @@ impl Context<'_> {
                 .collect();
         };
 
-        // Use three-pass matching (name -> mapping -> size) to correctly handle:
-        // 1. Exact name matches (highest priority, reserved first)
-        // 2. Dimension mappings (source.maps_to == target or vice versa)
-        // 3. Size-based matching for indexed dims (lowest priority)
+        // `dimensions::match_axes_partial` is the one axis-matching precedence.
+        // The PARTIAL answer is what this position wants: a reduction such as
+        // `SUM(source[A,B])` under an `[A]` target leaves `B` unmatched on
+        // purpose, and an unmatched axis becomes the wildcard the reducer
+        // iterates.
         //
-        // Partial matching supports reductions like SUM(source[A,B])
-        // in context [A] where B doesn't match anything.
-        let source_to_target = match_dimensions_with_mapping(
-            &source_dims,
-            active_dims,
-            &vec![false; active_dims.len()],
-            self.dimensions_ctx,
+        // Only the DIRECT mappings: what this function can emit for a matched
+        // axis is a dimension-name subscript, and that resolves to the active
+        // dimension's ORDINAL (GH #527 / #997). The ordinal read is the
+        // documented rule for a directly mapped pair; for a mapping onto a
+        // PARENT of the target it is not, and the wildcard this leaves instead
+        // keeps `resolve_iteration_element`'s element-name-and-mapping
+        // resolution, which reads the mapped element.
+        let source_to_target = match_axes_partial(
+            &axes_of(&source_dims),
+            &axes_of(active_dims),
+            &DirectMappingsOnly(self.dimensions_ctx),
         );
 
         source_dims
             .iter()
             .enumerate()
             .map(|(source_idx, _source_dim)| {
-                if let Some(target_idx) = source_to_target[source_idx] {
-                    let active_dim = &active_dims[target_idx];
+                if let Some((target_idx, _)) = source_to_target[source_idx].as_ref() {
+                    let active_dim = &active_dims[*target_idx];
                     // Create a dimension reference to the matched active dimension
                     ast::IndexExpr2::Expr(ast::Expr2::Var(Ident::new(active_dim.name()), None, loc))
                 } else {
@@ -570,77 +592,45 @@ impl Context<'_> {
         }
     }
 
-    /// Entry point for lowering Expr2 to compiler's Expr representation.
-    /// Applies pass 0 -> Expr3 -> pass 1 -> lower_from_expr3.
-    /// Returns a Vec<Expr> where the first elements are temp assignments
-    /// and the last element is the main expression.
-    ///
-    /// When A2A context is available (active_dimension and active_subscript set),
-    /// pass 1 can resolve Dimension and DimPosition references to concrete indices,
-    /// enabling decomposition of expressions that would otherwise be deferred.
-    pub(super) fn lower(&self, expr: &ast::Expr2) -> Result<Vec<Expr>> {
-        // Pass 0: normalize bare arrays, subscripts
+    /// Lower an `Expr2` to the compiler's `Expr` list: pass 0, then `Expr3`,
+    /// then Pass 1 temp decomposition, then `lower_from_expr3` over the temp
+    /// assignments and the main expression, which is last.
+    pub(super) fn lower(
+        &self,
+        expr: &ast::Expr2,
+        dimension_refs: DimensionRefs,
+    ) -> Result<Vec<Expr>> {
+        // Pass 0: normalize bare arrays into explicit subscripts.
         let normalized = self.lower_pass0(expr);
 
-        // Convert to Expr3 (wildcard resolution, dimension detection)
+        // Expr3: wildcard resolution and dimension detection.
         let expr3 = Expr3::from_expr2(&normalized, self).map_err(|e| Error {
             kind: ErrorKind::Model,
             code: e.code,
             details: Some(format!("Error at {}:{}", e.start, e.end)),
         })?;
 
-        // Pass 1: temp decomposition for complex array expressions
-        // Use A2A context when available to resolve dimension references
-        let mut pass1_ctx = match (&self.active_dimension, &self.active_subscript) {
-            (Some(dims), Some(subs)) => Pass1Context::with_a2a_context(dims, subs, &self.temps),
+        // Pass 1: temp decomposition. The apply-to-all context is exactly what
+        // resolves a dimension reference to a concrete element index, so
+        // withholding it is how `DimensionRefs::Preserve` preserves them.
+        let mut pass1_ctx = match (
+            dimension_refs,
+            &self.active_dimension,
+            &self.active_subscript,
+        ) {
+            (DimensionRefs::Resolve, Some(dims), Some(subs)) => {
+                Pass1Context::with_a2a_context(dims, subs, &self.temps)
+            }
             _ => Pass1Context::new(&self.temps),
         };
         let transformed = pass1_ctx.transform(expr3);
         let assignments = pass1_ctx.take_assignments();
 
-        // Lower the assignments
         let mut result: Vec<Expr> = assignments
             .iter()
             .map(|a| self.lower_from_expr3(a))
             .collect::<Result<Vec<_>>>()?;
-
-        // Lower the main expression
-        let main_expr = self.lower_from_expr3(&transformed)?;
-        result.push(main_expr);
-
-        Ok(result)
-    }
-
-    /// Lower an expression like `lower()`, but skip resolving Dimension
-    /// references in Pass 1.  This keeps `IndexExpr3::Dimension` intact so
-    /// that `normalize_subscripts3` can turn them into `ActiveDimRef`, which
-    /// `preserve_wildcards_for_iteration` then converts to `Wildcard` inside
-    /// array-producing builtins.
-    ///
-    /// Used when lowering equations from `Ast::Arrayed` that contain
-    /// array-producing builtins (VectorElmMap, VectorSortOrder, etc.).
-    pub(super) fn lower_preserving_dimensions(&self, expr: &ast::Expr2) -> Result<Vec<Expr>> {
-        let normalized = self.lower_pass0(expr);
-
-        let expr3 = Expr3::from_expr2(&normalized, self).map_err(|e| Error {
-            kind: ErrorKind::Model,
-            code: e.code,
-            details: Some(format!("Error at {}:{}", e.start, e.end)),
-        })?;
-
-        // Use Pass1Context WITHOUT A2A context so Dimension references
-        // are preserved (not resolved to concrete element indices).
-        let mut pass1_ctx = Pass1Context::new(&self.temps);
-        let transformed = pass1_ctx.transform(expr3);
-        let assignments = pass1_ctx.take_assignments();
-
-        let mut result: Vec<Expr> = assignments
-            .iter()
-            .map(|a| self.lower_from_expr3(a))
-            .collect::<Result<Vec<_>>>()?;
-
-        let main_expr = self.lower_from_expr3(&transformed)?;
-        result.push(main_expr);
+        result.push(self.lower_from_expr3(&transformed)?);
 
         Ok(result)
     }
@@ -924,45 +914,52 @@ impl Context<'_> {
             Expr3::Const(_, n, loc) => Ok(Expr::Const(n.value(), *loc)),
 
             Expr3::Var(id, _, loc) => {
-                // Check if this identifier is a dimension name
-                let is_dimension = self
-                    .dimensions
-                    .iter()
-                    .any(|dim| id.as_str() == &*canonicalize(dim.name()));
+                // A `dimensions::Dimension`'s name is canonical by
+                // construction and so is `id`, so neither side needs
+                // re-canonicalizing to be compared.
+                let is_dimension = self.dimensions.iter().any(|dim| dim.name() == id.as_str());
 
                 if is_dimension {
-                    // This is a dimension name
+                    // A dimension name USED AS A VALUE is the active element's
+                    // 1-based position along that dimension.
                     if let Some(active_dims) = &self.active_dimension {
                         if let Some(active_subscripts) = &self.active_subscript {
-                            // We're in an array context - find the matching dimension
-                            for (dim, subscript) in active_dims.iter().zip(active_subscripts.iter())
-                            {
-                                if id.as_str() == &*canonicalize(dim.name()) {
-                                    let index = Self::subscript_to_index(dim, subscript);
+                            // Which active axis the name stands for is
+                            // `dimensions::match_axes_partial`, the one
+                            // precedence, over the single named axis. Only the
+                            // DIRECT mappings, because what this produces is an
+                            // index into the NAMED dimension translated from the
+                            // active element through that mapping, and the
+                            // indirect correspondences have no such translation.
+                            let matched = match_axes_partial(
+                                &[Axis::named(id.as_str(), 0)],
+                                &axes_of(active_dims),
+                                &DirectMappingsOnly(self.dimensions_ctx),
+                            )
+                            .into_iter()
+                            .next()
+                            .flatten();
+
+                            match matched {
+                                Some((active_idx, AxisMatch::Exact)) => {
+                                    let index = Self::subscript_to_index(
+                                        &active_dims[active_idx],
+                                        &active_subscripts[active_idx],
+                                    );
                                     return Ok(Expr::Const(index, *loc));
                                 }
-                            }
-                            // Not a direct match -- check dimension mappings.
-                            // e.g. s[DimA] = DimB where DimB -> DimA
-                            let id_dim_name = CanonicalDimensionName::from_raw(id.as_str());
-                            for (dim, subscript) in active_dims.iter().zip(active_subscripts.iter())
-                            {
-                                let active_name =
-                                    CanonicalDimensionName::from_raw(&canonicalize(dim.name()));
-                                if self
-                                    .dimensions_ctx
-                                    .has_mapping_to(&id_dim_name, &active_name)
-                                    || self
-                                        .dimensions_ctx
-                                        .has_mapping_to(&active_name, &id_dim_name)
-                                {
-                                    // Translate through mapping to find the position in the
-                                    // referenced dimension, not the active dimension. This
-                                    // matters for reordered element-level mappings.
+                                // e.g. `s[DimA] = DimB` where DimB -> DimA.
+                                // Translate to the position in the REFERENCED
+                                // dimension rather than the active one, which is
+                                // what a reordered element map makes different.
+                                Some((active_idx, AxisMatch::Mapped { .. })) => {
+                                    let id_dim_name = CanonicalDimensionName::from_raw(id.as_str());
+                                    let active_dim = &active_dims[active_idx];
+                                    let subscript = &active_subscripts[active_idx];
                                     if let Some(translated) =
                                         self.dimensions_ctx.translate_via_mapping(
                                             &id_dim_name,
-                                            &active_name,
+                                            active_dim.canonical_name(),
                                             subscript,
                                         )
                                         && let Some(id_dim) = self.dimensions_ctx.get(&id_dim_name)
@@ -975,10 +972,15 @@ impl Context<'_> {
                                         ErrorCode::Generic,
                                         Some(format!(
                                             "dimension mapping between '{}' and '{}' exists but could not translate subscript '{}'",
-                                            id_dim_name, active_name, subscript
+                                            id_dim_name,
+                                            active_dim.name(),
+                                            subscript
                                         )),
                                     ));
                                 }
+                                // No active axis supplies it; fall through to
+                                // the module-input and variable lookups below.
+                                _ => {}
                             }
                         }
                     } else {
@@ -1025,7 +1027,7 @@ impl Context<'_> {
 
                                 // Check if dimensions can be reordered
                                 if let Some(reordering) =
-                                    find_dimension_reordering(&source_dim_names, &target_dim_names)
+                                    axis_reordering(&source_dim_names, &target_dim_names)
                                 {
                                     // Check if reordering is needed (not identity)
                                     let needs_reordering =
@@ -1087,654 +1089,7 @@ impl Context<'_> {
                 }
             }
 
-            Expr3::Subscript(id, indices, _bounds, loc) => {
-                // Handle subscript directly without converting to Expr2
-                let base = self.get_base_ref(id)?;
-                let dims = self.shape_of(id)?.dimensions().ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::Model,
-                        ErrorCode::Generic,
-                        Some(format!(
-                            "expected array variable '{}' to have dimensions",
-                            id.as_str()
-                        )),
-                    )
-                })?;
-
-                if indices.len() != dims.len() {
-                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
-                }
-
-                // Validate no array-valued subscript expressions
-                for idx in indices {
-                    if let IndexExpr3::Expr(expr) = idx
-                        && expr.get_array_bounds().is_some()
-                    {
-                        return sim_err!(
-                            Generic,
-                            format!("array-valued subscript expression for '{}'", id.as_str())
-                        );
-                    }
-                }
-
-                // Try to normalize subscripts to static operations
-                let config = Subscript3Config {
-                    dims,
-                    all_dimensions: self.dimensions,
-                    dimensions_ctx: self.dimensions_ctx,
-                    active_dimension: self.active_dimension.as_deref(),
-                };
-
-                if let Some(mut operations) = normalize_subscripts3(indices, &config) {
-                    // In scalar context (no active A2A dimension and not
-                    // inside an array-reducing builtin like SUM), resolve
-                    // DimPosition(@N) to a concrete Single element offset.
-                    // DimPosition normally preserves the dimension for A2A
-                    // iteration, but in scalar context @N selects element N.
-                    if self.active_dimension.is_none() && !self.preserve_wildcards_for_iteration {
-                        for (i, op) in operations.iter_mut().enumerate() {
-                            if let IndexOp::DimPosition(pos) = op {
-                                let pos_1based = *pos + 1;
-                                // pos_1based == 0 is defensive: normalize_subscripts3
-                                // already rejects @0, but we guard here too.
-                                if pos_1based == 0 || pos_1based > dims[i].len() {
-                                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
-                                }
-                                // Convert to 0-based Single index
-                                *op = IndexOp::Single(pos_1based - 1);
-                            }
-                        }
-                    }
-
-                    // Build a unified view for any combination of static operations
-                    let orig_dims: Vec<usize> = dims.iter().map(|d| d.len()).collect();
-
-                    // Calculate original strides (row-major)
-                    let mut orig_strides = vec![1isize; orig_dims.len()];
-                    for i in (0..orig_dims.len().saturating_sub(1)).rev() {
-                        orig_strides[i] = orig_strides[i + 1] * orig_dims[i + 1] as isize;
-                    }
-
-                    // Build the view using the helper
-                    let view_config = ViewBuildConfig {
-                        active_subscript: self.active_subscript.as_deref(),
-                        dims,
-                        active_dimension: self.active_dimension.as_deref(),
-                        dimensions_ctx: Some(self.dimensions_ctx),
-                    };
-                    let ViewBuildResult {
-                        view,
-                        dim_mapping,
-                        single_indices,
-                    } = build_view_from_ops(&operations, &orig_dims, &orig_strides, &view_config)?;
-
-                    // Check if we're in an array iteration context
-                    if let Some(active_subscripts) = &self.active_subscript
-                        && let Some(active_dims) = &self.active_dimension
-                    {
-                        // Check if we have any dimension positions
-                        let has_dim_positions = operations
-                            .iter()
-                            .any(|op| matches!(op, IndexOp::DimPosition(_)));
-
-                        // Wildcard, SparseRange, and Range always preserve
-                        // dimensions for iteration inside any array builtin.
-                        let has_wildcard_ops = operations.iter().any(|op| {
-                            matches!(
-                                op,
-                                IndexOp::Wildcard | IndexOp::SparseRange(_) | IndexOp::Range(_, _)
-                            )
-                        });
-                        // ActiveDimRef should only be promoted to Wildcard inside
-                        // array-producing builtins (VectorSortOrder, VectorElmMap,
-                        // etc.).  For reducers (SUM, MEAN, etc.) ActiveDimRef
-                        // resolves to a concrete offset via build_view_from_ops.
-                        let has_active_dim_ref = operations
-                            .iter()
-                            .any(|op| matches!(op, IndexOp::ActiveDimRef(_)));
-
-                        // Inside array-producing builtins, source arrays may live in a
-                        // different dimension space than the output; ActiveDimRef ops
-                        // should be preserved as full-array wildcards rather than
-                        // resolved to concrete offsets.
-                        let preserve_for_iteration = self.preserve_wildcards_for_iteration
-                            && (has_wildcard_ops
-                                || (self.promote_active_dim_ref && has_active_dim_ref));
-
-                        if has_dim_positions {
-                            // Fall through to dynamic handling at the end
-                        } else if preserve_for_iteration {
-                            // Rebuild view, only promoting ActiveDimRef to Wildcard
-                            // when inside an array-producing builtin context
-                            let preserved_ops: Vec<IndexOp> = operations
-                                .iter()
-                                .map(|op| match op {
-                                    IndexOp::ActiveDimRef(_) if self.promote_active_dim_ref => {
-                                        IndexOp::Wildcard
-                                    }
-                                    other => other.clone(),
-                                })
-                                .collect();
-                            let preserved_result = build_view_from_ops(
-                                &preserved_ops,
-                                &orig_dims,
-                                &orig_strides,
-                                &view_config,
-                            )?;
-                            return Ok(Expr::StaticSubscript(base, preserved_result.view, *loc));
-                        } else {
-                            if view.dims.is_empty() {
-                                // Inside an array-producing builtin a fully-
-                                // collapsed source element reference (e.g.
-                                // `x[three]` or `b[B1]`) must keep the element's
-                                // base offset so the builtin maps over the source
-                                // variable's FULL storage starting from that base
-                                // (genuine-Vensim VECTOR ELM MAP, GH #578).
-                                // Return the collapsed scalar view as a
-                                // StaticSubscript -- its `view.offset` is the
-                                // element's flat index, and the variable base
-                                // (`off`) lets `codegen::full_source_len` recover
-                                // the full source length. The earlier code
-                                // promoted the Single ops back to a whole-array
-                                // Wildcard view, which discarded the base and was
-                                // only correct when the element is index 0 (the
-                                // historical `b[B1]` case, where base == 0).
-                                if self.promote_active_dim_ref
-                                    && operations.iter().any(|op| matches!(op, IndexOp::Single(_)))
-                                {
-                                    return Ok(Expr::StaticSubscript(base, view, *loc));
-                                }
-                                return Ok(Expr::Var(base.offset_by(view.offset), *loc));
-                            }
-
-                            // For broadcasting: source array may have fewer dimensions than output.
-                            // Try to match dimensions by name. If name-based matching fails or isn't
-                            // applicable, fall back to positional matching.
-                            //
-                            // Build a map from dimension name to (active_idx, subscript)
-                            let active_dim_map: std::collections::HashMap<
-                                &str,
-                                (usize, &CanonicalElementName),
-                            > = active_dims
-                                .iter()
-                                .zip(active_subscripts.iter())
-                                .enumerate()
-                                .map(|(idx, (dim, sub))| (dim.name(), (idx, sub)))
-                                .collect();
-
-                            // Determine matching mode for each view dimension:
-                            // - Name-based: view dim name matches an active dim name (broadcasting)
-                            // - Mapping-based: view dim maps_to matches active dim or its parent
-                            // - Positional: view dim name is empty or doesn't match any active dim
-                            //
-                            // Broadcasting is allowed when source has fewer dimensions than output,
-                            // and all source dimensions match some output dimension by name/mapping.
-                            // Positional matching requires equal dimension counts.
-                            let use_name_matching: Vec<bool> = view
-                                .dim_names
-                                .iter()
-                                .map(|name| {
-                                    if name.is_empty() {
-                                        return false;
-                                    }
-                                    // Direct name match
-                                    if active_dim_map.contains_key(name.as_str()) {
-                                        return true;
-                                    }
-                                    let source_dim_name =
-                                        CanonicalDimensionName::from_raw(name.as_str());
-
-                                    // Check forward mapping: source has any mapping to an active dim
-                                    for active_dim_name in active_dim_map.keys() {
-                                        let active_canonical =
-                                            CanonicalDimensionName::from_raw(active_dim_name);
-                                        if self
-                                            .dimensions_ctx
-                                            .has_mapping_to(&source_dim_name, &active_canonical)
-                                        {
-                                            return true;
-                                        }
-                                        if self.dimensions_ctx.has_mapping_to_parent_of(
-                                            &source_dim_name,
-                                            &active_canonical,
-                                        ) {
-                                            return true;
-                                        }
-                                    }
-
-                                    // Check reverse mapping: active_dim has mapping to source
-                                    for active_dim_name in active_dim_map.keys() {
-                                        let active_canonical =
-                                            CanonicalDimensionName::from_raw(active_dim_name);
-                                        if self
-                                            .dimensions_ctx
-                                            .has_mapping_to(&active_canonical, &source_dim_name)
-                                        {
-                                            return true;
-                                        }
-                                    }
-
-                                    false
-                                })
-                                .collect();
-
-                            let all_name_matching = use_name_matching.iter().all(|&b| b);
-
-                            // If all dimensions use name matching, allow broadcasting (fewer dims).
-                            // Inside array-producing builtins (promote_active_dim_ref), dimension
-                            // mismatches are expected: the source array lives in a different
-                            // dimension space than the output (e.g. d[DimA,B1] partially
-                            // collapses to DimA-only, which differs from a DimA x DimB output).
-                            if !all_name_matching
-                                && !self.promote_active_dim_ref
-                                && view.dims.len() != active_dims.len()
-                            {
-                                return sim_err!(MismatchedDimensions, id.as_str().to_string());
-                            }
-
-                            // Track which view dimensions came from Range operations
-                            // so we can allow size mismatches and emit NaN for
-                            // out-of-bounds elements.
-                            let range_view_dims: std::collections::HashSet<usize> = {
-                                let mut set = std::collections::HashSet::new();
-                                let mut view_dim_idx = 0;
-                                for op in &operations {
-                                    match op {
-                                        IndexOp::Single(_) | IndexOp::ActiveDimRef(_) => {
-                                            // These collapse a dimension, no view dim
-                                        }
-                                        IndexOp::Range(_, _) => {
-                                            set.insert(view_dim_idx);
-                                            view_dim_idx += 1;
-                                        }
-                                        _ => {
-                                            view_dim_idx += 1;
-                                        }
-                                    }
-                                }
-                                set
-                            };
-
-                            // For positional matching, verify sizes match.
-                            // Skip when preserving wildcards for iteration (SUM,
-                            // MEAN, etc.): the view describes what the reduction
-                            // iterates over and is independent of the active
-                            // (output) dimensions.  Cross-dimension wildcards
-                            // like SUM(c[*]) in a DimB context are valid -- the
-                            // reduction iterates over c's DimA regardless of the
-                            // output's DimB.
-                            if !self.preserve_wildcards_for_iteration {
-                                for (view_idx, &view_dim) in view.dims.iter().enumerate() {
-                                    if !use_name_matching[view_idx] && view_idx < active_dims.len()
-                                    {
-                                        // Range-originated dimensions are allowed to be
-                                        // smaller than the target: out-of-bounds elements
-                                        // produce NaN at the per-element resolution step.
-                                        if range_view_dims.contains(&view_idx) {
-                                            continue;
-                                        }
-                                        // Positional matching - sizes must match
-                                        if view_dim != active_dims[view_idx].len() {
-                                            return sim_err!(
-                                                MismatchedDimensions,
-                                                id.as_str().to_string()
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Calculate the linear index in the result array based on the view
-                            let mut result_index = 0;
-
-                            // Build map of dim_index -> sparse parent_offsets for quick lookup
-                            let sparse_map: std::collections::HashMap<usize, &[usize]> = view
-                                .sparse
-                                .iter()
-                                .map(|s| (s.dim_index, s.parent_offsets.as_slice()))
-                                .collect();
-
-                            // For each dimension in the view, find its value from active subscripts
-                            for (view_idx, stride) in view.strides.iter().enumerate() {
-                                // Find the active dimension and subscript for this view dimension
-                                let (active_idx, subscript) = if use_name_matching[view_idx] {
-                                    // Name-based matching - could be direct name match or via mapping
-                                    let view_dim_name = &view.dim_names[view_idx];
-
-                                    // First try direct name match
-                                    if let Some(&(active_idx, subscript)) =
-                                        active_dim_map.get(view_dim_name.as_str())
-                                    {
-                                        (active_idx, subscript)
-                                    } else {
-                                        // Try mapping-based match: find the active dimension that
-                                        // matches via dimension mapping (forward or reverse)
-                                        let source_dim_name = CanonicalDimensionName::from_raw(
-                                            view_dim_name.as_str(),
-                                        );
-
-                                        let mut found = None;
-                                        // Forward: source has mapping to active_dim
-                                        for (active_dim_name, &(active_idx, subscript)) in
-                                            &active_dim_map
-                                        {
-                                            let active_canonical =
-                                                CanonicalDimensionName::from_raw(active_dim_name);
-                                            if self
-                                                .dimensions_ctx
-                                                .has_mapping_to(&source_dim_name, &active_canonical)
-                                            {
-                                                found = Some((active_idx, subscript));
-                                                break;
-                                            }
-                                            if self.dimensions_ctx.has_mapping_to_parent_of(
-                                                &source_dim_name,
-                                                &active_canonical,
-                                            ) {
-                                                found = Some((active_idx, subscript));
-                                                break;
-                                            }
-                                        }
-                                        // Reverse: active_dim has mapping to source
-                                        if found.is_none() {
-                                            for (active_dim_name, &(active_idx, subscript)) in
-                                                &active_dim_map
-                                            {
-                                                let active_canonical =
-                                                    CanonicalDimensionName::from_raw(
-                                                        active_dim_name,
-                                                    );
-                                                if self.dimensions_ctx.has_mapping_to(
-                                                    &active_canonical,
-                                                    &source_dim_name,
-                                                ) {
-                                                    found = Some((active_idx, subscript));
-                                                    break;
-                                                }
-                                            }
-                                        }
-
-                                        if let Some((active_idx, subscript)) = found {
-                                            (active_idx, subscript)
-                                        } else {
-                                            return sim_err!(
-                                                MismatchedDimensions,
-                                                id.as_str().to_string()
-                                            );
-                                        }
-                                    }
-                                } else if view_idx < active_subscripts.len() {
-                                    // Positional matching
-                                    (view_idx, &active_subscripts[view_idx])
-                                } else {
-                                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
-                                };
-
-                                let dim_idx = if let Some(dim_idx) =
-                                    dim_mapping.get(view_idx).and_then(|idx| *idx)
-                                {
-                                    dim_idx
-                                } else {
-                                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
-                                };
-                                if dim_idx >= dims.len() {
-                                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
-                                }
-
-                                let source_dim = &dims[dim_idx];
-                                let target_dim = &active_dims[active_idx];
-
-                                let is_sparse = sparse_map.contains_key(&view_idx);
-
-                                let prefer_source = source_dim.name() == target_dim.name()
-                                    || matches!(source_dim, Dimension::Named(_, _));
-
-                                let mut source_offset = if prefer_source {
-                                    source_dim.get_offset(subscript)
-                                } else {
-                                    None
-                                };
-
-                                // If source_offset failed, try dimension mapping in
-                                // both directions (forward and reverse).
-                                let mut mapping_failed = false;
-                                if source_offset.is_none() {
-                                    let source_dim_name = source_dim.canonical_name();
-                                    let target_dim_name = target_dim.canonical_name();
-
-                                    // Use bidirectional translation which handles:
-                                    // - Forward: source_dim maps to target_dim
-                                    // - Reverse: target_dim maps to source_dim
-                                    // - Subdimension: source_dim maps to parent of target_dim
-                                    let has_direct_or_reverse_mapping = self
-                                        .dimensions_ctx
-                                        .has_mapping_to(source_dim_name, target_dim_name)
-                                        || self
-                                            .dimensions_ctx
-                                            .has_mapping_to(target_dim_name, source_dim_name);
-                                    let has_parent_mapping = self
-                                        .dimensions_ctx
-                                        .has_mapping_to_parent_of(source_dim_name, target_dim_name);
-
-                                    if let Some(translated) =
-                                        self.dimensions_ctx.translate_via_mapping(
-                                            source_dim_name,
-                                            target_dim_name,
-                                            subscript,
-                                        )
-                                    {
-                                        source_offset = source_dim.get_offset(&translated);
-                                    } else if has_parent_mapping {
-                                        // Source maps to a parent of target -- find the specific
-                                        // parent (not just the first mapping target) and translate
-                                        // through it.
-                                        let parent_target =
-                                            self.dimensions_ctx.find_mapping_parent_of(
-                                                source_dim_name,
-                                                target_dim_name,
-                                            );
-                                        if let Some(parent) = parent_target
-                                            && let Some(translated) =
-                                                self.dimensions_ctx.translate_to_source_via_mapping(
-                                                    source_dim_name,
-                                                    parent,
-                                                    subscript,
-                                                )
-                                        {
-                                            source_offset = source_dim.get_offset(&translated);
-                                        } else {
-                                            mapping_failed = true;
-                                        }
-                                    } else if has_direct_or_reverse_mapping {
-                                        mapping_failed = true;
-                                    }
-                                }
-
-                                // Only try target_dim.get_offset as a fallback if:
-                                // 1. source_offset is still None (no direct or mapped resolution)
-                                // 2. mapping did NOT fail (mapping_failed is false)
-                                //
-                                // If a dimension mapping exists but translation failed, we must NOT
-                                // fall back to target_dim.get_offset. The mapping is authoritative -
-                                // falling back would hide configuration errors (like dimension size
-                                // mismatches) and could lead to subtle, hard-to-debug incorrect
-                                // array indexing behavior.
-                                let target_offset = if source_offset.is_none() && !mapping_failed {
-                                    target_dim.get_offset(subscript)
-                                } else {
-                                    None
-                                };
-
-                                let (abs_offset, offset_from_source) = if let Some(abs_offset) =
-                                    source_offset
-                                {
-                                    (abs_offset, true)
-                                } else if let Some(abs_offset) = target_offset {
-                                    (abs_offset, false)
-                                } else if mapping_failed {
-                                    // Provide a more specific error when mapping exists but failed
-                                    return sim_err!(
-                                        MismatchedDimensions,
-                                        format!(
-                                            "{}: dimension mapping from {} to {} failed for subscript '{}' \
-                                             (check that both dimensions have the same number of elements)",
-                                            id.as_str(),
-                                            source_dim.name(),
-                                            target_dim.name(),
-                                            subscript.as_str()
-                                        )
-                                    );
-                                } else {
-                                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
-                                };
-
-                                let rel_offset = if is_sparse {
-                                    if !offset_from_source {
-                                        return sim_err!(
-                                            MismatchedDimensions,
-                                            id.as_str().to_string()
-                                        );
-                                    }
-                                    abs_offset
-                                } else if offset_from_source {
-                                    let start_offset = single_indices[dim_idx];
-                                    if let Some(rel_offset) = abs_offset.checked_sub(start_offset) {
-                                        rel_offset
-                                    } else {
-                                        // For range-originated dimensions, subscript before
-                                        // the range start is out-of-bounds -> NaN fill
-                                        if range_view_dims.contains(&view_idx) {
-                                            return Ok(Expr::Const(f64::NAN, *loc));
-                                        }
-                                        return sim_err!(
-                                            MismatchedDimensions,
-                                            id.as_str().to_string()
-                                        );
-                                    }
-                                } else {
-                                    abs_offset
-                                };
-
-                                // For range-originated dimensions, check if the
-                                // offset exceeds the range size -> NaN fill for
-                                // out-of-bounds elements.
-                                if range_view_dims.contains(&view_idx)
-                                    && rel_offset >= view.dims[view_idx]
-                                {
-                                    return Ok(Expr::Const(f64::NAN, *loc));
-                                }
-
-                                result_index += rel_offset * (*stride as usize);
-                            }
-
-                            return Ok(Expr::Var(base.offset_by(view.offset + result_index), *loc));
-                        }
-
-                        if !has_dim_positions {
-                            return Ok(Expr::StaticSubscript(base, view, *loc));
-                        }
-                        // has_dim_positions is true - fall through to dynamic handling
-                    } else {
-                        // Not in A2A context - return StaticSubscript for the full view
-                        return Ok(Expr::StaticSubscript(base, view, *loc));
-                    }
-                }
-
-                // Fall back to dynamic subscript handling for Expr3.
-                // This handles cases where normalize_subscripts3 returned None.
-                //
-                // In A2A context with dynamic Range subscripts (e.g. data[start:end]
-                // where start/end are variables), the Range can't be used as a scalar
-                // subscript. Instead, resolve to a conditional per-element access:
-                // if the current element position is within [start, end], load the
-                // element; otherwise produce NaN.
-                let has_dynamic_range = indices
-                    .iter()
-                    .any(|idx| matches!(idx, IndexExpr3::Range(..)));
-
-                if has_dynamic_range
-                    && indices.len() == 1
-                    && dims.len() == 1
-                    && let Some(active_subscripts) = &self.active_subscript
-                    && let Some(active_dims) = &self.active_dimension
-                {
-                    // Find the active dimension matching the source dimension.
-                    // In multi-dimensional A2A contexts (e.g. target[DimA, DimB]
-                    // = data[start:end] where data is indexed by DimB), the source
-                    // dimension may not be active_dims[0].
-                    //
-                    // Match order: exact name, then subdimension/mapping relationships.
-                    let dim = &dims[0];
-                    let dim_cn = dim.canonical_name();
-                    let match_idx = active_dims
-                        .iter()
-                        .position(|ad| ad.name() == dim.name())
-                        .or_else(|| {
-                            active_dims.iter().position(|ad| {
-                                let ad_cn = ad.canonical_name();
-                                self.dimensions_ctx.is_subdimension_of(dim_cn, ad_cn)
-                                    || self.dimensions_ctx.is_subdimension_of(ad_cn, dim_cn)
-                                    || self.dimensions_ctx.has_mapping_to(dim_cn, ad_cn)
-                                    || self.dimensions_ctx.has_mapping_to(ad_cn, dim_cn)
-                            })
-                        })
-                        .unwrap_or(0);
-                    let target_dim = &active_dims[match_idx];
-                    let subscript = &active_subscripts[match_idx];
-                    let elem_pos_1based = Self::subscript_to_index(target_dim, subscript);
-
-                    if let IndexExpr3::Range(start_expr, end_expr, _) = &indices[0] {
-                        let start_lowered = self.lower_from_expr3(start_expr)?;
-                        let end_lowered = self.lower_from_expr3(end_expr)?;
-
-                        // P is the 1-based position of the current target element.
-                        // i = P - 1 is the 0-based target index.
-                        // Range [start:end] selects source positions start..end (1-based).
-                        // range_view[i] = data[start + i] (1-based).
-                        // Valid when i < end - start + 1, i.e., start + i <= end.
-                        let i_0based = elem_pos_1based - 1.0;
-
-                        // Computed 1-based index into the source: start + i
-                        let computed_index = Expr::Op2(
-                            BinaryOp::Add,
-                            Box::new(start_lowered.clone()),
-                            Box::new(Expr::Const(i_0based, *loc)),
-                            *loc,
-                        );
-                        // Bounds check: start + i <= end
-                        let in_bounds = Expr::Op2(
-                            BinaryOp::Lte,
-                            Box::new(computed_index.clone()),
-                            Box::new(end_lowered),
-                            *loc,
-                        );
-
-                        // Load the element via dynamic single subscript
-                        let load_elem = Expr::Subscript(
-                            base.clone(),
-                            vec![SubscriptIndex::Single(computed_index)],
-                            vec![dims[0].len()],
-                            *loc,
-                        );
-                        let nan_val = Expr::Const(f64::NAN, *loc);
-
-                        return Ok(Expr::If(
-                            Box::new(in_bounds),
-                            Box::new(load_elem),
-                            Box::new(nan_val),
-                            *loc,
-                        ));
-                    }
-                }
-
-                let orig_dims: Vec<usize> = dims.iter().map(|d| d.len()).collect();
-                let args: Result<Vec<_>> = indices
-                    .iter()
-                    .enumerate()
-                    .map(|(i, arg)| self.lower_index_expr3(arg, id, i, dims, &orig_dims, *loc))
-                    .collect();
-                Ok(Expr::Subscript(base, args?, orig_dims, *loc))
-            }
+            Expr3::Subscript(id, indices, _bounds, loc) => self.lower_subscript(id, indices, *loc),
 
             Expr3::App(builtin, _bounds, loc) => {
                 // Lower builtin directly without converting to Expr2
@@ -1851,14 +1206,12 @@ impl Context<'_> {
                             && l_names != r_names
                         {
                             // Check if r can be reordered to match l
-                            if let Some(reordering) = find_dimension_reordering(r_names, l_names) {
+                            if let Some(reordering) = axis_reordering(r_names, l_names) {
                                 r_expr =
                                     self.apply_dimension_reordering(r_expr, reordering, *loc)?;
                             }
                             // Otherwise check if l can be reordered to match r
-                            else if let Some(reordering) =
-                                find_dimension_reordering(l_names, r_names)
-                            {
+                            else if let Some(reordering) = axis_reordering(l_names, r_names) {
                                 l_expr =
                                     self.apply_dimension_reordering(l_expr, reordering, *loc)?;
                             }
@@ -1893,6 +1246,635 @@ impl Context<'_> {
                 Ok(Expr::If(Box::new(cond), Box::new(t), Box::new(f), *loc))
             }
         }
+    }
+
+    /// Row-major strides for `dims`.
+    fn row_major_strides(dims: &[usize]) -> Vec<isize> {
+        let mut strides = vec![1isize; dims.len()];
+        for i in (0..dims.len().saturating_sub(1)).rev() {
+            strides[i] = strides[i + 1] * dims[i + 1] as isize;
+        }
+        strides
+    }
+
+    /// The declared dimensions of the variable a subscript expression reads.
+    fn subscript_dims(&self, id: &Ident<Canonical>) -> Result<&[Dimension]> {
+        self.shape_of(id)?.dimensions().ok_or_else(|| {
+            Error::new(
+                ErrorKind::Model,
+                ErrorCode::Generic,
+                Some(format!(
+                    "expected array variable '{}' to have dimensions",
+                    id.as_str()
+                )),
+            )
+        })
+    }
+
+    /// `id[indices]` lowered.
+    ///
+    /// Four steps, each its own function: NORMALIZE the index expressions into
+    /// static [`IndexOp`]s ([`Self::normalize_subscript_ops`]), BUILD the view
+    /// they describe and decide what the enclosing context reads through it
+    /// ([`Self::lower_static_subscript`]), RESOLVE the one slot an
+    /// apply-to-all element reads ([`Self::resolve_iteration_element`]), and
+    /// EMIT the runtime-evaluated form for an index no view can carry
+    /// ([`Self::lower_dynamic_subscript`]).
+    fn lower_subscript(
+        &self,
+        id: &Ident<Canonical>,
+        indices: &[IndexExpr3],
+        loc: Loc,
+    ) -> Result<Expr> {
+        let base = self.get_base_ref(id)?;
+        let dims = self.subscript_dims(id)?;
+
+        if indices.len() != dims.len() {
+            return sim_err!(MismatchedDimensions, id.as_str().to_string());
+        }
+
+        // An ARRAY-valued index (`a[b[*]]`) has no meaning: an index selects
+        // one element and nothing says which element of `b` supplies it.
+        for idx in indices {
+            if let IndexExpr3::Expr(expr) = idx
+                && expr.get_array_bounds().is_some()
+            {
+                return sim_err!(
+                    Generic,
+                    format!("array-valued subscript expression for '{}'", id.as_str())
+                );
+            }
+        }
+
+        if let Some(operations) = self.normalize_subscript_ops(id, indices, dims)?
+            && let Some(expr) = self.lower_static_subscript(id, &operations, dims, &base, loc)?
+        {
+            return Ok(expr);
+        }
+
+        self.lower_dynamic_subscript(id, indices, dims, base, loc)
+    }
+
+    /// The static [`IndexOp`]s `indices` normalize to, or `None` when one of
+    /// them needs runtime evaluation.
+    ///
+    /// A dimension position (`@N`) normally SURVIVES normalization so the
+    /// enclosing iteration can bind it to an axis. In a scalar context -- no
+    /// active apply-to-all dimension, and not inside an array builtin whose
+    /// wildcards are being preserved -- there is no iteration to bind it to
+    /// and `@N` selects element N of the axis instead, so it is resolved here.
+    fn normalize_subscript_ops(
+        &self,
+        id: &Ident<Canonical>,
+        indices: &[IndexExpr3],
+        dims: &[Dimension],
+    ) -> Result<Option<Vec<IndexOp>>> {
+        let config = Subscript3Config {
+            dims,
+            all_dimensions: self.dimensions,
+            dimensions_ctx: self.dimensions_ctx,
+            active_dimension: self.active_dimension.as_deref(),
+        };
+        let Some(mut operations) = normalize_subscripts3(indices, &config) else {
+            return Ok(None);
+        };
+
+        if self.active_dimension.is_none() && !self.preserve_wildcards_for_iteration {
+            for (i, op) in operations.iter_mut().enumerate() {
+                if let IndexOp::DimPosition(pos) = op {
+                    let pos_1based = *pos + 1;
+                    // `normalize_subscripts3` already rejects `@0`; guarded
+                    // here too because the subtraction below would wrap.
+                    if pos_1based == 0 || pos_1based > dims[i].len() {
+                        return sim_err!(MismatchedDimensions, id.as_str().to_string());
+                    }
+                    *op = IndexOp::Single(pos_1based - 1);
+                }
+            }
+        }
+
+        Ok(Some(operations))
+    }
+
+    /// The context [`build_view_from_ops`] resolves an `ActiveDimRef` against.
+    fn view_config<'c>(&'c self, dims: &'c [Dimension]) -> ViewBuildConfig<'c> {
+        ViewBuildConfig {
+            active_subscript: self.active_subscript.as_deref(),
+            dims,
+            active_dimension: self.active_dimension.as_deref(),
+            dimensions_ctx: Some(self.dimensions_ctx),
+        }
+    }
+
+    /// The lowered form of a subscript whose indices are all static, or `None`
+    /// when only the dynamic path can finish it.
+    ///
+    /// `None` is exactly one shape: a dimension position (`@N`) inside an
+    /// apply-to-all body. `@N` names an axis of the ITERATION rather than an
+    /// element of the source, so it is bound per element by
+    /// [`Self::lower_index_expr3`] instead of being baked into a view here.
+    fn lower_static_subscript(
+        &self,
+        id: &Ident<Canonical>,
+        operations: &[IndexOp],
+        dims: &[Dimension],
+        base: &VarRef,
+        loc: Loc,
+    ) -> Result<Option<Expr>> {
+        let orig_dims: Vec<usize> = dims.iter().map(|d| d.len()).collect();
+        let orig_strides = Self::row_major_strides(&orig_dims);
+        let config = self.view_config(dims);
+        let built = build_view_from_ops(operations, &orig_dims, &orig_strides, &config)?;
+
+        let (Some(active_dims), Some(active_subscripts)) = (
+            self.active_dimension.as_deref(),
+            self.active_subscript.as_deref(),
+        ) else {
+            // Outside an apply-to-all body the whole view IS the value.
+            return Ok(Some(Expr::StaticSubscript(base.clone(), built.view, loc)));
+        };
+
+        if operations
+            .iter()
+            .any(|op| matches!(op, IndexOp::DimPosition(_)))
+        {
+            return Ok(None);
+        }
+
+        if self.preserves_axes_for_iteration(operations) {
+            // Only an ARRAY-PRODUCING builtin promotes an `ActiveDimRef` back
+            // to a whole-axis wildcard; a reducer keeps the concrete offset
+            // `build_view_from_ops` resolved.
+            let preserved_ops: Vec<IndexOp> = operations
+                .iter()
+                .map(|op| match op {
+                    IndexOp::ActiveDimRef(_) if self.promote_active_dim_ref => IndexOp::Wildcard,
+                    other => other.clone(),
+                })
+                .collect();
+            let preserved =
+                build_view_from_ops(&preserved_ops, &orig_dims, &orig_strides, &config)?;
+            return Ok(Some(Expr::StaticSubscript(
+                base.clone(),
+                preserved.view,
+                loc,
+            )));
+        }
+
+        if built.view.dims.is_empty() {
+            return Ok(Some(self.collapsed_element_read(
+                operations,
+                base,
+                &built.view,
+                loc,
+            )));
+        }
+
+        self.resolve_iteration_element(
+            id,
+            operations,
+            dims,
+            &built,
+            active_dims,
+            active_subscripts,
+            base,
+            loc,
+        )
+        .map(Some)
+    }
+
+    /// Whether this reference's axes survive as a view for an enclosing array
+    /// builtin's iteration rather than collapsing to the active element.
+    ///
+    /// A wildcard, a star range and a range always do, inside any array
+    /// builtin. An `ActiveDimRef` does so only inside an ARRAY-PRODUCING one
+    /// (`VECTOR SORT ORDER`, `VECTOR ELM MAP`, ...), where the source array may
+    /// live in a different dimension space than the output; inside a reducer
+    /// (`SUM`, `MEAN`, ...) it resolves to a concrete offset instead.
+    fn preserves_axes_for_iteration(&self, operations: &[IndexOp]) -> bool {
+        if !self.preserve_wildcards_for_iteration {
+            return false;
+        }
+        let has_axis_ops = operations.iter().any(|op| {
+            matches!(
+                op,
+                IndexOp::Wildcard | IndexOp::SparseRange { .. } | IndexOp::Range { .. }
+            )
+        });
+        let has_active_dim_ref = operations
+            .iter()
+            .any(|op| matches!(op, IndexOp::ActiveDimRef(_)));
+        has_axis_ops || (self.promote_active_dim_ref && has_active_dim_ref)
+    }
+
+    /// A source reference whose axes all collapsed to ONE element.
+    ///
+    /// Inside an array-producing builtin the element's BASE OFFSET has to
+    /// survive, because the builtin maps over the source variable's full
+    /// row-major storage starting from that base (genuine-Vensim
+    /// `VECTOR ELM MAP`, GH #578): the collapsed view's `offset` is the
+    /// element's flat index, and the variable base lets
+    /// `codegen::full_source_len` recover the full source length. Promoting
+    /// the `Single` ops back to a whole-array wildcard view discards that base
+    /// and is correct only when the element happens to be index 0.
+    fn collapsed_element_read(
+        &self,
+        operations: &[IndexOp],
+        base: &VarRef,
+        view: &ArrayView,
+        loc: Loc,
+    ) -> Expr {
+        if self.promote_active_dim_ref
+            && operations.iter().any(|op| matches!(op, IndexOp::Single(_)))
+        {
+            return Expr::StaticSubscript(base.clone(), view.clone(), loc);
+        }
+        Expr::Var(base.offset_by(view.offset), loc)
+    }
+
+    /// The dimension an [`AxisMatch::Mapped`] pairing was declared THROUGH
+    /// when it is neither axis's own -- the common-mapping-target rung, where
+    /// both axes map onto a third dimension.
+    ///
+    /// The forward and reverse rungs name the target and the source
+    /// respectively, and the mapped-parent rung is answered by its own arm
+    /// before this one is asked, so what is left is the two-mapping case.
+    /// Reading the PAIRING rather than re-deriving the relation is what keeps
+    /// the element step from resolving through a rung
+    /// [`crate::dimensions::match_axes_partial`] did not use: an axis the
+    /// matcher left unpaired is read positionally, and must not pick up a
+    /// mapping the matcher declined to apply.
+    fn common_mapping_target(
+        pairing: Option<&AxisMatch>,
+        source_dim: &Dimension,
+        target_dim: &Dimension,
+    ) -> Option<CanonicalDimensionName> {
+        match pairing {
+            Some(AxisMatch::Mapped { via })
+                if via != source_dim.canonical_name() && via != target_dim.canonical_name() =>
+            {
+                Some(via.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// The single slot the current apply-to-all element reads through
+    /// `built.view`.
+    ///
+    /// Two questions, in this order.
+    ///
+    /// WHICH ACTIVE AXIS supplies each view axis is
+    /// [`crate::dimensions::match_axes_partial`], the engine's one axis-matching
+    /// precedence, run over the view's `(name, length)` axes. An axis it does
+    /// not pair is read POSITIONALLY, and positional reading requires the
+    /// lengths to agree -- except for a range-derived axis, which is allowed
+    /// to be shorter and produces NaN past its end.
+    ///
+    /// WHICH ELEMENT of the source axis that active subscript selects is the
+    /// source axis's own name first, then the declared mapping in either
+    /// direction, then a mapped parent of the active subdimension, then the
+    /// dimension both axes map onto ([`Self::common_mapping_target`]). Those
+    /// last three arms answer the same three relations the pairing ran on, so
+    /// a reference resolves its element through the rung that paired its axes
+    /// rather than through a second, weaker guess. A mapping that EXISTS but
+    /// cannot translate is an error rather than a fallback onto the target
+    /// axis: falling back hides a misconfigured element map (a size mismatch,
+    /// say) behind a plausible-looking index.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_iteration_element(
+        &self,
+        id: &Ident<Canonical>,
+        operations: &[IndexOp],
+        dims: &[Dimension],
+        built: &ViewBuildResult,
+        active_dims: &[Dimension],
+        active_subscripts: &[CanonicalElementName],
+        base: &VarRef,
+        loc: Loc,
+    ) -> Result<Expr> {
+        let ViewBuildResult {
+            view,
+            dim_mapping,
+            single_indices,
+        } = built;
+
+        let view_axes: Vec<Axis<'_>> = view
+            .dim_names
+            .iter()
+            .zip(view.dims.iter())
+            .map(|(name, &len)| Axis::named(name.as_str(), len))
+            .collect();
+        let supplied_by =
+            match_axes_partial(&view_axes, &axes_of(active_dims), self.dimensions_ctx);
+        let every_axis_paired = supplied_by.iter().all(Option::is_some);
+
+        // Inside an array-producing builtin (`promote_active_dim_ref`) an arity
+        // mismatch is expected: the source array lives in a different dimension
+        // space than the output (`d[DimA,B1]` partially collapses to DimA only,
+        // which differs from a DimA x DimB output).
+        if !every_axis_paired
+            && !self.promote_active_dim_ref
+            && view.dims.len() != active_dims.len()
+        {
+            return sim_err!(MismatchedDimensions, id.as_str().to_string());
+        }
+
+        // Which view axes came from a Range, so a size mismatch is allowed and
+        // an out-of-bounds element becomes NaN rather than an error.
+        let range_view_dims: std::collections::HashSet<usize> = {
+            let mut set = std::collections::HashSet::new();
+            let mut view_dim_idx = 0;
+            for op in operations {
+                match op {
+                    // These collapse their axis and contribute no view axis.
+                    IndexOp::Single(_) | IndexOp::ActiveDimRef(_) => {}
+                    IndexOp::Range { .. } => {
+                        set.insert(view_dim_idx);
+                        view_dim_idx += 1;
+                    }
+                    _ => {
+                        view_dim_idx += 1;
+                    }
+                }
+            }
+            set
+        };
+
+        // A positionally-read axis must have the target's length. Skipped while
+        // preserving wildcards for iteration (`SUM`, `MEAN`, ...): the view
+        // describes what the REDUCTION iterates and is independent of the
+        // output's dimensions, so `SUM(c[*])` in a DimB context is valid.
+        if !self.preserve_wildcards_for_iteration {
+            for (view_idx, &view_dim) in view.dims.iter().enumerate() {
+                if supplied_by[view_idx].is_none()
+                    && view_idx < active_dims.len()
+                    && !range_view_dims.contains(&view_idx)
+                    && view_dim != active_dims[view_idx].len()
+                {
+                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
+                }
+            }
+        }
+
+        let mut result_index = 0;
+        for (view_idx, stride) in view.strides.iter().enumerate() {
+            let (active_idx, subscript, pairing) = match &supplied_by[view_idx] {
+                Some((active_idx, how)) => {
+                    (*active_idx, &active_subscripts[*active_idx], Some(how))
+                }
+                None if view_idx < active_subscripts.len() => {
+                    (view_idx, &active_subscripts[view_idx], None)
+                }
+                None => return sim_err!(MismatchedDimensions, id.as_str().to_string()),
+            };
+
+            let Some(Some(dim_idx)) = dim_mapping.get(view_idx).copied() else {
+                return sim_err!(MismatchedDimensions, id.as_str().to_string());
+            };
+            if dim_idx >= dims.len() {
+                return sim_err!(MismatchedDimensions, id.as_str().to_string());
+            }
+
+            let source_dim = &dims[dim_idx];
+            let target_dim = &active_dims[active_idx];
+            let is_sparse = view.sparse.iter().any(|s| s.dim_index == view_idx);
+
+            let prefer_source = source_dim.name() == target_dim.name()
+                || matches!(source_dim, Dimension::Named(_, _));
+            let mut source_offset = if prefer_source {
+                source_dim.get_offset(subscript)
+            } else {
+                None
+            };
+
+            // A mapping that exists but cannot translate is authoritative:
+            // `mapping_failed` suppresses the target-axis fallback below.
+            let mut mapping_failed = false;
+            if source_offset.is_none() {
+                let source_dim_name = source_dim.canonical_name();
+                let target_dim_name = target_dim.canonical_name();
+
+                let has_direct_or_reverse_mapping = self
+                    .dimensions_ctx
+                    .has_mapping_to(source_dim_name, target_dim_name)
+                    || self
+                        .dimensions_ctx
+                        .has_mapping_to(target_dim_name, source_dim_name);
+                let has_parent_mapping = self
+                    .dimensions_ctx
+                    .has_mapping_to_parent_of(source_dim_name, target_dim_name);
+
+                if let Some(translated) = self.dimensions_ctx.translate_via_mapping(
+                    source_dim_name,
+                    target_dim_name,
+                    subscript,
+                ) {
+                    source_offset = source_dim.get_offset(&translated);
+                } else if has_parent_mapping {
+                    // The source maps onto a PARENT of the target: translate
+                    // through that specific parent rather than the first
+                    // mapping target.
+                    let parent_target = self
+                        .dimensions_ctx
+                        .find_mapping_parent_of(source_dim_name, target_dim_name);
+                    if let Some(parent) = parent_target
+                        && let Some(translated) = self
+                            .dimensions_ctx
+                            .translate_to_source_via_mapping(source_dim_name, parent, subscript)
+                    {
+                        source_offset = source_dim.get_offset(&translated);
+                    } else {
+                        mapping_failed = true;
+                    }
+                } else if let Some(via) =
+                    Self::common_mapping_target(pairing, source_dim, target_dim)
+                {
+                    // The COMMON-MAPPING-TARGET rung: neither axis maps onto
+                    // the other, but both declare a mapping onto `via`, so the
+                    // element runs target -> via -> source. That is two
+                    // translations where every other rung needs one, and the
+                    // `target_offset` fallback below -- reading the source axis
+                    // at the target element's own ORDINAL -- is that element
+                    // only while BOTH mappings are positional. With an explicit
+                    // element map on either side the ordinal is a different
+                    // row, so the chain is walked rather than assumed, and a
+                    // chain that cannot be walked is authoritative like any
+                    // other declared mapping.
+                    //
+                    // Which element a pair of dimensions mapping onto a third
+                    // corresponds through is UNVERIFIED against Vensim and
+                    // Stella: neither documents the two-mapping case, and no
+                    // model under `test/` spells it. What is not a judgement
+                    // call is that the reference resolves through `via` if it
+                    // resolves at all -- `via` is the only reason the matcher
+                    // paired these axes.
+                    if let Some(via_element) =
+                        self.dimensions_ctx
+                            .translate_via_mapping(&via, target_dim_name, subscript)
+                        && let Some(translated) = self.dimensions_ctx.translate_via_mapping(
+                            source_dim_name,
+                            &via,
+                            &via_element,
+                        )
+                    {
+                        source_offset = source_dim.get_offset(&translated);
+                    } else {
+                        mapping_failed = true;
+                    }
+                } else if has_direct_or_reverse_mapping {
+                    mapping_failed = true;
+                }
+            }
+
+            let target_offset = if source_offset.is_none() && !mapping_failed {
+                target_dim.get_offset(subscript)
+            } else {
+                None
+            };
+
+            let (abs_offset, offset_from_source) = if let Some(abs_offset) = source_offset {
+                (abs_offset, true)
+            } else if let Some(abs_offset) = target_offset {
+                (abs_offset, false)
+            } else if mapping_failed {
+                return sim_err!(
+                    MismatchedDimensions,
+                    format!(
+                        "{}: dimension mapping from {} to {} failed for subscript '{}' \
+                         (check that both dimensions have the same number of elements)",
+                        id.as_str(),
+                        source_dim.name(),
+                        target_dim.name(),
+                        subscript.as_str()
+                    )
+                );
+            } else {
+                return sim_err!(MismatchedDimensions, id.as_str().to_string());
+            };
+
+            let rel_offset = if is_sparse {
+                if !offset_from_source {
+                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
+                }
+                abs_offset
+            } else if offset_from_source {
+                let start_offset = single_indices[dim_idx];
+                match abs_offset.checked_sub(start_offset) {
+                    Some(rel_offset) => rel_offset,
+                    // Before a range's start is out of bounds: NaN for a
+                    // range-derived axis, an error for anything else.
+                    None if range_view_dims.contains(&view_idx) => {
+                        return Ok(Expr::Const(f64::NAN, loc));
+                    }
+                    None => return sim_err!(MismatchedDimensions, id.as_str().to_string()),
+                }
+            } else {
+                abs_offset
+            };
+
+            if range_view_dims.contains(&view_idx) && rel_offset >= view.dims[view_idx] {
+                return Ok(Expr::Const(f64::NAN, loc));
+            }
+
+            result_index += rel_offset * (*stride as usize);
+        }
+
+        Ok(Expr::Var(base.offset_by(view.offset + result_index), loc))
+    }
+
+    /// A subscript at least one of whose indices needs runtime evaluation.
+    ///
+    /// The one special case is a dynamic RANGE (`data[start:end]` with
+    /// variable bounds) read per element of an apply-to-all body: a range is
+    /// not a scalar subscript, so it lowers to a per-element conditional --
+    /// load `data[start + i]` while `start + i <= end`, NaN past the end.
+    fn lower_dynamic_subscript(
+        &self,
+        id: &Ident<Canonical>,
+        indices: &[IndexExpr3],
+        dims: &[Dimension],
+        base: VarRef,
+        loc: Loc,
+    ) -> Result<Expr> {
+        let has_dynamic_range = indices
+            .iter()
+            .any(|idx| matches!(idx, IndexExpr3::Range(..)));
+
+        if has_dynamic_range
+            && indices.len() == 1
+            && dims.len() == 1
+            && let Some(active_subscripts) = &self.active_subscript
+            && let Some(active_dims) = &self.active_dimension
+            && let IndexExpr3::Range(start_expr, end_expr, _) = &indices[0]
+        {
+            // Which active axis is the source's own is
+            // `dimensions::match_axes_partial` -- and this is the ONE caller
+            // that admits the subdimension rung, because it only picks which
+            // axis to compare POSITIONS against and never resolves an element
+            // through the answer (an out-of-range position becomes NaN below).
+            // In a multi-dimensional context (`target[DimA, DimB] =
+            // data[start:end]` over a DimB-indexed `data`) the source axis is
+            // not necessarily `active_dims[0]`.
+            let source_axes = axes_of(&dims[..1]);
+            let match_idx = match_axes_partial(
+                &source_axes,
+                &axes_of(active_dims),
+                &SubdimensionRelations(self.dimensions_ctx),
+            )[0]
+            .as_ref()
+            .map(|(active_idx, _)| *active_idx)
+            // No axis of the target corresponds. Reading the first is a
+            // guess, and it is the guess this arm has always made; the
+            // range's own bounds check turns a wrong position into NaN
+            // rather than into a neighbouring element.
+            .unwrap_or(0);
+            let target_dim = &active_dims[match_idx];
+            let subscript = &active_subscripts[match_idx];
+            let elem_pos_1based = Self::subscript_to_index(target_dim, subscript);
+
+            let start_lowered = self.lower_from_expr3(start_expr)?;
+            let end_lowered = self.lower_from_expr3(end_expr)?;
+
+            // P is the 1-based position of the current target element and
+            // i = P - 1 its 0-based index. `[start:end]` selects source
+            // positions start..end (1-based), so range_view[i] is
+            // data[start + i], valid while start + i <= end.
+            let i_0based = elem_pos_1based - 1.0;
+            let computed_index = Expr::Op2(
+                BinaryOp::Add,
+                Box::new(start_lowered),
+                Box::new(Expr::Const(i_0based, loc)),
+                loc,
+            );
+            let in_bounds = Expr::Op2(
+                BinaryOp::Lte,
+                Box::new(computed_index.clone()),
+                Box::new(end_lowered),
+                loc,
+            );
+            let load_elem = Expr::Subscript(
+                base,
+                vec![SubscriptIndex::Single(computed_index)],
+                vec![dims[0].len()],
+                loc,
+            );
+
+            return Ok(Expr::If(
+                Box::new(in_bounds),
+                Box::new(load_elem),
+                Box::new(Expr::Const(f64::NAN, loc)),
+                loc,
+            ));
+        }
+
+        let orig_dims: Vec<usize> = dims.iter().map(|d| d.len()).collect();
+        let args: Result<Vec<_>> = indices
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| self.lower_index_expr3(arg, id, i, dims, &orig_dims, loc))
+            .collect();
+        Ok(Expr::Subscript(base, args?, orig_dims, loc))
     }
 
     /// Get dimension names from an Expr3 if it's an array variable
@@ -2280,7 +2262,7 @@ impl Context<'_> {
                 // mapped to it -- is nevertheless REACHABLE, and not by the
                 // route one would guess: Pass 1 folds an active dimension's
                 // name to an ordinal only when it runs, and
-                // `lower_preserving_dimensions` skips it, which is exactly how
+                // `DimensionRefs::Preserve` skips it, which is exactly how
                 // all 8 corpus references (`LOOKUP` table arguments with an
                 // `@N` sibling) arrive here naming an ACTIVE dimension. A
                 // fixture of that shape reaches this loop with two candidates.
@@ -2403,7 +2385,9 @@ fn test_lower() {
         (ast::BinaryOp::And, BinaryOp::And),
         (ast::BinaryOp::Or, BinaryOp::Or),
     ] {
-        let mut output_exprs = context.lower(&lower_if(op)).expect("lowers");
+        let mut output_exprs = context
+            .lower(&lower_if(op), DimensionRefs::Resolve)
+            .expect("lowers");
         // The last element is the main expression
         assert_eq!(expected(lowered_op), output_exprs.pop().unwrap());
     }

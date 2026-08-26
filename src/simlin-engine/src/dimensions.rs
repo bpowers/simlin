@@ -1132,6 +1132,380 @@ impl DimensionsContext {
 // Dimension Matching Algorithm
 // ============================================================================
 
+/// How one source axis was paired with one target axis, strongest rule first.
+///
+/// The order of the variants IS the precedence [`match_axes`] applies.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
+pub enum AxisMatch {
+    /// The two axes name the same dimension.
+    Exact,
+    /// A declared dimension mapping relates them. `via` is the dimension the
+    /// correspondence is declared through: the target for a forward mapping,
+    /// the source for a reverse one, the mapped parent for a mapping onto a
+    /// dimension the target is a subdimension of, and the shared dimension
+    /// when both map onto one.
+    Mapped { via: CanonicalDimensionName },
+    /// One axis's dimension is a subdimension of the other's.
+    Subdimension,
+    /// Both axes are indexed dimensions of the same length. Named dimensions
+    /// never match by size: their elements carry meaning, so `Cities{Boston,
+    /// Seattle}` and `Products{Widgets, Gadgets}` are not interchangeable
+    /// because both happen to hold two elements.
+    BySize,
+}
+
+/// One axis of an array shape, as [`match_axes_partial`] reads it.
+///
+/// An `ArrayView`'s axes are names and lengths rather than [`Dimension`]s, and
+/// a temp's axis has no name at all, so the matcher takes this rather than
+/// `&[Dimension]` and every caller projects onto it.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Axis<'a> {
+    /// Canonical dimension name, or `""` for an axis that has none. An unnamed
+    /// axis never matches by name: there is no name to compare, and two temps'
+    /// blank axes are not thereby the same dimension.
+    pub name: &'a str,
+    pub len: usize,
+    /// Whether the axis's dimension is an [`Dimension::Indexed`] one, which is
+    /// what admits [`AxisMatch::BySize`].
+    pub indexed: bool,
+}
+
+impl<'a> Axis<'a> {
+    /// The axis a declared dimension presents.
+    pub fn of(dim: &'a Dimension) -> Self {
+        Axis {
+            name: dim.name(),
+            len: dim.len(),
+            indexed: matches!(dim, Dimension::Indexed(_, _)),
+        }
+    }
+
+    /// A named axis of a shape that is not a declared dimension list -- an
+    /// `ArrayView`'s. `indexed` is false, because a view records the name and
+    /// the length of each axis but not which kind of dimension it came from;
+    /// a caller that wants the size rule must supply [`Dimension`]s.
+    pub fn named(name: &'a str, len: usize) -> Self {
+        Axis {
+            name,
+            len,
+            indexed: false,
+        }
+    }
+}
+
+/// [`Axis`] for each of `dims`.
+pub fn axes_of(dims: &[Dimension]) -> Vec<Axis<'_>> {
+    dims.iter().map(Axis::of).collect()
+}
+
+/// The declared relations between two dimension NAMES that
+/// [`match_axes_partial`] consults.
+///
+/// [`DimensionsContext`] is the production implementation. The trait exists
+/// because two callers cannot supply one: `ast::Expr2`'s bounds unification
+/// reaches its dimension facts through `Expr2Context` rather than through a
+/// `DimensionsContext`, and `compiler::mod`'s view join has neither -- it
+/// compares two `ArrayView`s, which carry names and lengths only. Both pass a
+/// projection instead of a second matcher, so there is one axis-matching
+/// precedence and callers differ only in which of its rules they can answer.
+/// Every method defaults to "no relation", so a projection states exactly what
+/// it knows.
+pub trait AxisRelations {
+    /// `from` declares a mapping onto `to`.
+    fn maps_to(&self, _from: &str, _to: &str) -> bool {
+        false
+    }
+
+    /// The mapping target of `from` that `of` is a subdimension of, if any.
+    ///
+    /// An INDIRECT correspondence: the paired element runs target -> that
+    /// parent -> source rather than being the target axis's own ordinal.
+    /// [`DirectMappingsOnly`] withholds it for a caller that resolves the
+    /// paired element by ordinal -- `compiler::context`'s
+    /// `make_dimension_subscripts`, which can only emit a dimension-name
+    /// subscript, and `ast::Expr2`'s bounds unification, which resolves no
+    /// element at all. A DIRECT mapping is safe for those callers because the
+    /// ordinal read IS the documented bare-reference rule (GH #527 / #997, see
+    /// [`DimensionsContext::positional_correspondence`]); the parent one is
+    /// not, and pairing through it makes `dst[SubA] = src` over `src[DimB]`
+    /// with `DimB -> DimA` and `SubA` a subdimension of `DimA` read `DimB`'s
+    /// first element instead of the mapped one.
+    fn mapping_parent_of(&self, _from: &str, _of: &str) -> Option<CanonicalDimensionName> {
+        None
+    }
+
+    /// A dimension both `a` and `b` declare a mapping onto, if any.
+    fn common_mapping_target(&self, _a: &str, _b: &str) -> Option<CanonicalDimensionName> {
+        None
+    }
+
+    /// `child`'s elements are all elements of `parent`.
+    ///
+    /// A subdimension relation is a PARTIAL correspondence -- only the
+    /// subdimension's own elements exist on both axes -- so admitting it is a
+    /// statement that the caller can act on a pairing that does not cover
+    /// every element. [`DimensionsContext`] does NOT admit it, because the
+    /// callers that resolve an ELEMENT through the pairing would each read a
+    /// row the subdimension does not declare. Both directions break, in
+    /// different arms, and `Parent{A,B,C,D}` with `Sub{A,C}` spells them:
+    ///
+    /// * `out[Sub] = src` over `src[Parent]` breaks in
+    ///   `compiler::context::make_dimension_subscripts`, which is the only arm
+    ///   that would be affected and which withholds the rung through
+    ///   [`DirectMappingsOnly`]. What that arm can emit for a paired axis is a
+    ///   dimension-name subscript, so admitting the rung there rewrites the
+    ///   reference to `src[Sub]` -- and that spelling resolves to the ACTIVE
+    ///   dimension's ordinal, reading `src`'s SECOND element for `Sub`'s `C`
+    ///   rather than its third (GH #1029). The whole reference is refused with
+    ///   `MismatchedDimensions` today.
+    /// * `out[Parent] = src` over `src[Sub]` breaks in the Subscript arm's
+    ///   element step (`compiler::context::resolve_iteration_element`), which
+    ///   runs under the full [`DimensionsContext`]. Pairing the axes skips the
+    ///   positional length check, and the element step then finds no `Sub`
+    ///   element named `B` and no mapping, so it falls back on the TARGET
+    ///   axis's ordinal: `Parent.get_offset(B)` is 1 and `Parent.get_offset(D)`
+    ///   is 3, indexing a two-element `src` -- a neighbouring row and then a
+    ///   read past its end. This too is refused today.
+    ///
+    /// So the rung trades two loud refusals for two silent wrong numbers, and
+    /// GH #1029 is why there is no correct element for it to resolve to yet:
+    /// even the explicit spelling `out[Sub] = src[Sub]` reads positionally into
+    /// `Parent` rather than by element name.
+    ///
+    /// [`SubdimensionRelations`] admits it, for the one caller that needs only
+    /// to know WHICH axis to compare positions against and never resolves an
+    /// element through the answer.
+    fn is_subdimension(&self, _child: &str, _parent: &str) -> bool {
+        false
+    }
+}
+
+/// No declared relations: only [`AxisMatch::Exact`] and [`AxisMatch::BySize`]
+/// can fire. What a caller comparing two `ArrayView`s can answer.
+pub struct NoAxisRelations;
+
+impl AxisRelations for NoAxisRelations {}
+
+/// Only the DIRECTLY declared mappings between two axes: a mapping in either
+/// direction, or both mapping onto one common dimension. For a caller that
+/// resolves the paired element by ORDINAL, which the indirect correspondences
+/// -- [`AxisRelations::mapping_parent_of`] and
+/// [`AxisRelations::is_subdimension`] -- are not.
+pub struct DirectMappingsOnly<'a>(pub &'a DimensionsContext);
+
+impl AxisRelations for DirectMappingsOnly<'_> {
+    fn maps_to(&self, from: &str, to: &str) -> bool {
+        self.0.maps_to(from, to)
+    }
+
+    fn common_mapping_target(&self, a: &str, b: &str) -> Option<CanonicalDimensionName> {
+        self.0.common_mapping_target(a, b)
+    }
+}
+
+/// [`DimensionsContext`]'s relations plus the subdimension rung, for a caller
+/// that acts on a partial correspondence. See [`AxisRelations::is_subdimension`]
+/// for why that is opt-in.
+pub struct SubdimensionRelations<'a>(pub &'a DimensionsContext);
+
+impl AxisRelations for SubdimensionRelations<'_> {
+    fn maps_to(&self, from: &str, to: &str) -> bool {
+        self.0.maps_to(from, to)
+    }
+
+    fn mapping_parent_of(&self, from: &str, of: &str) -> Option<CanonicalDimensionName> {
+        self.0.mapping_parent_of(from, of)
+    }
+
+    fn common_mapping_target(&self, a: &str, b: &str) -> Option<CanonicalDimensionName> {
+        self.0.common_mapping_target(a, b)
+    }
+
+    fn is_subdimension(&self, child: &str, parent: &str) -> bool {
+        self.0.is_subdimension_of(
+            &CanonicalDimensionName::from_raw(child),
+            &CanonicalDimensionName::from_raw(parent),
+        )
+    }
+}
+
+impl AxisRelations for DimensionsContext {
+    fn maps_to(&self, from: &str, to: &str) -> bool {
+        self.has_mapping_to(
+            &CanonicalDimensionName::from_raw(from),
+            &CanonicalDimensionName::from_raw(to),
+        )
+    }
+
+    fn mapping_parent_of(&self, from: &str, of: &str) -> Option<CanonicalDimensionName> {
+        self.find_mapping_parent_of(
+            &CanonicalDimensionName::from_raw(from),
+            &CanonicalDimensionName::from_raw(of),
+        )
+        .cloned()
+    }
+
+    fn common_mapping_target(&self, a: &str, b: &str) -> Option<CanonicalDimensionName> {
+        let a_targets = self.get_all_mapping_targets(&CanonicalDimensionName::from_raw(a));
+        if a_targets.is_empty() {
+            return None;
+        }
+        let b_targets = self.get_all_mapping_targets(&CanonicalDimensionName::from_raw(b));
+        a_targets
+            .into_iter()
+            .find(|t| b_targets.contains(t))
+            .cloned()
+    }
+}
+
+/// One rung of the precedence, as a predicate on a (source, target) axis pair.
+type AxisRule<'r> = dyn Fn(&Axis<'_>, &Axis<'_>) -> Option<AxisMatch> + 'r;
+
+/// How each axis of `source` pairs with an axis of `target`, or `None` for a
+/// source axis nothing supplies -- the engine's SINGLE axis-matching
+/// precedence.
+///
+/// # Precedence
+///
+/// Exact name, then declared mapping, then subdimension, then size -- the
+/// order [`AxisMatch`]'s variants are declared in. Every caller that pairs two
+/// axis lists asks this: implicit subscripts for a bare arrayed reference,
+/// the subscripts a bare reference under a reducer is given, the reordering
+/// that makes two operands' axes line up, `Expr2`'s bounds unification, the
+/// per-element resolution inside an apply-to-all body, and the view join.
+///
+/// # Two properties every caller depends on
+///
+/// The answer is POSITIONAL, so a shape that repeats a dimension
+/// (`target[D,D]`) is matched by index rather than by name; a map keyed by
+/// dimension name collapses the two occurrences and answers with whichever was
+/// inserted last.
+///
+/// The allocation is ONE-TO-ONE (`used`), so two source axes that could each
+/// take the same target axis are given different ones. Searching per source
+/// axis independently lets both claim the first match, and the second axis
+/// then reads a row the first is already reading.
+///
+/// # Why the passes are staged flat
+///
+/// Which of two competing source axes wins a target axis is decided by MATCH
+/// STRENGTH, not by declaration order: each rule runs across ALL source axes
+/// before the next rule runs for any of them. Order only breaks ties WITHIN a
+/// rule. Running the rules per source axis instead makes declaration order
+/// decisive -- an earlier axis consumes, through a weaker rule, the target a
+/// later axis matches more strongly, and since the allocation is one-to-one
+/// the later axis is then left unresolved. That is GH #996: on C-LEARN it hit
+/// two production shapes, `aggregated_definition[cop, aggregated_regions]`
+/// read under an `[aggregated_regions]` target and `[cop, semi_agg]` under
+/// `[semi_agg]`, both because the target's own dimension declares an element
+/// map onto `cop`, so `cop` (declared first) took the slot by MAPPING before
+/// the name-matching axis was considered. Each allocated `[Some(0), None]`,
+/// the LTM pin table dropped the dep, and 135 link scores were declined.
+/// `compiler::dimensions::tests::a_mapping_match_does_not_steal_a_later_name_match`
+/// and `a_size_match_does_not_steal_a_later_mapping_match` pin the rule.
+///
+/// # Where this is NOT the matcher
+///
+/// [`match_dimensions_two_pass`] is the RUNTIME broadcast matcher, shared by
+/// the VM's `LoadIterViewAt` and the wasm backend's `ViewDesc`. It pairs
+/// `dim_id`s rather than dimensions and runs where no `DimensionsContext`
+/// exists, so it cannot consult a declared mapping or a subdimension relation
+/// and deliberately states a weaker rule (id, then size). Do not fold the two
+/// together: an execution-time broadcast that silently followed a declared
+/// mapping would read a different element than the compile-time resolution
+/// that produced the view.
+pub fn match_axes_partial(
+    source: &[Axis<'_>],
+    target: &[Axis<'_>],
+    relations: &dyn AxisRelations,
+) -> Vec<Option<(usize, AxisMatch)>> {
+    let mut alloc: Vec<Option<(usize, AxisMatch)>> = vec![None; source.len()];
+    let mut used: Vec<bool> = vec![false; target.len()];
+
+    // Each closure answers ONE rule for one (source, target) pair. They are run
+    // as four flat passes below.
+    let exact = |s: &Axis<'_>, t: &Axis<'_>| {
+        (!s.name.is_empty() && s.name == t.name).then_some(AxisMatch::Exact)
+    };
+    let mapped = |s: &Axis<'_>, t: &Axis<'_>| {
+        if s.name.is_empty() || t.name.is_empty() {
+            return None;
+        }
+        if relations.maps_to(s.name, t.name) {
+            return Some(AxisMatch::Mapped {
+                via: CanonicalDimensionName::from_raw(t.name),
+            });
+        }
+        if let Some(parent) = relations.mapping_parent_of(s.name, t.name) {
+            return Some(AxisMatch::Mapped { via: parent });
+        }
+        if relations.maps_to(t.name, s.name) {
+            return Some(AxisMatch::Mapped {
+                via: CanonicalDimensionName::from_raw(s.name),
+            });
+        }
+        relations
+            .common_mapping_target(s.name, t.name)
+            .map(|via| AxisMatch::Mapped { via })
+    };
+    let subdimension = |s: &Axis<'_>, t: &Axis<'_>| {
+        (!s.name.is_empty()
+            && !t.name.is_empty()
+            && (relations.is_subdimension(s.name, t.name)
+                || relations.is_subdimension(t.name, s.name)))
+        .then_some(AxisMatch::Subdimension)
+    };
+    let by_size = |s: &Axis<'_>, t: &Axis<'_>| {
+        (s.indexed && t.indexed && s.len == t.len).then_some(AxisMatch::BySize)
+    };
+
+    let rules: [&AxisRule<'_>; 4] = [&exact, &mapped, &subdimension, &by_size];
+
+    for rule in rules {
+        for (source_idx, s) in source.iter().enumerate() {
+            if alloc[source_idx].is_some() {
+                continue;
+            }
+            for (target_idx, t) in target.iter().enumerate() {
+                if used[target_idx] {
+                    continue;
+                }
+                if let Some(how) = rule(s, t) {
+                    alloc[source_idx] = Some((target_idx, how));
+                    used[target_idx] = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    alloc
+}
+
+/// [`match_axes_partial`] over two declared dimension lists, with every source
+/// axis resolved, or `None`.
+///
+/// `None` is the compiler's `MismatchedDimensions`: no complete allocation
+/// exists. It subsumes an explicit `source.len() > target.len()` bail by
+/// pigeonhole -- the allocation is one-to-one, so a longer `source` always
+/// leaves an axis unresolved.
+pub fn match_axes(
+    source: &[Dimension],
+    target: &[Dimension],
+    ctx: &DimensionsContext,
+) -> Option<Vec<(usize, AxisMatch)>> {
+    match_axes_partial(&axes_of(source), &axes_of(target), ctx)
+        .into_iter()
+        .collect()
+}
+
+#[cfg(test)]
+#[path = "axis_match_tests.rs"]
+mod axis_match_tests;
+
 /// Match source dimensions to target dimensions using a two-pass algorithm.
 ///
 /// This algorithm is used for broadcasting array operations where a source array

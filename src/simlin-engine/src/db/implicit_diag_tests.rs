@@ -32,7 +32,8 @@ use crate::test_common::TestProject;
 
 /// An A2A SMTH1 whose argument is an array slice: the per-element capture
 /// helper `$⁚out⁚0⁚arg0⁚{elem}` holds `vals[*]` in a SCALAR equation, which
-/// codegen rejects ("Non-scalar StaticSubscript outside iteration context").
+/// codegen rejects ("an array of shape [2] is used where a single value is
+/// required").
 /// The model does not compile -- the point of the fixture is what the
 /// diagnostics SAY about that.
 fn failing_implicit_fixture() -> TestProject {
@@ -80,7 +81,7 @@ fn implicit_helper_codegen_failure_is_attributed() {
             unreachable!()
         };
         assert!(
-            msg.contains("Non-scalar StaticSubscript") || msg.contains("codegen"),
+            msg.contains("used where a single value is required") || msg.contains("codegen"),
             "the refused construct must be named: {msg}"
         );
         assert!(

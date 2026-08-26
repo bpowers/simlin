@@ -591,13 +591,15 @@ mod tests {
     /// Baked static-view geometries, addressed by the descriptor and by the
     /// VM's own `StaticArrayView::to_runtime_view` element for element: a row
     /// slice (`arr[2, *]`), a range (`arr[2:4]`), a transpose (`arr'`), a
-    /// star range (`arr[*:Sub]`), and a star range with another axis fixed.
-    /// Not rowed: a transpose applied on top of a star range
-    /// (`compiler/context.rs` can produce it through `ArrayView::transpose`);
-    /// it is a pre-existing defect tracked as GH #1027.
+    /// star range (`arr[*:Sub]`), a star range with another axis fixed, and a
+    /// transpose applied on top of a star range (`arr[*:Sub, *]'`, which
+    /// `compiler/context.rs` produces through `ArrayView::transpose`). The
+    /// last is the composed geometry GH #1027 addressed through the wrong
+    /// axis: the sparse mapping names an axis by index, so the transform has
+    /// to renumber it, and both backends read the same baked view.
     #[test]
     fn static_view_geometries_address_like_vm() {
-        let cases: [(&str, StaticArrayView); 5] = [
+        let cases: [(&str, StaticArrayView); 6] = [
             ("row slice of a 2x3", static_view(&[3], &[1], 3, &[])),
             ("range [1, 4) of a 5", static_view(&[3], &[1], 1, &[])),
             ("transposed 2x3", static_view(&[3, 2], &[1, 3], 0, &[])),
@@ -608,6 +610,13 @@ mod tests {
             (
                 "row 1 of a 3x4, star range on the columns",
                 static_view(&[2], &[1], 4, &[(0, &[0, 2])]),
+            ),
+            (
+                // `arr[*:Sub, *]'` over a 4x3 whose subdimension is rows 0 and
+                // 2: the untransposed view is dims [2,3] strides [3,1] with
+                // the mapping on axis 0, so the transpose puts it on axis 1.
+                "transposed star range of a 4x3",
+                static_view(&[3, 2], &[1, 3], 0, &[(1, &[0, 2])]),
             ),
         ];
         for (label, sv) in &cases {
@@ -632,6 +641,16 @@ mod tests {
         let star_row = ViewDesc::from_static(&cases[4].1);
         assert_eq!(star_row.flat_element_offset(0), 4);
         assert_eq!(star_row.flat_element_offset(1), 6);
+        // The transposed star range walks the selection in transposed order:
+        // column X of rows A and C, then column Y, then column Z -- flat
+        // offsets 0, 6, 1, 7, 2, 8 of the 4x3 parent.
+        let star_t = ViewDesc::from_static(&cases[5].1);
+        assert_eq!(
+            (0..star_t.size())
+                .map(|k| star_t.flat_element_offset(k))
+                .collect::<Vec<_>>(),
+            vec![0, 6, 1, 7, 2, 8]
+        );
     }
 
     /// Every [`ViewBase`] arm's region, its `module_off` verdict, and its

@@ -321,13 +321,38 @@ is the former's no-model-context spelling.
 
 ```rust
 pub enum AxisMatch { Exact, Mapped { via: CanonicalDimensionName }, Subdimension, BySize }
-pub fn match_axes(source: &[Dimension], target: &[Dimension], ctx: &DimensionsContext) -> Option<Vec<(usize, AxisMatch)>>;
+pub struct Axis<'a> { pub name: &'a str, pub len: usize, pub indexed: bool }
+pub trait AxisRelations {           // every method defaults to "no relation"
+    fn maps_to(&self, from: &str, to: &str) -> bool;
+    fn mapping_parent_of(&self, from: &str, of: &str) -> Option<CanonicalDimensionName>;
+    fn common_mapping_target(&self, a: &str, b: &str) -> Option<CanonicalDimensionName>;
+    fn is_subdimension(&self, child: &str, parent: &str) -> bool;
+}
+pub fn match_axes_partial(source: &[Axis<'_>], target: &[Axis<'_>], relations: &dyn AxisRelations)
+    -> Vec<Option<(usize, AxisMatch)>>;
+pub fn match_axes(source: &[Dimension], target: &[Dimension], ctx: &DimensionsContext)
+    -> Option<Vec<(usize, AxisMatch)>>;
 ```
 
 Precedence is exact name, then declared mapping (either direction, or both
-mapping to a common dimension), then subdimension, then size -- the union of
-what the existing matchers do, with the table-driven test deriving rows from
-each of them.
+mapping to a common dimension), then subdimension, then size, staged flat
+across all source axes and allocated one-to-one. `match_axes` is the total
+answer over two declared dimension lists; `match_axes_partial` is the general
+one, over bare axes, because two callers have no `Dimension` to give it --
+`compiler::mod`'s view join compares two `ArrayView`s, which carry a name and
+a length per axis, and `ast::Expr2`'s bounds unification reaches its dimension
+facts through `Expr2Context`.
+
+Which RULES can fire is the caller's `AxisRelations` projection, and that is
+the part the plan's original "union of what the existing matchers do" could
+not be: two of the rungs are INDIRECT correspondences, where the paired
+element is not the target axis's own ordinal, and a caller that resolves an
+element by ordinal reads a neighbouring row if it acts on them. So
+`DimensionsContext` answers the three mapping questions; `DirectMappingsOnly`
+withholds `mapping_parent_of`; `SubdimensionRelations` adds `is_subdimension`;
+`NoAxisRelations` answers nothing. `dimensions::axis_match_tests` is the
+table-driven test, one row per arm of each replaced matcher, and it rows the
+projections too.
 
 **Dependency reference (`db/query.rs`, Phase 8).**
 
@@ -534,6 +559,22 @@ Phase 3 (one lowering entry). (a) then (b), as two chunks.
 
 **Done when:** AC2.3; `rg "Pass1Context" src/` empty; corpus, array tests,
 and wasm parity green; ledger row (opcode/temp counts may change; explained).
+
+Part (a) is done: `dimensions::match_axes` is the one precedence, the
+Subscript arm is five named steps, `lower`/`lower_preserving_dimensions` are
+one function under `DimensionRefs`, and GH #1027 is fixed. Part (b) -- the
+single materialization pass and the deletion of Pass 1 hoisting -- is what
+remains, and inherits one lowering entry point with an explicit mode.
+
+One shape is waiting for it. Resolving a `Dimension(d)` subscript picks the
+first active axis named `d` for EVERY occurrence, so with `square[D,D]` holding
+`10i+j` both `o[D,D] = square` and `o[D,D] = square[D,D]` read the diagonal
+`square[d_i,d_i]` -- measured identical on the pre-change and the post-change
+CLI, so it is pre-existing and outside 6(a), but 6(a)'s corrected
+`square[*,*]` (divergence 7) now disagrees with both. The single
+materialization pass has to resolve each `Dimension(d)` occurrence against its
+own active axis, which is the same positional property `match_axes_partial`
+already states.
 <!-- END_PHASE_6 -->
 
 <!-- START_PHASE_7 -->
@@ -874,6 +915,221 @@ variables and the `ModelStage0` oracle, neither of which is ever a conveyor.
 states it; `variable_source_producers_agree_for_every_source_variable_kind`
 pins that everything else agrees, one row per `SourceVariableKind`.
 
+**Phase 6a semantic divergences.** Making `dimensions::match_axes` the one
+axis-matching precedence, and fixing GH #1027, changed how eight shapes
+compile and deliberately WITHHELD two rungs that the plan's original "union of
+what the existing matchers do" would have admitted. C-LEARN's artifacts are
+identical, plain and under `CLEARN_LTM=1`; each of the ten is pinned, and the
+values below were re-derived by running a pre-change and a post-change CLI
+over the same model.
+
+1. A star range over a subdimension changed in two directions at once, because
+   its axis is now NAMED for the subdimension. Read through a TEMP it
+   evaluates its own selection instead of NaN; read into an apply-to-all whose
+   own axis is the PARENT it is refused instead of silently reading rows the
+   selection excludes.
+
+   The NaN half is GH #1027, and it is larger than the issue states: the
+   issue's root cause (`ArrayView::transpose` cloning `sparse` without
+   renumbering `SparseInfo.dim_index`) is real but is not why the probe read
+   NaN. Two statements of one fact disagreed -- `ast::Expr2`'s bounds name a
+   star range's axis for the SUBDIMENSION while
+   `compiler::subscript::build_view_from_ops` named it for the PARENT (its own
+   `TODO` said so) -- so the temp a reference materializes into and the source
+   view it is filled from carried different `dim_id`s, the VM's broadcast
+   matcher paired nothing, and every element read the NaN the temp was filled
+   with. That reaches six spellings, not one: `SUM(arr[*:Sub, *]')`,
+   `SUM(arr[*:Con, *]')`, `SUM(arr[*:Sub, *] * 2)`, `SUM(arr[*:Con, *] * 2)`,
+   `SUM(row[*:Sub]')` and `SUM(row[*:Sub] * 2)` were all NaN, transposed or
+   not, contiguous subdimension or not. Both defects had to be fixed together:
+   with only the name aligned the transposed read reaches `flat_offset` with a
+   stale mapping and indexes a 2-element `parent_offsets` at 2 -- a bounds
+   panic, which under `panic = abort` takes the host process.
+
+   The refusal half follows from the same rename and is the price of it. With
+   `Parent{A,B,C,D}`, `Sub{A,C}` and `Other{X,Y,Z}`, `out[Parent,Other] =
+   arr[*:Sub, *]` over `arr[Parent,Other]` used to compile: the range's axis
+   was named `Parent`, name-matched the target's `Parent`, and resolved each
+   element through it, so `out[b,x]` was 21 and `out[d,x]` was 41 -- rows `B`
+   and `D`, which `Sub` does not select. Now the axes do not pair and the
+   positional read fails its length check (2 selected rows against a 4-element
+   target): `MismatchedDimensions` on the variable. The transposed spelling
+   `out_t[Other,Parent] = arr[*:Sub, *]'` moves the same way (`out_t[x,b]` was
+   21), and so does a target axis that reaches `Parent` through a declared
+   mapping rather than by name (`out[DimM,Other]` with `DimM -> Parent`:
+   `out[m2,x]` was 21). A target mapped onto `Sub` instead is refused on both
+   sides of the change.
+
+   Pinned by
+   `simulate.rs::transposed_star_range_over_a_noncontiguous_subdimension_reads_its_own_selection`
+   (VM values derived from the rules, plus `ensure_wasm_matches`),
+   `simulate.rs::a_star_range_over_a_subdimension_is_refused_by_a_parent_target`
+   (all four spellings, on the whole diagnostic vector),
+   `ast::array_view::tests::transpose_renumbers_a_sparse_axis` and its
+   `reorder_dimensions` and two-mapping siblings, and the transposed
+   star-range row of `wasmgen::views::tests::static_view_geometries_address_like_vm`.
+   The element-wise consumer (`t_elem[Other, Sub] = arr[*:Sub, *]'`) was
+   already correct and is rowed so a future change cannot fix one path and not
+   the other. Measured on the corpus: `test/test-models/tests/subscript_transposition`
+   has genuine Vensim DSS 7.3.4 ground truth checked in beside it
+   (`output.tab`) that nothing asserts, and its transposed `output2` moves
+   from all-NaN to exactly Vensim's `109, 1090, 109, 141, -13`.
+
+2. WITHHELD: the subdimension rung is OPT-IN (`AxisRelations::is_subdimension`,
+   admitted only by `SubdimensionRelations`, whose one caller is the
+   dynamic-range arm that picks which axis to compare positions against and
+   never resolves an element through the answer). Admitting it everywhere --
+   the literal union the plan first described -- would break both directions,
+   in different arms. `out[Sub] = src` over `src[Parent]` would break in
+   `make_dimension_subscripts`, the only arm affected: what it can emit for a
+   paired axis is a dimension-name subscript, so the reference becomes
+   `src[Sub]`, which resolves to the ACTIVE dimension's ordinal and reads
+   `src`'s SECOND element for `Sub`'s `C` rather than its third (GH #1029,
+   pre-existing and filed). `out[Parent] = src` over `src[Sub]` would break in
+   the Subscript arm's element step: pairing the axes skips the positional
+   length check, and the element step then falls back on the target axis's
+   ordinal -- `Parent.get_offset(B)` is 1 and `Parent.get_offset(D)` is 3,
+   indexing a two-element `src`. Both are loud `MismatchedDimensions` refusals
+   today, and the rung trades them for silent wrong numbers, so it waits on
+   #1029. Pinned by `axis_match_tests`'s
+   `a_subdimension_does_not_pair_for_a_caller_that_does_not_admit_the_rung`
+   and `a_subdimension_does_not_pair_for_an_ordinal_resolving_caller_either`,
+   beside the two rows that do admit it.
+
+3. WITHHELD: for the same reason the mapping-onto-a-PARENT rung is kept from
+   `make_dimension_subscripts` (`DirectMappingsOnly`), which can only emit a
+   dimension-name subscript and so resolves the paired element by ordinal. A
+   direct mapping is safe there -- the ordinal read is the documented
+   bare-reference rule (GH #527 / #997,
+   `DimensionsContext::positional_correspondence`) -- while the parent one runs
+   target -> parent -> source and is not the ordinal. Admitting it made
+   `dst[SubA] = src` over `src[DimB]` with `DimB -> DimA` and `SubA` a
+   subdimension of `DimA` read `DimB`'s first element instead of the mapped
+   one, which
+   `compiler::dimensions::tests::test_implicit_subscript_through_mapped_parent_dimension`
+   catches. `axis_match_tests`'s
+   `a_mapping_onto_a_parent_is_withheld_from_an_ordinal_resolving_caller` is
+   what asserts the projection withholds it, beside
+   `a_direct_mapping_still_pairs_for_an_ordinal_resolving_caller` and
+   `a_common_mapping_target_still_pairs_for_an_ordinal_resolving_caller`,
+   which assert it withholds no more than that.
+
+4. Rungs are newly available where the replaced matcher lacked them: the
+   common-mapping-target rung reaches `allocate_implicit_axes*`,
+   `compiler::subscript`'s active-dimension resolution and
+   `compiler::context`'s `resolve_iteration_element` (entry 9 below), and the
+   mapping rungs reach `normalize_subscripts3`'s `IndexExpr3::Expr(Var)` arm
+   and `ast::Expr2::unify_dims_with_names`, both of which were name-and-size
+   only. In `unify_dims_with_names` this turns a refusal into a compile: with
+   `a[X,DimB]`, `b_arr[DimA]` and `DimB -> DimA`, `out[X,DimB] = a[*,*] +
+   b_arr[*]` was `MismatchedDimensions` because `DimA` paired with neither of
+   `a`'s axes, and now the two operands unify at `[X,DimB]` and each element
+   adds the mapped one -- `out[x1,b2]` is `12 + b_arr[a2]`, 212. A widening at
+   an axis that was previously UNPAIRED can only turn a refusal into a
+   compile; it is where a widening changes which axis is ALREADY paired that a
+   number moves, which is entries 6 to 10. Rowed in `axis_match_tests` as
+   `two_axes_mapping_onto_one_common_dimension_pair_via_it` and the two
+   mapping rows, and pinned end to end by
+   `simulate.rs::operand_bounds_unify_through_a_declared_mapping`.
+
+5. `ast::Expr2::find_matching_dimension` tried SIZE before MAPPING, alone among
+   the matchers; the one precedence tries mapping first. The two orderings are
+   observable only across TARGETS and only through the reverse-mapping arm (a
+   mapping is declared on named dimensions, the size rule needs indexed ones),
+   so it takes an indexed source axis with an indexed same-length target beside
+   a named target that maps onto it. Rowed as
+   `a_declared_mapping_outranks_a_size_match_on_another_axis`. The same
+   function's per-axis search also had no usage tracking, so
+   `unify_dims_with_names` could report that `a[X(3), Y(3)]` matches `b[Z(3)]`
+   with both X and Y claiming Z; the one-to-one allocation cannot.
+   `compiler::view_contains` gains the same one-to-one property. It is not
+   observable there: `named_axes` already declines a view that leaves an axis
+   unnamed or names one twice, so both sides carry unique names, and exact-name
+   matching over unique names is injective -- the two views also reach the
+   identical-shape fast path before either matcher runs.
+
+6. The order the mapping rung's four sub-rules run in changed, and with it
+   which target a source axis takes. `allocate_implicit_axes` ran forward and
+   forward-to-a-parent across ALL targets and only then reverse; the one
+   `mapped` closure takes the first TARGET that any of the four relates the
+   source axis to, which is what C, F, H, L and M already did. With `S -> T2`
+   and `T1 -> S`, a stock `level[T1,T2]` whose inflow is `flow[S]` paired `S`
+   with `T2` (`level[t1,u2]` accumulated `flow[s2]`, 2) and now pairs it with
+   `T1` (`level[t1,u2]` accumulates `flow[s1]`, 1). Neither ordering is more
+   correct than the other -- the old forward-before-reverse staging was one of
+   the orderings being unified, and target order is the one that survived.
+   Pinned by
+   `simulate.rs::a_source_axis_takes_the_first_target_the_mapping_rung_relates_it_to`
+   (a stock's flow wiring is the production caller of that allocation) and
+   rowed at the matcher by
+   `axis_match_tests::the_mapping_rung_takes_the_first_target_any_sub_rule_relates`.
+
+7. `resolve_iteration_element` pairs the view's axes with the active ones
+   POSITIONALLY, where it used a map keyed by dimension NAME. A shape that
+   repeats a dimension collapsed onto whichever occurrence was inserted last:
+   with `square[D,D]` holding `10i+j`, `o[D,D] = square[*,*]` read the DIAGONAL
+   `square[d_j,d_j]`, so `o[d1,d2]` was 22 and is now 12. One source axis with
+   two candidate targets breaks its tie toward the FIRST rather than the last,
+   so `o_vec[D,D] = vec[*]` reads `vec[d_i]` where it read `vec[d_j]` -- which
+   is what the subscript-less spelling `o_vec[D,D] = vec` has always read, so
+   the two now agree. Pinned by
+   `simulate.rs::a_repeated_active_dimension_pairs_each_occurrence_with_its_own_axis`
+   (VM plus `ensure_wasm_matches`), rowed at the matcher by
+   `a_repeated_target_dimension_is_two_axes_not_one`.
+
+8. The same pairing is now ONE-TO-ONE, so two view axes cannot read one active
+   axis. With `DimB -> DimA` and `DimC -> DimA`, `out[DimA,DimX] = src[*,*]`
+   over `src[DimB,DimC]` had both mapped axes take `DimA` and read the diagonal
+   `src[b_i,c_i]` (`out[a1,x2]` was 11); now `DimB` takes `DimA`, `DimC` is
+   left unpaired and read positionally against `DimX`, and `out[a_i,x_j]` is
+   `src[b_i,c_j]` (`out[a1,x2]` is 12). Pinned by
+   `simulate.rs::two_mapped_source_axes_cannot_both_read_one_active_axis`.
+
+9. The common-mapping-target rung reaching `resolve_iteration_element` moves
+   numbers rather than only widening, because the axis it pairs was being read
+   positionally before. With `DimX -> {DimB,DimC}` and `DimY -> {DimA,DimC}`,
+   `out[Q,DimY] = src[*,*]` over `src[DimX,Q]` read `src[x_i,q_i]`
+   (`out[q1,y2]` was 11) and now reads `src[x_j,q_i]` (`out[q1,y2]` is 21).
+   The element step gained the matching translation: where every other rung
+   resolves an element through ONE declared mapping, this one runs
+   target -> `via` -> source, and the ordinal read the fallback would give is
+   that element only while both mappings are positional -- with a permuted
+   element map on `DimX -> DimC` the ordinal is a different row (11 where the
+   chain gives 31). Which element a pair of dimensions mapping onto a third
+   corresponds through is UNVERIFIED against Vensim and Stella: neither
+   documents the two-mapping case and no model under `test/` spells it; what
+   is not a judgement call is that the reference resolves through `via` if it
+   resolves at all, since `via` is the only reason the matcher paired the axes.
+   Pinned by `simulate.rs::two_axes_mapping_onto_a_common_dimension_pair_through_it`
+   (the positional pair) and
+   `a_common_mapping_target_resolves_through_its_element_maps` (the permuted
+   one, VM plus `ensure_wasm_matches`).
+
+10. The dynamic-range arm (`data[start:end]` with variable bounds, read per
+    element) asks the one precedence which active axis to compare positions
+    against, where it compared against axis 0. It is the one caller that
+    admits the subdimension rung, and it also gains the size and
+    common-mapping-target rules. With `data[I(3)]` and `out[J(4),K(3)] =
+    data[lo:hi]`, `I` now pairs with `K` by size: `out[i,j]` is `data[j]`
+    while `lo + j - 1 <= hi`, so `out[1,2]` moves from 10 to 20 and the whole
+    `J`=4 row moves from NaN to the same three values. Comparing against
+    axis 0 read `data[i]` and ran off the end of a three-element source at
+    `J`=4. Pinned by
+    `simulate.rs::a_dynamic_range_pairs_its_axis_by_size_not_by_position`
+    (VM only -- the wasm backend cannot express a runtime view size).
+
+Two further shapes were MEASURED as unchanged rather than argued: the
+codegen refusal for an array value in a scalar position now carries one code
+and one message for both arms (`NotSimulatable`, "an array of shape .. is used
+where a single value is required"; the `StaticSubscript` arm's `Generic`
+message, which named the opcode and the missing iteration context instead of
+the shape, is gone), which
+`per_element_gf_tests::array_valued_table_apply_assigned_to_one_slot_is_refused_not_aborted`
+rows for both arms and `db::implicit_diag_tests` reads through the diagnostic
+channel; and the Subscript arm's active-dimension lookup iterated a `HashMap`
+for its mapping arms, so two active dimensions both matching one source axis
+were separated by hash order -- the positional allocation is deterministic.
+
 **Risks.** Phase 6(b) and Phase 7 are the two places where artifact shape
 changes are expected; both rely on the corpus as oracle and must report opcode
 and temp deltas in the ledger. Phase 7 changes salsa keying; the determinism
@@ -895,3 +1151,4 @@ hash is not available to it.
 | 5a | `engine: one merger and one slot order for assembly` | 10.264 G (median of 5; range 10.260-10.281), -0.83% against the Phase 2c tree (`ca39c1c6` plus the staged monolith-deletion patch) re-measured in the same session (10.350 G, median of 5, range 10.339-10.353; interleaved pairs -0.85 / -0.82 / -0.66%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: every count above, the 371 names and 7 modules, the full opcode histogram and the post-fusion stream counts (both `bytecode_profile` blocks byte-identical), and the results-offset map key for key and slot for slot (5058 keys plain, 16073 under LTM); same channel and flags as the baseline row. The saving is deleted assembly work: one `FragmentMerger` per module absorbs each fragment once (`standalone_program` for every initial, `concatenate` for the flows and the stocks, `into_side_channels` for the module's one table set), where assembly ran a GF-dedup pass, a context-aggregation pass and a per-phase resource-count pass over every fragment and a hand-rolled initials renumber beside them; and the fragment map borrows the salsa-cached fragments instead of deep-cloning each into a per-assembly `HashMap`. The results-offset map is `compute_layout` flattened (`db::layout::flattened_offsets`), and `assemble_module` emits each program through one `program_fragments` over every source (explicit, implicit, LTM synthetic, LTM implicit), pinned by `db::assemble_tests`. One corrected shape, not in the corpus: a sub-model holding a lookup-only table shifted every parent variable after the module instance one slot in the results map (Additional Considerations, "Phase 5a semantic divergences") Phase 5's remainder is part (b), the error-channel half (DoD 8); the module-instance input-set owner lands with Phase 3. |
 | 3 | `engine: one fragment compiler over dependency shapes` | 8.974 G (median of 5; range 8.971-8.977), -13.3% against the Phase 2c tree re-measured in the same session (10.347 G, median of 5, range 10.337-10.356; interleaved pairs -13.31 / -13.20 / -13.23 / -13.22 / -13.24%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN: every count above, the 371 names and 7 modules, the full opcode histogram and the post-fusion stream counts -- the plain `bytecode_profile` block is byte-identical, and so is the LTM one (30123 slots, 908377 / 1477 / 28514 opcodes, 16741 literals, 441 temps, 2866 views); same channel and flags as the baseline row. The saving is deleted per-fragment work, none of it output-bearing: the explicit emitter lowers only the phases the variable's runlist membership admits (it lowered both phases of every variable and discarded the ungated one -- ~400 initial-phase lowerings on C-LEARN); an implicit helper builds its `FragmentInput` once instead of re-running the parse -> lower -> dependency-walk prologue once per gated phase; a sub-model's shape is one memoized `model_shape` per model instead of a stub symbol table rebuilt, arena and all, inside every fragment that reads the module; and no fragment clones `model_module_map`. One corrected shape, not in the corpus: a stdlib call whose hoisted argument reads a module output compiles and simulates (Additional Considerations, "Phase 3 semantic divergences"). The engine suite (lib 5656, integration 767), the wasm parity corpus, the 12-repeat determinism suites and every fragment/LTM golden are green with no regeneration |
 | 4 | `engine: one Variable shape and a borrowed parse input` | 8.799 G (median of 5; range 8.794-8.804), -1.67% against the Phase 3 tree re-measured in the same session (8.949 G, median of 5, range 8.938-8.951; interleaved pairs -1.68 / -1.69 / -1.69 / -1.50 / -1.64%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: every count above, the 371 names and 7 modules, the full opcode histogram and the post-fusion stream counts -- both `bytecode_profile` blocks are byte-identical; same channel and flags as the baseline row. The saving is deleted per-parse work: `datamodel_variable_from_source` rebuilt and deep-cloned a kind-tagged `datamodel::Variable` (equation, gf, units, flow lists, module references, compat) on every parse of every variable, and `parse_var` then cloned the equation again out of it; the parse now reads a borrowed `VariableSource<'_>` over the salsa inputs. `Variable` is one struct over a `VarKind` enum, so `model::lower_variable` maps over `kind` instead of hand-copying 9-11 fields per variant, and the five repeated fields are stated once. Twins retired: one `paren_if_necessary` over a shallow `NodeShape` classification shared by `print_eqn` and both LaTeX printers, one `render_latex` walker over a `LatexTier` trait replacing `latex_eqn`/`latex_eqn_expr0`/`latex_eqn_expr0_annotated`, one `is_lookup_only(eqn, gf)` replacing `variable::var_is_lookup_only` + `db::source_var_is_table_only`'s body, one `SourceVariableFields::from_datamodel` behind `db/sync.rs`'s fresh and incremental paths, and `NamedDimension::index_of` for callers already holding an `Ident<Canonical>`. One re-assembly of a kind-tagged `datamodel::Variable` survives, outside every parse path: `db::macro_registry::macro_body_variable`, whose consumer `MacroRegistry::build` walks whole `datamodel::Model`s. One corrected shape, not in the corpus: a per-element table holder over a zero-element dimension is lookup-only on the parse side too, so layout and `Var::new` agree (Additional Considerations, "Phase 4 semantic divergences"). Otherwise no semantic divergence: the engine suite (lib 5655, integration 767), the 12-repeat determinism suites and every fragment/LTM golden are green with no regeneration |
+| 6a | `engine: one axis matcher and a decomposed subscript arm` | 8.819 G (median of 5; range 8.816-8.829), -1.5% against the seeded tree (Phase 3 staged on `1373f6f3`) re-measured in the same session (8.942 G, median of 5, range 8.939-8.952; interleaved pairs -1.54 / -1.38 / -1.66%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: every count above, the 371 names and 7 modules, the full opcode histogram and the post-fusion stream counts -- both `bytecode_profile` blocks byte-identical; same channel and flags as the baseline row. The saving is deleted per-reference work, none of it output-bearing: `compiler::subscript` and `lower_from_expr3`'s dimension-as-value arm re-`canonicalize`d (and so re-interned) already-canonical dimension names once per subscript and once per candidate active dimension, and the Subscript arm ran two independent searches over the active dimensions -- one to decide whether an axis matched by name and a second to find which -- where the allocation now answers both once. `dimensions::match_axes` replaces seven matchers (`allocate_implicit_axes_partial` and `allocate_implicit_axes`, `match_dimensions_with_mapping`, `find_dimension_reordering`, `Expr2::can_all_match` and `find_matching_dimension` under `unify_dims_with_names`, `view_contains`/`named_dims`) and five inline searches in `compiler/context.rs` and `compiler/subscript.rs` -- the twelve rows of `axis_match_tests`. `allocate_implicit_axes_partial` and `allocate_implicit_axes` survive as the two projections of it that the LTM augmenter (`ltm_augment_post_transform.rs`) and `get_implicit_subscripts` call, so the matching is what was replaced, not the entry points; the Subscript arm is five named steps; `lower`/`lower_preserving_dimensions` are one function under `DimensionRefs`. Differential sweep of a pre-change and a post-change CLI over all 509 models under `test/`: 397 byte-identical, 110 refused identically, and the only movers were `subscript_transposition` (its transposed `output2` moves from all-NaN to exactly Vensim's `109, 1090, 109, 141, -13`) plus two models that flip between the same two outputs on BOTH binaries (GH #859, an importer nondeterminism this change does not touch). Ten divergences, pinned -- eight shapes whose compile changed and two rungs deliberately withheld (Additional Considerations, "Phase 6a semantic divergences") |

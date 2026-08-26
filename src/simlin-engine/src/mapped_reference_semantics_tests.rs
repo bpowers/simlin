@@ -148,8 +148,8 @@
 //!   rewrites the bare `Expr2::Var` into an `Expr2::Subscript` spelled with
 //!   the ACTIVE dimension's name -- so a bare in-equation reference IS the
 //!   [`Spelling::IteratedDim`] spelling by the time anything resolves it,
-//!   and is positional. When `match_dimensions_with_mapping` finds no
-//!   correspondence at all it emits a wildcard instead, and the reference
+//!   and is positional. When `make_dimension_subscripts`'s axis matching
+//!   finds no correspondence at all it emits a wildcard instead, and the reference
 //!   becomes a whole-array broadcast -- a third behavior, which
 //!   `no_mapping_unequal_cardinality` separates from the other two.
 //! - As a stock's inflow/outflow (`level[State] = INTEG(feed, 0)` with
@@ -874,7 +874,8 @@ fn a_bare_equation_reference_and_a_flow_reference_disagree() {
 /// BY MAPPING the active slot a later axis matches BY NAME.
 ///
 /// This is the hazard shape as a whole model rather than a hand-built call
-/// to `allocate_implicit_axes_partial`. Reaching the allocator from a real
+/// to `allocate_implicit_axes_partial`, the implicit-axis projection of
+/// `dimensions::match_axes_partial`. Reaching the allocator from a real
 /// model constrains the fixture: ordinary expression references never get
 /// there, because `Context::lower_pass0` rewrites a bare arrayed reference
 /// into an explicit subscript first (module docs). Tagging each call with its

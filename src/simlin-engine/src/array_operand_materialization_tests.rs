@@ -58,8 +58,8 @@
 //! **Why some rows carry a `+ SUM(VECTOR SORT ORDER(vals[*], 1))` tail.** A
 //! reducer or `VECTOR SELECT` argument only survives Pass 1 unmaterialized
 //! when the equation *also* holds an array-producing builtin: that is what
-//! makes `compiler::mod`'s apply-to-all hoister lower through
-//! `lower_preserving_dimensions`, whose `Pass1Context` has no apply-to-all
+//! makes `compiler::mod`'s apply-to-all hoister lower under
+//! `DimensionRefs::Preserve`, whose `Pass1Context` has no apply-to-all
 //! context and so defers every operand carrying a dimension reference. The
 //! tail is the smallest thing that forces that path; it contributes the
 //! constant 1 + 2 + 0 = 3.

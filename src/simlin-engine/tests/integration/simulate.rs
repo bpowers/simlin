@@ -967,6 +967,587 @@ fn ensure_wasm_matches_runs_supported_scalar_model() {
     );
 }
 
+/// GH #1027: a star range over a NON-CONTIGUOUS subdimension survives a
+/// transpose, both as the operand of a reducer and read per element.
+///
+/// Two facts have to hold together for `SUM(arr[*:Sub, *]')` to be 132, and
+/// each was broken on its own:
+///
+/// * the view's sparse mapping names an axis by INDEX, so `ArrayView`'s
+///   dimension-reordering transforms renumber it; leaving it on axis 0 made
+///   the transposed view claim the dense axis was the sparse one;
+/// * the axis a star range produces is named for the SUBDIMENSION it ranges
+///   over, which is what `ast::Expr2`'s bounds for the same reference say, so
+///   a temp the reference is materialized into matches its source view by
+///   dimension id. Naming it for the parent left the two disagreeing and every
+///   element of the temp read NaN -- which is how this reached `SUM` as NaN
+///   rather than as a bad address, and why the untransposed
+///   `SUM(arr[*:Sub, *] * 2)` was equally wrong.
+///
+/// The expected values are derived from the rules rather than from a run:
+/// `Sub` is rows A and C, so the selection is 11+12+13 + 31+32+33 = 132 and
+/// its maximum is 33; the dense transpose sums all twelve cells, 324. The
+/// per-element consumer `t_elem[Other, Sub]` reads the same six cells and was
+/// already correct, because a per-element read resolves through the active
+/// element rather than through a temp -- it is rowed here so a future change
+/// that fixes one path and not the other cannot pass.
+#[test]
+fn transposed_star_range_over_a_noncontiguous_subdimension_reads_its_own_selection() {
+    let datamodel = simlin_engine::test_common::TestProject::new("star_transpose")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("Parent", &["A", "B", "C", "D"])
+        .named_dimension("Sub", &["A", "C"])
+        .named_dimension("Other", &["X", "Y", "Z"])
+        .array_with_ranges(
+            "arr[Parent,Other]",
+            vec![
+                ("A,X", "11"),
+                ("A,Y", "12"),
+                ("A,Z", "13"),
+                ("B,X", "21"),
+                ("B,Y", "22"),
+                ("B,Z", "23"),
+                ("C,X", "31"),
+                ("C,Y", "32"),
+                ("C,Z", "33"),
+                ("D,X", "41"),
+                ("D,Y", "42"),
+                ("D,Z", "43"),
+            ],
+        )
+        .scalar_aux("s_star", "SUM(arr[*:Sub, *])")
+        .scalar_aux("s_star_t", "SUM(arr[*:Sub, *]')")
+        .scalar_aux("mx_star_t", "MAX(arr[*:Sub, *]')")
+        .scalar_aux("s_full_t", "SUM(arr[*, *]')")
+        // Through a temp, with and without the transpose.
+        .scalar_aux("s_star_temp", "SUM(arr[*:Sub, *] * 2)")
+        .scalar_aux("s_star_t_temp", "SUM(arr[*:Sub, *]' * 2)")
+        // The per-element consumer of the transposed selection.
+        .array_aux("t_elem[Other,Sub]", "arr[*:Sub, *]'")
+        .scalar_aux("t_elem_sum", "SUM(t_elem[*, *])")
+        .build_datamodel();
+
+    let expected = vm_results(&datamodel);
+    let last = expected.iter().next_back().unwrap().to_vec();
+    let at = |name: &str| -> f64 {
+        let off = *expected
+            .offsets
+            .get(&simlin_engine::common::Ident::new(name))
+            .unwrap_or_else(|| panic!("{name} missing from results"));
+        last[off]
+    };
+
+    assert_eq!(at("s_star"), 132.0, "the untransposed selection");
+    assert_eq!(at("s_star_t"), 132.0, "the same selection, transposed");
+    assert_eq!(at("mx_star_t"), 33.0, "its maximum, transposed");
+    assert_eq!(at("s_full_t"), 324.0, "the dense-transpose control");
+    assert_eq!(at("s_star_temp"), 264.0, "the selection through a temp");
+    assert_eq!(
+        at("s_star_t_temp"),
+        264.0,
+        "the transposed selection through a temp"
+    );
+    assert_eq!(at("t_elem_sum"), 132.0, "read per element");
+    for (cell, value) in [
+        ("t_elem[x,a]", 11.0),
+        ("t_elem[x,c]", 31.0),
+        ("t_elem[y,a]", 12.0),
+        ("t_elem[y,c]", 32.0),
+        ("t_elem[z,a]", 13.0),
+        ("t_elem[z,c]", 33.0),
+    ] {
+        assert_eq!(at(cell), value, "{cell}");
+    }
+
+    // Both backends lower the same `StaticArrayView`, so the fix has to hold
+    // on both; `ensure_wasm_matches` panics on any divergence.
+    let outcome = ensure_wasm_matches(&datamodel, "main", &expected, &[]);
+    assert!(
+        matches!(outcome, WasmRunOutcome::Ran),
+        "the wasm backend must run this model, got {outcome:?}"
+    );
+}
+
+/// The last row of a VM run, keyed by result name (`"out[a1,x2]"` for one
+/// element of an arrayed variable).
+///
+/// The axis-matching pins below assert single CELLS rather than whole rows:
+/// what each pins is which source element one target element reads, and naming
+/// the cell in the assertion is what makes a failure say which pairing moved.
+fn vm_last_row(datamodel: &simlin_engine::datamodel::Project) -> HashMap<String, f64> {
+    let results = vm_results(datamodel);
+    let last = results.iter().next_back().unwrap().to_vec();
+    results
+        .offsets
+        .iter()
+        .map(|(name, &off)| (name.as_str().to_string(), last[off]))
+        .collect()
+}
+
+/// Read one cell of [`vm_last_row`], with a message that names the missing key
+/// rather than unwrapping a `None`.
+fn cell(row: &HashMap<String, f64>, name: &str) -> f64 {
+    *row.get(name)
+        .unwrap_or_else(|| panic!("{name} missing from results"))
+}
+
+/// A repeated active dimension is TWO axes, and each occurrence is supplied by
+/// its own.
+///
+/// The allocation `dimensions::match_axes_partial` performs is POSITIONAL, so
+/// `o[D,D] = square[*,*]` over `square[D,D]` pairs view axis 0 with active axis
+/// 0 and view axis 1 with active axis 1, and `o[d_i,d_j]` is `square[d_i,d_j]`.
+/// Keyed by dimension NAME instead, the two `D` occurrences collapse onto
+/// whichever was inserted last and every element reads the DIAGONAL
+/// `square[d_j,d_j]`: `o[d1,d2]` was 22 rather than 12, a silent wrong row.
+///
+/// `o_vec[D,D] = vec[*]` has one source axis and two candidate targets, so the
+/// tie is broken WITHIN the exact-name rule by target order -- the first. That
+/// is the element the subscript-less spelling `o_vec_bare[D,D] = vec` reads, so
+/// the two agree; keyed by name they disagreed, the starred one reading
+/// `vec[d_j]` and the bare one `vec[d_i]`.
+///
+/// Values are derived from the rules rather than from a run: `square[d_i,d_j]`
+/// is `10i+j`, `vec[d_k]` is `10^(k-1)`, and `o_mul` is their product at the
+/// two axes each factor is now paired with -- `o_mul[d2,d1]` is
+/// `square[d2,d1] * vec[d2]`, 21*10 = 210.
+#[test]
+fn a_repeated_active_dimension_pairs_each_occurrence_with_its_own_axis() {
+    let datamodel = simlin_engine::test_common::TestProject::new("repeated_dim")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("D", &["d1", "d2", "d3"])
+        .array_with_ranges(
+            "square[D,D]",
+            vec![
+                ("d1,d1", "11"),
+                ("d1,d2", "12"),
+                ("d1,d3", "13"),
+                ("d2,d1", "21"),
+                ("d2,d2", "22"),
+                ("d2,d3", "23"),
+                ("d3,d1", "31"),
+                ("d3,d2", "32"),
+                ("d3,d3", "33"),
+            ],
+        )
+        .array_with_ranges("vec[D]", vec![("d1", "1"), ("d2", "10"), ("d3", "100")])
+        .array_aux("o[D,D]", "square[*, *]")
+        .array_aux("o_vec[D,D]", "vec[*]")
+        .array_aux("o_vec_bare[D,D]", "vec")
+        .array_aux("o_mul[D,D]", "square[*, *] * vec[*]")
+        .build_datamodel();
+
+    let row = vm_last_row(&datamodel);
+    for (name, value) in [
+        ("o[d1,d1]", 11.0),
+        ("o[d1,d2]", 12.0),
+        ("o[d2,d1]", 21.0),
+        ("o[d3,d2]", 32.0),
+        ("o[d3,d3]", 33.0),
+    ] {
+        assert_eq!(cell(&row, name), value, "{name} must be square[d_i,d_j]");
+    }
+    for (name, value) in [
+        ("o_vec[d1,d3]", 1.0),
+        ("o_vec[d2,d1]", 10.0),
+        ("o_vec[d3,d1]", 100.0),
+    ] {
+        assert_eq!(cell(&row, name), value, "{name} must be vec[d_i]");
+        let bare = name.replace("o_vec[", "o_vec_bare[");
+        assert_eq!(
+            cell(&row, &bare),
+            value,
+            "the starred and the bare spelling must read the same element"
+        );
+    }
+    assert_eq!(cell(&row, "o_mul[d2,d1]"), 210.0, "square[d2,d1] * vec[d2]");
+    assert_eq!(cell(&row, "o_mul[d1,d3]"), 13.0, "square[d1,d3] * vec[d1]");
+
+    // The wasm backend lowers the same resolved slots, so a pairing that moved
+    // on one backend and not the other is a divergence `ensure_wasm_matches`
+    // panics on.
+    let expected = vm_results(&datamodel);
+    assert!(
+        matches!(
+            ensure_wasm_matches(&datamodel, "main", &expected, &[]),
+            WasmRunOutcome::Ran
+        ),
+        "the wasm backend must run this model"
+    );
+}
+
+/// Two source axes that could each take one active axis are given different
+/// ones: the allocation is ONE-TO-ONE.
+///
+/// `out[DimA,DimX] = src[*,*]` over `src[DimB,DimC]` with `DimB -> DimA` and
+/// `DimC -> DimA`: both source axes match `DimA` through the mapping rung, and
+/// searching per source axis independently lets both claim it -- every element
+/// then read `src[b_i,c_i]`, the diagonal, and `out[a1,x2]` was 11. With the
+/// allocation one-to-one `DimB` takes `DimA` and `DimC` is left unpaired, so it
+/// is read POSITIONALLY against `DimX` (equal length, so the positional check
+/// passes) and resolves `x_j` through `DimX`'s own ordinal: `out[a_i,x_j]` is
+/// `src[b_i,c_j]`, and `src[b_i,c_j]` is `10i+j`.
+#[test]
+fn two_mapped_source_axes_cannot_both_read_one_active_axis() {
+    let datamodel = simlin_engine::test_common::TestProject::new("one_to_one")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("DimA", &["a1", "a2", "a3"])
+        .named_dimension_with_mapping("DimB", &["b1", "b2", "b3"], "DimA")
+        .named_dimension_with_mapping("DimC", &["c1", "c2", "c3"], "DimA")
+        .named_dimension("DimX", &["x1", "x2", "x3"])
+        .array_with_ranges(
+            "src[DimB,DimC]",
+            vec![
+                ("b1,c1", "11"),
+                ("b1,c2", "12"),
+                ("b1,c3", "13"),
+                ("b2,c1", "21"),
+                ("b2,c2", "22"),
+                ("b2,c3", "23"),
+                ("b3,c1", "31"),
+                ("b3,c2", "32"),
+                ("b3,c3", "33"),
+            ],
+        )
+        .array_aux("out[DimA,DimX]", "src[*, *]")
+        .build_datamodel();
+
+    let row = vm_last_row(&datamodel);
+    for (name, value) in [
+        ("out[a1,x2]", 12.0),
+        ("out[a2,x3]", 23.0),
+        ("out[a3,x1]", 31.0),
+    ] {
+        assert_eq!(cell(&row, name), value, "{name} must be src[b_i,c_j]");
+    }
+}
+
+/// Two axes that each declare a mapping onto a THIRD dimension pair through it,
+/// and the element runs target -> that dimension -> source.
+///
+/// `out[Q,DimY] = src[*,*]` over `src[DimX,Q]` with `DimX -> {DimB,DimC}` and
+/// `DimY -> {DimA,DimC}`: `Q` pairs by name, and `DimX` pairs with `DimY`
+/// through their shared `DimC`. Without that rung `DimX` was left unpaired and
+/// read positionally at `Q`'s ordinal, so `out[q_i,y_j]` was `src[x_i,q_i]` --
+/// `out[q1,y2]` was 11.
+///
+/// Both mappings here are positional, so `y_j -> c_j -> x_j` and `out[q_i,y_j]`
+/// is `src[x_j,q_i]`, which is `10j+i`. The permuted-element-map sibling below
+/// is what separates the chain from the target axis's ordinal.
+#[test]
+fn two_axes_mapping_onto_a_common_dimension_pair_through_it() {
+    let datamodel = simlin_engine::test_common::TestProject::new("common_target")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("DimA", &["a1", "a2", "a3"])
+        .named_dimension("DimB", &["b1", "b2", "b3"])
+        .named_dimension("DimC", &["c1", "c2", "c3"])
+        .named_dimension("Q", &["q1", "q2", "q3"])
+        .named_dimension_with_mappings("DimX", &["x1", "x2", "x3"], &[("DimB", &[]), ("DimC", &[])])
+        .named_dimension_with_mappings("DimY", &["y1", "y2", "y3"], &[("DimA", &[]), ("DimC", &[])])
+        .array_with_ranges(
+            "src[DimX,Q]",
+            vec![
+                ("x1,q1", "11"),
+                ("x1,q2", "12"),
+                ("x1,q3", "13"),
+                ("x2,q1", "21"),
+                ("x2,q2", "22"),
+                ("x2,q3", "23"),
+                ("x3,q1", "31"),
+                ("x3,q2", "32"),
+                ("x3,q3", "33"),
+            ],
+        )
+        .array_aux("out[Q,DimY]", "src[*, *]")
+        .build_datamodel();
+
+    let row = vm_last_row(&datamodel);
+    for (name, value) in [
+        ("out[q1,y2]", 21.0),
+        ("out[q2,y1]", 12.0),
+        ("out[q3,y3]", 33.0),
+    ] {
+        assert_eq!(cell(&row, name), value, "{name} must be src[x_j,q_i]");
+    }
+}
+
+/// The element the common-mapping-target rung resolves to is the one the two
+/// declared mappings agree on, NOT the target axis's ordinal.
+///
+/// Same shape as the sibling above, with `DimX -> DimC` carrying an explicit
+/// element map that PERMUTES (`x1->c2`, `x2->c3`, `x3->c1`) while `DimY -> DimC`
+/// stays positional. The chain is `y_j -> c_j -> x_k`, so `c1` is read at `x3`,
+/// `c2` at `x1` and `c3` at `x2`:
+///
+/// | target | via | source | value |
+/// |---|---|---|---|
+/// | `out[q1,y1]` | `c1` | `src[x3,q1]` | 31 |
+/// | `out[q1,y2]` | `c2` | `src[x1,q1]` | 11 |
+/// | `out[q1,y3]` | `c3` | `src[x2,q1]` | 21 |
+///
+/// Reading the source axis at the TARGET element's ordinal -- which is what the
+/// element step's `target_offset` fallback does, and what every rung without a
+/// translation gets -- answers 11, 21, 31 instead: right for a positional pair
+/// and a different row for this one.
+#[test]
+fn a_common_mapping_target_resolves_through_its_element_maps() {
+    let datamodel = simlin_engine::test_common::TestProject::new("common_target_elemmap")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("DimC", &["c1", "c2", "c3"])
+        .named_dimension("Q", &["q1", "q2", "q3"])
+        .named_dimension_with_element_mapping(
+            "DimX",
+            &["x1", "x2", "x3"],
+            "DimC",
+            &[("x1", "c2"), ("x2", "c3"), ("x3", "c1")],
+        )
+        .named_dimension_with_mapping("DimY", &["y1", "y2", "y3"], "DimC")
+        .array_with_ranges(
+            "src[DimX,Q]",
+            vec![
+                ("x1,q1", "11"),
+                ("x1,q2", "12"),
+                ("x1,q3", "13"),
+                ("x2,q1", "21"),
+                ("x2,q2", "22"),
+                ("x2,q3", "23"),
+                ("x3,q1", "31"),
+                ("x3,q2", "32"),
+                ("x3,q3", "33"),
+            ],
+        )
+        .array_aux("out[Q,DimY]", "src[*, *]")
+        .build_datamodel();
+
+    let row = vm_last_row(&datamodel);
+    for (name, value) in [
+        ("out[q1,y1]", 31.0),
+        ("out[q1,y2]", 11.0),
+        ("out[q1,y3]", 21.0),
+        ("out[q2,y1]", 32.0),
+    ] {
+        assert_eq!(
+            cell(&row, name),
+            value,
+            "{name} must follow the DimX -> DimC element map"
+        );
+    }
+
+    let expected = vm_results(&datamodel);
+    assert!(
+        matches!(
+            ensure_wasm_matches(&datamodel, "main", &expected, &[]),
+            WasmRunOutcome::Ran
+        ),
+        "the wasm backend must run this model"
+    );
+}
+
+/// A star range's axis is named for the SUBDIMENSION it ranges over, so an
+/// apply-to-all whose own axis is the PARENT no longer name-matches it.
+///
+/// `out[Parent,Other] = arr[*:Sub,*]` over `arr[Parent,Other]` used to compile:
+/// the range's axis was named `Parent`, matched the target's `Parent` by name,
+/// and then resolved each element through `Parent` -- so `out[b,x]` was 21 and
+/// `out[d,x]` was 41, rows `B` and `D` that `Sub{A,C}` does not select at all.
+/// Naming the axis for `Sub` (the same name `ast::Expr2`'s bounds give it, which
+/// is what GH #1027 needed) leaves the two axes unpaired, and the positional
+/// read then fails its length check: 2 selected rows against a 4-element target.
+/// The refusal is `MismatchedDimensions` on the variable.
+///
+/// Three spellings, because the axis name is what changed and each reaches it
+/// differently: the plain read, the transposed one, and a target axis that
+/// reaches `Parent` through a declared mapping rather than by name. The
+/// mapped-onto-`Sub` spelling is refused on both sides of the change and is
+/// rowed so the refusal is not read as covering more than it does.
+#[test]
+fn a_star_range_over_a_subdimension_is_refused_by_a_parent_target() {
+    fn project(name: &str) -> simlin_engine::test_common::TestProject {
+        simlin_engine::test_common::TestProject::new(name)
+            .with_sim_time(0.0, 1.0, 1.0)
+            .named_dimension("Parent", &["A", "B", "C", "D"])
+            .named_dimension("Sub", &["A", "C"])
+            .named_dimension("Other", &["X", "Y", "Z"])
+            .array_with_ranges(
+                "arr[Parent,Other]",
+                vec![
+                    ("A,X", "11"),
+                    ("A,Y", "12"),
+                    ("A,Z", "13"),
+                    ("B,X", "21"),
+                    ("B,Y", "22"),
+                    ("B,Z", "23"),
+                    ("C,X", "31"),
+                    ("C,Y", "32"),
+                    ("C,Z", "33"),
+                    ("D,X", "41"),
+                    ("D,Y", "42"),
+                    ("D,Z", "43"),
+                ],
+            )
+    }
+
+    // Each row asserts the WHOLE diagnostic vector rather than "contains": a
+    // pin that only looks for its own code passes when the change under test
+    // also refuses something else.
+    let plain = project("star_parent").array_aux("out[Parent,Other]", "arr[*:Sub, *]");
+    assert_eq!(
+        plain.error_diagnostics(),
+        vec![("main.out".to_string(), ErrorCode::MismatchedDimensions)],
+        "the plain read must be refused, not compiled onto Parent's rows"
+    );
+
+    let transposed = project("star_parent_t").array_aux("out_t[Other,Parent]", "arr[*:Sub, *]'");
+    assert_eq!(
+        transposed.error_diagnostics(),
+        vec![("main.out_t".to_string(), ErrorCode::MismatchedDimensions)],
+        "the transposed read must be refused too"
+    );
+
+    let mapped = project("star_parent_mapped")
+        .named_dimension_with_mapping("DimM", &["m1", "m2", "m3", "m4"], "Parent")
+        .array_aux("out[DimM,Other]", "arr[*:Sub, *]");
+    assert_eq!(
+        mapped.error_diagnostics(),
+        vec![("main.out".to_string(), ErrorCode::MismatchedDimensions)],
+        "a target axis mapped onto Parent must be refused as well"
+    );
+
+    let mapped_to_sub = project("star_sub_mapped")
+        .named_dimension_with_mapping("DimM", &["m1", "m2"], "Sub")
+        .array_aux("out[DimM,Other]", "arr[*:Sub, *]");
+    assert_eq!(
+        mapped_to_sub.error_diagnostics(),
+        vec![("main.out".to_string(), ErrorCode::MismatchedDimensions)],
+        "the mapped-onto-Sub spelling is refused on both sides of the change"
+    );
+}
+
+/// Two operands' bounds unify through a declared MAPPING, not by name alone.
+///
+/// `out[X,DimB] = a[*,*] + b_arr[*]` over `a[X,DimB]` and `b_arr[DimA]` with
+/// `DimB -> DimA`: `Expr2`'s bounds unification asked only for a name match and
+/// a size match, so `b_arr`'s `DimA` axis paired with neither of `a`'s and the
+/// whole equation was `MismatchedDimensions`. Through the one precedence
+/// `DimA` pairs with `DimB` by the declared mapping, the two operands unify at
+/// `[X,DimB]`, and each element adds the mapped one: `out[x_i,b_j]` is
+/// `a[x_i,b_j] + b_arr[a_j]`, `10i+j + 100j`.
+#[test]
+fn operand_bounds_unify_through_a_declared_mapping() {
+    let datamodel = simlin_engine::test_common::TestProject::new("bounds_mapping")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("X", &["x1", "x2"])
+        .named_dimension("DimA", &["a1", "a2", "a3"])
+        .named_dimension_with_mapping("DimB", &["b1", "b2", "b3"], "DimA")
+        .array_with_ranges(
+            "a[X,DimB]",
+            vec![
+                ("x1,b1", "11"),
+                ("x1,b2", "12"),
+                ("x1,b3", "13"),
+                ("x2,b1", "21"),
+                ("x2,b2", "22"),
+                ("x2,b3", "23"),
+            ],
+        )
+        .array_with_ranges(
+            "b_arr[DimA]",
+            vec![("a1", "100"), ("a2", "200"), ("a3", "300")],
+        )
+        .array_aux("out[X,DimB]", "a[*, *] + b_arr[*]")
+        .build_datamodel();
+
+    let row = vm_last_row(&datamodel);
+    for (name, value) in [
+        ("out[x1,b1]", 111.0),
+        ("out[x1,b2]", 212.0),
+        ("out[x2,b3]", 323.0),
+    ] {
+        assert_eq!(
+            cell(&row, name),
+            value,
+            "{name} must be a[x_i,b_j] + b_arr[a_j]"
+        );
+    }
+}
+
+/// Within the mapping rung, a source axis takes the FIRST TARGET any of the
+/// rung's sub-rules relates it to.
+///
+/// A stock's flow wiring is what reaches the implicit-axis allocation from
+/// production (`Context::fold_flows`), so the fixture is an inflow rather than
+/// an aux equation. `level[T1,T2]` with an inflow `flow[S]`, `S -> T2` and
+/// `T1 -> S`: `T1` is the first target, and the REVERSE sub-rule relates it to
+/// `S`, so `S` pairs with `T1` and `level[t_i,u_j]` accumulates `flow[s_i]`.
+/// Staging the sub-rules across all targets instead -- forward and
+/// forward-to-a-parent for every target, then reverse for every target -- makes
+/// `S` take `T2` by its own declared `maps_to`, and `level[t_i,u_j]`
+/// accumulated `flow[s_j]`: `level[t1,u2]` was 2 where it is now 1.
+///
+/// Neither ordering is more correct than the other; unifying them is the point,
+/// and target order is what the other matchers already used. With `dt` = 1 over
+/// one step the stock's final value IS its inflow.
+#[test]
+fn a_source_axis_takes_the_first_target_the_mapping_rung_relates_it_to() {
+    let datamodel = simlin_engine::test_common::TestProject::new("mapping_suborder")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension_with_mapping("S", &["s1", "s2", "s3"], "T2")
+        .named_dimension_with_mapping("T1", &["t1", "t2", "t3"], "S")
+        .named_dimension("T2", &["u1", "u2", "u3"])
+        .array_flow_with_ranges("flow[S]", vec![("s1", "1"), ("s2", "2"), ("s3", "4")])
+        .array_stock("level[T1,T2]", "0", &["flow"], &[], None)
+        .build_datamodel();
+
+    let row = vm_last_row(&datamodel);
+    for (name, value) in [
+        ("level[t1,u2]", 1.0),
+        ("level[t2,u1]", 2.0),
+        ("level[t3,u3]", 4.0),
+    ] {
+        assert_eq!(cell(&row, name), value, "{name} must accumulate flow[s_i]");
+    }
+}
+
+/// A dynamic range picks which active axis to compare positions against
+/// through the one precedence, so an INDEXED source axis finds its
+/// same-length indexed target rather than defaulting to axis 0.
+///
+/// `out[J,K] = data[lo:hi]` over `data[I(3)]` with `J(4)` and `K(3)`: `I` pairs
+/// with `K` by size, so the range's position is `K`'s ordinal and every row of
+/// `J` reads the same three elements -- `out[i,j]` is `data[j]` while
+/// `lo + j - 1 <= hi`, which for `lo`=1 and `hi`=3 is every `j`. Comparing
+/// against axis 0 instead read `data[i]`, so `out[1,2]` was 10 rather than 20
+/// and the whole `J`=4 row was NaN, past the end of a three-element source.
+///
+/// This is the one caller that admits the subdimension rung
+/// (`SubdimensionRelations`): it chooses an axis to compare positions against
+/// and never resolves an element through the answer, because an out-of-range
+/// position becomes NaN. The wasm backend cannot express a runtime view size,
+/// so this model is VM-only.
+#[test]
+fn a_dynamic_range_pairs_its_axis_by_size_not_by_position() {
+    let datamodel = simlin_engine::test_common::TestProject::new("dynrange_bysize")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .indexed_dimension("I", 3)
+        .indexed_dimension("J", 4)
+        .indexed_dimension("K", 3)
+        .array_with_ranges("data[I]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+        .scalar_aux("lo", "1")
+        .scalar_aux("hi", "3")
+        .array_aux("out[J,K]", "data[lo:hi]")
+        .build_datamodel();
+
+    let row = vm_last_row(&datamodel);
+    for (name, value) in [
+        ("out[1,2]", 20.0),
+        ("out[2,3]", 30.0),
+        ("out[4,1]", 10.0),
+        ("out[4,3]", 30.0),
+    ] {
+        assert_eq!(cell(&row, name), value, "{name} must be data[j]");
+    }
+}
+
 /// AC3.1: a model using a not-yet-supported construct is SKIPPED, not failed --
 /// `compile_simulation` returns `WasmGenError::Unsupported` and the helper
 /// surfaces it as `Skipped(msg)` carrying that message.

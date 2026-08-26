@@ -2,377 +2,96 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::HashMap;
-
-use crate::dimensions::{Dimension, DimensionsContext};
+use crate::dimensions::{
+    Axis, Dimension, DimensionsContext, NoAxisRelations, axes_of, match_axes, match_axes_partial,
+};
 
 /// For each dimension of `dims`, the POSITION in `active_dims` whose subscript
 /// supplies it, or `None` for a dimension no active axis supplies -- the
-/// engine's SINGLE implicit-subscript axis allocation, the rule behind a BARE
-/// arrayed reference inside an apply-to-all body.
+/// implicit-subscript axis allocation behind a BARE arrayed reference inside an
+/// apply-to-all body.
 ///
-/// Two properties matter to every caller and neither is re-derivable safely:
+/// The allocation itself is [`crate::dimensions::match_axes_partial`], the
+/// engine's one axis-matching precedence; this is the projection that drops
+/// HOW each axis matched and keeps only WHICH active axis supplies it. Read
+/// that function for the precedence and for the two properties every caller
+/// depends on (positional, one-to-one).
 ///
-/// - the answer is POSITIONAL, so a target that repeats a dimension
-///   (`target[D,D]`) is handled by index rather than by name. A map keyed by
-///   dimension name collapses the two occurrences and answers with whichever was
-///   inserted last;
-/// - the allocation is ONE-TO-ONE: each active axis is consumed at most once
-///   (`used`), so two dependency axes that could each match the same active axis
-///   are given different ones. Searching per dependency axis independently lets
-///   both claim the first match.
+/// Both properties were live silent-wrong-row defects in the LTM per-element
+/// projection (P2-1 / P2-2 of the whole-branch review) precisely because that
+/// projection re-derived the rule instead of asking for it.
+/// [`crate::ltm_augment`] now calls this, so its pins and the executed reads
+/// agree by construction rather than by parallel implementation.
 ///
-///   Which of the two gets it is decided by MATCH STRENGTH, not by declaration
-///   order: the three passes are staged flat -- every name match across all
-///   dependency axes, then every mapping match, then every size match -- so a
-///   stronger match always outranks a weaker one no matter which axis is
-///   declared first. Order only breaks ties WITHIN a pass. Running the passes
-///   per dimension instead made declaration order decisive, which is GH #996
-///   (see the FIRST PASS comment in the body), and both
-///   `a_mapping_match_does_not_steal_a_later_name_match` and
-///   `a_size_match_does_not_steal_a_later_mapping_match` pin the corrected rule.
-///   This is the same flat staging the sibling `match_dimensions_with_mapping`
-///   uses; the two functions state one precedence rule and must not drift.
-///
-///   Restaging is inert for the COMPILER path on the corpus: computing the old
-///   allocation alongside the new one at every call and flagging disagreement
-///   found zero across 7,617 calls / 53 distinct shapes (lib + integration), and
-///   556 / 4 while compiling C-LEARN with LTM. Treat that as empirical, not as
-///   proof -- the corpus is a WEAK instrument here. 18 of the 20 lib shapes are
-///   exact identity name matches, and only one reaches the mapping branch at all,
-///   with a single active axis where no reordering is possible. The shapes that
-///   could distinguish the orders are barely exercised, so "no disagreement" is
-///   mostly a statement about the corpus. Re-measuring on the compiler path
-///   alone found the same thing more sharply: over the lib suite every shape
-///   but two is `dims == active_dims` by name and the two exceptions are
-///   single-axis, and on C-LEARN the mapping pass is never consulted at all --
-///   278 calls spanning 4 shapes, ALL identity (`["scenario"]`, `["cop"]`,
-///   `["scenario","layers"]`, `["hfc_type"]`, each against itself). To
-///   reproduce the C-LEARN figure, print `dims`/`active_dims` at the top of
-///   `compiler::context`'s `get_implicit_subscripts` and run
-///   `cargo run --release -p simlin-engine --example ltm_fragment_failures`,
-///   which compiles the model with LTM enabled. (The lib-suite call counts
-///   and the two-caller invariant behind them are recorded on that same
-///   function, with the condition they need to be reproducible.)
-///
-///   The hazard is nevertheless REACHABLE from a real model, which is the part
-///   the corpus does not show:
-///   `mapped_reference_semantics_tests::the_996_hazard_shape_compiles_and_reads_name_first`
-///   is a stock over `[Line, Shift]` fed by a flow over `[Board Type, Line]`,
-///   where `Board Type` maps to both `Line` and `Shift`. Under this flat
-///   staging it compiles and reads the element map; under the per-dimension
-///   staging it does not compile at all. An ordinary expression cannot reach
-///   this function (see `compiler::context`'s `get_implicit_subscripts`), so a
-///   stock's flow is the way in and a fixture built from an aux equation will
-///   silently exercise nothing.
-///
-/// Both were live silent-wrong-row defects in the LTM per-element projection
-/// (P2-1 / P2-2 of the whole-branch review) precisely because that projection
-/// re-derived this rule instead of asking for it. `crate::ltm_augment` now calls
-/// this, so its pins and the executed reads agree by construction rather than by
-/// parallel implementation. Do not add a second copy of this decision.
+/// **Which references arrive here.** An ordinary expression cannot reach this
+/// allocation: `compiler::context`'s `lower_pass0` rewrites a bare arrayed
+/// reference in an equation body into an explicit `Expr2::Subscript` before
+/// Expr3, so it resolves through the subscript path. The two production
+/// callers are wiring rather than expressions -- a stock's inflow/outflow
+/// references (`Context::fold_flows`) and `compiler::Var::new`'s stock
+/// self-reference plus module input wiring. That is why the GH #996 hazard
+/// fixture in `crate::mapped_reference_semantics_tests` is built from a
+/// two-axis FLOW under a stock: a fixture built from an aux equation exercises
+/// nothing. See `compiler::context`'s `get_implicit_subscripts` for the rest
+/// of that measurement.
 ///
 /// The compiler wants the TOTAL answer and errors without it, so it calls
-/// [`allocate_implicit_axes`]; the LTM projection wants the partial one, because
-/// a SUBSCRIPTED reference spells some of its own axes and only needs the rest
-/// resolved. One algorithm, two projections of its result.
+/// [`allocate_implicit_axes`]; the LTM projection wants the partial one,
+/// because a SUBSCRIPTED reference spells some of its own axes and only needs
+/// the rest resolved.
 pub(crate) fn allocate_implicit_axes_partial(
     dims: &[Dimension],
     active_dims: &[Dimension],
     dimensions_ctx: &DimensionsContext,
 ) -> Vec<Option<usize>> {
-    let mut alloc: Vec<Option<usize>> = vec![None; dims.len()];
-
-    // Track which active dimensions have been used.
-    let mut used: Vec<bool> = vec![false; active_dims.len()];
-
-    // The three passes are STAGED FLAT: every exact name match across all
-    // dependency dimensions, then every mapping match, then every size match.
-    // That is what makes the documented precedence name > mapping > size hold
-    // for the WHOLE allocation rather than only within one dimension's turn,
-    // and it is the structure the sibling `match_dimensions_with_mapping` in
-    // this file already used.
-    //
-    // Run per dimension instead, an earlier axis consumes -- through a weaker
-    // match -- the active axis a later one matches more strongly, and since
-    // `used` is one-to-one the later axis is then left unresolved. That is
-    // GH #996. On C-LEARN it hit TWO production shapes, not one:
-    // `aggregated_definition[cop, aggregated_regions]` read under an
-    // `[aggregated_regions]` target and `[cop, semi_agg]` under `[semi_agg]` --
-    // both because the target's own dimension declares an element map ONTO
-    // `cop`, so `cop` (declared first) took the slot by MAPPING before the
-    // name-matching axis was considered. Each allocated `[Some(0), None]`, the
-    // LTM pin table dropped the dep, and 135 link scores were declined.
-    //
-    // The FIRST PASS's original comment already stated this rule for the SIZE
-    // fallback ("prevents size-based fallback from grabbing the wrong dimension
-    // when the correct name match exists later in the list"); the mapping pass
-    // was added afterwards, between name and size, and reintroduced for mappings
-    // the hazard that comment was written against.
-    for (dim_idx, dim) in dims.iter().enumerate() {
-        let name_match_idx = active_dims.iter().enumerate().find_map(|(i, candidate)| {
-            if !used[i] && candidate.name() == dim.name() {
-                Some(i)
-            } else {
-                None
-            }
-        });
-
-        if let Some(idx) = name_match_idx {
-            alloc[dim_idx] = Some(idx);
-            used[idx] = true;
-        }
-    }
-
-    for (dim_idx, dim) in dims.iter().enumerate() {
-        if alloc[dim_idx].is_some() {
-            continue;
-        }
-
-        // SECOND PASS: Check for dimension mapping matches in both directions.
-        // Forward: dim has any mapping to an active dimension
-        // Reverse: active_dim has any mapping to dim
-        let mapping_match_idx = {
-            // Forward: dim has mapping to active dim (or active is subdim of mapping target)
-            let mut found = active_dims.iter().enumerate().find_map(|(i, candidate)| {
-                if used[i] {
-                    return None;
-                }
-                let candidate_name = candidate.canonical_name();
-                if dimensions_ctx.has_mapping_to(dim.canonical_name(), candidate_name) {
-                    return Some(i);
-                }
-                if dimensions_ctx.has_mapping_to_parent_of(dim.canonical_name(), candidate_name) {
-                    return Some(i);
-                }
-                None
-            });
-            // Reverse: active_dim has mapping to dim
-            if found.is_none() {
-                found = active_dims.iter().enumerate().find_map(|(i, candidate)| {
-                    if used[i] {
-                        return None;
-                    }
-                    if dimensions_ctx
-                        .has_mapping_to(candidate.canonical_name(), dim.canonical_name())
-                    {
-                        return Some(i);
-                    }
-                    None
-                });
-            }
-            found
-        };
-
-        if let Some(idx) = mapping_match_idx {
-            alloc[dim_idx] = Some(idx);
-            used[idx] = true;
-        }
-    }
-
-    for (dim_idx, dim) in dims.iter().enumerate() {
-        if alloc[dim_idx].is_some() {
-            continue;
-        }
-
-        // THIRD PASS: Only if no name or mapping match exists, try size-based matching
-        // for indexed dimensions. Find the first unused indexed dimension with
-        // the same size.
-        //
-        // IMPORTANT: Size-based fallback only applies when BOTH dimensions are
-        // indexed. Named dimensions must match by name (or subdimension relationship)
-        // because their elements have semantic meaning. For example, Cities=[Boston,
-        // Seattle] and Products=[Widgets,Gadgets] shouldn't match just because both
-        // have size 2 - that would be semantically incorrect.
-        //
-        // NOTE: The two-pass (name -> size) matching logic is shared with the VM via
-        // dimensions::match_dimensions_two_pass. This compiler version adds a mapping
-        // pass between name and size matching.
-        let size_match_idx = if let Dimension::Indexed(_, dim_size) = dim {
-            active_dims.iter().enumerate().find_map(|(i, candidate)| {
-                if !used[i]
-                    && let Dimension::Indexed(_, candidate_size) = candidate
-                    && dim_size == candidate_size
-                {
-                    return Some(i);
-                }
-                None
-            })
-        } else {
-            None
-        };
-
-        if let Some(idx) = size_match_idx {
-            alloc[dim_idx] = Some(idx);
-            used[idx] = true;
-        }
-    }
-
-    alloc
+    match_axes_partial(&axes_of(dims), &axes_of(active_dims), dimensions_ctx)
+        .into_iter()
+        .map(|m| m.map(|(active_idx, _)| active_idx))
+        .collect()
 }
 
 /// [`allocate_implicit_axes_partial`] with every dimension resolved, or `None`.
 ///
 /// `None` is the compiler's `MismatchedDimensions`: no complete allocation
-/// exists. That subsumes the old explicit `dims.len() > active_dims.len()` bail
-/// by pigeonhole -- the allocation is one-to-one, so a longer `dims` always
-/// leaves an axis unresolved -- and it subsumes the old equal-arity
-/// [`find_dimension_reordering`] fast path, which could only fire on a
-/// duplicate-free permutation, where the partial allocation's first pass finds
-/// the same unique partner for every dimension.
+/// exists.
 pub(crate) fn allocate_implicit_axes(
     dims: &[Dimension],
     active_dims: &[Dimension],
     dimensions_ctx: &DimensionsContext,
 ) -> Option<Vec<usize>> {
-    allocate_implicit_axes_partial(dims, active_dims, dimensions_ctx)
-        .into_iter()
-        .collect()
+    match_axes(dims, active_dims, dimensions_ctx).map(|alloc| {
+        alloc
+            .into_iter()
+            .map(|(active_idx, _)| active_idx)
+            .collect()
+    })
 }
 
-/// Three-pass dimension matching: name -> mapping -> size.
+/// The permutation that reads `source_names`'s axes in `target_names`'s order:
+/// `result[i]` is the source axis that belongs at target position `i`, the
+/// form `@N` subscripts and [`crate::ast::ArrayView::reorder_dimensions`] take.
 ///
-/// For each source dimension, finds the target dimension by trying in order:
-/// 1. Exact name match
-/// 2. Mapping match (source maps_to target, or target maps_to source, or both map to same dim)
-/// 3. Size-based match (indexed dimensions only)
-///
-/// This handles cross-dimension array assignments like `a[DimA] = b[DimB]` when DimA maps_to DimB.
-pub(super) fn match_dimensions_with_mapping(
-    source_dims: &[Dimension],
-    target_dims: &[Dimension],
-    initially_used: &[bool],
-    dims_ctx: &DimensionsContext,
-) -> Vec<Option<usize>> {
-    let mut target_used = initially_used.to_vec();
-    let mut source_to_target: Vec<Option<usize>> = vec![None; source_dims.len()];
-
-    // PASS 1: Exact name matches (highest priority)
-    for (source_idx, source_dim) in source_dims.iter().enumerate() {
-        for (target_idx, target) in target_dims.iter().enumerate() {
-            if !target_used[target_idx] && target.name() == source_dim.name() {
-                target_used[target_idx] = true;
-                source_to_target[source_idx] = Some(target_idx);
-                break;
-            }
-        }
-    }
-
-    // PASS 2: Dimension mapping matches (source has mapping to target or vice versa)
-    for (source_idx, source_dim) in source_dims.iter().enumerate() {
-        if source_to_target[source_idx].is_some() {
-            continue;
-        }
-
-        for (target_idx, target) in target_dims.iter().enumerate() {
-            if target_used[target_idx] {
-                continue;
-            }
-
-            // source has mapping to target
-            if dims_ctx.has_mapping_to(source_dim.canonical_name(), target.canonical_name()) {
-                target_used[target_idx] = true;
-                source_to_target[source_idx] = Some(target_idx);
-                break;
-            }
-
-            // target has mapping to source
-            if dims_ctx.has_mapping_to(target.canonical_name(), source_dim.canonical_name()) {
-                target_used[target_idx] = true;
-                source_to_target[source_idx] = Some(target_idx);
-                break;
-            }
-
-            // source and target both map to at least one common dimension.
-            let source_targets = dims_ctx.get_all_mapping_targets(source_dim.canonical_name());
-            let target_targets = dims_ctx.get_all_mapping_targets(target.canonical_name());
-            if source_targets
-                .iter()
-                .any(|source_target| target_targets.contains(source_target))
-            {
-                target_used[target_idx] = true;
-                source_to_target[source_idx] = Some(target_idx);
-                break;
-            }
-        }
-    }
-
-    // PASS 3: Size-based matches for remaining sources (indexed dimensions only)
-    for (source_idx, source_dim) in source_dims.iter().enumerate() {
-        if source_to_target[source_idx].is_some() {
-            continue;
-        }
-
-        if let Dimension::Indexed(_, source_size) = source_dim {
-            for (target_idx, target) in target_dims.iter().enumerate() {
-                if !target_used[target_idx]
-                    && let Dimension::Indexed(_, target_size) = target
-                    && source_size == target_size
-                {
-                    target_used[target_idx] = true;
-                    source_to_target[source_idx] = Some(target_idx);
-                    break;
-                }
-            }
-        }
-    }
-
-    source_to_target
-}
-
-/// Determines if dimensions can be reordered to match target dimensions and returns the reordering
-///
-/// Given source dimensions and target dimensions, determines if the source can be
-/// reordered to match the target. If so, returns a vector of indices indicating
-/// how to reorder the source dimensions (suitable for use as @N subscripts).
-///
-/// # Arguments
-/// * `source_dims` - The dimension names of the source array
-/// * `target_dims` - The dimension names of the target array
-///
-/// # Returns
-/// * `Some(reordering)` - A vector where reordering[i] is the source dimension index
-///   that should go in position i of the target
-/// * `None` - If the dimensions cannot be reordered to match (different sets of dimensions)
-///
-/// # Examples
-/// ```
-/// // source: [A, B, C], target: [B, C, A]
-/// // returns: Some([1, 2, 0]) meaning [@2, @3, @1] in XMILE notation (1-indexed)
-/// ```
-pub fn find_dimension_reordering(
-    source_dims: &[String],
-    target_dims: &[String],
+/// Reordering is a RELABELLING of one shape, so the two lists must name the
+/// same axes: equal arity, and every target axis supplied by a distinct source
+/// axis. That is [`crate::dimensions::match_axes_partial`] run from the target
+/// side with no declared relations available -- these are dimension NAMES off
+/// an `ArrayView` or an `ArrayBounds`, and pairing `[DimA]` with `[DimB]`
+/// through a declared mapping would silently transpose one operand of an
+/// elementwise expression rather than reorder it.
+pub(super) fn axis_reordering(
+    source_names: &[String],
+    target_names: &[String],
 ) -> Option<Vec<usize>> {
-    if source_dims.len() != target_dims.len() {
+    if source_names.len() != target_names.len() {
         return None;
     }
-
-    // Build a map of dimension name to index in source
-    let mut source_map: HashMap<&str, usize> = HashMap::new();
-    for (i, dim) in source_dims.iter().enumerate() {
-        source_map.insert(dim.as_str(), i);
+    fn axes(names: &[String]) -> Vec<Axis<'_>> {
+        names.iter().map(|n| Axis::named(n.as_str(), 0)).collect()
     }
-
-    // Check if all target dimensions exist in source and build reordering
-    let mut reordering = Vec::with_capacity(target_dims.len());
-    for target_dim in target_dims {
-        match source_map.get(target_dim.as_str()) {
-            Some(&source_idx) => reordering.push(source_idx),
-            None => return None, // Target dimension not found in source
-        }
-    }
-
-    // Verify we've used all source dimensions (no duplicates in target)
-    let mut used = vec![false; source_dims.len()];
-    for &idx in &reordering {
-        if used[idx] {
-            return None; // Duplicate dimension in target
-        }
-        used[idx] = true;
-    }
-
-    Some(reordering)
+    match_axes_partial(&axes(target_names), &axes(source_names), &NoAxisRelations)
+        .into_iter()
+        .map(|m| m.map(|(source_idx, _)| source_idx))
+        .collect()
 }
 
 // simplified/lowered from ast::UnaryOp version
@@ -388,29 +107,6 @@ mod tests {
     use super::*;
     use crate::ast::ArrayView;
     use crate::common::CanonicalDimensionName;
-
-    fn named_dim(name: &str, elements: &[&str]) -> Dimension {
-        use crate::dimensions::NamedDimension;
-        let canonical_elements: Vec<crate::common::CanonicalElementName> = elements
-            .iter()
-            .map(|e| crate::common::CanonicalElementName::from_raw(e))
-            .collect();
-        let indexed_elements: crate::common::IdentMap<crate::common::CanonicalElementName, usize> =
-            canonical_elements
-                .iter()
-                .enumerate()
-                .map(|(i, elem)| (elem.clone(), i + 1))
-                .collect();
-        Dimension::Named(
-            CanonicalDimensionName::from_raw(name),
-            NamedDimension {
-                indexed_elements,
-                elements: canonical_elements,
-                maps_to: None,
-                mappings: vec![],
-            },
-        )
-    }
 
     /// GH #996: a NAME match must win globally, not lose to an earlier
     /// dimension's MAPPING match just because that dimension is processed first.
@@ -533,69 +229,56 @@ mod tests {
         );
     }
 
+    /// [`axis_reordering`]'s own contract: equal arity, every target axis
+    /// supplied by a distinct source axis, and the result in TARGET order.
+    /// The name rule it runs on is a row of `dimensions::axis_match_tests`.
     #[test]
-    fn test_find_dimension_reordering() {
-        // Test identical dimensions
-        let source = vec!["A".to_string(), "B".to_string(), "C".to_string()];
-        let target = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+    fn axis_reordering_is_a_relabelling_or_nothing() {
+        let names = |ns: &[&str]| -> Vec<String> { ns.iter().map(|s| s.to_string()).collect() };
+
+        // identity, a 2-D transpose, and two 3-D rotations
         assert_eq!(
-            find_dimension_reordering(&source, &target),
+            axis_reordering(&names(&["a", "b", "c"]), &names(&["a", "b", "c"])),
             Some(vec![0, 1, 2])
         );
-
-        // Test simple transpose (2D)
-        let source = vec!["Row".to_string(), "Col".to_string()];
-        let target = vec!["Col".to_string(), "Row".to_string()];
         assert_eq!(
-            find_dimension_reordering(&source, &target),
+            axis_reordering(&names(&["row", "col"]), &names(&["col", "row"])),
             Some(vec![1, 0])
         );
-
-        // Test 3D reordering: [A, B, C] -> [B, C, A]
-        let source = vec!["A".to_string(), "B".to_string(), "C".to_string()];
-        let target = vec!["B".to_string(), "C".to_string(), "A".to_string()];
         assert_eq!(
-            find_dimension_reordering(&source, &target),
+            axis_reordering(&names(&["a", "b", "c"]), &names(&["b", "c", "a"])),
             Some(vec![1, 2, 0])
         );
-
-        // Test 3D reordering: [A, B, C] -> [C, A, B]
-        let source = vec!["A".to_string(), "B".to_string(), "C".to_string()];
-        let target = vec!["C".to_string(), "A".to_string(), "B".to_string()];
         assert_eq!(
-            find_dimension_reordering(&source, &target),
+            axis_reordering(&names(&["a", "b", "c"]), &names(&["c", "a", "b"])),
             Some(vec![2, 0, 1])
         );
 
-        // Test different dimensions - should return None
-        let source = vec!["A".to_string(), "B".to_string()];
-        let target = vec!["C".to_string(), "D".to_string()];
-        assert_eq!(find_dimension_reordering(&source, &target), None);
+        // disjoint axes, a target axis the source does not have, unequal
+        // arity, and a target that repeats an axis the source declares once
+        assert_eq!(
+            axis_reordering(&names(&["a", "b"]), &names(&["c", "d"])),
+            None
+        );
+        assert_eq!(
+            axis_reordering(&names(&["a", "b"]), &names(&["a", "c"])),
+            None
+        );
+        assert_eq!(
+            axis_reordering(&names(&["a", "b"]), &names(&["a", "b", "c"])),
+            None
+        );
+        assert_eq!(
+            axis_reordering(&names(&["a", "b"]), &names(&["a", "a"])),
+            None
+        );
 
-        // Test missing dimension - should return None
-        let source = vec!["A".to_string(), "B".to_string()];
-        let target = vec!["A".to_string(), "C".to_string()];
-        assert_eq!(find_dimension_reordering(&source, &target), None);
-
-        // Test different lengths - should return None
-        let source = vec!["A".to_string(), "B".to_string()];
-        let target = vec!["A".to_string(), "B".to_string(), "C".to_string()];
-        assert_eq!(find_dimension_reordering(&source, &target), None);
-
-        // Test duplicate dimensions in target - should return None
-        let source = vec!["A".to_string(), "B".to_string()];
-        let target = vec!["A".to_string(), "A".to_string()];
-        assert_eq!(find_dimension_reordering(&source, &target), None);
-
-        // Test single dimension
-        let source = vec!["X".to_string()];
-        let target = vec!["X".to_string()];
-        assert_eq!(find_dimension_reordering(&source, &target), Some(vec![0]));
-
-        // Test empty dimensions
-        let source: Vec<String> = vec![];
-        let target: Vec<String> = vec![];
-        assert_eq!(find_dimension_reordering(&source, &target), Some(vec![]));
+        // the degenerate ends
+        assert_eq!(
+            axis_reordering(&names(&["x"]), &names(&["x"])),
+            Some(vec![0])
+        );
+        assert_eq!(axis_reordering(&[], &[]), Some(vec![]));
     }
 
     #[test]
@@ -1030,118 +713,5 @@ mod tests {
         let results = results.unwrap();
         assert_eq!(results["dst[a2]"].last().copied().unwrap(), 20.0);
         assert_eq!(results["dst[a3]"].last().copied().unwrap(), 30.0);
-    }
-
-    #[test]
-    fn test_match_dimensions_with_mapping_forward() {
-        // Test that match_dimensions_with_mapping finds matches via maps_to
-        use crate::dimensions::DimensionsContext;
-
-        let dim_a = crate::datamodel::Dimension::named(
-            "dima".to_string(),
-            vec!["a1".to_string(), "a2".to_string(), "a3".to_string()],
-        );
-        let mut dim_b = crate::datamodel::Dimension::named(
-            "dimb".to_string(),
-            vec!["b1".to_string(), "b2".to_string(), "b3".to_string()],
-        );
-        dim_b.set_maps_to("dima".to_string());
-
-        let dims_ctx = DimensionsContext::from(&[dim_a, dim_b]);
-
-        let source = vec![named_dim("dimb", &["b1", "b2", "b3"])];
-        let target = vec![named_dim("dima", &["a1", "a2", "a3"])];
-
-        let result = match_dimensions_with_mapping(&source, &target, &[false], &dims_ctx);
-        assert_eq!(result, vec![Some(0)], "DimB should match DimA via maps_to");
-    }
-
-    #[test]
-    fn test_match_dimensions_with_mapping_reverse() {
-        // Test reverse: target.maps_to == source
-        use crate::dimensions::DimensionsContext;
-
-        let mut dim_a = crate::datamodel::Dimension::named(
-            "dima".to_string(),
-            vec!["a1".to_string(), "a2".to_string(), "a3".to_string()],
-        );
-        dim_a.set_maps_to("dimb".to_string());
-        let dim_b = crate::datamodel::Dimension::named(
-            "dimb".to_string(),
-            vec!["b1".to_string(), "b2".to_string(), "b3".to_string()],
-        );
-
-        let dims_ctx = DimensionsContext::from(&[dim_a, dim_b]);
-
-        // Source is DimB, target is DimA (which maps to DimB)
-        let source = vec![named_dim("dimb", &["b1", "b2", "b3"])];
-        let target = vec![named_dim("dima", &["a1", "a2", "a3"])];
-
-        let result = match_dimensions_with_mapping(&source, &target, &[false], &dims_ctx);
-        assert_eq!(
-            result,
-            vec![Some(0)],
-            "DimB should match DimA via reverse maps_to"
-        );
-    }
-
-    #[test]
-    fn test_match_dimensions_with_mapping_shared_parent_second_target() {
-        use crate::dimensions::DimensionsContext;
-
-        let dim_a = crate::datamodel::Dimension::named(
-            "dima".to_string(),
-            vec!["a1".to_string(), "a2".to_string(), "a3".to_string()],
-        );
-        let dim_b = crate::datamodel::Dimension::named(
-            "dimb".to_string(),
-            vec!["b1".to_string(), "b2".to_string(), "b3".to_string()],
-        );
-        let dim_c = crate::datamodel::Dimension::named(
-            "dimc".to_string(),
-            vec!["c1".to_string(), "c2".to_string(), "c3".to_string()],
-        );
-
-        let mut dim_x = crate::datamodel::Dimension::named(
-            "dimx".to_string(),
-            vec!["x1".to_string(), "x2".to_string(), "x3".to_string()],
-        );
-        dim_x.mappings = vec![
-            crate::datamodel::DimensionMapping {
-                target: "dimb".to_string(),
-                element_map: vec![],
-            },
-            crate::datamodel::DimensionMapping {
-                target: "dimc".to_string(),
-                element_map: vec![],
-            },
-        ];
-
-        let mut dim_y = crate::datamodel::Dimension::named(
-            "dimy".to_string(),
-            vec!["y1".to_string(), "y2".to_string(), "y3".to_string()],
-        );
-        dim_y.mappings = vec![
-            crate::datamodel::DimensionMapping {
-                target: "dima".to_string(),
-                element_map: vec![],
-            },
-            crate::datamodel::DimensionMapping {
-                target: "dimc".to_string(),
-                element_map: vec![],
-            },
-        ];
-
-        let dims_ctx = DimensionsContext::from(&[dim_a, dim_b, dim_c, dim_x, dim_y]);
-
-        let source = vec![named_dim("dimx", &["x1", "x2", "x3"])];
-        let target = vec![named_dim("dimy", &["y1", "y2", "y3"])];
-
-        let result = match_dimensions_with_mapping(&source, &target, &[false], &dims_ctx);
-        assert_eq!(
-            result,
-            vec![Some(0)],
-            "dimensions sharing a non-first mapping target should match"
-        );
     }
 }

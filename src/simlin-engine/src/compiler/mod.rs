@@ -24,13 +24,14 @@ use crate::common::ErrorCode;
 use crate::common::{Canonical, CanonicalElementName, Ident, Result};
 #[cfg(test)]
 use crate::dimensions::DimensionsContext;
-use crate::dimensions::{Dimension, SubscriptIterator};
+use crate::dimensions::{Axis, Dimension, NoAxisRelations, SubscriptIterator, match_axes_partial};
 use crate::sim_err;
 use crate::variable::{VarKind, Variable};
 
 // Re-exports for crate-internal API
 pub(crate) use self::codegen::ModuleCtx;
 pub(crate) use self::context::Context;
+use self::context::DimensionRefs;
 pub(crate) use self::expr::{BuiltinFn, Expr, SubscriptIndex, Table, VarRef};
 
 /// The total slot count of the variable a reference addresses **in whole**,
@@ -593,7 +594,7 @@ impl Var {
                         }
                         match ast.as_ref().unwrap() {
                             Ast::Scalar(ast) => {
-                                let mut exprs = ctx.lower(ast)?;
+                                let mut exprs = ctx.lower(ast, DimensionRefs::Resolve)?;
                                 let main_expr = exprs.pop().unwrap();
                                 let main_expr = hoist_nested_array_builtins_in_scalar(
                                     main_expr, &mut exprs, &ctx.temps,
@@ -680,7 +681,7 @@ impl Var {
                     }
                     let exprs = match ast.as_ref().unwrap() {
                         Ast::Scalar(ast) => {
-                            let mut exprs = ctx.lower(ast)?;
+                            let mut exprs = ctx.lower(ast, DimensionRefs::Resolve)?;
                             let main_expr = exprs.pop().unwrap();
                             let main_expr = hoist_nested_array_builtins_in_scalar(
                                 main_expr, &mut exprs, &ctx.temps,
@@ -1093,7 +1094,7 @@ pub(super) fn view_repeats_a_dimension(view: &ArrayView) -> bool {
 /// True when an iteration shaped like `outer` can read every element of `inner`.
 ///
 /// The first branch is an IDENTICAL-shape test, and it carries both families
-/// [`named_dims`] refuses. An UNNAMED view (a temp's `dim_names` are empty
+/// [`named_axes`] refuses. An UNNAMED view (a temp's `dim_names` are empty
 /// strings) has no name to compare and needs none against a copy of itself. A
 /// REPEATED name is the same: `square[d,d] + square[d,d]` is a well-defined
 /// elementwise expression and joins to that shape, and the join is the right
@@ -1112,16 +1113,29 @@ fn view_contains(outer: &ArrayView, inner: &ArrayView) -> bool {
     if outer.dims == inner.dims && outer.dim_names == inner.dim_names {
         return true;
     }
-    let (Some(outer), Some(inner)) = (named_dims(outer), named_dims(inner)) else {
+    let (Some(outer), Some(inner)) = (named_axes(outer), named_axes(inner)) else {
         return false;
     };
-    inner
+    // `dimensions::match_axes_partial` is the one axis-matching precedence.
+    // A view carries each axis's NAME and LENGTH but not which kind of
+    // dimension produced it and no declared relations, so `Axis::named` and
+    // `NoAxisRelations` leave exactly the exact-name rule -- which is what
+    // containment can be decided on. The length is checked here rather than by
+    // the matcher because a RANGE-derived axis keeps its parent's name at a
+    // smaller size, and reading `arr[2:4]` where `arr` is expected would be
+    // the silently-wrong answer.
+    match_axes_partial(&inner, &outer, &NoAxisRelations)
         .iter()
-        .all(|(name, size)| outer.iter().any(|(o, s)| o == name && s == size))
+        .zip(inner.iter())
+        .all(|(matched, axis)| {
+            matched
+                .as_ref()
+                .is_some_and(|(outer_idx, _)| outer[*outer_idx].len == axis.len)
+        })
 }
 
-/// A view's `(dimension name, size)` pairs, or `None` when it does not name
-/// every dimension or names one TWICE.
+/// A view's axes, or `None` when it does not name every axis or names one
+/// TWICE.
 ///
 /// Both refusals are the same point: containment is decided by name, and
 /// neither shape can answer it. An unnamed axis has nothing to match; a
@@ -1131,7 +1145,7 @@ fn view_contains(outer: &ArrayView, inner: &ArrayView) -> bool {
 /// refuses a repeated name as an expression's SOLE shape is
 /// [`view_repeats_a_dimension`], at the materializer. See `array_operand`'s
 /// "What still declines".
-fn named_dims(view: &ArrayView) -> Option<Vec<(&str, usize)>> {
+fn named_axes(view: &ArrayView) -> Option<Vec<Axis<'_>>> {
     if view.dim_names.len() != view.dims.len() || view.dim_names.iter().any(|n| n.is_empty()) {
         return None;
     }
@@ -1141,8 +1155,8 @@ fn named_dims(view: &ArrayView) -> Option<Vec<(&str, usize)>> {
     Some(
         view.dim_names
             .iter()
-            .map(|n| n.as_str())
-            .zip(view.dims.iter().copied())
+            .zip(view.dims.iter())
+            .map(|(name, &len)| Axis::named(name.as_str(), len))
             .collect(),
     )
 }
@@ -1617,7 +1631,7 @@ fn expand_arrayed_with_hoisting(
             continue;
         };
         let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
-        let mut elem_exprs = elem_ctx.lower(ast)?;
+        let mut elem_exprs = elem_ctx.lower(ast, DimensionRefs::Resolve)?;
         let main_expr = elem_exprs.pop().unwrap();
         if contains_array_producing_builtin(&main_expr) {
             drop(scopes);
@@ -1662,11 +1676,11 @@ fn expand_a2a_with_hoisting(
 
     let first_subscripts: Vec<String> = SubscriptIterator::new(dims).next().unwrap_or_default();
     let first_ctx = ctx.with_active_subscripts(active_dims.clone(), &first_subscripts);
-    let mut first_exprs = first_ctx.lower(ast)?;
+    let mut first_exprs = first_ctx.lower(ast, DimensionRefs::Resolve)?;
     let main_expr = first_exprs.pop().unwrap();
 
     if contains_array_producing_builtin(&main_expr) {
-        // Re-lower with lower_preserving_dimensions so that
+        // Re-lower with `DimensionRefs::Preserve` so that
         // IndexExpr3::Dimension references survive Pass 1 and reach
         // normalize_subscripts3 as ActiveDimRef.  Inside array-producing
         // builtins (lowered with preserve_wildcards_for_iteration)
@@ -1676,7 +1690,7 @@ fn expand_a2a_with_hoisting(
         // array arguments to scalars.
         drop(scopes);
         ctx.temps.discard_since(mark);
-        let mut first_exprs = first_ctx.lower_preserving_dimensions(ast)?;
+        let mut first_exprs = first_ctx.lower(ast, DimensionRefs::Preserve)?;
         let main_expr = first_exprs.pop().unwrap();
         return expand_a2a_hoisted(ctx, dims, ast, base, &active_dims, first_exprs, main_expr);
     }
@@ -1688,7 +1702,7 @@ fn expand_a2a_with_hoisting(
     for (i, subscripts) in SubscriptIterator::new(dims).enumerate().skip(1) {
         scopes.begin_element();
         let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
-        let mut exprs = elem_ctx.lower(ast)?;
+        let mut exprs = elem_ctx.lower(ast, DimensionRefs::Resolve)?;
         let main_expr = exprs.pop().unwrap();
         exprs.push(Expr::AssignCurr(base.offset_by(i), Box::new(main_expr)));
         all_exprs.extend(exprs);
@@ -1720,7 +1734,7 @@ fn expression_depends_on_active_dimension(
         for subscripts in SubscriptIterator::new(dims) {
             scopes.begin_element();
             let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
-            let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
+            let mut elem_exprs = elem_ctx.lower(ast, DimensionRefs::Preserve)?;
             let elem_main = elem_exprs.pop().unwrap();
             match &reference {
                 None => reference = Some(elem_main),
@@ -1805,7 +1819,7 @@ fn expand_a2a_hoisted(
             // from the fragment allocator like every other temp's.
             for (i, subscripts) in SubscriptIterator::new(dims).enumerate() {
                 let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
-                let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
+                let mut elem_exprs = elem_ctx.lower(ast, DimensionRefs::Preserve)?;
                 let elem_main = elem_exprs.pop().unwrap();
                 result.extend(elem_exprs);
 
@@ -1954,7 +1968,7 @@ fn expand_a2a_per_element_hoisted(
             Some(first) => first,
             None => {
                 let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
-                let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
+                let mut elem_exprs = elem_ctx.lower(ast, DimensionRefs::Preserve)?;
                 let main = elem_exprs.pop().unwrap();
                 // Keep the element's pre-expressions (intermediate temps from
                 // complex subexpressions); their ids come from the fragment
@@ -2021,7 +2035,7 @@ fn expand_arrayed_hoisted(
 ) -> Result<Vec<Expr>> {
     let first_subscripts: Vec<String> = SubscriptIterator::new(dims).next().unwrap_or_default();
     let first_ctx = ctx.with_active_subscripts(active_dims.clone(), &first_subscripts);
-    let mut first_exprs = first_ctx.lower_preserving_dimensions(hoisting_ast)?;
+    let mut first_exprs = first_ctx.lower(hoisting_ast, DimensionRefs::Preserve)?;
     let main_expr = first_exprs.pop().unwrap();
     let var_view = array_view_from_dims(dims);
 
@@ -2068,7 +2082,7 @@ fn expand_arrayed_hoisted(
         // keeps that lowering; a hoisting arm drops it along with its temp
         // ids and is lowered again below, preserving dimension references.
         let mark = ctx.temps.mark();
-        let mut elem_exprs = elem_ctx.lower(ast)?;
+        let mut elem_exprs = elem_ctx.lower(ast, DimensionRefs::Resolve)?;
         let elem_main = elem_exprs.pop().unwrap();
         if !contains_array_producing_builtin(&elem_main) {
             result.extend(elem_exprs);
@@ -2084,7 +2098,7 @@ fn expand_arrayed_hoisted(
             let hoist = if expression_depends_on_active_dimension(ctx, dims, ast, active_dims)? {
                 ArmHoist::PerElement
             } else {
-                let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
+                let mut elem_exprs = elem_ctx.lower(ast, DimensionRefs::Preserve)?;
                 let elem_main = elem_exprs.pop().unwrap();
                 result.extend(elem_exprs);
                 let mut hoisted = Vec::new();
@@ -2112,7 +2126,7 @@ fn expand_arrayed_hoisted(
 
         // The element hoists on its own: an arm whose lowered form varies
         // with the element, or an explicit arm of this element alone.
-        let mut elem_exprs = elem_ctx.lower_preserving_dimensions(ast)?;
+        let mut elem_exprs = elem_ctx.lower(ast, DimensionRefs::Preserve)?;
         let elem_main = elem_exprs.pop().unwrap();
         result.extend(elem_exprs);
         let mut hoisted = Vec::new();

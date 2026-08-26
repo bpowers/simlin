@@ -144,62 +144,101 @@ impl ArrayView {
         })
     }
 
-    /// Create a transposed view by reversing dimensions and strides.
-    /// Transpose reverses the order of dimensions - e.g., a 2x3 array becomes 3x2.
-    pub fn transpose(&self) -> ArrayView {
-        let mut dims = self.dims.clone();
-        dims.reverse();
-        let mut strides = self.strides.clone();
-        strides.reverse();
-        let mut dim_names = self.dim_names.clone();
-        dim_names.reverse();
-
-        ArrayView {
-            dims,
-            strides,
-            offset: self.offset,
-            sparse: self.sparse.clone(),
-            dim_names,
-        }
-    }
-
-    /// Create a view with reordered dimensions.
-    /// The reordering slice maps output dimension indices to input dimension indices.
-    /// For example, [1, 0] swaps the first two dimensions (equivalent to transpose for 2D).
-    /// [1, 2, 0] means output dim 0 = input dim 1, output dim 1 = input dim 2, output dim 2 = input dim 0.
+    /// This view with its axes in the order `order` gives: axis `i` of the
+    /// result is axis `order[i]` of `self`.
+    ///
+    /// The one place a dimension-reordering transform is written, because
+    /// FOUR things move together and a transform that moves three of them
+    /// silently addresses the wrong axis: `dims`, `strides`, `dim_names`, and
+    /// every [`SparseInfo::dim_index`], which is an index INTO `dims` and so
+    /// has to be renumbered through the same permutation. Transposing
+    /// `arr[*:Sub, *]` without renumbering left the mapping claiming the other
+    /// axis was the sparse one, and `SUM` over the result read all-NaN with
+    /// exit 0 (GH #1027). The runtime transforms that drop an axis
+    /// (`bytecode::RuntimeView::apply_single_subscript`,
+    /// `wasmgen::ViewDesc::apply_single_subscript_dynamic`) renumber for the
+    /// same reason.
     ///
     /// # Panics
-    /// Panics in debug builds if:
-    /// - `reordering.len() != self.dims.len()`
-    /// - Any index in `reordering` is out of bounds
-    pub fn reorder_dimensions(&self, reordering: &[usize]) -> ArrayView {
+    /// Panics in debug builds if `order` is not a permutation of this view's
+    /// axes, or if the result's sparse mappings do not describe its axes.
+    fn permute_axes(&self, order: &[usize]) -> ArrayView {
         debug_assert_eq!(
-            reordering.len(),
+            order.len(),
             self.dims.len(),
-            "reordering length ({}) must match number of dimensions ({})",
-            reordering.len(),
+            "order length ({}) must match number of dimensions ({})",
+            order.len(),
             self.dims.len()
         );
         debug_assert!(
-            reordering.iter().all(|&idx| idx < self.dims.len()),
-            "reordering indices must be valid dimension indices (< {})",
+            order.iter().all(|&idx| idx < self.dims.len()),
+            "order entries must be valid dimension indices (< {})",
             self.dims.len()
         );
 
-        let dims: Vec<usize> = reordering.iter().map(|&idx| self.dims[idx]).collect();
-        let strides: Vec<isize> = reordering.iter().map(|&idx| self.strides[idx]).collect();
-        let dim_names: Vec<String> = reordering
-            .iter()
-            .map(|&idx| self.dim_names[idx].clone())
-            .collect();
-
-        ArrayView {
-            dims,
-            strides,
-            offset: self.offset,
-            sparse: self.sparse.clone(),
-            dim_names,
+        // `order` maps NEW axis -> OLD axis; a sparse mapping names an OLD
+        // axis and needs the inverse.
+        let mut old_to_new = vec![None; self.dims.len()];
+        for (new_idx, &old_idx) in order.iter().enumerate() {
+            old_to_new[old_idx] = Some(new_idx);
         }
+
+        let view = ArrayView {
+            dims: order.iter().map(|&idx| self.dims[idx]).collect(),
+            strides: order.iter().map(|&idx| self.strides[idx]).collect(),
+            offset: self.offset,
+            sparse: self
+                .sparse
+                .iter()
+                .filter_map(|s| {
+                    Some(SparseInfo {
+                        dim_index: old_to_new.get(s.dim_index).copied().flatten()?,
+                        parent_offsets: s.parent_offsets.clone(),
+                    })
+                })
+                .collect(),
+            dim_names: order
+                .iter()
+                .map(|&idx| self.dim_names[idx].clone())
+                .collect(),
+        };
+        view.debug_assert_sparse_describes_axes();
+        view
+    }
+
+    /// Every sparse mapping names an axis of this view and supplies exactly
+    /// one parent offset per element of it.
+    ///
+    /// `build_view_from_ops` establishes both when it emits a `SparseRange`;
+    /// this is what a transform has to preserve.
+    fn debug_assert_sparse_describes_axes(&self) {
+        debug_assert!(
+            self.sparse.iter().all(|s| s.dim_index < self.dims.len()
+                && s.parent_offsets.len() == self.dims[s.dim_index]),
+            "sparse mapping must describe one of this view's axes: dims {:?}, sparse {:?}",
+            self.dims,
+            self.sparse
+                .iter()
+                .map(|s| (s.dim_index, s.parent_offsets.len()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A transposed view: the axes in reverse order, so a 2x3 becomes a 3x2.
+    pub fn transpose(&self) -> ArrayView {
+        let order: Vec<usize> = (0..self.dims.len()).rev().collect();
+        self.permute_axes(&order)
+    }
+
+    /// A view with reordered dimensions: output axis `i` is input axis
+    /// `reordering[i]`, so `[1, 0]` swaps the first two (a 2-D transpose) and
+    /// `[1, 2, 0]` moves the first axis to the end.
+    ///
+    /// # Panics
+    /// Panics in debug builds if `reordering` is not a permutation of this
+    /// view's axes.
+    pub fn reorder_dimensions(&self, reordering: &[usize]) -> ArrayView {
+        self.permute_axes(reordering)
     }
 }
 
@@ -278,14 +317,99 @@ mod tests {
         assert!(!view.is_contiguous());
     }
 
-    #[test]
-    fn test_non_contiguous_with_sparse() {
-        let mut view = ArrayView::contiguous(vec![4, 4]);
+    /// A star range over a non-contiguous subdimension: axis 0 has two
+    /// elements drawn from parent offsets 0 and 2, the shape
+    /// `compiler::subscript::build_view_from_ops` emits for `arr[*:Sub, *]`.
+    fn sparse_star_range() -> ArrayView {
+        let mut view = ArrayView::contiguous_with_names(
+            vec![2, 3],
+            vec!["parent".to_string(), "other".to_string()],
+        );
+        // The view selects rows 0 and 2 of a 4x3 parent, so it keeps the
+        // parent's strides rather than its own contiguous ones.
+        view.strides = vec![3, 1];
         view.sparse.push(SparseInfo {
             dim_index: 0,
             parent_offsets: vec![0, 2],
         });
-        assert!(!view.is_contiguous());
+        view
+    }
+
+    #[test]
+    fn test_non_contiguous_with_sparse() {
+        assert!(!sparse_star_range().is_contiguous());
+    }
+
+    /// GH #1027: a sparse mapping's `dim_index` indexes the view's `dims`, so
+    /// a transform that moves the axes has to renumber it. Transposing
+    /// `arr[*:Sub, *]` used to leave the mapping on axis 0 -- claiming the
+    /// size-3 dense axis was the sparse one -- and every element of the result
+    /// then addressed the wrong storage.
+    #[test]
+    fn transpose_renumbers_a_sparse_axis() {
+        let view = sparse_star_range();
+        let transposed = view.transpose();
+
+        assert_eq!(transposed.dims, vec![3, 2]);
+        assert_eq!(transposed.strides, vec![1, 3]);
+        assert_eq!(transposed.dim_names, vec!["other", "parent"]);
+        assert_eq!(transposed.sparse.len(), 1);
+        assert_eq!(transposed.sparse[0].dim_index, 1);
+        assert_eq!(transposed.sparse[0].parent_offsets, vec![0, 2]);
+        assert_eq!(
+            transposed.sparse[0].parent_offsets.len(),
+            transposed.dims[transposed.sparse[0].dim_index],
+            "a mapping must supply one parent offset per element of its axis"
+        );
+    }
+
+    /// The same for the general reordering, on a 3-D view where the sparse
+    /// axis moves twice.
+    #[test]
+    fn reorder_dimensions_renumbers_a_sparse_axis() {
+        let mut view = ArrayView::contiguous_with_names(
+            vec![2, 3, 4],
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        );
+        view.sparse.push(SparseInfo {
+            dim_index: 0,
+            parent_offsets: vec![0, 2],
+        });
+
+        // [1, 2, 0] moves the sparse axis from position 0 to position 2.
+        let rotated = view.reorder_dimensions(&[1, 2, 0]);
+        assert_eq!(rotated.dims, vec![3, 4, 2]);
+        assert_eq!(rotated.sparse[0].dim_index, 2);
+        assert_eq!(rotated.sparse[0].parent_offsets, vec![0, 2]);
+
+        // The identity leaves it where it is.
+        let identity = view.reorder_dimensions(&[0, 1, 2]);
+        assert_eq!(identity.sparse[0].dim_index, 0);
+    }
+
+    /// Two sparse axes are renumbered independently, so the mapping that
+    /// describes each axis follows that axis rather than its position.
+    #[test]
+    fn transpose_renumbers_every_sparse_axis() {
+        let mut view = ArrayView::contiguous_with_names(
+            vec![2, 4, 3],
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        );
+        view.sparse.push(SparseInfo {
+            dim_index: 0,
+            parent_offsets: vec![0, 2],
+        });
+        view.sparse.push(SparseInfo {
+            dim_index: 2,
+            parent_offsets: vec![1, 4, 5],
+        });
+
+        let transposed = view.transpose();
+        assert_eq!(transposed.dims, vec![3, 4, 2]);
+        assert_eq!(transposed.sparse[0].dim_index, 2);
+        assert_eq!(transposed.sparse[0].parent_offsets, vec![0, 2]);
+        assert_eq!(transposed.sparse[1].dim_index, 0);
+        assert_eq!(transposed.sparse[1].parent_offsets, vec![1, 4, 5]);
     }
 
     #[test]
@@ -315,12 +439,8 @@ mod tests {
 
     #[test]
     fn test_transpose_preserves_offset_and_sparse() {
-        let mut view = ArrayView::contiguous(vec![3, 4]);
+        let mut view = sparse_star_range();
         view.offset = 5;
-        view.sparse.push(SparseInfo {
-            dim_index: 0,
-            parent_offsets: vec![0, 2],
-        });
 
         let transposed = view.transpose();
 

@@ -192,6 +192,24 @@ pub(super) struct Compiler<'module> {
     iter_source_views: Option<Vec<(SymbolicStaticView, u8)>>,
 }
 
+/// The ONE refusal for an array value in a position that consumes a single
+/// value.
+///
+/// Two arms of `Compiler::walk_expr` reach it -- a `StaticSubscript` (a view
+/// over a variable's storage) and a `TempArray` (a view over a temp) that still
+/// has axes outside an iteration body -- and they are the same refusal: an
+/// array where one number is required. Every legitimate array consumer reads
+/// its operand through `walk_expr_as_view`, so nothing that reaches either arm
+/// could use a pushed view, and the operand sites propagate the `Err` through
+/// `?` rather than each guarding against a missing stack value (an `unwrap` on
+/// a missing stack value is a process abort under `panic = abort`).
+fn array_in_scalar_position<T>(dims: &[usize]) -> Result<T> {
+    sim_err!(
+        NotSimulatable,
+        format!("an array of shape {dims:?} is used where a single value is required")
+    )
+}
+
 impl<'module> Compiler<'module> {
     pub(super) fn new(module: ModuleCtx<'module>) -> Compiler<'module> {
         // Pre-populate graphical_functions with all tables and record base IDs.
@@ -886,12 +904,11 @@ impl<'module> Compiler<'module> {
                     });
                     Some(())
                 } else {
-                    // Non-scalar array outside iteration context - this shouldn't happen
-                    // for well-formed expressions after pass 1 decomposition
-                    return sim_err!(
-                        Generic,
-                        "Non-scalar StaticSubscript outside iteration context".to_string()
-                    );
+                    // A view over a variable's storage that still has axes, in
+                    // a position that consumes one value: `s = arr[*] + 1`, or
+                    // a per-element capture helper holding `vals[*]` in a
+                    // scalar equation.
+                    return array_in_scalar_position(&view.dims);
                 }
             }
             Expr::TempArray(id, view, _) => {
@@ -914,19 +931,8 @@ impl<'module> Compiler<'module> {
                     // per-element `g`), an operand (`ABS(LOOKUP(g, t))`,
                     // `LOOKUP(g, t) + 1`), or an element's right-hand side in
                     // an apply-to-all equation that leaves an axis of the
-                    // table free. Every legitimate array consumer reads its
-                    // operand through `walk_expr_as_view`, so nothing that
-                    // reaches this arm could use a pushed view, and this is
-                    // the one place the shape is refused: the operand sites
-                    // propagate the `Err` rather than each guarding against a
-                    // missing stack value.
-                    return sim_err!(
-                        NotSimulatable,
-                        format!(
-                            "an array of shape {:?} is used where a single value is required",
-                            view.dims
-                        )
-                    );
+                    // table free.
+                    return array_in_scalar_position(&view.dims);
                 }
             }
             Expr::TempArrayElement(id, _view, idx, _) => {

@@ -109,7 +109,7 @@ fn failure_class(reason: &str, from: &str) -> &'static str {
         }
     } else if reason.contains("Cannot push view")
         || reason.contains("array-producing builtin outside AssignTemp")
-        || reason.contains("Non-scalar StaticSubscript")
+        || reason.contains("is used where a single value is required")
     {
         "array-valued operand (#995)"
     } else {

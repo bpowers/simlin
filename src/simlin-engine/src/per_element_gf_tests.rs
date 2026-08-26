@@ -1202,6 +1202,19 @@ fn two_dim_table_model(consumers: &str) -> datamodel::Project {
     probe_mdl(&body)
 }
 
+/// A 1-D array `arr[COP]` holding 1, 2, 3, with `s` reading it through
+/// `equation` -- the rows that refuse a SLICE of a variable's storage
+/// (`arr[*]`) rather than a temp. Built through `TestProject` rather than the
+/// MDL fixture beside it because Vensim has no `[*]` spelling.
+fn array_slice_model(equation: &str) -> datamodel::Project {
+    crate::test_common::TestProject::new("array_slice")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("COP", &["a", "b", "c"])
+        .array_with_ranges("arr[COP]", vec![("a", "1"), ("b", "2"), ("c", "3")])
+        .scalar_aux("s", equation)
+        .build_datamodel()
+}
+
 fn probe_mdl(body: &str) -> datamodel::Project {
     crate::open_vensim(&format!("{{UTF-8}}\n{body}{BARE_TABLE_SIM_SPECS}"))
         .expect("the probe MDL parses")
@@ -1264,16 +1277,23 @@ fn bare_two_dim_table_under_a_reducer_sums_the_elements_own_row() {
     assert_elements(&project, "out", &[("out[a]", 30.0), ("out[b]", 70.0)]);
 }
 
-/// An array-valued per-element table apply in a position that consumes ONE
-/// value has no meaning and is REFUSED with a diagnostic attributed to the
-/// variable, never emitted. The rule has one owner: codegen's `TempArray` arm
-/// (`compiler::codegen::Compiler::walk_expr`) refuses a temp array outside an
-/// iteration body, and every operand site inherits the refusal through `?`
-/// (an `unwrap` on a missing stack value there is a process abort under
-/// `panic = abort`). The rows are a sample of the consumers the apply can land
-/// in -- the whole right-hand side, an `Apply` operand, an `Op2` operand, an
-/// `IF` condition, an n-ary `MEAN` operand, and the per-element right-hand side
-/// of an apply-to-all equation over a 2-D table (each element's apply is the
+/// An array value in a position that consumes ONE value has no meaning and is
+/// REFUSED with a diagnostic attributed to the variable, never emitted.
+///
+/// The rule has ONE owner and one message
+/// (`compiler::codegen::array_in_scalar_position`), reached by the two
+/// `Compiler::walk_expr` arms that can hold an array outside an iteration
+/// body: a `TempArray` (a view over a temp, which is what an array-valued
+/// per-element table apply becomes) and a `StaticSubscript` (a view over a
+/// variable's storage, `arr[*]`). Both are rowed, because a refusal split
+/// across two codes and two messages is what this replaced. Every operand site
+/// inherits the refusal through `?` (an `unwrap` on a missing stack value
+/// there is a process abort under `panic = abort`).
+///
+/// The rows are a sample of the consumers the value can land in -- the whole
+/// right-hand side, an `Apply` operand, an `Op2` operand, an `IF` condition, an
+/// n-ary `MEAN` operand, and the per-element right-hand side of an
+/// apply-to-all equation over a 2-D table (each element's apply is the
 /// element's whole `ROW` row). The other consumers (an `Op1` operand, an `IF`
 /// branch, a lookup index, a subscript index) reach the same arm through the
 /// same `?`; a subscript index is not rowed only because Vensim has no
@@ -1283,6 +1303,11 @@ fn array_valued_table_apply_assigned_to_one_slot_is_refused_not_aborted() {
     use crate::db::{DiagnosticError, DiagnosticSeverity, collect_all_diagnostics};
 
     let rows = [
+        // The `StaticSubscript` arm: a slice of a variable's storage, not a
+        // temp, in the same one-value positions.
+        (array_slice_model("arr[*] + 1"), "s"),
+        (array_slice_model("arr[*]"), "s"),
+        (array_slice_model("ABS(arr[*])"), "s"),
         (one_dim_table_model("s = ABS(LOOKUP(g, Time)) ~~|\n"), "s"),
         (one_dim_table_model("s = LOOKUP(g, Time) ~~|\n"), "s"),
         (one_dim_table_model("s = LOOKUP(g, Time) + 1 ~~|\n"), "s"),
