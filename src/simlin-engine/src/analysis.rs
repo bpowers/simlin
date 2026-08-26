@@ -1550,7 +1550,7 @@ mod tests {
     /// `mod_a -> mod_b` where `mod_b` is itself a module reading `mod_a·pos`
     /// on its input port. `recompute_module_input_edge_series` must read the
     /// exit port off `mod_b`'s `ModuleInput.src` (the
-    /// `Variable::Module { inputs, .. }` arm), not off an aux reader. `mod_b`
+    /// `VarKind::Module { inputs, .. }` arm), not off an aux reader. `mod_b`
     /// is a single-output identity passthrough (`out = input`), so the loop
     /// polarity follows `mod_a`'s `pos` port: reinforcing.
     fn module_to_module_multi_output_project() -> datamodel::Project {

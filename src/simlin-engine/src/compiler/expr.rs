@@ -27,7 +27,8 @@ use super::dimensions::UnaryOp;
 /// instance's slot block, because the enclosing model's layout has one entry
 /// for `m` spanning the whole sub-model and none for `m·x`. That is the one
 /// place a sub-model's own (already fixed) layout is consulted during
-/// lowering; see `Context::submodel_offset_within`.
+/// lowering: the module dependency's `DepKind::Module` carries that layout as
+/// a `ModelShape`, and `Context::resolve` is its one reader.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct VarRef {

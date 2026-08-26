@@ -374,67 +374,90 @@ pub fn sync_from_datamodel(db: &SimlinDb, project: &datamodel::Project) -> SyncR
     }
 }
 
+/// The `SourceVariable` field values a `datamodel::Variable` yields.
+///
+/// One statement of "which datamodel field becomes which salsa input field",
+/// read by both the fresh-sync constructor and the incremental updater below.
+/// Owned rather than borrowed because every field is stored into a salsa input:
+/// the fresh path moves them in, and the incremental path compares each against
+/// the stored value before setting it.
+struct SourceVariableFields {
+    ident: String,
+    equation: datamodel::Equation,
+    kind: SourceVariableKind,
+    units: Option<String>,
+    gf: Option<datamodel::GraphicalFunction>,
+    inflows: Vec<String>,
+    outflows: Vec<String>,
+    module_refs: Vec<datamodel::ModuleReference>,
+    /// A `Module` variable's referenced target model; empty for every other
+    /// kind (NOT the owning model -- see `enclosing_macro_for_var`).
+    referenced_model_name: String,
+    non_negative: bool,
+    can_be_module_input: bool,
+    compat: datamodel::Compat,
+}
+
+impl SourceVariableFields {
+    fn from_datamodel(var: &datamodel::Variable) -> Self {
+        let (inflows, outflows) = match var {
+            datamodel::Variable::Stock(s) => (s.inflows.clone(), s.outflows.clone()),
+            _ => (Vec::new(), Vec::new()),
+        };
+        let (module_refs, referenced_model_name) = match var {
+            datamodel::Variable::Module(m) => (m.references.clone(), m.model_name.clone()),
+            _ => (Vec::new(), String::new()),
+        };
+        SourceVariableFields {
+            ident: var.get_ident().to_string(),
+            equation: var
+                .get_equation()
+                .cloned()
+                .unwrap_or_else(|| datamodel::Equation::Scalar(String::new())),
+            kind: SourceVariableKind::from_datamodel_variable(var),
+            units: var.get_units().cloned(),
+            gf: match var {
+                datamodel::Variable::Flow(f) => f.gf.clone(),
+                datamodel::Variable::Aux(a) => a.gf.clone(),
+                _ => None,
+            },
+            inflows,
+            outflows,
+            module_refs,
+            referenced_model_name,
+            // Only a stock and a flow carry the non-negativity flag.
+            non_negative: match var {
+                datamodel::Variable::Stock(s) => s.compat.non_negative,
+                datamodel::Variable::Flow(f) => f.compat.non_negative,
+                _ => false,
+            },
+            can_be_module_input: var.can_be_module_input(),
+            compat: match var {
+                datamodel::Variable::Stock(s) => s.compat.clone(),
+                datamodel::Variable::Flow(f) => f.compat.clone(),
+                datamodel::Variable::Aux(a) => a.compat.clone(),
+                datamodel::Variable::Module(m) => m.compat.clone(),
+            },
+        }
+    }
+}
+
 fn source_variable_from_datamodel(db: &SimlinDb, var: &datamodel::Variable) -> SourceVariable {
-    let ident = var.get_ident().to_string();
-    let kind = SourceVariableKind::from_datamodel_variable(var);
-
-    let equation = var
-        .get_equation()
-        .cloned()
-        .unwrap_or_else(|| datamodel::Equation::Scalar(String::new()));
-
-    let units = var.get_units().cloned();
-
-    let gf = match var {
-        datamodel::Variable::Flow(f) => f.gf.clone(),
-        datamodel::Variable::Aux(a) => a.gf.clone(),
-        _ => None,
-    };
-
-    let inflows = match var {
-        datamodel::Variable::Stock(s) => s.inflows.clone(),
-        _ => Vec::new(),
-    };
-
-    let outflows = match var {
-        datamodel::Variable::Stock(s) => s.outflows.clone(),
-        _ => Vec::new(),
-    };
-
-    let (module_refs, referenced_model_name) = match var {
-        datamodel::Variable::Module(m) => (m.references.clone(), m.model_name.clone()),
-        _ => (Vec::new(), String::new()),
-    };
-
-    let non_negative = match var {
-        datamodel::Variable::Stock(s) => s.compat.non_negative,
-        datamodel::Variable::Flow(f) => f.compat.non_negative,
-        _ => false,
-    };
-
-    let can_be_module_input = var.can_be_module_input();
-
-    let compat = match var {
-        datamodel::Variable::Stock(s) => s.compat.clone(),
-        datamodel::Variable::Flow(f) => f.compat.clone(),
-        datamodel::Variable::Aux(a) => a.compat.clone(),
-        datamodel::Variable::Module(m) => m.compat.clone(),
-    };
-
+    let f = SourceVariableFields::from_datamodel(var);
     SourceVariable::new(
         db,
-        ident,
-        equation,
-        kind,
-        units,
-        gf,
-        inflows,
-        outflows,
-        module_refs,
-        referenced_model_name,
-        non_negative,
-        can_be_module_input,
-        compat,
+        f.ident,
+        f.equation,
+        f.kind,
+        f.units,
+        f.gf,
+        f.inflows,
+        f.outflows,
+        f.module_refs,
+        f.referenced_model_name,
+        f.non_negative,
+        f.can_be_module_input,
+        f.compat,
     )
 }
 
@@ -442,6 +465,11 @@ fn source_variable_from_datamodel(db: &SimlinDb, var: &datamodel::Variable) -> S
 
 /// Update a single `SourceVariable`'s fields via salsa setters, only
 /// touching fields whose values actually changed.
+///
+/// "Only what changed" is load-bearing, not an optimization: a salsa setter
+/// bumps the input's revision whether or not the value differs, so setting
+/// every field unconditionally would invalidate every query keyed on this
+/// variable on every sync.
 fn update_source_variable(
     db: &mut SimlinDb,
     source_var: SourceVariable,
@@ -449,89 +477,45 @@ fn update_source_variable(
 ) {
     use salsa::Setter;
 
-    let new_ident = dm_var.get_ident().to_string();
-    if *source_var.ident(&*db) != new_ident {
-        source_var.set_ident(db).to(new_ident);
-    }
+    let f = SourceVariableFields::from_datamodel(dm_var);
 
-    let new_equation = dm_var
-        .get_equation()
-        .cloned()
-        .unwrap_or_else(|| datamodel::Equation::Scalar(String::new()));
-    if *source_var.equation(&*db) != new_equation {
-        source_var.set_equation(db).to(new_equation);
+    if *source_var.ident(&*db) != f.ident {
+        source_var.set_ident(db).to(f.ident);
     }
-
-    let new_kind = SourceVariableKind::from_datamodel_variable(dm_var);
-    if source_var.kind(&*db) != new_kind {
-        source_var.set_kind(db).to(new_kind);
+    if *source_var.equation(&*db) != f.equation {
+        source_var.set_equation(db).to(f.equation);
     }
-
-    let new_units = dm_var.get_units().cloned();
-    if *source_var.units(&*db) != new_units {
-        source_var.set_units(db).to(new_units);
+    if source_var.kind(&*db) != f.kind {
+        source_var.set_kind(db).to(f.kind);
     }
-
-    let new_gf = match dm_var {
-        datamodel::Variable::Flow(f) => f.gf.clone(),
-        datamodel::Variable::Aux(a) => a.gf.clone(),
-        _ => None,
-    };
-    if *source_var.gf(&*db) != new_gf {
-        source_var.set_gf(db).to(new_gf);
+    if *source_var.units(&*db) != f.units {
+        source_var.set_units(db).to(f.units);
     }
-
-    let new_inflows = match dm_var {
-        datamodel::Variable::Stock(s) => s.inflows.clone(),
-        _ => Vec::new(),
-    };
-    if *source_var.inflows(&*db) != new_inflows {
-        source_var.set_inflows(db).to(new_inflows);
+    if *source_var.gf(&*db) != f.gf {
+        source_var.set_gf(db).to(f.gf);
     }
-
-    let new_outflows = match dm_var {
-        datamodel::Variable::Stock(s) => s.outflows.clone(),
-        _ => Vec::new(),
-    };
-    if *source_var.outflows(&*db) != new_outflows {
-        source_var.set_outflows(db).to(new_outflows);
+    if *source_var.inflows(&*db) != f.inflows {
+        source_var.set_inflows(db).to(f.inflows);
     }
-
-    let (new_module_refs, new_model_name) = match dm_var {
-        datamodel::Variable::Module(m) => (m.references.clone(), m.model_name.clone()),
-        _ => (Vec::new(), String::new()),
-    };
-    if *source_var.module_refs(&*db) != new_module_refs {
-        source_var.set_module_refs(db).to(new_module_refs);
+    if *source_var.outflows(&*db) != f.outflows {
+        source_var.set_outflows(db).to(f.outflows);
     }
-    if *source_var.model_name(&*db) != new_model_name {
-        source_var.set_model_name(db).to(new_model_name);
+    if *source_var.module_refs(&*db) != f.module_refs {
+        source_var.set_module_refs(db).to(f.module_refs);
     }
-
-    let new_non_negative = match dm_var {
-        datamodel::Variable::Stock(s) => s.compat.non_negative,
-        datamodel::Variable::Flow(f) => f.compat.non_negative,
-        _ => false,
-    };
-    if source_var.non_negative(&*db) != new_non_negative {
-        source_var.set_non_negative(db).to(new_non_negative);
+    if *source_var.model_name(&*db) != f.referenced_model_name {
+        source_var.set_model_name(db).to(f.referenced_model_name);
     }
-
-    let new_can_be_module_input = dm_var.can_be_module_input();
-    if source_var.can_be_module_input(&*db) != new_can_be_module_input {
+    if source_var.non_negative(&*db) != f.non_negative {
+        source_var.set_non_negative(db).to(f.non_negative);
+    }
+    if source_var.can_be_module_input(&*db) != f.can_be_module_input {
         source_var
             .set_can_be_module_input(db)
-            .to(new_can_be_module_input);
+            .to(f.can_be_module_input);
     }
-
-    let new_compat = match dm_var {
-        datamodel::Variable::Stock(s) => s.compat.clone(),
-        datamodel::Variable::Flow(f) => f.compat.clone(),
-        datamodel::Variable::Aux(a) => a.compat.clone(),
-        datamodel::Variable::Module(m) => m.compat.clone(),
-    };
-    if *source_var.compat(&*db) != new_compat {
-        source_var.set_compat(db).to(new_compat);
+    if *source_var.compat(&*db) != f.compat {
+        source_var.set_compat(db).to(f.compat);
     }
 }
 

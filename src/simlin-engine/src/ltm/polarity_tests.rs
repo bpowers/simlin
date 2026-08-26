@@ -80,18 +80,21 @@ fn test_provable_value_sign() {
     let cnst = |v: f64| Expr2::Const(format!("{v}"), crate::ast::Literal::new(v), Loc::default());
     let neg = |e: Expr2| Expr2::Op1(UnaryOp::Negative, Box::new(e), None, Loc::default());
     let var = |n: &str| Expr2::Var(Ident::new(n), None, Loc::default());
-    let scalar_var = |ident: &str, eq: Expr2| Variable::Var {
+    use crate::variable::VarKind;
+    let scalar_var = |ident: &str, eq: Expr2| Variable {
         ident: Ident::new(ident),
-        ast: Some(Ast::Scalar(eq)),
-        init_ast: None,
-        eqn: None,
         units: None,
-        tables: vec![],
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
+        eqn: None,
         errors: vec![],
         unit_errors: vec![],
+        kind: VarKind::Aux {
+            ast: Some(Ast::Scalar(eq)),
+            init_ast: None,
+            tables: vec![],
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+        },
     };
 
     // `k_neg = -5` hand-builds the Op1(Negative, Const(5)) equation shape,

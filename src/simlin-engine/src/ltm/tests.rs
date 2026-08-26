@@ -22,7 +22,7 @@ use crate::db::{
     compute_link_polarities, model_cycle_partitions, model_detected_loops, sync_from_datamodel,
 };
 use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
-use crate::variable::Variable;
+use crate::variable::{VarKind, Variable};
 use std::collections::{HashMap, HashSet};
 
 #[test]
@@ -477,18 +477,20 @@ fn test_polarity_div_denominator_value_sign_guards_numerator_polarity() {
     // z = x / ttc where ttc is a positive-constant VARIABLE (the dominant SD
     // idiom: dividing by a named positive parameter) must stay Positive.
     let ttc: Ident<Canonical> = Ident::new("ttc");
-    let ttc_variable = crate::variable::Variable::Var {
+    let ttc_variable = crate::variable::Variable {
         ident: ttc.clone(),
-        ast: Some(Ast::Scalar(cnst(5.0))),
-        init_ast: None,
-        eqn: Some(crate::datamodel::Equation::Scalar("5".to_string())),
         units: None,
-        tables: vec![],
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
+        eqn: Some(crate::datamodel::Equation::Scalar("5".to_string())),
         errors: vec![],
         unit_errors: vec![],
+        kind: crate::variable::VarKind::Aux {
+            ast: Some(Ast::Scalar(cnst(5.0))),
+            init_ast: None,
+            tables: vec![],
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+        },
     };
     let mut vars = HashMap::new();
     vars.insert(ttc.clone(), ttc_variable);
@@ -903,7 +905,7 @@ fn test_lookup_forward_backward_arm_polarity() {
     }
 }
 
-/// Build a minimal `Variable::Var` carrying just the parts the LOOKUP polarity
+/// Build a minimal `VarKind::Aux` variable carrying just the parts the LOOKUP polarity
 /// path reads: `tables` (one per element, in element order) and an `ast` whose
 /// dimensions `Variable::get_dimensions` reports (an `ApplyToAll` over `dims`).
 /// Everything else is the natural default. Used by the focused unit test for
@@ -915,25 +917,28 @@ fn gf_var_for_test(
     tables: Vec<crate::variable::Table>,
 ) -> Variable {
     use crate::ast::{Ast, Expr2, Loc};
-    Variable::Var {
+    use crate::variable::VarKind;
+    Variable {
         ident: Ident::new(ident),
-        ast: Some(Ast::ApplyToAll(
-            dims,
-            Expr2::Const(
-                "0".to_string(),
-                crate::ast::Literal::new(0.0),
-                Loc::default(),
-            ),
-        )),
-        init_ast: None,
-        eqn: None,
         units: None,
-        tables,
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
+        eqn: None,
         errors: vec![],
         unit_errors: vec![],
+        kind: VarKind::Aux {
+            ast: Some(Ast::ApplyToAll(
+                dims,
+                Expr2::Const(
+                    "0".to_string(),
+                    crate::ast::Literal::new(0.0),
+                    Loc::default(),
+                ),
+            )),
+            init_ast: None,
+            tables,
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+        },
     }
 }
 
@@ -2270,10 +2275,7 @@ fn test_regression_causal_graph_after_implicit_instantiation() {
 
     // The parent model's variable map carries a Module variable for the
     // smth1 instance the SMTH1 call expanded into.
-    let has_module = graph
-        .variables()
-        .values()
-        .any(|v| matches!(v, Variable::Module { .. }));
+    let has_module = graph.variables().values().any(|v| v.is_module());
 
     assert!(
         has_module,
@@ -3434,16 +3436,19 @@ fn enrich_with_module_stocks_falls_back_to_all_stocks_on_truncation() {
 
     // Parent graph: a circuit `driver -> mod_node -> driver` where `mod_node`
     // is the module whose `input` port the predecessor `driver` feeds.
-    let module_var = Variable::Module {
+    let module_var = Variable {
         ident: Ident::new("mod_node"),
-        model_name: Ident::new("sub"),
         units: None,
-        inputs: vec![ModuleInput {
-            src: Ident::new("driver"),
-            dst: Ident::new("input"),
-        }],
+        eqn: None,
         errors: vec![],
         unit_errors: vec![],
+        kind: VarKind::Module {
+            model_name: Ident::new("sub"),
+            inputs: vec![ModuleInput {
+                src: Ident::new("driver"),
+                dst: Ident::new("input"),
+            }],
+        },
     };
     let mut parent_variables = HashMap::new();
     parent_variables.insert(Ident::new("mod_node"), module_var);

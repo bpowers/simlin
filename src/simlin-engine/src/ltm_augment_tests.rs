@@ -473,20 +473,22 @@ fn test_dimension_element_names_indexed_zero() {
 use crate::ast::{Ast, Expr2, IndexExpr2};
 use crate::builtins::{BuiltinFn, Loc};
 
-/// Build a Variable::Var with a hand-built Expr2 AST.
+/// Build a `VarKind::Aux` variable with a hand-built Expr2 AST.
 fn var_with_expr(expr: Expr2) -> Variable {
-    Variable::Var {
+    Variable {
         ident: Ident::new("target"),
-        ast: Some(Ast::Scalar(expr)),
-        init_ast: None,
-        eqn: None,
         units: None,
-        tables: vec![],
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
+        eqn: None,
         errors: vec![],
         unit_errors: vec![],
+        kind: VarKind::Aux {
+            ast: Some(Ast::Scalar(expr)),
+            init_ast: None,
+            tables: vec![],
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+        },
     }
 }
 
@@ -701,18 +703,20 @@ fn test_classify_reducer_var_ref_no_subscript() {
 #[test]
 fn test_classify_reducer_no_ast() {
     // Variable without an AST
-    let var: Variable = Variable::Var {
+    let var: Variable = Variable {
         ident: Ident::new("target"),
-        ast: None,
-        init_ast: None,
-        eqn: None,
         units: None,
-        tables: vec![],
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
+        eqn: None,
         errors: vec![],
         unit_errors: vec![],
+        kind: VarKind::Aux {
+            ast: None,
+            init_ast: None,
+            tables: vec![],
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+        },
     };
     let result = classify_reducer(&var, "population");
     assert_eq!(result, None);
@@ -3231,10 +3235,12 @@ fn arrayed_var_from_text(
     let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let mut implicit_vars = Vec::new();
     let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
-        &crate::dimensions::DimensionsContext::from(dims),
+        &crate::variable::ParseContext::new(
+            &crate::dimensions::DimensionsContext::from(dims),
+            &units_ctx,
+        ),
         &dm_var,
         &mut implicit_vars,
-        &units_ctx,
         |mi| Ok(Some(mi.clone())),
     );
     let dim_ctx = crate::dimensions::DimensionsContext::from(dims);
@@ -3301,10 +3307,12 @@ fn scalar_aux_from_text(ident: &str, eqn_text: &str) -> Variable {
     let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let mut implicit_vars = Vec::new();
     let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
-        &crate::dimensions::DimensionsContext::default(),
+        &crate::variable::ParseContext::new(
+            &crate::dimensions::DimensionsContext::default(),
+            &units_ctx,
+        ),
         &dm_var,
         &mut implicit_vars,
-        &units_ctx,
         |mi| Ok(Some(mi.clone())),
     );
     let dim_ctx = crate::dimensions::DimensionsContext::from(&[][..]);
@@ -3496,10 +3504,12 @@ fn lower_dm_var(
     let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let mut implicit_vars = Vec::new();
     let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
-        &crate::dimensions::DimensionsContext::from(dims),
+        &crate::variable::ParseContext::new(
+            &crate::dimensions::DimensionsContext::from(dims),
+            &units_ctx,
+        ),
         &dm_var,
         &mut implicit_vars,
-        &units_ctx,
         |mi| Ok(Some(mi.clone())),
     );
     let dim_ctx = crate::dimensions::DimensionsContext::from(dims);
@@ -3898,18 +3908,20 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
     // Guard: the Arrayed-target path must not regress scalar or
     // ApplyToAll targets. A scalar aux target -> Equation::Scalar; an
     // ApplyToAll arrayed aux target -> Equation::ApplyToAll.
-    let scalar_to = Variable::Var {
+    let scalar_to = Variable {
         ident: Ident::new("scalar_target"),
-        ast: Some(Ast::Scalar(var_ref("driver"))),
-        init_ast: None,
-        eqn: Some(Equation::Scalar("driver".to_string())),
         units: None,
-        tables: vec![],
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
+        eqn: Some(Equation::Scalar("driver".to_string())),
         errors: vec![],
         unit_errors: vec![],
+        kind: VarKind::Aux {
+            ast: Some(Ast::Scalar(var_ref("driver"))),
+            init_ast: None,
+            tables: vec![],
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+        },
     };
     let from = Ident::<Canonical>::new("driver");
     let to = Ident::<Canonical>::new("scalar_target");
@@ -3946,10 +3958,12 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
         compat: crate::datamodel::Compat::default(),
     });
     let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
-        &crate::dimensions::DimensionsContext::from(dims.as_slice()),
+        &crate::variable::ParseContext::new(
+            &crate::dimensions::DimensionsContext::from(dims.as_slice()),
+            &units_ctx,
+        ),
         &a2a_dm,
         &mut implicit,
-        &units_ctx,
         |mi| Ok(Some(mi.clone())),
     );
     let dim_ctx = crate::dimensions::DimensionsContext::from(dims.as_slice());
@@ -3990,34 +4004,38 @@ fn flow_to_stock_test_stock(
     inflows: &[&str],
     outflows: &[&str],
 ) -> Variable {
-    Variable::Stock {
+    Variable {
         ident: Ident::new(ident),
-        init_ast: None,
-        eqn: Some(eqn),
         units: None,
-        inflows: inflows.iter().map(|f| Ident::new(f)).collect(),
-        outflows: outflows.iter().map(|f| Ident::new(f)).collect(),
-        non_negative: false,
+        eqn: Some(eqn),
         errors: vec![],
         unit_errors: vec![],
+        kind: VarKind::Stock {
+            init_ast: None,
+            inflows: inflows.iter().map(|f| Ident::new(f)).collect(),
+            outflows: outflows.iter().map(|f| Ident::new(f)).collect(),
+            non_negative: false,
+        },
     }
 }
 
-/// Build a `Variable::Var` flow for the flow-to-stock generator tests.
+/// Build a `VarKind::Aux` flow for the flow-to-stock generator tests.
 /// Only `ident` and `eqn` (dimension source) matter to the generator.
 fn flow_to_stock_test_flow(ident: &str, eqn: Equation) -> Variable {
-    Variable::Var {
+    Variable {
         ident: Ident::new(ident),
-        ast: None,
-        init_ast: None,
-        eqn: Some(eqn),
         units: None,
-        tables: vec![],
-        non_negative: false,
-        is_flow: true,
-        is_table_only: false,
+        eqn: Some(eqn),
         errors: vec![],
         unit_errors: vec![],
+        kind: VarKind::Aux {
+            ast: None,
+            init_ast: None,
+            tables: vec![],
+            non_negative: false,
+            is_flow: true,
+            is_table_only: false,
+        },
     }
 }
 

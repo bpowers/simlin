@@ -21,7 +21,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::common::{Canonical, Ident};
-use crate::variable::Variable;
+use crate::variable::{VarKind, Variable};
 
 use super::indexed::{IndexedCircuits, IndexedGraph, TruncatedByBudgetInternal};
 use super::partitions::{CyclePartitions, tarjan_scc};
@@ -447,7 +447,10 @@ impl CausalGraph {
                 None => continue,
             };
             let module_var = match self.variables.get(node) {
-                Some(Variable::Module { inputs, .. }) => inputs,
+                Some(Variable {
+                    kind: VarKind::Module { inputs, .. },
+                    ..
+                }) => inputs,
                 _ => continue,
             };
 
@@ -1117,9 +1120,9 @@ impl CausalGraph {
         // Get the 'to' variable
         if let Some(to_var) = self.variables.get(to) {
             // Special case: flow -> stock relationships
-            if let Variable::Stock {
+            if let VarKind::Stock {
                 inflows, outflows, ..
-            } = to_var
+            } = &to_var.kind
             {
                 // Check if 'from' is an inflow (positive) or outflow (negative)
                 if inflows.contains(from) {
@@ -1135,7 +1138,7 @@ impl CausalGraph {
             // (positive relationship). If the module has an internal graph,
             // we could trace through it, but for the input->module edge
             // itself the polarity is positive.
-            if let Variable::Module { inputs, .. } = to_var
+            if let VarKind::Module { inputs, .. } = &to_var.kind
                 && inputs.iter().any(|inp| &inp.src == from)
             {
                 return LinkPolarity::Positive;

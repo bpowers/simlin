@@ -12,7 +12,7 @@ use crate::model::ModelStage1;
 #[cfg(test)]
 use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
 use crate::units::{Context, UnitOp, Units, combine};
-use crate::variable::Variable;
+use crate::variable::{VarKind, Variable};
 
 /// Source of a constraint for error reporting.
 /// Tracks which variable a constraint relates to and optionally where in that variable's equation.
@@ -975,14 +975,11 @@ impl UnitInferer<'_> {
         for (id, var) in sorted_vars {
             let current_var = format!("{prefix}{id}");
 
-            if let Variable::Stock {
-                ident,
-                inflows,
-                outflows,
-                ..
-            } = var
+            if let VarKind::Stock {
+                inflows, outflows, ..
+            } = &var.kind
             {
-                let stock_ident = ident;
+                let stock_ident = &var.ident;
                 let stock_var = format!("{prefix}{stock_ident}");
                 // expected = @stock / time_units (the units a flow must carry).
                 let expected = combine(
@@ -1013,13 +1010,7 @@ impl UnitInferer<'_> {
                 };
                 check_flows(inflows);
                 check_flows(outflows);
-            } else if let Variable::Module {
-                ident,
-                model_name,
-                inputs,
-                ..
-            } = var
-            {
+            } else if let VarKind::Module { model_name, inputs } = &var.kind {
                 // Two reasons to decline a module's submodel constraints, both
                 // of which DEGRADE rather than fail -- the variable still falls
                 // through to its declared-units constraint below, and inference
@@ -1055,7 +1046,7 @@ impl UnitInferer<'_> {
                 if let Some(&submodel) = self.models.get(model_name)
                     && !active.contains(model_name)
                 {
-                    let subprefix = format!("{prefix}{ident}·");
+                    let subprefix = format!("{prefix}{}·", var.ident);
                     for input in inputs {
                         let src_var = format!("{}{}", prefix, input.src);
                         let dst_var = format!("{}{}", subprefix, input.dst);
@@ -1848,18 +1839,20 @@ pub(crate) fn infer(
     let units = UnitInferer {
         ctx: units_ctx,
         models,
-        time: Variable::Var {
+        time: Variable {
             ident: Ident::new("time"),
-            ast: None,
-            init_ast: None,
-            eqn: None,
             units: Some(time_units),
-            tables: vec![],
-            non_negative: false,
-            is_flow: false,
-            is_table_only: false,
+            eqn: None,
             errors: vec![],
             unit_errors: vec![],
+            kind: VarKind::Aux {
+                ast: None,
+                init_ast: None,
+                tables: vec![],
+                non_negative: false,
+                is_flow: false,
+                is_table_only: false,
+            },
         },
     };
 

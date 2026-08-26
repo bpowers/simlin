@@ -746,7 +746,7 @@ fn two_dim_non_sorted_axis_per_element_gf_row_major_flatten() {
 /// GH #907 semantic pin: a gf-only XMILE `<element>` (a `<gf>` with no
 /// `<eqn>`) imports as an EMPTY per-element equation. When EVERY element
 /// equation is empty and there is no EXCEPT default, the variable is a pure
-/// per-element table holder -- lookup-only (`var_is_lookup_only`, #606): it
+/// per-element table holder -- lookup-only (`variable::is_lookup_only`, #606): it
 /// is excluded from the results (it produces NO series of its own), and each
 /// element's table is reachable from consumers via `LOOKUP(g[elem], x)`.
 /// This is the arrayed analogue of a whole-variable empty-eqn-with-gf static

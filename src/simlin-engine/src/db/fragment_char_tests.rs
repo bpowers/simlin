@@ -2262,8 +2262,9 @@ fn cross_module_element_offsets(
 /// a cross-module reference `sub·output` lowers to
 /// `VarRef { name: sub, element_offset: <output's offset INSIDE producer> }`,
 /// because the parent's layout has a single entry spanning the whole instance
-/// and none for `sub·output`. `Context::submodel_offset_within` reads that
-/// offset out of `compute_layout(producer)`, which is already fixed before any
+/// and none for `sub·output`. `Context::resolve` reads that offset out of the
+/// module dependency's `ModelShape` (`db::model_shape`, which is
+/// `compute_layout(producer)` keyed by variable name), already fixed before any
 /// parent fragment compiles.
 ///
 /// So the parent's cached fragment is a function of the SUB-model's layout,
@@ -2627,7 +2628,7 @@ fn implicit_and_ltm_fragment_cache_granularity() {
 /// synthesizes no implicit variable at all and so never touches this edge. A
 /// variable whose equation calls `PREVIOUS` or `INIT` DOES synthesize one, and
 /// before the `model_implicit_var_by_name` projection every fragment in the
-/// model re-executed for it -- `collect_var_dependencies` read the whole
+/// model re-executed for it -- `explicit_fragment_input` read the whole
 /// implicit-var map to answer a per-name question.
 ///
 /// The `SMTH1` half is the honest limit, asserted as the CURRENT CONTRACT so

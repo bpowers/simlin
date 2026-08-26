@@ -40,7 +40,73 @@
 use std::collections::HashMap;
 
 use crate::datamodel;
-use crate::db::{Db, SourceProject, SourceVariable, datamodel_variable_from_source};
+use crate::db::{Db, SourceProject, SourceVariable, SourceVariableKind, variable_source};
+
+/// The kind-tagged `datamodel::Variable` form of a macro-marked model's body
+/// variable.
+///
+/// `MacroRegistry::build` walks whole `datamodel::Model`s -- it reads each body
+/// variable's ident, its equation text and whether it is a module instance --
+/// so the macro path is the one salsa consumer that needs the assembled enum
+/// rather than the borrowed [`crate::variable::VariableSource`] view every
+/// parse reads. It reads the same fields through that view, so there is still
+/// one statement of which salsa field means what.
+///
+/// The fields the salsa input does not carry -- `documentation`, `ai_state`,
+/// `uid` -- are reconstructed as empty/None: registry building ignores them.
+fn macro_body_variable(db: &dyn Db, var: SourceVariable) -> datamodel::Variable {
+    let src = variable_source(db, var);
+    let ident = src.ident.to_owned();
+    let equation = src.equation.into_owned();
+    let units = src.units.map(str::to_owned);
+    let mut compat = var.compat(db).clone();
+    compat.non_negative = src.non_negative;
+    compat.can_be_module_input = src.can_be_module_input;
+
+    match src.kind {
+        SourceVariableKind::Stock => datamodel::Variable::Stock(datamodel::Stock {
+            ident,
+            equation,
+            documentation: String::new(),
+            units,
+            inflows: src.inflows.to_vec(),
+            outflows: src.outflows.to_vec(),
+            ai_state: None,
+            uid: None,
+            compat,
+        }),
+        SourceVariableKind::Flow => datamodel::Variable::Flow(datamodel::Flow {
+            ident,
+            equation,
+            documentation: String::new(),
+            units,
+            gf: src.gf.cloned(),
+            ai_state: None,
+            uid: None,
+            compat,
+        }),
+        SourceVariableKind::Aux => datamodel::Variable::Aux(datamodel::Aux {
+            ident,
+            equation,
+            documentation: String::new(),
+            units,
+            gf: src.gf.cloned(),
+            ai_state: None,
+            uid: None,
+            compat,
+        }),
+        SourceVariableKind::Module => datamodel::Variable::Module(datamodel::Module {
+            ident,
+            model_name: src.model_name.to_owned(),
+            documentation: String::new(),
+            units,
+            references: src.module_refs.to_vec(),
+            compat,
+            ai_state: None,
+            uid: None,
+        }),
+    }
+}
 
 /// The result of building the per-project macro registry: the (possibly
 /// empty) resolution registry plus the build error, if any.
@@ -139,7 +205,7 @@ fn reconstruct_project_models(db: &dyn Db, project: SourceProject) -> Vec<datamo
                         source_model
                             .variables(db)
                             .values()
-                            .map(|sv| datamodel_variable_from_source(db, *sv))
+                            .map(|sv| macro_body_variable(db, *sv))
                             .collect()
                     })
                     .unwrap_or_default()
@@ -266,7 +332,7 @@ pub(crate) fn project_macro_registry(db: &dyn Db, project: SourceProject) -> Mac
         let variables: Vec<datamodel::Variable> = source_model
             .variables(db)
             .values()
-            .map(|sv| datamodel_variable_from_source(db, *sv))
+            .map(|sv| macro_body_variable(db, *sv))
             .collect();
         models.push(datamodel::Model {
             name: source_model.name(db).clone(),

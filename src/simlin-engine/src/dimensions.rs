@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 use smallvec::SmallVec;
 
-use crate::common::{CanonicalDimensionName, CanonicalElementName, IdentMap};
+use crate::common::{Canonical, CanonicalDimensionName, CanonicalElementName, Ident, IdentMap};
 use crate::datamodel;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -33,15 +33,26 @@ pub struct DimensionMappingInfo {
 }
 
 impl NamedDimension {
-    /// Get the 0-based index of an element by name using O(1) hash lookup.
+    /// The 0-based index of the element an ALREADY-CANONICAL identifier names,
+    /// by O(1) hash lookup.
     ///
-    /// The input should be in canonical form (lowercase, spaces as underscores).
-    /// This is more efficient than iterating through `elements` for large dimensions.
+    /// Typed on the caller's side rather than trusting a `&str`: an
+    /// `Ident<Canonical>` cannot need canonicalizing, so this is the whole
+    /// lookup -- no case folding, no allocation. Probing by `&str`
+    /// (`CanonicalElementName: Borrow<str>`) rather than building a
+    /// `CanonicalElementName` is deliberate too: a lookup has no reason to take
+    /// a shard of the global interner and install an `Arc` payload for a name
+    /// it is only asking about.
+    pub fn index_of(&self, element: &Ident<Canonical>) -> Option<usize> {
+        self.indexed_elements
+            .get(element.as_str())
+            .map(|&idx| idx - 1) // Convert from 1-based to 0-based
+    }
+
+    /// [`Self::index_of`] for a name that is NOT known to be canonical yet: it
+    /// case-folds first. A caller already holding an `Ident<Canonical>` should
+    /// call `index_of` and skip that work.
     pub fn get_element_index(&self, element: &str) -> Option<usize> {
-        // Probe by `&str` (`CanonicalElementName: Borrow<str>`) rather than
-        // building a `CanonicalElementName`: a lookup has no reason to take a
-        // shard of the global interner and install an `Arc` payload for a name
-        // it is only asking about.
         self.indexed_elements
             .get(crate::common::canonicalize(element).as_ref())
             .map(|&idx| idx - 1) // Convert from 1-based to 0-based

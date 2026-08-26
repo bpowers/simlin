@@ -394,7 +394,7 @@ fn test_sync_sim_specs_dt_reciprocal() {
 #[test]
 fn test_parse_source_variable_scalar() {
     use crate::ast::Expr0;
-    use crate::variable::Variable;
+    use crate::variable::VarKind;
 
     let db = SimlinDb::default();
     let project = simple_project();
@@ -404,7 +404,7 @@ fn test_parse_source_variable_scalar() {
     let parsed = parse_var_no_module_ctx(&db, pop_var, result.project);
 
     // Should parse to a Var (aux) with equation "100"
-    assert!(matches!(&parsed.variable, Variable::Var { .. }));
+    assert!(matches!(&parsed.variable.kind, VarKind::Aux { .. }));
     assert_eq!(parsed.variable.ident(), "population");
 
     // Should have a valid AST with a constant 100.0
@@ -419,7 +419,7 @@ fn test_parse_source_variable_scalar() {
 
 #[test]
 fn test_parse_source_variable_stock() {
-    use crate::variable::Variable;
+    use crate::variable::VarKind;
 
     let db = SimlinDb::default();
     let project = datamodel::Project {
@@ -480,15 +480,15 @@ fn test_parse_source_variable_stock() {
     // Parse the stock variable
     let stock_var = result.models["main"].variables["inventory"].source;
     let parsed = parse_var_no_module_ctx(&db, stock_var, result.project);
-    assert!(matches!(&parsed.variable, Variable::Stock { .. }));
+    assert!(parsed.variable.is_stock());
     assert_eq!(parsed.variable.ident(), "inventory");
 
     // Parse a flow variable
     let flow_var = result.models["main"].variables["production"].source;
     let parsed = parse_var_no_module_ctx(&db, flow_var, result.project);
     assert!(matches!(
-        &parsed.variable,
-        Variable::Var { is_flow: true, .. }
+        &parsed.variable.kind,
+        VarKind::Aux { is_flow: true, .. }
     ));
     assert_eq!(parsed.variable.ident(), "production");
 }
@@ -2862,5 +2862,334 @@ fn test_incremental_sync_updates_module_visibility() {
         module_var.compat(&db).visibility,
         datamodel::Visibility::Public,
         "incremental sync should propagate module visibility changes"
+    );
+}
+
+/// The two producers of a [`crate::variable::VariableSource`] -- the salsa
+/// inputs (`db::input::variable_source`) and a `datamodel::Variable` -- yield
+/// the same parse.
+///
+/// They are two independent field extractions over two representations of the
+/// same variable, so their agreement is a claim, not a construction: never let
+/// one of them grow a field rule the other does not have. Everything downstream
+/// of a parse -- the runlist, the layout, the bytecode -- is keyed on what the
+/// parse produced, so a disagreement here is a model that compiles differently
+/// depending on which entry point read it.
+///
+/// The fixture is production-shaped -- one whole `datamodel::Project` through
+/// `sync_from_datamodel` -- rather than a hand-built `SourceVariable`, so what
+/// is compared is what sync really stores. The loop asserts every
+/// `SourceVariableKind` was seen, so a fixture that stopped producing one
+/// cannot make this vacuous.
+///
+/// The rows cover the four kinds, and hold NON-default every field on which the
+/// two producers carry an independent per-variant rule. A field left at its
+/// default cannot catch a producer that stopped reading it, and two producers
+/// that BOTH stopped reading one agree vacuously -- so each non-default value
+/// below is also asserted in the parse output after the loop:
+///
+/// * `non_negative` -- its stock arm (`level`), its flow arm (`fill`), and the
+///   aux arm both producers deliberately DROP (`rate` sets the flag and both
+///   must still report `false`, which is what makes the drop agreed rather
+///   than accidental);
+/// * `gf` -- its flow arm (`fill`: a table beside a REAL equation, the WITH
+///   LOOKUP shape, so `tables` is non-empty while `is_table_only` stays false)
+///   and its aux arm (`demand_table`: a table beside an EMPTY equation, so it
+///   is lookup-only and the `EmptyEquation` diagnostic is suppressed);
+/// * `active_initial` -- `fill`, read only on the initial pass, so a producer
+///   that drops it yields `init_ast: None`;
+/// * `can_be_module_input` -- `imported_input`, the OTHER `EmptyEquation`
+///   suppression path (an empty equation with no table at all);
+/// * `inflows`/`outflows` -- `level`'s two lists are both non-empty and
+///   different, so a producer reading one for the other is caught;
+/// * `module_refs`/`model_name` -- the `sub` module row.
+#[test]
+fn variable_source_producers_agree_for_every_source_variable_kind() {
+    use crate::db::SourceVariableKind;
+    use crate::variable::{ParseContext, VarKind, VariableSource, parse_var};
+    use std::collections::{HashMap, HashSet};
+
+    type ParsedVar = crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0>;
+
+    fn lookup_table() -> datamodel::GraphicalFunction {
+        datamodel::GraphicalFunction {
+            kind: datamodel::GraphicalFunctionKind::Continuous,
+            x_points: Some(vec![0.0, 1.0, 2.0]),
+            y_points: vec![0.0, 5.0, 10.0],
+            x_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 2.0 },
+            y_scale: datamodel::GraphicalFunctionScale {
+                min: 0.0,
+                max: 10.0,
+            },
+        }
+    }
+
+    let sub = crate::testutils::x_model("sub", vec![crate::testutils::x_aux("port", "1", None)]);
+    let main = crate::testutils::x_model(
+        "main",
+        vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "level".to_string(),
+                equation: datamodel::Equation::Scalar("7".to_string()),
+                documentation: String::new(),
+                units: Some("widgets".to_string()),
+                inflows: vec!["fill".to_string()],
+                outflows: vec!["drain".to_string()],
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat {
+                    non_negative: true,
+                    ..datamodel::Compat::default()
+                },
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "fill".to_string(),
+                equation: datamodel::Equation::Scalar("rate * 2".to_string()),
+                documentation: String::new(),
+                units: Some("widgets/time".to_string()),
+                gf: Some(lookup_table()),
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat {
+                    non_negative: true,
+                    active_initial: Some("3".to_string()),
+                    ..datamodel::Compat::default()
+                },
+            }),
+            crate::testutils::x_flow("drain", "1", Some("widgets/time")),
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "rate".to_string(),
+                equation: datamodel::Equation::Scalar("level / 2".to_string()),
+                documentation: String::new(),
+                units: Some("widgets".to_string()),
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat {
+                    non_negative: true,
+                    ..datamodel::Compat::default()
+                },
+            }),
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "demand_table".to_string(),
+                equation: datamodel::Equation::Scalar(String::new()),
+                documentation: String::new(),
+                units: None,
+                gf: Some(lookup_table()),
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "imported_input".to_string(),
+                equation: datamodel::Equation::Scalar(String::new()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat {
+                    can_be_module_input: true,
+                    ..datamodel::Compat::default()
+                },
+            }),
+            crate::testutils::x_module("sub", &[("rate", "sub.port")], None),
+        ],
+    );
+    let project = datamodel::Project {
+        models: vec![main.clone(), sub],
+        ..simple_project()
+    };
+
+    let db = SimlinDb::default();
+    let synced = sync_from_datamodel(&db, &project);
+
+    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
+    let dim_ctx = crate::dimensions::DimensionsContext::default();
+    let ctx = ParseContext::new(&dim_ctx, &units_ctx);
+
+    let mut seen: HashSet<SourceVariableKind> = HashSet::new();
+    let mut parsed: HashMap<&str, ParsedVar> = HashMap::new();
+    for dm_var in &main.variables {
+        let source_var = synced.models["main"].variables[dm_var.get_ident()].source;
+
+        let mut implicit_from_salsa = Vec::new();
+        let from_salsa: ParsedVar = parse_var(
+            &ctx,
+            crate::db::variable_source(&db, source_var),
+            &mut implicit_from_salsa,
+            |mi| Ok(Some(mi.clone())),
+        );
+
+        let mut implicit_from_datamodel = Vec::new();
+        let from_datamodel: ParsedVar =
+            parse_var(&ctx, dm_var, &mut implicit_from_datamodel, |mi| {
+                Ok(Some(mi.clone()))
+            });
+
+        assert!(
+            from_salsa == from_datamodel,
+            "the two VariableSource producers disagreed on {}",
+            dm_var.get_ident()
+        );
+        assert_eq!(
+            implicit_from_salsa,
+            implicit_from_datamodel,
+            "the two VariableSource producers synthesized different implicit vars for {}",
+            dm_var.get_ident()
+        );
+        seen.insert(VariableSource::from(dm_var).kind);
+        parsed.insert(dm_var.get_ident(), from_salsa);
+    }
+
+    assert_eq!(
+        seen,
+        HashSet::from([
+            SourceVariableKind::Stock,
+            SourceVariableKind::Flow,
+            SourceVariableKind::Aux,
+            SourceVariableKind::Module,
+        ]),
+        "the fixture must exercise every SourceVariableKind"
+    );
+
+    // Every non-default field above reached the parse. Without this half, a
+    // field that BOTH producers stopped reading would still compare equal.
+    match &parsed["level"].kind {
+        VarKind::Stock {
+            inflows,
+            outflows,
+            non_negative,
+            ..
+        } => {
+            assert!(*non_negative, "the stock arm of `non_negative`");
+            assert_ne!(inflows, outflows, "`level`'s two flow lists must differ");
+            assert_eq!(inflows.len(), 1, "`level` has one inflow");
+            assert_eq!(outflows.len(), 1, "`level` has one outflow");
+        }
+        _ => panic!("`level` did not parse as a stock"),
+    }
+    match &parsed["fill"].kind {
+        VarKind::Aux {
+            init_ast,
+            tables,
+            non_negative,
+            is_flow,
+            is_table_only,
+            ..
+        } => {
+            assert!(*is_flow, "`fill` is a flow");
+            assert!(*non_negative, "the flow arm of `non_negative`");
+            assert!(
+                init_ast.is_some(),
+                "`compat.active_initial` must reach the initial pass"
+            );
+            assert_eq!(tables.len(), 1, "the flow arm of `gf`");
+            assert!(
+                !*is_table_only,
+                "a table beside a real equation is WITH LOOKUP, not a lookup-only table"
+            );
+        }
+        _ => panic!("`fill` did not parse as a flow"),
+    }
+    match &parsed["rate"].kind {
+        VarKind::Aux { non_negative, .. } => assert!(
+            !*non_negative,
+            "an aux's `compat.non_negative` is dropped by BOTH producers"
+        ),
+        _ => panic!("`rate` did not parse as an aux"),
+    }
+    match &parsed["demand_table"].kind {
+        VarKind::Aux {
+            tables,
+            is_table_only,
+            ..
+        } => {
+            assert_eq!(tables.len(), 1, "the aux arm of `gf`");
+            assert!(
+                *is_table_only,
+                "an empty equation beside a table is a lookup-only table"
+            );
+        }
+        _ => panic!("`demand_table` did not parse as an aux"),
+    }
+    assert!(
+        parsed["demand_table"].errors.is_empty(),
+        "a lookup-only table's empty equation is not an EmptyEquation error"
+    );
+    assert!(
+        parsed["imported_input"].errors.is_empty(),
+        "`can_be_module_input` suppresses EmptyEquation on an empty equation"
+    );
+    assert_eq!(
+        parsed["sub"].eqn, None,
+        "a module instance has no equation of its own"
+    );
+    match &parsed["sub"].kind {
+        VarKind::Module { model_name, inputs } => {
+            assert_eq!(model_name.as_str(), "sub");
+            assert_eq!(inputs.len(), 1, "the module's one wiring reference");
+        }
+        _ => panic!("`sub` did not parse as a module"),
+    }
+}
+
+/// The ONE field the salsa producer rewrites rather than borrows: a conveyor
+/// stock's §7.2 explicit init list becomes the constant raw-sum placeholder, so
+/// the parse-only diagnostic path (which sees the UN-expanded project) accepts
+/// exactly the lists the runtime accepts instead of flagging a comma list as a
+/// parse error.
+///
+/// The `datamodel::Variable` producer deliberately does NOT apply it: that path
+/// parses synthesized implicit variables and the `ModelStage0` oracle, neither
+/// of which is ever a conveyor, and the ordinary compile path hard-rejects an
+/// un-expanded conveyor marker before reading the equation at all.
+#[test]
+fn variable_source_rewrites_a_conveyor_init_list_only_on_the_salsa_path() {
+    use crate::variable::VariableSource;
+
+    let belt = datamodel::Variable::Stock(datamodel::Stock {
+        ident: "belt".to_string(),
+        equation: datamodel::Equation::Scalar("100, 200, 300".to_string()),
+        documentation: String::new(),
+        units: None,
+        inflows: vec![],
+        outflows: vec![],
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat {
+            conveyor: Some(datamodel::Conveyor {
+                transit_time: "3".to_string(),
+                capacity: None,
+                inflow_limit: None,
+                sample: None,
+                arrest: None,
+                discrete: false,
+                batch_integrity: false,
+                one_at_a_time: false,
+                exponential_leak: false,
+                ignore_earlier_zone_losses: false,
+            }),
+            ..datamodel::Compat::default()
+        },
+    });
+    let project = datamodel::Project {
+        models: vec![crate::testutils::x_model("main", vec![belt.clone()])],
+        ..simple_project()
+    };
+
+    let db = SimlinDb::default();
+    let synced = sync_from_datamodel(&db, &project);
+    let source_var = synced.models["main"].variables["belt"].source;
+
+    assert_eq!(
+        *crate::db::variable_source(&db, source_var).equation,
+        datamodel::Equation::Scalar("600".to_string()),
+        "the salsa producer substitutes the list's raw sum"
+    );
+    assert_eq!(
+        *VariableSource::from(&belt).equation,
+        datamodel::Equation::Scalar("100, 200, 300".to_string()),
+        "the datamodel producer leaves the equation as written"
     );
 }

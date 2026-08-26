@@ -62,8 +62,11 @@ branch).
    `keep_dt_dep` are replaced by reading the structured fields.
 6. **One `Variable`.** `Variable { ident, units, eqn, errors, unit_errors, kind }`
    with a `VarKind` enum. Parsing reads a borrowed `VariableSource<'_>` over
-   `SourceVariable` fields; `datamodel_variable_from_source` is gone, as is the
-   duplicated field extraction in `db/sync.rs`.
+   `SourceVariable` fields; `datamodel_variable_from_source` is gone from every
+   parse path, as is the duplicated field extraction in `db/sync.rs`. One
+   re-assembly is left, and is confined to the macro-registry build
+   (`db::macro_registry::macro_body_variable`), whose consumer
+   `MacroRegistry::build` walks whole `datamodel::Model`s.
 7. **Assembly owns no second copy.** The initials phase is renumbered by
    `FragmentMerger` (phase-local literal pool mode), the results-offset map is
    derived from `VariableLayout`, the module-instance input-set extraction has
@@ -265,20 +268,54 @@ identified by its shape), and `ModelShape` rather than `VariableLayout` because
 the resolver needs each sub-model variable's dimensions and nested-module
 identity, which a layout does not carry.
 
-**Variable (`variable.rs`, Phase 4).**
+**Variable (`variable.rs`, Phase 4).** As implemented:
 
 ```rust
 pub struct Variable<MI = ModuleInput, E = Expr2> {
-    pub ident, pub units, pub eqn, pub errors, pub unit_errors,
+    pub ident: Ident<Canonical>, pub units: Option<datamodel::UnitMap>,
+    pub eqn: Option<datamodel::Equation>,          // None for a module instance
+    pub errors: Vec<EquationError>, pub unit_errors: Vec<UnitError>,
     pub kind: VarKind<MI, E>,
 }
-pub enum VarKind<MI, E> {
-    Stock { init_ast: Option<Ast<E>>, inflows, outflows, non_negative },
-    Aux   { ast: Option<Ast<E>>, init_ast: Option<Ast<E>>, tables, is_flow, is_table_only, non_negative },
-    Module { model_name, inputs: Vec<MI> },
+pub enum VarKind<MI = ModuleInput, E = Expr2> {
+    Stock { init_ast: Option<Ast<E>>, inflows: Vec<Ident<Canonical>>,
+            outflows: Vec<Ident<Canonical>>, non_negative: bool },
+    Aux   { ast: Option<Ast<E>>, init_ast: Option<Ast<E>>, tables: Vec<Table>,
+            non_negative: bool, is_flow: bool, is_table_only: bool },
+    Module { model_name: Ident<Canonical>, inputs: Vec<MI> },
 }
-pub struct VariableSource<'a> { /* borrowed SourceVariable fields: ident, equation, gf, units, kind, inflows, outflows, module_refs, compat */ }
+pub struct VariableSource<'a> {                    // borrowed; two producers
+    pub ident: &'a str, pub equation: Cow<'a, datamodel::Equation>,
+    pub kind: SourceVariableKind, pub units: Option<&'a str>,
+    pub gf: Option<&'a datamodel::GraphicalFunction>,
+    pub inflows: &'a [String], pub outflows: &'a [String],
+    pub module_refs: &'a [datamodel::ModuleReference], pub model_name: &'a str,
+    pub non_negative: bool, pub can_be_module_input: bool,
+    pub active_initial: Option<&'a str>,
+}
+pub struct ParseContext<'a> {                      // was nine parameters
+    pub dimensions: &'a DimensionsContext, pub units_ctx: &'a units::Context,
+    pub module_idents: Option<&'a HashSet<Ident<Canonical>>>,
+    pub model_var_names: Option<&'a HashSet<Ident<Canonical>>>,
+    pub macro_registry: Option<&'a MacroRegistry>,
+    pub enclosing_model: Option<&'a str>,
+}
+impl<'a> ParseContext<'a> { pub fn new(dimensions, units_ctx) -> Self }   // no model context
+pub fn parse_var<'a, MI, F>(ctx: &ParseContext<'_>, v: impl Into<VariableSource<'a>>,
+                            implicit_vars: &mut Vec<datamodel::Variable>, module_input_mapper: F)
+                            -> Variable<MI, Expr0>;
+pub fn variable_source(db: &dyn Db, var: SourceVariable) -> VariableSource<'_>;  // db/input.rs
+impl<'a> From<&'a datamodel::Variable> for VariableSource<'a> { .. }
 ```
+
+`eqn` moves onto the struct even though a module has none (`None` there), because
+every consumer that reads it already declined for modules. `equation` is the one
+`Cow` field: the salsa producer substitutes a conveyor stock's §7.2 explicit init
+list with its constant raw-sum placeholder, which the `datamodel::Variable`
+producer deliberately does not (it parses synthesized implicit variables and the
+`ModelStage0` oracle, neither of which is ever a conveyor). `parse_var` and
+`parse_var_with_module_context` collapse into the one `parse_var`; `ParseContext::new`
+is the former's no-model-context spelling.
 
 **Dimension matcher (`dimensions.rs`, Phase 6).**
 
@@ -431,10 +468,13 @@ listed twins have one owner.
 `project.rs`, `ast/mod.rs` (one `paren_if_necessary`, one LaTeX printer
 parameterized by expression tier), `variable::var_is_lookup_only` and
 `db::source_var_is_table_only` -> one predicate over the shared equation shape,
-`compiler/context.rs` (`var_ref`/`submodel_offset_within`/`get_submodel_metadata`
--> one `resolve_qualified`), `canonicalize` calls on already-canonical inputs
-in `ClassifyVisitor`, `normalize_subscripts3`, `NamedDimension::get_element_index`
-replaced by typed inputs.
+the redundant `canonicalize` calls on already-canonical inputs in
+`ClassifyVisitor`, and `NamedDimension::index_of` for the callers that already
+hold an `Ident<Canonical>` (the case-folding `get_element_index` stays for the
+rest). The `compiler/context.rs` reference resolver is Phase 3's
+`Context::resolve`, not this phase's, and `normalize_subscripts3`'s
+canonicalize-on-canonical calls are deferred to Phase 6a, which rewrites
+`compiler/subscript.rs`'s inline matching anyway.
 
 **Dependencies:** Phase 3 (the compiler no longer takes `&Variable`, so the
 restructure touches parse/model only).
@@ -600,7 +640,8 @@ same-session null control is not recorded.
 `compile_project_incremental`. A test that needs a variable's lowered form
 reads it through the production per-variable lowering
 (`test_common::TestProject::flow_exprs`, over
-`db::var_fragment::lower_var_fragment`); a test that needs a refusal's
+`db::var_fragment::explicit_fragment_input` +
+`compiler::fragment::lower_fragment`); a test that needs a refusal's
 location reads `TestProject::error_diagnostics`; loop-discovery tests drive
 `ltm_finding::discover_loops_with_graph` with the graph and context
 `analysis::analyze_model` builds. A second whole-model path would be a second
@@ -792,6 +833,47 @@ emitter is its constructor's `FragmentInput`, lowered and emitted
 (`db::fragment_input_tests`, one row per constructor), the fragment and LTM
 goldens are untouched, and the determinism suites are green.
 
+**Phase 4 semantic divergences.** Making one `Variable`, one borrowed parse
+input and one owner per twin changed nothing observable: C-LEARN's artifacts are
+byte-identical plain and under `CLEARN_LTM=1`, and every fragment and LTM golden
+is unchanged. One latent DISAGREEMENT between two twins is closed rather than
+preserved, and it is worth naming because the two verdicts feed different halves
+of the compiler:
+
+1. "Is this variable a standalone lookup-only table" had two implementations --
+   `variable::var_is_lookup_only`, read by `parse_var` to set
+   `VarKind::Aux::is_table_only` (which `Var::new` consults), and
+   `db::source_var_is_table_only`, read by the layout and the dependency graph.
+   They agreed on every shape except one: a per-element arrayed table holder
+   whose declared dimension has ZERO elements. The parse-side twin derived "has
+   a table" from the tables `build_tables` actually produced, which for that
+   variable is an empty list, so it answered `false`; the salsa-side twin
+   derived it from the presence of a `gf` on the variable or on any element, so
+   it answered `true`. The layout therefore reserved no value slot for a
+   variable the fragment compiler would still try to compile. The one
+   `variable::is_lookup_only(eqn, gf)` both now call answers `true`, the
+   salsa side's reading, so layout and compilation agree. (That a zero-element
+   dimension yields an empty table list is the crate's own recorded behaviour:
+   `dimensions::subscript_iter_tests::test_subscript_offset_iter` pins
+   `[empty_dim] -> []`, and `reorder_arrayed_element_tables` collects that
+   iterator.) No generator produces a zero-element dimension, which is why the
+   disagreement had never fired.
+   Pinned by `variable::is_lookup_only_tests::is_lookup_only_covers_every_equation_shape`,
+   whose rows are the cross product of `datamodel::Equation`'s three variants,
+   the equation contents (real / empty / whitespace / the legacy `"0+0"` MDL
+   sentinel), and the two places a graphical function can sit.
+
+One intended asymmetry survives between the two `VariableSource` producers, and
+is pinned rather than removed: the salsa producer substitutes a conveyor stock's
+§7.2 explicit init list with the constant raw-sum placeholder
+(`conveyor_compile::explicit_init_list`) so the parse-only diagnostic path
+accepts exactly the lists the runtime accepts, while the `datamodel::Variable`
+producer leaves the equation as written -- it parses synthesized implicit
+variables and the `ModelStage0` oracle, neither of which is ever a conveyor.
+`db::tests::variable_source_rewrites_a_conveyor_init_list_only_on_the_salsa_path`
+states it; `variable_source_producers_agree_for_every_source_variable_kind`
+pins that everything else agrees, one row per `SourceVariableKind`.
+
 **Risks.** Phase 6(b) and Phase 7 are the two places where artifact shape
 changes are expected; both rely on the corpus as oracle and must report opcode
 and temp deltas in the ledger. Phase 7 changes salsa keying; the determinism
@@ -812,3 +894,4 @@ hash is not available to it.
 | 2b | `engine: retire the unemitted opcode families` | 10.365 G (median of 5; range 10.355-10.369), +0.19% against the Phase 2a commit re-measured in the same session (10.345 G, median of 5, range 10.341-10.347; interleaved pairs +0.17 / +0.08 / +0.16%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN: every count above, the 371 names and 7 modules, the full opcode histogram and the post-fusion stream counts (the `bytecode_profile` block is byte-identical); same channel and flags as the baseline row. The compile measurement embeds one VM run, and the delta is that run's: on the run channel (`CLEARN_PROFILE=run CLEARN_RUN_ITERS=20`, retired instructions, same binaries) the identical artifact executes 31.936 G against 31.654 G (medians of 5; interleaved pairs +0.87 / +0.92 / +0.90%), +0.9% or about 13.4 M instructions per run, which is 13.4 M of the compile channel's 19.8 M and leaves a +0.06% residual inside that channel's floor. The run delta is dispatch-loop codegen, not emitted work: the opcode stream is identical, `eval_bytecode` lost sixteen arms and shrank from 63,380 to 52,520 bytes, and a sampled profile of the run loop places the delta in `eval_bytecode` and the `RuntimeView` helpers LLVM inlines into or splits out of it (`offset_for_iter_index` folded in, `dense_linear_start` split out) -- the codegen-perturbation class `engine-performance.md` "Measuring a change" records for this function. Accepted by the owner as a simplicity trade and not investigated further; a perf pass follows this branch. Sixteen `SymbolicOpcode` variants, their `Opcode` twins, VM and wasm arms, `ByteCodeContext.arrays` / `.subdim_relations`, and the `BeginIter` flat-offset precompute whose only reader was `LoadIterElement` are gone; the `dead_code` lint, denied under clippy, is the standing pin (GH #612). Semantics: the engine suite (lib 5657, integration 767), the wasm parity corpus and the 12-repeat determinism suites are green, and 43 hand-written probes (the Phase 1 and 2a probe sets plus the array corpus models) simulate byte-identically, exit codes included, on the pre-change and post-change CLIs |
 | 5a | `engine: one merger and one slot order for assembly` | 10.264 G (median of 5; range 10.260-10.281), -0.83% against the Phase 2c tree (`ca39c1c6` plus the staged monolith-deletion patch) re-measured in the same session (10.350 G, median of 5, range 10.339-10.353; interleaved pairs -0.85 / -0.82 / -0.66%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: every count above, the 371 names and 7 modules, the full opcode histogram and the post-fusion stream counts (both `bytecode_profile` blocks byte-identical), and the results-offset map key for key and slot for slot (5058 keys plain, 16073 under LTM); same channel and flags as the baseline row. The saving is deleted assembly work: one `FragmentMerger` per module absorbs each fragment once (`standalone_program` for every initial, `concatenate` for the flows and the stocks, `into_side_channels` for the module's one table set), where assembly ran a GF-dedup pass, a context-aggregation pass and a per-phase resource-count pass over every fragment and a hand-rolled initials renumber beside them; and the fragment map borrows the salsa-cached fragments instead of deep-cloning each into a per-assembly `HashMap`. The results-offset map is `compute_layout` flattened (`db::layout::flattened_offsets`), and `assemble_module` emits each program through one `program_fragments` over every source (explicit, implicit, LTM synthetic, LTM implicit), pinned by `db::assemble_tests`. One corrected shape, not in the corpus: a sub-model holding a lookup-only table shifted every parent variable after the module instance one slot in the results map (Additional Considerations, "Phase 5a semantic divergences") Phase 5's remainder is part (b), the error-channel half (DoD 8); the module-instance input-set owner lands with Phase 3. |
 | 3 | `engine: one fragment compiler over dependency shapes` | 8.974 G (median of 5; range 8.971-8.977), -13.3% against the Phase 2c tree re-measured in the same session (10.347 G, median of 5, range 10.337-10.356; interleaved pairs -13.31 / -13.20 / -13.23 / -13.22 / -13.24%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN: every count above, the 371 names and 7 modules, the full opcode histogram and the post-fusion stream counts -- the plain `bytecode_profile` block is byte-identical, and so is the LTM one (30123 slots, 908377 / 1477 / 28514 opcodes, 16741 literals, 441 temps, 2866 views); same channel and flags as the baseline row. The saving is deleted per-fragment work, none of it output-bearing: the explicit emitter lowers only the phases the variable's runlist membership admits (it lowered both phases of every variable and discarded the ungated one -- ~400 initial-phase lowerings on C-LEARN); an implicit helper builds its `FragmentInput` once instead of re-running the parse -> lower -> dependency-walk prologue once per gated phase; a sub-model's shape is one memoized `model_shape` per model instead of a stub symbol table rebuilt, arena and all, inside every fragment that reads the module; and no fragment clones `model_module_map`. One corrected shape, not in the corpus: a stdlib call whose hoisted argument reads a module output compiles and simulates (Additional Considerations, "Phase 3 semantic divergences"). The engine suite (lib 5656, integration 767), the wasm parity corpus, the 12-repeat determinism suites and every fragment/LTM golden are green with no regeneration |
+| 4 | `engine: one Variable shape and a borrowed parse input` | 8.799 G (median of 5; range 8.794-8.804), -1.67% against the Phase 3 tree re-measured in the same session (8.949 G, median of 5, range 8.938-8.951; interleaved pairs -1.68 / -1.69 / -1.69 / -1.50 / -1.64%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: every count above, the 371 names and 7 modules, the full opcode histogram and the post-fusion stream counts -- both `bytecode_profile` blocks are byte-identical; same channel and flags as the baseline row. The saving is deleted per-parse work: `datamodel_variable_from_source` rebuilt and deep-cloned a kind-tagged `datamodel::Variable` (equation, gf, units, flow lists, module references, compat) on every parse of every variable, and `parse_var` then cloned the equation again out of it; the parse now reads a borrowed `VariableSource<'_>` over the salsa inputs. `Variable` is one struct over a `VarKind` enum, so `model::lower_variable` maps over `kind` instead of hand-copying 9-11 fields per variant, and the five repeated fields are stated once. Twins retired: one `paren_if_necessary` over a shallow `NodeShape` classification shared by `print_eqn` and both LaTeX printers, one `render_latex` walker over a `LatexTier` trait replacing `latex_eqn`/`latex_eqn_expr0`/`latex_eqn_expr0_annotated`, one `is_lookup_only(eqn, gf)` replacing `variable::var_is_lookup_only` + `db::source_var_is_table_only`'s body, one `SourceVariableFields::from_datamodel` behind `db/sync.rs`'s fresh and incremental paths, and `NamedDimension::index_of` for callers already holding an `Ident<Canonical>`. One re-assembly of a kind-tagged `datamodel::Variable` survives, outside every parse path: `db::macro_registry::macro_body_variable`, whose consumer `MacroRegistry::build` walks whole `datamodel::Model`s. One corrected shape, not in the corpus: a per-element table holder over a zero-element dimension is lookup-only on the parse side too, so layout and `Var::new` agree (Additional Considerations, "Phase 4 semantic divergences"). Otherwise no semantic divergence: the engine suite (lib 5655, integration 767), the 12-repeat determinism suites and every fragment/LTM golden are green with no regeneration |

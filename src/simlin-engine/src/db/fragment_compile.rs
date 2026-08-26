@@ -378,13 +378,11 @@ fn lower_implicit_var<'db>(
     let units_ctx = project_units_context(db, project);
 
     let mut dummy_implicits = Vec::new();
-    let parsed_implicit = crate::variable::parse_var(
-        dim_context,
-        implicit_dm_var,
-        &mut dummy_implicits,
-        units_ctx,
-        |mi| Ok(Some(mi.clone())),
-    );
+    let ctx = crate::variable::ParseContext::new(dim_context, units_ctx);
+    let parsed_implicit =
+        crate::variable::parse_var(&ctx, implicit_dm_var, &mut dummy_implicits, |mi| {
+            Ok(Some(mi.clone()))
+        });
 
     if parsed_implicit
         .equation_errors()
@@ -503,9 +501,9 @@ pub(crate) fn implicit_fragment_input<'db>(
         })
         .map(String::as_str)
         .collect();
-    if let crate::variable::Variable::Stock {
+    if let crate::variable::VarKind::Stock {
         inflows, outflows, ..
-    } = &lowered
+    } = &lowered.kind
     {
         all_names.extend(inflows.iter().chain(outflows.iter()).map(Ident::as_str));
     }

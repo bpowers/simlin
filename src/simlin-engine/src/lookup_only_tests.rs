@@ -6,7 +6,7 @@
 // This is a test orchestrator: it builds datamodel projects (data), drives the
 // salsa incremental compile + the bytecode VM (I/O-ish orchestration), and
 // asserts the resulting saved series. The pure logic under test lives in
-// `variable::var_is_lookup_only` / `db::source_var_is_table_only`.
+// `variable::is_lookup_only` / `db::source_var_is_table_only`.
 
 //! Standalone graphical-function ("lookup-only") variable semantics (#606).
 //!

@@ -435,7 +435,7 @@ fn implicit_helper_signatures(dm: &datamodel::Project, model_name: &str, var: &s
 ///
 /// This began as an assumption, was disproved, and is now enforced -- the
 /// sequence is worth keeping because the middle step is the defect.
-/// `parse_var_with_module_context` runs `parse_and_lower_eqn` TWICE over one
+/// `parse_var` runs `parse_and_lower_eqn` TWICE over one
 /// variable, once per phase, and both passes name their helpers from a counter
 /// that restarts at zero. For a `Scalar`/`ApplyToAll` equation the initial pass
 /// returns nothing unless the variable carries an `ACTIVE INITIAL`; the
@@ -451,7 +451,7 @@ fn implicit_helper_signatures(dm: &datamodel::Project, model_name: &str, var: &s
 /// pinned as a loud failure by
 /// [`an_active_initial_that_collides_a_helper_name_is_refused`].
 ///
-/// `variable::parse_var_with_module_context` now MERGES across the phases
+/// `variable::parse_var` now MERGES across the phases
 /// instead of appending, so a byte-identical repeat collapses and a genuine
 /// collision is an error. Uniqueness is therefore a property of the parse, and
 /// this test is what says so for every route into `implicit_vars`.
@@ -596,7 +596,7 @@ fn a_cross_context_helper_name_collision_is_confined_to_a_failing_compile() {
 /// Two phases must not be able to claim one helper name with different bodies.
 ///
 /// The regression test for the cross-phase merge in
-/// `variable::parse_var_with_module_context`. `v`'s dt equation and its
+/// `variable::parse_var`. `v`'s dt equation and its
 /// `ACTIVE INITIAL` both call `SMTH1`, so both passes mint `$⁚v⁚0⁚arg0` -- with
 /// `driver * 2` in one and `driver * 100` in the other. Before the merge this
 /// project COMPILED, keeping only the initial pass's helper, so the dt phase

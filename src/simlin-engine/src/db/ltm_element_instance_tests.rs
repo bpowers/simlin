@@ -581,7 +581,7 @@ fn an_arrayed_capture_helper_is_not_treated_as_element_bound() {
 /// builder can give an arrayed implicit helper its real array shape -- its own
 /// rustdoc says so, naming the GH #541 helper as the reason. The LTM fragment
 /// compiler consulted it for LTM-side parse helpers and NOT for the model's own
-/// implicit vars, which got a scalar `Variable::Var` stub with `ast: None`. A
+/// implicit vars, which got a scalar `VarKind::Aux` stub with `ast: None`. A
 /// consuming `helper[dim·elem]` subscript then failed lowering with "expected
 /// array variable ... to have dimensions", so every score touching the helper
 /// read a constant 0 and took the loop scores with it.

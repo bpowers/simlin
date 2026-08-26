@@ -3526,9 +3526,13 @@ pub(crate) fn reconstruct_model_variables(
         // the wrong-signed composite. (`reconstruct_single_variable` already
         // takes this branch for the exhaustive override; both reconstructions
         // must keep module wiring.)
-        let dm_var = super::datamodel_variable_from_source(db, *source_var);
-        if matches!(dm_var, datamodel::Variable::Module(_)) {
-            let lowered = reconstruct_implicit_variable(db, model, &scope, &dm_var);
+        if source_var.kind(db) == crate::db::SourceVariableKind::Module {
+            let lowered = module_instance_from_refs(
+                model.name(db),
+                Ident::new(source_var.ident(db)),
+                Ident::new(source_var.model_name(db)),
+                source_var.module_refs(db),
+            );
             variables.insert(Ident::new(name), lowered);
             continue;
         }
@@ -3628,34 +3632,45 @@ fn reconstruct_implicit_variable(
     use crate::common::{Canonical, Ident};
 
     if let datamodel::Variable::Module(dm_module) = implicit_dm_var {
-        let ident = Ident::<Canonical>::new(implicit_dm_var.get_ident());
-        let module_var_prefix = format!("{}·", ident.as_str());
-        let inputs = build_module_inputs(
+        return module_instance_from_refs(
             model.name(db),
-            &module_var_prefix,
-            dm_module
-                .references
-                .iter()
-                .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
-        );
-
-        return crate::variable::Variable::module_instance(
-            ident,
+            Ident::<Canonical>::new(implicit_dm_var.get_ident()),
             Ident::new(&dm_module.model_name),
-            inputs,
+            &dm_module.references,
         );
     }
 
     let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let mut dummy_implicits = Vec::new();
-    let parsed_imp = crate::variable::parse_var(
-        scope.dimensions,
-        implicit_dm_var,
-        &mut dummy_implicits,
-        &units_ctx,
-        |mi| Ok(Some(mi.clone())),
-    );
+    let ctx = crate::variable::ParseContext::new(scope.dimensions, &units_ctx);
+    let parsed_imp =
+        crate::variable::parse_var(&ctx, implicit_dm_var, &mut dummy_implicits, |mi| {
+            Ok(Some(mi.clone()))
+        });
     crate::model::lower_variable(scope, &parsed_imp)
+}
+
+/// A module instance's lowered form, built straight from its stored
+/// `ModuleReference`s.
+///
+/// `parse_var` does not preserve the `references` list, so a module that went
+/// through the generic parse+lower path would lose its input wiring; both
+/// reconstructions (explicit and implicit) therefore short-circuit to this.
+fn module_instance_from_refs(
+    parent_model_name: &str,
+    ident: crate::common::Ident<crate::common::Canonical>,
+    model_name: crate::common::Ident<crate::common::Canonical>,
+    references: &[datamodel::ModuleReference],
+) -> crate::variable::Variable {
+    let module_var_prefix = format!("{}·", ident.as_str());
+    let inputs = build_module_inputs(
+        parent_model_name,
+        &module_var_prefix,
+        references
+            .iter()
+            .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
+    );
+    crate::variable::Variable::module_instance(ident, model_name, inputs)
 }
 
 #[cfg(test)]

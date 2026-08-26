@@ -747,7 +747,7 @@ AST (`Ast<Expr2>`) at compile time. The recursive analysis
   malformed input (GH #536 is narrower than its title suggests).
 - **Per-element graphical functions** (#502): when an *arrayed* source feeds an
   *arrayed* per-element graphical-function target -- each element of the target
-  has its own lookup `Table` (the per-element `tables` list on `Variable::Var`) --
+  has its own lookup `Table` (the per-element `tables` list on `VarKind::Aux`) --
   the per-element table polarities are folded into one link polarity, and the link
   is `Positive` / `Negative` only if every element agrees. The multi-dimensional
   case (a per-element GF over more than one dimension) stays conservatively

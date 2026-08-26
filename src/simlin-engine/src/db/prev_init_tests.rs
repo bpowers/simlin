@@ -144,10 +144,12 @@ fn test_previous_qualified_element_subscript_no_helper() {
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
         crate::variable::parse_var(
-            &crate::dimensions::DimensionsContext::from(dims.as_slice()),
+            &crate::variable::ParseContext::new(
+                &crate::dimensions::DimensionsContext::from(dims.as_slice()),
+                &units_ctx,
+            ),
             &aux,
             &mut implicit_vars,
-            &units_ctx,
             |mi| Ok(Some(mi.clone())),
         );
     assert!(
@@ -343,10 +345,12 @@ fn test_init_qualified_element_subscript_no_helper() {
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
         crate::variable::parse_var(
-            &crate::dimensions::DimensionsContext::from(dims.as_slice()),
+            &crate::variable::ParseContext::new(
+                &crate::dimensions::DimensionsContext::from(dims.as_slice()),
+                &units_ctx,
+            ),
             &aux,
             &mut implicit_vars,
-            &units_ctx,
             |mi| Ok(Some(mi.clone())),
         );
     assert!(
@@ -428,16 +432,17 @@ fn test_previous_bare_element_no_helper_with_var_names() {
         [Ident::new("base_val"), Ident::new("lagged")].into();
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
-        crate::variable::parse_var_with_module_context(
-            &crate::dimensions::DimensionsContext::from(dims.as_slice()),
+        crate::variable::parse_var(
+            &crate::variable::ParseContext {
+                model_var_names: Some(&var_names),
+                ..crate::variable::ParseContext::new(
+                    &crate::dimensions::DimensionsContext::from(dims.as_slice()),
+                    &units_ctx,
+                )
+            },
             &aux,
             &mut implicit_vars,
-            &units_ctx,
             |mi| Ok(Some(mi.clone())),
-            None,
-            Some(&var_names),
-            None,
-            None,
         );
     assert!(
         parsed.equation_errors().is_none(),
@@ -463,16 +468,17 @@ fn test_previous_bare_element_no_helper_with_var_names() {
     .into();
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
-        crate::variable::parse_var_with_module_context(
-            &crate::dimensions::DimensionsContext::from(dims.as_slice()),
+        crate::variable::parse_var(
+            &crate::variable::ParseContext {
+                model_var_names: Some(&var_names_with_shadow),
+                ..crate::variable::ParseContext::new(
+                    &crate::dimensions::DimensionsContext::from(dims.as_slice()),
+                    &units_ctx,
+                )
+            },
             &aux,
             &mut implicit_vars,
-            &units_ctx,
             |mi| Ok(Some(mi.clone())),
-            None,
-            Some(&var_names_with_shadow),
-            None,
-            None,
         );
     assert!(parsed.equation_errors().is_none());
     assert_eq!(
@@ -490,10 +496,12 @@ fn test_previous_bare_element_no_helper_with_var_names() {
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
         crate::variable::parse_var(
-            &crate::dimensions::DimensionsContext::from(dims.as_slice()),
+            &crate::variable::ParseContext::new(
+                &crate::dimensions::DimensionsContext::from(dims.as_slice()),
+                &units_ctx,
+            ),
             &aux,
             &mut implicit_vars,
-            &units_ctx,
             |mi| Ok(Some(mi.clone())),
         );
     assert!(parsed.equation_errors().is_none());

@@ -4,10 +4,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{Expr0, lower_ast};
+use crate::ast::{Ast, Expr0, Expr2, lower_ast};
 use crate::common::{Canonical, EquationError, EquationResult, Ident, canonicalize};
+use crate::db::SourceVariableKind;
 use crate::dimensions::DimensionsContext;
-use crate::variable::{ModuleInput, Variable};
+use crate::variable::{ModuleInput, VarKind, Variable, VariableSource};
 use crate::{datamodel, eqn_err};
 
 #[cfg(test)]
@@ -15,7 +16,7 @@ use {
     crate::datamodel::Dimension,
     crate::db,
     crate::units::Context,
-    crate::variable::{parse_var, parse_var_with_module_context},
+    crate::variable::{ParseContext, parse_var},
 };
 
 #[cfg(test)]
@@ -111,118 +112,89 @@ fn resolve_relative<'a>(
 
 /// lower_variable takes a stage 0 variable and turns it into a stage 1 variable.
 /// This involves resolving both module inputs and dimension indexes.
+///
+/// Everything but `kind` carries over unchanged, so this is a map over the
+/// kind: lower the ASTs a `Stock`/`Aux` holds, resolve the input wiring a
+/// `Module` holds, and append whatever each raised to the variable's error
+/// channel.
 pub(crate) fn lower_variable(scope: &ScopeStage0, var_s0: &VariableStage0) -> Variable {
-    match var_s0 {
-        Variable::Stock {
-            ident,
-            init_ast: ast,
-            eqn,
-            units,
+    let mut errors = var_s0.errors.clone();
+    let mut lower = |ast: &Option<Ast<Expr0>>| -> Option<Ast<Expr2>> {
+        ast.as_ref().and_then(|ast| match lower_ast(scope, ast) {
+            Ok(ast) => Some(ast),
+            Err(err) => {
+                errors.push(err);
+                None
+            }
+        })
+    };
+
+    let kind = match &var_s0.kind {
+        VarKind::Stock {
+            init_ast,
             inflows,
             outflows,
             non_negative,
-            errors,
-            unit_errors,
-        } => {
-            let mut errors = errors.clone();
-            let ast = ast.as_ref().and_then(|ast| match lower_ast(scope, ast) {
-                Ok(ast) => Some(ast),
-                Err(err) => {
-                    errors.push(err);
-                    None
-                }
-            });
-            Variable::Stock {
-                ident: ident.clone(),
-                init_ast: ast,
-                eqn: eqn.clone(),
-                units: units.clone(),
-                inflows: inflows.clone(),
-                outflows: outflows.clone(),
-                non_negative: *non_negative,
-                errors,
-                unit_errors: unit_errors.clone(),
-            }
-        }
-        Variable::Var {
-            ident,
+        } => VarKind::Stock {
+            init_ast: lower(init_ast),
+            inflows: inflows.clone(),
+            outflows: outflows.clone(),
+            non_negative: *non_negative,
+        },
+        VarKind::Aux {
             ast,
             init_ast,
-            eqn,
-            units,
             tables,
             non_negative,
             is_flow,
             is_table_only,
-            errors,
-            unit_errors,
-        } => {
-            let mut errors = errors.clone();
-            let ast = ast.as_ref().and_then(|ast| match lower_ast(scope, ast) {
-                Ok(ast) => Some(ast),
-                Err(err) => {
-                    errors.push(err);
-                    None
-                }
-            });
-            let init_ast = init_ast
-                .as_ref()
-                .and_then(|ast| match lower_ast(scope, ast) {
-                    Ok(ast) => Some(ast),
-                    Err(err) => {
-                        errors.push(err);
-                        None
-                    }
-                });
-            Variable::Var {
-                ident: ident.clone(),
-                ast,
-                init_ast,
-                eqn: eqn.clone(),
-                units: units.clone(),
-                tables: tables.clone(),
-                non_negative: *non_negative,
-                is_flow: *is_flow,
-                is_table_only: *is_table_only,
-                errors,
-                unit_errors: unit_errors.clone(),
-            }
-        }
-        Variable::Module {
-            ident,
-            model_name,
-            units,
-            inputs,
-            errors,
-            unit_errors,
-        } => {
-            let var_errors = errors;
-
-            let inputs = inputs.iter().map(|mi| {
+        } => VarKind::Aux {
+            ast: lower(ast),
+            init_ast: lower(init_ast),
+            tables: tables.clone(),
+            non_negative: *non_negative,
+            is_flow: *is_flow,
+            is_table_only: *is_table_only,
+        },
+        VarKind::Module { model_name, inputs } => {
+            let resolved = inputs.iter().map(|mi| {
                 resolve_module_input(
                     scope.models,
                     scope.model_name,
-                    ident.as_str(),
+                    var_s0.ident.as_str(),
                     mi.src.as_str(),
                     mi.dst.as_str(),
                 )
             });
 
-            let (inputs, errors): (Vec<_>, Vec<_>) = inputs.partition(EquationResult::is_ok);
+            let (inputs, input_errors): (Vec<_>, Vec<_>) =
+                resolved.partition(EquationResult::is_ok);
             let inputs: Vec<ModuleInput> = inputs.into_iter().flat_map(|i| i.unwrap()).collect();
-            let mut errors: Vec<EquationError> =
-                errors.into_iter().map(|e| e.unwrap_err()).collect();
-            errors.append(&mut var_errors.clone());
+            // Wiring errors are prepended rather than appended. The order is
+            // not observable in production: `parse_var`'s Module arm produces
+            // errors only from its `module_input_mapper`, and every call site
+            // passes the infallible `|mi| Ok(Some(mi.clone()))`, so a module
+            // arrives here with no errors of its own. This is a stated
+            // convention, not a load-bearing one.
+            let mut module_errors: Vec<EquationError> =
+                input_errors.into_iter().map(|e| e.unwrap_err()).collect();
+            module_errors.append(&mut errors);
+            errors = module_errors;
 
-            Variable::Module {
-                ident: ident.clone(),
+            VarKind::Module {
                 model_name: model_name.clone(),
-                units: units.clone(),
                 inputs,
-                errors,
-                unit_errors: unit_errors.clone(),
             }
         }
+    };
+
+    Variable {
+        ident: var_s0.ident.clone(),
+        units: var_s0.units.clone(),
+        eqn: var_s0.eqn.clone(),
+        errors,
+        unit_errors: var_s0.unit_errors.clone(),
+        kind,
     }
 }
 
@@ -271,45 +243,39 @@ pub(crate) fn resolve_module_input<'a>(
     }
 }
 
-/// Scan a model's datamodel variables and return the set of identifiers
-/// that will become module variables during compilation.
+/// Scan a model's variables and return the set of identifiers that will become
+/// module variables during compilation.
 ///
 /// This includes:
-/// - Explicit `datamodel::Variable::Module` variables
-/// - `datamodel::Variable::Aux` and `datamodel::Variable::Flow` variables
-///   whose equations parse to a top-level **module-function** call: a stdlib
-///   function (`SMTH1`, `DELAY`, ...) or a project macro (consulted via the
-///   passed `MacroRegistry`).
+/// - explicit module instances (`SourceVariableKind::Module`)
+/// - aux and flow variables whose equations parse to a top-level
+///   **module-function** call: a stdlib function (`SMTH1`, `DELAY`, ...) or a
+///   project macro (consulted via the passed `MacroRegistry`).
 ///
 /// This set is needed so that `PREVIOUS(module_var)` rewrites through a
 /// synthesized scalar helper aux instead of compiling `LoadPrev` directly
 /// against a multi-slot module. A `y = MYMACRO(...)` caller must be
 /// pre-classified here exactly as a `y = SMTH1(...)` caller is, so the
 /// PREVIOUS/INIT rewrite sees it as module-backed.
-pub(crate) fn collect_module_idents(
-    variables: &[datamodel::Variable],
+pub(crate) fn collect_module_idents<'a>(
+    variables: impl IntoIterator<Item = VariableSource<'a>>,
     macro_registry: &crate::module_functions::MacroRegistry,
 ) -> HashSet<Ident<Canonical>> {
     let mut module_idents = HashSet::new();
     for v in variables {
-        if v.can_be_module_input() {
-            module_idents.insert(Ident::new(&canonicalize(v.get_ident())));
+        if v.can_be_module_input {
+            module_idents.insert(Ident::new(&canonicalize(v.ident)));
         }
-        match v {
-            datamodel::Variable::Module(m) => {
-                module_idents.insert(Ident::new(&canonicalize(&m.ident)));
+        match v.kind {
+            SourceVariableKind::Module => {
+                module_idents.insert(Ident::new(&canonicalize(v.ident)));
             }
-            datamodel::Variable::Aux(a) => {
-                if equation_is_module_call(&a.equation, macro_registry) {
-                    module_idents.insert(Ident::new(&canonicalize(&a.ident)));
+            SourceVariableKind::Aux | SourceVariableKind::Flow => {
+                if equation_is_module_call(&v.equation, macro_registry) {
+                    module_idents.insert(Ident::new(&canonicalize(v.ident)));
                 }
             }
-            datamodel::Variable::Flow(f) => {
-                if equation_is_module_call(&f.equation, macro_registry) {
-                    module_idents.insert(Ident::new(&canonicalize(&f.ident)));
-                }
-            }
-            datamodel::Variable::Stock(_) => {}
+            SourceVariableKind::Stock => {}
         }
     }
     module_idents
@@ -395,7 +361,7 @@ impl ModelStage0 {
     /// derived from `x_model` plus the project's macro definitions.
     ///
     /// This is the independent twin of the salsa-native
-    /// `db::stages::model_stage0` -- the two share `parse_var_with_module_context`
+    /// `db::stages::model_stage0` -- the two share `parse_var`
     /// but derive the module-ident set, the macro registry and the
     /// duplicate-ident errors along completely different routes -- which is what
     /// makes it a real oracle for that query rather than a restatement of it.
@@ -439,7 +405,10 @@ impl ModelStage0 {
                 .map(|v| Ident::new(&canonicalize(v.get_ident())))
                 .collect()
         } else {
-            collect_module_idents(&x_model.variables, &macro_registry)
+            collect_module_idents(
+                x_model.variables.iter().map(VariableSource::from),
+                &macro_registry,
+            )
         };
 
         // #554: a macro-marked model's body variables get the model name as
@@ -451,35 +420,28 @@ impl ModelStage0 {
         // form, and building it per variable is what the salsa path stopped
         // doing (it reads the cached `project_dimensions_context` instead).
         let dimensions_ctx = DimensionsContext::from(dimensions);
+        let ctx = ParseContext {
+            dimensions: &dimensions_ctx,
+            units_ctx,
+            module_idents: Some(&module_idents),
+            model_var_names: None,
+            macro_registry: Some(&macro_registry),
+            enclosing_model,
+        };
         let mut variable_list: Vec<VariableStage0> = x_model
             .variables
             .iter()
-            .map(|v| {
-                parse_var_with_module_context(
-                    &dimensions_ctx,
-                    v,
-                    &mut implicit_vars,
-                    units_ctx,
-                    |mi| Ok(Some(mi.clone())),
-                    Some(&module_idents),
-                    None,
-                    Some(&macro_registry),
-                    enclosing_model,
-                )
-            })
+            .map(|v| parse_var(&ctx, v, &mut implicit_vars, |mi| Ok(Some(mi.clone()))))
             .collect();
 
         {
             // FIXME: this is an unfortunate API choice
             let mut dummy_implicit_vars: Vec<datamodel::Variable> = Vec::new();
+            let implicit_ctx = ParseContext::new(&dimensions_ctx, units_ctx);
             variable_list.extend(implicit_vars.into_iter().map(|x_var| {
-                parse_var(
-                    &dimensions_ctx,
-                    &x_var,
-                    &mut dummy_implicit_vars,
-                    units_ctx,
-                    |mi| Ok(Some(mi.clone())),
-                )
+                parse_var(&implicit_ctx, &x_var, &mut dummy_implicit_vars, |mi| {
+                    Ok(Some(mi.clone()))
+                })
             }));
             assert_eq!(0, dummy_implicit_vars.len());
         }
@@ -543,13 +505,16 @@ fn test_module_parse() {
             dst: Ident::new("lynxes"),
         },
     ];
-    let expected = Variable::Module {
-        model_name: Ident::new("hares"),
+    let expected = Variable {
         ident: Ident::new("hares"),
         units: None,
-        inputs,
+        eqn: None,
         errors: vec![],
         unit_errors: vec![],
+        kind: VarKind::Module {
+            model_name: Ident::new("hares"),
+            inputs,
+        },
     };
 
     let lynxes_model = x_model(
@@ -607,12 +572,190 @@ fn test_module_parse() {
     assert_eq!("hares", hares_var.get_ident());
 
     let dims_ctx = DimensionsContext::default();
-    let actual = parse_var(&dims_ctx, hares_var, &mut implicit_vars, &units_ctx, |mi| {
+    let ctx = ParseContext::new(&dims_ctx, &units_ctx);
+    let actual = parse_var(&ctx, hares_var, &mut implicit_vars, |mi| {
         resolve_module_input(&models, "main", hares_var.get_ident(), &mi.src, &mi.dst)
     });
     assert!(actual.equation_errors().is_none());
     assert!(implicit_vars.is_empty());
     assert_eq!(expected, actual);
+}
+
+/// `lower_variable` carries EVERY field of a Stage0 variable into its Stage1
+/// twin, for every `VarKind`.
+///
+/// Lowering rewrites exactly two things -- a `Stock`/`Aux` AST from `Expr0` to
+/// `Expr2`, and a `Module`'s input wiring from `datamodel::ModuleReference`s to
+/// resolved `ModuleInput`s -- and must pass everything else through untouched.
+/// The old shape restated nine to eleven field names per variant, and a field
+/// dropped from one arm would have been invisible; this pins the pass-through
+/// per kind.
+///
+/// The rows ARE the `VarKind` enumeration: one variable of each kind, plus both
+/// `Aux` sub-shapes (flow and non-flow), driven through the production parse
+/// (`ModelStage0::new_in_project`) and the production lowering
+/// (`ModelStage1::new`). Both destructurings below are exhaustive -- no `..` --
+/// so a new field on any variant fails to compile here until it is either
+/// asserted or explicitly excused.
+#[test]
+fn lower_variable_preserves_every_field_of_every_kind() {
+    use crate::variable::VarKind;
+
+    let sub_model = x_model(
+        "sub",
+        vec![x_aux("port", "1", None), x_aux("out", "2", None)],
+    );
+    let main_model = x_model(
+        "main",
+        vec![
+            x_stock("level", "7", &["fill"], &["drain"], Some("widgets")),
+            x_flow("fill", "1", Some("widgets/time")),
+            x_flow("drain", "level * 0.1", None),
+            x_aux("rate", "level / 2", Some("widgets")),
+            x_module("sub", &[("rate", "sub.port")], None),
+        ],
+    );
+
+    let units_ctx = Context::new(&[], &Default::default()).0;
+    let project_models = vec![main_model.clone(), sub_model.clone()];
+    let owned_s0: HashMap<Ident<Canonical>, ModelStage0> = project_models
+        .iter()
+        .map(|m| {
+            (
+                Ident::new(&m.name),
+                ModelStage0::new_in_project(&project_models, m, &[], &units_ctx, false),
+            )
+        })
+        .collect();
+    let models: HashMap<Ident<Canonical>, &ModelStage0> =
+        owned_s0.iter().map(|(k, v)| (k.clone(), v)).collect();
+    let dimensions_ctx = DimensionsContext::default();
+    let scope = ScopeStage0 {
+        models: &models,
+        dimensions: &dimensions_ctx,
+        model_name: "main",
+    };
+    let s0 = &owned_s0[&Ident::<Canonical>::new("main")];
+    let s1 = ModelStage1::new(&scope, s0);
+
+    // Every kind of the enumeration must actually be exercised; a fixture that
+    // silently stopped producing one would otherwise make this test vacuous.
+    let mut seen_stock = false;
+    let mut seen_flow = false;
+    let mut seen_aux = false;
+    let mut seen_module = false;
+
+    for (ident, parsed) in s0.variables.iter() {
+        let lowered = s1
+            .variables
+            .get(ident)
+            .unwrap_or_else(|| panic!("{ident} was dropped by lowering"));
+
+        // The five kind-independent fields pass through verbatim.
+        assert_eq!(parsed.ident, lowered.ident, "{ident}: ident");
+        assert_eq!(parsed.units, lowered.units, "{ident}: units");
+        assert_eq!(parsed.eqn, lowered.eqn, "{ident}: eqn");
+        assert_eq!(
+            parsed.unit_errors, lowered.unit_errors,
+            "{ident}: unit_errors"
+        );
+        assert_eq!(
+            parsed.errors, lowered.errors,
+            "{ident}: errors (this fixture raises none, so lowering must add none)"
+        );
+
+        match (&parsed.kind, &lowered.kind) {
+            (
+                VarKind::Stock {
+                    init_ast: p_init,
+                    inflows: p_in,
+                    outflows: p_out,
+                    non_negative: p_nn,
+                },
+                VarKind::Stock {
+                    init_ast: l_init,
+                    inflows: l_in,
+                    outflows: l_out,
+                    non_negative: l_nn,
+                },
+            ) => {
+                seen_stock = true;
+                assert_eq!(p_in, l_in, "{ident}: inflows");
+                assert_eq!(p_out, l_out, "{ident}: outflows");
+                assert_eq!(p_nn, l_nn, "{ident}: non_negative");
+                // The AST changes tier, so only its presence is comparable.
+                assert_eq!(p_init.is_some(), l_init.is_some(), "{ident}: init_ast");
+                assert!(l_init.is_some(), "{ident}: the stock has an equation");
+            }
+            (
+                VarKind::Aux {
+                    ast: p_ast,
+                    init_ast: p_init,
+                    tables: p_tables,
+                    non_negative: p_nn,
+                    is_flow: p_flow,
+                    is_table_only: p_table_only,
+                },
+                VarKind::Aux {
+                    ast: l_ast,
+                    init_ast: l_init,
+                    tables: l_tables,
+                    non_negative: l_nn,
+                    is_flow: l_flow,
+                    is_table_only: l_table_only,
+                },
+            ) => {
+                if *l_flow {
+                    seen_flow = true;
+                } else {
+                    seen_aux = true;
+                }
+                assert_eq!(p_tables, l_tables, "{ident}: tables");
+                assert_eq!(p_nn, l_nn, "{ident}: non_negative");
+                assert_eq!(p_flow, l_flow, "{ident}: is_flow");
+                assert_eq!(p_table_only, l_table_only, "{ident}: is_table_only");
+                assert_eq!(p_ast.is_some(), l_ast.is_some(), "{ident}: ast");
+                assert_eq!(p_init.is_some(), l_init.is_some(), "{ident}: init_ast");
+                assert!(l_ast.is_some(), "{ident}: the aux/flow has an equation");
+            }
+            (
+                VarKind::Module {
+                    model_name: p_model,
+                    inputs: p_inputs,
+                },
+                VarKind::Module {
+                    model_name: l_model,
+                    inputs: l_inputs,
+                },
+            ) => {
+                seen_module = true;
+                assert_eq!(p_model, l_model, "{ident}: model_name");
+                // Inputs are RESOLVED by lowering, not passed through: the
+                // Stage0 form is a `datamodel::ModuleReference` and the Stage1
+                // form a `(src, dst)` pair of canonical idents. What must not
+                // change is that every reference produces exactly one input.
+                assert_eq!(p_inputs.len(), l_inputs.len(), "{ident}: input count");
+                let wiring: Vec<(&str, &str)> = l_inputs
+                    .iter()
+                    .map(|mi| (mi.src.as_str(), mi.dst.as_str()))
+                    .collect();
+                // `resolve_module_input` strips the instance prefix from the
+                // destination, so `sub.port` binds the sub-model's own `port`.
+                assert_eq!(
+                    wiring,
+                    vec![("rate", "port")],
+                    "{ident}: resolved module wiring"
+                );
+            }
+            _ => panic!("{ident}: lowering changed the variable's kind"),
+        }
+    }
+
+    assert!(
+        seen_stock && seen_flow && seen_aux && seen_module,
+        "the fixture must exercise every VarKind (stock {seen_stock}, flow {seen_flow}, \
+         aux {seen_aux}, module {seen_module})"
+    );
 }
 
 /// A reference to an undefined variable is refused by the production dependency
@@ -841,13 +984,13 @@ fn test_incremental_compile_previous_of_module_backed_var() {
 
 #[test]
 fn test_collect_module_idents_skips_intrinsic_previous() {
-    let vars = vec![
+    let vars = [
         x_aux("x", "TIME", None),
         x_aux("prev_x", "PREVIOUS(x)", None),
         x_aux("prev_x_init", "PREVIOUS(x, 42)", None),
     ];
     let registry = crate::module_functions::MacroRegistry::default();
-    let ids = collect_module_idents(&vars, &registry);
+    let ids = collect_module_idents(vars.iter().map(VariableSource::from), &registry);
     assert!(
         !ids.contains(&Ident::new("prev_x")),
         "1-arg PREVIOUS should stay on the intrinsic opcode path",
@@ -908,7 +1051,7 @@ fn test_equation_is_module_call_recognizes_macros_and_stdlib() {
 
 #[test]
 fn test_collect_module_idents_skips_apply_to_all_previous() {
-    let vars = vec![
+    let vars = [
         x_aux("x", "TIME", None),
         datamodel::Variable::Aux(datamodel::Aux {
             ident: "prev_x_init".to_string(),
@@ -925,7 +1068,7 @@ fn test_collect_module_idents_skips_apply_to_all_previous() {
         }),
     ];
     let registry = crate::module_functions::MacroRegistry::default();
-    let ids = collect_module_idents(&vars, &registry);
+    let ids = collect_module_idents(vars.iter().map(VariableSource::from), &registry);
     assert!(
         !ids.contains(&Ident::new("prev_x_init")),
         "ApplyToAll equations that invoke PREVIOUS should stay intrinsic",

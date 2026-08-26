@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use crate::ast::{Ast, BinaryOp, Expr2, IndexExpr2};
 use crate::builtins::BuiltinFn;
 use crate::common::{Canonical, Ident};
-use crate::variable::Variable;
+use crate::variable::{VarKind, Variable};
 
 use super::types::{LinkPolarity, normalize_module_ref};
 
@@ -959,7 +959,7 @@ pub(super) fn analyze_graphical_function_polarity(table: &crate::variable::Table
 /// `input_polarity` is the AST-derived polarity of the raw input equation
 /// with respect to the link source. Rules, mirroring the compiler's wrap:
 ///
-/// - not a `Variable::Var`, table-only (a static table, no implicit wrap),
+/// - not a `VarKind::Aux`, table-only (a static table, no implicit wrap),
 ///   or no tables: `input_polarity` unchanged;
 /// - no non-empty table at all: a zero-point gf is treated as ABSENT by
 ///   the compiler (the raw input evaluates unwrapped), so `input_polarity`
@@ -976,11 +976,11 @@ pub(super) fn compose_with_lookup_polarity(
     input_polarity: LinkPolarity,
     to_var: &Variable,
 ) -> LinkPolarity {
-    let Variable::Var {
+    let VarKind::Aux {
         tables,
         is_table_only: false,
         ..
-    } = to_var
+    } = &to_var.kind
     else {
         return input_polarity;
     };
@@ -1046,7 +1046,7 @@ fn lookup_table_polarity(
             let Some(var) = variables.get(&*crate::common::canonicalize(name.as_str())) else {
                 return LinkPolarity::Unknown;
             };
-            let Variable::Var { tables, .. } = var else {
+            let VarKind::Aux { tables, .. } = &var.kind else {
                 return LinkPolarity::Unknown;
             };
             // A bare reference to a per-element GF variable inside an
@@ -1069,7 +1069,7 @@ fn lookup_table_polarity(
             let Some(var) = variables.get(&*crate::common::canonicalize(name.as_str())) else {
                 return LinkPolarity::Unknown;
             };
-            let Variable::Var { tables, .. } = var else {
+            let VarKind::Aux { tables, .. } = &var.kind else {
                 return LinkPolarity::Unknown;
             };
             let Some(dims) = var.get_dimensions() else {

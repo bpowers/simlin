@@ -669,7 +669,9 @@ fn compute_module_link_overrides(
             // the discovery-side `recompute_module_input_edge_series` (GH #698 /
             // PR #705 r3353459409).
             let module_var = reconstruct_single_variable(db, model, project, module_name);
-            let Some(crate::variable::Variable::Module { inputs, .. }) = module_var else {
+            let Some(crate::variable::VarKind::Module { inputs, .. }) =
+                module_var.as_ref().map(|v| &v.kind)
+            else {
                 continue;
             };
             let from_ident = Ident::<Canonical>::new(from);
@@ -705,8 +707,8 @@ fn compute_module_link_overrides(
                     // ambiguous: a unique distinct port is fine.
                     let y_var = reconstruct_single_variable(db, model, project, y);
                     let module_ident = Ident::<Canonical>::new(module_name);
-                    match y_var {
-                        Some(crate::variable::Variable::Module { inputs: y_in, .. }) => {
+                    match y_var.map(|v| v.kind) {
+                        Some(crate::variable::VarKind::Module { inputs: y_in, .. }) => {
                             let mut exit: Option<String> = None;
                             let mut ambiguous = false;
                             for inp in &y_in {

@@ -7,8 +7,8 @@
 //! tag (`SourceVariableKind`), the three `#[salsa::input]` structs
 //! (`SourceProject`/`SourceModel`/`SourceVariable`) that hold the synced
 //! datamodel field-by-field for fine-grained invalidation, the
-//! `source_var_is_table_only` lookup-only predicate, and the
-//! `datamodel_variable_from_source` re-assembly the parser consumes.
+//! `source_var_is_table_only` lookup-only predicate, and the borrowed
+//! `VariableSource` view the parser consumes.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -91,7 +91,7 @@ impl<'db> ModuleInputSet<'db> {
 
 // ── Variable kind ──────────────────────────────────────────────────────
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SourceVariableKind {
     Stock,
     Flow,
@@ -241,15 +241,12 @@ pub struct SourceVariable {
     pub compat: datamodel::Compat,
 }
 
-/// Whether a source variable is a standalone lookup-only table: a
-/// graphical-function holder with an empty-or-sentinel equation and no real
-/// functional input. Such a variable is a *table indexed by an explicit input*
-/// (`y = table(input)`), not a value-bearing variable -- it is excluded from the
-/// runlist and produces no saved series (issue #606). This is the salsa-layer
-/// twin of `crate::variable::var_is_lookup_only`, evaluated over the
-/// `datamodel::Equation` + `datamodel::GraphicalFunction` representation; both
-/// delegate to the shared `crate::variable::is_empty_or_sentinel` core (which
-/// also accepts the legacy `"0+0"` sentinel for back-compat).
+/// [`crate::variable::is_lookup_only`] over the salsa inputs -- the one owner
+/// of the rule, asked here about a `SourceVariable` (issue #606).
+///
+/// It reads exactly the two fields the predicate needs, not the whole
+/// [`crate::variable::VariableSource`] view, so a lookup-only verdict does not
+/// gain a dependency on the variable's flows, units or compat flags.
 ///
 /// Salsa-tracked so its `bool` output backdates: callers in tracked contexts
 /// (`build_var_info` -> `model_dependency_graph`, `flattened_offsets`)
@@ -257,116 +254,56 @@ pub struct SourceVariable {
 /// would invalidate the dependency graph on every unrelated equation edit.
 #[salsa::tracked(returns(clone))]
 pub(crate) fn source_var_is_table_only(db: &dyn Db, var: SourceVariable) -> bool {
-    use crate::variable::is_empty_or_sentinel;
-    match var.equation(db) {
-        // Scalar / A2A: one equation string plus a variable-level gf.
-        datamodel::Equation::Scalar(s) | datamodel::Equation::ApplyToAll(_, s) => {
-            var.gf(db).is_some() && is_empty_or_sentinel(s)
-        }
-        // Arrayed: a pure per-element table holder iff it has tables (a
-        // variable-level or any per-element gf) and EVERY element equation (and
-        // the EXCEPT default, if any) is empty/sentinel. The per-element gf is
-        // the 4th tuple field `(subscript, equation, gf_equation, gf)`.
-        datamodel::Equation::Arrayed(_, elements, default, _) => {
-            let has_tables =
-                var.gf(db).is_some() || elements.iter().any(|(_, _, _, gf)| gf.is_some());
-            has_tables
-                && !elements.is_empty()
-                && elements
-                    .iter()
-                    .all(|(_, eq, _, _)| is_empty_or_sentinel(eq))
-                && default.as_deref().map(is_empty_or_sentinel).unwrap_or(true)
-        }
-    }
+    crate::variable::is_lookup_only(var.equation(db), var.gf(db).as_ref())
 }
 
-/// Re-assembles the kind-tagged `datamodel::Variable` from the split salsa
-/// input fields for the parser.
+/// The parser's borrowed view of a variable's salsa input fields.
 ///
-/// Builds a `datamodel::Variable` from the per-field `SourceVariable` salsa
-/// input for use with the existing parsing pipeline (parse_var,
-/// lower_variable). The input stores the datamodel `Equation`/`GraphicalFunction`/
-/// `ModuleReference` fields directly, so this is a cheap re-assembly into the
-/// kind-tagged enum the parser expects rather than a structural conversion.
+/// Every field is a borrow of the `SourceVariable`'s stored value, so a parse
+/// costs no re-assembly and no deep clone of a kind-tagged
+/// `datamodel::Variable`. The fields the salsa input does not carry --
+/// `documentation`, `ai_state`, `uid` -- are not in the view either: parsing
+/// and lowering never read them.
 ///
-/// The fields the salsa input does not carry -- `documentation`, `ai_state`,
-/// `uid` -- are reconstructed as empty/None: parsing and lowering ignore them,
-/// so their absence is semantically identical to the original datamodel value.
 /// `compat.non_negative`/`can_be_module_input` are taken from the dedicated
-/// scalar input fields (the canonical source for those flags after sync).
-pub fn datamodel_variable_from_source(db: &dyn Db, var: SourceVariable) -> datamodel::Variable {
-    let ident = var.ident(db).clone();
-    let equation = var.equation(db).clone();
-    let units = var.units(db).clone();
-    let non_negative = var.non_negative(db);
-    let can_be_module_input = var.can_be_module_input(db);
-    let mut compat = var.compat(db).clone();
-    compat.non_negative = non_negative;
-    compat.can_be_module_input = can_be_module_input;
-
-    match var.kind(db) {
-        SourceVariableKind::Stock => {
-            // A conveyor stock's <eqn> may be a §7.2 explicit init list
-            // ("100, 200, 300"), which is not a scalar expression. The special
-            // build path (conveyor_compile::expand_conveyors) parses the list
-            // and compiles the stock with a constant raw-sum placeholder;
-            // mirror that rewrite here so the salsa DIAGNOSTIC path (which
-            // parses the UN-expanded project) accepts exactly the equations
-            // the runtime accepts instead of flagging a valid list as a parse
-            // error. A malformed list (or a non-list) is left untouched: the
-            // ordinary parse diagnostic fires, and the special path adds the
-            // precise ConveyorInitListUnsupported rejection. The ordinary
-            // COMPILE path is unaffected -- it hard-rejects any un-expanded
-            // conveyor marker before using this equation.
-            let equation = if compat.conveyor.is_some() {
-                match crate::conveyor_compile::explicit_init_list(&ident, &equation) {
-                    Ok(Some((_spec, placeholder))) => placeholder,
-                    _ => equation,
-                }
-            } else {
-                equation
-            };
-            datamodel::Variable::Stock(datamodel::Stock {
-                ident,
-                equation,
-                documentation: String::new(),
-                units,
-                inflows: var.inflows(db).clone(),
-                outflows: var.outflows(db).clone(),
-                ai_state: None,
-                uid: None,
-                compat,
-            })
+/// scalar input fields (the canonical source for those flags after sync), not
+/// from the stored `compat`.
+///
+/// One field is rewritten rather than borrowed. A conveyor stock's `<eqn>` may
+/// be a §7.2 explicit init list ("100, 200, 300"), which is not a scalar
+/// expression. The special build path (`conveyor_compile::expand_conveyors`)
+/// parses the list and compiles the stock with a constant raw-sum placeholder;
+/// mirroring that rewrite here makes the salsa DIAGNOSTIC path (which parses
+/// the UN-expanded project) accept exactly the equations the runtime accepts
+/// instead of flagging a valid list as a parse error. A malformed list (or a
+/// non-list) is left untouched: the ordinary parse diagnostic fires, and the
+/// special path adds the precise `ConveyorInitListUnsupported` rejection. The
+/// ordinary COMPILE path is unaffected -- it hard-rejects any un-expanded
+/// conveyor marker before using this equation.
+pub fn variable_source(db: &dyn Db, var: SourceVariable) -> crate::variable::VariableSource<'_> {
+    let equation = var.equation(db);
+    let compat = var.compat(db);
+    let equation = if var.kind(db) == SourceVariableKind::Stock && compat.conveyor.is_some() {
+        match crate::conveyor_compile::explicit_init_list(var.ident(db), equation) {
+            Ok(Some((_spec, placeholder))) => std::borrow::Cow::Owned(placeholder),
+            _ => std::borrow::Cow::Borrowed(equation),
         }
-        SourceVariableKind::Flow => datamodel::Variable::Flow(datamodel::Flow {
-            ident,
-            equation,
-            documentation: String::new(),
-            units,
-            gf: var.gf(db).clone(),
-            ai_state: None,
-            uid: None,
-            compat,
-        }),
-        SourceVariableKind::Aux => datamodel::Variable::Aux(datamodel::Aux {
-            ident,
-            equation,
-            documentation: String::new(),
-            units,
-            gf: var.gf(db).clone(),
-            ai_state: None,
-            uid: None,
-            compat,
-        }),
-        SourceVariableKind::Module => datamodel::Variable::Module(datamodel::Module {
-            ident,
-            model_name: var.model_name(db).clone(),
-            documentation: String::new(),
-            units,
-            references: var.module_refs(db).clone(),
-            compat,
-            ai_state: None,
-            uid: None,
-        }),
+    } else {
+        std::borrow::Cow::Borrowed(equation)
+    };
+
+    crate::variable::VariableSource {
+        ident: var.ident(db),
+        equation,
+        kind: var.kind(db),
+        units: var.units(db).as_deref(),
+        gf: var.gf(db).as_ref(),
+        inflows: var.inflows(db),
+        outflows: var.outflows(db),
+        module_refs: var.module_refs(db),
+        model_name: var.model_name(db),
+        non_negative: var.non_negative(db),
+        can_be_module_input: var.can_be_module_input(db),
+        active_initial: compat.active_initial.as_deref(),
     }
 }

@@ -838,10 +838,10 @@ fn lower_ltm_variable(
             // Nested implicits of an implicit are registered (and compiled)
             // in their own right; here only the dep's own dimensions matter.
             let mut nested = Vec::new();
-            let dep_parsed =
-                crate::variable::parse_var(dim_ctx, implicit_dm, &mut nested, units_ctx, |mi| {
-                    Ok(Some(mi.clone()))
-                });
+            let dep_ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
+            let dep_parsed = crate::variable::parse_var(&dep_ctx, implicit_dm, &mut nested, |mi| {
+                Ok(Some(mi.clone()))
+            });
             stage0_vars.insert(Ident::new(dep_name), dep_parsed);
         } else if let Some(ltm_dims) = find_arrayed_ltm_dep(dep_name) {
             // An arrayed sibling LTM var (the GH #995 freeze helper): a
@@ -858,10 +858,9 @@ fn lower_ltm_variable(
                 compat: datamodel::Compat::default(),
             });
             let mut nested = Vec::new();
+            let dep_ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
             let dep_parsed =
-                crate::variable::parse_var(dim_ctx, &stub, &mut nested, units_ctx, |mi| {
-                    Ok(Some(mi.clone()))
-                });
+                crate::variable::parse_var(&dep_ctx, &stub, &mut nested, |mi| Ok(Some(mi.clone())));
             stage0_vars.insert(Ident::new(dep_name), dep_parsed);
         }
     }
@@ -1625,13 +1624,11 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
     let units_ctx = project_units_context(db, project);
 
     let mut dummy_implicits = Vec::new();
-    let parsed_implicit = crate::variable::parse_var(
-        dim_context,
-        implicit_dm_var,
-        &mut dummy_implicits,
-        units_ctx,
-        |mi| Ok(Some(mi.clone())),
-    );
+    let ctx = crate::variable::ParseContext::new(dim_context, units_ctx);
+    let parsed_implicit =
+        crate::variable::parse_var(&ctx, implicit_dm_var, &mut dummy_implicits, |mi| {
+            Ok(Some(mi.clone()))
+        });
     if parsed_implicit
         .equation_errors()
         .is_some_and(|e| !e.is_empty())

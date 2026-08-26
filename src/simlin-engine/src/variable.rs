@@ -14,6 +14,7 @@ use crate::common::{
     UnitError, canonicalize,
 };
 use crate::datamodel;
+use crate::db::SourceVariableKind;
 use crate::dimensions::{Dimension, DimensionsContext};
 use crate::lexer::LexerType;
 #[cfg(test)]
@@ -81,90 +82,85 @@ pub struct ModuleInput {
     pub dst: Ident<Canonical>,
 }
 
+/// A variable's per-kind payload: exactly the facts whose meaning depends on
+/// what kind of variable this is. Everything a variable has regardless of kind
+/// -- its name, its declared units, its source equation, and the two error
+/// channels -- lives on [`Variable`] itself, so a transformation that only
+/// rewrites equations (`model::lower_variable`) maps over `kind` instead of
+/// re-listing every field of every variant.
+///
+/// `Aux` covers both auxiliaries and flows (`is_flow` says which) because they
+/// lower identically: one slot per element holding the value of one equation.
+/// A flow is distinguished only by where a stock's integration reads it.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
-pub enum Variable<MI = ModuleInput, E = Expr2> {
+pub enum VarKind<MI = ModuleInput, E = Expr2> {
     Stock {
-        ident: Ident<Canonical>,
         init_ast: Option<Ast<E>>,
-        eqn: Option<datamodel::Equation>,
-        units: Option<datamodel::UnitMap>,
         inflows: Vec<Ident<Canonical>>,
         outflows: Vec<Ident<Canonical>>,
         non_negative: bool,
-        /// How parsing and lowering report a failure on this variable; see the
-        /// note on [`Variable::equation_errors`].
-        errors: Vec<EquationError>,
-        /// How parsing reports a malformed `<units>` string on this variable;
-        /// see the note on [`Variable::unit_errors`].
-        unit_errors: Vec<UnitError>,
     },
-    Var {
-        ident: Ident<Canonical>,
+    Aux {
         ast: Option<Ast<E>>,
         init_ast: Option<Ast<E>>,
-        eqn: Option<datamodel::Equation>,
-        units: Option<datamodel::UnitMap>,
         tables: Vec<Table>,
         non_negative: bool,
         is_flow: bool,
         is_table_only: bool,
-        /// How parsing and lowering report a failure on this variable; see the
-        /// note on [`Variable::equation_errors`].
-        errors: Vec<EquationError>,
-        /// How parsing reports a malformed `<units>` string on this variable;
-        /// see the note on [`Variable::unit_errors`].
-        unit_errors: Vec<UnitError>,
     },
     Module {
         // the current spec has ident == model name
-        ident: Ident<Canonical>,
         model_name: Ident<Canonical>,
-        units: Option<datamodel::UnitMap>,
         inputs: Vec<MI>,
-        /// How parsing and lowering report a failure on this variable; see the
-        /// note on [`Variable::equation_errors`].
-        errors: Vec<EquationError>,
-        /// How parsing reports a malformed `<units>` string on this variable;
-        /// see the note on [`Variable::unit_errors`].
-        unit_errors: Vec<UnitError>,
     },
+}
+
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
+pub struct Variable<MI = ModuleInput, E = Expr2> {
+    pub ident: Ident<Canonical>,
+    pub units: Option<datamodel::UnitMap>,
+    /// The variable's source equation, kept for the consumers that reason about
+    /// what the modeller WROTE rather than what it lowered to (LTM's arrayed
+    /// re-derivation, unit inference's diagnostics). `None` for a module
+    /// instance, which has no equation of its own.
+    pub eqn: Option<datamodel::Equation>,
+    /// How parsing and lowering report a failure on this variable; see the
+    /// note on [`Variable::equation_errors`].
+    pub errors: Vec<EquationError>,
+    /// How parsing reports a malformed `<units>` string on this variable;
+    /// see the note on [`Variable::unit_errors`].
+    pub unit_errors: Vec<UnitError>,
+    pub kind: VarKind<MI, E>,
 }
 
 impl<MI, E> Variable<MI, E> {
     pub fn ident(&self) -> &str {
-        match self {
-            Variable::Stock { ident: name, .. }
-            | Variable::Var { ident: name, .. }
-            | Variable::Module { ident: name, .. } => name.as_str(),
-        }
+        self.ident.as_str()
     }
 
     pub fn canonical_ident(&self) -> &Ident<Canonical> {
-        match self {
-            Variable::Stock { ident: name, .. }
-            | Variable::Var { ident: name, .. }
-            | Variable::Module { ident: name, .. } => name,
-        }
+        &self.ident
     }
 
     pub fn ast(&self) -> Option<&Ast<E>> {
-        match self {
-            Variable::Stock {
+        match &self.kind {
+            VarKind::Stock {
                 init_ast: Some(ast),
                 ..
             }
-            | Variable::Var { ast: Some(ast), .. } => Some(ast),
+            | VarKind::Aux { ast: Some(ast), .. } => Some(ast),
             _ => None,
         }
     }
 
     // returns the init_ast if one exists, otherwise ast()
     pub fn init_ast(&self) -> Option<&Ast<E>> {
-        if let Variable::Var {
+        if let VarKind::Aux {
             init_ast: Some(ast),
             ..
-        } = self
+        } = &self.kind
         {
             return Some(ast);
         }
@@ -172,47 +168,25 @@ impl<MI, E> Variable<MI, E> {
     }
 
     pub fn scalar_equation(&self) -> Option<&String> {
-        match self {
-            Variable::Stock {
-                eqn: Some(datamodel::Equation::Scalar(s)),
-                ..
-            }
-            | Variable::Var {
-                eqn: Some(datamodel::Equation::Scalar(s)),
-                ..
-            } => Some(s),
+        match &self.eqn {
+            Some(datamodel::Equation::Scalar(s)) => Some(s),
             _ => None,
         }
     }
 
     pub fn get_dimensions(&self) -> Option<&[Dimension]> {
-        match self {
-            Variable::Stock {
-                init_ast: Some(Ast::Arrayed(dims, _, _, _)),
-                ..
-            }
-            | Variable::Var {
-                ast: Some(Ast::Arrayed(dims, _, _, _)),
-                ..
-            } => Some(dims),
-            Variable::Stock {
-                init_ast: Some(Ast::ApplyToAll(dims, _)),
-                ..
-            }
-            | Variable::Var {
-                ast: Some(Ast::ApplyToAll(dims, _)),
-                ..
-            } => Some(dims),
-            _ => None,
+        match self.ast()? {
+            Ast::Arrayed(dims, _, _, _) | Ast::ApplyToAll(dims, _) => Some(dims),
+            Ast::Scalar(_) => None,
         }
     }
 
     pub fn is_stock(&self) -> bool {
-        matches!(self, Variable::Stock { .. })
+        matches!(self.kind, VarKind::Stock { .. })
     }
 
     pub fn is_module(&self) -> bool {
-        matches!(self, Variable::Module { .. })
+        matches!(self.kind, VarKind::Module { .. })
     }
 
     /// The equation errors parsing and lowering recorded on this variable.
@@ -237,15 +211,10 @@ impl<MI, E> Variable<MI, E> {
     /// So `db::collect_model_diagnostics` is not an ALTERNATIVE source for
     /// these -- it is the same errors, downstream of this field.
     pub fn equation_errors(&self) -> Option<Vec<EquationError>> {
-        let errors = match self {
-            Variable::Stock { errors, .. }
-            | Variable::Var { errors, .. }
-            | Variable::Module { errors, .. } => errors,
-        };
-        if errors.is_empty() {
+        if self.errors.is_empty() {
             None
         } else {
-            Some(errors.clone())
+            Some(self.errors.clone())
         }
     }
 
@@ -257,40 +226,26 @@ impl<MI, E> Variable<MI, E> {
     /// *consistency* mismatches are a different pass (`db::units`) and never
     /// land here -- nothing appends to this field after parsing.
     pub fn unit_errors(&self) -> Option<Vec<UnitError>> {
-        let errors = match self {
-            Variable::Stock { unit_errors, .. }
-            | Variable::Var { unit_errors, .. }
-            | Variable::Module { unit_errors, .. } => unit_errors,
-        };
-        if errors.is_empty() {
+        if self.unit_errors.is_empty() {
             None
         } else {
-            Some(errors.clone())
+            Some(self.unit_errors.clone())
         }
     }
 
     pub fn table(&self) -> Option<&Table> {
-        match self {
-            Variable::Stock { .. } => None,
-            Variable::Var { tables, .. } => tables.first(),
-            Variable::Module { .. } => None,
-        }
+        self.tables().first()
     }
 
     pub fn tables(&self) -> &[Table] {
-        match self {
-            Variable::Stock { .. } => &[],
-            Variable::Var { tables, .. } => tables,
-            Variable::Module { .. } => &[],
+        match &self.kind {
+            VarKind::Aux { tables, .. } => tables,
+            VarKind::Stock { .. } | VarKind::Module { .. } => &[],
         }
     }
 
     pub fn units(&self) -> Option<&datamodel::UnitMap> {
-        match self {
-            Variable::Stock { units, .. } => units.as_ref(),
-            Variable::Var { units, .. } => units.as_ref(),
-            Variable::Module { units, .. } => units.as_ref(),
-        }
+        self.units.as_ref()
     }
 }
 
@@ -305,25 +260,24 @@ impl Variable {
         model_name: Ident<Canonical>,
         inputs: Vec<ModuleInput>,
     ) -> Self {
-        Variable::Module {
+        Variable {
             ident,
-            model_name,
             units: None,
-            inputs,
+            eqn: None,
             errors: vec![],
             unit_errors: vec![],
+            kind: VarKind::Module { model_name, inputs },
         }
     }
 }
 
 #[allow(clippy::unnecessary_wraps)]
 pub(crate) fn parse_table(
-    gf: &Option<datamodel::GraphicalFunction>,
+    gf: Option<&datamodel::GraphicalFunction>,
 ) -> EquationResult<Option<Table>> {
-    if gf.is_none() {
+    let Some(gf) = gf else {
         return Ok(None);
-    }
-    let gf = gf.as_ref().unwrap();
+    };
 
     let x: Vec<f64> = match &gf.x_points {
         Some(x_points) => x_points.clone(),
@@ -392,7 +346,7 @@ pub(crate) fn reorder_arrayed_element_tables<T>(
 /// equation's dimension names are resolved against it to drive the
 /// element-name -> dimension-index reorder.
 fn build_tables(
-    gf: &Option<datamodel::GraphicalFunction>,
+    gf: Option<&datamodel::GraphicalFunction>,
     equation: &datamodel::Equation,
     dimensions: &DimensionsContext,
 ) -> (Vec<Table>, Vec<EquationError>) {
@@ -407,7 +361,7 @@ fn build_tables(
             // absent from the map and get an empty placeholder at their slot.
             let mut present: HashMap<CanonicalElementName, Table> = HashMap::new();
             for (subscript, _, _, elem_gf) in elements {
-                match parse_table(elem_gf) {
+                match parse_table(elem_gf.as_ref()) {
                     Ok(Some(table)) => {
                         present.insert(CanonicalElementName::from_raw(subscript), table);
                     }
@@ -452,27 +406,6 @@ fn build_tables(
     (tables, errors)
 }
 
-/// Pure predicate: a "lookup-only" variable is a standalone graphical-function
-/// holder -- it carries a graphical function (`has_tables`) and its equation is
-/// empty or the MDL lookup sentinel (i.e. there is no functional input
-/// expression to feed the table). Such a variable is a *table indexed by an
-/// explicit input* (`y = table(input)`), not a runtime value-bearing variable:
-/// it produces no simulation series (see `Variable::Var::is_table_only`).
-///
-/// Mirrors `mdl::writer::is_lookup_only_equation`'s "empty or sentinel" rule so
-/// that BOTH the canonical empty-equation form (now emitted by both the XMILE
-/// and MDL importers) and a legacy MDL-sourced one (the `LOOKUP_SENTINEL`
-/// equation alongside a `gf`) are detected. New imports emit the empty form; the
-/// `"0+0"` arm is a back-compat read-shim for models already serialized with it.
-///
-/// Returns `false` for WITH LOOKUP (`var = WITH LOOKUP(input, table)`: tables
-/// present but a *real* input equation) and for an ordinary aux (a real
-/// equation, no tables). The `has_tables` guard also keeps an empty-RHS aux (no
-/// gf) off this path.
-pub(crate) fn is_lookup_only(equation: &str, has_tables: bool) -> bool {
-    has_tables && is_empty_or_sentinel(equation)
-}
-
 /// An equation string with no functional content: empty/whitespace-only (the
 /// canonical lookup-only form) or exactly the MDL lookup sentinel `"0+0"` (a
 /// legacy back-compat read-shim -- older serialized models may still carry it).
@@ -482,33 +415,47 @@ pub(crate) fn is_empty_or_sentinel(equation: &str) -> bool {
     trimmed.is_empty() || trimmed == crate::mdl::LOOKUP_SENTINEL
 }
 
-/// Whether a whole variable is lookup-only, given its source `datamodel::Equation`
-/// and whether it carries graphical functions (`has_tables`). A scalar/A2A
-/// variable is lookup-only when its single equation is empty/sentinel; an
-/// arrayed (`Equation::Arrayed`) variable is lookup-only when EVERY element
-/// equation (and the EXCEPT default, if any) is empty/sentinel -- i.e. it is a
-/// pure per-element table holder. Returns `false` when the variable has no
-/// equation or no tables.
-pub(crate) fn var_is_lookup_only(eqn: Option<&datamodel::Equation>, has_tables: bool) -> bool {
+/// Whether a variable is a standalone "lookup-only" table: it carries a
+/// graphical function and has no functional input expression to feed it. Such
+/// a variable is a *table indexed by an explicit input* (`y = table(input)`),
+/// not a runtime value-bearing variable: it produces no simulation series and
+/// is excluded from every runlist (see [`VarKind::Aux::is_table_only`] and
+/// `db::source_var_is_table_only`, which is this predicate over the salsa
+/// inputs).
+///
+/// The rule per equation shape:
+///
+/// * **Scalar / apply-to-all** -- lookup-only iff the one equation is
+///   empty-or-sentinel and a variable-level `gf` is present.
+/// * **Arrayed (per-element)** -- lookup-only iff the variable holds a table
+///   *somewhere* (a variable-level `gf` or any per-element one) and EVERY
+///   element equation, plus the EXCEPT default when there is one, is
+///   empty-or-sentinel: a pure per-element table holder.
+///
+/// The empty-or-sentinel rule mirrors `mdl::writer::is_lookup_only_equation`,
+/// so BOTH the canonical empty-equation form (what both the XMILE and MDL
+/// importers emit today) and a legacy MDL-sourced one (the `LOOKUP_SENTINEL`
+/// `"0+0"` equation alongside a `gf`) are detected.
+///
+/// Returns `false` for WITH LOOKUP (`var = WITH LOOKUP(input, table)`: tables
+/// present but a *real* input equation), for an ordinary aux (a real equation,
+/// no tables), and for an empty-RHS aux with no `gf` at all.
+pub(crate) fn is_lookup_only(
+    eqn: &datamodel::Equation,
+    gf: Option<&datamodel::GraphicalFunction>,
+) -> bool {
     use crate::datamodel::Equation;
-    if !has_tables {
-        return false;
-    }
     match eqn {
-        // Scalar / A2A: one equation string -- the pure `is_lookup_only` atom.
-        Some(Equation::Scalar(s)) | Some(Equation::ApplyToAll(_, s)) => {
-            is_lookup_only(s, has_tables)
-        }
-        // Arrayed: a pure per-element table holder iff EVERY element equation
-        // (and the EXCEPT default, if any) is empty/sentinel. `has_tables` is
-        // already true here, so the per-element check is just the string
-        // predicate `is_empty_or_sentinel` that the atom is built on.
-        Some(Equation::Arrayed(_, elements, default, _)) => {
-            !elements.is_empty()
+        Equation::Scalar(s) | Equation::ApplyToAll(_, s) => gf.is_some() && is_empty_or_sentinel(s),
+        // The per-element gf is the 4th tuple field
+        // `(subscript, equation, gf_equation, gf)`.
+        Equation::Arrayed(_, elements, default, _) => {
+            let has_tables = gf.is_some() || elements.iter().any(|(_, _, _, gf)| gf.is_some());
+            has_tables
+                && !elements.is_empty()
                 && elements.iter().all(|(_, e, _, _)| is_empty_or_sentinel(e))
                 && default.as_deref().map(is_empty_or_sentinel).unwrap_or(true)
         }
-        None => false,
     }
 }
 
@@ -722,45 +669,155 @@ pub(crate) fn may_have_unfilled_arms(
 mod is_lookup_only_tests {
     use super::*;
 
-    #[test]
-    fn is_lookup_only_sentinel_equation_with_tables_is_true() {
-        // Legacy MDL-sourced lookup-only: `g(<table>)` serialized with equation
-        // == LOOKUP_SENTINEL ("0+0") + a graphical function. Still detected as a
-        // back-compat read-shim even though new imports emit the empty form.
-        assert!(is_lookup_only(crate::mdl::LOOKUP_SENTINEL, true));
+    /// A minimal graphical function -- the only thing the predicate asks of a
+    /// `gf` is whether one is there.
+    fn gf() -> datamodel::GraphicalFunction {
+        datamodel::GraphicalFunction {
+            kind: datamodel::GraphicalFunctionKind::Continuous,
+            x_points: None,
+            x_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+            y_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+            y_points: vec![0.0, 1.0],
+        }
     }
 
-    #[test]
-    fn is_lookup_only_empty_equation_with_tables_is_true() {
-        // Canonical lookup-only: a variable with a `<gf>` but no equation.
-        assert!(is_lookup_only("", true));
-        // Whitespace-only is equivalent to empty (matches the `.trim()` in
-        // `mdl::writer::is_lookup_only_equation`).
-        assert!(is_lookup_only("   ", true));
+    fn arrayed(elements: &[(&str, &str, bool)], default: Option<&str>) -> datamodel::Equation {
+        datamodel::Equation::Arrayed(
+            vec!["d".to_owned()],
+            elements
+                .iter()
+                .map(|(sub, eqn, has_gf)| {
+                    ((*sub).to_owned(), (*eqn).to_owned(), None, has_gf.then(gf))
+                })
+                .collect(),
+            default.map(str::to_owned),
+            default.is_some(),
+        )
     }
 
+    /// Every combination of (equation shape) x (equation content) x (where the
+    /// table lives), derived from `datamodel::Equation`'s three variants and
+    /// the two places a graphical function can sit (the variable, an element).
+    /// One row per cell; the expectation is the documented rule, not a
+    /// restatement of the code.
     #[test]
-    fn is_lookup_only_with_lookup_real_input_is_false() {
-        // WITH LOOKUP (`g = WITH LOOKUP(some_input, <table>)`): tables present
-        // but a real input expression. Must NOT be treated as lookup-only --
-        // it is a genuine value-bearing variable that evaluates `gf(input)`.
-        assert!(!is_lookup_only("some_input", true));
-    }
-
-    #[test]
-    fn is_lookup_only_ordinary_aux_no_tables_is_false() {
-        // An ordinary aux: a real equation and no graphical function.
-        assert!(!is_lookup_only("3 * x + 1", false));
-    }
-
-    #[test]
-    fn is_lookup_only_sentinel_equation_without_tables_is_false() {
-        // An empty-RHS aux (MdlEquation::EmptyRhs): the sentinel equation but
-        // NO graphical function. `has_tables == false` keeps it off the
-        // lookup-only path even though its equation text matches the sentinel.
-        assert!(!is_lookup_only(crate::mdl::LOOKUP_SENTINEL, false));
-        // The empty-equation, no-tables case is likewise not lookup-only.
-        assert!(!is_lookup_only("", false));
+    fn is_lookup_only_covers_every_equation_shape() {
+        use datamodel::Equation::{ApplyToAll, Scalar};
+        let sentinel = crate::mdl::LOOKUP_SENTINEL;
+        let cases: Vec<(&str, datamodel::Equation, bool, bool)> = vec![
+            // -- scalar --
+            ("scalar empty + gf", Scalar(String::new()), true, true),
+            (
+                "scalar whitespace + gf",
+                Scalar("   ".to_owned()),
+                true,
+                true,
+            ),
+            (
+                "scalar sentinel + gf (legacy MDL)",
+                Scalar(sentinel.to_owned()),
+                true,
+                true,
+            ),
+            // WITH LOOKUP: a real input expression beside the table.
+            (
+                "scalar real equation + gf",
+                Scalar("some_input".to_owned()),
+                true,
+                false,
+            ),
+            // An ordinary aux, and an empty-RHS aux: no table, so never this.
+            (
+                "scalar real equation, no gf",
+                Scalar("3 * x + 1".to_owned()),
+                false,
+                false,
+            ),
+            ("scalar empty, no gf", Scalar(String::new()), false, false),
+            (
+                "scalar sentinel, no gf",
+                Scalar(sentinel.to_owned()),
+                false,
+                false,
+            ),
+            // -- apply-to-all: one equation, same rule as scalar --
+            (
+                "a2a empty + gf",
+                ApplyToAll(vec!["d".to_owned()], String::new()),
+                true,
+                true,
+            ),
+            (
+                "a2a real equation + gf",
+                ApplyToAll(vec!["d".to_owned()], "x".to_owned()),
+                true,
+                false,
+            ),
+            (
+                "a2a empty, no gf",
+                ApplyToAll(vec!["d".to_owned()], String::new()),
+                false,
+                false,
+            ),
+            // -- arrayed: every arm must be empty, and a table must exist --
+            (
+                "arrayed all empty, per-element gfs",
+                arrayed(&[("a", "", true), ("b", "", true)], None),
+                false,
+                true,
+            ),
+            (
+                "arrayed all empty, variable-level gf",
+                arrayed(&[("a", "", false), ("b", "", false)], None),
+                true,
+                true,
+            ),
+            (
+                "arrayed all sentinel, per-element gfs",
+                arrayed(&[("a", sentinel, true)], None),
+                false,
+                true,
+            ),
+            (
+                "arrayed one arm has an equation",
+                arrayed(&[("a", "", true), ("b", "x", true)], None),
+                false,
+                false,
+            ),
+            (
+                "arrayed all empty, no table anywhere",
+                arrayed(&[("a", "", false)], None),
+                false,
+                false,
+            ),
+            (
+                "arrayed all empty, EXCEPT default empty",
+                arrayed(&[("a", "", true)], Some("")),
+                false,
+                true,
+            ),
+            (
+                "arrayed all empty, EXCEPT default has an equation",
+                arrayed(&[("a", "", true)], Some("x")),
+                false,
+                false,
+            ),
+            (
+                "arrayed with no elements at all",
+                arrayed(&[], None),
+                true,
+                false,
+            ),
+        ];
+        for (label, eqn, has_var_gf, expected) in cases {
+            let table = gf();
+            let var_gf = has_var_gf.then_some(&table);
+            assert_eq!(
+                expected,
+                is_lookup_only(&eqn, var_gf),
+                "is_lookup_only disagreed on '{label}'"
+            );
+        }
     }
 }
 
@@ -880,75 +937,175 @@ fn parse_equation(
     }
 }
 
-pub fn parse_var<MI, F>(
-    dimensions: &DimensionsContext,
-    v: &datamodel::Variable,
-    implicit_vars: &mut Vec<datamodel::Variable>,
-    units_ctx: &units::Context,
-    module_input_mapper: F,
-) -> Variable<MI, Expr0>
-where
-    MI: std::fmt::Debug, // TODO: not sure why unwrap_err needs this
-    F: Fn(&datamodel::ModuleReference) -> EquationResult<Option<MI>>,
-{
-    parse_var_with_module_context(
-        dimensions,
-        v,
-        implicit_vars,
-        units_ctx,
-        module_input_mapper,
-        None,
-        None,
-        None,
-        // `parse_var` is the no-project-macros convenience path, so there is
-        // never an enclosing macro body here.
-        None,
-    )
+/// The fields the parser reads from a variable, borrowed from whichever
+/// representation the caller holds.
+///
+/// Two producers, one consumer. The salsa path builds this directly over
+/// `SourceVariable`'s split input fields (`db::input::variable_source`), which
+/// is why nothing between the salsa inputs and the parse has to re-assemble --
+/// and deep-clone -- a kind-tagged `datamodel::Variable` per parse. The
+/// non-salsa paths (the `ModelStage0` oracle, and every path that parses a
+/// synthesized implicit `datamodel::Variable`) come through the
+/// `From<&datamodel::Variable>` impl below.
+///
+/// `equation` is a `Cow` for one producer-specific rewrite: a conveyor stock's
+/// `<eqn>` may be a §7.2 explicit init list (`"100, 200, 300"`), which is not a
+/// scalar expression, so the salsa producer substitutes the constant raw-sum
+/// placeholder `conveyor_compile::explicit_init_list` computes. That
+/// substitution and the empty stand-in for a variable with no equation at all
+/// (a module instance) are the only owned values either producer builds; every
+/// other field, on both producers, is a plain borrow.
+pub struct VariableSource<'a> {
+    pub ident: &'a str,
+    pub equation: std::borrow::Cow<'a, datamodel::Equation>,
+    pub kind: SourceVariableKind,
+    pub units: Option<&'a str>,
+    pub gf: Option<&'a datamodel::GraphicalFunction>,
+    pub inflows: &'a [String],
+    pub outflows: &'a [String],
+    pub module_refs: &'a [datamodel::ModuleReference],
+    /// The model a `Module` instance instantiates; empty for every other kind.
+    pub model_name: &'a str,
+    pub non_negative: bool,
+    pub can_be_module_input: bool,
+    /// `compat.active_initial`: an importer-supplied separate initial-phase
+    /// equation (Vensim's `ACTIVE INITIAL`), read only on the initial pass.
+    pub active_initial: Option<&'a str>,
 }
 
-/// Like `parse_var` but accepts a set of module variable identifiers from
-/// the parent model and the per-project macro registry.
+impl VariableSource<'_> {
+    /// Whether this is a standalone lookup-only table -- see [`is_lookup_only`],
+    /// the one owner of the rule.
+    pub fn is_lookup_only(&self) -> bool {
+        is_lookup_only(&self.equation, self.gf)
+    }
+}
+
+impl<'a> From<&'a datamodel::Variable> for VariableSource<'a> {
+    fn from(v: &'a datamodel::Variable) -> Self {
+        const NO_NAMES: &[String] = &[];
+        const NO_REFS: &[datamodel::ModuleReference] = &[];
+        let (inflows, outflows) = match v {
+            datamodel::Variable::Stock(s) => (s.inflows.as_slice(), s.outflows.as_slice()),
+            _ => (NO_NAMES, NO_NAMES),
+        };
+        let (module_refs, model_name) = match v {
+            datamodel::Variable::Module(m) => (m.references.as_slice(), m.model_name.as_str()),
+            _ => (NO_REFS, ""),
+        };
+        let gf = match v {
+            datamodel::Variable::Flow(f) => f.gf.as_ref(),
+            datamodel::Variable::Aux(a) => a.gf.as_ref(),
+            _ => None,
+        };
+        // An aux's `non_negative` is deliberately dropped: only a stock and a
+        // flow have the flag, and `db::sync` stores the same `false` for an aux
+        // on the salsa input, so both producers agree.
+        let non_negative = match v {
+            datamodel::Variable::Stock(s) => s.compat.non_negative,
+            datamodel::Variable::Flow(f) => f.compat.non_negative,
+            _ => false,
+        };
+        let compat = match v {
+            datamodel::Variable::Stock(s) => &s.compat,
+            datamodel::Variable::Flow(f) => &f.compat,
+            datamodel::Variable::Aux(a) => &a.compat,
+            datamodel::Variable::Module(m) => &m.compat,
+        };
+        VariableSource {
+            ident: v.get_ident(),
+            // Borrowed, like every other field: only the salsa producer's
+            // conveyor rewrite owns. A module has no equation at all, and the
+            // empty scalar stand-in is the one value with nothing to borrow
+            // from.
+            equation: v
+                .get_equation()
+                .map(std::borrow::Cow::Borrowed)
+                .unwrap_or_else(|| {
+                    std::borrow::Cow::Owned(datamodel::Equation::Scalar(String::new()))
+                }),
+            kind: SourceVariableKind::from_datamodel_variable(v),
+            units: v.get_units().map(String::as_str),
+            gf,
+            inflows,
+            outflows,
+            module_refs,
+            model_name,
+            non_negative,
+            can_be_module_input: v.can_be_module_input(),
+            active_initial: compat.active_initial.as_deref(),
+        }
+    }
+}
+
+/// Everything a parse reads BESIDE the variable itself: the project-global
+/// contexts plus the four optional model-level facts that decide how
+/// `PREVIOUS`/`INIT` and module-function calls expand.
 ///
-/// `module_idents`: when provided, `PREVIOUS(module_var)` in equations
-/// synthesizes a scalar helper aux instead of compiling `LoadPrev` directly
-/// against a multi-slot module.
-///
-/// `model_var_names`: when provided, the model's full variable-name set;
-/// `PREVIOUS`/`INIT` then accept a non-shadowed bare element name as a static
-/// subscript index instead of synthesizing a helper aux per call site (see
-/// `BuiltinVisitor::index_is_static`). The salsa per-variable parse path
-/// passes `None` to preserve incremental invalidation granularity (the parse
-/// must not depend on the model's full name set); the LTM equation parse path
-/// -- whose equations are regenerated wholesale on model changes anyway --
-/// passes the set, which is what keeps large arrayed models' LTM helper
-/// volume bounded (GH #654).
-///
-/// `macro_registry`: when provided, a call resolving to a project macro
-/// expands into a synthetic `Variable::Module` (and shadows an identically
-/// named builtin/stdlib func). `None` -- the convenience `parse_var` path
-/// and the test sites -- means "no project macros", an empty registry.
-///
-/// `enclosing_model`: the owning model's name when `v` is a macro-marked
-/// model's body variable; `None` for ordinary variables. Threaded to
-/// `instantiate_implicit_modules` for the #554 same-named-opcode-intrinsic
-/// exception (a macro body's renamed `init`/`previous` builtin must resolve
-/// to the intrinsic, not recurse into the like-named macro).
-#[allow(clippy::too_many_arguments)]
-pub fn parse_var_with_module_context<MI, F>(
-    dimensions: &DimensionsContext,
-    v: &datamodel::Variable,
+/// A struct rather than a parameter list because every field is optional
+/// context that most callers do not supply -- [`ParseContext::new`] is the
+/// "no project context" parse the non-salsa paths use.
+pub struct ParseContext<'a> {
+    pub dimensions: &'a DimensionsContext,
+    pub units_ctx: &'a units::Context,
+    /// The parent model's module-backed variable identifiers. When provided,
+    /// `PREVIOUS(module_var)` synthesizes a scalar helper aux instead of
+    /// compiling `LoadPrev` directly against a multi-slot module.
+    pub module_idents: Option<&'a HashSet<Ident<Canonical>>>,
+    /// The model's full variable-name set. When provided, `PREVIOUS`/`INIT`
+    /// accept a non-shadowed bare element name as a static subscript index
+    /// instead of synthesizing a helper aux per call site (see
+    /// `BuiltinVisitor::index_is_static`). The salsa per-variable parse path
+    /// passes `None` to preserve incremental invalidation granularity (the
+    /// parse must not depend on the model's full name set); the LTM equation
+    /// parse path -- whose equations are regenerated wholesale on model
+    /// changes anyway -- passes the set, which is what keeps large arrayed
+    /// models' LTM helper volume bounded (GH #654).
+    pub model_var_names: Option<&'a HashSet<Ident<Canonical>>>,
+    /// The per-project macro registry. When provided, a call resolving to a
+    /// project macro expands into a synthetic module variable (and shadows an
+    /// identically named builtin/stdlib func). `None` means "no project
+    /// macros", an empty registry.
+    pub macro_registry: Option<&'a MacroRegistry>,
+    /// The owning model's name when the variable is a macro-marked model's
+    /// body variable; `None` for ordinary variables. Threaded to
+    /// `instantiate_implicit_modules` for the #554 same-named-opcode-intrinsic
+    /// exception (a macro body's renamed `init`/`previous` builtin must
+    /// resolve to the intrinsic, not recurse into the like-named macro).
+    pub enclosing_model: Option<&'a str>,
+}
+
+impl<'a> ParseContext<'a> {
+    /// A parse with no model-level context: no module-ident set, no model
+    /// variable-name set, no project macros, and no enclosing macro body.
+    pub fn new(dimensions: &'a DimensionsContext, units_ctx: &'a units::Context) -> Self {
+        ParseContext {
+            dimensions,
+            units_ctx,
+            module_idents: None,
+            model_var_names: None,
+            macro_registry: None,
+            enclosing_model: None,
+        }
+    }
+}
+
+/// Parse one variable's equations into a `Variable<MI, Expr0>`, appending any
+/// implicit helper variables the `PREVIOUS`/`INIT`/stdlib-call expansion
+/// synthesizes to `implicit_vars`.
+pub fn parse_var<'a, MI, F>(
+    ctx: &ParseContext<'_>,
+    v: impl Into<VariableSource<'a>>,
     implicit_vars: &mut Vec<datamodel::Variable>,
-    units_ctx: &units::Context,
     module_input_mapper: F,
-    module_idents: Option<&HashSet<Ident<Canonical>>>,
-    model_var_names: Option<&HashSet<Ident<Canonical>>>,
-    macro_registry: Option<&MacroRegistry>,
-    enclosing_model: Option<&str>,
 ) -> Variable<MI, Expr0>
 where
     MI: std::fmt::Debug, // TODO: not sure why unwrap_err needs this
     F: Fn(&datamodel::ModuleReference) -> EquationResult<Option<MI>>,
 {
+    let v: VariableSource<'a> = v.into();
+    let dimensions = ctx.dimensions;
+
     // Canonical name -> its index in `implicit_vars`, for the helpers THIS call
     // contributes. Seeded empty rather than from the caller's vector, which is
     // deliberate on both counts:
@@ -977,15 +1134,15 @@ where
                 // The closure (not the bare `fn` pointer) lets the
                 // `&'static` empty default coerce to the parameter's
                 // borrow lifetime instead of forcing it to `'static`.
-                let registry = macro_registry.unwrap_or_else(|| empty_macro_registry());
+                let registry = ctx.macro_registry.unwrap_or_else(|| empty_macro_registry());
                 match instantiate_implicit_modules(
                     ident,
                     ast,
                     Some(dimensions),
-                    module_idents,
-                    model_var_names,
+                    ctx.module_idents,
+                    ctx.model_var_names,
                     registry,
-                    enclosing_model,
+                    ctx.enclosing_model,
                 ) {
                     Ok((ast, new_vars)) => {
                         // MERGE rather than append. This closure runs twice per
@@ -1048,17 +1205,9 @@ where
                 // equation + a `<gf>`) is a valid static table, not an error
                 // (issue #606): it produces no series and is excluded from the
                 // runlist downstream. (WITH LOOKUP has a real input equation, so
-                // it never reaches this empty-equation branch.)
-                let is_lookup_only_table = matches!(
-                    v,
-                    datamodel::Variable::Aux(datamodel::Aux { gf: Some(_), .. })
-                        | datamodel::Variable::Flow(datamodel::Flow { gf: Some(_), .. })
-                );
-                if errors.is_empty()
-                    && !is_initial
-                    && !v.can_be_module_input()
-                    && !is_lookup_only_table
-                {
+                // it never reaches this empty-equation branch.) Only a flow and
+                // an aux can carry a `gf`, so its presence IS the kind test.
+                if errors.is_empty() && !is_initial && !v.can_be_module_input && v.gf.is_none() {
                     errors.push(EquationError {
                         start: 0,
                         end: 0,
@@ -1071,145 +1220,79 @@ where
 
         (ast, errors)
     };
-    match v {
-        datamodel::Variable::Stock(v) => {
-            let ident = v.ident.clone();
 
+    let mut unit_errors: Vec<UnitError> = vec![];
+    let units = match parse_units(ctx.units_ctx, v.units) {
+        Ok(units) => units,
+        Err(errors) => {
+            unit_errors.extend(errors);
+            None
+        }
+    };
+
+    let ident = Ident::<Canonical>::new(v.ident);
+    let (eqn, errors, kind) = match v.kind {
+        SourceVariableKind::Stock => {
             // TODO: should is_intial be true here?
-            let (ast, errors) = parse_and_lower_eqn(&ident, &v.equation, false, None);
-
-            let mut unit_errors: Vec<UnitError> = vec![];
-            let units = match parse_units(units_ctx, v.units.as_deref()) {
-                Ok(units) => units,
-                Err(errors) => {
-                    for err in errors.into_iter() {
-                        unit_errors.push(err);
-                    }
-                    None
-                }
-            };
-            Variable::Stock {
-                ident: Ident::new(&ident),
-                init_ast: ast,
-                eqn: Some(v.equation.clone()),
-                units,
-                inflows: v.inflows.iter().map(|i| Ident::new(i)).collect(),
-                outflows: v.outflows.iter().map(|o| Ident::new(o)).collect(),
-                non_negative: v.compat.non_negative,
+            let (ast, errors) = parse_and_lower_eqn(v.ident, &v.equation, false, None);
+            (
+                Some(v.equation.as_ref().clone()),
                 errors,
-                unit_errors,
-            }
+                VarKind::Stock {
+                    init_ast: ast,
+                    inflows: v.inflows.iter().map(|i| Ident::new(i)).collect(),
+                    outflows: v.outflows.iter().map(|o| Ident::new(o)).collect(),
+                    non_negative: v.non_negative,
+                },
+            )
         }
-        datamodel::Variable::Flow(v) => {
-            let ident = Ident::new(&v.ident);
-
+        SourceVariableKind::Flow | SourceVariableKind::Aux => {
             let (ast, mut errors) = parse_and_lower_eqn(ident.as_str(), &v.equation, false, None);
-            let (init_ast, init_errors) = parse_and_lower_eqn(
-                ident.as_str(),
-                &v.equation,
-                true,
-                v.compat.active_initial.as_deref(),
-            );
+            let (init_ast, init_errors) =
+                parse_and_lower_eqn(ident.as_str(), &v.equation, true, v.active_initial);
             errors.extend(init_errors);
 
-            let mut unit_errors: Vec<UnitError> = vec![];
-            let units = match parse_units(units_ctx, v.units.as_deref()) {
-                Ok(units) => units,
-                Err(errors) => {
-                    for err in errors.into_iter() {
-                        unit_errors.push(err);
-                    }
-                    None
-                }
-            };
-            let (tables, table_errors) = build_tables(&v.gf, &v.equation, dimensions);
+            let (tables, table_errors) = build_tables(v.gf, &v.equation, dimensions);
             errors.extend(table_errors);
             // A standalone graphical-function holder (a `<gf>`/MDL lookup with an
             // empty-or-sentinel equation) is a static table, not a value-bearing
             // variable: it is excluded from the runlist and produces no series.
-            let is_table_only = var_is_lookup_only(Some(&v.equation), !tables.is_empty());
-            Variable::Var {
-                ident,
-                ast,
-                init_ast,
-                eqn: Some(v.equation.clone()),
-                units,
-                tables,
-                is_flow: true,
-                is_table_only,
-                non_negative: v.compat.non_negative,
+            let is_table_only = v.is_lookup_only();
+            (
+                Some(v.equation.as_ref().clone()),
                 errors,
-                unit_errors,
-            }
+                VarKind::Aux {
+                    ast,
+                    init_ast,
+                    tables,
+                    non_negative: v.non_negative,
+                    is_flow: matches!(v.kind, SourceVariableKind::Flow),
+                    is_table_only,
+                },
+            )
         }
-        datamodel::Variable::Aux(v) => {
-            let ident = Ident::new(&v.ident);
-
-            let (ast, mut errors) = parse_and_lower_eqn(ident.as_str(), &v.equation, false, None);
-            let (init_ast, init_errors) = parse_and_lower_eqn(
-                ident.as_str(),
-                &v.equation,
-                true,
-                v.compat.active_initial.as_deref(),
-            );
-            errors.extend(init_errors);
-
-            let mut unit_errors: Vec<UnitError> = vec![];
-            let units = match parse_units(units_ctx, v.units.as_deref()) {
-                Ok(units) => units,
-                Err(errors) => {
-                    for err in errors.into_iter() {
-                        unit_errors.push(err);
-                    }
-                    None
-                }
-            };
-            let (tables, table_errors) = build_tables(&v.gf, &v.equation, dimensions);
-            errors.extend(table_errors);
-            // A standalone graphical-function holder (a `<gf>`/MDL lookup with an
-            // empty-or-sentinel equation) is a static table, not a value-bearing
-            // variable: it is excluded from the runlist and produces no series.
-            let is_table_only = var_is_lookup_only(Some(&v.equation), !tables.is_empty());
-            Variable::Var {
-                ident,
-                ast,
-                init_ast,
-                eqn: Some(v.equation.clone()),
-                units,
-                tables,
-                is_flow: false,
-                is_table_only,
-                non_negative: false,
-                errors,
-                unit_errors,
-            }
-        }
-        datamodel::Variable::Module(v) => {
-            let ident = Ident::new(&v.ident);
-            let inputs = v.references.iter().map(module_input_mapper);
+        SourceVariableKind::Module => {
+            let inputs = v.module_refs.iter().map(module_input_mapper);
             let (inputs, errors): (Vec<_>, Vec<_>) = inputs.partition(EquationResult::is_ok);
             let inputs: Vec<MI> = inputs.into_iter().flat_map(|i| i.unwrap()).collect();
             let errors: Vec<EquationError> = errors.into_iter().map(|e| e.unwrap_err()).collect();
-            let mut unit_errors: Vec<UnitError> = vec![];
-            let units = match parse_units(units_ctx, v.units.as_deref()) {
-                Ok(units) => units,
-                Err(errors) => {
-                    for err in errors.into_iter() {
-                        unit_errors.push(err);
-                    }
-                    None
-                }
-            };
-
-            Variable::Module {
-                model_name: Ident::new(&v.model_name),
-                ident,
-                units,
-                inputs,
+            (
+                None,
                 errors,
-                unit_errors,
-            }
+                VarKind::Module {
+                    model_name: Ident::new(v.model_name),
+                    inputs,
+                },
+            )
         }
+    };
+    Variable {
+        ident,
+        units,
+        eqn,
+        errors,
+        unit_errors,
+        kind,
     }
 }
 
@@ -1299,14 +1382,20 @@ struct ClassifyVisitor<'a> {
 }
 
 impl ClassifyVisitor<'_> {
-    /// Check if an identifier is a dimension name or element (and should be skipped)
-    fn is_dimension_or_element(&self, ident: &str) -> bool {
+    /// Whether `ident` names one of the active dimensions or one of their
+    /// elements (and so is a subscript, not a variable reference).
+    ///
+    /// Both sides are already canonical -- `Dimension::canonical_name` is a
+    /// `CanonicalDimensionName` and the AST's identifiers are
+    /// `Ident<Canonical>` -- so this is two string comparisons per axis and no
+    /// case folding.
+    fn is_dimension_or_element(&self, ident: &Ident<Canonical>) -> bool {
         for dim in self.dimensions.iter() {
-            if ident == &*canonicalize(dim.name()) {
+            if ident.as_str() == dim.canonical_name().as_str() {
                 return true;
             }
             if let Dimension::Named(_, named_dim) = dim
-                && named_dim.get_element_index(ident).is_some()
+                && named_dim.index_of(ident).is_some()
             {
                 return true;
             }
@@ -1317,7 +1406,7 @@ impl ClassifyVisitor<'_> {
     /// Walk an expression, filtering out dimension names/elements
     fn walk_index_expr(&mut self, expr: &Expr2) {
         if let Expr2::Var(arg_ident, _, _) = expr {
-            if !self.is_dimension_or_element(arg_ident.as_str()) {
+            if !self.is_dimension_or_element(arg_ident) {
                 self.walk(expr);
             }
         } else {
@@ -1357,10 +1446,11 @@ impl ClassifyVisitor<'_> {
         match e {
             Expr2::Const(_, _, _) => (),
             Expr2::Var(id, _, _) => {
-                let is_dimension = self.dimensions.iter().any(|dim| {
-                    let canonicalized_dim = canonicalize(dim.name());
-                    id.as_str() == &*canonicalized_dim
-                });
+                // `Dimension::canonical_name` is already canonical, as is `id`.
+                let is_dimension = self
+                    .dimensions
+                    .iter()
+                    .any(|dim| id.as_str() == dim.canonical_name().as_str());
                 if !is_dimension {
                     self.all.insert(id.clone());
                     if self.in_init && !self.in_previous {
@@ -2209,41 +2299,42 @@ fn test_tables() {
         compat: datamodel::Compat::default(),
     });
 
-    let expected = Variable::Var {
+    let expected = Variable {
         ident: Ident::new("lookup_function_table"),
-        ast: Some(Ast::Scalar(Expr0::Const(
-            "0".to_string(),
-            crate::ast::Literal::new(0.0),
-            Loc::new(0, 1),
-        ))),
-        init_ast: None,
-        eqn: Some(datamodel::Equation::Scalar("0".to_string())),
         units: None,
-        tables: vec![Table {
-            x: vec![0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0],
-            y: vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, -1.0, -1.0, 0.0, 0.0],
-            x_range: datamodel::GraphicalFunctionScale {
-                min: 0.0,
-                max: 45.0,
-            },
-            y_range: datamodel::GraphicalFunctionScale {
-                min: -1.0,
-                max: 1.0,
-            },
-        }],
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
+        eqn: Some(datamodel::Equation::Scalar("0".to_string())),
         errors: vec![],
         unit_errors: vec![],
+        kind: VarKind::Aux {
+            ast: Some(Ast::Scalar(Expr0::Const(
+                "0".to_string(),
+                crate::ast::Literal::new(0.0),
+                Loc::new(0, 1),
+            ))),
+            init_ast: None,
+            tables: vec![Table {
+                x: vec![0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0],
+                y: vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, -1.0, -1.0, 0.0, 0.0],
+                x_range: datamodel::GraphicalFunctionScale {
+                    min: 0.0,
+                    max: 45.0,
+                },
+                y_range: datamodel::GraphicalFunctionScale {
+                    min: -1.0,
+                    max: 1.0,
+                },
+            }],
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+        },
     };
 
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let unit_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let dims_ctx = DimensionsContext::default();
-    let output = parse_var(&dims_ctx, &input, &mut implicit_vars, &unit_ctx, |mi| {
-        Ok(Some(mi.clone()))
-    });
+    let ctx = ParseContext::new(&dims_ctx, &unit_ctx);
+    let output = parse_var(&ctx, &input, &mut implicit_vars, |mi| Ok(Some(mi.clone())));
 
     assert_eq!(expected, output);
 }

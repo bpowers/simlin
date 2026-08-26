@@ -2066,7 +2066,7 @@ fn recompute_module_input_edge_series_for(
     sub_model_output_ports: &SubModelOutputPorts,
 ) -> Option<Vec<f64>> {
     use crate::ltm::normalize_module_ref;
-    use crate::variable::Variable;
+    use crate::variable::VarKind;
 
     // `m` must be a module instance with a recursively-built internal graph
     // (a DynamicModule / passthrough exposing pathways). Pathless modules and
@@ -2084,7 +2084,7 @@ fn recompute_module_input_edge_series_for(
     // exhaustive twin `compute_module_link_overrides` (GH #698 / PR #705
     // r3353459409).
     let module_var = causal_graph.variables().get(module_name)?;
-    let Variable::Module { inputs, .. } = module_var else {
+    let VarKind::Module { inputs, .. } = &module_var.kind else {
         return None;
     };
     let mut matching = inputs
@@ -2098,7 +2098,7 @@ fn recompute_module_input_edge_series_for(
 
     // Exit port, resolved off the reader `y` supplied by the caller.
     let y_var = causal_graph.variables().get(exit_reader)?;
-    let exit_port = match y_var {
+    let exit_port = match &y_var.kind {
         // `y` is itself a module: m's output feeds y's input port(s). y's
         // ModuleInput src is the qualified `m·{port}`; the exit port is the
         // `{port}` whose normalized ref is `m`. If `y` reads TWO DISTINCT
@@ -2108,7 +2108,7 @@ fn recompute_module_input_edge_series_for(
         // mirroring the non-module `discovery_module_exit_port` arm and the
         // exhaustive twin (GH #698 / PR #705 r3353597299). Two inputs naming
         // the SAME `m·port` are NOT ambiguous: a unique distinct port is fine.
-        Variable::Module { inputs: y_in, .. } => {
+        VarKind::Module { inputs: y_in, .. } => {
             let mut exit: Option<Ident<Canonical>> = None;
             for inp in y_in {
                 if normalize_module_ref(&inp.src) != *module_name {
@@ -2137,10 +2137,10 @@ fn recompute_module_input_edge_series_for(
     // the sub-model's canonical name -- NOT a parent-scoped re-derivation,
     // which would shift the indices when ANOTHER project model reads a
     // different output port (GH #698 / PR #705 r3353097150).
-    let Variable::Module {
+    let VarKind::Module {
         model_name: sub_model_name,
         ..
-    } = module_var
+    } = &module_var.kind
     else {
         return None;
     };
@@ -2326,7 +2326,7 @@ impl<'a> ModuleOverrideCache<'a> {
         module: &Ident<Canonical>,
     ) -> Option<Rc<[usize]>> {
         use crate::ltm::{normalize_module_ref, strip_subscript};
-        use crate::variable::Variable;
+        use crate::variable::VarKind;
 
         let key = (
             Ident::<Canonical>::new(strip_subscript(from.as_str())),
@@ -2338,11 +2338,11 @@ impl<'a> ModuleOverrideCache<'a> {
         let resolve = || -> Option<Vec<usize>> {
             let module_graph = self.causal_graph.module_graph(&key.1)?;
             let module_var = self.causal_graph.variables().get(&key.1)?;
-            let Variable::Module {
+            let VarKind::Module {
                 inputs,
                 model_name: sub_model_name,
                 ..
-            } = module_var
+            } = &module_var.kind
             else {
                 return None;
             };

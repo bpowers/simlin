@@ -351,6 +351,13 @@ pub(crate) fn model_shape(
             let shape = if meta.is_module {
                 module_dep_shape(db, project, meta.model_name.as_deref().unwrap_or(""))
             } else {
+                // An `LtmImplicitVarMeta` carries no `dimensions` field (its
+                // `ImplicitVarMeta` sibling does), so the helper's axes come
+                // from its synthesized equation's declared dimension names --
+                // the same read `ltm_fragment_input`'s `helper_dims` and
+                // `ltm_implicit_fragment_input` make, so a parent resolving
+                // this helper through the model's shape sizes it exactly as
+                // this model's own fragments do.
                 let dim_names = match meta.variable.get_equation() {
                     Some(
                         datamodel::Equation::ApplyToAll(dim_names, _)

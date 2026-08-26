@@ -564,7 +564,7 @@ fn resolve_dist_profile(
     }
     // 1. A named graphical-function variable.
     if let Some(gf) = model_variable_gf(model, spec) {
-        match crate::variable::parse_table(&Some(gf.clone())) {
+        match crate::variable::parse_table(Some(gf)) {
             Ok(Some(table)) if table.x.len() >= 2 && table.x.len() == table.y.len() => {
                 let pairs = table
                     .x
@@ -830,7 +830,7 @@ pub(crate) fn canonical_subscript_key(subscript: &str) -> String {
 /// equation with every list replaced by its constant RAW SUM, merely making
 /// the stock's `<eqn>` parseable (a comma list is not a scalar expression).
 /// The raw sum is fine for the parse-only salsa diagnostic path
-/// (`db::input::datamodel_variable_from_source` -- that equation is never
+/// (`db::input::variable_source` -- that equation is never
 /// simulated, and the LaTeX surface returns NULL for list stocks rather than
 /// rendering it); [`expand_conveyors`] does NOT use this placeholder value --
 /// it swaps in the NORMALIZED belt total from [`normalized_init_total`]

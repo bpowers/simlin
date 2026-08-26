@@ -15,7 +15,7 @@ use crate::common::{
     Result, canonicalize,
 };
 use crate::dimensions::{Dimension, DimensionsContext};
-use crate::variable::Variable;
+use crate::variable::{VarKind, Variable};
 use crate::{Error, sim_err};
 
 use super::dimensions::{
@@ -752,9 +752,9 @@ impl Context<'_> {
     }
 
     pub(super) fn build_stock_update_expr(&self, stock: &VarRef, var: &Variable) -> Result<Expr> {
-        if let Variable::Stock {
+        if let VarKind::Stock {
             inflows, outflows, ..
-        } = var
+        } = &var.kind
         {
             let inflows = self
                 .fold_flows(inflows)?

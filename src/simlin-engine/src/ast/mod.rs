@@ -9,7 +9,7 @@ use crate::builtins::{BuiltinContents, UntypedBuiltinFn, walk_builtin_expr};
 use crate::common::{CanonicalElementName, EquationResult, canonicalize};
 use crate::dimensions::Dimension;
 use crate::model::{ModelStage0, ScopeStage0};
-use crate::variable::Variable;
+use crate::variable::{VarKind, Variable};
 use unicode_xid::UnicodeXID;
 
 mod array_view;
@@ -161,10 +161,10 @@ impl<'a> ArrayContext<'a> {
                 .get_model(model_name)?
                 .variables
                 .get(&*canonicalize(submodel_module_name))?;
-            if let Variable::Module {
+            if let VarKind::Module {
                 model_name: submodel_name,
                 ..
-            } = module_var
+            } = &module_var.kind
             {
                 return self.get_variable(submodel_name.as_str(), submodel_var);
             }
@@ -329,7 +329,25 @@ fn is_prefix_unary(op: &UnaryOp) -> bool {
     !matches!(op, UnaryOp::Transpose)
 }
 
-/// Parenthesize an `Expr0` child of a unary/binary operator when the operator's
+/// The shape facts the grouping rule reads off a node, for either expression
+/// tier. The rule asks only what KIND of node it is looking at and, for an
+/// operator, which one -- never at the operands -- so one classification serves
+/// `Expr0` and `Expr2` alike.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodeShape {
+    /// A `Const`, `Var` or `Subscript`: exactly what `parse_postfix` can reach,
+    /// which is why a transpose operand of this shape needs no grouping.
+    Atom,
+    /// A function/builtin call. NOT reachable by `parse_postfix` -- `parse_app`
+    /// returns an `App` before `parse_postfix` ever runs -- so `abs(a)'` is a
+    /// parse error while `(abs(a))'` is fine.
+    Call,
+    Op1(UnaryOp),
+    Op2(BinaryOp),
+    If,
+}
+
+/// Parenthesize a child of a unary/binary operator when the operator's
 /// precedence, associativity, or the grammar requires it.
 ///
 /// The engine re-parses `print_eqn` output constantly (LTM partial-equation
@@ -346,77 +364,66 @@ fn is_prefix_unary(op: &UnaryOp) -> bool {
 ///   re-parse as `-(a ^ b)`: a sign flip, not a parse error.
 /// * **The postfix transpose binds tighter than everything.** `(a + b)'` printed
 ///   bare would transpose only `b`. Its operand must additionally be one of the
-///   things `parse_postfix` can reach: a `Const`, `Var`, or `Subscript`. A CALL is
-///   NOT among them -- `parse_app` returns an `App` before `parse_postfix` ever
-///   runs, so `abs(a)'` is a parse error while `(abs(a))'` is fine.
-fn paren_if_necessary(parent: &Expr0, child: &Expr0, is_right_child: bool, eqn: String) -> String {
+///   things `parse_postfix` can reach (see [`NodeShape::Atom`]).
+///
+/// The LaTeX printers share this rule even though LaTeX is never re-parsed, so
+/// for them it is a *readability* rule rather than a correctness one: `(a^b)^c`
+/// must not render as the ambiguous `a^{b}^{c}`, a negated base must render as
+/// `(-a)^{b}` so a reader groups it the way the engine does, and `(-a)'`
+/// rendered as `-a^T` reads as negating the transpose rather than transposing
+/// the negation. A model rendered through the `Expr2` printer and the same
+/// model rendered through the `Expr0` one must not disagree about where the
+/// parentheses go, and "these two arms differ because only one of them has to
+/// be correct" is a distinction no reader of the output can see. Pinned by
+/// `test_latex_printers_agree_on_if_under_an_operator`.
+pub(crate) fn paren_if_necessary(
+    parent: NodeShape,
+    child: NodeShape,
+    is_right_child: bool,
+    eqn: String,
+) -> String {
     let needs = match parent {
-        Expr0::Const(_, _, _) | Expr0::Var(_, _) => false,
-        Expr0::App(_, _) | Expr0::Subscript(_, _, _) => false,
-        Expr0::Op1(UnaryOp::Transpose, _, _) => !matches!(
-            child,
-            Expr0::Const(_, _, _) | Expr0::Var(_, _) | Expr0::Subscript(_, _, _)
-        ),
-        Expr0::Op1(_, _, _) => matches!(child, Expr0::Op2(_, _, _, _) | Expr0::If(_, _, _, _)),
-        Expr0::Op2(parent_op, _, _, _) => match child {
-            Expr0::Op2(child_op, _, _, _) => {
-                needs_parens_for_op(parent_op, child_op, is_right_child)
-            }
+        NodeShape::Atom | NodeShape::Call | NodeShape::If => false,
+        NodeShape::Op1(UnaryOp::Transpose) => child != NodeShape::Atom,
+        NodeShape::Op1(_) => matches!(child, NodeShape::Op2(_) | NodeShape::If),
+        NodeShape::Op2(parent_op) => match child {
+            NodeShape::Op2(child_op) => needs_parens_for_op(&parent_op, &child_op, is_right_child),
             // Only the BASE of `^` needs it: the exponent is parsed as a full
             // unary expression, so `a ^ -b` already round-trips.
-            Expr0::Op1(child_op, _, _) => {
-                matches!(parent_op, BinaryOp::Exp) && !is_right_child && is_prefix_unary(child_op)
+            NodeShape::Op1(child_op) => {
+                matches!(parent_op, BinaryOp::Exp) && !is_right_child && is_prefix_unary(&child_op)
             }
-            Expr0::If(_, _, _, _) => true,
-            _ => false,
+            NodeShape::If => true,
+            NodeShape::Atom | NodeShape::Call => false,
         },
-        Expr0::If(_, _, _, _) => false,
     };
     if needs { format!("({eqn})") } else { eqn }
 }
 
-/// The LaTeX-rendering sibling of [`paren_if_necessary`]. LaTeX output is never
-/// re-parsed, so this is a *readability* rule rather than a correctness one, but
-/// it shares `needs_parens_for_op` and therefore the same associativity facts:
-/// `(a^b)^c` must not render as the ambiguous `a^{b}^{c}`, and a negated base
-/// must render as `(-a)^{b}` so a reader groups it the way the engine does.
-///
-/// The transpose-parent arm mirrors [`paren_if_necessary`]'s: `^T` renders as a
-/// superscript, which visually binds to the single token it follows, so any
-/// operand other than a `Const`/`Var`/`Subscript` must be grouped -- `(-a)'`
-/// rendered as `-a^T` reads as negating the transpose, not transposing the
-/// negation.
-///
-/// Every arm mirrors its [`paren_if_necessary`] twin, `If`-under-an-operator
-/// included, even though nothing here re-parses. A model rendered through the
-/// `Expr2` printer and the same model rendered through the `Expr0` one must not
-/// disagree about where the parentheses go, and "these two arms differ because
-/// only one of them has to be correct" is a distinction no reader of the output
-/// can see. Pinned by `test_latex_printers_agree_on_if_under_an_operator`.
-fn paren_if_necessary1(parent: &Expr2, child: &Expr2, is_right_child: bool, eqn: String) -> String {
-    let needs = match parent {
-        Expr2::Const(_, _, _) | Expr2::Var(_, _, _) => false,
-        Expr2::App(_, _, _) | Expr2::Subscript(_, _, _, _) => false,
-        Expr2::Op1(UnaryOp::Transpose, _, _, _) => !matches!(
-            child,
-            Expr2::Const(_, _, _) | Expr2::Var(_, _, _) | Expr2::Subscript(_, _, _, _)
-        ),
-        Expr2::Op1(_, _, _, _) => {
-            matches!(child, Expr2::Op2(_, _, _, _, _) | Expr2::If(_, _, _, _, _))
+impl Expr0 {
+    pub(crate) fn shape(&self) -> NodeShape {
+        match self {
+            Expr0::Const(_, _, _) | Expr0::Var(_, _) | Expr0::Subscript(_, _, _) => NodeShape::Atom,
+            Expr0::App(_, _) => NodeShape::Call,
+            Expr0::Op1(op, _, _) => NodeShape::Op1(*op),
+            Expr0::Op2(op, _, _, _) => NodeShape::Op2(*op),
+            Expr0::If(_, _, _, _) => NodeShape::If,
         }
-        Expr2::Op2(parent_op, _, _, _, _) => match child {
-            Expr2::Op2(child_op, _, _, _, _) => {
-                needs_parens_for_op(parent_op, child_op, is_right_child)
+    }
+}
+
+impl Expr2 {
+    pub(crate) fn shape(&self) -> NodeShape {
+        match self {
+            Expr2::Const(_, _, _) | Expr2::Var(_, _, _) | Expr2::Subscript(_, _, _, _) => {
+                NodeShape::Atom
             }
-            Expr2::Op1(child_op, _, _, _) => {
-                matches!(parent_op, BinaryOp::Exp) && !is_right_child && is_prefix_unary(child_op)
-            }
-            Expr2::If(_, _, _, _, _) => true,
-            _ => false,
-        },
-        Expr2::If(_, _, _, _, _) => false,
-    };
-    if needs { format!("({eqn})") } else { eqn }
+            Expr2::App(_, _, _) => NodeShape::Call,
+            Expr2::Op1(op, _, _, _) => NodeShape::Op1(*op),
+            Expr2::Op2(op, _, _, _, _) => NodeShape::Op2(*op),
+            Expr2::If(_, _, _, _, _) => NodeShape::If,
+        }
+    }
 }
 
 /// How a binary operator is laid out in LaTeX. Most are a simple infix token
@@ -542,7 +549,7 @@ impl Visitor<String> for PrintVisitor {
                 // The operand is parenthesized through the shared rule in both
                 // arms: the postfix `'` binds tighter than any operator, so a
                 // non-atomic operand must be grouped (`(a + b)'`).
-                let l = paren_if_necessary(expr, l, false, self.walk(l));
+                let l = paren_if_necessary(expr.shape(), l.shape(), false, self.walk(l));
                 match op {
                     UnaryOp::Transpose => format!("{l}'"),
                     // `not `, NOT `!`: the equation lexer has no `!` rule at all
@@ -553,8 +560,8 @@ impl Visitor<String> for PrintVisitor {
                 }
             }
             Expr0::Op2(op, l, r, _) => {
-                let l = paren_if_necessary(expr, l, false, self.walk(l));
-                let r = paren_if_necessary(expr, r, true, self.walk(r));
+                let l = paren_if_necessary(expr.shape(), l.shape(), false, self.walk(l));
+                let r = paren_if_necessary(expr.shape(), r.shape(), true, self.walk(r));
                 let op: &str = match op {
                     BinaryOp::Add => "+",
                     BinaryOp::Sub => "-",
@@ -980,169 +987,6 @@ fn test_print_eqn_quotes_special_identifiers() {
     );
 }
 
-struct LatexVisitor {}
-
-impl LatexVisitor {
-    fn walk_index(&mut self, expr: &IndexExpr2) -> String {
-        match expr {
-            IndexExpr2::Wildcard(_) => "*".to_string(),
-            IndexExpr2::StarRange(id, _) => format!("*:{id}"),
-            IndexExpr2::Range(l, r, _) => format!("{}:{}", self.walk(l), self.walk(r)),
-            IndexExpr2::DimPosition(n, _) => format!("@{n}"),
-            IndexExpr2::Expr(e) => self.walk(e),
-        }
-    }
-
-    fn walk(&mut self, expr: &Expr2) -> String {
-        match expr {
-            Expr2::Const(s, n, _) => {
-                if n.value().is_nan() {
-                    "\\mathrm{{NaN}}".to_owned()
-                } else {
-                    s.clone()
-                }
-            }
-            Expr2::Var(id, _, _) => {
-                let id = str::replace(id.as_str(), "_", "\\_");
-                format!("\\mathrm{{{id}}}")
-            }
-            Expr2::App(builtin, _, _) => {
-                let mut args: Vec<String> = vec![];
-                walk_builtin_expr(builtin, |contents| {
-                    let arg = match contents {
-                        BuiltinContents::Ident(id, _loc) => format!("\\mathrm{{{id}}}"),
-                        // The lookup table identity is a printed argument too.
-                        BuiltinContents::Expr(expr) | BuiltinContents::LookupTable(expr) => {
-                            self.walk(expr)
-                        }
-                    };
-                    args.push(arg);
-                });
-                let func = builtin.name();
-                format!("\\operatorname{{{}}}({})", func, args.join(", "))
-            }
-            Expr2::Subscript(id, args, _, _) => {
-                let args: Vec<String> = args.iter().map(|e| self.walk_index(e)).collect();
-                format!("{}[{}]", id.as_str(), args.join(", "))
-            }
-            Expr2::Op1(op, l, _, _) => {
-                // The operand is grouped through the shared rule in both arms:
-                // the postfix `^T` binds tighter than any infix, so `(a + b)^T`
-                // must keep its parentheses or it reads as transposing only `b`.
-                let l = paren_if_necessary1(expr, l, false, self.walk(l));
-                match op {
-                    UnaryOp::Transpose => format!("{l}^T"),
-                    UnaryOp::Positive => format!("+{l}"),
-                    UnaryOp::Negative => format!("-{l}"),
-                    UnaryOp::Not => format!("\\neg {l}"),
-                }
-            }
-            Expr2::Op2(op, l, r, _, _) => {
-                let l = paren_if_necessary1(expr, l, false, self.walk(l));
-                let r = paren_if_necessary1(expr, r, true, self.walk(r));
-                match binary_op_latex(*op) {
-                    BinaryOpLatex::Infix(token) => format!("{l} {token} {r}"),
-                    BinaryOpLatex::Superscript => format!("{l}^{{{r}}}"),
-                    BinaryOpLatex::Fraction => format!("\\frac{{{l}}}{{{r}}}"),
-                }
-            }
-            Expr2::If(cond, t, f, _, _) => {
-                let cond = self.walk(cond);
-                let t = self.walk(t);
-                let f = self.walk(f);
-
-                format!(
-                    "\\begin{{cases}}
-                     {t} & \\text{{if }} {cond} \\\\
-                     {f} & \\text{{else}}
-                 \\end{{cases}}"
-                )
-            }
-        }
-    }
-}
-
-pub fn latex_eqn(expr: &Expr2) -> String {
-    let mut visitor = LatexVisitor {};
-    visitor.walk(expr)
-}
-
-/// Render an Expr0 (pre-lowering) AST node as LaTeX.
-///
-/// Variable names are canonicalized (lowercased with underscores) to match
-/// the Expr2-based `latex_eqn`. This avoids needing the full lowering
-/// pipeline just for LaTeX display.
-pub fn latex_eqn_expr0(expr: &Expr0) -> String {
-    match expr {
-        Expr0::Const(s, n, _) => {
-            if n.value().is_nan() {
-                "\\mathrm{{NaN}}".to_owned()
-            } else {
-                s.clone()
-            }
-        }
-        Expr0::Var(raw, _) => {
-            let id = canonicalize(raw.as_str());
-            let id = str::replace(&id, "_", "\\_");
-            format!("\\mathrm{{{id}}}")
-        }
-        Expr0::App(UntypedBuiltinFn(name, args), _) => {
-            let rendered_args: Vec<String> = args.iter().map(latex_eqn_expr0).collect();
-            format!("\\operatorname{{{}}}({})", name, rendered_args.join(", "))
-        }
-        Expr0::Subscript(raw, indices, _) => {
-            let id = canonicalize(raw.as_str());
-            let rendered: Vec<String> = indices
-                .iter()
-                .map(|idx| match idx {
-                    IndexExpr0::Wildcard(_) => "*".to_string(),
-                    IndexExpr0::StarRange(id, _) => {
-                        format!("*:{}", canonicalize(id.as_str()))
-                    }
-                    IndexExpr0::Range(l, r, _) => {
-                        format!("{}:{}", latex_eqn_expr0(l), latex_eqn_expr0(r))
-                    }
-                    IndexExpr0::DimPosition(n, _) => format!("@{n}"),
-                    IndexExpr0::Expr(e) => latex_eqn_expr0(e),
-                })
-                .collect();
-            format!("{id}[{}]", rendered.join(", "))
-        }
-        Expr0::Op1(op, inner_expr, _) => {
-            // Every arm groups through the shared rule, transpose included: the
-            // `^T` superscript binds to the token it follows, so `(a + b)'` left
-            // ungrouped renders as `a + b^T` -- transposing `b` alone.
-            let inner = paren_if_necessary(expr, inner_expr, false, latex_eqn_expr0(inner_expr));
-            match op {
-                UnaryOp::Transpose => format!("{inner}^T"),
-                UnaryOp::Positive => format!("+{inner}"),
-                UnaryOp::Negative => format!("-{inner}"),
-                UnaryOp::Not => format!("\\neg {inner}"),
-            }
-        }
-        Expr0::Op2(op, l, r, _) => {
-            let l = paren_if_necessary(expr, l, false, latex_eqn_expr0(l));
-            let r = paren_if_necessary(expr, r, true, latex_eqn_expr0(r));
-            match binary_op_latex(*op) {
-                BinaryOpLatex::Infix(token) => format!("{l} {token} {r}"),
-                BinaryOpLatex::Superscript => format!("{l}^{{{r}}}"),
-                BinaryOpLatex::Fraction => format!("\\frac{{{l}}}{{{r}}}"),
-            }
-        }
-        Expr0::If(cond, t, f, _) => {
-            let cond = latex_eqn_expr0(cond);
-            let t = latex_eqn_expr0(t);
-            let f = latex_eqn_expr0(f);
-            format!(
-                "\\begin{{cases}}
-                     {t} & \\text{{if }} {cond} \\\\
-                     {f} & \\text{{else}}
-                 \\end{{cases}}"
-            )
-        }
-    }
-}
-
 /// Wrap `inner` in a KaTeX `\htmlData{<attr>=START_END}` annotation. KaTeX
 /// renders this as a span carrying `data-<attr>="START_END"`, giving the
 /// half-open byte range `[START, END)` of the source equation text that the
@@ -1167,121 +1011,269 @@ fn latex_html_data(attr: HtmlDataAttr, start: u16, end: u16, inner: &str) -> Str
     format!("\\htmlData{{{name}={start}_{end}}}{{{inner}}}")
 }
 
-/// Like [`latex_eqn_expr0`], but every rendered node is wrapped in a
-/// `\htmlData{eqnloc=START_END}` annotation giving the byte range it covers
-/// in the source equation, and each binary/unary operator additionally gets
-/// an annotation spanning the gap between its operands -- the operator token
-/// plus any surrounding whitespace; the consumer trims that range to the
-/// operator itself. Exponentiation (superscript) and division (`\frac`) have
-/// no operator glyph, so they get only the whole-expression wrapper.
+/// A node as the shared LaTeX walker sees it: either a leaf that has already
+/// rendered itself, or one of the three structural forms whose grouping,
+/// operator layout and annotations are tier-independent.
+enum LatexNode<'a, E> {
+    Leaf(String),
+    Op1(UnaryOp, &'a E),
+    Op2(BinaryOp, &'a E, &'a E),
+    If(&'a E, &'a E, &'a E),
+}
+
+/// What one expression tier must supply for [`render_latex`] to print it.
 ///
-/// This is what the FFI's `simlin_model_get_latex_equation` returns; rendering
-/// the result requires enabling KaTeX's `trust` option, scoped to `\htmlData`.
-pub fn latex_eqn_expr0_annotated(expr: &Expr0) -> String {
-    let loc = expr.get_loc();
-    let inner = match expr {
-        Expr0::Const(s, n, _) => {
-            if n.value().is_nan() {
-                "\\mathrm{{NaN}}".to_owned()
-            } else {
-                s.clone()
+/// Only the leaves differ between `Expr0` and `Expr2`: an `Expr0` identifier is
+/// as-written and must be canonicalized, an `Expr2` identifier already is, and
+/// the two tiers hold a call's arguments in different shapes. Everything
+/// structural -- the grouping rule, `\frac`/superscript layout, the `cases`
+/// environment, and the optional `\htmlData` annotations -- is shared, which is
+/// what keeps the tiers from disagreeing about where a parenthesis goes.
+trait LatexTier: Sized {
+    fn shape(&self) -> NodeShape;
+    fn loc(&self) -> Loc;
+    /// Decompose into the structural node the walker renders. A leaf renders
+    /// itself here, recursing through [`render_latex`] with the same `annotate`
+    /// mode for any nested expression.
+    fn decompose(&self, annotate: bool) -> LatexNode<'_, Self>;
+}
+
+impl LatexTier for Expr0 {
+    fn shape(&self) -> NodeShape {
+        Expr0::shape(self)
+    }
+
+    fn loc(&self) -> Loc {
+        self.get_loc()
+    }
+
+    fn decompose(&self, annotate: bool) -> LatexNode<'_, Self> {
+        match self {
+            Expr0::Const(s, n, _) => LatexNode::Leaf(latex_const(s, n)),
+            Expr0::Var(raw, _) => LatexNode::Leaf(latex_ident(&canonicalize(raw.as_str()))),
+            Expr0::App(UntypedBuiltinFn(name, args), _) => {
+                let rendered: Vec<String> =
+                    args.iter().map(|a| render_latex(a, annotate)).collect();
+                LatexNode::Leaf(latex_call(name, &rendered))
             }
-        }
-        Expr0::Var(raw, _) => {
-            let id = canonicalize(raw.as_str());
-            let id = str::replace(&id, "_", "\\_");
-            format!("\\mathrm{{{id}}}")
-        }
-        Expr0::App(UntypedBuiltinFn(name, args), _) => {
-            let rendered_args: Vec<String> = args.iter().map(latex_eqn_expr0_annotated).collect();
-            format!("\\operatorname{{{}}}({})", name, rendered_args.join(", "))
-        }
-        Expr0::Subscript(raw, indices, _) => {
-            let id = canonicalize(raw.as_str());
-            let rendered: Vec<String> = indices
-                .iter()
-                .map(|idx| match idx {
-                    IndexExpr0::Wildcard(_) => "*".to_string(),
-                    IndexExpr0::StarRange(id, _) => {
-                        format!("*:{}", canonicalize(id.as_str()))
-                    }
-                    IndexExpr0::Range(l, r, _) => {
-                        format!(
+            Expr0::Subscript(raw, indices, _) => {
+                let id = canonicalize(raw.as_str());
+                let rendered: Vec<String> = indices
+                    .iter()
+                    .map(|idx| match idx {
+                        IndexExpr0::Wildcard(_) => "*".to_string(),
+                        IndexExpr0::StarRange(id, _) => {
+                            format!("*:{}", canonicalize(id.as_str()))
+                        }
+                        IndexExpr0::Range(l, r, _) => format!(
                             "{}:{}",
-                            latex_eqn_expr0_annotated(l),
-                            latex_eqn_expr0_annotated(r)
-                        )
-                    }
-                    IndexExpr0::DimPosition(n, _) => format!("@{n}"),
-                    IndexExpr0::Expr(e) => latex_eqn_expr0_annotated(e),
-                })
-                .collect();
-            format!("{id}[{}]", rendered.join(", "))
+                            render_latex(l, annotate),
+                            render_latex(r, annotate)
+                        ),
+                        IndexExpr0::DimPosition(n, _) => format!("@{n}"),
+                        IndexExpr0::Expr(e) => render_latex(e, annotate),
+                    })
+                    .collect();
+                LatexNode::Leaf(format!("{id}[{}]", rendered.join(", ")))
+            }
+            Expr0::Op1(op, l, _) => LatexNode::Op1(*op, l),
+            Expr0::Op2(op, l, r, _) => LatexNode::Op2(*op, l, r),
+            Expr0::If(cond, t, f, _) => LatexNode::If(cond, t, f),
         }
-        Expr0::Op1(op, inner_expr, _) => {
-            // The operand groups through the shared rule in every arm -- see the
-            // twin in `latex_eqn_expr0`. This function backs the FFI
-            // `simlin_model_get_latex_equation`, so an ungrouped transpose operand
-            // is what a user sees rendered.
-            let inner_rendered = paren_if_necessary(
-                expr,
-                inner_expr,
+    }
+}
+
+impl LatexTier for Expr2 {
+    fn shape(&self) -> NodeShape {
+        Expr2::shape(self)
+    }
+
+    fn loc(&self) -> Loc {
+        self.get_loc()
+    }
+
+    fn decompose(&self, annotate: bool) -> LatexNode<'_, Self> {
+        match self {
+            Expr2::Const(s, n, _) => LatexNode::Leaf(latex_const(s, n)),
+            // An `Expr2` identifier is already canonical.
+            Expr2::Var(id, _, _) => LatexNode::Leaf(latex_ident(id.as_str())),
+            Expr2::App(builtin, _, _) => {
+                let mut args: Vec<String> = vec![];
+                walk_builtin_expr(builtin, |contents| {
+                    let arg = match contents {
+                        BuiltinContents::Ident(id, _loc) => latex_ident_raw(id),
+                        // The lookup table identity is a printed argument too.
+                        BuiltinContents::Expr(expr) | BuiltinContents::LookupTable(expr) => {
+                            render_latex(expr, annotate)
+                        }
+                    };
+                    args.push(arg);
+                });
+                LatexNode::Leaf(latex_call(builtin.name(), &args))
+            }
+            Expr2::Subscript(id, args, _, _) => {
+                let rendered: Vec<String> = args
+                    .iter()
+                    .map(|e| match e {
+                        IndexExpr2::Wildcard(_) => "*".to_string(),
+                        IndexExpr2::StarRange(id, _) => format!("*:{id}"),
+                        IndexExpr2::Range(l, r, _) => format!(
+                            "{}:{}",
+                            render_latex(l, annotate),
+                            render_latex(r, annotate)
+                        ),
+                        IndexExpr2::DimPosition(n, _) => format!("@{n}"),
+                        IndexExpr2::Expr(e) => render_latex(e, annotate),
+                    })
+                    .collect();
+                LatexNode::Leaf(format!("{}[{}]", id.as_str(), rendered.join(", ")))
+            }
+            Expr2::Op1(op, l, _, _) => LatexNode::Op1(*op, l),
+            Expr2::Op2(op, l, r, _, _) => LatexNode::Op2(*op, l, r),
+            Expr2::If(cond, t, f, _, _) => LatexNode::If(cond, t, f),
+        }
+    }
+}
+
+fn latex_const(text: &str, literal: &Literal) -> String {
+    if literal.value().is_nan() {
+        "\\mathrm{{NaN}}".to_owned()
+    } else {
+        text.to_owned()
+    }
+}
+
+/// An identifier in math mode. `_` is TeX's subscript operator, so it has to be
+/// escaped or the rest of the name renders as a subscript.
+fn latex_ident(id: &str) -> String {
+    let id = str::replace(id, "_", "\\_");
+    format!("\\mathrm{{{id}}}")
+}
+
+/// An identifier that is emitted as-is. `Expr2`'s `BuiltinContents::Ident`
+/// payload (`ISMODULEINPUT`'s argument) has never been `_`-escaped; keeping
+/// that separate from [`latex_ident`] states the difference rather than
+/// silently changing it.
+fn latex_ident_raw(id: &str) -> String {
+    format!("\\mathrm{{{id}}}")
+}
+
+fn latex_call(name: &str, args: &[String]) -> String {
+    format!("\\operatorname{{{}}}({})", name, args.join(", "))
+}
+
+/// Render one expression tier as LaTeX, optionally annotating every node with
+/// its source byte range.
+///
+/// When `annotate` is set, every rendered node is wrapped in a
+/// `\htmlData{eqnloc=START_END}` annotation giving the byte range it covers in
+/// the source equation, and each infix binary/prefix unary operator
+/// additionally gets an annotation spanning the gap between its operands -- the
+/// operator token plus any surrounding whitespace; the consumer trims that
+/// range to the operator itself. Exponentiation (superscript), division
+/// (`\frac`) and the postfix transpose have no operator token sitting between
+/// (or before) their operands, so they get only the whole-node wrapper.
+fn render_latex<E: LatexTier>(expr: &E, annotate: bool) -> String {
+    let loc = expr.loc();
+    let inner = match expr.decompose(annotate) {
+        LatexNode::Leaf(text) => text,
+        LatexNode::Op1(op, operand) => {
+            // The operand is grouped through the shared rule in every arm: the
+            // postfix `^T` renders as a superscript, which binds to the single
+            // token it follows, so `(a + b)'` left ungrouped renders as
+            // `a + b^T` -- transposing `b` alone.
+            let rendered = paren_if_necessary(
+                expr.shape(),
+                operand.shape(),
                 false,
-                latex_eqn_expr0_annotated(inner_expr),
+                render_latex(operand, annotate),
             );
             match op {
                 // Postfix: there is no operator token BEFORE the operand to
-                // annotate, so `^T` is emitted plain (as it always has been).
-                UnaryOp::Transpose => format!("{inner_rendered}^T"),
+                // annotate, so `^T` is emitted plain.
+                UnaryOp::Transpose => format!("{rendered}^T"),
                 _ => {
-                    let op_str: &str = match op {
+                    let token: &str = match op {
                         UnaryOp::Positive => "+",
                         UnaryOp::Negative => "-",
                         UnaryOp::Not => "\\neg ",
                         UnaryOp::Transpose => unreachable!(), // handled above
                     };
-                    // the operator token sits somewhere in [Op1.start, operand.start)
-                    let op_anno = latex_html_data(
-                        HtmlDataAttr::Op,
-                        loc.start,
-                        inner_expr.get_loc().start,
-                        op_str,
-                    );
-                    format!("{op_anno}{inner_rendered}")
+                    if annotate {
+                        // the operator token sits somewhere in
+                        // [Op1.start, operand.start)
+                        let op_anno = latex_html_data(
+                            HtmlDataAttr::Op,
+                            loc.start,
+                            operand.loc().start,
+                            token,
+                        );
+                        format!("{op_anno}{rendered}")
+                    } else {
+                        format!("{token}{rendered}")
+                    }
                 }
             }
         }
-        Expr0::Op2(op, l, r, _) => {
-            let l_rendered = paren_if_necessary(expr, l, false, latex_eqn_expr0_annotated(l));
-            let r_rendered = paren_if_necessary(expr, r, true, latex_eqn_expr0_annotated(r));
-            match binary_op_latex(*op) {
+        LatexNode::Op2(op, l, r) => {
+            let l_rendered =
+                paren_if_necessary(expr.shape(), l.shape(), false, render_latex(l, annotate));
+            let r_rendered =
+                paren_if_necessary(expr.shape(), r.shape(), true, render_latex(r, annotate));
+            match binary_op_latex(op) {
                 BinaryOpLatex::Superscript => format!("{l_rendered}^{{{r_rendered}}}"),
                 BinaryOpLatex::Fraction => format!("\\frac{{{l_rendered}}}{{{r_rendered}}}"),
                 BinaryOpLatex::Infix(token) => {
-                    // the operator token sits somewhere in [L.end, R.start)
-                    let op_anno = latex_html_data(
-                        HtmlDataAttr::Op,
-                        l.get_loc().end,
-                        r.get_loc().start,
-                        token,
-                    );
-                    format!("{l_rendered} {op_anno} {r_rendered}")
+                    if annotate {
+                        // the operator token sits somewhere in [L.end, R.start)
+                        let op_anno =
+                            latex_html_data(HtmlDataAttr::Op, l.loc().end, r.loc().start, token);
+                        format!("{l_rendered} {op_anno} {r_rendered}")
+                    } else {
+                        format!("{l_rendered} {token} {r_rendered}")
+                    }
                 }
             }
         }
-        Expr0::If(cond, t, f, _) => {
-            let cond_r = latex_eqn_expr0_annotated(cond);
-            let t_r = latex_eqn_expr0_annotated(t);
-            let f_r = latex_eqn_expr0_annotated(f);
+        LatexNode::If(cond, t, f) => {
+            let cond = render_latex(cond, annotate);
+            let t = render_latex(t, annotate);
+            let f = render_latex(f, annotate);
             format!(
                 "\\begin{{cases}}
-                     {t_r} & \\text{{if }} {cond_r} \\\\
-                     {f_r} & \\text{{else}}
+                     {t} & \\text{{if }} {cond} \\\\
+                     {f} & \\text{{else}}
                  \\end{{cases}}"
             )
         }
     };
-    latex_html_data(HtmlDataAttr::Node, loc.start, loc.end, &inner)
+    if annotate {
+        latex_html_data(HtmlDataAttr::Node, loc.start, loc.end, &inner)
+    } else {
+        inner
+    }
+}
+
+pub fn latex_eqn(expr: &Expr2) -> String {
+    render_latex(expr, false)
+}
+
+/// Render an Expr0 (pre-lowering) AST node as LaTeX.
+///
+/// Variable names are canonicalized (lowercased with underscores) to match
+/// the Expr2-based [`latex_eqn`]. This avoids needing the full lowering
+/// pipeline just for LaTeX display.
+pub fn latex_eqn_expr0(expr: &Expr0) -> String {
+    render_latex(expr, false)
+}
+
+/// Like [`latex_eqn_expr0`], but every node carries a `\htmlData` source-range
+/// annotation -- see [`render_latex`].
+///
+/// This is what the FFI's `simlin_model_get_latex_equation` returns; rendering
+/// the result requires enabling KaTeX's `trust` option, scoped to `\htmlData`.
+pub fn latex_eqn_expr0_annotated(expr: &Expr0) -> String {
+    render_latex(expr, true)
 }
 
 #[test]
@@ -1548,10 +1540,12 @@ fn test_latex_eqn_groups_transpose_of_a_prefix_unary() {
 }
 
 /// The `Expr0` and `Expr2` LaTeX printers must agree on where parentheses go.
-/// `paren_if_necessary`'s `If`-under-an-operator rule exists for CORRECTNESS on
-/// the `print_eqn` path it shares, but `paren_if_necessary1` has no such
-/// obligation -- and dropping the rule there made the same model render two
-/// different ways depending on which lowering stage it happened to be in.
+/// They share one `paren_if_necessary` over a tier-independent `NodeShape`, so
+/// they cannot disagree by construction; this pins the agreement anyway,
+/// because the rule's `If`-under-an-operator arm exists for CORRECTNESS on the
+/// `print_eqn` path and only for READABILITY on the LaTeX one -- and dropping
+/// it from the LaTeX side once made the same model render two different ways
+/// depending on which lowering stage it happened to be in.
 #[test]
 fn test_latex_printers_agree_on_if_under_an_operator() {
     use crate::common::Ident;

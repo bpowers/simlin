@@ -84,7 +84,7 @@ use crate::db::{
     parse_source_variable_with_module_context, project_dimensions_context, project_units_context,
 };
 use crate::model::{ModelStage0, ModelStage1, ScopeStage0, VariableStage0};
-use crate::variable::Variable;
+use crate::variable::VarKind;
 
 // Test-only per-thread execution counters for the two stage queries and the
 // unit-check pass that reads them.
@@ -401,13 +401,10 @@ pub(crate) fn model_scope_models(
     let mut queue: Vec<SourceModel> = vec![model];
     while let Some(src_model) = queue.pop() {
         for var in model_stage0(db, src_model, project).variables.values() {
-            let Variable::Module {
-                ident, model_name, ..
-            } = var
-            else {
+            let VarKind::Module { model_name, .. } = &var.kind else {
                 continue;
             };
-            for target in [model_name, ident] {
+            for target in [model_name, &var.ident] {
                 if !visited.insert(target.clone()) {
                     continue;
                 }
@@ -504,8 +501,9 @@ pub(crate) fn model_stage0(db: &dyn Db, model: SourceModel, project: SourceProje
     // expansion cannot recurse -- assert that rather than silently dropping a
     // second generation into the `nested` sink.
     let mut nested_implicit: Vec<datamodel::Variable> = Vec::new();
+    let implicit_ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
     var_list.extend(implicit_dm.into_iter().map(|dm_var| {
-        crate::variable::parse_var(dim_ctx, &dm_var, &mut nested_implicit, units_ctx, |mi| {
+        crate::variable::parse_var(&implicit_ctx, &dm_var, &mut nested_implicit, |mi| {
             Ok(Some(mi.clone()))
         })
     }));

@@ -493,7 +493,7 @@ fn omitting_stdlib_models_from_the_lowering_scope_is_inert_today() {
                 s0.ident
             );
             assert!(
-                !matches!(var, crate::variable::Variable::Module { .. }),
+                !var.is_module(),
                 "stdlib model {} instantiates a module ({ident}). Two consequences: it can now \
                  be an intermediate hop in `resolve_relative`, so a lowering scope that omits \
                  stdlib models can silently break a chained reference; and -- the abort-class \
@@ -575,7 +575,7 @@ fn cached_stages_equal_the_datamodel_driven_build_for_every_model_shape() {
     let main_s0 = model_stage0(&db, sync.models["main"].source, sync.project);
     assert!(
         main_s0.variables.values().any(
-            |v| matches!(v, crate::variable::Variable::Module { model_name, .. }
+            |v| matches!(&v.kind, crate::variable::VarKind::Module { model_name, .. }
                 if model_name.as_str() == "stdlib\u{205A}smth1")
         ),
         "SMTH1 must have expanded into an implicit stdlib module instance: {:?}",
@@ -583,7 +583,7 @@ fn cached_stages_equal_the_datamodel_driven_build_for_every_model_shape() {
     );
     assert!(
         main_s0.variables.values().any(
-            |v| matches!(v, crate::variable::Variable::Module { model_name, .. }
+            |v| matches!(&v.kind, crate::variable::VarKind::Module { model_name, .. }
                 if model_name.as_str() == "scaled")
         ),
         "the macro call must have expanded into a synthetic module targeting the macro model"
@@ -1174,7 +1174,7 @@ fn dropping_a_macro_models_scope_edge_changes_the_lowered_value() {
             .variables
             .values()
             .any(
-                |v| matches!(v, crate::variable::Variable::Module { model_name, .. }
+                |v| matches!(&v.kind, crate::variable::VarKind::Module { model_name, .. }
                 if model_name.as_str() == "scaled")
             ),
         "the macro call must have expanded into a synthetic module targeting `scaled`"
@@ -1374,8 +1374,8 @@ fn a_two_hop_cross_module_unit_mismatch_is_still_reported() {
         model_stage0(&db, sync.models[model].source, sync.project)
             .variables
             .values()
-            .filter_map(|v| match v {
-                crate::variable::Variable::Module { model_name, .. } => {
+            .filter_map(|v| match &v.kind {
+                crate::variable::VarKind::Module { model_name, .. } => {
                     Some(model_name.as_str().to_string())
                 }
                 _ => None,

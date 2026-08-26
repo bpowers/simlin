@@ -74,13 +74,11 @@ pub(super) fn extract_implicit_var_deps(
             }
 
             let mut dummy_implicits = Vec::new();
-            let parsed_implicit = crate::variable::parse_var(
-                dim_context,
-                implicit_var,
-                &mut dummy_implicits,
-                &units_ctx,
-                |mi| Ok(Some(mi.clone())),
-            );
+            let ctx = crate::variable::ParseContext::new(dim_context, &units_ctx);
+            let parsed_implicit =
+                crate::variable::parse_var(&ctx, implicit_var, &mut dummy_implicits, |mi| {
+                    Ok(Some(mi.clone()))
+                });
 
             let models = HashMap::new();
             let scope = crate::model::ScopeStage0 {

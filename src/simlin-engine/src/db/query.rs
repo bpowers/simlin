@@ -199,14 +199,9 @@ fn parse_source_variable_impl(
     // empty, so this is free in the common case.
     let dim_ctx = crate::dimensions::DimensionsContext::from(&dims);
     let units_ctx = project_units_context(db, project);
-    let dm_var = datamodel_variable_from_source(db, var);
-    let mut implicit_vars = Vec::new();
-    let variable = crate::variable::parse_var_with_module_context(
-        &dim_ctx,
-        &dm_var,
-        &mut implicit_vars,
+    let ctx = crate::variable::ParseContext {
+        dimensions: &dim_ctx,
         units_ctx,
-        |mi| Ok(Some(mi.clone())),
         module_idents,
         // No model-var-names set: the per-variable parse must not depend on
         // the model's full name set, or any variable add/remove/rename would
@@ -214,10 +209,15 @@ fn parse_source_variable_impl(
         // Bare element subscripts in user equations therefore keep the
         // conservative helper-aux path; the LTM parse path (whose equations
         // are regenerated wholesale anyway) passes the set instead.
-        None,
+        model_var_names: None,
         macro_registry,
-        crate::db::macro_registry::enclosing_macro_for_var(db, project, var), // #554
-    );
+        enclosing_model: crate::db::macro_registry::enclosing_macro_for_var(db, project, var), // #554
+    };
+    let mut implicit_vars = Vec::new();
+    let variable =
+        crate::variable::parse_var(&ctx, variable_source(db, var), &mut implicit_vars, |mi| {
+            Ok(Some(mi.clone()))
+        });
 
     ParsedVariableResult {
         variable,
@@ -249,19 +249,19 @@ fn module_ident_context_for_model<'db>(
     extra_module_idents: &[String],
 ) -> ModuleIdentContext<'db> {
     let source_vars = model.variables(db);
-    let dm_vars: Vec<datamodel::Variable> = source_vars
-        .values()
-        .map(|source_var| datamodel_variable_from_source(db, *source_var))
-        .collect();
     // Pre-classification must recognize macro calls as module calls too
     // (so `PREVIOUS(y)` rewrites correctly when `y = MYMACRO(...)`), the
     // same way it already recognizes `y = SMTH1(...)`.
     let macro_registry = &crate::db::macro_registry::project_macro_registry(db, project).registry;
-    let mut module_ident_list: Vec<String> =
-        crate::model::collect_module_idents(&dm_vars, macro_registry)
-            .into_iter()
-            .map(|ident| ident.as_str().to_owned())
-            .collect();
+    let mut module_ident_list: Vec<String> = crate::model::collect_module_idents(
+        source_vars
+            .values()
+            .map(|source_var| variable_source(db, *source_var)),
+        macro_registry,
+    )
+    .into_iter()
+    .map(|ident| ident.as_str().to_owned())
+    .collect();
     module_ident_list.extend(
         extra_module_idents
             .iter()
@@ -491,7 +491,7 @@ pub struct ImplicitVarMeta {
     /// points at the LAST occurrence, since this map is name-keyed and
     /// last-wins) and the scan (which returns the first) could select
     /// different helpers, and the hint would stop being an optimization.
-    /// `variable::parse_var_with_module_context` establishes it by MERGING
+    /// `variable::parse_var` establishes it by MERGING
     /// helpers across the dt and initial passes rather than appending, so a
     /// byte-identical repeat collapses and a genuine collision is refused;
     /// `db::fragment_determinism_tests::implicit_helper_names_are_unique_within_one_parse`
@@ -657,7 +657,7 @@ pub fn model_implicit_var_info(
 ///
 /// `model_implicit_var_info` is derived from every variable's parse, so adding
 /// a variable that synthesizes ANY implicit helper changes the whole map and
-/// re-executes every fragment that reads it. `collect_var_dependencies` only
+/// re-executes every fragment that reads it. `explicit_fragment_input` only
 /// ever asks it "is this one name an implicit helper, and what shape is it",
 /// so this projection returns that and backdates on it.
 ///

@@ -325,11 +325,10 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
         let mut sorted_vars: Vec<_> = target_model.variables.iter().collect();
         sorted_vars.sort_unstable_by_key(|(id, _)| id.as_str());
         for (var_ident, var) in sorted_vars {
-            if let crate::variable::Variable::Module {
+            if let crate::variable::VarKind::Module {
                 model_name: sub_model_name,
                 inputs,
-                ..
-            } = var
+            } = &var.kind
             {
                 // Only check stdlib modules where we know the constraint structure
                 if !sub_model_name.as_str().starts_with("stdlib\u{205A}") {
@@ -355,7 +354,7 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
                     .variables
                     .values()
                     .filter_map(|sv| {
-                        if matches!(sv, crate::variable::Variable::Stock { .. }) {
+                        if sv.is_stock() {
                             sv.ast().map(init_value_equivalence_group)
                         } else {
                             None
@@ -675,11 +674,11 @@ fn check_conveyor_param_units(
     // must never reach another reader of the memo.
     let dim_ctx = project_dimensions_context(db, project);
     let mut aug_ms0 = model_stage0(db, model, project).clone();
+    let synth_ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
     for dm_var in &synth_dm_vars {
         let mut dummy: Vec<datamodel::Variable> = Vec::new();
-        let vs0 = crate::variable::parse_var(dim_ctx, dm_var, &mut dummy, units_ctx, |mi| {
-            Ok(Some(mi.clone()))
-        });
+        let vs0 =
+            crate::variable::parse_var(&synth_ctx, dm_var, &mut dummy, |mi| Ok(Some(mi.clone())));
         aug_ms0.variables.insert(Ident::new(vs0.ident()), vs0);
     }
     // The scope holds each reachable model's UNAUGMENTED Stage0 -- including the

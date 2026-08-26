@@ -79,7 +79,7 @@ use std::hash::{Hash, Hasher};
 ///   their symbolic twins `compiler::symbolic::SymbolicByteCode::literals` /
 ///   `PerVarBytecodes::graphical_functions` (GH #642);
 /// * `variable::Table`'s `x`/`y: Vec<f64>` lookup points and its two
-///   `datamodel::GraphicalFunctionScale`s, which ride on `Variable::Var` into
+///   `datamodel::GraphicalFunctionScale`s, which ride on `VarKind::Aux` into
 ///   the same `ModelStage0` / `ModelStage1` / `db::query::ParsedVariableResult`
 ///   memos this type's fix serves.
 ///

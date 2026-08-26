@@ -17,7 +17,7 @@
 
 use std::collections::HashSet;
 
-use crate::variable::Variable;
+use crate::variable::{VarKind, Variable};
 
 use super::quote_ident;
 
@@ -101,8 +101,8 @@ use super::quote_ident;
 ///    see that function's doc for the per-call-site reachability argument.
 pub(crate) fn is_implicit_with_lookup(var: &Variable) -> bool {
     matches!(
-        var,
-        Variable::Var {
+        var.kind,
+        VarKind::Aux {
             is_table_only: false,
             ..
         }
@@ -184,11 +184,11 @@ pub(crate) fn with_lookup_reducer_owner_wrap(to_var: &Variable) -> WithLookupWra
 /// [`is_implicit_with_lookup`].
 pub(crate) fn with_lookup_table_ref(to_var: &Variable) -> Option<String> {
     use crate::ast::Ast;
-    let Variable::Var {
+    let VarKind::Aux {
         tables,
         is_table_only: false,
         ..
-    } = to_var
+    } = &to_var.kind
     else {
         return None;
     };
@@ -265,11 +265,11 @@ impl WithLookupSlotRefs {
         to_var: &Variable,
         target_ast_dims: &[crate::dimensions::Dimension],
     ) -> SlotRefKind {
-        let Variable::Var {
+        let VarKind::Aux {
             tables,
             is_table_only: false,
             ..
-        } = to_var
+        } = &to_var.kind
         else {
             return SlotRefKind::NoGf;
         };

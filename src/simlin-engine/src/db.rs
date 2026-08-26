@@ -77,7 +77,7 @@ mod input;
 pub(crate) use input::source_var_is_table_only;
 pub use input::{
     LtmLinkId, ModuleIdentContext, ModuleInputSet, PinnedLoopSpec, SourceModel, SourceProject,
-    SourceVariable, SourceVariableKind, datamodel_variable_from_source,
+    SourceVariable, SourceVariableKind, variable_source,
 };
 
 mod query;
@@ -864,7 +864,7 @@ pub(crate) fn module_link_score_equation(
 
     let equation = if !from_is_module && to_is_module {
         // variable -> module: the edge feeds one of `to`'s input ports.
-        let crate::variable::Variable::Module { inputs, .. } = to_var else {
+        let crate::variable::VarKind::Module { inputs, .. } = &to_var.kind else {
             return Some(LtmEquation::scalar(black_box_unit_transfer_equation(
                 from_name,
                 &module_output_ref(to_name),
@@ -883,7 +883,7 @@ pub(crate) fn module_link_score_equation(
         // module-qualified `from·output`, so match against the normalized
         // module node rather than the bare name.
         let from_output = module_output_ref(from_name);
-        let crate::variable::Variable::Module { inputs, .. } = to_var else {
+        let crate::variable::VarKind::Module { inputs, .. } = &to_var.kind else {
             return Some(LtmEquation::scalar(black_box_unit_transfer_equation(
                 &from_output,
                 &module_output_ref(to_name),

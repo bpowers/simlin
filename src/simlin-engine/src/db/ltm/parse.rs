@@ -34,7 +34,7 @@ use super::LtmEquation;
 /// The equation is already a parsed AST (`LtmEquation`), so this only resolves
 /// its dimension names to `Dimension`s (building the flow-phase `Ast<Expr0>`)
 /// and runs `instantiate_implicit_modules` -- the exact visitor the ordinary
-/// `variable::parse_var_with_module_context` runs -- so PREVIOUS/INIT capture
+/// `variable::parse_var` runs -- so PREVIOUS/INIT capture
 /// auxes and stdlib module calls expand identically.
 ///
 /// Flow-phase only: LTM synthetic variables are scalar auxes (never stocks),
@@ -77,18 +77,20 @@ pub(super) fn parse_ltm_equation(
         None => None,
     };
 
-    let variable = crate::variable::Variable::Var {
+    let variable = crate::variable::Variable {
         ident: Ident::new(var_name),
-        ast,
-        init_ast: None,
-        eqn: None,
         units: None,
-        tables: vec![],
-        is_flow: false,
-        is_table_only: false,
-        non_negative: false,
+        eqn: None,
         errors,
         unit_errors: vec![],
+        kind: crate::variable::VarKind::Aux {
+            ast,
+            init_ast: None,
+            tables: vec![],
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+        },
     };
 
     ParsedVariableResult {

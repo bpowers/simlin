@@ -54,9 +54,7 @@ pub(crate) fn extract_tables_from_source_var(
                 HashMap::new();
             for (subscript, _, _, gf) in elements {
                 if let Some(gf) = gf.as_ref()
-                    && let Some(var_table) = crate::variable::parse_table(&Some(gf.clone()))
-                        .ok()
-                        .flatten()
+                    && let Some(var_table) = crate::variable::parse_table(Some(gf)).ok().flatten()
                     && let Ok(table) = crate::compiler::Table::new(ident, &var_table)
                 {
                     present.insert(
@@ -94,7 +92,7 @@ pub(crate) fn extract_tables_from_source_var(
     // Scalar or apply-to-all: use the variable-level graphical function.
     let gf = source_var.gf(db);
     match gf {
-        Some(gf) => crate::variable::parse_table(&Some(gf.clone()))
+        Some(gf) => crate::variable::parse_table(Some(gf))
             .ok()
             .flatten()
             .and_then(|vt| crate::compiler::Table::new(ident, &vt).ok())

@@ -13,7 +13,7 @@ use crate::common::{
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
 use crate::units::{Context, UnitOp, Units, combine};
-use crate::variable::Variable;
+use crate::variable::{VarKind, Variable};
 
 // Type alias to reduce complexity
 type UnitErrorList = Vec<(Ident<Canonical>, UnitError)>;
@@ -458,18 +458,20 @@ pub fn model_time_units(ctx: &Context) -> UnitMap {
 /// The synthetic `time` variable the `UnitEvaluator` uses to resolve
 /// `time`/`initial_time`/`final_time` references and the TIME/DT/... builtins.
 fn time_variable(ctx: &Context) -> Variable {
-    Variable::Var {
+    Variable {
         ident: Ident::new("time"),
-        ast: None,
-        init_ast: None,
-        eqn: None,
         units: Some(model_time_units(ctx)),
-        tables: vec![],
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
+        eqn: None,
         errors: vec![],
         unit_errors: vec![],
+        kind: VarKind::Aux {
+            ast: None,
+            init_ast: None,
+            tables: vec![],
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+        },
     }
 }
 
@@ -628,14 +630,11 @@ pub fn check(
         }
 
         if let Some(expected) = var.units() {
-            if let Variable::Stock {
-                ident,
-                inflows,
-                outflows,
-                ..
-            } = var
+            if let VarKind::Stock {
+                inflows, outflows, ..
+            } = &var.kind
             {
-                let stock_ident = ident;
+                let stock_ident = &var.ident;
                 let expected_flow_units =
                     combine(UnitOp::Mul, expected.clone(), one_over_time.clone());
                 let mut check_flows = |flows: &Vec<Ident<Canonical>>| {

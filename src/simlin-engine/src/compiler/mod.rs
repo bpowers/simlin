@@ -26,7 +26,7 @@ use crate::common::{Canonical, CanonicalElementName, Ident, Result};
 use crate::dimensions::DimensionsContext;
 use crate::dimensions::{Dimension, SubscriptIterator};
 use crate::sim_err;
-use crate::variable::Variable;
+use crate::variable::{VarKind, Variable};
 
 // Re-exports for crate-internal API
 pub(crate) use self::codegen::ModuleCtx;
@@ -178,16 +178,18 @@ fn test_module_var_new_missing_input_source_returns_error() {
 #[test]
 fn test_build_stock_update_expr_inflows_only() {
     let inputs = BTreeSet::new();
-    let stock_var = Variable::Stock {
+    let stock_var = Variable {
         ident: Ident::new("stock"),
-        init_ast: None,
-        eqn: None,
         units: None,
-        inflows: vec![Ident::new("inflow")],
-        outflows: vec![],
-        non_negative: false,
+        eqn: None,
         errors: vec![],
         unit_errors: vec![],
+        kind: VarKind::Stock {
+            init_ast: None,
+            inflows: vec![Ident::new("inflow")],
+            outflows: vec![],
+            non_negative: false,
+        },
     };
     let deps = scalar_deps(&["stock", "inflow"]);
     let dims_ctx = DimensionsContext::default();
@@ -230,16 +232,18 @@ fn test_build_stock_update_expr_inflows_only() {
 #[test]
 fn test_build_stock_update_expr_outflows_only() {
     let inputs = BTreeSet::new();
-    let stock_var = Variable::Stock {
+    let stock_var = Variable {
         ident: Ident::new("stock"),
-        init_ast: None,
-        eqn: None,
         units: None,
-        inflows: vec![],
-        outflows: vec![Ident::new("outflow")],
-        non_negative: false,
+        eqn: None,
         errors: vec![],
         unit_errors: vec![],
+        kind: VarKind::Stock {
+            init_ast: None,
+            inflows: vec![],
+            outflows: vec![Ident::new("outflow")],
+            non_negative: false,
+        },
     };
     let deps = scalar_deps(&["stock", "outflow"]);
     let dims_ctx = DimensionsContext::default();
@@ -281,16 +285,18 @@ fn test_build_stock_update_expr_outflows_only() {
 #[test]
 fn test_build_stock_update_expr_no_flows() {
     let inputs = BTreeSet::new();
-    let stock_var = Variable::Stock {
+    let stock_var = Variable {
         ident: Ident::new("stock"),
-        init_ast: None,
-        eqn: None,
         units: None,
-        inflows: vec![],
-        outflows: vec![],
-        non_negative: false,
+        eqn: None,
         errors: vec![],
         unit_errors: vec![],
+        kind: VarKind::Stock {
+            init_ast: None,
+            inflows: vec![],
+            outflows: vec![],
+            non_negative: false,
+        },
     };
     let deps = scalar_deps(&["stock"]);
     let dims_ctx = DimensionsContext::default();
@@ -327,16 +333,18 @@ fn test_build_stock_update_expr_no_flows() {
 #[test]
 fn test_build_stock_update_expr_multiple_flows() {
     let inputs = BTreeSet::new();
-    let stock_var = Variable::Stock {
+    let stock_var = Variable {
         ident: Ident::new("stock"),
-        init_ast: None,
-        eqn: None,
         units: None,
-        inflows: vec![Ident::new("in1"), Ident::new("in2")],
-        outflows: vec![Ident::new("out1"), Ident::new("out2")],
-        non_negative: false,
+        eqn: None,
         errors: vec![],
         unit_errors: vec![],
+        kind: VarKind::Stock {
+            init_ast: None,
+            inflows: vec![Ident::new("in1"), Ident::new("in2")],
+            outflows: vec![Ident::new("out1"), Ident::new("out2")],
+            non_negative: false,
+        },
     };
     let deps = scalar_deps(&["stock", "in1", "in2", "out1", "out2"]);
     let dims_ctx = DimensionsContext::default();
@@ -426,27 +434,29 @@ fn test_arrayed_default_equation_applies_to_missing_elements() {
         ),
     );
 
-    let var = Variable::Var {
+    let var = Variable {
         ident: Ident::new("x"),
-        ast: Some(Ast::Arrayed(
-            dims.clone(),
-            elements,
-            Some(crate::ast::Expr2::Const(
-                "7".to_string(),
-                crate::ast::Literal::new(7.0),
-                Loc::default(),
-            )),
-            true,
-        )),
-        init_ast: None,
-        eqn: None,
         units: None,
-        tables: vec![],
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
+        eqn: None,
         errors: vec![],
         unit_errors: vec![],
+        kind: VarKind::Aux {
+            ast: Some(Ast::Arrayed(
+                dims.clone(),
+                elements,
+                Some(crate::ast::Expr2::Const(
+                    "7".to_string(),
+                    crate::ast::Literal::new(7.0),
+                    Loc::default(),
+                )),
+                true,
+            )),
+            init_ast: None,
+            tables: vec![],
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+        },
     };
 
     let mut deps: crate::common::IdentMap<Ident<Canonical>, fragment::DepShape> =
@@ -557,13 +567,8 @@ impl Var {
                 Box::new(Expr::ModuleInput(input_idx, Loc::default())),
             )]
         } else {
-            match var {
-                Variable::Module {
-                    ident,
-                    model_name,
-                    inputs,
-                    ..
-                } => {
+            match &var.kind {
+                VarKind::Module { model_name, inputs } => {
                     let mut inputs = inputs.clone();
                     inputs.sort_unstable_by(|a, b| a.dst.partial_cmp(&b.dst).unwrap());
                     // Create input set for module lookup key
@@ -574,13 +579,13 @@ impl Var {
                         .map(|mi| Ok(Expr::Var(ctx.get_ref(&mi.src)?, Loc::default())))
                         .collect::<Result<Vec<_>>>()?;
                     vec![Expr::EvalModule(
-                        ident.clone(),
+                        var.ident.clone(),
                         model_name.clone(),
                         input_set,
                         inputs,
                     )]
                 }
-                Variable::Stock { init_ast: ast, .. } => {
+                VarKind::Stock { init_ast: ast, .. } => {
                     let base = ctx.get_base_ref(&Ident::new(var.ident()))?;
                     if ctx.is_initial {
                         if ast.is_none() {
@@ -646,7 +651,7 @@ impl Var {
                         }
                     }
                 }
-                Variable::Var {
+                VarKind::Aux {
                     tables,
                     is_table_only,
                     ..

@@ -16,7 +16,7 @@ use crate::common::{Canonical, Ident, RawIdent};
 use crate::datamodel::{self, Equation};
 use crate::lexer::LexerType;
 use crate::ltm::{Loop, normalize_module_ref, split_node_subscript, strip_subscript};
-use crate::variable::{Variable, identifier_set};
+use crate::variable::{VarKind, Variable, identifier_set};
 use std::collections::{HashMap, HashSet};
 
 use crate::db::LtmEquation;
@@ -3323,15 +3323,16 @@ fn generate_link_score_equation(
     freeze_helpers: &mut Vec<ArrayFreezeHelper>,
 ) -> Result<LtmEquation, PartialEquationError> {
     // Check if this is a stock-to-flow link
-    let is_stock_to_flow = matches!(all_vars.get(from), Some(Variable::Stock { .. }))
-        && matches!(to_var, Variable::Var { is_flow: true, .. });
+    let is_stock_to_flow = all_vars.get(from).is_some_and(Variable::is_stock)
+        && matches!(to_var.kind, VarKind::Aux { is_flow: true, .. });
 
     // Flow-to-stock link: `to` is a stock and `from` is one of its flows.
     // Binding `flow_var` here -- rather than computing an `is_flow_to_stock`
     // bool and re-fetching the (proven-present) flow variable -- lets the
     // generator take a plain `&Variable`.
-    if let Variable::Stock { .. } = to_var
-        && let Some(flow_var @ Variable::Var { is_flow: true, .. }) = all_vars.get(from)
+    if to_var.is_stock()
+        && let Some(flow_var) = all_vars.get(from)
+        && matches!(flow_var.kind, VarKind::Aux { is_flow: true, .. })
     {
         // Flow-to-stock uses a fixed structural formula -- no AST parse,
         // so neither `shape` nor `source_dim_elements` matter here. The
@@ -3429,10 +3430,8 @@ fn link_score_guard_form_with_numerator(
 /// equations are tagged with these so `parse_ltm_equation` resolves the
 /// dimensions by exact-name match against the project's datamodel.
 fn target_equation_dims(var: &Variable) -> Option<Vec<String>> {
-    let eqn = match var {
-        Variable::Stock { eqn, .. } | Variable::Var { eqn, .. } => eqn.as_ref()?,
-        Variable::Module { .. } => return None,
-    };
+    // A module has no equation of its own, so its `eqn` is always `None`.
+    let eqn = var.eqn.as_ref()?;
     match eqn {
         Equation::Scalar(_) => None,
         Equation::ApplyToAll(dims, _) | Equation::Arrayed(dims, _, _, _) => {
@@ -3748,15 +3747,8 @@ fn scalar_or_a2a_target_deps(
 /// else `"0"`. See [`scalar_or_a2a_target_expr`] for why this
 /// fallback exists (a variable that failed to lower).
 fn scalar_eqn_text_or_zero(target_var: &Variable) -> String {
-    match target_var {
-        Variable::Stock {
-            eqn: Some(Equation::Scalar(eq)),
-            ..
-        }
-        | Variable::Var {
-            eqn: Some(Equation::Scalar(eq)),
-            ..
-        } => eq.clone(),
+    match &target_var.eqn {
+        Some(Equation::Scalar(eq)) => eq.clone(),
         _ => "0".to_string(),
     }
 }
@@ -4022,7 +4014,7 @@ fn generate_flow_to_stock_equation(
     stock_var: &Variable,
 ) -> LtmEquation {
     // Check if this flow is an inflow or outflow
-    let is_inflow = if let Variable::Stock { inflows, .. } = stock_var {
+    let is_inflow = if let VarKind::Stock { inflows, .. } = &stock_var.kind {
         inflows.iter().any(|f| f.as_str() == flow)
     } else {
         true // Default to inflow
