@@ -653,32 +653,22 @@ impl TestProject {
     }
 }
 
-/// Methods for tests that inspect compiler internals (e.g. lowered
-/// expressions via `Module::get_flow_exprs`).
+/// Methods for tests that inspect the compiler's intermediate results rather
+/// than simulation values. `#[cfg(test)]` because they reach into crate-private
+/// per-variable lowering that the `test-support` feature does not export.
 #[cfg(test)]
 impl TestProject {
-    /// Build the monolithic `Project`, or the `Error`-severity salsa
-    /// diagnostics that stop it, as `(location, code)` pairs.
-    ///
-    /// The error set comes from `collect_all_diagnostics` rather than from the
-    /// monolithic path's own embedded error fields. Those fields are a strict
-    /// subset -- they never carried the unknown-dependency, bare-lookup-table
-    /// or assembly diagnostics, and their cycle gate was a second
-    /// implementation that disagreed with production's (GH #568) -- so this
-    /// helper used to report a model as broken that production compiles, and
-    /// as fine when production rejects it.
+    /// The `Error`-severity salsa diagnostics of this project, as
+    /// `(location, code)` pairs in emission order.
     ///
     /// `location` is `model.variable` for a variable-attributed diagnostic, the
     /// model name for a model-level one, and `"project"` for the project-level
     /// ones (the macro-registry build error and the unit definition errors,
-    /// which name no model). The `Project` is built against the SAME database
-    /// the diagnostics came from, so the datamodel is synced once.
-    fn compile_checked(&self) -> Result<crate::project::Project, Vec<(String, ErrorCode)>> {
-        let datamodel = self.build_datamodel();
-        let db = SimlinDb::default();
-        let sync = sync_from_datamodel(&db, &datamodel);
-
-        let errors: Vec<(String, ErrorCode)> = collect_all_diagnostics(&db, sync.project)
+    /// which name no model). A test that must pin WHICH variable a refusal lands
+    /// on reads this rather than [`TestProject::assert_compile_error_vm`], which
+    /// accepts the code anywhere in the project.
+    pub fn error_diagnostics(&self) -> Vec<(String, ErrorCode)> {
+        self.diagnostics_incremental()
             .iter()
             .filter(|d| d.severity == DiagnosticSeverity::Error)
             .map(|d| {
@@ -699,42 +689,29 @@ impl TestProject {
                 };
                 (location, code)
             })
-            .collect();
-        if !errors.is_empty() {
-            return Err(errors);
-        }
+            .collect()
+    }
 
-        Ok(crate::project::Project::from_salsa(
-            datamodel,
+    /// The production-lowered flow-phase expressions of the `main` model's
+    /// `var_name`: one `Expr` per element of an arrayed equation, preceded by
+    /// any temps the lowering hoisted.
+    ///
+    /// Sourced through `db::var_fragment::lower_var_fragment`, the exact
+    /// per-variable lowering `compile_var_fragment` runs, so a structural
+    /// assertion over this list constrains what the fragment compiler emits.
+    /// Panics when the variable has no `SourceVariable` (an implicit helper) or
+    /// does not lower; a test that expects a refusal reads
+    /// [`TestProject::error_diagnostics`] instead.
+    pub fn flow_exprs(&self, var_name: &str) -> Vec<crate::compiler::Expr> {
+        let datamodel = self.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        crate::db::var_noninitial_lowered_exprs(
             &db,
+            sync.models["main"].source,
             sync.project,
-            |_models, _units_ctx, _model| {},
-        ))
-    }
-
-    /// Build and compile the project, reporting the diagnostics production
-    /// would report; see [`TestProject::compile_checked`].
-    pub fn compile(&self) -> Result<crate::project::Project, Vec<(String, ErrorCode)>> {
-        self.compile_checked()
-    }
-
-    /// Build a Module for testing lowered expressions.
-    pub fn build_module(&self) -> Result<crate::compiler::Module, String> {
-        use crate::common::Canonical;
-        use std::collections::BTreeSet;
-
-        let compiled = self
-            .compile_checked()
-            .map_err(|errors| format!("Project has compilation errors: {errors:?}"))?;
-        let main_ident = Ident::<Canonical>::from_str_unchecked("main");
-        let model = compiled
-            .models
-            .get(&main_ident)
-            .ok_or_else(|| "Model 'main' not found in compiled project".to_string())?;
-
-        let inputs: BTreeSet<Ident<Canonical>> = BTreeSet::new();
-        crate::compiler::Module::new(&compiled, model.clone(), &inputs, true)
-            .map_err(|e| format!("Failed to create module: {e:?}"))
+            &crate::canonicalize(var_name),
+        )
     }
 }
 

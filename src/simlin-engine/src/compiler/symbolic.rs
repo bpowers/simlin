@@ -389,32 +389,6 @@ impl VariableLayout {
         VariableLayout { entries, n_slots }
     }
 
-    /// Build from a model's `name -> (offset, size)` map.
-    ///
-    /// `#[cfg(test)]` because its only caller is: the test-only monolithic
-    /// `compiler::Module` builds its whole-model layout this way and resolves
-    /// its emitted symbolic module against it. Production gets the same shape
-    /// from the salsa `compute_layout` query instead.
-    #[cfg(test)]
-    pub fn from_offset_map(
-        offsets: &HashMap<crate::common::Ident<crate::common::Canonical>, (usize, usize)>,
-        n_slots: usize,
-    ) -> Self {
-        let entries = offsets
-            .iter()
-            .map(|(name, (offset, size))| {
-                (
-                    name.to_string(),
-                    LayoutEntry {
-                        offset: *offset,
-                        size: *size,
-                    },
-                )
-            })
-            .collect();
-        VariableLayout { entries, n_slots }
-    }
-
     pub fn get(&self, name: &str) -> Option<&LayoutEntry> {
         self.entries.get(name)
     }
@@ -950,10 +924,10 @@ pub(crate) fn resolve_opcode(
             // `full_source_len` is invisible through `simulates_vector_simple_mdl`
             // / `simulates_vector_xmile_genuine` alone. The NUMERIC end-to-end
             // coverage (GH #579) therefore lives in `array_tests`: the
-            // full-array-source `out_of_bounds_element_returns_nan_{vm,
-            // monolithic}` (base 0, `source_is_full_array == true`) and the
-            // strict-slice-source `strict_slice_source_oob_returns_nan_{vm,
-            // monolithic}` (base != 0, the other branch) both feed an
+            // full-array-source `out_of_bounds_element_returns_nan_vm`
+            // (base 0, `source_is_full_array == true`) and the
+            // strict-slice-source `strict_slice_source_oob_returns_nan_vm`
+            // (base != 0, the other branch) both feed an
             // out-of-range offset, so a `full_source_len` corrupted in EITHER
             // the codegen computation (`codegen::full_source_len`) OR this
             // `resolve`/`renumber_opcode` path stops yielding the expected NaN
@@ -3640,30 +3614,6 @@ mod tests {
             ],
         );
         compile_and_check_resolution(&dm_project, "main");
-    }
-
-    // ====================================================================
-    // VariableLayout::from_offset_map coverage
-    // ====================================================================
-
-    #[test]
-    fn test_layout_from_offset_map() {
-        let mut offsets: HashMap<Ident<Canonical>, (usize, usize)> = HashMap::new();
-        offsets.insert(Ident::new("alpha"), (0, 1));
-        offsets.insert(Ident::new("beta"), (1, 3));
-
-        let layout = VariableLayout::from_offset_map(&offsets, 4);
-        assert_eq!(layout.n_slots, 4);
-
-        let alpha = layout.get("alpha").unwrap();
-        assert_eq!(alpha.offset, 0);
-        assert_eq!(alpha.size, 1);
-
-        let beta = layout.get("beta").unwrap();
-        assert_eq!(beta.offset, 1);
-        assert_eq!(beta.size, 3);
-
-        assert!(layout.get("gamma").is_none());
     }
 
     // ====================================================================

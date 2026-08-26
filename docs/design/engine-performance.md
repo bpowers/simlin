@@ -399,8 +399,8 @@ mispredict-bound like the Ryzen profile above -- but the lever is the same
 **Constant folding (`compiler::fold`, run −2%, bytecode −5%).** The flow
 program re-evaluated every `literal op literal` subtree per step -- 792
 `BinConstConst` sites on C-LEARN, including one per negative literal (unary
-minus lowers to `0 - x`). A fold pass in `Var::new` (the chokepoint both the
-monolithic and salsa lowering paths funnel through) collapses constant-only
+minus lowers to `0 - x`). A fold pass in `Var::new` (the chokepoint every
+fragment lowering funnels through) collapses constant-only
 subtrees at compile time, computing results with the VM's own
 `eval_op2`/`is_truthy` so folds are bit-identical by construction. Only
 IEEE-exact ops fold; `^` (libm `powf`) and transcendental builtins stay

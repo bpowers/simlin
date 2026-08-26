@@ -1793,7 +1793,8 @@ mod star_range_subdimension_tests {
 #[cfg(test)]
 mod structural_lowering_tests {
     //! Tests that verify the structure of lowered expressions, not just execution results.
-    //! These tests use Module::get_flow_exprs() to inspect the AST after lowering.
+    //! They read each variable's production-lowered flow exprs through
+    //! `TestProject::flow_exprs`.
 
     use crate::compiler::pretty::pretty;
     use crate::compiler::{BuiltinFn, Expr};
@@ -1808,8 +1809,7 @@ mod structural_lowering_tests {
             .array_const("source[D]", 10.0)
             .array_aux("result[D]", "source[*]");
 
-        let module = project.build_module().expect("should compile");
-        let exprs = module.get_flow_exprs("result");
+        let exprs = project.flow_exprs("result");
 
         // Should have 3 expressions (one per A2A element)
         assert_eq!(
@@ -1841,13 +1841,12 @@ mod structural_lowering_tests {
             .array_const("source[A]", 10.0)
             .scalar_aux("total", "SUM(source[2:4])");
 
-        let module = project.build_module().expect("should compile");
-        let exprs = module.get_flow_exprs("total");
+        let exprs = project.flow_exprs("total");
 
         assert_eq!(exprs.len(), 1, "scalar should have 1 expression");
 
         // Verify SUM contains StaticSubscript with range view
-        let expr = exprs[0];
+        let expr = &exprs[0];
         if let Expr::AssignCurr(_, inner) = expr {
             if let Expr::App(BuiltinFn::Sum(sum_inner), _) = inner.as_ref() {
                 if let Expr::StaticSubscript(_, view, _) = sum_inner.as_ref() {
@@ -2118,8 +2117,7 @@ mod structural_lowering_tests {
             .array_const("m[DimD, DimE]", 10.0)
             .array_aux("msum[DimD]", "SUM(m[DimD, *])");
 
-        let module = project.build_module().expect("should compile");
-        let exprs = module.get_flow_exprs("msum");
+        let exprs = project.flow_exprs("msum");
 
         // 2 A2A elements (D1, D2)
         assert_eq!(
@@ -2167,11 +2165,10 @@ mod structural_lowering_tests {
             .array_const("x[D]", 5.0)
             .scalar_aux("y", "SUM(x[*])");
 
-        let module = project.build_module().expect("should compile");
-        let exprs = module.get_flow_exprs("y");
+        let exprs = project.flow_exprs("y");
 
         assert_eq!(exprs.len(), 1);
-        let pretty_str = pretty(exprs[0]);
+        let pretty_str = pretty(&exprs[0]);
         // Should contain recognizable structure (lowercase from pretty() format)
         assert!(
             pretty_str.contains("curr") && pretty_str.contains("sum"),
@@ -2203,8 +2200,7 @@ mod pass0_structural_lowering_tests {
             .array_const("source[DimB]", 10.0)
             .array_aux("result[DimB]", "source"); // bare var reference
 
-        let module = project.build_module().expect("should compile");
-        let exprs = module.get_flow_exprs("result");
+        let exprs = project.flow_exprs("result");
 
         // Should have 2 A2A elements
         assert_eq!(exprs.len(), 2, "expected 2 A2A elements");
@@ -2229,8 +2225,7 @@ mod pass0_structural_lowering_tests {
             .scalar_const("x", 5.0)
             .scalar_aux("y", "x");
 
-        let module = project.build_module().expect("should compile");
-        let exprs = module.get_flow_exprs("y");
+        let exprs = project.flow_exprs("y");
         assert_eq!(exprs.len(), 1);
         // Verify it compiled - scalar vars should work
         // (2 time steps: t=0 and t=1)
@@ -2248,8 +2243,7 @@ mod pass0_structural_lowering_tests {
             .array_aux("f[DimA, DimB]", "(DimA - 1) * 3 + DimB")
             .array_aux("p[DimB, DimA]", "f"); // reordered dimensions
 
-        let module = project.build_module().expect("should compile");
-        let exprs = module.get_flow_exprs("p");
+        let exprs = project.flow_exprs("p");
         // 3 * 2 = 6 A2A elements
         assert_eq!(exprs.len(), 6, "expected 6 A2A elements");
 
@@ -2334,8 +2328,7 @@ mod pass0_structural_lowering_tests {
             .array_const("source[DimA, DimB]", 1.0)
             .array_aux("target[DimA, DimB]", "source");
 
-        let module = project.build_module().expect("should compile");
-        let exprs = module.get_flow_exprs("target");
+        let exprs = project.flow_exprs("target");
         assert_eq!(exprs.len(), 6, "expected 6 A2A elements (2 * 3)");
     }
 

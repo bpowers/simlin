@@ -1370,17 +1370,7 @@ fn test_inference() {
         // there is non-determinism in inference; do it a few times to
         // shake out heisenbugs
         for _ in 0..64 {
-            let mut results = InferenceResult::default();
-            let db = crate::db::SimlinDb::default();
-            let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
-            let _project = crate::project::Project::from_salsa(
-                project_datamodel.clone(),
-                &db,
-                sync.project,
-                |models, units_ctx, model| {
-                    results = infer(models, units_ctx, model);
-                },
-            );
+            let results = infer_project(&project_datamodel, "main");
             assert!(
                 results.conflicts.is_empty(),
                 "expected no conflicts for a fully-inferrable model, got: {:?}",
@@ -1424,17 +1414,7 @@ fn test_declared_units_without_equation_propagate() {
     let model = x_model("main", vars);
     let project_datamodel = x_project(sim_specs.clone(), &[model]);
 
-    let mut results = InferenceResult::default();
-    let db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
-    let _project = crate::project::Project::from_salsa(
-        project_datamodel.clone(),
-        &db,
-        sync.project,
-        |models, units_ctx, model| {
-            results = infer(models, units_ctx, model);
-        },
-    );
+    let results = infer_project(&project_datamodel, "main");
     let results = results.resolved;
 
     let widget: UnitMap = crate::units::parse_units(&units_ctx, Some("widget"))
@@ -1503,17 +1483,7 @@ fn test_inference_negative() {
         // there is non-determinism in inference; do it a few times to
         // shake out heisenbugs
         for _ in 0..64 {
-            let mut results = InferenceResult::default();
-            let db = crate::db::SimlinDb::default();
-            let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
-            let _project = crate::project::Project::from_salsa(
-                project_datamodel.clone(),
-                &db,
-                sync.project,
-                |models, units_ctx, model| {
-                    results = infer(models, units_ctx, model);
-                },
-            );
+            let results = infer_project(&project_datamodel, "main");
             assert!(
                 !results.conflicts.is_empty(),
                 "expected a dimensional conflict to be reported"
@@ -1534,17 +1504,7 @@ fn test_inference_error_has_location() {
     let model = x_model("main", vars);
     let project_datamodel = x_project(sim_specs.clone(), &[model]);
 
-    let mut results = InferenceResult::default();
-    let db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
-    let _project = crate::project::Project::from_salsa(
-        project_datamodel.clone(),
-        &db,
-        sync.project,
-        |models, units_ctx, model| {
-            results = infer(models, units_ctx, model);
-        },
-    );
+    let results = infer_project(&project_datamodel, "main");
 
     // Verify that at least one reported conflict carries source + location info.
     assert!(
@@ -1601,17 +1561,7 @@ fn test_inference_partial_results_survive_conflict() {
     let model = x_model("main", vars);
     let project_datamodel = x_project(sim_specs.clone(), &[model]);
 
-    let mut result = InferenceResult::default();
-    let db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
-    let _project = crate::project::Project::from_salsa(
-        project_datamodel.clone(),
-        &db,
-        sync.project,
-        |models, units_ctx, model| {
-            result = infer(models, units_ctx, model);
-        },
-    );
+    let result = infer_project(&project_datamodel, "main");
 
     // The clean chain is resolved despite conflicts elsewhere in the model.
     let widget: UnitMap = crate::units::parse_units(&units_ctx, Some("widget"))
@@ -1673,19 +1623,7 @@ fn test_macro_body_units_naming_parameters_are_polymorphic() {
     );
     let project_datamodel = x_project(sim_specs.clone(), &[root, macro_model]);
 
-    let mut result = InferenceResult::default();
-    let db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
-    let _project = crate::project::Project::from_salsa(
-        project_datamodel.clone(),
-        &db,
-        sync.project,
-        |models, units_ctx, model| {
-            if model.name.as_str() == "main" {
-                result = infer(models, units_ctx, model);
-            }
-        },
-    );
+    let result = infer_project(&project_datamodel, "main");
 
     assert!(
         result.conflicts.is_empty(),
@@ -1745,19 +1683,7 @@ fn test_macro_param_named_units_resolve_to_actual_arg() {
     );
     let project_datamodel = x_project(sim_specs.clone(), &[root, macro_model]);
 
-    let mut result = InferenceResult::default();
-    let db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
-    let _project = crate::project::Project::from_salsa(
-        project_datamodel.clone(),
-        &db,
-        sync.project,
-        |models, units_ctx, model| {
-            if model.name.as_str() == "main" {
-                result = infer(models, units_ctx, model);
-            }
-        },
-    );
+    let result = infer_project(&project_datamodel, "main");
 
     assert!(
         result.conflicts.is_empty(),
@@ -1813,19 +1739,7 @@ fn test_inconsistent_macro_reports_clear_user_facing_conflict() {
     );
     let project_datamodel = x_project(sim_specs.clone(), &[root, macro_model]);
 
-    let mut result = InferenceResult::default();
-    let db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
-    let _project = crate::project::Project::from_salsa(
-        project_datamodel.clone(),
-        &db,
-        sync.project,
-        |models, units_ctx, model| {
-            if model.name.as_str() == "main" {
-                result = infer(models, units_ctx, model);
-            }
-        },
-    );
+    let result = infer_project(&project_datamodel, "main");
 
     assert!(
         !result.conflicts.is_empty(),
@@ -1902,19 +1816,7 @@ fn test_macro_mixed_param_and_base_units_infer_cleanly() {
     );
     let project_datamodel = x_project(sim_specs.clone(), &[root, macro_model]);
 
-    let mut result = InferenceResult::default();
-    let db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
-    let _project = crate::project::Project::from_salsa(
-        project_datamodel.clone(),
-        &db,
-        sync.project,
-        |models, units_ctx, model| {
-            if model.name.as_str() == "main" {
-                result = infer(models, units_ctx, model);
-            }
-        },
-    );
+    let result = infer_project(&project_datamodel, "main");
 
     assert!(
         result.conflicts.is_empty(),
@@ -1972,10 +1874,10 @@ pub(crate) fn infer(
 // These tests drive `infer` the way `db::units::check_model_units` does, over
 // each project model's salsa-cached `ModelStage1`.
 
-/// Run inference over `model_name` with every project model's lowered stage in
-/// the map, mirroring `db::units::check_model_units`. Deliberately NOT routed
-/// through `Project::from_salsa`: that path enumerates module instantiations of
-/// its own, and these fixtures are about the shape of the module graph itself.
+/// Run inference over `model_name` with every project model's salsa-cached
+/// lowered stage in the map, the way `db::units::check_model_units` drives
+/// `infer` (its map is the model's module-reachable scope, a subset of this
+/// one; inference only ever looks up module targets, so the two agree).
 #[cfg(test)]
 fn infer_project(
     project_datamodel: &crate::datamodel::Project,
@@ -2325,17 +2227,7 @@ fn test_previous_infers_units_from_lagged_arg() {
     let project_datamodel = x_project(sim_specs.clone(), &[model]);
 
     for _ in 0..64 {
-        let mut results = InferenceResult::default();
-        let db = crate::db::SimlinDb::default();
-        let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
-        let _project = crate::project::Project::from_salsa(
-            project_datamodel.clone(),
-            &db,
-            sync.project,
-            |models, units_ctx, model| {
-                results = infer(models, units_ctx, model);
-            },
-        );
+        let results = infer_project(&project_datamodel, "main");
         let results = results.resolved;
         for (ident, expected_units) in expected.iter() {
             let expected_units: UnitMap =
@@ -2382,17 +2274,7 @@ fn test_previous_constrains_fallback_units() {
     let project_datamodel = x_project(sim_specs, &[model]);
 
     for _ in 0..64 {
-        let mut results = InferenceResult::default();
-        let db = crate::db::SimlinDb::default();
-        let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
-        let _project = crate::project::Project::from_salsa(
-            project_datamodel.clone(),
-            &db,
-            sync.project,
-            |models, units_ctx, model| {
-                results = infer(models, units_ctx, model);
-            },
-        );
+        let results = infer_project(&project_datamodel, "main");
         assert!(
             !results.conflicts.is_empty(),
             "PREVIOUS(widget, wallop) should fail unit inference"
@@ -2436,17 +2318,7 @@ fn test_multi_metavar_constraint_mismatch() {
     let model = x_model("main", vars);
     let project_datamodel = x_project(sim_specs.clone(), &[model]);
 
-    let mut results = InferenceResult::default();
-    let db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
-    let _project = crate::project::Project::from_salsa(
-        project_datamodel.clone(),
-        &db,
-        sync.project,
-        |models, units_ctx, model| {
-            results = infer(models, units_ctx, model);
-        },
-    );
+    let results = infer_project(&project_datamodel, "main");
 
     // The inference should report a conflict because x and y have inconsistent
     // unit declarations.
@@ -2675,17 +2547,7 @@ fn test_rank_builtin_unit_inference() {
     let project_datamodel = x_project(sim_specs.clone(), &[model]);
 
     let units_ctx = Context::new_with_builtins(&[], &sim_specs).0;
-    let mut results = InferenceResult::default();
-    let db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
-    let _project = crate::project::Project::from_salsa(
-        project_datamodel.clone(),
-        &db,
-        sync.project,
-        |models, units_ctx, model| {
-            results = infer(models, units_ctx, model);
-        },
-    );
+    let results = infer_project(&project_datamodel, "main");
 
     let results = results.resolved;
 
@@ -2725,17 +2587,7 @@ fn test_unify_conflict_detection() {
     let model = x_model("main", model_vars);
     let project_datamodel = x_project(sim_specs.clone(), &[model]);
 
-    let mut results = InferenceResult::default();
-    let db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
-    let _project = crate::project::Project::from_salsa(
-        project_datamodel.clone(),
-        &db,
-        sync.project,
-        |models, units_ctx, model| {
-            results = infer(models, units_ctx, model);
-        },
-    );
+    let results = infer_project(&project_datamodel, "main");
 
     // This should report a conflict because 'a' can't be both meters and seconds.
     assert!(

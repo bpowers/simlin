@@ -79,8 +79,8 @@ branch).
    to equation text and re-parsed. `ModuleIdentContext` no longer exists.
    Adding a module variable re-keys one parse, not every parse.
 10. **Whole-model lowered copies are gone.** Every reader of `model_stage0`/
-    `model_stage1`/`Project::from_salsa` is moved to per-variable queries and
-    those memos are deleted.
+    `model_stage1` (unit checking, the database-free `ModelStage0::new_in_project`
+    oracle tests) is moved to per-variable queries and those memos are deleted.
 11. The sixteen `#[allow(dead_code)]` `SymbolicOpcode` variants (broadcast
     iteration, incremental view-stack construction) and their `Opcode`, VM, and
     wasm twins are retired (closes GH #612).
@@ -384,8 +384,7 @@ read `DepKind::Module.layout`); `db/var_fragment.rs` and
 compile paths reduced to constructors; `db/assemble.rs` (`build_stub_variable`,
 `build_submodel_metadata` deleted; `build_module_inputs` and a single
 `module_input_set(refs, prefix)` owner used by `enumerate_module_instances_inner`,
-`build_var_info`, and LTM); the test-only `compiler::Module`/`build_metadata`
-adapted to build `DepShape`s from its `Variable`s; `Cargo.toml` drops `bumpalo`.
+`build_var_info`, and LTM); `Cargo.toml` drops `bumpalo`.
 
 **Dependencies:** Phases 1-2.
 
@@ -515,10 +514,9 @@ evergreen.
 walk), `db/assemble.rs` (`collect_expr_refs` deleted; invariance support from
 `DepRef`), `db/dep_graph.rs` (`build_var_info` reads fields), `db/stages.rs`
 and every reader of `model_stage0`/`model_stage1` (`db/units.rs`,
-`project.rs::from_salsa`, `model.rs::ModelStage1::set_dependencies`,
-`enumerate_modules`) moved to per-variable queries and the memos deleted;
-decision recorded on the test-only `compiler::Module` oracle (keep adapted or
-delete -- see Additional Considerations); engine `CLAUDE.md`,
+`units_infer.rs`, `units_check.rs`, and the database-free
+`ModelStage0::new_in_project` oracle the `stages_tests` compare against) moved
+to per-variable queries and the memos deleted; engine `CLAUDE.md`,
 `docs/architecture.md`, `docs/design/engine-performance.md` rewritten as
 current state.
 
@@ -531,22 +529,27 @@ pipeline as it is; final ledger row; this document's ledger complete.
 
 ## Additional Considerations
 
-**Team process.** One checkout, branch `compiler-unification`, at most three
-agents running at once, every teammate on the same model as the lead. A chunk
-is: implementer works with the tree uncommitted and runs the relevant
-`cargo test -p simlin-engine` subsets, `cargo clippy`, and `cargo fmt` before
-declaring done; the lead verifies the tree (`git status`, `git diff --stat`,
-a test run); a fresh reviewer reads the diff adversarially and reports
-findings split into defects / semantic changes not pinned by a test /
-violated invariants / duplication the chunk was meant to remove / doc drift,
-plus design observations; the same implementer fixes; a fresh re-reviewer
-checks the prior findings and the fixes; when there are no material findings
-the implementer commits through the pre-commit hook (never `--no-verify`) and
-the lead confirms the commit in `git log`. Read-only audits may run in
-parallel with an implementer; two implementers never edit one checkout. A
-phase that claims identical semantics also builds the pre-change commit from
-`git archive` into the scratchpad and runs both CLIs on hand-written probe
-models covering the shapes the corpus lacks, diffing the simulation output.
+**Team process.** One checkout holds the branch; at most three agents run at
+once, every teammate on the same model as the lead. A chunk is: an implementer
+works with the tree uncommitted and runs the relevant engine test subsets,
+`cargo clippy`, and `cargo fmt` before declaring done; the lead verifies the
+tree (`git status`, `git diff --stat`, a targeted test run); ONE fresh reviewer
+reads the diff adversarially and reports material findings -- defects,
+semantic changes not pinned by a test, violated invariants, duplication the
+chunk was meant to remove, false claims in docs or comments -- separately from
+nits; the same implementer fixes every material finding and folds in nits that
+are trivial; the implementer commits through the pre-commit hook (never
+`--no-verify`) and the lead confirms the commit in `git log`. A second review
+round happens only when the fixes themselves are substantive. The next chunk
+starts in an isolated worktree (its own cargo target directory, no commits)
+while the previous one is in review; the lead applies its patch to the main
+checkout once that commit lands. Measurement per phase is the cheap channel --
+retired instructions plus the `bytecode_profile()` artifact block -- recorded
+in the ledger; a delta under about one percent is recorded, not investigated,
+and a later perf pass owns it. A phase that claims identical semantics also
+builds the pre-change commit from `git archive` into the scratchpad and runs
+both CLIs on hand-written probe models covering the shapes the corpus lacks,
+diffing the simulation output.
 
 **Teammate standing rules** (inline in every prompt): TDD; derive test rows
 from the enumeration and name uncovered arms; fixtures must be what
@@ -569,18 +572,83 @@ reports (slots, opcodes per runlist, literals, GFs, temps, views, names,
 modules). Name the channel on every row. A cycles number without a
 same-session null control is not recorded.
 
-**Test-only monolith (`compiler::Module`, `Project::from_salsa`,
-`ModelStage1::set_dependencies`).** Phase 3 adapts it (it must build
-`DepShape`s from its `Variable`s) and Phase 8 removes the Stage0/Stage1 memos
-it consumes. Whether the monolith itself stays as a differential oracle or is
-deleted is a product decision: it is a second implementation of layout and
-metadata that cannot lower resolved SCCs, and every compiler change is made
-twice because of it. The lead surfaces this to the owner before Phase 8; the
-default if unanswered is to keep it compiling and narrow its surface.
+**One compiler, in tests too.** There is no whole-model test oracle beside
+`compile_project_incremental`. A test that needs a variable's lowered form
+reads it through the production per-variable lowering
+(`test_common::TestProject::flow_exprs`, over
+`db::var_fragment::lower_var_fragment`); a test that needs a refusal's
+location reads `TestProject::error_diagnostics`; loop-discovery tests drive
+`ltm_finding::discover_loops_with_graph` with the graph and context
+`analysis::analyze_model` builds. A second whole-model path would be a second
+implementation of layout and metadata that cannot lower resolved SCCs and
+makes every compiler change twice; differential checking belongs at the
+artifact level (the genuine-output corpus, the fragment goldens, the
+wasm-vs-VM parity run). The `ModelStage0`/`ModelStage1` memos are read by unit
+checking only, and Phase 8 retires them with it.
 
-**Phase 7 investigation output.** The enumerated list of module-context
-decisions and their new homes is appended here by the Phase 7 teammate before
-code moves. (Placeholder until then.)
+**Phase 7 investigation output.** The enumeration the phase required is in
+`docs/design-plans/2026-08-26-compiler-unification-phase7-investigation.md`
+(every claim with `file:line` at commit `cf534130`). What it settled, and the
+decisions taken on it:
+
+- Of the sixteen decisions `builtins_visitor.rs` makes, exactly three read
+  model-level state: D1 "is this identifier module-backed" (`module_idents`),
+  D2 its pre-classifier `collect_module_idents`/`equation_is_module_call`
+  (which re-parses every Aux/Flow equation of the model), and D3 "is this bare
+  subscript index an element not shadowed by a variable" (`model_var_names`,
+  LTM path only). Everything else reads project-global inputs (dimensions, the
+  macro registry, `macro_body_owner`) or nothing, so a parse keyed on
+  `(variable, project)` needs no model key; D8 (is this call inside the macro
+  that owns it) is answered by the project-keyed `macro_body_owner`.
+- D1 and D3 move to lowering, decided by ONE predicate -- "does the argument
+  lower to a `static_slot`/`snapshot_static_view`" -- computed once from the
+  capture's lowered form and exposed as a per-variable projection that BOTH
+  the dependency stage and `lower_fragment` consume, so the graph and the
+  bytecode cannot drift (the GH #568 class).
+- Four module-ident contexts are live today (empty, the model's own, the
+  per-instance widened one, the stdlib-extended one) plus LTM's own sets; the
+  analysis, LTM, layout, libsimlin and CLI paths parse every variable a second
+  time under the empty context and can see different dependency sets than the
+  compiler schedules. They collapse to one memo per variable; the ~20 call
+  sites that construct a context are rewritten in chunk 7.4, which is why
+  `rg ModuleIdentContext src/` is empty only after that chunk.
+- A synthesized helper is printed to text at two sites and re-parsed at seven;
+  its name is its identity at twenty-one. Captures carry the argument as an
+  AST subtree with positional identity `(parent, id)`.
+- AC3.1 needs more than the parse key: `compile_var_fragment` and
+  `compile_implicit_var_phase_bytecodes` clone the whole `model_module_map`,
+  whose value changes whenever an implicit module instance is added. Chunk 7.4
+  adds a per-ident projection (`module_target_by_ident`) and starts with a
+  salsa execution-count probe of the pinning test, whose stated cause (1) --
+  `project.models` changing on a stdlib splice -- is inconsistent with
+  `db/sync.rs` splicing stdlib models on every sync.
+- The runlist contract a capture reproduces: a PREVIOUS capture is a flows-only
+  unit with no edge from its parent in either phase; an INIT capture is seeded
+  into initials through `all_init_referenced`, keeps the parent->capture
+  initial edge (load-bearing: `LoadInitial` reads `curr` during initials),
+  loses the dt edge, and is also recomputed in flows. Byte-identical runlists
+  and layout additionally need the capture's runlist ident to sort exactly as
+  today's `$⁚{parent}⁚{n}⁚arg0[⁚{suffix}]` does, with `n` assigned in the same
+  argument-first walk order and the same shared-`n`-per-module rule.
+- LTM's PREVIOUS helpers become captures too, but keep their append-by-presence
+  placement (sound because `LoadPrev` reads the snapshot); they do not enter
+  `model_dependency_graph` in this plan.
+
+Phase 7 is therefore executed as: 7.1 the execution-count probe and the single
+D1/D3 predicate as a projection; 7.2 captures for PREVIOUS/INIT with today's
+capture set, names, and walk order held fixed (the goldens are the defect
+detector); 7.3a stdlib `ImplicitModule` with per-element expansion and shared
+`n`; 7.3b macros, passthrough, and GH #554; 7.4 deletion of `ModuleIdentContext`
+and the empty-context twin call sites, the `model_module_map` projection, and
+the AC3.1 flip; 7.5 the shape changes, one commit and ledger row each: dropping
+the captures D1 synthesizes for `PREVIOUS(module-call aux)` and
+`PREVIOUS(m·scalar_port)` (redundant: codegen's `static_slot` already accepts
+`m·port`, and a stdlib-call aux is a one-slot scalar) and refusing a bare
+`PREVIOUS(sub)` of an explicit module loudly; generalising the D3 bare-element
+rule from the LTM path to user equations; taking INIT captures out of the flows
+runlist; keeping `ApplyToAll` instead of rewriting to `Arrayed` for an
+apply-to-all body that merely contains `PREVIOUS`/`INIT` (D14); and hoisting
+`DELAYN`'s duplicated input argument once.
 
 **Phase 1 semantic divergences.** Making the signature table the one statement
 of per-builtin facts changed how four edge shapes compile. None occurs in the

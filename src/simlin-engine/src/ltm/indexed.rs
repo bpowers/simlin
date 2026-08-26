@@ -255,9 +255,9 @@ impl IndexedGraph {
 
         let mut succ: Vec<Vec<u32>> = vec![Vec::new(); nodes.len()];
         // Successor lists use first-seen insertion order to dedup
-        // duplicate edges that `CausalGraph::from_model` can produce
-        // (e.g. a flow that is both an inflow and an outflow of the
-        // same stock).  We deliberately do NOT sort: distinct directed
+        // duplicate edges a causal graph can carry (e.g. a flow that
+        // is both an inflow and an outflow of the same stock). We
+        // deliberately do NOT sort: distinct directed
         // cycles over the same node set (e.g. `A -> B -> C -> A` vs
         // `A -> C -> B -> A` on a multidigraph) canonicalize to
         // different rotations and are retained as separate loops by

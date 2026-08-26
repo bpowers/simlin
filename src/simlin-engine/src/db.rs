@@ -39,6 +39,11 @@ use std::collections::BTreeSet;
 //   mod/parse/compile/loops/link_scores), the reference-site IR, the macro
 //   registry, and the unit-check pass.
 mod dep_graph;
+// The production per-variable lowering as a flow-phase `Vec<Expr>`, which
+// `test_common::TestProject::flow_exprs` reads from outside `db` so structural
+// lowering tests constrain the fragment compiler rather than a re-derivation.
+#[cfg(test)]
+pub(crate) use dep_graph::var_noninitial_lowered_exprs;
 #[cfg(test)]
 mod element_graph_proptest;
 mod invariance;
@@ -63,7 +68,6 @@ mod units;
 mod var_fragment;
 
 mod diagnostic;
-pub(crate) use diagnostic::model_duplicate_variables;
 pub use diagnostic::{
     CompilationDiagnostic, Diagnostic, DiagnosticError, DiagnosticSeverity,
     collect_all_diagnostics, collect_model_diagnostics, model_all_diagnostics,
@@ -185,6 +189,9 @@ pub use analysis::causal_graph_from_edges;
 pub use analysis::causal_graph_from_element_edges;
 pub use analysis::causal_graph_from_element_edges_with_modules;
 pub(crate) use analysis::reconstruct_model_variables;
+// The variable-level graph with module sub-graphs, for tests outside `db` that
+// pin edge normalization and polarity on the production graph constructor.
+pub(crate) use analysis::causal_graph_with_modules;
 // The same-element diagonal/broadcast/mapped projection the element graph
 // emits for a `Bare` A2A reference. Discovery's `expand_a2a_link_offsets`
 // consumes it (via `crate::db::expand_same_element`) so its per-element

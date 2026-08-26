@@ -38,7 +38,6 @@ use crate::datamodel;
 use crate::db::LtmSyntheticVar;
 use crate::ltm::{CausalGraph, CyclePartitions, Link, LinkPolarity, Loop, LoopPolarity};
 use crate::ltm_post::NormGroup;
-use crate::project::Project;
 use crate::results::Results;
 
 // Union-graph circuit enumeration: discovery's primary candidate generator
@@ -138,10 +137,10 @@ pub type SubModelOutputPorts = HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>;
 /// element correspondence. Together they let `expand_a2a_link_offsets` project
 /// the score's element tuple onto `from`'s own dims through the SAME
 /// `db::expand_same_element` diagonal/broadcast/mapped rule the element graph
-/// uses, so the two surfaces spell the from-node identically. The
-/// db-less `discover_loops` convenience path (variable-level graph, empty
-/// `ltm_vars`) passes [`LinkExpansionContext::default`]: no A2A expansion runs
-/// there, so the empty map is never consulted.
+/// uses, so the two surfaces spell the from-node identically. A caller that
+/// passes empty `ltm_vars` gets no A2A expansion, so
+/// [`LinkExpansionContext::default`] suffices there and its empty map is never
+/// consulted.
 #[derive(Default, Clone)]
 pub struct LinkExpansionContext {
     /// Canonical variable name -> declared dimensions, in declared order.
@@ -1005,168 +1004,6 @@ fn datamodel_dim_element_names(dim: &datamodel::Dimension) -> Vec<String> {
             .collect(),
         datamodel::DimensionElements::Indexed(size) => (1..=*size).map(|i| i.to_string()).collect(),
     }
-}
-
-/// Look up the main model deterministically by its canonical name "main".
-///
-/// Returns `None` if no model named "main" exists or if it is implicit.
-/// We intentionally avoid falling back to arbitrary HashMap iteration
-/// (which is nondeterministic) -- all well-formed projects have a "main" model.
-fn find_main_model(project: &Project) -> Option<&std::sync::Arc<crate::model::ModelStage1>> {
-    project
-        .models
-        .get(&*crate::common::canonicalize("main"))
-        .filter(|m| !m.implicit)
-}
-
-/// Identify stock variables from the project's main model.
-fn get_stock_variables(project: &Project) -> Vec<Ident<Canonical>> {
-    let mut stocks = Vec::new();
-
-    let main_model = match find_main_model(project) {
-        Some(model) => model,
-        None => return stocks,
-    };
-
-    for (var_name, var) in &main_model.variables {
-        if matches!(var, crate::variable::Variable::Stock { .. }) {
-            stocks.push(var_name.clone());
-        }
-    }
-
-    // Sort for deterministic ordering
-    stocks.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    stocks
-}
-
-/// Run loop discovery on simulation results.
-///
-/// Reads link score values from `results` (computed during simulation via
-/// LTM synthetic variables), then generates and scores loop candidates over
-/// the recorded series.
-///
-/// The simulation must have been compiled with `ltm_discovery_mode` enabled
-/// so that link score variables exist for all causal links.
-///
-/// This convenience function builds the causal graph from the `Project` and
-/// does not have access to LTM synthetic variable metadata or project
-/// dimensions, so A2A link scores are treated as scalar (no element-level
-/// expansion). For full element-level discovery, use
-/// `discover_loops_with_graph` with explicit `ltm_vars` and `dims`.
-pub fn discover_loops(results: &Results, project: &Project) -> Result<Vec<FoundLoop>> {
-    let stocks = get_stock_variables(project);
-    let main_model = find_main_model(project).ok_or_else(|| crate::common::Error {
-        kind: crate::common::ErrorKind::Model,
-        code: crate::common::ErrorCode::NotSimulatable,
-        details: Some("No non-implicit model found for loop discovery".to_string()),
-    })?;
-    let causal_graph = CausalGraph::from_model(main_model, project)?;
-    // The per-exit-port recompute (GH #698) needs each sub-model's emitted
-    // output-port set. The db-backed `analyze_model` path reads it from the
-    // emission query directly; this convenience path has no db, so it
-    // reconstructs the set with the SAME project-wide semantics emission uses
-    // (union of `{instance}·{port}` reads over ALL project models + the stdlib
-    // `output` short-circuit -- see `project_sub_model_output_ports`).
-    let sub_model_ports = project_sub_model_output_ports(project);
-    // The convenience path is unbudgeted: it builds the graph from a `Project`
-    // and is used by small-model callers that never hit the GH #647 slowness.
-    // It passes empty `ltm_vars`/`dims`, so no A2A expansion runs and the empty
-    // `LinkExpansionContext` is never consulted.
-    Ok(discover_loops_with_graph(
-        results,
-        &causal_graph,
-        &stocks,
-        &[],
-        &[],
-        &LinkExpansionContext::default(),
-        &sub_model_ports,
-        None,
-    )?
-    .loops)
-}
-
-/// Reconstruct each sub-model's emitted LTM output-port set from a compiled
-/// `Project`, mirroring the emission-side `db::ltm::find_model_output_ports`
-/// project-wide semantics for the db-less `discover_loops` convenience path.
-///
-/// Emission scans reads across ALL project models (not just the analyzed one)
-/// and unions the `{instance}·{port}` ports per sub-model, sorted; a stdlib
-/// sub-model short-circuits to exactly `["output"]`. The recompute must use the
-/// IDENTICAL set/order to land on the sub-model's emitted `$⁚ltm⁚path` indices,
-/// so this reproduces that decision rather than scanning the analyzed model
-/// alone (the GH #698 / PR #705 r3353097150 cross-model index-shift bug). The
-/// db-backed `analyze_model` path instead reads `db::ltm::sub_model_output_ports`
-/// directly -- the one authoritative emission decision; this is its db-less
-/// twin, kept in lockstep by the shared "project-wide union + stdlib output"
-/// rule.
-fn project_sub_model_output_ports(project: &Project) -> SubModelOutputPorts {
-    use crate::variable::Variable;
-
-    let mut ports: SubModelOutputPorts = HashMap::new();
-    for model in project.models.values() {
-        // Instance name -> sub-model name, for instances declared in THIS
-        // model (an `instance·port` read only resolves to a same-model
-        // instance).
-        let instance_sub_model: HashMap<&Ident<Canonical>, &Ident<Canonical>> = model
-            .variables
-            .iter()
-            .filter_map(|(name, var)| match var {
-                Variable::Module { model_name, .. } => Some((name, model_name)),
-                _ => None,
-            })
-            .collect();
-        if instance_sub_model.is_empty() {
-            continue;
-        }
-
-        let mut note_read = |dep: &str| {
-            let Some((module_part, port)) = dep.split_once('\u{00B7}') else {
-                return;
-            };
-            if port.starts_with('$') {
-                return;
-            }
-            if let Some(sub_model) = instance_sub_model.get(&Ident::<Canonical>::new(module_part)) {
-                ports
-                    .entry((*sub_model).clone())
-                    .or_default()
-                    .push(Ident::new(port));
-            }
-        };
-
-        for var in model.variables.values() {
-            // A module reads upstream module outputs through its input wiring
-            // (`mod_b`'s `ModuleInput.src == mod_a·pos`); a module has no
-            // equation AST, so its reads come from `inputs`. Non-module reads
-            // come from the equation AST. This mirrors `find_model_output_ports`
-            // scanning `variable_direct_dependencies` (which includes input srcs).
-            if let Variable::Module { inputs, .. } = var {
-                for inp in inputs {
-                    note_read(inp.src.as_str());
-                }
-                continue;
-            }
-            let Some(ast) = var.ast() else { continue };
-            for dep in crate::variable::identifier_set(ast, &[], None) {
-                note_read(dep.as_str());
-            }
-        }
-    }
-
-    // Stdlib sub-models are always read through the `output` convention
-    // regardless of which internal ports a parent happens to reference, and a
-    // stdlib sub-model emits its pathway vars against exactly `["output"]`.
-    // Apply the same short-circuit `db::ltm::sub_model_output_ports` takes, then
-    // dedup + sort each set to the emission order.
-    for (sub_model, port_list) in ports.iter_mut() {
-        if sub_model.as_str().starts_with("stdlib\u{205A}") {
-            *port_list = vec![Ident::new("output")];
-            continue;
-        }
-        port_list.sort();
-        port_list.dedup();
-    }
-    ports
 }
 
 /// Collapse synthetic aggregate nodes out of a discovered loop's link chain.
@@ -2828,14 +2665,14 @@ fn split_budget(started: Instant, limit: Duration) -> Deadlines {
 
 /// Run loop discovery using a pre-built `CausalGraph`.
 ///
-/// This is the implementation shared by `discover_loops` (which builds
-/// the graph from a `Project`) and callers that have a salsa-derived
-/// `CausalGraph`.
+/// The caller supplies the graph; `analysis::analyze_model` builds it with
+/// `db::causal_graph_from_element_edges_with_modules` over the model's
+/// element-level causal edges, and the engine's discovery tests drive this
+/// entry through the same constructors.
 ///
 /// When `ltm_vars` and `dims` are provided, A2A link scores are expanded
 /// into per-element edges so discovery operates on the element-level graph.
-/// When they are empty (convenience path), all link scores are treated as
-/// scalar.
+/// When they are empty, all link scores are treated as scalar.
 ///
 /// `sub_model_output_ports` maps each referenced sub-model's canonical name to
 /// the sorted LTM output-port set it EMITTED its `$⁚ltm⁚path⁚{port}⁚{idx}` vars

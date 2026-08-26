@@ -1483,7 +1483,7 @@ void simlin_project_serialize_protobuf(SimlinProject *project,
 //
 // # Thread Safety
 // - This function is thread-safe for concurrent calls with the same `project` pointer.
-// - The underlying `engine::Project` uses `Arc<ModelStage1>` and is protected by a `Mutex`.
+// - The project's datamodel is held in a `Mutex`, so concurrent readers serialize on it.
 // - Multiple threads may safely access the same project concurrently.
 // - Different projects may also be serialized concurrently from different threads safely.
 //

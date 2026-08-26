@@ -644,9 +644,8 @@ fn test_ac2_7_vm_validation_errors() {
     // This proves the error path exists for AC2.7.
 }
 
-/// AC2.7 supplemental: Verify that assembly-level errors from
-/// compile_project_incremental (circular deps, missing models) are
-/// both returned as Err and accumulated as diagnostics.
+/// AC2.7 supplemental: Verify that a circular dependency is both returned as
+/// `Err` by `compile_project_incremental` and accumulated as a diagnostic.
 #[test]
 fn test_ac2_7_assembly_errors_accumulated() {
     let db = SimlinDb::default();
@@ -2159,6 +2158,11 @@ fn test_duplicate_idents_surface_error_diagnostic() {
     let d = dups[0];
     assert_eq!(d.severity, DiagnosticSeverity::Error);
     assert_eq!(d.model, "main");
+    assert_eq!(
+        d.variable.as_deref(),
+        Some("attrition"),
+        "the diagnostic is attributed to the canonical ident the spellings collide on"
+    );
     let DiagnosticError::Model(e) = &d.error else {
         unreachable!()
     };
@@ -2878,6 +2882,16 @@ fn unit_definition_errors_are_reported_exactly_once() {
         "a unit declaration belongs to the project, not a model: {:?}",
         found[0]
     );
+    assert_eq!(
+        found[0].severity,
+        DiagnosticSeverity::Error,
+        "a unit declaration that fails to parse is an error, not an advisory"
+    );
+    assert!(
+        matches!(found[0].variable.as_deref(), Some("widget" | "doodad")),
+        "the row names the conflicting unit as its variable: {:?}",
+        found[0]
+    );
 
     for (name, source_model) in sync.project.models(&db) {
         let per_model = collect_model_diagnostics(&db, *source_model, sync.project);
@@ -2928,13 +2942,9 @@ fn unit_definition_errors_survive_an_unrelated_input_change() {
 }
 
 /// `Variable::errors` and `Variable::unit_errors` are the CHANNEL by which
-/// parsing and lowering report a failure to the salsa path, not residue from
-/// the monolithic compiler.
-///
-/// `docs/tech-debt.md` item 17 claimed all four embedded error fields were
-/// "dead weight carried through the monolithic compilation path", redundant
-/// with the salsa pipeline. For these two that is backwards: the salsa
-/// pipeline's diagnostics are DOWNSTREAM of them --
+/// parsing and lowering report a failure to the salsa path; they are not
+/// redundant with it (`docs/tech-debt.md` item 17 records why that matters).
+/// The salsa pipeline's diagnostics are DOWNSTREAM of them --
 /// `db::var_fragment::lower_var_fragment` reads
 /// `parsed.variable.unit_errors()`, `parsed.variable.equation_errors()` and
 /// `lowered.equation_errors()` and turns each entry into a `Diagnostic`. Acting

@@ -115,7 +115,19 @@ fn mutually_recursive_modules_error_without_panicking() {
     let mut project = TestProject::new("test").build_datamodel();
     project.models = vec![
         model("a", vec![module_var("to_b", "b"), aux_var("x", "1")]),
-        model("b", vec![module_var("to_a", "a"), aux_var("y", "1")]),
+        // Model `b` also carries a variable-level cycle, so this pins that the
+        // module-cycle gate runs BEFORE the dependency graph: the dependency
+        // walk over `b` must never start (it would recurse through the module
+        // map into salsa's cycle panic).
+        model(
+            "b",
+            vec![
+                module_var("to_a", "a"),
+                aux_var("y", "1"),
+                aux_var("p", "q + 1"),
+                aux_var("q", "p + 1"),
+            ],
+        ),
     ];
 
     let db = SimlinDb::default();
@@ -622,5 +634,86 @@ fn acyclic_nested_modules_compile_clean() {
     assert!(
         !has_circular_diagnostic(&diags),
         "acyclic nesting must not report a module cycle: {diags:?}"
+    );
+}
+
+/// A module whose `model_name` is not in the project -- a reference to a
+/// deleted model -- is a project a user can produce at any moment. Every
+/// production entry point must refuse it cleanly rather than index a missing
+/// model and abort, and the diagnostic pass must say WHY: assembly is the only
+/// other place that notices, and it never runs on that pass, so without the
+/// wiring check's `BadModelName` the modeller sees "does not compile" and no
+/// explanation.
+#[test]
+fn module_targeting_a_missing_model_errors_without_panicking() {
+    let mut project = TestProject::new("test").build_datamodel();
+    project.models[0].variables.push(aux_var("x", "1"));
+    project.models[0]
+        .variables
+        .push(module_var("m", "nonexistent"));
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let sp = sync.project;
+
+    assert!(
+        compile_project_incremental(&db, sp, "main").is_err(),
+        "a module targeting a missing model must not compile"
+    );
+
+    let diags = collect_all_diagnostics(&db, sp);
+    let dangling: Vec<&crate::db::Diagnostic> = diags
+        .iter()
+        .filter(
+            |d| matches!(&d.error, DiagnosticError::Model(e) if e.code == ErrorCode::BadModelName),
+        )
+        .collect();
+    assert_eq!(
+        dangling.len(),
+        1,
+        "expected exactly one BadModelName diagnostic, got {diags:?}"
+    );
+    assert_eq!(dangling[0].severity, crate::db::DiagnosticSeverity::Error);
+    assert_eq!(dangling[0].model, "main");
+    assert_eq!(
+        dangling[0].variable.as_deref(),
+        Some("m"),
+        "the diagnostic must name the module variable"
+    );
+
+    let mut db = db;
+    let analysis = analyze_model(&project, &mut db, sp, "main", None)
+        .expect("analyze_model must not panic on a missing module target");
+    assert!(
+        analysis.analysis_error.is_some(),
+        "expected an analysis_error for a module targeting a missing model"
+    );
+}
+
+/// The other arm of the dangling-target check: an EMPTY `model_name` is the
+/// normal freshly-drawn state of a module, so it is not reported -- a modeller
+/// who has not yet pointed the module at a model gets no Error on every
+/// keystroke. The project still does not compile, exactly as for a dangling
+/// name; only the diagnostic differs.
+#[test]
+fn module_with_an_empty_model_name_is_not_reported_as_dangling() {
+    let mut project = TestProject::new("test").build_datamodel();
+    project.models[0].variables.push(aux_var("x", "1"));
+    project.models[0].variables.push(module_var("m", ""));
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let sp = sync.project;
+
+    assert!(
+        compile_project_incremental(&db, sp, "main").is_err(),
+        "a module with no target model must not compile"
+    );
+    let diags = collect_all_diagnostics(&db, sp);
+    assert!(
+        !diags.iter().any(|d| {
+            matches!(&d.error, DiagnosticError::Model(e) if e.code == ErrorCode::BadModelName)
+        }),
+        "an empty model_name is the freshly-drawn state, not a dangling reference: {diags:?}"
     );
 }

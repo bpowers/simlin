@@ -7,31 +7,28 @@
 //!
 //! `CausalGraph` owns model adjacency, stock identity, an optional variable
 //! AST map for polarity analysis, and optional recursively-built sub-graphs
-//! for referenced sub-models. `CausalGraph::from_model` populates both for
-//! EVERY referenced sub-model (dynamic modules and stockless passthroughs
-//! alike -- the latter needed by the discovery-mode per-exit-port pathway
-//! recompute, GH #698); the lightweight edge-only constructors in
-//! `db::analysis` (`causal_graph_from_edges` / `causal_graph_from_element_edges`)
-//! leave the variable map and module sub-graphs EMPTY, and a caller that needs
-//! them on an element-level graph uses `causal_graph_from_element_edges_with_modules`.
+//! for referenced sub-models. Its constructors live in `db::analysis`:
+//! `causal_graph_with_modules` populates both maps for EVERY referenced
+//! sub-model (dynamic modules and stockless passthroughs alike -- the latter
+//! needed by the discovery-mode per-exit-port pathway recompute, GH #698); the
+//! lightweight edge-only constructors (`causal_graph_from_edges` /
+//! `causal_graph_from_element_edges`) leave the variable map and module
+//! sub-graphs EMPTY, and a caller that needs them on an element-level graph
+//! uses `causal_graph_from_element_edges_with_modules`.
 //! Callers interact with this type to find loops, compute cycle partitions,
 //! materialize per-link polarities, and traverse module pathways.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::common::{Canonical, Ident, Result};
-use crate::model::ModelStage1;
-use crate::project::Project;
-use crate::variable::{Variable, identifier_set};
+use crate::common::{Canonical, Ident};
+use crate::variable::Variable;
 
 use super::indexed::{IndexedCircuits, IndexedGraph, TruncatedByBudgetInternal};
 use super::partitions::{CyclePartitions, tarjan_scc};
 use super::polarity::{
     analyze_agg_consumer_polarity, analyze_link_polarity, compose_with_lookup_polarity,
 };
-use super::types::{
-    Link, LinkPolarity, Loop, LoopPolarity, TruncatedByBudget, normalize_module_ref,
-};
+use super::types::{Link, LinkPolarity, Loop, LoopPolarity, TruncatedByBudget};
 
 /// Internal module pathways keyed by input port: each port maps to its list of
 /// open `input -> ... -> output` link-paths.
@@ -119,28 +116,6 @@ impl Drop for ModulePathwayBudgetGuard {
     }
 }
 
-/// Get direct dependencies from a Variable
-pub(super) fn get_variable_dependencies(var: &Variable) -> Vec<Ident<Canonical>> {
-    match var {
-        Variable::Module { inputs, .. } => {
-            // For modules, dependencies are the source variables of inputs
-            inputs.iter().map(|input| input.src.clone()).collect()
-        }
-        _ => {
-            // Get the main equation AST
-            let ast = var.ast();
-            match ast {
-                Some(ast) => {
-                    // We don't have dimensions info here, so pass empty vec
-                    // We also don't have module inputs, so pass None
-                    identifier_set(ast, &[], None).into_iter().collect()
-                }
-                None => vec![],
-            }
-        }
-    }
-}
-
 /// Graph representation for loop detection
 impl std::fmt::Debug for CausalGraph {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -213,87 +188,6 @@ impl CausalGraph {
             .map(|scc| scc.len())
             .max()
             .unwrap_or(0)
-    }
-
-    /// Build a causal graph from a model with project context for modules
-    pub fn from_model(model: &ModelStage1, project: &Project) -> Result<Self> {
-        let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
-        let mut stocks = HashSet::new();
-        let mut variables = HashMap::new();
-        let mut module_graphs = HashMap::new();
-
-        // Build edges from variable dependencies
-        for (var_name, var) in &model.variables {
-            // Store variable for polarity analysis
-            variables.insert(var_name.clone(), var.clone());
-
-            // Record if this is a stock
-            if matches!(var, Variable::Stock { .. }) {
-                stocks.insert(var_name.clone());
-            }
-
-            // Handle modules specially
-            if let Variable::Module {
-                model_name, inputs, ..
-            } = var
-            {
-                // Recursively build the internal graph for any referenced
-                // sub-model. A DynamicModule (has stocks) needs it for stock
-                // enrichment and polarity traversal; a stockless *passthrough*
-                // with an input->output pathway also needs it for the
-                // discovery-mode per-exit-port pathway recompute (GH #698 --
-                // such a module emits `$⁚ltm⁚path⁚{port}⁚{idx}` vars whose exit
-                // ports we recover from this sub-graph). A genuinely pathless
-                // module's sub-graph enumerates no pathways, so building it is
-                // harmless. (Before GH #698 this was gated on DynamicModule, so
-                // a passthrough's sub-graph was absent and the per-exit-port
-                // recompute had no pathway map to consult.)
-                if let Some(module_model) = project.models.get(model_name) {
-                    let module_graph = CausalGraph::from_model(module_model, project)?;
-                    module_graphs.insert(var_name.clone(), Box::new(module_graph));
-                }
-
-                // Add edges from input sources to the module
-                for input in inputs {
-                    edges
-                        .entry(input.src.clone())
-                        .or_default()
-                        .push(var_name.clone());
-                }
-            } else {
-                // For stocks, also add edges from inflows and outflows
-                if let Variable::Stock {
-                    inflows, outflows, ..
-                } = var
-                {
-                    for flow in inflows.iter().chain(outflows.iter()) {
-                        edges
-                            .entry(flow.clone())
-                            .or_default()
-                            .push(var_name.clone());
-                    }
-                } else {
-                    // Get dependencies and create edges for flows + auxes.  We don't want to
-                    // do this for stocks because get_variable_dependencies() only looks at the
-                    // equation for the stock's initial value
-                    let deps = get_variable_dependencies(var);
-                    for dep in deps {
-                        let normalized_dep = normalize_module_ref(&dep);
-                        edges
-                            .entry(normalized_dep)
-                            .or_default()
-                            .push(var_name.clone());
-                    }
-                }
-            }
-        }
-
-        Ok(CausalGraph {
-            edges,
-            stocks,
-            variables: std::sync::Arc::new(variables),
-            module_graphs,
-        })
     }
 
     /// Find all elementary circuits (feedback loops) as materialized

@@ -594,7 +594,7 @@ mod tests {
     /// star range (`arr[*:Sub]`), and a star range with another axis fixed.
     /// Not rowed: a transpose applied on top of a star range
     /// (`compiler/context.rs` can produce it through `ArrayView::transpose`);
-    /// it is tracked separately as a pre-existing defect.
+    /// it is a pre-existing defect tracked as GH #1027.
     #[test]
     fn static_view_geometries_address_like_vm() {
         let cases: [(&str, StaticArrayView); 5] = [

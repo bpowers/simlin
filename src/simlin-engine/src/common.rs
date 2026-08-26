@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::{error, result};
@@ -1185,54 +1185,6 @@ where
 /// the hard compile error (`compile_project_incremental`,
 /// `queue_compile::build_compiled`) and the accumulated diagnostic
 /// (`model_all_diagnostics`) so every surface reports identical text.
-/// Build one model-level `DuplicateVariable` [`Error`] per colliding
-/// canonical-ident group, or `None` when every declared ident is distinct
-/// (GH #891).
-///
-/// This is the `ModelStage0`-construction twin of the salsa-layer gate
-/// (`compile_project_incremental` / `emit_duplicate_variable_diagnostics`,
-/// GH #885): every `ModelStage0` constructor collapses variables into a
-/// canonical-keyed map last-wins, so callers seed the model's error list with
-/// this result instead of silently building a different model than the one
-/// declared. The message text is shared via [`duplicate_variable_message`], so
-/// every surface reports identically.
-pub(crate) fn duplicate_variable_errors_from_groups(
-    model_name: &str,
-    groups: &[(String, Vec<String>)],
-) -> Option<Vec<Error>> {
-    if groups.is_empty() {
-        return None;
-    }
-    Some(
-        groups
-            .iter()
-            .map(|(canonical, spellings)| {
-                Error::new(
-                    ErrorKind::Model,
-                    ErrorCode::DuplicateVariable,
-                    Some(duplicate_variable_message(model_name, canonical, spellings)),
-                )
-            })
-            .collect(),
-    )
-}
-
-/// [`duplicate_variable_errors_from_groups`] over a raw declared-ident list:
-/// groups the idents by canonical form first. Used by the datamodel-driven
-/// `ModelStage0` constructor -- itself `#[cfg(test)]`, hence the gate here --
-/// while the salsa-driven path (`db::stages::model_stage0`, which every other
-/// consumer including `Project::from_salsa` now reads) feeds the memoized
-/// `db::model_duplicate_variables` groups directly. The two routes to the same
-/// error list are what `model::test_stage0_records_duplicate_variable_error`
-/// cross-checks.
-#[cfg(test)]
-pub(crate) fn duplicate_variable_errors<'a, I>(model_name: &str, idents: I) -> Option<Vec<Error>>
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    duplicate_variable_errors_from_groups(model_name, &duplicate_variable_groups(idents))
-}
-
 pub(crate) fn duplicate_variable_message(
     model_name: &str,
     canonical: &str,
@@ -3134,57 +3086,4 @@ fn test_unit_error_inference_display() {
         display.contains("--"),
         "Should have -- separator for details"
     );
-}
-
-pub fn topo_sort<'out>(
-    runlist: Vec<&'out Ident<Canonical>>,
-    dependencies: &'out HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
-) -> Vec<&'out Ident<Canonical>> {
-    use std::collections::HashSet;
-
-    let runlist_len = runlist.len();
-    let mut result: Vec<&'out Ident<Canonical>> = Vec::with_capacity(runlist_len);
-    let mut used: HashSet<&Ident<Canonical>> = HashSet::new();
-
-    // We want to do a postorder, recursive traversal of variables to ensure
-    // dependencies are calculated before the variables that reference them.
-    // By this point, we have already errored out if we have e.g. a cycle
-    fn add<'a>(
-        dependencies: &'a HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
-        result: &mut Vec<&'a Ident<Canonical>>,
-        used: &mut HashSet<&'a Ident<Canonical>>,
-        ident: &'a Ident<Canonical>,
-    ) {
-        if used.contains(ident) {
-            return;
-        }
-        used.insert(ident);
-        // An ident with no dependencies entry is a dangling reference -- skip it
-        // rather than panicking. A dangling module reference (an empty or missing
-        // `model_name`) on the legacy `from_salsa` path can leave such an ident
-        // in the dependency set; it is not a real variable to place in the
-        // runlist, so dropping it keeps this test-only path from crashing with an
-        // "internal compiler error" on user-controllable input (GH #806). The
-        // production salsa path uses `topo_sort_str` and rejects a
-        // dangling/cyclic module graph up front, so valid runlists -- where every
-        // ident has a deps entry -- are unaffected (result == runlist).
-        if let Some(deps) = dependencies.get(ident) {
-            for dep in deps.iter() {
-                add(dependencies, result, used, dep)
-            }
-            result.push(ident);
-        }
-    }
-
-    for ident in runlist.into_iter() {
-        add(dependencies, &mut result, &mut used, ident);
-    }
-
-    // For a well-formed runlist every ident has a dependencies entry and every
-    // dependency is itself in the runlist, so `result` holds exactly the runlist
-    // idents (`result.len() == runlist_len`). A dangling reference (GH #806) is
-    // skipped above, so the result may be shorter; we no longer assert equality
-    // (it would re-introduce a panic on the bad input this guards against).
-    debug_assert!(result.len() <= runlist_len);
-    result
 }

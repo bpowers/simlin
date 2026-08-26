@@ -764,7 +764,6 @@ pub(crate) fn lower_var_fragment(
             ident: Ident::new(model_name_str),
             display_name: model_name_str.to_string(),
             variables: stage0_vars,
-            errors: None,
             implicit: false,
             // Single-variable fragment compilation only; not a macro template.
             is_macro: false,

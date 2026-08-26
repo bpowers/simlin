@@ -76,7 +76,6 @@ mod parser;
 mod patch;
 #[cfg(test)]
 mod per_element_gf_tests;
-mod project;
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[path = "project_io.gen.rs"]
 pub mod project_io;
@@ -132,7 +131,6 @@ pub use self::model::ModelStage1;
 pub use self::patch::{
     ModelOperation, ModelPatch, ProjectOperation, ProjectPatch, apply_patch, is_view_only_patch,
 };
-pub use self::project::Project;
 pub use self::queue_compile::build_sim;
 pub use self::results::{Method, Results, Specs as SimSpecs};
 pub use self::variable::{

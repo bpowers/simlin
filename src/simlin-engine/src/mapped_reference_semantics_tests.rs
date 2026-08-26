@@ -616,16 +616,18 @@ fn assert_cell(kind: MappingKind, direction: Direction, spelling: Spelling) {
 ///
 /// `TestProject::assert_compile_error_vm` accepts any Error-severity
 /// diagnostic anywhere in the project carrying the code, which for a code as
-/// broad as `Generic` is close to no constraint at all. `TestProject::compile`
-/// reports `("model.variable", code)` pairs from the same
-/// `collect_all_diagnostics` pass, so the pin can name the target. A message
-/// substring would be stronger still, but the diagnostic these cells produce
-/// is an `EquationError`, which carries a code and a span and no text.
+/// broad as `Generic` is close to no constraint at all.
+/// `TestProject::error_diagnostics` reports `("model.variable", code)` pairs
+/// from the same `collect_all_diagnostics` pass, so the pin can name the
+/// target. A message substring would be stronger still, but the diagnostic
+/// these cells produce is an `EquationError`, which carries a code and a span
+/// and no text.
 fn assert_refused(project: &TestProject, code: ErrorCode, where_: &str) {
-    let errors = match project.compile() {
-        Ok(_) => panic!("{where_}: expected a compile failure, but it compiled"),
-        Err(errors) => errors,
-    };
+    let errors = project.error_diagnostics();
+    assert!(
+        !errors.is_empty(),
+        "{where_}: expected a compile failure, but no Error-severity diagnostic was emitted"
+    );
     let want = ("main.target".to_string(), code);
     assert!(
         errors.contains(&want),

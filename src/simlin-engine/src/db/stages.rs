@@ -30,12 +30,10 @@
 //! This is the ONLY place in the crate the two stages are built from salsa
 //! inputs. It is its own file, rather than more of `db/query.rs`, so that a
 //! second construction site has to arrive as a new file instead of hiding as a
-//! few more lines in a grab-bag module -- the drift this exists to delete.
-//! `Project::from_salsa` used to carry a second copy (silently disagreeing on
-//! three fields: the stdlib `implicit` test, the stdlib module-ident set, and
-//! whether duplicate-canonical-ident model errors are recorded); this body took
-//! `from_salsa`'s behaviour in all three, so retiring that copy was a deletion
-//! rather than a merge, and `from_salsa` now clones these memos.
+//! few more lines in a grab-bag module. A second copy is exactly the drift this
+//! exists to prevent: two builders of the same stage silently disagree on the
+//! small decisions (the stdlib `implicit` test, the stdlib module-ident set),
+//! and every consumer then reads whichever one it happened to call.
 //!
 //! Every other place in the crate that builds either stage, exhaustively --
 //! this file exists to be where that list is right, so keep it complete:
@@ -58,11 +56,11 @@
 //!   - `ModelStage0::new` / `new_in_project` build from a `datamodel::Model`
 //!     with no database at all, which these queries cannot do. They are the
 //!     independent oracle `db::stages_tests` checks this module against.
-//!   - Four `ModelStage1::new` call sites lower those oracle Stage0s:
-//!     `model.rs` (the dependency-resolution and `enumerate_modules` tests) and
-//!     `db::stages_tests::datamodel_driven_stage1s` (the whole-project lowering
-//!     oracle). They take a `ScopeStage0` the test builds by hand, so they are
-//!     construction sites for the stage TYPE but never for a cached value.
+//!   - `db::stages_tests` lowers those oracle Stage0s through `ModelStage1::new`
+//!     (`datamodel_driven_stage1s`, the whole-project lowering oracle, and
+//!     `lower_main_without`, the scope-narrowing probe). They take a
+//!     `ScopeStage0` the test builds by hand, so they are construction sites
+//!     for the stage TYPE but never for a cached value.
 //!
 //! **Memory.** `returns(ref)` means salsa RETAINS one `ModelStage0` and one
 //! `ModelStage1` per model for as long as their memos stay valid, where the old
@@ -82,9 +80,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::common::{Canonical, Ident};
 use crate::datamodel;
 use crate::db::{
-    Db, ModuleIdentContext, SourceModel, SourceProject, model_duplicate_variables,
-    model_module_ident_context, parse_source_variable_with_module_context,
-    project_dimensions_context, project_units_context,
+    Db, ModuleIdentContext, SourceModel, SourceProject, model_module_ident_context,
+    parse_source_variable_with_module_context, project_dimensions_context, project_units_context,
 };
 use crate::model::{ModelStage0, ModelStage1, ScopeStage0, VariableStage0};
 use crate::variable::Variable;
@@ -220,12 +217,10 @@ pub(crate) fn source_model_is_stdlib(db: &dyn Db, model: SourceModel) -> bool {
 ///
 /// No shipped stdlib body calls `PREVIOUS`/`INIT`, so today this changes no
 /// parse result. It is kept because it is the rule the datamodel-driven
-/// `ModelStage0::new` uses for an implicit model, and the rule
-/// `Project::from_salsa` used while it still built its own stages: one rule
-/// means every path reaching a stdlib model's parse hits the SAME
-/// `ModuleIdentContext` and shares one
-/// `parse_source_variable_with_module_context` cache entry, instead of minting
-/// a second set of parses under a second key.
+/// `ModelStage0::new` uses for an implicit model: one rule means every path
+/// reaching a stdlib model's parse hits the SAME `ModuleIdentContext` and
+/// shares one `parse_source_variable_with_module_context` cache entry, instead
+/// of minting a second set of parses under a second key.
 ///
 /// `pub(super)` for the same reason as [`model_is_stdlib`]: the rule is inert
 /// in the stage VALUE today, so `db::stages_tests` pins it here.
@@ -528,14 +523,6 @@ pub(crate) fn model_stage0(db: &dyn Db, model: SourceModel, project: SourceProje
         ident,
         display_name: display_name.clone(),
         variables,
-        // Two declared variables whose names canonicalize identically already
-        // collapsed last-wins on the canonical-keyed `variables` map above, so
-        // it cannot detect the twin; the memoized groups derive from the raw
-        // pre-dedup declared-ident list instead (GH #885/#891).
-        errors: crate::common::duplicate_variable_errors_from_groups(
-            display_name,
-            model_duplicate_variables(db, model),
-        ),
         implicit: is_stdlib,
         is_macro: model.macro_spec(db).is_some(),
         macro_params: crate::model::macro_param_idents(model.macro_spec(db).as_ref()),

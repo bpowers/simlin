@@ -12,18 +12,14 @@
 //!      same models -- across every model shape, up to and including the
 //!      combined [`every_shape_project`].
 //!   2. **Cost (GH #966)**: whole-project unit diagnostics build each model's
-//!      two stages AT MOST ONCE per revision, not once per (model, model) pair
-//!      -- and `Project::from_salsa` READS those same memos rather than building
-//!      a second set.
+//!      two stages AT MOST ONCE per revision, not once per (model, model) pair.
 //!   3. **Diagnostics do not move**: every diagnostic that reached a harvest
 //!      point before the stage construction moved out of `check_model_units`
 //!      still reaches it.
 //!
-//! The oracles used to be `ModelStage0::new_cached` (a test-only third copy of
-//! the salsa-cached construction) and `Project::from_salsa`'s own inline
-//! lowering. Both are gone: the first was deleted, and the second became
-//! circular once `from_salsa` started reading these queries. A datamodel-driven
-//! constructor that touches no database is the oracle that cannot go circular.
+//! The oracle is a datamodel-driven constructor that touches no database: an
+//! oracle that read the queries under test would compare a memo against a
+//! clone of itself and pass unconditionally.
 //!
 //! # Compare stages with `PartialEq`, never with Debug text
 //!
@@ -33,12 +29,6 @@
 //! equations therefore reports spurious inequality -- including a stage
 //! "differing from itself" -- for a reason that has nothing to do with the code
 //! under test.
-//!
-//! This has cost time twice: once in a throwaway harness written to design the
-//! scope-narrowing fixtures, and once in the temporary oracle used to verify
-//! that `Project::from_salsa`'s deleted inline build equalled these queries --
-//! which sorted Debug strings and was sound only by the accident that its
-//! fixtures had no `Equation::Arrayed`.
 //!
 //! The rule: compare with `PartialEq`, always. The one thing that used to force
 //! a Debug-text oracle is gone -- a stage carrying a NaN EQUATION LITERAL was
@@ -52,7 +42,7 @@
 //! a graphical function, let alone a NaN in one, so the rule holds here.
 
 use super::*;
-use crate::common::{Canonical, ErrorCode, Ident};
+use crate::common::{Canonical, Ident};
 use crate::datamodel;
 use crate::model::{ModelStage0, ModelStage1};
 use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module, x_project};
@@ -184,8 +174,7 @@ fn chain_project() -> datamodel::Project {
     project
 }
 
-/// Every shape `Project::from_salsa`'s deleted inline Stage0 build had to
-/// handle, in one project:
+/// Every model shape the stage queries have to handle, in one project:
 ///
 ///   - an IMPLICIT stdlib module instance (`SMTH1`), whose expansion synthesizes
 ///     module and argument variables that have no `SourceVariable` of their own
@@ -198,8 +187,8 @@ fn chain_project() -> datamodel::Project {
 ///   - a MACRO-marked model (`is_macro` / `macro_params` non-default) together
 ///     with a caller of it, which only classifies correctly under the
 ///     PROJECT-wide macro registry;
-///   - two variables whose names canonicalize identically, the one case where
-///     Stage0 records a model-level error.
+///   - two variables whose names canonicalize identically, which the
+///     canonical-keyed `variables` map collapses last-wins on both sides.
 fn every_shape_project() -> datamodel::Project {
     let sub = x_model(
         "sub",
@@ -322,9 +311,8 @@ fn cached_stage0_equals_datamodel_driven_constructor() {
 /// stdlib models `db::sync` splices into every project -- staged by the
 /// datamodel-driven constructor.
 ///
-/// This is the whole-project Stage0 map `Project::from_salsa` used to build
-/// inline, reconstructed through the salsa-free constructor so it remains an
-/// independent oracle now that `from_salsa` reads these queries instead. The
+/// This is the whole-project Stage0 map, built through the salsa-free
+/// constructor so it is an oracle independent of the cached queries. The
 /// stdlib half is here because the scope map holds it, not because any shipped
 /// template can change a lowering -- see
 /// [`omitting_stdlib_models_from_the_lowering_scope_is_inert_today`].
@@ -352,8 +340,8 @@ fn datamodel_driven_stage0s(
     all
 }
 
-/// Lower [`datamodel_driven_stage0s`] the way `Project::from_salsa` used to:
-/// one whole-project `ScopeStage0` per model, keyed by canonical model name.
+/// Lower [`datamodel_driven_stage0s`] under one whole-project `ScopeStage0` per
+/// model, keyed by canonical model name.
 fn datamodel_driven_stage1s(
     all_s0: &[ModelStage0],
     dims_ctx: &crate::dimensions::DimensionsContext,
@@ -374,19 +362,8 @@ fn datamodel_driven_stage1s(
 }
 
 /// The cached `model_stage1` must equal the datamodel-driven whole-project
-/// lowering of the same models.
-///
-/// This used to compare against `Project::from_salsa`'s output. That became
-/// circular the moment `from_salsa` started reading this query -- it would have
-/// compared a memo against a clone of itself and passed unconditionally -- so
-/// the oracle moved to the salsa-free constructors, which is what `from_salsa`
-/// was standing in for all along.
-///
-/// Because the oracle is now a freshly built `ModelStage1` rather than one
-/// `from_salsa` has already post-processed, `model_deps` and `errors` are
-/// compared too; the old version had to skip them (`model_deps.take()` and
-/// `set_dependencies` had already consumed and rewritten them). `instantiations`
-/// is `None` on both sides -- neither construction fills it.
+/// lowering of the same models, field by field; `variables` is compared last so
+/// a mismatch names the fixture and model.
 #[test]
 fn cached_stage1_lowering_equals_datamodel_driven_lowering() {
     for (fixture, project, names) in [
@@ -422,9 +399,6 @@ fn cached_stage1_lowering_equals_datamodel_driven_lowering() {
             assert_eq!(cached.implicit, oracle.implicit);
             assert_eq!(cached.is_macro, oracle.is_macro);
             assert_eq!(cached.macro_params, oracle.macro_params);
-            assert_eq!(cached.model_deps, oracle.model_deps);
-            assert_eq!(cached.errors, oracle.errors);
-            assert!(cached.instantiations.is_none() && oracle.instantiations.is_none());
             assert!(
                 cached.variables == oracle.variables,
                 "cached model_stage1 lowering for `{name}` in fixture `{fixture}` must equal \
@@ -538,26 +512,20 @@ fn omitting_stdlib_models_from_the_lowering_scope_is_inert_today() {
     );
 }
 
-/// Both cached stages equal the datamodel-driven build for EVERY model shape
-/// `Project::from_salsa`'s deleted inline copy handled -- see
-/// [`every_shape_project`] for the four.
+/// Both cached stages equal the datamodel-driven build for EVERY model shape in
+/// [`every_shape_project`].
 ///
 /// The two oracle tests above cover a plain multi-model project; this one is the
-/// combined fixture, and it is where the field-by-field equality argument for
-/// deleting that copy is actually pinned. Every `ModelStage0` field is compared
-/// (the `==` is the derived `PartialEq` over the whole struct): `ident`,
-/// `display_name`, `variables` (including the implicit SMOOTH expansion),
-/// `errors` (the duplicate-ident pair), `implicit`, `is_macro` and
-/// `macro_params`.
+/// combined fixture. Every `ModelStage0` field is compared (the `==` is the
+/// derived `PartialEq` over the whole struct): `ident`, `display_name`,
+/// `variables` (including the implicit SMOOTH expansion), `implicit`,
+/// `is_macro` and `macro_params`.
 ///
 /// The comparison ranges over EVERY model the sync produced -- the three user
-/// models and all nine spliced stdlib templates. It used to be restricted to
-/// the user models because five of the nine templates declare
-/// `initial_value = NAN` and a stage holding a bare `f64` NaN did not compare
-/// equal even to ITSELF, so a stdlib assertion failed for a reason unrelated to
-/// what is being tested. `ast::Literal` compares float literals by bit pattern
-/// (GH #987/#981), so those stages are now ordinary values and the oracle can
-/// cover them.
+/// models and all nine spliced stdlib templates. Five of the nine templates
+/// declare `initial_value = NAN`; `ast::Literal` compares float literals by bit
+/// pattern (GH #987/#981), which is what lets a NaN-bearing stage equal its own
+/// rebuild and the oracle cover them.
 ///
 /// The row-count assertion is not about a newly added stdlib template -- both
 /// sides derive their stdlib half from `stdlib::MODEL_NAMES`, so one of those
@@ -602,7 +570,7 @@ fn cached_stages_equal_the_datamodel_driven_build_for_every_model_shape() {
         );
     }
 
-    // The fixture really does exercise all four shapes -- otherwise the
+    // The fixture really does exercise its module shapes -- otherwise the
     // equalities above would be comparing an ordinary project twice.
     let main_s0 = model_stage0(&db, sync.models["main"].source, sync.project);
     assert!(
@@ -626,13 +594,6 @@ fn cached_stages_equal_the_datamodel_driven_build_for_every_model_shape() {
             .contains_key(&Ident::<Canonical>::new("sub")),
         "the explicit user sub-model instance must be staged"
     );
-    assert!(
-        main_s0
-            .errors
-            .as_ref()
-            .is_some_and(|errs| errs.iter().any(|e| e.code == ErrorCode::DuplicateVariable)),
-        "the duplicate canonical idents must record a model-level error"
-    );
     let macro_s0 = model_stage0(&db, sync.models["scaled"].source, sync.project);
     assert!(
         macro_s0.is_macro,
@@ -650,10 +611,8 @@ fn cached_stages_equal_the_datamodel_driven_build_for_every_model_shape() {
 /// A model is implicit/stdlib only when the `stdlib⁚` prefix is followed by a
 /// name that is actually in `stdlib::MODEL_NAMES`.
 ///
-/// `db/units.rs`'s deleted `build_model_s0` used the bare prefix; the unified
-/// query takes `Project::from_salsa`'s stricter rule. Both are inert for unit
-/// checking today (nothing on the units path reads `implicit`), so this pins
-/// the decision at the only place it is observable.
+/// The rule is inert for unit checking (nothing on the units path reads
+/// `implicit`), so this pins the decision at the only place it is observable.
 #[test]
 fn model_is_stdlib_requires_a_known_stdlib_suffix() {
     assert!(crate::db::stages::model_is_stdlib("stdlib\u{205A}smth1"));
@@ -729,9 +688,8 @@ fn source_model_is_stdlib_canonicalizes_the_display_name() {
 /// module-backed; a user model's extra set is empty.
 ///
 /// Inert today (no stdlib body calls `PREVIOUS`/`INIT`, the only consumer of
-/// the module-ident set), but load-bearing for cache sharing: the same rule in
-/// both construction paths means one `ModuleIdentContext` and one set of
-/// per-variable parse memos.
+/// the module-ident set), but load-bearing for cache sharing: one rule means
+/// one `ModuleIdentContext` and one set of per-variable parse memos.
 #[test]
 fn stdlib_models_add_every_variable_name_to_the_module_ident_set() {
     let db = SimlinDb::default();
@@ -766,8 +724,8 @@ fn stdlib_models_add_every_variable_name_to_the_module_ident_set() {
 /// rule is inert in every stage VALUE (no stdlib body calls `PREVIOUS`/`INIT`),
 /// so reverting the query's call site to `vec![]` left the whole engine suite
 /// green while quietly minting a SECOND set of per-variable parse memos under a
-/// different key -- losing the cache sharing with `Project::from_salsa` that is
-/// the entire stated reason for the rule. `Stage0Context` is the one place that
+/// different key -- losing the cache sharing that is the entire stated reason
+/// for the rule. `Stage0Context` is the one place that
 /// wiring can now go wrong, and interned contexts compare by identity, so the
 /// difference is directly observable even though the parse is not.
 #[test]
@@ -865,50 +823,6 @@ fn cached_stdlib_stage0_equals_implicit_datamodel_build() {
     );
 }
 
-/// Two variables whose names canonicalize identically collapse last-wins on
-/// the canonical-keyed `variables` map, so Stage0 records the collision as a
-/// model-level `DuplicateVariable` error (GH #885/#891).
-///
-/// `db/units.rs`'s deleted builder set `errors: None`; the unified query takes
-/// `Project::from_salsa`'s recording behaviour. Nothing on the units path reads
-/// `ModelStage0::errors`, so the change adds no unit diagnostic -- asserted
-/// below so a future reader of the field cannot start emitting one silently.
-#[test]
-fn stage0_records_duplicate_canonical_ident_errors() {
-    let db = SimlinDb::default();
-    let model = x_model(
-        "main",
-        vec![x_aux("net flow", "1", None), x_aux("net_flow", "2", None)],
-    );
-    let project = x_project(sim_specs_with_units("month"), &[model]);
-    let sync = sync_from_datamodel(&db, &project);
-    let source = sync.models["main"].source;
-
-    let errors = model_stage0(&db, source, sync.project)
-        .errors
-        .as_ref()
-        .expect("duplicate canonical idents must record a model-level error");
-    let dup = errors
-        .iter()
-        .find(|e| e.code == ErrorCode::DuplicateVariable)
-        .unwrap_or_else(|| panic!("expected a DuplicateVariable error, got: {errors:?}"));
-    let msg = dup.details.as_deref().unwrap_or("");
-    assert!(
-        msg.contains("'net flow'") && msg.contains("'net_flow'"),
-        "message should name both colliding spellings, got: {msg}"
-    );
-    // The lowered stage carries it forward, and the unit pass still ignores it.
-    assert!(model_stage1(&db, source, sync.project).errors.is_some());
-    let unit_diagnostics = unit_pass_diagnostics(&db, source, sync.project);
-    assert!(
-        !unit_diagnostics
-            .iter()
-            .any(|cd| matches!(&cd.0.error, DiagnosticError::Model(e)
-                if e.code == ErrorCode::DuplicateVariable)),
-        "the unit pass must not start reporting Stage0's model errors: {unit_diagnostics:?}"
-    );
-}
-
 // ── 3. the GH #966 cost claim ───────────────────────────────────────────
 
 /// Collecting whole-project diagnostics BUILDS each model's Stage0 and Stage1
@@ -999,60 +913,6 @@ fn whole_project_diagnostics_build_each_models_stages_once() {
             unit_check: n_models,
         },
         "re-reading every model's stages must not rebuild any of them"
-    );
-}
-
-/// `Project::from_salsa` READS these queries; it does not build stages of its
-/// own.
-///
-/// The evidence is execution counts, not values. A value oracle cannot see the
-/// difference at all: the copy this commit deleted from `from_salsa` produced
-/// stages that were *equal* to the cached ones (that was the point -- B2 adopted
-/// `from_salsa`'s semantics field by field so this step would be a deletion
-/// rather than a behaviour change), so an equality assertion passes just as
-/// happily against a second inline build. The counters distinguish them: with
-/// the inline build `from_salsa` entered neither query body and both counts read
-/// ZERO here.
-///
-/// The second half is the "one construction site" claim made observable. Running
-/// the whole-project unit pass afterwards on the SAME database rebuilds nothing,
-/// because `from_salsa` and `check_model_units` now share one set of memos. With
-/// two construction sites the same sequence paid for both.
-#[test]
-fn project_from_salsa_reads_the_cached_stages() {
-    let db = SimlinDb::default();
-    let project = three_model_project();
-    let sync = sync_from_datamodel(&db, &project);
-    let n_models = sync.project.models(&db).len();
-    let expected = QueryExecutions {
-        stage0: n_models,
-        stage1: n_models,
-        unit_check: 0,
-    };
-
-    reset_query_executions();
-    let built =
-        crate::project::Project::from_salsa(project.clone(), &db, sync.project, |_, _, _| {});
-    assert_eq!(
-        query_executions(),
-        expected,
-        "from_salsa must build each model's stages through the cached queries, once each"
-    );
-    assert_eq!(
-        built.models.len(),
-        n_models,
-        "every project model must reach the built Project"
-    );
-
-    let diagnostics = collect_all_diagnostics(&db, sync.project);
-    assert_eq!(
-        query_executions(),
-        QueryExecutions {
-            unit_check: n_models,
-            ..expected
-        },
-        "the unit pass must reuse the stages from_salsa already demanded, not rebuild them \
-         (diagnostics: {diagnostics:?})"
     );
 }
 
@@ -1291,10 +1151,9 @@ fn lower_main_without(
 ///     some incidental sensitivity to the map's contents.
 ///
 /// What a mis-lowering here actually corrupts is worth stating, because it is
-/// narrower than "the model simulates wrong": `model_stage1`'s consumers are
-/// unit checking and the test-only `Project::from_salsa`. Simulation compiles
-/// from the per-variable fragment path (its own mini Stage0s), so it does not
-/// read this stage at all.
+/// narrower than "the model simulates wrong": `model_stage1`'s consumer is
+/// unit checking. Simulation compiles from the per-variable fragment path (its
+/// own mini Stage0s), so it does not read this stage at all.
 #[test]
 fn dropping_a_macro_models_scope_edge_changes_the_lowered_value() {
     let total: Ident<Canonical> = Ident::new("total");

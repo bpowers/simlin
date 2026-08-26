@@ -336,8 +336,7 @@ pub fn compile_var_fragment<'db>(
     // Flow phase: non-stock vars AND stock-typed module inputs get compiled
     // with is_initial=false. Stock-typed module inputs need LoadModuleInput ->
     // AssignCurr in the flows phase to propagate the parent-provided value
-    // each timestep (matching the monolithic path's `instantiation.contains(id)
-    // || !var.is_stock()` filter).
+    // each timestep (the flows rule is `is_module_input || !is_stock`).
     let in_flows_runlist = (!is_stock || is_module_input) && membership.flows;
     let flow_bytecodes = if in_flows_runlist {
         match &per_phase_lowered.noninitial {
@@ -730,8 +729,7 @@ pub(crate) fn compile_implicit_var_phase_bytecodes(
     // consumed by `compile_implicit_var_fragment`). `ModuleIdentContext`
     // is a `Copy` interned handle, so the one context is threaded into
     // both the shared prefix and the parse below (a single
-    // `module_ident_context_for_model` build, matching the pre-extraction
-    // monolith).
+    // `module_ident_context_for_model` build).
     let (implicit_name, lowered) =
         lower_implicit_var(db, meta, model, project, module_ident_context)?;
     // The parent's parsed result for the module-refs reconstruction /

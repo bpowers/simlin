@@ -2,17 +2,13 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::hash::Hash;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Expr0, lower_ast};
-use crate::common::{
-    Canonical, EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result,
-    canonicalize,
-};
+use crate::common::{Canonical, EquationError, EquationResult, Ident, canonicalize};
 use crate::dimensions::DimensionsContext;
 use crate::variable::{ModuleInput, Variable};
-use crate::{datamodel, eqn_err, model_err};
+use crate::{datamodel, eqn_err};
 
 #[cfg(test)]
 use {
@@ -24,8 +20,6 @@ use {
 
 #[cfg(test)]
 use crate::testutils::{x_aux, x_flow, x_model, x_module, x_stock};
-
-pub type ModuleInputSet = BTreeSet<Ident<Canonical>>;
 
 pub type VariableStage0 = Variable<datamodel::ModuleReference, Expr0>;
 
@@ -50,18 +44,6 @@ pub struct ModelStage0 {
     pub ident: Ident<Canonical>,
     pub display_name: String,
     pub variables: HashMap<Ident<Canonical>, VariableStage0>,
-    /// Model-level errors recorded while building this stage: today only the
-    /// duplicate-canonical-ident collision (GH #891), which the canonical-keyed
-    /// `variables` map above would otherwise swallow last-wins.
-    ///
-    /// Read only by [`ModelStage1::new`], which copies it into
-    /// [`ModelStage1::errors`] -- the monolithic path's simulatability gate.
-    /// Production's own duplicate-ident diagnostic is a separate derivation
-    /// (`db::model_duplicate_variables` -> `emit_duplicate_variable_diagnostics`)
-    /// over the raw `declared_variable_idents` input, so the two are
-    /// independent, and `db::stages_tests` compares this field against the
-    /// salsa-free `ModelStage0::new_in_project` oracle.
-    pub errors: Option<Vec<Error>>,
     /// implicit is true if this model was implicitly added to the project
     /// by virtue of it being in the stdlib (or some similar reason)
     pub implicit: bool,
@@ -78,26 +60,16 @@ pub struct ModelStage0 {
     pub macro_params: Vec<Ident<Canonical>>,
 }
 
+/// A model's variables lowered to `Expr2`: a [`ModelStage0`] resolved against
+/// the project's dimension context and the module inputs of the models in its
+/// lowering scope (`db::stages::model_stage1`). Unit inference and checking
+/// read it; simulation compiles per variable and never builds one.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
 pub struct ModelStage1 {
     pub name: Ident<Canonical>,
     pub display_name: String,
     pub variables: HashMap<Ident<Canonical>, Variable>,
-    /// The monolithic path's simulatability gate: `compiler::Module::new`
-    /// refuses to build a module from a model with a non-empty list here.
-    ///
-    /// Filled by [`ModelStage1::set_dependencies`] from three sources -- the
-    /// Stage0 duplicate-ident collision, the production dependency graph's
-    /// `has_cycle` verdict, and a roll-up of the equation errors the variables
-    /// themselves carry. It is NOT an alternative to the salsa diagnostics: it
-    /// is deliberately coarser (a code, no location), it exists only on this
-    /// test-only construction path, and everything that reports errors to a
-    /// user goes through `db::collect_all_diagnostics` instead.
-    pub errors: Option<Vec<Error>>,
-    /// model_deps is the transitive set of model names referenced from modules in this model
-    pub model_deps: Option<BTreeSet<Ident<Canonical>>>,
-    pub instantiations: Option<HashMap<ModuleInputSet, ModuleStage2>>,
     /// implicit is true if this model was implicitly added to the project
     /// by virtue of it being in the stdlib (or some similar reason)
     pub implicit: bool,
@@ -108,26 +80,6 @@ pub struct ModelStage1 {
     /// Canonical formal-parameter names when `is_macro` is true (empty
     /// otherwise); see `ModelStage0::macro_params` (GH #619).
     pub macro_params: Vec<Ident<Canonical>>,
-}
-
-/// One module instantiation's evaluation order, as the monolithic
-/// `compiler::Module` consumes it.
-///
-/// The three runlists are copied verbatim out of the production dependency
-/// graph (`db::dep_graph::model_dependency_graph`); this type carries no
-/// dependency analysis of its own. It used to also carry that graph's
-/// `dt_dependencies` / `initial_dependencies` maps, whose only readers were the
-/// second, now-deleted dependency walk that produced them.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
-pub struct ModuleStage2 {
-    pub model_ident: Ident<Canonical>,
-    /// inputs is the set of variables overridden (provided as input) in this
-    /// module instantiation.
-    pub inputs: ModuleInputSet,
-    pub runlist_initials: Vec<Ident<Canonical>>,
-    pub runlist_flows: Vec<Ident<Canonical>>,
-    pub runlist_stocks: Vec<Ident<Canonical>>,
 }
 
 fn resolve_relative<'a>(
@@ -317,85 +269,6 @@ pub(crate) fn resolve_module_input<'a>(
         Some(_) => Ok(Some(ModuleInput { src, dst })),
         None => eqn_err!(BadModuleInputSrc, 0, 0),
     }
-}
-
-pub fn enumerate_modules<T>(
-    models: &HashMap<&str, &ModelStage1>,
-    main_model_name: &str,
-    mapper: fn(&ModelStage1) -> T,
-) -> Result<HashMap<T, BTreeSet<BTreeSet<Ident<Canonical>>>>>
-where
-    T: Eq + Hash,
-{
-    let mut modules = HashMap::new();
-    // manually insert the main model (which has no dependencies)
-    if let Some(main_model) = models.get(main_model_name) {
-        let no_module_inputs = BTreeSet::new();
-        modules.insert(
-            mapper(main_model),
-            [no_module_inputs].iter().cloned().collect(),
-        );
-    } else {
-        return model_err!(BadModelName, main_model_name.to_owned());
-    }
-
-    enumerate_modules_inner(models, main_model_name, mapper, &mut modules)?;
-
-    Ok(modules)
-}
-
-pub(crate) fn enumerate_modules_inner<T>(
-    models: &HashMap<&str, &ModelStage1>,
-    model_name: &str,
-    mapper: fn(&ModelStage1) -> T,
-    modules: &mut HashMap<T, BTreeSet<BTreeSet<Ident<Canonical>>>>,
-) -> Result<()>
-where
-    T: Eq + Hash,
-{
-    let model = *models.get(model_name).ok_or_else(|| Error {
-        kind: ErrorKind::Simulation,
-        code: ErrorCode::NotSimulatable,
-        details: Some(format!("model for module '{model_name}' not found")),
-    })?;
-    for v in model.variables.values() {
-        if let Variable::Module {
-            model_name, inputs, ..
-        } = v
-        {
-            if let Some(model) = models.get(model_name.as_str()) {
-                let inputs: BTreeSet<Ident<Canonical>> =
-                    inputs.iter().map(|input| input.dst.clone()).collect();
-
-                let key = mapper(model);
-                let first_sighting = !modules.contains_key(&key);
-
-                // Record this instantiation BEFORE descending into the model.
-                // The `first_sighting` test is what stops the walk revisiting a
-                // model, so a model that is still being walked has to count as
-                // seen: otherwise two models that instantiate each other are
-                // each unrecorded when the other looks, and the recursion
-                // diverges into a stack overflow -- a process abort, not a
-                // catchable panic. (A cycle THROUGH the main model happened to
-                // terminate already, because `enumerate_modules` records main
-                // up front.) Recording early cannot lose an instantiation: this
-                // line runs at every module site regardless, and the values are
-                // a set of input sets, so the order they arrive in is not
-                // observable.
-                modules.entry(key).or_default().insert(inputs);
-
-                if first_sighting {
-                    // first time we are seeing the model for this module.
-                    // make sure all _its_ module instantiations are recorded
-                    enumerate_modules_inner(models, model_name.as_str(), mapper, modules)?;
-                }
-            } else {
-                return model_err!(BadModelName, model_name.as_str().to_string());
-            }
-        }
-    }
-
-    Ok(())
 }
 
 /// Scan a model's datamodel variables and return the set of identifiers
@@ -620,16 +493,6 @@ impl ModelStage0 {
             ident: Ident::new(&x_model.name),
             display_name: x_model.name.clone(),
             variables,
-            // The canonical-keyed map above collapses same-canonical twins
-            // last-wins; record the collision as a model error instead of
-            // silently building a different model (GH #891). Only DECLARED
-            // idents are scanned (mirroring the salsa gate's
-            // `declared_variable_idents`, GH #885) -- synthesized implicit
-            // vars are unique by construction.
-            errors: crate::common::duplicate_variable_errors(
-                &x_model.name,
-                x_model.variables.iter().map(|v| v.get_ident()),
-            ),
             implicit,
             is_macro: x_model.macro_spec.is_some(),
             macro_params: macro_param_idents(x_model.macro_spec.as_ref()),
@@ -645,19 +508,6 @@ pub(crate) struct ScopeStage0<'a> {
 
 impl ModelStage1 {
     pub(crate) fn new(scope: &ScopeStage0, model_s0: &ModelStage0) -> Self {
-        let model_deps = model_s0
-            .variables
-            .values()
-            .filter(|v| v.is_module())
-            .map(|v| {
-                if let Variable::Module { model_name, .. } = v {
-                    model_name.to_owned()
-                } else {
-                    unreachable!();
-                }
-            })
-            .collect::<BTreeSet<_>>();
-
         // Create a new scope with the model name for this specific model
         let model_scope = ScopeStage0 {
             models: scope.models,
@@ -673,159 +523,10 @@ impl ModelStage1 {
                 .iter()
                 .map(|(ident, v)| (ident.clone(), lower_variable(&model_scope, v)))
                 .collect(),
-            errors: model_s0.errors.clone(),
-            model_deps: Some(model_deps),
-            instantiations: None,
             implicit: model_s0.implicit,
             is_macro: model_s0.is_macro,
             macro_params: model_s0.macro_params.clone(),
         }
-    }
-
-    /// Fill `instantiations` -- the per-module-instance evaluation order the
-    /// monolithic `compiler::Module` consumes -- from the production
-    /// dependency-graph query.
-    ///
-    /// This used to be a second, independent dependency analysis: its own
-    /// transitive-closure walk (`all_deps`), its own cross-model output
-    /// resolution, its own `CircularDependency` gate and its own topological
-    /// runlists. That is the divergence GH #568 tracked. The two gates did not
-    /// merely *risk* disagreeing -- they DID: an element-acyclic recurrence SCC
-    /// (`ecc[t2] = ecc[t1] + 1`) that `db::dep_graph::resolve_recurrence_sccs`
-    /// resolves was still a whole-variable `CircularDependency` here, so this
-    /// path rejected models production compiles and simulates. There is now one
-    /// gate, and it is the one production uses.
-    ///
-    /// The runlists are therefore the production runlists, including everything
-    /// the second walk did not have: the resolved-SCC contiguous blocks, the
-    /// dt stock-submodel-output chain break, and the `INITIAL()`-backed
-    /// initials seeding (GH #584).
-    ///
-    /// # Two model classes are refused, for two different reasons
-    ///
-    /// A rejected graph (`has_cycle`) records a model-level
-    /// `CircularDependency`. Note it does NOT get empty runlists, despite the
-    /// dependency MAP being emptied: `topo_sort_str` over an empty map still
-    /// emits every allowed name, in sorted order, so the runlists come out
-    /// populated and mutually incoherent (a stock's init can read a variable
-    /// that is absent from the initials runlist). `ModelStage1::errors` is what
-    /// stops `compiler::Module::new` from compiling them; the gate is not
-    /// redundant with an empty-runlist check, because there is no such thing.
-    ///
-    /// A RESOLVED recurrence SCC (`resolved_sccs` non-empty) is refused too,
-    /// with `NotSimulatable`. Unifying the gate did not unify the emitter:
-    /// production compiles such an SCC by interleaving its members' per-element
-    /// segments (`db::assemble::combine_scc_fragment`, reached only from
-    /// `assemble_module`), and `compiler::Module` has no equivalent -- it would
-    /// emit the members whole, in runlist order, so a member reads a co-member's
-    /// element before it is assigned. That is a silent wrong answer, not a
-    /// failure. Before the unification the second gate happened to refuse these
-    /// models by calling them circular; refusing them deliberately keeps the
-    /// monolith honest as an oracle, which is the only reason it still exists.
-    /// The distinct code matters: `CircularDependency` here would contradict
-    /// `project::tests::the_circular_dependency_gate_is_the_production_one`,
-    /// which asserts the two gates agree that this model class is NOT circular.
-    pub(crate) fn set_dependencies(
-        &mut self,
-        db: &dyn crate::db::Db,
-        source_model: crate::db::SourceModel,
-        project: crate::db::SourceProject,
-        instantiations: &BTreeSet<ModuleInputSet>,
-    ) {
-        // Model errors: seed with any pre-existing model-level errors recorded
-        // at Stage0 construction (e.g. DuplicateVariable, GH #891) so this
-        // recompute extends rather than clobbers them. `set_dependencies` runs
-        // once per model (Project::from_salsa), so taking the list cannot
-        // double-report.
-        let mut errors: Vec<Error> = self.errors.take().unwrap_or_default();
-        let mut has_cycle = false;
-        let mut has_resolved_scc = false;
-
-        let to_idents = |names: &[String]| -> Vec<Ident<Canonical>> {
-            // The graph's runlists are canonical names by construction, so
-            // interning them needs no re-canonicalization scan.
-            names.iter().map(|n| Ident::from_str_unchecked(n)).collect()
-        };
-
-        let instantiations: HashMap<ModuleInputSet, ModuleStage2> = instantiations
-            .iter()
-            .map(|inputs| {
-                let interned = crate::db::ModuleInputSet::from_canonical_set(db, inputs);
-                let graph = crate::db::model_dependency_graph(db, source_model, project, interned);
-                has_cycle |= graph.has_cycle;
-                has_resolved_scc |= !graph.resolved_sccs.is_empty();
-                (
-                    inputs.clone(),
-                    ModuleStage2 {
-                        model_ident: self.name.clone(),
-                        inputs: inputs.clone(),
-                        runlist_initials: to_idents(&graph.runlist_initials),
-                        runlist_flows: to_idents(&graph.runlist_flows),
-                        runlist_stocks: to_idents(&graph.runlist_stocks),
-                    },
-                )
-            })
-            .collect();
-
-        self.instantiations = Some(instantiations);
-
-        if has_cycle {
-            errors.push(Error::new(
-                ErrorKind::Model,
-                ErrorCode::CircularDependency,
-                None,
-            ));
-        }
-
-        // The gate is unified; the EMITTER is not. See the rustdoc above: the
-        // monolith cannot lower an interleaved per-element SCC, so refuse rather
-        // than emit members whole and read a co-member's element early.
-        if has_resolved_scc {
-            errors.push(Error::new(
-                ErrorKind::Model,
-                ErrorCode::NotSimulatable,
-                Some(format!(
-                    "model '{}' contains a resolved recurrence SCC, which only \
-                     the per-element interleaving fragment compiler can lower",
-                    self.name
-                )),
-            ));
-        }
-
-        // Equation errors already ride on the variables themselves, recorded by
-        // parsing and by `lower_variable`. Roll them up to the model level so
-        // the `Module::new` gate still refuses a model with a broken variable.
-        if self
-            .variables
-            .values()
-            .any(|var| var.equation_errors().is_some())
-        {
-            errors.push(Error::new(
-                ErrorKind::Model,
-                ErrorCode::VariablesHaveErrors,
-                None,
-            ));
-        }
-
-        self.errors = if errors.is_empty() {
-            None
-        } else {
-            Some(errors)
-        };
-    }
-
-    /// The equation errors this model's variables carry, keyed by variable.
-    ///
-    /// A projection of [`Variable::equation_errors`] over the model, used by
-    /// the roll-up above and by the tests that check it. User-facing reporting
-    /// goes through `db::collect_all_diagnostics`, which reports the same
-    /// errors with a source location attached.
-    #[cfg(test)]
-    pub fn get_variable_errors(&self) -> HashMap<Ident<Canonical>, Vec<EquationError>> {
-        self.variables
-            .iter()
-            .flat_map(|(ident, var)| var.equation_errors().map(|errs| (ident.clone(), errs)))
-            .collect()
     }
 }
 
@@ -914,82 +615,16 @@ fn test_module_parse() {
     assert_eq!(expected, actual);
 }
 
-/// A variable carrying an equation error rolls up to a model-level
-/// `VariablesHaveErrors`, which is what stops `compiler::Module::new` from
-/// compiling a model with a broken variable.
-///
-/// The errors rolled up are the ones parsing and `lower_variable` recorded on
-/// the variables themselves (`Variable::errors`). `set_dependencies` used to
-/// contribute a second source -- its own dependency walk's
-/// `UnknownDependency` / `CircularDependency` / `ExpectedModule` -- which was
-/// the GH #568 divergence; that walk is gone and its diagnostics come from the
-/// production gate instead (see
-/// `unknown_dependency_reaches_the_one_remaining_gate`).
+/// A reference to an undefined variable is refused by the production dependency
+/// gate, as an `UnknownDependency` attributed to the referencing variable.
 #[test]
-fn variable_equation_errors_roll_up_to_the_model() {
-    let units_ctx = Context::new(&[], &Default::default()).0;
-    let main_model = x_model("main", vec![x_aux("aux_3", "1 +", None)]);
-    let direct = ModelStage0::new(&main_model, &[], &units_ctx, false);
-    let models: HashMap<Ident<Canonical>, &ModelStage0> =
-        std::iter::once((Ident::new("main"), &direct)).collect();
-
-    let db = db::SimlinDb::default();
-    let project_datamodel = datamodel::Project {
-        name: "errors".to_string(),
-        sim_specs: datamodel::SimSpecs::default(),
-        dimensions: vec![],
-        units: vec![],
-        models: vec![main_model.clone()],
-        source: None,
-        ai_information: None,
-    };
-    let sync = db::sync_from_datamodel(&db, &project_datamodel);
-
-    let scope = ScopeStage0 {
-        models: &models,
-        dimensions: &Default::default(),
-        model_name: "main",
-    };
-    let mut model = ModelStage1::new(&scope, &direct);
-    let no_module_inputs: ModuleInputSet = BTreeSet::new();
-    let default_instantiation = [no_module_inputs].iter().cloned().collect();
-    model.set_dependencies(
-        &db,
-        sync.models["main"].source,
-        sync.project,
-        &default_instantiation,
-    );
-
-    assert_eq!(
-        Some(&Error::new(
-            ErrorKind::Model,
-            ErrorCode::VariablesHaveErrors,
-            None
-        )),
-        model.errors.as_ref().and_then(|errs| errs.first()),
-    );
-
-    let var_errors = model.get_variable_errors();
-    let aux_3_key = Ident::new("aux_3");
-    assert_eq!(
-        1,
-        var_errors.len(),
-        "exactly the broken variable carries errors, got: {var_errors:?}"
-    );
-    assert!(var_errors.contains_key(&aux_3_key));
-}
-
-/// The `UnknownDependency` the deleted second dependency walk used to raise is
-/// still raised -- by the production gate, which is now the only one.
-#[test]
-fn unknown_dependency_reaches_the_one_remaining_gate() {
+fn unknown_dependency_is_attributed_to_the_referencing_variable() {
+    use crate::common::ErrorCode;
     use crate::test_common::TestProject;
 
-    let tp = TestProject::new("main").aux("aux_3", "unknown_variable * 3.14", None);
-    let errs = match tp.compile() {
-        Ok(_) => panic!("a model referencing an undefined variable must not compile"),
-        Err(errs) => errs,
-    };
+    let errs = TestProject::new("main")
+        .aux("aux_3", "unknown_variable * 3.14", None)
+        .error_diagnostics();
     assert!(
         errs.iter()
             .any(|(loc, code)| loc == "main.aux_3" && *code == ErrorCode::UnknownDependency),
@@ -1057,84 +692,6 @@ fn test_cached_stage0_preserves_previous_helper_rewrite() {
         has_previous_helper(&direct),
         has_previous_helper(cached),
         "cached parse should preserve PREVIOUS(module_var) helper rewriting"
-    );
-}
-
-/// GH #891: every `ModelStage0` constructor collapses variables into a
-/// canonical-keyed map (last-in-declaration-order wins), so two variables whose
-/// names canonicalize identically would silently produce a DIFFERENT model than
-/// the one written. Both the datamodel-driven constructor and the cached query
-/// must record a `DuplicateVariable` model-level error naming the colliding
-/// spellings, and that error must survive `set_dependencies` (which recomputes
-/// model-level errors).
-///
-/// The two derive the error from genuinely different inputs -- the raw
-/// `datamodel::Variable` list here, the memoized `db::model_duplicate_variables`
-/// groups off `SourceModel::declared_variable_idents` there -- so comparing them
-/// is a cross-check, not a restatement. (Before this commit the salsa side of
-/// this test was `ModelStage0::new_cached`, which computed the errors with the
-/// SAME raw-list helper as the direct constructor and so compared nothing.)
-#[test]
-fn test_stage0_records_duplicate_variable_error() {
-    let units_ctx = Context::new(&[], &Default::default()).0;
-    let main_model = x_model(
-        "main",
-        vec![x_aux("net flow", "1", None), x_aux("net_flow", "2", None)],
-    );
-
-    let direct = ModelStage0::new(&main_model, &[], &units_ctx, false);
-    let errors = direct
-        .errors
-        .as_ref()
-        .expect("duplicate canonical idents must record a model-level error");
-    assert_eq!(1, errors.len());
-    assert_eq!(ErrorCode::DuplicateVariable, errors[0].code);
-    let msg = errors[0].details.as_deref().unwrap_or("");
-    assert!(
-        msg.contains("'net flow'") && msg.contains("'net_flow'"),
-        "message should name both colliding spellings, got: {msg}"
-    );
-
-    // The salsa-cached query must agree with the direct constructor.
-    let project_datamodel = datamodel::Project {
-        name: "dup".to_string(),
-        sim_specs: datamodel::SimSpecs::default(),
-        dimensions: vec![],
-        units: vec![],
-        models: vec![main_model.clone()],
-        source: None,
-        ai_information: None,
-    };
-    let db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
-    let cached = db::model_stage0(&db, sync.models["main"].source, sync.project);
-    assert_eq!(direct.errors, cached.errors);
-
-    // `set_dependencies` rebuilds the model-level error list; the Stage0
-    // duplicate error must be extended, not clobbered.
-    let models: HashMap<Ident<Canonical>, &ModelStage0> =
-        std::iter::once((Ident::new("main"), &direct)).collect();
-    let scope = ScopeStage0 {
-        models: &models,
-        dimensions: &Default::default(),
-        model_name: "main",
-    };
-    let mut model = ModelStage1::new(&scope, &direct);
-    let no_module_inputs: ModuleInputSet = BTreeSet::new();
-    let default_instantiation = [no_module_inputs].iter().cloned().collect();
-    model.set_dependencies(
-        &db,
-        sync.models["main"].source,
-        sync.project,
-        &default_instantiation,
-    );
-    assert!(
-        model
-            .errors
-            .as_ref()
-            .is_some_and(|errs| errs.iter().any(|e| e.code == ErrorCode::DuplicateVariable)),
-        "DuplicateVariable must survive set_dependencies, got: {:?}",
-        model.errors
     );
 }
 

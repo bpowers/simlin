@@ -18,16 +18,16 @@ use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::db::model_element_loop_circuits;
 use simlin_engine::db::{
     DetectedLoop, DetectedLoopPolarity, LtmEquation, SimlinDb, causal_graph_from_edges,
-    causal_graph_from_element_edges, compile_project_incremental, model_causal_edges,
-    model_cycle_partitions, model_detected_loops, model_element_causal_edges,
-    model_element_cycle_partitions, model_loop_circuits, model_loop_circuits_tiered,
-    model_ltm_variables, project_datamodel_dims, reclassify_loops_from_results,
-    set_project_ltm_discovery_mode, set_project_ltm_enabled, sync_from_datamodel,
-    sync_from_datamodel_incremental,
+    causal_graph_from_element_edges, causal_graph_from_element_edges_with_modules,
+    compile_project_incremental, model_causal_edges, model_cycle_partitions, model_detected_loops,
+    model_element_causal_edges, model_element_cycle_partitions, model_loop_circuits,
+    model_loop_circuits_tiered, model_ltm_variables, project_datamodel_dims,
+    reclassify_loops_from_results, set_project_ltm_discovery_mode, set_project_ltm_enabled,
+    sync_from_datamodel, sync_from_datamodel_incremental,
 };
 use simlin_engine::indexmap::IndexMap;
 use simlin_engine::xmile;
-use simlin_engine::{CompiledSimulation, Project, Results, Vm, json, ltm_finding, ltm_post};
+use simlin_engine::{CompiledSimulation, Results, Vm, json, ltm_finding, ltm_post};
 
 const LTM_TOLERANCE: f64 = 0.05;
 
@@ -292,24 +292,13 @@ fn simulates_population_ltm() {
 
 // --- Discovery mode integration tests ---
 
-/// Run discovery mode on a model file and return discovered loops.
-/// Simulation uses the VM path (compile_ltm_discovery_incremental);
-/// Project::from_datamodel (salsa-backed) is used for causal graph structural analysis.
+/// Run discovery mode on a model file and return the discovered loops, through
+/// the same graph and context `analyze_model` builds ([`run_discovery`]).
 fn discover_loops_from_path(model_path: &str) -> Vec<ltm_finding::FoundLoop> {
     let f = File::open(model_path).unwrap();
     let mut f = BufReader::new(f);
     let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
-
-    // VM discovery path for simulation
-    let compiled = compile_ltm_discovery_incremental(&datamodel_project);
-    let mut vm = Vm::new(compiled).unwrap();
-    vm.run_to_end().unwrap();
-    let results = vm.into_results();
-
-    // Project for causal graph structural analysis (from_datamodel uses salsa internally)
-    let project = Project::from(datamodel_project);
-
-    ltm_finding::discover_loops(&results, &project).expect("discover_loops should succeed")
+    run_discovery(&datamodel_project).1
 }
 
 #[test]
@@ -902,15 +891,7 @@ fn test_smooth_model_discovery_mode() {
         .flow("adjustment", "gap / adjustment_time", None)
         .build_datamodel();
 
-    let compiled = compile_ltm_discovery_incremental(&datamodel_project);
-    let project_for_discovery = Project::from(datamodel_project.clone());
-
-    let mut vm = Vm::new(compiled).unwrap();
-    vm.run_to_end().unwrap();
-    let results = vm.into_results();
-
-    let found = ltm_finding::discover_loops(&results, &project_for_discovery)
-        .expect("discover_loops should succeed");
+    let found = run_discovery(&datamodel_project).1;
 
     assert!(
         !found.is_empty(),
@@ -935,12 +916,7 @@ fn test_discovery_submodel_link_scores_excluded_from_search() {
         .flow("adj", "SMTH1(gap, 5)", None)
         .build_datamodel();
 
-    let compiled = compile_ltm_discovery_incremental(&datamodel_project);
-    let project_for_discovery = Project::from(datamodel_project.clone());
-
-    let mut vm = Vm::new(compiled).unwrap();
-    vm.run_to_end().unwrap();
-    let results = vm.into_results();
+    let (results, found) = run_discovery(&datamodel_project);
 
     // Root-level link scores should exist and start with the standard prefix
     let root_link_scores: Vec<_> = results
@@ -978,10 +954,6 @@ fn test_discovery_submodel_link_scores_excluded_from_search() {
             var
         );
     }
-
-    // Run discover_loops and verify only root-level links are found
-    let found = ltm_finding::discover_loops(&results, &project_for_discovery)
-        .expect("discover_loops should succeed");
 
     // Discovered loops should only reference root-level variables (no interpunct)
     for loop_result in &found {
@@ -1200,17 +1172,7 @@ fn test_discovery_independent_subsystems() {
         .flow("flow_b", "stock_b * 0.1", None)
         .build_datamodel();
 
-    // VM discovery path for simulation
-    let compiled = compile_ltm_discovery_incremental(&datamodel_project);
-    let mut vm = Vm::new(compiled).unwrap();
-    vm.run_to_end().unwrap();
-    let results = vm.into_results();
-
-    // Project for causal graph structural analysis (from_datamodel uses salsa internally)
-    let project = Project::from(datamodel_project);
-
-    let found =
-        ltm_finding::discover_loops(&results, &project).expect("discover_loops should succeed");
+    let found = run_discovery(&datamodel_project).1;
 
     assert!(
         found.len() >= 2,
@@ -1395,10 +1357,7 @@ fn test_feedback_loop_discovery_vm() {
         .flow("adj", "gap / 5", None)
         .build_datamodel();
 
-    let compiled = compile_ltm_discovery_incremental(&project);
-    let mut vm = Vm::new(compiled).unwrap();
-    vm.run_to_end().unwrap();
-    let results = vm.into_results();
+    let (results, found) = run_discovery(&project);
 
     let link_score_offsets: Vec<_> = results
         .offsets
@@ -1412,11 +1371,6 @@ fn test_feedback_loop_discovery_vm() {
         !link_score_offsets.is_empty(),
         "discovery mode should have link score variables"
     );
-
-    // Build Project for discover_loops (from_datamodel uses salsa internally)
-    let compiled_project = Project::from(project);
-    let found = ltm_finding::discover_loops(&results, &compiled_project)
-        .expect("discover_loops should succeed");
 
     assert!(
         !found.is_empty(),
@@ -4592,18 +4546,28 @@ fn test_mixed_loop_scalar_per_element_scores() {
 // element-level link scores.
 // ============================================================================
 
-/// Run the full element-level discovery pipeline for an arrayed model.
-///
-/// This mirrors the pipeline in `analysis.rs::run_ltm_pipeline` but is
-/// callable from integration tests. It:
-/// 1. Compiles with LTM discovery mode enabled
-/// 2. Simulates to get link score results
-/// 3. Builds an element-level CausalGraph
-/// 4. Calls `discover_loops_with_graph` with LTM var metadata and dims
-///    so that A2A link scores are expanded into per-element edges
+/// Run the full discovery pipeline for a model and return the discovered loops.
 fn discover_loops_element_level(
     project: &simlin_engine::datamodel::Project,
 ) -> Vec<ltm_finding::FoundLoop> {
+    run_discovery(project).1
+}
+
+/// Run the full discovery pipeline for a model: the simulation results it
+/// discovered over, and the loops.
+///
+/// This mirrors `analysis.rs::run_ltm_pipeline` step for step, so a discovery
+/// assertion here constrains the production path rather than a test-local
+/// reconstruction of it. It:
+/// 1. Compiles with LTM discovery mode enabled
+/// 2. Simulates to get link score results
+/// 3. Builds the element-level `CausalGraph`, enriched with the variable map
+///    and module sub-graphs the per-exit-port recompute needs (GH #698)
+/// 4. Calls `discover_loops_with_graph` with LTM var metadata and dims
+///    so that A2A link scores are expanded into per-element edges
+fn run_discovery(
+    project: &simlin_engine::datamodel::Project,
+) -> (Results, Vec<ltm_finding::FoundLoop>) {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
@@ -4624,7 +4588,12 @@ fn discover_loops_element_level(
         .copied()
         .expect("main model should exist in salsa DB");
     let element_edges = model_element_causal_edges(&db, source_model, sync.project);
-    let causal_graph = causal_graph_from_element_edges(element_edges);
+    let causal_graph = causal_graph_from_element_edges_with_modules(
+        &db,
+        source_model,
+        sync.project,
+        element_edges,
+    );
 
     let stocks: Vec<Ident<Canonical>> =
         element_edges.stocks.iter().map(|s| Ident::new(s)).collect();
@@ -4638,7 +4607,7 @@ fn discover_loops_element_level(
     // recompute needs (GH #698), built through the exact production decision.
     let sub_model_ports = simlin_engine::analysis::build_sub_model_output_ports(&db, sync.project);
 
-    ltm_finding::discover_loops_with_graph(
+    let found = ltm_finding::discover_loops_with_graph(
         &results,
         &causal_graph,
         &stocks,
@@ -4649,7 +4618,8 @@ fn discover_loops_element_level(
         None,
     )
     .expect("discover_loops_with_graph should succeed")
-    .loops
+    .loops;
+    (results, found)
 }
 
 /// AC7.1: Discovery mode on an arrayed model finds element-specific loops.
@@ -10175,14 +10145,7 @@ fn discovery_multi_output_loop_polarity_matches_exhaustive() {
     // Discovery: run loop discovery and find the loop through the module. Its
     // settled signed score must have the same sign exhaustive reports, not the
     // inverted one the composite tie-break produced.
-    let compiled = compile_ltm_discovery_incremental(&project);
-    let mut vm = Vm::new(compiled).unwrap();
-    vm.run_to_end().expect("discovery simulation should run");
-    let discovery_results = vm.into_results();
-
-    let proj = Project::from(project);
-    let found = ltm_finding::discover_loops(&discovery_results, &proj)
-        .expect("discover_loops should succeed");
+    let (_discovery_results, found) = run_discovery(&project);
     assert!(
         !found.is_empty(),
         "discovery should find the feedback loop through the multi-output module"
@@ -10667,13 +10630,7 @@ fn discovery_rux_classification_matches_exhaustive() {
     let exhaustive_confidence = exhaustive_loops[0].polarity_confidence;
 
     // Discovery: run loop discovery over the discovery-mode sim.
-    let compiled = compile_ltm_discovery_incremental(&project);
-    let mut vm = Vm::new(compiled).unwrap();
-    vm.run_to_end().expect("discovery simulation should run");
-    let discovery_results = vm.into_results();
-    let proj = Project::from(project);
-    let found =
-        ltm_finding::discover_loops(&discovery_results, &proj).expect("discovery should succeed");
+    let (_discovery_results, found) = run_discovery(&project);
     assert_eq!(found.len(), 1, "discovery finds the single feedback loop");
 
     assert_eq!(

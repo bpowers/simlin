@@ -1458,6 +1458,10 @@ pub(crate) fn array_producing_vars(
 /// The engine's OWN per-variable production-lowered non-initial (dt/flow)
 /// `Vec<Expr>` for the canonical `var_name`.
 ///
+/// Two test surfaces read it: `array_producing_vars` below, and
+/// `test_common::TestProject::flow_exprs`, through which every structural
+/// lowering assertion in the crate constrains the production fragment compiler.
+///
 /// Sourced via `crate::db::var_fragment::lower_var_fragment` -- the exact
 /// per-variable lowering the production caller
 /// `crate::db::compile_var_fragment` runs -- with the caller-owned,
@@ -1497,7 +1501,7 @@ pub(crate) fn var_noninitial_lowered_exprs(
     let source_vars = model.variables(db);
     let Some(sv) = source_vars.get(var_name) else {
         panic!(
-            "array_producing_vars: universe var {var_name:?} has no \
+            "var_noninitial_lowered_exprs: var {var_name:?} has no \
              SourceVariable (an implicit SMOOTH/DELAY/INIT helper) -- \
              abort, never silent-skip (a silent skip would under-count \
              array-producing membership)"
@@ -1532,15 +1536,15 @@ pub(crate) fn var_noninitial_lowered_exprs(
         } => match per_phase_lowered.noninitial {
             Ok(v) => v.ast,
             Err(e) => panic!(
-                "array_producing_vars: universe var {var_name:?} non-initial \
+                "var_noninitial_lowered_exprs: var {var_name:?} non-initial \
                  Var::new errored ({e:?}) -- cannot source its production \
                  lowered exprs (abort, never silent-skip)"
             ),
         },
         LoweredVarFragment::Fatal { .. } => panic!(
-            "array_producing_vars: universe var {var_name:?} failed to lower \
-             (LoweredVarFragment::Fatal) -- cannot assess array-producing \
-             membership (abort, never silent-skip)"
+            "var_noninitial_lowered_exprs: var {var_name:?} failed to lower \
+             (LoweredVarFragment::Fatal) -- cannot source its production \
+             lowered exprs (abort, never silent-skip)"
         ),
     }
 }
@@ -2578,11 +2582,11 @@ pub(crate) fn model_dependency_graph_impl(
         )
     };
 
-    // Flows runlist: non-stock variables, modules, AND stock-typed module inputs.
-    // The monolithic path uses `instantiation.contains(id) || !var.is_stock()`
-    // which includes stock-typed module inputs (e.g., a stock declared with
-    // access="input" in XMILE). These need LoadModuleInput -> AssignCurr in
-    // the flows phase to propagate the parent-provided value each timestep.
+    // Flows runlist: non-stock variables, modules, AND stock-typed module inputs
+    // (a stock declared with access="input" in XMILE): the rule is
+    // `is_module_input || !is_stock`. A stock-typed input needs
+    // LoadModuleInput -> AssignCurr in the flows phase to propagate the
+    // parent-provided value each timestep.
     let module_input_set: BTreeSet<String> = module_input_names
         .iter()
         .map(|s| canonicalize(s).into_owned())

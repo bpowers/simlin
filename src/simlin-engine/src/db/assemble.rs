@@ -190,8 +190,8 @@ pub(crate) fn build_stub_variable(
     }
 }
 
-/// Populate sub-model metadata in `all_metadata` for module variable compilation.
-/// Mirrors the monolithic `build_metadata` but works with salsa SourceModel/SourceVariable.
+/// Populate sub-model metadata in `all_metadata` for module variable
+/// compilation, from the sub-model's salsa `SourceModel`/`SourceVariable`s.
 /// Recursively populates metadata for nested modules.
 pub(crate) fn build_submodel_metadata<'arena>(
     arena: &'arena bumpalo::Bump,
@@ -1502,8 +1502,8 @@ pub fn assemble_module<'db>(
     // consist of LoadModuleInput -> AssignCurr, which copies the
     // parent-provided value into the sub-model's local slot. This must
     // happen during initials and flows phases. Only the stocks phase
-    // excludes module inputs (matching the monolithic path which uses
-    // `!instantiation.contains(id) && (is_stock || is_module)` for stocks).
+    // excludes module inputs: a stock update runs for
+    // `!is_module_input && (is_stock || is_module)`.
     let is_module_input =
         |var_name: &str| -> bool { canonical_inputs.contains(&*canonicalize(var_name)) };
 
@@ -1802,8 +1802,8 @@ pub fn assemble_module<'db>(
 
     // #583: temps are NOT a per-phase-offset resource. The plain-phase
     // concat recycles every fragment's 0-based temps into ONE shared
-    // identity pool (matching the monolithic `Module::compile` keyed
-    // max-merge over the flattened initials+flows+stocks runlists), so the
+    // identity pool (a keyed max-merge over the flattened
+    // initials+flows+stocks runlists), so the
     // `ctx_base.temps` is 0 for EVERY phase -- the pool is not partitioned by
     // phase. (Summing per phase, as before, drove the renumbered `temp_id`
     // past `u8::MAX` and diverged `flows_concat` from the all-phases `merged`
@@ -1830,16 +1830,16 @@ pub fn assemble_module<'db>(
     };
 
     // #582: graphical functions are content-de-duplicated across ALL
-    // fragments of the model (one block per distinct table, matching the
-    // monolithic `Compiler::new`), so -- unlike the flat literal/module/
+    // fragments of the model (one block per distinct table), so -- unlike the
+    // flat literal/module/
     // view/temp/dim-list resources -- their `base_gf`s cannot be a per-phase
     // running count. Build the dedup ONCE over the union of every phase's
     // fragments (in the all-phases order initials, flows, stocks) and feed
     // each phase the corresponding per-fragment GF remap. A dependency
     // arrayed GF referenced by hundreds of consumer fragments now lands in
     // `graphical_functions` exactly once instead of once per consumer,
-    // which both fixes the `GraphicalFunctionId = u8` overflow and matches
-    // the monolithic GF-table layout.
+    // which is what keeps the `GraphicalFunctionId = u8` namespace
+    // proportional to the model's distinct tables.
     let all_frags: Vec<&crate::compiler::symbolic::PerVarBytecodes> = initial_frags
         .iter()
         .map(|(_, bc)| *bc)
@@ -2182,8 +2182,8 @@ fn enumerate_module_instances_inner(
             ));
         }
 
-        // Strip module ident prefix from dst to get bare sub-model variable
-        // names, matching how resolve_module_input works in the monolithic path
+        // Strip the module ident prefix from dst to get bare sub-model variable
+        // names, the same derivation `model::resolve_module_input` performs
         let input_prefix = format!("{var_name}\u{00B7}");
         let inputs: BTreeSet<Ident<Canonical>> = source_var
             .module_refs(db)

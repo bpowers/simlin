@@ -183,35 +183,31 @@ mod tests {
         (*inv).clone()
     }
 
-    /// Compute the monolithic-path run-invariant flow var-name set by running
-    /// the SAME shared classifier over the test-only `Module`'s model-global
-    /// lowered exprs. The callback reads the owning variable's name straight off
-    /// the reference, then classifies it by kind (stock/module -> variant) and
-    /// by the accumulated invariant set, mirroring the salsa callback.
-    /// Restricted to scalar variables (no array temps) so
-    /// `Module::get_flow_exprs` captures each variable's full flow statement
-    /// list.
-    ///
-    /// Before references carried names this callback had to reverse-map a
-    /// model-global offset through the `Module`'s own offset map -- a second,
-    /// hand-written copy of the resolution the salsa side did differently. The
-    /// two callbacks are now the same lookup, which is why this differential
-    /// test is cheaper AND stronger than it was.
-    fn monolithic_invariant_set(tp: &TestProject, runlist_order: &[String]) -> BTreeSet<String> {
+    /// The run-invariant flow var-name set obtained by running the SAME shared
+    /// classifier directly over each variable's production-lowered flow exprs
+    /// (`var_noninitial_lowered_exprs`), in runlist order. The callback reads
+    /// the owning variable's name straight off the reference, then classifies
+    /// it by kind (stock/module -> variant) and by the accumulated invariant
+    /// set -- the fixpoint `model_flows_invariant` computes from the
+    /// `FlowInvarianceSupport` that `compile_var_fragment` precomputes.
+    /// Restricted to scalar variables (no array temps) so one variable's flow
+    /// statement list is exactly its lowered exprs.
+    fn direct_classifier_invariant_set(
+        db: &SimlinDb,
+        model: SourceModel,
+        project: SourceProject,
+        project_dm: &datamodel::Project,
+        runlist_order: &[String],
+    ) -> BTreeSet<String> {
         use crate::common::{Canonical, Ident};
 
-        let module = tp.build_module().expect("build monolithic module");
-        let model_ident = module.ident.clone();
-
         // Stocks and modules in this model (by canonical name): a referenced
-        // owner of these kinds is variant. We derive stock/module membership
-        // from the datamodel (the monolithic Module does not carry kind flags
-        // in its offset map).
-        let project_dm = tp.build_datamodel();
+        // owner of these kinds is variant. Membership comes from the datamodel,
+        // which is what the classifier's callback has to know about each name.
         let main_model = project_dm
             .models
             .iter()
-            .find(|m| Ident::<Canonical>::new(&m.name) == model_ident)
+            .find(|m| m.name == "main")
             .expect("main model in datamodel");
         let mut stock_or_module: BTreeSet<String> = BTreeSet::new();
         for v in &main_model.variables {
@@ -230,11 +226,8 @@ mod tests {
             if stock_or_module.contains(var_name) {
                 continue;
             }
-            let exprs: Vec<Expr> = module
-                .get_flow_exprs(var_name)
-                .into_iter()
-                .cloned()
-                .collect();
+            let exprs: Vec<Expr> =
+                crate::db::var_noninitial_lowered_exprs(db, model, project, var_name);
             if exprs.is_empty() {
                 continue;
             }
@@ -261,12 +254,13 @@ mod tests {
         invariant
     }
 
-    /// The salsa and monolithic paths -- both running the SAME shared classifier
-    /// over each path's lowered exprs -- agree on which flow variables are
-    /// run-invariant. This guards against the two paths' offset callbacks
-    /// drifting.
+    /// `model_flows_invariant`'s fixpoint over the precomputed per-fragment
+    /// support agrees with the shared classifier run directly over each
+    /// variable's production-lowered exprs. This guards the `locally_pure` /
+    /// `dep_names` precomputation against drifting from the classifier it
+    /// summarizes.
     #[test]
-    fn salsa_and_monolithic_paths_agree() {
+    fn precomputed_support_agrees_with_the_direct_classifier_run() {
         let tp = TestProject::new("main")
             .with_sim_time(0.0, 5.0, 1.0)
             // invariant constant chain
@@ -281,8 +275,8 @@ mod tests {
 
         let salsa = salsa_invariant_set(&tp);
 
-        // Build the monolithic runlist order from the dep graph so both paths
-        // classify the same variable universe.
+        // Classify in the production flow runlist order, so both computations
+        // walk the same variable universe in the same order.
         let db = SimlinDb::default();
         let project_dm = tp.build_datamodel();
         let result = sync_from_datamodel(&db, &project_dm);
@@ -293,11 +287,17 @@ mod tests {
             result.project,
             ModuleInputSet::empty(&db),
         );
-        let mono = monolithic_invariant_set(&tp, &dep_graph.runlist_flows);
+        let direct = direct_classifier_invariant_set(
+            &db,
+            model,
+            result.project,
+            &project_dm,
+            &dep_graph.runlist_flows,
+        );
 
         assert_eq!(
-            salsa, mono,
-            "salsa and monolithic invariant sets disagree:\n  salsa: {salsa:?}\n  mono:  {mono:?}"
+            salsa, direct,
+            "precomputed and direct invariant sets disagree:\n  precomputed: {salsa:?}\n  direct: {direct:?}"
         );
 
         // Sanity: the constant chain is invariant, the TIME/stock chain is not.

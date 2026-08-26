@@ -831,8 +831,8 @@ fn materializing_an_elm_map_source_confines_the_mapping_to_the_temp() {
 ///
 /// This is not observable from VM values -- the post-lowering pass materializes
 /// the same operand either way, and the numbers agree -- so it is pinned at the
-/// lowered-fragment level, through the production `Var::new` lowering that
-/// `build_module` drives. What differs is WHERE the temp is allocated: Pass 1
+/// lowered-fragment level, through the production per-variable lowering
+/// (`TestProject::flow_exprs`). What differs is WHERE the temp is allocated: Pass 1
 /// numbers the operand's temp before the apply-to-all hoister numbers the
 /// builtin's result, while the post-lowering pass continues past the highest id
 /// the fragment already uses, so the two temps come out in the opposite order.
@@ -846,9 +846,7 @@ fn the_rank_arm_decomposes_its_array_argument_like_its_siblings() {
         use crate::compiler::expr::Expr;
         fixture(name)
             .array_aux("out[d]", eqn)
-            .build_module()
-            .unwrap_or_else(|e| panic!("{name} should build: {e}"))
-            .runlist_flows
+            .flow_exprs("out")
             .iter()
             .filter_map(|e| match e {
                 Expr::AssignTemp(id, _, _) => Some(*id),
@@ -2006,17 +2004,17 @@ fn a_scalar_previous_beside_an_array_operand_still_materializes() {
 /// `walk_expr_as_view`'s four accepted shapes consumes no extra temp, and a
 /// computed one costs exactly one.
 ///
-/// `temp_sizes` is derived from the lowered expressions, so it is the direct
-/// readout of how many temps a fragment allocates.
+/// The temp count is derived from the lowered expressions the same way
+/// assembly derives a fragment's `temp_sizes` (`extract_temp_sizes`), so it is
+/// the direct readout of how many temps the fragment allocates.
 #[test]
 fn a_computed_operand_costs_exactly_one_temp_and_a_view_costs_none() {
     let temps = |name: &str, eqn: &str| -> usize {
-        fixture(name)
-            .array_aux("out[d]", eqn)
-            .build_module()
-            .unwrap_or_else(|e| panic!("{name} should build: {e}"))
-            .temp_sizes
-            .len()
+        let mut sizes = std::collections::HashMap::new();
+        for expr in fixture(name).array_aux("out[d]", eqn).flow_exprs("out") {
+            crate::compiler::extract_temp_sizes_pub(&expr, &mut sizes);
+        }
+        sizes.len()
     };
 
     let control = temps("temp_ctl", "VECTOR SORT ORDER(vals[d], 1)");

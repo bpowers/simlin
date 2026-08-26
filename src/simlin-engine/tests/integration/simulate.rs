@@ -4285,8 +4285,7 @@ fn beer_game_import_has_no_unknown_element_subscripts() {
     );
 }
 
-/// All test models that the monolithic compiler can handle.
-/// The incremental path must also handle these.
+/// Every test model the compiler must handle end to end.
 static ALL_INCREMENTALLY_COMPILABLE_MODELS: &[&str] = &[
     "../../test/alias1/alias1.stmx",
     "../../test/builtin_init/builtin_init.stmx",
@@ -4313,8 +4312,8 @@ static ALL_INCREMENTALLY_COMPILABLE_MODELS: &[&str] = &[
     "../../test/lookup_arrayed/lookup_arrayed.xmile",
 ];
 
-/// Verify that the salsa-based incremental compilation path successfully
-/// compiles every test model that the monolithic path handles.
+/// Verify that `compile_project_incremental` compiles every model in
+/// `ALL_INCREMENTALLY_COMPILABLE_MODELS`.
 #[test]
 fn incremental_compilation_covers_all_models() {
     let mut failures: Vec<(String, String)> = Vec::new();

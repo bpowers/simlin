@@ -18,8 +18,8 @@ use crate::ast::BinaryOp;
 use crate::common::{Canonical, Ident};
 use crate::datamodel::Dimension;
 use crate::db::{
-    DetectedLoop, DetectedLoopPolarity, SimlinDb, compute_link_polarities, model_cycle_partitions,
-    model_detected_loops, sync_from_datamodel,
+    DetectedLoop, DetectedLoopPolarity, SimlinDb, causal_graph_with_modules,
+    compute_link_polarities, model_cycle_partitions, model_detected_loops, sync_from_datamodel,
 };
 use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
 use crate::variable::Variable;
@@ -2188,15 +2188,13 @@ fn test_module_output_dep_normalized() {
         .aux("x", "10", None)
         .aux("s", "SMTH1(x, 5)", None)
         .aux("y", "s * 2", None)
-        .compile()
-        .expect("should compile");
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let graph = causal_graph_with_modules(&db, sync.models["main"].source, sync.project);
 
-    let main_ident: Ident<Canonical> = Ident::new("main");
-    let model = &project.models[&main_ident];
-    let graph = CausalGraph::from_model(model, &project).unwrap();
-
-    let smth1_var = model
-        .variables
+    let smth1_var = graph
+        .variables()
         .keys()
         .find(|k| k.as_str().contains("smth1"))
         .expect("should have smth1 module variable");
@@ -2235,15 +2233,13 @@ fn test_module_polarity_through_output_ref() {
         .aux("x", "10", None)
         .aux("s", "SMTH1(x, 5)", None)
         .aux("y", "s * 2", None)
-        .compile()
-        .expect("should compile");
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let graph = causal_graph_with_modules(&db, sync.models["main"].source, sync.project);
 
-    let main_ident: Ident<Canonical> = Ident::new("main");
-    let model = &project.models[&main_ident];
-    let graph = CausalGraph::from_model(model, &project).unwrap();
-
-    let smth1_var = model
-        .variables
+    let smth1_var = graph
+        .variables()
         .keys()
         .find(|k| k.as_str().contains("smth1"))
         .expect("should have smth1 module variable");
@@ -2267,15 +2263,15 @@ fn test_regression_causal_graph_after_implicit_instantiation() {
         .with_sim_time(0.0, 10.0, 1.0)
         .aux("x", "10", None)
         .aux("s", "SMTH1(x, 5)", None)
-        .compile()
-        .expect("should compile");
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let graph = causal_graph_with_modules(&db, sync.models["main"].source, sync.project);
 
-    let main_ident: Ident<Canonical> = Ident::new("main");
-    let model = &project.models[&main_ident];
-
-    // After compilation, the parent model should have a Module variable for smth1
-    let has_module = model
-        .variables
+    // The parent model's variable map carries a Module variable for the
+    // smth1 instance the SMTH1 call expanded into.
+    let has_module = graph
+        .variables()
         .values()
         .any(|v| matches!(v, Variable::Module { .. }));
 

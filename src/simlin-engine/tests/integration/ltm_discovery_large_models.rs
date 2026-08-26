@@ -31,13 +31,11 @@
 //! path*: `ltm_finding::discover_loops_with_graph` with the
 //! **element-level** causal graph and populated `ltm_vars` / `dims`,
 //! assembled exactly as `analysis.rs::run_ltm_pipeline` does (the call
-//! site behind `analysis::analyze_model`). It deliberately does NOT use
-//! the `ltm_finding::discover_loops` convenience wrapper: that wrapper
-//! runs on the *variable-level* graph with empty `ltm_vars` / `dims`,
-//! which is a strict minor of the production graph -- a discovery
-//! algorithm made tractable on the variable graph could still be
-//! intractable on the element graph, and a variable-level test would not
-//! catch that.
+//! site behind `analysis::analyze_model`). It deliberately does NOT run on
+//! the *variable-level* graph with empty `ltm_vars` / `dims`, which is a
+//! strict minor of the production graph -- a discovery algorithm made
+//! tractable on the variable graph could still be intractable on the
+//! element graph, and a variable-level test would not catch that.
 //!
 //! ## The 2-step startup guard
 //!
@@ -324,9 +322,8 @@ fn assert_discovery_contract(found: &[ltm_finding::FoundLoop]) {
 ///
 /// Why the element-level path: `analysis::analyze_model` (the production
 /// caller) runs `discover_loops_with_graph` on the element-level graph
-/// with populated `ltm_vars` / `dims`. The `ltm_finding::discover_loops`
-/// convenience wrapper runs on the variable-level graph with empty
-/// metadata -- a strict minor of the production graph -- so a
+/// with populated `ltm_vars` / `dims`. A variable-level graph with empty
+/// metadata is a strict minor of the production graph, so a
 /// variable-level test would not exercise the production element-level
 /// path.
 #[test]

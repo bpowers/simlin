@@ -742,12 +742,11 @@ mod tests {
 
     #[test]
     fn test_dimension_metadata_population() {
-        use crate::common::canonicalize;
         use crate::datamodel::{
             self, Aux as DatamodelAux, Model as DatamodelModel, SimMethod, SimSpecs,
             Variable as DatamodelVariable, Visibility,
         };
-        use crate::project::Project;
+        use crate::test_common::TestProject;
 
         // Create a datamodel project with a named dimension
         let datamodel_project = datamodel::Project {
@@ -796,27 +795,14 @@ mod tests {
             ai_information: None,
         };
 
-        // Convert to engine project
-        let project: Project = datamodel_project.into();
-
-        // Create a Module and compile it
-        let model = project
-            .models
-            .get(&*canonicalize("main"))
-            .expect("main model should exist");
-        let module: super::super::Module = super::super::Module::new(
-            &project,
-            model.clone(),
-            &std::collections::BTreeSet::new(),
-            true,
-        )
-        .expect("Module creation should succeed");
-
-        // Compile the module
-        let compiled = module.compile().expect("Compilation should succeed");
+        // Compile through the production path and read the root module's
+        // bytecode context: the table the VM resolves every `DimId` against.
+        let compiled = TestProject::from_datamodel(datamodel_project)
+            .compile_incremental()
+            .expect("compilation should succeed");
+        let context = &compiled.modules[&compiled.root].context;
 
         // Verify dimension metadata is populated
-        let context = &compiled.context;
 
         // Should have one dimension: "letters" with 5 elements
         assert!(
@@ -872,12 +858,11 @@ mod tests {
 
     #[test]
     fn test_indexed_dimension_metadata() {
-        use crate::common::canonicalize;
         use crate::datamodel::{
             self, Aux as DatamodelAux, Model as DatamodelModel, SimMethod, SimSpecs,
             Variable as DatamodelVariable, Visibility,
         };
-        use crate::project::Project;
+        use crate::test_common::TestProject;
 
         // Create a datamodel project with an indexed dimension
         let datamodel_project = datamodel::Project {
@@ -917,22 +902,10 @@ mod tests {
             ai_information: None,
         };
 
-        let project: Project = datamodel_project.into();
-
-        let model = project
-            .models
-            .get(&*canonicalize("main"))
-            .expect("main model should exist");
-        let module: super::super::Module = super::super::Module::new(
-            &project,
-            model.clone(),
-            &std::collections::BTreeSet::new(),
-            true,
-        )
-        .expect("Module creation should succeed");
-
-        let compiled = module.compile().expect("Compilation should succeed");
-        let context = &compiled.context;
+        let compiled = TestProject::from_datamodel(datamodel_project)
+            .compile_incremental()
+            .expect("compilation should succeed");
+        let context = &compiled.modules[&compiled.root].context;
 
         // Find the "size" dimension (name is canonicalized)
         let size_dim = context.dimensions.iter().find(|dim| {

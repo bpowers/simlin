@@ -217,8 +217,8 @@ impl<MI, E> Variable<MI, E> {
 
     /// The equation errors parsing and lowering recorded on this variable.
     ///
-    /// **This is a live error channel, not residue from the monolithic
-    /// compiler.** `parse_var` writes an equation's parse errors here and
+    /// **This is a live error channel.** `parse_var` writes an equation's
+    /// parse errors here and
     /// `model::lower_variable` appends the errors `lower_ast` raises, because
     /// both produce a `Variable` and have nowhere else to put a failure. The
     /// salsa path READS it: `db::var_fragment::lower_var_fragment` turns each

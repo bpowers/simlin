@@ -27,15 +27,12 @@ use super::{Var, VarSizes};
 /// Everything `Compiler` reads, borrowed for the duration of one emission.
 ///
 /// This is the compiler's *whole* input contract, and there is exactly one
-/// codegen behind it. Two very different callers build one:
+/// codegen behind it, with one caller:
 ///
-/// * [`super::Module::compile`] -- the test-only monolithic whole-model path,
-///   which borrows every field straight off its owned `Module` and then
-///   resolves the emitted symbolic module against its own layout;
-/// * `db::assemble::compile_phase_to_per_var_bytecodes` -- the production
-///   per-variable fragment compiler, which borrows the salsa-cached
-///   project-global dimension context and converted dimensions plus the
-///   variable's own lowered expressions, and keeps the emitted fragment
+/// * `db::assemble::compile_phase_to_per_var_bytecodes` -- the per-variable
+///   fragment compiler, which borrows the salsa-cached project-global
+///   converted dimensions plus the variable's own lowered expressions, and
+///   keeps the emitted fragment
 ///   symbolic until assembly.
 ///
 /// Borrowing rather than owning is the point (GH #964 / #655): the fragment
@@ -1885,9 +1882,8 @@ impl<'module> Compiler<'module> {
             // The flow-runlist invariant/dynamic partition is decided at module
             // assembly (the salsa `assemble_module` path, where the whole
             // root-model runlist is available), NOT here: `Compiler::compile`
-            // runs both per single-variable fragment (split is trivially 0) and
-            // on the test-only monolithic whole-model `Module`. So this is
-            // always 0; the production split is installed by `assemble_module`
+            // runs per single-variable fragment, where the split is trivially
+            // 0. So this is always 0; the split is installed by `assemble_module`
             // on the `SymbolicCompiledModule` it builds from the fragments
             // (GH #712).
             flows_invariant_opcode_len: 0,

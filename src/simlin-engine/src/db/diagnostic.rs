@@ -1027,21 +1027,27 @@ fn fmt_diag_value(v: f64) -> String {
     }
 }
 
-/// Validate the input wiring of each explicit module variable in `model`.
+/// Validate each explicit module variable in `model`: the model it names and
+/// the wiring of its inputs.
 ///
 /// A module reference is `{ src, dst }` where `dst` is the module-qualified
 /// `{module}·{port}` form naming an input of the target model and `src` is a
 /// variable in the enclosing model. `build_module_inputs` SILENTLY DROPS a
 /// reference whose `dst` does not match an existing child input -- the port then
-/// reads its default and the simulation is quietly wrong, with no error. The
-/// legacy monolithic path returned `BadModuleInputDst`/`BadModuleInputSrc` here;
-/// the salsa path dropped the check. Re-add it as a Warning (partial-result
-/// philosophy: a mis-wired input should not block the rest of the model).
+/// reads its default and the simulation is quietly wrong, with no error -- so a
+/// mis-wired input is reported here, as a Warning (partial-result philosophy: it
+/// should not block the rest of the model).
 ///
-/// Validated conservatively to avoid false positives:
+/// A module whose non-empty `model_name` names no project model (a reference to
+/// a deleted model) is an Error (`BadModelName`): the project cannot compile
+/// without that model, and assembly -- the only other place that notices -- runs
+/// on a compile, never on this diagnostic pass, so this is where the refusal is
+/// explained. An EMPTY `model_name` is skipped: it is the normal freshly-drawn
+/// state, and a module the modeller has not pointed anywhere yet is not a
+/// defect to report on every keystroke.
+///
+/// Wiring is validated conservatively to avoid false positives:
 /// - empty placeholder endpoints (the new-row UI pattern) are skipped;
-/// - only an EXISTING target model is checked (an empty / dangling `model_name`
-///   is a separate concern and the empty name is the normal freshly-drawn state);
 /// - a `src` is checked only when it is a bare ident (no `·`) and not an engine
 ///   synthetic (`$⁚…`) -- a qualified cross-module output or temporary is left
 ///   to the equation checker.
@@ -1078,6 +1084,22 @@ pub fn model_module_wiring_diagnostics(db: &dyn Db, model: SourceModel, project:
         let svar = &source_vars[module_name];
         let child_canonical = crate::canonicalize(svar.model_name(db));
         let Some(child_model) = project_models.get(child_canonical.as_ref()) else {
+            if !child_canonical.is_empty() {
+                CompilationDiagnostic(Diagnostic {
+                    model: model_name.clone(),
+                    variable: Some(module_name.clone()),
+                    error: DiagnosticError::Model(Error::new(
+                        crate::common::ErrorKind::Model,
+                        crate::common::ErrorCode::BadModelName,
+                        Some(format!(
+                            "module '{module_name}' references model '{}', which is not in the project",
+                            svar.model_name(db)
+                        )),
+                    )),
+                    severity: DiagnosticSeverity::Error,
+                })
+                .accumulate(db);
+            }
             continue;
         };
         let child_vars = child_model.variables(db);
