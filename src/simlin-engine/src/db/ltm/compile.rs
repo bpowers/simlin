@@ -710,7 +710,7 @@ fn expr_contains_pass1_decomposition_site(expr: &crate::ast::Expr2) -> bool {
 fn lower_ltm_variable(
     db: &dyn Db,
     parsed_variable: &crate::model::VariableStage0,
-    equation_implicits: &[datamodel::Variable],
+    equation_implicits: &[crate::capture::ImplicitVar],
     model: SourceModel,
     project: SourceProject,
 ) -> LoweredLtmVariable {
@@ -776,10 +776,10 @@ fn lower_ltm_variable(
     // Resolve a dep that is an LTM-parse-time implicit helper aux to its
     // datamodel form (modules are scalar nodes in equations; only helper
     // auxes can be arrayed).
-    let find_implicit_dm = |name: &str| -> Option<&datamodel::Variable> {
+    let find_implicit_dm = |name: &str| -> Option<&crate::capture::ImplicitVar> {
         equation_implicits
             .iter()
-            .find(|v| canonicalize(v.get_ident()) == name)
+            .find(|v| canonicalize(v.ident()) == name)
             .or_else(|| {
                 ltm_implicit_info
                     .get(name)
@@ -787,12 +787,7 @@ fn lower_ltm_variable(
                     .map(|meta| &meta.variable)
             })
     };
-    let dm_var_is_arrayed = |v: &datamodel::Variable| {
-        matches!(
-            v.get_equation(),
-            Some(datamodel::Equation::ApplyToAll(..) | datamodel::Equation::Arrayed(..))
-        )
-    };
+    let dm_var_is_arrayed = |v: &crate::capture::ImplicitVar| !v.equation_dims().is_empty();
     // An ARRAYED sibling LTM var referenced as a dep -- today that is the
     // GH #995 freeze helper, a whole-array operand of a vector builtin
     // (`VECTOR SELECT("$⁚ltm⁚freeze⁚…", …)`). The Pass-1 temp decomposition
@@ -834,14 +829,19 @@ fn lower_ltm_variable(
             let dep_parsed =
                 parse_source_variable_with_module_context(db, *dep_sv, project, module_ctx);
             stage0_vars.insert(Ident::new(dep_name), dep_parsed.variable.clone());
-        } else if let Some(implicit_dm) = find_implicit_dm(dep_name) {
+        } else if let Some(implicit_dep) = find_implicit_dm(dep_name) {
             // Nested implicits of an implicit are registered (and compiled)
             // in their own right; here only the dep's own dimensions matter.
-            let mut nested = Vec::new();
-            let dep_ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
-            let dep_parsed = crate::variable::parse_var(&dep_ctx, implicit_dm, &mut nested, |mi| {
-                Ok(Some(mi.clone()))
-            });
+            let dep_parsed = match implicit_dep {
+                crate::capture::ImplicitVar::Capture(capture) => capture.variable_stage0(dim_ctx),
+                crate::capture::ImplicitVar::Synthesized(dm_var) => {
+                    let mut nested = Vec::new();
+                    let dep_ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
+                    crate::variable::parse_var(&dep_ctx, dm_var.as_ref(), &mut nested, |mi| {
+                        Ok(Some(mi.clone()))
+                    })
+                }
+            };
             stage0_vars.insert(Ident::new(dep_name), dep_parsed);
         } else if let Some(ltm_dims) = find_arrayed_ltm_dep(dep_name) {
             // An arrayed sibling LTM var (the GH #995 freeze helper): a
@@ -967,14 +967,10 @@ pub(crate) fn ltm_fragment_input<'db>(
         parsed
             .implicit_vars
             .iter()
-            .find(|v| canonicalize(v.get_ident()) == name)
+            .find(|v| canonicalize(v.ident()) == name)
     };
-    let helper_dims = |helper: &datamodel::Variable| match helper.get_equation() {
-        Some(
-            datamodel::Equation::ApplyToAll(dim_names, _)
-            | datamodel::Equation::Arrayed(dim_names, _, _, _),
-        ) => dimensions_named(dim_names, dim_context),
-        _ => Vec::new(),
+    let helper_dims = |helper: &crate::capture::ImplicitVar| {
+        dimensions_named(helper.equation_dims(), dim_context)
     };
 
     let mut deps: IdentMap<Ident<Canonical>, DepShape> = Default::default();
@@ -995,11 +991,9 @@ pub(crate) fn ltm_fragment_input<'db>(
         let shape = if let Some(sv) = source_vars.get(head) {
             source_dep_shape(db, *sv, project)
         } else if let Some(helper) = parsed_implicit(head) {
-            match helper {
-                datamodel::Variable::Module(dm_module) => {
-                    module_dep_shape(db, project, &dm_module.model_name)
-                }
-                _ => DepShape::var(helper_dims(helper)),
+            match helper.module() {
+                Some(dm_module) => module_dep_shape(db, project, &dm_module.model_name),
+                None => DepShape::var(helper_dims(helper)),
             }
         } else if let Some(meta) = implicit_info.get(head) {
             implicit_dep_shape(db, project, meta)
@@ -1619,19 +1613,32 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
     module_input_names: &[String],
 ) -> Option<FragmentInput<'db>> {
     let implicit_dm_var = &meta.variable;
-    let implicit_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
+    let implicit_name = canonicalize(implicit_dm_var.ident()).into_owned();
     let var_ident: Ident<Canonical> = Ident::new(&implicit_name);
 
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
-    let units_ctx = project_units_context(db, project);
 
-    let mut dummy_implicits = Vec::new();
-    let ctx = crate::variable::ParseContext::new(dim_context, units_ctx);
-    let parsed_implicit =
-        crate::variable::parse_var(&ctx, implicit_dm_var, &mut dummy_implicits, |mi| {
-            Ok(Some(mi.clone()))
-        });
+    // A capture holds its body as an AST subtree; a hoisted module-call
+    // argument still carries equation text. Neither can synthesize a further
+    // generation of helpers -- both bodies are already walked -- and the sink
+    // is shared across the two arms so that stays asserted rather than assumed,
+    // as it is in `db::stages::model_stage0` and `ModelStage0::new_in_project`.
+    let mut nested_implicits = Vec::new();
+    let parsed_implicit = match implicit_dm_var {
+        crate::capture::ImplicitVar::Capture(capture) => capture.variable_stage0(dim_context),
+        crate::capture::ImplicitVar::Synthesized(dm_var) => {
+            let units_ctx = project_units_context(db, project);
+            let ctx = crate::variable::ParseContext::new(dim_context, units_ctx);
+            crate::variable::parse_var(&ctx, dm_var.as_ref(), &mut nested_implicits, |mi| {
+                Ok(Some(mi.clone()))
+            })
+        }
+    };
+    debug_assert!(
+        nested_implicits.is_empty(),
+        "an implicit helper must not synthesize further implicit helpers"
+    );
     if parsed_implicit
         .equation_errors()
         .is_some_and(|e| !e.is_empty())
@@ -1646,9 +1653,7 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
     let lowered = if meta.is_module {
         // A module-typed helper is its wiring (a module has no equation); its
         // dependencies are the sources its inputs read.
-        let datamodel::Variable::Module(dm_module) = implicit_dm_var else {
-            return None;
-        };
+        let dm_module = implicit_dm_var.module()?;
         deps.insert(
             var_ident.clone(),
             module_dep_shape(db, project, &dm_module.model_name),
@@ -1699,7 +1704,7 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
             variable: lowered,
             dep_idents,
             referenced_tables,
-        } = lower_ltm_variable(db, &parsed_implicit, &dummy_implicits, model, project);
+        } = lower_ltm_variable(db, &parsed_implicit, &nested_implicits, model, project);
         // An arrayed capture helper occupies one slot per element.
         deps.insert(
             var_ident,
@@ -1797,7 +1802,7 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
 
-    let implicit_name = canonicalize(meta.variable.get_ident()).into_owned();
+    let implicit_name = canonicalize(meta.variable.ident()).into_owned();
 
     // GH #741: the same test-scoped forced failure as
     // `compile_ltm_synthetic_fragment` (GH #547), extended to the implicit-

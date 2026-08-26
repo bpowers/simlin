@@ -14,7 +14,6 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::common::{Canonical, Ident};
-use crate::datamodel;
 use crate::ltm::strip_subscript;
 
 use crate::db::{
@@ -91,7 +90,7 @@ pub(super) fn find_model_output_ports(
             let parsed =
                 parse_source_variable_with_module_context(db, *source_var, project, module_ctx);
             for implicit_dm_var in &parsed.implicit_vars {
-                if let datamodel::Variable::Module(_) = implicit_dm_var {
+                if implicit_dm_var.is_module() {
                     continue;
                 }
                 let deps =

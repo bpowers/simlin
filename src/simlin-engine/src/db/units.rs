@@ -676,7 +676,7 @@ fn check_conveyor_param_units(
     let mut aug_ms0 = model_stage0(db, model, project).clone();
     let synth_ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
     for dm_var in &synth_dm_vars {
-        let mut dummy: Vec<datamodel::Variable> = Vec::new();
+        let mut dummy: Vec<crate::capture::ImplicitVar> = Vec::new();
         let vs0 =
             crate::variable::parse_var(&synth_ctx, dm_var, &mut dummy, |mi| Ok(Some(mi.clone())));
         aug_ms0.variables.insert(Ident::new(vs0.ident()), vs0);

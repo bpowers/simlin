@@ -1418,6 +1418,8 @@ pub fn compile_project_incremental(
 #[cfg(test)]
 mod assemble_tests;
 #[cfg(test)]
+mod capture_tests;
+#[cfg(test)]
 mod combined_fragment_proptest;
 #[cfg(test)]
 mod combined_fragment_tests;

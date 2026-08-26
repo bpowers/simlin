@@ -842,7 +842,7 @@ pub struct LtmImplicitVarMeta {
     /// re-parsing the parent LTM equation -- which previously happened 2-3
     /// times per synthetic variable and was a measurable fraction of LTM
     /// compile time on large models (GH #655).
-    pub variable: datamodel::Variable,
+    pub variable: crate::capture::ImplicitVar,
 }
 
 /// Cached implicit variable info for all LTM synthetic variables.
@@ -906,15 +906,11 @@ pub fn model_ltm_implicit_var_info(
 
         let project_models = project.models(db);
 
-        for implicit_dm_var in parsed.implicit_vars.iter() {
-            let im_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
-            let is_module = matches!(implicit_dm_var, datamodel::Variable::Module(_));
-            let is_stock = matches!(implicit_dm_var, datamodel::Variable::Stock(_));
-            let model_name = if let datamodel::Variable::Module(m) = implicit_dm_var {
-                Some(m.model_name.clone())
-            } else {
-                None
-            };
+        for implicit_var in parsed.implicit_vars.iter() {
+            let im_name = canonicalize(implicit_var.ident()).into_owned();
+            let is_module = implicit_var.is_module();
+            let is_stock = implicit_var.is_stock();
+            let model_name = implicit_var.module().map(|m| m.model_name.clone());
             let size = if is_module {
                 model_name
                     .as_deref()
@@ -935,7 +931,7 @@ pub fn model_ltm_implicit_var_info(
                 // as scalar.
                 ltm_implicit_helper_size(
                     crate::db::project_dimensions_context(db, project),
-                    implicit_dm_var,
+                    implicit_var,
                 )
             };
 
@@ -947,7 +943,7 @@ pub fn model_ltm_implicit_var_info(
                     is_module,
                     model_name,
                     size,
-                    variable: implicit_dm_var.clone(),
+                    variable: implicit_var.clone(),
                 },
             );
         }
@@ -956,27 +952,22 @@ pub fn model_ltm_implicit_var_info(
     result
 }
 
-/// Slot count of a non-module LTM implicit helper: 1 for a scalar helper
-/// aux, product(dim lengths) for an arrayed (`Equation::ApplyToAll` /
-/// `Equation::Arrayed`) capture helper. An unknown dimension name degrades
-/// to 1 per axis (defensive -- the helper's own fragment compile rejects it
-/// loudly).
+/// Slot count of a non-module LTM implicit helper: 1 for a scalar one,
+/// product(dim lengths) for an arrayed capture. An unknown dimension name
+/// degrades to 1 per axis (defensive -- the helper's own fragment compile
+/// rejects it loudly).
 fn ltm_implicit_helper_size(
     dim_ctx: &crate::dimensions::DimensionsContext,
-    var: &datamodel::Variable,
+    var: &crate::capture::ImplicitVar,
 ) -> usize {
-    match var.get_equation() {
-        Some(datamodel::Equation::ApplyToAll(dim_names, _))
-        | Some(datamodel::Equation::Arrayed(dim_names, _, _, _)) => dim_names
-            .iter()
-            .map(|n| {
-                let canonical = crate::common::CanonicalDimensionName::from_raw(n);
-                dim_ctx.get(&canonical).map(|d| d.len()).unwrap_or(1)
-            })
-            .product::<usize>()
-            .max(1),
-        _ => 1,
-    }
+    var.equation_dims()
+        .iter()
+        .map(|n| {
+            let canonical = crate::common::CanonicalDimensionName::from_raw(n);
+            dim_ctx.get(&canonical).map(|d| d.len()).unwrap_or(1)
+        })
+        .product::<usize>()
+        .max(1)
 }
 
 /// Name -> first-occurrence-index lookup into [`model_ltm_variables`]'s

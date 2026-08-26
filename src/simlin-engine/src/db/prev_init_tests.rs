@@ -141,7 +141,7 @@ fn test_previous_qualified_element_subscript_no_helper() {
         compat: datamodel::Compat::default(),
     });
     let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
+    let mut implicit_vars: Vec<crate::capture::ImplicitVar> = Vec::new();
     let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
         crate::variable::parse_var(
             &crate::variable::ParseContext::new(
@@ -162,7 +162,7 @@ fn test_previous_qualified_element_subscript_no_helper() {
         "qualified-element PREVIOUS must not synthesize helper vars; got: {:?}",
         implicit_vars
             .iter()
-            .map(|v| v.get_ident().to_string())
+            .map(|v| v.ident().to_string())
             .collect::<Vec<_>>()
     );
 
@@ -342,7 +342,7 @@ fn test_init_qualified_element_subscript_no_helper() {
         compat: datamodel::Compat::default(),
     });
     let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
+    let mut implicit_vars: Vec<crate::capture::ImplicitVar> = Vec::new();
     let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
         crate::variable::parse_var(
             &crate::variable::ParseContext::new(
@@ -363,7 +363,7 @@ fn test_init_qualified_element_subscript_no_helper() {
         "qualified-element INIT must not synthesize helper vars; got: {:?}",
         implicit_vars
             .iter()
-            .map(|v| v.get_ident().to_string())
+            .map(|v| v.ident().to_string())
             .collect::<Vec<_>>()
     );
 
@@ -430,7 +430,7 @@ fn test_previous_bare_element_no_helper_with_var_names() {
     // bare element index is static: no helper.
     let var_names: HashSet<Ident<Canonical>> =
         [Ident::new("base_val"), Ident::new("lagged")].into();
-    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
+    let mut implicit_vars: Vec<crate::capture::ImplicitVar> = Vec::new();
     let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
         crate::variable::parse_var(
             &crate::variable::ParseContext {
@@ -454,7 +454,7 @@ fn test_previous_bare_element_no_helper_with_var_names() {
         "non-shadowed bare-element PREVIOUS must not synthesize helper vars; got: {:?}",
         implicit_vars
             .iter()
-            .map(|v| v.get_ident().to_string())
+            .map(|v| v.ident().to_string())
             .collect::<Vec<_>>()
     );
 
@@ -466,7 +466,7 @@ fn test_previous_bare_element_no_helper_with_var_names() {
         Ident::new("b2"),
     ]
     .into();
-    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
+    let mut implicit_vars: Vec<crate::capture::ImplicitVar> = Vec::new();
     let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
         crate::variable::parse_var(
             &crate::variable::ParseContext {
@@ -487,13 +487,13 @@ fn test_previous_bare_element_no_helper_with_var_names() {
         "an element name shadowed by a variable must keep the helper-aux path; got: {:?}",
         implicit_vars
             .iter()
-            .map(|v| v.get_ident().to_string())
+            .map(|v| v.ident().to_string())
             .collect::<Vec<_>>()
     );
 
     // Without the variable-name set (the user-equation parse path), the
     // conservative helper path is also kept.
-    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
+    let mut implicit_vars: Vec<crate::capture::ImplicitVar> = Vec::new();
     let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
         crate::variable::parse_var(
             &crate::variable::ParseContext::new(

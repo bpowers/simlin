@@ -389,7 +389,7 @@ impl ModelStage0 {
         units_ctx: &Context,
         implicit: bool,
     ) -> Self {
-        let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
+        let mut implicit_vars: Vec<crate::capture::ImplicitVar> = Vec::new();
 
         // Determine which variable names should force PREVIOUS to synthesize
         // a scalar temp arg rather than reading a flat slot directly.
@@ -446,12 +446,18 @@ impl ModelStage0 {
 
         {
             // FIXME: this is an unfortunate API choice
-            let mut dummy_implicit_vars: Vec<datamodel::Variable> = Vec::new();
+            let mut dummy_implicit_vars: Vec<crate::capture::ImplicitVar> = Vec::new();
             let implicit_ctx = ParseContext::new(&dimensions_ctx, units_ctx);
-            variable_list.extend(implicit_vars.into_iter().map(|x_var| {
-                parse_var(&implicit_ctx, &x_var, &mut dummy_implicit_vars, |mi| {
-                    Ok(Some(mi.clone()))
-                })
+            variable_list.extend(implicit_vars.into_iter().map(|iv| match iv {
+                crate::capture::ImplicitVar::Capture(capture) => {
+                    capture.variable_stage0(&dimensions_ctx)
+                }
+                crate::capture::ImplicitVar::Synthesized(x_var) => parse_var(
+                    &implicit_ctx,
+                    x_var.as_ref(),
+                    &mut dummy_implicit_vars,
+                    |mi| Ok(Some(mi.clone())),
+                ),
             }));
             assert_eq!(0, dummy_implicit_vars.len());
         }
@@ -559,7 +565,7 @@ fn test_module_parse() {
         ],
     );
 
-    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
+    let mut implicit_vars: Vec<crate::capture::ImplicitVar> = Vec::new();
     let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
 
     let owned_models: HashMap<Ident<Canonical>, ModelStage0> = vec![

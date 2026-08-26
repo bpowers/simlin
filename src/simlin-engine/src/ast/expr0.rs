@@ -113,6 +113,20 @@ impl IndexExpr0 {
         }
     }
 
+    /// The [`Expr0::eq_ignoring_loc`] twin for one subscript index.
+    pub(crate) fn eq_ignoring_loc(&self, other: &IndexExpr0) -> bool {
+        match (self, other) {
+            (IndexExpr0::Wildcard(_), IndexExpr0::Wildcard(_)) => true,
+            (IndexExpr0::StarRange(l, _), IndexExpr0::StarRange(r, _)) => l == r,
+            (IndexExpr0::Range(ll, lr, _), IndexExpr0::Range(rl, rr, _)) => {
+                ll.eq_ignoring_loc(rl) && lr.eq_ignoring_loc(rr)
+            }
+            (IndexExpr0::DimPosition(l, _), IndexExpr0::DimPosition(r, _)) => l == r,
+            (IndexExpr0::Expr(l), IndexExpr0::Expr(r)) => l.eq_ignoring_loc(r),
+            _ => false,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn strip_loc(self) -> Self {
         let loc = Loc::default();
@@ -272,6 +286,46 @@ impl Expr0 {
                 Box::new(f.strip_loc()),
                 loc,
             ),
+        }
+    }
+
+    /// Do these two expressions say the same thing, ignoring where they were
+    /// written?
+    ///
+    /// `PartialEq` compares source positions, and it must: salsa uses it to
+    /// decide whether a re-parse changed anything, and an expression that moved
+    /// changes every diagnostic span derived from it. But identity of a
+    /// SYNTHESIZED helper is a different question -- two helpers claiming one
+    /// name are the same helper when they compute the same thing, wherever the
+    /// two copies came from. The apply-to-all expansion walks one cloned body
+    /// per element, and the dt and initial passes walk one equation twice, so
+    /// that question is asked on every model with a capture in an arrayed
+    /// equation. See [`crate::capture::Capture::same_definition`].
+    pub(crate) fn eq_ignoring_loc(&self, other: &Expr0) -> bool {
+        match (self, other) {
+            (Expr0::Const(ls, ln, _), Expr0::Const(rs, rn, _)) => ls == rs && ln == rn,
+            (Expr0::Var(l, _), Expr0::Var(r, _)) => l == r,
+            (
+                Expr0::App(UntypedBuiltinFn(lf, largs), _),
+                Expr0::App(UntypedBuiltinFn(rf, rargs), _),
+            ) => {
+                lf == rf
+                    && largs.len() == rargs.len()
+                    && largs.iter().zip(rargs).all(|(l, r)| l.eq_ignoring_loc(r))
+            }
+            (Expr0::Subscript(lid, lidx, _), Expr0::Subscript(rid, ridx, _)) => {
+                lid == rid
+                    && lidx.len() == ridx.len()
+                    && lidx.iter().zip(ridx).all(|(l, r)| l.eq_ignoring_loc(r))
+            }
+            (Expr0::Op1(lop, l, _), Expr0::Op1(rop, r, _)) => lop == rop && l.eq_ignoring_loc(r),
+            (Expr0::Op2(lop, ll, lr, _), Expr0::Op2(rop, rl, rr, _)) => {
+                lop == rop && ll.eq_ignoring_loc(rl) && lr.eq_ignoring_loc(rr)
+            }
+            (Expr0::If(lc, lt, lf, _), Expr0::If(rc, rt, rf, _)) => {
+                lc.eq_ignoring_loc(rc) && lt.eq_ignoring_loc(rt) && lf.eq_ignoring_loc(rf)
+            }
+            _ => false,
         }
     }
 

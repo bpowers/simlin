@@ -35,7 +35,6 @@ use std::collections::{BTreeSet, HashMap};
 use crate::canonicalize;
 use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::fragment::{DepShape, FragmentInput};
-use crate::datamodel;
 use crate::db::{
     Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ImplicitVarMeta, ModuleInputSet,
     SourceModel, SourceProject, SourceVariable, SourceVariableKind, build_module_inputs,
@@ -499,8 +498,8 @@ pub(crate) fn explicit_fragment_input<'db>(
     // The implicit module instances this variable's parse synthesized
     // (`INIT(x)` creates `$⁚x⁚0⁚init`, whose output the rewritten equation
     // reads as `$⁚x⁚0⁚init·output`): the read relocates through the instance.
-    for implicit_dm_var in &parsed.implicit_vars {
-        if let datamodel::Variable::Module(dm_module) = implicit_dm_var {
+    for implicit_var in &parsed.implicit_vars {
+        if let Some(dm_module) = implicit_var.module() {
             dep_shapes
                 .entry(Ident::new(&dm_module.ident))
                 .or_insert_with(|| module_dep_shape(db, project, &dm_module.model_name));

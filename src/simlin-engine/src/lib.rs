@@ -32,6 +32,7 @@ mod builtin_signature_tests;
 pub mod builtins;
 mod builtins_visitor;
 mod bytecode;
+mod capture;
 pub mod common;
 pub mod compat;
 mod compiler;

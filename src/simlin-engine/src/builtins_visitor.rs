@@ -9,6 +9,7 @@ use indexmap::IndexMap;
 
 use crate::ast::{Ast, BinaryOp, Expr0, IndexExpr0, Literal, print_eqn};
 use crate::builtins::{UntypedBuiltinFn, is_builtin_fn};
+use crate::capture::{Capture, CaptureKind, ImplicitVar, synthetic_ident};
 use crate::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, EquationError, Ident, RawIdent,
     canonicalize,
@@ -213,23 +214,23 @@ fn elements_in_stable_order(
 }
 
 /// Collapse entries that repeat an earlier entry's identifier, preserving
-/// first-occurrence order -- but ONLY when the duplicates are byte-identical.
+/// first-occurrence order -- but ONLY when the duplicates define the same
+/// thing (`ImplicitVar::same_definition`).
 ///
 /// The per-element apply-to-all expansion runs a fresh `BuiltinVisitor` per
 /// element and unions every visitor's synthesized helpers. Helper identity by
 /// path:
 ///
-/// * A *scalar* per-element helper, and the arrayed helper synthesized in the
+/// * A *scalar* per-element capture, and the arrayed capture synthesized in the
 ///   `Ast::Arrayed` per-element expansion, both carry the element in their name
 ///   (`...⁚arg0⁚north`), so the union already holds N distinct entries -- one
 ///   per slot. No collapsing happens for them.
-/// * The arrayed `PREVIOUS`/`INIT` helper synthesized in the `Ast::ApplyToAll`
+/// * The arrayed `PREVIOUS`/`INIT` capture synthesized in the `Ast::ApplyToAll`
 ///   per-element expansion (GH #541) deliberately omits the element suffix:
-///   every slot walks the *same cloned* body, so all N copies are
-///   byte-identical `Equation::ApplyToAll` variables. The union collapses them
-///   to one.
+///   every slot walks the *same cloned* body, so all N copies define the same
+///   value. The union collapses them to one.
 ///
-/// An ident collision whose two variables are NOT byte-identical is a compiler
+/// An ident collision whose two helpers define DIFFERENT things is a compiler
 /// bug -- exactly the silent corruption a suffix-less helper caused for the
 /// `Ast::Arrayed` path (PR #668), where two slots' different bodies shared one
 /// name and a later slot read the earlier slot's helper. Such a collision is
@@ -237,15 +238,15 @@ fn elements_in_stable_order(
 /// being silently kept-first, so any future regression of this class surfaces
 /// rather than corrupting results.
 fn dedup_vars_by_ident(
-    vars: Vec<datamodel::Variable>,
-) -> std::result::Result<Vec<datamodel::Variable>, EquationError> {
-    let mut seen: HashMap<Ident<Canonical>, datamodel::Variable> = HashMap::new();
-    let mut deduped: Vec<datamodel::Variable> = Vec::with_capacity(vars.len());
+    vars: Vec<ImplicitVar>,
+) -> std::result::Result<Vec<ImplicitVar>, EquationError> {
+    let mut seen: HashMap<Ident<Canonical>, ImplicitVar> = HashMap::new();
+    let mut deduped: Vec<ImplicitVar> = Vec::with_capacity(vars.len());
     for v in vars {
-        let ident = Ident::new(v.get_ident());
+        let ident = Ident::new(v.ident());
         match seen.get(&ident) {
-            Some(existing) if existing == &v => {
-                // Byte-identical duplicate (the `Ast::ApplyToAll` suffix-less
+            Some(existing) if existing.same_definition(&v) => {
+                // Same-definition duplicate (the `Ast::ApplyToAll` suffix-less
                 // arrayed helper): drop it, keeping the first occurrence.
             }
             Some(_) => {
@@ -269,11 +270,13 @@ fn dedup_vars_by_ident(
 
 pub struct BuiltinVisitor<'a> {
     variable_name: &'a str,
-    /// Modules synthesized during the current walk (e.g., SMOOTH, DELAY
-    /// expansions). These are created using the same
-    /// `is_stdlib_module_function` classification rule, extending the base
-    /// set from `collect_module_idents()` at runtime so that nested references
-    /// (like `PREVIOUS(SMOOTH(...))`) correctly synthesize scalar helper args.
+    /// Every helper synthesized during the current walk: `PREVIOUS`/`INIT`
+    /// captures, plus the module instances a stdlib or macro call expands into
+    /// and the auxes their non-`Var` arguments are hoisted into. The modules
+    /// are created using the same `is_stdlib_module_function` classification
+    /// rule, extending the base set from `collect_module_idents()` at runtime
+    /// so that nested references (like `PREVIOUS(SMOOTH(...))`) correctly
+    /// capture.
     ///
     /// Insertion-ordered, and that is load-bearing rather than incidental
     /// (GH #1002). Every producer of `ParsedVariableResult::implicit_vars`
@@ -290,7 +293,7 @@ pub struct BuiltinVisitor<'a> {
     /// `VariableDeps::implicit_vars` -- have derived `PartialEq`, so an
     /// unstable order still defeats backdating and makes the compiled artifact
     /// irreproducible (the GH #595 class).
-    vars: IndexMap<Ident<Canonical>, datamodel::Variable>,
+    vars: IndexMap<Ident<Canonical>, ImplicitVar>,
     n: usize,
     self_allowed: bool,
     /// Full dimension info for A2A context (used to identify indexed vs named dimensions)
@@ -347,17 +350,17 @@ pub struct BuiltinVisitor<'a> {
     /// equations, even though they share `variable_name` and each fresh visitor
     /// restarts `n` at 0.
     ///
-    /// This selects whether the GH #541 arrayed `PREVIOUS`/`INIT` helper
+    /// This selects whether the GH #541 arrayed `PREVIOUS`/`INIT` capture
     /// (`make_temp_arg`'s arrayed branch) carries the active element in its
     /// name. In the `Ast::ApplyToAll` per-element expansion every slot walks the
-    /// SAME cloned body, so the suffix-less helper `$⁚{var}⁚{n}⁚arg0` is
-    /// byte-identical across slots and `dedup_vars_by_ident` correctly collapses
-    /// them to one. In the `Ast::Arrayed` per-element expansion the bodies
-    /// differ per slot, so a suffix-less helper would mint the SAME id for
-    /// DIFFERENT `Equation::ApplyToAll` bodies -- a silent collision that made a
-    /// later slot read an earlier slot's helper (PR #668). When this flag is
-    /// set, the arrayed helper appends the slot's element suffix (like the
-    /// scalar helpers always have), so distinct slots never collide. Set ONLY by
+    /// SAME cloned body, so the suffix-less capture `$⁚{var}⁚{n}⁚arg0` defines
+    /// the same value in every slot and `dedup_vars_by_ident` correctly
+    /// collapses them to one. In the `Ast::Arrayed` per-element expansion the
+    /// bodies differ per slot, so a suffix-less capture would mint the SAME id
+    /// for DIFFERENT bodies -- a silent collision that made a later slot read an
+    /// earlier slot's capture (PR #668). When this flag is set, the arrayed
+    /// capture appends the slot's element suffix (like the scalar captures
+    /// always have), so distinct slots never collide. Set ONLY by
     /// the `Ast::Arrayed` branch of `instantiate_implicit_modules`; NOT by its
     /// `default_expr` visitor (which uses `::new`, has no `active_subscript`, and
     /// so never reaches the arrayed-helper branch).
@@ -484,10 +487,7 @@ impl<'a> BuiltinVisitor<'a> {
     /// the parent model (`module_idents`) or modules synthesized in this pass.
     fn is_known_module_ident(&self, ident: &Ident<Canonical>) -> bool {
         self.module_idents.is_some_and(|ids| ids.contains(ident))
-            || self
-                .vars
-                .get(ident)
-                .is_some_and(|var| matches!(var, datamodel::Variable::Module(_)))
+            || self.vars.get(ident).is_some_and(ImplicitVar::is_module)
     }
 
     /// PREVIOUS/INIT opcode routing only applies to direct scalar variables.
@@ -874,32 +874,30 @@ impl<'a> BuiltinVisitor<'a> {
         }
     }
 
-    /// Synthesize the helper aux that captures an expression `PREVIOUS`/`INIT`
-    /// argument and return the reference expression the caller substitutes for
-    /// the argument.
+    /// Hoist a `PREVIOUS`/`INIT` argument into a [`Capture`] and return the
+    /// reference expression the caller substitutes for the argument.
     ///
     /// Outside A2A context (`active_subscript == None`), or when the captured
-    /// argument carries no bare variable reference, the helper is a scalar aux
-    /// holding the (dimension-substituted) argument and the reference is a bare
-    /// `Var` -- unchanged from the original behavior.
+    /// argument carries no bare variable reference, the capture is scalar: it
+    /// holds the (dimension-substituted) argument and the reference is a bare
+    /// `Var`.
     ///
     /// In A2A context, when the argument contains a bare variable reference
     /// (`arg_has_bare_var_ref`) AND no subscript at all (`arg_has_subscript`),
-    /// the helper is instead an *arrayed* aux (`Equation::ApplyToAll` over the
-    /// active dimensions) holding the argument *without* per-element
-    /// substitution, so a bare arrayed name keeps its array shape (GH #541). The
-    /// returned reference subscripts that helper by the active element
-    /// (`helper[<element>]`), a static per-element access the caller's outer
-    /// `PREVIOUS`/`INIT` then compiles to a fixed slot. The arrayed helper's
-    /// name carries NO element suffix, so every element of the enclosing
-    /// apply-to-all produces the identical `Equation::ApplyToAll` helper, which
+    /// the capture is instead *arrayed* -- it applies over the active
+    /// dimensions and holds the argument *without* per-element substitution, so
+    /// a bare arrayed name keeps its array shape (GH #541). The returned
+    /// reference subscripts it by the active element (`capture[<element>]`), a
+    /// static per-element access the caller's outer `PREVIOUS`/`INIT` then
+    /// compiles to a fixed slot. Its name carries NO element suffix, so every
+    /// element of the enclosing apply-to-all produces the same capture, which
     /// `instantiate_implicit_modules` deduplicates into one.
     ///
-    /// Any subscripted arg takes the OLD scalar path instead (see
+    /// Any subscripted arg takes the scalar path instead (see
     /// `arg_has_subscript`): `substitute_dimension_refs` translates each
-    /// subscript per element, which is the proven pre-#541 behavior and avoids
-    /// the arrayed helper's subscript-interaction bugs (the C-LEARN regression).
-    fn make_temp_arg(&mut self, arg: Expr0) -> Expr0 {
+    /// subscript per element, which avoids the arrayed capture's
+    /// subscript-interaction bugs (the C-LEARN regression).
+    fn make_temp_arg(&mut self, kind: CaptureKind, arg: Expr0) -> Expr0 {
         let loc = crate::builtins::Loc::default();
 
         // The active per-element subscript, cloned up front so the helper-
@@ -910,50 +908,36 @@ impl<'a> BuiltinVisitor<'a> {
             && self.arg_has_bare_var_ref(&arg)
             && !self.arg_has_subscript(&arg)
         {
-            // Arrayed helper holding the *un-substituted* argument so bare
+            // Arrayed capture holding the *un-substituted* argument so bare
             // arrayed names stay arrayed and a subscripted reference (`arr[Dim]`)
-            // broadcasts over the helper's own dimensions instead of being
+            // broadcasts over the capture's own dimensions instead of being
             // frozen to one element.
             //
             // The name omits the element suffix in the `Ast::ApplyToAll`
             // per-element expansion (every slot walks the same cloned body, so
-            // the suffix-less helper is byte-identical and `dedup_vars_by_ident`
-            // collapses the N copies into one). But in the `Ast::Arrayed`
-            // per-element expansion (`per_element_equation`) each slot has its
-            // OWN body, so a suffix-less id would mint the same name for
-            // different bodies -- a silent collision (PR #668). There the name
-            // carries the slot's element suffix, exactly like the scalar
-            // helpers, so distinct slots get distinct helpers.
+            // every slot's capture defines the same value and
+            // `dedup_vars_by_ident` collapses the N copies into one). But in the
+            // `Ast::Arrayed` per-element expansion (`per_element_equation`) each
+            // slot has its OWN body, so a suffix-less id would mint the same
+            // name for different bodies -- a silent collision (PR #668). There
+            // the name carries the slot's element suffix, exactly like the
+            // scalar captures, so distinct slots get distinct captures.
             let subscript_suffix = self.subscript_suffix();
-            let id = if self.per_element_equation && !subscript_suffix.is_empty() {
-                format!(
-                    "$⁚{}⁚{}⁚arg0⁚{}",
-                    self.variable_name, self.n, subscript_suffix
-                )
-            } else {
-                format!("$⁚{}⁚{}⁚arg0", self.variable_name, self.n)
-            };
-            // The helper aux's `Equation::ApplyToAll` dims carry the active
-            // (canonical) dimension names; `variable::get_dimensions` resolves
-            // them canonically against the project dimensions, so they match a
-            // dimension declared with original casing/spacing.
+            let suffix = (self.per_element_equation && !subscript_suffix.is_empty())
+                .then_some(subscript_suffix);
+            // The capture's dims carry the active (canonical) dimension names;
+            // `variable::get_dimensions` resolves them canonically against the
+            // project dimensions, so they match a dimension declared with
+            // original casing/spacing.
             let dims: Vec<String> = self
                 .dimension_names
                 .iter()
                 .map(|d| d.as_str().to_string())
                 .collect();
-            let eqn = print_eqn(&arg);
-            let x_var = datamodel::Variable::Aux(datamodel::Aux {
-                ident: id.clone(),
-                equation: datamodel::Equation::ApplyToAll(dims, eqn),
-                documentation: "".to_string(),
-                units: None,
-                gf: None,
-                ai_state: None,
-                uid: None,
-                compat: datamodel::Compat::default(),
-            });
-            self.vars.insert(Ident::new(&id), x_var);
+            let capture = Capture::new(self.variable_name, self.n, kind, arg, suffix, dims);
+            let id = capture.ident().to_string();
+            self.vars
+                .insert(Ident::new(&id), ImplicitVar::Capture(capture));
             self.n += 1;
 
             // Reference the helper at the active element: one qualified
@@ -978,26 +962,18 @@ impl<'a> BuiltinVisitor<'a> {
             arg
         };
         let subscript_suffix = self.subscript_suffix();
-        let id = if subscript_suffix.is_empty() {
-            format!("$⁚{}⁚{}⁚arg0", self.variable_name, self.n)
-        } else {
-            format!(
-                "$⁚{}⁚{}⁚arg0⁚{}",
-                self.variable_name, self.n, subscript_suffix
-            )
-        };
-        let eqn = print_eqn(&transformed_arg);
-        let x_var = datamodel::Variable::Aux(datamodel::Aux {
-            ident: id.clone(),
-            equation: datamodel::Equation::Scalar(eqn),
-            documentation: "".to_string(),
-            units: None,
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: datamodel::Compat::default(),
-        });
-        self.vars.insert(Ident::new(&id), x_var);
+        let suffix = (!subscript_suffix.is_empty()).then_some(subscript_suffix);
+        let capture = Capture::new(
+            self.variable_name,
+            self.n,
+            kind,
+            transformed_arg,
+            suffix,
+            Vec::new(),
+        );
+        let id = capture.ident().to_string();
+        self.vars
+            .insert(Ident::new(&id), ImplicitVar::Capture(capture));
         self.n += 1;
         Expr0::Var(RawIdent::new_from_str(&id), loc)
     }
@@ -1064,14 +1040,12 @@ impl<'a> BuiltinVisitor<'a> {
 
         // In A2A context, add subscript suffix to module name for uniqueness
         let subscript_suffix = self.subscript_suffix();
-        let module_name = if subscript_suffix.is_empty() {
-            format!("$⁚{}⁚{}⁚{}", self.variable_name, self.n, func)
-        } else {
-            format!(
-                "$⁚{}⁚{}⁚{}⁚{}",
-                self.variable_name, self.n, func, subscript_suffix
-            )
-        };
+        let module_name = synthetic_ident(
+            self.variable_name,
+            self.n,
+            func,
+            Some(subscript_suffix.as_str()),
+        );
 
         let ident_args = args.into_iter().enumerate().map(|(i, arg)| {
             if let Var(id, _loc) = arg {
@@ -1091,14 +1065,12 @@ impl<'a> BuiltinVisitor<'a> {
                     arg
                 };
 
-                let id = if subscript_suffix.is_empty() {
-                    format!("$⁚{}⁚{}⁚arg{}", self.variable_name, self.n, i)
-                } else {
-                    format!(
-                        "$⁚{}⁚{}⁚arg{}⁚{}",
-                        self.variable_name, self.n, i, subscript_suffix
-                    )
-                };
+                let id = synthetic_ident(
+                    self.variable_name,
+                    self.n,
+                    &format!("arg{i}"),
+                    Some(subscript_suffix.as_str()),
+                );
                 let eqn = print_eqn(&transformed_arg);
                 let x_var = datamodel::Variable::Aux(datamodel::Aux {
                     ident: id.clone(),
@@ -1110,7 +1082,8 @@ impl<'a> BuiltinVisitor<'a> {
                     uid: None,
                     compat: datamodel::Compat::default(),
                 });
-                self.vars.insert(Ident::new(&id), x_var);
+                self.vars
+                    .insert(Ident::new(&id), ImplicitVar::Synthesized(Box::new(x_var)));
                 id
             }
         });
@@ -1142,7 +1115,10 @@ impl<'a> BuiltinVisitor<'a> {
         // `·output` used (the already-canonical compile-time AST separator);
         // `primary_output` is "output" for stdlib, so stdlib stays identical.
         let module_output_name = format!("{}\u{b7}{}", module_name, descriptor.primary_output);
-        self.vars.insert(Ident::new(&module_name), x_module);
+        self.vars.insert(
+            Ident::new(&module_name),
+            ImplicitVar::Synthesized(Box::new(x_module)),
+        );
 
         self.n += 1;
         Ok(Var(RawIdent::new_from_str(&module_output_name), loc))
@@ -1313,11 +1289,16 @@ impl<'a> BuiltinVisitor<'a> {
                         self.snapshot_arg(&arg0).access() == SnapshotAccess::Capture;
                     let arg0 = if needs_temp_arg {
                         // `make_temp_arg` returns the reference expression for
-                        // the synthesized helper: a bare `Var` for a scalar
-                        // helper, or a subscripted `helper[<element>]` access
-                        // for the arrayed helper it synthesizes when the arg
+                        // the synthesized capture: a bare `Var` for a scalar
+                        // capture, or a subscripted `capture[<element>]` access
+                        // for the arrayed capture it synthesizes when the arg
                         // carries a bare arrayed reference (GH #541).
-                        self.make_temp_arg(arg0)
+                        let kind = if is_prev_routing {
+                            CaptureKind::Previous
+                        } else {
+                            CaptureKind::Init
+                        };
+                        self.make_temp_arg(kind, arg0)
                     } else {
                         arg0
                     };
@@ -1410,7 +1391,7 @@ pub fn instantiate_implicit_modules(
     model_var_names: Option<&HashSet<Ident<Canonical>>>,
     macro_registry: &MacroRegistry,
     enclosing_model: Option<&str>,
-) -> std::result::Result<(Ast<Expr0>, Vec<datamodel::Variable>), EquationError> {
+) -> std::result::Result<(Ast<Expr0>, Vec<ImplicitVar>), EquationError> {
     match ast {
         Ast::Scalar(ast) => {
             let mut builtin_visitor = BuiltinVisitor::new(variable_name)
@@ -1579,37 +1560,120 @@ mod tests {
         })
     }
 
-    /// `dedup_vars_by_ident` collapses byte-identical duplicates (the
-    /// `Ast::ApplyToAll` suffix-less arrayed helper) but keeps distinct idents.
-    #[test]
-    fn dedup_vars_collapses_identical_keeps_distinct() {
-        let vars = vec![
-            aux("h", "previous(a, 0)"),
-            aux("h", "previous(a, 0)"), // byte-identical duplicate
-            aux("g", "previous(b, 0)"),
-        ];
-        let out = dedup_vars_by_ident(vars).expect("identical duplicate must collapse");
-        assert_eq!(out.len(), 2, "identical 'h' collapses; 'g' stays");
-        assert_eq!(out[0].get_ident(), "h");
-        assert_eq!(out[1].get_ident(), "g");
+    /// A capture of `parent`, minted the way the visitor mints one.
+    fn capture(parent: &str, id: usize, eqn: &str) -> ImplicitVar {
+        let arg = Expr0::new(eqn, crate::lexer::LexerType::Equation)
+            .expect("test argument must lex")
+            .expect("test argument must parse");
+        ImplicitVar::Capture(Capture::new(
+            parent,
+            id,
+            CaptureKind::Previous,
+            arg,
+            None,
+            Vec::new(),
+        ))
     }
 
-    /// An ident collision whose two variables DIFFER (the PR #668 corruption:
+    /// A synthesized module-call argument aux, the other arm of
+    /// [`ImplicitVar`].
+    fn synthesized(ident: &str, eqn: &str) -> ImplicitVar {
+        ImplicitVar::Synthesized(Box::new(aux(ident, eqn)))
+    }
+
+    /// `dedup_vars_by_ident` collapses same-definition duplicates (the
+    /// `Ast::ApplyToAll` suffix-less arrayed capture) but keeps distinct
+    /// idents.
+    ///
+    /// Both arms of `ImplicitVar` are rows, because both reach this function:
+    /// a per-element apply-to-all expansion unions every element visitor's
+    /// helpers, and one element's walk can mint a capture and a module-call
+    /// argument aux alike.
+    #[test]
+    fn dedup_vars_collapses_identical_keeps_distinct() {
+        let cases: &[(&str, Vec<ImplicitVar>, [&str; 2])] = &[
+            (
+                "captures",
+                vec![
+                    capture("h", 0, "a"),
+                    capture("h", 0, "a"), // same definition
+                    capture("g", 0, "b"),
+                ],
+                ["$⁚h⁚0⁚arg0", "$⁚g⁚0⁚arg0"],
+            ),
+            (
+                "synthesized auxes",
+                vec![
+                    synthesized("h", "previous(a, 0)"),
+                    synthesized("h", "previous(a, 0)"), // byte-identical duplicate
+                    synthesized("g", "previous(b, 0)"),
+                ],
+                ["h", "g"],
+            ),
+        ];
+        for (what, vars, expected) in cases {
+            let out = dedup_vars_by_ident(vars.clone()).unwrap_or_else(|e| {
+                panic!("{what}: same-definition duplicate must collapse: {e:?}")
+            });
+            assert_eq!(
+                out.len(),
+                2,
+                "{what}: the first collapses; the second stays"
+            );
+            assert_eq!(out[0].ident(), expected[0], "{what}");
+            assert_eq!(out[1].ident(), expected[1], "{what}");
+        }
+    }
+
+    /// An ident collision whose two helpers DIFFER (the PR #668 corruption:
     /// two `Ast::Arrayed` slots minting the same suffix-less helper id for
     /// different bodies) must be a LOUD error, never silently kept-first.
+    /// Both arms of `ImplicitVar`, for the reason the sibling test states.
     #[test]
     fn dedup_vars_errors_on_conflicting_collision() {
-        let vars = vec![
-            aux("h", "previous(a, 0)"),
-            aux("h", "previous(b, 0)"), // same ident, DIFFERENT body
+        let cases: &[(&str, Vec<ImplicitVar>)] = &[
+            (
+                "captures",
+                // Same (parent, id), so the same derived ident, DIFFERENT body.
+                vec![capture("h", 0, "a"), capture("h", 0, "b")],
+            ),
+            (
+                "synthesized auxes",
+                vec![
+                    synthesized("h", "previous(a, 0)"),
+                    synthesized("h", "previous(b, 0)"),
+                ],
+            ),
         ];
-        let err = dedup_vars_by_ident(vars)
-            .expect_err("a conflicting same-ident collision must be a loud error");
-        assert_eq!(
-            err.code,
-            crate::common::ErrorCode::Generic,
-            "expected a Generic compiler-invariant error, got {err:?}"
+        for (what, vars) in cases {
+            let err = dedup_vars_by_ident(vars.clone())
+                .expect_err("a conflicting same-ident collision must be a loud error");
+            assert_eq!(
+                err.code,
+                crate::common::ErrorCode::Generic,
+                "{what}: expected a Generic compiler-invariant error, got {err:?}"
+            );
+        }
+    }
+
+    /// A capture whose two copies differ only in where they were written is
+    /// ONE capture. The apply-to-all expansion walks a clone of one body per
+    /// element and the dt and initial passes walk one equation twice, so this
+    /// is what lets those copies collapse instead of colliding; positions
+    /// would also make a whitespace-only difference between an element's
+    /// equation and its initial equation a compile error.
+    #[test]
+    fn a_capture_is_identified_by_its_body_not_its_position() {
+        let spaced = capture("h", 0, "a + b");
+        let tight = capture("h", 0, "a+b");
+        assert_ne!(spaced, tight, "PartialEq keeps positions, for salsa");
+        assert!(
+            spaced.same_definition(&tight),
+            "the dedup question ignores them"
         );
+        let out = dedup_vars_by_ident(vec![spaced, tight])
+            .expect("two spellings of one body are one capture");
+        assert_eq!(out.len(), 1);
     }
 
     #[test]

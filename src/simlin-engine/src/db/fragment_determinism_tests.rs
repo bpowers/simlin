@@ -417,18 +417,36 @@ fn implicit_helper_signatures(dm: &datamodel::Project, model_name: &str, var: &s
     parse_source_variable_with_module_context(&db, source_var, project, ctx)
         .implicit_vars
         .iter()
-        .map(|v| match v {
-            datamodel::Variable::Module(m) => {
+        .map(describe_implicit)
+        .collect()
+}
+
+/// A stable textual rendering of one synthesized helper's DEFINITION, for the
+/// comparisons below: a capture is its declared shape plus its printed
+/// argument subtree, a module instance is its wiring, and a hoisted call
+/// argument is its equation. Two helpers render identically exactly when the
+/// dedup would call them the same helper.
+fn describe_implicit(v: &crate::capture::ImplicitVar) -> String {
+    use crate::capture::ImplicitVar;
+    match v {
+        ImplicitVar::Capture(c) => format!(
+            "{} = capture[{}] {}",
+            c.ident(),
+            c.dims().join(","),
+            crate::ast::print_eqn(c.arg())
+        ),
+        ImplicitVar::Synthesized(other) => match v.module() {
+            Some(m) => {
                 let refs: Vec<String> = m
                     .references
                     .iter()
                     .map(|r| format!("{}->{}", r.src, r.dst))
                     .collect();
-                format!("{} = module {} {:?}", v.get_ident(), m.model_name, refs)
+                format!("{} = module {} {:?}", v.ident(), m.model_name, refs)
             }
-            _ => format!("{} = {:?}", v.get_ident(), v.get_equation()),
-        })
-        .collect()
+            None => format!("{} = {:?}", v.ident(), other.get_equation()),
+        },
+    }
 }
 
 /// No two helpers of one variable may share a canonical name.
@@ -558,7 +576,7 @@ fn a_cross_context_helper_name_collision_is_confined_to_a_failing_compile() {
         parse_source_variable_with_module_context(&db, source_var, project, ctx)
             .implicit_vars
             .iter()
-            .map(|v| (v.get_ident().to_string(), format!("{:?}", v.get_equation())))
+            .map(|v| (v.ident().to_string(), describe_implicit(v)))
             .collect()
     };
     let derived = helpers(vec![]);
@@ -1062,7 +1080,7 @@ fn an_implicit_helper_declines_when_the_contexts_synthesize_different_sets() {
         parse_source_variable_with_module_context(&db, source_var, project, ctx)
             .implicit_vars
             .iter()
-            .map(|v| v.get_ident().to_string())
+            .map(|v| v.ident().to_string())
             .collect()
     };
     let derived_under = helpers_under(vec![]);

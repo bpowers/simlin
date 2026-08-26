@@ -358,15 +358,9 @@ pub(crate) fn model_shape(
                 // `ltm_implicit_fragment_input` make, so a parent resolving
                 // this helper through the model's shape sizes it exactly as
                 // this model's own fragments do.
-                let dim_names = match meta.variable.get_equation() {
-                    Some(
-                        datamodel::Equation::ApplyToAll(dim_names, _)
-                        | datamodel::Equation::Arrayed(dim_names, _, _, _),
-                    ) => dim_names.as_slice(),
-                    _ => &[],
-                };
                 DepShape::var(
-                    dim_names
+                    meta.variable
+                        .equation_dims()
                         .iter()
                         .filter_map(|name| {
                             dim_context

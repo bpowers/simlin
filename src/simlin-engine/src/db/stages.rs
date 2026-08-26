@@ -78,7 +78,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::common::{Canonical, Ident};
-use crate::datamodel;
 use crate::db::{
     Db, ModuleIdentContext, SourceModel, SourceProject, model_module_ident_context,
     parse_source_variable_with_module_context, project_dimensions_context, project_units_context,
@@ -488,7 +487,7 @@ pub(crate) fn model_stage0(db: &dyn Db, model: SourceModel, project: SourceProje
 
     let src_vars = model.variables(db);
     let mut var_list: Vec<VariableStage0> = Vec::with_capacity(src_vars.len());
-    let mut implicit_dm: Vec<datamodel::Variable> = Vec::new();
+    let mut implicit_dm: Vec<crate::capture::ImplicitVar> = Vec::new();
     for svar in src_vars.values() {
         let parsed = parse_source_variable_with_module_context(db, *svar, project, module_idents);
         var_list.push(parsed.variable.clone());
@@ -496,16 +495,21 @@ pub(crate) fn model_stage0(db: &dyn Db, model: SourceModel, project: SourceProje
     }
 
     // The implicit variables SMOOTH/DELAY/TREND expansion synthesized have no
-    // `SourceVariable` of their own, so they are parsed directly here. They are
-    // plain stocks/flows/auxes and module instances, never module CALLS, so the
+    // `SourceVariable` of their own, so they are built here. A capture already
+    // holds its body as an AST and needs no parse; a module instance and its
+    // hoisted call arguments still carry equation text. Those are plain
+    // stocks/flows/auxes and module instances, never module CALLS, so the
     // expansion cannot recurse -- assert that rather than silently dropping a
     // second generation into the `nested` sink.
-    let mut nested_implicit: Vec<datamodel::Variable> = Vec::new();
+    let mut nested_implicit: Vec<crate::capture::ImplicitVar> = Vec::new();
     let implicit_ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
-    var_list.extend(implicit_dm.into_iter().map(|dm_var| {
-        crate::variable::parse_var(&implicit_ctx, &dm_var, &mut nested_implicit, |mi| {
-            Ok(Some(mi.clone()))
-        })
+    var_list.extend(implicit_dm.into_iter().map(|iv| match iv {
+        crate::capture::ImplicitVar::Capture(capture) => capture.variable_stage0(dim_ctx),
+        crate::capture::ImplicitVar::Synthesized(dm_var) => {
+            crate::variable::parse_var(&implicit_ctx, dm_var.as_ref(), &mut nested_implicit, |mi| {
+                Ok(Some(mi.clone()))
+            })
+        }
     }));
     debug_assert!(
         nested_implicit.is_empty(),

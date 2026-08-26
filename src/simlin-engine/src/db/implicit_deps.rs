@@ -3,6 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use super::*;
+use crate::capture::ImplicitVar;
 use std::collections::{BTreeSet, HashMap};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,16 +44,11 @@ pub(super) fn extract_implicit_var_deps(
         .implicit_vars
         .iter()
         .map(|implicit_var| {
-            let implicit_name = canonicalize(implicit_var.get_ident()).into_owned();
-            let is_module = matches!(implicit_var, datamodel::Variable::Module(_));
-            let model_name = match implicit_var {
-                datamodel::Variable::Module(m) => Some(m.model_name.clone()),
-                _ => None,
-            };
+            let implicit_name = canonicalize(implicit_var.ident()).into_owned();
 
             // Module-type implicit vars have no AST -- extract deps from
             // their module reference src fields instead.
-            if let datamodel::Variable::Module(m) = implicit_var {
+            if let Some(m) = implicit_var.module() {
                 let refs: BTreeSet<String> = m
                     .references
                     .iter()
@@ -73,12 +69,18 @@ pub(super) fn extract_implicit_var_deps(
                 };
             }
 
-            let mut dummy_implicits = Vec::new();
-            let ctx = crate::variable::ParseContext::new(dim_context, &units_ctx);
-            let parsed_implicit =
-                crate::variable::parse_var(&ctx, implicit_var, &mut dummy_implicits, |mi| {
-                    Ok(Some(mi.clone()))
-                });
+            // A capture's body is an AST subtree the parse already produced; a
+            // hoisted module-call argument still carries equation text.
+            let parsed_implicit = match implicit_var {
+                ImplicitVar::Capture(capture) => capture.variable_stage0(dim_context),
+                ImplicitVar::Synthesized(dm_var) => {
+                    let mut dummy_implicits = Vec::new();
+                    let ctx = crate::variable::ParseContext::new(dim_context, &units_ctx);
+                    crate::variable::parse_var(&ctx, dm_var.as_ref(), &mut dummy_implicits, |mi| {
+                        Ok(Some(mi.clone()))
+                    })
+                }
+            };
 
             let models = HashMap::new();
             let scope = crate::model::ScopeStage0 {
@@ -105,8 +107,9 @@ pub(super) fn extract_implicit_var_deps(
             ImplicitVarDeps {
                 name: implicit_name,
                 is_stock: parsed_implicit.is_stock(),
-                is_module,
-                model_name,
+                // The module arm returned above, so nothing here is one.
+                is_module: false,
+                model_name: None,
                 dt_deps: dt_classification
                     .all
                     .into_iter()

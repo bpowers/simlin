@@ -20,6 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::*;
+use crate::capture::ImplicitVar;
 use crate::common::{Canonical, Ident};
 
 /// Result of parsing a single variable, including any implicit variables
@@ -27,7 +28,7 @@ use crate::common::{Canonical, Ident};
 #[derive(Clone, PartialEq)]
 pub struct ParsedVariableResult {
     pub variable: crate::model::VariableStage0,
-    pub implicit_vars: Vec<datamodel::Variable>,
+    pub implicit_vars: Vec<ImplicitVar>,
 }
 
 impl std::fmt::Debug for ParsedVariableResult {
@@ -541,11 +542,8 @@ impl ImplicitVarMeta {
     /// every name on both sides is canonical and a raw comparison resolves
     /// identically (checked on a parent named `"My Var"`). Kept because nothing
     /// in the type system says so and the cost is a borrow.
-    pub(crate) fn find_in<'a>(
-        &self,
-        parsed: &'a ParsedVariableResult,
-    ) -> Option<&'a datamodel::Variable> {
-        let is_mine = |v: &datamodel::Variable| canonicalize(v.get_ident()) == self.name;
+    pub(crate) fn find_in<'a>(&self, parsed: &'a ParsedVariableResult) -> Option<&'a ImplicitVar> {
+        let is_mine = |v: &ImplicitVar| canonicalize(v.ident()) == self.name;
         // The hint is right whenever the two parses agree, which is every model
         // that is not the GH #372 divergence -- measured at a 100% hit rate on
         // every model in the corpus, so the scan below is the exceptional path,
@@ -596,22 +594,16 @@ pub fn model_implicit_var_info(
             module_ident_context,
         );
         for (index, implicit_var) in parsed.implicit_vars.iter().enumerate() {
-            let name = canonicalize(implicit_var.get_ident()).into_owned();
-            let is_stock = matches!(implicit_var, datamodel::Variable::Stock(_));
-            let is_module = matches!(implicit_var, datamodel::Variable::Module(_));
-            let model_name = match implicit_var {
-                datamodel::Variable::Module(m) => Some(m.model_name.clone()),
-                _ => None,
-            };
+            let name = canonicalize(implicit_var.ident()).into_owned();
+            let is_stock = implicit_var.is_stock();
+            let is_module = implicit_var.is_module();
+            let model_name = implicit_var.module().map(|m| m.model_name.clone());
             // An arrayed implicit helper (the GH #541 bare-arrayed-PREVIOUS
-            // case) is an `Equation::ApplyToAll` carrying its dimension names;
-            // every other helper is scalar (empty dims, size 1). Resolve the
-            // dimension sizes from the project's dimension definitions so a
-            // consumer that subscripts the helper sees its real array shape.
-            let dimensions: Vec<String> = match implicit_var.get_equation() {
-                Some(datamodel::Equation::ApplyToAll(dims, _)) => dims.clone(),
-                _ => Vec::new(),
-            };
+            // capture) applies over dimensions; every other helper is scalar
+            // (empty dims, size 1). Resolve the dimension sizes from the
+            // project's dimension definitions so a consumer that subscripts the
+            // helper sees its real array shape.
+            let dimensions: Vec<String> = implicit_var.equation_dims().to_vec();
             let size = if dimensions.is_empty() {
                 1
             } else {

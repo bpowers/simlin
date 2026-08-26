@@ -325,17 +325,12 @@ fn macro_call_expands_to_synthetic_module_structurally() {
     )
     .expect("a macro call must expand");
 
-    let modules: Vec<&crate::datamodel::Module> = vars
-        .iter()
-        .filter_map(|v| match v {
-            crate::datamodel::Variable::Module(m) => Some(m),
-            _ => None,
-        })
-        .collect();
+    let modules: Vec<&crate::datamodel::Module> = vars.iter().filter_map(|v| v.module()).collect();
     assert_eq!(
         modules.len(),
         1,
-        "a single-output macro call synthesizes exactly one Module, got {vars:?}",
+        "a single-output macro call synthesizes exactly one Module, got {} helpers",
+        vars.len(),
     );
     let module = modules[0];
     assert_eq!(

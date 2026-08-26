@@ -1739,7 +1739,7 @@ fn enumerate_module_instances_inner(
             module_ident_context,
         );
         let inputs: BTreeSet<Ident<Canonical>> =
-            if let Some(datamodel::Variable::Module(dm_module)) = meta.find_in(parsed) {
+            if let Some(dm_module) = meta.find_in(parsed).and_then(|iv| iv.module()) {
                 module_input_set(
                     &module_input_prefix(name),
                     dm_module.references.iter().map(|mr| (&mr.src, &mr.dst)),
@@ -1788,10 +1788,8 @@ fn enumerate_module_instances_inner(
                     continue;
                 }
 
-                let implicit_dm_var = &im_meta.variable;
-
                 let inputs: BTreeSet<Ident<Canonical>> =
-                    if let datamodel::Variable::Module(dm_module) = implicit_dm_var {
+                    if let Some(dm_module) = im_meta.variable.module() {
                         module_input_set(
                             &module_input_prefix(im_name),
                             dm_module.references.iter().map(|mr| (&mr.src, &mr.dst)),

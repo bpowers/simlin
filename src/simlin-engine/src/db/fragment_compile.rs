@@ -20,6 +20,7 @@ use std::collections::{BTreeSet, HashMap};
 use salsa::Accumulator;
 
 use super::*;
+use crate::capture::ImplicitVar;
 use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::fragment::{DepShape, FragmentInput, lower_fragment};
 use crate::db::var_fragment::{
@@ -322,14 +323,15 @@ pub fn compile_var_fragment<'db>(
 }
 
 /// The genuinely-shared prefix of synthetic-helper sourcing: resolve a
-/// model's implicit variable from its parent's `implicit_vars`, parse it,
-/// and lower it to a `crate::variable::Variable`.
+/// model's implicit variable from its parent's `implicit_vars`, build its
+/// parse-stage form, and lower it to a `crate::variable::Variable`.
 ///
 /// This is the *single shared relation* for "given an `ImplicitVarMeta`,
 /// produce the helper's parsed + lowered form": the chain `parent → the
-/// parse's helper NAMED by the metadata → parse_var → lower_variable` (the
-/// non-module branch builds via `lower_variable`; the module branch is the
-/// instance's wiring, since a module has no equation). It is consumed by
+/// parse's helper NAMED by the metadata → its parse-stage variable →
+/// lower_variable` (the non-module branch builds via `lower_variable`; the
+/// module branch is the instance's wiring, since a module has no equation).
+/// It is consumed by
 /// [`implicit_fragment_input`], which both `compile_implicit_var_fragment`
 /// (the production per-variable fragment compiler) and
 /// `var_phase_symbolic_fragment_prod`'s no-`SourceVariable` arm (parent-
@@ -355,19 +357,25 @@ fn lower_implicit_var<'db>(
         project,
         module_ident_context,
     );
-    let implicit_dm_var = meta.find_in(parsed)?;
-    let implicit_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
+    let implicit_var = meta.find_in(parsed)?;
+    let implicit_name = canonicalize(implicit_var.ident()).into_owned();
 
     let dim_context = project_dimensions_context(db, project);
 
-    let units_ctx = project_units_context(db, project);
-
-    let mut dummy_implicits = Vec::new();
-    let ctx = crate::variable::ParseContext::new(dim_context, units_ctx);
-    let parsed_implicit =
-        crate::variable::parse_var(&ctx, implicit_dm_var, &mut dummy_implicits, |mi| {
-            Ok(Some(mi.clone()))
-        });
+    // A capture already holds its body as an AST subtree, so it is built
+    // directly; a module instance and a hoisted module-call argument still
+    // carry equation text and are parsed.
+    let parsed_implicit = match implicit_var {
+        ImplicitVar::Capture(capture) => capture.variable_stage0(dim_context),
+        ImplicitVar::Synthesized(dm_var) => {
+            let units_ctx = project_units_context(db, project);
+            let mut dummy_implicits = Vec::new();
+            let ctx = crate::variable::ParseContext::new(dim_context, units_ctx);
+            crate::variable::parse_var(&ctx, dm_var.as_ref(), &mut dummy_implicits, |mi| {
+                Ok(Some(mi.clone()))
+            })
+        }
+    };
 
     if parsed_implicit
         .equation_errors()
@@ -379,9 +387,7 @@ fn lower_implicit_var<'db>(
     // A module-typed helper is its wiring; `lower_variable`'s module arm would
     // need a populated models map to validate the sources against.
     let lowered = if meta.is_module {
-        let datamodel::Variable::Module(dm_module) = implicit_dm_var else {
-            return None;
-        };
+        let dm_module = implicit_var.module()?;
         crate::variable::Variable::module_instance(
             Ident::new(&implicit_name),
             Ident::new(&dm_module.model_name),

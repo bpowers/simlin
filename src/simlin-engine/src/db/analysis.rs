@@ -22,6 +22,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use crate::canonicalize;
+use crate::capture::ImplicitVar;
 use crate::datamodel;
 
 use super::{
@@ -1667,11 +1668,11 @@ pub fn model_causal_edges(
         // Include implicit variables (module instances from SMOOTH/DELAY expansion)
         let parsed =
             parse_source_variable_with_module_context(db, *source_var, project, module_ctx);
-        for implicit_dm_var in &parsed.implicit_vars {
-            let imp_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
+        for implicit_var in &parsed.implicit_vars {
+            let imp_name = canonicalize(implicit_var.ident()).into_owned();
 
-            match implicit_dm_var {
-                datamodel::Variable::Stock(s) => {
+            match implicit_var.synthesized() {
+                Some(datamodel::Variable::Stock(s)) => {
                     stocks.insert(imp_name.clone());
                     for flow in s.inflows.iter().chain(s.outflows.iter()) {
                         let canonical_flow = canonicalize(flow).into_owned();
@@ -1681,7 +1682,7 @@ pub fn model_causal_edges(
                             .insert(imp_name.clone());
                     }
                 }
-                datamodel::Variable::Module(m) => {
+                Some(datamodel::Variable::Module(m)) => {
                     let self_prefix = format!("{imp_name}\u{00B7}");
                     for mr in &m.references {
                         let canonical_src = canonicalize(&mr.src).into_owned();
@@ -3543,8 +3544,8 @@ pub(crate) fn reconstruct_model_variables(
         variables.insert(Ident::new(name), lowered);
 
         // Add implicit variables (module instances from SMOOTH/DELAY expansion)
-        for implicit_dm_var in &parsed.implicit_vars {
-            let imp_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
+        for implicit_var in &parsed.implicit_vars {
+            let imp_name = canonicalize(implicit_var.ident()).into_owned();
             // `or_insert_with`, not `insert`: an explicit variable wins a
             // canonical-name collision with a synthesized implicit one. That
             // is the precedence `reconstruct_single_variable` had when it
@@ -3552,9 +3553,9 @@ pub(crate) fn reconstruct_model_variables(
             // Unreachable today -- implicit names carry the reserved `$⁚`
             // prefix -- so this fixes no bug; it keeps the two from being
             // able to differ.
-            variables.entry(Ident::new(&imp_name)).or_insert_with(|| {
-                reconstruct_implicit_variable(db, model, &scope, implicit_dm_var)
-            });
+            variables
+                .entry(Ident::new(&imp_name))
+                .or_insert_with(|| reconstruct_implicit_variable(db, model, &scope, implicit_var));
         }
     }
 
@@ -3627,26 +3628,32 @@ fn reconstruct_implicit_variable(
     db: &dyn Db,
     model: SourceModel,
     scope: &crate::model::ScopeStage0<'_>,
-    implicit_dm_var: &datamodel::Variable,
+    implicit_var: &ImplicitVar,
 ) -> crate::variable::Variable {
     use crate::common::{Canonical, Ident};
 
-    if let datamodel::Variable::Module(dm_module) = implicit_dm_var {
+    if let Some(dm_module) = implicit_var.module() {
         return module_instance_from_refs(
             model.name(db),
-            Ident::<Canonical>::new(implicit_dm_var.get_ident()),
+            Ident::<Canonical>::new(implicit_var.ident()),
             Ident::new(&dm_module.model_name),
             &dm_module.references,
         );
     }
 
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let mut dummy_implicits = Vec::new();
-    let ctx = crate::variable::ParseContext::new(scope.dimensions, &units_ctx);
-    let parsed_imp =
-        crate::variable::parse_var(&ctx, implicit_dm_var, &mut dummy_implicits, |mi| {
-            Ok(Some(mi.clone()))
-        });
+    // A capture holds its body as an AST subtree; a hoisted module-call
+    // argument still carries equation text.
+    let parsed_imp = match implicit_var {
+        ImplicitVar::Capture(capture) => capture.variable_stage0(scope.dimensions),
+        ImplicitVar::Synthesized(dm_var) => {
+            let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
+            let mut dummy_implicits = Vec::new();
+            let ctx = crate::variable::ParseContext::new(scope.dimensions, &units_ctx);
+            crate::variable::parse_var(&ctx, dm_var.as_ref(), &mut dummy_implicits, |mi| {
+                Ok(Some(mi.clone()))
+            })
+        }
+    };
     crate::model::lower_variable(scope, &parsed_imp)
 }
 

@@ -9,6 +9,7 @@ use crate::ast::Loc;
 use crate::ast::{Ast, Expr0, Expr2, IndexExpr2};
 use crate::builtins::{BuiltinContents, BuiltinFn, walk_builtin_expr};
 use crate::builtins_visitor::{empty_macro_registry, instantiate_implicit_modules};
+use crate::capture::ImplicitVar;
 use crate::common::{
     Canonical, CanonicalElementName, DimensionName, EquationError, EquationResult, Ident,
     UnitError, canonicalize,
@@ -1101,7 +1102,7 @@ impl<'a> ParseContext<'a> {
 pub fn parse_var<'a, MI, F>(
     ctx: &ParseContext<'_>,
     v: impl Into<VariableSource<'a>>,
-    implicit_vars: &mut Vec<datamodel::Variable>,
+    implicit_vars: &mut Vec<ImplicitVar>,
     module_input_mapper: F,
 ) -> Variable<MI, Expr0>
 where
@@ -1163,20 +1164,20 @@ where
                         // the other phase's helper body.
                         //
                         // The rule is `dedup_vars_by_ident`'s, applied across the
-                        // phases instead of within one: a byte-identical repeat
+                        // phases instead of within one: a same-definition repeat
                         // collapses (the `Arrayed` arm re-parses every slot on the
                         // initial pass, so this is the common case and costs
                         // nothing), and a same-name/different-body pair is a loud
                         // error rather than a silent pick.
                         for new_var in new_vars {
-                            let ident = Ident::<Canonical>::new(new_var.get_ident());
+                            let ident = Ident::<Canonical>::new(new_var.ident());
                             // Indexed, not scanned: an apply-to-all `SMTH1` over
                             // an N-element dimension mints ~2N helpers on one
                             // variable, and a scan here is the same O(k^2) shape
                             // `ImplicitVarMeta::index_hint` exists to remove --
                             // measured at +30% on N=800 before this map.
                             match implicit_index.get(&ident).map(|i| &implicit_vars[*i]) {
-                                Some(existing) if *existing == new_var => {}
+                                Some(existing) if existing.same_definition(&new_var) => {}
                                 Some(_) => {
                                     // `DuplicateVariable` rather than the
                                     // `Generic` its within-one-pass twin uses:
@@ -2335,7 +2336,7 @@ fn test_tables() {
         },
     };
 
-    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
+    let mut implicit_vars: Vec<crate::capture::ImplicitVar> = Vec::new();
     let unit_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let dims_ctx = DimensionsContext::default();
     let ctx = ParseContext::new(&dims_ctx, &unit_ctx);
