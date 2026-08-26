@@ -7,8 +7,8 @@
 //! GH #994 made a codegen rejection during per-variable fragment compilation
 //! attributable for EXPLICIT variables (`compile_var_fragment` routes through
 //! the reporting emission twin and accumulates a diagnostic naming the
-//! variable and the refused construct). The implicit-helper path
-//! (`compile_implicit_var_phase_bytecodes`) still discarded its errors, so a
+//! variable and the refused construct). The implicit-helper path still
+//! discarded its errors, so a
 //! failure in a SMOOTH/DELAY/TREND capture helper surfaced only as
 //! `assemble_module`'s unattributed batch message ("failed to compile
 //! fragments for variables: $⁚out⁚0⁚arg0⁚c1") -- the GH #913 shape -- and

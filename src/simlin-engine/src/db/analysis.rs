@@ -3639,14 +3639,11 @@ fn reconstruct_implicit_variable(
                 .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
         );
 
-        return crate::variable::Variable::Module {
+        return crate::variable::Variable::module_instance(
             ident,
-            model_name: Ident::new(&dm_module.model_name),
-            units: None,
+            Ident::new(&dm_module.model_name),
             inputs,
-            errors: vec![],
-            unit_errors: vec![],
-        };
+        );
     }
 
     let units_ctx = crate::units::Context::new(&[], &Default::default()).0;

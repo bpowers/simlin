@@ -1144,7 +1144,7 @@ pub fn model_module_wiring_diagnostics(db: &dyn Db, model: SourceModel, project:
 /// cycle, or `None` when its reachable subgraph is acyclic.
 ///
 /// Driving a reaching model's per-model passes would take `compile_var_fragment`
-/// into the recursive `model_module_map` query, which salsa turns into an
+/// into the recursive `compute_layout` query (through `model_shape`), which salsa turns into an
 /// unrecoverable dependency-graph cycle panic (GH #806). Both diagnostic
 /// collectors must therefore consult this FIRST and report the cycle instead of
 /// running the passes -- and both must scope it to REACHABILITY, so an

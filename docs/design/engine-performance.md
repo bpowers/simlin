@@ -562,8 +562,8 @@ longer describes the code.
 
 The equation parser builds `Expr0` with `Box` children + `Vec` args — 3.86M+
 transient heap allocations, all lowered to `VariableStage0` and dropped.
-`bumpalo` is already a dependency. Allocating the AST in a per-parse arena turns
-these into pointer bumps. The constraint: the salsa-cached result
+Allocating the AST in a per-parse arena (a `bumpalo`-style bump allocator; the
+engine carries no such dependency) would turn these into pointer bumps. The constraint: the salsa-cached result
 (`ParsedVariableResult`) must be owned/`'static`, so the arena can only back the
 transient parse→lower step, with the cached value being the owned lowered form.
 Much of this benefit is captured more cheaply by mimalloc (B); pursue the arena
@@ -699,7 +699,8 @@ edit.
 **Two hazards found by measurement, not by reasoning.** Both are silent.
 
 1. **The prewarm must run AFTER the module-cycle gate, never before.**
-   `compile_var_fragment` demands the recursive `model_module_map`, which salsa
+   `compile_var_fragment` demands the recursive `compute_layout` (through
+   `model_shape`), which salsa
    turns into a dependency-graph cycle panic — a process abort under
    `panic = abort` (GH #806). A prewarm placed ahead of
    `assemble_simulation`'s `project_module_graph(..).cycle_error_from(..)`

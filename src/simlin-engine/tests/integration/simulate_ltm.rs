@@ -715,8 +715,10 @@ fn test_smooth_goal_seeking_ltm() {
 ///     fragment compiler reconstructed the SMOOTH sub-model *without* its LTM
 ///     augmentation, so that cross-module reference did not resolve, the
 ///     fragment was dropped, and the link score read a constant 0 -- zeroing
-///     the whole loop. Now `build_submodel_metadata` registers the sub-model's
-///     LTM synthetic vars (including the composite), so the reference resolves
+///     the whole loop. `db::model_shape` registers the sub-model's LTM
+///     synthetic vars (including the composite) at their layout slots in the
+///     shape every parent fragment resolves a cross-module read through, so the
+///     reference resolves
 ///     and the link score carries the macro's composite signal.
 ///   * Because the loop score is the product of its link scores, the
 ///     previously-zeroing `level->smth1` link now lets the parent

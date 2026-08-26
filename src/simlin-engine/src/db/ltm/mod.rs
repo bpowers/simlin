@@ -96,6 +96,11 @@ pub(crate) use pinned::model_pinned_loops;
 pub(crate) use compile::LtmFragmentFailureGuard;
 #[cfg(test)]
 pub(crate) use compile::compile_ltm_equation_fragment;
+// The two LTM constructors of `compiler::fragment::FragmentInput`, re-exported
+// for `db::fragment_input_tests`, which pins each emitter as "its constructor,
+// lowered and emitted".
+#[cfg(test)]
+pub(crate) use compile::{ltm_fragment_input, ltm_implicit_fragment_input};
 #[cfg(test)]
 pub(crate) use loops::{AggLoopBudgetGuard, MAX_CROSS_AGG_LOOPS, build_element_level_loops};
 
@@ -970,40 +975,6 @@ fn ltm_implicit_helper_size(
             .max(1),
         _ => 1,
     }
-}
-
-/// The module-typed projection of [`model_ltm_implicit_var_info`]: each
-/// module-typed LTM implicit variable's canonical name mapped to its
-/// sub-model name.
-///
-/// `compile_ltm_implicit_var_fragment` runs once per LTM implicit variable,
-/// and a large arrayed model produces hundreds of thousands of those
-/// (C-LEARN v77: ~145k PREVIOUS-helper auxes). Each run merges the
-/// module-typed refs into its compilation context so cross-references
-/// between module-typed implicit vars resolve -- but scanning the full
-/// implicit-var map inside every run made LTM compilation O(K^2) in the
-/// implicit-var count (tens of seconds of pure HashMap iteration on
-/// C-LEARN). This query computes the projection once.
-///
-/// In the current architecture LTM equations are generated from
-/// post-module-expansion ASTs and never contain module-function calls, so
-/// this map is empty in practice; it exists so that if that ever changes,
-/// the cross-reference resolution keeps working.
-#[salsa::tracked(returns(ref))]
-pub fn model_ltm_implicit_module_refs(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-) -> HashMap<Ident<Canonical>, Ident<Canonical>> {
-    let info = model_ltm_implicit_var_info(db, model, project);
-    info.iter()
-        .filter(|(_, meta)| meta.is_module)
-        .filter_map(|(name, meta)| {
-            meta.model_name
-                .as_ref()
-                .map(|mn| (Ident::new(name), Ident::new(mn.as_str())))
-        })
-        .collect()
 }
 
 /// Name -> first-occurrence-index lookup into [`model_ltm_variables`]'s

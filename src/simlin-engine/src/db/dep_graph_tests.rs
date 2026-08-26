@@ -725,7 +725,8 @@ fn array_producing_vars_flags_exactly_the_two_positive_cases() {
     // Lowered-shape regression guards. Sourced from the same engine
     // per-variable production lowering `array_producing_vars` consumes
     // (`var_noninitial_lowered_exprs` ->
-    // `crate::db::var_fragment::lower_var_fragment`), partitioned by
+    // `crate::db::var_fragment::explicit_fragment_input` +
+    // `compiler::fragment::lower_fragment`), partitioned by
     // top-level element kind, then the same production predicate
     // (`exprs_contain_array_producing_builtin`) applied per partition --
     // no re-implementation of the array-producing recursion.

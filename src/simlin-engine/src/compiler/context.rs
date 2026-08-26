@@ -22,6 +22,7 @@ use super::dimensions::{
     UnaryOp, allocate_implicit_axes, find_dimension_reordering, match_dimensions_with_mapping,
 };
 use super::expr::{BuiltinFn, Expr, SubscriptIndex, VarRef};
+use super::fragment::{DepKind, DepShape, ModelShape};
 use super::subscript::{
     IndexOp, Subscript3Config, ViewBuildConfig, ViewBuildResult, build_view_from_ops,
     normalize_subscripts3,
@@ -29,129 +30,9 @@ use super::subscript::{
 use crate::builtins::ArgKind;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy)]
-pub(crate) struct VariableMetadata<'a> {
-    /// The variable's slot offset within **its own model's** layout.
-    ///
-    /// `None` means that layout has not been assigned yet, which is the normal
-    /// case for the model being compiled: the per-variable fragment path defers
-    /// its model's layout to assembly, so a fragment cannot know (and must not
-    /// depend on) where its own variables land.
-    ///
-    /// The only reader is `Context::submodel_offset_within`, and it only ever
-    /// walks *sub*-model entries: a cross-module reference `m·x` lowers to
-    /// `VarRef { name: m, element_offset: <x's offset inside the sub-model> }`,
-    /// and the sub-model's layout IS already fixed (`db::compute_layout`) --
-    /// the parent relocates the whole block via `m`'s own name. A `None` there
-    /// is a loud `DoesNotExist`, never a silent slot 0.
-    pub(crate) offset: Option<usize>,
-    pub(crate) size: usize,
-    pub(crate) var: &'a Variable,
-}
-
-/// The symbol table lowering builds: `model -> variable -> metadata`. It holds
-/// the model being compiled plus every sub-model reachable from it, which is
-/// what makes a cross-module name resolvable.
-pub(crate) type MetadataByModel<'a> =
-    IdentMap<Ident<Canonical>, IdentMap<Ident<Canonical>, VariableMetadata<'a>>>;
-
-/// Project [`super::VarSizes`] out of the symbol table: the extent of every
-/// variable a reference in `model` can address **in whole**.
-///
-/// This is the single statement of "which reference addresses which variable's
-/// full storage", and both consumers of that question read it -- lowering's
-/// GH #578 scalar-source ELM MAP fold (`Context::full_var_len_for_base`) and
-/// emission's `codegen::full_source_len`. They used to answer it separately,
-/// each from its own view of the symbol table, and both got a cross-module
-/// source wrong in a different direction.
-///
-/// An ordinary variable contributes one entry, at its base. A MODULE INSTANCE
-/// contributes none of its own -- its slot count is the whole sub-model block,
-/// which is the extent of nothing a reference can name -- and instead
-/// contributes one entry per sub-model variable at that variable's slot within
-/// the instance, recursively through nested instances so every entry names a
-/// leaf variable. A reference landing mid-array is absent from the result,
-/// which is the same answer it has always had: the extent of one element of a
-/// bigger array is not the array's extent, so the caller falls back to what the
-/// lowered view says.
-///
-/// A sub-model that is not in `metadata` contributes nothing. That is the
-/// loud-safe direction: the reference falls back to its view's extent, exactly
-/// as an unresolvable one always did, rather than borrowing a neighbour's size.
-pub(crate) fn whole_variable_extents(
-    metadata: &MetadataByModel<'_>,
-    model: &Ident<Canonical>,
-) -> super::VarSizes {
-    let mut extents = super::VarSizes::new();
-    let Some(vars) = metadata.get(model) else {
-        return extents;
-    };
-    for (name, md) in vars {
-        if let Variable::Module {
-            model_name: sub_model,
-            ..
-        } = md.var
-        {
-            let mut path = vec![model.clone()];
-            collect_instance_extents(metadata, sub_model, name, 0, &mut path, &mut extents);
-        } else {
-            extents.insert(VarRef::base(name.clone()), md.size);
-        }
-    }
-    extents
-}
-
-/// One module instance's contribution to [`whole_variable_extents`].
-///
-/// `base` is the slot the instance's copy of `sub_model` starts at, measured
-/// from the instance's own base, so a nested instance's variables are reached
-/// by accumulating the offsets on the way down -- the same arithmetic
-/// `Context::submodel_offset_within` performs when it lowers `m·n·x`.
-///
-/// `path` is the chain of models being walked, and a model already on it is
-/// declined rather than descended into. `db::project_module_graph` rejects a
-/// cyclic project before any of this runs, so the guard exists to bound the
-/// walk, not to gate the project.
-fn collect_instance_extents(
-    metadata: &MetadataByModel<'_>,
-    sub_model: &Ident<Canonical>,
-    instance: &Ident<Canonical>,
-    base: usize,
-    path: &mut Vec<Ident<Canonical>>,
-    extents: &mut super::VarSizes,
-) {
-    if path.iter().any(|seen| seen == sub_model) {
-        return;
-    }
-    let Some(vars) = metadata.get(sub_model) else {
-        return;
-    };
-    path.push(sub_model.clone());
-    for md in vars.values() {
-        // A sub-model's layout is always already assigned (`db::compute_layout`
-        // runs before any fragment of the parent compiles); an entry without one
-        // is the model being compiled, which cannot also be its own sub-model.
-        let Some(offset) = md.offset else {
-            continue;
-        };
-        if let Variable::Module {
-            model_name: nested, ..
-        } = md.var
-        {
-            collect_instance_extents(metadata, nested, instance, base + offset, path, extents);
-        } else {
-            extents.insert(VarRef::new(instance.clone(), base + offset), md.size);
-        }
-    }
-    path.pop();
-}
-
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 pub(crate) struct Context<'a> {
     pub(crate) core: ContextCore<'a>,
-    #[allow(dead_code)]
-    pub(crate) ident: &'a Ident<Canonical>,
     pub(crate) active_dimension: Option<Arc<[Dimension]>>,
     pub(crate) active_subscript: Option<Vec<CanonicalElementName>>,
     pub(crate) is_initial: bool,
@@ -177,18 +58,28 @@ pub(crate) struct Context<'a> {
 #[derive(Clone, Copy)]
 pub(crate) struct ContextCore<'a> {
     pub(crate) dimensions: &'a [Dimension],
-    #[allow(dead_code)]
     pub(crate) dimensions_ctx: &'a DimensionsContext,
-    pub(crate) model_name: &'a Ident<Canonical>,
-    pub(crate) metadata: &'a MetadataByModel<'a>,
-    /// The extents [`whole_variable_extents`] projects out of `metadata`, so
-    /// lowering and codegen answer "how big is the variable this reference
-    /// addresses?" from one table rather than from two readings of the symbol
-    /// table. Derived, never authored: build it with `whole_variable_extents`.
+    /// The shape of every name the fragment can reference, the variable being
+    /// lowered included. A module dependency's shape carries the sub-model's
+    /// fixed layout, which is how a cross-module name resolves.
+    pub(crate) deps: &'a IdentMap<Ident<Canonical>, DepShape>,
+    /// The extents [`super::fragment::reference_extents`] projects out of
+    /// `deps`, so lowering and codegen answer "how big is the variable this
+    /// reference addresses?" from one table. Derived, never authored.
     pub(crate) var_sizes: &'a super::VarSizes,
-    pub(crate) module_models:
-        &'a IdentMap<Ident<Canonical>, IdentMap<Ident<Canonical>, Ident<Canonical>>>,
     pub(crate) inputs: &'a BTreeSet<Ident<Canonical>>,
+}
+
+/// What a name denotes from inside a fragment (see [`Context::resolve`]):
+/// `'d` is the dependency shapes' lifetime, `'n` the resolved name's.
+struct Resolved<'d, 'n> {
+    shape: &'d DepShape,
+    /// The last segment of the name -- the variable itself, as diagnostics
+    /// spell it.
+    leaf: &'n str,
+    /// For a cross-module name, the module instance it relocates through and
+    /// the slot its variable's block starts at inside that instance.
+    instance: Option<(Ident<Canonical>, usize)>,
 }
 
 impl<'a> std::ops::Deref for Context<'a> {
@@ -200,14 +91,9 @@ impl<'a> std::ops::Deref for Context<'a> {
 }
 
 impl Context<'_> {
-    pub(crate) fn new<'a>(
-        core: ContextCore<'a>,
-        ident: &'a Ident<Canonical>,
-        is_initial: bool,
-    ) -> Context<'a> {
+    pub(crate) fn new<'a>(core: ContextCore<'a>, is_initial: bool) -> Context<'a> {
         Context {
             core,
-            ident,
             active_dimension: None,
             active_subscript: None,
             is_initial,
@@ -224,7 +110,6 @@ impl Context<'_> {
     ) -> Self {
         Context {
             core: self.core,
-            ident: self.ident,
             active_dimension,
             active_subscript,
             is_initial: self.is_initial,
@@ -264,8 +149,16 @@ impl Context<'_> {
         self.var_ref(ident, true)
     }
 
-    pub(super) fn get_metadata(&self, ident: &Ident<Canonical>) -> Result<&VariableMetadata<'_>> {
-        self.get_submodel_metadata(self.model_name, ident)
+    /// The shape `ident` denotes, following a `·`-qualified name into the
+    /// module dependency's sub-model shape (and on through nested instances).
+    pub(super) fn shape_of(&self, ident: &Ident<Canonical>) -> Result<&DepShape> {
+        Ok(self.resolve(ident)?.shape)
+    }
+
+    /// The dimensions of the variable `ident` denotes, or `None` when it is a
+    /// scalar, a module instance, or not a name this fragment can reference.
+    fn dims_of(&self, ident: &Ident<Canonical>) -> Option<&[Dimension]> {
+        self.shape_of(ident).ok().and_then(DepShape::dimensions)
     }
 
     /// The active subscript each of `dims` reads, for a subscript-less arrayed
@@ -404,36 +297,62 @@ impl Context<'_> {
         }
     }
 
-    fn get_submodel_metadata(
-        &self,
-        model: &Ident<Canonical>,
-        ident: &Ident<Canonical>,
-    ) -> Result<&VariableMetadata<'_>> {
-        let metadata = self
-            .metadata
-            .get(model)
-            .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
-        if let Some(pos) = ident.as_str().find('\u{00B7}') {
-            let submodel_module_name = &ident.as_str()[..pos];
-            let module_key = Ident::<Canonical>::from_str_unchecked(submodel_module_name);
-            // The module variable may have been deleted while dependent
-            // equations still reference it (e.g. `module.output`).
-            let model_modules = self
-                .module_models
-                .get(model)
-                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
-            let submodel_name = model_modules
-                .get(&module_key)
-                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
-            let submodel_var = &ident.as_str()[pos + '\u{00B7}'.len_utf8()..];
-            self.get_submodel_metadata(
-                submodel_name,
-                &Ident::<Canonical>::from_str_unchecked(submodel_var),
-            )
-        } else {
-            metadata
-                .get(ident)
-                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))
+    /// Resolve `ident` -- a plain name, or a `·`-qualified cross-module name
+    /// `m·x` / `m·n·x` -- to the shape it denotes and, for a cross-module name,
+    /// to the instance it relocates through.
+    ///
+    /// A plain name is looked up in the fragment's dependency shapes. A
+    /// qualified name's first segment must be a module dependency; each
+    /// further segment is looked up in the current sub-model shape, accumulating
+    /// the slot offset at which that variable's block starts inside the
+    /// instance, and a segment that is followed by another must itself be a
+    /// nested module instance. A name that leaves that chain at any point --
+    /// the head is not a module dependency (the module variable may have been
+    /// deleted while dependent equations still reference `module.output`), a
+    /// segment names no sub-model variable -- is a loud `DoesNotExist`, never a
+    /// silent slot 0.
+    fn resolve<'d, 'n>(&'d self, ident: &'n Ident<Canonical>) -> Result<Resolved<'d, 'n>> {
+        let does_not_exist = || Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None);
+        let ident_str = ident.as_str();
+        let Some(pos) = ident_str.find('\u{00B7}') else {
+            let shape = self.deps.get(ident).ok_or_else(does_not_exist)?;
+            return Ok(Resolved {
+                shape,
+                leaf: ident_str,
+                instance: None,
+            });
+        };
+        let head = &ident_str[..pos];
+        let mut rest = &ident_str[pos + '\u{00B7}'.len_utf8()..];
+        let mut model: &'d ModelShape = match &self.deps.get(head).ok_or_else(does_not_exist)?.kind
+        {
+            DepKind::Module { shape } => shape,
+            DepKind::Var => return Err(does_not_exist()),
+        };
+        let mut base = 0;
+        loop {
+            let (segment, tail) = match rest.find('\u{00B7}') {
+                Some(p) => (&rest[..p], Some(&rest[p + '\u{00B7}'.len_utf8()..])),
+                None => (rest, None),
+            };
+            let entry = model.vars.get(segment).ok_or_else(does_not_exist)?;
+            base += entry.offset;
+            match tail {
+                None => {
+                    return Ok(Resolved {
+                        shape: &entry.shape,
+                        leaf: segment,
+                        instance: Some((Ident::from_str_unchecked(head), base)),
+                    });
+                }
+                Some(tail) => {
+                    let DepKind::Module { shape: nested } = &entry.shape.kind else {
+                        return Err(does_not_exist());
+                    };
+                    model = nested.as_ref();
+                    rest = tail;
+                }
+            }
         }
     }
 
@@ -446,122 +365,26 @@ impl Context<'_> {
     /// `m`, because the enclosing model's layout has one entry spanning the
     /// whole sub-model instance and none for `m·x`; the element offset is `x`'s
     /// position inside that block, which the sub-model's already-fixed layout
-    /// supplies (see [`Self::submodel_offset_within`]).
+    /// (the module dependency's shape) supplies. That is the one place a
+    /// concrete offset is computed during lowering, and it is sound because a
+    /// sub-model's layout is fixed (`db::compute_layout`) before any fragment
+    /// of the parent compiles: the parent relocates the whole block through
+    /// the module variable's name.
     fn var_ref(&self, ident: &Ident<Canonical>, ignore_arrays: bool) -> Result<VarRef> {
-        let metadata = self
-            .metadata
-            .get(self.model_name)
-            .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
-        let ident_str = ident.as_str();
-        if let Some(pos) = ident_str.find('\u{00B7}') {
-            let submodel_module_name = &ident_str[..pos];
-            let module_key = Ident::<Canonical>::from_str_unchecked(submodel_module_name);
-            // The module variable may have been deleted while dependent
-            // equations still reference it (e.g. `module.output`).
-            let model_modules = self
-                .module_models
-                .get(self.model_name)
-                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
-            let submodel_name = model_modules
-                .get(&module_key)
-                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
-            // The module variable must still be in scope; the sub-model's
-            // internal offset is what indexes into its block.
-            if !metadata.contains_key(&module_key) {
-                return Err(Error::new(
-                    ErrorKind::Simulation,
-                    ErrorCode::DoesNotExist,
-                    None,
-                ));
-            }
-            let submodel_var = &ident_str[pos + '\u{00B7}'.len_utf8()..];
-            let element_offset = self.submodel_offset_within(
-                submodel_name,
-                &Ident::<Canonical>::from_str_unchecked(submodel_var),
-                ignore_arrays,
-            )?;
-            Ok(VarRef::new(module_key, element_offset))
-        } else {
-            // The lookup is load-bearing even when `ignore_arrays` discards the
-            // metadata: a reference to a variable that is not in scope must be
-            // `DoesNotExist`, and naming it is no longer enough to prove it
-            // exists.
-            let var_meta = metadata
-                .get(ident)
-                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
-            if ignore_arrays {
-                return Ok(VarRef::base(ident.clone()));
-            }
-            match var_meta.var.get_dimensions() {
-                Some(dims) => {
-                    let off = self.get_implicit_subscript_off(dims, ident.as_str())?;
-                    Ok(VarRef::new(ident.clone(), off))
-                }
-                None => Ok(VarRef::base(ident.clone())),
-            }
+        let resolved = self.resolve(ident)?;
+        let (name, base) = match resolved.instance {
+            Some((instance, base)) => (instance, base),
+            None => (ident.clone(), 0),
+        };
+        if ignore_arrays {
+            return Ok(VarRef::new(name, base));
         }
-    }
-
-    /// The absolute slot offset of `ident` within the *sub*-model `model`'s own
-    /// layout.
-    ///
-    /// This is the one place a concrete offset is still computed during
-    /// lowering, and it is sound because a sub-model's layout is already fixed
-    /// (`db::compute_layout`) before any fragment of the parent is compiled: the
-    /// parent relocates the whole block through the module variable's name. A
-    /// metadata entry with no offset (the model being compiled, whose layout is
-    /// assigned at assembly) is a loud `DoesNotExist` rather than a silent 0 --
-    /// reaching one here would mean a model instantiated itself, which the
-    /// module-graph cycle gate rejects first.
-    fn submodel_offset_within(
-        &self,
-        model: &Ident<Canonical>,
-        ident: &Ident<Canonical>,
-        ignore_arrays: bool,
-    ) -> Result<usize> {
-        let metadata = self
-            .metadata
-            .get(model)
-            .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
-        let ident_str = ident.as_str();
-        if let Some(pos) = ident_str.find('\u{00B7}') {
-            let submodel_module_name = &ident_str[..pos];
-            let module_key = Ident::<Canonical>::from_str_unchecked(submodel_module_name);
-            let model_modules = self
-                .module_models
-                .get(model)
-                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
-            let submodel_name = model_modules
-                .get(&module_key)
-                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
-            let submodel_var = &ident_str[pos + '\u{00B7}'.len_utf8()..];
-            let submodel_off = metadata
-                .get(&module_key)
-                .and_then(|m| m.offset)
-                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
-            Ok(submodel_off
-                + self.submodel_offset_within(
-                    submodel_name,
-                    &Ident::<Canonical>::from_str_unchecked(submodel_var),
-                    ignore_arrays,
-                )?)
-        } else {
-            let var_meta = metadata
-                .get(ident)
-                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
-            let base = var_meta
-                .offset
-                .ok_or_else(|| Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None))?;
-            if ignore_arrays {
-                return Ok(base);
+        match resolved.shape.dimensions() {
+            Some(dims) => {
+                let off = self.get_implicit_subscript_off(dims, resolved.leaf)?;
+                Ok(VarRef::new(name, base + off))
             }
-            match var_meta.var.get_dimensions() {
-                Some(dims) => {
-                    let off = self.get_implicit_subscript_off(dims, ident.as_str())?;
-                    Ok(base + off)
-                }
-                None => Ok(base),
-            }
+            None => Ok(VarRef::new(name, base)),
         }
     }
 
@@ -633,12 +456,8 @@ impl Context<'_> {
         bounds: &ast::ArrayBounds,
         loc: Loc,
     ) -> Vec<ast::IndexExpr2> {
-        // Get the source dimensions (from metadata or bounds)
-        let source_dims: Option<Vec<Dimension>> = self
-            .get_metadata(ident)
-            .ok()
-            .and_then(|metadata| metadata.var.get_dimensions())
-            .map(|dims| dims.to_vec());
+        // Get the source dimensions (from the dependency's shape or bounds)
+        let source_dims: Option<Vec<Dimension>> = self.dims_of(ident).map(|dims| dims.to_vec());
 
         let Some(source_dims) = source_dims else {
             return bounds
@@ -694,10 +513,7 @@ impl Context<'_> {
         bounds: &ast::ArrayBounds,
         subscripts: &[ast::IndexExpr2],
     ) -> Option<ast::ArrayBounds> {
-        let dims = self
-            .get_metadata(ident)
-            .ok()
-            .and_then(|metadata| metadata.var.get_dimensions())?;
+        let dims = self.dims_of(ident)?;
 
         let mut result_dims = Vec::new();
         let mut result_dim_names = Vec::new();
@@ -861,10 +677,8 @@ impl Context<'_> {
         match &expr {
             Expr::Var(var, _) => {
                 // This is a bare array variable - create a StaticSubscript with reordered view
-                // First, get the variable metadata to get dimensions
-                if let Some(metadata) = self.whole_var_metadata(var)
-                    && let Some(dims) = metadata.var.get_dimensions()
-                {
+                // First, get the variable's declared dimensions
+                if let Some(dims) = self.whole_var_dims(var) {
                     let orig_dims: Vec<usize> = dims.iter().map(|d| d.len()).collect();
                     let orig_dim_names: Vec<String> =
                         dims.iter().map(|d| d.name().to_string()).collect();
@@ -901,27 +715,25 @@ impl Context<'_> {
         }
     }
 
-    /// Metadata for a reference that addresses a variable's *whole* storage, in
-    /// the model being compiled.
+    /// The declared dimensions of the variable a reference addresses in
+    /// *whole*.
     ///
-    /// `None` for a reference into the middle of a variable, which is the exact
-    /// answer the previous offset-scan gave ("no variable's storage begins at
-    /// this offset"): a mid-variable reference names an element, not the array,
-    /// so neither the array's dimensions nor its extent apply to it.
+    /// `None` for a reference into the middle of a variable: a mid-variable
+    /// reference names an element, not the array, so neither the array's
+    /// dimensions nor its extent apply to it.
     ///
     /// The sole reader is [`Self::apply_dimension_reordering`], which wants a
-    /// bare array reference's declared DIMENSIONS. Note that a CROSS-MODULE
-    /// reference gets the module instance's entry here (a `Variable::Module`,
-    /// which declares no dimensions), so the reorder falls through to its
-    /// generic path rather than specializing -- correct, if unspecialized. Do
-    /// not reach for this to answer a question about a reference's EXTENT:
-    /// [`super::VarSizes`] is where that lives, precisely because it resolves
-    /// the cross-module case.
-    fn whole_var_metadata(&self, var: &VarRef) -> Option<&VariableMetadata<'_>> {
+    /// bare array reference's declared DIMENSIONS. A CROSS-MODULE reference
+    /// names the module instance here, whose shape declares no dimensions, so
+    /// the reorder falls through to its generic path rather than specializing
+    /// -- correct, if unspecialized. Do not reach for this to answer a question
+    /// about a reference's EXTENT: [`super::VarSizes`] is where that lives,
+    /// precisely because it resolves the cross-module case.
+    fn whole_var_dims(&self, var: &VarRef) -> Option<&[Dimension]> {
         if !var.is_whole_var() {
             return None;
         }
-        self.metadata.get(self.model_name)?.get(&var.name)
+        self.deps.get(&var.name)?.dimensions()
     }
 
     /// Full element count of the variable `base` addresses in whole. `None` for
@@ -932,7 +744,7 @@ impl Context<'_> {
     /// point: the fold and the opcode must agree about where a source's storage
     /// ends, and they are on opposite sides of lowering. Answering from the
     /// variable's own declared dimensions -- what this did before -- silently
-    /// reported 1 for a cross-module source, whose metadata entry here is the
+    /// reported 1 for a cross-module source, whose dependency shape here is the
     /// dimensionless module instance rather than the sub-model variable the
     /// reference actually names.
     pub(super) fn full_var_len_for_base(&self, base: &VarRef) -> Option<usize> {
@@ -980,40 +792,26 @@ impl Context<'_> {
 
 // Implement Expr3LowerContext for Context to enable Expr2 -> Expr3 conversion
 impl Expr3LowerContext for Context<'_> {
-    /// Resolved through [`Self::get_metadata`], so a CROSS-MODULE name
-    /// (`m·arr`) reports the sub-model variable's dimensions rather than
-    /// nothing. A direct `metadata[model][ident]` lookup -- what this did
-    /// before -- has no entry for the dotted name, and the `None` it returned
-    /// made `Expr3::from_expr2` treat every cross-module array as a scalar, so
-    /// a WILDCARD subscript on one (`SUM(m.arr[*])`) was rejected as
-    /// `CantSubscriptScalar`. `ast::ArrayContext::get_dimensions`, the
-    /// Expr2-stage twin of this trait method, has always followed the module
-    /// variable into the sub-model; this is the same rule, one stage later.
-    ///
-    /// The wildcard rejection was the whole of the user-visible consequence.
-    /// A BARE cross-module array reference was unaffected: it skipped the
-    /// implicit-subscript expansion here, but `lower_from_expr3`'s `Var` arm
-    /// resolves it one layer down through `var_ref` ->
-    /// `submodel_offset_within(.., ignore_arrays: false)`, which reads the
-    /// sub-model's own metadata and gets the dimensions this method did not.
-    /// Bare references, whole-array copies and transposes all produced correct
-    /// results before the fix.
+    /// Resolved through [`Self::shape_of`], so a CROSS-MODULE name (`m·arr`)
+    /// reports the sub-model variable's dimensions rather than nothing: a
+    /// `None` there would make `Expr3::from_expr2` treat every cross-module
+    /// array as a scalar and reject a WILDCARD subscript on one
+    /// (`SUM(m.arr[*])`) as `CantSubscriptScalar`. `ast::ArrayContext::
+    /// get_dimensions`, the Expr2-stage twin of this trait method, follows the
+    /// module variable into the sub-model the same way; this is the same rule,
+    /// one stage later.
     fn get_dimensions(&self, ident: &str) -> Option<&[Dimension]> {
         let canonical = canonicalize(ident);
-        let vars = self.metadata.get(self.model_name)?;
         // A plain name is its own key, so the direct lookup answers it without
-        // interning an `Ident`; only a name the model does not hold -- every
+        // interning an `Ident`; only a name the fragment does not hold -- every
         // dotted cross-module one among them -- pays for the module-following
-        // resolution. The two agree on a plain name by construction:
-        // `get_submodel_metadata` reduces to this same lookup when there is no
-        // module separator to follow.
-        let var_metadata = match vars.get(&*canonical) {
-            Some(md) => md,
-            None => self
-                .get_metadata(&Ident::from_unchecked(canonical.into_owned()))
-                .ok()?,
-        };
-        var_metadata.var.get_dimensions()
+        // resolution. The two agree on a plain name by construction: `resolve`
+        // reduces to this same lookup when there is no module separator to
+        // follow.
+        match self.deps.get(&*canonical) {
+            Some(shape) => shape.dimensions(),
+            None => self.dims_of(&Ident::from_unchecked(canonical.into_owned())),
+        }
     }
 
     /// Only `ident` needs canonicalizing: a `Dimension`'s name is a
@@ -1069,7 +867,6 @@ impl Context<'_> {
     fn with_preserved_wildcards(&self) -> Self {
         Context {
             core: self.core,
-            ident: self.ident,
             active_dimension: self.active_dimension.clone(),
             active_subscript: self.active_subscript.clone(),
             is_initial: self.is_initial,
@@ -1087,7 +884,6 @@ impl Context<'_> {
     fn with_vector_builtin_wildcards(&self) -> Self {
         Context {
             core: self.core,
-            ident: self.ident,
             active_dimension: self.active_dimension.clone(),
             active_subscript: self.active_subscript.clone(),
             is_initial: self.is_initial,
@@ -1214,8 +1010,7 @@ impl Context<'_> {
                         // If get_offset fails because it's an array without implicit subscripts,
                         // try to create a full array view
                         if matches!(err.code, ErrorCode::ArrayReferenceNeedsExplicitSubscripts)
-                            && let Ok(metadata) = self.get_metadata(id)
-                            && let Some(source_dims) = metadata.var.get_dimensions()
+                            && let Some(source_dims) = self.dims_of(id)
                         {
                             // This is an array variable - check if we need dimension reordering
                             let base = self.get_base_ref(id)?;
@@ -1295,8 +1090,7 @@ impl Context<'_> {
             Expr3::Subscript(id, indices, _bounds, loc) => {
                 // Handle subscript directly without converting to Expr2
                 let base = self.get_base_ref(id)?;
-                let metadata = self.get_metadata(id)?;
-                let dims = metadata.var.get_dimensions().ok_or_else(|| {
+                let dims = self.shape_of(id)?.dimensions().ok_or_else(|| {
                     Error::new(
                         ErrorKind::Model,
                         ErrorCode::Generic,
@@ -1953,10 +1747,8 @@ impl Context<'_> {
                     ast::UnaryOp::Transpose => {
                         // Special handling for transpose of bare array variables
                         if let Expr3::Var(id, _, var_loc) = &**inner {
-                            // Get the variable's metadata to check if it's an array
-                            if let Ok(metadata) = self.get_metadata(id)
-                                && let Some(dims) = metadata.var.get_dimensions()
-                            {
+                            // Check the variable's declared dimensions: is it an array?
+                            if let Some(dims) = self.dims_of(id) {
                                 if self.active_dimension.is_some() {
                                     // We're in an A2A context - need to handle bare array transpose specially
                                     // Process the variable with reversed active dimensions
@@ -2106,14 +1898,8 @@ impl Context<'_> {
     /// Get dimension names from an Expr3 if it's an array variable
     fn get_expr3_dimension_names(&self, expr: &Expr3) -> Option<Vec<String>> {
         match expr {
-            Expr3::Var(ident, _, _) => {
-                let metadata = self.get_metadata(ident).ok()?;
-                let dims = metadata.var.get_dimensions()?;
-                Some(dims.iter().map(|d| d.name().to_string()).collect())
-            }
-            Expr3::Subscript(ident, _, _, _) => {
-                let metadata = self.get_metadata(ident).ok()?;
-                let dims = metadata.var.get_dimensions()?;
+            Expr3::Var(ident, _, _) | Expr3::Subscript(ident, _, _, _) => {
+                let dims = self.dims_of(ident)?;
                 Some(dims.iter().map(|d| d.name().to_string()).collect())
             }
             _ => None,
@@ -2182,14 +1968,8 @@ impl Context<'_> {
             _ => return Ok(()),
         };
 
-        let metadata = match self.get_metadata(var_ident) {
-            Ok(m) => m,
-            Err(_) => return Ok(()),
-        };
-
-        let full_dims = match metadata.var.get_dimensions() {
-            Some(d) => d,
-            None => return Ok(()),
+        let Some(full_dims) = self.dims_of(var_ident) else {
+            return Ok(());
         };
 
         if current_ndims >= full_dims.len() {
@@ -2540,15 +2320,38 @@ impl Context<'_> {
     }
 }
 
+/// A `Context` over hand-built dependency shapes, for the unit tests of the
+/// resolution mechanics below. Production contexts are built by
+/// `super::fragment::lower_fragment` from a `FragmentInput`; these tests
+/// exercise the resolver on inputs of their own choosing.
+#[cfg(test)]
+fn test_context<'a>(
+    dimensions: &'a [Dimension],
+    dimensions_ctx: &'a DimensionsContext,
+    deps: &'a IdentMap<Ident<Canonical>, DepShape>,
+    var_sizes: &'a super::VarSizes,
+    inputs: &'a BTreeSet<Ident<Canonical>>,
+) -> Context<'a> {
+    Context::new(
+        ContextCore {
+            dimensions,
+            dimensions_ctx,
+            deps,
+            var_sizes,
+            inputs,
+        },
+        false,
+    )
+}
+
 #[test]
 fn test_lower() {
     use crate::common::{Canonical, Ident};
-    let input = {
-        use ast::BinaryOp::*;
+    let lower_if = |op: ast::BinaryOp| {
         use ast::Expr2::*;
         Box::new(If(
             Box::new(Op2(
-                And,
+                op,
                 Box::new(Var(Ident::new("true_input"), None, Loc::default())),
                 Box::new(Var(Ident::new("false_input"), None, Loc::default())),
                 None,
@@ -2568,253 +2371,57 @@ fn test_lower() {
             Loc::default(),
         ))
     };
+    let expected = |op: BinaryOp| {
+        Expr::If(
+            Box::new(Expr::Op2(
+                op,
+                Box::new(Expr::Var(
+                    VarRef::base(Ident::new("true_input")),
+                    Loc::default(),
+                )),
+                Box::new(Expr::Var(
+                    VarRef::base(Ident::new("false_input")),
+                    Loc::default(),
+                )),
+                Loc::default(),
+            )),
+            Box::new(Expr::Const(1.0, Loc::default())),
+            Box::new(Expr::Const(0.0, Loc::default())),
+            Loc::default(),
+        )
+    };
 
-    let inputs = &BTreeSet::new();
-    let module_models: crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
-    > = Default::default();
-    let true_var = Variable::Var {
-        ident: Ident::new(""),
-        ast: None,
-        init_ast: None,
-        eqn: None,
-        units: None,
-        tables: vec![],
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
-        errors: vec![],
-        unit_errors: vec![],
-    };
-    let false_var = Variable::Var {
-        ident: Ident::new(""),
-        ast: None,
-        init_ast: None,
-        eqn: None,
-        units: None,
-        tables: vec![],
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
-        errors: vec![],
-        unit_errors: vec![],
-    };
-    let mut metadata: crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>> =
-        Default::default();
-    metadata.insert(
-        Ident::new("true_input"),
-        VariableMetadata {
-            offset: Some(7),
-            size: 1,
-            var: &true_var,
-        },
-    );
-    metadata.insert(
-        Ident::new("false_input"),
-        VariableMetadata {
-            offset: Some(8),
-            size: 1,
-            var: &false_var,
-        },
-    );
-    let mut metadata2 = crate::common::IdentMap::default();
-    let main_ident = Ident::new("main");
-    let test_ident = Ident::new("test");
-    metadata2.insert(main_ident.clone(), metadata);
+    let inputs = BTreeSet::new();
+    let mut deps: IdentMap<Ident<Canonical>, DepShape> = Default::default();
+    deps.insert(Ident::new("true_input"), DepShape::var(vec![]));
+    deps.insert(Ident::new("false_input"), DepShape::var(vec![]));
     let dims_ctx = DimensionsContext::default();
-    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
-    let context = Context::new(
-        ContextCore {
-            dimensions: &[],
-            dimensions_ctx: &dims_ctx,
-            model_name: &main_ident,
-            metadata: &metadata2,
-            var_sizes: &var_sizes,
-            module_models: &module_models,
-            inputs,
-        },
-        &test_ident,
-        false,
-    );
-    let expected = Expr::If(
-        Box::new(Expr::Op2(
-            BinaryOp::And,
-            Box::new(Expr::Var(
-                VarRef::base(Ident::new("true_input")),
-                Loc::default(),
-            )),
-            Box::new(Expr::Var(
-                VarRef::base(Ident::new("false_input")),
-                Loc::default(),
-            )),
-            Loc::default(),
-        )),
-        Box::new(Expr::Const(1.0, Loc::default())),
-        Box::new(Expr::Const(0.0, Loc::default())),
-        Loc::default(),
-    );
+    let var_sizes = super::fragment::reference_extents(&deps);
+    let context = test_context(&[], &dims_ctx, &deps, &var_sizes, &inputs);
 
-    let output = context.lower(&input);
-    assert!(output.is_ok());
-    let mut output_exprs = output.unwrap();
-    // The last element is the main expression
-    assert_eq!(expected, output_exprs.pop().unwrap());
-
-    let input = {
-        use ast::BinaryOp::*;
-        use ast::Expr2::*;
-        Box::new(If(
-            Box::new(Op2(
-                Or,
-                Box::new(Var(Ident::new("true_input"), None, Loc::default())),
-                Box::new(Var(Ident::new("false_input"), None, Loc::default())),
-                None,
-                Loc::default(),
-            )),
-            Box::new(Const(
-                "1".to_string(),
-                crate::ast::Literal::new(1.0),
-                Loc::default(),
-            )),
-            Box::new(Const(
-                "0".to_string(),
-                crate::ast::Literal::new(0.0),
-                Loc::default(),
-            )),
-            None,
-            Loc::default(),
-        ))
-    };
-
-    let inputs = &BTreeSet::new();
-    let module_models: crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
-    > = Default::default();
-    let true_var = Variable::Var {
-        ident: Ident::new(""),
-        ast: None,
-        init_ast: None,
-        eqn: None,
-        units: None,
-        tables: vec![],
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
-        errors: vec![],
-        unit_errors: vec![],
-    };
-    let false_var = Variable::Var {
-        ident: Ident::new(""),
-        ast: None,
-        init_ast: None,
-        eqn: None,
-        units: None,
-        tables: vec![],
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
-        errors: vec![],
-        unit_errors: vec![],
-    };
-    let mut metadata: crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>> =
-        Default::default();
-    metadata.insert(
-        Ident::new("true_input"),
-        VariableMetadata {
-            offset: Some(7),
-            size: 1,
-            var: &true_var,
-        },
-    );
-    metadata.insert(
-        Ident::new("false_input"),
-        VariableMetadata {
-            offset: Some(8),
-            size: 1,
-            var: &false_var,
-        },
-    );
-    let mut metadata2 = crate::common::IdentMap::default();
-    let main_ident = Ident::new("main");
-    let test_ident = Ident::new("test");
-    metadata2.insert(main_ident.clone(), metadata);
-    let dims_ctx = DimensionsContext::default();
-    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
-    let context = Context::new(
-        ContextCore {
-            dimensions: &[],
-            dimensions_ctx: &dims_ctx,
-            model_name: &main_ident,
-            metadata: &metadata2,
-            var_sizes: &var_sizes,
-            module_models: &module_models,
-            inputs,
-        },
-        &test_ident,
-        false,
-    );
-    let expected = Expr::If(
-        Box::new(Expr::Op2(
-            BinaryOp::Or,
-            Box::new(Expr::Var(
-                VarRef::base(Ident::new("true_input")),
-                Loc::default(),
-            )),
-            Box::new(Expr::Var(
-                VarRef::base(Ident::new("false_input")),
-                Loc::default(),
-            )),
-            Loc::default(),
-        )),
-        Box::new(Expr::Const(1.0, Loc::default())),
-        Box::new(Expr::Const(0.0, Loc::default())),
-        Loc::default(),
-    );
-
-    let output = context.lower(&input);
-    assert!(output.is_ok());
-    let mut output_exprs = output.unwrap();
-    // The last element is the main expression
-    assert_eq!(expected, output_exprs.pop().unwrap());
+    for (op, lowered_op) in [
+        (ast::BinaryOp::And, BinaryOp::And),
+        (ast::BinaryOp::Or, BinaryOp::Or),
+    ] {
+        let mut output_exprs = context.lower(&lower_if(op)).expect("lowers");
+        // The last element is the main expression
+        assert_eq!(expected(lowered_op), output_exprs.pop().unwrap());
+    }
 }
 
 #[test]
 fn test_with_active_subscripts_reuses_dimension_storage() {
     use crate::common::CanonicalDimensionName;
 
-    let model_name = Ident::new("main");
-    let ident = Ident::new("aux");
     let dims_ctx = DimensionsContext::default();
     let dims = vec![Dimension::Indexed(
         CanonicalDimensionName::from_raw("letters"),
         3,
     )];
-    let metadata: crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>>,
-    > = Default::default();
-    let module_models: crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
-    > = Default::default();
+    let deps: IdentMap<Ident<Canonical>, DepShape> = Default::default();
     let inputs = BTreeSet::new();
-
-    let var_sizes = whole_variable_extents(&metadata, &model_name);
-    let base = Context::new(
-        ContextCore {
-            dimensions: &dims,
-            dimensions_ctx: &dims_ctx,
-            model_name: &model_name,
-            metadata: &metadata,
-            var_sizes: &var_sizes,
-            module_models: &module_models,
-            inputs: &inputs,
-        },
-        &ident,
-        false,
-    );
+    let var_sizes = super::fragment::reference_extents(&deps);
+    let base = test_context(&dims, &dims_ctx, &deps, &var_sizes, &inputs);
 
     let active_dims = Arc::<[Dimension]>::from(dims.clone());
     let ctx_a = base.with_active_subscripts(active_dims.clone(), &["1"]);
@@ -2850,32 +2457,10 @@ fn test_get_implicit_subscript_off_translates_through_mapping_parent() {
         Dimension::from(&sub_a),
         Dimension::from(&dim_b),
     ];
-    let metadata: crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>>,
-    > = Default::default();
-    let module_models: crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
-    > = Default::default();
+    let deps: IdentMap<Ident<Canonical>, DepShape> = Default::default();
     let inputs = BTreeSet::new();
-    let model_name = Ident::new("main");
-    let ident = Ident::new("test_var");
-
-    let var_sizes = whole_variable_extents(&metadata, &model_name);
-    let base = Context::new(
-        ContextCore {
-            dimensions: &all_dims,
-            dimensions_ctx: &dims_ctx,
-            model_name: &model_name,
-            metadata: &metadata,
-            var_sizes: &var_sizes,
-            module_models: &module_models,
-            inputs: &inputs,
-        },
-        &ident,
-        false,
-    );
+    let var_sizes = super::fragment::reference_extents(&deps);
+    let base = test_context(&all_dims, &dims_ctx, &deps, &var_sizes, &inputs);
 
     let active_dims = Arc::<[Dimension]>::from(vec![Dimension::from(&sub_a)]);
     let ctx = base.with_active_subscripts(active_dims, &["a2"]);
@@ -2911,62 +2496,14 @@ fn test_positional_fallback_ignores_unrelated_mapping() {
         Dimension::from(&other),
     ];
 
-    let source_var = Variable::Var {
-        ident: Ident::new("source_var"),
-        ast: Some(ast::Ast::ApplyToAll(
-            vec![Dimension::from(&source)],
-            ast::Expr2::Const(
-                "0".to_string(),
-                crate::ast::Literal::new(0.0),
-                Loc::default(),
-            ),
-        )),
-        init_ast: None,
-        eqn: None,
-        units: None,
-        tables: vec![],
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
-        errors: vec![],
-        unit_errors: vec![],
-    };
-
-    let mut model_metadata: IdentMap<Ident<Canonical>, VariableMetadata<'_>> = Default::default();
-    model_metadata.insert(
+    let mut deps: IdentMap<Ident<Canonical>, DepShape> = Default::default();
+    deps.insert(
         Ident::new("source_var"),
-        VariableMetadata {
-            offset: Some(10),
-            size: 2,
-            var: &source_var,
-        },
+        DepShape::var(vec![Dimension::from(&source)]),
     );
-
-    let mut metadata: IdentMap<Ident<Canonical>, IdentMap<Ident<Canonical>, VariableMetadata<'_>>> =
-        Default::default();
-    let model_name = Ident::new("main");
-    metadata.insert(model_name.clone(), model_metadata);
-
-    let module_models: crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
-    > = Default::default();
     let inputs = BTreeSet::new();
-    let ident = Ident::new("test_var");
-    let var_sizes = whole_variable_extents(&metadata, &model_name);
-    let base = Context::new(
-        ContextCore {
-            dimensions: &all_dims,
-            dimensions_ctx: &dims_ctx,
-            model_name: &model_name,
-            metadata: &metadata,
-            var_sizes: &var_sizes,
-            module_models: &module_models,
-            inputs: &inputs,
-        },
-        &ident,
-        false,
-    );
+    let var_sizes = super::fragment::reference_extents(&deps);
+    let base = test_context(&all_dims, &dims_ctx, &deps, &var_sizes, &inputs);
 
     let active_dims = Arc::<[Dimension]>::from(vec![Dimension::from(&target)]);
     let ctx = base.with_active_subscripts(active_dims, &["t2"]);
@@ -2988,6 +2525,122 @@ fn test_positional_fallback_ignores_unrelated_mapping() {
         Expr::Var(VarRef::new(Ident::new("source_var"), 1), Loc::default()),
         "target element t2 should select the second source element"
     );
+}
+
+/// The resolver over every shape of name a fragment can spell: a plain name,
+/// a module output, an arrayed sub-model variable read per element, a nested
+/// `m·n·x`, and the three ways a qualified name leaves the chain (no such
+/// module dependency, a non-module head, a missing sub-model variable). Each
+/// row states the `VarRef` the standing invariant promises: the instance's
+/// name and the variable's slot inside it.
+#[test]
+fn resolve_walks_module_shapes_and_refuses_loudly_off_the_chain() {
+    use super::fragment::{ModelShape, ShapeEntry};
+    use crate::common::CanonicalDimensionName;
+
+    let d = Dimension::Indexed(CanonicalDimensionName::from_raw("d"), 3);
+    // `inner`: `x` at 0 (scalar), `arr[d]` at 1.
+    let inner = Arc::new(ModelShape {
+        vars: [
+            (
+                Ident::new("x"),
+                ShapeEntry {
+                    offset: 0,
+                    shape: DepShape::var(vec![]),
+                },
+            ),
+            (
+                Ident::new("arr"),
+                ShapeEntry {
+                    offset: 1,
+                    shape: DepShape::var(vec![d.clone()]),
+                },
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        n_slots: 4,
+    });
+    // `outer`: `out` at 0, a nested `inner` instance `n` at 1.
+    let outer = Arc::new(ModelShape {
+        vars: [
+            (
+                Ident::new("out"),
+                ShapeEntry {
+                    offset: 0,
+                    shape: DepShape::var(vec![]),
+                },
+            ),
+            (
+                Ident::new("n"),
+                ShapeEntry {
+                    offset: 1,
+                    shape: DepShape::module(inner.clone()),
+                },
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        n_slots: 5,
+    });
+    let mut deps: IdentMap<Ident<Canonical>, DepShape> = Default::default();
+    deps.insert(Ident::new("plain"), DepShape::var(vec![]));
+    deps.insert(Ident::new("m"), DepShape::module(outer));
+    let dims = [d.clone()];
+    let dims_ctx = DimensionsContext::default();
+    let var_sizes = super::fragment::reference_extents(&deps);
+    let inputs = BTreeSet::new();
+    let ctx = test_context(&dims, &dims_ctx, &deps, &var_sizes, &inputs);
+
+    let var_ref = |name: &str| ctx.get_base_ref(&Ident::new(name));
+    assert_eq!(var_ref("plain").unwrap(), VarRef::base(Ident::new("plain")));
+    assert_eq!(
+        var_ref("m\u{00B7}out").unwrap(),
+        VarRef::new(Ident::new("m"), 0)
+    );
+    assert_eq!(
+        var_ref("m\u{00B7}n\u{00B7}x").unwrap(),
+        VarRef::new(Ident::new("m"), 1),
+        "a nested instance accumulates the offsets on the way down"
+    );
+    assert_eq!(
+        var_ref("m\u{00B7}n\u{00B7}arr").unwrap(),
+        VarRef::new(Ident::new("m"), 2)
+    );
+    // The per-element read of the nested arrayed variable: element `2` of `d`
+    // lands one slot past the array's base inside the instance.
+    let elem_ctx = ctx.with_active_subscripts(Arc::<[Dimension]>::from(vec![d]), &["2"]);
+    assert_eq!(
+        elem_ctx
+            .get_ref(&Ident::new("m\u{00B7}n\u{00B7}arr"))
+            .unwrap(),
+        VarRef::new(Ident::new("m"), 3)
+    );
+    // The dimensions of a qualified name come from the sub-model's shape.
+    assert_eq!(
+        ctx.get_dimensions("m\u{00B7}n\u{00B7}arr").map(|d| d.len()),
+        Some(1)
+    );
+    assert_eq!(ctx.get_dimensions("m\u{00B7}out"), None);
+
+    for off_the_chain in [
+        "ghost\u{00B7}x",         // no such dependency
+        "plain\u{00B7}x",         // the head is not a module
+        "m\u{00B7}missing",       // no such sub-model variable
+        "m\u{00B7}out\u{00B7}x",  // a non-module segment followed by another
+        "m\u{00B7}n\u{00B7}nope", // missing in the nested model
+    ] {
+        let err = var_ref(off_the_chain).expect_err(off_the_chain);
+        assert_eq!(err.code, ErrorCode::DoesNotExist, "{off_the_chain}");
+    }
+
+    // Every leaf of a module instance, and nothing for the instance itself,
+    // is in the extents table, at its slot inside the instance.
+    assert_eq!(var_sizes[&VarRef::base(Ident::new("plain"))], 1);
+    assert_eq!(var_sizes[&VarRef::new(Ident::new("m"), 0)], 1);
+    assert_eq!(var_sizes[&VarRef::new(Ident::new("m"), 1)], 1);
+    assert_eq!(var_sizes[&VarRef::new(Ident::new("m"), 2)], 3);
+    assert_eq!(var_sizes.len(), 4);
 }
 
 #[test]

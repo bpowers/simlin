@@ -5,7 +5,7 @@
 //! Regression tests for the module-reference cycle guard.
 //!
 //! A cyclic or self-referential module graph makes the recursive
-//! `model_module_map` / `compute_layout` salsa queries loop, which salsa turns
+//! `compute_layout` / `model_shape` salsa queries loop, which salsa turns
 //! into an unrecoverable dependency-graph panic. The empty-`model_name` sibling
 //! of this class was fixed in c1c4c954; this is the reachable cousin tracked as
 //! GH #806. Every production entry point -- compile, diagnostic collection, and
@@ -156,8 +156,8 @@ fn mutually_recursive_modules_error_without_panicking() {
 /// `project_module_graph` before driving each model's passes;
 /// `collect_model_diagnostics` -- equally `pub`, and the shape a future caller
 /// would reach for to diagnose one model -- did not, so on a cyclic project it
-/// drove `model_all_diagnostics` straight into the recursive `model_module_map`
-/// query and salsa raised an unrecoverable dependency-graph cycle panic. Milder
+/// drove `model_all_diagnostics` straight into the recursive `compute_layout`
+/// query (through `model_shape`) and salsa raised an unrecoverable dependency-graph cycle panic. Milder
 /// than a stack overflow (this one unwinds, so a non-`panic=abort` host could
 /// catch it) but the same class: the caller-side gate was the only thing
 /// holding it, and only on one of the two callers.
@@ -358,7 +358,7 @@ fn unused_draft_cycle_does_not_block_valid_main() {
 /// mac`. Its closing edge is the macro call, which `project_module_graph` does
 /// not record (it reads variable KINDS off the salsa inputs, never a parse
 /// result), so `cycle_error_from` reported no cycle from any root and every
-/// entry point drove the recursive `model_module_map` straight into salsa's
+/// entry point drove the recursive `compute_layout` straight into salsa's
 /// dependency-graph cycle panic -- an abort under `panic=abort`.
 ///
 /// Every part of this fixture was ablated; only these three switches carry the
@@ -413,20 +413,18 @@ fn macro_holding_a_module_project() -> datamodel::Project {
 /// is worth recording because it is what someone debugging a reopening would
 /// need. Measured by disabling Pass 4 and driving each entry point separately:
 ///
-///   - `collect_all_diagnostics` -> **`model_module_map`**
-///     (`model_all_diagnostics -> compile_var_fragment -> model_module_map ->
-///     model_module_map -> parse_source_variable_with_module_context ->
-///     variable_relevant_dimensions`);
+///   - `collect_all_diagnostics` -> **`compute_layout`** (the fragment path
+///     reaches it through `model_shape`: `model_all_diagnostics ->
+///     compile_var_fragment -> model_shape -> compute_layout -> ...`);
 ///   - `compile_project_incremental` -> **`compute_layout`**
 ///     (`assemble_simulation -> assemble_module -> compute_layout ->
 ///     compute_layout -> variable_size -> variable_dimensions -> ...`);
 ///   - `analyze_model` -> **`compute_layout`** (same prefix, reaching
 ///     `variable_size` via `model_ltm_mode`).
 ///
-/// So BOTH recursive cross-model queries are live abort paths, not just the one
-/// the diagnostic path happens to hit. An earlier version of this comment
-/// claimed all three panicked in `model_module_map`; that was wrong for two of
-/// the three, and would have sent a reader to the wrong query.
+/// So every entry point reaches the same recursive cross-model query
+/// (`compute_layout`, directly or through `model_shape`); naming the query is
+/// what sends a reader debugging a reopening to the right place.
 ///
 /// Because the panic aborted the test, the return values were never observed --
 /// so this test asserts what the entry points do NOW and records the panic as

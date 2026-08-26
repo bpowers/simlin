@@ -34,7 +34,7 @@ branch).
 
 ## Definition of Done
 
-1. **One fragment compiler.** `lower_fragment(&FragmentInput) -> LoweredVarFragment`
+1. **One fragment compiler.** `lower_fragment(&FragmentInput, is_initial) -> Result<Var>`
    is the only per-variable lowering entry point. Explicit variables, implicit
    helpers, LTM synthetic variables, and LTM implicit helpers are four
    *constructors* of `FragmentInput`. `compiler::Context` consumes `DepShape`s,
@@ -223,25 +223,47 @@ and `walk_builtin_expr` read `args()`. `BuiltinId::arity()` (`bytecode.rs`) is
 the precedent and keeps its role for the VM's 22 `Apply` builtins (`INF` and
 `PI` lower to `LoadConstant` and carry no id).
 
-**Fragment input (`db/var_fragment.rs` -> `compiler/`, Phase 3).**
+**Fragment input (`compiler/fragment.rs`, Phase 3).**
 
 ```rust
-pub struct DepShape { pub dims: Vec<Dimension>, pub kind: DepKind }
-pub enum DepKind { Aux, Stock, Module { model_name: Ident<Canonical>, layout: Arc<VariableLayout> } }
+pub struct DepShape { pub dims: Vec<Dimension>, pub kind: DepKind }   // dims empty = scalar
+pub enum DepKind { Var, Module { shape: Arc<ModelShape> } }           // Var: aux, flow, stock, table, helper
+pub struct ModelShape { pub vars: IdentMap<Ident<Canonical>, ShapeEntry>, pub n_slots: usize }
+pub struct ShapeEntry { pub offset: usize, pub shape: DepShape }      // nested module: its own ModelShape
 pub struct FragmentInput<'a> {
-    ident, kind /* aux | stock{inflows, outflows} | module{..} */,
-    ast: Option<&'a Ast<Expr2>>, init_ast: Option<&'a Ast<Expr2>>,
-    tables: &'a HashMap<Ident<Canonical>, Vec<Table>>,
-    deps: &'a IdentMap<Ident<Canonical>, DepShape>,
-    module_inputs: &'a BTreeSet<Ident<Canonical>>,
-    dims: &'a DimensionsContext, model_name: &'a Ident<Canonical>,
+    pub target: Variable,                                  // the variable in its Expr2 form
+    pub deps: IdentMap<Ident<Canonical>, DepShape>,        // every referenceable name, the target included
+    pub tables: HashMap<Ident<Canonical>, Vec<Table>>,
+    pub module_inputs: BTreeSet<Ident<Canonical>>,
+    pub model_name: Ident<Canonical>,
+    pub dimensions: &'a [Dimension], pub dimensions_ctx: &'a DimensionsContext,
+    var_sizes: VarSizes,                                   // derived by reference_extents(&deps) in new()
 }
-pub fn lower_fragment(input: &FragmentInput<'_>) -> LoweredVarFragment;
+impl FragmentInput<'_> { pub fn new(target, deps, tables, module_inputs, model_name, dimensions, dimensions_ctx) -> Self;
+                         pub fn emit_ctx(&self) -> ModuleCtx<'_> }
+pub fn lower_fragment(input: &FragmentInput<'_>, is_initial: bool) -> Result<Var>;
+pub fn reference_extents(deps: &IdentMap<Ident<Canonical>, DepShape>) -> VarSizes;
+// db/: the four constructors
+fn explicit_fragment_input(db, var, model, project, module_input_names) -> ExplicitFragment   // Fatal { unit_diags, fatal_diags } | Ready { unit_diags, input }
+fn implicit_fragment_input(db, meta, model, project, module_input_names) -> Result<FragmentInput, ImplicitInputError>
+fn ltm_fragment_input(db, var_name, equation, model, project) -> Result<FragmentInput, String>
+fn ltm_implicit_fragment_input(db, meta, model, project, module_input_names) -> Option<FragmentInput>
+#[salsa::tracked(returns(ref))] fn model_shape(db, model, project) -> Arc<ModelShape>
+fn module_input_set(prefix, refs) -> BTreeSet<Ident<Canonical>>   // the one owner of "which ports does this wiring bind"
 ```
 
-`compiler::Context` reads `DepShape` where it reads `VariableMetadata.var`
-today; what `get_submodel_metadata`/`submodel_offset_within` read off a
-sub-model's stubs comes from `DepKind::Module.layout`.
+`lower_fragment` is per phase (`is_initial`), so an emitter lowers only the
+phases its runlist membership admits and an LTM synthetic variable lowers its
+one flow phase; one `FragmentInput` serves every phase and the emission. A
+module dependency's `DepKind::Module` carries the sub-model's `ModelShape` --
+layout slot plus shape per variable, recursively for nested instances -- and
+`Context::resolve` is the one reader of it: a plain name is a dependency
+shape, a `·`-qualified name walks the shapes accumulating the slot offset.
+`DepKind` has no `Stock` variant and no `model_name` because lowering reads
+neither (a stock and an aux are both one slot per element; a module's model is
+identified by its shape), and `ModelShape` rather than `VariableLayout` because
+the resolver needs each sub-model variable's dimensions and nested-module
+identity, which a layout does not carry.
 
 **Variable (`variable.rs`, Phase 4).**
 
@@ -383,8 +405,10 @@ read `DepKind::Module.layout`); `db/var_fragment.rs` and
 `db/fragment_compile.rs` reduced to constructors; `db/ltm/compile.rs` both
 compile paths reduced to constructors; `db/assemble.rs` (`build_stub_variable`,
 `build_submodel_metadata` deleted; `build_module_inputs` and a single
-`module_input_set(refs, prefix)` owner used by `enumerate_module_instances_inner`,
-`build_var_info`, and LTM); `Cargo.toml` drops `bumpalo`.
+`module_input_set(prefix, refs)` owner used by `enumerate_module_instances_inner`
+-- `build_var_info`'s `·` splits classify dependency strings rather than
+extract wiring, and Phase 8's `DepRef` replaces them); `Cargo.toml` drops
+`bumpalo`.
 
 **Dependencies:** Phases 1-2.
 
@@ -615,11 +639,12 @@ decisions taken on it:
 - A synthesized helper is printed to text at two sites and re-parsed at seven;
   its name is its identity at twenty-one. Captures carry the argument as an
   AST subtree with positional identity `(parent, id)`.
-- AC3.1 needs more than the parse key: `compile_var_fragment` and
-  `compile_implicit_var_phase_bytecodes` clone the whole `model_module_map`,
-  whose value changes whenever an implicit module instance is added. Chunk 7.4
-  adds a per-ident projection (`module_target_by_ident`) and starts with a
-  salsa execution-count probe of the pinning test, whose stated cause (1) --
+- AC3.1 needs more than the parse key: the fragment compilers cloned a
+  whole-model module map whose value changed whenever an implicit module
+  instance was added. Phase 3 deleted that map (no fragment reads a whole-model
+  module map; module shapes come from `model_shape` per sub-model), so chunk
+  7.4 starts with a salsa execution-count probe of the pinning test to find
+  what still re-executes, whose stated cause (1) --
   `project.models` changing on a stdlib splice -- is inconsistent with
   `db/sync.rs` splicing stdlib models on every sync.
 - The runlist contract a capture reproduces: a PREVIOUS capture is a flows-only
@@ -639,8 +664,7 @@ D1/D3 predicate as a projection; 7.2 captures for PREVIOUS/INIT with today's
 capture set, names, and walk order held fixed (the goldens are the defect
 detector); 7.3a stdlib `ImplicitModule` with per-element expansion and shared
 `n`; 7.3b macros, passthrough, and GH #554; 7.4 deletion of `ModuleIdentContext`
-and the empty-context twin call sites, the `model_module_map` projection, and
-the AC3.1 flip; 7.5 the shape changes, one commit and ledger row each: dropping
+and the empty-context twin call sites and the AC3.1 flip; 7.5 the shape changes, one commit and ledger row each: dropping
 the captures D1 synthesizes for `PREVIOUS(module-call aux)` and
 `PREVIOUS(m·scalar_port)` (redundant: codegen's `static_slot` already accepts
 `m·port`, and a stdlib-call aux is a one-slot scalar) and refusing a bare
@@ -742,6 +766,32 @@ generator produces them:
    which rewrote the period sentinel to `.`, a spelling `Ident::new` reads back
    as the module separator.
 
+**Phase 3 semantic divergences.** Feeding every fragment through one
+`FragmentInput` changed how one shape compiles. It does not occur in the
+corpus (C-LEARN artifacts are identical, plain and LTM); it is pinned:
+
+1. A stdlib call whose hoisted argument reads a module output --
+   `sm = SMTH1(sub·output * 2, 2)`, hoisting `$⁚sm⁚0⁚arg0 = sub·output * 2`
+   -- compiles and simulates. The implicit-helper compiler used to hand a
+   NON-module helper's lowering an empty module map, so the cross-module read
+   inside the helper was `DoesNotExist` and the whole model failed to compile
+   (`implicit variable '$⁚sm⁚0⁚arg0' ... could not be lowered:
+   SimulationError{does_not_exist}`); the helper now resolves `sub` through
+   its own dependency shapes like every other fragment. Pinned by
+   `db::fragment_input_tests::smooth_argument_reading_a_module_output_compiles`
+   with the values derived from the rules (the helper and the instance's input
+   are 60 on every step; the smooth rises 0, 30, 45). The 0 start is the
+   pre-existing cross-model initials boundary -- a stockless sub-model
+   evaluates nothing in the initials phase, so a parent stock (an explicit one
+   too) initialized from its output reads 0 -- pinned as a disclosed residual
+   by `stock_initialized_from_a_stockless_modules_output_is_a_pre_existing_residual`,
+   tracked as GH #1028, and independent of this phase.
+
+Every other path is byte-identical by construction and by measurement: each
+emitter is its constructor's `FragmentInput`, lowered and emitted
+(`db::fragment_input_tests`, one row per constructor), the fragment and LTM
+goldens are untouched, and the determinism suites are green.
+
 **Risks.** Phase 6(b) and Phase 7 are the two places where artifact shape
 changes are expected; both rely on the corpus as oracle and must report opcode
 and temp deltas in the ledger. Phase 7 changes salsa keying; the determinism
@@ -761,3 +811,4 @@ hash is not available to it.
 | 2a | `engine: one temp allocator per variable lowering` | 10.349 G (median of 5; range 10.345-10.353), -3.78% against the Phase 1 commit re-measured in the same session (10.756 G, median of 5, range 10.747-10.759; interleaved pairs -3.75 / -3.78 / -3.74%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN: every count above, the 371 names and 7 modules, the full opcode histogram and the post-fusion stream counts; temp numbering identical on every checked-in fragment golden (no regeneration); same channel and flags as the baseline row. The saving is deleted reconciliation work: the operand materializer walked every fragment's whole expression list into a `HashMap` to find the next free id, the arrayed path lowered every element twice (once to classify, once to keep), the shared-hoist paths re-lowered every element a second time to replay its temp ids, and every re-lowered element tree was walked twice more to shift and re-scan its ids. One corrected shape, not in the corpus: an arrayed arm that is not the hoisting arm and holds a Pass 1 temp beside its own hoist read another arm's hoist through that temp at the Phase 1 commit and reads its own operand on this one (Additional Considerations, "Phase 2a semantic divergences"). Every other probe -- the engine suite, the determinism suites, and hand-written models covering nested hoists, EXCEPT arms in XMILE and MDL, 2-D apply-to-all with reducers, the Phase 1 per-element GF shapes, and the pre-existing refusal of an array-producing builtin inside operand arithmetic -- simulates byte-identically on the pre-change and post-change CLIs |
 | 2b | `engine: retire the unemitted opcode families` | 10.365 G (median of 5; range 10.355-10.369), +0.19% against the Phase 2a commit re-measured in the same session (10.345 G, median of 5, range 10.341-10.347; interleaved pairs +0.17 / +0.08 / +0.16%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN: every count above, the 371 names and 7 modules, the full opcode histogram and the post-fusion stream counts (the `bytecode_profile` block is byte-identical); same channel and flags as the baseline row. The compile measurement embeds one VM run, and the delta is that run's: on the run channel (`CLEARN_PROFILE=run CLEARN_RUN_ITERS=20`, retired instructions, same binaries) the identical artifact executes 31.936 G against 31.654 G (medians of 5; interleaved pairs +0.87 / +0.92 / +0.90%), +0.9% or about 13.4 M instructions per run, which is 13.4 M of the compile channel's 19.8 M and leaves a +0.06% residual inside that channel's floor. The run delta is dispatch-loop codegen, not emitted work: the opcode stream is identical, `eval_bytecode` lost sixteen arms and shrank from 63,380 to 52,520 bytes, and a sampled profile of the run loop places the delta in `eval_bytecode` and the `RuntimeView` helpers LLVM inlines into or splits out of it (`offset_for_iter_index` folded in, `dense_linear_start` split out) -- the codegen-perturbation class `engine-performance.md` "Measuring a change" records for this function. Accepted by the owner as a simplicity trade and not investigated further; a perf pass follows this branch. Sixteen `SymbolicOpcode` variants, their `Opcode` twins, VM and wasm arms, `ByteCodeContext.arrays` / `.subdim_relations`, and the `BeginIter` flat-offset precompute whose only reader was `LoadIterElement` are gone; the `dead_code` lint, denied under clippy, is the standing pin (GH #612). Semantics: the engine suite (lib 5657, integration 767), the wasm parity corpus and the 12-repeat determinism suites are green, and 43 hand-written probes (the Phase 1 and 2a probe sets plus the array corpus models) simulate byte-identically, exit codes included, on the pre-change and post-change CLIs |
 | 5a | `engine: one merger and one slot order for assembly` | 10.264 G (median of 5; range 10.260-10.281), -0.83% against the Phase 2c tree (`ca39c1c6` plus the staged monolith-deletion patch) re-measured in the same session (10.350 G, median of 5, range 10.339-10.353; interleaved pairs -0.85 / -0.82 / -0.66%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: every count above, the 371 names and 7 modules, the full opcode histogram and the post-fusion stream counts (both `bytecode_profile` blocks byte-identical), and the results-offset map key for key and slot for slot (5058 keys plain, 16073 under LTM); same channel and flags as the baseline row. The saving is deleted assembly work: one `FragmentMerger` per module absorbs each fragment once (`standalone_program` for every initial, `concatenate` for the flows and the stocks, `into_side_channels` for the module's one table set), where assembly ran a GF-dedup pass, a context-aggregation pass and a per-phase resource-count pass over every fragment and a hand-rolled initials renumber beside them; and the fragment map borrows the salsa-cached fragments instead of deep-cloning each into a per-assembly `HashMap`. The results-offset map is `compute_layout` flattened (`db::layout::flattened_offsets`), and `assemble_module` emits each program through one `program_fragments` over every source (explicit, implicit, LTM synthetic, LTM implicit), pinned by `db::assemble_tests`. One corrected shape, not in the corpus: a sub-model holding a lookup-only table shifted every parent variable after the module instance one slot in the results map (Additional Considerations, "Phase 5a semantic divergences") Phase 5's remainder is part (b), the error-channel half (DoD 8); the module-instance input-set owner lands with Phase 3. |
+| 3 | `engine: one fragment compiler over dependency shapes` | 8.974 G (median of 5; range 8.971-8.977), -13.3% against the Phase 2c tree re-measured in the same session (10.347 G, median of 5, range 10.337-10.356; interleaved pairs -13.31 / -13.20 / -13.23 / -13.22 / -13.24%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN: every count above, the 371 names and 7 modules, the full opcode histogram and the post-fusion stream counts -- the plain `bytecode_profile` block is byte-identical, and so is the LTM one (30123 slots, 908377 / 1477 / 28514 opcodes, 16741 literals, 441 temps, 2866 views); same channel and flags as the baseline row. The saving is deleted per-fragment work, none of it output-bearing: the explicit emitter lowers only the phases the variable's runlist membership admits (it lowered both phases of every variable and discarded the ungated one -- ~400 initial-phase lowerings on C-LEARN); an implicit helper builds its `FragmentInput` once instead of re-running the parse -> lower -> dependency-walk prologue once per gated phase; a sub-model's shape is one memoized `model_shape` per model instead of a stub symbol table rebuilt, arena and all, inside every fragment that reads the module; and no fragment clones `model_module_map`. One corrected shape, not in the corpus: a stdlib call whose hoisted argument reads a module output compiles and simulates (Additional Considerations, "Phase 3 semantic divergences"). The engine suite (lib 5656, integration 767), the wasm parity corpus, the 12-repeat determinism suites and every fragment/LTM golden are green with no regeneration |

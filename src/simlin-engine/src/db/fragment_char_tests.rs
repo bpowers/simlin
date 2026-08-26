@@ -496,7 +496,6 @@ fn collect_model_fragments(
         .unwrap_or_else(|| panic!("fixture declares model `{model_name}`, which does not exist"));
     let owned_inputs: Vec<String> = module_input_names.iter().map(|s| s.to_string()).collect();
     let inputs = ModuleInputSet::from_names(db, &owned_inputs);
-    let dep_graph = model_dependency_graph(db, model, project, inputs);
 
     let mut out: Vec<RenderedVar> = Vec::new();
     let push = |out: &mut Vec<RenderedVar>, kind: FragmentKind, result: &VarFragmentResult| {
@@ -547,7 +546,6 @@ fn collect_model_fragments(
                 &ltm_implicit[name],
                 model,
                 project,
-                dep_graph,
                 &owned_inputs,
                 None,
             ) {
@@ -1768,7 +1766,7 @@ fn char_ltm_fragments_discovery() {
 //      value changed and every dependent re-executed. Narrowed by the
 //      `var_runlist_membership` projection, which returns those three bits and
 //      backdates.
-//   2. `lower_var_fragment` / `collect_var_dependencies` read the whole
+//   2. the explicit fragment constructor read the whole
 //      `SourceModel::variables` map field to resolve dependency names, so any
 //      change to the model's variable SET invalidated every fragment through
 //      that edge too. Narrowed by the `model_variable_by_name` firewall query,
@@ -2257,8 +2255,9 @@ fn cross_module_element_offsets(
 /// place the value-equality assertions above still have teeth of their own.
 ///
 /// Since GH #964 a fragment carries no offset of its own model at all, and
-/// consulting one is a compile error (`VariableMetadata::offset` is `None` for
-/// the model being compiled), so the TYPE now subsumes most of what those
+/// consulting one is impossible (a `FragmentInput` carries no offset of the
+/// model being compiled; only a module dependency's sub-model shape has
+/// slots), so the TYPE now subsumes most of what those
 /// assertions were watching for. One channel survives, in the other direction:
 /// a cross-module reference `sub·output` lowers to
 /// `VarRef { name: sub, element_offset: <output's offset INSIDE producer> }`,
@@ -2407,7 +2406,7 @@ fn equation_only_edit_recompiles_only_the_edited_fragment() {
          that variable's fragment"
     );
 
-    // ...but the blast radius is one hop wide, not zero: `lower_var_fragment`
+    // ...but the blast radius is one hop wide, not zero: `explicit_fragment_input`
     // builds its dependency-granular mini `ModelStage0` by PARSING each
     // dependency, so a consumer's fragment depends on its dependencies'
     // equation text and not merely on their shape. Editing `k`'s constant

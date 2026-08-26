@@ -60,7 +60,6 @@ calamine = { version = "0.33", optional = true }
 resvg = { version = "0.47", optional = true, default-features = false, features = ["text"] }
 xmutil = { version = "1", path = "../xmutil", optional = true }
 
-bumpalo = "3"
 salsa = "0.28"
 # Insertion-order-preserving map. Used for `LtmVariablesResult.loop_partitions`
 # so the post-sim rel-loop-score denominator sums in the loops' emission order

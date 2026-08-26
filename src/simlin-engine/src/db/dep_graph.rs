@@ -775,9 +775,9 @@ enum SccVerdict {
 ///
 /// **Why symbolic (GH #575).** The prior builder keyed the element graph
 /// on raw `Expr::AssignCurr` operands, which are *per-variable mini-slots*
-/// (`lower_var_fragment` builds a fresh per-variable layout: every
-/// member's own variable sits at `crate::vm::IMPLICIT_VAR_COUNT`, its own
-/// deps after it). Those slots are NOT model-global, so for a multi-member
+/// (a private per-variable layout in which every member's own variable sat
+/// at `crate::vm::IMPLICIT_VAR_COUNT`, its own deps after it). Those slots are
+/// NOT model-global, so for a multi-member
 /// SCC every member's write-slots collided and every cross-member read
 /// landed on the *reading* member's private dep mini-slots -- ZERO
 /// cross-member edges, a wrong order, and (fatally) a genuine
@@ -853,8 +853,8 @@ enum SccVerdict {
 /// `walk_successors` relation reports none); for an SCC that IS identified
 /// via an un-lagged cross-member chain, this strip is what lets its acyclic
 /// current-value element graph resolve. dt stock-breaking is genuinely
-/// inherited (it is reflected in the symbolic bytecode `lower_var_fragment`
-/// + `compile_phase_to_per_var_bytecodes` produce, not re-implemented).
+/// inherited (it is reflected in the symbolic bytecode `lower_fragment` +
+/// `compile_phase_to_per_var_bytecodes` produce, not re-implemented).
 fn symbolic_phase_element_order(
     db: &dyn Db,
     model: SourceModel,
@@ -1301,7 +1301,7 @@ pub(crate) struct DtSccResolution {
 /// fragment injection (Task 6, `assemble_module` ->
 /// `var_phase_symbolic_fragment_prod`) deliberately consumes the *same*
 /// no-input wiring: the symbolic per-member fragments are lowered with
-/// `lower_var_fragment(.., &[], ..)` / `inputs = BTreeSet::new()`, matching
+/// the no-input `FragmentInput` (`explicit_fragment_input(.., &[])`), matching
 /// this SCC identification's `build_var_info(.., &[])`, so the verdict's
 /// `element_order` and the combined fragment's per-element segmentation
 /// agree by construction. The real `module_input_names` are intentionally NOT
@@ -1462,13 +1462,11 @@ pub(crate) fn array_producing_vars(
 /// `test_common::TestProject::flow_exprs`, through which every structural
 /// lowering assertion in the crate constrains the production fragment compiler.
 ///
-/// Sourced via `crate::db::var_fragment::lower_var_fragment` -- the exact
-/// per-variable lowering the production caller
-/// `crate::db::compile_var_fragment` runs -- with the caller-owned,
-/// lowering-independent context constructed byte-identically to that
-/// caller (same helpers, same order: `project_datamodel_dims` ->
-/// `DimensionsContext`/`Dimension`, `model.name`, `model_module_map`)
-/// and the default no-module-input wiring `dt_cycle_sccs` uses
+/// Sourced through the explicit constructor of `FragmentInput`
+/// (`crate::db::var_fragment::explicit_fragment_input`) and
+/// `compiler::fragment::lower_fragment` -- the exact per-variable lowering the
+/// production caller `crate::db::compile_var_fragment` runs -- under the
+/// default no-module-input wiring `dt_cycle_sccs` uses
 /// (`build_var_info(.., &[])`, empty module inputs -- the lowering is
 /// role-independent, so there is no `is_root` selector to match).
 /// This is the engine's real lowering, never a re-derivation. The
@@ -1477,9 +1475,9 @@ pub(crate) fn array_producing_vars(
 ///
 /// Aborts (panics -- never silent-skip) when a universe variable's
 /// non-initial production lowered exprs cannot be sourced: no
-/// `SourceVariable` (an implicit SMOOTH/DELAY/INIT helper -- it has no
-/// `lower_var_fragment` entry), `LoweredVarFragment::Fatal` (the variable
-/// did not lower at all), or the non-initial phase's `Var::new` errored.
+/// `SourceVariable` (an implicit SMOOTH/DELAY/INIT helper -- the explicit
+/// constructor has no entry for it), `ExplicitFragment::Fatal` (the variable
+/// did not lower at all), or the non-initial phase's lowering errored.
 ///
 /// The abort must fire on *any* incomplete sourcing, not merely a
 /// whole-variable `Fatal`: an incompletely-sourced production `Vec<Expr>`
@@ -1496,7 +1494,8 @@ pub(crate) fn var_noninitial_lowered_exprs(
     project: SourceProject,
     var_name: &str,
 ) -> Vec<crate::compiler::Expr> {
-    use crate::db::var_fragment::{LoweredVarFragment, lower_var_fragment};
+    use crate::compiler::fragment::lower_fragment;
+    use crate::db::var_fragment::{ExplicitFragment, explicit_fragment_input};
 
     let source_vars = model.variables(db);
     let Some(sv) = source_vars.get(var_name) else {
@@ -1508,42 +1507,18 @@ pub(crate) fn var_noninitial_lowered_exprs(
         );
     };
 
-    // Caller-owned, lowering-independent context, read EXACTLY as
-    // `crate::db::compile_var_fragment` reads it (the salsa-cached
-    // project-global dimension context + converted dims).
-    let dim_context = crate::db::project_dimensions_context(db, project);
-    let converted_dims = crate::db::project_converted_dimensions(db, project);
-    let model_name_ident = Ident::new(model.name(db));
-    let inputs: BTreeSet<Ident<Canonical>> = BTreeSet::new();
-    let module_models = crate::db::model_module_map(db, model, project).clone();
-
-    let lowered = lower_var_fragment(
-        db,
-        *sv,
-        model,
-        project,
-        &[],
-        converted_dims,
-        dim_context,
-        &model_name_ident,
-        &module_models,
-        &inputs,
-    );
-
-    match lowered {
-        LoweredVarFragment::Lowered {
-            per_phase_lowered, ..
-        } => match per_phase_lowered.noninitial {
+    match explicit_fragment_input(db, *sv, model, project, &[]) {
+        ExplicitFragment::Ready { input, .. } => match lower_fragment(&input, false) {
             Ok(v) => v.ast,
             Err(e) => panic!(
                 "var_noninitial_lowered_exprs: var {var_name:?} non-initial \
-                 Var::new errored ({e:?}) -- cannot source its production \
+                 lowering errored ({e:?}) -- cannot source its production \
                  lowered exprs (abort, never silent-skip)"
             ),
         },
-        LoweredVarFragment::Fatal { .. } => panic!(
+        ExplicitFragment::Fatal { .. } => panic!(
             "var_noninitial_lowered_exprs: var {var_name:?} failed to lower \
-             (LoweredVarFragment::Fatal) -- cannot source its production \
+             (ExplicitFragment::Fatal) -- cannot source its production \
              lowered exprs (abort, never silent-skip)"
         ),
     }

@@ -696,9 +696,11 @@ impl TestProject {
     /// `var_name`: one `Expr` per element of an arrayed equation, preceded by
     /// any temps the lowering hoisted.
     ///
-    /// Sourced through `db::var_fragment::lower_var_fragment`, the exact
-    /// per-variable lowering `compile_var_fragment` runs, so a structural
-    /// assertion over this list constrains what the fragment compiler emits.
+    /// Sourced through the explicit `FragmentInput` constructor
+    /// (`db::var_fragment::explicit_fragment_input`) and
+    /// `compiler::fragment::lower_fragment`, the exact per-variable lowering
+    /// `compile_var_fragment` runs, so a structural assertion over this list
+    /// constrains what the fragment compiler emits.
     /// Panics when the variable has no `SourceVariable` (an implicit helper) or
     /// does not lower; a test that expects a refusal reads
     /// [`TestProject::error_diagnostics`] instead.

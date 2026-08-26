@@ -379,9 +379,10 @@ signed unit transfer when nothing better exists:
   the two modules' output refs.
 
 **Composites resolve in both modes (GH #548 / #675).** Since GH #548,
-`build_submodel_metadata` lays out a sub-model's LTM synthetic vars (composites
-included) in the parent's flattened offset map whenever `ltm_enabled`, which
-holds in *both* exhaustive and discovery mode. An empirical probe confirmed a
+`db::model_shape` registers a sub-model's LTM synthetic vars (composites
+included) at their layout slots in the shape every parent fragment resolves a
+cross-module read through, whenever `ltm_enabled`, which holds in *both*
+exhaustive and discovery mode. An empirical probe confirmed a
 SMOOTH composite resolving to a nonzero value in a discovery run. Discovery
 mode therefore uses the *same* composite reference exhaustive mode does -- the
 pre-#675 discovery-only gain variant (`Δ(module·output)/Δfrom`, justified by a

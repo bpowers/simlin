@@ -70,16 +70,17 @@
 //! are derived in each docstring from the builtins' rules rather than copied
 //! from a run.
 //!
-//! Every fixture is lowered through `lower_var_fragment`, exactly as
-//! `compile_var_fragment` lowers it, and emitted through
-//! `compile_var_fragment` itself. The last test is the one deliberate
-//! exception: it hand-builds a non-dense expression list that no lowering
-//! produces, to pin the emitter's loud refusal of one.
+//! Every fixture is lowered through the explicit `FragmentInput` constructor
+//! and `lower_fragment`, exactly as `compile_var_fragment` lowers it, and
+//! emitted through `compile_var_fragment` itself. The last test is the one
+//! deliberate exception: it hand-builds a non-dense expression list that no
+//! lowering produces, to pin the emitter's loud refusal of one.
 
 use std::collections::BTreeSet;
 
-use super::var_fragment::{LoweredVarFragment, lower_var_fragment};
+use super::var_fragment::{ExplicitFragment, explicit_fragment_input};
 use super::*;
+use crate::compiler::fragment::lower_fragment;
 use crate::compiler::{Expr, SubscriptIndex};
 use crate::test_common::TestProject;
 
@@ -178,9 +179,9 @@ fn temp_events(exprs: &[Expr]) -> Vec<TempEvent> {
 }
 
 /// The production lowering and emission of `var`'s non-initial phase: the
-/// lowered `Vec<Expr>` from `lower_var_fragment` (called as
-/// `compile_var_fragment` calls it) and the `temp_sizes` of the flow fragment
-/// `compile_var_fragment` emits from it.
+/// lowered `Vec<Expr>` from the explicit `FragmentInput` constructor and
+/// `lower_fragment` (called as `compile_var_fragment` calls them) and the
+/// `temp_sizes` of the flow fragment `compile_var_fragment` emits from it.
 fn flow_fragment(project: &TestProject, var: &str) -> (Vec<Expr>, Vec<(u32, usize)>) {
     let datamodel = project.build_datamodel();
     let db = SimlinDb::default();
@@ -194,33 +195,13 @@ fn flow_fragment(project: &TestProject, var: &str) -> (Vec<Expr>, Vec<(u32, usiz
         .get(var)
         .unwrap_or_else(|| panic!("fixture declares `{var}`"));
 
-    let dim_context = project_dimensions_context(&db, source_project);
-    let converted_dims = project_converted_dimensions(&db, source_project);
-    let model_name_ident = Ident::new(model.name(&db));
-    let inputs: BTreeSet<Ident<Canonical>> = BTreeSet::new();
-    let module_models = model_module_map(&db, model, source_project).clone();
-    let lowered = lower_var_fragment(
-        &db,
-        source_var,
-        model,
-        source_project,
-        &[],
-        converted_dims,
-        dim_context,
-        &model_name_ident,
-        &module_models,
-        &inputs,
-    );
-    let exprs = match lowered {
-        LoweredVarFragment::Lowered {
-            per_phase_lowered, ..
-        } => {
-            per_phase_lowered
-                .noninitial
+    let exprs = match explicit_fragment_input(&db, source_var, model, source_project, &[]) {
+        ExplicitFragment::Ready { input, .. } => {
+            lower_fragment(&input, false)
                 .unwrap_or_else(|e| panic!("`{var}` must lower: {e:?}"))
                 .ast
         }
-        LoweredVarFragment::Fatal { fatal_diags, .. } => {
+        ExplicitFragment::Fatal { fatal_diags, .. } => {
             panic!("`{var}` must lower, got {fatal_diags:?}")
         }
     };
@@ -822,15 +803,28 @@ fn a2a_per_element_nested_hoist_beside_a_pass1_temp() {
 #[test]
 fn emitter_refuses_a_non_dense_temp_id() {
     use crate::ast::{ArrayView, Loc};
-    use crate::compiler::VarRef;
-    use crate::db::assemble::{compile_phase_to_per_var_bytecodes_reporting, fragment_emit_ctx};
+    use crate::compiler::{ModuleCtx, VarRef};
+    use crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting;
 
     let model_name = Ident::new("main");
     let inputs: BTreeSet<Ident<Canonical>> = BTreeSet::new();
     let var_sizes = crate::compiler::VarSizes::new();
     let tables = std::collections::HashMap::new();
     let dimensions: Vec<crate::dimensions::Dimension> = Vec::new();
-    let base = fragment_emit_ctx(&model_name, &inputs, &var_sizes, &tables, &dimensions);
+    // The phase-invariant context `FragmentInput::emit_ctx` builds, spelled out
+    // because this input has no `FragmentInput` -- it is the shape no lowering
+    // produces.
+    let base = ModuleCtx {
+        ident: &model_name,
+        inputs: &inputs,
+        temp_sizes: &[],
+        runlist_initials_by_var: &[],
+        runlist_flows: &[],
+        runlist_stocks: &[],
+        var_sizes: &var_sizes,
+        tables: &tables,
+        dimensions: &dimensions,
+    };
     let view = ArrayView::contiguous(vec![2]);
     // Temp 1 is written and read; temp 0 is never written.
     let exprs = vec![

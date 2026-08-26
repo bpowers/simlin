@@ -132,7 +132,7 @@ pub(crate) fn model_flows_invariant<'db>(
 
         // Use the already-cached `compile_var_fragment` result (a salsa cache
         // hit -- `assemble_module` triggers compilation before this query
-        // runs) rather than re-calling `lower_var_fragment`. The
+        // runs) rather than re-lowering the fragment. The
         // `flow_invariance` field was pre-computed there at no extra cost.
         let Some(result) = compile_var_fragment(db, *svar, model, project, module_inputs) else {
             // Compilation failed; treat as variant by omission.

@@ -8,6 +8,7 @@ pub mod context;
 pub mod dimensions;
 pub mod expr;
 pub(crate) mod fold;
+pub(crate) mod fragment;
 pub(crate) mod invariance;
 pub mod pretty;
 pub mod subscript;
@@ -26,12 +27,10 @@ use crate::dimensions::DimensionsContext;
 use crate::dimensions::{Dimension, SubscriptIterator};
 use crate::sim_err;
 use crate::variable::Variable;
-#[cfg(test)]
-use crate::vm::IMPLICIT_VAR_COUNT;
 
 // Re-exports for crate-internal API
 pub(crate) use self::codegen::ModuleCtx;
-pub(crate) use self::context::{Context, ContextCore, VariableMetadata, whole_variable_extents};
+pub(crate) use self::context::Context;
 pub(crate) use self::expr::{BuiltinFn, Expr, SubscriptIndex, Table, VarRef};
 
 /// The total slot count of the variable a reference addresses **in whole**,
@@ -55,12 +54,13 @@ pub(crate) use self::expr::{BuiltinFn, Expr, SubscriptIndex, Table, VarRef};
 /// the same answer an in-model mid-array reference gets, so the caller's
 /// fallback ("all the view can honestly report") is unchanged.
 ///
-/// Built once per emission unit by [`context::whole_variable_extents`]. That is
-/// the only place the rule is DERIVED -- every production site calls it, so
-/// lowering and emission cannot disagree about what a reference addresses.
-/// (`codegen`'s unit tests hand-build a table instead, in order to state the
-/// lookup's contract against inputs of their own choosing; they exercise the
-/// reader, not the rule.)
+/// Built once per fragment by [`fragment::reference_extents`], from the
+/// fragment's dependency shapes. That is the only place the rule is DERIVED --
+/// every production site reads the table `FragmentInput` carries, so lowering
+/// and emission cannot disagree about what a reference addresses. (`codegen`'s
+/// unit tests hand-build a table instead, in order to state the lookup's
+/// contract against inputs of their own choosing; they exercise the reader,
+/// not the rule.)
 pub(crate) type VarSizes = HashMap<VarRef, usize>;
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -70,79 +70,45 @@ pub struct Var {
     pub(crate) ast: Vec<Expr>,
 }
 
-#[test]
-fn test_fold_flows() {
-    let inputs = &BTreeSet::new();
-    let module_models: crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
-    > = Default::default();
-    let dummy_var = Variable::Var {
-        ident: Ident::new(""),
-        ast: None,
-        init_ast: None,
-        eqn: None,
-        units: None,
-        tables: vec![],
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
-        errors: vec![],
-        unit_errors: vec![],
-    };
-    let mut metadata: crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>> =
-        Default::default();
-    metadata.insert(
-        Ident::new("a"),
-        VariableMetadata {
-            offset: Some(1),
-            size: 1,
-            var: &dummy_var,
-        },
-    );
-    metadata.insert(
-        Ident::new("b"),
-        VariableMetadata {
-            offset: Some(2),
-            size: 1,
-            var: &dummy_var,
-        },
-    );
-    metadata.insert(
-        Ident::new("c"),
-        VariableMetadata {
-            offset: Some(3),
-            size: 1,
-            var: &dummy_var,
-        },
-    );
-    metadata.insert(
-        Ident::new("d"),
-        VariableMetadata {
-            offset: Some(4),
-            size: 1,
-            var: &dummy_var,
-        },
-    );
-    let mut metadata2 = crate::common::IdentMap::default();
-    let main_ident = Ident::new("main");
-    let test_ident = Ident::new("test");
-    metadata2.insert(main_ident.clone(), metadata);
-    let dims_ctx = DimensionsContext::default();
-    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
-    let ctx = Context::new(
-        ContextCore {
-            dimensions: &[],
-            dimensions_ctx: &dims_ctx,
-            model_name: &main_ident,
-            metadata: &metadata2,
-            var_sizes: &var_sizes,
-            module_models: &module_models,
+/// A `Context` over hand-built dependency shapes for the unit tests of
+/// `Var::new`'s mechanics below. Production contexts are built by
+/// `fragment::lower_fragment` from a `FragmentInput`.
+#[cfg(test)]
+fn test_context<'a>(
+    dimensions: &'a [Dimension],
+    dimensions_ctx: &'a DimensionsContext,
+    deps: &'a crate::common::IdentMap<Ident<Canonical>, fragment::DepShape>,
+    var_sizes: &'a VarSizes,
+    inputs: &'a BTreeSet<Ident<Canonical>>,
+) -> Context<'a> {
+    Context::new(
+        context::ContextCore {
+            dimensions,
+            dimensions_ctx,
+            deps,
+            var_sizes,
             inputs,
         },
-        &test_ident,
         false,
-    );
+    )
+}
+
+/// Scalar dependency shapes for `names`.
+#[cfg(test)]
+fn scalar_deps(names: &[&str]) -> crate::common::IdentMap<Ident<Canonical>, fragment::DepShape> {
+    names
+        .iter()
+        .map(|name| (Ident::new(name), fragment::DepShape::var(vec![])))
+        .collect()
+}
+
+#[test]
+fn test_fold_flows() {
+    let inputs = BTreeSet::new();
+    let deps = scalar_deps(&["a", "b", "c", "d"]);
+    let dims_ctx = DimensionsContext::default();
+    let var_sizes = fragment::reference_extents(&deps);
+    let ctx = test_context(&[], &dims_ctx, &deps, &var_sizes, &inputs);
 
     assert_eq!(Ok(None), ctx.fold_flows(&[]));
     assert_eq!(
@@ -168,69 +134,39 @@ fn test_fold_flows() {
 }
 
 /// Var::new for a module whose input source variable is missing from the
-/// metadata must return an error, not panic.  This guards against the
+/// dependency shapes must return an error, not panic.  This guards against the
 /// case where a module's input source is deleted but the module itself
 /// still exists with its original references.
 #[test]
 fn test_module_var_new_missing_input_source_returns_error() {
     use crate::variable::ModuleInput;
 
-    let inputs = &BTreeSet::new();
+    let inputs = BTreeSet::new();
     let module_ident = Ident::new("my_module");
     let model_name_ident: Ident<Canonical> = Ident::new("sub_model");
 
-    // module_models maps "main" -> { "my_module" -> "sub_model" }
-    let mut module_models: crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
-    > = Default::default();
-    let mut main_modules = crate::common::IdentMap::default();
-    main_modules.insert(module_ident.clone(), model_name_ident.clone());
-    let main_ident = Ident::new("main");
-    module_models.insert(main_ident.clone(), main_modules);
-
-    // The module variable itself (1 slot in the parent model)
-    let module_var = Variable::Module {
-        ident: module_ident.clone(),
-        model_name: model_name_ident,
-        units: None,
-        inputs: vec![ModuleInput {
+    // The module variable itself (an empty sub-model shape: the source is
+    // what is missing, not the sub-model)
+    let module_var = Variable::module_instance(
+        module_ident.clone(),
+        model_name_ident,
+        vec![ModuleInput {
             src: Ident::new("missing_source"),
             dst: Ident::new("available"),
         }],
-        errors: vec![],
-        unit_errors: vec![],
-    };
-
-    // metadata only contains "my_module" -- NOT "missing_source"
-    let mut metadata: crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>> =
-        Default::default();
-    metadata.insert(
-        module_ident.clone(),
-        VariableMetadata {
-            offset: Some(IMPLICIT_VAR_COUNT),
-            size: 1,
-            var: &module_var,
-        },
     );
-    let mut metadata2 = crate::common::IdentMap::default();
-    metadata2.insert(main_ident.clone(), metadata);
+
+    // deps only contain "my_module" -- NOT "missing_source"
+    let mut deps: crate::common::IdentMap<Ident<Canonical>, fragment::DepShape> =
+        Default::default();
+    deps.insert(
+        module_ident.clone(),
+        fragment::DepShape::module(Arc::new(fragment::ModelShape::default())),
+    );
 
     let dims_ctx = DimensionsContext::default();
-    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
-    let ctx = Context::new(
-        ContextCore {
-            dimensions: &[],
-            dimensions_ctx: &dims_ctx,
-            model_name: &main_ident,
-            metadata: &metadata2,
-            var_sizes: &var_sizes,
-            module_models: &module_models,
-            inputs,
-        },
-        &module_ident,
-        false,
-    );
+    let var_sizes = fragment::reference_extents(&deps);
+    let ctx = test_context(&[], &dims_ctx, &deps, &var_sizes, &inputs);
 
     let result = Var::new(&ctx, &module_var);
     assert!(
@@ -241,11 +177,7 @@ fn test_module_var_new_missing_input_source_returns_error() {
 
 #[test]
 fn test_build_stock_update_expr_inflows_only() {
-    let inputs = &BTreeSet::new();
-    let module_models: crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
-    > = Default::default();
+    let inputs = BTreeSet::new();
     let stock_var = Variable::Stock {
         ident: Ident::new("stock"),
         init_ast: None,
@@ -257,56 +189,10 @@ fn test_build_stock_update_expr_inflows_only() {
         errors: vec![],
         unit_errors: vec![],
     };
-    let dummy_var = Variable::Var {
-        ident: Ident::new(""),
-        ast: None,
-        init_ast: None,
-        eqn: None,
-        units: None,
-        tables: vec![],
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
-        errors: vec![],
-        unit_errors: vec![],
-    };
-    let mut metadata: crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>> =
-        Default::default();
-    metadata.insert(
-        Ident::new("stock"),
-        VariableMetadata {
-            offset: Some(0),
-            size: 1,
-            var: &dummy_var,
-        },
-    );
-    metadata.insert(
-        Ident::new("inflow"),
-        VariableMetadata {
-            offset: Some(1),
-            size: 1,
-            var: &dummy_var,
-        },
-    );
-    let mut metadata2 = crate::common::IdentMap::default();
-    let main_ident = Ident::new("main");
-    let test_ident = Ident::new("test");
-    metadata2.insert(main_ident.clone(), metadata);
+    let deps = scalar_deps(&["stock", "inflow"]);
     let dims_ctx = DimensionsContext::default();
-    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
-    let ctx = Context::new(
-        ContextCore {
-            dimensions: &[],
-            dimensions_ctx: &dims_ctx,
-            model_name: &main_ident,
-            metadata: &metadata2,
-            var_sizes: &var_sizes,
-            module_models: &module_models,
-            inputs,
-        },
-        &test_ident,
-        false,
-    );
+    let var_sizes = fragment::reference_extents(&deps);
+    let ctx = test_context(&[], &dims_ctx, &deps, &var_sizes, &inputs);
 
     let result = ctx
         .build_stock_update_expr(&VarRef::base(Ident::new("stock")), &stock_var)
@@ -343,11 +229,7 @@ fn test_build_stock_update_expr_inflows_only() {
 
 #[test]
 fn test_build_stock_update_expr_outflows_only() {
-    let inputs = &BTreeSet::new();
-    let module_models: crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
-    > = Default::default();
+    let inputs = BTreeSet::new();
     let stock_var = Variable::Stock {
         ident: Ident::new("stock"),
         init_ast: None,
@@ -359,56 +241,10 @@ fn test_build_stock_update_expr_outflows_only() {
         errors: vec![],
         unit_errors: vec![],
     };
-    let dummy_var = Variable::Var {
-        ident: Ident::new(""),
-        ast: None,
-        init_ast: None,
-        eqn: None,
-        units: None,
-        tables: vec![],
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
-        errors: vec![],
-        unit_errors: vec![],
-    };
-    let mut metadata: crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>> =
-        Default::default();
-    metadata.insert(
-        Ident::new("stock"),
-        VariableMetadata {
-            offset: Some(0),
-            size: 1,
-            var: &dummy_var,
-        },
-    );
-    metadata.insert(
-        Ident::new("outflow"),
-        VariableMetadata {
-            offset: Some(1),
-            size: 1,
-            var: &dummy_var,
-        },
-    );
-    let mut metadata2 = crate::common::IdentMap::default();
-    let main_ident = Ident::new("main");
-    let test_ident = Ident::new("test");
-    metadata2.insert(main_ident.clone(), metadata);
+    let deps = scalar_deps(&["stock", "outflow"]);
     let dims_ctx = DimensionsContext::default();
-    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
-    let ctx = Context::new(
-        ContextCore {
-            dimensions: &[],
-            dimensions_ctx: &dims_ctx,
-            model_name: &main_ident,
-            metadata: &metadata2,
-            var_sizes: &var_sizes,
-            module_models: &module_models,
-            inputs,
-        },
-        &test_ident,
-        false,
-    );
+    let var_sizes = fragment::reference_extents(&deps);
+    let ctx = test_context(&[], &dims_ctx, &deps, &var_sizes, &inputs);
 
     let result = ctx
         .build_stock_update_expr(&VarRef::base(Ident::new("stock")), &stock_var)
@@ -444,11 +280,7 @@ fn test_build_stock_update_expr_outflows_only() {
 
 #[test]
 fn test_build_stock_update_expr_no_flows() {
-    let inputs = &BTreeSet::new();
-    let module_models: crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
-    > = Default::default();
+    let inputs = BTreeSet::new();
     let stock_var = Variable::Stock {
         ident: Ident::new("stock"),
         init_ast: None,
@@ -460,48 +292,10 @@ fn test_build_stock_update_expr_no_flows() {
         errors: vec![],
         unit_errors: vec![],
     };
-    let dummy_var = Variable::Var {
-        ident: Ident::new(""),
-        ast: None,
-        init_ast: None,
-        eqn: None,
-        units: None,
-        tables: vec![],
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
-        errors: vec![],
-        unit_errors: vec![],
-    };
-    let mut metadata: crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>> =
-        Default::default();
-    metadata.insert(
-        Ident::new("stock"),
-        VariableMetadata {
-            offset: Some(0),
-            size: 1,
-            var: &dummy_var,
-        },
-    );
-    let mut metadata2 = crate::common::IdentMap::default();
-    let main_ident = Ident::new("main");
-    let test_ident = Ident::new("test");
-    metadata2.insert(main_ident.clone(), metadata);
+    let deps = scalar_deps(&["stock"]);
     let dims_ctx = DimensionsContext::default();
-    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
-    let ctx = Context::new(
-        ContextCore {
-            dimensions: &[],
-            dimensions_ctx: &dims_ctx,
-            model_name: &main_ident,
-            metadata: &metadata2,
-            var_sizes: &var_sizes,
-            module_models: &module_models,
-            inputs,
-        },
-        &test_ident,
-        false,
-    );
+    let var_sizes = fragment::reference_extents(&deps);
+    let ctx = test_context(&[], &dims_ctx, &deps, &var_sizes, &inputs);
 
     let result = ctx
         .build_stock_update_expr(&VarRef::base(Ident::new("stock")), &stock_var)
@@ -532,11 +326,7 @@ fn test_build_stock_update_expr_no_flows() {
 
 #[test]
 fn test_build_stock_update_expr_multiple_flows() {
-    let inputs = &BTreeSet::new();
-    let module_models: crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
-    > = Default::default();
+    let inputs = BTreeSet::new();
     let stock_var = Variable::Stock {
         ident: Ident::new("stock"),
         init_ast: None,
@@ -548,56 +338,10 @@ fn test_build_stock_update_expr_multiple_flows() {
         errors: vec![],
         unit_errors: vec![],
     };
-    let dummy_var = Variable::Var {
-        ident: Ident::new(""),
-        ast: None,
-        init_ast: None,
-        eqn: None,
-        units: None,
-        tables: vec![],
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
-        errors: vec![],
-        unit_errors: vec![],
-    };
-    let mut metadata: crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>> =
-        Default::default();
-    for (name, off) in [
-        ("stock", 0),
-        ("in1", 1),
-        ("in2", 2),
-        ("out1", 3),
-        ("out2", 4),
-    ] {
-        metadata.insert(
-            Ident::new(name),
-            VariableMetadata {
-                offset: Some(off),
-                size: 1,
-                var: &dummy_var,
-            },
-        );
-    }
-    let mut metadata2 = crate::common::IdentMap::default();
-    let main_ident = Ident::new("main");
-    let test_ident = Ident::new("test");
-    metadata2.insert(main_ident.clone(), metadata);
+    let deps = scalar_deps(&["stock", "in1", "in2", "out1", "out2"]);
     let dims_ctx = DimensionsContext::default();
-    let var_sizes = whole_variable_extents(&metadata2, &main_ident);
-    let ctx = Context::new(
-        ContextCore {
-            dimensions: &[],
-            dimensions_ctx: &dims_ctx,
-            model_name: &main_ident,
-            metadata: &metadata2,
-            var_sizes: &var_sizes,
-            module_models: &module_models,
-            inputs,
-        },
-        &test_ident,
-        false,
-    );
+    let var_sizes = fragment::reference_extents(&deps);
+    let ctx = test_context(&[], &dims_ctx, &deps, &var_sizes, &inputs);
 
     let result = ctx
         .build_stock_update_expr(&VarRef::base(Ident::new("stock")), &stock_var)
@@ -705,41 +449,14 @@ fn test_arrayed_default_equation_applies_to_missing_elements() {
         unit_errors: vec![],
     };
 
-    let mut model_metadata: crate::common::IdentMap<Ident<Canonical>, VariableMetadata<'_>> =
+    let mut deps: crate::common::IdentMap<Ident<Canonical>, fragment::DepShape> =
         Default::default();
-    model_metadata.insert(
-        Ident::new("x"),
-        VariableMetadata {
-            offset: Some(0),
-            size: 3,
-            var: &var,
-        },
-    );
-    let mut metadata = crate::common::IdentMap::default();
-    let model_name = Ident::new("main");
-    metadata.insert(model_name.clone(), model_metadata);
+    deps.insert(Ident::new("x"), fragment::DepShape::var(dims.clone()));
 
     let inputs = BTreeSet::new();
-    let module_models: crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
-    > = Default::default();
     let dims_ctx = DimensionsContext::from(std::slice::from_ref(&datamodel_dim));
-    let ident = Ident::new("test");
-    let var_sizes = whole_variable_extents(&metadata, &model_name);
-    let ctx = Context::new(
-        ContextCore {
-            dimensions: &dims,
-            dimensions_ctx: &dims_ctx,
-            model_name: &model_name,
-            metadata: &metadata,
-            var_sizes: &var_sizes,
-            module_models: &module_models,
-            inputs: &inputs,
-        },
-        &ident,
-        false,
-    );
+    let var_sizes = fragment::reference_extents(&deps);
+    let ctx = test_context(&dims, &dims_ctx, &deps, &var_sizes, &inputs);
 
     let lowered = Var::new(&ctx, &var).expect("arrayed lowering should succeed");
 

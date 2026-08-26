@@ -5,13 +5,13 @@
 //! Module/simulation assembly: turning per-variable symbolic fragments into
 //! a concrete `CompiledModule`/`CompiledSimulation`.
 //!
-//! Holds the table/metadata extraction helpers
-//! (`extract_tables_from_source_var`, `build_module_inputs`,
-//! `build_stub_variable`, `build_submodel_metadata`), the per-variable
-//! emission tail (`compile_phase_to_per_var_bytecodes` and the
-//! `VarFragmentResult`/`PerVarSizes` values), the production
-//! element-graph source `var_phase_symbolic_fragment_prod`, the resolved
-//! recurrence-SCC interleaver (`segment_member_by_element` /
+//! Holds the table extraction helper (`extract_tables_from_source_var`), the
+//! two owners of module input wiring (`build_module_inputs` and
+//! `module_input_set`, the only places a wiring is derived from `(src, dst)`
+//! reference strings), the per-variable emission tail
+//! (`compile_phase_to_per_var_bytecodes` and the `VarFragmentResult` value),
+//! the production element-graph source `var_phase_symbolic_fragment_prod`,
+//! the resolved recurrence-SCC interleaver (`segment_member_by_element` /
 //! `combine_scc_fragment`), the salsa-tracked `assemble_module` (fragment
 //! collection, per-program emission order, the one `FragmentMerger` per
 //! module) and `assemble_simulation`, and module-instance enumeration
@@ -26,8 +26,8 @@ use crate::common::{Canonical, Ident};
 use crate::compiler::symbolic::Phase;
 
 /// Extract compiler::Table data directly from a SourceVariable's graphical
-/// function fields. Used to populate the mini-Module's tables map for
-/// dependency variables that define lookup tables.
+/// function fields, for a fragment's tables map: the lookup tables the
+/// variable calls.
 pub(crate) fn extract_tables_from_source_var(
     db: &dyn Db,
     source_var: &SourceVariable,
@@ -104,6 +104,13 @@ pub(crate) fn extract_tables_from_source_var(
     }
 }
 
+/// The namespace prefix of module instance `instance`'s ports: a reference
+/// `dst` of `{instance}·{port}` wires `port`, and a `src` under the prefix is
+/// internal to the instance.
+pub(crate) fn module_input_prefix(instance: &str) -> String {
+    format!("{instance}\u{00B7}")
+}
+
 /// Build module input mappings from raw (src, dst) reference pairs.
 ///
 /// Filters out references where src is an internal module input (starts
@@ -136,257 +143,27 @@ pub(crate) fn build_module_inputs<S1: AsRef<str>, S2: AsRef<str>>(
     .collect()
 }
 
-/// Build a dimension-only stub Variable for use in a minimal compilation
-/// context. Only get_dimensions() is called on these by Context.
-pub(crate) fn build_stub_variable(
-    db: &dyn Db,
-    source_var: &SourceVariable,
-    ident: &Ident<Canonical>,
-    dims: &[crate::dimensions::Dimension],
-) -> crate::variable::Variable {
-    let dummy_ast = if dims.is_empty() {
-        None
-    } else {
-        Some(crate::ast::Ast::ApplyToAll(
-            dims.to_vec(),
-            crate::ast::Expr2::Const(
-                "0".to_string(),
-                crate::ast::Literal::new(0.0),
-                crate::ast::Loc::default(),
-            ),
-        ))
-    };
-
-    match source_var.kind(db) {
-        SourceVariableKind::Stock => crate::variable::Variable::Stock {
-            ident: ident.clone(),
-            init_ast: dummy_ast,
-            eqn: None,
-            units: None,
-            inflows: vec![],
-            outflows: vec![],
-            non_negative: false,
-            errors: vec![],
-            unit_errors: vec![],
-        },
-        SourceVariableKind::Module => crate::variable::Variable::Module {
-            ident: ident.clone(),
-            model_name: Ident::new(source_var.model_name(db)),
-            units: None,
-            inputs: vec![],
-            errors: vec![],
-            unit_errors: vec![],
-        },
-        _ => crate::variable::Variable::Var {
-            ident: ident.clone(),
-            ast: dummy_ast,
-            init_ast: None,
-            eqn: None,
-            units: None,
-            tables: vec![],
-            non_negative: false,
-            is_flow: source_var.kind(db) == SourceVariableKind::Flow,
-            is_table_only: false,
-            errors: vec![],
-            unit_errors: vec![],
-        },
-    }
-}
-
-/// Populate sub-model metadata in `all_metadata` for module variable
-/// compilation, from the sub-model's salsa `SourceModel`/`SourceVariable`s.
-/// Recursively populates metadata for nested modules.
-pub(crate) fn build_submodel_metadata<'arena>(
-    arena: &'arena bumpalo::Bump,
-    db: &dyn Db,
-    sub_model: SourceModel,
-    project: SourceProject,
-    all_metadata: &mut crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::common::IdentMap<Ident<Canonical>, crate::compiler::VariableMetadata<'arena>>,
-    >,
-) {
-    let sub_model_name: Ident<Canonical> = Ident::new(sub_model.name(db));
-
-    if all_metadata.contains_key(&sub_model_name) {
-        return;
-    }
-
-    let layout = compute_layout(db, sub_model, project);
-    let source_vars = sub_model.variables(db);
-    let project_models = project.models(db);
-
-    let mut sub_metadata: crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::compiler::VariableMetadata<'arena>,
-    > = Default::default();
-
-    let mut sorted_names: Vec<&String> = source_vars.keys().collect();
-    sorted_names.sort_unstable();
-
-    for name in &sorted_names {
-        let svar = &source_vars[name.as_str()];
-        let var_ident: Ident<Canonical> = Ident::new(name.as_str());
-        let entry = layout.get(name.as_str());
-        let (offset, size) = entry.map_or((0, 1), |e| (e.offset, e.size));
-
-        // Build a stub variable with correct dimensions for the sub-model context
-        let dims = variable_dimensions(db, *svar, project);
-        let stub = build_stub_variable(db, svar, &var_ident, dims);
-        let stub: &'arena crate::variable::Variable = arena.alloc(stub);
-
-        sub_metadata.insert(
-            var_ident.clone(),
-            crate::compiler::VariableMetadata {
-                offset: Some(offset),
-                size,
-                var: stub,
-            },
-        );
-
-        // Recurse into nested module variables
-        if svar.kind(db) == SourceVariableKind::Module {
-            let nested_model_name = svar.model_name(db);
-            let nested_canonical = canonicalize(nested_model_name);
-            if let Some(nested_model) = project_models.get(nested_canonical.as_ref()) {
-                build_submodel_metadata(arena, db, *nested_model, project, all_metadata);
-            }
-        }
-    }
-
-    // When LTM is enabled the sub-model is itself LTM-augmented: its layout
-    // (from `compute_layout`) carries the synthetic LTM variables, most
-    // importantly the per-input-port composite score `$⁚ltm⁚composite⁚{port}`.
-    // A parent equation can reference one of these across the module boundary
-    // -- the exhaustive-mode input→macro link score is the composite-reference
-    // form `"{module}·$⁚ltm⁚composite⁚{port}"` (GH #548) -- and `Context::
-    // get_submodel_offset` resolves that by looking the bare LTM var up in
-    // *this* sub-model's metadata. Without an entry here the lookup returns
-    // `DoesNotExist`, the parent fragment fails to compile, `assemble_module`
-    // drops it, and the link score reads a constant 0 -- silently zeroing every
-    // loop that runs through the macro. Register the LTM vars (and their
-    // implicit helpers) at their `compute_layout` offsets so the cross-module
-    // reference resolves the same way the full flattened-offset assembly does.
-    if project.ltm_enabled(db) {
-        let ltm_vars = model_ltm_variables(db, sub_model, project);
-        let dim_context = project_dimensions_context(db, project);
-        for ltm_var in &ltm_vars.vars {
-            let var_ident: Ident<Canonical> = Ident::new(&ltm_var.name);
-            if sub_metadata.contains_key(&var_ident) {
-                continue;
-            }
-            let Some(entry) = layout.get(&ltm_var.name) else {
-                continue;
-            };
-            // A2A link/loop scores carry dimensions; the stub's dummy AST
-            // mirrors the layout so any subscripted cross-module read resolves
-            // an element offset rather than collapsing to slot 0. Scalar LTM
-            // vars (the composite among them) get a plain `Var` stub.
-            let dummy_ast = if ltm_var.dimensions.is_empty() {
-                None
-            } else {
-                let dims: Vec<crate::dimensions::Dimension> = ltm_var
-                    .dimensions
-                    .iter()
-                    .filter_map(|name| {
-                        let canonical = crate::common::CanonicalDimensionName::from_raw(name);
-                        dim_context.get(&canonical).cloned()
-                    })
-                    .collect();
-                Some(crate::ast::Ast::ApplyToAll(
-                    dims,
-                    crate::ast::Expr2::Const(
-                        "0".to_string(),
-                        crate::ast::Literal::new(0.0),
-                        crate::ast::Loc::default(),
-                    ),
-                ))
-            };
-            let stub: &'arena crate::variable::Variable =
-                arena.alloc(crate::variable::Variable::Var {
-                    ident: var_ident.clone(),
-                    ast: dummy_ast,
-                    init_ast: None,
-                    eqn: None,
-                    units: None,
-                    tables: vec![],
-                    non_negative: false,
-                    is_flow: false,
-                    is_table_only: false,
-                    errors: vec![],
-                    unit_errors: vec![],
-                });
-            sub_metadata.insert(
-                var_ident,
-                crate::compiler::VariableMetadata {
-                    offset: Some(entry.offset),
-                    size: entry.size,
-                    var: stub,
-                },
-            );
-        }
-
-        let ltm_implicit = model_ltm_implicit_var_info(db, sub_model, project);
-        for (im_name, meta) in ltm_implicit.iter() {
-            let var_ident: Ident<Canonical> = Ident::new(im_name);
-            if sub_metadata.contains_key(&var_ident) {
-                continue;
-            }
-            let Some(entry) = layout.get(im_name) else {
-                continue;
-            };
-            // Module-type LTM implicit helpers (PREVIOUS-of-module-output
-            // instances) need the `Module` variant and a recursion into their
-            // sub-model so a nested cross-module reference resolves; scalar
-            // helpers use a plain `Var` stub.
-            let stub: &'arena crate::variable::Variable = if meta.is_module {
-                let model_name = meta.model_name.as_deref().unwrap_or("");
-                if !model_name.is_empty() {
-                    let nested_canonical = canonicalize(model_name);
-                    if let Some(nested_model) = project_models.get(nested_canonical.as_ref()) {
-                        build_submodel_metadata(arena, db, *nested_model, project, all_metadata);
-                    }
-                }
-                arena.alloc(crate::variable::Variable::Module {
-                    ident: var_ident.clone(),
-                    model_name: Ident::new(model_name),
-                    units: None,
-                    inputs: vec![],
-                    errors: vec![],
-                    unit_errors: vec![],
-                })
-            } else {
-                arena.alloc(crate::variable::Variable::Var {
-                    ident: var_ident.clone(),
-                    ast: None,
-                    init_ast: None,
-                    eqn: None,
-                    units: None,
-                    tables: vec![],
-                    non_negative: false,
-                    is_flow: false,
-                    is_table_only: false,
-                    errors: vec![],
-                    unit_errors: vec![],
-                })
-            };
-            sub_metadata.insert(
-                var_ident,
-                crate::compiler::VariableMetadata {
-                    offset: Some(entry.offset),
-                    size: entry.size,
-                    var: stub,
-                },
-            );
-        }
-    }
-
-    all_metadata.insert(sub_model_name, sub_metadata);
+/// The set of ports a module instance's wiring binds: each `dst` of `refs`
+/// with the instance's prefix (`module_input_prefix`) stripped to the bare
+/// sub-model variable name; a `dst` outside the instance's namespace binds
+/// nothing. This is the instance's identity at assembly -- the same
+/// `stdlib⁚smth1` model compiles to a distinct module per distinct port set,
+/// because `isModuleInput(port)` selects the live branch from it.
+pub(crate) fn module_input_set<S1: AsRef<str>, S2: AsRef<str>>(
+    module_var_prefix: &str,
+    refs: impl Iterator<Item = (S1, S2)>,
+) -> BTreeSet<Ident<Canonical>> {
+    refs.filter_map(|(_src, dst)| {
+        let dst_canonical = canonicalize(dst.as_ref());
+        let bare = dst_canonical.strip_prefix(module_var_prefix)?;
+        Some(Ident::new(bare))
+    })
+    .collect()
 }
 
 /// Pre-computed invariance data for the flow phase, stored on
 /// `VarFragmentResult` so `model_flows_invariant` can run its topological
-/// fixpoint pass without re-calling `lower_var_fragment` (the compile-time
+/// fixpoint pass without re-lowering the fragment (the compile-time
 /// regression fix, GH #712).
 ///
 /// `locally_pure`: the variable's flow-phase expression is invariant assuming
@@ -572,19 +349,6 @@ pub(crate) fn compute_flow_invariance_support(
     })
 }
 
-/// `reference -> extent of the variable it addresses in whole`: the per-fragment
-/// size table `lower_var_fragment` produces, and which BOTH halves of the
-/// compile borrow -- the lowering context (`compiler::ContextCore`) and the
-/// per-phase emission context (`compiler::ModuleCtx`). This IS
-/// `compiler::VarSizes` -- the fragment-side name for the same type, kept so the
-/// db-side signatures read in fragment terms.
-///
-/// Its predecessor carried `(offset, size)` per variable over a private
-/// per-fragment layout that existed only so symbolization could undo it. There
-/// are no fragment-local offsets any more: emission reads names, and the only
-/// surviving question is how big a variable is.
-pub(crate) type PerVarSizes = crate::compiler::VarSizes;
-
 /// Flatten a phase's temp-id -> size map into the `(temp_id, size)` vector
 /// `PerVarBytecodes::temp_sizes` carries, **ordered by temp id**.
 ///
@@ -612,59 +376,25 @@ pub(crate) fn temp_sizes_by_id(temp_sizes_map: &HashMap<u32, usize>) -> Vec<(u32
     temp_sizes
 }
 
-/// Assemble the phase-INVARIANT emission context for one variable's
-/// fragment: everything `compile_phase_to_per_var_bytecodes` needs except
-/// the phase's own lowered expressions (and the temp sizes derived from
-/// them, which that function fills in).
-///
-/// Every field is a borrow with the caller's lifetime -- the fragment's size
-/// table and tables, and the salsa-cached project-global dimension context and
-/// converted dimensions, are read in place, never copied into a per-fragment
-/// container.
-///
-/// The empty `runlist_flows`/`temp_sizes` placeholders exist in exactly one
-/// place, here, so no emission site can forget which runlist a fragment's
-/// expressions belong in.
-pub(crate) fn fragment_emit_ctx<'a>(
-    model_name: &'a Ident<Canonical>,
-    inputs: &'a BTreeSet<Ident<Canonical>>,
-    var_sizes: &'a PerVarSizes,
-    tables: &'a HashMap<Ident<Canonical>, Vec<crate::compiler::Table>>,
-    dimensions: &'a [crate::dimensions::Dimension],
-) -> crate::compiler::ModuleCtx<'a> {
-    crate::compiler::ModuleCtx {
-        ident: model_name,
-        inputs,
-        temp_sizes: &[],
-        runlist_initials_by_var: &[],
-        runlist_flows: &[],
-        runlist_stocks: &[],
-        var_sizes,
-        tables,
-        dimensions,
-    }
-}
-
 /// Compile one phase's lowered `Vec<Expr>` for a single variable into a
 /// layout-independent `PerVarBytecodes`.
 ///
 /// **This is the single fragment emission entry point** (GH #964's "explicit,
 /// implicit, and LTM variables share one fragment emission implementation").
 /// Five call sites reach it: `compile_var_fragment` (explicit variables),
-/// `compile_implicit_var_phase_bytecodes` (SMOOTH/DELAY/TREND helpers, and
-/// through it `var_phase_symbolic_fragment_prod`'s parent-sourced arm),
-/// `var_phase_symbolic_fragment_prod` itself (the element-cycle SCC graph
-/// builder, which must reuse the *exact* production path rather than a
-/// re-derivation), and both LTM emitters in `db/ltm/compile.rs`. The two LTM
-/// sites used to carry hand-copied 97-line duplicates of this body, which is
-/// how the same `temp_sizes` ordering defect came to need fixing in three
-/// places at once.
+/// `compile_implicit_var_fragment` (SMOOTH/DELAY/TREND helpers),
+/// `var_phase_symbolic_fragment_prod` (the element-cycle SCC graph builder,
+/// which must reuse the *exact* production path rather than a re-derivation),
+/// and both LTM emitters in `db/ltm/compile.rs`. Every one of them lowers a
+/// `compiler::fragment::FragmentInput` with `lower_fragment` and emits under
+/// that input's `emit_ctx`.
 ///
-/// `base` is the phase-INVARIANT half of the emission context, built once
-/// per variable by the caller: its `runlist_flows`/`temp_sizes` are ignored
-/// (this function fills both in per phase), and everything else -- the
-/// fragment's `var_sizes` and `tables`, the project-global `dimensions`, and
-/// the module-input set -- is borrowed for the call and never cloned.
+/// `base` is the phase-INVARIANT half of the emission context
+/// (`FragmentInput::emit_ctx`), built once per variable by the caller: its
+/// `runlist_flows`/`temp_sizes` are ignored (this function fills both in per
+/// phase), and everything else -- the fragment's `var_sizes` and `tables`, the
+/// project-global `dimensions`, and the module-input set -- is borrowed for
+/// the call and never cloned.
 ///
 /// What comes back is codegen's output verbatim: it is already symbolic, so
 /// there is nothing between emission and the salsa-cached fragment.
@@ -745,7 +475,8 @@ pub(crate) fn compile_phase_to_per_var_bytecodes_reporting(
 }
 
 /// A variable's *symbolic* `PerVarBytecodes` for a phase, sourced through
-/// the exact production lowering + emission path (`lower_var_fragment` +
+/// the exact production lowering + emission path (the variable's
+/// `FragmentInput` constructor + `lower_fragment` +
 /// `compile_phase_to_per_var_bytecodes`), never a re-derivation.
 ///
 /// This is the cross-member-comparable substrate the element-cycle SCC
@@ -773,18 +504,16 @@ pub(crate) fn compile_phase_to_per_var_bytecodes_reporting(
 /// node failing to be element-*sourced* (always `None`, never a panic),
 /// not about which sourced opcodes are ordering edges.
 ///
-/// The caller-owned, lowering-independent context is built byte-identically
-/// to `compile_var_fragment` (same helpers, same order, the default
-/// no-module-input wiring `build_var_info(.., &[])` uses):
-/// `SccPhase::Dt` selects `per_phase_lowered.noninitial`,
-/// `SccPhase::Initial` selects `.initial`.
+/// The input is built by the same constructor `compile_var_fragment` uses,
+/// under the default no-module-input wiring `build_var_info(.., &[])` uses:
+/// `SccPhase::Dt` selects the non-initial lowering, `SccPhase::Initial` the
+/// initial one.
 ///
 /// A synthetic helper (`$\u{205A}` prefix, absent from `model.variables`)
 /// that lands in a recurrence SCC is **parent-sourced**: its symbolic
-/// `PerVarBytecodes` is the parent variable's NAMED implicit helper
-/// compiled through the shared per-phase relation
-/// `compile_implicit_var_phase_bytecodes` (the same chain
-/// `compile_implicit_var_fragment` runs), so the element-graph builder
+/// `PerVarBytecodes` is the parent variable's NAMED implicit helper built
+/// through the implicit constructor (`implicit_fragment_input`, the same
+/// chain `compile_implicit_var_fragment` runs), so the element-graph builder
 /// consumes it exactly like a real member (element-cycle Phase 3 Task 2 /
 /// AC3.1, pinned by `synthetic_helper_symbolic_fragment_is_parent_sourced`).
 ///
@@ -793,11 +522,11 @@ pub(crate) fn compile_phase_to_per_var_bytecodes_reporting(
 /// on a sourcing failure -- on EVERY way a node fails to be
 /// element-sourced:
 /// - no `SourceVariable` AND not a parent-sourceable synthetic helper
-///   (absent from `model_implicit_var_info`, or the shared per-phase
-///   compile failed): `None` (the loud-safe signal -- AC3.2);
-/// - `LoweredVarFragment::Fatal` (the variable did not lower at all):
+///   (absent from `model_implicit_var_info`, or the helper's input or phase
+///   failed to build): `None` (the loud-safe signal -- AC3.2);
+/// - `ExplicitFragment::Fatal` (the variable did not lower at all):
 ///   explicit `return None`;
-/// - the requested phase's `Var::new` errored (`phase_var.ok()?`);
+/// - the requested phase's lowering errored (`.ok()?`);
 /// - any `compile_phase_to_per_var_bytecodes` failure (empty exprs, the
 ///   codegen) -- that function is itself total-and-`None`-on-failure.
 ///
@@ -873,102 +602,55 @@ fn var_phase_symbolic_fragment_memo(
     var_name: String,
     phase: SccPhase,
 ) -> Option<crate::compiler::symbolic::PerVarBytecodes> {
-    use crate::db::var_fragment::{LoweredVarFragment, lower_var_fragment};
+    use crate::compiler::fragment::lower_fragment;
+    use crate::db::fragment_compile::implicit_fragment_input;
+    use crate::db::var_fragment::{ExplicitFragment, explicit_fragment_input};
 
     let var_name = var_name.as_str();
     let source_vars = model.variables(db);
+    let is_initial = matches!(phase, SccPhase::Initial);
     // No `SourceVariable` (a synthetic INIT/PREVIOUS/SMOOTH/macro-expansion
     // helper, `$\u{205A}` prefix, absent from `model.variables`): before
     // the loud-safe `None`, attempt parent-`implicit_vars` sourcing
     // (element-cycle Phase 3 Task 2 / AC3.1). A synthetic helper that
     // lands in a recurrence SCC has no `SourceVariable` but DOES resolve
     // in `model_implicit_var_info`; its symbolic `PerVarBytecodes` is the
-    // parent variable's named implicit helper compiled through
-    // the SAME shared per-phase relation the production per-variable
-    // assembly uses (`compile_implicit_var_phase_bytecodes` -- the exact
-    // `parent → the parse's helper of that name → parse_var → lower_variable →
-    // compile` chain `compile_implicit_var_fragment` runs), so
-    // the element-graph builder consumes it exactly like a real member
-    // (same layout-independent `SymVarRef` form). The element-cycle SCC
-    // identification uses the default no-module-input wiring, so source the
-    // helper with `module_input_names = &[]` (matching the real-var arm's
-    // `lower_var_fragment(.., &[], ..)` below; the symbolic fragment is
-    // role-independent, so there is no longer an `is_root` selector).
-    // Genuinely unsourceable (absent from `model_implicit_var_info`
-    // too, or the shared compile failed) ⇒ `None`, the loud-safe signal
-    // (see the rustdoc's loud-safe contract): the SCC stays unresolved and
-    // `CircularDependency` is kept -- no panic, no silent miscompile
-    // (AC3.2).
+    // parent variable's named implicit helper built through the SAME
+    // constructor the production per-variable assembly uses
+    // (`implicit_fragment_input` -- the exact `parent → the parse's helper of
+    // that name → parse_var → lower_variable` chain
+    // `compile_implicit_var_fragment` runs), so the element-graph builder
+    // consumes it exactly like a real member (same layout-independent
+    // `SymVarRef` form). The element-cycle SCC identification uses the
+    // default no-module-input wiring, so source the helper with
+    // `module_input_names = &[]` (matching the real-var arm below; the
+    // symbolic fragment is role-independent, so there is no `is_root`
+    // selector). Genuinely unsourceable (absent from
+    // `model_implicit_var_info` too, or the input or phase failed to build)
+    // ⇒ `None`, the loud-safe signal (see the rustdoc's loud-safe contract):
+    // the SCC stays unresolved and `CircularDependency` is kept -- no panic,
+    // no silent miscompile (AC3.2). The cycle-gate probe wants only the
+    // fragment; failures stay silent here (the production assembly path
+    // attributes them, GH #1000).
     let Some(sv) = source_vars.get(var_name) else {
         let canonical_name = canonicalize(var_name).into_owned();
         let info = model_implicit_var_info(db, model, project);
         let meta = info.get(&canonical_name)?;
-        let is_initial = matches!(phase, SccPhase::Initial);
-        // The cycle-gate probe wants only the fragment; failures stay silent
-        // here (the production assembly path attributes them, GH #1000).
-        return compile_implicit_var_phase_bytecodes(
-            db,
-            meta,
-            model,
-            project,
-            &[],
-            is_initial,
-            None,
-        );
+        let input = implicit_fragment_input(db, meta, model, project, &[]).ok()?;
+        let var = lower_fragment(&input, is_initial).ok()?;
+        return compile_phase_to_per_var_bytecodes(&input.emit_ctx(), &var.ast);
     };
 
-    // Caller-owned, lowering-independent context, read EXACTLY as
-    // `compile_var_fragment` reads it (mirror byte-for-byte): the
-    // salsa-cached project-global dimension context and converted dims.
-    let dim_context = project_dimensions_context(db, project);
-    let converted_dims = project_converted_dimensions(db, project);
-    let model_name_ident = Ident::new(model.name(db));
-    let inputs: BTreeSet<Ident<Canonical>> = BTreeSet::new();
-    let module_models = model_module_map(db, model, project).clone();
-
-    let lowered = lower_var_fragment(
-        db,
-        *sv,
-        model,
-        project,
-        &[],
-        converted_dims,
-        dim_context,
-        &model_name_ident,
-        &module_models,
-        &inputs,
-    );
-
-    let (per_phase_lowered, tables, var_sizes) = match lowered {
-        LoweredVarFragment::Lowered {
-            per_phase_lowered,
-            tables,
-            var_sizes,
-            ..
-        } => (per_phase_lowered, tables, var_sizes),
-        // The variable did not lower at all => `None` (loud-safe).
-        LoweredVarFragment::Fatal { .. } => return None,
+    // The variable did not lower at all => `None` (loud-safe).
+    let ExplicitFragment::Ready { input, .. } =
+        explicit_fragment_input(db, *sv, model, project, &[])
+    else {
+        return None;
     };
-
-    // `SccPhase::Dt` selects the non-initial (dt/flow) lowering;
-    // `SccPhase::Initial` selects the initial lowering -- the same
-    // selection `compile_var_fragment` makes per phase.
-    let phase_var = match phase {
-        SccPhase::Dt => per_phase_lowered.noninitial,
-        SccPhase::Initial => per_phase_lowered.initial,
-    };
-    // The phase's `Var::new` errored => cannot source its production
-    // lowered exprs => `None` (loud-safe).
-    let var = phase_var.ok()?;
-
-    let base_ctx = fragment_emit_ctx(
-        &model_name_ident,
-        &inputs,
-        &var_sizes,
-        &tables,
-        converted_dims,
-    );
-    compile_phase_to_per_var_bytecodes(&base_ctx, &var.ast)
+    // The phase's lowering errored => cannot source its production lowered
+    // exprs => `None` (loud-safe).
+    let var = lower_fragment(&input, is_initial).ok()?;
+    compile_phase_to_per_var_bytecodes(&input.emit_ctx(), &var.ast)
 }
 
 /// Segment one member's symbolic opcode stream into per-element slices,
@@ -1287,7 +969,6 @@ fn collect_fragments<'db>(
     model: SourceModel,
     project: SourceProject,
     module_inputs: ModuleInputSet<'db>,
-    dep_graph: &ModelDepGraphResult,
     layout: &crate::compiler::symbolic::VariableLayout,
 ) -> ModuleFragments<'db> {
     use crate::compiler::symbolic::fragment_vars_in_layout;
@@ -1339,7 +1020,6 @@ fn collect_fragments<'db>(
                 &ltm_implicit[name],
                 model,
                 project,
-                dep_graph,
                 module_input_names,
                 None,
             ) && fragment_vars_in_layout(&result.fragment, layout)
@@ -1646,7 +1326,7 @@ pub fn assemble_module<'db>(
     // corrupts every result.
     crate::compiler::symbolic::check_layout_addressable(layout.n_slots, model.name(db))?;
 
-    let fragments = collect_fragments(db, model, project, module_inputs, dep_graph, layout);
+    let fragments = collect_fragments(db, model, project, module_inputs, layout);
     let sccs = combine_resolved_sccs(db, model, project, &dep_graph.resolved_sccs)?;
 
     // The `is_module_input` predicate, reconstructed from the interned set --
@@ -2018,18 +1698,13 @@ fn enumerate_module_instances_inner(
             ));
         }
 
-        // Strip the module ident prefix from dst to get bare sub-model variable
-        // names, the same derivation `model::resolve_module_input` performs
-        let input_prefix = format!("{var_name}\u{00B7}");
-        let inputs: BTreeSet<Ident<Canonical>> = source_var
-            .module_refs(db)
-            .iter()
-            .filter_map(|mr| {
-                let dst_canonical = canonicalize(&mr.dst);
-                let bare = dst_canonical.strip_prefix(&input_prefix)?;
-                Some(Ident::new(bare))
-            })
-            .collect();
+        let inputs = module_input_set(
+            &module_input_prefix(var_name),
+            source_var
+                .module_refs(db)
+                .iter()
+                .map(|mr| (&mr.src, &mr.dst)),
+        );
 
         let key = Ident::<Canonical>::new(sub_model_name);
         let is_new = !modules.contains_key(&key);
@@ -2065,18 +1740,12 @@ fn enumerate_module_instances_inner(
             project,
             module_ident_context,
         );
-        let input_prefix = format!("{name}\u{00B7}");
         let inputs: BTreeSet<Ident<Canonical>> =
             if let Some(datamodel::Variable::Module(dm_module)) = meta.find_in(parsed) {
-                dm_module
-                    .references
-                    .iter()
-                    .filter_map(|mr| {
-                        let dst_canonical = canonicalize(&mr.dst);
-                        let bare = dst_canonical.strip_prefix(&input_prefix)?;
-                        Some(Ident::new(bare))
-                    })
-                    .collect()
+                module_input_set(
+                    &module_input_prefix(name),
+                    dm_module.references.iter().map(|mr| (&mr.src, &mr.dst)),
+                )
             } else {
                 BTreeSet::new()
             };
@@ -2123,19 +1792,12 @@ fn enumerate_module_instances_inner(
 
                 let implicit_dm_var = &im_meta.variable;
 
-                // Extract input set from the implicit module's references
-                let input_prefix = format!("{im_name}\u{00B7}");
                 let inputs: BTreeSet<Ident<Canonical>> =
                     if let datamodel::Variable::Module(dm_module) = implicit_dm_var {
-                        dm_module
-                            .references
-                            .iter()
-                            .filter_map(|mr| {
-                                let dst_canonical = canonicalize(&mr.dst);
-                                let bare = dst_canonical.strip_prefix(&input_prefix)?;
-                                Some(Ident::new(bare))
-                            })
-                            .collect()
+                        module_input_set(
+                            &module_input_prefix(im_name),
+                            dm_module.references.iter().map(|mr| (&mr.src, &mr.dst)),
+                        )
                     } else {
                         BTreeSet::new()
                     };

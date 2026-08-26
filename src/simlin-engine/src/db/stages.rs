@@ -40,7 +40,7 @@
 //!
 //! PRODUCTION (three, none a whole-model salsa build, each deliberate):
 //!
-//!   - `db::var_fragment::lower_var_fragment` (`ModelStage0` literal) and
+//!   - `db::var_fragment::explicit_fragment_input` (`ModelStage0` literal) and
 //!     `db::ltm::compile` (ditto) build a per-variable MINI Stage0 holding only
 //!     that variable's dependencies, then call `lower_variable` directly rather
 //!     than `ModelStage1::new`. Pointing those at this query would add a

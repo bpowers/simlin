@@ -441,7 +441,7 @@ impl MacroRegistry {
         // `db::project_module_graph` is the gate every production compile /
         // diagnostic / analysis entry point consults so that a module cycle
         // surfaces as a clean `CircularDependency` instead of driving the
-        // recursive `model_module_map` / `compute_layout` queries into salsa's
+        // recursive `compute_layout` / `model_shape` queries into salsa's
         // dependency-graph cycle panic (an abort under `panic = "abort"`). That
         // graph records only EXPLICIT `Variable::Module` edges, because it reads
         // variable KINDS off the salsa inputs and must never depend on a parse
@@ -491,7 +491,7 @@ impl MacroRegistry {
         // Stage0 `variables`. Only the first opens a cycle path: `compute_layout`
         // recurses on `model_implicit_var_info`'s module entries (Section 2) but
         // takes `meta.size` verbatim for the LTM ones (Section 3b), and
-        // `model_module_map` does not read the LTM map at all. So the LTM
+        // `model_shape` recurses only through `compute_layout`. So the LTM
         // recorder is inert for cycle safety -- but it is a place a future edit
         // could make recursive, which is why it is named here rather than left
         // out of the enumeration.

@@ -265,3 +265,139 @@ fn flatten_model(
         }
     }
 }
+
+/// The shape of `model` as a module INSTANCE: every variable's slot inside the
+/// block (`compute_layout`) together with its dimensions and kind, nested
+/// module variables carrying their own model's shape -- what a parent
+/// fragment resolves a cross-module read `m·x` (or `m·n·x`) through, and what
+/// its reference-extent table is projected from.
+///
+/// Keyed per model, like `compute_layout`, because that is the value's
+/// granularity: a cross-module read depends on the whole sub-model's layout
+/// (inserting a variable ahead of `x` moves `x`'s slot), so a fragment that
+/// resolves one genuinely depends on this whole value, and the memo backdates
+/// when the sub-model's shape is unchanged. The `Arc` is what the fragment
+/// constructors clone into `DepKind::Module`, so a shape is derived once per
+/// revision and shared by every fragment that reads the sub-model.
+///
+/// When LTM is enabled the sub-model is itself LTM-augmented: its layout
+/// carries the synthetic LTM variables, most importantly the per-input-port
+/// composite score `$⁚ltm⁚composite⁚{port}`, which a parent equation
+/// references across the module boundary (the exhaustive-mode input->macro
+/// link score is the composite-reference form
+/// `"{module}·$⁚ltm⁚composite⁚{port}"`, GH #548). Those variables and the
+/// LTM implicit helpers are registered at their layout slots so the
+/// cross-module reference resolves the same way the flattened-offset assembly
+/// does; without them the parent fragment fails to compile, `assemble_module`
+/// drops it, and the link score reads a constant 0 -- silently zeroing every
+/// loop that runs through the macro.
+#[salsa::tracked(returns(ref))]
+pub(crate) fn model_shape(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> std::sync::Arc<crate::compiler::fragment::ModelShape> {
+    use crate::compiler::fragment::{DepShape, ModelShape, ShapeEntry};
+
+    let layout = compute_layout(db, model, project);
+    let source_vars = model.variables(db);
+    let mut vars: crate::common::IdentMap<Ident<Canonical>, ShapeEntry> = Default::default();
+
+    for (name, svar) in source_vars.iter() {
+        let Some(entry) = layout.get(name.as_str()) else {
+            continue;
+        };
+        let shape = if svar.kind(db) == SourceVariableKind::Module {
+            module_dep_shape(db, project, svar.model_name(db))
+        } else {
+            DepShape::var(variable_dimensions(db, *svar, project).clone())
+        };
+        vars.insert(
+            Ident::new(name.as_str()),
+            ShapeEntry {
+                offset: entry.offset,
+                shape,
+            },
+        );
+    }
+
+    if project.ltm_enabled(db) {
+        let dim_context = project_dimensions_context(db, project);
+        for ltm_var in &model_ltm_variables(db, model, project).vars {
+            let Some(entry) = layout.get(&ltm_var.name) else {
+                continue;
+            };
+            // A2A link/loop scores carry dimensions, so a subscripted
+            // cross-module read resolves an element offset rather than
+            // collapsing to slot 0.
+            let dims = ltm_var
+                .dimensions
+                .iter()
+                .filter_map(|name| {
+                    dim_context
+                        .get(&crate::common::CanonicalDimensionName::from_raw(name))
+                        .cloned()
+                })
+                .collect();
+            vars.entry(Ident::new(&ltm_var.name)).or_insert(ShapeEntry {
+                offset: entry.offset,
+                shape: DepShape::var(dims),
+            });
+        }
+        for (im_name, meta) in model_ltm_implicit_var_info(db, model, project).iter() {
+            let Some(entry) = layout.get(im_name) else {
+                continue;
+            };
+            let shape = if meta.is_module {
+                module_dep_shape(db, project, meta.model_name.as_deref().unwrap_or(""))
+            } else {
+                let dim_names = match meta.variable.get_equation() {
+                    Some(
+                        datamodel::Equation::ApplyToAll(dim_names, _)
+                        | datamodel::Equation::Arrayed(dim_names, _, _, _),
+                    ) => dim_names.as_slice(),
+                    _ => &[],
+                };
+                DepShape::var(
+                    dim_names
+                        .iter()
+                        .filter_map(|name| {
+                            dim_context
+                                .get(&crate::common::CanonicalDimensionName::from_raw(name))
+                                .cloned()
+                        })
+                        .collect(),
+                )
+            };
+            vars.entry(Ident::new(im_name)).or_insert(ShapeEntry {
+                offset: entry.offset,
+                shape,
+            });
+        }
+    }
+
+    std::sync::Arc::new(ModelShape {
+        vars,
+        n_slots: layout.n_slots,
+    })
+}
+
+/// The shape of an instance of the model named `model_name`: a
+/// `DepKind::Module` over that model's [`model_shape`], or over an empty
+/// shape when the project has no such model (the reference then fails to
+/// resolve, `DoesNotExist`, exactly as a reference into a missing sub-model
+/// must).
+pub(crate) fn module_dep_shape(
+    db: &dyn Db,
+    project: SourceProject,
+    model_name: &str,
+) -> crate::compiler::fragment::DepShape {
+    use crate::compiler::fragment::{DepShape, ModelShape};
+
+    let sub_canonical = canonicalize(model_name);
+    let shape = match project.models(db).get(sub_canonical.as_ref()) {
+        Some(sub_model) => model_shape(db, *sub_model, project).clone(),
+        None => std::sync::Arc::new(ModelShape::default()),
+    };
+    DepShape::module(shape)
+}

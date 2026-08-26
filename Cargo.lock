@@ -3302,7 +3302,6 @@ name = "simlin-engine"
 version = "0.1.0"
 dependencies = [
  "base64",
- "bumpalo",
  "calamine",
  "checked",
  "criterion",

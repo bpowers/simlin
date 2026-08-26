@@ -2945,7 +2945,7 @@ fn unit_definition_errors_survive_an_unrelated_input_change() {
 /// parsing and lowering report a failure to the salsa path; they are not
 /// redundant with it (`docs/tech-debt.md` item 17 records why that matters).
 /// The salsa pipeline's diagnostics are DOWNSTREAM of them --
-/// `db::var_fragment::lower_var_fragment` reads
+/// `db::var_fragment::explicit_fragment_input` reads
 /// `parsed.variable.unit_errors()`, `parsed.variable.equation_errors()` and
 /// `lowered.equation_errors()` and turns each entry into a `Diagnostic`. Acting
 /// on the claim would silently drop those diagnostics, so it is pinned here

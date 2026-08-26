@@ -83,10 +83,9 @@ pub use input::{
 mod query;
 pub use query::{
     ImplicitVarMeta, ModuleReferenceGraph, ParsedVariableResult, UnitsContextResult, VariableDeps,
-    model_implicit_var_info, model_module_ident_context, model_module_map,
-    parse_source_variable_with_module_context, project_converted_dimensions,
-    project_datamodel_dims, project_dimensions_context, project_module_graph,
-    project_units_context, project_units_context_result, variable_dimensions,
+    model_implicit_var_info, model_module_ident_context, parse_source_variable_with_module_context,
+    project_converted_dimensions, project_datamodel_dims, project_dimensions_context,
+    project_module_graph, project_units_context, project_units_context_result, variable_dimensions,
     variable_direct_dependencies, variable_relevant_dimensions, variable_size,
 };
 pub(crate) use query::{
@@ -103,12 +102,11 @@ pub(crate) use sync::{build_stdlib_models, expand_maps_to_chains};
 mod layout;
 pub use layout::compute_layout;
 pub(crate) use layout::flattened_offsets;
+pub(crate) use layout::module_dep_shape;
 
 mod fragment_compile;
+pub(crate) use fragment_compile::compile_implicit_var_fragment;
 pub use fragment_compile::compile_var_fragment;
-pub(crate) use fragment_compile::{
-    compile_implicit_var_fragment, compile_implicit_var_phase_bytecodes,
-};
 // Test-only: the per-thread record of which fragment-compiler bodies ran, so
 // `fragment_char_tests` can prove a layout-only edit did or did not recompile
 // a fragment. Pointer equality of a memo cannot prove that -- salsa backdates
@@ -121,9 +119,8 @@ pub(crate) use fragment_compile::{
 
 mod assemble;
 pub(crate) use assemble::{
-    PerVarSizes, VarFragmentResult, build_module_inputs, build_stub_variable,
-    build_submodel_metadata, compile_phase_to_per_var_bytecodes, extract_tables_from_source_var,
-    fragment_emit_ctx, var_phase_symbolic_fragment_prod,
+    VarFragmentResult, build_module_inputs, compile_phase_to_per_var_bytecodes,
+    extract_tables_from_source_var, module_input_prefix, var_phase_symbolic_fragment_prod,
 };
 pub use assemble::{assemble_module, assemble_simulation};
 // `combine_scc_fragment` is consumed at runtime only WITHIN `assemble.rs`; the
@@ -142,8 +139,8 @@ mod ltm;
 use ltm::*;
 pub use ltm::{
     LtmArm, LtmEquation, LtmImplicitVarMeta, ShapedLinkScore, compile_ltm_var_fragment,
-    link_score_equation_text_shaped, model_ltm_implicit_module_refs, model_ltm_implicit_var_info,
-    model_ltm_mode, model_ltm_var_name_index, model_ltm_variables,
+    link_score_equation_text_shaped, model_ltm_implicit_var_info, model_ltm_mode,
+    model_ltm_var_name_index, model_ltm_variables,
 };
 // The cross-agg petal-stitching core, shared with `crate::ltm_finding`'s
 // discovery-mode recovery (GH #696).
@@ -828,7 +825,7 @@ pub(crate) fn module_link_score_equation(
     // The composite var name a sub-model emits for `port`, if any.
     //
     // This resolves in BOTH exhaustive and discovery mode: since GH #548,
-    // `build_submodel_metadata` lays out a sub-model's LTM synthetic vars
+    // `model_shape` registers a sub-model's LTM synthetic vars
     // (composites included) in the parent's flattened offset map whenever
     // `ltm_enabled`, which holds in both modes. (The pre-#675 code gated
     // composites to exhaustive mode on a now-stale "cross-module refs don't
@@ -1421,6 +1418,8 @@ mod fragment_cache_tests;
 mod fragment_char_tests;
 #[cfg(test)]
 mod fragment_determinism_tests;
+#[cfg(test)]
+mod fragment_input_tests;
 #[cfg(test)]
 mod implicit_diag_tests;
 #[cfg(test)]

@@ -7,33 +7,38 @@
 //!
 //! This is the emission side of the LTM pipeline: the per-link salsa
 //! fragment (`compile_ltm_var_fragment`), the shape-aware link-score
-//! equation-text query (`link_score_equation_text_shaped`), the shared
-//! equation-to-bytecode compiler (`compile_ltm_equation_fragment`), the
-//! synthetic-fragment selector (`compile_ltm_synthetic_fragment`), the
-//! compile-failure diagnostic pass (`model_ltm_fragment_diagnostics`), and
-//! the implicit-variable fragment compiler (`compile_ltm_implicit_var_fragment`).
+//! equation-text query (`link_score_equation_text_shaped`), the two LTM
+//! constructors of `compiler::fragment::FragmentInput` (`ltm_fragment_input`
+//! for a synthetic variable, `ltm_implicit_fragment_input` for a helper its
+//! parse synthesized) with the emitters over them
+//! (`compile_ltm_equation_fragment`, `compile_ltm_implicit_var_fragment`),
+//! the synthetic-fragment selector (`compile_ltm_synthetic_fragment`), and
+//! the compile-failure diagnostic pass (`model_ltm_fragment_diagnostics`).
 
 use std::collections::{BTreeSet, HashMap};
 
 use crate::canonicalize;
-use crate::common::{Canonical, Ident};
+use crate::common::{Canonical, Ident, IdentMap};
 use crate::datamodel;
 
+use crate::compiler::fragment::{DepShape, FragmentInput, lower_fragment};
+use crate::db::var_fragment::{
+    dep_head, dimensions_named, implicit_dep_shape, is_implicit_global, source_dep_shape,
+};
 use crate::db::{
-    Db, LtmLinkId, LtmSyntheticVar, ModelDepGraphResult, ModuleInputSet, PerVarSizes, RefShape,
-    SourceModel, SourceProject, SourceVariableKind, VarFragmentResult, build_module_inputs,
-    build_stub_variable, build_submodel_metadata, canonical_module_input_set,
-    compile_phase_to_per_var_bytecodes, compute_layout, extract_tables_from_source_var,
-    fragment_emit_ctx, model_dependency_graph, model_implicit_var_info, model_module_ident_context,
-    model_module_map, parse_source_variable_with_module_context, project_converted_dimensions,
+    Db, LtmLinkId, LtmSyntheticVar, RefShape, SourceModel, SourceProject, SourceVariableKind,
+    VarFragmentResult, build_module_inputs, canonical_module_input_set,
+    compile_phase_to_per_var_bytecodes, extract_tables_from_source_var, model_implicit_var_info,
+    model_module_ident_context, module_dep_shape, module_input_prefix,
+    parse_source_variable_with_module_context, project_converted_dimensions,
     project_dimensions_context, project_units_context, reconstruct_single_variable,
-    variable_dimensions, variable_size,
+    variable_dimensions,
 };
 
-use super::parse::{ltm_equation_dimensions, parse_ltm_equation, scalarize_ltm_equation};
+use super::parse::{parse_ltm_equation, scalarize_ltm_equation};
 use super::{
-    LtmEquation, LtmImplicitVarMeta, ltm_module_idents, model_ltm_implicit_module_refs,
-    model_ltm_implicit_var_info, model_ltm_var_name_index, model_ltm_variables,
+    LtmEquation, LtmImplicitVarMeta, ltm_module_idents, model_ltm_implicit_var_info,
+    model_ltm_var_name_index, model_ltm_variables,
 };
 
 /// Compile a single LTM synthetic variable's equation to symbolic
@@ -523,7 +528,7 @@ impl Drop for ForcePartialEquationErrorGuard {
 /// Result of [`lower_ltm_variable`]: the lowered variable plus the
 /// dependency classification of its lowered AST, computed once during
 /// lowering. Callers reuse `dep_idents`/`referenced_tables` to build their
-/// metadata stubs instead of re-running `classify_dependencies` on the
+/// dependency shapes instead of re-running `classify_dependencies` on the
 /// returned variable -- the classification is a per-fragment AST walk, and
 /// duplicating it across every LTM fragment was a measurable slice of
 /// C-LEARN's LTM compile time.
@@ -536,37 +541,27 @@ struct LoweredLtmVariable {
     /// scoped re-lower ran.
     ///
     /// ORDERED, not a `HashSet` -- **deliberately, even though no consumer is
-    /// order-sensitive today.** Keep it that way; the reasoning is not
-    /// "something breaks if you don't", so a reader who checks only that will
-    /// wrongly conclude it is free to change.
+    /// order-sensitive.** Keep it that way; the reasoning is not "something
+    /// breaks if you don't", so a reader who checks only that will wrongly
+    /// conclude it is free to change.
     ///
-    /// Both consumers walk this set to build per-dependency stub variables,
-    /// which land in a `HashMap`-keyed symbol table and a `HashMap` of tables.
-    /// Iteration order therefore does not reach the emitted fragment: the
-    /// stubs are keyed by ident, the insertion loops are first-inserted-wins
-    /// over distinct idents, and `Compiler::new` sorts the table idents it
-    /// lays graphical functions out from. The walk USED to assign consecutive
-    /// private per-fragment offsets in iteration order -- so a `HashSet` made
-    /// them a function of the per-process hash seed -- and symbolization then
-    /// inverted those offsets, which is why even then nothing observable
-    /// changed. GH #964 deleted both the offsets and the symbolization, so the
-    /// ordering is now inert rather than invisible.
-    ///
-    /// The rule it upholds is unchanged and is the reason to keep it: a
+    /// Both consumers walk this set to build per-dependency shapes, which land
+    /// in an ident-keyed map (first-inserted-wins over distinct idents) and an
+    /// ident-keyed map of tables, and `Compiler::new` sorts the table idents it
+    /// lays graphical functions out from -- so iteration order does not reach
+    /// the emitted fragment. The rule this upholds is the reason to keep it: a
     /// query's intermediate state must be a function of its inputs, not of the
     /// hash seed. That is the same rule `db::assemble::temp_sizes_by_id`
-    /// restores, and the class of defect it prevents (GH #595) does not
+    /// upholds, and the class of defect it prevents (GH #595) does not
     /// announce itself -- it surfaces as salsa backdating quietly failing or a
     /// compiled artifact that is not reproducible run to run, neither of which
-    /// a test would attribute back to here. It costs nothing, and the non-LTM
-    /// twins (`db::var_fragment::collect_var_dependencies`,
-    /// `db::compile_implicit_var_phase_bytecodes`) use a `BTreeSet` here too;
-    /// these two hand-copied LTM walks were the outliers.
+    /// a test would attribute back to here. It costs nothing, and the explicit
+    /// and implicit constructors (`db::var_fragment`, `db::fragment_compile`)
+    /// walk a `BTreeSet` too.
     ///
-    /// This does NOT explain (or fix) the separately-reported
-    /// nondeterministic *invalidation* of `compile_ltm_var_fragment`: that
-    /// was measured before and after this change with no effect, and salsa
-    /// verifies a dependency SET, which an ordering cannot alter.
+    /// This does NOT explain the separately-reported nondeterministic
+    /// *invalidation* of `compile_ltm_var_fragment`: salsa verifies a
+    /// dependency SET, which an ordering cannot alter.
     dep_idents: BTreeSet<Ident<Canonical>>,
     /// `classify_dependencies(..).referenced_tables` of the same AST.
     referenced_tables: BTreeSet<String>,
@@ -681,7 +676,7 @@ fn expr_contains_pass1_decomposition_site(expr: &crate::ast::Expr2) -> bool {
 /// empty scope the bounds are never computed, the array expression stays
 /// inline under the reducer, and codegen rejects the fragment ("Cannot push
 /// view for expression type ..."), silently stubbing the LTM variable to a
-/// constant 0. Mirrors `lower_var_fragment`'s minimal-`ModelStage0`
+/// constant 0. Mirrors `explicit_fragment_input`'s minimal-`ModelStage0`
 /// construction for ordinary per-variable fragments.
 ///
 /// Strategy: lower once with an empty scope (cheap, and byte-identical to
@@ -709,8 +704,8 @@ fn expr_contains_pass1_decomposition_site(expr: &crate::ast::Expr2) -> bool {
 /// score referenced by a loop score -- which is sound because loop and
 /// relative-score equations reference those deps only in plain products,
 /// never inside reducers; their multi-slot layout is handled separately by
-/// the compile stage's dimension-aware metadata stubs (the LTM-var dep
-/// branch in `compile_ltm_equation_fragment`, tech-debt #34). `·`-dotted
+/// the compile stage's dimension-aware dependency shapes (the LTM-var dep
+/// branch in `ltm_fragment_input`, tech-debt #34). `·`-dotted
 /// module-output refs likewise stay outside (they are not flat variables).
 fn lower_ltm_variable(
     db: &dyn Db,
@@ -730,7 +725,7 @@ fn lower_ltm_variable(
 
     // Classify dependencies ONCE on the preliminary lowering; the set is
     // scope-independent, so it serves both the re-lower decision below and
-    // the caller's metadata-stub construction. `Variable::ast()` is the
+    // the caller's dependency-shape construction. `Variable::ast()` is the
     // right (and only needed) source: every LTM Stage0 input here is an
     // Aux-parsed Var whose dt AST is its sole AST, and even a hypothetical
     // stock-shaped input is covered because `ast()` returns a Stock's init
@@ -805,7 +800,7 @@ fn lower_ltm_variable(
     // the lowering scope knows the helper's dims; without them the reference
     // lowers as a scalar and codegen rejects the fragment ("expected array
     // expression"). Same registry lookup (and the same safety argument) as
-    // the dep-stub branch in `compile_ltm_equation_fragment`: this runs from
+    // the LTM-var dep branch in `ltm_fragment_input`: this runs from
     // fragment compilation, strictly after `model_ltm_variables` completed.
     let find_arrayed_ltm_dep = |name: &str| -> Option<Vec<String>> {
         let idx = *model_ltm_var_name_index(db, model, project).get(name)?;
@@ -894,49 +889,44 @@ fn lower_ltm_variable(
     }
 }
 
-/// Compile an arbitrary LTM `Equation` to symbolic bytecodes.
+/// Build the fragment input of one LTM synthetic variable: parse its typed
+/// equation (running the SAME implicit-module / PREVIOUS-INIT visitor the
+/// ordinary variable parse runs), lower it with a scope that can resolve its
+/// arrayed dependencies' bounds (GH #738), and resolve the shape of every name
+/// it references. `Err` carries the reason the generated equation did not
+/// parse.
 ///
-/// Shared implementation used by `compile_ltm_var_fragment` (link scores)
-/// and the loop/relative score compilation in `assemble_module`. Builds
-/// a mini-context that includes both model variables and implicit vars
-/// synthesized while parsing the LTM equation.
+/// LTM equations are scalar (or A2A) aux equations that may reference model
+/// variables from the parent model, other LTM variables (a loop score reads
+/// link scores; an A2A loop score must see an A2A link score's dimensions so
+/// the compiler emits per-element fetches rather than collapsing every slot to
+/// slot 0, tech-debt #34), implicit helper/module variables synthesized while
+/// parsing this or another LTM equation (an ARRAYED capture helper -- the GH
+/// #541 arrayed `PREVIOUS`/`INIT` capture, extended to array-valued builtin
+/// subtrees like `rank(pop, 1)` by GH #742 -- needs its dimensions so the
+/// consuming `helper[dim·elem]` subscript resolves), the model's own
+/// SMOOTH/DELAY instances and capture helpers, and the implicit time globals.
+/// A name that is none of those resolves to a scalar shape, so the reference
+/// compiles (to a bare slot read) and assembly's `fragment_vars_in_layout`
+/// filter decides whether it is in this model's layout -- the sub-model
+/// stdlib-instance case.
 ///
 /// The variant of `equation` determines the variable's slot count: a
 /// `Scalar` equation gets 1 slot; an `ApplyToAll`/`Arrayed` equation
 /// gets `product(dim_lengths)` slots and is compiled with the A2A /
 /// per-element expansion the compiler applies to those variants.
-///
-/// `why`, when supplied, receives a human-readable reason on failure. The
-/// three ways this function can fail -- a parse error in the generated text,
-/// a lowering `Err` from `compiler::Var::new`, and codegen declining to emit
-/// -- otherwise all collapse into the same `None`/`flow_bytecodes: None`, so a
-/// caller reporting the failure could say only *that* it happened. That cost
-/// was concrete: ~1,600 failures on one real model with no way to tell which
-/// construct was responsible short of instrumenting this function by hand.
-/// Callers that only want the fragment pass `None` and pay nothing.
-pub(crate) fn compile_ltm_equation_fragment(
-    db: &dyn Db,
+pub(crate) fn ltm_fragment_input<'db>(
+    db: &'db dyn Db,
     var_name: &str,
     equation: &LtmEquation,
     model: SourceModel,
     project: SourceProject,
-    mut why: Option<&mut Option<String>>,
-) -> Option<VarFragmentResult> {
-    use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
-
-    #[cfg(test)]
-    crate::db::note_fragment_execution(crate::db::FragmentExecKind::LtmBody, var_name);
-
-    // Project-global dims (datamodel form, used to resolve the equation's
-    // dimension names) plus the canonicalized context + converted dims, all
-    // from the salsa-cached queries rather than rebuilt per LTM fragment.
+) -> Result<FragmentInput<'db>, String> {
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
 
     let module_idents = ltm_module_idents(db, model, project);
     let model_var_names = super::ltm_model_var_names(db, model, project);
-
-    let var_dimensions = ltm_equation_dimensions(equation);
 
     let parsed = parse_ltm_equation(
         var_name,
@@ -945,750 +935,176 @@ pub(crate) fn compile_ltm_equation_fragment(
         Some(module_idents),
         Some(model_var_names),
     );
-
-    // Check for parse errors
-    if parsed
-        .variable
-        .equation_errors()
-        .is_some_and(|e| !e.is_empty())
+    if let Some(errs) = parsed.variable.equation_errors()
+        && !errs.is_empty()
     {
-        if let Some(slot) = why.as_deref_mut() {
-            let errs = parsed.variable.equation_errors().unwrap_or_default();
-            *slot = Some(format!(
-                "the generated equation did not parse: {}",
-                errs.iter()
-                    .map(|e| format!("{:?} at {}..{}", e.code, e.start, e.end))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ));
-        }
-        return None;
+        return Err(format!(
+            "the generated equation did not parse: {}",
+            errs.iter()
+                .map(|e| format!("{:?} at {}..{}", e.code, e.start, e.end))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
     }
 
-    // Lower the variable. Scalar LTM vars produce a plain Var;
-    // A2A LTM vars produce a Var with dimension views that the
-    // compiler's expand_a2a_with_hoisting handles automatically.
     // `lower_ltm_variable` threads the dependencies (model variables and
     // arrayed parse-time helpers) into the lowering scope so array bounds
     // resolve (GH #738), and hands back the dependency classification it
-    // computed so we don't re-walk the lowered AST below.
+    // computed so the lowered AST is not walked again here.
     let LoweredLtmVariable {
         variable: lowered,
         dep_idents,
         referenced_tables,
     } = lower_ltm_variable(db, &parsed.variable, &parsed.implicit_vars, model, project);
 
-    let model_name_ident = Ident::new(model.name(db));
     let var_name_canonical = canonicalize(var_name).into_owned();
-    let var_ident_canonical: Ident<Canonical> = Ident::new(&var_name_canonical);
-
-    // Arena for sub-model stub variables allocated by build_submodel_metadata
-    let arena = bumpalo::Bump::new();
-
-    let mut mini_metadata: crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::compiler::VariableMetadata<'_>,
-    > = Default::default();
-
-    // Add implicit time/dt/initial_time/final_time variables
-    {
-        use std::sync::LazyLock;
-        static IMPLICIT_TIME: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("time"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        static IMPLICIT_DT: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("dt"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        static IMPLICIT_INITIAL_TIME: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("initial_time"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        static IMPLICIT_FINAL_TIME: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("final_time"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        mini_metadata.insert(
-            Ident::new("time"),
-            crate::compiler::VariableMetadata {
-                offset: None,
-                size: 1,
-                var: &IMPLICIT_TIME,
-            },
-        );
-        mini_metadata.insert(
-            Ident::new("dt"),
-            crate::compiler::VariableMetadata {
-                offset: None,
-                size: 1,
-                var: &IMPLICIT_DT,
-            },
-        );
-        mini_metadata.insert(
-            Ident::new("initial_time"),
-            crate::compiler::VariableMetadata {
-                offset: None,
-                size: 1,
-                var: &IMPLICIT_INITIAL_TIME,
-            },
-        );
-        mini_metadata.insert(
-            Ident::new("final_time"),
-            crate::compiler::VariableMetadata {
-                offset: None,
-                size: 1,
-                var: &IMPLICIT_FINAL_TIME,
-            },
-        );
-    }
-
-    // Compute the LTM variable's size from the equation's dimension names.
-    // Scalar vars get size 1; A2A/Arrayed vars get product(dim_lengths).
-    let var_size: usize = if var_dimensions.is_empty() {
-        1
-    } else {
-        var_dimensions
-            .iter()
-            .map(|dim_name| {
-                let canonical = crate::common::CanonicalDimensionName::from_raw(dim_name);
-                dim_context.get(&canonical).map(|d| d.len()).unwrap_or(1)
-            })
-            .product()
-    };
-
-    // Add self (the LTM var itself)
-    mini_metadata.insert(
-        var_ident_canonical.clone(),
-        crate::compiler::VariableMetadata {
-            offset: None,
-            size: var_size,
-            var: &lowered,
-        },
-    );
-
-    // `dep_idents`/`referenced_tables` came back from `lower_ltm_variable`
-    // (classified once during lowering). Lookup-table references are not
-    // data-flow deps (issue #606 keeps them in `referenced_tables`, off the
-    // causal graph), but the fragment still needs them: see the
-    // referenced-tables pass below.
+    let var_ident: Ident<Canonical> = Ident::new(&var_name_canonical);
     let source_vars = model.variables(db);
-    let project_models = project.models(db);
     let implicit_info = model_implicit_var_info(db, model, project);
     let ltm_implicit_info = model_ltm_implicit_var_info(db, model, project);
 
-    let mut dep_variables: Vec<(Ident<Canonical>, crate::variable::Variable, usize)> = Vec::new();
-    let mut implicit_module_vars: Vec<(Ident<Canonical>, crate::variable::Variable, usize)> =
-        Vec::new();
-    let mut implicit_module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = HashMap::new();
-    let mut implicit_submodels: Vec<(String, SourceModel)> = Vec::new();
-
-    // Process dependencies from the parsed AST
-    for dep_ident_str in &dep_idents {
-        let dep_str = dep_ident_str.as_str();
-        let effective = dep_str.strip_prefix('\u{00B7}').unwrap_or(dep_str);
-
-        if effective == var_name_canonical
-            || matches!(effective, "time" | "dt" | "initial_time" | "final_time")
-        {
-            continue;
-        }
-
-        // Handle module output references (contains middle dot)
-        if let Some(dot_pos) = effective.find('\u{00B7}') {
-            let module_var_name = &effective[..dot_pos];
-            let module_ident: Ident<Canonical> = Ident::new(module_var_name);
-
-            if mini_metadata.contains_key(&module_ident)
-                || implicit_module_vars
-                    .iter()
-                    .any(|(id, _, _)| id == &module_ident)
-            {
-                continue;
-            }
-
-            // Check if this is an explicit model variable (module type)
-            if let Some(mod_source_var) = source_vars.get(module_var_name) {
-                if mod_source_var.kind(db) == SourceVariableKind::Module {
-                    let mod_model_name = mod_source_var.model_name(db);
-                    let sub_canonical = canonicalize(mod_model_name);
-                    let sub_size = project_models
-                        .get(sub_canonical.as_ref())
-                        .map(|sm| compute_layout(db, *sm, project).n_slots)
-                        .unwrap_or(1);
-
-                    let mod_input_prefix = format!("{module_var_name}\u{00B7}");
-                    let module_inputs = build_module_inputs(
-                        model.name(db),
-                        &mod_input_prefix,
-                        mod_source_var
-                            .module_refs(db)
-                            .iter()
-                            .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
-                    );
-
-                    let mod_var = crate::variable::Variable::Module {
-                        ident: module_ident.clone(),
-                        model_name: Ident::new(mod_model_name),
-                        units: None,
-                        inputs: module_inputs.clone(),
-                        errors: vec![],
-                        unit_errors: vec![],
-                    };
-                    dep_variables.push((module_ident.clone(), mod_var, sub_size));
-
-                    let input_set: BTreeSet<Ident<Canonical>> =
-                        module_inputs.iter().map(|mi| mi.dst.clone()).collect();
-                    implicit_module_refs
-                        .insert(module_ident, (Ident::new(mod_model_name), input_set));
-
-                    if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
-                        implicit_submodels.push((mod_model_name.to_string(), *sub_model));
-                    }
-                }
-                continue;
-            }
-
-            // Check if this is an implicit var from the LTM equation's own
-            // parse-time helper/module synthesis.
-            let mut found_in_parsed = false;
-            for implicit_dm_var in &parsed.implicit_vars {
-                if let datamodel::Variable::Module(dm_module) = implicit_dm_var
-                    && canonicalize(&dm_module.ident) == module_var_name
-                {
-                    let sub_canonical = canonicalize(&dm_module.model_name);
-                    let sub_size = project_models
-                        .get(sub_canonical.as_ref())
-                        .map(|sm| compute_layout(db, *sm, project).n_slots)
-                        .unwrap_or(1);
-
-                    let input_prefix = format!("{module_var_name}\u{00B7}");
-                    let module_inputs = build_module_inputs(
-                        model.name(db),
-                        &input_prefix,
-                        dm_module
-                            .references
-                            .iter()
-                            .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
-                    );
-
-                    let im_var = crate::variable::Variable::Module {
-                        ident: module_ident.clone(),
-                        model_name: Ident::new(&dm_module.model_name),
-                        units: None,
-                        inputs: module_inputs.clone(),
-                        errors: vec![],
-                        unit_errors: vec![],
-                    };
-                    implicit_module_vars.push((module_ident.clone(), im_var, sub_size));
-
-                    let input_set: BTreeSet<Ident<Canonical>> =
-                        module_inputs.iter().map(|mi| mi.dst.clone()).collect();
-                    implicit_module_refs.insert(
-                        module_ident.clone(),
-                        (Ident::new(&dm_module.model_name), input_set),
-                    );
-
-                    if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
-                        implicit_submodels.push((dm_module.model_name.clone(), *sub_model));
-                    }
-
-                    found_in_parsed = true;
-                    break;
-                }
-            }
-
-            if !found_in_parsed {
-                // Check the model's own implicit vars (SMOOTH, DELAY, etc.)
-                if let Some(im_meta) = implicit_info.get(module_var_name)
-                    && im_meta.is_module
-                    && let Some(im_model_name) = im_meta.model_name.as_deref()
-                {
-                    let sub_canonical = canonicalize(im_model_name);
-                    let sub_size = project_models
-                        .get(sub_canonical.as_ref())
-                        .map(|sm| compute_layout(db, *sm, project).n_slots)
-                        .unwrap_or(1);
-
-                    let module_ctx = model_module_ident_context(db, model, project, vec![]);
-                    let parent_parsed = parse_source_variable_with_module_context(
-                        db,
-                        im_meta.parent_source_var,
-                        project,
-                        module_ctx,
-                    );
-                    let input_prefix = format!("{module_var_name}\u{00B7}");
-                    let module_inputs = parent_parsed
-                        .implicit_vars
-                        .iter()
-                        .find_map(|iv| match iv {
-                            datamodel::Variable::Module(dm_module)
-                                if canonicalize(dm_module.ident.as_str()) == module_var_name =>
-                            {
-                                Some(build_module_inputs(
-                                    model.name(db),
-                                    &input_prefix,
-                                    dm_module
-                                        .references
-                                        .iter()
-                                        .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
-                                ))
-                            }
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-
-                    let mod_var = crate::variable::Variable::Module {
-                        ident: module_ident.clone(),
-                        model_name: Ident::new(im_model_name),
-                        units: None,
-                        inputs: module_inputs.clone(),
-                        errors: vec![],
-                        unit_errors: vec![],
-                    };
-                    dep_variables.push((module_ident.clone(), mod_var, sub_size));
-
-                    let input_set: BTreeSet<Ident<Canonical>> =
-                        module_inputs.iter().map(|mi| mi.dst.clone()).collect();
-                    implicit_module_refs
-                        .insert(module_ident, (Ident::new(im_model_name), input_set));
-
-                    if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
-                        implicit_submodels.push((im_model_name.to_string(), *sub_model));
-                    }
-                }
-                // Also check LTM implicit vars from other LTM equations
-                else if let Some(ltm_im_meta) = ltm_implicit_info.get(module_var_name)
-                    && ltm_im_meta.is_module
-                    && let Some(im_model_name) = ltm_im_meta.model_name.as_deref()
-                {
-                    let sub_canonical = canonicalize(im_model_name);
-                    let sub_size = project_models
-                        .get(sub_canonical.as_ref())
-                        .map(|sm| compute_layout(db, *sm, project).n_slots)
-                        .unwrap_or(1);
-
-                    // The implicit module variable rides on its meta (captured
-                    // at LTM-equation parse time), so the parent equation is
-                    // not re-parsed to recover its input references.
-                    let module_inputs =
-                        if let datamodel::Variable::Module(dm_module) = &ltm_im_meta.variable {
-                            let input_prefix = format!("{module_var_name}\u{00B7}");
-                            build_module_inputs(
-                                model.name(db),
-                                &input_prefix,
-                                dm_module
-                                    .references
-                                    .iter()
-                                    .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
-                            )
-                        } else {
-                            Vec::new()
-                        };
-
-                    let mod_var = crate::variable::Variable::Module {
-                        ident: module_ident.clone(),
-                        model_name: Ident::new(im_model_name),
-                        units: None,
-                        inputs: module_inputs.clone(),
-                        errors: vec![],
-                        unit_errors: vec![],
-                    };
-                    dep_variables.push((module_ident.clone(), mod_var, sub_size));
-
-                    let input_set: BTreeSet<Ident<Canonical>> =
-                        module_inputs.iter().map(|mi| mi.dst.clone()).collect();
-                    implicit_module_refs
-                        .insert(module_ident, (Ident::new(im_model_name), input_set));
-
-                    if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
-                        implicit_submodels.push((im_model_name.to_string(), *sub_model));
-                    }
-                }
-            }
-            continue;
-        }
-
-        let dep_ident = Ident::new(effective);
-        if mini_metadata.contains_key(&dep_ident) {
-            continue;
-        }
-
-        // Look up in explicit model variables
-        if let Some(dep_source_var) = source_vars.get(effective) {
-            let dep_dims = variable_dimensions(db, *dep_source_var, project);
-            let dep_size = variable_size(db, *dep_source_var, project);
-            let dep_var = build_stub_variable(db, dep_source_var, &dep_ident, dep_dims);
-            dep_variables.push((dep_ident, dep_var, dep_size));
-        } else if let Some(im_meta) = implicit_info.get(effective) {
-            // Dep is an implicit var from the model (SMOOTH/DELAY expansion).
-            // Module-type implicits need their full size and Module variant so
-            // the compiler can resolve submodel offset lookups. Scalar implicits
-            // (helper auxes) use a plain Var stub.
-            if im_meta.is_module
-                && let Some(ref mn) = im_meta.model_name
-            {
-                let sub_size = {
-                    let sub_canonical = canonicalize(mn);
-                    project_models
-                        .get(sub_canonical.as_ref())
-                        .map(|sm| compute_layout(db, *sm, project).n_slots)
-                        .unwrap_or(1)
-                };
-                dep_variables.push((
-                    dep_ident.clone(),
-                    crate::variable::Variable::Module {
-                        ident: dep_ident.clone(),
-                        model_name: Ident::new(mn),
-                        units: None,
-                        inputs: vec![],
-                        errors: vec![],
-                        unit_errors: vec![],
-                    },
-                    sub_size,
-                ));
-                implicit_module_refs.insert(dep_ident, (Ident::new(mn), BTreeSet::new()));
-                let sub_canonical = canonicalize(mn);
-                if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
-                    implicit_submodels.push((mn.to_string(), *sub_model));
-                }
-            } else {
-                // An ARRAYED implicit helper needs a dimension-aware stub for
-                // exactly the reason the LTM-side branch below documents: a
-                // consuming `helper[dim·elem]` subscript cannot lower against a
-                // scalar stub ("expected array variable ... to have
-                // dimensions"), so the fragment fails and the score reads a
-                // constant 0. `ImplicitVarMeta::dimensions` is carried for this
-                // -- it was consulted for LTM parse helpers and not for the
-                // model's own implicit vars, which is where the GH #541 arrayed
-                // `PREVIOUS`/`INIT` capture lands.
-                dep_variables.push((
-                    dep_ident.clone(),
-                    crate::variable::Variable::Var {
-                        ident: dep_ident,
-                        ast: stub_ast_for_dimension_names(&im_meta.dimensions, dim_context),
-                        init_ast: None,
-                        eqn: None,
-                        units: None,
-                        tables: vec![],
-                        non_negative: false,
-                        is_flow: false,
-                        is_table_only: false,
-                        errors: vec![],
-                        unit_errors: vec![],
-                    },
-                    im_meta.size,
-                ));
-            }
-        }
-        // Dep is an LTM parse-time helper aux -- from this equation's own
-        // parse or another LTM equation's (cross-equation refs resolve
-        // through the cached registry). Scalar helpers worked through the
-        // generic fallback below, but an ARRAYED capture helper (the GH #541
-        // arrayed `PREVIOUS`/`INIT` capture, extended to array-valued builtin
-        // subtrees like `rank(pop, 1)` by GH #742) needs a dimension-aware
-        // stub: registered as a size-1 scalar, the consuming equation's
-        // `helper[dim·elem]` subscript is a dimension error and the fragment
-        // fails to compile.
-        else if let Some(helper_dm) = parsed
+    // A helper this equation's own parse synthesized, by canonical name.
+    let parsed_implicit = |name: &str| {
+        parsed
             .implicit_vars
             .iter()
-            .find(|v| {
-                !matches!(v, datamodel::Variable::Module(_))
-                    && canonicalize(v.get_ident()) == effective
-            })
-            .or_else(|| {
-                ltm_implicit_info
-                    .get(effective)
-                    .filter(|meta| !meta.is_module)
-                    .map(|meta| &meta.variable)
-            })
-        {
-            let (dep_size, dep_ast) = match helper_dm.get_equation() {
-                Some(
-                    datamodel::Equation::ApplyToAll(dim_names, _)
-                    | datamodel::Equation::Arrayed(dim_names, _, _, _),
-                ) => {
-                    let ast = stub_ast_for_dimension_names(dim_names, dim_context);
-                    let size = match &ast {
-                        Some(crate::ast::Ast::ApplyToAll(dims, _)) => {
-                            dims.iter().map(|d| d.len()).product::<usize>().max(1)
-                        }
-                        _ => 1,
-                    };
-                    (size, ast)
-                }
-                _ => (1, None),
-            };
-            dep_variables.push((
-                dep_ident.clone(),
-                crate::variable::Variable::Var {
-                    ident: dep_ident,
-                    ast: dep_ast,
-                    init_ast: None,
-                    eqn: None,
-                    units: None,
-                    tables: vec![],
-                    non_negative: false,
-                    is_flow: false,
-                    is_table_only: false,
-                    errors: vec![],
-                    unit_errors: vec![],
-                },
-                dep_size,
-            ));
+            .find(|v| canonicalize(v.get_ident()) == name)
+    };
+    let helper_dims = |helper: &datamodel::Variable| match helper.get_equation() {
+        Some(
+            datamodel::Equation::ApplyToAll(dim_names, _)
+            | datamodel::Equation::Arrayed(dim_names, _, _, _),
+        ) => dimensions_named(dim_names, dim_context),
+        _ => Vec::new(),
+    };
+
+    let mut deps: IdentMap<Ident<Canonical>, DepShape> = Default::default();
+    deps.insert(
+        var_ident,
+        DepShape::var(
+            lowered
+                .get_dimensions()
+                .map(<[crate::dimensions::Dimension]>::to_vec)
+                .unwrap_or_default(),
+        ),
+    );
+    for dep in &dep_idents {
+        let (head, _qualified) = dep_head(dep.as_str());
+        if head == var_name_canonical || is_implicit_global(head) || deps.contains_key(head) {
+            continue;
         }
-        // Dep could also be another LTM var (e.g., loop score refs link
-        // scores; composite refs paths).  These cases need dimension-
-        // aware stubs: an A2A loop_score that references an A2A
-        // link_score must see that dep as A2A so the compiler emits
-        // per-element fetches; otherwise references collapse to slot 0
-        // and every output slot reads the same numerator (tech-debt #34).
-        //
-        // model_ltm_variables and the name index are salsa-cached, so this
-        // lookup is cheap and safe to call from within
-        // compile_ltm_equation_fragment -- the same pattern is used by the
-        // implicit-module branch above. The indexed lookup matters: most
-        // unresolved deps here are PREVIOUS-helper names that are NOT LTM
-        // vars, and a linear scan over all LTM vars per dep was O(N^2)
-        // across a model's compile (~145k lookups over 6.7k vars on
-        // C-LEARN).
-        else {
-            let ltm_dep = model_ltm_var_name_index(db, model, project)
-                .get(effective)
-                .map(|&i| model_ltm_variables(db, model, project).vars[i].clone());
-            let (dep_size, dep_ast) = match ltm_dep {
-                Some(lsv) if !lsv.dimensions.is_empty() => {
-                    let canonical_dims: Vec<crate::dimensions::Dimension> = lsv
-                        .dimensions
-                        .iter()
-                        .filter_map(|name| {
-                            let canonical = crate::common::CanonicalDimensionName::from_raw(name);
-                            dim_context.get(&canonical).cloned()
-                        })
-                        .collect();
-                    let size: usize = canonical_dims.iter().map(|d| d.len()).product();
-                    let ast = if canonical_dims.is_empty() {
-                        None
-                    } else {
-                        Some(crate::ast::Ast::ApplyToAll(
-                            canonical_dims,
-                            crate::ast::Expr2::Const(
-                                "0".to_string(),
-                                crate::ast::Literal::new(0.0),
-                                crate::ast::Loc::default(),
-                            ),
-                        ))
-                    };
-                    (size.max(1), ast)
+        let shape = if let Some(sv) = source_vars.get(head) {
+            source_dep_shape(db, *sv, project)
+        } else if let Some(helper) = parsed_implicit(head) {
+            match helper {
+                datamodel::Variable::Module(dm_module) => {
+                    module_dep_shape(db, project, &dm_module.model_name)
                 }
-                _ => (1, None),
-            };
-            dep_variables.push((
-                dep_ident.clone(),
-                crate::variable::Variable::Var {
-                    ident: dep_ident,
-                    ast: dep_ast,
-                    init_ast: None,
-                    eqn: None,
-                    units: None,
-                    tables: vec![],
-                    non_negative: false,
-                    is_flow: false,
-                    is_table_only: false,
-                    errors: vec![],
-                    unit_errors: vec![],
-                },
-                dep_size,
-            ));
-        }
+                _ => DepShape::var(helper_dims(helper)),
+            }
+        } else if let Some(meta) = implicit_info.get(head) {
+            implicit_dep_shape(db, project, meta)
+        } else if let Some(meta) = ltm_implicit_info.get(head) {
+            if meta.is_module {
+                module_dep_shape(db, project, meta.model_name.as_deref().unwrap_or(""))
+            } else {
+                DepShape::var(helper_dims(&meta.variable))
+            }
+        } else if let Some(&idx) = model_ltm_var_name_index(db, model, project).get(head) {
+            // Another LTM synthetic variable. The indexed lookup matters: most
+            // unresolved deps here are PREVIOUS-helper names that are NOT LTM
+            // vars, and a linear scan over all LTM vars per dep was O(N^2)
+            // across a model's compile (~145k lookups over 6.7k vars on
+            // C-LEARN).
+            let lsv = &model_ltm_variables(db, model, project).vars[idx];
+            DepShape::var(dimensions_named(&lsv.dimensions, dim_context))
+        } else {
+            DepShape::var(Vec::new())
+        };
+        deps.insert(Ident::new(head), shape);
     }
 
     // Lookup-table references (issue #606): a `LOOKUP(table, x)` call's table
-    // argument is not a data-flow dep, but the fragment still needs (a) a
-    // metadata stub so lowering resolves the table ident to a layout offset
-    // (the lookup codegen recovers the table identity by reverse offset
-    // lookup), and (b) the table's graphical-function data in the
-    // mini-Module's tables map so the Lookup opcode gets a base_gf. Without
+    // argument is not a data-flow dep, but the fragment still needs (a) the
+    // table's shape so lowering resolves the table ident, and (b) the table's
+    // graphical-function data so the Lookup opcode gets a base_gf. Without
     // both, the fragment fails to compile and the link score silently reads a
     // constant 0 -- the failure mode behind WRLD3's identically-zero
     // table-mediated link scores (food_per_capita -> lifetime_multiplier_from_food
-    // and 50+ siblings).
+    // and 50+ siblings). Module-namespaced tables can't be referenced from LTM
+    // equations.
     let mut tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
     for table_name in &referenced_tables {
-        let effective = table_name
-            .strip_prefix('\u{00B7}')
-            .unwrap_or(table_name.as_str());
-        // Module-namespaced tables can't be referenced from LTM equations.
-        if effective.contains('\u{00B7}') {
+        let (head, qualified) = dep_head(table_name);
+        if qualified {
             continue;
         }
-        let table_ident: Ident<Canonical> = Ident::new(effective);
-        let Some(table_sv) = source_vars.get(effective) else {
+        let Some(table_sv) = source_vars.get(head) else {
             continue;
         };
         let table_data = extract_tables_from_source_var(db, table_sv, project);
         if !table_data.is_empty() {
-            tables.insert(table_ident.clone(), table_data);
+            tables.insert(Ident::new(head), table_data);
         }
-        let already_present = mini_metadata.contains_key(&table_ident)
-            || dep_variables.iter().any(|(id, _, _)| id == &table_ident);
-        if !already_present {
-            let table_dims = variable_dimensions(db, *table_sv, project);
-            let table_size = variable_size(db, *table_sv, project);
-            let table_var = build_stub_variable(db, table_sv, &table_ident, table_dims);
-            dep_variables.push((table_ident, table_var, table_size));
-        }
+        deps.entry(Ident::new(head))
+            .or_insert_with(|| source_dep_shape(db, *table_sv, project));
     }
 
-    // Add dep metadata
-    for (dep_ident, dep_var, dep_size) in &dep_variables {
-        if !mini_metadata.contains_key(dep_ident) {
-            mini_metadata.insert(
-                dep_ident.clone(),
-                crate::compiler::VariableMetadata {
-                    offset: None,
-                    size: *dep_size,
-                    var: dep_var,
-                },
-            );
-        }
-    }
-
-    // Add implicit vars synthesized while parsing the LTM equation
-    for (im_ident, im_var, im_size) in &implicit_module_vars {
-        if !mini_metadata.contains_key(im_ident) {
-            mini_metadata.insert(
-                im_ident.clone(),
-                crate::compiler::VariableMetadata {
-                    offset: None,
-                    size: *im_size,
-                    var: im_var,
-                },
-            );
-        }
-    }
-
-    // Build the all_metadata map
-    let mut all_metadata: crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::common::IdentMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>>,
-    > = Default::default();
-    all_metadata.insert(model_name_ident.clone(), mini_metadata);
-
-    // Populate sub-model metadata for implicit module sub-models
-    for (_sub_name, sub_model) in &implicit_submodels {
-        build_submodel_metadata(&arena, db, *sub_model, project, &mut all_metadata);
-    }
-
-    let inputs = BTreeSet::new();
-
-    // Merge LTM implicit module references from LTM equation parsing into the
-    // module_models map so the compiler context can resolve module_var_name ->
-    // sub_model_name lookups. Copy-on-write: the salsa-cached base map is only
-    // cloned when this equation actually has implicit module refs (this
-    // function runs once per LTM synthetic var, ~6.7k times on C-LEARN).
-    let base_module_models = model_module_map(db, model, project);
-    let merged_module_models;
-    let module_models: &crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
-    > = if implicit_module_refs.is_empty() {
-        base_module_models
-    } else {
-        merged_module_models = {
-            let mut merged = base_module_models.clone();
-            let current_model_modules = merged.entry(model_name_ident.clone()).or_default();
-            for (var_ident, (sub_model_name, _input_set)) in &implicit_module_refs {
-                current_model_modules.insert(var_ident.clone(), sub_model_name.clone());
-            }
-            merged
-        };
-        &merged_module_models
-    };
-
-    // The LTM synthetic var's fragment goes through the SAME emission entry
-    // point the explicit and implicit paths use. This site used to carry a
-    // hand-copied duplicate of that function's body, differing only in which
-    // module-ref map it stuffed into the stand-in `Module` -- a field codegen
-    // never read.
-    let var_sizes: PerVarSizes =
-        crate::compiler::whole_variable_extents(&all_metadata, &model_name_ident);
-
-    let core = crate::compiler::ContextCore {
-        dimensions: converted_dims,
-        dimensions_ctx: dim_context,
-        model_name: &model_name_ident,
-        metadata: &all_metadata,
-        var_sizes: &var_sizes,
-        module_models,
-        inputs: &inputs,
-    };
-
-    let build_var = |is_initial: bool| {
-        crate::compiler::Var::new(
-            &crate::compiler::Context::new(core, &var_ident_canonical, is_initial),
-            &lowered,
-        )
-    };
-
-    let base_ctx = fragment_emit_ctx(
-        &model_name_ident,
-        &inputs,
-        &var_sizes,
-        &tables,
+    Ok(FragmentInput::new(
+        lowered,
+        deps,
+        tables,
+        BTreeSet::new(),
+        Ident::new(model.name(db)),
         converted_dims,
-    );
-    let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
-        compile_phase_to_per_var_bytecodes(&base_ctx, exprs)
+        dim_context,
+    ))
+}
+
+/// Compile an arbitrary LTM `Equation` to symbolic bytecodes: its
+/// [`ltm_fragment_input`], lowered and emitted through the same emission
+/// entry point the explicit and implicit paths use.
+///
+/// Shared implementation used by `compile_ltm_var_fragment` (link scores)
+/// and the loop/relative score compilation in `assemble_module`.
+///
+/// `why`, when supplied, receives a human-readable reason on failure. The
+/// three ways this function can fail -- a parse error in the generated text,
+/// a lowering `Err`, and codegen declining to emit -- otherwise all collapse
+/// into the same `None`/`flow_bytecodes: None`, so a caller reporting the
+/// failure could say only *that* it happened. That cost was concrete: ~1,600
+/// failures on one real model with no way to tell which construct was
+/// responsible short of instrumenting this function by hand. Callers that only
+/// want the fragment pass `None` and pay nothing.
+pub(crate) fn compile_ltm_equation_fragment(
+    db: &dyn Db,
+    var_name: &str,
+    equation: &LtmEquation,
+    model: SourceModel,
+    project: SourceProject,
+    mut why: Option<&mut Option<String>>,
+) -> Option<VarFragmentResult> {
+    use crate::compiler::symbolic::CompiledVarFragment;
+
+    #[cfg(test)]
+    crate::db::note_fragment_execution(crate::db::FragmentExecKind::LtmBody, var_name);
+
+    let input = match ltm_fragment_input(db, var_name, equation, model, project) {
+        Ok(input) => input,
+        Err(reason) => {
+            if let Some(slot) = why.as_deref_mut() {
+                *slot = Some(reason);
+            }
+            return None;
+        }
     };
 
     // LTM vars are always flow-phase only (scalar auxes, not stocks)
-    let flow_bytecodes = match build_var(false) {
+    let flow_bytecodes = match lower_fragment(&input, false) {
         Ok(var_result) => {
             if why.is_some() {
                 match crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting(
-                    &base_ctx,
+                    &input.emit_ctx(),
                     &var_result.ast,
                 ) {
                     Ok(bytecodes) => Some(bytecodes),
@@ -1700,29 +1116,12 @@ pub(crate) fn compile_ltm_equation_fragment(
                     }
                 }
             } else {
-                compile_phase(&var_result.ast)
+                compile_phase_to_per_var_bytecodes(&input.emit_ctx(), &var_result.ast)
             }
         }
         Err(err) => {
             if let Some(slot) = why {
-                // A lowering `Err` of `empty_equation` is usually a MASK: the
-                // variable reached `Var::new` with no AST because the earlier
-                // scope-lowering rejected the equation and left `ast: None`.
-                // Report that upstream rejection when it is there, since
-                // "empty equation" describes a formula we printed in full.
-                let lowered_errs = lowered.equation_errors().unwrap_or_default();
-                *slot = Some(if lowered_errs.is_empty() {
-                    format!("could not be lowered: {err}")
-                } else {
-                    format!(
-                        "could not be lowered: {}",
-                        lowered_errs
-                            .iter()
-                            .map(|e| format!("{:?} at {}..{}", e.code, e.start, e.end))
-                            .collect::<Vec<_>>()
-                            .join("; ")
-                    )
-                });
+                *slot = Some(lowering_failure_reason(&input, &err));
             }
             None
         }
@@ -1730,7 +1129,7 @@ pub(crate) fn compile_ltm_equation_fragment(
 
     Some(VarFragmentResult {
         fragment: CompiledVarFragment {
-            ident: var_name_canonical,
+            ident: canonicalize(var_name).into_owned(),
             initial_bytecodes: None,
             flow_bytecodes,
             stock_bytecodes: None,
@@ -1739,6 +1138,29 @@ pub(crate) fn compile_ltm_equation_fragment(
         // for run-invariance.
         flow_invariance: None,
     })
+}
+
+/// The `why` text for a phase that `lower_fragment` refused.
+///
+/// A lowering `Err` of `empty_equation` is usually a MASK: the variable
+/// reached lowering with no AST because the earlier scope-lowering rejected
+/// the equation and left `ast: None`. Report that upstream rejection when it
+/// is there, since "empty equation" describes a formula that was printed in
+/// full.
+fn lowering_failure_reason(input: &FragmentInput<'_>, err: &crate::common::Error) -> String {
+    let lowered_errs = input.target.equation_errors().unwrap_or_default();
+    if lowered_errs.is_empty() {
+        format!("could not be lowered: {err}")
+    } else {
+        format!(
+            "could not be lowered: {}",
+            lowered_errs
+                .iter()
+                .map(|e| format!("{:?} at {}..{}", e.code, e.start, e.end))
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    }
 }
 
 /// Select-and-compile a single LTM synthetic variable's flow-phase
@@ -2103,9 +1525,9 @@ pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: 
     // model assembly's input set IS empty, so the probe is byte-identical to
     // assembly there. For a sub-model instance with inputs the probe is an
     // approximation, but compile success cannot diverge: the input set only
-    // flips how a resolved name is loaded (`ModuleInput` slot vs a stubbed
-    // scalar var -- every dependency is stubbed into the fragment's
-    // mini-layout either way), never whether the equation compiles.
+    // flips how a resolved name is loaded (`ModuleInput` slot vs a slot
+    // read -- every dependency has a shape in the fragment's input either
+    // way), never whether the equation compiles.
     //
     // Iteration is name-sorted so warning order is deterministic, matching
     // the assembly loop.
@@ -2113,7 +1535,6 @@ pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: 
     if ltm_implicit.is_empty() {
         return;
     }
-    let dep_graph = model_dependency_graph(db, model, project, ModuleInputSet::empty(db));
     let mut implicit_names: Vec<&String> = ltm_implicit.keys().collect();
     implicit_names.sort();
     for im_name in implicit_names {
@@ -2124,7 +1545,6 @@ pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: 
             meta,
             model,
             project,
-            dep_graph,
             &[],
             Some(&mut helper_reason),
         );
@@ -2175,30 +1595,209 @@ pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: 
     }
 }
 
-/// Compile a single implicit variable from an
-/// LTM equation to symbolic bytecodes.
+/// Build the fragment input of one implicit helper an LTM equation's parse
+/// synthesized (a PREVIOUS/INIT capture aux, or -- should an LTM equation ever
+/// contain a module-function call -- a module instance): the helper's lowered
+/// form and the shape of every name it references.
+///
+/// The helper rides on its `LtmImplicitVarMeta` (captured when
+/// `model_ltm_implicit_var_info` parsed the LTM equations), so no parent
+/// equation is re-parsed. A capture helper's dependencies are the model
+/// variables its expression reads (including `module·port` outputs, which
+/// resolve through the module's shape); a name that is neither a model variable
+/// nor a module instance -- another LTM variable or helper -- resolves to a
+/// scalar shape, so the reference compiles to a bare slot read and assembly's
+/// layout filter judges it. `None` when the helper's equation does not parse
+/// (the diagnostic pass reports the missing bytecode).
+pub(crate) fn ltm_implicit_fragment_input<'db>(
+    db: &'db dyn Db,
+    meta: &LtmImplicitVarMeta,
+    model: SourceModel,
+    project: SourceProject,
+    module_input_names: &[String],
+) -> Option<FragmentInput<'db>> {
+    let implicit_dm_var = &meta.variable;
+    let implicit_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
+    let var_ident: Ident<Canonical> = Ident::new(&implicit_name);
+
+    let dim_context = project_dimensions_context(db, project);
+    let converted_dims = project_converted_dimensions(db, project);
+    let units_ctx = project_units_context(db, project);
+
+    let mut dummy_implicits = Vec::new();
+    let parsed_implicit = crate::variable::parse_var(
+        dim_context,
+        implicit_dm_var,
+        &mut dummy_implicits,
+        units_ctx,
+        |mi| Ok(Some(mi.clone())),
+    );
+    if parsed_implicit
+        .equation_errors()
+        .is_some_and(|e| !e.is_empty())
+    {
+        return None;
+    }
+
+    let source_vars = model.variables(db);
+    let mut deps: IdentMap<Ident<Canonical>, DepShape> = Default::default();
+    let mut tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
+
+    let lowered = if meta.is_module {
+        // A module-typed helper is its wiring (a module has no equation); its
+        // dependencies are the sources its inputs read.
+        let datamodel::Variable::Module(dm_module) = implicit_dm_var else {
+            return None;
+        };
+        deps.insert(
+            var_ident.clone(),
+            module_dep_shape(db, project, &dm_module.model_name),
+        );
+        let ltm_implicit_all = model_ltm_implicit_var_info(db, model, project);
+        for mr in &dm_module.references {
+            let src = canonicalize(&mr.src);
+            let (head, qualified) = dep_head(&src);
+            if head == implicit_name || is_implicit_global(head) || deps.contains_key(head) {
+                continue;
+            }
+            let shape = if qualified {
+                // `module_var·output`: the instance the read relocates through,
+                // another module-typed LTM implicit variable.
+                match ltm_implicit_all.get(head) {
+                    Some(ref_meta) if ref_meta.is_module => {
+                        module_dep_shape(db, project, ref_meta.model_name.as_deref().unwrap_or(""))
+                    }
+                    _ => continue,
+                }
+            } else if let Some(dep_sv) = source_vars.get(head) {
+                source_dep_shape(db, *dep_sv, project)
+            } else {
+                // Another LTM var or implicit helper: scalar.
+                DepShape::var(Vec::new())
+            };
+            deps.insert(Ident::new(head), shape);
+        }
+        crate::variable::Variable::module_instance(
+            var_ident,
+            Ident::new(&dm_module.model_name),
+            build_module_inputs(
+                model.name(db),
+                &module_input_prefix(&implicit_name),
+                dm_module
+                    .references
+                    .iter()
+                    .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
+            ),
+        )
+    } else {
+        // Same dependency-aware lowering scope as `ltm_fragment_input` (GH
+        // #738): a synthesized helper aux whose equation embeds a reducer over
+        // an array expression needs its deps' dimensions resolvable for Pass-1
+        // temp decomposition. The classification comes back from the same
+        // lowering, so the lowered AST is not walked again.
+        let LoweredLtmVariable {
+            variable: lowered,
+            dep_idents,
+            referenced_tables,
+        } = lower_ltm_variable(db, &parsed_implicit, &dummy_implicits, model, project);
+        // An arrayed capture helper occupies one slot per element.
+        deps.insert(
+            var_ident,
+            DepShape::var(
+                lowered
+                    .get_dimensions()
+                    .map(<[crate::dimensions::Dimension]>::to_vec)
+                    .unwrap_or_default(),
+            ),
+        );
+        // No lowered AST -> no dependency shapes: if the scoped re-lower
+        // surfaced an equation error, `lowered.ast()` is `None` and the
+        // fragment compiles to nothing anyway.
+        let (dep_idents, referenced_tables) = if lowered.ast().is_some() {
+            (dep_idents, referenced_tables)
+        } else {
+            (BTreeSet::new(), BTreeSet::new())
+        };
+        let implicit_info = model_implicit_var_info(db, model, project);
+        for dep in &dep_idents {
+            let (head, qualified) = dep_head(dep.as_str());
+            if head == implicit_name || is_implicit_global(head) || deps.contains_key(head) {
+                continue;
+            }
+            let shape = if qualified {
+                // `module·port`: the instance the read relocates through -- one
+                // of the model's SMOOTH/DELAY instances, or an explicit module
+                // variable of the parent model.
+                if let Some(im_meta) = implicit_info.get(head).filter(|m| m.is_module) {
+                    implicit_dep_shape(db, project, im_meta)
+                } else if let Some(dep_sv) = source_vars
+                    .get(head)
+                    .filter(|sv| sv.kind(db) == SourceVariableKind::Module)
+                {
+                    source_dep_shape(db, *dep_sv, project)
+                } else {
+                    continue;
+                }
+            } else if let Some(dep_sv) = source_vars.get(head) {
+                source_dep_shape(db, *dep_sv, project)
+            } else {
+                DepShape::var(Vec::new())
+            };
+            deps.insert(Ident::new(head), shape);
+        }
+        // Referenced lookup tables: shape + graphical-function data, so a
+        // `lookup(table, ...)` inside a synthesized helper compiles (issue
+        // #606; see `ltm_fragment_input`).
+        for table_name in &referenced_tables {
+            let (head, qualified) = dep_head(table_name);
+            if qualified {
+                continue;
+            }
+            let Some(table_sv) = source_vars.get(head) else {
+                continue;
+            };
+            let table_data = extract_tables_from_source_var(db, table_sv, project);
+            if !table_data.is_empty() {
+                tables.insert(Ident::new(head), table_data);
+            }
+            deps.entry(Ident::new(head))
+                .or_insert_with(|| source_dep_shape(db, *table_sv, project));
+        }
+        lowered
+    };
+
+    Some(FragmentInput::new(
+        lowered,
+        deps,
+        tables,
+        canonical_module_input_set(module_input_names),
+        Ident::new(model.name(db)),
+        converted_dims,
+        dim_context,
+    ))
+}
+
+/// Compile a single implicit variable from an LTM equation to symbolic
+/// bytecodes: its [`ltm_implicit_fragment_input`], lowered per phase and
+/// emitted through the same emission entry point every other fragment uses.
 ///
 /// This is analogous to `compile_implicit_var_fragment` but for implicit
 /// variables generated by LTM equation parsing rather than by
-/// SourceVariable parsing. The parent is an LTM equation (not a
-/// SourceVariable), so we reconstruct the parse result from the LTM
-/// equation text.
-#[allow(clippy::too_many_arguments)]
+/// SourceVariable parsing. LTM implicit vars participate in whichever
+/// phases their lowered form needs; assembly appends them to the runlists by
+/// bytecode presence (they are not part of the dependency graph), so every
+/// available phase is compiled.
 pub(crate) fn compile_ltm_implicit_var_fragment(
     db: &dyn Db,
     meta: &LtmImplicitVarMeta,
     model: SourceModel,
     project: SourceProject,
-    _dep_graph: &ModelDepGraphResult,
     module_input_names: &[String],
     mut why: Option<&mut Option<String>>,
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
 
-    // The implicit variable rides on the meta (captured at LTM-equation parse
-    // time by `model_ltm_implicit_var_info`), so no parent re-parse is needed.
-    let implicit_dm_var = &meta.variable;
-    let implicit_name = canonicalize(implicit_dm_var.get_ident()).into_owned();
+    let implicit_name = canonicalize(meta.variable.get_ident()).into_owned();
 
     // GH #741: the same test-scoped forced failure as
     // `compile_ltm_synthetic_fragment` (GH #547), extended to the implicit-
@@ -2219,566 +1818,13 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         }
     }
 
-    // The project-global canonicalized dimension context + converted dims,
-    // from the salsa-cached queries.
-    let dim_context = project_dimensions_context(db, project);
-    let converted_dims = project_converted_dimensions(db, project);
-
-    let units_ctx = project_units_context(db, project);
-
-    let mut dummy_implicits = Vec::new();
-    let parsed_implicit = crate::variable::parse_var(
-        dim_context,
-        implicit_dm_var,
-        &mut dummy_implicits,
-        units_ctx,
-        |mi| Ok(Some(mi.clone())),
-    );
-
-    if parsed_implicit
-        .equation_errors()
-        .is_some_and(|e| !e.is_empty())
-    {
-        return None;
-    }
-
-    // Dependency classification handed back by `lower_ltm_variable` for the
-    // non-module path, reused by the dep-collection pass below (the module
-    // path constructs its deps from the dm_module references instead).
-    let mut ltm_lowered_deps: Option<(BTreeSet<Ident<Canonical>>, BTreeSet<String>)> = None;
-
-    // Module-type implicit vars need direct Module construction
-    let lowered = if meta.is_module {
-        if let datamodel::Variable::Module(dm_module) = implicit_dm_var {
-            let module_inputs: Vec<crate::variable::ModuleInput> = dm_module
-                .references
-                .iter()
-                .filter_map(|mr| {
-                    let ident_prefix = format!("{}\u{00B7}", canonicalize(&implicit_name));
-                    let src = canonicalize(&mr.src);
-                    let dst = canonicalize(&mr.dst);
-                    if src.starts_with(&ident_prefix) {
-                        return None;
-                    }
-                    let dst_stripped = dst.strip_prefix(&ident_prefix)?;
-                    let src_str = if model.name(db) == "main" && src.starts_with('\u{00B7}') {
-                        &src['\u{00B7}'.len_utf8()..]
-                    } else {
-                        &src
-                    };
-                    Some(crate::variable::ModuleInput {
-                        src: Ident::new(src_str),
-                        dst: Ident::new(dst_stripped),
-                    })
-                })
-                .collect();
-            crate::variable::Variable::Module {
-                ident: Ident::new(&implicit_name),
-                model_name: Ident::new(&dm_module.model_name),
-                units: None,
-                inputs: module_inputs,
-                errors: vec![],
-                unit_errors: vec![],
-            }
-        } else {
-            return None;
-        }
-    } else {
-        // Same dependency-aware lowering scope as
-        // `compile_ltm_equation_fragment` (GH #738): a synthesized helper aux
-        // whose equation embeds a reducer over an array expression needs its
-        // deps' dimensions resolvable for Pass-1 temp decomposition.
-        let ll = lower_ltm_variable(db, &parsed_implicit, &dummy_implicits, model, project);
-        ltm_lowered_deps = Some((ll.dep_idents, ll.referenced_tables));
-        ll.variable
-    };
-
-    let model_name_ident = Ident::new(model.name(db));
-    let var_ident_canonical: Ident<Canonical> = Ident::new(&implicit_name);
-
-    // Arena for sub-model stub variables
-    let arena = bumpalo::Bump::new();
-
-    let mut mini_metadata: crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::compiler::VariableMetadata<'_>,
-    > = Default::default();
-
-    // Add implicit time/dt/initial_time/final_time
-    {
-        use std::sync::LazyLock;
-        static IMPLICIT_TIME: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("time"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        static IMPLICIT_DT: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("dt"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        static IMPLICIT_INITIAL_TIME: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("initial_time"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        static IMPLICIT_FINAL_TIME: LazyLock<crate::variable::Variable> =
-            LazyLock::new(|| crate::variable::Variable::Var {
-                ident: Ident::new("final_time"),
-                ast: None,
-                init_ast: None,
-                eqn: None,
-                units: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
-                errors: vec![],
-                unit_errors: vec![],
-            });
-        mini_metadata.insert(
-            Ident::new("time"),
-            crate::compiler::VariableMetadata {
-                offset: None,
-                size: 1,
-                var: &IMPLICIT_TIME,
-            },
-        );
-        mini_metadata.insert(
-            Ident::new("dt"),
-            crate::compiler::VariableMetadata {
-                offset: None,
-                size: 1,
-                var: &IMPLICIT_DT,
-            },
-        );
-        mini_metadata.insert(
-            Ident::new("initial_time"),
-            crate::compiler::VariableMetadata {
-                offset: None,
-                size: 1,
-                var: &IMPLICIT_INITIAL_TIME,
-            },
-        );
-        mini_metadata.insert(
-            Ident::new("final_time"),
-            crate::compiler::VariableMetadata {
-                offset: None,
-                size: 1,
-                var: &IMPLICIT_FINAL_TIME,
-            },
-        );
-    }
-
-    let project_models = project.models(db);
-    let self_size = meta.size;
-
-    mini_metadata.insert(
-        var_ident_canonical.clone(),
-        crate::compiler::VariableMetadata {
-            offset: None,
-            size: self_size,
-            var: &lowered,
-        },
-    );
-
-    // Collect dependencies from the implicit var itself
-    let source_vars = model.variables(db);
-    let mut dep_variables: Vec<(Ident<Canonical>, crate::variable::Variable, usize)> = Vec::new();
-    let mut module_refs: HashMap<Ident<Canonical>, crate::vm::ModuleKey> = HashMap::new();
-    // Lookup tables referenced by this implicit var's equation (issue #606):
-    // populated by the non-module dependency pass below, consumed by the
-    // mini-Module construction.
-    let mut fragment_tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> =
-        HashMap::new();
-
-    // For module-type implicit vars, build module_refs from the dm_module references
-    if meta.is_module
-        && let datamodel::Variable::Module(dm_module) = implicit_dm_var
-    {
-        let input_prefix = format!("{implicit_name}\u{00B7}");
-        let input_set: BTreeSet<Ident<Canonical>> = dm_module
-            .references
-            .iter()
-            .filter_map(|mr| {
-                let dst_canonical = canonicalize(&mr.dst);
-                let bare = dst_canonical.strip_prefix(&input_prefix)?;
-                Some(Ident::new(bare))
-            })
-            .collect();
-        module_refs.insert(
-            var_ident_canonical.clone(),
-            (Ident::new(&dm_module.model_name), input_set),
-        );
-
-        // Add dependency stubs for module input sources
-        let ltm_implicit_all = model_ltm_implicit_var_info(db, model, project);
-        for mr in &dm_module.references {
-            let src = canonicalize(&mr.src);
-            let effective = src.strip_prefix('\u{00B7}').unwrap_or(&src);
-            if effective == implicit_name.as_str()
-                || matches!(effective, "time" | "dt" | "initial_time" | "final_time")
-            {
-                continue;
-            }
-            // For submodel references like `module_var·output`, extract the
-            // module variable name and add it as a module-type dependency so
-            // the compiler context can resolve the submodel offset lookup.
-            if let Some(dot_pos) = effective.find('\u{00B7}') {
-                let module_var_name = &effective[..dot_pos];
-                let dep_ident = Ident::new(module_var_name);
-                if mini_metadata.contains_key(&dep_ident)
-                    || dep_variables.iter().any(|(id, _, _)| id == &dep_ident)
-                {
-                    continue;
-                }
-                // Look up the referenced module in LTM implicit vars
-                if let Some(ref_meta) = ltm_implicit_all.get(module_var_name)
-                    && ref_meta.is_module
-                    && let Some(ref mn) = ref_meta.model_name
-                {
-                    dep_variables.push((
-                        dep_ident.clone(),
-                        crate::variable::Variable::Module {
-                            ident: dep_ident,
-                            model_name: Ident::new(mn),
-                            units: None,
-                            inputs: vec![],
-                            errors: vec![],
-                            unit_errors: vec![],
-                        },
-                        ref_meta.size,
-                    ));
-                }
-                continue;
-            }
-            let dep_ident = Ident::new(effective);
-            if mini_metadata.contains_key(&dep_ident)
-                || dep_variables.iter().any(|(id, _, _)| id == &dep_ident)
-            {
-                continue;
-            }
-            if let Some(dep_sv) = source_vars.get(effective) {
-                let dep_dims = variable_dimensions(db, *dep_sv, project);
-                let dep_size = variable_size(db, *dep_sv, project);
-                let dep_var = build_stub_variable(db, dep_sv, &dep_ident, dep_dims);
-                dep_variables.push((dep_ident, dep_var, dep_size));
-            } else {
-                // Could be another LTM var or implicit var -- scalar stub
-                dep_variables.push((
-                    dep_ident.clone(),
-                    crate::variable::Variable::Var {
-                        ident: dep_ident,
-                        ast: None,
-                        init_ast: None,
-                        eqn: None,
-                        units: None,
-                        tables: vec![],
-                        non_negative: false,
-                        is_flow: false,
-                        is_table_only: false,
-                        errors: vec![],
-                        unit_errors: vec![],
-                    },
-                    1,
-                ));
-            }
-        }
-    } else {
-        // Non-module implicit vars (e.g., temp args from PREVIOUS rewrite)
-        // may reference module variables from the parent model. Collect
-        // those dependencies so the compilation context can resolve them.
-        // Lookup-table references are handled separately below (they are not
-        // data-flow deps -- issue #606 -- but the fragment needs their layout
-        // stub and graphical-function data so a `lookup(table, ...)` inside a
-        // synthesized helper compiles; see compile_ltm_equation_fragment).
-        //
-        // The classification was computed once inside `lower_ltm_variable`
-        // (on the same `Variable::ast()` source this pass always used).
-        // The `lowered.ast().is_some()` guard preserves the long-standing
-        // "no lowered AST -> no dep stubs" behavior: if the scoped re-lower
-        // surfaced an equation error, `lowered.ast()` is `None` and the
-        // fragment compiles to nothing anyway.
-        let (dep_idents, referenced_tables) = if lowered.ast().is_some() {
-            ltm_lowered_deps.take().unwrap_or_default()
-        } else {
-            (BTreeSet::new(), BTreeSet::new())
-        };
-
-        let implicit_info = model_implicit_var_info(db, model, project);
-
-        for dep_ident_str in &dep_idents {
-            let dep_str = dep_ident_str.as_str();
-            let effective = dep_str.strip_prefix('\u{00B7}').unwrap_or(dep_str);
-
-            if effective == implicit_name.as_str()
-                || matches!(effective, "time" | "dt" | "initial_time" | "final_time")
-            {
-                continue;
-            }
-
-            // Handle dotted module·port references (e.g., module·output).
-            // Extract the module variable name and add it as a dependency.
-            if let Some(dot_pos) = effective.find('\u{00B7}') {
-                let module_var_name = &effective[..dot_pos];
-                let dep_ident = Ident::new(module_var_name);
-                if mini_metadata.contains_key(&dep_ident)
-                    || dep_variables.iter().any(|(id, _, _)| id == &dep_ident)
-                {
-                    continue;
-                }
-                // Check model's implicit module vars (SMOOTH/DELAY instances)
-                if let Some(im_meta) = implicit_info.get(module_var_name)
-                    && im_meta.is_module
-                    && let Some(ref mn) = im_meta.model_name
-                {
-                    dep_variables.push((
-                        dep_ident.clone(),
-                        crate::variable::Variable::Module {
-                            ident: dep_ident,
-                            model_name: Ident::new(mn),
-                            units: None,
-                            inputs: vec![],
-                            errors: vec![],
-                            unit_errors: vec![],
-                        },
-                        im_meta.size,
-                    ));
-                    module_refs.insert(
-                        Ident::new(module_var_name),
-                        (Ident::new(mn), BTreeSet::new()),
-                    );
-                } else if let Some(dep_sv) = source_vars.get(module_var_name)
-                    && dep_sv.kind(db) == SourceVariableKind::Module
-                {
-                    let mod_model_name = dep_sv.model_name(db);
-                    let sub_canonical = canonicalize(mod_model_name);
-                    let sub_size = project_models
-                        .get(sub_canonical.as_ref())
-                        .map(|sm| compute_layout(db, *sm, project).n_slots)
-                        .unwrap_or(1);
-                    dep_variables.push((
-                        dep_ident.clone(),
-                        crate::variable::Variable::Module {
-                            ident: dep_ident,
-                            model_name: Ident::new(mod_model_name),
-                            units: None,
-                            inputs: vec![],
-                            errors: vec![],
-                            unit_errors: vec![],
-                        },
-                        sub_size,
-                    ));
-                    module_refs.insert(
-                        Ident::new(module_var_name),
-                        (Ident::new(mod_model_name), BTreeSet::new()),
-                    );
-                }
-                continue;
-            }
-
-            let dep_ident = Ident::new(effective);
-            if mini_metadata.contains_key(&dep_ident)
-                || dep_variables.iter().any(|(id, _, _)| id == &dep_ident)
-            {
-                continue;
-            }
-
-            if let Some(dep_sv) = source_vars.get(effective) {
-                let dep_dims = variable_dimensions(db, *dep_sv, project);
-                let dep_size = variable_size(db, *dep_sv, project);
-                let dep_var = build_stub_variable(db, dep_sv, &dep_ident, dep_dims);
-                dep_variables.push((dep_ident, dep_var, dep_size));
-            } else {
-                dep_variables.push((
-                    dep_ident.clone(),
-                    crate::variable::Variable::Var {
-                        ident: dep_ident,
-                        ast: None,
-                        init_ast: None,
-                        eqn: None,
-                        units: None,
-                        tables: vec![],
-                        non_negative: false,
-                        is_flow: false,
-                        is_table_only: false,
-                        errors: vec![],
-                        unit_errors: vec![],
-                    },
-                    1,
-                ));
-            }
-        }
-
-        // Referenced lookup tables: layout stub + graphical-function data
-        // (mirrors compile_ltm_equation_fragment's referenced-tables pass).
-        for table_name in &referenced_tables {
-            let effective = table_name
-                .strip_prefix('\u{00B7}')
-                .unwrap_or(table_name.as_str());
-            if effective.contains('\u{00B7}') {
-                continue;
-            }
-            let table_ident: Ident<Canonical> = Ident::new(effective);
-            let Some(table_sv) = source_vars.get(effective) else {
-                continue;
-            };
-            let table_data = extract_tables_from_source_var(db, table_sv, project);
-            if !table_data.is_empty() {
-                fragment_tables.insert(table_ident.clone(), table_data);
-            }
-            let already_present = mini_metadata.contains_key(&table_ident)
-                || dep_variables.iter().any(|(id, _, _)| id == &table_ident);
-            if !already_present {
-                let table_dims = variable_dimensions(db, *table_sv, project);
-                let table_size = variable_size(db, *table_sv, project);
-                let table_var = build_stub_variable(db, table_sv, &table_ident, table_dims);
-                dep_variables.push((table_ident, table_var, table_size));
-            }
-        }
-    }
-
-    for (dep_ident, dep_var, dep_size) in &dep_variables {
-        if !mini_metadata.contains_key(dep_ident) {
-            mini_metadata.insert(
-                dep_ident.clone(),
-                crate::compiler::VariableMetadata {
-                    offset: None,
-                    size: *dep_size,
-                    var: dep_var,
-                },
-            );
-        }
-    }
-
-    let mut all_metadata: crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::common::IdentMap<Ident<Canonical>, crate::compiler::VariableMetadata<'_>>,
-    > = Default::default();
-    all_metadata.insert(model_name_ident.clone(), mini_metadata);
-
-    // Build sub-model metadata for module-type implicit vars and any
-    // module dependencies discovered during dependency collection.
-    if meta.is_module
-        && let Some(model_name) = &meta.model_name
-    {
-        let sub_canonical = canonicalize(model_name);
-        if let Some(sub_model) = project_models.get(sub_canonical.as_ref()) {
-            build_submodel_metadata(&arena, db, *sub_model, project, &mut all_metadata);
-        }
-    }
-    for (sub_model_name, _input_set) in module_refs.values() {
-        let sub_canonical = canonicalize(sub_model_name.as_str());
-        if let Some(sub_model) = project_models.get(sub_canonical.as_ref())
-            && !all_metadata.contains_key(sub_model_name)
-        {
-            build_submodel_metadata(&arena, db, *sub_model, project, &mut all_metadata);
-        }
-    }
-
-    let tables = fragment_tables;
-    let inputs = canonical_module_input_set(module_input_names);
-
-    // Merge the current variable's own module refs plus the module-typed LTM
-    // implicit refs into the model module map so cross-references resolve (a
-    // module's inputs may reference outputs from OTHER LTM implicit modules,
-    // e.g. one PREVIOUS instance reading another's output).
-    //
-    // Both source maps are salsa-cached and the merge is copy-on-write. This
-    // function runs once per LTM implicit variable -- ~145k times on a model
-    // like C-LEARN -- so the previous per-call clone-and-rescan of the full
-    // `model_ltm_implicit_var_info` map was O(K^2) in the implicit-var count
-    // and dominated LTM compile time (tens of seconds of HashMap iteration).
-    let base_module_models = model_module_map(db, model, project);
-    let ltm_module_refs = model_ltm_implicit_module_refs(db, model, project);
-    let merged_module_models;
-    let module_models: &crate::common::IdentMap<
-        Ident<Canonical>,
-        crate::common::IdentMap<Ident<Canonical>, Ident<Canonical>>,
-    > = if module_refs.is_empty() && ltm_module_refs.is_empty() {
-        base_module_models
-    } else {
-        merged_module_models = {
-            let mut merged = base_module_models.clone();
-            let current_model_modules = merged.entry(model_name_ident.clone()).or_default();
-            for (var_ident, (sub_model_name, _input_set)) in &module_refs {
-                current_model_modules.insert(var_ident.clone(), sub_model_name.clone());
-            }
-            for (im_ident, sub_model_name) in ltm_module_refs.iter() {
-                current_model_modules.insert(im_ident.clone(), sub_model_name.clone());
-            }
-            merged
-        };
-        &merged_module_models
-    };
-
-    // Same single emission entry point as every other fragment site. This was
-    // the second hand-copied duplicate of that body; it differed from the
-    // first only in the (unread) module-ref map, and it rebuilt the offsets
-    // projection once per phase rather than once per variable.
-    let var_sizes: PerVarSizes =
-        crate::compiler::whole_variable_extents(&all_metadata, &model_name_ident);
-
-    let core = crate::compiler::ContextCore {
-        dimensions: converted_dims,
-        dimensions_ctx: dim_context,
-        model_name: &model_name_ident,
-        metadata: &all_metadata,
-        var_sizes: &var_sizes,
-        module_models,
-        inputs: &inputs,
-    };
-
-    let build_var = |is_initial: bool| {
-        crate::compiler::Var::new(
-            &crate::compiler::Context::new(core, &var_ident_canonical, is_initial),
-            &lowered,
-        )
-    };
-
-    let base_ctx = fragment_emit_ctx(
-        &model_name_ident,
-        &inputs,
-        &var_sizes,
-        &tables,
-        converted_dims,
-    );
+    let input = ltm_implicit_fragment_input(db, meta, model, project, module_input_names)?;
+    let emit_ctx = input.emit_ctx();
     let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
-        compile_phase_to_per_var_bytecodes(&base_ctx, exprs)
+        compile_phase_to_per_var_bytecodes(&emit_ctx, exprs)
     };
 
-    // LTM implicit vars participate in whichever phases their lowered
-    // form needs. The dep_graph won't have them in its runlists since
-    // they are not part of the original model.
-    // We compile all available phases.
-    let initial_bytecodes = match build_var(true) {
+    let initial_bytecodes = match lower_fragment(&input, true) {
         Ok(var_result) => compile_phase(&var_result.ast),
         Err(_) => None,
     };
@@ -2787,11 +1833,11 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
     // `model_ltm_fragment_diagnostics` gates on, so it is the one whose
     // failure turns the helper into a silent constant 0.
     let flow_bytecodes = if !meta.is_stock {
-        match build_var(false) {
+        match lower_fragment(&input, false) {
             Ok(var_result) => {
                 if why.is_some() {
                     match crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting(
-                        &base_ctx,
+                        &emit_ctx,
                         &var_result.ast,
                     ) {
                         Ok(bytecodes) => Some(bytecodes),
@@ -2808,19 +1854,7 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
             }
             Err(err) => {
                 if let Some(slot) = why {
-                    let lowered_errs = lowered.equation_errors().unwrap_or_default();
-                    *slot = Some(if lowered_errs.is_empty() {
-                        format!("could not be lowered: {err}")
-                    } else {
-                        format!(
-                            "could not be lowered: {}",
-                            lowered_errs
-                                .iter()
-                                .map(|e| format!("{:?} at {}..{}", e.code, e.start, e.end))
-                                .collect::<Vec<_>>()
-                                .join("; ")
-                        )
-                    });
+                    *slot = Some(lowering_failure_reason(&input, &err));
                 }
                 None
             }
@@ -2830,7 +1864,7 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
     };
 
     let stock_bytecodes = if meta.is_stock || meta.is_module {
-        match build_var(false) {
+        match lower_fragment(&input, false) {
             Ok(var_result) => compile_phase(&var_result.ast),
             Err(_) => None,
         }
@@ -2849,44 +1883,6 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         // run-invariance.
         flow_invariance: None,
     })
-}
-
-/// A dimension-aware dep stub's AST for a helper declared over `dim_names`, or
-/// `None` when it is scalar (or names no dimension the project declares).
-///
-/// The fragment compiler resolves a `helper[dim·elem]` subscript through the
-/// dep stub's `get_dimensions()`, so a stub built with `ast: None` for an
-/// ARRAYED helper fails lowering with "expected array variable ... to have
-/// dimensions" and takes every score that touches the helper to a constant 0.
-/// Only the SHAPE matters -- nothing reads the body -- so the arms are a
-/// constant.
-///
-/// Shared by the two dep-stub branches that can see an arrayed helper: the
-/// model's own implicit vars (`ImplicitVarMeta::dimensions`, where the GH #541
-/// arrayed `PREVIOUS`/`INIT` capture lands) and the LTM parse-time helpers. They
-/// had drifted -- the second handled it, the first did not.
-fn stub_ast_for_dimension_names(
-    dim_names: &[String],
-    dim_context: &crate::dimensions::DimensionsContext,
-) -> Option<crate::ast::Ast<crate::ast::Expr2>> {
-    let canonical_dims: Vec<crate::dimensions::Dimension> = dim_names
-        .iter()
-        .filter_map(|name| {
-            let canonical = crate::common::CanonicalDimensionName::from_raw(name);
-            dim_context.get(&canonical).cloned()
-        })
-        .collect();
-    if canonical_dims.is_empty() {
-        return None;
-    }
-    Some(crate::ast::Ast::ApplyToAll(
-        canonical_dims,
-        crate::ast::Expr2::Const(
-            "0".to_string(),
-            crate::ast::Literal::new(0.0),
-            crate::ast::Loc::default(),
-        ),
-    ))
 }
 
 #[cfg(test)]

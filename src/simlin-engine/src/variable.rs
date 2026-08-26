@@ -221,7 +221,7 @@ impl<MI, E> Variable<MI, E> {
     /// parse errors here and
     /// `model::lower_variable` appends the errors `lower_ast` raises, because
     /// both produce a `Variable` and have nowhere else to put a failure. The
-    /// salsa path READS it: `db::var_fragment::lower_var_fragment` turns each
+    /// salsa path READS it: `db::var_fragment::explicit_fragment_input` turns each
     /// entry into a `Diagnostic`, at two sites. The read of the LOWERED
     /// variable is the one nothing else covers -- drop it and every
     /// `MismatchedDimensions` disappears
@@ -252,7 +252,7 @@ impl<MI, E> Variable<MI, E> {
     /// The malformed-`<units>`-string errors parsing recorded on this variable.
     ///
     /// Live for the same reason as [`Variable::equation_errors`]: `parse_var`
-    /// is where a unit string is parsed, and `lower_var_fragment` reads this
+    /// is where a unit string is parsed, and `explicit_fragment_input` reads this
     /// field to emit the non-fatal `DiagnosticError::Unit` rows. Unit
     /// *consistency* mismatches are a different pass (`db::units`) and never
     /// land here -- nothing appends to this field after parsing.
@@ -290,6 +290,28 @@ impl<MI, E> Variable<MI, E> {
             Variable::Stock { units, .. } => units.as_ref(),
             Variable::Var { units, .. } => units.as_ref(),
             Variable::Module { units, .. } => units.as_ref(),
+        }
+    }
+}
+
+impl Variable {
+    /// A module instance in its lowered form: the instance `ident`, the model
+    /// it instantiates, and its resolved input wiring. A module has no
+    /// equation of its own, so its lowered form is exactly these three facts;
+    /// the fragment constructors build it from the instance's `(src, dst)`
+    /// references (`db::build_module_inputs`) without a parse.
+    pub(crate) fn module_instance(
+        ident: Ident<Canonical>,
+        model_name: Ident<Canonical>,
+        inputs: Vec<ModuleInput>,
+    ) -> Self {
+        Variable::Module {
+            ident,
+            model_name,
+            units: None,
+            inputs,
+            errors: vec![],
+            unit_errors: vec![],
         }
     }
 }

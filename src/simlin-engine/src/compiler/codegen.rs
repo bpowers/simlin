@@ -62,7 +62,7 @@ pub(crate) struct ModuleCtx<'a> {
     pub(crate) runlist_stocks: &'a [Expr],
     /// Reference -> the extent of the variable it addresses in whole. The sole
     /// reader is [`Compiler::full_source_len`]; the sole producer is
-    /// `context::whole_variable_extents`, shared with lowering.
+    /// `fragment::reference_extents`, shared with lowering.
     pub(crate) var_sizes: &'a VarSizes,
     pub(crate) tables: &'a HashMap<Ident<Canonical>, Vec<Table>>,
     pub(crate) dimensions: &'a [Dimension],
@@ -1951,14 +1951,14 @@ mod tests {
         }
 
         /// The extent of a whole reference to `name`, as
-        /// `context::whole_variable_extents` records an ordinary variable.
+        /// `fragment::reference_extents` records an ordinary variable.
         fn with_var_size(mut self, name: &str, size: usize) -> Self {
             self.var_sizes.insert(VarRef::base(Ident::new(name)), size);
             self
         }
 
         /// The extent of a SUB-MODEL variable living at slot `slot` of module
-        /// instance `instance`, as `whole_variable_extents` records one.
+        /// instance `instance`, as `reference_extents` records one.
         fn with_submodel_var_size(mut self, instance: &str, slot: usize, size: usize) -> Self {
             self.var_sizes
                 .insert(VarRef::new(Ident::new(instance), slot), size);
