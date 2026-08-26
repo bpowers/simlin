@@ -102,6 +102,7 @@ pub(crate) use sync::{build_stdlib_models, expand_maps_to_chains};
 
 mod layout;
 pub use layout::compute_layout;
+pub(crate) use layout::flattened_offsets;
 
 mod fragment_compile;
 pub use fragment_compile::compile_var_fragment;
@@ -125,21 +126,12 @@ pub(crate) use assemble::{
     fragment_emit_ctx, var_phase_symbolic_fragment_prod,
 };
 pub use assemble::{assemble_module, assemble_simulation};
-// `combine_scc_fragment` and `calc_flattened_offsets_incremental` are
-// consumed at runtime only WITHIN `assemble.rs`; the root re-export exists
-// solely so the `#[cfg(test)]` test modules
-// (`combined_fragment_tests`/`fragment_cache_tests`) can reach them as
+// `combine_scc_fragment` is consumed at runtime only WITHIN `assemble.rs`; the
+// root re-export exists solely so the `#[cfg(test)]` test modules
+// (`combined_fragment_tests` and its proptest) can reach it as
 // `crate::db::...` / `super::...`.
 #[cfg(test)]
-pub(crate) use assemble::{calc_flattened_offsets_incremental, combine_scc_fragment};
-// `renumber_initials_phase` is the initials half of assembly's phase renumber.
-// The root re-export exists so the merger's M8 property
-// (`compiler::symbolic_merge_proptest`) can drive the REAL function rather than
-// re-deriving it: as an inline loop inside `assemble_module` it was unreachable
-// from a test, and freezing two of its three accumulators left the whole
-// repository green.
-#[cfg(test)]
-pub(crate) use assemble::renumber_initials_phase;
+pub(crate) use assemble::combine_scc_fragment;
 
 pub use dep_graph::{
     ModelDepGraphResult, ResolvedScc, RunlistMembership, SccPhase, model_dependency_graph,
@@ -1409,6 +1401,8 @@ pub fn compile_project_incremental(
     }
 }
 
+#[cfg(test)]
+mod assemble_tests;
 #[cfg(test)]
 mod combined_fragment_proptest;
 #[cfg(test)]

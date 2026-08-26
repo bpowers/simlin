@@ -550,7 +550,7 @@ pub fn expand_queues(
 /// simulation's offset map (docs/design/queues.md §10.3), flattening each arrayed
 /// queue into ONE [`QueuePlan`] per array element (§6). An arrayed variable's
 /// elements occupy contiguous slots keyed `name[elem1,elem2]` in the offset map
-/// (`calc_flattened_offsets_incremental`), so element `e` resolves via the
+/// (`db::layout::flattened_offsets`), so element `e` resolves via the
 /// subscripted key built from `meta.element_subscripts[e]`; a scalar queue
 /// resolves its bare name and yields a single plan (so the per-queue runtime pass
 /// is identical to before). Returns `None` if any required name is missing -- an

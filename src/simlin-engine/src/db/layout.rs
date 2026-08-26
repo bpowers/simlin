@@ -2,16 +2,21 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! The per-model body layout query (`compute_layout`): the salsa-tracked,
+//! Slot order, stated once.
+//!
+//! `compute_layout` is the per-model body layout query: the salsa-tracked,
 //! role-independent slot assignment for explicit variables, implicit
 //! (SMOOTH/DELAY/TREND) helpers, and -- when LTM is enabled -- the LTM
 //! synthetic variables and their implicit helpers. Offsets start at 0; the
-//! root module's `IMPLICIT_VAR_COUNT` shift is applied later at assembly via
-//! `VariableLayout::root_shifted`.
+//! root module's `IMPLICIT_VAR_COUNT` shift is applied at assembly via
+//! `VariableLayout::root_shifted`. `flattened_offsets` is that layout read
+//! back out as the results-offset map, so the slot a name reads is the slot
+//! `resolve_module` addressed its fragment against.
 
 use std::collections::HashMap;
 
 use super::*;
+use crate::common::{Canonical, Ident};
 
 #[salsa::tracked(returns(ref))]
 pub fn compute_layout(
@@ -140,4 +145,123 @@ pub fn compute_layout(
     }
 
     VariableLayout::new(entries, offset)
+}
+
+/// The results-offset map: every saved series' canonical name mapped to its
+/// absolute slot in the root module's data buffer. This is
+/// `CompiledSimulation::offsets`, and through it `Results::offsets` -- what the
+/// VM's `get_series`, libsimlin's variable list, the CLI's TSV columns and the
+/// LTM result readers resolve a name with.
+///
+/// It is the root's `compute_layout`, root-shifted, flattened through every
+/// module instance: a top-level variable is keyed by its canonical name at its
+/// layout slot; a module variable contributes no key of its own but its
+/// sub-model's map, each name prefixed `module·` and each slot based at the
+/// module's; an arrayed explicit variable is keyed per element as
+/// `name[e1,e2]` in the VM's row-major storage order (the conveyor and queue
+/// plans index belts by these keys); an arrayed implicit or LTM variable is
+/// keyed once, by its bare name, at its base slot (readers widen it by the
+/// variable's own dimensions); and a standalone lookup-only table keeps its
+/// layout slot but has no key, because it produces no series (GH #606).
+pub(crate) fn flattened_offsets(
+    db: &dyn Db,
+    project: SourceProject,
+    root: SourceModel,
+) -> HashMap<Ident<Canonical>, usize> {
+    let mut offsets = HashMap::new();
+    let layout = compute_layout(db, root, project).root_shifted();
+    flatten_model(db, project, root, &layout, 0, None, &mut offsets);
+    offsets
+}
+
+/// How one layout entry reaches the results map.
+enum Flatten<'a> {
+    /// A module instance: its sub-model's map, based at this slot. `None`
+    /// when the project holds no such model -- there is nothing to flatten.
+    Module(Option<SourceModel>),
+    /// A static table (GH #606): the slot is reserved, there is no series.
+    Table,
+    /// An arrayed explicit variable: one key per element, row-major.
+    Elements(&'a [crate::dimensions::Dimension]),
+    /// One key at the entry's base slot.
+    Series,
+}
+
+/// Insert one model's layout into `offsets`: every entry at `base +
+/// entry.offset`, keyed under `prefix·name`. A module variable recurses into
+/// its sub-model's body layout with the module's slot as the new base.
+fn flatten_model(
+    db: &dyn Db,
+    project: SourceProject,
+    model: SourceModel,
+    layout: &crate::compiler::symbolic::VariableLayout,
+    base: usize,
+    prefix: Option<&Ident<Canonical>>,
+    offsets: &mut HashMap<Ident<Canonical>, usize>,
+) {
+    let project_models = project.models(db);
+    let source_vars = model.variables(db);
+    let implicit_info = model_implicit_var_info(db, model, project);
+    let ltm_implicit = model_ltm_implicit_var_info(db, model, project);
+    let sub_model = |name: &str| project_models.get(canonicalize(name).as_ref()).copied();
+    let qualified = |local: Ident<Canonical>| match prefix {
+        Some(prefix) => Ident::join(&prefix.as_canonical_str(), &local.as_canonical_str()),
+        None => local,
+    };
+
+    for (name, entry) in layout.iter() {
+        let slot = base + entry.offset;
+        let kind = if let Some(svar) = source_vars.get(name) {
+            if svar.kind(db) == SourceVariableKind::Module {
+                Flatten::Module(sub_model(svar.model_name(db)))
+            } else if source_var_is_table_only(db, *svar) {
+                Flatten::Table
+            } else if entry.size > 1 {
+                // The entry's size is the product of these dimensions.
+                Flatten::Elements(variable_dimensions(db, *svar, project))
+            } else {
+                Flatten::Series
+            }
+        } else if let Some(info) = implicit_info.get(name)
+            && info.is_module
+        {
+            Flatten::Module(info.model_name.as_deref().and_then(sub_model))
+        } else if let Some(meta) = ltm_implicit.get(name)
+            && meta.is_module
+        {
+            Flatten::Module(meta.model_name.as_deref().and_then(sub_model))
+        } else {
+            // A scalar or arrayed implicit helper, an LTM synthetic variable,
+            // or one of the root's implicit globals.
+            Flatten::Series
+        };
+        match kind {
+            Flatten::Module(Some(sub)) => {
+                let sub_layout = compute_layout(db, sub, project);
+                let module_ident = qualified(Ident::<Canonical>::new(name));
+                flatten_model(
+                    db,
+                    project,
+                    sub,
+                    sub_layout,
+                    slot,
+                    Some(&module_ident),
+                    offsets,
+                );
+            }
+            Flatten::Module(None) | Flatten::Table => {}
+            Flatten::Elements(dims) => {
+                for (j, subscripts) in crate::dimensions::SubscriptIterator::new(dims).enumerate() {
+                    let element = format!("{name}[{}]", subscripts.join(","));
+                    offsets.insert(
+                        qualified(Ident::<Canonical>::from_unchecked(element)),
+                        slot + j,
+                    );
+                }
+            }
+            Flatten::Series => {
+                offsets.insert(qualified(Ident::<Canonical>::new(name)), slot);
+            }
+        }
+    }
 }

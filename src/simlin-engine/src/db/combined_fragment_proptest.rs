@@ -279,7 +279,7 @@ fn scc_of(order: Vec<(Ident<Canonical>, usize)>) -> ResolvedScc {
 /// member exactly as the opcode ids do.
 ///
 /// Scanning only channel 1 left a real defect green across the whole
-/// repository: a merger that shifted a view's `Temp` base by `ctx_base.temps`
+/// repository: a merger that shifted a view's `Temp` base by a fixed base rather than the per-fragment offset
 /// instead of the per-fragment offset (correct under `Recycle`, wrong under
 /// `Sum`) passed lib 5365/0 and `file_io` 637/0. Every member after the first
 /// in a resolved recurrence SCC would read the FIRST member's scratch array --

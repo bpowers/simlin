@@ -8,9 +8,9 @@
 # Provenance: every seed below was captured during the C2 mutation experiments
 # on `FragmentMerger` (GH #964 row C), not from a production bug. Between them
 # they fail under: a resource base that ignores the running merged length
-# (M1/M2), a phase `ctx_base` dropped from that base (M8), the sequential concat
-# switched to `TempStrategy::Sum` (M5), and an initials-phase accumulator frozen
-# in `renumber_initials_phase` (M8).
+# (M1/M2), a merger that restarts its module / view / dim-list tables for each
+# program of a module instead of continuing them (M8), and the sequential
+# concatenation switched to `TempStrategy::Sum` (M5).
 #
 # The two GF seeds cover DIFFERENT halves of M4's gap totality, and the
 # distinction is the whole reason they are both here:

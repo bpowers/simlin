@@ -341,6 +341,27 @@ pub(crate) struct CompiledVarFragment {
     pub stock_bytecodes: Option<PerVarBytecodes>,
 }
 
+/// The three programs of an assembled module. A variable's fragment carries
+/// bytecode for whichever of them its runlist membership schedules it in, and
+/// `db::assemble` emits each program from the fragments that have one for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Phase {
+    Initials,
+    Flows,
+    Stocks,
+}
+
+impl CompiledVarFragment {
+    /// This variable's bytecode for `phase`, if it is scheduled in it.
+    pub(crate) fn phase(&self, phase: Phase) -> Option<&PerVarBytecodes> {
+        match phase {
+            Phase::Initials => self.initial_bytecodes.as_ref(),
+            Phase::Flows => self.flow_bytecodes.as_ref(),
+            Phase::Stocks => self.stock_bytecodes.as_ref(),
+        }
+    }
+}
+
 /// Bytecodes plus side-channel data for one variable in one phase.
 ///
 /// This is the value of the TRACKED `db::compile_var_fragment`, read by the
@@ -393,6 +414,14 @@ impl VariableLayout {
         self.entries.get(name)
     }
 
+    /// Every variable the layout places, with its entry. Iteration order is
+    /// the map's and carries no meaning; a consumer that needs an order sorts.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, &LayoutEntry)> {
+        self.entries
+            .iter()
+            .map(|(name, entry)| (name.as_str(), entry))
+    }
+
     /// Produce the root-module layout from this body layout.
     ///
     /// `compute_layout` returns a role-independent *body* layout whose
@@ -405,14 +434,12 @@ impl VariableLayout {
     /// fixed slots, and grows `n_slots` accordingly.
     ///
     /// This is the SINGLE place the root +`IMPLICIT_VAR_COUNT` shift is
-    /// computed. Both machineries that produce final root offsets consume
-    /// it: `assemble_module`'s root path (it resolves every fragment
-    /// `SymVarRef` and module-decl `off` against the shifted layout) and
-    /// `calc_flattened_offsets_incremental`'s LTM section (it reads the
-    /// shifted entry offsets so the results map agrees with the assembled
-    /// module entry-for-entry). Centralizing it keeps the two in lockstep:
-    /// they cannot diverge on the reservation amount, the implicit-global
-    /// slots, or the body offset.
+    /// computed. Both consumers of final root offsets read it:
+    /// `assemble_module`'s root path (it resolves every fragment `SymVarRef`
+    /// and module-decl `off` against the shifted layout) and
+    /// `db::layout::flattened_offsets` (the results-offset map is this layout
+    /// flattened), so the two cannot diverge on the reservation amount, the
+    /// implicit-global slots, or the body offset.
     pub(crate) fn root_shifted(&self) -> VariableLayout {
         use crate::vm::{DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF};
 
@@ -1172,85 +1199,6 @@ pub(crate) fn extract_assign_curr_offsets(bc: &ByteCode) -> Vec<usize> {
 // Fragment Concatenation
 // ============================================================================
 
-/// Merged result of concatenating per-variable symbolic bytecodes.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ConcatenatedBytecodes {
-    pub bytecode: SymbolicByteCode,
-    pub graphical_functions: Vec<Vec<(f64, f64)>>,
-    pub module_decls: Vec<SymbolicModuleDecl>,
-    pub static_views: Vec<SymbolicStaticView>,
-    pub temp_offsets: Vec<usize>,
-    pub temp_total_size: usize,
-    pub dim_lists: Vec<(u8, [u16; 4])>,
-}
-
-/// Flat base offsets for the *non-GF* shared context resources when
-/// concatenating multiple phases into a single resource namespace.
-/// Literals are excluded because each phase's bytecode has its own literal
-/// pool. Graphical functions are excluded because they are content-de-
-/// duplicated (#582) rather than flat-counted -- their per-fragment base
-/// comes from a shared `GfDedup` remap, not a running sum.
-///
-/// The three `u16`-addressed counts are held as `usize` on purpose. They are
-/// COUNTS, not ids: a count of exactly `U16_ID_CAPACITY` describes a full table
-/// whose every id (`0..=u16::MAX`) is representable, and a phase that follows it
-/// with none of that resource assigns no id at all. Narrowing them here would
-/// reject that program even though M3 -- *every assigned id is representable* --
-/// holds for it; the one place that can tell is [`resource_base`], which sees
-/// the following fragment's length and is where the bound therefore lives.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct ContextResourceCounts {
-    pub modules: usize,
-    pub views: usize,
-    pub temps: u32,
-    pub dim_lists: usize,
-}
-
-impl ContextResourceCounts {
-    /// Sum the flat (non-GF) context resource counts from a set of
-    /// per-variable fragments. Used to derive a later phase's `ctx_base`
-    /// from the preceding phases' module / view / dim-list counts (those
-    /// resources are laid out disjointly per phase).
-    ///
-    /// The `temps` sum is a count utility only: temps RECYCLE into one
-    /// global identity pool (#583), so `assemble_module` passes a
-    /// `ctx_base.temps` of 0 for every plain phase (the recycle's fixed base)
-    /// rather than this per-phase sum. The field is summed here for the
-    /// benefit of any caller that genuinely wants the disjoint per-phase temp
-    /// count (e.g. the `Sum` strategy / `combine_scc_fragment` accounting).
-    ///
-    /// Infallible: summing counts cannot violate M3 by itself, because a base
-    /// only has to be representable once a fragment uses it to name something.
-    /// The check lives in [`resource_base`], which is handed both the base and
-    /// the length of the fragment about to consume it.
-    pub fn from_fragments(fragments: &[&PerVarBytecodes]) -> Self {
-        let mut modules: usize = 0;
-        let mut views: usize = 0;
-        let mut temps: u32 = 0;
-        let mut dim_lists: usize = 0;
-        for frag in fragments {
-            modules += frag.module_decls.len();
-            views += frag.static_views.len();
-            // Each fragment's temps start at 0, so the disjoint-layout total
-            // is the sum of each fragment's (max_id + 1), not the global max.
-            let frag_temp_count = frag
-                .temp_sizes
-                .iter()
-                .map(|(id, _)| *id + 1)
-                .max()
-                .unwrap_or(0);
-            temps += frag_temp_count;
-            dim_lists += frag.dim_lists.len();
-        }
-        ContextResourceCounts {
-            modules,
-            views,
-            temps,
-            dim_lists,
-        }
-    }
-}
-
 /// How many entries a `u16`-addressed merged resource table can hold: ids run
 /// `0..=u16::MAX`.
 const U16_ID_CAPACITY: usize = u16::MAX as usize + 1;
@@ -1300,12 +1248,11 @@ impl Drop for IdCapacityGuard {
 }
 
 /// The base id for a fragment's `frag_len` entries appended to a merged table
-/// that already holds `merged_len`, itself offset by `ctx_base` (M2 + M3).
+/// that already holds `merged_len` (M2 + M3).
 ///
 /// **This is the only place the `u16` capacity bound is stated.** Every base a
 /// `u16`-addressed resource is renumbered against comes from here -- the
-/// merger's four, and the running offsets `db::assemble::renumber_initials_phase`
-/// tracks by hand -- so the boundary cannot be one value in one place and a
+/// merger's four -- so the boundary cannot be one value in one place and a
 /// different one in another. Everything upstream counts in `usize`.
 ///
 /// The ids this fragment will use are `base .. base + frag_len`, so the check
@@ -1318,8 +1265,8 @@ impl Drop for IdCapacityGuard {
 /// is `u16::MAX` -- addressable. Tightening it to `>=` rejects a table that
 /// fills the id space exactly, which is a legal program; a reader "simplifying"
 /// it that way is the live risk, and `literal_pool_past_u16_capacity_fails_loud`
-/// / `a_full_ctx_base_bounds_only_the_phases_that_use_it` /
-/// `the_initials_phase_shares_the_mergers_capacity_bound` all red if they do.
+/// / `a_full_table_bounds_only_the_programs_that_name_it` /
+/// `a_standalone_program_shares_the_tables_bound` all red if they do.
 ///
 /// A fragment carrying NONE of this resource is exempt: it names no id, so
 /// there is nothing to represent, and the base it is handed is never used. Note
@@ -1330,12 +1277,11 @@ impl Drop for IdCapacityGuard {
 /// fragment with no entries), but returning a saturated 65,535 rather than a
 /// wrapped 0 keeps the dead value from ever being mistaken for a live one.
 pub(crate) fn resource_base(
-    ctx_base: usize,
     merged_len: usize,
     frag_len: usize,
     label: &str,
 ) -> Result<u16, String> {
-    let base = ctx_base + merged_len;
+    let base = merged_len;
     let end = base + frag_len;
     if frag_len == 0 {
         // No id to assign; hand back a base the caller will not use, saturated
@@ -1382,9 +1328,10 @@ pub(crate) struct FragmentResourceOffsets {
 /// [`FragmentMerger::absorb_context`] can honestly report.
 ///
 /// Separate from [`FragmentResourceOffsets`] so that "this absorb assigned no
-/// literal id" is a property of the type rather than a placeholder value. The
-/// all-phases aggregation keeps no literal pool, and a `lit_offset: 0` sitting
-/// in its result would be indistinguishable from a real base of zero.
+/// literal id" is a property of the type rather than a placeholder value: the
+/// context tables span every program of a module while a literal pool belongs
+/// to one, and a `lit_offset: 0` sitting in a context-only result would be
+/// indistinguishable from a real base of zero.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ContextResourceOffsets {
     pub mod_offset: u16,
@@ -1434,8 +1381,9 @@ pub(crate) type GfRemap = SmallVec<[GraphicalFunctionId; 8]>;
 /// emission shape it is about to produce:
 ///
 /// - `Recycle` -- the caller emits each fragment's opcodes as one contiguous
-///   run, in fragment order (`concatenate_fragments_with_gf`; the fragments
-///   are sequential, non-overlapping runlist segments). Temps collapse by
+///   run, in fragment order (`FragmentMerger::concatenate`; the fragments are
+///   sequential, non-overlapping runlist segments), or as a program of its own
+///   (`FragmentMerger::standalone_program`). Temps collapse by
 ///   IDENTITY into one shared pool: fragment A's temp 0 and fragment B's
 ///   temp 0 both become slot `base + 0`, and that slot's size is the MAX over
 ///   its users, so it is large enough for each of them in turn. Sharing is
@@ -1474,14 +1422,21 @@ pub(crate) enum TempStrategy {
 /// Running merge state for combining `PerVarBytecodes` into a single
 /// resource namespace.
 ///
-/// This is the shared core of `concatenate_fragments_with_gf` and the
-/// per-element-granular `combine_scc_fragment` (a multi-member recurrence
-/// SCC's combined fragment). Both consumers absorb fragments through this one
-/// implementation so they cannot drift: `concatenate_fragments_with_gf`
-/// absorbs each fragment and immediately renumbers its whole (Ret-stripped)
-/// code, while `combine_scc_fragment` absorbs each *member* once and
-/// renumbers that member's per-element segments with the member's offsets,
-/// emitting the segments in the SCC's interleaved `element_order`.
+/// One merger assembles one module. `assemble_module` drives it through the
+/// module's programs in order -- every initial as a [`standalone_program`],
+/// then the flows and the stocks as one [`concatenate`] each -- and finishes
+/// it with [`into_side_channels`]: the module's one module-decl / static-view /
+/// temp / dim-list / graphical-function table set, which every program's ids
+/// index. `combine_scc_fragment` drives a second, isolated merger per resolved
+/// recurrence SCC, absorbing each member once ([`absorb`]) and renumbering the
+/// member's per-element segments itself before interleaving them; the combined
+/// fragment is itself a fragment the module's merger later absorbs. Both
+/// consumers go through the same absorption, so they cannot drift.
+///
+/// [`standalone_program`]: FragmentMerger::standalone_program
+/// [`concatenate`]: FragmentMerger::concatenate
+/// [`into_side_channels`]: FragmentMerger::into_side_channels
+/// [`absorb`]: FragmentMerger::absorb
 ///
 /// # What the merged fragment owes
 ///
@@ -1519,21 +1474,19 @@ pub(crate) enum TempStrategy {
 /// `u8`). A merged table that outgrows its id type is a loud `Err`, never a
 /// wrapped id silently naming a different resource. Note what the obligation
 /// does NOT say: a table of exactly `U16_ID_CAPACITY` entries satisfies it, and
-/// so does any number of later phases that add nothing to one -- so the counts
-/// that become a later phase's base are carried in `usize` and the bound is
-/// discharged in exactly one function, [`resource_base`], which is the only
-/// point that sees both a base and the length of the fragment about to consume
-/// it. "Assigned" also means assigned to something the module KEEPS: a merge
-/// whose pool is discarded names no id, so bounding it rejects programs that
-/// are entirely valid. That is not hypothetical either -- it is why the
-/// all-phases aggregation is [`merge_context_side_channels`] and not a full
-/// merge. Pinned by `literal_pool_past_u16_capacity_fails_loud` (within a
-/// phase), `a_full_ctx_base_bounds_only_the_phases_that_use_it` (across
-/// phases), `the_initials_phase_shares_the_mergers_capacity_bound` (the
-/// initials phase's own running offsets),
-/// `the_all_phases_aggregation_does_not_bound_the_literal_pool` and
-/// `assembly_bounds_the_retained_pools_and_not_the_aggregate` (retained vs
-/// discarded), `renumber_opcode_u16_addition_overflow_is_loud`,
+/// so does any number of later programs that add nothing to one -- so the
+/// tables are counted in `usize` and the bound is discharged in exactly one
+/// function, [`resource_base`], the only point that sees both a table's length
+/// and the length of the fragment about to extend it. The bound is per table
+/// the module KEEPS: each program's literal pool is its own, so a module whose
+/// pools each fit assembles even when they would not fit as one (roughly 33k
+/// scalar stocks, inside the size class this compiler targets). Pinned by
+/// `literal_pool_past_u16_capacity_fails_loud` (within a program),
+/// `a_full_table_bounds_only_the_programs_that_name_it` (across programs),
+/// `a_standalone_program_shares_the_tables_bound`,
+/// `literal_pools_are_per_program` and
+/// `assembly_bounds_the_retained_pools_and_not_the_aggregate` (per-program
+/// pools), `renumber_opcode_u16_addition_overflow_is_loud`,
 /// `test_renumber_opcode_u8_addition_overflow` and
 /// `test_concatenate_genuinely_distinct_gf_over_capacity_fails_loud`.
 ///
@@ -1556,12 +1509,13 @@ pub(crate) enum TempStrategy {
 /// and by `db::combined_fragment_proptest`'s
 /// `interleaved_members_never_share_a_temp_slot` for the interleaving one.
 ///
-/// **M6 -- absorption is 1:1 on opcodes.** The merged code is each fragment's
-/// Ret-stripped opcodes, contiguous and in fragment order, plus one terminal
-/// `Ret`. Two downstream boundaries are COUNTS into this stream and would move
-/// silently if it were not 1:1: `flows_invariant_opcode_len` (the
-/// run-invariant flow prefix, GH #712, computed in `db::assemble` as a sum of
-/// Ret-stripped fragment lengths) and the SCC per-element segmentation.
+/// **M6 -- absorption is 1:1 on opcodes.** A concatenated program is each
+/// fragment's Ret-stripped opcodes, contiguous and in fragment order, plus one
+/// terminal `Ret`; a standalone program is its fragment's opcodes verbatim,
+/// `Ret` included. Two downstream boundaries are COUNTS into the concatenated
+/// stream and would move silently if it were not 1:1: `flows_invariant_opcode_len`
+/// (the run-invariant flow prefix, GH #712, computed in `db::assemble` as a sum
+/// of Ret-stripped fragment lengths) and the SCC per-element segmentation.
 /// Pinned by `merge_is_one_to_one_on_opcodes_and_prefix_lengths_are_boundaries`
 /// -- which asserts the stronger form the boundary actually needs, that a
 /// fragment's renumbering never depends on what FOLLOWS it -- and, for the
@@ -1576,28 +1530,23 @@ pub(crate) enum TempStrategy {
 /// blanks only the resource ids, so every `SymVarRef` and every jump offset
 /// must survive byte-identical.
 ///
-/// **M8 -- the phase split agrees with the whole-model merge.** `assemble_module`
-/// renumbers initials, flows and stocks SEPARATELY, but takes the module's
-/// `module_decls` / `static_views` / `temp_offsets` / `dim_lists` tables from a
-/// single all-phases merge. So merging one phase with `ctx_base` set to the
-/// summed counts of the preceding phases must assign each fragment exactly the
-/// ids the all-phases merge assigns it -- otherwise a flows opcode indexes the
-/// module's table with an id computed against a different table. Literals are
-/// the deliberate exception: each phase's bytecode carries its own pool and
-/// the all-phases pool is discarded, so `ctx_base` does not apply to them.
-/// Pinned by `phase_split_assigns_the_same_ids_as_the_all_phases_merge`, with
-/// `forced_rich_phase_split_uses_non_zero_bases` as its non-vacuity guard --
-/// with an all-zero `ctx_base` the split IS the all-phases merge, so the
-/// property would pass without testing anything.
-///
-/// `ctx_base` provides the context resource id offsets inherited from
-/// preceding phases (M8). Temps recycle into ONE pool shared by every phase,
-/// so `ctx_base.temps` is 0 for every phase -- the pool is not partitioned by
-/// phase. When merging a single phase in isolation, pass
-/// `ContextResourceCounts::default()`.
+/// **M8 -- every program of a module indexes one table set.** A module keeps
+/// three kinds of program -- each initial, which `eval_initials` runs on its
+/// own; the flows; the stocks -- and ONE set of context tables. The merger
+/// assigns a fragment's module / view / temp / dim-list ids from its running
+/// tables whichever program the fragment lands in, so an id any program carries
+/// indexes the tables the merger finishes with. Literals are per program: a
+/// program's bytecode carries its own pool, so the pool is taken with the
+/// program and the next program's literal ids start at 0 again. Pinned by
+/// `module_programs_index_one_table_set`, with
+/// `forced_rich_module_programs_use_non_zero_bases` as its non-vacuity guard --
+/// a module whose initials carry none of a resource leaves the flows' bases at
+/// zero, where the property would pass without testing anything.
 pub(crate) struct FragmentMerger {
-    ctx_base: ContextResourceCounts,
     temp_strategy: TempStrategy,
+    /// The literal pool of the program under construction. Each program keeps
+    /// its own pool (M8), so the method that finishes a program takes this and
+    /// the next program's literal ids start at 0.
     merged_literals: Vec<f64>,
     merged_gf: Vec<Vec<(f64, f64)>>,
     /// Cross-fragment graphical-function de-duplication index (#582, M4).
@@ -1844,23 +1793,11 @@ fn gf_blocks_of_fragment(frag: &PerVarBytecodes) -> Result<Vec<(usize, usize)>, 
 }
 
 impl FragmentMerger {
-    /// New merger with the disjoint-range (`Sum`) temp strategy -- the form
-    /// `combine_scc_fragment` (interleaved segments) and the GF-only
-    /// `GfDedup::build` (never touches temps) use.
-    pub(crate) fn new(ctx_base: &ContextResourceCounts) -> Self {
-        Self::new_with_temp_strategy(ctx_base, TempStrategy::Sum)
-    }
-
-    /// New merger with an explicit temp strategy (M5). A caller that emits
-    /// each fragment's opcodes as one contiguous run passes
-    /// `TempStrategy::Recycle`; one that interleaves them passes `Sum`. See
-    /// [`TempStrategy`].
-    pub(crate) fn new_with_temp_strategy(
-        ctx_base: &ContextResourceCounts,
-        temp_strategy: TempStrategy,
-    ) -> Self {
+    /// A merger over empty tables. `temp_strategy` declares the emission shape
+    /// the caller will produce (M5): `Recycle` for a module's programs, `Sum`
+    /// for an interleaved SCC. See [`TempStrategy`].
+    pub(crate) fn new(temp_strategy: TempStrategy) -> Self {
         FragmentMerger {
-            ctx_base: ctx_base.clone(),
             temp_strategy,
             merged_literals: Vec::new(),
             merged_gf: Vec::new(),
@@ -1873,12 +1810,13 @@ impl FragmentMerger {
     }
 
     /// Absorb one fragment's side-channels into the running merge state and
-    /// return the five flat non-GF resource base offsets plus the per-slot
-    /// GF remap this fragment's opcodes must be renumbered by. This is
-    /// `absorb_non_gf` followed by `absorb_gf` (see those for the contract);
-    /// it is the form `combine_scc_fragment` and `GfDedup::build` use, where
-    /// the GF dedup and the flat accounting must be driven by the same
-    /// merger.
+    /// return the five flat non-GF resource base offsets plus the per-slot GF
+    /// remap this fragment's opcodes must be renumbered by. This is
+    /// `absorb_non_gf` followed by `absorb_gf` (see those for the contract).
+    /// The program-building methods call it once per fragment and renumber on
+    /// the caller's behalf; `combine_scc_fragment` calls it directly, because
+    /// it renumbers a member's per-element segments itself before interleaving
+    /// them.
     pub(crate) fn absorb(
         &mut self,
         frag: &PerVarBytecodes,
@@ -1902,27 +1840,21 @@ impl FragmentMerger {
     /// a dim-list is truncated to the 4 elements the `(u8, [u16; 4])` merged
     /// representation holds.
     ///
-    /// The *temp* offset instead follows `temp_strategy` (#583, M5): `Sum`
-    /// advances per fragment so each gets a disjoint range;  `Recycle` uses
-    /// the fixed `ctx_base.temps` so every fragment's temp `t` lands on the
-    /// same slot `t + base`, max-merged below. See [`TempStrategy`] for which
-    /// emission shape needs which. Graphical functions are handled separately
-    /// by `absorb_gf` (content-de-duplicated, #582, M4).
+    /// The literal base is the length of the pool the CURRENT program has
+    /// built so far (M8): the pool is per program, so it restarts at zero
+    /// with each one. Every other flat table spans the module and keeps
+    /// growing -- that half is `absorb_context`. The *temp* offset follows
+    /// `temp_strategy` (#583, M5): `Sum` advances per fragment so each gets a
+    /// disjoint range; `Recycle` places every fragment's temp `t` on slot `t`,
+    /// max-merged in `absorb_context`. Graphical functions are handled
+    /// separately by `absorb_gf` (content-de-duplicated, #582, M4).
     ///
     /// `Err` on M3: a merged table that outgrows its `u16` id type. The base
     /// offsets are checked here rather than only at `renumber_opcode` because
     /// a fragment may carry entries no opcode reads (over-collected dependency
     /// resources), and those still consume ids for the fragments after it.
-    pub(crate) fn absorb_non_gf(
-        &mut self,
-        frag: &PerVarBytecodes,
-    ) -> Result<FragmentResourceOffsets, String> {
-        // Literals are phase-local; no ctx_base offset needed (M8). They are
-        // also the ONE resource an aggregation may legitimately not want, which
-        // is why they are the half that lives here rather than in
-        // `absorb_context` -- see that method's rustdoc.
+    fn absorb_non_gf(&mut self, frag: &PerVarBytecodes) -> Result<FragmentResourceOffsets, String> {
         let lit_offset = resource_base(
-            0,
             self.merged_literals.len(),
             frag.symbolic.literals.len(),
             "literal",
@@ -1935,55 +1867,34 @@ impl FragmentMerger {
 
     /// Absorb one fragment's SHARED CONTEXT side-channels -- module decls,
     /// static views, temp sizes, dim lists -- and return their base offsets.
-    /// The literal pool is deliberately not touched.
-    ///
-    /// This is the whole of `absorb_non_gf` except the literal pool, and it is
-    /// separate because the two have different lifetimes in the assembled
-    /// module. The context tables are shared by every phase and reported ONCE,
-    /// by the all-phases aggregation ([`merge_context_side_channels`]); the
-    /// literal pools are per-phase and each is retained by the phase that built
-    /// it. An aggregation that wants the former must not be bounded by the
-    /// latter, because it assigns no merged literal id to anything.
+    /// The literal pool is deliberately not touched: these tables span every
+    /// program of the module (M8), while the pool belongs to one program.
     fn absorb_context(&mut self, frag: &PerVarBytecodes) -> Result<ContextResourceOffsets, String> {
-        // Modules, views, and dim-lists are appended unshifted, so their offset
-        // is `ctx_base + cumulative_appended` (no double-count: the appended
-        // entries do NOT carry the ctx_base, so `merged_X.len()` excludes it).
-        // Temps are different: see below.
+        // Modules, views, and dim-lists are appended, so a fragment's base is
+        // the table's length before it.
         let mod_offset = resource_base(
-            self.ctx_base.modules,
             self.merged_modules.len(),
             frag.module_decls.len(),
             "module declaration",
         )?;
         let view_offset = resource_base(
-            self.ctx_base.views,
             self.merged_views.len(),
             frag.static_views.len(),
             "static view",
         )?;
-        // #583: temps recycle (plain-phase) or sum (interleaved SCC).
+        // #583: temps recycle (a module's programs) or sum (an interleaved SCC).
         //
-        // `Recycle`: a FIXED base (`ctx_base.temps`, which is 0 for every
-        //   plain phase since temps share ONE global identity pool). The
-        //   per-fragment max-merge below places fragment temp id `t` at slot
-        //   `t + base`, so every fragment's id 0 collapses to the same slot.
+        // `Recycle`: every fragment's temp `t` lands on slot `t` -- one identity
+        //   pool shared by every program of the module, sized per slot to the
+        //   largest user by the max-merge below.
         // `Sum`: advance by the running pool length so each fragment gets a
         //   disjoint range (interleaved segments need non-overlapping live
-        //   ranges). NOTE the previous unconditional
-        //   `merged_temp_sizes.len() + ctx_base.temps` double-counted
-        //   `ctx_base.temps`: temps are stored at `id + temp_offset` (which
-        //   already includes the base), so `merged_temp_sizes.len()` absorbs
-        //   the base -- adding it again diverged `flows_concat` from the
-        //   all-phases `merged` table (an M8 violation). The recycle path's
-        //   fixed base removes that divergence; the Sum path runs only with
-        //   `ctx_base.temps == 0` (`combine_scc_fragment` passes a default
-        //   ctx_base).
+        //   ranges).
         let temp_offset = match self.temp_strategy {
-            TempStrategy::Recycle => self.ctx_base.temps,
-            TempStrategy::Sum => self.merged_temp_sizes.len() as u32 + self.ctx_base.temps,
+            TempStrategy::Recycle => 0,
+            TempStrategy::Sum => self.merged_temp_sizes.len() as u32,
         };
         let dl_offset = resource_base(
-            self.ctx_base.dim_lists,
             self.merged_dim_lists.len(),
             frag.dim_lists.len(),
             "dimension list",
@@ -2047,7 +1958,7 @@ impl FragmentMerger {
     /// Returns `Err` if the *distinct* GF count exceeds
     /// `GraphicalFunctionId` capacity (`u8::MAX`) -- the genuine-capacity
     /// case the dedup cannot help; escalate, do not widen the ID width here.
-    pub(crate) fn absorb_gf(&mut self, frag: &PerVarBytecodes) -> Result<GfRemap, String> {
+    fn absorb_gf(&mut self, frag: &PerVarBytecodes) -> Result<GfRemap, String> {
         let gf_len = frag.graphical_functions.len();
         if gf_len == 0 {
             return Ok(GfRemap::new());
@@ -2088,33 +1999,76 @@ impl FragmentMerger {
         Ok(gf_remap)
     }
 
-    /// Consume the merger and finalize into a `ConcatenatedBytecodes`,
-    /// computing per-temp byte offsets from the max-merged temp sizes.
-    /// `code` is the already-renumbered, Ret-stripped opcode stream;
-    /// a single trailing `Ret` is appended iff `code` is non-empty
-    /// (preserving the original `concatenate_fragments` behavior).
-    fn into_concatenated(mut self, mut code: Vec<SymbolicOpcode>) -> ConcatenatedBytecodes {
+    /// Renumber `frag` as a program of its own, its trailing `Ret` kept -- the
+    /// initials shape, which `eval_initials` runs one at a time. The fragment's
+    /// context resources join the module tables exactly as `concatenate`'s do
+    /// (M8); its literal pool is the program's.
+    pub(crate) fn standalone_program(
+        &mut self,
+        frag: &PerVarBytecodes,
+    ) -> Result<SymbolicByteCode, String> {
+        debug_assert!(
+            self.merged_literals.is_empty(),
+            "a program's literal pool starts empty"
+        );
+        let (off, gf_remap) = self.absorb(frag)?;
+        let code = frag
+            .symbolic
+            .code
+            .iter()
+            .map(|op| {
+                renumber_opcode(
+                    op,
+                    off.lit_offset,
+                    &gf_remap,
+                    off.mod_offset,
+                    off.view_offset,
+                    off.temp_offset,
+                    off.dl_offset,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(self.finish_program(code))
+    }
+
+    /// Merge `fragments` into one program: each fragment's Ret-stripped opcodes
+    /// appended as one contiguous run, in order, under a single terminal `Ret`
+    /// when there is any code (M6), with one literal pool (M8). The contiguous
+    /// runs are what make `TempStrategy::Recycle` sound for this shape (M5),
+    /// and what make a prefix of the fragment list a prefix of the program --
+    /// the boundary `assemble_module` counts for the run-invariant flow prefix.
+    pub(crate) fn concatenate(
+        &mut self,
+        fragments: &[&PerVarBytecodes],
+    ) -> Result<SymbolicByteCode, String> {
+        debug_assert!(
+            self.merged_literals.is_empty(),
+            "a program's literal pool starts empty"
+        );
+        let mut code: Vec<SymbolicOpcode> = Vec::new();
+        for frag in fragments {
+            let (off, gf_remap) = self.absorb(frag)?;
+            renumber_fragment_code(&frag.symbolic.code, &off, &gf_remap, &mut code)?;
+        }
         if !code.is_empty() {
             code.push(SymbolicOpcode::Ret);
         }
-        let literals = std::mem::take(&mut self.merged_literals);
-        let side = self.into_side_channels();
-        ConcatenatedBytecodes {
-            bytecode: SymbolicByteCode { literals, code },
-            graphical_functions: side.graphical_functions,
-            module_decls: side.module_decls,
-            static_views: side.static_views,
-            temp_offsets: side.temp_offsets,
-            temp_total_size: side.temp_total_size,
-            dim_lists: side.dim_lists,
+        Ok(self.finish_program(code))
+    }
+
+    /// Pair a program's renumbered code with the literal pool built for it,
+    /// leaving the pool empty for the next program (M8).
+    fn finish_program(&mut self, code: Vec<SymbolicOpcode>) -> SymbolicByteCode {
+        SymbolicByteCode {
+            literals: std::mem::take(&mut self.merged_literals),
+            code,
         }
     }
 
-    /// Consume the merger and finalize just the SHARED CONTEXT side-channels,
-    /// discarding any literal pool. `temp_offsets` is the prefix sum of the
-    /// merged temp sizes, computed here and nowhere else so the two finishers
-    /// cannot disagree about the temp layout.
-    fn into_side_channels(self) -> ContextSideChannels {
+    /// Consume the merger and finalize the module's shared tables -- the ones
+    /// every program built through it indexes (M8). `temp_offsets` is the
+    /// prefix sum of the merged temp sizes, computed here and nowhere else.
+    pub(crate) fn into_side_channels(self) -> ContextSideChannels {
         let mut temp_offsets = Vec::with_capacity(self.merged_temp_sizes.len());
         let mut offset = 0usize;
         for &size in &self.merged_temp_sizes {
@@ -2134,17 +2088,17 @@ impl FragmentMerger {
 
     /// Consume the merger and finalize into a `PerVarBytecodes` (the shape
     /// `combine_scc_fragment` returns -- a combined fragment is itself a
-    /// fragment, re-fed to `concatenate_fragments` at assembly). `code` is
+    /// fragment, absorbed by the module's merger at assembly). `code` is
     /// the already-renumbered opcode stream of the interleaved segments;
     /// a single trailing `Ret` is appended iff `code` is non-empty.
     ///
     /// `temp_sizes`/`dim_lists` are converted back to the `PerVarBytecodes`
     /// representations: `merged_temp_sizes[i]` becomes `(i, size)` for
-    /// every slot (including zero-size ones, so `from_fragments`'
-    /// `max(id+1)` temp count is preserved), and each truncated dim-list
-    /// `(n, arr)` becomes `arr[..n].to_vec()`. The truncation is
-    /// idempotent on the <=4-element dimension tuples dim-lists hold, so a
-    /// later `concatenate_fragments` pass is unaffected.
+    /// every slot (including zero-size ones, so the combined fragment's temp
+    /// count is preserved), and each truncated dim-list `(n, arr)` becomes
+    /// `arr[..n].to_vec()`. The truncation is idempotent on the <=4-element
+    /// dimension tuples dim-lists hold, so the module merger's later pass is
+    /// unaffected.
     pub(crate) fn into_per_var_bytecodes(self, mut code: Vec<SymbolicOpcode>) -> PerVarBytecodes {
         if !code.is_empty() {
             code.push(SymbolicOpcode::Ret);
@@ -2205,10 +2159,9 @@ pub(crate) fn renumber_fragment_code(
     Ok(())
 }
 
-/// The context resources every phase of an assembled module SHARES, reported
-/// once. These are the only things the all-phases aggregation exists to
-/// produce; the bytecode and literal pool a full merge would also build are
-/// per-phase and are retained by the phases that build them.
+/// The tables every program of an assembled module shares (M8), finished once
+/// by [`FragmentMerger::into_side_channels`]. The bytecode and literal pool of
+/// each program are handed back by the method that builds it.
 pub(crate) struct ContextSideChannels {
     pub graphical_functions: Vec<Vec<(f64, f64)>>,
     pub module_decls: Vec<SymbolicModuleDecl>,
@@ -2218,151 +2171,41 @@ pub(crate) struct ContextSideChannels {
     pub dim_lists: Vec<(u8, [u16; 4])>,
 }
 
-/// Aggregate the SHARED CONTEXT resources of every fragment in a module, in the
-/// all-phases order (initials, flows, stocks), so the module reports one
-/// module-decl / static-view / temp / dim-list table that each phase's
-/// separately-renumbered ids index.
-///
-/// This is deliberately NOT a merge. The phases that keep bytecode
-/// (`concatenate_fragments_with_gf` for flows and stocks,
-/// `db::assemble::renumber_initials_phase` for initials) each keep their own
-/// literal pool, so an aggregate pool over all three corresponds to no id the
-/// module retains. Building one was not merely wasted work: it put the whole
-/// model's literal count under `resource_base`'s `u16` bound, so a model whose
-/// every RETAINED pool was comfortably addressable failed to assemble once the
-/// three phases' pools summed past 65,536 -- roughly 33k scalar stocks, which
-/// is inside the size class this compiler targets. Assembly used to survive it
-/// by wrapping the offsets of a stream nobody read; the capacity check turned
-/// that into a hard error.
-///
-/// M8 is unaffected: it obliges the per-phase renumber and the all-phases
-/// aggregation to assign the same *context* ids, and literals were never part
-/// of it (`absorb_non_gf` bases them at 0 in every phase precisely because they
-/// are phase-local). Graphical functions come from the shared `dedup`, exactly
-/// as they do for a phase merge.
-pub(crate) fn merge_context_side_channels(
-    fragments: &[&PerVarBytecodes],
-    ctx_base: &ContextResourceCounts,
-    dedup: &GfDedup,
-) -> Result<ContextSideChannels, String> {
-    // `Recycle` to match the phase merges: temp slots collapse by identity into
-    // the one pool every phase shares, and this aggregation is what sizes it.
-    let mut merger = FragmentMerger::new_with_temp_strategy(ctx_base, TempStrategy::Recycle);
-    for frag in fragments {
-        merger.absorb_context(frag)?;
-    }
-    let mut side = merger.into_side_channels();
-    // The merger never touched GF (`absorb_context`), so install the shared
-    // deduped table; every phase reports the same `graphical_functions`.
-    side.graphical_functions = dedup.tables.clone();
-    Ok(side)
+/// A program and the tables it indexes: the shape a unit test that merges one
+/// fragment list in isolation reads. Production never pairs the two -- a
+/// module's programs share one table set that `assemble_module` takes once,
+/// after the last program.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ConcatenatedBytecodes {
+    pub bytecode: SymbolicByteCode,
+    pub graphical_functions: Vec<Vec<(f64, f64)>>,
+    pub module_decls: Vec<SymbolicModuleDecl>,
+    pub static_views: Vec<SymbolicStaticView>,
+    pub temp_offsets: Vec<usize>,
+    pub temp_total_size: usize,
+    pub dim_lists: Vec<(u8, [u16; 4])>,
 }
 
-/// Merge a single phase's `PerVarBytecodes` into one stream, renumbering
-/// `LiteralId`, `GraphicalFunctionId`, `ModuleId`, `ViewId`, `TempId`, and
-/// `DimListId` to avoid collisions across fragments, with the graphical
-/// functions content-de-duplicated within the call (#582).
-///
-/// Assembly's multi-phase path uses `GfDedup::build` +
-/// `concatenate_fragments_with_gf` directly (one shared GF dedup across all
-/// phases); this single-call convenience wrapper -- a `GfDedup::build` over
-/// exactly `fragments` followed by `concatenate_fragments_with_gf` -- is the
-/// focused-unit-test surface for the merge + dedup behavior, so it is
-/// `#[cfg(test)]`.
+/// Merge `fragments` as one program on a fresh `Recycle` merger and return it
+/// with the tables it indexes: the focused-unit-test surface for the merge and
+/// GF-dedup behavior.
 #[cfg(test)]
 pub(crate) fn concatenate_fragments(
     fragments: &[&PerVarBytecodes],
-    ctx_base: &ContextResourceCounts,
 ) -> Result<ConcatenatedBytecodes, String> {
-    let dedup = GfDedup::build(fragments)?;
-    concatenate_fragments_with_gf(fragments, ctx_base, &dedup, 0)
-}
-
-/// Cross-fragment graphical-function de-duplication result (#582): the one
-/// de-duplicated GF table plus a per-fragment local-slot -> global-slot
-/// remap, one entry per input fragment (by input index). Built once over
-/// the union of all fragments that share a resource namespace, then handed
-/// to every phase's renumber so each phase's `base_gf`s index the same
-/// deduped table -- the only way the dedup stays coherent when the
-/// initials / flows / stocks phases are renumbered separately.
-pub(crate) struct GfDedup {
-    /// The de-duplicated GF tables (the module's final `graphical_functions`).
-    pub tables: Vec<Vec<(f64, f64)>>,
-    /// Per-fragment (by input index) local-slot -> deduped-global-slot map.
-    remaps: Vec<GfRemap>,
-}
-
-impl GfDedup {
-    /// De-duplicate the GF blocks of `fragments` (in order) by bit-exact
-    /// content (M4). Value-exact: two blocks share an offset only when their
-    /// content is identical, so a `Lookup` can never be redirected to a
-    /// different table. `Err` if the *distinct* GF count exceeds
-    /// `GraphicalFunctionId` capacity (the genuine-capacity case the dedup
-    /// cannot help -- escalate, do not widen the ID width here).
-    pub fn build(fragments: &[&PerVarBytecodes]) -> Result<Self, String> {
-        // Reuse `FragmentMerger`'s GF-dedup machinery on an otherwise-unused
-        // merger so the de-dup logic lives in exactly one place. Only the
-        // GF side-channel is touched (`absorb_gf`); the flat resources are
-        // the per-phase callers' concern.
-        let mut merger = FragmentMerger::new(&ContextResourceCounts::default());
-        let mut remaps = Vec::with_capacity(fragments.len());
-        for frag in fragments {
-            remaps.push(merger.absorb_gf(frag)?);
-        }
-        Ok(GfDedup {
-            tables: merger.merged_gf,
-            remaps,
-        })
-    }
-
-    pub(crate) fn remap(&self, frag_index: usize) -> &[GraphicalFunctionId] {
-        &self.remaps[frag_index]
-    }
-}
-
-/// Renumber `fragments` into one stream, using `dedup` for the (already
-/// computed, possibly cross-phase) GF de-duplication and `ctx_base` +
-/// flat running counts for the other resources. `gf_index_base` is the
-/// position of `fragments[0]` within the fragment slice `dedup` was built
-/// over (0 when `dedup` covers exactly `fragments`; the running phase
-/// offset when one `GfDedup` spans initials + flows + stocks).
-///
-/// This is the sequential-emission consumer of `FragmentMerger`: each
-/// fragment's Ret-stripped opcodes are appended as ONE contiguous run, in
-/// fragment order (M6), which is what makes `TempStrategy::Recycle` sound
-/// here (M5) and what makes a prefix of the fragment list correspond to a
-/// prefix of the merged opcode stream -- the boundary `assemble_module`
-/// counts for the run-invariant flow prefix.
-pub(crate) fn concatenate_fragments_with_gf(
-    fragments: &[&PerVarBytecodes],
-    ctx_base: &ContextResourceCounts,
-    dedup: &GfDedup,
-    gf_index_base: usize,
-) -> Result<ConcatenatedBytecodes, String> {
-    // Fragments are appended whole and in order below, so no two fragments'
-    // temp uses interleave and they may share slots by identity (M5).
-    // `combine_scc_fragment`, which interleaves per-element segments, uses the
-    // disjoint `Sum` path instead.
-    let mut merger = FragmentMerger::new_with_temp_strategy(ctx_base, TempStrategy::Recycle);
-    let mut merged_code: Vec<SymbolicOpcode> = Vec::new();
-
-    for (i, frag) in fragments.iter().enumerate() {
-        // Only the flat resources are merged here; GF numbering comes from
-        // the shared `dedup` so it is coherent across phases.
-        let off = merger.absorb_non_gf(frag)?;
-        renumber_fragment_code(
-            &frag.symbolic.code,
-            &off,
-            dedup.remap(gf_index_base + i),
-            &mut merged_code,
-        )?;
-    }
-
-    let mut concatenated = merger.into_concatenated(merged_code);
-    // The merger never touched GF (`absorb_non_gf`), so install the shared
-    // deduped table; every phase reports the same `graphical_functions`.
-    concatenated.graphical_functions = dedup.tables.clone();
-    Ok(concatenated)
+    let mut merger = FragmentMerger::new(TempStrategy::Recycle);
+    let bytecode = merger.concatenate(fragments)?;
+    let side = merger.into_side_channels();
+    Ok(ConcatenatedBytecodes {
+        bytecode,
+        graphical_functions: side.graphical_functions,
+        module_decls: side.module_decls,
+        static_views: side.static_views,
+        temp_offsets: side.temp_offsets,
+        temp_total_size: side.temp_total_size,
+        dim_lists: side.dim_lists,
+    })
 }
 
 fn checked_add_u8(base: u8, off: u8, label: &str) -> Result<u8, String> {
@@ -2410,10 +2253,10 @@ fn remap_gf(
 /// `TempId` (= `u8`), on any `u16` id past its type, or on a `base_gf` out of
 /// range for `gf_remap` (a corrupt fragment).
 ///
-/// There is no separate `temp_off > u8::MAX` precheck (#583): the plain-
-/// phase concat recycles temps into one identity pool whose `temp_off` is 0
-/// (or a small fixed `ctx_base.temps`), and `combine_scc_fragment` sums into
-/// a per-SCC range bounded by the members' (small) temp counts. A genuine
+/// There is no separate `temp_off > u8::MAX` precheck (#583): a module's
+/// programs recycle temps into one identity pool whose `temp_off` is 0, and
+/// `combine_scc_fragment` sums into a per-SCC range bounded by the members'
+/// (small) temp counts. A genuine
 /// per-opcode overflow -- a single variable bearing more than 255 temps, or
 /// an SCC summing past 255 -- is still caught loud by `checked_add_u8`,
 /// which adds the actual `temp_id` to the offset (the precheck only saw the
@@ -2421,9 +2264,8 @@ fn remap_gf(
 ///
 /// The `u16` adds are belt-and-braces alongside `absorb_non_gf`'s capacity
 /// check: that one bounds the merged TABLE, this one bounds the id an
-/// individual opcode carries, and a caller can reach this function with a base
-/// the merger did not compute (`assemble_module`'s per-initial renumber loop
-/// tracks its own running offsets).
+/// individual opcode carries. Every production base comes from the merger; the
+/// add stays checked so a caller with a hand-computed base could not wrap one.
 pub(crate) fn renumber_opcode(
     op: &SymbolicOpcode,
     lit_off: u16,
@@ -2436,7 +2278,7 @@ pub(crate) fn renumber_opcode(
     // A `temp_off` that itself exceeds u8 can only arise from the `Sum` path
     // (interleaved SCC) summing past 255 temps; `checked_add_u8` below
     // surfaces it loud when the first temp opcode is renumbered. The
-    // recycle path's `temp_off` is always a small fixed base.
+    // recycle path's `temp_off` is always 0.
     let temp_off_u8 = u8::try_from(temp_off).map_err(|_| {
         format!(
             "temp offset {} exceeds TempId capacity (u8::MAX = {})",
@@ -3695,12 +3537,35 @@ mod tests {
         assert!(renumber_opcode(&op, 0, &[255], 0, 0, 0, 0).is_ok());
     }
 
-    // ====================================================================
-    // concatenate_fragments with base offsets (fix #1)
-    // ====================================================================
+    /// A fragment carrying `n` module declarations and nothing else.
+    fn module_decls_frag(n: usize) -> PerVarBytecodes {
+        PerVarBytecodes {
+            symbolic: SymbolicByteCode {
+                literals: vec![],
+                code: (0..n)
+                    .map(|i| SymbolicOpcode::EvalModule {
+                        id: i as ModuleId,
+                        n_inputs: 0,
+                    })
+                    .chain(std::iter::once(SymbolicOpcode::Ret))
+                    .collect(),
+            },
+            graphical_functions: vec![],
+            module_decls: (0..n)
+                .map(|i| SymbolicModuleDecl {
+                    model_name: Ident::new(&format!("sub{i}")),
+                    input_set: BTreeSet::new(),
+                    var: SymVarRef::new(Ident::new("m"), i),
+                })
+                .collect(),
+            static_views: vec![],
+            temp_sizes: vec![],
+            dim_lists: vec![],
+        }
+    }
 
     #[test]
-    fn test_concatenate_with_base_offsets() {
+    fn test_gf_ids_are_independent_of_the_flat_tables() {
         // Fragment A has 1 GF and its opcode references GF 0
         let frag_a = PerVarBytecodes {
             symbolic: SymbolicByteCode {
@@ -3744,105 +3609,44 @@ mod tests {
         // The two fragments carry DIFFERENT GF content, so they stay
         // distinct: frag_a's GF at 0, frag_b's at 1 (#582 dedup is
         // value-exact -- different content never collides).
-        let no_base = ContextResourceCounts::default();
-        let merged_no_base = concatenate_fragments(&[&frag_a, &frag_b], &no_base).unwrap();
-        assert_eq!(merged_no_base.graphical_functions.len(), 2);
-        match &merged_no_base.bytecode.code[0] {
+        let merged = concatenate_fragments(&[&frag_a, &frag_b]).unwrap();
+        assert_eq!(merged.graphical_functions.len(), 2);
+        match &merged.bytecode.code[0] {
             SymbolicOpcode::Lookup { base_gf, .. } => assert_eq!(*base_gf, 0),
             other => panic!("expected Lookup, got {:?}", other),
         }
-        match &merged_no_base.bytecode.code[1] {
+        match &merged.bytecode.code[1] {
             SymbolicOpcode::Lookup { base_gf, .. } => assert_eq!(*base_gf, 1),
             other => panic!("expected Lookup, got {:?}", other),
         }
 
-        // GF numbering is INDEPENDENT of the (now GF-free) non-GF
-        // `ctx_base` -- graphical functions are content-de-duplicated and
-        // globally remapped, not flat-offset by a preceding-phase count
-        // (#582). A non-default non-GF base (e.g. 5 preceding modules) must
-        // NOT shift the GF indices.
-        let base = ContextResourceCounts {
-            modules: 5,
-            ..ContextResourceCounts::default()
-        };
-        let merged_with_base = concatenate_fragments(&[&frag_a, &frag_b], &base).unwrap();
-        match &merged_with_base.bytecode.code[0] {
+        // GF numbering is INDEPENDENT of the flat tables already merged --
+        // graphical functions are content-de-duplicated and remapped, not
+        // flat-offset by a preceding program's counts (#582). Five module
+        // declarations absorbed by an earlier program of the same module must
+        // NOT shift the next program's GF indices.
+        let mut merger = FragmentMerger::new(TempStrategy::Recycle);
+        merger.concatenate(&[&module_decls_frag(5)]).unwrap();
+        let later = merger.concatenate(&[&frag_a, &frag_b]).unwrap();
+        match &later.code[0] {
             SymbolicOpcode::Lookup { base_gf, .. } => assert_eq!(*base_gf, 0),
             other => panic!("expected Lookup, got {:?}", other),
         }
-        match &merged_with_base.bytecode.code[1] {
+        match &later.code[1] {
             SymbolicOpcode::Lookup { base_gf, .. } => assert_eq!(*base_gf, 1),
             other => panic!("expected Lookup, got {:?}", other),
         }
-    }
-
-    #[test]
-    fn test_resource_counts_from_fragments() {
-        let frag = PerVarBytecodes {
-            symbolic: SymbolicByteCode {
-                literals: vec![1.0, 2.0, 3.0],
-                code: vec![SymbolicOpcode::Ret],
-            },
-            // GF count is NOT a `ContextResourceCounts` field anymore (#582
-            // dedup), so a GF here must not affect the flat counts below.
-            graphical_functions: vec![vec![(0.0, 1.0)], vec![(1.0, 2.0)]],
-            module_decls: vec![],
-            static_views: vec![],
-            temp_sizes: vec![(0, 4), (1, 8)],
-            dim_lists: vec![vec![1, 2]],
-        };
-
-        let counts = ContextResourceCounts::from_fragments(&[&frag]);
-        assert_eq!(counts.modules, 0);
-        assert_eq!(counts.views, 0);
-        assert_eq!(counts.temps, 2);
-        assert_eq!(counts.dim_lists, 1);
-    }
-
-    #[test]
-    fn test_resource_counts_sums_temps_across_fragments() {
-        // Each fragment starts temps at 0; the total should be the sum,
-        // not the max. Two fragments with temp_sizes [(0, 4)] each should
-        // produce temps=2 (one slot per fragment), not temps=1 (max(0+1, 0+1)).
-        let frag_a = PerVarBytecodes {
-            symbolic: SymbolicByteCode {
-                literals: vec![],
-                code: vec![SymbolicOpcode::Ret],
-            },
-            graphical_functions: vec![],
-            module_decls: vec![],
-            static_views: vec![],
-            temp_sizes: vec![(0, 4)],
-            dim_lists: vec![],
-        };
-        let frag_b = PerVarBytecodes {
-            symbolic: SymbolicByteCode {
-                literals: vec![],
-                code: vec![SymbolicOpcode::Ret],
-            },
-            graphical_functions: vec![],
-            module_decls: vec![],
-            static_views: vec![],
-            temp_sizes: vec![(0, 4)],
-            dim_lists: vec![],
-        };
-
-        let counts = ContextResourceCounts::from_fragments(&[&frag_a, &frag_b]);
-        assert_eq!(
-            counts.temps, 2,
-            "temps should be sum of per-fragment counts, not max"
-        );
     }
 
     #[test]
     fn test_concatenate_renumbers_static_view_temp_base() {
         // A static view whose base is a temp must be renumbered by the SAME
-        // temp offset the recycle assigns the temp it points at. #583: the
-        // plain-phase concat RECYCLES temps into one identity pool, so two
+        // temp offset the merger assigns the temp it points at. #583: a
+        // module's programs RECYCLE temps into one identity pool, so two
         // fragments' id-0 temps share slot 0 -- a `Temp(0)` static view base
         // stays `Temp(0)` (it tracks the recycled slot, NOT a per-fragment
-        // sum). The view base shifts only by the fixed `ctx_base.temps`
-        // recycle base, which is exercised below.
+        // sum). Under `Sum` the base moves with the fragment's temps, which is
+        // exercised below.
         let frag_a = PerVarBytecodes {
             symbolic: SymbolicByteCode {
                 literals: vec![],
@@ -3873,11 +3677,10 @@ mod tests {
             dim_lists: vec![],
         };
 
-        // With the production plain-phase base (temps == 0), frag_b's Temp(0)
-        // recycles to slot 0 -- the same slot frag_a's temp 0 occupies (max
-        // size 8). The view base must stay Temp(0).
-        let no_base = ContextResourceCounts::default();
-        let merged = concatenate_fragments(&[&frag_a, &frag_b], &no_base).unwrap();
+        // Under `Recycle`, frag_b's Temp(0) recycles to slot 0 -- the same slot
+        // frag_a's temp 0 occupies (max size 8). The view base must stay
+        // Temp(0).
+        let merged = concatenate_fragments(&[&frag_a, &frag_b]).unwrap();
         assert_eq!(merged.static_views.len(), 1);
         match &merged.static_views[0].base {
             SymStaticViewBase::Temp(id) => assert_eq!(
@@ -3892,19 +3695,22 @@ mod tests {
             "both fragments' id-0 temps recycle to one slot"
         );
 
-        // A non-zero fixed recycle base (the `ctx_base.temps`) shifts every
-        // fragment's temp ids -- including a static view's Temp base -- by
-        // that base uniformly, proving the Temp-base renumber tracks the
-        // recycle base (not a per-fragment running sum).
-        let based = ContextResourceCounts {
-            temps: 3,
-            ..ContextResourceCounts::default()
-        };
-        let merged_based = concatenate_fragments(&[&frag_a, &frag_b], &based).unwrap();
-        match &merged_based.static_views[0].base {
+        // Under `Sum` -- the interleaving emitter's strategy -- frag_b's temp
+        // follows frag_a's one slot, and its view's Temp base moves with it:
+        // the base is renumbered by the same per-fragment offset as the
+        // fragment's temp opcodes, whichever strategy sets that offset.
+        let mut merger = FragmentMerger::new(TempStrategy::Sum);
+        merger.concatenate(&[&frag_a, &frag_b]).unwrap();
+        let summed = merger.into_side_channels();
+        assert_eq!(
+            summed.temp_offsets.len(),
+            2,
+            "Sum gives the two fragments disjoint slots"
+        );
+        match &summed.static_views[0].base {
             SymStaticViewBase::Temp(id) => assert_eq!(
-                *id, 3,
-                "Temp(0) view base shifts by the fixed ctx_base.temps recycle base"
+                *id, 1,
+                "Temp(0) view base follows frag_a's one temp under Sum"
             ),
             other => panic!("expected Temp base, got {:?}", other),
         }
@@ -3974,14 +3780,12 @@ mod tests {
         };
 
         // frag_a is a temp-bearing fragment; frag_b carries the VectorElmMap.
-        // #583: the plain-phase concat RECYCLES temps into one identity pool,
-        // so frag_b's id-0 write_temp_id recycles to slot 0 (not summed past
-        // frag_a's temps). To keep this test's renumber NON-trivial -- so the
-        // `full_source_len` survival assertion is load-bearing -- we drive
-        // the concat with a fixed non-zero `ctx_base.temps` recycle base
-        // (TEMP_BASE), which shifts every fragment's temp ids uniformly: a
-        // legitimate exercise of the recycle renumber arithmetic.
-        const TEMP_BASE: u32 = 2;
+        // #583: a module's programs RECYCLE temps into one identity pool, so
+        // under `Recycle` frag_b's id-0 write_temp_id would stay 0 and the
+        // renumber would be the identity. To keep this test's renumber
+        // NON-trivial -- so the `full_source_len` survival assertion is
+        // load-bearing -- the merge runs under `Sum`, the interleaving
+        // emitter's strategy, which places frag_b's temp past frag_a's two.
         let frag_a = PerVarBytecodes {
             symbolic: SymbolicByteCode {
                 literals: vec![],
@@ -4005,16 +3809,13 @@ mod tests {
             dim_lists: vec![],
         };
 
-        let based = ContextResourceCounts {
-            temps: TEMP_BASE,
-            ..ContextResourceCounts::default()
-        };
-        let merged = concatenate_fragments(&[&frag_a, &frag_b], &based).unwrap();
+        let mut merger = FragmentMerger::new(TempStrategy::Sum);
+        let merged = merger.concatenate(&[&frag_a, &frag_b]).unwrap();
 
         // Resolve to concrete bytecode against an empty layout: the
         // VectorElmMap opcode carries no variable reference.
         let empty_layout = VariableLayout::new(HashMap::new(), 0);
-        let resolved = resolve_bytecode(&merged.bytecode, &empty_layout).unwrap();
+        let resolved = resolve_bytecode(&merged, &empty_layout).unwrap();
 
         let elm_map = resolved
             .code
@@ -4029,13 +3830,13 @@ mod tests {
             .expect("merged+resolved bytecode should contain a VectorElmMap opcode");
 
         // The merge path actually ran a non-trivial renumber on this opcode:
-        // the fixed recycle base TEMP_BASE shifts frag_b's write_temp_id 0 to
-        // TEMP_BASE. (If this were 0, the merger never renumbered the opcode
-        // and the full_source_len assertion below would prove nothing.)
+        // `Sum` places frag_b's write_temp_id 0 past frag_a's two temps. (If
+        // this were 0, the merger never renumbered the opcode and the
+        // full_source_len assertion below would prove nothing.)
         assert_eq!(
-            elm_map.0, TEMP_BASE as u8,
-            "write_temp_id must be offset by the fixed recycle base, proving \
-             the fragment merger renumbered this opcode"
+            elm_map.0, 2,
+            "write_temp_id must be offset past frag_a's temps, proving the \
+             fragment merger renumbered this opcode"
         );
         // The invariant: full_source_len is absolute, not renumbered. It must
         // survive concatenate/renumber -> resolve unchanged even
@@ -4062,10 +3863,10 @@ mod tests {
     // program runs and returns different numbers, with no diagnostic anywhere.
     //
     // The bound is EXACT in both directions -- a table of 65,536 entries is
-    // addressable, 65,537 is not -- and the tests below say so at each of the
-    // three places a base is computed, because the first fix stated it once per
-    // place and the three disagreed: the cross-phase and initials-phase
-    // narrowings rejected a count of exactly 65,536 that the merger accepts.
+    // addressable, 65,537 is not -- and the tests below say so at each surface
+    // that reaches it: within one program, across the programs of a module, and
+    // through a standalone program. Stating it at every surface is what keeps a
+    // surface from carrying its own, different boundary.
     // ====================================================================
 
     /// A fragment carrying `n` literals and nothing else.
@@ -4091,7 +3892,7 @@ mod tests {
         let cap = u16::MAX as usize + 1;
         let a = literal_pool_frag(cap - 1);
         let b = literal_pool_frag(4);
-        let err = concatenate_fragments(&[&a, &b], &ContextResourceCounts::default())
+        let err = concatenate_fragments(&[&a, &b])
             .expect_err("a literal pool past u16 capacity must be reported, not wrapped");
         assert!(
             err.contains("literal") && err.contains("16-bit"),
@@ -4101,7 +3902,7 @@ mod tests {
         // ...and one entry less is still fine, so the bound is exact rather than
         // conservative.
         let c = literal_pool_frag(1);
-        concatenate_fragments(&[&a, &c], &ContextResourceCounts::default())
+        concatenate_fragments(&[&a, &c])
             .expect("a pool of exactly u16::MAX + 1 literals is addressable");
 
         // A fragment carrying NONE of the resource is exempt even at a full
@@ -4119,7 +3920,7 @@ mod tests {
             temp_sizes: vec![],
             dim_lists: vec![],
         };
-        concatenate_fragments(&[&a, &c, &empty], &ContextResourceCounts::default())
+        concatenate_fragments(&[&a, &c, &empty])
             .expect("a fragment with no literals must not be bounded by a full pool");
     }
 
@@ -4144,37 +3945,31 @@ mod tests {
         }
     }
 
-    /// The same bound, one level up: across PHASES, where the base is a
-    /// preceding phase's count rather than a running merged length.
+    /// The same bound, one level up: across the PROGRAMS of a module, where a
+    /// later program's base is the table length the earlier programs left.
     ///
-    /// The literal pool cannot reach this path -- literals are phase-local, so
-    /// their `ctx_base` is always 0 -- which is why the exactness the test above
-    /// pins did not extend to the three resources that DO carry a `ctx_base`.
-    /// Those went through a separate narrowing (`ContextResourceCounts` held
-    /// `u16` fields and `assemble_module` summed them with a checked add), and
-    /// that narrowing rejected a count of exactly `U16_ID_CAPACITY` outright --
-    /// disagreeing with `resource_base`, which accepts a table of exactly that
-    /// size because every id in it is `<= u16::MAX`. A model whose initials
-    /// filled the table and whose flows and stocks then named no dim list at all
-    /// was rejected with every one of its ids valid.
+    /// The literal pool cannot reach this path -- it is per program, so it
+    /// always restarts at 0 -- which is why the exactness
+    /// `literal_pool_past_u16_capacity_fails_loud` pins is restated here for a
+    /// table that DOES span programs: filling it exactly is legal, a following
+    /// program that names none of the resource is exempt, and one that names a
+    /// single entry past the end is reported.
     #[test]
-    fn a_full_ctx_base_bounds_only_the_phases_that_use_it() {
+    fn a_full_table_bounds_only_the_programs_that_name_it() {
         let cap = U16_ID_CAPACITY;
         let full = dim_list_frag(cap);
         let one = dim_list_frag(1);
         let none = dim_list_frag(0);
 
-        // A phase count is just a count: filling the table exactly is legal, and
-        // saying so is not the same as handing out an id past the end.
-        let at_capacity = ContextResourceCounts::from_fragments(&[&full]);
-        assert_eq!(at_capacity.dim_lists, cap);
-
-        // A following phase that names no dim list assigns no id, so it merges.
-        concatenate_fragments(&[&none], &at_capacity)
-            .expect("a phase carrying no dim lists is not bounded by a full table");
-
-        // One that names even a single dim list would need id 65,536.
-        let err = concatenate_fragments(&[&one], &at_capacity)
+        let mut merger = FragmentMerger::new(TempStrategy::Recycle);
+        merger
+            .concatenate(&[&full])
+            .expect("a program filling the dim-list table exactly is addressable");
+        merger
+            .concatenate(&[&none])
+            .expect("a program naming no dim list is not bounded by a full table");
+        let err = merger
+            .concatenate(&[&one])
             .expect_err("a dim list id past u16 capacity must be reported, not wrapped");
         assert!(
             err.contains("dimension list") && err.contains("16-bit"),
@@ -4182,53 +3977,41 @@ mod tests {
         );
 
         // ...and the bound is exact from below: one entry short of capacity, the
-        // following phase's single entry is id 65,535 and merges.
-        let nearly = ContextResourceCounts::from_fragments(&[&dim_list_frag(cap - 1)]);
-        concatenate_fragments(&[&one], &nearly)
+        // following program's single entry is id 65,535 and merges.
+        let mut merger = FragmentMerger::new(TempStrategy::Recycle);
+        merger
+            .concatenate(&[&dim_list_frag(cap - 1)])
+            .expect("one short of capacity");
+        merger
+            .concatenate(&[&one])
             .expect("the last addressable dim list id (u16::MAX) must merge");
 
-        // The same exactness within one phase's merged table, so the two halves
-        // of the bound are stated against the same resource.
-        concatenate_fragments(
-            &[&dim_list_frag(cap - 1), &one],
-            &ContextResourceCounts::default(),
-        )
-        .expect("a merged table of exactly u16::MAX + 1 dim lists is addressable");
-        concatenate_fragments(&[&full, &one], &ContextResourceCounts::default())
+        // The same exactness within one program's merged table, so the two
+        // halves of the bound are stated against the same resource.
+        concatenate_fragments(&[&dim_list_frag(cap - 1), &one])
+            .expect("a merged table of exactly u16::MAX + 1 dim lists is addressable");
+        concatenate_fragments(&[&full, &one])
             .expect_err("one dim list past a full merged table must be reported");
-        concatenate_fragments(&[&full, &none], &ContextResourceCounts::default())
+        concatenate_fragments(&[&full, &none])
             .expect("a fragment with no dim lists must not be bounded by a full table");
     }
 
-    /// The initials phase tracks its own running offsets rather than going
-    /// through the merger (each initial keeps its own bytecode, so each is
-    /// renumbered at literal offset 0), and it has to agree with the merger
-    /// about where the table ends.
-    ///
-    /// It did not: it narrowed each initial's count and its running total to
-    /// `u16` eagerly, so an initials list that filled the table exactly was
-    /// rejected the moment the LAST initial's count was folded in -- with
-    /// nothing left to assign an id to.
+    /// A standalone program extends the module tables through the same
+    /// absorption a concatenation does, so it shares the bound exactly: an
+    /// initial that fills the dim-list table is addressable, a following one
+    /// naming no dim list is exempt, and one needing id 65,536 is reported.
     #[test]
-    fn the_initials_phase_shares_the_mergers_capacity_bound() {
+    fn a_standalone_program_shares_the_tables_bound() {
         let cap = U16_ID_CAPACITY;
-        let full = dim_list_frag(cap);
-        let one = dim_list_frag(1);
-        let none = dim_list_frag(0);
-
-        let run = |frags: &[&PerVarBytecodes]| -> Result<(), String> {
-            let dedup = GfDedup::build(frags)?;
-            let named: Vec<(String, &PerVarBytecodes)> = frags
-                .iter()
-                .enumerate()
-                .map(|(i, f)| (format!("init{i}"), *f))
-                .collect();
-            crate::db::renumber_initials_phase(&named, &dedup).map(|_| ())
-        };
-
-        run(&[&full]).expect("initials that fill the dim-list table exactly are addressable");
-        run(&[&full, &none]).expect("an initial naming no dim list is not bounded by a full table");
-        let err = run(&[&full, &one])
+        let mut merger = FragmentMerger::new(TempStrategy::Recycle);
+        merger
+            .standalone_program(&dim_list_frag(cap))
+            .expect("initials that fill the dim-list table exactly are addressable");
+        merger
+            .standalone_program(&dim_list_frag(0))
+            .expect("an initial naming no dim list is not bounded by a full table");
+        let err = merger
+            .standalone_program(&dim_list_frag(1))
             .expect_err("an initial needing dim list id 65,536 must be reported");
         assert!(
             err.contains("dimension list") && err.contains("16-bit"),
@@ -4236,43 +4019,50 @@ mod tests {
         );
     }
 
-    /// The all-phases aggregation of the shared context tables must NOT bound
-    /// the model's literal count, because it retains no literal pool.
-    ///
-    /// Each compiled initial keeps its own pool and the flows and stocks phases
-    /// keep one each; the aggregation exists only for the module-decl /
-    /// static-view / temp / dim-list tables those three phases' ids index. A
-    /// full merge over every fragment additionally built a literal pool spanning
-    /// the whole model and threw it away -- but not before `resource_base`
-    /// bounded it, so a model whose every RETAINED pool was comfortably
-    /// addressable stopped assembling once the three summed past capacity.
+    /// Literal pools are per program. Each initial keeps its own pool and the
+    /// flows and stocks keep one each, so only a single program's pool is
+    /// bounded: a module whose pools each fit assembles even when they would
+    /// not fit as one.
     #[test]
-    fn the_all_phases_aggregation_does_not_bound_the_literal_pool() {
+    fn literal_pools_are_per_program() {
         let cap = U16_ID_CAPACITY;
-        // Two fragments that together overrun the literal id space.
         let full = literal_pool_frag(cap);
         let one = literal_pool_frag(1);
-        let frags = [&full, &one];
-        let dedup = GfDedup::build(&frags).expect("no GFs to dedup");
 
-        // Merging them into ONE stream assigns literal id 65,536 and is an
-        // error -- that pool would be retained, so the bound is right.
-        let err =
-            concatenate_fragments_with_gf(&frags, &ContextResourceCounts::default(), &dedup, 0)
-                .expect_err("a retained pool past capacity must be reported");
+        // Merged into ONE program they assign literal id 65,536 -- that pool
+        // would be retained, so the bound is right.
+        let err = concatenate_fragments(&[&full, &one])
+            .expect_err("a retained pool past capacity must be reported");
         assert!(
             err.contains("literal") && err.contains("16-bit"),
             "expected a loud literal-capacity error, got: {err}"
         );
 
-        // Aggregating their context side-channels assigns no literal id at all,
-        // so the same fragments are fine.
-        let side = merge_context_side_channels(&frags, &ContextResourceCounts::default(), &dedup)
-            .expect("the side-channel aggregation must not be bounded by a literal pool");
+        // As two programs of one module each pool starts at 0 and both fit.
+        let mut merger = FragmentMerger::new(TempStrategy::Recycle);
+        let first = merger
+            .concatenate(&[&full])
+            .expect("a pool of exactly u16::MAX + 1 literals is addressable");
+        let second = merger
+            .concatenate(&[&one])
+            .expect("the next program's pool starts at literal id 0");
+        assert_eq!(first.literals.len(), cap);
+        assert_eq!(second.literals.len(), 1);
         assert!(
-            side.module_decls.is_empty() && side.static_views.is_empty(),
-            "these fragments carry no context resources; only literals"
+            matches!(second.code[0], SymbolicOpcode::LoadConstant { id: 0 }),
+            "the second program's literal ids start at 0: {:?}",
+            second.code[0]
         );
+
+        // Standalone programs likewise.
+        let mut merger = FragmentMerger::new(TempStrategy::Recycle);
+        merger
+            .standalone_program(&full)
+            .expect("an initial's own pool may fill the table");
+        let next = merger
+            .standalone_program(&one)
+            .expect("the next initial's pool starts at literal id 0");
+        assert_eq!(next.literals.len(), 1);
     }
 
     /// The same property end-to-end, through `assemble_module` on a real model,
@@ -4330,10 +4120,9 @@ mod tests {
         }
     }
 
-    /// M3 for the per-opcode add. `renumber_opcode` can be reached with a base the
-    /// merger did not compute -- `assemble_module`'s per-initial loop tracks its
-    /// own running module / view / dim-list offsets -- so the add is checked there
-    /// too rather than relying on the merger's table bound alone.
+    /// M3 for the per-opcode add: `renumber_opcode` checks it itself rather than
+    /// relying on the merger's table bound alone, so a base the merger did not
+    /// compute could not wrap an id.
     #[test]
     fn renumber_opcode_u16_addition_overflow_is_loud() {
         let cases: Vec<(SymbolicOpcode, &str, [u16; 4])> = vec![
@@ -4524,8 +4313,7 @@ mod tests {
         // two copies of table_b dedup to one slot.
         let shares_b = gf_lookup_frag(table_b.clone());
 
-        let no_base = ContextResourceCounts::default();
-        let merged = concatenate_fragments(&[&two_blocks, &shares_b], &no_base).unwrap();
+        let merged = concatenate_fragments(&[&two_blocks, &shares_b]).unwrap();
 
         assert_eq!(
             merged.graphical_functions.len(),
@@ -4565,8 +4353,7 @@ mod tests {
             (0..300).map(|_| gf_lookup_frag(shared.clone())).collect();
         let refs: Vec<&PerVarBytecodes> = frags.iter().collect();
 
-        let no_base = ContextResourceCounts::default();
-        let merged = concatenate_fragments(&refs, &no_base)
+        let merged = concatenate_fragments(&refs)
             .expect("identical GF tables must de-duplicate, not overflow u8");
 
         assert_eq!(
@@ -4606,8 +4393,7 @@ mod tests {
         let frag_b = gf_lookup_frag(content_b.clone());
         let frag_c = gf_lookup_frag(content_ac.clone());
 
-        let no_base = ContextResourceCounts::default();
-        let merged = concatenate_fragments(&[&frag_a, &frag_b, &frag_c], &no_base).unwrap();
+        let merged = concatenate_fragments(&[&frag_a, &frag_b, &frag_c]).unwrap();
 
         assert_eq!(
             merged.graphical_functions.len(),
@@ -4675,8 +4461,7 @@ mod tests {
         let fb = arrayed_frag(list_xy.clone());
         let fc = arrayed_frag(list_z.clone());
 
-        let no_base = ContextResourceCounts::default();
-        let merged = concatenate_fragments(&[&fa, &fb, &fc], &no_base).unwrap();
+        let merged = concatenate_fragments(&[&fa, &fb, &fc]).unwrap();
 
         // list_xy (shared by fa, fb) + list_z (fc) = 2 distinct 3-table
         // runs = 6 tables, NOT the pre-fix 9.
@@ -4748,8 +4533,7 @@ mod tests {
         // shift, so the relocation is actually exercised.
         let prefix = gf_lookup_frag(vec![(5.0, 5.0)]);
 
-        let no_base = ContextResourceCounts::default();
-        let merged = concatenate_fragments(&[&prefix, &overlap_frag], &no_base)
+        let merged = concatenate_fragments(&[&prefix, &overlap_frag])
             .expect("overlapping element/whole-array refs must not be rejected");
 
         // prefix (1 table) + the 3-table arrayed list = 4 tables, none
@@ -4790,7 +4574,7 @@ mod tests {
     // #583, M5: the sequential concat shares temp slots by IDENTITY.
     //
     // A fragment's temps are 0-based scratch that dies at the end of that
-    // fragment's runlist segment, and `concatenate_fragments_with_gf` emits
+    // fragment's runlist segment, and `FragmentMerger::concatenate` emits
     // each fragment as one contiguous run, so no two fragments' temp uses
     // interleave and fragment A's temp 0 may occupy the same slot as fragment
     // B's temp 0 -- sized to the MAX of its users, since each of them holds it
@@ -4843,8 +4627,7 @@ mod tests {
         let frag_c = sort_order_temp_frag(0, 2);
         let refs: Vec<&PerVarBytecodes> = vec![&frag_a, &frag_b, &frag_c];
 
-        let no_base = ContextResourceCounts::default();
-        let merged = concatenate_fragments(&refs, &no_base).unwrap();
+        let merged = concatenate_fragments(&refs).unwrap();
 
         assert_eq!(
             merged.temp_offsets.len(),
@@ -4897,7 +4680,7 @@ mod tests {
         let frag_b = sort_order_temp_frag(0, 8);
         let refs: Vec<&PerVarBytecodes> = vec![&frag_a, &frag_b];
 
-        let merged = concatenate_fragments(&refs, &ContextResourceCounts::default()).unwrap();
+        let merged = concatenate_fragments(&refs).unwrap();
         assert_eq!(
             merged.temp_offsets.len(),
             2,
@@ -4925,31 +4708,24 @@ mod tests {
     }
 
     #[test]
-    fn test_concatenate_temp_recycle_agrees_across_phase_bases() {
-        // The all-phases `merged` (no_base) and a later phase's concat (with
-        // a non-zero non-temp ctx_base, as `flow_base`/`stock_base` carry)
-        // must assign the SAME identity temp ids to the same fragment temps,
-        // because temps recycle into ONE global identity pool whose ctx_base
-        // temps offset is 0 for every phase. (Before #583 the per-phase
-        // ctx_base.temps was re-added per fragment, so `flows_concat` and
-        // `merged` disagreed -- the runtime OOB.)
+    fn test_temps_recycle_to_one_pool_across_a_modules_programs() {
+        // Every program of a module shares ONE identity temp pool: the same
+        // fragment temp gets the same slot whether it is merged into the first
+        // program or into a later one whose flat tables already hold entries,
+        // and the module's pool is one slot wide. (A per-program partition of
+        // the pool would drive the renumbered `temp_id` past `u8::MAX` on a
+        // large model and make a later program index temp storage the tables
+        // do not describe -- #583.)
         let frag = sort_order_temp_frag(0, 4);
-        let refs: Vec<&PerVarBytecodes> = vec![&frag];
+        let mut merger = FragmentMerger::new(TempStrategy::Recycle);
+        let first = merger
+            .concatenate(&[&frag, &dim_list_frag(2), &module_decls_frag(3)])
+            .unwrap();
+        let later = merger.concatenate(&[&frag]).unwrap();
+        let tables = merger.into_side_channels();
 
-        let merged = concatenate_fragments(&refs, &ContextResourceCounts::default()).unwrap();
-        // A phase base with preceding modules/views/dim_lists but temps left
-        // to recycle globally (temps: 0).
-        let phase_base = ContextResourceCounts {
-            modules: 5,
-            views: 3,
-            temps: 0,
-            dim_lists: 2,
-        };
-        let phase = concatenate_fragments(&refs, &phase_base).unwrap();
-
-        let temp_write = |bc: &ConcatenatedBytecodes| -> TempId {
-            bc.bytecode
-                .code
+        let temp_write = |bc: &SymbolicByteCode| -> TempId {
+            bc.code
                 .iter()
                 .find_map(|op| match op {
                     SymbolicOpcode::VectorSortOrder { write_temp_id } => Some(*write_temp_id),
@@ -4958,12 +4734,16 @@ mod tests {
                 .expect("a VectorSortOrder opcode")
         };
         assert_eq!(
-            temp_write(&merged),
-            temp_write(&phase),
-            "the same fragment temp must get the same identity id in the \
-             all-phases merge and a phase concat (temps recycle globally)"
+            temp_write(&first),
+            temp_write(&later),
+            "the same fragment temp must get the same identity id in every program of the module"
         );
-        assert_eq!(temp_write(&merged), 0, "identity recycle keeps id 0");
+        assert_eq!(temp_write(&later), 0, "identity recycle keeps id 0");
+        assert_eq!(
+            tables.temp_offsets.len(),
+            1,
+            "the module's temp pool is one slot wide, not one slot per program"
+        );
     }
 
     #[test]
@@ -4977,7 +4757,7 @@ mod tests {
             .map(|i| gf_lookup_frag(vec![(0.0, i as f64), (1.0, (i + 1) as f64)]))
             .collect();
         let refs: Vec<&PerVarBytecodes> = frags.iter().collect();
-        let err = concatenate_fragments(&refs, &ContextResourceCounts::default())
+        let err = concatenate_fragments(&refs)
             .expect_err("300 genuinely-distinct GF tables exceed u8 capacity");
         assert!(
             err.contains("distinct graphical function count")

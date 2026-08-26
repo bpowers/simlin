@@ -11256,8 +11256,8 @@ fn clearn_ltm_slot_maxima_digest() {
     let results = vm.into_results();
 
     // Which result slots belong to LTM. `Results::offsets` is one entry per
-    // VARIABLE and carries no extent -- `calc_flattened_offsets_incremental`
-    // computes a size but `CompiledSimulation` drops it -- so reading one slot
+    // VARIABLE and carries no extent -- `flattened_offsets` keys an arrayed LTM
+    // score once, at its base slot -- so reading one slot
     // per entry would sample only the FIRST element of every arrayed score. On
     // C-LEARN that is ~7,000 of 21,045 LTM slots across 1,088 arrayed
     // variables, and a regression in any later element would leave every pinned

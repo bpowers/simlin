@@ -1721,8 +1721,9 @@ fn test_incremental_compile_implicit_lookup_dep_tables() {
 #[test]
 fn test_implicit_module_offsets_in_flattened_map() {
     // SMOOTH creates implicit MODULE variables whose sub-models contain
-    // multiple slots.  calc_flattened_offsets_incremental must account for
-    // the full sub-model size, not just 1 slot per implicit var.
+    // multiple slots. The results-offset map must place every variable laid
+    // out after the implicit module past the sub-model's full slot count, not
+    // one slot per implicit var.
     let project = datamodel::Project {
         name: "smooth_offsets".to_string(),
         sim_specs: datamodel::SimSpecs {
@@ -1798,28 +1799,20 @@ fn test_implicit_module_offsets_in_flattened_map() {
     let compiled = compile_project_incremental(&db, sync.project, "main")
         .expect("SMOOTH model should compile incrementally");
 
-    // The flattened offsets should match the layout: implicit MODULE vars
-    // must occupy their sub-model's full slot count. `calc_flattened_offsets`
-    // is computed as root (it reserves the implicit-global slots), so compare
-    // against the root-shifted layout -- the SAME final layout
-    // `assemble_module`'s root path resolves against (the lockstep guarantee).
+    // The results-offset map is the root-shifted layout -- the SAME final
+    // layout `assemble_module`'s root path resolves against -- so `trailing`,
+    // laid out after the SMTH3 instance, must sit at its layout slot and every
+    // key must address a real slot.
     let layout = compute_layout(&db, sync.models["main"].source, sync.project).root_shifted();
-    let offsets = calc_flattened_offsets_incremental(&db, sync.project, "main", true);
-
-    // The total size from offsets should equal the layout's n_slots.
-    let offsets_total: usize = if offsets.is_empty() {
-        0
-    } else {
-        offsets
-            .values()
-            .map(|(off, size)| off + size)
-            .max()
-            .unwrap_or(0)
-    };
+    let offsets = flattened_offsets(&db, sync.project, sync.models["main"].source);
     assert_eq!(
-        offsets_total, layout.n_slots,
-        "flattened offsets total ({offsets_total}) must match layout n_slots ({})",
-        layout.n_slots
+        offsets.get(&crate::common::Ident::new("trailing")),
+        Some(&layout.get("trailing").expect("trailing").offset),
+        "`trailing` must be keyed at its layout slot, past the implicit module's slots"
+    );
+    assert!(
+        offsets.values().all(|off| *off < layout.n_slots),
+        "every results key addresses a slot of the root layout"
     );
 
     // Verify the simulation runs and produces correct results.

@@ -290,7 +290,7 @@ pub struct ConveyorMeta {
     pub primary_dest_conveyor: Option<String>,
     /// Per-element subscript suffixes for an arrayed conveyor (§10), in the same
     /// row-major order the compiled offset map lays out an arrayed variable's
-    /// elements (`calc_flattened_offsets_incremental` via `SubscriptIterator`).
+    /// elements (`db::layout::flattened_offsets` via `SubscriptIterator`).
     /// Each entry is the canonical `elem1,elem2` suffix so
     /// [`resolve_plans`] can form the subscripted offset keys `name[elem]`. An
     /// arrayed conveyor is `N_elem` independent belts, one per element; this is
@@ -2358,7 +2358,7 @@ pub(crate) fn equation_dims(equation: &Equation) -> Vec<DimensionName> {
 /// [`Dimension`](crate::dimensions::Dimension) list (with element names), in
 /// declaration order, then enumerate the per-element subscript suffixes in the
 /// SAME row-major order the compiled offset map uses
-/// (`calc_flattened_offsets_incremental` drives its element keys off the identical
+/// (`db::layout::flattened_offsets` drives its element keys off the identical
 /// `SubscriptIterator`). Each returned suffix is the canonical `elem1,elem2`
 /// string. Returns an error if any dimension name is unknown in the project (an
 /// internal-consistency guard, §10). Shared by conveyors and queues (queue.md
@@ -2408,7 +2408,7 @@ pub(crate) fn n_elements(element_subscripts: &[String]) -> usize {
 /// Element-aware offset lookup into the compiled offset map: the bare `name`
 /// for a scalar conveyor/queue (`element_subscripts` empty), the subscripted
 /// `name[elem1,elem2]` key for element `e` of an arrayed one -- the same
-/// row-major keys `calc_flattened_offsets_incremental` lays out. Shared by
+/// row-major keys `db::layout::flattened_offsets` lays out. Shared by
 /// both `resolve_plans` flattenings (whose per-element `eoff` closures wrap
 /// it) and the coupling resolution in [`crate::queue_compile`].
 pub(crate) fn element_offset(
@@ -2449,7 +2449,7 @@ pub(crate) fn resolve_container_plans(
 /// simulation's offset map, flattening each arrayed conveyor into ONE
 /// [`ConveyorPlan`] per array element (§10). An arrayed variable's elements
 /// occupy contiguous slots keyed `name[elem1,elem2]` in the offset map
-/// (`calc_flattened_offsets_incremental`), so element `e` resolves via the
+/// (`db::layout::flattened_offsets`), so element `e` resolves via the
 /// subscripted key built from `meta.element_subscripts[e]`; a scalar conveyor
 /// resolves its bare name and yields a single plan (so the per-belt runtime pass
 /// is identical to before). Each meta's belts occupy a contiguous flattened-plan

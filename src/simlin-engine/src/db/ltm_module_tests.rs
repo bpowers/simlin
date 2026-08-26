@@ -1220,7 +1220,7 @@ fn module_pathway_truncation_still_compiles_and_simulates() {
         .expect("a pathway-truncated module must simulate to completion");
 }
 
-/// The results offsets map (`calc_flattened_offsets_incremental`, what
+/// The results offsets map (`flattened_offsets`, what
 /// `CompiledSimulation.offsets` / `Results.offsets` is built from) and the
 /// compiled layout (`compute_layout`, what `resolve_module` assigns bytecode
 /// slot offsets from) MUST agree on every variable's slot. If they diverge,
@@ -1228,14 +1228,12 @@ fn module_pathway_truncation_still_compiles_and_simulates() {
 /// variable's data -- silently.
 ///
 /// This is exercised with LTM enabled on a model containing a SMOOTH module:
-/// the module variable's size is computed by both functions independently
-/// (`compute_layout` uses the sub-model's `n_slots`; the offsets map sums its
-/// own recursive entries), and with LTM enabled the sub-model's layout
-/// includes LTM synthetic variables, which is where the two historically
-/// diverged.
+/// with LTM enabled the sub-model's layout includes LTM synthetic variables,
+/// so the module variable spans more than its stdlib template's slots and
+/// every variable laid out after it depends on that span.
 #[test]
 fn test_results_offsets_agree_with_layout_under_ltm() {
-    use crate::db::calc_flattened_offsets_incremental;
+    use crate::db::flattened_offsets;
     use salsa::Setter;
 
     let project = datamodel::Project {
@@ -1275,11 +1273,11 @@ fn test_results_offsets_agree_with_layout_under_ltm() {
     };
     source_project.set_ltm_enabled(&mut db).to(true);
 
-    let offsets = calc_flattened_offsets_incremental(&db, source_project, "main", true);
+    let offsets = flattened_offsets(&db, source_project, source_model);
     let layout = compute_layout(&db, source_model, source_project).root_shifted();
 
     let mut mismatches: Vec<String> = Vec::new();
-    for (name, (off, _size)) in offsets.iter() {
+    for (name, off) in offsets.iter() {
         // Only names that exist verbatim in the layout are directly
         // comparable (per-element `x[a1]` and module-flattened `mod·sub`
         // names are offsets-map-only expansions).
@@ -1307,7 +1305,7 @@ fn test_results_offsets_agree_with_layout_under_ltm() {
 #[test]
 #[ignore]
 fn test_clearn_results_offsets_agree_with_layout() {
-    use crate::db::calc_flattened_offsets_incremental;
+    use crate::db::flattened_offsets;
     use salsa::Setter;
 
     let path = format!(
@@ -1328,12 +1326,12 @@ fn test_clearn_results_offsets_agree_with_layout() {
         .copied()
         .expect("main model");
 
-    let offsets = calc_flattened_offsets_incremental(&db, source_project, "main", true);
+    let offsets = flattened_offsets(&db, source_project, source_model);
     let layout = compute_layout(&db, source_model, source_project).root_shifted();
 
     let mut mismatches: Vec<(usize, String)> = Vec::new();
     let mut compared = 0usize;
-    for (name, (off, _size)) in offsets.iter() {
+    for (name, off) in offsets.iter() {
         if let Some(entry) = layout.get(name.as_str()) {
             compared += 1;
             if entry.offset != *off {

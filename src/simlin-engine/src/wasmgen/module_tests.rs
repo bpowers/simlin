@@ -2346,7 +2346,7 @@ fn layout_offset(artifact: &WasmArtifact, name: &str) -> usize {
 
 /// The canonical qualified ident for a sub-model `instance`'s sub-variable
 /// `var` (`Ident::join`, the U+00B7 module-hierarchy separator), e.g.
-/// `sub0·k`. Built the same way `calc_flattened_offsets_incremental` keys the
+/// `sub0·k`. Built the same way `db::layout::flattened_offsets` keys the
 /// layout, so it stays correct if the separator ever changes.
 fn qualified_ident(instance: &str, var: &str) -> Ident<Canonical> {
     Ident::<Canonical>::join(
@@ -2357,8 +2357,8 @@ fn qualified_ident(instance: &str, var: &str) -> Ident<Canonical> {
 
 /// The absolute slab offsets of the two `submodel_with_constant_project`
 /// instances' own constant `k` (`sub0·k`, `sub1·k`). These are distinct
-/// because `calc_flattened_offsets_incremental` advances the base offset per
-/// instance, mirroring the VM's `collect_constant_info` recursion.
+/// because `db::layout::flattened_offsets` bases each instance's keys at the
+/// instance's slot, mirroring the VM's `collect_constant_info` recursion.
 fn instance_k_offsets(artifact: &WasmArtifact) -> (usize, usize) {
     (
         layout_offset(artifact, qualified_ident("sub0", "k").as_str()),
@@ -2420,7 +2420,7 @@ fn compile_simulation_set_value_override_matches_vm() {
         let ident = Ident::<Canonical>::from_str_unchecked(name);
         // Index the VM slab with the VM's own offset for this variable. It
         // equals `wasm_off` (both backends derive offsets from
-        // `calc_flattened_offsets_incremental`), so this also skips the
+        // `db::layout::flattened_offsets`), so this also skips the
         // implicit globals the layout carries but the VM offsets map omits.
         let vm_off = match sim.get_offset(&ident) {
             Some(o) => o,

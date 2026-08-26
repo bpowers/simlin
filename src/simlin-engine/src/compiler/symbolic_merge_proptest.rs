@@ -179,9 +179,10 @@ fn forced_rich_specs() -> impl Strategy<Value = Vec<FragSpec>> {
             n_elements: 2,
         },
     );
-    // At least three, so `check_phase_split`'s thirds give every phase a
-    // fragment and the derived `ctx_base`s are non-zero.
-    prop::collection::vec(rich, 3..5).prop_map(|mut specs| {
+    // At least four, so `check_module_programs`' split gives the module two
+    // standalone initials and a fragment in each of its other two programs,
+    // and every later program's bases are non-zero.
+    prop::collection::vec(rich, 4..6).prop_map(|mut specs| {
         for (i, spec) in specs.iter_mut().enumerate() {
             spec.tag = i + 1;
         }
@@ -411,22 +412,18 @@ fn ret_stripped_len(frag: &PerVarBytecodes) -> usize {
 // Denotation: what an opcode's ids NAME
 // ============================================================================
 
-/// The tables an opcode's resource ids are addressed relative to, plus the
-/// base to subtract before indexing them.
+/// The tables an opcode's resource ids are addressed relative to.
 ///
-/// A merged table is PHASE-local while the ids the merger hands out are global
-/// (they carry `ctx_base`), so dereferencing a merged opcode against a merged
-/// table means subtracting the base back off. That asymmetry is real -- it is
-/// how `assemble_module` can renumber a phase against preceding phases' counts
-/// while every phase reports the same tables -- so the test models it rather
-/// than hiding it.
+/// A fragment's own opcodes index its own tables. A program's opcodes index
+/// the module's tables for every resource but literals, whose pool is the
+/// program's own (M8) -- so the tables a program is checked against pair its
+/// literal pool with the module's other tables.
 struct ResourceTables<'a> {
     literals: &'a [f64],
     graphical_functions: &'a [Vec<(f64, f64)>],
     module_decls: &'a [SymbolicModuleDecl],
     static_views: &'a [SymbolicStaticView],
     dim_lists: Vec<Vec<u16>>,
-    base: ContextResourceCounts,
 }
 
 impl<'a> ResourceTables<'a> {
@@ -438,13 +435,11 @@ impl<'a> ResourceTables<'a> {
             module_decls: &frag.module_decls,
             static_views: &frag.static_views,
             dim_lists: frag.dim_lists.iter().map(|dl| truncate4(dl)).collect(),
-            base: ContextResourceCounts::default(),
         }
     }
 
-    /// The tables a merged stream's opcodes are addressed against, given the
-    /// `ctx_base` the merge was run with.
-    fn of_merged(merged: &'a ConcatenatedBytecodes, base: &ContextResourceCounts) -> Self {
+    /// The tables a one-program merge's opcodes are addressed against.
+    fn of_merged(merged: &'a ConcatenatedBytecodes) -> Self {
         ResourceTables {
             literals: &merged.bytecode.literals,
             graphical_functions: &merged.graphical_functions,
@@ -455,7 +450,22 @@ impl<'a> ResourceTables<'a> {
                 .iter()
                 .map(|(n, arr)| arr[..(*n as usize)].to_vec())
                 .collect(),
-            base: base.clone(),
+        }
+    }
+
+    /// The tables one PROGRAM of a module is addressed against: its own literal
+    /// pool, the module's tables for everything else (M8).
+    fn of_program(program: &'a SymbolicByteCode, module: &'a ContextSideChannels) -> Self {
+        ResourceTables {
+            literals: &program.literals,
+            graphical_functions: &module.graphical_functions,
+            module_decls: &module.module_decls,
+            static_views: &module.static_views,
+            dim_lists: module
+                .dim_lists
+                .iter()
+                .map(|(n, arr)| arr[..(*n as usize)].to_vec())
+                .collect(),
         }
     }
 }
@@ -624,25 +634,21 @@ fn denote(op: &SymbolicOpcode, tables: &ResourceTables<'_>) -> Result<Denotation
         static_views: Vec::new(),
         dim_lists: Vec::new(),
     };
-    let index = |id: u16, base: usize, len: usize, what: &str| -> Result<usize, String> {
-        let idx = (id as usize)
-            .checked_sub(base)
-            .ok_or_else(|| format!("{what} id {id} is below its ctx_base {base}"))?;
+    let index = |id: u16, len: usize, what: &str| -> Result<usize, String> {
+        let idx = id as usize;
         if idx >= len {
-            return Err(format!(
-                "{what} id {id} (index {idx}) is past its table of {len}"
-            ));
+            return Err(format!("{what} id {id} is past its table of {len}"));
         }
         Ok(idx)
     };
 
     match op {
         SymbolicOpcode::LoadConstant { id } => {
-            let i = index(*id, 0, tables.literals.len(), "literal")?;
+            let i = index(*id, tables.literals.len(), "literal")?;
             d.literals.push(tables.literals[i].to_bits());
         }
         SymbolicOpcode::AssignConstCurr { literal_id, .. } => {
-            let i = index(*literal_id, 0, tables.literals.len(), "literal")?;
+            let i = index(*literal_id, tables.literals.len(), "literal")?;
             d.literals.push(tables.literals[i].to_bits());
         }
         // Every opcode carrying a GF run, taken from `SymbolicOpcode::gf_run`
@@ -664,30 +670,15 @@ fn denote(op: &SymbolicOpcode, tables: &ResourceTables<'_>) -> Result<Denotation
             }
         }
         SymbolicOpcode::EvalModule { id, .. } => {
-            let i = index(
-                *id,
-                tables.base.modules,
-                tables.module_decls.len(),
-                "module",
-            )?;
+            let i = index(*id, tables.module_decls.len(), "module")?;
             d.module_decls.push(tables.module_decls[i].clone());
         }
         SymbolicOpcode::PushStaticView { view_id } => {
-            let i = index(
-                *view_id,
-                tables.base.views,
-                tables.static_views.len(),
-                "view",
-            )?;
+            let i = index(*view_id, tables.static_views.len(), "view")?;
             d.static_views.push(tables.static_views[i].clone());
         }
         SymbolicOpcode::PushVarViewDirect { dim_list_id, .. } => {
-            let i = index(
-                *dim_list_id,
-                tables.base.dim_lists,
-                tables.dim_lists.len(),
-                "dim list",
-            )?;
+            let i = index(*dim_list_id, tables.dim_lists.len(), "dim list")?;
             d.dim_lists.push(tables.dim_lists[i].clone());
         }
         _ => {}
@@ -801,12 +792,11 @@ fn check_denotations_and_ret(
     frags: &[PerVarBytecodes],
 ) -> Result<ConcatenatedBytecodes, TestCaseError> {
     let refs = as_refs(frags);
-    let no_base = ContextResourceCounts::default();
-    let merged = concatenate_fragments(&refs, &no_base)
+    let merged = concatenate_fragments(&refs)
         .map_err(|e| TestCaseError::fail(format!("well-formed fragments must merge: {e}")))?;
 
     {
-        let merged_tables = ResourceTables::of_merged(&merged, &no_base);
+        let merged_tables = ResourceTables::of_merged(&merged);
         let mut pos = 0usize;
         for frag in frags {
             let n = ret_stripped_len(frag);
@@ -862,7 +852,8 @@ proptest! {
     /// M2 stated positively: each flat merged table is EXACTLY the
     /// concatenation of the fragments' tables, in fragment order, with the two
     /// documented normalizations (a dim list truncated to four elements, a
-    /// `Temp`-based view's base shifted onto the merged temp slot). That is
+    /// `Temp`-based view's base on the merged temp slot -- under `Recycle` the
+    /// identity, since every fragment's temp `t` IS slot `t`). That is
     /// disjointness and tiling in one statement -- a fragment whose entries
     /// overlapped another's, or that was dropped, or that was reordered, fails
     /// it.
@@ -873,13 +864,7 @@ proptest! {
     fn flat_resource_ranges_are_disjoint_and_tile_the_merged_table(specs in frag_specs()) {
         let frags = build_fragments(&specs);
         let refs = as_refs(&frags);
-        // A non-zero recycle base, so the view/temp shift is exercised rather
-        // than being the identity.
-        let base = ContextResourceCounts {
-            temps: 2,
-            ..ContextResourceCounts::default()
-        };
-        let merged = concatenate_fragments(&refs, &base)
+        let merged = concatenate_fragments(&refs)
             .map_err(|e| TestCaseError::fail(format!("well-formed fragments must merge: {e}")))?;
 
         let want_literals: Vec<f64> = frags
@@ -896,15 +881,7 @@ proptest! {
 
         let want_views: Vec<SymbolicStaticView> = frags
             .iter()
-            .flat_map(|f| {
-                f.static_views.iter().map(|v| SymbolicStaticView {
-                    base: match &v.base {
-                        SymStaticViewBase::Temp(id) => SymStaticViewBase::Temp(id + base.temps),
-                        other => other.clone(),
-                    },
-                    ..v.clone()
-                })
-            })
+            .flat_map(|f| f.static_views.iter().cloned())
             .collect();
         prop_assert_eq!(&merged.static_views, &want_views);
 
@@ -958,12 +935,19 @@ proptest! {
         specs.push(dup);
 
         let frags = build_fragments(&specs);
-        let refs = as_refs(&frags);
-        let dedup = GfDedup::build(&refs)
-            .map_err(|e| TestCaseError::fail(format!("well-formed fragments must dedup: {e}")))?;
+        // The GF half of absorption on its own, exactly as `absorb` runs it per
+        // fragment: every fragment's remap against the one growing table.
+        let mut merger = FragmentMerger::new(TempStrategy::Recycle);
+        let mut remaps: Vec<GfRemap> = Vec::with_capacity(frags.len());
+        for frag in &frags {
+            remaps.push(merger.absorb_gf(frag).map_err(|e| {
+                TestCaseError::fail(format!("well-formed fragments must dedup: {e}"))
+            })?);
+        }
+        let tables = merger.into_side_channels().graphical_functions;
 
         for (i, frag) in frags.iter().enumerate() {
-            let remap = dedup.remap(i);
+            let remap = &remaps[i];
             prop_assert_eq!(
                 remap.len(),
                 frag.graphical_functions.len(),
@@ -973,13 +957,13 @@ proptest! {
             for (local, table) in frag.graphical_functions.iter().enumerate() {
                 let global = remap[local] as usize;
                 prop_assert!(
-                    global < dedup.tables.len(),
+                    global < tables.len(),
                     "fragment {} slot {} remapped past the deduped table",
                     i,
                     local
                 );
                 prop_assert_eq!(
-                    table_bits(&dedup.tables[global]),
+                    table_bits(&tables[global]),
                     table_bits(table),
                     "fragment {} slot {} lost its content under de-duplication",
                     i,
@@ -1006,8 +990,8 @@ proptest! {
         }
 
         prop_assert_eq!(
-            dedup.remap(0),
-            dedup.remap(dup_index),
+            &remaps[0],
+            &remaps[dup_index],
             "two fragments carrying bit-identical GF blocks must share them"
         );
     }
@@ -1116,8 +1100,7 @@ proptest! {
     fn merged_temp_slot_uses_never_interleave(specs in frag_specs()) {
         let frags = build_fragments(&specs);
         let refs = as_refs(&frags);
-        let no_base = ContextResourceCounts::default();
-        let merged = concatenate_fragments(&refs, &no_base)
+        let merged = concatenate_fragments(&refs)
             .map_err(|e| TestCaseError::fail(format!("well-formed fragments must merge: {e}")))?;
 
         // Which merged positions belong to which fragment (M6's slicing).
@@ -1177,8 +1160,8 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     /// The `Recycle` half of M5: sharing is by IDENTITY (fragment-local temp
-    /// `t` becomes merged slot `t + ctx_base.temps`, whichever fragment it came
-    /// from), and a shared slot is sized to the LARGEST of its users.
+    /// `t` becomes merged slot `t`, whichever fragment it came from), and a
+    /// shared slot is sized to the LARGEST of its users.
     ///
     /// Both halves are load-bearing and fail differently. Identity is what
     /// bounds the merged count by the widest single fragment instead of the sum
@@ -1189,15 +1172,11 @@ proptest! {
     fn recycle_shares_by_identity_and_sizes_by_max(specs in frag_specs()) {
         let frags = build_fragments(&specs);
         let refs = as_refs(&frags);
-        let base = ContextResourceCounts {
-            temps: 1,
-            ..ContextResourceCounts::default()
-        };
-        let merged = concatenate_fragments(&refs, &base)
+        let merged = concatenate_fragments(&refs)
             .map_err(|e| TestCaseError::fail(format!("well-formed fragments must merge: {e}")))?;
 
         // Identity: read each fragment's temp uses back out of its slice of the
-        // merged stream and check the shift is the fixed base, not a per-
+        // merged stream and check each is the fragment's own id, not a per-
         // fragment running sum.
         let mut pos = 0usize;
         for frag in &frags {
@@ -1206,11 +1185,7 @@ proptest! {
             let global = temp_uses(&merged.bytecode.code[pos..pos + n], &merged.static_views);
             prop_assert_eq!(local.len(), global.len());
             for ((_, l), (_, g)) in local.iter().zip(global.iter()) {
-                prop_assert_eq!(
-                    *g,
-                    *l + base.temps,
-                    "recycle must shift every fragment's temps by the same fixed base"
-                );
+                prop_assert_eq!(*g, *l, "recycle must keep every fragment's temp ids");
             }
             pos += n;
         }
@@ -1222,7 +1197,7 @@ proptest! {
         let mut want: HashMap<u32, usize> = HashMap::new();
         for frag in &frags {
             for (id, size) in &frag.temp_sizes {
-                let slot = *id + base.temps;
+                let slot = *id;
                 let e = want.entry(slot).or_insert(0);
                 *e = (*e).max(*size);
             }
@@ -1265,14 +1240,13 @@ proptest! {
     ) {
         let frags = build_fragments(&specs);
         let refs = as_refs(&frags);
-        let no_base = ContextResourceCounts::default();
-        let full = concatenate_fragments(&refs, &no_base)
+        let full = concatenate_fragments(&refs)
             .map_err(|e| TestCaseError::fail(format!("well-formed fragments must merge: {e}")))?;
 
         let mut boundary = 0usize;
         for k in 1..=frags.len() {
             boundary += ret_stripped_len(&frags[k - 1]);
-            let prefix = concatenate_fragments(&refs[..k], &no_base)
+            let prefix = concatenate_fragments(&refs[..k])
                 .map_err(|e| TestCaseError::fail(format!("prefix merge failed: {e}")))?;
             prop_assert_eq!(
                 prefix.bytecode.code.len(),
@@ -1295,7 +1269,7 @@ proptest! {
 }
 
 // ============================================================================
-// M8: the phase split agrees with the whole-model merge
+// M8: every program of a module indexes one table set
 // ============================================================================
 
 proptest! {
@@ -1303,20 +1277,22 @@ proptest! {
 
     /// M8, stated the way the VM experiences it.
     ///
-    /// `assemble_module` renumbers initials, flows and stocks SEPARATELY (each
-    /// against a `ctx_base` summed from the preceding phases) but builds the
-    /// module's `module_decls` / `static_views` / `dim_lists` / `temp_offsets`
-    /// from ONE all-phases merge. So the test derefs a phase's renumbered
-    /// opcodes against the ALL-PHASES tables and requires them to name what the
-    /// fragment named -- which is literally what happens at run time.
+    /// `assemble_module` drives ONE merger through a module's programs -- each
+    /// initial as a standalone program, then the flows and the stocks as a
+    /// concatenation each -- and takes the module's `module_decls` /
+    /// `static_views` / `dim_lists` / `temp_offsets` / `graphical_functions`
+    /// once, after the last program. So the test derefs every program's
+    /// renumbered opcodes against the tables the merger FINISHES with and
+    /// requires them to name what the fragment named -- which is literally what
+    /// happens at run time, whichever program an id sits in.
     ///
     /// Literals are the deliberate exception, and the property is written to
-    /// show why rather than to skip them: each phase's bytecode carries its own
-    /// literal pool and the all-phases pool is discarded, so a phase's literal
-    /// ids are checked against the PHASE's pool.
+    /// show why rather than to skip them: each program's bytecode carries its
+    /// own literal pool, so a program's literal ids are checked against the
+    /// PROGRAM's pool.
     #[test]
-    fn phase_split_assigns_the_same_ids_as_the_all_phases_merge(specs in frag_specs()) {
-        check_phase_split(&build_fragments(&specs), false)?;
+    fn module_programs_index_one_table_set(specs in frag_specs()) {
+        check_module_programs(&build_fragments(&specs), false)?;
     }
 }
 
@@ -1326,198 +1302,128 @@ proptest! {
     /// Non-vacuity guard for the property above, and it matters more here than
     /// anywhere else in this file.
     ///
-    /// A phase whose fragments carry no modules, no views and no dim lists
-    /// hands the NEXT phase a `ctx_base` of all zeros, and with a zero base the
-    /// phase split is trivially the all-phases merge -- the property passes
-    /// without testing anything. The base strategy produces that shape often.
-    /// `forced_rich_specs` guarantees each fragment carries all three
-    /// resources, and `check_phase_split(.., require_nonzero_base = true)`
-    /// asserts the derived bases really are non-zero before checking anything.
+    /// A program whose fragments carry no modules, no views and no dim lists
+    /// leaves the NEXT program's bases at zero, and with zero bases every id is
+    /// the fragment's own -- the property passes without testing anything. The
+    /// base strategy produces that shape often. `forced_rich_specs` guarantees
+    /// each fragment carries all three resources and gives the module two
+    /// initials, and `check_module_programs(.., require_nonzero_base = true)`
+    /// asserts the later programs' bases really are non-zero before checking
+    /// anything.
     ///
     /// Worth the extra property specifically because this is the one obligation
     /// whose violation nothing else in the default (`--lib`) test suite
-    /// notices: dropping `ctx_base` from `absorb_non_gf` leaves all 5363 other
-    /// tests green.
+    /// notices: a merger that restarted its module / view / dim-list tables per
+    /// program would leave every other test green.
     #[test]
-    fn forced_rich_phase_split_uses_non_zero_bases(specs in forced_rich_specs()) {
-        check_phase_split(&build_fragments(&specs), true)?;
+    fn forced_rich_module_programs_use_non_zero_bases(specs in forced_rich_specs()) {
+        check_module_programs(&build_fragments(&specs), true)?;
     }
 }
 
 /// M8, stated the way the VM experiences it. Shared by the arbitrary and the
 /// forced-rich properties.
 ///
-/// `assemble_module` renumbers initials, flows and stocks SEPARATELY (each
-/// against a `ctx_base` summed from the preceding phases) but builds the
-/// module's `module_decls` / `static_views` / `dim_lists` / `temp_offsets` from
-/// ONE all-phases merge. So this derefs a phase's renumbered opcodes against
-/// the ALL-PHASES tables and requires them to name what the fragment named --
-/// which is literally what happens at run time.
-///
-/// Literals are the deliberate exception, and the check is written to show why
-/// rather than to skip them: each phase's bytecode carries its own literal pool
-/// and the all-phases pool is discarded, so a phase's literal ids are resolved
-/// against the PHASE's pool.
-fn check_phase_split(
+/// The fragments are split the way a module's are: the first half become
+/// standalone programs (the initials, renumbered one at a time because
+/// `eval_initials` runs them one at a time), the rest form two concatenated
+/// programs (the flows and the stocks). An empty program is a real shape (a
+/// model with no stocks), so the split is allowed to produce one. Every
+/// program's opcodes are then dereferenced against the module's finished
+/// tables and the program's own literal pool.
+fn check_module_programs(
     frags: &[PerVarBytecodes],
     require_nonzero_base: bool,
 ) -> Result<(), TestCaseError> {
     let refs = as_refs(frags);
-    // Split into the three phases assembly uses. An empty phase is a real
-    // shape (a model with no stocks), so the split is allowed to produce
-    // one.
     let n = refs.len();
-    let a = n / 3;
+    let a = n / 2;
     let b = a + (n - a) / 2;
-    let phases: [&[&PerVarBytecodes]; 3] = [&refs[..a], &refs[a..b], &refs[b..]];
-
-    let counts0 = ContextResourceCounts::from_fragments(phases[0]);
-    let counts1 = ContextResourceCounts::from_fragments(phases[1]);
-    // Exactly `assemble_module`'s bases: modules / views / dim-lists sum
-    // across preceding phases, temps stay at 0 because the temp pool is
-    // shared by every phase rather than partitioned.
-    let bases = [
-        ContextResourceCounts::default(),
-        ContextResourceCounts {
-            temps: 0,
-            ..counts0.clone()
-        },
-        ContextResourceCounts {
-            modules: counts0.modules + counts1.modules,
-            views: counts0.views + counts1.views,
-            temps: 0,
-            dim_lists: counts0.dim_lists + counts1.dim_lists,
-        },
-    ];
+    let (initials, flows, stocks) = (&refs[..a], &refs[a..b], &refs[b..]);
 
     if require_nonzero_base {
-        prop_assert!(
-            bases[1].modules > 0 && bases[1].views > 0 && bases[1].dim_lists > 0,
-            "the second phase's base must be non-zero or the split is \
-                 trivially the all-phases merge: {:?}",
-            bases[1]
-        );
-        prop_assert!(
-            bases[2].modules > bases[1].modules,
-            "the third phase's base must exceed the second's: {:?} vs {:?}",
-            bases[2],
-            bases[1]
-        );
-    }
-
-    let dedup = GfDedup::build(&refs).map_err(|e| TestCaseError::fail(format!("dedup: {e}")))?;
-    let all = concatenate_fragments_with_gf(&refs, &ContextResourceCounts::default(), &dedup, 0)
-        .map_err(|e| TestCaseError::fail(format!("all-phases merge: {e}")))?;
-
-    // The INITIALS phase does not go through a concat: `eval_initials` runs
-    // each initial separately, so assembly renumbers them one at a time through
-    // `renumber_initials_phase`, each at literal offset 0. Drive the REAL
-    // function and deref its output against the same all-phases tables, so this
-    // property covers the path assembly actually takes rather than a concat
-    // standing in for it. As an inline loop that function was unreachable from
-    // a test, and freezing two of its three accumulators left the whole
-    // repository green.
-    //
-    // Run it over EVERY fragment rather than over `phases[0]`: the thirds
-    // split leaves the initials phase with at most one fragment, and with one
-    // initial the running offsets are never used at all -- freezing two of the
-    // three would still pass. A model in which every variable has an initial is
-    // both a real shape and the one that exercises the accumulators, and it
-    // keeps the all-phases tables the correct thing to deref against (the
-    // fragment list and its order are the same).
-    let named_initials: Vec<(String, &PerVarBytecodes)> = refs
-        .iter()
-        .enumerate()
-        .map(|(i, f)| (format!("init{i}"), *f))
-        .collect();
-    if require_nonzero_base {
-        prop_assert!(
-            named_initials.len() >= 2,
-            "one initial never advances the per-initial offsets, so the check \
-             below would be vacuous"
-        );
-    }
-    let initials = crate::db::renumber_initials_phase(&named_initials, &dedup)
-        .map_err(|e| TestCaseError::fail(format!("initials renumber: {e}")))?;
-    for (frag, compiled) in refs.iter().zip(initials.iter()) {
-        let frag_tables = ResourceTables::of_fragment(frag);
-        let tables = ResourceTables {
-            literals: &compiled.bytecode.literals,
-            graphical_functions: &all.graphical_functions,
-            module_decls: &all.module_decls,
-            static_views: &all.static_views,
-            dim_lists: all
-                .dim_lists
-                .iter()
-                .map(|(n, arr)| arr[..(*n as usize)].to_vec())
-                .collect(),
-            base: ContextResourceCounts::default(),
+        let carried = |frags: &[&PerVarBytecodes], count: fn(&PerVarBytecodes) -> usize| {
+            frags.iter().map(|f| count(f)).sum::<usize>()
         };
-        let n = ret_stripped_len(frag);
-        for k in 0..n {
-            let want = denote_shaped(&frag.symbolic.code[k], &frag_tables)
-                .map_err(|e| TestCaseError::fail(format!("initial fragment: {e}")))?;
-            let have = denote_shaped(&compiled.bytecode.code[k], &tables).map_err(|e| {
-                TestCaseError::fail(format!(
-                    "initial opcode {k} against the all-phases tables: {e}"
-                ))
-            })?;
-            prop_assert_eq!(
-                &want,
-                &have,
-                "initial opcode {} does not name its fragment's resource in the \
-                 module's all-phases tables",
-                k
-            );
-        }
+        prop_assert!(
+            initials.len() >= 2,
+            "one initial never continues a table another initial started; got {}",
+            initials.len()
+        );
+        prop_assert!(
+            carried(initials, |f| f.module_decls.len()) > 0
+                && carried(initials, |f| f.static_views.len()) > 0
+                && carried(initials, |f| f.dim_lists.len()) > 0,
+            "the flows' bases must be non-zero or the split is trivially the identity"
+        );
+        prop_assert!(
+            carried(flows, |f| f.module_decls.len()) > 0,
+            "the stocks' bases must exceed the flows'"
+        );
     }
 
-    let mut gf_index_base = 0usize;
-    let mut frag_index = 0usize;
-    for (p, phase) in phases.iter().enumerate() {
-        let concat = concatenate_fragments_with_gf(phase, &bases[p], &dedup, gf_index_base)
-            .map_err(|e| TestCaseError::fail(format!("phase {p} merge: {e}")))?;
-        // The tables the VM would consult: the phase's OWN literal pool,
-        // every other table from the all-phases merge.
-        let tables = ResourceTables {
-            literals: &concat.bytecode.literals,
-            graphical_functions: &all.graphical_functions,
-            module_decls: &all.module_decls,
-            static_views: &all.static_views,
-            dim_lists: all
-                .dim_lists
-                .iter()
-                .map(|(n, arr)| arr[..(*n as usize)].to_vec())
-                .collect(),
-            base: ContextResourceCounts::default(),
-        };
+    // One merger, driven exactly as `assemble_module` drives it.
+    let mut merger = FragmentMerger::new(TempStrategy::Recycle);
+    let mut programs: Vec<(Vec<&PerVarBytecodes>, SymbolicByteCode, bool)> = Vec::new();
+    for frag in initials {
+        let program = merger
+            .standalone_program(frag)
+            .map_err(|e| TestCaseError::fail(format!("standalone program: {e}")))?;
+        programs.push((vec![*frag], program, true));
+    }
+    let flows_program = merger
+        .concatenate(flows)
+        .map_err(|e| TestCaseError::fail(format!("flows program: {e}")))?;
+    programs.push((flows.to_vec(), flows_program, false));
+    let stocks_program = merger
+        .concatenate(stocks)
+        .map_err(|e| TestCaseError::fail(format!("stocks program: {e}")))?;
+    programs.push((stocks.to_vec(), stocks_program, false));
+    let module = merger.into_side_channels();
 
+    for (p, (frags_of, program, standalone)) in programs.iter().enumerate() {
+        let tables = ResourceTables::of_program(program, &module);
         let mut pos = 0usize;
-        for frag in phase.iter() {
-            let n = ret_stripped_len(frag);
+        for frag in frags_of {
+            // A standalone program keeps its fragment's `Ret`; a concatenation
+            // strips each fragment's and ends in one of its own (M6).
+            let n = if *standalone {
+                frag.symbolic.code.len()
+            } else {
+                ret_stripped_len(frag)
+            };
             let frag_tables = ResourceTables::of_fragment(frag);
             for k in 0..n {
                 let want = denote_shaped(&frag.symbolic.code[k], &frag_tables)
                     .map_err(|e| TestCaseError::fail(format!("fragment: {e}")))?;
-                let have = denote_shaped(&concat.bytecode.code[pos + k], &tables).map_err(|e| {
+                let have = denote_shaped(&program.code[pos + k], &tables).map_err(|e| {
                     TestCaseError::fail(format!(
-                        "phase {p} opcode {} against the all-phases tables: {e}",
+                        "program {p} opcode {} against the module's tables: {e}",
                         pos + k
                     ))
                 })?;
                 prop_assert_eq!(
                     &want,
                     &have,
-                    "phase {} opcode {} does not name its fragment's resource in the \
-                         module's all-phases tables",
+                    "program {} opcode {} does not name its fragment's resource in the \
+                     module's tables",
                     p,
                     pos + k
                 );
             }
             pos += n;
-            frag_index += 1;
         }
-        gf_index_base = frag_index;
+        let want_len = if *standalone || pos == 0 {
+            pos
+        } else {
+            pos + 1
+        };
+        prop_assert_eq!(
+            program.code.len(),
+            want_len,
+            "program {} is its fragments' opcodes (a concatenation adds one Ret)",
+            p
+        );
     }
 
     Ok(())

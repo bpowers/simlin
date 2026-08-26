@@ -252,7 +252,7 @@ pub struct SourceVariable {
 /// also accepts the legacy `"0+0"` sentinel for back-compat).
 ///
 /// Salsa-tracked so its `bool` output backdates: callers in tracked contexts
-/// (`build_var_info` -> `model_dependency_graph`, `calc_flattened_offsets`)
+/// (`build_var_info` -> `model_dependency_graph`, `flattened_offsets`)
 /// must NOT gain a fine-grained dependency on a variable's equation TEXT, which
 /// would invalidate the dependency graph on every unrelated equation edit.
 #[salsa::tracked(returns(clone))]

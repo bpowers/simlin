@@ -1430,24 +1430,17 @@ fn test_assemble_module_unchanged_submodule_is_cache_hit() {
     );
 }
 
-/// Migration guard for dropping `is_root` from the tracked layout/compile
-/// queries: the root +`IMPLICIT_VAR_COUNT` shift now lives in two separate
-/// machineries -- `assemble_module`'s root path (via
-/// `VariableLayout::root_shifted`) and `calc_flattened_offsets_incremental`'s
-/// own root reservation. They MUST stay in perfect lockstep; a divergence (an
-/// off-by-IMPLICIT_VAR_COUNT, a different ordering, a missing global) would
-/// corrupt every result slot. This test fails loudly if they ever diverge.
+/// The root +`IMPLICIT_VAR_COUNT` shift has two readers -- `assemble_module`'s
+/// root path (through `VariableLayout::root_shifted`) and the results-offset
+/// map (`flattened_offsets`) -- and they must agree on every slot: an
+/// off-by-IMPLICIT_VAR_COUNT, a different ordering, or a missing global would
+/// make every results column read some other variable's data.
 ///
-/// It uses a model with a submodule so the nested module-decl `off`
-/// relocation is exercised: the submodule is assembled with the unshifted
-/// body layout and the parent relocates it via the (root-shifted) module-decl
-/// offset. It also uses a SMOOTH builtin so the SMOOTH/DELAY implicit-var
-/// section is cross-checked: that is the ONE section
-/// `calc_flattened_offsets_incremental` computes INDEPENDENTLY (via its
-/// running `i`-arithmetic) rather than reading `root_shifted()` directly, so
-/// it is the divergence-prone section the entry-for-entry loop must cover.
-/// (The body section is also covered by the loop; the LTM section is
-/// tautologically consistent because both sides read `root_shifted()`.)
+/// The model holds a submodule, so the nested module-decl `off` relocation is
+/// exercised (the submodule is assembled against the unshifted body layout and
+/// the parent relocates it via the root-shifted module-decl offset), and a
+/// SMOOTH builtin, so the SMOOTH/DELAY implicit-variable section is covered by
+/// the entry-for-entry loop as well as the explicit section.
 #[test]
 fn test_is_root_shift_machineries_in_lockstep() {
     let db = SimlinDb::default();
@@ -1492,8 +1485,7 @@ fn test_is_root_shift_machineries_in_lockstep() {
                     }),
                     // SMTH3 synthesizes implicit module/helper variables
                     // (`$⁚smoothed⁚…`), exercising the SMOOTH/DELAY implicit-var
-                    // section that `calc_flattened_offsets_incremental` lays out
-                    // with its own independent `i`-arithmetic.
+                    // section of the results-offset map.
                     datamodel::Variable::Aux(datamodel::Aux {
                         ident: "smoothed".to_string(),
                         equation: datamodel::Equation::Scalar("SMTH3(aaa, 5)".to_string()),
@@ -1568,17 +1560,17 @@ fn test_is_root_shift_machineries_in_lockstep() {
         "the first body variable must start at IMPLICIT_VAR_COUNT in the root layout"
     );
 
-    // The SEPARATE results-map machinery, computed as root.
-    let flat = crate::db::calc_flattened_offsets_incremental(&db, sync.project, "main", true);
+    // The results-offset map, computed for the root.
+    let flat = crate::db::flattened_offsets(&db, sync.project, main_model);
 
     // Lockstep: every name the flattened results map exposes at the top level
     // (the implicit globals + scalar body vars + SMOOTH/DELAY implicit vars;
     // submodule entries are dotted names absent from the parent layout) must
     // match the root-shifted layout offset entry-for-entry. We track which
     // implicit-var (`$⁚`-prefixed) names were cross-checked so the test can
-    // assert it is non-vacuous for that independently-computed section.
+    // assert it is non-vacuous for that section.
     let mut implicit_names_checked = 0usize;
-    for (name, (off, _size)) in &flat {
+    for (name, off) in &flat {
         if let Some(entry) = root_layout.get(name.as_str()) {
             assert_eq!(
                 entry.offset,
@@ -1598,9 +1590,9 @@ fn test_is_root_shift_machineries_in_lockstep() {
     // Non-vacuity for the implicit-var section: SMTH3 synthesizes at least one
     // `$⁚`-prefixed implicit variable that appears in BOTH the root layout and
     // the flattened results map, so the entry-for-entry loop above actually
-    // cross-checked `calc_flattened_offsets_incremental`'s independent
-    // implicit-section arithmetic against `root_shifted()`. Without a SMOOTH/
-    // DELAY builtin this count would be 0 and the section would be uncovered.
+    // cross-checked the implicit section against `root_shifted()`. Without a
+    // SMOOTH/DELAY builtin this count would be 0 and the section would be
+    // uncovered.
     assert!(
         implicit_names_checked > 0,
         "expected at least one SMOOTH/DELAY implicit variable cross-checked in \
@@ -1617,7 +1609,7 @@ fn test_is_root_shift_machineries_in_lockstep() {
     let sub_output_off = flat
         .iter()
         .find(|(k, _)| k.as_str() == "sub·output")
-        .map(|(_, (off, _))| *off)
+        .map(|(_, off)| *off)
         .expect("sub.output must appear in the flattened results map");
     assert_eq!(
         sub_output_off, sub_entry.offset,
@@ -1625,10 +1617,8 @@ fn test_is_root_shift_machineries_in_lockstep() {
          offset + its body offset (0)"
     );
 
-    // End-to-end: the assembled simulation's offsets come from the SAME
-    // `calc_flattened_offsets_incremental` call, and its n_slots is the root
-    // layout's n_slots -- the final proof the two machineries produced one
-    // consistent picture.
+    // End-to-end: the assembled simulation's offsets are this map, and its
+    // n_slots is the root layout's n_slots.
     let sim = assemble_simulation(&db, sync.project, "main".to_string())
         .expect("assemble_simulation should succeed");
     assert_eq!(

@@ -1198,7 +1198,8 @@ fn char_array_ops() {
 //     producing `LookupArray` opcode into a temp (GH #580).
 //
 // `graphical_functions` is a fragment-local resource that assembly de-duplicates
-// and renumbers (`GfDedup`, #582), so every fragment's gf block is pinned here.
+// and renumbers (`FragmentMerger::absorb_gf`, #582), so every fragment's gf
+// block is pinned here.
 // ---------------------------------------------------------------------------
 
 /// A two-point continuous gf over x in [0, 1] whose y-values are
