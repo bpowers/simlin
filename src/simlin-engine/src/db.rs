@@ -1442,6 +1442,8 @@ mod fragment_input_tests;
 #[cfg(test)]
 mod implicit_diag_tests;
 #[cfg(test)]
+mod implicit_module_tests;
+#[cfg(test)]
 mod incremental_compile_tests;
 #[cfg(test)]
 mod ltm_array_freeze_tests;

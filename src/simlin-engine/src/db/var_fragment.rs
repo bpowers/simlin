@@ -501,8 +501,8 @@ pub(crate) fn explicit_fragment_input<'db>(
     for implicit_var in &parsed.implicit_vars {
         if let Some(dm_module) = implicit_var.module() {
             dep_shapes
-                .entry(Ident::new(&dm_module.ident))
-                .or_insert_with(|| module_dep_shape(db, project, &dm_module.model_name));
+                .entry(Ident::new(dm_module.ident()))
+                .or_insert_with(|| module_dep_shape(db, project, dm_module.model_name()));
         }
     }
 

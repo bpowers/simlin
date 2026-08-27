@@ -362,19 +362,11 @@ fn lower_implicit_var<'db>(
 
     let dim_context = project_dimensions_context(db, project);
 
-    // A capture already holds its body as an AST subtree, so it is built
-    // directly; a module instance and a hoisted module-call argument still
-    // carry equation text and are parsed.
+    // Every helper carries parsed data, so no helper is lexed back from text.
     let parsed_implicit = match implicit_var {
         ImplicitVar::Capture(capture) => capture.variable_stage0(dim_context),
-        ImplicitVar::Synthesized(dm_var) => {
-            let units_ctx = project_units_context(db, project);
-            let mut dummy_implicits = Vec::new();
-            let ctx = crate::variable::ParseContext::new(dim_context, units_ctx);
-            crate::variable::parse_var(&ctx, dm_var.as_ref(), &mut dummy_implicits, |mi| {
-                Ok(Some(mi.clone()))
-            })
-        }
+        ImplicitVar::HoistedArg(arg) => arg.variable_stage0(dim_context),
+        ImplicitVar::Module(module) => module.variable_stage0(),
     };
 
     if parsed_implicit
@@ -390,12 +382,12 @@ fn lower_implicit_var<'db>(
         let dm_module = implicit_var.module()?;
         crate::variable::Variable::module_instance(
             Ident::new(&implicit_name),
-            Ident::new(&dm_module.model_name),
+            Ident::new(dm_module.model_name()),
             build_module_inputs(
                 model.name(db),
                 &module_input_prefix(&implicit_name),
                 dm_module
-                    .references
+                    .references()
                     .iter()
                     .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
             ),

@@ -2,8 +2,9 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Captures: the `PREVIOUS`/`INIT` arguments the parse hoists out of their
-//! call, and the identity every synthesized helper is filed under.
+//! Parsed data synthesized while walking one variable: `PREVIOUS`/`INIT`
+//! captures, module-call arguments hoisted into auxes, module instances, and
+//! the lookup key every one of them is filed under.
 //!
 //! `PREVIOUS`/`INIT` compile to opcodes that read a fixed slot or a static
 //! view of the snapshot regions. An argument that addresses neither
@@ -11,10 +12,11 @@
 //! storage of its own first, and that storage is a *capture*: a hidden
 //! per-callsite evaluation unit whose body is the argument.
 //!
-//! A capture carries the argument as an AST subtree. Its identity is
-//! positional -- the parent variable it was hoisted out of, plus the walk
-//! counter `id` the visitor was at -- and every stage downstream of the parse
-//! consumes the subtree directly.
+//! A capture carries the argument as an AST subtree. Its logical callsite is
+//! positional -- the parent variable it was hoisted out of, the walk counter
+//! `id`, the argument position, and any active-element suffix -- and those
+//! inputs are the single source from which its name is constructed. Every
+//! stage downstream of the parse consumes the subtree directly.
 //!
 //! **Never route a capture's body through the printer and the lexer.** Whenever
 //! those two disagree about one spelling, a legal model stops compiling, and the
@@ -25,14 +27,20 @@
 //!
 //! # Why a name still exists
 //!
-//! [`Capture::ident`] is an external key, not the identity. Every stage that
-//! files a unit of evaluation under a *name* -- the runlist (a lexicographic
-//! sort), the layout's implicit section (name-sorted), the results offset map,
-//! and symbolic bytecode's `VarRef` -- needs one for a capture too, and it must
-//! sort exactly where it sorts today or the compiled artifact moves. So the
-//! name is derived, once, by [`synthetic_ident`], from the positional identity
-//! plus the active element. Internal code addresses a capture by `(parent,
-//! id)`; only the stages listed above use the name.
+//! [`Capture::ident`] is the physical lookup key used today. Every stage that
+//! files a unit of evaluation under a *name* -- including
+//! `ImplicitVarMeta::{name,index_hint}`, the runlist (a lexicographic sort),
+//! the layout's implicit section (name-sorted), the results offset map, and
+//! symbolic bytecode's `VarRef` -- needs one for a capture too, and it must
+//! sort exactly where it sorts today or the compiled artifact moves. The name
+//! is derived once by [`synthetic_ident`] from the logical callsite inputs. No
+//! downstream store physically addresses a capture by a `(parent, id)` tuple.
+//!
+//! A [`HoistedArg`] carries a module-call argument as an AST subtree for the
+//! same reason as a capture. An [`ImplicitModule`] carries the target model and
+//! input wiring directly. A bare identifier argument is not hoisted: it wires
+//! straight to the module port by name, so an instance's references and
+//! hoisted-argument list do not correspond one-to-one.
 
 use crate::ast::{Ast, Expr0, print_eqn};
 use crate::builtins_visitor::{empty_macro_registry, instantiate_implicit_modules};
@@ -105,12 +113,13 @@ impl CaptureKind {
 #[derive(Clone, PartialEq)]
 pub struct Capture {
     /// The name every name-keyed stage files this capture under, derived by
-    /// [`synthetic_ident`] from the positional identity. Stored rather than
-    /// recomputed because the parent's rewritten equation refers to the capture
-    /// by it, and a capture outlives the visitor that knew its parent's name.
+    /// [`synthetic_ident`] from the logical callsite inputs. Stored rather than
+    /// recomputed because the parent's rewritten equation refers to the
+    /// capture by it, and a capture outlives the visitor that knew its parent's
+    /// name.
     ident: String,
-    /// The walk counter this capture was minted at. `(parent, id)` is the
-    /// identity; the name is derived from it.
+    /// The walk counter this capture was minted at. It is retained as typed
+    /// callsite data; current downstream lookup remains keyed by `ident`.
     id: usize,
     kind: CaptureKind,
     /// The argument, exactly as the walk left it -- already dimension-
@@ -178,8 +187,8 @@ impl Capture {
 
     /// Do these two captures define the same value?
     ///
-    /// Source position is deliberately excluded. A helper's identity has always
-    /// been its BODY, not where the body was written: the apply-to-all
+    /// Source position is deliberately excluded. Definition equality is based
+    /// on the BODY, not where the body was written: the apply-to-all
     /// expansion walks one cloned equation per element and collapses the
     /// identical results into one helper, and the dt and initial passes walk
     /// one equation twice. Comparing positions would refuse a pair that differs
@@ -263,7 +272,6 @@ impl Capture {
     /// helpers is impossible -- a capture body is already walked -- and is
     /// asserted rather than assumed.
     pub(crate) fn variable_stage0(&self, dimensions: &DimensionsContext) -> VariableStage0 {
-        let ident = Ident::<Canonical>::new(&self.ident);
         let mut errors: Vec<EquationError> = Vec::new();
         let ast = if self.dims.is_empty() {
             Some(Ast::Scalar(self.arg.clone()))
@@ -276,113 +284,283 @@ impl Capture {
                 }
             }
         };
-        let ast = ast.and_then(|ast| {
-            match instantiate_implicit_modules(
-                ident.as_str(),
-                ast,
-                Some(dimensions),
-                // The same four model-level facts a parse of a synthesized
-                // helper has always been given: none of them. A capture body
-                // names no module the parent's walk did not already resolve,
-                // and it is not a macro body.
-                None,
-                None,
-                empty_macro_registry(),
-                None,
-            ) {
-                Ok((ast, nested)) => {
-                    debug_assert!(
-                        nested.is_empty(),
-                        "a capture body must synthesize no further helpers"
-                    );
-                    Some(ast)
-                }
-                Err(err) => {
-                    errors.push(err);
-                    None
-                }
-            }
-        });
-
-        Variable {
-            ident,
-            units: None,
-            eqn: Some(self.datamodel_equation()),
+        subtree_variable_stage0(
+            &self.ident,
+            ast,
+            self.datamodel_equation(),
             errors,
+            dimensions,
+        )
+    }
+}
+
+/// Build the parse-stage aux represented by an AST-carrying synthesized
+/// helper.
+///
+/// Captures and hoisted module-call arguments are plain, non-negative,
+/// non-flow auxes with no graphical function, units, or separate initial
+/// equation. Their bodies have already been walked as part of the parent, but
+/// `instantiate_implicit_modules` still owns the apply-to-all expansion shape:
+/// an arrayed helper containing `PREVIOUS`/`INIT` becomes the same per-element
+/// `Ast::Arrayed` form an ordinary parse produces. A nested helper generation
+/// would violate the argument-first walk order and is therefore asserted.
+fn subtree_variable_stage0(
+    ident: &str,
+    ast: Option<Ast<Expr0>>,
+    eqn: datamodel::Equation,
+    mut errors: Vec<EquationError>,
+    dimensions: &DimensionsContext,
+) -> VariableStage0 {
+    let ident = Ident::<Canonical>::new(ident);
+    let ast = ast.and_then(|ast| {
+        match instantiate_implicit_modules(
+            ident.as_str(),
+            ast,
+            Some(dimensions),
+            None,
+            None,
+            empty_macro_registry(),
+            None,
+        ) {
+            Ok((ast, nested)) => {
+                debug_assert!(
+                    nested.is_empty(),
+                    "a synthesized helper's body must synthesize no further helpers"
+                );
+                Some(ast)
+            }
+            Err(err) => {
+                errors.push(err);
+                None
+            }
+        }
+    });
+
+    Variable {
+        ident,
+        units: None,
+        eqn: Some(eqn),
+        errors,
+        unit_errors: vec![],
+        kind: VarKind::Aux {
+            ast,
+            init_ast: None,
+            tables: vec![],
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+        },
+    }
+}
+
+/// One module-call argument that is not a bare identifier, hoisted into its
+/// own unit of evaluation so a module input port has a variable name to read.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
+pub struct HoistedArg {
+    ident: String,
+    /// Shared with the module instance and the call's other hoisted arguments;
+    /// the `arg{i}` name component identifies the argument within the call.
+    id: usize,
+    /// The argument exactly as the parent walk left it, including any active
+    /// apply-to-all element substitution.
+    arg: Expr0,
+    suffix: Option<String>,
+}
+
+impl HoistedArg {
+    pub(crate) fn new(
+        parent: &str,
+        id: usize,
+        index: usize,
+        arg: Expr0,
+        suffix: Option<String>,
+    ) -> Self {
+        HoistedArg {
+            ident: synthetic_ident(parent, id, &format!("arg{index}"), suffix.as_deref()),
+            id,
+            arg,
+            suffix,
+        }
+    }
+
+    pub fn ident(&self) -> &str {
+        &self.ident
+    }
+
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
+    pub fn arg(&self) -> &Expr0 {
+        &self.arg
+    }
+
+    pub fn suffix(&self) -> Option<&str> {
+        self.suffix.as_deref()
+    }
+
+    pub(crate) fn same_definition(&self, other: &Self) -> bool {
+        self.ident == other.ident
+            && self.suffix == other.suffix
+            && self.arg.eq_ignoring_loc(&other.arg)
+    }
+
+    pub(crate) fn variable_stage0(&self, dimensions: &DimensionsContext) -> VariableStage0 {
+        subtree_variable_stage0(
+            &self.ident,
+            Some(Ast::Scalar(self.arg.clone())),
+            datamodel::Equation::Scalar(print_eqn(&self.arg)),
+            Vec::new(),
+            dimensions,
+        )
+    }
+}
+
+/// One stdlib or macro module-function call expanded into a module instance.
+///
+/// The dependency graph reads the reference sources, fragment construction
+/// reads the target model and wiring, and layout sizes the target model. Those
+/// are therefore carried directly rather than wrapped in a datamodel variable.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
+pub struct ImplicitModule {
+    /// The external key derived from `(parent, id, call_name, suffix)` by the
+    /// only constructor. It is stored because every name-keyed consumer needs
+    /// a borrowed spelling, but callers cannot provide it independently of the
+    /// logical callsite inputs.
+    ident: String,
+    /// Shared with every hoisted argument belonging to this call.
+    id: usize,
+    model_name: String,
+    references: Vec<datamodel::ModuleReference>,
+    suffix: Option<String>,
+}
+
+impl ImplicitModule {
+    /// Mint one implicit module from its logical callsite and source-to-port
+    /// wiring.
+    ///
+    /// Both the instance name and each `ModuleReference::dst` are derived here;
+    /// accepting either from the caller would allow a typed `id`/`suffix` to
+    /// disagree with the name consumed by layout and assembly.
+    pub(crate) fn new(
+        parent: &str,
+        id: usize,
+        call_name: &str,
+        model_name: String,
+        inputs: Vec<(String, String)>,
+        suffix: Option<String>,
+    ) -> Self {
+        let ident = synthetic_ident(parent, id, call_name, suffix.as_deref());
+        let references = inputs
+            .into_iter()
+            .map(|(src, port)| datamodel::ModuleReference {
+                src,
+                dst: format!("{ident}.{port}"),
+            })
+            .collect();
+        ImplicitModule {
+            ident,
+            id,
+            model_name,
+            references,
+            suffix,
+        }
+    }
+
+    pub fn ident(&self) -> &str {
+        &self.ident
+    }
+
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
+    pub fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
+    pub fn references(&self) -> &[datamodel::ModuleReference] {
+        &self.references
+    }
+
+    pub fn suffix(&self) -> Option<&str> {
+        self.suffix.as_deref()
+    }
+
+    pub(crate) fn variable_stage0(&self) -> VariableStage0 {
+        Variable {
+            ident: Ident::<Canonical>::new(&self.ident),
+            units: None,
+            eqn: None,
+            errors: vec![],
             unit_errors: vec![],
-            kind: VarKind::Aux {
-                ast,
-                // A capture's body is one expression: the argument. It has no
-                // separate initial-phase equation, so both phases run it.
-                init_ast: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
+            kind: VarKind::Module {
+                model_name: Ident::new(&self.model_name),
+                inputs: self.references.clone(),
             },
         }
+    }
+
+    pub(crate) fn same_definition(&self, other: &Self) -> bool {
+        self == other
     }
 }
 
 /// One helper the parse synthesized while walking a variable's equation.
 ///
-/// Two things ride this list, and they are at different stages of Phase 7:
-/// a [`Capture`] is an AST subtree with positional identity, while a stdlib or
-/// macro module instance and its hoisted call arguments are still
-/// `datamodel::Variable`s carrying printed equation text.
+/// Each arm is parsed data. The list is ordered by synthesis, and that order is
+/// load-bearing because it rides salsa-cached values with derived `PartialEq`.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
 pub enum ImplicitVar {
     /// A `PREVIOUS`/`INIT` argument hoisted out of its call.
     Capture(Capture),
-    /// A stdlib/macro module instance, or an argument aux hoisted out of such
-    /// a call.
-    ///
-    /// Boxed because a `datamodel::Variable` is an order of magnitude larger
-    /// than a capture, and this list is retained by salsa for every variable of
-    /// every model -- and, under LTM, for every synthetic variable too, where
-    /// the retention was measured at +82 MiB on C-LEARN
-    /// (`db::ltm::model_ltm_implicit_var_info`).
-    Synthesized(Box<datamodel::Variable>),
+    /// A non-identifier module-call argument hoisted into an aux.
+    HoistedArg(HoistedArg),
+    /// A module-function call expanded into an instance and its wiring.
+    Module(ImplicitModule),
 }
 
 impl ImplicitVar {
     pub fn ident(&self) -> &str {
         match self {
             ImplicitVar::Capture(c) => c.ident(),
-            ImplicitVar::Synthesized(v) => v.get_ident(),
+            ImplicitVar::HoistedArg(a) => a.ident(),
+            ImplicitVar::Module(m) => m.ident(),
         }
     }
 
     pub fn capture(&self) -> Option<&Capture> {
         match self {
             ImplicitVar::Capture(c) => Some(c),
-            ImplicitVar::Synthesized(_) => None,
-        }
-    }
-
-    /// The datamodel variable this helper is, when it is not a capture.
-    pub fn synthesized(&self) -> Option<&datamodel::Variable> {
-        match self {
-            ImplicitVar::Capture(_) => None,
-            ImplicitVar::Synthesized(v) => Some(v),
+            ImplicitVar::HoistedArg(_) | ImplicitVar::Module(_) => None,
         }
     }
 
     /// The module instance this helper is, if it is one.
-    pub fn module(&self) -> Option<&datamodel::Module> {
-        match self.synthesized() {
-            Some(datamodel::Variable::Module(m)) => Some(m),
-            _ => None,
+    pub fn module(&self) -> Option<&ImplicitModule> {
+        match self {
+            ImplicitVar::Module(m) => Some(m),
+            ImplicitVar::Capture(_) | ImplicitVar::HoistedArg(_) => None,
         }
     }
 
     pub fn is_module(&self) -> bool {
-        self.module().is_some()
+        match self {
+            ImplicitVar::Capture(_) | ImplicitVar::HoistedArg(_) => false,
+            ImplicitVar::Module(_) => true,
+        }
     }
 
+    /// The implicit-variable metadata has a stock bit for every evaluation
+    /// unit, but the exhaustive arm list above contains no stock-producing
+    /// form.
     pub fn is_stock(&self) -> bool {
-        matches!(self.synthesized(), Some(datamodel::Variable::Stock(_)))
+        match self {
+            ImplicitVar::Capture(_) | ImplicitVar::HoistedArg(_) | ImplicitVar::Module(_) => false,
+        }
     }
 
     /// The dimension names this helper applies over, or `&[]` when it is
@@ -391,13 +569,7 @@ impl ImplicitVar {
     pub fn equation_dims(&self) -> &[String] {
         match self {
             ImplicitVar::Capture(c) => c.dims(),
-            ImplicitVar::Synthesized(v) => match v.get_equation() {
-                Some(
-                    datamodel::Equation::ApplyToAll(dims, _)
-                    | datamodel::Equation::Arrayed(dims, _, _, _),
-                ) => dims,
-                _ => &[],
-            },
+            ImplicitVar::HoistedArg(_) | ImplicitVar::Module(_) => &[],
         }
     }
 
@@ -408,8 +580,13 @@ impl ImplicitVar {
     pub(crate) fn same_definition(&self, other: &Self) -> bool {
         match (self, other) {
             (ImplicitVar::Capture(a), ImplicitVar::Capture(b)) => a.same_definition(b),
-            (ImplicitVar::Synthesized(a), ImplicitVar::Synthesized(b)) => a == b,
-            _ => false,
+            (ImplicitVar::HoistedArg(a), ImplicitVar::HoistedArg(b)) => a.same_definition(b),
+            (ImplicitVar::Module(a), ImplicitVar::Module(b)) => a.same_definition(b),
+            (ImplicitVar::Capture(_), ImplicitVar::HoistedArg(_) | ImplicitVar::Module(_))
+            | (ImplicitVar::HoistedArg(_), ImplicitVar::Capture(_) | ImplicitVar::Module(_))
+            | (ImplicitVar::Module(_), ImplicitVar::Capture(_) | ImplicitVar::HoistedArg(_)) => {
+                false
+            }
         }
     }
 }

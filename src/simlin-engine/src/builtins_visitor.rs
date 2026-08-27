@@ -7,19 +7,21 @@ use std::sync::LazyLock;
 
 use indexmap::IndexMap;
 
-use crate::ast::{Ast, BinaryOp, Expr0, IndexExpr0, Literal, print_eqn};
+use crate::ast::{Ast, BinaryOp, Expr0, IndexExpr0, Literal};
 use crate::builtins::{UntypedBuiltinFn, is_builtin_fn};
-use crate::capture::{Capture, CaptureKind, ImplicitVar, synthetic_ident};
+use crate::capture::{Capture, CaptureKind, HoistedArg, ImplicitModule, ImplicitVar};
 use crate::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, EquationError, Ident, RawIdent,
     canonicalize,
 };
+#[cfg(test)]
+use crate::datamodel;
 use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
+use crate::eqn_err;
 use crate::module_functions::{
     MacroRegistry, ModuleFunctionDescriptor, is_renamed_builtin_macro_collision, stdlib_descriptor,
 };
 use crate::snapshot_arg::{SnapshotAccess, SnapshotArg, SnapshotIndex};
-use crate::{datamodel, eqn_err};
 
 /// An empty registry used when no project macros are in scope (e.g. the
 /// `BuiltinVisitor::new` / `new_with_subscript_context` constructors before
@@ -182,7 +184,7 @@ fn get_dimension_names(dimensions: &[Dimension]) -> Vec<CanonicalDimensionName> 
 ///
 /// * `!any_module_call` is inert. `contains_module_call` is true for every
 ///   construct that can synthesize a helper at all -- a stdlib call, a macro,
-///   `init`, `previous` -- since the sole `make_temp_arg` call site sits inside
+///   `init`, `previous` -- since the sole `hoist_capture` call site sits inside
 ///   the PREVIOUS/INIT routing branch, and the only other producer is
 ///   `expand_module_function`, whose macro and stdlib call sites are gated by
 ///   the same predicates `contains_module_call` consults. With no module call
@@ -218,8 +220,8 @@ fn elements_in_stable_order(
 /// thing (`ImplicitVar::same_definition`).
 ///
 /// The per-element apply-to-all expansion runs a fresh `BuiltinVisitor` per
-/// element and unions every visitor's synthesized helpers. Helper identity by
-/// path:
+/// element and unions every visitor's synthesized helpers. Lookup-key behavior
+/// by path:
 ///
 /// * A *scalar* per-element capture, and the arrayed capture synthesized in the
 ///   `Ast::Arrayed` per-element expansion, both carry the element in their name
@@ -278,6 +280,12 @@ pub struct BuiltinVisitor<'a> {
     /// so that nested references (like `PREVIOUS(SMOOTH(...))`) correctly
     /// capture.
     ///
+    /// Every producer files through `insert_implicit_var`. Calling
+    /// `IndexMap::insert` directly would silently replace an earlier helper:
+    /// a macro named `ARG1` with a computed second argument can make its module
+    /// and that argument both derive `$⁚{parent}⁚{n}⁚arg1`. Same-definition
+    /// repeats are idempotent; any other collision is a loud parse error.
+    ///
     /// Insertion-ordered, and that is load-bearing rather than incidental
     /// (GH #1002). Every producer of `ParsedVariableResult::implicit_vars`
     /// emits this map with `.values()`, and `ImplicitVarMeta` used to identify
@@ -287,8 +295,8 @@ pub struct BuiltinVisitor<'a> {
     /// `ModuleIdentContext` -- reported the helpers in two different orders,
     /// and a position recorded against one parse resolved to a different
     /// helper against the other. Insertion order is the walk's synthesis
-    /// order, so it is a function of the equation alone. Helper identity no
-    /// longer rides on it (see `ImplicitVarMeta::name`), but the two salsa
+    /// order, so it is a function of the equation alone. Helper lookup no
+    /// longer rides on position (see `ImplicitVarMeta::name`), but the two salsa
     /// values carrying this order -- `ParsedVariableResult::implicit_vars` and
     /// `VariableDeps::implicit_vars` -- have derived `PartialEq`, so an
     /// unstable order still defeats backdating and makes the compiled artifact
@@ -351,7 +359,7 @@ pub struct BuiltinVisitor<'a> {
     /// restarts `n` at 0.
     ///
     /// This selects whether the GH #541 arrayed `PREVIOUS`/`INIT` capture
-    /// (`make_temp_arg`'s arrayed branch) carries the active element in its
+    /// (`hoist_capture`'s arrayed branch) carries the active element in its
     /// name. In the `Ast::ApplyToAll` per-element expansion every slot walks the
     /// SAME cloned body, so the suffix-less capture `$⁚{var}⁚{n}⁚arg0` defines
     /// the same value in every slot and `dedup_vars_by_ident` correctly
@@ -383,6 +391,30 @@ impl<'a> BuiltinVisitor<'a> {
             macro_registry: &EMPTY_MACRO_REGISTRY,
             enclosing_model: None,
             per_element_equation: false,
+        }
+    }
+
+    /// File one helper under its derived name without allowing `IndexMap`'s
+    /// replacement behavior to hide a collision.
+    ///
+    /// A repeated same-definition helper is idempotent (the apply-to-all walk
+    /// can encounter one), while different definitions claiming one name are
+    /// a source-reachable compile error. The first definition remains in the
+    /// map so an error can never change which helper later checks observe.
+    fn insert_implicit_var(&mut self, implicit_var: ImplicitVar) -> Result<(), EquationError> {
+        let ident = Ident::<Canonical>::new(implicit_var.ident());
+        match self.vars.get(&ident) {
+            Some(existing) if existing.same_definition(&implicit_var) => Ok(()),
+            Some(_) => eqn_err!(
+                DuplicateVariable,
+                0,
+                0,
+                format!("two different synthesized helpers both claim the name '{ident}'")
+            ),
+            None => {
+                self.vars.insert(ident, implicit_var);
+                Ok(())
+            }
         }
     }
 
@@ -658,9 +690,14 @@ impl<'a> BuiltinVisitor<'a> {
         }
     }
 
-    /// Substitute dimension references in the expression with concrete element names.
-    /// For example, if we're processing element "A2" of dimension "SubA",
-    /// transform `input[SubA]` to `input[A2]`.
+    /// Rewrite dimension references in `expr` to the active element: processing
+    /// element `A2` of dimension `SubA`, `input[SubA]` becomes `input[A2]`.
+    ///
+    /// This decision belongs before the hoist. A capture, hoisted call
+    /// argument, or module-input source is a scalar unit with no active
+    /// apply-to-all element of its own, so lowering cannot resolve the bare
+    /// dimension later. The GH #541 arrayed-capture arm is deliberately exempt:
+    /// its declared dimensions give lowering the context it needs.
     fn substitute_dimension_refs(&self, expr: Expr0) -> Expr0 {
         use Expr0::*;
         use std::mem;
@@ -784,7 +821,7 @@ impl<'a> BuiltinVisitor<'a> {
     /// name has no meaning inside a scalar `Equation::Scalar` helper, so the
     /// helper fragment fails to compile (GH #541 -- the canonical trigger is a
     /// nested `PREVIOUS(PREVIOUS(arr))`, whose inner `PREVIOUS(arr)` is an
-    /// expression arg routed through `make_temp_arg`).
+    /// expression arg routed through `hoist_capture`).
     ///
     /// We cannot tell here whether the bare name is arrayed or scalar (the
     /// visitor has no variable->dimensions map -- the per-variable parse path
@@ -897,11 +934,11 @@ impl<'a> BuiltinVisitor<'a> {
     /// `arg_has_subscript`): `substitute_dimension_refs` translates each
     /// subscript per element, which avoids the arrayed capture's
     /// subscript-interaction bugs (the C-LEARN regression).
-    fn make_temp_arg(&mut self, kind: CaptureKind, arg: Expr0) -> Expr0 {
+    fn hoist_capture(&mut self, kind: CaptureKind, arg: Expr0) -> Result<Expr0, EquationError> {
         let loc = crate::builtins::Loc::default();
 
         // The active per-element subscript, cloned up front so the helper-
-        // insertion (`&mut self.vars`) below does not conflict with borrowing
+        // checked insertion below does not conflict with borrowing
         // it. `Some` exactly in A2A context; cheap (a few element-name Strings).
         let active_subscript = self.active_subscript.clone();
         if let Some(subscript) = active_subscript.as_ref()
@@ -936,8 +973,7 @@ impl<'a> BuiltinVisitor<'a> {
                 .collect();
             let capture = Capture::new(self.variable_name, self.n, kind, arg, suffix, dims);
             let id = capture.ident().to_string();
-            self.vars
-                .insert(Ident::new(&id), ImplicitVar::Capture(capture));
+            self.insert_implicit_var(ImplicitVar::Capture(capture))?;
             self.n += 1;
 
             // Reference the helper at the active element: one qualified
@@ -953,7 +989,7 @@ impl<'a> BuiltinVisitor<'a> {
                     IndexExpr0::Expr(Expr0::Var(RawIdent::new_from_str(&qualified), loc))
                 })
                 .collect();
-            return Expr0::Subscript(RawIdent::new_from_str(&id), indices, loc);
+            return Ok(Expr0::Subscript(RawIdent::new_from_str(&id), indices, loc));
         }
 
         let transformed_arg = if self.active_subscript.is_some() {
@@ -972,10 +1008,9 @@ impl<'a> BuiltinVisitor<'a> {
             Vec::new(),
         );
         let id = capture.ident().to_string();
-        self.vars
-            .insert(Ident::new(&id), ImplicitVar::Capture(capture));
+        self.insert_implicit_var(ImplicitVar::Capture(capture))?;
         self.n += 1;
-        Expr0::Var(RawIdent::new_from_str(&id), loc)
+        Ok(Expr0::Var(RawIdent::new_from_str(&id), loc))
     }
 
     fn walk_index(&mut self, expr: IndexExpr0) -> Result<IndexExpr0, EquationError> {
@@ -991,19 +1026,10 @@ impl<'a> BuiltinVisitor<'a> {
         Ok(result)
     }
 
-    /// Expand one module-function call (stdlib *or* macro) into a synthetic
-    /// `Variable::Module` plus hoisted argument `Aux`es, returning the
-    /// replacement expression `Var("<module>·<primary_output>")`.
-    ///
-    /// This is the generalized form of the previously stdlib-hardcoded
-    /// rewrite. The descriptor supplies the three facts that used to be
-    /// inlined: the target `model_name` (was `format!("stdlib⁚{func}")`),
-    /// the ordered `dst` port names (was `stdlib_args`), and the output
-    /// variable whose value replaces the call (was the hardcoded
-    /// `·output`). The synthetic-instance name, A2A subscript-suffix logic,
-    /// and per-argument hoisting are reused verbatim, so for a stdlib
-    /// descriptor (`primary_output == "output"`) the expansion is
-    /// byte-for-byte identical to before.
+    /// Expand one module-function call into an [`ImplicitModule`] plus a
+    /// [`HoistedArg`] for each computed argument, returning a reference to the
+    /// module's primary output. The descriptor owns the target model, ordered
+    /// input ports, primary output, and macro-vs-stdlib arity rule.
     ///
     /// Arity: a project macro is strict -- `args.len()` must equal
     /// `descriptor.parameter_ports.len()`, else `BadBuiltinArgs` over the
@@ -1011,9 +1037,8 @@ impl<'a> BuiltinVisitor<'a> {
     /// port like `SMTH1`'s `initial_value` may be unwired), so no arity
     /// check is applied when `!descriptor.is_macro`.
     ///
-    /// `func` is only used to name the synthetic instance/arg vars (kept
-    /// identical to the pre-extraction `$⁚{var}⁚{n}⁚{func}` form); routing
-    /// is entirely descriptor-driven.
+    /// `func` is used only to derive the synthetic name; routing is entirely
+    /// descriptor-driven.
     fn expand_module_function(
         &mut self,
         descriptor: &ModuleFunctionDescriptor,
@@ -1038,87 +1063,65 @@ impl<'a> BuiltinVisitor<'a> {
             );
         }
 
-        // In A2A context, add subscript suffix to module name for uniqueness
         let subscript_suffix = self.subscript_suffix();
-        let module_name = synthetic_ident(
-            self.variable_name,
-            self.n,
-            func,
-            Some(subscript_suffix.as_str()),
-        );
+        let suffix = (!subscript_suffix.is_empty()).then(|| subscript_suffix.clone());
 
-        let ident_args = args.into_iter().enumerate().map(|(i, arg)| {
-            if let Var(id, _loc) = arg {
-                // In A2A context, substitute dimension refs in simple var references too
-                if self.active_subscript.is_some() {
-                    let substituted = self.substitute_dimension_refs(Var(id.clone(), _loc));
-                    if let Var(new_id, _) = substituted {
-                        return new_id.as_str().to_string();
-                    }
+        // Arguments are inserted before their instance. This ordering and the
+        // shared counter are logical callsite facts, not presentation.
+        let mut references = Vec::with_capacity(args.len());
+        for (i, arg) in args.into_iter().enumerate() {
+            let src = if let Var(id, loc) = arg {
+                // A bare identifier wires directly. In apply-to-all
+                // context a dimension name is first resolved to the active
+                // qualified element name; indexed dimensions substitute to
+                // a constant and retain the identifier spelling because a
+                // module reference can only name storage.
+                if self.active_subscript.is_some()
+                    && let Var(new_id, _) = self.substitute_dimension_refs(Var(id.clone(), loc))
+                {
+                    new_id.as_str().to_string()
+                } else {
+                    id.as_str().to_string()
                 }
-                id.as_str().to_string()
             } else {
-                // In A2A context, substitute dimension refs and add subscript suffix
+                // A port can only read a named variable, so a computed
+                // argument becomes a scalar aux carrying the walked AST.
                 let transformed_arg = if self.active_subscript.is_some() {
                     self.substitute_dimension_refs(arg)
                 } else {
                     arg
                 };
-
-                let id = synthetic_ident(
+                let hoisted = HoistedArg::new(
                     self.variable_name,
                     self.n,
-                    &format!("arg{i}"),
-                    Some(subscript_suffix.as_str()),
+                    i,
+                    transformed_arg,
+                    suffix.clone(),
                 );
-                let eqn = print_eqn(&transformed_arg);
-                let x_var = datamodel::Variable::Aux(datamodel::Aux {
-                    ident: id.clone(),
-                    equation: datamodel::Equation::Scalar(eqn),
-                    documentation: "".to_string(),
-                    units: None,
-                    gf: None,
-                    ai_state: None,
-                    uid: None,
-                    compat: datamodel::Compat::default(),
-                });
-                self.vars
-                    .insert(Ident::new(&id), ImplicitVar::Synthesized(Box::new(x_var)));
+                let id = hoisted.ident().to_string();
+                self.insert_implicit_var(ImplicitVar::HoistedArg(hoisted))?;
                 id
-            }
-        });
+            };
 
-        let references: Vec<_> = ident_args
-            .into_iter()
-            .enumerate()
-            .map(|(i, src)| datamodel::ModuleReference {
-                src,
-                // dst port names come from the descriptor (stdlib_args for a
-                // stdlib func, MacroSpec.parameters for a macro). A macro
-                // call has exactly `parameter_ports.len()` args (checked
-                // above); a stdlib call may legitimately have fewer, wiring
-                // only the leading ports.
-                dst: format!("{}.{}", module_name, descriptor.parameter_ports[i]),
-            })
-            .collect();
-        let x_module = datamodel::Variable::Module(datamodel::Module {
-            ident: module_name.clone(),
-            model_name: descriptor.model_name.clone(),
-            documentation: "".to_string(),
-            units: None,
+            // The descriptor owns the ordered input-port names. A macro has
+            // strict arity; stdlib calls may omit trailing optional ports.
+            references.push((src, descriptor.parameter_ports[i].clone()));
+        }
+
+        let module = ImplicitModule::new(
+            self.variable_name,
+            self.n,
+            func,
+            descriptor.model_name.clone(),
             references,
-            compat: datamodel::Compat::default(),
-            ai_state: None,
-            uid: None,
-        });
+            suffix,
+        );
+        let module_name = module.ident().to_string();
         // The same U+00B7 (·) middle-dot the previously-hardcoded
         // `·output` used (the already-canonical compile-time AST separator);
         // `primary_output` is "output" for stdlib, so stdlib stays identical.
         let module_output_name = format!("{}\u{b7}{}", module_name, descriptor.primary_output);
-        self.vars.insert(
-            Ident::new(&module_name),
-            ImplicitVar::Synthesized(Box::new(x_module)),
-        );
+        self.insert_implicit_var(ImplicitVar::Module(module))?;
 
         self.n += 1;
         Ok(Var(RawIdent::new_from_str(&module_output_name), loc))
@@ -1205,7 +1208,7 @@ impl<'a> BuiltinVisitor<'a> {
                 // (`classify_passthrough`). So `func` here canonicalizes to the
                 // opcode-backed builtin (e.g. `init`) and routes to the right
                 // intrinsic below -- `init` -> `LoadInitial`, with the existing
-                // `make_temp_arg` hoisting for an expression argument
+                // `hoist_capture` hoisting for an expression argument
                 // (`init_needs_temp_arg`). The macro body did no work beyond the
                 // bare call, so collapsing to the opcode loses nothing.
                 if let Some(descriptor) = descriptor
@@ -1261,7 +1264,7 @@ impl<'a> BuiltinVisitor<'a> {
                     // Only subscripted args benefit from the substitution (it
                     // makes their indices statically resolvable); other shapes
                     // keep their original form so behavior is unchanged for
-                    // them (`make_temp_arg` substitutes internally, and the
+                    // them (`hoist_capture` substitutes internally, and the
                     // substitution is idempotent). An ARRAY-shaped subscript is
                     // the exception: substituting would pin it to one element
                     // before lowering can tell whether the position wants the
@@ -1288,7 +1291,7 @@ impl<'a> BuiltinVisitor<'a> {
                     let needs_temp_arg =
                         self.snapshot_arg(&arg0).access() == SnapshotAccess::Capture;
                     let arg0 = if needs_temp_arg {
-                        // `make_temp_arg` returns the reference expression for
+                        // `hoist_capture` returns the reference expression for
                         // the synthesized capture: a bare `Var` for a scalar
                         // capture, or a subscripted `capture[<element>]` access
                         // for the arrayed capture it synthesizes when the arg
@@ -1298,7 +1301,7 @@ impl<'a> BuiltinVisitor<'a> {
                         } else {
                             CaptureKind::Init
                         };
-                        self.make_temp_arg(kind, arg0)
+                        self.hoist_capture(kind, arg0)?
                     } else {
                         arg0
                     };
@@ -1546,114 +1549,288 @@ mod tests {
     use crate::builtins::Loc;
     use crate::test_common::TestProject;
 
-    /// Build a minimal `Variable::Aux` with the given ident and scalar equation.
-    fn aux(ident: &str, eqn: &str) -> datamodel::Variable {
-        datamodel::Variable::Aux(datamodel::Aux {
-            ident: ident.to_string(),
-            equation: datamodel::Equation::Scalar(eqn.to_string()),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: datamodel::Compat::default(),
-        })
+    fn body(eqn: &str) -> Expr0 {
+        Expr0::new(eqn, crate::lexer::LexerType::Equation)
+            .expect("test argument must lex")
+            .expect("test argument must parse")
     }
 
     /// A capture of `parent`, minted the way the visitor mints one.
     fn capture(parent: &str, id: usize, eqn: &str) -> ImplicitVar {
-        let arg = Expr0::new(eqn, crate::lexer::LexerType::Equation)
-            .expect("test argument must lex")
-            .expect("test argument must parse");
         ImplicitVar::Capture(Capture::new(
             parent,
             id,
             CaptureKind::Previous,
-            arg,
+            body(eqn),
             None,
             Vec::new(),
         ))
     }
 
-    /// A synthesized module-call argument aux, the other arm of
-    /// [`ImplicitVar`].
-    fn synthesized(ident: &str, eqn: &str) -> ImplicitVar {
-        ImplicitVar::Synthesized(Box::new(aux(ident, eqn)))
+    fn hoisted(parent: &str, id: usize, index: usize, eqn: &str) -> ImplicitVar {
+        ImplicitVar::HoistedArg(HoistedArg::new(parent, id, index, body(eqn), None))
+    }
+
+    fn module(parent: &str, id: usize, func: &str, src: &str) -> ImplicitVar {
+        ImplicitVar::Module(ImplicitModule::new(
+            parent,
+            id,
+            func,
+            format!("stdlib\u{205A}{func}"),
+            vec![(src.to_string(), "input".to_string())],
+            None,
+        ))
+    }
+
+    /// One representative of every current [`ImplicitVar`] arm, derived from
+    /// the production visitor rather than assembled as a test-only variant
+    /// list. The equation emits a capture while walking the first argument,
+    /// then hoisted arguments and their module instance.
+    fn every_implicit_var_variant() -> Vec<ImplicitVar> {
+        let ast = Ast::Scalar(body("SMTH1(PREVIOUS(a * 2, 0) + 1, 2)"));
+        let (_, emitted) =
+            instantiate_implicit_modules("h", ast, None, None, None, empty_macro_registry(), None)
+                .expect("the representative production expansion must succeed");
+
+        let mut capture = None;
+        let mut hoisted = None;
+        let mut module = None;
+        for helper in emitted {
+            // Exhaustive by construction: a new enum arm must state how it is
+            // represented in the N-way dedup tests below.
+            match helper {
+                ImplicitVar::Capture(_) if capture.is_none() => capture = Some(helper),
+                ImplicitVar::HoistedArg(_) if hoisted.is_none() => hoisted = Some(helper),
+                ImplicitVar::Module(_) if module.is_none() => module = Some(helper),
+                ImplicitVar::Capture(_) | ImplicitVar::HoistedArg(_) | ImplicitVar::Module(_) => {}
+            }
+        }
+        vec![
+            capture.expect("the production fixture must emit a capture"),
+            hoisted.expect("the production fixture must emit a hoisted argument"),
+            module.expect("the production fixture must emit a module"),
+        ]
+    }
+
+    /// A different-ident helper of the same arm as `helper`.
+    fn distinct_helper(helper: &ImplicitVar) -> ImplicitVar {
+        match helper {
+            ImplicitVar::Capture(_) => capture("g", 0, "b"),
+            ImplicitVar::HoistedArg(_) => hoisted("g", 0, 0, "b"),
+            ImplicitVar::Module(_) => module("g", 0, "smth1", "b"),
+        }
+    }
+
+    /// The same ident as `helper`, but a different definition.
+    fn conflicting_helper(helper: &ImplicitVar) -> ImplicitVar {
+        match helper {
+            ImplicitVar::Capture(c) => ImplicitVar::Capture(Capture::new(
+                "h",
+                c.id(),
+                c.kind(),
+                body("different"),
+                c.suffix().map(str::to_string),
+                c.dims().to_vec(),
+            )),
+            // The production representative is the first call argument.
+            ImplicitVar::HoistedArg(a) => ImplicitVar::HoistedArg(HoistedArg::new(
+                "h",
+                a.id(),
+                0,
+                body("different"),
+                a.suffix().map(str::to_string),
+            )),
+            ImplicitVar::Module(m) => ImplicitVar::Module(ImplicitModule::new(
+                "h",
+                m.id(),
+                "smth1",
+                m.model_name().to_string(),
+                vec![("different".to_string(), "input".to_string())],
+                m.suffix().map(str::to_string),
+            )),
+        }
+    }
+
+    /// Re-key a production-emitted representative so every arm claims the
+    /// same physical lookup key. The bodies, model, and wiring sources come from the
+    /// visitor output; only the private constructor inputs that produce the
+    /// common `$⁚matrix⁚0⁚arg0` key are changed. That is the state the
+    /// name-keyed dedup must adjudicate.
+    fn pair_matrix_helper(helper: &ImplicitVar) -> ImplicitVar {
+        match helper {
+            ImplicitVar::Capture(c) => ImplicitVar::Capture(Capture::new(
+                "matrix",
+                0,
+                c.kind(),
+                c.arg().clone(),
+                None,
+                c.dims().to_vec(),
+            )),
+            ImplicitVar::HoistedArg(a) => {
+                ImplicitVar::HoistedArg(HoistedArg::new("matrix", 0, 0, a.arg().clone(), None))
+            }
+            ImplicitVar::Module(m) => ImplicitVar::Module(ImplicitModule::new(
+                "matrix",
+                0,
+                "arg0",
+                m.model_name().to_string(),
+                m.references()
+                    .iter()
+                    .map(|reference| {
+                        let (_, port) = reference
+                            .dst
+                            .rsplit_once('.')
+                            .expect("production module destinations carry a port");
+                        (reference.src.clone(), port.to_string())
+                    })
+                    .collect(),
+                None,
+            )),
+        }
+    }
+
+    fn implicit_var_arm(helper: &ImplicitVar) -> &'static str {
+        match helper {
+            ImplicitVar::Capture(_) => "Capture",
+            ImplicitVar::HoistedArg(_) => "HoistedArg",
+            ImplicitVar::Module(_) => "Module",
+        }
     }
 
     /// `dedup_vars_by_ident` collapses same-definition duplicates (the
     /// `Ast::ApplyToAll` suffix-less arrayed capture) but keeps distinct
     /// idents.
     ///
-    /// Both arms of `ImplicitVar` are rows, because both reach this function:
-    /// a per-element apply-to-all expansion unions every element visitor's
-    /// helpers, and one element's walk can mint a capture and a module-call
-    /// argument aux alike.
+    /// Rows come from [`every_implicit_var_variant`], and
+    /// [`distinct_helper`]'s exhaustive match makes a new arm a compile error
+    /// until its semantics are pinned here.
     #[test]
     fn dedup_vars_collapses_identical_keeps_distinct() {
-        let cases: &[(&str, Vec<ImplicitVar>, [&str; 2])] = &[
-            (
-                "captures",
-                vec![
-                    capture("h", 0, "a"),
-                    capture("h", 0, "a"), // same definition
-                    capture("g", 0, "b"),
-                ],
-                ["$⁚h⁚0⁚arg0", "$⁚g⁚0⁚arg0"],
-            ),
-            (
-                "synthesized auxes",
-                vec![
-                    synthesized("h", "previous(a, 0)"),
-                    synthesized("h", "previous(a, 0)"), // byte-identical duplicate
-                    synthesized("g", "previous(b, 0)"),
-                ],
-                ["h", "g"],
-            ),
-        ];
-        for (what, vars, expected) in cases {
-            let out = dedup_vars_by_ident(vars.clone()).unwrap_or_else(|e| {
-                panic!("{what}: same-definition duplicate must collapse: {e:?}")
-            });
-            assert_eq!(
-                out.len(),
-                2,
-                "{what}: the first collapses; the second stays"
-            );
-            assert_eq!(out[0].ident(), expected[0], "{what}");
-            assert_eq!(out[1].ident(), expected[1], "{what}");
+        for helper in every_implicit_var_variant() {
+            assert!(!helper.is_stock(), "no current implicit arm is a stock");
+            let distinct = distinct_helper(&helper);
+            let expected = [helper.ident().to_string(), distinct.ident().to_string()];
+            let out = dedup_vars_by_ident(vec![helper.clone(), helper, distinct])
+                .unwrap_or_else(|e| panic!("same-definition duplicate must collapse: {e:?}"));
+            assert_eq!(out.len(), 2, "the first collapses; the second stays");
+            assert_eq!(out[0].ident(), expected[0]);
+            assert_eq!(out[1].ident(), expected[1]);
         }
     }
 
-    /// An ident collision whose two helpers DIFFER (the PR #668 corruption:
-    /// two `Ast::Arrayed` slots minting the same suffix-less helper id for
-    /// different bodies) must be a LOUD error, never silently kept-first.
-    /// Both arms of `ImplicitVar`, for the reason the sibling test states.
+    /// An ident collision whose two helpers differ (the PR #668 corruption:
+    /// two `Ast::Arrayed` slots minting one suffix-less helper id for different
+    /// bodies) is a loud error, never silently kept-first.
+    ///
+    /// The representatives are production-emitted and
+    /// [`conflicting_helper`]'s exhaustive match pins every current enum arm.
     #[test]
     fn dedup_vars_errors_on_conflicting_collision() {
-        let cases: &[(&str, Vec<ImplicitVar>)] = &[
-            (
-                "captures",
-                // Same (parent, id), so the same derived ident, DIFFERENT body.
-                vec![capture("h", 0, "a"), capture("h", 0, "b")],
-            ),
-            (
-                "synthesized auxes",
-                vec![
-                    synthesized("h", "previous(a, 0)"),
-                    synthesized("h", "previous(b, 0)"),
-                ],
-            ),
-        ];
-        for (what, vars) in cases {
-            let err = dedup_vars_by_ident(vars.clone())
+        for helper in every_implicit_var_variant() {
+            let conflict = conflicting_helper(&helper);
+            assert_eq!(
+                helper.ident(),
+                conflict.ident(),
+                "the fixture must collide on ident"
+            );
+            let err = dedup_vars_by_ident(vec![helper, conflict])
                 .expect_err("a conflicting same-ident collision must be a loud error");
             assert_eq!(
                 err.code,
                 crate::common::ErrorCode::Generic,
-                "{what}: expected a Generic compiler-invariant error, got {err:?}"
+                "expected a Generic compiler-invariant error, got {err:?}"
             );
         }
+    }
+
+    /// The visitor's checked map insertion is idempotent for an exact repeat,
+    /// rejects a different definition under the same key, and leaves the first
+    /// definition intact. Representatives come from the production expansion
+    /// in [`every_implicit_var_variant`]; [`conflicting_helper`] is exhaustive
+    /// over the enum, so every producer arm is constrained.
+    #[test]
+    fn checked_insertion_keeps_first_and_refuses_conflicting_definition() {
+        for helper in every_implicit_var_variant() {
+            let mut visitor = BuiltinVisitor::new("h");
+            visitor
+                .insert_implicit_var(helper.clone())
+                .expect("the first definition must be accepted");
+            visitor
+                .insert_implicit_var(helper.clone())
+                .expect("an exact repeat must be idempotent");
+            assert_eq!(visitor.vars.len(), 1);
+
+            let conflict = conflicting_helper(&helper);
+            let error = visitor
+                .insert_implicit_var(conflict)
+                .expect_err("a different definition under the same name must be loud");
+            assert_eq!(error.code, crate::common::ErrorCode::DuplicateVariable);
+            assert_eq!(visitor.vars.len(), 1);
+            assert!(
+                visitor
+                    .vars
+                    .values()
+                    .next()
+                    .is_some_and(|kept| kept == &helper),
+                "the rejected insertion must not replace the first definition"
+            );
+        }
+    }
+
+    /// Every ordered pair in the current 3x3 [`ImplicitVar`] matrix reaches
+    /// name-keyed dedup. Same-arm clones collapse; each of the six cross-arm
+    /// pairs is a loud collision in both directions.
+    ///
+    /// Representatives come from [`every_implicit_var_variant`], not test-only
+    /// enum construction. [`pair_matrix_helper`] is exhaustive, so a new arm
+    /// cannot silently escape this matrix even though Rust enums have no
+    /// runtime variant iterator.
+    #[test]
+    fn dedup_vars_covers_the_complete_variant_pair_matrix() {
+        let helpers: Vec<_> = every_implicit_var_variant()
+            .iter()
+            .map(pair_matrix_helper)
+            .collect();
+        assert_eq!(helpers.len(), 3, "the current enum has three variants");
+
+        let mut pair_count = 0;
+        let mut cross_variant_count = 0;
+        for (left_index, left) in helpers.iter().enumerate() {
+            for (right_index, right) in helpers.iter().enumerate() {
+                pair_count += 1;
+                assert_eq!(
+                    left.ident(),
+                    right.ident(),
+                    "the matrix only constrains same-name pairs"
+                );
+                let result = dedup_vars_by_ident(vec![left.clone(), right.clone()]);
+                if left_index == right_index {
+                    let deduped = result.unwrap_or_else(|error| {
+                        panic!(
+                            "{} + {} clones must collapse: {error:?}",
+                            implicit_var_arm(left),
+                            implicit_var_arm(right)
+                        )
+                    });
+                    assert_eq!(deduped.len(), 1);
+                } else {
+                    cross_variant_count += 1;
+                    let error = result.expect_err("cross-variant same-name pair must be loud");
+                    assert_eq!(
+                        error.code,
+                        crate::common::ErrorCode::Generic,
+                        "{} + {} must refuse as a compiler-invariant collision",
+                        implicit_var_arm(left),
+                        implicit_var_arm(right)
+                    );
+                }
+            }
+        }
+        assert_eq!(pair_count, 9, "3 variants produce 3x3 ordered pairs");
+        assert_eq!(
+            cross_variant_count, 6,
+            "the off-diagonal matrix has six ordered pairs"
+        );
     }
 
     /// A capture whose two copies differ only in where they were written is
@@ -1663,7 +1840,7 @@ mod tests {
     /// would also make a whitespace-only difference between an element's
     /// equation and its initial equation a compile error.
     #[test]
-    fn a_capture_is_identified_by_its_body_not_its_position() {
+    fn capture_definition_equality_ignores_source_position() {
         let spaced = capture("h", 0, "a + b");
         let tight = capture("h", 0, "a+b");
         assert_ne!(spaced, tight, "PartialEq keeps positions, for salsa");
@@ -1721,16 +1898,13 @@ mod tests {
         }
     }
 
-    /// GH #913: a module-backed builtin's argument is serialized with
-    /// `print_eqn` into a synthesized helper aux, whose equation text is then
-    /// RE-PARSED. So every operator the printer spells differently from the way
-    /// the lexer reads it turns a perfectly legal model into a hard compile
-    /// failure ("failed to compile fragments for variables: $⁚s⁚0⁚arg0"), not a
-    /// cosmetic printer nit. `<>` used to print as `!=` and `not` as `!`, and
-    /// the lexer accepts neither -- so `<>`/`not` inside any SMTH*/DELAY*/TREND
-    /// argument was unusable.
+    /// Every operator is usable inside a module-function argument (GH #913).
+    ///
+    /// The argument is carried as an `Expr0` subtree, so the printer and lexer
+    /// need not agree on spellings such as `<>`, `not`, and chained `^` for the
+    /// model to compile.
     #[test]
-    fn module_backed_builtin_argument_survives_print_and_reparse() {
+    fn every_operator_is_usable_inside_a_module_function_argument() {
         let project = TestProject::new("printer_reparse")
             .aux("a", "1", None)
             .aux("b", "2", None)
@@ -1741,26 +1915,17 @@ mod tests {
         project.assert_compiles_incremental();
     }
 
-    /// The same #913 print-and-reparse round trip, but the shape that fails
-    /// **SILENTLY** -- and therefore the most important test in this change.
+    /// The subtree keeps an `If` under an operator grouped as written (GH #913).
     ///
-    /// `If` is not an atom in the equation grammar: it is legal only at the top
-    /// of an expression, inside parentheses, or as a call argument. `print_eqn`
-    /// used to emit it bare under an operator, so the argument AST
-    /// `Div(If(1>0, 10, 20), 2)` printed as
+    /// `If` is not an atom in the equation grammar. Printing the argument AST
+    /// `Div(If(1>0, 10, 20), 2)` bare under its operator can produce
     ///
     /// ```text
     /// if (1 > 0) then (10) else (20) / 2
     /// ```
     ///
-    /// which re-parses as `If(1>0, 10, 20/2)` -- the division migrated INTO the
-    /// else branch. Unlike `<>` / `not` / chained `^` (which produce text the
-    /// lexer rejects, so the model fails loudly to compile), this text parses
-    /// fine. It just means something different.
-    ///
-    /// The result is a plain user model, with no arrays and no LTM, that
-    /// compiles clean, runs clean, and reports the wrong number: `10` instead of
-    /// `5`. Nothing anywhere in the engine would have caught it.
+    /// which parses as `If(1>0, 10, 20/2)` and silently reports `10` instead of
+    /// `5`. Carrying the subtree makes that regrouping impossible.
     #[test]
     fn module_backed_builtin_if_argument_is_not_regrouped() {
         // SMTH1's input is a constant 5, so the smooth sits at its initial value

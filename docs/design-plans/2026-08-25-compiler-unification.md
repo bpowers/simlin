@@ -118,8 +118,9 @@ Slug: `compiler-unification`. Tests named after an AC use the full identifier.
   match, and a table-driven test derives its rows from the old matchers'
   precedence orders.
 - **AC2.4** After Phase 7, `rg "print_eqn" src/simlin-engine/src/builtins_visitor.rs`
-  and the `make_temp_arg`/textual `substitute_dimension_refs` path are gone;
-  `rg ModuleIdentContext src/` is empty.
+  and `rg "make_temp_arg" src/simlin-engine/src` are empty;
+  `substitute_dimension_refs` is an AST-to-AST pre-hoist rewrite with no
+  print/parse boundary; `rg ModuleIdentContext src/` is empty.
 
 ### compiler-unification.AC3: incrementality improves and never regresses
 - **AC3.1** A salsa execution-count test shows adding a module variable to a
@@ -379,9 +380,11 @@ into the parent would add those edges (and make `x = PREVIOUS(y); y = f(x)` a
 cycle). So a capture keeps a hidden layout slot and its own dependency set,
 files into the runlists under a synthetic ident, and is compiled through
 `lower_fragment` with a `FragmentInput` constructor of its own -- what changes
-is that it is carried as an AST subtree with a positional identity, never as
-equation text with a name-derived identity (the GH #1002 question dissolves:
-identity is `(parent, id)`). The parse becomes keyed on `(variable, project)`
+is that it is carried as an AST subtree with logical callsite inputs
+`(parent, id, argument position, suffix)`, never as equation text. Those inputs
+derive the synthetic name; current storage and `ImplicitVarMeta::find_in`
+remain name-keyed until the context-dependent parse is removed. The parse
+becomes keyed on `(variable, project)`
 because every decision that needed the module set -- is this dotted name a
 module output, is this call a user module -- moves to lowering, where
 `FragmentInput.deps` already knows each dependency's kind. The implementing
@@ -718,16 +721,21 @@ decisions taken on it:
   compiler schedules. They collapse to one memo per variable; the ~20 call
   sites that construct a context are rewritten in chunk 7.4, which is why
   `rg ModuleIdentContext src/` is empty only after that chunk.
-- A `PREVIOUS`/`INIT` capture carries its argument as an AST subtree with
-  positional identity `(parent, id)`: nothing prints one to equation text and
-  parses it back, so the printer and the lexer no longer have to agree on every
-  spelling for a model to compile (GH #913's class). A stdlib or macro module
-  instance and its hoisted call arguments are still text; they are printed at
-  ONE site (`expand_module_function`) and re-parsed at the six production sites
-  that build a helper's parse-stage form, plus the test-only
-  `ModelStage0::new_in_project` oracle. Chunk 7.3 closes those. A helper's name
-  is still its identity at the twenty-one name-keyed sites, and it is derived in
-  ONE place (`capture::synthetic_ident`); see "Phase 7.2 captures" below.
+- Every helper the parse synthesizes carries parsed data: a `PREVIOUS`/`INIT`
+  capture and a hoisted module-call argument are `Expr0` subtrees with logical
+  callsite inputs `(parent, id, argument position, suffix)`, and a stdlib or
+  macro module instance is its target model plus its input wiring. No
+  compile-stage consumer lexes a
+  helper back from generated text, so the printer and lexer do not have to
+  agree on every spelling for a model to compile (GH #913's class). The
+  source-format `Variable::eqn` projection remains for diagnostics and LTM's
+  generated-equation fallback; it does not define the helper's AST or identity.
+  A helper's derived name is still its physical lookup key at the name-keyed
+  sites: `ImplicitVarMeta::name` selects it, `index_hint` only accelerates that
+  name check, and runlists, layout, offsets, and symbolic references are
+  name-keyed too. `capture::synthetic_ident` is the ONE derivation; no store
+  physically addresses the logical callsite tuple. See "Phase 7.2 captures"
+  and "Phase 7.3a implicit modules" below.
 - AC3.1 needs the parse key and nothing else. The two other causes on the
   record are gone or were never real: the whole-model module map the fragment
   compilers cloned was deleted with Phase 3 (module shapes come from
@@ -752,8 +760,10 @@ D1/D3 predicate (a plain function, not a projection: the parse still decides
 and the dep stage still reads the parsed helper list, so no projection removes
 a whole-model read); 7.2 captures for PREVIOUS/INIT with today's
 capture set, names, and walk order held fixed (the goldens are the defect
-detector); 7.3a stdlib `ImplicitModule` with per-element expansion and shared
-`n`; 7.3b macros, passthrough, and GH #554; 7.4 deletion of `ModuleIdentContext`
+detector); 7.3a `ImplicitModule` with per-element expansion and shared `n`,
+which covers macro CALLS because `expand_module_function` is one expansion for
+both; 7.3b macro passthrough and GH #554, the paths that deliberately do not
+reach it; 7.4 deletion of `ModuleIdentContext`
 and the empty-context twin call sites and the AC3.1 flip; 7.5 the shape changes, one commit and ledger row each: dropping
 the captures D1 synthesizes for `PREVIOUS(module-call aux)` and
 `PREVIOUS(m·scalar_port)` (redundant: codegen's `static_slot` already accepts
@@ -775,17 +785,18 @@ hoisted into its own unit of evaluation: `(id, kind, arg, suffix, dims)`, where
 `id` is the walk counter the visitor was at, `suffix` is the active
 apply-to-all element when the parent is expanded per element, and `dims` is
 non-empty only for the GH #541 arrayed capture. `capture::ImplicitVar` is the
-ordered list a parse produces: a `Capture`, or a `Synthesized` module instance
-or hoisted call argument that is still a `datamodel::Variable`.
+ordered list a parse produces: a `Capture`, a `HoistedArg`, or an
+`ImplicitModule`. Each arm carries parsed data directly.
 
 `capture::synthetic_ident(parent, n, part, suffix)` is the single statement of
 how EVERY synthesized helper is named -- captures, module instances, and their
 hoisted arguments alike -- so `rg "arg0" src/simlin-engine/src` finds exactly
-one production derivation. The name is an external key, not the identity:
-every runlist is a lexicographic sort, and the layout's implicit section and
-the results offset map are name-sorted, so a helper filed under a different
-string sorts elsewhere and moves the artifact. Internal code addresses a
-capture by `(parent, id)`.
+one production derivation. The constructor's `(parent, id, part, suffix)` is
+the logical callsite source of that name, while the name remains the physical
+lookup key: `ImplicitVarMeta::{name,index_hint}` resolve it by name, every
+runlist is a lexicographic sort, and the layout's implicit section and results
+offset map are name-sorted. No downstream store physically addresses a capture
+by `(parent, id)`.
 
 `Capture::variable_stage0` is the one constructor of a capture's parse-stage
 `Variable`, replacing the `parse_var`-over-printed-text call at every consumer
@@ -831,6 +842,61 @@ of one cloned body, and what stops a whitespace-only difference between an
 element's equation and its initial equation from becoming two helpers claiming
 one name. `PartialEq` keeps positions, because salsa uses it to decide whether
 a re-parse changed anything and a moved span changes the diagnostics.
+
+**Phase 7.3a implicit modules.** A stdlib or macro module-function call
+expands into two typed values on the same ordered `ImplicitVar` list, one entry
+per synthesized variable so list order, name-keyed deduplication, and salsa
+equality preserve the source walk's logical callsite identity:
+
+- `capture::ImplicitModule` is the instance: its logical callsite `(parent,
+  id, call_name, suffix)`, target `model_name`, and source-to-port inputs. Its
+  constructor derives both the `synthetic_ident` external key and every
+  `ModuleReference::dst`, so neither can disagree with the typed callsite
+  inputs.
+- `capture::HoistedArg` is one value per argument that is not a bare
+  identifier, carrying that argument's exact `Expr0` subtree, including source
+  locations. A bare identifier
+  argument wires straight to its port by name, so the wiring and hoisted-
+  argument list are not one-to-one; `arg{i}` in a helper name is the argument's
+  position in the call, not its position in an auxiliary list.
+
+`ImplicitModule::variable_stage0` and `HoistedArg::variable_stage0` join
+`Capture::variable_stage0` as the constructors every compile-stage consumer
+uses. `ImplicitVar::Synthesized` and the module-call helper's generated-text
+parse boundary do not exist. Because `expand_module_function` is the single
+expansion for stdlib calls and macro calls, macro calls use these values too;
+7.3b is limited to macro passthrough and GH #554, paths that do not reach that
+function.
+
+The typed callsite fields are constructor sources, not a tuple-addressed
+storage API. `ImplicitVarMeta::find_in` currently resolves an implicit helper
+by `name`, using `index_hint` only as a checked fast path, and later compiler
+stages also file helpers by their derived name.
+
+`BuiltinVisitor::insert_implicit_var` is the only mutation of the visitor's
+helper map. An exact same-definition repeat is idempotent; different helpers
+claiming one derived name preserve the first definition and return a
+`DuplicateVariable` error before `IndexMap::insert` can overwrite it. This is
+source-reachable: a macro named `ARG1` invoked as `ARG1(k, k * 2)` makes the
+module and its computed second-argument helper both derive
+`$⁚out⁚0⁚arg1`. Cross-element aggregation uses a `Vec` followed by
+`dedup_vars_by_ident`, and the dt/initial merge has the same checked
+first-definition contract, so no helper merge path silently overwrites before
+checking definition equality.
+
+Two details remain because they encode source semantics rather than the old
+text representation:
+
+- `substitute_dimension_refs` is an `Expr0` to `Expr0` rewrite. It runs before
+  hoisting because the argument is about to leave an apply-to-all body and
+  become a scalar helper with no active element against which lowering could
+  resolve a bare dimension name. The apply-to-all rows in
+  `db::implicit_module_tests` pin the substituted `vals[d·e1]` bodies.
+- `ImplicitVar::is_stock()` answers `false` from the typed arm list. The parser
+  synthesizes captures, hoisted arguments, and module instances, none of which
+  is a stock; the predicate remains because dependency metadata carries an
+  `is_stock` field for every variable. Retiring that field belongs to Phase 8's
+  dependency-shape work.
 
 **Phase 7.1 probe.** The execution-count probe chunk 7.1 owed AC3.1 is
 `db::exec_probe::ProbedDb`: a `SimlinDb` built over salsa storage carrying an
@@ -1397,13 +1463,14 @@ suites and the execution-count tests are the guard.
 
 ## Measured
 
-Ledger rows are appended by each phase's teammate. Every compile-cost number
+Ledger rows are recorded by each phase's teammate. Every compile-cost number
 is retired instructions unless the row says otherwise. A phase row names its
 commit by subject line: the row is written before the commit exists, so the
 hash is not available to it.
 
 | phase | commit | cold compile Ir | slots | opcodes (flow / stock / init) | literals / GFs / temps / views | notes |
 |---|---|---:|---:|---|---|---|
+| 7.3a | `engine: implicit modules carry parsed data` | 8.7253 G (median of 5; range 8.7159-8.7290), +0.33% against the base tree (the 7.2 chunk staged on `8b9ef311`) re-measured in the same session (8.6966 G, median of 5; range 8.6857-8.7009; interleaved pairs +0.456 / +0.372 / +0.484 / +0.173 / +0.223%). Each binary's spread is about 0.15-0.17%, so the delta is outside the channel's noise but below the one-percent threshold for investigation. A current-artifact verification measured 8.7213 G (mean of 5, +/-0.02%). `size_of::<ImplicitVar>()` remains 144 bytes because `Capture` is still the largest variant; a later performance pass owns the residual | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | C-LEARN artifacts remain identical, plain and under `CLEARN_LTM=1`: 56,829 total opcodes plain and 938,368 with LTM, including the full histograms, post-fusion tables, 371 names, and 7 modules. A call is a typed `capture::ImplicitModule` plus one `capture::HoistedArg` per non-identifier argument; the old `ImplicitVar::Synthesized` text carrier is absent. `ImplicitModule` derives its ident and port destinations from logical callsite inputs `(parent, id, call_name, suffix)` plus source-to-port wiring, while current resolution remains name-keyed through `ImplicitVarMeta::{name,index_hint}`. Production-derived stdlib and macro tests require exact nonzero-span `Expr0` subtree identity. The complete ordered 3x3 `ImplicitVar` pair matrix pins same-arm dedup and all six loud cross-arm collisions; a production ACTIVE INITIAL fixture pins the reachable hoisted-argument/capture collision through parsing, diagnostic collection, and compile refusal. Within one visitor, `insert_implicit_var` is the only map mutation and refuses conflicting definitions before `IndexMap` can replace the first; the production `ARG1(k, k * 2)` macro regression pins the module/second-argument collision through diagnostic collection and compile refusal. `expand_module_function` serves stdlib and macro calls, so 7.3b retains only macro passthrough and GH #554. `print_eqn` is absent from `builtins_visitor.rs`; `make_temp_arg` is absent from `src/simlin-engine/src`; `substitute_dimension_refs` remains the AST-to-AST pre-hoist source-semantics rewrite documented above. The base/working-tree differential sweep over all 509 models found 396 byte-identical and 110 identically refused; the three nondeterministic models (`arrays_cname`, `arrays_varname`, `subscript_transposition`) produced the same two-output set on both binaries across 12 resamples, so no model moved. Current validation: engine lib 5688 passed / 2 ignored, integration 776 passed / 16 ignored, VM allocation 4 passed, doctests 2 passed / 1 ignored; focused implicit-module, capture, macro, fragment-determinism, and stage suites are green; clippy with all targets/features and rustfmt are green |
 | baseline | `867f2e63` | 10.788 G (median of 9; range 10.778-10.791) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | retired instructions, `perf stat -e instructions` (user space, whole process: parse, one measured compile, five `CLEARN_COMPILE_ITERS` compiles, one VM run), `CLEARN_PROFILE=compile`; release `opt-level=3` + LTO, mimalloc; 371 names, 7 modules; 1174 initials |
 | 1 | `engine: one signature table of per-builtin facts` | 10.753 G (median of 4; range 10.748-10.755), -0.30% (interleaved pairs -0.34 / -0.28 / -0.34%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN: every count above, the 371 names and 7 modules, and the full opcode histogram; same channel and flags as the baseline row; the saving is `try_map_ref` lowering `Expr2` builtins without cloning them; four edge-shape divergences, pinned (Additional Considerations, "Phase 1 semantic divergences") |
 | 2a | `engine: one temp allocator per variable lowering` | 10.349 G (median of 5; range 10.345-10.353), -3.78% against the Phase 1 commit re-measured in the same session (10.756 G, median of 5, range 10.747-10.759; interleaved pairs -3.75 / -3.78 / -3.74%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN: every count above, the 371 names and 7 modules, the full opcode histogram and the post-fusion stream counts; temp numbering identical on every checked-in fragment golden (no regeneration); same channel and flags as the baseline row. The saving is deleted reconciliation work: the operand materializer walked every fragment's whole expression list into a `HashMap` to find the next free id, the arrayed path lowered every element twice (once to classify, once to keep), the shared-hoist paths re-lowered every element a second time to replay its temp ids, and every re-lowered element tree was walked twice more to shift and re-scan its ids. One corrected shape, not in the corpus: an arrayed arm that is not the hoisting arm and holds a Pass 1 temp beside its own hoist read another arm's hoist through that temp at the Phase 1 commit and reads its own operand on this one (Additional Considerations, "Phase 2a semantic divergences"). Every other probe -- the engine suite, the determinism suites, and hand-written models covering nested hoists, EXCEPT arms in XMILE and MDL, 2-D apply-to-all with reducers, the Phase 1 per-element GF shapes, and the pre-existing refusal of an array-producing builtin inside operand arithmetic -- simulates byte-identically on the pre-change and post-change CLIs |
@@ -1414,4 +1481,4 @@ hash is not available to it.
 | 6a | `engine: one axis matcher and a decomposed subscript arm` | 8.819 G (median of 5; range 8.816-8.829), -1.5% against the seeded tree (Phase 3 staged on `1373f6f3`) re-measured in the same session (8.942 G, median of 5, range 8.939-8.952; interleaved pairs -1.54 / -1.38 / -1.66%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: every count above, the 371 names and 7 modules, the full opcode histogram and the post-fusion stream counts -- both `bytecode_profile` blocks byte-identical; same channel and flags as the baseline row. The saving is deleted per-reference work, none of it output-bearing: `compiler::subscript` and `lower_from_expr3`'s dimension-as-value arm re-`canonicalize`d (and so re-interned) already-canonical dimension names once per subscript and once per candidate active dimension, and the Subscript arm ran two independent searches over the active dimensions -- one to decide whether an axis matched by name and a second to find which -- where the allocation now answers both once. `dimensions::match_axes` replaces seven matchers (`allocate_implicit_axes_partial` and `allocate_implicit_axes`, `match_dimensions_with_mapping`, `find_dimension_reordering`, `Expr2::can_all_match` and `find_matching_dimension` under `unify_dims_with_names`, `view_contains`/`named_dims`) and five inline searches in `compiler/context.rs` and `compiler/subscript.rs` -- the twelve rows of `axis_match_tests`. `allocate_implicit_axes_partial` and `allocate_implicit_axes` survive as the two projections of it that the LTM augmenter (`ltm_augment_post_transform.rs`) and `get_implicit_subscripts` call, so the matching is what was replaced, not the entry points; the Subscript arm is five named steps; `lower`/`lower_preserving_dimensions` are one function under `DimensionRefs`. Differential sweep of a pre-change and a post-change CLI over all 509 models under `test/`: 397 byte-identical, 110 refused identically, and the only movers were `subscript_transposition` (its transposed `output2` moves from all-NaN to exactly Vensim's `109, 1090, 109, 141, -13`) plus two models that flip between the same two outputs on BOTH binaries (GH #859, an importer nondeterminism this change does not touch). Ten divergences, pinned -- eight shapes whose compile changed and two rungs deliberately withheld (Additional Considerations, "Phase 6a semantic divergences") |
 | 5b | `engine: diagnostics keep their message from parse to collection` | 8.829 G (median of 5; range 8.827-8.841), +0.36% against the Phase 4 tree re-measured in the same session (8.798 G, median of 5, range 8.791-8.802; interleaved pairs +0.44 / +0.32 / +0.28 / +0.49 / +0.38%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: both `bytecode_profile` blocks are byte-identical, including the full opcode histogram, the post-fusion stream counts, the 371 names and 7 modules; same channel and flags as the baseline row. This phase changes diagnostics, not codegen, so the delta is cost rather than saving: `EquationError` grew an `Option<String>` from 8 to 32 bytes, and it is the error type of every `EquationResult` in the AST-lowering path and the element type of `Variable::errors`, which is cloned per parse. Under the one-percent bar the plan sets for recording rather than investigating; a perf pass follows this branch. Diagnostics on the `test/` corpus: the same 501 rows with the same per-code distribution, of which 409 now carry a payload where 209 did (`unknown_builtin` 0 -> 96, `unknown_dependency` 0 -> 48, `mismatched_dimensions` 0 -> 14, `generic` 0 -> 10, `bad_builtin_args` 0 -> 6, `array_reference_needs_explicit_subscripts` 0 -> 5, `empty_equation` 0 -> 18 of 58, `bad_binary_op_in_units` 0 -> 3). 372 of the 409 are a SENTENCE; the other 37 are a bare identifier, which is what their raising site had -- `empty_equation` (18), `mismatched_dimensions` (14) and `array_reference_needs_explicit_subscripts` (5), all raised in `compiler/mod.rs` and `compiler/context.rs`, which Phase 6(b) rewrites and which the sentences should follow. The 92 that remain payload-less are the parse stage (45), whose reason is the source snippet every Rust surface now renders from the span, plus three sites in files Phase 6a/6b own (43) and one (`db/dep_graph.rs`'s `cycle_diagnostic`, 4) that has no reason in hand. One deliberately re-baselined pin and three named divergences (Additional Considerations, "Phase 5b semantic divergences"), which also record the two places a reason still stops: the web app's equation arm (GH #1030) and the bare-identifier payloads above. The CLI renders through `collect_formatted_errors`, so the parse row's "the snippet IS the reason" rule now holds on every Rust surface -- libsimlin, both MCP servers and the CLI. The engine suite (lib 5661, integration 767), the CLI suite (9), the 12-repeat determinism suites, every fragment/LTM golden with no regeneration, and one capped `cargo test --workspace` are green; `cbindgen` reproduces `simlin.h` unchanged |
 | 7.1 | `engine: one predicate for a direct PREVIOUS read` | 8.689 G (median of 5; range 8.685-8.698), -0.01% against the seeded tree (`6cf3660b`) re-measured in the same session (8.690 G, median of 5, range 8.679-8.692; interleaved pairs +0.10 / -0.03 / +0.07 / -0.05 / +0.02%), inside the channel's noise floor and not investigated | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: the whole `bytecode_profile` block is byte-identical in both modes -- every count above, the 371 names and 7 modules, the full opcode histogram, the post-fusion stream counts and the fused-binop table; same channel and flags as the baseline row. A refactor plus a probe, so no saving is expected or found. `snapshot_arg::SnapshotArg::access` is now the one statement of what `PREVIOUS`/`INIT` addresses directly, called by `BuiltinVisitor::snapshot_arg` over the source argument (replacing `needs_temp_arg` and `arg_is_array_shaped`) and by `codegen::lowered_snapshot_arg` over the lowered one (feeding `static_slot` and `Compiler::snapshot_static_view`); `db::exec_probe::ProbedDb` counts every tracked query's executions from salsa's own events. Differential sweep of a base-tree and a working-tree CLI over all 509 models under `test/`, each run twice per binary: 396 byte-identical, 110 refused identically, and the only three models whose output is not identical are `subscript_transposition`, `arrays_cname` and `arrays_varname`, each of which flips between exactly the same TWO outputs on BOTH binaries (GH #859, an importer nondeterminism; resampled 12x per binary per model, which is what separates a flip from a move -- two samples per binary does not). No model moved. Four parse-vs-codegen divergences recorded, none of them introduced here and none changing an artifact (Additional Considerations, "Phase 7.1 predicate"); the probe's findings, including that `ModuleIdentContext` is the sole remaining cause of AC3.1's loose case, are under "Phase 7.1 probe" |
-| 7.2 | `engine: captures carry their argument, not its text` | 8.6920 G (median of 5; range 8.6866-8.6976), -0.02% against the base tree (the 7.1 chunk staged on `68774a16`) re-measured in the same session (8.6937 G, median of 5, range 8.6834-8.6979; interleaved pairs -0.017 / +0.163 / -0.047 / -0.038 / -0.017%), inside the channel's noise floor and not investigated | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: the whole `bytecode_profile` block is byte-identical in both modes -- every count above, the 371 names and 7 modules, the full opcode histogram, the post-fusion stream counts and the fused-binop table; same channel and flags as the baseline row. A representation change with the observable result held fixed, so no saving is expected and none is found. The exact per-capture delta at each of the six consumers that build a helper's parse-stage form is: a lex-and-parse of the helper's equation text is deleted, and one `print_eqn` (the `Variable::eqn` field is source text by definition) plus one `Expr0` subtree clone replaces it. The `instantiate_implicit_modules` walk is NOT part of the delta -- `parse_var` ran it on the old path too, and `Capture::variable_stage0` runs it for the same reason. On a model with 233 captures among 5215 slots that trade is a wash. `PREVIOUS`/`INIT` arguments are now `capture::Capture` values -- an `Expr0` subtree with positional identity `(parent, id)` -- carried on the parse result in a `capture::ImplicitVar` list beside the module instances and hoisted call arguments that are still text; `Capture::variable_stage0` is the one constructor of a capture's parse-stage variable, and `capture::synthetic_ident` the one derivation of every synthesized helper's name (`rg "arg0" src/simlin-engine/src` finds one production site). `ImplicitVar::Synthesized` is boxed, which is what keeps the enum the size of a capture rather than of a `datamodel::Variable` in a list salsa retains per variable and, under LTM, per synthetic variable. Differential sweep of the base-tree and working-tree CLIs over all 509 models under `test/`, each run twice per binary: 396 byte-identical, 110 refused identically, and the only three non-identical models are `arrays_cname`, `arrays_varname` and `subscript_transposition`, each resampled 12x per binary and each producing the SAME two-output set on both binaries (GH #859, the importer nondeterminism). No model moved. The engine suite (lib 5677, integration 776, CLI 4, wasm 2), the 12-repeat determinism suites and every fragment/LTM golden are green with no regeneration |
+| 7.2 | `engine: captures carry their argument, not its text` | 8.6920 G (median of 5; range 8.6866-8.6976), -0.02% against the base tree (the 7.1 chunk staged on `68774a16`) re-measured in the same session (8.6937 G, median of 5, range 8.6834-8.6979; interleaved pairs -0.017 / +0.163 / -0.047 / -0.038 / -0.017%), inside the channel's noise floor and not investigated | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: the whole `bytecode_profile` block is byte-identical in both modes -- every count above, the 371 names and 7 modules, the full opcode histogram, the post-fusion stream counts and the fused-binop table; same channel and flags as the baseline row. A representation change with the observable result held fixed, so no saving is expected and none is found. The exact per-capture delta at each of the six consumers that build a helper's parse-stage form is: a lex-and-parse of the helper's equation text is deleted, and one `print_eqn` (the `Variable::eqn` field is source text by definition) plus one `Expr0` subtree clone replaces it. The `instantiate_implicit_modules` walk is NOT part of the delta -- `parse_var` ran it on the old path too, and `Capture::variable_stage0` runs it for the same reason. On a model with 233 captures among 5215 slots that trade is a wash. `PREVIOUS`/`INIT` arguments are now `capture::Capture` values -- an `Expr0` subtree whose logical callsite inputs are `(parent, id, arg0, suffix)` -- carried on the parse result in a `capture::ImplicitVar` list beside the module instances and hoisted call arguments that are still text; `Capture::variable_stage0` is the one constructor of a capture's parse-stage variable, and `capture::synthetic_ident` the one derivation of every synthesized helper's name (`rg "arg0" src/simlin-engine/src` finds one production site). `ImplicitVar::Synthesized` is boxed, which is what keeps the enum the size of a capture rather than of a `datamodel::Variable` in a list salsa retains per variable and, under LTM, per synthetic variable. Differential sweep of the base-tree and working-tree CLIs over all 509 models under `test/`, each run twice per binary: 396 byte-identical, 110 refused identically, and the only three non-identical models are `arrays_cname`, `arrays_varname` and `subscript_transposition`, each resampled 12x per binary and each producing the SAME two-output set on both binaries (GH #859, the importer nondeterminism). No model moved. The engine suite (lib 5677, integration 776, CLI 4, wasm 2), the 12-repeat determinism suites and every fragment/LTM golden are green with no regeneration |

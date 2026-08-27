@@ -1742,7 +1742,7 @@ fn enumerate_module_instances_inner(
             if let Some(dm_module) = meta.find_in(parsed).and_then(|iv| iv.module()) {
                 module_input_set(
                     &module_input_prefix(name),
-                    dm_module.references.iter().map(|mr| (&mr.src, &mr.dst)),
+                    dm_module.references().iter().map(|mr| (&mr.src, &mr.dst)),
                 )
             } else {
                 BTreeSet::new()
@@ -1792,7 +1792,7 @@ fn enumerate_module_instances_inner(
                     if let Some(dm_module) = im_meta.variable.module() {
                         module_input_set(
                             &module_input_prefix(im_name),
-                            dm_module.references.iter().map(|mr| (&mr.src, &mr.dst)),
+                            dm_module.references().iter().map(|mr| (&mr.src, &mr.dst)),
                         )
                     } else {
                         BTreeSet::new()

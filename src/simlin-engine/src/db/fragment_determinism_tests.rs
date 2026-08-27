@@ -435,17 +435,17 @@ fn describe_implicit(v: &crate::capture::ImplicitVar) -> String {
             c.dims().join(","),
             crate::ast::print_eqn(c.arg())
         ),
-        ImplicitVar::Synthesized(other) => match v.module() {
-            Some(m) => {
-                let refs: Vec<String> = m
-                    .references
-                    .iter()
-                    .map(|r| format!("{}->{}", r.src, r.dst))
-                    .collect();
-                format!("{} = module {} {:?}", v.ident(), m.model_name, refs)
-            }
-            None => format!("{} = {:?}", v.ident(), other.get_equation()),
-        },
+        ImplicitVar::HoistedArg(a) => {
+            format!("{} = arg {}", a.ident(), crate::ast::print_eqn(a.arg()))
+        }
+        ImplicitVar::Module(m) => {
+            let refs: Vec<String> = m
+                .references()
+                .iter()
+                .map(|r| format!("{}->{}", r.src, r.dst))
+                .collect();
+            format!("{} = module {} {:?}", m.ident(), m.model_name(), refs)
+        }
     }
 }
 

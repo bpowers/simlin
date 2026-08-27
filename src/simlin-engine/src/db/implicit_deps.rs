@@ -38,8 +38,6 @@ pub(super) fn extract_implicit_var_deps(
         return Vec::new();
     }
 
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-
     parsed
         .implicit_vars
         .iter()
@@ -50,7 +48,7 @@ pub(super) fn extract_implicit_var_deps(
             // their module reference src fields instead.
             if let Some(m) = implicit_var.module() {
                 let refs: BTreeSet<String> = m
-                    .references
+                    .references()
                     .iter()
                     .map(|mr| canonicalize(&mr.src).into_owned())
                     .collect();
@@ -58,7 +56,7 @@ pub(super) fn extract_implicit_var_deps(
                     name: implicit_name,
                     is_stock: false,
                     is_module: true,
-                    model_name: Some(m.model_name.clone()),
+                    model_name: Some(m.model_name().to_string()),
                     dt_deps: refs.clone(),
                     initial_deps: refs,
                     dt_init_only_referenced_vars: BTreeSet::new(),
@@ -69,17 +67,11 @@ pub(super) fn extract_implicit_var_deps(
                 };
             }
 
-            // A capture's body is an AST subtree the parse already produced; a
-            // hoisted module-call argument still carries equation text.
+            // Both non-module arms carry their bodies as AST subtrees.
             let parsed_implicit = match implicit_var {
                 ImplicitVar::Capture(capture) => capture.variable_stage0(dim_context),
-                ImplicitVar::Synthesized(dm_var) => {
-                    let mut dummy_implicits = Vec::new();
-                    let ctx = crate::variable::ParseContext::new(dim_context, &units_ctx);
-                    crate::variable::parse_var(&ctx, dm_var.as_ref(), &mut dummy_implicits, |mi| {
-                        Ok(Some(mi.clone()))
-                    })
-                }
+                ImplicitVar::HoistedArg(arg) => arg.variable_stage0(dim_context),
+                ImplicitVar::Module(_) => unreachable!("the module arm returned above"),
             };
 
             let models = HashMap::new();

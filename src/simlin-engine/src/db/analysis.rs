@@ -1671,20 +1671,10 @@ pub fn model_causal_edges(
         for implicit_var in &parsed.implicit_vars {
             let imp_name = canonicalize(implicit_var.ident()).into_owned();
 
-            match implicit_var.synthesized() {
-                Some(datamodel::Variable::Stock(s)) => {
-                    stocks.insert(imp_name.clone());
-                    for flow in s.inflows.iter().chain(s.outflows.iter()) {
-                        let canonical_flow = canonicalize(flow).into_owned();
-                        edges
-                            .entry(canonical_flow)
-                            .or_default()
-                            .insert(imp_name.clone());
-                    }
-                }
-                Some(datamodel::Variable::Module(m)) => {
+            match implicit_var.module() {
+                Some(m) => {
                     let self_prefix = format!("{imp_name}\u{00B7}");
-                    for mr in &m.references {
+                    for mr in m.references() {
                         let canonical_src = canonicalize(&mr.src).into_owned();
                         if canonical_src.starts_with(&self_prefix) {
                             continue;
@@ -1695,9 +1685,9 @@ pub fn model_causal_edges(
                             .or_default()
                             .insert(imp_name.clone());
                     }
-                    dynamic_modules.insert(imp_name.clone(), m.model_name.clone());
+                    dynamic_modules.insert(imp_name.clone(), m.model_name().to_string());
                 }
-                _ => {
+                None => {
                     // For implicit flows/auxes, get deps from the parent's
                     // variable_direct_dependencies result.
                     let deps = variable_direct_dependencies(
@@ -3636,23 +3626,16 @@ fn reconstruct_implicit_variable(
         return module_instance_from_refs(
             model.name(db),
             Ident::<Canonical>::new(implicit_var.ident()),
-            Ident::new(&dm_module.model_name),
-            &dm_module.references,
+            Ident::new(dm_module.model_name()),
+            dm_module.references(),
         );
     }
 
-    // A capture holds its body as an AST subtree; a hoisted module-call
-    // argument still carries equation text.
+    // The remaining arms carry their bodies as AST subtrees.
     let parsed_imp = match implicit_var {
         ImplicitVar::Capture(capture) => capture.variable_stage0(scope.dimensions),
-        ImplicitVar::Synthesized(dm_var) => {
-            let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-            let mut dummy_implicits = Vec::new();
-            let ctx = crate::variable::ParseContext::new(scope.dimensions, &units_ctx);
-            crate::variable::parse_var(&ctx, dm_var.as_ref(), &mut dummy_implicits, |mi| {
-                Ok(Some(mi.clone()))
-            })
-        }
+        ImplicitVar::HoistedArg(arg) => arg.variable_stage0(scope.dimensions),
+        ImplicitVar::Module(_) => unreachable!("the module arm returned above"),
     };
     crate::model::lower_variable(scope, &parsed_imp)
 }

@@ -444,8 +444,10 @@ pub fn variable_direct_dependencies<'db>(
 #[derive(Clone, PartialEq, Eq)]
 pub struct ImplicitVarMeta {
     pub parent_source_var: SourceVariable,
-    /// Canonical name of this helper -- its IDENTITY, and the key it is filed
-    /// under in [`model_implicit_var_info`].
+    /// Canonical name of this helper: the physical lookup key under which it is
+    /// filed in [`model_implicit_var_info`]. The helper's logical callsite is
+    /// the constructor input `(parent, id, argument position/call name,
+    /// suffix)`; this metadata does not provide tuple-addressed storage.
     ///
     /// This used to be `index_in_parent`, a position in the parent's
     /// `implicit_vars` vector, and that was a defect rather than a shortcut
@@ -457,7 +459,7 @@ pub struct ImplicitVarMeta {
     /// a different helper, including the merely-reordered case that made
     /// GH #1002 seed-dependent. A name survives reordering; a position does not.
     ///
-    /// **A name is not a fully context-stable identity, and the residual is
+    /// **A name is not a fully context-stable lookup key, and the residual is
     /// bounded rather than absent.** Synthesized names embed `BuiltinVisitor`'s
     /// walk counter (`$⁚v⁚{n}⁚arg0`), so a context that inserts an EARLIER
     /// helper shifts every later `n`. `PREVIOUS(port, 0) + SMTH1(port + 1, 3)`
@@ -477,7 +479,7 @@ pub struct ImplicitVarMeta {
     /// which is GH #372's explicit model-level parse context, not a change here.
     pub name: String,
     /// The position `name` occupied in the parse it was derived from -- a
-    /// lookup HINT, never the identity.
+    /// lookup HINT, never a separate key.
     ///
     /// [`ImplicitVarMeta::find_in`] tries this position first and accepts what
     /// it finds only if that helper carries `name`; otherwise it scans. So a
@@ -549,7 +551,7 @@ impl ImplicitVarMeta {
         // every model in the corpus, so the scan below is the exceptional path,
         // not the usual one. Verifying the name before accepting the hint is
         // what keeps this a pure optimization; dropping
-        // that check restores positional identity and reds
+        // that check restores unchecked positional lookup and reds
         // `an_implicit_helper_declines_when_the_contexts_synthesize_different_sets`.
         if let Some(hinted) = parsed.implicit_vars.get(self.index_hint)
             && is_mine(hinted)
@@ -564,7 +566,7 @@ impl std::fmt::Debug for ImplicitVarMeta {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ImplicitVarMeta")
             .field("name", &self.name)
-            // The hint is not identity, but a WRONG one is exactly what you are
+            // The hint is not an independent key, but a WRONG one is exactly what you are
             // looking at this for, so it is rendered rather than hidden.
             .field("index_hint", &self.index_hint)
             .field("is_stock", &self.is_stock)
@@ -597,7 +599,7 @@ pub fn model_implicit_var_info(
             let name = canonicalize(implicit_var.ident()).into_owned();
             let is_stock = implicit_var.is_stock();
             let is_module = implicit_var.is_module();
-            let model_name = implicit_var.module().map(|m| m.model_name.clone());
+            let model_name = implicit_var.module().map(|m| m.model_name().to_string());
             // An arrayed implicit helper (the GH #541 bare-arrayed-PREVIOUS
             // capture) applies over dimensions; every other helper is scalar
             // (empty dims, size 1). Resolve the dimension sizes from the

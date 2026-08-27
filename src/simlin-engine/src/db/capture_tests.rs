@@ -9,7 +9,7 @@
 //! `db::prev_init_tests::every_prev_init_argument_shape_agrees_between_the_parse_and_codegen`
 //! decides WHICH arguments capture; these tests pin what the capture then IS.
 //! Together they cover the `PREVIOUS`/`INIT` routing arms of
-//! `builtins_visitor::walk` and both branches of its `make_temp_arg`.
+//! `builtins_visitor::walk` and both branches of its `hoist_capture`.
 
 use super::*;
 use crate::ast::{Expr0, print_eqn};
@@ -71,7 +71,7 @@ struct CaptureRow {
 /// because a macro body needs a project a `TestProject` cannot express.
 const ROWS: &[CaptureRow] = &[
     CaptureRow {
-        covers: "make_temp_arg scalar branch: an argument that references no storage at all",
+        covers: "hoist_capture scalar branch: an argument that references no storage at all",
         parent: Parent::Scalar,
         equation: "PREVIOUS(k * 2, 0)",
         captures: &[("$⁚lagged⁚0⁚arg0", CaptureKind::Previous, "k * 2", &[])],
@@ -126,7 +126,7 @@ const ROWS: &[CaptureRow] = &[
         rewritten: None,
     },
     CaptureRow {
-        covers: "make_temp_arg scalar branch inside apply-to-all: one capture per element, \
+        covers: "hoist_capture scalar branch inside apply-to-all: one capture per element, \
                  each carrying its element suffix. Substitution is a no-op on this body -- \
                  the index is a VARIABLE, not a dimension -- so the three bodies are equal \
                  and only the suffixes tell the captures apart",
@@ -142,13 +142,13 @@ const ROWS: &[CaptureRow] = &[
         ),
     },
     CaptureRow {
-        covers: "make_temp_arg scalar branch inside apply-to-all, with the substitution \
+        covers: "hoist_capture scalar branch inside apply-to-all, with the substitution \
                  actually firing: a dimension reference in the body is rewritten to the \
                  active element, so each element's capture holds a DIFFERENT body. This is \
                  the one arm where the capture is deliberately not the source subtree",
         parent: Parent::ApplyToAll,
         // `Op2`, so the routing's pre-substitution (which only fires on a bare
-        // `Subscript` arg0) does not run and `make_temp_arg` owns the whole
+        // `Subscript` arg0) does not run and `hoist_capture` owns the whole
         // substitution; `k` is the bare variable reference and `vals[d]` the
         // subscript, which together select the SCALAR branch over the arrayed
         // one (`arg_has_bare_var_ref && !arg_has_subscript`).
@@ -176,7 +176,7 @@ const ROWS: &[CaptureRow] = &[
         rewritten: Some("substitute_dimension_refs rewrites the body per element"),
     },
     CaptureRow {
-        covers: "make_temp_arg ARRAYED branch (GH #541): a bare arrayed name inside the \
+        covers: "hoist_capture ARRAYED branch (GH #541): a bare arrayed name inside the \
                  argument keeps its array shape, so ONE apply-to-all capture is synthesized \
                  for every element and the suffix is omitted so they dedup to one",
         parent: Parent::ApplyToAll,
@@ -190,7 +190,7 @@ const ROWS: &[CaptureRow] = &[
         rewritten: Some("the walk gives the inner PREVIOUS its default fallback"),
     },
     CaptureRow {
-        covers: "make_temp_arg ARRAYED branch under a PER-ELEMENT parent: each slot gets a \
+        covers: "hoist_capture ARRAYED branch under a PER-ELEMENT parent: each slot gets a \
                  fresh visitor, so the walk counter restarts at 0 for every one of them and \
                  the element suffix is the whole of what keeps their names apart (PR #668)",
         parent: Parent::PerElement,
@@ -737,7 +737,7 @@ fn a_captures_fragment_is_its_argument_compiled() {
 /// A capture synthesized inside a macro body is filed under the BODY
 /// variable's name, not the invoking variable's.
 ///
-/// The macro-body arm reaches `make_temp_arg` through the same routing as any
+/// The macro-body arm reaches `hoist_capture` through the same routing as any
 /// other equation -- what a macro body changes is which calls resolve to the
 /// builtin (`enclosing_model`, GH #554), not how a capture is minted -- so
 /// this row exists to say that the parent a capture names is the variable

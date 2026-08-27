@@ -834,13 +834,8 @@ fn lower_ltm_variable(
             // in their own right; here only the dep's own dimensions matter.
             let dep_parsed = match implicit_dep {
                 crate::capture::ImplicitVar::Capture(capture) => capture.variable_stage0(dim_ctx),
-                crate::capture::ImplicitVar::Synthesized(dm_var) => {
-                    let mut nested = Vec::new();
-                    let dep_ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
-                    crate::variable::parse_var(&dep_ctx, dm_var.as_ref(), &mut nested, |mi| {
-                        Ok(Some(mi.clone()))
-                    })
-                }
+                crate::capture::ImplicitVar::HoistedArg(arg) => arg.variable_stage0(dim_ctx),
+                crate::capture::ImplicitVar::Module(module) => module.variable_stage0(),
             };
             stage0_vars.insert(Ident::new(dep_name), dep_parsed);
         } else if let Some(ltm_dims) = find_arrayed_ltm_dep(dep_name) {
@@ -992,7 +987,7 @@ pub(crate) fn ltm_fragment_input<'db>(
             source_dep_shape(db, *sv, project)
         } else if let Some(helper) = parsed_implicit(head) {
             match helper.module() {
-                Some(dm_module) => module_dep_shape(db, project, &dm_module.model_name),
+                Some(dm_module) => module_dep_shape(db, project, dm_module.model_name()),
                 None => DepShape::var(helper_dims(helper)),
             }
         } else if let Some(meta) = implicit_info.get(head) {
@@ -1414,7 +1409,7 @@ impl Drop for LtmFragmentFailureGuard {
 /// plausible-but-wrong loop scores went unnoticed precisely because of
 /// this). Surfacing the failure makes a degraded LTM analysis *visible*
 /// instead of silently wrong. The implicit helpers (the PREVIOUS/INIT
-/// capture auxes `builtins_visitor::make_temp_arg` synthesizes while
+/// capture auxes `builtins_visitor::hoist_capture` synthesizes while
 /// parsing LTM equations, `$⁚$⁚ltm⁚…⁚arg{n}`) ride the exact same
 /// silent-drop assembly path, and a dropped helper corrupts every link
 /// score that reads it -- with, before GH #741, no diagnostic anywhere.
@@ -1619,26 +1614,12 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
 
-    // A capture holds its body as an AST subtree; a hoisted module-call
-    // argument still carries equation text. Neither can synthesize a further
-    // generation of helpers -- both bodies are already walked -- and the sink
-    // is shared across the two arms so that stays asserted rather than assumed,
-    // as it is in `db::stages::model_stage0` and `ModelStage0::new_in_project`.
-    let mut nested_implicits = Vec::new();
+    // Every helper carries enough parsed data to build its stage directly.
     let parsed_implicit = match implicit_dm_var {
         crate::capture::ImplicitVar::Capture(capture) => capture.variable_stage0(dim_context),
-        crate::capture::ImplicitVar::Synthesized(dm_var) => {
-            let units_ctx = project_units_context(db, project);
-            let ctx = crate::variable::ParseContext::new(dim_context, units_ctx);
-            crate::variable::parse_var(&ctx, dm_var.as_ref(), &mut nested_implicits, |mi| {
-                Ok(Some(mi.clone()))
-            })
-        }
+        crate::capture::ImplicitVar::HoistedArg(arg) => arg.variable_stage0(dim_context),
+        crate::capture::ImplicitVar::Module(module) => module.variable_stage0(),
     };
-    debug_assert!(
-        nested_implicits.is_empty(),
-        "an implicit helper must not synthesize further implicit helpers"
-    );
     if parsed_implicit
         .equation_errors()
         .is_some_and(|e| !e.is_empty())
@@ -1656,10 +1637,10 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
         let dm_module = implicit_dm_var.module()?;
         deps.insert(
             var_ident.clone(),
-            module_dep_shape(db, project, &dm_module.model_name),
+            module_dep_shape(db, project, dm_module.model_name()),
         );
         let ltm_implicit_all = model_ltm_implicit_var_info(db, model, project);
-        for mr in &dm_module.references {
+        for mr in dm_module.references() {
             let src = canonicalize(&mr.src);
             let (head, qualified) = dep_head(&src);
             if head == implicit_name || is_implicit_global(head) || deps.contains_key(head) {
@@ -1684,12 +1665,12 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
         }
         crate::variable::Variable::module_instance(
             var_ident,
-            Ident::new(&dm_module.model_name),
+            Ident::new(dm_module.model_name()),
             build_module_inputs(
                 model.name(db),
                 &module_input_prefix(&implicit_name),
                 dm_module
-                    .references
+                    .references()
                     .iter()
                     .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
             ),
@@ -1704,7 +1685,7 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
             variable: lowered,
             dep_idents,
             referenced_tables,
-        } = lower_ltm_variable(db, &parsed_implicit, &nested_implicits, model, project);
+        } = lower_ltm_variable(db, &parsed_implicit, &[], model, project);
         // An arrayed capture helper occupies one slot per element.
         deps.insert(
             var_ident,

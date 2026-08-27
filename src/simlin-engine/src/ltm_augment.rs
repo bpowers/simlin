@@ -1256,7 +1256,7 @@ fn expr_is_array_slice_valued(expr: &Expr0) -> bool {
             // is unfreezable -- the slice-bearing capture lands in a scalar
             // helper, where `rank(...)` is ill-typed), while a bare-name
             // argument (`PREVIOUS(rank(pop, 1))`) stays freezable because
-            // `make_temp_arg` captures it into an ARRAYED helper (the GH #541
+            // `hoist_capture` captures it into an ARRAYED helper (the GH #541
             // path, extended to array-valued builtins by the same GH #742
             // predicate in `arg_has_bare_var_ref`).
             if crate::ltm_agg::reducer_collapses_to_scalar(&name.to_ascii_lowercase(), args.len()) {
@@ -3999,7 +3999,7 @@ fn dimension_subscript_suffix(var: &Variable) -> String {
 /// are all bound by the `ApplyToAll` iteration. A scalar stock/flow has
 /// no dimensions, so its references stay bare -- the pre-fix behavior.
 ///
-/// NOTE: GH #541's engine-level fix (`make_temp_arg` now synthesizes an
+/// NOTE: GH #541's engine-level fix (`hoist_capture` now synthesizes an
 /// arrayed helper for a bare arrayed reference) makes the bare form compile
 /// too, so this generator-side subscripting is no longer load-bearing.
 /// It is intentionally retained: the engine fix is a strict superset

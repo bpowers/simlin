@@ -325,7 +325,8 @@ fn macro_call_expands_to_synthetic_module_structurally() {
     )
     .expect("a macro call must expand");
 
-    let modules: Vec<&crate::datamodel::Module> = vars.iter().filter_map(|v| v.module()).collect();
+    let modules: Vec<&crate::capture::ImplicitModule> =
+        vars.iter().filter_map(|v| v.module()).collect();
     assert_eq!(
         modules.len(),
         1,
@@ -334,16 +335,17 @@ fn macro_call_expands_to_synthetic_module_structurally() {
     );
     let module = modules[0];
     assert_eq!(
-        module.model_name, "mymacro",
+        module.model_name(),
+        "mymacro",
         "the synthetic module must target the macro's model",
     );
     assert_eq!(
-        module.references.len(),
+        module.references().len(),
         2,
         "one ModuleReference per macro parameter",
     );
     let dst_ports: Vec<String> = module
-        .references
+        .references()
         .iter()
         .map(|r| r.dst.rsplit('.').next().unwrap().to_string())
         .collect();
@@ -356,11 +358,86 @@ fn macro_call_expands_to_synthetic_module_structurally() {
     let Ast::Scalar(Expr0::Var(replacement, _)) = &transformed else {
         panic!("the call expression must be replaced by a single Var, got {transformed:?}");
     };
-    let expected = format!("{}\u{b7}mymacro", module.ident);
+    let expected = format!("{}\u{b7}mymacro", module.ident());
     assert_eq!(
         replacement.as_str(),
         expected,
         "the call must be replaced by <module>·<primary_output>",
+    );
+}
+
+/// A computed macro argument keeps the exact production-parser subtree,
+/// including its nonzero source span, across module expansion.
+#[test]
+fn computed_macro_argument_keeps_the_exact_source_subtree() {
+    use crate::ast::Expr0;
+    use crate::capture::ImplicitVar;
+    use crate::db::{
+        model_module_ident_context, parse_source_variable_with_module_context, sync_from_datamodel,
+    };
+
+    let source = mdl(r#":MACRO: MYMACRO(p1, p2)
+MYMACRO = p1 + p2
+	~	dmnl
+	~	computed-argument identity
+	|
+
+:END OF MACRO:
+a = 1
+	~	dmnl
+	~	|
+b = 2
+	~	dmnl
+	~	|
+y = MYMACRO(a * 2 + b, 4)
+	~	dmnl
+	~	|
+"#);
+    let project = open_vensim(&source).expect("MDL must parse into a datamodel project");
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let main = sync.models["main"].source;
+    let source_var = sync.models["main"].variables["y"].source;
+    let equation = match source_var.equation(&db) {
+        crate::datamodel::Equation::Scalar(equation) => equation,
+        _ => panic!("the macro caller must be scalar"),
+    };
+    let parsed = Expr0::new(equation, crate::lexer::LexerType::Equation)
+        .expect("the imported equation must lex")
+        .expect("the imported equation must parse");
+    let Expr0::App(crate::builtins::UntypedBuiltinFn(_, args), _) = parsed else {
+        panic!("the imported equation must remain a macro call")
+    };
+    let expected = args[0].clone();
+    let loc = expected.get_loc();
+    assert!(
+        loc.start > 0 && loc.end > loc.start,
+        "the defect detector requires a nonzero macro-argument span, got {loc}"
+    );
+
+    let ctx = model_module_ident_context(&db, main, sync.project, vec![]);
+    let parsed = parse_source_variable_with_module_context(&db, source_var, sync.project, ctx);
+    let hoisted = parsed
+        .implicit_vars
+        .iter()
+        .find_map(|helper| match helper {
+            ImplicitVar::HoistedArg(arg) if arg.ident() == "$⁚y⁚0⁚arg0" => Some(arg),
+            ImplicitVar::Capture(_) | ImplicitVar::HoistedArg(_) | ImplicitVar::Module(_) => None,
+        })
+        .expect("the computed macro argument must be hoisted");
+    assert!(
+        hoisted.arg() == &expected,
+        "the hoisted macro argument must retain the exact source Expr0, including Loc"
+    );
+    let reparsed = Expr0::new(
+        &crate::ast::print_eqn(&expected),
+        crate::lexer::LexerType::Equation,
+    )
+    .expect("the printed comparison tree must lex")
+    .expect("the printed comparison tree must parse");
+    assert!(
+        reparsed != expected,
+        "the nonzero source span must distinguish the subtree from print/reparse"
     );
 }
 
@@ -420,6 +497,51 @@ y=
             "y at step {i} expected 5.5 (= 5 * 1.1), got {v}",
         );
     }
+}
+
+/// A computed argument and its macro instance can derive the same helper name
+/// when the macro itself is named for that argument position. Both are real
+/// evaluation units, so overwriting either one would wire the macro input to
+/// the wrong body. The production parse must diagnose the collision and the
+/// incremental compiler must refuse the model.
+#[test]
+fn macro_name_cannot_overwrite_its_same_named_hoisted_argument() {
+    let source = mdl(r#":MACRO: ARG1(p1, p2)
+ARG1 = p1 + p2
+	~	dmnl
+	~	name collides with the second argument helper
+	|
+
+:END OF MACRO:
+k = 3
+	~	dmnl
+	~		|
+out = ARG1(k, k * 2)
+	~	dmnl
+	~		|
+"#);
+    let collision_name = "$⁚out⁚0⁚arg1";
+
+    let err = compile_mdl(&source)
+        .expect_err("a module and hoisted argument claiming one name must not compile");
+    assert_eq!(err.code, ErrorCode::NotSimulatable);
+
+    let diagnostics = diagnostics_for(&source);
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == DiagnosticSeverity::Error
+                && diagnostic.variable.as_deref() == Some("out")
+                && matches!(
+                    &diagnostic.error,
+                    DiagnosticError::Equation(error)
+                        if error.code == ErrorCode::DuplicateVariable
+                            && error.details.as_deref().is_some_and(
+                                |details| details.contains(collision_name)
+                            )
+                )
+        }),
+        "the production diagnostic must name the conflicting helper: {diagnostics:?}"
+    );
 }
 
 /// macros.AC5.4: a macro shadowing the `SSHAPE` builtin resolves to the

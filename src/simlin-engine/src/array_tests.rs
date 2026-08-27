@@ -4634,7 +4634,7 @@ TIME STEP = 1 ~~|
     }
 }
 
-/// Regression tests for GH #580 Bug A: when `make_temp_arg` lifts a per-element
+/// Regression tests for GH #580 Bug A: when `hoist_capture` lifts a per-element
 /// scalar helper out of an `INITIAL(...)`-wrapped apply-to-all parent, a
 /// cross-dimension subscript that is related by a *group* (unequal-cardinality)
 /// mapping must still be translated to a concrete element. Before the fix the

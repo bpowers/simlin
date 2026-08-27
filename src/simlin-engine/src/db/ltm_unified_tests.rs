@@ -4574,7 +4574,7 @@ fn ltm_fragment_failures_with_agg_present(project: &datamodel::Project) -> Vec<S
 /// Warning names an agg variable), and the only failures still present --
 /// if any -- are the known residual: the *direct* `scale→grow` link score,
 /// whose ceteris-paribus partial contains `PREVIOUS(pop[*])` and trips the
-/// documented GH #541 scalar-helper limitation (`make_temp_arg` outside A2A
+/// documented GH #541 scalar-helper limitation (`hoist_capture` outside A2A
 /// context captures a wildcard-subscripted arrayed arg into an ill-typed
 /// *scalar* helper). That residual is a separate defect from #738 -- the
 /// loop score consuming that direct link stays 0 pending GH #737's

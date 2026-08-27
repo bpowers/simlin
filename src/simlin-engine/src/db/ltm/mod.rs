@@ -910,7 +910,7 @@ pub fn model_ltm_implicit_var_info(
             let im_name = canonicalize(implicit_var.ident()).into_owned();
             let is_module = implicit_var.is_module();
             let is_stock = implicit_var.is_stock();
-            let model_name = implicit_var.module().map(|m| m.model_name.clone());
+            let model_name = implicit_var.module().map(|m| m.model_name().to_string());
             let size = if is_module {
                 model_name
                     .as_deref()
