@@ -15,10 +15,12 @@
 //! itself (`model_dependency_graph_impl` -- the transitive-closure DFS,
 //! the SCC-aware back-edge break, the SCC-as-collapsed-node accumulation,
 //! and the SCC-contiguous topological runlist sort). The dep-graph result
-//! types (`SccPhase`, `ResolvedScc`, `ModelDepGraphResult`) and the thin
-//! `#[salsa::tracked]` wrapper (`model_dependency_graph`, keyed on an
-//! interned `ModuleInputSet`, re-exported at the `db.rs` root) live here
-//! too; the wrapper delegates straight to `model_dependency_graph_impl`.
+//! types (`SccPhase`, `ResolvedScc`, `ModelDepGraphResult`) and the
+//! `#[salsa::tracked]` projections (`base_model_dependency_graph` for pure
+//! local facts and `model_dependency_graph` for the project-required initial
+//! output extension, both keyed on an interned `ModuleInputSet`) live here too.
+//! Cycle reporting is deliberately a separate per-model trigger: the
+//! project-wide projection inspects unrelated roots and must be accumulator-free.
 //!
 //! The cycle relation has exactly one definition (`walk_successors`,
 //! phase-parameterized), consumed by BOTH the production cycle gate and
@@ -32,7 +34,7 @@
 //! `macro_registry`) kept in its own file purely to keep `db.rs` under the
 //! per-file line cap; callers reach it via `crate::db::dep_graph::...`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use salsa::Accumulator;
@@ -45,7 +47,7 @@ use crate::common::{Canonical, Ident};
 use crate::db::{
     CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ModuleInputSet,
     SourceModel, SourceProject, SourceVariable, SourceVariableKind, VariableDeps,
-    model_module_ident_context, variable_direct_dependencies,
+    variable_direct_dependencies,
 };
 
 /// Per-variable dependency facts used to build the model dependency
@@ -192,8 +194,6 @@ pub(crate) fn build_var_info(
 ) {
     let source_vars = model.variables(db);
     let module_input_names = module_input_names.to_vec();
-    let module_ident_context =
-        model_module_ident_context(db, model, project, module_input_names.clone());
     // Intern the module-input wiring once. An empty set is the no-inputs case
     // (the old `None`-inputs path); `variable_direct_dependencies` maps it back
     // to `None` internally, so the classification is byte-identical to the old
@@ -229,13 +229,7 @@ pub(crate) fn build_var_info(
     let var_deps: Vec<(&String, &VariableDeps)> = source_vars
         .iter()
         .map(|(name, source_var)| {
-            let deps = variable_direct_dependencies(
-                db,
-                *source_var,
-                project,
-                module_ident_context,
-                module_inputs,
-            );
+            let deps = variable_direct_dependencies(db, *source_var, project, module_inputs);
             (name, deps)
         })
         .collect();
@@ -339,12 +333,18 @@ pub(crate) fn build_var_info(
         all_init_referenced.extend(
             deps.init_referenced_vars
                 .iter()
-                .map(|d| Ident::from_str_unchecked(d)),
+                // Initials runlist candidates are model-local variables. A
+                // qualified output therefore seeds its module instance, whose
+                // initials program populates the nested output slot before the
+                // parent's LoadInitial snapshots it. Keeping the composite
+                // name here cannot match `var_names` and silently leaves the
+                // nested initial value unwritten.
+                .map(|d| normalize_dep(d)),
         );
 
         // Include implicit variables from this variable's deps result.
         // Since we read this from variable_direct_dependencies (not
-        // parse_source_variable_with_module_context), salsa's backdating
+        // parse_source_variable), salsa's backdating
         // ensures that if the deps + implicit vars haven't changed, this
         // function is cached.
         for implicit in &deps.implicit_vars {
@@ -623,21 +623,7 @@ pub(crate) fn dt_cycle_sccs_engine_consistent(
     let empty_inputs = ModuleInputSet::empty(db);
     let dep_graph = model_dependency_graph(db, model, project, empty_inputs);
     let resolved_sccs = dep_graph.resolved_sccs.clone();
-    let diags = model_dependency_graph::accumulated::<CompilationDiagnostic>(
-        db,
-        model,
-        project,
-        empty_inputs,
-    );
-    let engine_raises_circular = diags.iter().any(|d| {
-        matches!(
-            d.0.error,
-            DiagnosticError::Model(crate::common::Error {
-                code: crate::common::ErrorCode::CircularDependency,
-                ..
-            })
-        )
-    });
+    let engine_raises_circular = dep_graph.has_cycle;
     if let Some(reason) =
         dt_cycle_sccs_consistency_violation(&sccs, &resolved_sccs, engine_raises_circular)
     {
@@ -1217,7 +1203,7 @@ pub(crate) struct DtSccResolution {
     /// element-sourceable -- single-variable self-recurrence OR a
     /// multi-variable recurrence cluster (Subcomponent B / GH #575: both
     /// route through the same symbolic element-graph verdict). These are
-    /// excluded from the `CircularDependency` accumulation and recorded on
+    /// excluded from the unresolved-cycle attribution and recorded on
     /// `ModelDepGraphResult.resolved_sccs`.
     pub(crate) resolved: Vec<crate::db::ResolvedScc>,
     /// `true` iff at least one offending SCC is NOT resolved
@@ -1225,8 +1211,8 @@ pub(crate) struct DtSccResolution {
     /// the symbolic builder detects -- or not element-sourceable). When
     /// `false`, every back-edge in this phase is fully explained by
     /// resolvable recurrences and the phase's cycle gate must NOT set
-    /// `has_cycle` / accumulate `CircularDependency` (loud-safe: any doubt
-    /// leaves this `true`).
+    /// `has_cycle` / record a `CircularDependency` attribution (loud-safe: any
+    /// doubt leaves this `true`).
     pub(crate) has_unresolved: bool,
 }
 
@@ -1659,17 +1645,271 @@ pub struct ModelDepGraphResult {
     pub resolved_sccs: Vec<ResolvedScc>,
 }
 
-/// Per-model tracked dependency graph, keyed on the module-instance input
-/// wiring (`module_inputs`). The empty `ModuleInputSet` is the no-inputs case;
-/// because it is a single interned id, every no-input caller shares one cache
-/// entry. Models instantiated with different input wiring can have different
-/// dependency sets when `isModuleInput(...)` appears in equations.
+/// Pure dependency-graph facts, including the one variable used to attribute
+/// an unresolved cycle. Keeping the attribution on the value lets project-wide
+/// requirement propagation inspect every module key without replaying another
+/// model's diagnostic through its caller's accumulator graph.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ModelDependencyGraphFacts {
+    graph: ModelDepGraphResult,
+    /// First unresolved-cycle attribution in deterministic gate order: dt
+    /// before init, and each phase's sorted dependency walk. A model gets one
+    /// model-level diagnostic even when the same recurrence fails both gates.
+    cycle_variable: Option<String>,
+}
+
+/// The stable compilation identity shared by module enumeration, dependency
+/// classification, and bytecode assembly.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ModuleCompilationKey {
+    model_name: Ident<Canonical>,
+    module_inputs: Vec<String>,
+}
+
+impl ModuleCompilationKey {
+    fn new(model_name: Ident<Canonical>, module_inputs: &[String]) -> Self {
+        Self {
+            model_name,
+            module_inputs: module_inputs.to_vec(),
+        }
+    }
+}
+
+/// Qualified child outputs that must be evaluated in a module key's sparse
+/// initials program because a caller reads them during its own initial phase.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ProjectInitialOutputRequirements {
+    by_module: BTreeMap<ModuleCompilationKey, BTreeSet<Ident<Canonical>>>,
+}
+
+/// Raw initial dependency paths by local variable/helper name. Unlike
+/// `build_var_info`, this view deliberately preserves qualification so the
+/// project-level propagation can cross one concrete module instance at a
+/// time. PREVIOUS-only reads are removed by the same classification field the
+/// model graph consumes; they read history and must not seed child initials.
+fn initial_dependency_paths(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    module_inputs: ModuleInputSet<'_>,
+) -> BTreeMap<Ident<Canonical>, BTreeSet<String>> {
+    let mut paths = BTreeMap::new();
+    for (name, source_var) in model.variables(db) {
+        let deps = variable_direct_dependencies(db, *source_var, project, module_inputs);
+        let mut initial = deps.initial_deps.clone();
+        initial.retain(|dep| !deps.initial_previous_referenced_vars.contains(dep));
+        paths.insert(Ident::from_str_unchecked(name), initial);
+
+        for implicit in &deps.implicit_vars {
+            let mut initial = implicit.initial_deps.clone();
+            initial.retain(|dep| !implicit.initial_previous_referenced_vars.contains(dep));
+            paths.insert(Ident::from_str_unchecked(&implicit.name), initial);
+        }
+    }
+    paths
+}
+
+/// Route a qualified dependency path out of `current_key`. A nested path such
+/// as `m·n·out` both seeds `n` in `m`'s model and `out` in `n`'s model. The
+/// caller's ordinary dependency closure already schedules the first module
+/// (`m`); only the suffix is an external requirement.
+fn route_initial_output_requirement(
+    db: &dyn Db,
+    project: SourceProject,
+    known_keys: &BTreeSet<ModuleCompilationKey>,
+    current_key: &ModuleCompilationKey,
+    path: &str,
+    requirements: &mut ProjectInitialOutputRequirements,
+    pending: &mut VecDeque<(ModuleCompilationKey, Ident<Canonical>)>,
+) -> bool {
+    let path = path.strip_prefix('\u{00B7}').unwrap_or(path);
+    let Some((instance, suffix)) = path.split_once('\u{00B7}') else {
+        return false;
+    };
+    let Some(current_model) = project.models(db).get(current_key.model_name.as_str()) else {
+        return false;
+    };
+    let Some(target) =
+        crate::db::assemble::module_instance_target(db, *current_model, project, instance)
+    else {
+        return false;
+    };
+    let target_inputs: Vec<String> = target
+        .inputs
+        .iter()
+        .map(|input| input.as_str().to_owned())
+        .collect();
+    let target_key = ModuleCompilationKey::new(target.model_name, &target_inputs);
+    if !known_keys.contains(&target_key) {
+        return false;
+    }
+
+    if let Some((nested_instance, _)) = suffix.split_once('\u{00B7}') {
+        if !route_initial_output_requirement(
+            db,
+            project,
+            known_keys,
+            &target_key,
+            suffix,
+            requirements,
+            pending,
+        ) {
+            return false;
+        }
+        let nested_instance = Ident::from_str_unchecked(nested_instance);
+        if requirements
+            .by_module
+            .entry(target_key.clone())
+            .or_default()
+            .insert(nested_instance.clone())
+        {
+            pending.push_back((target_key, nested_instance));
+        }
+        return true;
+    }
+
+    let output = Ident::from_str_unchecked(suffix);
+    if requirements
+        .by_module
+        .entry(target_key.clone())
+        .or_default()
+        .insert(output.clone())
+    {
+        pending.push_back((target_key, output));
+    }
+    true
+}
+
+/// Project-wide fixed point of cross-model initial-output requirements.
 ///
-/// This thin salsa wrapper lives alongside the dependency-graph cycle gate
-/// it delegates to (`model_dependency_graph_impl`, the SCC-aware back-edge
-/// break, the collapsed-node transitive accumulation) and the shared cycle
-/// relation that gate consumes (`walk_successors`/`build_var_info`/
-/// `resolve_recurrence_sccs`); it is re-exported at the `db.rs` root.
+/// Runtime modules are shared by `(model, bound-port set)`, so requirements
+/// are unioned on exactly that key. Every instance has private slots and
+/// initial bytecode is pure, making this union semantically equivalent to
+/// compiling a more exact per-instance program without enlarging `ModuleKey`.
+#[salsa::tracked(returns(ref))]
+fn project_initial_output_requirements(
+    db: &dyn Db,
+    project: SourceProject,
+) -> ProjectInitialOutputRequirements {
+    let mut known_keys = BTreeSet::new();
+    // `models`/`model_names` include the stdlib templates spliced at sync. They
+    // are not independent compile roots: treating them as such parses and
+    // graphs every template before its first call, defeating the source-parse
+    // cache boundary. `macro_declarations` is the ordered project-declared
+    // model list; production enumeration pulls in exactly the stdlib models
+    // each of those roots actually instantiates.
+    for (root, _) in project.macro_declarations(db) {
+        let Ok(instances) =
+            crate::db::assemble::enumerate_initial_dependency_module_instances(db, project, root)
+        else {
+            // Assembly owns dangling-module diagnostics. Requirements are an
+            // optimization of a valid module graph, never a second error path.
+            continue;
+        };
+        for (model_name, input_sets) in instances {
+            for inputs in input_sets {
+                let names: Vec<String> = inputs
+                    .iter()
+                    .map(|input| input.as_str().to_owned())
+                    .collect();
+                known_keys.insert(ModuleCompilationKey::new(model_name.clone(), &names));
+            }
+        }
+    }
+
+    let mut paths_by_key = BTreeMap::new();
+    let mut pending = VecDeque::new();
+    for key in &known_keys {
+        let Some(model) = project.models(db).get(key.model_name.as_str()) else {
+            continue;
+        };
+        let module_inputs = ModuleInputSet::from_names(db, &key.module_inputs);
+        paths_by_key.insert(
+            key.clone(),
+            initial_dependency_paths(db, *model, project, module_inputs),
+        );
+        for name in &base_model_dependency_graph(db, *model, project, module_inputs)
+            .graph
+            .runlist_initials
+        {
+            pending.push_back((key.clone(), Ident::from_str_unchecked(name)));
+        }
+    }
+
+    let mut requirements = ProjectInitialOutputRequirements::default();
+    let mut visited = BTreeSet::new();
+    while let Some((key, name)) = pending.pop_front() {
+        if !visited.insert((key.clone(), name.clone())) {
+            continue;
+        }
+        let Some(paths) = paths_by_key.get(&key).and_then(|paths| paths.get(&name)) else {
+            continue;
+        };
+        for dependency in paths {
+            let dependency = dependency
+                .strip_prefix('\u{00B7}')
+                .unwrap_or(dependency.as_str());
+            if dependency.contains('\u{00B7}') {
+                route_initial_output_requirement(
+                    db,
+                    project,
+                    &known_keys,
+                    &key,
+                    dependency,
+                    &mut requirements,
+                    &mut pending,
+                );
+            } else {
+                pending.push_back((key.clone(), Ident::from_str_unchecked(dependency)));
+            }
+        }
+    }
+    requirements
+}
+
+/// Per-module-key projection of the project fixed point. This is the salsa
+/// firewall read by the public graph: an unrelated caller edit may recompute
+/// the project walk, but an unchanged seed set backdates before invalidating
+/// this module's graph, membership projections, or fragments.
+#[salsa::tracked(returns(clone))]
+fn model_initial_output_requirements<'db>(
+    db: &'db dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    module_inputs: ModuleInputSet<'db>,
+) -> BTreeSet<Ident<Canonical>> {
+    let key = ModuleCompilationKey::new(
+        Ident::new(model.name(db)),
+        module_inputs.names(db).as_slice(),
+    );
+    project_initial_output_requirements(db, project)
+        .by_module
+        .get(&key)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Base per-model tracked dependency facts. This query owns the pure graph,
+/// first unresolved-cycle attribution, and all expensive relation/SCC work; it
+/// never accumulates diagnostics. The public projection below only extends the
+/// sparse initial runlist with cross-model output requirements, so adding those
+/// seeds does not rebuild the graph. `emit_model_dependency_cycle_diagnostic`
+/// is the sole owner of accumulator emission and reads this memoized value.
+#[salsa::tracked(returns(ref))]
+fn base_model_dependency_graph<'db>(
+    db: &'db dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    module_inputs: ModuleInputSet<'db>,
+) -> ModelDependencyGraphFacts {
+    let module_input_names = module_inputs.names(db);
+    model_dependency_graph_impl(db, model, project, module_input_names)
+}
+
+/// Per-model dependency graph keyed on module-instance input wiring. In
+/// addition to the model-local relation, its initials runlist contains the
+/// exact child outputs reached by qualified same-step initial dependencies in
+/// callers of this `(model, input-set)` compilation key.
 #[salsa::tracked(returns(ref))]
 pub fn model_dependency_graph<'db>(
     db: &'db dyn Db,
@@ -1677,8 +1917,136 @@ pub fn model_dependency_graph<'db>(
     project: SourceProject,
     module_inputs: ModuleInputSet<'db>,
 ) -> ModelDepGraphResult {
-    let module_input_names = module_inputs.names(db);
-    model_dependency_graph_impl(db, model, project, module_input_names)
+    let base = base_model_dependency_graph(db, model, project, module_inputs);
+    let required = model_initial_output_requirements(db, model, project, module_inputs);
+    if required.is_empty() {
+        return base.graph.clone();
+    }
+    let mut graph = base.graph.clone();
+    graph.runlist_initials = extend_initial_runlist(&base.graph, &required);
+    graph
+}
+
+/// Add externally-required variables and their model-local initial closure to
+/// a base graph, then emit the same deterministic dependency/SCC order used by
+/// the model-local runlist builder.
+fn extend_initial_runlist(
+    base: &ModelDepGraphResult,
+    required: &BTreeSet<Ident<Canonical>>,
+) -> Vec<String> {
+    let mut allowed: BTreeSet<String> = base.runlist_initials.iter().cloned().collect();
+    allowed.extend(
+        required
+            .iter()
+            .filter(|name| base.initial_dependencies.contains_key(name.as_str()))
+            .map(|name| name.as_str().to_owned()),
+    );
+    loop {
+        let additional: BTreeSet<String> = allowed
+            .iter()
+            .flat_map(|name| {
+                base.initial_dependencies
+                    .get(name.as_str())
+                    .into_iter()
+                    .flat_map(|deps| deps.iter())
+            })
+            .filter(|dependency| !allowed.contains(dependency.as_str()))
+            .map(|dependency| dependency.as_str().to_owned())
+            .collect();
+        if additional.is_empty() {
+            break;
+        }
+        allowed.extend(additional);
+    }
+
+    let mut scc_of: BTreeMap<String, usize> = BTreeMap::new();
+    let mut scc_members: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+    for (index, scc) in base.resolved_sccs.iter().enumerate() {
+        let members: Vec<String> = scc
+            .members
+            .iter()
+            .map(|member| member.as_str().to_owned())
+            .collect();
+        for member in &members {
+            scc_of.insert(member.clone(), index);
+        }
+        scc_members.insert(index, members);
+    }
+
+    fn add(
+        graph: &ModelDepGraphResult,
+        allowed: &BTreeSet<String>,
+        scc_of: &BTreeMap<String, usize>,
+        scc_members: &BTreeMap<usize, Vec<String>>,
+        used: &mut BTreeSet<String>,
+        result: &mut Vec<String>,
+        name: &str,
+    ) {
+        if used.contains(name) {
+            return;
+        }
+        if let Some(scc_id) = scc_of.get(name)
+            && let Some(members) = scc_members.get(scc_id)
+        {
+            for member in members {
+                used.insert(member.clone());
+            }
+            for member in members {
+                if let Some(dependencies) = graph.initial_dependencies.get(member.as_str()) {
+                    for dependency in dependencies {
+                        add(
+                            graph,
+                            allowed,
+                            scc_of,
+                            scc_members,
+                            used,
+                            result,
+                            dependency.as_str(),
+                        );
+                    }
+                }
+            }
+            for member in members {
+                if allowed.contains(member) {
+                    result.push(member.clone());
+                }
+            }
+            return;
+        }
+
+        used.insert(name.to_owned());
+        if let Some(dependencies) = graph.initial_dependencies.get(name) {
+            for dependency in dependencies {
+                add(
+                    graph,
+                    allowed,
+                    scc_of,
+                    scc_members,
+                    used,
+                    result,
+                    dependency.as_str(),
+                );
+            }
+        }
+        if allowed.contains(name) {
+            result.push(name.to_owned());
+        }
+    }
+
+    let mut used = BTreeSet::new();
+    let mut result = Vec::with_capacity(allowed.len());
+    for name in &allowed {
+        add(
+            base,
+            &allowed,
+            &scc_of,
+            &scc_members,
+            &mut used,
+            &mut result,
+            name,
+        );
+    }
+    result
 }
 
 /// Which of the three phase runlists one variable appears in.
@@ -1759,13 +2127,9 @@ fn membership_in(dep_graph: &ModelDepGraphResult, name: &str) -> RunlistMembersh
 // `ltm_ir` / `macro_registry`) split out purely for the per-file line
 // cap.
 
-/// Accumulate a model-level `CircularDependency` diagnostic for
-/// `var_name` (the variable the dependency walk reported the back-edge
-/// on). Factored out of `model_dependency_graph_impl` because the
-/// dt-phase, the dt-phase residual-after-resolution, and the init-phase
-/// cycle paths all emit the identical diagnostic; keeping one definition
-/// prevents the four sites from drifting.
-pub(crate) fn cycle_diagnostic(db: &dyn Db, model: SourceModel, var_name: String) {
+/// Accumulate a model-level `CircularDependency` diagnostic for the variable
+/// the pure dependency-graph facts selected to attribute the cycle.
+fn cycle_diagnostic(db: &dyn Db, model: SourceModel, var_name: String) {
     CompilationDiagnostic(Diagnostic {
         model: model.name(db).clone(),
         variable: Some(var_name),
@@ -1777,6 +2141,27 @@ pub(crate) fn cycle_diagnostic(db: &dyn Db, model: SourceModel, var_name: String
         severity: DiagnosticSeverity::Error,
     })
     .accumulate(db);
+}
+
+/// The sole accumulator-owning trigger for an ordinary dependency cycle.
+///
+/// Graph construction itself is pure because the project-wide initial-output
+/// requirement fixed point inspects every production module key. Attaching a
+/// diagnostic to that shared projection would replay an unrelated model's
+/// cycle through each caller. Reporting instead probes the already-memoized
+/// empty-input facts exactly once from the affected model's diagnostics pass.
+#[salsa::tracked]
+pub(crate) fn emit_model_dependency_cycle_diagnostic(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) {
+    let empty_inputs = ModuleInputSet::empty(db);
+    if let Some(var_name) =
+        &base_model_dependency_graph(db, model, project, empty_inputs).cycle_variable
+    {
+        cycle_diagnostic(db, model, var_name.clone());
+    }
 }
 
 /// Build the SCC-aware back-edge map consumed by
@@ -1834,12 +2219,12 @@ pub(crate) fn same_resolved_scc(
     )
 }
 
-pub(crate) fn model_dependency_graph_impl(
+fn model_dependency_graph_impl(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
     module_input_names: &[String],
-) -> ModelDepGraphResult {
+) -> ModelDependencyGraphFacts {
     let module_input_names = module_input_names.to_vec();
     let (var_info, all_init_referenced) = build_var_info(db, model, project, &module_input_names);
 
@@ -1885,12 +2270,13 @@ pub(crate) fn model_dependency_graph_impl(
             // Hot working maps use FxHash (fixed-seed, deterministic) and
             // interned `Ident<Canonical>` keys: the O(V^2) transitive-closure
             // clones are Arc-refcount bumps and map ops stop paying SipHash.
-            // `all_deps` insertion/lookup order does not leak into output --
-            // every dependency *set* is a `BTreeSet` (lexicographic), and the
-            // runlist sort tie-breaks by `topo_sort_str`'s visit order over a
-            // pre-sorted `names` list -- so the FxHash iteration order is never
-            // observable. `processing` is membership-only (DFS-stack back-edge
-            // detection); its order is irrelevant.
+            // `var_info` iteration is observably unsafe for DFS roots: the
+            // first unresolved back-edge supplies the diagnostic attribution,
+            // so roots are sorted below before recursion. `all_deps` map order
+            // does not leak: every dependency set is a lexical `BTreeSet`, the
+            // returned map is probed by key, and runlists use their own sorted
+            // visit list. `processing` is membership-only; its order is
+            // irrelevant.
             let mut all_deps: FxHashMap<Ident<Canonical>, Option<BTreeSet<Ident<Canonical>>>> =
                 var_info.keys().map(|k| (k.clone(), None)).collect();
             let mut processing: FxHashSet<Ident<Canonical>> = FxHashSet::default();
@@ -2109,10 +2495,14 @@ pub(crate) fn model_dependency_graph_impl(
                 Ok(())
             }
 
-            // Iterate every node once. The keys (interned idents) are cloned
-            // (Arc bumps) so the borrow of `var_info` is released before the
-            // mutable `all_deps`/`processing` recursion.
-            let names: Vec<Ident<Canonical>> = var_info.keys().cloned().collect();
+            // Iterate every node once in canonical order. Besides making
+            // independent components deterministic, this fixes which member
+            // attributes the first unresolved cycle; each node's successors
+            // are already lexical through `walk_successors`'s BTreeSet.
+            // Interned keys are cheap Arc bumps and release the `var_info`
+            // borrow before mutable `all_deps`/`processing` recursion.
+            let mut names: Vec<Ident<Canonical>> = var_info.keys().cloned().collect();
+            names.sort_unstable();
             for name in &names {
                 compute_inner(
                     &var_info,
@@ -2125,9 +2515,9 @@ pub(crate) fn model_dependency_graph_impl(
             }
 
             // Materialize the std `HashMap` (default hasher) the salsa return
-            // type uses; the FxHash working map's iteration order is irrelevant
-            // (each value is a `BTreeSet`, and downstream consumers either probe
-            // by key or re-sort).
+            // type uses; this remaining FxHash iteration is not observable
+            // (each value is a `BTreeSet`, and downstream consumers either
+            // probe by key or re-sort).
             Ok(all_deps
                 .into_iter()
                 .map(|(k, v)| (k, v.unwrap_or_default()))
@@ -2135,6 +2525,7 @@ pub(crate) fn model_dependency_graph_impl(
         };
 
     let mut has_cycle = false;
+    let mut cycle_variable = None;
     let mut resolved_sccs: Vec<ResolvedScc> = Vec::new();
 
     let no_scc: BTreeMap<Ident<Canonical>, usize> = BTreeMap::new();
@@ -2182,7 +2573,7 @@ pub(crate) fn model_dependency_graph_impl(
             if dt_scc_map.is_empty() {
                 // Unresolved: keep the conservative `CircularDependency`.
                 has_cycle = true;
-                cycle_diagnostic(db, model, first_cycle_var);
+                cycle_variable.get_or_insert(first_cycle_var);
                 HashMap::new()
             } else {
                 // Re-run with every resolved SCC treated as one collapsed
@@ -2192,7 +2583,7 @@ pub(crate) fn model_dependency_graph_impl(
                 compute_transitive(false, &dt_scc_map).unwrap_or_else(|var_name| {
                     has_cycle = true;
                     resolved_sccs.clear();
-                    cycle_diagnostic(db, model, var_name);
+                    cycle_variable.get_or_insert(var_name);
                     HashMap::new()
                 })
             }
@@ -2258,7 +2649,7 @@ pub(crate) fn model_dependency_graph_impl(
                 // gate still errs (a genuine residual cycle). Loud-safe:
                 // keep the conservative `CircularDependency`.
                 has_cycle = true;
-                cycle_diagnostic(db, model, first_init_cycle_var);
+                cycle_variable.get_or_insert(first_init_cycle_var);
                 HashMap::new()
             } else {
                 // Break the init-only resolved SCCs' intra edges too (in
@@ -2281,7 +2672,7 @@ pub(crate) fn model_dependency_graph_impl(
                     Err(var_name) => {
                         has_cycle = true;
                         resolved_sccs.clear();
-                        cycle_diagnostic(db, model, var_name);
+                        cycle_variable.get_or_insert(var_name);
                         HashMap::new()
                     }
                 }
@@ -2599,27 +2990,30 @@ pub(crate) fn model_dependency_graph_impl(
         .cloned()
         .collect();
 
-    ModelDepGraphResult {
-        dt_dependencies,
-        initial_dependencies,
-        runlist_initials,
-        runlist_flows,
-        runlist_stocks,
-        has_cycle,
-        // Populated by the element-cycle refinement
-        // (`resolve_recurrence_sccs`) when a cycle gate's back-edge is
-        // fully explained by resolvable single-variable self-recurrences:
-        // the dt path emits `phase: Dt` SCCs, and the symmetric init
-        // path (Phase 2 Task 3) emits `phase: Initial` SCCs for the
-        // structurally-distinct init-only recurrences a stock's initial
-        // value can introduce (the both-relations aux self-recurrence is
-        // NOT double-counted -- the init path excludes members the dt
-        // path already resolved). Empty on the acyclic happy path and
-        // whenever the conservative loud-safe `CircularDependency`
-        // fallback fires (zero extra work, no behavior change there).
-        // This is the sole `ModelDepGraphResult` construction site (the
-        // dt/init back-edge paths fall through here), so the byte-stable
-        // `resolved` vector flows straight onto the salsa return value.
-        resolved_sccs,
+    ModelDependencyGraphFacts {
+        graph: ModelDepGraphResult {
+            dt_dependencies,
+            initial_dependencies,
+            runlist_initials,
+            runlist_flows,
+            runlist_stocks,
+            has_cycle,
+            // Populated by the element-cycle refinement
+            // (`resolve_recurrence_sccs`) when a cycle gate's back-edge is
+            // fully explained by resolvable single-variable self-recurrences:
+            // the dt path emits `phase: Dt` SCCs, and the symmetric init
+            // path (Phase 2 Task 3) emits `phase: Initial` SCCs for the
+            // structurally-distinct init-only recurrences a stock's initial
+            // value can introduce (the both-relations aux self-recurrence is
+            // NOT double-counted -- the init path excludes members the dt
+            // path already resolved). Empty on the acyclic happy path and
+            // whenever the conservative loud-safe `CircularDependency`
+            // fallback fires (zero extra work, no behavior change there).
+            // This is the sole `ModelDepGraphResult` construction site (the
+            // dt/init back-edge paths fall through here), so the byte-stable
+            // `resolved` vector flows straight onto the salsa return value.
+            resolved_sccs,
+        },
+        cycle_variable,
     }
 }

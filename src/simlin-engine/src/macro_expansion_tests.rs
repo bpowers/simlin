@@ -335,7 +335,7 @@ fn macro_call_expands_to_synthetic_module_structurally() {
     );
 
     let (transformed, vars) = crate::builtins_visitor::instantiate_implicit_modules(
-        "y", ast, None, None, None, &registry, None,
+        "y", ast, None, None, &registry, None,
     )
     .expect("a macro call must expand");
 
@@ -386,9 +386,7 @@ fn macro_call_expands_to_synthetic_module_structurally() {
 fn computed_macro_argument_keeps_the_exact_source_subtree() {
     use crate::ast::Expr0;
     use crate::capture::ImplicitVar;
-    use crate::db::{
-        model_module_ident_context, parse_source_variable_with_module_context, sync_from_datamodel,
-    };
+    use crate::db::{parse_source_variable, sync_from_datamodel};
 
     let source = mdl(r#":MACRO: MYMACRO(p1, p2)
 MYMACRO = p1 + p2
@@ -410,7 +408,6 @@ y = MYMACRO(a * 2 + b, 4)
     let project = open_vensim(&source).expect("MDL must parse into a datamodel project");
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    let main = sync.models["main"].source;
     let source_var = sync.models["main"].variables["y"].source;
     let equation = match source_var.equation(&db) {
         crate::datamodel::Equation::Scalar(equation) => equation,
@@ -429,8 +426,7 @@ y = MYMACRO(a * 2 + b, 4)
         "the defect detector requires a nonzero macro-argument span, got {loc}"
     );
 
-    let ctx = model_module_ident_context(&db, main, sync.project, vec![]);
-    let parsed = parse_source_variable_with_module_context(&db, source_var, sync.project, ctx);
+    let parsed = parse_source_variable(&db, source_var, sync.project);
     let hoisted = parsed
         .implicit_vars
         .iter()
@@ -456,7 +452,7 @@ y = MYMACRO(a * 2 + b, 4)
 }
 
 /// The production importer and salsa parser exercise every successful macro
-/// call route and leave only typed helpers behind.
+/// call route and expose each route's typed expansion products.
 ///
 /// The rows are the successful variants of `MacroCallResolution`: ordinary
 /// expansion, external passthrough, and an enclosing macro's renamed-builtin
@@ -466,9 +462,7 @@ y = MYMACRO(a * 2 + b, 4)
 #[test]
 fn production_macro_routes_leave_the_expected_typed_helpers() {
     use crate::capture::ImplicitVar;
-    use crate::db::{
-        model_module_ident_context, parse_source_variable_with_module_context, sync_from_datamodel,
-    };
+    use crate::db::{parse_source_variable, sync_from_datamodel};
 
     let source = mdl(r#":MACRO: INIT(x)
 INIT = INITIAL(x)
@@ -507,9 +501,7 @@ ordinary caller = ORDINARY(k * 2, 1)
     let helpers = |model_name: &str, var_name: &str| {
         let synced_model = &sync.models[model_name];
         let source_var = synced_model.variables[var_name].source;
-        let context =
-            model_module_ident_context(&db, synced_model.source, sync.project, Vec::new());
-        parse_source_variable_with_module_context(&db, source_var, sync.project, context)
+        parse_source_variable(&db, source_var, sync.project)
             .implicit_vars
             .to_vec()
     };
@@ -535,8 +527,9 @@ ordinary caller = ORDINARY(k * 2, 1)
         matches!(init_body.as_slice(), [ImplicitVar::Capture(capture)]
         if capture.ident() == "$⁚init⁚0⁚arg0"
             && capture.kind() == crate::capture::CaptureKind::Init),
-        "the macro body's same-named INIT call must reach the intrinsic capture path, not \
-         instantiate itself"
+        "the macro body's same-named INIT call must resolve as the intrinsic; its formal \
+         parameter is non-storage and therefore receives a typed capture rather than \
+         instantiating the macro recursively"
     );
 
     let delayn_body = helpers("delayn", "delayn");
@@ -1045,12 +1038,10 @@ y=
 // (`mdl/xmile_compat.rs`; the engine's `Expr1` lowering recognizes only the
 // opcode name `init`, not `initial`). C-LEARN's uninvoked
 // `:MACRO: INIT(x) ... INIT = INITIAL(x)` therefore stores the datamodel
-// body `init = init(x)`. Pre-fix, the macro recursion check mistook that
-// renamed-intrinsic call for a recursive `init -> init` macro edge and failed
-// the WHOLE `MacroRegistry::build`; the empty registry then un-shadowed the
-// project's OTHER macros, so their (correct) calls fell through to the
-// builtins and failed with `BadBuiltinArgs`/`UnknownBuiltin` -- a single
-// false positive blocking all macro expansion.
+// body `init = init(x)`. The macro recursion check must route that self-call
+// through the renamed-intrinsic arm rather than recording a recursive `init ->
+// init` macro edge. A registry build is all-or-nothing, so misclassifying this
+// one call would also un-shadow every unrelated macro in the project.
 //
 // These end-to-end tests reproduce the pattern on a tiny inline `.mdl`
 // (C-LEARN itself is 1.4 MB; its full-corpus guard is the `#[ignore]`d
@@ -1126,10 +1117,10 @@ sibling=
 }
 
 /// #584 (AC7.3 Cluster A): a macro whose primary output is *exactly*
-/// `INITIAL(x)` (compiles to a bare `LoadInitial`) must have that output
-/// written during the parent's initials phase, so a parent reading the
-/// output via `INITIAL()` sees its true t=0 value -- NOT the uninitialized
-/// slot (0 in a clean VM, `inf`/NaN in C-LEARN's reused buffer).
+/// `INITIAL(x)` must have that output written during the parent's initials
+/// phase, so a parent reading the output via `INITIAL()` sees its true t=0
+/// value. A macro formal has no storage in the generic model, so the typed
+/// parse captures `x` and `LoadInitial` reads that capture's slot.
 ///
 /// The macro's compiled INITIALS runlist used to OMIT its own `INITIAL()`
 /// primary output (`myinit = INITIAL(x)`): the output was compiled only into
@@ -1161,7 +1152,7 @@ xin = 5
 y=
 	MYINIT(xin, 0)
 	~
-	~	the module output, read in the flows phase (already correct pre-fix)
+	~	the module output, read in the flows phase
 	|
 
 z=
@@ -1172,17 +1163,15 @@ z=
 	|
 "#);
 
-    // y reads the module output in the flows phase, which was always correct.
+    // y reads the module output in the flows phase.
     let y = run_mdl_var(&source, "y");
     assert!(
         y.iter().all(|&v| (v - 5.0).abs() < 1e-9),
         "y = MYINIT(xin=5, 0) = INITIAL(5) = 5 at every step: {y:?}",
     );
 
-    // z reads the module output DURING initials. Pre-fix the macro output's
-    // initials slot was never written, so INITIAL(y) snapshotted garbage (0).
-    // Post-fix the INITIAL-backed output is in the macro's initials runlist,
-    // so z = INITIAL(y) = 5.
+    // z reads the module output during initials. The INITIAL-backed output is
+    // in the macro's initials runlist, so z = INITIAL(y) = 5.
     let z = run_mdl_var(&source, "z");
     assert!(
         z.iter().all(|&v| (v - 5.0).abs() < 1e-9),
@@ -1224,9 +1213,10 @@ z=
 ///   t=0: fallback        => k       = 4
 ///   t=1: prev value of x => 9 (const) = 9
 ///   t=2: prev value of x => 9 (const) = 9
-/// i.e. `wrapped == [4, 9, 9]`. (`x` is a plain port aux, not module-backed,
-/// so `PREVIOUS(x, k)` compiles straight to `LoadPrev` -- the same intrinsic
-/// path C-LEARN's renamed `SAMPLE IF TRUE` desugar takes.)
+/// i.e. `wrapped == [4, 9, 9]`. The typed macro registry identifies `x` as a
+/// formal without storage in the generic model, so parsing gives it a capture
+/// slot and the intrinsic `LoadPrev` reads that slot -- the same snapshot
+/// semantics C-LEARN's renamed `SAMPLE IF TRUE` desugar uses.
 #[test]
 fn issue_554_invoked_macro_wrapping_own_previous_intrinsic_compiles_and_runs() {
     let source = mdl(r#":MACRO: PREVIOUS(x, k)
@@ -1342,16 +1332,10 @@ y=
 // single-token XMILE `DELAYN(input,dt,n,init)` (`mdl/xmile_compat.rs`). So
 // thyroid-2008-d.mdl's `:MACRO: DELAYN(Input,DelayTime,Init,Order) ... DELAYN
 // = DELAY N(Input,DelayTime,Init,Order)` stores the datamodel macro body
-// `delayn = delayn(input, delaytime, order, init)`. Pre-fix, the macro
-// recursion check mistook that renamed-builtin call for a recursive `delayn ->
-// delayn` macro edge and failed the WHOLE `MacroRegistry::build` -- the same
-// #554 cascade, but for a *stdlib-module-backed* builtin that #554 was
-// deliberately scoped to exclude (its termination argument -- fall through to
-// the LoadInitial/LoadPrev opcode -- did not cover the stdlib-module case).
-//
-// The follow-up extends the shared self-edge suppression to the
-// stdlib-module-backed renamed-builtin set: skipping the macro resolve makes
-// the body's `delayn(...)` fall through to
+// `delayn = delayn(input, delaytime, order, init)`. The shared self-call router
+// classifies that call as a renamed stdlib builtin, not a recursive `delayn ->
+// delayn` macro edge: skipping the macro resolve makes the body's `delayn(...)`
+// fall through to
 // `rewrite_alias_module_call`/`stdlib_descriptor`, resolving to a DISTINCT
 // `stdlib⁚delay1`/`stdlib⁚delay3` module (never the user `delayn` macro
 // model), so it terminates and computes the stdlib delay behavior.

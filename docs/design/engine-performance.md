@@ -574,24 +574,13 @@ only if profiling after B still shows the parser as a hotspot.
 
 ### C2. Halve `reconstruct_variable` — MOOT
 
-`reconstruct_variable` is now the salsa-cached `reconstruct_model_variables`,
-and every caller is on the LTM / analysis / patch path; it does not appear in
-an ordinary compile profile at all. The 2x duplication that WAS real, and is
-fixed, was a different function: `variable_dimensions` demanded the per-variable
-parse under an empty `ModuleIdentContext`, a cache key nothing else used, so
-every variable was parsed twice per compile.
-
-### C2. Halve `reconstruct_variable` (6.4% of compile)
-
-`reconstruct_variable` rebuilds a full `datamodel::Variable` (ident/equation/
-inflows/outflows/compat clones) and is called ~2× per variable: once in the
-per-variable parse, and once in `module_ident_context_for_model` →
-`collect_module_idents`. The latter only needs each variable's `(ident, kind,
-is-module-call)` — a lighter projection straight from `SourceVariable` would
-avoid ~half the full reconstructions (and their clones).
-
-- Effort: medium. Risk: low–medium (changes the `collect_module_idents` input
-  type; behavior must stay identical).
+`reconstruct_variable` is the salsa-cached `reconstruct_model_variables`, and
+every caller is on the LTM / analysis / patch path; it does not appear in an
+ordinary compile profile. Source parsing reads a borrowed `VariableSource`
+and has one query key, `(SourceVariable, SourceProject)`. Layout derives
+declared dimensions from the source equation without demanding a second parse,
+and module-call classification happens during the one AST walk rather than a
+whole-model equation pre-scan.
 
 ### C3. `canonicalize` — the lever is call elimination, not a faster slow path
 
@@ -648,7 +637,7 @@ question it had already answered, under a key that did not say so.
 | what | mechanism | share of cold compile |
 |---|---|---|
 | `is_dimension_name` | re-canonicalized every declared dimension name per call | −5.0% |
-| `variable_dimensions` | demanded the parse under an empty `ModuleIdentContext` -> every variable parsed twice | −3.5% |
+| `variable_dimensions` | derives declared axes directly instead of demanding equation parsing | −3.5% |
 | `compile_implicit_var_fragment` | not tracked: every SMOOTH/DELAY/TREND helper recompiled per assembly | −12% cold, **−28% of a warm edit** |
 | `var_phase_symbolic_fragment_prod` | not tracked: cycle gate built 135 fragments per compile for 57 distinct keys | −14.3% |
 | topo-sort probe maps, `changes_when_lowercased` | SipHash and Unicode tables on the engine's own idents | −1.8%, −2.4% |
@@ -759,9 +748,9 @@ edit now costs 40.6M instructions and its profile is almost entirely salsa's
 own `maybe_changed_after` verification plus the lexer re-reading the one edited
 equation, which is what proportional looks like.
 
-**What still costs a full recompile: an edit that changes the dependency
-structure.** Measured at 1.798G instructions -- 85% of a cold compile -- and it
-decomposes as:
+**A dependency-structure edit invalidates graph and runlist work, but does not
+re-key every parse.** The older measurement was 1.798G instructions -- 85% of
+a cold compile -- and decomposed as:
 
 | | calls | Ir | share |
 |---|---:|---:|---:|
@@ -770,19 +759,16 @@ decomposes as:
 | ...of which `resolve_recurrence_sccs` | 2 | 245M | 14% |
 | `compile_implicit_var_fragment` | **651** (all) | 233M | 13% |
 
-Nearly every fragment in the model recompiles, which the per-variable keys
-should have prevented. The reason is already written down one level away, on
-`model_implicit_var_by_name`: a structural edit can change the model's implicit
-helper set, `model_module_ident_context` is an INTERNED handle whose id changes
-when that set grows, and a new key cannot backdate at all -- so every variable's
-parse is re-keyed and every fragment behind it recompiles. The bound is pinned
-by `implicit_helper_add_is_tight_but_module_helper_add_is_not`, which asserts
-exactly this asymmetry.
-
-So the next lever for interactive latency is **not** the dependency graph and
-not the fragment compilers: it is the granularity of the module-ident context's
-interning, which is GH #372's context-stable naming. Anything else attacks the
-22% and 13% rows while leaving the mechanism that produced them in place.
+That table describes the retired model-context parse key, not a standing cost
+model. Source parsing now depends only on the edited variable and project-global
+language contexts. The production AC3.1 execution probe states the warm-edit
+boundary exactly: adding a second SMTH1 instance parses and compiles only the
+new parent and its two new helpers; existing sources, helpers, and the stdlib
+template remain cached. Adding the first instance also compiles the five
+first-use stdlib sources and legitimately rebuilds the parent input whose
+initial-phase membership changes, while an unrelated dependent remains cached.
+The remaining structural cost is therefore graph/runlist verification and
+genuinely changed phase membership, not model-wide parse identity.
 
 ### C5. `Compiler::intern_name` — the top allocation site, blocked on artifact identity
 
@@ -833,10 +819,9 @@ short of it rather than taking a ~2-3%.
    starting; both are silent, and one is a process abort.
 8. **C5 (`Compiler::intern_name`)** — the top allocation site, blocked on
    `NameId` assignment order being part of the compiled artifact.
-9. **C6's residual** — the remaining interactive lever, and it is GH #372's
-   context-stable helper naming rather than anything in the compile path: a
-   structural edit re-keys `model_module_ident_context`, and a new interned key
-   cannot backdate, so every fragment behind it recompiles.
+9. **C6's residual** — dependency-graph and runlist verification for a genuine
+   structural edit. Source parse identity is already per variable; new work is
+   limited to new sources/helpers and variables whose phase membership changes.
 10. **LTM link-score arms** — the dominant cost of an LTM-enabled run on an
     arrayed model, and mostly a generation question rather than a VM one. An
     arm whose ceteris-paribus partial is *provably* `PREVIOUS(target)` is

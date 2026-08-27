@@ -276,9 +276,8 @@ pub struct BuiltinVisitor<'a> {
     /// captures, plus the module instances a stdlib or macro call expands into
     /// and the auxes their non-`Var` arguments are hoisted into. The modules
     /// are created using the same `is_stdlib_module_function` classification
-    /// rule, extending the base set from `collect_module_idents()` at runtime
-    /// so that nested references (like `PREVIOUS(SMOOTH(...))`) correctly
-    /// capture.
+    /// rule, so nested references (like `PREVIOUS(SMOOTH(...))`) can see the
+    /// module synthesized earlier in this walk.
     ///
     /// Every producer files through `insert_implicit_var`. Calling
     /// `IndexMap::insert` directly would silently replace an earlier helper:
@@ -288,15 +287,9 @@ pub struct BuiltinVisitor<'a> {
     ///
     /// Insertion-ordered, and that is load-bearing rather than incidental
     /// (GH #1002). Every producer of `ParsedVariableResult::implicit_vars`
-    /// emits this map with `.values()`, and `ImplicitVarMeta` used to identify
-    /// a helper by its POSITION in the resulting vector. Rust draws a fresh
-    /// `RandomState` key per `HashMap`, so with a `HashMap` here two parses of
-    /// the same variable -- in ONE process, differing only in their
-    /// `ModuleIdentContext` -- reported the helpers in two different orders,
-    /// and a position recorded against one parse resolved to a different
-    /// helper against the other. Insertion order is the walk's synthesis
-    /// order, so it is a function of the equation alone. Helper lookup no
-    /// longer rides on position (see `ImplicitVarMeta::name`), but the two salsa
+    /// emits this map with `.values()`, so insertion order makes helper order a
+    /// function of the equation's walk. Helper identity is its canonical name
+    /// rather than this position (see `ImplicitVarMeta::name`), but the two salsa
     /// values carrying this order -- `ParsedVariableResult::implicit_vars` and
     /// `VariableDeps::implicit_vars` -- have derived `PartialEq`, so an
     /// unstable order still defeats backdating and makes the compiled artifact
@@ -312,21 +305,10 @@ pub struct BuiltinVisitor<'a> {
     active_subscript: Option<Vec<String>>,
     /// Reference to DimensionsContext for dimension mapping lookups
     dimensions_ctx: Option<&'a DimensionsContext>,
-    /// Identifiers of Module variables in the parent model.
-    /// PREVIOUS(module_var) must synthesize a scalar temp arg rather than
-    /// reading a flat slot directly, because modules occupy multiple slots.
-    module_idents: Option<&'a HashSet<Ident<Canonical>>>,
-    /// Identifiers of *all* variables in the parent model, when known.
-    ///
-    /// Used by `index_is_static` to accept a *bare* element name as a static
-    /// subscript index: a name that is a dimension element AND not any
-    /// variable's name cannot be a dynamic-index reference, so the compiler
-    /// is guaranteed to resolve it against the subscripted variable's
-    /// declared dimensions (the element interpretation always wins -- see
-    /// `compiler::context`'s subscript lowering). `None` (the user-equation
-    /// parse path, which must stay incremental under variable renames)
-    /// disables the check, keeping bare element indices on the conservative
-    /// helper path.
+    /// Identifiers of all variables in the owning model, when parsing an LTM
+    /// synthetic equation. Source-equation parsing leaves this unset so its
+    /// cache key depends only on that source variable and project-global
+    /// syntax context.
     model_var_names: Option<&'a HashSet<Ident<Canonical>>>,
     /// The per-project macro registry. A call name that resolves here is
     /// expanded as a macro -- *before* alias-normalization, `is_builtin_fn`,
@@ -385,7 +367,6 @@ impl<'a> BuiltinVisitor<'a> {
             dimension_names: Vec::new(),
             active_subscript: None,
             dimensions_ctx: None,
-            module_idents: None,
             model_var_names: None,
             macro_registry: &EMPTY_MACRO_REGISTRY,
             enclosing_model: None,
@@ -433,7 +414,6 @@ impl<'a> BuiltinVisitor<'a> {
             dimension_names: get_dimension_names(dimensions),
             active_subscript: Some(subscript.to_vec()),
             dimensions_ctx,
-            module_idents: None,
             model_var_names: None,
             macro_registry: &EMPTY_MACRO_REGISTRY,
             enclosing_model: None,
@@ -466,14 +446,8 @@ impl<'a> BuiltinVisitor<'a> {
         self
     }
 
-    /// Set the module identifiers for PREVIOUS routing.
-    fn with_module_idents(mut self, module_idents: Option<&'a HashSet<Ident<Canonical>>>) -> Self {
-        self.module_idents = module_idents;
-        self
-    }
-
-    /// Set the model's full variable-name set so `index_is_static` can accept
-    /// non-shadowed bare element names (see the `model_var_names` field doc).
+    /// Set the LTM model's full variable-name set so `index_is_static` can
+    /// accept non-shadowed bare element names.
     fn with_model_var_names(
         mut self,
         model_var_names: Option<&'a HashSet<Ident<Canonical>>>,
@@ -495,43 +469,41 @@ impl<'a> BuiltinVisitor<'a> {
         self
     }
 
-    /// Returns true when the identifier names a module variable in either
-    /// the parent model (`module_idents`) or modules synthesized in this pass.
-    fn is_known_module_ident(&self, ident: &Ident<Canonical>) -> bool {
-        self.module_idents.is_some_and(|ids| ids.contains(ident))
-            || self.vars.get(ident).is_some_and(ImplicitVar::is_module)
+    /// Returns true when the identifier has no snapshot slot of its own: a
+    /// module synthesized earlier in this walk, or a formal parameter of the
+    /// macro body being parsed. Macro parameters come from the same typed
+    /// registry parsing already reads, so this keeps parsing independent of
+    /// the owning model's changing variable set.
+    fn is_known_nonstorage_ident(&self, ident: &Ident<Canonical>) -> bool {
+        self.vars.get(ident).is_some_and(ImplicitVar::is_module)
+            || self
+                .enclosing_model
+                .and_then(|model| self.macro_registry.resolve_macro(model))
+                .is_some_and(|descriptor| {
+                    descriptor
+                        .parameter_ports
+                        .iter()
+                        .any(|parameter| canonicalize(parameter) == ident.as_str())
+                })
     }
 
-    /// PREVIOUS/INIT opcode routing only applies to direct scalar variables.
-    /// Module variables and qualified module outputs (`module·output`) must
-    /// be treated as module-backed so PREVIOUS/INIT can synthesize scalar
-    /// helper args before compiling to intrinsic opcodes.
-    ///
-    /// The `·` split runs on the RAW ident, so a fully-quoted composite --
-    /// `"module·port"`, which is what `ltm_augment::quote_ident` emits for every
-    /// module-output reference in a generated LTM equation -- misses: the raw text
-    /// keeps its quotes, the base is `"module` (an unclosed quote that
-    /// `canonicalize` passes through verbatim), and the module lookup fails. That
-    /// miss is INERT, not a latent bug: `canonicalize` strips a balanced quoted
-    /// part, so the whole ident still resolves through `Context::var_ref` to the
-    /// module instance's slot, codegen's `static_slot` accepts the resulting
-    /// `Expr::Var`, and the emitted `LoadPrev` reads exactly the slot a capture
-    /// helper would have. The helper path is needed only for a reference codegen
-    /// cannot take a fixed slot for -- an ARRAYED module output port, which no
-    /// model in the corpus produces. Splitting the canonical form instead would be
-    /// a one-token change; it is not made because it buys no observable behavior
-    /// and the quoted spelling is itself pinned by
-    /// `ltm_augment_tests::quote_ident_needs_both_of_its_conjuncts`.
+    /// PREVIOUS/INIT parsing can reject direct opcode routing only for
+    /// non-storage identities available without the owning model's variable
+    /// set: a module synthesized earlier in this walk or a macro formal
+    /// parameter from the typed registry. Qualified output ports of other
+    /// module variables remain ordinary references here; lowering resolves
+    /// their concrete storage slot. Bound module inputs likewise reach
+    /// lowering unchanged, where the current no-snapshot-storage case refuses
+    /// loudly instead of inventing a parse-context-dependent helper.
     fn is_module_backed_ident(&self, ident: &RawIdent) -> bool {
         let canonical = Ident::new(&canonicalize(ident.as_str()));
-        if self.is_known_module_ident(&canonical) {
+        if self.is_known_nonstorage_ident(&canonical) {
             return true;
         }
 
-        ident
-            .as_str()
-            .split_once('·')
-            .is_some_and(|(base, _)| self.is_known_module_ident(&Ident::new(&canonicalize(base))))
+        ident.as_str().split_once('·').is_some_and(|(base, _)| {
+            self.is_known_nonstorage_ident(&Ident::new(&canonicalize(base)))
+        })
     }
 
     /// Is this subscript index expression *certainly* statically resolvable
@@ -542,21 +514,16 @@ impl<'a> BuiltinVisitor<'a> {
     ///   * a qualified `dimension·element` reference (which
     ///     `constify_dimensions` folds to a constant during Expr1 lowering,
     ///     regardless of context);
-    ///   * when the model's variable-name set is known (`model_var_names`),
-    ///     a bare identifier that is a dimension element and is NOT shadowed
-    ///     by any variable (model variable, module, or implicit var
-    ///     synthesized during this walk). Such a name cannot be a
-    ///     dynamic-index reference, so the compiler is guaranteed to resolve
-    ///     it against the subscripted variable's declared dimensions -- the
-    ///     element interpretation always wins in subscript lowering.
+    ///   * for an LTM synthetic equation whose model variable-name set is
+    ///     supplied, a bare identifier that is a dimension element and is not
+    ///     shadowed by a variable or helper synthesized during this walk.
     ///
-    /// Without `model_var_names`, bare identifiers are NOT considered static
-    /// even when they name a dimension element: XMILE explicitly allows
-    /// element names to shadow variable names ("the Element names can be the
-    /// same as Variable names"), and only the compiler -- which knows the
-    /// subscripted variable's declared dimensions -- can disambiguate
-    /// element-vs-variable for them. A bare identifier index therefore stays
-    /// on the conservative helper-aux path for PREVIOUS/INIT.
+    /// The ordinary source parse intentionally receives only the variable's
+    /// relevant dimensions, so a scalar equation still treats a bare element
+    /// conservatively until Phase 7.5 moves the complete verdict to lowering.
+    /// LTM parses receive the project-wide dimension context plus their
+    /// model's name set, preserving both bare-element helper reduction and
+    /// variable shadowing until Phase 7.5 moves the verdict to lowering.
     fn index_is_static(&self, idx: &IndexExpr0) -> bool {
         match idx {
             IndexExpr0::Expr(Expr0::Const(_, _, _)) => true,
@@ -653,11 +620,10 @@ impl<'a> BuiltinVisitor<'a> {
     /// GH #568 failure class, where the dependency graph and the bytecode
     /// disagree about what a variable reads.
     ///
-    /// A module-backed base classifies as `not_storage`, which is stricter than
-    /// codegen: codegen's `static_slot` accepts an `m·port` reference like any
-    /// other variable, so the capture this synthesizes for one is redundant.
-    /// The redundancy is preserved deliberately -- dropping it removes slots and
-    /// fragments, which is an artifact-shape change with its own ledger row.
+    /// Only context-free facts can classify a base as non-storage here: a
+    /// module synthesized earlier in this equation walk or a macro formal
+    /// parameter from the typed registry. An explicit `m·port` remains a
+    /// reference; lowering resolves its dependency shape and concrete slot.
     fn snapshot_arg(&self, arg: &Expr0) -> SnapshotArg {
         match arg {
             Expr0::Var(ident, _) if !self.is_module_backed_ident(ident) => SnapshotArg::whole(),
@@ -1201,20 +1167,15 @@ impl<'a> BuiltinVisitor<'a> {
                 // PREVIOUS and INIT opcode routing:
                 //
                 // Both compile to intrinsic opcodes (LoadPrev / LoadInitial)
-                // that read a fixed slot, so arg0 must resolve to a static
-                // location:
-                //   * a direct (non-module-backed) scalar variable reference, or
-                //   * a subscripted reference whose base is not module-backed
-                //     and whose every index is statically resolvable -- a
-                //     numeric constant or a qualified `dimension·element`
-                //     reference (see `index_is_static`).
+                // over snapshot storage. Source syntax can identify a direct
+                // reference or a statically resolvable subscript, but only
+                // lowering can decide whether its dependency shape is a slot,
+                // a module output, a bound module input, or a bare module.
                 //
-                // Anything else (nested PREVIOUS, PREVIOUS(expr),
-                // PREVIOUS(module_var), dynamic subscript indices) is rewritten
-                // through a synthesized scalar temp variable that captures the
-                // value each timestep -- which also gives dynamic indices the
-                // correct lagged semantics (the index itself is read at the
-                // *previous* step).
+                // Computed expressions, dynamic subscript indices, modules
+                // synthesized in this walk, and typed macro formal parameters
+                // use a capture variable. Dynamic indices thereby retain their
+                // previous-step index as well as their previous-step value.
                 //
                 // In A2A per-element context, dimension references inside a
                 // subscripted arg0 are substituted to qualified element
@@ -1337,9 +1298,7 @@ impl<'a> BuiltinVisitor<'a> {
 /// `macro_registry` carries the per-project macros: a call name resolving
 /// there expands as a macro (shadowing an identically named builtin/stdlib
 /// func) and an *arrayed* macro invocation rides the per-element path via
-/// `contains_module_call`. When `module_idents` is provided,
-/// `PREVIOUS(module_var)` synthesizes a scalar temp arg instead of reading a
-/// flat slot directly.
+/// `contains_module_call`.
 ///
 /// `enclosing_model` is the owning model's name when `variable_name` is a
 /// macro-marked model's body variable (`None` otherwise). It drives the #554
@@ -1347,15 +1306,14 @@ impl<'a> BuiltinVisitor<'a> {
 /// macro body's renamed-builtin call (`init` inside macro `INIT`) resolves to
 /// the intrinsic instead of recursing into the macro forever.
 ///
-/// `model_var_names`, when provided, is the model's full variable-name set;
-/// it lets `PREVIOUS`/`INIT` accept a non-shadowed bare element name as a
-/// static subscript index instead of synthesizing a helper aux (see
-/// `BuiltinVisitor::index_is_static`).
+/// `model_var_names` is supplied only for generated LTM equations. It keeps
+/// bare-element indices conservative when a same-named model variable exists;
+/// source parsing deliberately passes `None` to keep its cache key local.
+///
 pub fn instantiate_implicit_modules(
     variable_name: &str,
     ast: Ast<Expr0>,
     dimensions_ctx: Option<&DimensionsContext>,
-    module_idents: Option<&HashSet<Ident<Canonical>>>,
     model_var_names: Option<&HashSet<Ident<Canonical>>>,
     macro_registry: &MacroRegistry,
     enclosing_model: Option<&str>,
@@ -1364,7 +1322,6 @@ pub fn instantiate_implicit_modules(
         Ast::Scalar(ast) => {
             let mut builtin_visitor = BuiltinVisitor::new(variable_name)
                 .with_dimensions_ctx(dimensions_ctx)
-                .with_module_idents(module_idents)
                 .with_model_var_names(model_var_names)
                 .with_macro_registry(macro_registry)
                 .with_enclosing_model(enclosing_model);
@@ -1389,7 +1346,6 @@ pub fn instantiate_implicit_modules(
                         &subscript,
                         dimensions_ctx,
                     )
-                    .with_module_idents(module_idents)
                     .with_model_var_names(model_var_names)
                     .with_macro_registry(macro_registry)
                     .with_enclosing_model(enclosing_model);
@@ -1407,7 +1363,6 @@ pub fn instantiate_implicit_modules(
                 // No module-function calls - original behavior
                 let mut builtin_visitor = BuiltinVisitor::new(variable_name)
                     .with_dimensions_ctx(dimensions_ctx)
-                    .with_module_idents(module_idents)
                     .with_model_var_names(model_var_names)
                     .with_macro_registry(macro_registry)
                     .with_enclosing_model(enclosing_model);
@@ -1438,7 +1393,6 @@ pub fn instantiate_implicit_modules(
                         &subscript_parts,
                         dimensions_ctx,
                     )
-                    .with_module_idents(module_idents)
                     .with_model_var_names(model_var_names)
                     .with_macro_registry(macro_registry)
                     .with_enclosing_model(enclosing_model)
@@ -1453,7 +1407,7 @@ pub fn instantiate_implicit_modules(
                 let transformed_default = if let Some(default_expr) = default_expr {
                     let mut default_visitor = BuiltinVisitor::new(variable_name)
                         .with_dimensions_ctx(dimensions_ctx)
-                        .with_module_idents(module_idents)
+                        .with_model_var_names(model_var_names)
                         .with_macro_registry(macro_registry)
                         .with_enclosing_model(enclosing_model);
                     let transformed = default_visitor.walk(default_expr)?;
@@ -1474,7 +1428,6 @@ pub fn instantiate_implicit_modules(
             } else {
                 let mut builtin_visitor = BuiltinVisitor::new(variable_name)
                     .with_dimensions_ctx(dimensions_ctx)
-                    .with_module_idents(module_idents)
                     .with_model_var_names(model_var_names)
                     .with_macro_registry(macro_registry)
                     .with_enclosing_model(enclosing_model);
@@ -1554,7 +1507,7 @@ mod tests {
     fn every_implicit_var_variant() -> Vec<ImplicitVar> {
         let ast = Ast::Scalar(body("SMTH1(PREVIOUS(a * 2, 0) + 1, 2)"));
         let (_, emitted) =
-            instantiate_implicit_modules("h", ast, None, None, None, empty_macro_registry(), None)
+            instantiate_implicit_modules("h", ast, None, None, empty_macro_registry(), None)
                 .expect("the representative production expansion must succeed");
 
         let mut capture = None;

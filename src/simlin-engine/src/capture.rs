@@ -318,7 +318,6 @@ fn subtree_variable_stage0(
             ast,
             Some(dimensions),
             None,
-            None,
             empty_macro_registry(),
             None,
         ) {

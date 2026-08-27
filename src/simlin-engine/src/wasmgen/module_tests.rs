@@ -1467,6 +1467,51 @@ fn compile_simulation_submodel_matches_vm() {
     );
 }
 
+/// A parent's `INIT(sub.out)` reads the child's ordinary flow-computed output
+/// at t0. This is a value contract, not merely VM/wasm parity: both backends
+/// share the module phase model, so parity alone would allow them to agree on
+/// an uninitialized zero.
+#[test]
+fn compile_simulation_init_of_qualified_submodel_output_has_t0_value() {
+    let mut datamodel = submodel_project(
+        "submod_init_output",
+        crate::datamodel::SimMethod::Euler,
+        "5 + TIME",
+        "in * 2",
+        false,
+        1,
+    );
+    datamodel.models[0]
+        .variables
+        .push(crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+            ident: "frozen".to_string(),
+            equation: crate::datamodel::Equation::Scalar("INIT(sub0.out)".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: crate::datamodel::Compat::default(),
+        }));
+
+    let sim = compile_sim(&datamodel, "main");
+    let artifact = compile_simulation(&sim).expect("wasm codegen (qualified module INIT)");
+    assert_matches_vm(sim, &artifact);
+
+    let frozen_off = artifact
+        .layout
+        .var_offsets
+        .iter()
+        .find(|(name, _)| name == "frozen")
+        .map(|(_, off)| *off)
+        .expect("frozen result offset");
+    let slab = run_artifact_results(&artifact);
+    let actual: Vec<f64> = (0..artifact.layout.n_chunks)
+        .map(|chunk| slab[chunk * artifact.layout.n_slots + frozen_off])
+        .collect();
+    assert_eq!(actual, vec![10.0; artifact.layout.n_chunks]);
+}
+
 /// Task 1: `LoadModuleInput` reads the right input. The submodel's output is
 /// exactly its input, and `in_value` varies with TIME, so a wrong input-param
 /// index (or a missing pass-through) would diverge from the VM immediately.

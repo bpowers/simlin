@@ -79,8 +79,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::common::{Canonical, Ident};
 use crate::db::{
-    Db, ModuleIdentContext, SourceModel, SourceProject, model_module_ident_context,
-    parse_source_variable_with_module_context, project_dimensions_context,
+    Db, SourceModel, SourceProject, parse_source_variable, project_dimensions_context,
 };
 use crate::model::{ModelStage0, ModelStage1, ScopeStage0, VariableStage0};
 use crate::variable::VarKind;
@@ -202,69 +201,6 @@ pub(super) fn model_is_stdlib(canonical_model_name: &str) -> bool {
 /// `Stdlib⁚Smth1` is the same model as `stdlib⁚smth1`.
 pub(crate) fn source_model_is_stdlib(db: &dyn Db, model: SourceModel) -> bool {
     model_is_stdlib(Ident::<Canonical>::new(model.name(db)).as_str())
-}
-
-/// The module-ident names a model's variable parses must treat as module-backed
-/// ON TOP OF the ones `model_module_ident_context` derives from the model's own
-/// module variables and module-call equations.
-///
-/// For a stdlib model that is EVERY variable name. Inside a submodule some
-/// variables are module inputs whose values arrive through a transient array
-/// and have no persistent slot, so `PREVIOUS(module_input)` must first capture
-/// the current value into a scalar helper aux rather than compile a `LoadPrev`
-/// against a slot that does not exist.
-///
-/// No shipped stdlib body calls `PREVIOUS`/`INIT`, so today this changes no
-/// parse result. It is kept because it is the rule the datamodel-driven
-/// `ModelStage0::new` uses for an implicit model: one rule means every path
-/// reaching a stdlib model's parse hits the SAME `ModuleIdentContext` and
-/// shares one `parse_source_variable_with_module_context` cache entry, instead
-/// of minting a second set of parses under a second key.
-///
-/// `pub(super)` for the same reason as [`model_is_stdlib`]: the rule is inert
-/// in the stage VALUE today, so `db::stages_tests` pins it here.
-pub(super) fn extra_module_idents(db: &dyn Db, model: SourceModel, is_stdlib: bool) -> Vec<String> {
-    if is_stdlib {
-        model.variables(db).keys().cloned().collect()
-    } else {
-        vec![]
-    }
-}
-
-/// The two facts [`model_stage0`] derives about a model before it parses
-/// anything: whether it is a stdlib template, and the interned module-ident
-/// context its variables must be parsed under.
-pub(super) struct Stage0Context<'db> {
-    pub(super) is_stdlib: bool,
-    pub(super) module_idents: ModuleIdentContext<'db>,
-}
-
-/// Derive [`Stage0Context`] for `model`.
-///
-/// The two are derived TOGETHER, in one `pub(super)` function, on purpose. The
-/// stdlib rule feeds both `ModelStage0::implicit` and the extra module idents,
-/// and when they were derived separately inside the query body the extra-ident
-/// half was untestable: reverting it to `vec![]` at the call site changed no
-/// stage value and no test failed, because the rule is inert in the parse
-/// result today (see [`extra_module_idents`]). `model_stage0` cannot obtain
-/// `implicit` without also obtaining the context, so the wiring now has exactly
-/// one place to go wrong, and `db::stages_tests` pins that place on the
-/// INTERNED context identity rather than on a parse result that cannot differ.
-pub(super) fn model_stage0_context<'db>(
-    db: &'db dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-) -> Stage0Context<'db> {
-    let is_stdlib = source_model_is_stdlib(db, model);
-    Stage0Context {
-        is_stdlib,
-        module_idents: model_module_ident_context(
-            db,
-            model,
-            project,
-            extra_module_idents(db, model, is_stdlib),
-        ),
-    }
 }
 
 /// The models `model`'s lowering and unit inference can reach: itself, plus the
@@ -479,16 +415,13 @@ pub(crate) fn model_stage0(db: &dyn Db, model: SourceModel, project: SourceProje
 
     let display_name = model.name(db);
     let ident: Ident<Canonical> = Ident::new(display_name);
-    let Stage0Context {
-        is_stdlib,
-        module_idents,
-    } = model_stage0_context(db, model, project);
+    let is_stdlib = source_model_is_stdlib(db, model);
 
     let src_vars = model.variables(db);
     let mut var_list: Vec<VariableStage0> = Vec::with_capacity(src_vars.len());
     let mut implicit_dm: Vec<crate::capture::ImplicitVar> = Vec::new();
     for svar in src_vars.values() {
-        let parsed = parse_source_variable_with_module_context(db, *svar, project, module_idents);
+        let parsed = parse_source_variable(db, *svar, project);
         var_list.push(parsed.variable.clone());
         implicit_dm.extend(parsed.implicit_vars.iter().cloned());
     }

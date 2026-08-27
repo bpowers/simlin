@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use super::{compile_ltm_equation_fragment, scalarize_ltm_equation};
+use super::{compile_ltm_equation_fragment, ltm_fragment_input, scalarize_ltm_equation};
 use crate::datamodel;
 use crate::db::{
     LtmLinkId, RefShape, ShapedLinkScore, SimlinDb, compute_layout,
@@ -10,28 +10,10 @@ use crate::db::{
 };
 use crate::test_common::TestProject;
 
-fn phase_sym_load_prev_names(
-    phase: &Option<crate::compiler::symbolic::PerVarBytecodes>,
-) -> Vec<&str> {
-    phase
-        .as_ref()
-        .map(|bc| {
-            bc.symbolic
-                .code
-                .iter()
-                .filter_map(|op| match op {
-                    crate::compiler::symbolic::SymbolicOpcode::SymLoadPrev { var } => {
-                        Some(var.name.as_str())
-                    }
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 #[test]
-fn test_ltm_previous_module_var_uses_helper_rewrite() {
+fn test_ltm_bare_module_snapshot_refuses_both_intrinsics_loudly() {
+    use crate::db::prev_init_tests::SnapshotBuiltin;
+
     let project = datamodel::Project {
         name: "ltm_prev_module_regression".to_string(),
         sim_specs: datamodel::SimSpecs::default(),
@@ -82,35 +64,49 @@ fn test_ltm_previous_module_var_uses_helper_rewrite() {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let source_model = sync.models["main"].source;
+    for builtin in SnapshotBuiltin::ALL {
+        let var_name = format!("$⁚ltm⁚test_{}_module", builtin.name().to_lowercase());
+        let equation = crate::db::LtmEquation::scalar(builtin.call("producer"));
+        let input = ltm_fragment_input(&db, &var_name, &equation, source_model, sync.project)
+            .expect("the typed LTM equation must build a fragment input");
+        assert!(
+            matches!(
+                input.deps["producer"].kind,
+                crate::compiler::fragment::DepKind::Module { .. }
+            ),
+            "the production LTM input must retain the module dependency shape"
+        );
+        let lowering_error = crate::compiler::fragment::lower_fragment(&input, false)
+            .expect_err("lowering must reject a bare module snapshot");
+        assert_eq!(
+            lowering_error.code,
+            crate::common::ErrorCode::NotSimulatable,
+            "{} must retain the typed refusal at the LTM lowering boundary",
+            builtin.name()
+        );
 
-    let fragment = compile_ltm_equation_fragment(
-        &db,
-        "$⁚ltm⁚test_prev_module",
-        &crate::db::LtmEquation::scalar("PREVIOUS(producer)".to_string()),
-        source_model,
-        sync.project,
-        None,
-    )
-    .expect("LTM equation should compile");
-
-    let initial_prev_names = phase_sym_load_prev_names(&fragment.fragment.initial_bytecodes);
-    let flow_prev_names = phase_sym_load_prev_names(&fragment.fragment.flow_bytecodes);
-    let stock_prev_names = phase_sym_load_prev_names(&fragment.fragment.stock_bytecodes);
-
-    assert!(
-        initial_prev_names.is_empty(),
-        "initial phase should not use SymLoadPrev for PREVIOUS(module_var)",
-    );
-    assert!(
-        flow_prev_names
-            .iter()
-            .all(|name| name.starts_with("$⁚$⁚ltm⁚test_prev_module⁚0⁚arg0")),
-        "flow phase should use SymLoadPrev only for the synthesized helper arg, got {flow_prev_names:?}",
-    );
-    assert!(
-        stock_prev_names.is_empty(),
-        "stock phase should not use SymLoadPrev for PREVIOUS(module_var)",
-    );
+        let mut why = None;
+        let fragment = compile_ltm_equation_fragment(
+            &db,
+            &var_name,
+            &equation,
+            source_model,
+            sync.project,
+            Some(&mut why),
+        )
+        .expect("the LTM compiler retains a failed fragment for diagnostic reporting");
+        assert!(
+            fragment.fragment.flow_bytecodes.is_none(),
+            "{} of a bare module instance must emit no bytecode rather than read slot zero",
+            builtin.name()
+        );
+        let err = why.expect("the LTM boundary must preserve the lowering reason");
+        assert!(
+            err.contains("cannot read the bare module instance 'producer'"),
+            "{} refusal for {var_name} must identify the unsafe module read, got {err}",
+            builtin.name()
+        );
+    }
 }
 
 /// AC1.1 (layout): When LTM is enabled on a model with arrayed stocks,

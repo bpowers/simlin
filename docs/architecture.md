@@ -12,7 +12,10 @@ This is a monorepo without external users -- breaking changes are OK as long as 
 Core simulation engine. Compiles, type-checks, unit-checks, and simulates SD models.
 - Projects consist of 1 or more models, compiled to bytecode (`compiler/`)
 - Primary compilation path is `db::compile_project_incremental()` using salsa tracked functions for fine-grained incrementality (`db.rs`, `db/analysis.rs`, `db/ltm.rs`, `db/ltm_ir.rs`)
-- Equation text is parsed via recursive descent parser (`parser/mod.rs`)
+- Equation text is parsed once per source variable via the salsa query
+  `db::parse_source_variable(variable, project)`. Its key contains only the
+  variable and project-global language contexts; model shape and instance
+  wiring are resolved later during lowering.
 - Simulations run on a stack-based bytecode VM (`vm.rs`) with `PREVIOUS`/`INIT` intrinsic opcodes
 - An alternative WebAssembly code-generation backend (`wasmgen/`) lowers a compiled model to one self-contained wasm module (no host imports) for fast repeated re-simulation; the VM stays the correctness oracle (every emitted module is checked against it). Surfaced through libsimlin `simlin_model_compile_to_wasm`
 - `builtins.rs` defines builtin functions (including `PREVIOUS`, `INIT`); stateful module functions (TREND, SMOOTH3) are model definitions in `stdlib/*.stmx`, generated into `stdlib.gen.rs`

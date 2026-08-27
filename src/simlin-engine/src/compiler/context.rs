@@ -1905,6 +1905,26 @@ impl Context<'_> {
         &self,
         builtin: &crate::builtins::BuiltinFn<Expr3>,
     ) -> Result<BuiltinFn> {
+        let snapshot_arg = match builtin {
+            crate::builtins::BuiltinFn::Previous(arg, _)
+            | crate::builtins::BuiltinFn::Init(arg) => Some(arg.as_ref()),
+            _ => None,
+        };
+        if let Some(Expr3::Var(ident, _, _)) = snapshot_arg
+            && matches!(
+                self.shape_of(ident).map(|shape| &shape.kind),
+                Ok(DepKind::Module { .. })
+            )
+        {
+            return Err(Error::new(
+                ErrorKind::Simulation,
+                ErrorCode::NotSimulatable,
+                Some(format!(
+                    "PREVIOUS/INIT cannot read the bare module instance '{ident}': name a scalar output port"
+                )),
+            ));
+        }
+
         let mut whole_ctx: Option<Context<'_>> = None;
         let mut lowered = builtin.try_map_ref_with_kinds(|arg, kind| match kind {
             ArgKind::Array { whole: false } => {

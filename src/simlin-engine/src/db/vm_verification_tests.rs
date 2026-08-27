@@ -1996,7 +1996,7 @@ fn test_2arg_previous_uses_explicit_fallback() {
     );
 }
 #[test]
-fn test_dependency_graph_includes_previous_helper_for_module_backed_var() {
+fn test_dependency_graph_needs_no_previous_helper_for_scalar_module_call_aux() {
     use crate::testutils::{x_aux, x_model};
 
     let project = crate::testutils::x_project(
@@ -2024,8 +2024,8 @@ fn test_dependency_graph_includes_previous_helper_for_module_backed_var() {
         .chain(dep_graph.runlist_stocks.iter())
         .any(|name| name.starts_with("$⁚prev_delayed⁚0⁚arg0"));
     assert!(
-        has_previous_helper,
-        "dependency graph runlists should include the helper aux for PREVIOUS(module-backed var)"
+        !has_previous_helper,
+        "a scalar module-call aux has a snapshot slot and needs no helper runlist member"
     );
 }
 #[test]
@@ -2053,9 +2053,8 @@ fn test_previous_of_module_backed_variable_compiles_correctly() {
     use crate::testutils::{x_aux, x_model};
     use crate::vm::Vm;
 
-    // PREVIOUS(x) where x = SMTH1(input, 1) must rewrite through a scalar
-    // helper aux, not LoadPrev directly against the module-backed variable.
-    // Module-backed variables like SMTH1 occupy multiple VM slots.
+    // `x` remains a scalar variable with its own snapshot slot even though its
+    // equation expands to a separate SMTH1 module instance.
     let project = datamodel::Project {
         name: "previous_of_smooth".to_string(),
         sim_specs: datamodel::SimSpecs {

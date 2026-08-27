@@ -3,21 +3,19 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 //! Demand-driven read queries over the salsa inputs: per-variable parsing
-//! (`parse_source_variable_with_module_context` and its `_impl`), the
+//! (`parse_source_variable` and its implementation), the
 //! project-global cached contexts (`project_units_context_result` and its
 //! `project_units_context` projection, `project_datamodel_dims`,
 //! `project_dimensions_context`, `project_converted_dimensions`), the
-//! module-ident context
-//! (`module_ident_context_for_model`/`model_module_ident_context`), the
 //! per-variable direct-dependency extraction
-//! (`variable_direct_dependencies` and its `_impl`, plus the
+//! (`variable_direct_dependencies` and its implementation, plus the
 //! `canonical_module_input_set` helper and the `VariableDeps` value), the
 //! implicit-variable metadata (`ImplicitVarMeta`/`model_implicit_var_info`),
 //! and the dimension-read
 //! queries (`variable_relevant_dimensions`/`variable_dimensions`/
 //! `variable_size`).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::*;
 use crate::capture::ImplicitVar;
@@ -176,7 +174,6 @@ fn parse_source_variable_impl(
     db: &dyn Db,
     var: SourceVariable,
     project: SourceProject,
-    module_idents: Option<&HashSet<Ident<Canonical>>>,
     macro_registry: Option<&crate::module_functions::MacroRegistry>,
 ) -> ParsedVariableResult {
     let relevant_dim_names = variable_relevant_dimensions(db, var);
@@ -203,14 +200,6 @@ fn parse_source_variable_impl(
     let ctx = crate::variable::ParseContext {
         dimensions: &dim_ctx,
         units_ctx,
-        module_idents,
-        // No model-var-names set: the per-variable parse must not depend on
-        // the model's full name set, or any variable add/remove/rename would
-        // invalidate every cached parse (dimension-granularity incrementality).
-        // Bare element subscripts in user equations therefore keep the
-        // conservative helper-aux path; the LTM parse path (whose equations
-        // are regenerated wholesale anyway) passes the set instead.
-        model_var_names: None,
         macro_registry,
         enclosing_model: crate::db::macro_registry::enclosing_macro_for_var(db, project, var), // #554
     };
@@ -227,60 +216,21 @@ fn parse_source_variable_impl(
 }
 
 #[salsa::tracked(returns(ref))]
-pub fn parse_source_variable_with_module_context<'db>(
-    db: &'db dyn Db,
+/// Parse one source variable against project-global syntax contexts.
+///
+/// The cache key contains no owning-model variable set or module-instance
+/// input set. Adding or removing an unrelated variable therefore cannot re-key
+/// an unchanged equation. Relevant dimensions, units, the macro registry and
+/// an enclosing macro descriptor remain project inputs because they determine
+/// the source language itself.
+pub fn parse_source_variable(
+    db: &dyn Db,
     var: SourceVariable,
     project: SourceProject,
-    module_ident_context: ModuleIdentContext<'db>,
 ) -> ParsedVariableResult {
-    let module_idents: HashSet<Ident<Canonical>> = module_ident_context
-        .idents(db)
-        .iter()
-        .map(|ident| Ident::new(ident.as_str()))
-        .collect();
     // Reaches the BuiltinVisitor so a macro call expands (salsa-cached).
     let macro_registry = &crate::db::macro_registry::project_macro_registry(db, project).registry;
-    parse_source_variable_impl(db, var, project, Some(&module_idents), Some(macro_registry))
-}
-
-fn module_ident_context_for_model<'db>(
-    db: &'db dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-    extra_module_idents: &[String],
-) -> ModuleIdentContext<'db> {
-    let source_vars = model.variables(db);
-    // Pre-classification must recognize macro calls as module calls too
-    // (so `PREVIOUS(y)` rewrites correctly when `y = MYMACRO(...)`), the
-    // same way it already recognizes `y = SMTH1(...)`.
-    let macro_registry = &crate::db::macro_registry::project_macro_registry(db, project).registry;
-    let mut module_ident_list: Vec<String> = crate::model::collect_module_idents(
-        source_vars
-            .values()
-            .map(|source_var| variable_source(db, *source_var)),
-        macro_registry,
-    )
-    .into_iter()
-    .map(|ident| ident.as_str().to_owned())
-    .collect();
-    module_ident_list.extend(
-        extra_module_idents
-            .iter()
-            .map(|ident| canonicalize(ident).into_owned()),
-    );
-    module_ident_list.sort();
-    module_ident_list.dedup();
-    ModuleIdentContext::new(db, module_ident_list)
-}
-
-#[salsa::tracked(returns(clone))]
-pub fn model_module_ident_context<'db>(
-    db: &'db dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-    extra_module_idents: Vec<String>,
-) -> ModuleIdentContext<'db> {
-    module_ident_context_for_model(db, model, project, &extra_module_idents)
+    parse_source_variable_impl(db, var, project, Some(macro_registry))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -324,7 +274,6 @@ fn variable_direct_dependencies_impl(
     var: SourceVariable,
     project: SourceProject,
     module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
-    module_ident_context: ModuleIdentContext,
 ) -> VariableDeps {
     match var.kind(db) {
         SourceVariableKind::Module => {
@@ -346,8 +295,7 @@ fn variable_direct_dependencies_impl(
             }
         }
         _ => {
-            let parsed =
-                parse_source_variable_with_module_context(db, var, project, module_ident_context);
+            let parsed = parse_source_variable(db, var, project);
             // The canonicalized context + converted dims come from the
             // project-global salsa-cached queries (no per-variable rebuild).
             let dim_context = project_dimensions_context(db, project);
@@ -405,39 +353,33 @@ fn variable_direct_dependencies_impl(
 
 /// Per-variable direct dependency extraction.
 ///
-/// `module_ident_context` is the caller's module-ident set (the empty
-/// `ModuleIdentContext` for callers whose model is unknown), and
 /// `module_inputs` is the module instance's input wiring (the empty
 /// `ModuleInputSet` for the no-inputs case).
 ///
-/// This collapses what were four separately-keyed tracked variants
-/// (`variable_direct_dependencies`, `_with_inputs`, `_with_context`,
-/// `_with_context_and_inputs`) into one. The empty `ModuleInputSet` is treated
-/// IDENTICALLY to the old `None`-inputs path: `classify_dependencies`
+/// The empty `ModuleInputSet` follows the no-instance-inputs path:
+/// `classify_dependencies`
 /// special-cases an `isModuleInput(...)` conditional only when given
 /// `Some(inputs)` (then walks the matching branch), so `None` and
-/// `Some(empty_set)` are NOT equivalent there -- `None` walks all three
-/// branches. The old no-inputs variants passed `None`, and the only live
-/// inputs caller (`build_var_info`) passed `Some(..)` exclusively for a
-/// non-empty set. Mapping the empty `ModuleInputSet` to `None` therefore
-/// preserves the old behavior exactly.
+/// `Some(empty_set)` are NOT equivalent there: `None` walks all three
+/// branches. `build_var_info` supplies instance inputs only for a non-empty
+/// set, so mapping the empty value to `None` keeps dependency extraction
+/// consistent with the production no-inputs path.
 #[salsa::tracked(returns(ref))]
 pub fn variable_direct_dependencies<'db>(
     db: &'db dyn Db,
     var: SourceVariable,
     project: SourceProject,
-    module_ident_context: ModuleIdentContext<'db>,
     module_inputs: ModuleInputSet<'db>,
 ) -> VariableDeps {
     let canonical_inputs = module_inputs.canonical_input_set(db);
-    // An empty input set is the old `None` path (no `isModuleInput` branch
-    // selection); a non-empty set is the old `Some(&set)` path.
+    // An empty input set means no `isModuleInput` branch selection; a
+    // non-empty set supplies the instance-specific names.
     let module_inputs_opt = if canonical_inputs.is_empty() {
         None
     } else {
         Some(&canonical_inputs)
     };
-    variable_direct_dependencies_impl(db, var, project, module_inputs_opt, module_ident_context)
+    variable_direct_dependencies_impl(db, var, project, module_inputs_opt)
 }
 
 /// Metadata for a single implicit variable generated by builtin expansion.
@@ -449,44 +391,16 @@ pub struct ImplicitVarMeta {
     /// the constructor input `(parent, id, argument position/call name,
     /// suffix)`; this metadata does not provide tuple-addressed storage.
     ///
-    /// This used to be `index_in_parent`, a position in the parent's
-    /// `implicit_vars` vector, and that was a defect rather than a shortcut
-    /// (GH #1002). A consumer resolves a helper by re-parsing the parent, and
-    /// it does so under the module-ident context of the INSTANCE it is
-    /// compiling -- while this metadata is derived under the no-extra-idents
-    /// context. A position is only meaningful against the exact vector it was
-    /// taken from, so ANY disagreement between those two parses resolved it to
-    /// a different helper, including the merely-reordered case that made
-    /// GH #1002 seed-dependent. A name survives reordering; a position does not.
-    ///
-    /// **A name is not a fully context-stable lookup key, and the residual is
-    /// bounded rather than absent.** Synthesized names embed `BuiltinVisitor`'s
-    /// walk counter (`$⁚v⁚{n}⁚arg0`), so a context that inserts an EARLIER
-    /// helper shifts every later `n`. `PREVIOUS(port, 0) + SMTH1(port + 1, 3)`
-    /// over a bound `port` is the smallest case: the no-extra-idents parse calls
-    /// `$⁚sm⁚0⁚arg0` the SMTH argument (`port + 1`), the widened parse calls it
-    /// the PREVIOUS capture (`port`), and [`Self::find_in`] returns the latter
-    /// for metadata that meant the former. So the honest guarantee is "a helper
-    /// CARRYING this name, or nothing" -- not "this helper, or nothing".
-    ///
-    /// What bounds it: a name can only collide that way when the two parses
-    /// synthesize different helper SEQUENCES, and that already makes the
-    /// model's layout (derived from one parse) disagree with its runlists
-    /// (derived from the other), so the project fails to compile before any
-    /// mis-resolved fragment could be executed. Pinned by
-    /// `db::fragment_determinism_tests::a_cross_context_helper_name_collision_is_confined_to_a_failing_compile`.
-    /// Closing it properly means making the names themselves context-stable,
-    /// which is GH #372's explicit model-level parse context, not a change here.
+    /// A name, rather than a vector position, is the stable identity required
+    /// by GH #1002. Helper order is deterministic but is not part of the lookup
+    /// contract: a consumer must resolve the name it was given.
     pub name: String,
     /// The position `name` occupied in the parse it was derived from -- a
     /// lookup HINT, never a separate key.
     ///
     /// [`ImplicitVarMeta::find_in`] tries this position first and accepts what
-    /// it finds only if that helper carries `name`; otherwise it scans. So a
-    /// stale or wrong hint costs one comparison and can never yield a helper
-    /// other than `name`'s -- which is the whole difference between this and
-    /// the `index_in_parent` it replaces, and is what the `#[cfg(test)]`
-    /// mutation in `find_in`'s body note pins.
+    /// it finds only if that helper carries `name`; otherwise it scans. Thus a
+    /// stale hint costs one comparison and cannot change the answer.
     ///
     /// That "cannot change the answer" rests on a PRECONDITION worth naming,
     /// because it did not always hold: no two entries of one
@@ -498,10 +412,7 @@ pub struct ImplicitVarMeta {
     /// helpers across the dt and initial passes rather than appending, so a
     /// byte-identical repeat collapses and a genuine collision is refused;
     /// `db::fragment_determinism_tests::implicit_helper_names_are_unique_within_one_parse`
-    /// is what says so for every route into the vector. Note this is a
-    /// WITHIN-parse property and is independent of the cross-parse residual on
-    /// [`Self::name`] -- there, one name denotes different helpers in two
-    /// different parses, and hint and scan still agree with each other.
+    /// is what says so for every route into the vector.
     ///
     /// It exists because the scan alone is O(k) per helper and so O(k^2) per
     /// parent variable, and `k` is not small on ordinary models: an
@@ -511,8 +422,7 @@ pub struct ImplicitVarMeta {
     /// it without a timer, by counting entries examined per compile: 17,289,600
     /// scanning versus 14,400 with the hint, a 1200x reduction, at a 100% hit
     /// rate on every model tried (C-LEARN, WRLD3, scirev7, and the synthetic at
-    /// both 200 and 800). The hit rate is the load-bearing number -- a miss is
-    /// only possible under the cross-parse divergence, which does not compile.
+    /// both 200 and 800).
     pub index_hint: usize,
     pub is_stock: bool,
     pub is_module: bool,
@@ -533,11 +443,9 @@ pub struct ImplicitVarMeta {
 impl ImplicitVarMeta {
     /// The helper this metadata names, within one parse of its parent.
     ///
-    /// `parsed` must be a parse of `self.parent_source_var`; the caller chooses
-    /// the module-ident context, which is exactly why the match is by name (see
-    /// [`ImplicitVarMeta::name`], including the bounded case where a name is
-    /// not context-stable). `None` means this parse synthesized no helper of
-    /// that name -- a loud-safe skip for the caller.
+    /// `parsed` must be the parse of `self.parent_source_var`. `None` means the
+    /// parse synthesized no helper of that name, which is a loud-safe skip for
+    /// the caller.
     ///
     /// The `canonicalize` is defence in depth, not load-bearing: a synthesized
     /// helper's ident is built from its parent's already-canonical ident, so
@@ -546,13 +454,9 @@ impl ImplicitVarMeta {
     /// in the type system says so and the cost is a borrow.
     pub(crate) fn find_in<'a>(&self, parsed: &'a ParsedVariableResult) -> Option<&'a ImplicitVar> {
         let is_mine = |v: &ImplicitVar| canonicalize(v.ident()) == self.name;
-        // The hint is right whenever the two parses agree, which is every model
-        // that is not the GH #372 divergence -- measured at a 100% hit rate on
-        // every model in the corpus, so the scan below is the exceptional path,
-        // not the usual one. Verifying the name before accepting the hint is
-        // what keeps this a pure optimization; dropping
-        // that check restores unchecked positional lookup and reds
-        // `an_implicit_helper_declines_when_the_contexts_synthesize_different_sets`.
+        // Verifying the name before accepting the hint keeps it a pure
+        // optimization rather than positional identity. The scan is the
+        // exceptional path, but remains the source of truth.
         if let Some(hinted) = parsed.implicit_vars.get(self.index_hint)
             && is_mine(hinted)
         {
@@ -585,16 +489,10 @@ pub fn model_implicit_var_info(
     project: SourceProject,
 ) -> HashMap<String, ImplicitVarMeta> {
     let source_vars = model.variables(db);
-    let module_ident_context = model_module_ident_context(db, model, project, vec![]);
     let mut result = HashMap::new();
 
     for source_var in source_vars.values() {
-        let parsed = parse_source_variable_with_module_context(
-            db,
-            *source_var,
-            project,
-            module_ident_context,
-        );
+        let parsed = parse_source_variable(db, *source_var, project);
         for (index, implicit_var) in parsed.implicit_vars.iter().enumerate() {
             let name = canonicalize(implicit_var.ident()).into_owned();
             let is_stock = implicit_var.is_stock();
@@ -655,20 +553,11 @@ pub fn model_implicit_var_info(
 /// ever asks it "is this one name an implicit helper, and what shape is it",
 /// so this projection returns that and backdates on it.
 ///
-/// **This narrowing is partial, and the limitation is pinned, not merely
-/// noted.** It makes an added `PREVIOUS`/`INIT` helper tight. It does NOT make
-/// an added *module-instantiating* helper (`SMTH1`, `DELAY`, a user sub-model)
-/// tight, and exactly one whole-model dependency is why:
-/// `model_module_ident_context` is an INTERNED handle whose value changes when
-/// the model's module-ident set grows, which gives every variable's parse a
-/// new cache key -- and a new key cannot backdate at all. No projection
-/// substitutes for deleting it: the set is genuinely whole-model, and it is a
-/// key as well as a read. Both outcomes are asserted by
-/// `implicit_helper_add_is_tight_but_module_helper_add_is_not`, so the day
-/// someone fixes the module-ident cache key that test reds rather than
-/// silently over-delivering; the cause is isolated by
-/// `module_helper_add_saturates_only_through_the_module_ident_context`, which
-/// measures every tracked query rather than the fragment compilers alone.
+/// Parsing is keyed only by the source variable and project-global contexts,
+/// so adding a different source variable cannot re-key this helper's parent
+/// parse. `implicit_helper_add_is_tight_for_plain_and_module_helpers` and
+/// `module_helper_add_reparses_only_the_added_variable` pin that boundary with
+/// production assembly and salsa execution counts.
 #[salsa::tracked(returns(clone))]
 pub(crate) fn model_implicit_var_by_name(
     db: &dyn Db,
@@ -726,13 +615,9 @@ pub fn variable_relevant_dimensions(db: &dyn Db, var: SourceVariable) -> BTreeSe
 /// A variable's DECLARED dimensions, resolved against the project.
 ///
 /// Derived straight from `var.equation(db)`'s dimension-name list rather than
-/// from a parse, and that is the whole point: the parse is keyed on a
-/// `ModuleIdentContext`, so asking for one here under the empty context --
-/// which is the only context this query could name, since it takes no `model`
-/// -- minted a SECOND full parse of every variable under a key nothing else
-/// uses. On C-LEARN that was 1,910 executions of
-/// `parse_source_variable_with_module_context` for 934 variables (~2.05x), and
-/// removing it measures -3.5% of a cold compile there and -6.7% on WORLD3.
+/// from a parse. Layout needs only the declared axes; keeping that projection
+/// independent prevents layout from demanding equation parsing merely to
+/// recover declaration metadata.
 ///
 /// The derivation mirrors `parse_source_variable_impl`'s own narrowed
 /// dimension context exactly -- `variable_relevant_dimensions` widened by

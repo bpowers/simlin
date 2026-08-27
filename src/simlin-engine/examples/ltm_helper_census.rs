@@ -6,9 +6,10 @@
 //!
 //! Compiles a model's LTM instrumentation (discovery mode) and classifies
 //! every `PREVIOUS(...)` argument in the generated equation text by syntactic
-//! form, approximating which forms compile to a direct LoadPrev and which
-//! force a synthesized helper aux. The classification is heuristic (it cannot
-//! see variable shadowing); the ground truth helper count is the
+//! form, approximating which forms the context-free parse captures and which
+//! lowering resolves against snapshot storage. The classification is heuristic
+//! (it cannot see variable shadowing, dependency kinds, or module input
+//! wiring); the ground truth helper count is the
 //! `model_ltm_implicit_var_info` total printed above the breakdown.
 //!
 //! Usage:
@@ -50,15 +51,14 @@ fn is_bare_ident(s: &str) -> bool {
             .all(|c| c.is_alphanumeric() || c == '_' || c == '"' || c == '$' || c == '\u{205A}')
 }
 
-/// Classify one PREVIOUS argument by what the builtins visitor will do
-/// with it (see `builtins_visitor.rs` PREVIOUS/INIT opcode routing).
+/// Classify one PREVIOUS argument by its likely parse/lowering route.
 fn classify_arg(arg: &str) -> &'static str {
     let arg = arg.trim();
     // Strip a trailing `, 0` fallback arg (PREVIOUS(x, 0)).
     let arg = arg.strip_suffix(", 0").unwrap_or(arg);
 
     if arg.contains('\u{00B7}') && !arg.contains('[') {
-        return "module-output ref (PREVIOUS(module·output)) -> helper";
+        return "qualified ref -> direct slot unless its base is a synthesized module";
     }
     if let Some(bracket) = arg.find('[') {
         let base = &arg[..bracket];
@@ -88,7 +88,7 @@ fn classify_arg(arg: &str) -> &'static str {
         return "bare-element subscript -> direct LoadPrev unless shadowed";
     }
     if is_bare_ident(arg) {
-        return "bare ident -> direct LoadPrev (no helper)";
+        return "bare ident -> direct slot unless lowering resolves a module/input";
     }
     "complex expression -> helper"
 }

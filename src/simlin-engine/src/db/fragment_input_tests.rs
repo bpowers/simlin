@@ -444,21 +444,14 @@ fn run_series(
 }
 
 /// A stdlib call whose hoisted argument reads a module output
-/// (`SMTH1(sub·output * 2, 2)`) compiles: the hoisted helper `$⁚sm⁚0⁚arg0 =
-/// sub·output * 2` resolves `sub` through its own dependency shapes, like
-/// every other fragment. This is the one shape the unified compiler changed
-/// (the design plan's "Phase 3 semantic divergences" paragraph records the
-/// refusal it replaces), so its values are pinned here.
+/// (`SMTH1(sub·output * 2, 2)`) resolves `sub` through its own dependency
+/// shapes, like every other fragment.
 ///
 /// Expected values, derived from the rules: `sub·output = 3 * 10 = 30`, so the
 /// helper -- and the SMTH1 instance's `input` -- is 60 on every step. The
-/// instance's stock starts from the value `input` has during the parent's
-/// INITIALS phase, and `producer` has no stocks, so its initials runlist is
-/// empty and `sub·output` is 0 there (the pre-existing cross-model initials
-/// boundary `db::dep_graph`'s runlist seeding documents, shared with an
-/// explicit stock -- see the residual pin below); the smooth therefore rises
-/// from 0 toward 60 with delay 2 at dt 1: `0, 0 + (60-0)/2 = 30, 30 + (60-30)/2
-/// = 45`.
+/// instance's stock starts from that initial-phase input. Cross-model initial
+/// requirements seed `producer.output` and its local input closure, so the
+/// smooth starts and remains at 60.
 #[test]
 fn smooth_argument_reading_a_module_output_compiles() {
     let db = SimlinDb::default();
@@ -471,21 +464,15 @@ fn smooth_argument_reading_a_module_output_compiles() {
     let series = run_series(&db, sync.project);
     assert_eq!(series["$⁚sm⁚0⁚arg0"], vec![60.0, 60.0, 60.0]);
     assert_eq!(series["$⁚sm⁚0⁚smth1·input"], vec![60.0, 60.0, 60.0]);
-    assert_eq!(series["sm"], vec![0.0, 30.0, 45.0]);
+    assert_eq!(series["sm"], vec![60.0, 60.0, 60.0]);
 }
 
-/// Disclosed pre-existing residual, independent of the fragment compiler: a
-/// stock initialized from a STOCKLESS sub-model's output reads 0 at t=0. A
-/// model's initials runlist is seeded by its own stocks, modules and
-/// INIT-referenced variables and closed within the model, so `producer`
-/// (`input`, `output`, no stock) evaluates nothing in the initials phase and
-/// the parent's `level = INTEG(0, sub·output)` snapshots an unwritten 0 where
-/// the true t=0 value is 30. The same boundary gives the SMTH1 instance above
-/// its 0 start. Pinned so the number is a known one rather than a surprise;
-/// the fix is cross-model seeding of the initials runlist, which is a
-/// dependency-graph change, not a lowering one (GH #1028).
+/// A stock's initial equation can read a stockless sub-model output. The
+/// qualified initial dependency seeds exactly that output and its child-local
+/// dependency closure, so the parent snapshots the computed value rather than
+/// the module block's zero-filled storage.
 #[test]
-fn stock_initialized_from_a_stockless_modules_output_is_a_pre_existing_residual() {
+fn stock_initialized_from_a_stockless_modules_output_reads_its_t0_value() {
     let mut project = smooth_of_module_output_project();
     project.models[0]
         .variables
@@ -504,12 +491,7 @@ fn stock_initialized_from_a_stockless_modules_output_is_a_pre_existing_residual(
     let sync = sync_from_datamodel(&db, &project);
     let series = run_series(&db, sync.project);
     assert_eq!(series["sub·output"], vec![30.0, 30.0, 30.0]);
-    assert_eq!(
-        series["level"],
-        vec![0.0, 0.0, 0.0],
-        "the stock's initial reads the sub-model output before the sub-model has \
-         evaluated anything; 30 is the value a cross-model initials seed would give"
-    );
+    assert_eq!(series["level"], vec![30.0, 30.0, 30.0]);
 }
 
 /// `module_input_set` is the one owner of "which ports does this wiring bind":

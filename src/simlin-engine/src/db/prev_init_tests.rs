@@ -5,6 +5,42 @@
 use super::*;
 use crate::datamodel;
 
+/// The complete snapshot-intrinsic alphabet used by shared refusal tests.
+/// Iterating this table keeps the `PREVIOUS` and `INIT` lowering branches from
+/// acquiring one-sided coverage as their surface syntax evolves.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum SnapshotBuiltin {
+    Previous,
+    Init,
+}
+
+impl SnapshotBuiltin {
+    pub(super) const ALL: [SnapshotBuiltin; 2] = [SnapshotBuiltin::Previous, SnapshotBuiltin::Init];
+
+    pub(super) const fn name(self) -> &'static str {
+        match self {
+            SnapshotBuiltin::Previous => "PREVIOUS",
+            SnapshotBuiltin::Init => "INIT",
+        }
+    }
+
+    pub(super) fn call(self, argument: &str) -> String {
+        match self {
+            SnapshotBuiltin::Previous => format!("PREVIOUS({argument}, -7)"),
+            SnapshotBuiltin::Init => format!("INIT({argument})"),
+        }
+    }
+
+    fn unaddressable_argument_message(self) -> &'static str {
+        match self {
+            SnapshotBuiltin::Previous => {
+                "PREVIOUS requires a variable reference after helper rewriting"
+            }
+            SnapshotBuiltin::Init => "INIT requires a variable reference argument",
+        }
+    }
+}
+
 #[test]
 fn test_model_dependency_graph_prunes_lagged_deps_for_implicit_helpers() {
     let db = SimlinDb::default();
@@ -389,34 +425,62 @@ fn test_init_qualified_element_subscript_no_helper() {
     }
 }
 
-/// PREVIOUS of an array element selected by a *bare* element name compiles to
-/// a direct LoadPrev (no helper aux) when the parse knows the model's
-/// variable-name set -- even when the element is declared by multiple
-/// dimensions at different positions, which defeats project-unique
-/// qualification.
-///
-/// A bare name that is a dimension element AND not any variable's name cannot
-/// be a dynamic-index reference, so the compiler resolves it against the
-/// subscripted variable's own declared dimension (the element interpretation
-/// always wins in subscript lowering). This is the GH #654 case: C-LEARN's
-/// generated LTM equations carry ~24k such call sites, each of which
-/// previously synthesized a helper aux.
+/// The complete bare-element classification at the remaining generated-LTM
+/// parse boundary: an unshadowed element is static, a same-named variable is
+/// conservative, and an ordinary source parse has no model-name input and is
+/// conservative too. The model name sets and source equation are obtained
+/// through the same sync/query functions production uses.
 #[test]
-fn test_previous_bare_element_no_helper_with_var_names() {
-    use std::collections::HashSet;
+fn bare_element_snapshot_shadowing_has_all_three_production_rows() {
+    use crate::db::ltm::{LtmEquation, ltm_model_var_names, parse_ltm_equation};
+    use crate::test_common::TestProject;
 
-    use crate::common::{Canonical, Ident};
+    let classify = |shadowed: bool| {
+        let mut tp = TestProject::new("bare_element_shadowing")
+            .named_dimension("DimA", &["a1", "b2"])
+            .named_dimension("DimB", &["b2", "x1"])
+            .array_aux("base_val[DimA]", "1")
+            .aux("lagged", "PREVIOUS(base_val[b2], 0)", None);
+        if shadowed {
+            tp = tp.aux("b2", "1", None);
+        }
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &tp.build_datamodel());
+        let model = sync.models["main"].source;
+        let source_var = sync.models["main"].variables["lagged"].source;
+        let source_text = match source_var.equation(&db) {
+            datamodel::Equation::Scalar(text) => text.clone(),
+            _ => unreachable!("the production fixture declares a scalar equation"),
+        };
+        let ltm_equation = LtmEquation::scalar(source_text);
+        let ltm = parse_ltm_equation(
+            "lagged",
+            &ltm_equation,
+            project_dimensions_context(&db, sync.project),
+            Some(ltm_model_var_names(&db, model, sync.project)),
+        );
+        let source = parse_source_variable(&db, source_var, sync.project);
+        (ltm.implicit_vars.len(), source.implicit_vars.len())
+    };
 
-    // `b2` is declared by DimA (position 2) and DimB (position 1):
-    // project-unique qualification fails, only the variable's declared
-    // dimensions can disambiguate.
-    let dims = vec![
-        datamodel::Dimension::named("DimA".to_string(), vec!["a1".to_string(), "b2".to_string()]),
-        datamodel::Dimension::named("DimB".to_string(), vec!["b2".to_string(), "x1".to_string()]),
-    ];
-    let aux = datamodel::Variable::Aux(datamodel::Aux {
-        ident: "lagged".to_string(),
-        equation: datamodel::Equation::Scalar("PREVIOUS(base_val[b2], 0)".to_string()),
+    assert_eq!(classify(false), (0, 1), "unshadowed LTM / source rows");
+    assert_eq!(classify(true), (1, 1), "shadowed LTM / source rows");
+}
+
+/// Qualified module output ports name ordinary stored values after lowering.
+/// The fixture makes the module block's first slot, the selected scalar port,
+/// and both array elements distinct so a read from slot zero or element zero
+/// cannot accidentally satisfy the value assertions.
+#[test]
+fn scalar_and_array_module_output_snapshots_need_no_capture() {
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module, x_project};
+
+    let array_output = datamodel::Variable::Aux(datamodel::Aux {
+        ident: "z_array_output".to_string(),
+        equation: datamodel::Equation::ApplyToAll(
+            vec!["d".to_string()],
+            "100 * d + TIME".to_string(),
+        ),
         documentation: String::new(),
         units: None,
         gf: None,
@@ -424,92 +488,704 @@ fn test_previous_bare_element_no_helper_with_var_names() {
         uid: None,
         compat: datamodel::Compat::default(),
     });
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-
-    // With the model's variable names known (and `b2` not among them), the
-    // bare element index is static: no helper.
-    let var_names: HashSet<Ident<Canonical>> =
-        [Ident::new("base_val"), Ident::new("lagged")].into();
-    let mut implicit_vars: Vec<crate::capture::ImplicitVar> = Vec::new();
-    let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
-        crate::variable::parse_var(
-            &crate::variable::ParseContext {
-                model_var_names: Some(&var_names),
-                ..crate::variable::ParseContext::new(
-                    &crate::dimensions::DimensionsContext::from(dims.as_slice()),
-                    &units_ctx,
-                )
-            },
-            &aux,
-            &mut implicit_vars,
-            |mi| Ok(Some(mi.clone())),
-        );
-    assert!(
-        parsed.equation_errors().is_none(),
-        "equation should parse cleanly: {:?}",
-        parsed.equation_errors()
+    let producer = x_model(
+        "producer",
+        vec![
+            x_aux("a_padding", "901", None),
+            x_aux("z_output", "10 + TIME", None),
+            array_output,
+        ],
     );
-    assert!(
-        implicit_vars.is_empty(),
-        "non-shadowed bare-element PREVIOUS must not synthesize helper vars; got: {:?}",
-        implicit_vars
-            .iter()
-            .map(|v| v.ident().to_string())
-            .collect::<Vec<_>>()
-    );
-
-    // Shadowed case: a variable named `b2` exists, so the index could be a
-    // dynamic reference -- the conservative helper path must be kept.
-    let var_names_with_shadow: HashSet<Ident<Canonical>> = [
-        Ident::new("base_val"),
-        Ident::new("lagged"),
-        Ident::new("b2"),
-    ]
-    .into();
-    let mut implicit_vars: Vec<crate::capture::ImplicitVar> = Vec::new();
-    let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
-        crate::variable::parse_var(
-            &crate::variable::ParseContext {
-                model_var_names: Some(&var_names_with_shadow),
-                ..crate::variable::ParseContext::new(
-                    &crate::dimensions::DimensionsContext::from(dims.as_slice()),
-                    &units_ctx,
-                )
-            },
-            &aux,
-            &mut implicit_vars,
-            |mi| Ok(Some(mi.clone())),
-        );
-    assert!(parsed.equation_errors().is_none());
-    assert_eq!(
-        implicit_vars.len(),
-        1,
-        "an element name shadowed by a variable must keep the helper-aux path; got: {:?}",
-        implicit_vars
-            .iter()
-            .map(|v| v.ident().to_string())
-            .collect::<Vec<_>>()
-    );
-
-    // Without the variable-name set (the user-equation parse path), the
-    // conservative helper path is also kept.
-    let mut implicit_vars: Vec<crate::capture::ImplicitVar> = Vec::new();
-    let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
-        crate::variable::parse_var(
-            &crate::variable::ParseContext::new(
-                &crate::dimensions::DimensionsContext::from(dims.as_slice()),
-                &units_ctx,
+    let main = x_model(
+        "main",
+        vec![
+            x_module("producer", &[], None),
+            x_aux("prev_scalar", "PREVIOUS(producer.z_output, -7)", None),
+            x_aux("init_scalar", "INIT(producer.z_output)", None),
+            x_aux(
+                "prev_array_element",
+                "PREVIOUS(producer.z_array_output[2], -7)",
+                None,
             ),
-            &aux,
-            &mut implicit_vars,
-            |mi| Ok(Some(mi.clone())),
-        );
-    assert!(parsed.equation_errors().is_none());
-    assert_eq!(
-        implicit_vars.len(),
-        1,
-        "without the variable-name set, bare element indices keep the helper path"
+            x_aux(
+                "init_array_element",
+                "INIT(producer.z_array_output[2])",
+                None,
+            ),
+        ],
     );
+    let mut specs = sim_specs_with_units("month");
+    specs.stop = 3.0;
+    specs.dt = datamodel::Dt::Dt(1.0);
+    let mut project = x_project(specs, &[main, producer]);
+    project.dimensions.push(datamodel::Dimension::named(
+        "d".to_string(),
+        vec!["e1".to_string(), "e2".to_string()],
+    ));
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    for name in [
+        "prev_scalar",
+        "init_scalar",
+        "prev_array_element",
+        "init_array_element",
+    ] {
+        let source = sync.models["main"].variables[name].source;
+        assert!(
+            parse_source_variable(&db, source, sync.project)
+                .implicit_vars
+                .iter()
+                .all(|helper| helper.capture().is_none()),
+            "{name} must not synthesize a redundant capture"
+        );
+    }
+    let dep_graph = model_dependency_graph(
+        &db,
+        sync.models["main"].source,
+        sync.project,
+        ModuleInputSet::empty(&db),
+    );
+    let producer_initial = dep_graph
+        .runlist_initials
+        .iter()
+        .position(|name| name == "producer")
+        .expect("INIT(producer.z_output) must seed the module's initials evaluation");
+    let reader_initial = dep_graph
+        .runlist_initials
+        .iter()
+        .position(|name| name == "init_scalar")
+        .expect("the INIT reader must be in the initials runlist");
+    assert!(
+        producer_initial < reader_initial,
+        "the module must initialize before its qualified-output reader: {:?}",
+        dep_graph.runlist_initials
+    );
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("qualified scalar and array-element module ports must compile");
+    let mut vm = crate::vm::Vm::new(compiled).expect("the qualified-port model must build a VM");
+    vm.run_to_end()
+        .expect("the qualified-port model must simulate");
+    let results = crate::test_common::collect_results(&vm.into_results());
+    assert_eq!(results["prev_scalar"], [-7.0, 10.0, 11.0, 12.0]);
+    assert_eq!(results["prev_array_element"], [-7.0, 200.0, 201.0, 202.0]);
+    assert_eq!(results["init_scalar"], [10.0, 10.0, 10.0, 10.0]);
+    assert_eq!(results["init_array_element"], [200.0, 200.0, 200.0, 200.0]);
+}
+
+/// A qualified output can traverse more than one module boundary. Every
+/// component is resolved structurally before the snapshot slot is selected;
+/// the padding values make reading either enclosing block's first slot visible.
+#[test]
+fn nested_qualified_module_output_snapshots_read_the_leaf_port() {
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module_named, x_project};
+
+    let leaf = x_model(
+        "leaf",
+        vec![
+            x_aux("a_padding", "801", None),
+            x_aux("z_port", "50 + TIME", None),
+        ],
+    );
+    let middle = x_model(
+        "middle",
+        vec![
+            x_aux("a_padding", "701", None),
+            x_module_named("n", "leaf", &[], None),
+        ],
+    );
+    let main = x_model(
+        "main",
+        vec![
+            x_module_named("m", "middle", &[], None),
+            x_aux("lagged", "PREVIOUS(m.n.z_port, -7)", None),
+            x_aux("frozen", "INIT(m.n.z_port)", None),
+        ],
+    );
+    let mut specs = sim_specs_with_units("month");
+    specs.stop = 3.0;
+    specs.dt = datamodel::Dt::Dt(1.0);
+    let project = x_project(specs, &[main, middle, leaf]);
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let lagged = sync.models["main"].variables["lagged"].source;
+    assert!(
+        parse_source_variable(&db, lagged, sync.project)
+            .implicit_vars
+            .iter()
+            .all(|helper| helper.capture().is_none()),
+        "a nested qualified output is resolved by lowering, without a parse capture"
+    );
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("the nested qualified output must compile");
+    let mut vm = crate::vm::Vm::new(compiled).expect("the nested module model must build a VM");
+    vm.run_to_end().expect("the nested module model must run");
+    let results = crate::test_common::collect_results(&vm.into_results());
+    assert_eq!(results["lagged"], [-7.0, 50.0, 51.0, 52.0]);
+    assert_eq!(results["frozen"], [50.0, 50.0, 50.0, 50.0]);
+}
+
+/// Child initialization uses the child's initial AST, not its flow AST, and a
+/// stock output remains a normal initial-phase value. These two rows prevent a
+/// runtime implementation from evaluating child flows during parent initials.
+#[test]
+fn qualified_init_uses_child_active_initial_and_stock_values() {
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module, x_project, x_stock};
+
+    let mut active_output = x_aux("active_output", "10 + TIME", None);
+    if let datamodel::Variable::Aux(output) = &mut active_output {
+        output.compat.active_initial = Some("55".to_string());
+    } else {
+        unreachable!("x_aux constructs an aux");
+    }
+    let child = x_model(
+        "child",
+        vec![
+            x_aux("padding", "901", None),
+            active_output,
+            x_stock("level", "33", &[], &[], None),
+        ],
+    );
+    let main = x_model(
+        "main",
+        vec![
+            x_module("child", &[], None),
+            x_aux("frozen_active", "INIT(child.active_output)", None),
+            x_aux("frozen_stock", "INIT(child.level)", None),
+        ],
+    );
+    let mut specs = sim_specs_with_units("month");
+    specs.stop = 2.0;
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &x_project(specs, &[main, child]));
+    let compiled = compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+    let active_offset = vm
+        .get_offset(&Ident::new("frozen_active"))
+        .expect("frozen_active result offset");
+    let stock_offset = vm
+        .get_offset(&Ident::new("frozen_stock"))
+        .expect("frozen_stock result offset");
+
+    vm.run_initials().expect("initials run");
+    assert_eq!(vm.get_value_now(active_offset), 55.0);
+    assert_eq!(vm.get_value_now(stock_offset), 33.0);
+
+    vm.reset();
+    vm.run_initials().expect("initials rerun after reset");
+    assert_eq!(vm.get_value_now(active_offset), 55.0);
+    assert_eq!(vm.get_value_now(stock_offset), 33.0);
+
+    vm.run_to_end().expect("runs");
+    let results = crate::test_common::collect_results(&vm.into_results());
+    assert_eq!(results["frozen_active"], [55.0, 55.0, 55.0]);
+    assert_eq!(results["frozen_stock"], [33.0, 33.0, 33.0]);
+}
+
+/// Two instances with the same `(model, input-set)` share one compiled module,
+/// so their demanded outputs are unioned on that key. The unrelated output
+/// stays absent: cross-model initialization remains sparse.
+#[test]
+fn qualified_init_unions_same_module_key_without_initializing_unrelated_outputs() {
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module_named, x_project};
+
+    let child = x_model(
+        "child",
+        vec![
+            x_aux("out_a", "10", None),
+            x_aux("out_b", "20", None),
+            x_aux("unrelated", "999", None),
+        ],
+    );
+    let main = x_model(
+        "main",
+        vec![
+            x_module_named("first", "child", &[], None),
+            x_module_named("second", "child", &[], None),
+            x_aux("frozen_a", "INIT(first.out_a)", None),
+            x_aux("frozen_b", "INIT(second.out_b)", None),
+        ],
+    );
+    let mut specs = sim_specs_with_units("month");
+    specs.stop = 1.0;
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &x_project(specs, &[main, child]));
+    let child_graph = model_dependency_graph(
+        &db,
+        sync.models["child"].source,
+        sync.project,
+        ModuleInputSet::empty(&db),
+    );
+    assert!(
+        child_graph
+            .runlist_initials
+            .iter()
+            .any(|name| name == "out_a")
+    );
+    assert!(
+        child_graph
+            .runlist_initials
+            .iter()
+            .any(|name| name == "out_b")
+    );
+    assert!(
+        !child_graph
+            .runlist_initials
+            .iter()
+            .any(|name| name == "unrelated"),
+        "only outputs reached by an actual caller initial dependency are seeded: {:?}",
+        child_graph.runlist_initials
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+    vm.run_to_end().expect("runs");
+    let results = crate::test_common::collect_results(&vm.into_results());
+    assert_eq!(results["frozen_a"], [10.0, 10.0]);
+    assert_eq!(results["frozen_b"], [20.0, 20.0]);
+}
+
+/// The runtime compilation key is shared across project roots as well as
+/// across instances within one root. Requirement discovery must therefore
+/// remain project-wide even though its dependency-graph reads are pure: each
+/// root below demands a different output from the same no-input child key.
+#[test]
+fn qualified_init_unions_same_module_key_across_project_roots() {
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module, x_project};
+
+    let root_a = x_model(
+        "root_a",
+        vec![
+            x_module("child", &[], None),
+            x_aux("frozen_a", "INIT(child.out_a)", None),
+        ],
+    );
+    let root_b = x_model(
+        "root_b",
+        vec![
+            x_module("child", &[], None),
+            x_aux("frozen_b", "INIT(child.out_b)", None),
+        ],
+    );
+    let child = x_model(
+        "child",
+        vec![
+            x_aux("out_a", "10", None),
+            x_aux("out_b", "20", None),
+            x_aux("unrelated", "999", None),
+        ],
+    );
+    let mut specs = sim_specs_with_units("month");
+    specs.stop = 1.0;
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &x_project(specs, &[root_a, root_b, child]));
+
+    let child_graph = model_dependency_graph(
+        &db,
+        sync.models["child"].source,
+        sync.project,
+        ModuleInputSet::empty(&db),
+    );
+    assert!(
+        child_graph
+            .runlist_initials
+            .iter()
+            .any(|name| name == "out_a")
+    );
+    assert!(
+        child_graph
+            .runlist_initials
+            .iter()
+            .any(|name| name == "out_b")
+    );
+    assert!(
+        !child_graph
+            .runlist_initials
+            .iter()
+            .any(|name| name == "unrelated"),
+        "the cross-root union must remain sparse: {:?}",
+        child_graph.runlist_initials
+    );
+
+    for (root, output, expected) in [
+        ("root_a", "frozen_a", [10.0, 10.0]),
+        ("root_b", "frozen_b", [20.0, 20.0]),
+    ] {
+        let compiled = compile_project_incremental(&db, sync.project, root)
+            .unwrap_or_else(|error| panic!("{root} compiles: {error:?}"));
+        let mut vm = crate::vm::Vm::new(compiled).expect("root VM");
+        vm.run_to_end().expect("root simulation");
+        let results = crate::test_common::collect_results(&vm.into_results());
+        assert_eq!(
+            results[output], expected,
+            "{root} reads its demanded output"
+        );
+    }
+}
+
+/// Bound-port sets are part of a compiled module's identity. Distinct keys
+/// receive distinct output seeds and pull in only the selected output's local
+/// dependency closure.
+#[test]
+fn qualified_init_requirements_are_keyed_by_module_input_set() {
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module_named, x_project};
+
+    let module_input = |name: &str| {
+        let mut input = x_aux(name, "0", None);
+        let datamodel::Variable::Aux(input) = &mut input else {
+            unreachable!("x_aux constructs an aux")
+        };
+        input.compat.can_be_module_input = true;
+        datamodel::Variable::Aux(input.clone())
+    };
+    let child = x_model(
+        "child",
+        vec![
+            module_input("input_a"),
+            module_input("input_b"),
+            x_aux("out_a", "input_a * 10", None),
+            x_aux("out_b", "input_b * 100", None),
+        ],
+    );
+    let main = x_model(
+        "main",
+        vec![
+            x_aux("source_a", "3", None),
+            x_aux("source_b", "4", None),
+            x_module_named(
+                "one_port",
+                "child",
+                &[("source_a", "one_port.input_a")],
+                None,
+            ),
+            x_module_named(
+                "two_ports",
+                "child",
+                &[
+                    ("source_a", "two_ports.input_a"),
+                    ("source_b", "two_ports.input_b"),
+                ],
+                None,
+            ),
+            x_aux("frozen_a", "INIT(one_port.out_a)", None),
+            x_aux("frozen_b", "INIT(two_ports.out_b)", None),
+        ],
+    );
+    let mut specs = sim_specs_with_units("month");
+    specs.stop = 1.0;
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &x_project(specs, &[main, child]));
+    let child_model = sync.models["child"].source;
+    let input_sets = crate::db::assemble::module_input_sets_for(&db, sync.project, "main", "child");
+    assert_eq!(
+        input_sets.len(),
+        2,
+        "fixture must produce two compilation keys"
+    );
+    for inputs in input_sets {
+        let graph = model_dependency_graph(
+            &db,
+            child_model,
+            sync.project,
+            ModuleInputSet::from_canonical_set(&db, &inputs),
+        );
+        let has_a = graph.runlist_initials.iter().any(|name| name == "out_a");
+        let has_b = graph.runlist_initials.iter().any(|name| name == "out_b");
+        if inputs.contains("input_b") {
+            assert_eq!((has_a, has_b), (false, true), "two-port key: {graph:?}");
+            let input_pos = graph
+                .runlist_initials
+                .iter()
+                .position(|name| name == "input_b")
+                .expect("out_b's input closure");
+            let output_pos = graph
+                .runlist_initials
+                .iter()
+                .position(|name| name == "out_b")
+                .expect("out_b seed");
+            assert!(input_pos < output_pos);
+        } else {
+            assert_eq!((has_a, has_b), (true, false), "one-port key: {graph:?}");
+            let input_pos = graph
+                .runlist_initials
+                .iter()
+                .position(|name| name == "input_a")
+                .expect("out_a's input closure");
+            let output_pos = graph
+                .runlist_initials
+                .iter()
+                .position(|name| name == "out_a")
+                .expect("out_a seed");
+            assert!(input_pos < output_pos);
+        }
+    }
+
+    let compiled = compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+    vm.run_to_end().expect("runs");
+    let results = crate::test_common::collect_results(&vm.into_results());
+    assert_eq!(results["frozen_a"], [30.0, 30.0]);
+    assert_eq!(results["frozen_b"], [400.0, 400.0]);
+}
+
+/// An externally seeded output can depend on a generated stdlib module. The
+/// fixed point follows that implicit module boundary and initializes its
+/// output before the enclosing model publishes `smoothed` to its caller.
+#[test]
+fn qualified_init_follows_an_implicit_module_dependency() {
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module, x_project};
+
+    let child = x_model(
+        "child",
+        vec![
+            {
+                let mut input = x_aux("input", "0", None);
+                let datamodel::Variable::Aux(input) = &mut input else {
+                    unreachable!("x_aux constructs an aux")
+                };
+                input.compat.can_be_module_input = true;
+                datamodel::Variable::Aux(input.clone())
+            },
+            x_aux("smoothed", "SMTH1(input, 2)", None),
+        ],
+    );
+    let main = x_model(
+        "main",
+        vec![
+            x_aux("source", "8", None),
+            x_module("child", &[("source", "child.input")], None),
+            x_aux("frozen", "INIT(child.smoothed)", None),
+        ],
+    );
+    let mut specs = sim_specs_with_units("month");
+    specs.stop = 2.0;
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &x_project(specs, &[main, child]));
+    let compiled = compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+    vm.run_to_end().expect("runs");
+    let results = crate::test_common::collect_results(&vm.into_results());
+    assert_eq!(results["frozen"], [8.0, 8.0, 8.0]);
+}
+
+/// PREVIOUS is lagged in both dependency phases. A qualified PREVIOUS-only
+/// reader must not seed the child output in initials; the explicit fallback is
+/// the t0 value and the child flow value is available from the next step.
+#[test]
+fn qualified_previous_only_does_not_seed_child_initials() {
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module, x_project};
+
+    let child = x_model("child", vec![x_aux("output", "10 + TIME", None)]);
+    let main = x_model(
+        "main",
+        vec![
+            x_module("child", &[], None),
+            x_aux("lagged", "PREVIOUS(child.output, -7)", None),
+        ],
+    );
+    let mut specs = sim_specs_with_units("month");
+    specs.stop = 2.0;
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &x_project(specs, &[main, child]));
+    let graph = model_dependency_graph(
+        &db,
+        sync.models["child"].source,
+        sync.project,
+        ModuleInputSet::empty(&db),
+    );
+    assert!(
+        !graph.runlist_initials.iter().any(|name| name == "output"),
+        "PREVIOUS-only qualified reads are filtered before propagation: {:?}",
+        graph.runlist_initials
+    );
+    let compiled = compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+    vm.run_to_end().expect("runs");
+    let results = crate::test_common::collect_results(&vm.into_results());
+    assert_eq!(results["lagged"], [-7.0, 10.0, 11.0]);
+}
+
+/// Cross-model seeds enter the same resolved-SCC ordering path as model-local
+/// initial seeds. This forward element recurrence is a one-member resolved SCC
+/// and must publish its final element during parent initialization.
+#[test]
+fn qualified_init_seed_preserves_resolved_scc_initial_order() {
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module, x_project};
+
+    let recurrence = datamodel::Variable::Aux(datamodel::Aux {
+        ident: "series".to_string(),
+        equation: datamodel::Equation::Arrayed(
+            vec!["d".to_string()],
+            vec![
+                ("d1".to_string(), "1".to_string(), None, None),
+                ("d2".to_string(), "series[d1] + 1".to_string(), None, None),
+                ("d3".to_string(), "series[d2] + 1".to_string(), None, None),
+            ],
+            None,
+            false,
+        ),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    });
+    let child = x_model("child", vec![recurrence]);
+    let main = x_model(
+        "main",
+        vec![
+            x_module("child", &[], None),
+            x_aux("frozen", "INIT(child.series[d3])", None),
+        ],
+    );
+    let mut specs = sim_specs_with_units("month");
+    specs.stop = 1.0;
+    let mut project = x_project(specs, &[main, child]);
+    project.dimensions.push(datamodel::Dimension::named(
+        "d".to_string(),
+        vec!["d1".to_string(), "d2".to_string(), "d3".to_string()],
+    ));
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let child_graph = model_dependency_graph(
+        &db,
+        sync.models["child"].source,
+        sync.project,
+        ModuleInputSet::empty(&db),
+    );
+    assert_eq!(child_graph.resolved_sccs.len(), 1);
+    assert_eq!(child_graph.runlist_initials, ["series"]);
+    let compiled = compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+    vm.run_to_end().expect("runs");
+    let results = crate::test_common::collect_results(&vm.into_results());
+    assert_eq!(results["frozen"], [3.0, 3.0]);
+}
+
+/// A bare module instance denotes a whole slot block, never one snapshot slot.
+/// The source parse is context-free and therefore leaves the reference intact;
+/// lowering, which has the dependency shape, must reject it rather than read
+/// the block's first slot.
+#[test]
+fn direct_snapshot_of_a_bare_module_refuses_both_intrinsics_loudly() {
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module, x_project};
+
+    for builtin in SnapshotBuiltin::ALL {
+        let target = format!("{}_bare_module", builtin.name().to_lowercase());
+        let main = x_model(
+            "main",
+            vec![
+                x_module("producer", &[], None),
+                x_aux(&target, &builtin.call("producer"), None),
+            ],
+        );
+        let producer = x_model("producer", vec![x_aux("output", "TIME", None)]);
+        let project = x_project(sim_specs_with_units("month"), &[main, producer]);
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+
+        let err = compile_project_incremental(&db, sync.project, "main")
+            .expect_err("a bare module snapshot must not compile as slot zero");
+        assert_eq!(err.code, crate::common::ErrorCode::NotSimulatable);
+        let diagnostics = collect_all_diagnostics(&db, sync.project);
+        assert!(
+            diagnostics.iter().any(|diag| {
+                diag.model == "main"
+                    && diag.variable.as_deref() == Some(target.as_str())
+                    && diag.severity == DiagnosticSeverity::Error
+                    && matches!(
+                        &diag.error,
+                        DiagnosticError::Equation(error)
+                            if error.code == crate::common::ErrorCode::NotSimulatable
+                                && error.details.as_deref().is_some_and(|details| details.contains(
+                                    "cannot read the bare module instance 'producer'"
+                                ))
+                    )
+            }),
+            "{} refusal must be attributed to main/{target}, got {diagnostics:?}",
+            builtin.name()
+        );
+    }
+}
+
+/// Whether an aux is bound as a module input is an instantiation property, so
+/// it cannot affect the source parse. The no-capture shape is pinned here; the
+/// current lowering refusal is loud because transient module inputs have no
+/// snapshot storage of their own.
+#[test]
+fn bound_module_input_snapshot_refuses_both_intrinsics_loudly() {
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module, x_project};
+
+    let input = datamodel::Variable::Aux(datamodel::Aux {
+        ident: "input".to_string(),
+        equation: datamodel::Equation::Scalar("0".to_string()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat {
+            can_be_module_input: true,
+            ..datamodel::Compat::default()
+        },
+    });
+    for builtin in SnapshotBuiltin::ALL {
+        let target = format!("{}_input", builtin.name().to_lowercase());
+        let sub = x_model(
+            "sub",
+            vec![input.clone(), x_aux(&target, &builtin.call("input"), None)],
+        );
+        let main = x_model(
+            "main",
+            vec![
+                x_aux("source", "TIME", None),
+                x_module("sub", &[("source", "sub.input")], None),
+                x_aux("out", &format!("sub.{target}"), None),
+            ],
+        );
+        let project = x_project(sim_specs_with_units("month"), &[main, sub]);
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        let target_var = sync.models["sub"].variables[target.as_str()].source;
+        assert!(
+            parse_source_variable(&db, target_var, sync.project)
+                .implicit_vars
+                .iter()
+                .all(|helper| helper.capture().is_none()),
+            "binding another model must not change the {} source parse",
+            builtin.name()
+        );
+        let err = compile_project_incremental(&db, sync.project, "main")
+            .expect_err("a transient module input has no snapshot to address");
+        assert_eq!(err.code, crate::common::ErrorCode::NotSimulatable);
+        let input_sets =
+            crate::db::assemble::module_input_sets_for(&db, sync.project, "main", "sub");
+        assert_eq!(input_sets.len(), 1, "the fixture has one sub instance");
+        let inputs = ModuleInputSet::from_canonical_set(&db, &input_sets[0]);
+        let sub_model = sync.models["sub"].source;
+        let diagnostics = compile_var_fragment::accumulated::<CompilationDiagnostic>(
+            &db,
+            target_var,
+            sub_model,
+            sync.project,
+            inputs,
+        );
+        assert!(
+            diagnostics.iter().any(|CompilationDiagnostic(diag)| {
+                diag.model == "sub"
+                    && diag.variable.as_deref() == Some(target.as_str())
+                    && diag.severity == DiagnosticSeverity::Error
+                    && matches!(
+                        &diag.error,
+                        DiagnosticError::Assembly(message)
+                            if message.contains(builtin.unaddressable_argument_message())
+                    )
+            }),
+            "{} refusal must be attributed to sub/{target}, got {diagnostics:?}",
+            builtin.name()
+        );
+    }
 }
 
 /// End-to-end (salsa + VM): an LTM-instrumented model whose A2A target
@@ -572,8 +1248,8 @@ use crate::snapshot_arg::SnapshotAccess;
 /// One `PREVIOUS`/`INIT` argument shape, and what each of the two decisions
 /// `snapshot_arg::SnapshotArg::access` states for it.
 struct AgreementRow {
-    /// Which arm of the parse's old rule and of codegen's old rule this row
-    /// covers, so the table can be read back against both enumerations.
+    /// Which source-classification and lowered-access arms this row covers, so
+    /// the table can be read back against both representations.
     covers: &'static str,
     /// True when the equation is apply-to-all over `d` (`out[d] = ..`), false
     /// when it is a scalar aux (`lagged = ..`).
@@ -597,12 +1273,12 @@ struct AgreementRow {
 /// rule ([`crate::snapshot_arg::SnapshotArg::access`]), and this table is what
 /// says so shape by shape.
 ///
-/// Rows are derived from BOTH of the rule sets that statement replaced:
+/// Rows are derived from both representations that apply the shared rule:
 ///
-/// * the parse's, `BuiltinVisitor`'s `needs_temp_arg`/`arg_is_array_shaped` --
-///   a `Var` whose base is or is not module-backed, a `Subscript` whose every
-///   index is static / leaves a dimension standing / is dynamic, and the
-///   catch-all for anything that is not a reference;
+/// * the parse's `BuiltinVisitor::snapshot_arg` -- a `Var` whose identity is
+///   known storage or known non-storage, a `Subscript` whose every index is
+///   static / leaves a dimension standing / is dynamic, and the catch-all for
+///   anything that is not a reference;
 /// * codegen's, `static_slot` plus `Compiler::snapshot_static_view` -- an
 ///   `Expr::Var`, a `StaticSubscript` that collapsed to one element, a
 ///   `StaticSubscript` with dimensions standing, and the refusals.
@@ -616,12 +1292,11 @@ struct AgreementRow {
 ///
 /// **Arms this table does not cover, and where they are covered instead.**
 ///
-/// * A `Subscript` whose BASE is module-backed. It shares the identical
-///   `is_module_backed_ident` test with the `Var` row below, and a module
-///   output port that can be subscripted needs an explicit sub-model, which
-///   `TestProject` does not build. The module-backed base is pinned by
-///   `model::test_previous_module_input_var_uses_helper_rewrite` and
-///   `db::ltm_tests::test_ltm_previous_module_var_uses_helper_rewrite`.
+/// * Qualified scalar and array-element module outputs are production-built
+///   and value-pinned by
+///   `scalar_and_array_module_output_snapshots_need_no_capture`; bound module
+///   inputs and bare modules are the non-storage lowering rows pinned for both
+///   intrinsics by the two refusal-table tests above and the LTM twin.
 /// * An index that is BOTH `SpansDimension` and `Static` -- a name that is an
 ///   active apply-to-all dimension and also an element of some other
 ///   dimension. No corpus model reaches it: the branch of `index_is_static`
@@ -633,10 +1308,11 @@ struct AgreementRow {
 ///   precedence is stated once in `SnapshotArg::subscripted` and pinned by its
 ///   own test there, over the classified-index alphabet that is that
 ///   function's actual domain.
-/// * Codegen's `Expr::TempArray` and residual refusals. They are unreachable
-///   because the parse captures every non-storage argument first -- which is
-///   what the capture rows below establish, by showing the helper's own
-///   lowered body is the shape codegen would otherwise have seen.
+/// * Lowered temporary arrays and position-specific view refusals are not
+///   source-classification rows. Their typed-error propagation is covered by
+///   `compiler::codegen::tests::previous_of_non_var_inside_subscript_index_is_err_not_panic`
+///   and its array-view twin; this table instead classifies each expression
+///   that production parsing and fragment lowering supply here.
 #[test]
 fn every_prev_init_argument_shape_agrees_between_the_parse_and_codegen() {
     use crate::compiler::fragment::lower_fragment;
@@ -654,18 +1330,12 @@ fn every_prev_init_argument_shape_agrees_between_the_parse_and_codegen() {
             divergence: None,
         },
         AgreementRow {
-            covers: "visitor: Var, base module-backed. codegen: Expr::Var",
+            covers: "visitor: Var, scalar module-call aux. codegen: Expr::Var",
             a2a: false,
             equation: "PREVIOUS(smoothed, 0)",
-            captures: true,
+            captures: false,
             codegen: Some(SnapshotAccess::Slot),
-            divergence: Some(
-                "the parse treats a stdlib-call aux as module-backed, but the call is \
-                 rewritten to a reference to a separate module instance and the aux \
-                 keeps one slot, so codegen addresses it like any other variable. The \
-                 capture is redundant; dropping it removes a slot and a fragment, which \
-                 is an artifact change with its own ledger row",
-            ),
+            divergence: None,
         },
         AgreementRow {
             covers: "visitor: Subscript, numeric index. codegen: collapsed StaticSubscript",

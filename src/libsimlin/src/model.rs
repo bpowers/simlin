@@ -505,15 +505,11 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
         }
     };
 
-    // The empty module-ident context and empty input set reproduce the old
-    // no-arg `variable_direct_dependencies` default path.
-    let empty_ctx = engine::db::ModuleIdentContext::new(&*db_locked, vec![]);
     let empty_inputs = engine::db::ModuleInputSet::empty(&*db_locked);
     let var_deps = engine::db::variable_direct_dependencies(
         &*db_locked,
         source_var,
         source_project,
-        empty_ctx,
         empty_inputs,
     );
     // Combine dt and initial deps from the variable itself plus any
@@ -737,13 +733,7 @@ pub unsafe extern "C" fn simlin_model_get_latex_equation(
         return ptr::null_mut();
     }
 
-    let empty_ctx = engine::db::ModuleIdentContext::new(&*db_locked, vec![]);
-    let parsed = engine::db::parse_source_variable_with_module_context(
-        &*db_locked,
-        source_var,
-        source_project,
-        empty_ctx,
-    );
+    let parsed = engine::db::parse_source_variable(&*db_locked, source_var, source_project);
     let ast = match parsed.variable.ast() {
         Some(a) => a,
         None => return ptr::null_mut(),

@@ -280,15 +280,12 @@ fn reconstruct_project_models(db: &dyn Db, project: SourceProject) -> Vec<datamo
 /// memoized VALUE that its two consumers read directly:
 /// `compile_project_incremental` (to fail with a clear message) and
 /// `collect_all_diagnostics` (to emit the project-level `Diagnostic`, once).
-/// It used to accumulate here, which was wrong twice over. A registry failure
-/// is a PROJECT-level fact, but every model's `model_all_diagnostics` subtree
-/// reaches this query through `model_module_ident_context`, so the accumulator
-/// DFS found the one accumulated value once per model and `collect_all_diagnostics`
-/// reported N identical copies. Worse, a value accumulated inside a memo body is
-/// only discoverable while the `accumulated_inputs` flags along the whole path
-/// stay `Any`: after an unrelated salsa revision bump the deep-verify path
-/// recomputed them as `Empty`, the DFS pruned the subtree, and the diagnostic
-/// silently vanished from the next collection entirely (pinned by
+/// A registry failure is a PROJECT-level fact and must not be accumulated from
+/// a memo that many model diagnostic subtrees read: that would report one copy
+/// per model. A value accumulated inside a memo body is also discoverable only
+/// while `accumulated_inputs` flags along the whole path stay `Any`; after an
+/// unrelated salsa revision bump the deep-verify path may recompute them as
+/// `Empty`, prune the subtree, and lose the diagnostic (pinned by
 /// `db::diagnostic_tests::macro_registry_build_error_survives_an_unrelated_input_change`).
 /// Reading the memoized value sidesteps the accumulator, and with it both bugs.
 ///
@@ -366,7 +363,7 @@ pub(crate) fn project_macro_registry(db: &dyn Db, project: SourceProject) -> Mac
 /// per-parse reverse scan of every model would be O(vars x models). This
 /// salsa-tracked query builds the reverse map once per project (memoized;
 /// only macro-marked models contribute, and they are few and small), so the
-/// hot `parse_source_variable_with_module_context` does a single map lookup.
+/// hot `parse_source_variable` does a single map lookup.
 ///
 /// Keyed on `SourceProject`, so it is recomputed only when the project's
 /// models change. Non-macro models contribute nothing, so an ordinary

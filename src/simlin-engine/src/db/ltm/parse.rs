@@ -17,11 +17,10 @@
 //! itself (`scalarize`, `retarget_dims`, `dimensions`); the thin wrappers below
 //! keep the call sites' free-function spelling.
 
-use std::collections::HashSet;
-
 use crate::builtins_visitor::{empty_macro_registry, instantiate_implicit_modules};
 use crate::common::{Canonical, Ident};
 use crate::dimensions::DimensionsContext;
+use std::collections::HashSet;
 
 use crate::db::ParsedVariableResult;
 
@@ -42,11 +41,10 @@ use super::LtmEquation;
 /// visitor over the same arm bodies, synthesizing the *same-named* helpers that
 /// dedup away (`model_ltm_implicit_var_info` keys implicit vars by canonical
 /// name), so it is skipped.
-pub(super) fn parse_ltm_equation(
+pub(crate) fn parse_ltm_equation(
     var_name: &str,
     equation: &LtmEquation,
     dims: &DimensionsContext,
-    module_idents: Option<&HashSet<Ident<Canonical>>>,
     model_var_names: Option<&HashSet<Ident<Canonical>>>,
 ) -> ParsedVariableResult {
     let (flow_ast, mut errors) = equation.to_flow_ast(dims);
@@ -57,7 +55,6 @@ pub(super) fn parse_ltm_equation(
             var_name,
             ast,
             Some(dims),
-            module_idents,
             model_var_names,
             // LTM synthetic equations are engine-generated and never contain
             // user macro invocations -> no registry needed; and are never a

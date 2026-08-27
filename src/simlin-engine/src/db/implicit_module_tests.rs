@@ -332,15 +332,12 @@ fn model_for(row: &ModuleRow) -> (TestProject, &'static str) {
 
 /// The helpers one variable's production parse synthesized, in walk order.
 ///
-/// Read through `parse_source_variable_with_module_context` under the model's
-/// own module-ident context -- the same call, with the same context, that
-/// `model_implicit_var_info` makes -- so these are the helpers the compile
-/// sees, not a re-derivation.
+/// Read through the production per-variable parse, so these are the helpers
+/// the compiler sees rather than a re-derivation.
 fn helpers_of(db: &SimlinDb, sync: &SyncResult, model_name: &str, var: &str) -> Vec<ImplicitVar> {
     let model = sync.models[model_name].source;
     let source_var = model.variables(db)[var];
-    let ctx = model_module_ident_context(db, model, sync.project, vec![]);
-    parse_source_variable_with_module_context(db, source_var, sync.project, ctx)
+    parse_source_variable(db, source_var, sync.project)
         .implicit_vars
         .to_vec()
 }
@@ -497,10 +494,8 @@ fn active_initial_capture_cannot_replace_dt_hoisted_argument() {
 
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    let main = sync.models["main"].source;
     let out = sync.models["main"].variables["out"].source;
-    let ctx = model_module_ident_context(&db, main, sync.project, vec![]);
-    let parsed = parse_source_variable_with_module_context(&db, out, sync.project, ctx);
+    let parsed = parse_source_variable(&db, out, sync.project);
     let collision_name = "$⁚out⁚0⁚arg0";
     assert!(
         parsed.implicit_vars.iter().any(

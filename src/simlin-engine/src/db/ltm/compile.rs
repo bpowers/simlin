@@ -29,16 +29,15 @@ use crate::db::{
     Db, LtmLinkId, LtmSyntheticVar, RefShape, SourceModel, SourceProject, SourceVariableKind,
     VarFragmentResult, build_module_inputs, canonical_module_input_set,
     compile_phase_to_per_var_bytecodes, extract_tables_from_source_var, model_implicit_var_info,
-    model_module_ident_context, module_dep_shape, module_input_prefix,
-    parse_source_variable_with_module_context, project_converted_dimensions,
+    module_dep_shape, module_input_prefix, parse_source_variable, project_converted_dimensions,
     project_dimensions_context, project_units_context, reconstruct_single_variable,
     variable_dimensions,
 };
 
 use super::parse::{parse_ltm_equation, scalarize_ltm_equation};
 use super::{
-    LtmEquation, LtmImplicitVarMeta, ltm_module_idents, model_ltm_implicit_var_info,
-    model_ltm_var_name_index, model_ltm_variables,
+    LtmEquation, LtmImplicitVarMeta, model_ltm_implicit_var_info, model_ltm_var_name_index,
+    model_ltm_variables,
 };
 
 /// Compile a single LTM synthetic variable's equation to symbolic
@@ -819,15 +818,13 @@ fn lower_ltm_variable(
     }
 
     let model_name_str = model.name(db);
-    let module_ctx = model_module_ident_context(db, model, project, vec![]);
     let dim_ctx = project_dimensions_context(db, project);
     let units_ctx = project_units_context(db, project);
     let mut stage0_vars: HashMap<Ident<Canonical>, crate::model::VariableStage0> = HashMap::new();
     stage0_vars.insert(Ident::new(parsed_variable.ident()), parsed_variable.clone());
     for dep_name in &dep_names {
         if let Some(dep_sv) = source_vars.get(*dep_name) {
-            let dep_parsed =
-                parse_source_variable_with_module_context(db, *dep_sv, project, module_ctx);
+            let dep_parsed = parse_source_variable(db, *dep_sv, project);
             stage0_vars.insert(Ident::new(dep_name), dep_parsed.variable.clone());
         } else if let Some(implicit_dep) = find_implicit_dm(dep_name) {
             // Nested implicits of an implicit are registered (and compiled)
@@ -915,16 +912,9 @@ pub(crate) fn ltm_fragment_input<'db>(
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
 
-    let module_idents = ltm_module_idents(db, model, project);
     let model_var_names = super::ltm_model_var_names(db, model, project);
 
-    let parsed = parse_ltm_equation(
-        var_name,
-        equation,
-        dim_context,
-        Some(module_idents),
-        Some(model_var_names),
-    );
+    let parsed = parse_ltm_equation(var_name, equation, dim_context, Some(model_var_names));
     if let Some(errs) = parsed.variable.equation_errors()
         && !errs.is_empty()
     {

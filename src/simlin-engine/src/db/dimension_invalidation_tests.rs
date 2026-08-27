@@ -18,13 +18,13 @@
 use super::*;
 use crate::datamodel;
 
-/// Parse with an empty module-ident context (test convenience).
+/// Parse one source variable (test convenience).
 fn parse_var_no_module_ctx(
     db: &dyn Db,
     var: SourceVariable,
     project: SourceProject,
 ) -> &ParsedVariableResult {
-    parse_source_variable_with_module_context(db, var, project, ModuleIdentContext::new(db, vec![]))
+    parse_source_variable(db, var, project)
 }
 
 /// AC8.1: A scalar variable should be immune to dimension changes.

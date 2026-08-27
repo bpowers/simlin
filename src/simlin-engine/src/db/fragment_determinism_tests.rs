@@ -27,8 +27,7 @@ use crate::datamodel;
 use crate::db::{
     ModuleInputSet, SimlinDb, assemble_simulation, collect_all_diagnostics,
     compile_implicit_var_fragment, compile_project_incremental, compile_var_fragment,
-    model_implicit_var_info, model_module_ident_context, parse_source_variable_with_module_context,
-    sync_from_datamodel,
+    model_implicit_var_info, parse_source_variable, sync_from_datamodel,
 };
 use crate::test_common::TestProject;
 use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module, x_project};
@@ -280,68 +279,20 @@ fn ltm_fragment_with_temps_is_stable_across_fresh_databases() {
 
 // ── Implicit-helper identity (GH #1002) ─────────────────────────────────
 //
-// `BuiltinVisitor` accumulated its synthesized SMOOTH/DELAY/TREND/PREVIOUS
-// helpers in a `HashMap` and every producer of `ParsedVariableResult::
-// implicit_vars` emitted them with `.values()`. Rust draws a fresh `RandomState`
-// key per map, so two parses of the SAME variable -- in the same process, under
-// two different `ModuleIdentContext`s -- yielded the helpers in two different
-// ORDERS. `ImplicitVarMeta` identified a helper by its POSITION in that vector,
-// so a position recorded against one parse resolved to a different helper
-// against the other: an aux where a module was expected, or the reverse. Both
-// mis-resolutions fail to lower, so the sub-model silently lost every helper
-// fragment and the whole project failed to compile -- on a coin flip.
-//
-// Two fixes, in three production edits. Which test gates which is MEASURED --
-// each edit was reverted ALONE, faithfully (the identity revert restores
-// `index_in_parent` and indexes with it, rather than some stronger mutation),
-// and the whole suite re-run three times:
-//
-//   * ORDER (a): `BuiltinVisitor::vars` is an `IndexMap`. Reverting reds
-//     `implicit_helper_order_is_stable_across_fresh_databases`,
-//     `per_element_implicit_helper_order_is_stable_across_fresh_databases`, and
-//     `undimensioned_arrayed_helper_bindings_are_stable_across_fresh_databases`
-//     -- every route into `implicit_vars` runs through this map.
-//   * ORDER (b): `elements_in_stable_order` at the per-element `Ast::Arrayed`
-//     call site. Reverting reds `per_element_…` alone.
-//   * ORDER (c): `elements_in_stable_order` at the shared-visitor call site.
-//     Reverting reds `undimensioned_arrayed_…` alone.
-//   * IDENTITY: `ImplicitVarMeta::name` replaces `index_in_parent`. Reverting
-//     reds `an_implicit_helper_declines_when_the_contexts_synthesize_different_sets`
-//     ALONE.
-//
-// That last cell is the one worth reading twice, because it is not what a
-// first guess predicts. With the order fix standing, a stable order makes a
-// POSITIONAL index resolve correctly whenever the two contexts synthesize the
-// same helper SET -- so `a_submodel_with_a_bound_input_compiles_on_every_fresh_database`
-// and `an_implicit_helper_resolves_to_its_own_name_under_the_instances_input_set`
-// gate the ORDER fix, not the identity one. Only a fixture whose two contexts
-// synthesize DIFFERENT sets can tell positional from named identity, and there
-// is exactly one such test.
-//
-// Both fixes are kept because they close different properties, and either
-// alone would have stopped the reported crash (verified in both directions).
-// Identity makes a helper resolve by NAME, so no compile outcome depends on the
-// order of the vector. Order makes the two salsa-cached vectors carrying it
-// (`ParsedVariableResult::implicit_vars`, `VariableDeps::implicit_vars`) equal
-// their own recomputation; without it those values still differ run to run,
-// salsa stops backdating, and the compiled artifact stops being reproducible --
-// the GH #595 class, invisible in every numeric result and in the compile
-// outcome alike.
-//
-// What name-based identity does NOT buy, since an earlier draft of this header
-// claimed it did: it is not "this helper or nothing". A synthesized name embeds
-// the visitor's walk counter, so two parse contexts can attach one name to two
-// different helpers, and `find_in` will return the one in the parse it was
-// handed. `a_cross_context_helper_name_collision_is_confined_to_a_failing_compile`
-// builds that case and pins what actually bounds it -- such a project does not
-// compile. Do not build mutation work on the stronger invariant; it is false.
+// A source variable has one parse and one ordered implicit-helper sequence.
+// `BuiltinVisitor::vars` and both `Ast::Arrayed` element walks preserve source
+// order, so the salsa-cached `ParsedVariableResult` and `VariableDeps` values
+// compare equal across recomputation. `ImplicitVarMeta` resolves a helper by
+// canonical name; its index is only a checked fast-path hint. The tests below
+// cover ordinary, per-element, undimensioned, LTM and bound-input journeys on
+// fresh databases because deterministic values are required for salsa
+// backdating and reproducible bytecode (GH #595, GH #1002).
 
 /// A sub-model whose body makes a stdlib module call over a BOUND input.
 ///
-/// The bound input is what puts two DIFFERENT parse contexts on the same
-/// variable: `model_implicit_var_info` derives helper identity under the
-/// no-extra-idents context, while assembly resolves it under the context
-/// widened by this instance's module-input names.
+/// The bound input is derived through production instance enumeration and
+/// passed to dependency classification and fragment compilation. It is not a
+/// parse input.
 fn submodel_with_bound_input_project() -> datamodel::Project {
     let sub = x_model(
         "sub",
@@ -413,8 +364,7 @@ fn implicit_helper_signatures(dm: &datamodel::Project, model_name: &str, var: &s
         .get(model_name)
         .unwrap_or_else(|| panic!("fixture must have a `{model_name}` model"));
     let source_var = model.variables(&db)[var];
-    let ctx = model_module_ident_context(&db, model, project, vec![]);
-    parse_source_variable_with_module_context(&db, source_var, project, ctx)
+    parse_source_variable(&db, source_var, project)
         .implicit_vars
         .iter()
         .map(describe_implicit)
@@ -526,89 +476,6 @@ fn implicit_helper_names_are_unique_within_one_parse() {
              discarded helper body"
         );
     }
-}
-
-/// A helper name is not fully context-stable, and the case where it is not is
-/// confined to a project that already fails to compile.
-///
-/// `ImplicitVarMeta::name` replaced a position with a name, and the PR
-/// originally claimed that made resolution "this helper or nothing". It does
-/// not: synthesized names embed `BuiltinVisitor`'s walk counter, so a context
-/// that inserts an EARLIER helper renames every later one. Here the
-/// no-extra-idents parse calls `$⁚sm⁚0⁚arg0` the SMTH argument and the widened
-/// parse calls it the PREVIOUS capture, so `find_in` hands back a helper the
-/// metadata did not mean.
-///
-/// This test exists to keep that honest and to bound it. The bound is the
-/// second half: a collision of this kind REQUIRES the two parses to synthesize
-/// different helper sequences, which is exactly what makes the model's layout
-/// disagree with its runlists -- so the project fails to compile and no
-/// mis-resolved fragment ever runs. If the compile ever starts succeeding here,
-/// the mis-resolution stops being harmless and this test is what says so.
-///
-/// The real fix is context-stable names, which is GH #372's territory.
-#[test]
-fn a_cross_context_helper_name_collision_is_confined_to_a_failing_compile() {
-    let sub = x_model(
-        "sub",
-        vec![
-            x_aux("port", "0", None),
-            x_aux("sm", "PREVIOUS(port, 0) + SMTH1(port + 1, 3)", None),
-        ],
-    );
-    let main = x_model(
-        "main",
-        vec![
-            x_aux("x", "5", None),
-            x_module("sub", &[("x", "sub.port")], None),
-            x_aux("out", "sub.sm", None),
-        ],
-    );
-    let dm = x_project(sim_specs_with_units("month"), &[main, sub]);
-
-    let db = SimlinDb::default();
-    let project = sync_from_datamodel(&db, &dm).project;
-    let sub_model = *project.models(&db).get("sub").expect("fixture has `sub`");
-    let source_var = sub_model.variables(&db)["sm"];
-
-    let helpers = |extra: Vec<String>| -> Vec<(String, String)> {
-        let ctx = model_module_ident_context(&db, sub_model, project, extra);
-        parse_source_variable_with_module_context(&db, source_var, project, ctx)
-            .implicit_vars
-            .iter()
-            .map(|v| (v.ident().to_string(), describe_implicit(v)))
-            .collect()
-    };
-    let derived = helpers(vec![]);
-    let resolved = helpers(
-        instantiation_input_set(&db, project, "sub")
-            .names(&db)
-            .clone(),
-    );
-
-    // The collision itself: one name, two different helpers.
-    let colliding: Vec<&(String, String)> = derived
-        .iter()
-        .filter(|(name, body)| resolved.iter().any(|(n2, b2)| n2 == name && b2 != body))
-        .collect();
-    assert!(
-        !colliding.is_empty(),
-        "the fixture must actually collide a name across the two contexts, or \
-         it is not exercising the residual this test documents.\nderived: \
-         {derived:?}\nresolved: {resolved:?}"
-    );
-
-    // The bound: such a project does not compile, so nothing executes the
-    // helper `find_in` mis-identifies.
-    let err = compile_project_incremental(&db, project, "main").expect_err(
-        "a project whose two parse contexts synthesize different helper \
-         sequences must fail to compile -- that failure is what keeps the \
-         name collision above harmless",
-    );
-    assert!(
-        err.to_string().contains("failed to compile fragments"),
-        "expected the layout-vs-runlist mismatch, got {err}"
-    );
 }
 
 /// Two phases must not be able to claim one helper name with different bodies.
@@ -806,22 +673,11 @@ fn implicit_helper_order_is_stable_across_fresh_databases() {
     }
 }
 
-/// A helper's identity must not depend on WHICH parse context resolves it.
-///
-/// `model_implicit_var_info` keys helpers by canonical name under the
-/// no-extra-idents context; `compile_implicit_var_fragment` resolves the same
-/// helper under the context widened by the instance's module-input names. The
-/// fragment it produces must be the helper the key names. When identity was
-/// positional this failed outright -- the two parses disagreed about which
-/// position held which helper, and every helper failed to lower.
-///
-/// Measured against the pre-fix defect, ONE sample of this misses 45% of the
-/// time -- the two-entry regime the module header describes -- so it runs the
-/// whole check `REPEATS` times on independent databases like its siblings. A
-/// single-sample probabilistic detector in a file built around repetition is a
-/// coin flip dressed as a test.
+/// Every helper must resolve by its canonical name while its fragment is
+/// compiled with the production instance-input set. Repetition on fresh
+/// databases also pins helper order and artifact determinism.
 #[test]
-fn an_implicit_helper_resolves_to_its_own_name_under_the_instances_input_set() {
+fn implicit_helpers_resolve_by_name_for_a_bound_input_instance() {
     for _ in 0..REPEATS {
         check_helpers_resolve_to_their_own_names();
     }
@@ -837,17 +693,14 @@ fn check_helpers_resolve_to_their_own_names() {
         .get("sub")
         .expect("fixture must have a `sub` model");
 
-    // The input set `sub` is actually instantiated with, not the empty one:
-    // the empty set is the context helper identity was DERIVED under, so
-    // asserting against it could not observe the disagreement. Taken from
-    // production's own enumeration rather than spelled here, so that removing
-    // the fixture's binding fails the guard below instead of leaving a
-    // hand-written `["port"]` quietly describing wiring that no longer exists.
+    // Taken from production's own enumeration rather than spelled here, so
+    // removing the fixture's binding fails the guard below instead of leaving
+    // a hand-written `["port"]` describing wiring that no longer exists.
     let inputs = instantiation_input_set(&db, project, "sub");
     assert!(
         !inputs.names(&db).is_empty(),
-        "the fixture's sub-model must be instantiated WITH a bound input, or the \
-         two parse contexts coincide and this test proves nothing"
+        "the fixture's sub-model must be instantiated with a bound input, or \
+         this test does not exercise instance-specific fragment inputs"
     );
 
     let info = model_implicit_var_info(&db, sub, project);
@@ -868,8 +721,7 @@ fn check_helpers_resolve_to_their_own_names() {
         assert_eq!(
             &fragment.fragment.ident, name,
             "the fragment compiled for helper `{name}` is actually \
-             `{}`; helper identity must not depend on which parse context \
-             resolves it (GH #1002)",
+             `{}`; helper identity is its canonical name (GH #1002)",
             fragment.fragment.ident
         );
     }
@@ -1004,137 +856,9 @@ fn undimensioned_arrayed_helper_bindings_are_stable_across_fresh_databases() {
     }
 }
 
-/// A sub-model whose bound input changes WHICH helpers its body synthesizes.
-///
-/// `port` carries no `access="input"` flag, so `collect_module_idents` does not
-/// see it and the no-extra-idents parse treats `PREVIOUS(port, 0)` as a direct
-/// scalar read (`LoadPrev`, no helper). Binding it as a module input widens the
-/// context, `is_module_backed_ident` then answers yes, and the same call is
-/// rewritten through a synthesized capture aux -- one EXTRA helper, ahead of
-/// the `SMTH1` ones in walk order.
-///
-/// That is the shape a stable ORDER cannot rescue: the two contexts do not
-/// disagree about the order of one list, they produce different lists.
-fn submodel_whose_input_changes_the_helper_set_project() -> datamodel::Project {
-    let sub = x_model(
-        "sub",
-        vec![
-            x_aux("port", "0", None),
-            x_aux("sm", "PREVIOUS(port, 0) + SMTH1(port, 3)", None),
-        ],
-    );
-    let main = x_model(
-        "main",
-        vec![
-            x_aux("x", "5", None),
-            x_module("sub", &[("x", "sub.port")], None),
-            x_aux("out", "sub.sm", None),
-        ],
-    );
-    x_project(sim_specs_with_units("month"), &[main, sub])
-}
-
-/// When the two parse contexts synthesize DIFFERENT helper sets, resolution
-/// must decline -- never hand back a different helper's fragment under this
-/// helper's name.
-///
-/// Stabilizing the order (which is what fixed the observed GH #1002 failures)
-/// leaves this shape open: every position at or after the extra helper still
-/// names a different variable in the widened parse than it did in the parse
-/// identity was derived from, deterministically. Positional identity therefore
-/// produced a fragment whose `ident` was `$⁚sm⁚0⁚arg0` filed under the key
-/// `$⁚sm⁚0⁚arg1`. A name resolves to its own helper or to nothing.
-///
-/// **What this test does NOT claim.** It does not claim the fixture compiles.
-/// It does not, on this branch or before it: the model's slot layout is derived
-/// from the no-extra-idents parse while its runlists come from the widened one,
-/// so the sub-model's helpers have no slots under the names assembly asks for,
-/// and the project fails with `failed to compile fragments for variables: …`.
-/// That failure is deterministic and PRE-EXISTING (verified byte-identical at
-/// the parent commit), and it is a different defect: the module-ident parse
-/// context is allowed to change a model's helper SET, which is the tension
-/// GH #372 tracks and proposes an explicit model-level parse context for. What
-/// changes here is only that the mis-resolution is loud instead of silent.
-#[test]
-fn an_implicit_helper_declines_when_the_contexts_synthesize_different_sets() {
-    let dm = submodel_whose_input_changes_the_helper_set_project();
-    let db = SimlinDb::default();
-    let project = sync_from_datamodel(&db, &dm).project;
-    let sub = *project
-        .models(&db)
-        .get("sub")
-        .expect("fixture must have a `sub` model");
-    let source_var = sub.variables(&db)["sm"];
-    let inputs = instantiation_input_set(&db, project, "sub");
-    assert!(
-        !inputs.names(&db).is_empty(),
-        "the fixture's sub-model must be instantiated WITH a bound input, or the \
-         two parse contexts coincide and this test proves nothing"
-    );
-
-    // The premise, derived rather than asserted from reading: the widened
-    // context really does synthesize a different helper list. Without this the
-    // test would silently degenerate into a duplicate of the sibling above.
-    let helpers_under = |extra: Vec<String>| -> Vec<String> {
-        let ctx = model_module_ident_context(&db, sub, project, extra);
-        parse_source_variable_with_module_context(&db, source_var, project, ctx)
-            .implicit_vars
-            .iter()
-            .map(|v| v.ident().to_string())
-            .collect()
-    };
-    let derived_under = helpers_under(vec![]);
-    let resolved_under = helpers_under(inputs.names(&db).clone());
-    assert_ne!(
-        derived_under, resolved_under,
-        "the fixture must make the two parse contexts synthesize DIFFERENT \
-         helper lists, or it does not exercise anything the order fix left open"
-    );
-
-    let info = model_implicit_var_info(&db, sub, project);
-    assert!(
-        !info.is_empty(),
-        "the fixture must derive some helpers, or the loop below is vacuous"
-    );
-    let mut declined = 0usize;
-    for name in info.keys() {
-        // `None` is the correct answer here: this parse holds no helper of that
-        // name. What must never happen is `Some` carrying a DIFFERENT name --
-        // that is the one thing `find_in`'s name check does guarantee. It does
-        // NOT guarantee the helper is the one the metadata meant; a name is not
-        // context-stable, which
-        // `a_cross_context_helper_name_collision_is_confined_to_a_failing_compile`
-        // builds and bounds.
-        match compile_implicit_var_fragment(&db, sub, project, name.clone(), inputs) {
-            Some(fragment) => assert_eq!(
-                &fragment.fragment.ident, name,
-                "the fragment compiled for helper `{name}` is filed under `{}`; \
-                 a fragment must carry the name it was resolved by (GH #1002)",
-                fragment.fragment.ident
-            ),
-            None => declined += 1,
-        }
-    }
-    // Without this the loop would also pass if every helper resolved, which is
-    // not what this fixture does today and not what the assertion above is
-    // there to catch. If a later change makes the two contexts agree on the
-    // helper SET -- the GH #372 direction -- this reds, and updating it is the
-    // deliberate act of recording that the divergence is gone.
-    assert_eq!(
-        declined,
-        info.len(),
-        "every helper of this fixture is absent from the parse its instance \
-         compiles under, so every one must decline; got {declined} of {}",
-        info.len()
-    );
-}
-
-/// A sub-model that instantiates a stdlib module over a bound input must
-/// compile, every time.
-///
-/// GH #1002's first observable: this project compiled on some process seeds and
-/// failed with the unattributed `failed to compile fragments for variables:
-/// $⁚sm⁚0⁚arg1, $⁚sm⁚0⁚smth1` on others.
+/// A sub-model that instantiates a stdlib module over a bound input must compile
+/// on every fresh database. This pins stable helper order and name resolution
+/// along the production module-input path (GH #1002).
 #[test]
 fn a_submodel_with_a_bound_input_compiles_on_every_fresh_database() {
     let dm = submodel_with_bound_input_project();
@@ -1154,17 +878,9 @@ fn a_submodel_with_a_bound_input_compiles_on_every_fresh_database() {
 /// A wiring mistake that is only a WARNING must not decide, at random, whether
 /// the implicit helpers around it report errors.
 ///
-/// This is GH #1002's second reported observable, and it is a GUARD rather than
-/// a reproduction: it passes at the parent commit too (checked, 120 samples).
-/// The reason is structural and worth recording, since a future refactor can
-/// take it away. `collect_all_diagnostics` probes the helpers with the EMPTY
-/// input set -- `db::diagnostic` chooses that deliberately and says why -- and
-/// derives them from `model_implicit_var_info`, which uses the empty context
-/// too. Both reads therefore hit the SAME parse memo, so no second context
-/// exists on that path and no mis-resolution is expressible there. The moment
-/// that probe is changed to use each model's real instantiation input sets (the
-/// improvement its own comment describes), this test becomes the thing that
-/// notices.
+/// The diagnostic pass probes helpers with the empty input set by design (see
+/// `db::diagnostic`) but resolves them from the same single source parse as
+/// assembly. A warning-only wiring error must therefore stay deterministic.
 ///
 /// Binding `sub.phantom`, where `phantom` names no variable of `sub`, is
 /// diagnosed as `BadModuleInputDst` and widens this instance's module-input

@@ -25,9 +25,8 @@ use simlin_engine::data_provider::FilesystemDataProvider;
 use simlin_engine::datamodel::Project as DatamodelProject;
 use simlin_engine::db::{
     PersistentSyncState, SimlinDb, SourceProject, collect_all_diagnostics,
-    compile_project_incremental, model_detected_loops, model_module_ident_context,
-    parse_source_variable_with_module_context, set_project_ltm_enabled, sync_from_datamodel,
-    sync_from_datamodel_incremental,
+    compile_project_incremental, model_detected_loops, parse_source_variable,
+    set_project_ltm_enabled, sync_from_datamodel, sync_from_datamodel_incremental,
 };
 use simlin_engine::errors::{
     FormattedError, FormattedErrorKind, FormattedErrors, collect_formatted_errors,
@@ -592,9 +591,6 @@ fn print_equations(project: &DatamodelProject, output: Option<PathBuf>) {
 
         let var_names = source_model.variable_names(&db);
         let vars = source_model.variables(&db);
-        let module_ident_context =
-            model_module_ident_context(&db, source_model, sync.project, vec![]);
-
         output_file
             .write_fmt(format_args!("% {model_name}\n"))
             .unwrap();
@@ -609,12 +605,7 @@ fn print_equations(project: &DatamodelProject, output: Option<PathBuf>) {
                 None => continue,
             };
 
-            let parsed = parse_source_variable_with_module_context(
-                &db,
-                source_var,
-                sync.project,
-                module_ident_context,
-            );
+            let parsed = parse_source_variable(&db, source_var, sync.project);
             let var = &parsed.variable;
 
             let is_stock = var.is_stock();

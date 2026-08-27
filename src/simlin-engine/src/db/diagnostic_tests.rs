@@ -11,6 +11,235 @@
 use super::*;
 use crate::datamodel;
 
+/// A project-wide dependency projection may inspect models that the requested
+/// root never instantiates, but that inspection must remain a pure fact read.
+/// Diagnostics belong to the affected model's one reporting trigger: otherwise
+/// draining `main` can replay a draft model's cycle once per fragment that
+/// reached the shared projection. The trigger emits one model-level row from
+/// the pure facts' first attribution (dt before init, sorted dependency walk),
+/// rather than one row for every phase that encounters the same cycle.
+#[test]
+fn unrelated_draft_cycle_is_attributed_once_without_leaking_into_main() {
+    use salsa::Setter;
+
+    use crate::common::ErrorCode;
+    use crate::db::exec_probe::ProbedDb;
+    use crate::errors::{FormattedErrorKind, collect_formatted_errors};
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_project};
+
+    let main = x_model("main", vec![x_aux("answer", "42", None)]);
+    let draft = x_model("draft", vec![x_aux("a", "b", None), x_aux("b", "a", None)]);
+    let mut specs = sim_specs_with_units("month");
+    specs.stop = 1.0;
+    let project = x_project(specs, &[main, draft]);
+    let mut probed = ProbedDb::new();
+    let sync = sync_from_datamodel(probed.db(), &project);
+    let main_model = sync.models["main"].source;
+    let answer = sync.models["main"].variables["answer"].source;
+    let model_count = sync.project.models(probed.db()).len();
+
+    let assert_diagnostics = |db: &SimlinDb| {
+        let main_diagnostics = collect_model_diagnostics(db, main_model, sync.project);
+        assert!(
+            !main_diagnostics.iter().any(|diagnostic| {
+                matches!(
+                    &diagnostic.error,
+                    DiagnosticError::Model(error) if error.code == ErrorCode::CircularDependency
+                )
+            }),
+            "main must not inherit the unrelated draft cycle: {main_diagnostics:?}"
+        );
+
+        let all = collect_all_diagnostics(db, sync.project);
+        let cycles: Vec<&Diagnostic> = all
+            .iter()
+            .filter(|diagnostic| {
+                matches!(
+                    &diagnostic.error,
+                    DiagnosticError::Model(error) if error.code == ErrorCode::CircularDependency
+                )
+            })
+            .collect();
+        assert_eq!(
+            cycles.len(),
+            1,
+            "one draft cycle, not accumulator replay: {all:?}"
+        );
+        let cycle = cycles[0];
+        assert_eq!(cycle.model, "draft");
+        assert_eq!(cycle.variable.as_deref(), Some("b"));
+        assert_eq!(cycle.severity, DiagnosticSeverity::Error);
+        let DiagnosticError::Model(error) = &cycle.error else {
+            unreachable!("the filtered cycle is a model diagnostic")
+        };
+        assert_eq!(error.kind, crate::common::ErrorKind::Model);
+        assert_eq!(error.code, ErrorCode::CircularDependency);
+        assert_eq!(error.details, None);
+
+        let formatted = collect_formatted_errors(&all, &project);
+        let formatted_cycles: Vec<_> = formatted
+            .errors
+            .iter()
+            .filter(|error| error.code == ErrorCode::CircularDependency)
+            .collect();
+        assert_eq!(
+            formatted_cycles.len(),
+            1,
+            "the CLI diagnostic surface must preserve exactly one cycle: {formatted:?}"
+        );
+        let formatted_cycle = formatted_cycles[0];
+        assert_eq!(formatted_cycle.model_name.as_deref(), Some("draft"));
+        assert_eq!(formatted_cycle.variable_name.as_deref(), Some("b"));
+        assert_eq!(formatted_cycle.severity, DiagnosticSeverity::Error);
+        assert_eq!(formatted_cycle.kind, FormattedErrorKind::Model);
+        assert_eq!(formatted_cycle.details, None);
+        assert!(
+            formatted_cycle.message.as_deref().is_some_and(|message| {
+                message.contains("draft") && message.contains("circular_dependency")
+            }),
+            "the formatted summary must identify the model and typed code: {formatted_cycle:?}"
+        );
+        assert!(formatted.has_model_errors);
+        assert!(!formatted.has_variable_errors);
+    };
+
+    probed.reset();
+    assert_diagnostics(probed.db());
+    let counts = probed.counts();
+    for query in [
+        "base_model_dependency_graph",
+        "model_dependency_graph",
+        "emit_model_dependency_cycle_diagnostic",
+    ] {
+        assert_eq!(
+            counts.get(query),
+            Some(&(model_count, model_count)),
+            "{query} must run every production model key exactly once: {counts:?}"
+        );
+    }
+
+    let compiled = compile_project_incremental(probed.db(), sync.project, "main")
+        .expect("an unrelated draft cycle must not prevent compiling main");
+    let mut vm = crate::vm::Vm::new(compiled).expect("main VM");
+    vm.run_to_end().expect("main simulation");
+    assert_eq!(
+        crate::test_common::collect_results(&vm.into_results())["answer"],
+        [42.0, 42.0]
+    );
+
+    // A valid equation edit bumps the revision without changing the draft.
+    // The next collection must neither lose nor replay its diagnostic.
+    answer
+        .set_equation(probed.db_mut())
+        .to(datamodel::Equation::Scalar("43".to_string()));
+    probed.reset();
+    assert_diagnostics(probed.db());
+    let counts = probed.counts();
+    for query in [
+        "base_model_dependency_graph",
+        "model_dependency_graph",
+        "emit_model_dependency_cycle_diagnostic",
+    ] {
+        assert!(
+            !counts.contains_key(query),
+            "{query} must remain cached after the unrelated revision: {counts:?}"
+        );
+    }
+    assert_eq!(
+        counts.get("model_all_diagnostics"),
+        Some(&(model_count, model_count)),
+        "the untracked reporting walk must replay each cached model trigger once: {counts:?}"
+    );
+
+    let compiled = compile_project_incremental(probed.db(), sync.project, "main")
+        .expect("main must still compile after the unrelated revision");
+    let mut vm = crate::vm::Vm::new(compiled).expect("main VM after edit");
+    vm.run_to_end().expect("main simulation after edit");
+    assert_eq!(
+        crate::test_common::collect_results(&vm.into_results())["answer"],
+        [43.0, 43.0]
+    );
+}
+
+/// The first cycle attribution is a cached observable: it becomes the
+/// structured diagnostic's `variable`, so the dependency walk's root order
+/// must not inherit `FxHashMap` insertion/hash order. These declaration-order
+/// rotations and fresh databases all describe the same three-cycle graph.
+/// Sorted roots enter the lexically first component at `a`, follow `z`, and
+/// attribute the back-edge to `z`; a revision that leaves the graph unchanged
+/// must preserve that choice.
+#[test]
+fn dependency_cycle_attribution_is_stable_across_insertion_orders_and_revisions() {
+    use salsa::Setter;
+
+    use crate::common::ErrorCode;
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_project};
+
+    const NAMES: [&str; 7] = ["a", "z", "b", "y", "c", "x", "padding"];
+    for rotation in 0..NAMES.len() {
+        let order: Vec<&str> = NAMES
+            .iter()
+            .cycle()
+            .skip(rotation)
+            .take(NAMES.len())
+            .copied()
+            .collect();
+        for fresh_db in 0..4 {
+            let variables = order
+                .iter()
+                .map(|name| match *name {
+                    "a" => x_aux("a", "z", None),
+                    "z" => x_aux("z", "a", None),
+                    "b" => x_aux("b", "y", None),
+                    "y" => x_aux("y", "b", None),
+                    "c" => x_aux("c", "x", None),
+                    "x" => x_aux("x", "c", None),
+                    "padding" => x_aux("padding", "0", None),
+                    _ => unreachable!("the declaration-order alphabet is exhaustive"),
+                })
+                .collect();
+            let project = x_project(sim_specs_with_units("month"), &[x_model("main", variables)]);
+            let mut db = SimlinDb::default();
+            let sync = sync_from_datamodel(&db, &project);
+            let model = sync.models["main"].source;
+            let padding = sync.models["main"].variables["padding"].source;
+
+            let chosen = |db: &SimlinDb| {
+                let cycles: Vec<_> = collect_model_diagnostics(db, model, sync.project)
+                    .into_iter()
+                    .filter(|diagnostic| {
+                        matches!(
+                            &diagnostic.error,
+                            DiagnosticError::Model(error)
+                                if error.code == ErrorCode::CircularDependency
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    cycles.len(),
+                    1,
+                    "one cycle row for rotation {rotation}, fresh db {fresh_db}: {cycles:?}"
+                );
+                cycles[0].variable.clone()
+            };
+
+            assert_eq!(
+                chosen(&db).as_deref(),
+                Some("z"),
+                "canonical root order for rotation {rotation}, fresh db {fresh_db}"
+            );
+            padding
+                .set_equation(&mut db)
+                .to(datamodel::Equation::Scalar("1".to_string()));
+            assert_eq!(
+                chosen(&db).as_deref(),
+                Some("z"),
+                "canonical root order after revision for rotation {rotation}, fresh db {fresh_db}"
+            );
+        }
+    }
+}
+
 // ---- Task 5: model_all_diagnostics triggers all sources ----
 
 /// Task 5 verification: model_all_diagnostics triggers all accumulation
@@ -2686,15 +2915,10 @@ fn test_unknown_element_subscript_warns_on_conveyor_init_list() {
 //
 // An invalid macro set (a recursion cycle, a duplicate macro name, a
 // macro/model name collision) is a PROJECT-level failure: exactly one thing is
-// wrong with the project, regardless of how many models it holds. It used to be
-// accumulated from inside `project_macro_registry`'s body and discovered only by
-// whatever accumulator DFS happened to reach that memo, which made it both
-// over-reported (once per model, since every model's `model_all_diagnostics`
-// subtree reaches the registry through `model_module_ident_context`) and
-// FRAGILE (see the pruning hazard documented above `unit_warning_fixture`: after
-// an unrelated revision bump the whole subtree is pruned and the diagnostic
-// silently vanishes). It is now emitted once, directly, by
-// `collect_all_diagnostics` from the memoized `build_error`.
+// wrong with the project, regardless of how many model diagnostic subtrees
+// read the registry. `collect_all_diagnostics` therefore emits it once from
+// the memoized `build_error`; it is not an accumulator attached to a shared
+// subtree, where fan-out and salsa pruning could duplicate or lose it.
 
 /// A project with `n_extra` filler models plus two macros that share a name --
 /// an AC5.3 `DuplicateMacroName` registry-build failure.

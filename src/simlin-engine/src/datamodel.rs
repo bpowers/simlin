@@ -962,11 +962,10 @@ impl Model {
     ///   port `Variable` is synthesized: a [`Variable::Flow`] if the
     ///   parameter name appears in any body stock's `inflows`/`outflows`,
     ///   else a [`Variable::Aux`], with a `"0"` placeholder equation and
-    ///   `can_be_module_input == true`. The flag is *required*: it is how
-    ///   `collect_module_idents` recognizes the port as a module-input slot
-    ///   (a macro model is registered as an ordinary, non-`stdlib⁚`-prefixed
-    ///   sub-model), the same flag an ordinary XMILE submodel sets via
-    ///   `access="input"`.
+    ///   `can_be_module_input == true`. The flag is required by module-input
+    ///   validation and layout (a macro model is registered as an ordinary,
+    ///   non-`stdlib⁚`-prefixed sub-model), just like the flag an ordinary
+    ///   XMILE submodel receives from `access="input"`.
     /// - `additional_outputs` are computed by the body and so already have
     ///   body equations; they are *not* synthesized as ports.
     /// - `primary_output` is set to `macro_name` without validating that a

@@ -1044,9 +1044,8 @@ impl<'a> From<&'a datamodel::Variable> for VariableSource<'a> {
     }
 }
 
-/// Everything a parse reads BESIDE the variable itself: the project-global
-/// contexts plus the four optional model-level facts that decide how
-/// `PREVIOUS`/`INIT` and module-function calls expand.
+/// Everything a parse reads besides the variable itself: project-global
+/// dimensions, units, macros, and macro-body ownership.
 ///
 /// A struct rather than a parameter list because every field is optional
 /// context that most callers do not supply -- [`ParseContext::new`] is the
@@ -1054,20 +1053,6 @@ impl<'a> From<&'a datamodel::Variable> for VariableSource<'a> {
 pub struct ParseContext<'a> {
     pub dimensions: &'a DimensionsContext,
     pub units_ctx: &'a units::Context,
-    /// The parent model's module-backed variable identifiers. When provided,
-    /// `PREVIOUS(module_var)` synthesizes a scalar helper aux instead of
-    /// compiling `LoadPrev` directly against a multi-slot module.
-    pub module_idents: Option<&'a HashSet<Ident<Canonical>>>,
-    /// The model's full variable-name set. When provided, `PREVIOUS`/`INIT`
-    /// accept a non-shadowed bare element name as a static subscript index
-    /// instead of synthesizing a helper aux per call site (see
-    /// `BuiltinVisitor::index_is_static`). The salsa per-variable parse path
-    /// passes `None` to preserve incremental invalidation granularity (the
-    /// parse must not depend on the model's full name set); the LTM equation
-    /// parse path -- whose equations are regenerated wholesale on model
-    /// changes anyway -- passes the set, which is what keeps large arrayed
-    /// models' LTM helper volume bounded (GH #654).
-    pub model_var_names: Option<&'a HashSet<Ident<Canonical>>>,
     /// The per-project macro registry. When provided, a call resolving to a
     /// project macro expands into a synthetic module variable (and shadows an
     /// identically named builtin/stdlib func). `None` means "no project
@@ -1082,14 +1067,11 @@ pub struct ParseContext<'a> {
 }
 
 impl<'a> ParseContext<'a> {
-    /// A parse with no model-level context: no module-ident set, no model
-    /// variable-name set, no project macros, and no enclosing macro body.
+    /// A parse with no project macro registry or enclosing macro body.
     pub fn new(dimensions: &'a DimensionsContext, units_ctx: &'a units::Context) -> Self {
         ParseContext {
             dimensions,
             units_ctx,
-            module_idents: None,
-            model_var_names: None,
             macro_registry: None,
             enclosing_model: None,
         }
@@ -1145,8 +1127,7 @@ where
                     ident,
                     ast,
                     Some(dimensions),
-                    ctx.module_idents,
-                    ctx.model_var_names,
+                    None,
                     registry,
                     ctx.enclosing_model,
                 ) {

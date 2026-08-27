@@ -95,6 +95,8 @@ pub enum DiagnosticError {
 ///    equation errors (EmptyEquation, syntax errors), unit definition
 ///    syntax errors (bad unit strings), and compilation-level errors
 ///    (BadTable, MismatchedDimensions, etc.)
+/// 1b. `emit_model_dependency_cycle_diagnostic` -- emits the model's one
+///     attributed `CircularDependency` row from the pure graph facts.
 /// 2. `check_model_units` -- accumulates unit inference/checking warnings
 /// 3. When LTM is enabled, `model_ltm_fragment_diagnostics` -- accumulates
 ///    LTM assembly diagnostics: the auto-flip warning that surfaces when
@@ -164,10 +166,15 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // failure like a duplicate macro name, not a partial-result advisory.
     emit_duplicate_variable_diagnostics(db, model);
 
+    // Dependency graphs are also traversed by the project-wide qualified-INIT
+    // requirement fixed point. That shared projection is accumulator-free;
+    // this per-model trigger is the one owner of its cycle diagnostic.
+    crate::db::dep_graph::emit_model_dependency_cycle_diagnostic(db, model, project);
+
     let source_vars = model.variables(db);
 
     // Trigger compile_var_fragment for each variable. This is a superset
-    // of parse_source_variable_with_module_context: it first accumulates
+    // of parse_source_variable: it first accumulates
     // unit definition syntax errors from the parsed variable, then checks
     // for equation parse errors, then proceeds with compilation which can
     // surface additional errors like BadTable, MismatchedDimensions, etc.
@@ -195,11 +202,13 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     //
     // Probed with the EMPTY input set: byte-identical to assembly for the
     // ROOT model (root assembly uses the empty set), and only there. For a
-    // SUB-MODEL the input set genuinely changes compilation -- input names
-    // widen the module-ident parse context and a reference can resolve
-    // solely through `ContextCore.inputs` -- so this probe can MISS a
-    // failure that only occurs under a parent's bindings (that class keeps
-    // the pre-#1000 unattributed batch message), and, symmetrically, a
+    // SUB-MODEL the input set genuinely changes dependency and lowering
+    // classification: `ContextCore.inputs` makes a bound name a transient
+    // `ModuleInput`, so a reference can resolve only under a parent's actual
+    // bindings. Source parsing remains instance-independent. This probe can
+    // therefore MISS a failure that only occurs under a parent's bindings
+    // (that class surfaces through `assemble_module`'s unattributed batch
+    // message), and, symmetrically, a
     // degenerate phantom-dst binding (`BadModuleInputDst`-warned, and
     // nondeterministically compiling due to a pre-existing implicit-index
     // instability) can fail HERE while assembly passes. Probing each model
@@ -845,21 +854,17 @@ fn resolve_equation_dimensions(
 ///
 /// This is a memo READ, not a parse. `model_all_diagnostics` triggers
 /// `compile_var_fragment` for every variable before this pass runs, and that
-/// path parses through `parse_source_variable_with_module_context` under
-/// `model_module_ident_context(db, model, project, vec![])` -- the same key used
-/// here, so the memo is already populated and shared rather than a second parse
-/// under a second key.
+/// path parses through the same `parse_source_variable` key used here, so the
+/// memo is already populated and shared rather than a second parse.
 ///
 /// Callers must still gate on `variable::may_have_unfilled_arms` first: this is
 /// cheap, but the classification it feeds walks the equation's declared slots.
 fn parsed_equation_ast(
     db: &dyn Db,
-    model: SourceModel,
     project: SourceProject,
     var: SourceVariable,
 ) -> Option<crate::ast::Ast<crate::ast::Expr0>> {
-    let module_ident_context = model_module_ident_context(db, model, project, vec![]);
-    let parsed = parse_source_variable_with_module_context(db, var, project, module_ident_context);
+    let parsed = parse_source_variable(db, var, project);
     parsed.variable.ast().cloned()
 }
 
@@ -957,7 +962,7 @@ fn emit_unfilled_equation_warnings(db: &dyn Db, model: SourceModel, project: Sou
         if !may_have_unfilled_arms(svar.equation(db), nan_names_a_variable) {
             continue;
         }
-        let Some(ast) = parsed_equation_ast(db, model, project, svar) else {
+        let Some(ast) = parsed_equation_ast(db, project, svar) else {
             continue;
         };
         let Some(unfilled) = unfilled_arms(&ast) else {

@@ -763,12 +763,16 @@ capture set, names, and walk order held fixed (the goldens are the defect
 detector); 7.3a `ImplicitModule` with per-element expansion and shared `n`,
 which covers macro CALLS because `expand_module_function` is one expansion for
 both; 7.3b macro passthrough and GH #554, the paths that deliberately do not
-reach it; 7.4 deletion of `ModuleIdentContext`
-and the empty-context twin call sites and the AC3.1 flip; 7.5 the shape changes, one commit and ledger row each: dropping
-the captures D1 synthesizes for `PREVIOUS(module-call aux)` and
-`PREVIOUS(m·scalar_port)` (redundant: codegen's `static_slot` already accepts
-`m·port`, and a stdlib-call aux is a one-slot scalar) and refusing a bare
-`PREVIOUS(sub)` of an explicit module loudly; generalising the D3 bare-element
+reach it; 7.4 deletion of `ModuleIdentContext`, the empty-context twin call
+sites and the AC3.1 flip. Removing the context necessarily also removes the D1
+captures for `PREVIOUS(module-call aux)` and qualified scalar/array-element
+module ports (their lowered references already address concrete slots), and
+adds a loud refusal for a bare explicit module rather than allowing it to read
+flattened slot zero. A bound module input likewise remains uncaptured and
+refuses loudly because its lowered `Expr::ModuleInput` has no snapshot storage;
+macro formal parameters retain captures because their typed descriptor is
+project-global parse input. 7.5 keeps the remaining shape changes, one commit
+and ledger row each: generalising the D3 bare-element
 rule from the LTM path to user equations, together with the QUALIFIED-element
 form `PREVIOUS(vals[Dim.elem])`, which captures unless the qualified dimension
 is among the variable's own declared dimensions or their map chains, because
@@ -989,15 +993,18 @@ Every count is one execution per distinct key. The control region -- an
 identical re-sync -- runs nothing at all in either case, so the numbers are the
 edit's.
 
-The `SMTH1` column is two different things added together, and the distinction
+The `SMTH1` column is three different things added together, and the distinction
 is what 7.4 needs. Five of the eight `compile_var_fragment` runs and ten of the
 thirteen parses are the `stdlib⁚smth1` template compiling for the first time
 (its five variables, parsed under the two contexts assembly demands for it: the
 model's own and the per-instance one widened by the instance's module-input
 names), along with `model_shape` and the second `compute_layout` /
-`assemble_module`. That is a new sub-model, not saturation. The saturation
-proper is `k` and `probe`: two fragments and two parses that should have been
-reused (the added `smoothed` itself is new work).
+`assemble_module`. That is a new sub-model, not saturation. The added
+`smoothed` itself is new work. `k` also legitimately changes: the new implicit
+module seeds initials, its initial-dependency closure pulls in parent-side
+source `k`, and `k` therefore changes from flows-only membership to
+initials-plus-flows and gains an initial fragment. Only `probe` is residual
+over-invalidation: its phase membership and fragment input are unchanged.
 
 **One cause, and it is not the one the pinning test named.** Two experiments
 isolate it, both in
@@ -1029,7 +1036,7 @@ the map is identical across both edits.
 
 Classified against the remedies AC3.1 has: fixed by the parse-key rule --
 `parse_source_variable_with_module_context`, `variable_direct_dependencies`,
-`compile_var_fragment` and `model_implicit_var_info` for `k`/`probe`, all four
+`compile_var_fragment` and `model_implicit_var_info` for `probe`, all four
 through the single `ModuleIdentContext` edge. Fixed by a projection -- nothing;
 the projections AC3.1 needs (`var_runlist_membership`,
 `model_implicit_var_by_name`, `model_variable_by_name`) are already in place and
@@ -1039,7 +1046,8 @@ per-model queries of the edited model itself. **So 7.4 needs exactly one thing
 for AC3.1 to flip: delete `ModuleIdentContext`, from the parse key and from
 every caller that derives it (the eleven `model_module_ident_context` call
 sites and the empty-context twins, which is chunk 7.4's list). No new
-projection is warranted.**
+projection is warranted. The first module instance still recompiles `k` for
+its required phase-membership change; AC3.1 forbids recompiling `probe`.**
 
 **Phase 7.1 predicate.** `snapshot_arg::SnapshotArg::access` is the one
 statement of what `PREVIOUS`/`INIT` can read directly: a reference into one
@@ -1078,6 +1086,78 @@ read. That one costs nothing -- the equation is ill-typed with or without the
 `PREVIOUS` (`x = arr` refuses too, with a different message) and the refusal is
 loud -- and it closes the same way the other three do, by giving the decision
 the dimensions, which is what moving it to lowering does.
+
+**Phase 7.4 context-free parse.** `parse_source_variable(var, project)` is the
+only source parse query. Its project dependency is limited to source-language
+facts -- relevant dimensions, units, macros and the enclosing typed macro
+descriptor -- and never includes an owning-model variable set or an instance's
+input wiring. `ModuleIdentContext`, both model-context constructors, every
+contextual/empty twin parse and D2's equation pre-scan are absent. Generated
+LTM equations deliberately retain `ltm_model_var_names`: D3 needs the exact
+three-way distinction between a bare dimension element, a same-named model
+variable, and ordinary source parsing's conservative unknown until 7.5 moves
+that classification to lowering.
+
+The unavoidable D1 artifact slice lands here rather than pretending 7.4 can be
+artifact-neutral. A scalar stdlib-call auxiliary and qualified scalar or
+array-element output port no longer allocate a redundant capture; lowering
+reads their resolved slot. A bound module input no longer acquires a helper
+from instance-specific parse context and refuses loudly because
+`Expr::ModuleInput` has no snapshot slot. A bare explicit module also refuses
+loudly in direct and LTM lowering, closing the silent flattened-slot-zero read.
+Macro formal parameters remain captures because the project-keyed typed macro
+registry names them without model-local context. Full deferred classification,
+D3 generalisation and capture allocation for non-storage resolved shapes remain
+7.5.
+
+Qualified same-step initial dependencies propagate into the referenced child
+module's sparse initials program. A project-level fixed point starts from each
+production module key's actual model-local initials runlist, removes
+PREVIOUS-only paths through the shared dependency classification, follows
+explicit and generated module instances structurally, and preserves nested
+suffixes such as `m·n·out`. Requirements are unioned by the runtime compilation
+identity `(model, bound-port set)`: instances sharing a key share the required
+initial bytecode but retain private slots, while distinct `isModuleInput`
+branch keys remain separate. The per-key salsa projection extends only the
+initial runlist; the existing membership projections therefore compile the
+new initial fragments without changing VM/wasm `EvalModule` phase semantics.
+Production VM rows pin scalar, array element, nested, stock, active-initial,
+implicit-module, same-key-union, distinct-input-set and resolved-SCC values;
+the PREVIOUS-only and unrelated-output controls remain absent. The wasm row
+pins both parity and the absolute qualified-INIT value. A seed edit recompiles
+only the caller plus the two child variables whose initial membership changes.
+
+The fixed point reads accumulator-free dependency facts. It must inspect every
+project root because two roots can demand different outputs from the same
+runtime `(model, bound-port set)` key; attaching cycle emission to that shared
+walk leaks an unrelated draft model's diagnostic into each caller. The local
+facts therefore carry at most one unresolved-cycle attribution as ordinary
+memoized data, and `emit_model_dependency_cycle_diagnostic` is the sole
+per-model accumulator trigger. Assembly rejects through the same pure
+`has_cycle` fact. A production regression pins zero draft-cycle rows when
+collecting a valid `main`, exactly one attributed row in whole-project and CLI
+diagnostics, successful main simulation, and the same results after an
+unrelated revision. Its salsa execution probe observes one execution per graph
+key on the initial walk and no graph/SCC or cycle-emitter execution after the
+revision; only the eleven intentionally untracked `model_all_diagnostics`
+bodies rerun and replay the cached per-model emitter's accumulator row.
+The transitive-closure DFS sorts its cloned root identifiers before recursion;
+successors were already lexical `BTreeSet`s. This makes the first attribution
+canonical even with several disconnected cycles, pinned across every rotation
+of a seven-variable production declaration alphabet, 28 fresh databases and an
+unrelated revision in each. The artifact effect is diagnostic-only: a
+compilable graph's transitive maps and separately sorted runlists are unchanged,
+and an unresolved-cycle graph emits no bytecode; only the selected
+`Diagnostic.variable` is stabilized.
+
+AC3.1 is pinned through salsa's production execution events. Adding the first
+`SMTH1(k, 2)` to `k = 3; probe = k * 2` executes explicit fragments exactly
+`[delay_time, flow, initial_value, input, k, output, smoothed]`, its two new
+implicit helpers, and six distinct parses (`smoothed` plus the five first-use
+stdlib sources), while `probe` stays cached. The `k` execution is required by
+its new initial-phase membership. Adding a second instance executes and parses
+only `smoothed2` and compiles only its two new helpers; the first instance,
+`k`, `probe`, and the stdlib template remain cached.
 
 **Phase 1 semantic divergences.** Making the signature table the one statement
 of per-builtin facts changed how four edge shapes compile. None occurs in the
@@ -1185,12 +1265,10 @@ corpus (C-LEARN artifacts are identical, plain and LTM); it is pinned:
    its own dependency shapes like every other fragment. Pinned by
    `db::fragment_input_tests::smooth_argument_reading_a_module_output_compiles`
    with the values derived from the rules (the helper and the instance's input
-   are 60 on every step; the smooth rises 0, 30, 45). The 0 start is the
-   pre-existing cross-model initials boundary -- a stockless sub-model
-   evaluates nothing in the initials phase, so a parent stock (an explicit one
-   too) initialized from its output reads 0 -- pinned as a disclosed residual
-   by `stock_initialized_from_a_stockless_modules_output_is_a_pre_existing_residual`,
-   tracked as GH #1028, and independent of this phase.
+   are 60 on every step and the smooth starts and remains at 60). The child
+   output is part of the cross-model initial requirement fixed point described
+   under Phase 7.4, so the same t0 value is available to an explicit parent
+   stock initialized from that output.
 
 Every other path is byte-identical by construction and by measurement: each
 emitter is its constructor's `FragmentInput`, lowered and emitted
@@ -1531,6 +1609,7 @@ hash is not available to it.
 
 | phase | commit | cold compile Ir | slots | opcodes (flow / stock / init) | literals / GFs / temps / views | notes |
 |---|---|---:|---:|---|---|---|
+| 7.4 | `engine: parse source without model context` | 8.5872 G (median of 5; range 8.5869-8.5901), -1.60% against the saved 7.3b binary re-measured in the same session (8.7266 G, median of 5; range 8.7167-8.7307). An interleaved five-round wall-clock comparison measured the compile loop at -0.6%, inside that channel's noise floor | 5215 | 30694 / 1477 / 24795 | 1740 / 162 / 28 / 643 | C-LEARN adds 137 initial opcodes, 16 initial fragments and 8 literals against 7.3b, both plain (56,966 total opcodes, 1,190 initials) and under `CLEARN_LTM=1` (938,505 total, 1,960 initials, 16,749 literals); the correction seeds qualified child outputs that callers read during initialization. Flow/stock opcodes, slots, names, modules, temps, views, the complete post-fusion flow profile and every user-model series are unchanged. `parse_source_variable(var, project)` is the one source parse query; `ModuleIdentContext`, the model-context constructors, contextual/empty twin parses, D2's pre-parse equation probes and LTM's parallel module-ident set are absent. The AC3.1 first-instance probe executes explicit `[delay_time, flow, initial_value, input, k, output, smoothed]`, its two helpers and six distinct parses; `k` legitimately gains initial bytecode through the new module's initial closure and `probe` stays cached. A second SMTH1 executes/parses only `smoothed2` and its two new helpers. Production-derived D1 rows pin qualified scalar, array-element and nested ports by VM value; same-key unions within and across roots, distinct input sets, active-initial, stock, implicit-module and resolved-SCC rows pin the cross-model initial fixed point; wasm pins parity and an absolute value; and PREVIOUS-only plus unrelated child outputs remain absent. Bound module inputs and direct or LTM bare-module reads refuse both PREVIOUS and INIT loudly with attributed diagnostics instead of reading flattened slot zero. The fixed point consumes pure dependency facts: one per-model trigger emits at most one attributed cycle diagnostic, so a valid main neither inherits nor duplicates an unrelated draft's cycle. The execution probe runs all 11 initial graph keys once each; after an unrelated revision neither graph nor cycle-emitter body reruns, while the eleven `model_all_diagnostics` bodies replay the cached single draft row for whole-project and CLI collection. DFS roots and successors are both canonical, so the first attribution is stable across declaration rotations, fresh databases and revisions; this changes only `Diagnostic.variable` for an unresolved graph, never a compilable artifact. Macro formal parameters retain typed-registry-derived captures. D3's generated-LTM three-way shadowing stays pinned through `ltm_model_var_names`; general source classification remains 7.5. Validation: engine lib 5,699 passed / 2 ignored, integration 776 passed / 16 ignored (genuine-output, VM/wasm and LTM corpora included), VM allocation 4 passed, doctests 2 passed / 1 ignored, release C-LEARN LTM parity green, both determinism modules pass 12 consecutive invocations, and the qualified-INIT VM row is green through `run_initials`, reset, a second `run_initials` and the complete run; legacy-symbol and graph-accumulator zero-searches, all-target/all-feature clippy, rustfmt and `git diff --check` are green. The accumulator-ownership and DFS-root-order corrections do not alter bytecode-producing logic, seed sets or SCC verdicts, so the artifact and performance measurements were not repeated after those review-only fixes |
 | 7.3b | `engine: centralize macro call routing` | 8.7284 G (mean of 5, +/-0.02%), +0.04% against the saved 7.3a binary re-measured in the same session (8.7249 G, mean of 5, +/-0.03%), inside the channel's noise floor and not investigated | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical to 7.3a on C-LEARN, plain and under `CLEARN_LTM=1`: 56,829 total opcodes plain and 938,368 with LTM, including the complete top-25 histogram, post-fusion totals and fused-binop tables, 371 names and 7 modules; the release LTM run also preserves every user-model series. `MacroRegistry::resolve_call` is the one exhaustive decision read by expansion and recursion analysis, with explicit `Expand`, `Passthrough`, `RenamedBuiltinSelfCall` and `Unresolved` arms; both registered-macro outcomes retain a descriptor long enough for one visitor-boundary exact-arity check, while renamed self-calls deliberately use builtin arity; `ImplicitVar::variable_stage0` is the one typed conversion at all seven consumers, including both LTM sites. The production MDL/salsa parse row pins the helper order and exact typed shape for ordinary expansion, external INIT passthrough, the INIT macro body's renamed-intrinsic self-call and the DELAYN macro body's renamed-stdlib self-call. Production MDL `DELAY1` and XMILE `PREVIOUS` passthrough rows derive their one-argument contract from the imported descriptor, compile valid unary calls, and attribute builtin-acceptable binary calls to the caller as `BadBuiltinArgs`/`NotSimulatable`. The compile-stage text audit finds no implicit-module helper reparse; the intentional source/diagnostic and LTM-generator boundaries are recorded in the Phase 7.3b note. `ModuleIdentContext` remains wholly owned by 7.4. The arity correction changes only declared-invalid macro calls, so the valid-route artifact, release-LTM, and performance gates were not repeated. Validation: engine lib 5691 passed / 2 ignored, integration 776 passed / 16 ignored, VM allocation 4 passed, doctests 2 passed / 1 ignored; the focused macro, capture, implicit-module, four-constructor fragment-input and 14-test determinism suites are green; the ignored release `clearn_with_ltm_simulates_model_vars_identically` gate is green; clippy with all targets/features and rustfmt are green |
 | 7.3a | `engine: implicit modules carry parsed data` | 8.7253 G (median of 5; range 8.7159-8.7290), +0.33% against the base tree (the 7.2 chunk staged on `8b9ef311`) re-measured in the same session (8.6966 G, median of 5; range 8.6857-8.7009; interleaved pairs +0.456 / +0.372 / +0.484 / +0.173 / +0.223%). Each binary's spread is about 0.15-0.17%, so the delta is outside the channel's noise but below the one-percent threshold for investigation. A current-artifact verification measured 8.7213 G (mean of 5, +/-0.02%). `size_of::<ImplicitVar>()` remains 144 bytes because `Capture` is still the largest variant; a later performance pass owns the residual | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | C-LEARN artifacts remain identical, plain and under `CLEARN_LTM=1`: 56,829 total opcodes plain and 938,368 with LTM, including the full histograms, post-fusion tables, 371 names, and 7 modules. A call is a typed `capture::ImplicitModule` plus one `capture::HoistedArg` per non-identifier argument; the old `ImplicitVar::Synthesized` text carrier is absent. `ImplicitModule` derives its ident and port destinations from logical callsite inputs `(parent, id, call_name, suffix)` plus source-to-port wiring, while current resolution remains name-keyed through `ImplicitVarMeta::{name,index_hint}`. Production-derived stdlib and macro tests require exact nonzero-span `Expr0` subtree identity. The complete ordered 3x3 `ImplicitVar` pair matrix pins same-arm dedup and all six loud cross-arm collisions; a production ACTIVE INITIAL fixture pins the reachable hoisted-argument/capture collision through parsing, diagnostic collection, and compile refusal. Within one visitor, `insert_implicit_var` is the only map mutation and refuses conflicting definitions before `IndexMap` can replace the first; the production `ARG1(k, k * 2)` macro regression pins the module/second-argument collision through diagnostic collection and compile refusal. `expand_module_function` serves stdlib and macro calls, so 7.3b retains only macro passthrough and GH #554. `print_eqn` is absent from `builtins_visitor.rs`; `make_temp_arg` is absent from `src/simlin-engine/src`; `substitute_dimension_refs` remains the AST-to-AST pre-hoist source-semantics rewrite documented above. The base/working-tree differential sweep over all 509 models found 396 byte-identical and 110 identically refused; the three nondeterministic models (`arrays_cname`, `arrays_varname`, `subscript_transposition`) produced the same two-output set on both binaries across 12 resamples, so no model moved. Current validation: engine lib 5688 passed / 2 ignored, integration 776 passed / 16 ignored, VM allocation 4 passed, doctests 2 passed / 1 ignored; focused implicit-module, capture, macro, fragment-determinism, and stage suites are green; clippy with all targets/features and rustfmt are green |
 | baseline | `867f2e63` | 10.788 G (median of 9; range 10.778-10.791) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | retired instructions, `perf stat -e instructions` (user space, whole process: parse, one measured compile, five `CLEARN_COMPILE_ITERS` compiles, one VM run), `CLEARN_PROFILE=compile`; release `opt-level=3` + LTO, mimalloc; 371 names, 7 modules; 1174 initials |

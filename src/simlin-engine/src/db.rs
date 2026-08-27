@@ -80,16 +80,16 @@ pub use diagnostic::{
 mod input;
 pub(crate) use input::source_var_is_table_only;
 pub use input::{
-    LtmLinkId, ModuleIdentContext, ModuleInputSet, PinnedLoopSpec, SourceModel, SourceProject,
-    SourceVariable, SourceVariableKind, variable_source,
+    LtmLinkId, ModuleInputSet, PinnedLoopSpec, SourceModel, SourceProject, SourceVariable,
+    SourceVariableKind, variable_source,
 };
 
 mod query;
 pub use query::{
     ImplicitVarMeta, ModuleReferenceGraph, ParsedVariableResult, UnitsContextResult, VariableDeps,
-    model_implicit_var_info, model_module_ident_context, parse_source_variable_with_module_context,
-    project_converted_dimensions, project_datamodel_dims, project_dimensions_context,
-    project_module_graph, project_units_context, project_units_context_result, variable_dimensions,
+    model_implicit_var_info, parse_source_variable, project_converted_dimensions,
+    project_datamodel_dims, project_dimensions_context, project_module_graph,
+    project_units_context, project_units_context_result, variable_dimensions,
     variable_direct_dependencies, variable_relevant_dimensions, variable_size,
 };
 pub(crate) use query::{
@@ -611,7 +611,6 @@ pub fn model_module_output_ports(
     project: SourceProject,
 ) -> HashMap<String, Vec<String>> {
     let middot = '\u{00B7}';
-    let empty_ctx = ModuleIdentContext::new(db, vec![]);
     let empty_inputs = ModuleInputSet::empty(db);
     let mut ports: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
     let record = |dep: &str, ports: &mut HashMap<String, std::collections::BTreeSet<String>>| {
@@ -627,7 +626,7 @@ pub fn model_module_output_ports(
         }
     };
     for source_var in model.variables(db).values() {
-        let deps = variable_direct_dependencies(db, *source_var, project, empty_ctx, empty_inputs);
+        let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
         for dep in deps.dt_deps.iter().chain(deps.initial_deps.iter()) {
             record(dep, &mut ports);
         }

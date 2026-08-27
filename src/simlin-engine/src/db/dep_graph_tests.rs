@@ -1243,16 +1243,11 @@ fn init_recurrence_behind_stock_model_dep_graph_resolves_no_circular() {
             .collect::<BTreeSet<_>>()
     );
 
-    // No CircularDependency diagnostic was accumulated.
-    let diags = crate::db::model_dependency_graph::accumulated::<crate::db::CompilationDiagnostic>(
-        &db,
-        model,
-        result.project,
-        crate::db::ModuleInputSet::empty(&db),
-    );
+    // The model's reporting trigger must agree with the pure graph verdict.
+    let diags = crate::db::collect_model_diagnostics(&db, model, result.project);
     assert!(
         !diags.iter().any(|d| matches!(
-            d.0.error,
+            d.error,
             crate::db::DiagnosticError::Model(crate::common::Error {
                 code: crate::common::ErrorCode::CircularDependency,
                 ..
@@ -2147,9 +2142,10 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
     // `var_phase_symbolic_fragment_prod` -> `?`-None ->
     // `symbolic_phase_element_order` None -> `refine_scc_to_element_verdict`
     // Unresolved -> `resolve_recurrence_sccs` has_unresolved ->
-    // `model_dependency_graph_impl` keeps `has_cycle` + accumulates
-    // `CircularDependency`, resolved_sccs stays empty (the other members,
-    // if any, are NOT partially resolved).
+    // `model_dependency_graph_impl` keeps `has_cycle` plus one cycle
+    // attribution fact, resolved_sccs stays empty (the other members, if any,
+    // are NOT partially resolved). The per-model reporting trigger below owns
+    // the corresponding `CircularDependency` diagnostic.
     let db = SimlinDb::default();
     let result = sync_from_datamodel(&db, &dm);
     let model = result.models["main"].source;
@@ -2180,20 +2176,22 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
 
     // The fallback must surface the loud `CircularDependency` diagnostic
     // (the model is rejected, not silently miscompiled).
-    let diags = crate::db::model_dependency_graph::accumulated::<crate::db::CompilationDiagnostic>(
-        &db,
-        model,
-        result.project,
-        crate::db::ModuleInputSet::empty(&db),
-    );
-    assert!(
-        diags.iter().any(|d| matches!(
-            &d.0.error,
-            crate::db::DiagnosticError::Model(e)
-                if e.code == crate::common::ErrorCode::CircularDependency
-        )),
-        "the loud-safe fallback must accumulate a CircularDependency \
-         diagnostic (model rejected, not silently miscompiled)"
+    let diags = crate::db::collect_model_diagnostics(&db, model, result.project);
+    let circular: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            matches!(
+                &d.error,
+                crate::db::DiagnosticError::Model(e)
+                    if e.code == crate::common::ErrorCode::CircularDependency
+            )
+        })
+        .collect();
+    assert_eq!(
+        circular.len(),
+        1,
+        "the loud-safe fallback must report one CircularDependency diagnostic \
+         (model rejected, not silently miscompiled): {diags:?}"
     );
 
     // And the focused-accessor contract: the forced-unsourceable member

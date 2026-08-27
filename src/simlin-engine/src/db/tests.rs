@@ -6,26 +6,18 @@ use super::*;
 use crate::datamodel;
 use salsa::plumbing::AsId;
 
-/// Parse with an empty module-ident context (test convenience).
+/// Parse one source variable (test convenience).
 fn parse_var_no_module_ctx(
     db: &dyn Db,
     var: SourceVariable,
     project: SourceProject,
 ) -> &ParsedVariableResult {
-    parse_source_variable_with_module_context(db, var, project, ModuleIdentContext::new(db, vec![]))
+    parse_source_variable(db, var, project)
 }
 
-/// Direct dependencies with an empty module-ident context and no module
-/// inputs -- the default (input-agnostic) path the old no-arg
-/// `variable_direct_dependencies` took. A test convenience.
+/// Direct dependencies with no module inputs (test convenience).
 fn deps_no_inputs(db: &dyn Db, var: SourceVariable, project: SourceProject) -> &VariableDeps {
-    variable_direct_dependencies(
-        db,
-        var,
-        project,
-        ModuleIdentContext::new(db, vec![]),
-        ModuleInputSet::empty(db),
-    )
+    variable_direct_dependencies(db, var, project, ModuleInputSet::empty(db))
 }
 
 pub(crate) fn simple_project() -> datamodel::Project {
@@ -1110,7 +1102,7 @@ fn test_model_dependency_graph_stock_breaks_chain() {
 }
 
 #[test]
-fn test_model_dependency_graph_circular_emits_diagnostic() {
+fn test_model_dependency_cycle_reporting_trigger_emits_once() {
     let db = SimlinDb::default();
     let project = datamodel::Project {
         name: "test".to_string(),
@@ -1159,25 +1151,23 @@ fn test_model_dependency_graph_circular_emits_diagnostic() {
         ModuleInputSet::empty(&db),
     );
 
-    // Collect diagnostics emitted by model_dependency_graph
-    let diags = model_dependency_graph::accumulated::<CompilationDiagnostic>(
-        &db,
-        result.models["main"].source,
-        result.project,
-        ModuleInputSet::empty(&db),
-    );
-    let has_circular = diags.iter().any(|d| {
-        matches!(
-            d.0.error,
-            DiagnosticError::Model(crate::common::Error {
-                code: crate::common::ErrorCode::CircularDependency,
-                ..
-            })
-        )
-    });
-    assert!(
-        has_circular,
-        "circular dependency between a and b should emit a diagnostic"
+    let diags = collect_model_diagnostics(&db, result.models["main"].source, result.project);
+    let circular: Vec<_> = diags
+        .iter()
+        .filter(|diagnostic| {
+            matches!(
+                diagnostic.error,
+                DiagnosticError::Model(crate::common::Error {
+                    code: crate::common::ErrorCode::CircularDependency,
+                    ..
+                })
+            )
+        })
+        .collect();
+    assert_eq!(
+        circular.len(),
+        1,
+        "a model's reporting trigger must emit its circular dependency once: {diags:?}"
     );
 }
 

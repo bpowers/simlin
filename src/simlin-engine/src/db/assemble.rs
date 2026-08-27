@@ -159,6 +159,68 @@ pub(crate) fn module_input_set<S1: AsRef<str>, S2: AsRef<str>>(
     .collect()
 }
 
+/// The compilation identity of one module instance declared in `model`.
+///
+/// The target model and its bound-port set are the two facts needed both by
+/// production instance enumeration and by cross-model initial dependency
+/// propagation. The latter resolves a qualified path one module boundary at a
+/// time, so it must derive this identity from the same source/module-helper
+/// records assembly consumes rather than reconstructing it from a dependency
+/// string.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ModuleInstanceTarget {
+    pub(crate) model_name: Ident<Canonical>,
+    pub(crate) inputs: BTreeSet<Ident<Canonical>>,
+}
+
+/// Resolve `instance` through the production explicit and generated-helper
+/// module registries for `model`. These are the only registries represented in
+/// the ordinary dependency graph whose qualified initial paths call this
+/// helper; LTM synthetic variables are compiled outside that runlist.
+pub(crate) fn module_instance_target(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    instance: &str,
+) -> Option<ModuleInstanceTarget> {
+    let canonical = canonicalize(instance);
+    if let Some(source_var) = model.variables(db).get(canonical.as_ref())
+        && source_var.kind(db) == SourceVariableKind::Module
+    {
+        return Some(ModuleInstanceTarget {
+            model_name: Ident::new(source_var.model_name(db)),
+            inputs: module_input_set(
+                &module_input_prefix(canonical.as_ref()),
+                source_var
+                    .module_refs(db)
+                    .iter()
+                    .map(|reference| (&reference.src, &reference.dst)),
+            ),
+        });
+    }
+
+    if let Some(meta) = model_implicit_var_info(db, model, project).get(canonical.as_ref())
+        && meta.is_module
+    {
+        let parsed = parse_source_variable(db, meta.parent_source_var, project);
+        let module = meta
+            .find_in(parsed)
+            .and_then(|implicit| implicit.module())?;
+        return Some(ModuleInstanceTarget {
+            model_name: Ident::new(module.model_name()),
+            inputs: module_input_set(
+                &module_input_prefix(canonical.as_ref()),
+                module
+                    .references()
+                    .iter()
+                    .map(|reference| (&reference.src, &reference.dst)),
+            ),
+        });
+    }
+
+    None
+}
+
 /// Pre-computed invariance data for the flow phase, stored on
 /// `VarFragmentResult` so `model_flows_invariant` can run its topological
 /// fixpoint pass without re-lowering the fragment (the compile-time
@@ -533,8 +595,9 @@ pub(crate) fn compile_phase_to_per_var_bytecodes_reporting(
 /// `None` (its `?` on this call), so `refine_scc_to_element_verdict`
 /// yields `SccVerdict::Unresolved`, `resolve_recurrence_sccs` sets
 /// `has_unresolved`, and `model_dependency_graph_impl` keeps `has_cycle`
-/// and accumulates the `CircularDependency` diagnostic
-/// (`dt_scc_map`/`init_scc_map` stays empty, `resolved_sccs` stays empty).
+/// and records the variable that the per-model reporting trigger attributes in
+/// its one `CircularDependency` diagnostic (`dt_scc_map`/`init_scc_map` stays
+/// empty, `resolved_sccs` stays empty).
 /// The model is rejected loudly -- no panic, no silent miscompile, and the
 /// other SCC members are **not** partially resolved (the SCC is rejected
 /// as a unit). This contract is regression-pinned by
@@ -1616,7 +1679,7 @@ pub fn assemble_simulation(
     )))
 }
 
-type ModuleInstanceMap = HashMap<Ident<Canonical>, BTreeSet<BTreeSet<Ident<Canonical>>>>;
+pub(crate) type ModuleInstanceMap = HashMap<Ident<Canonical>, BTreeSet<BTreeSet<Ident<Canonical>>>>;
 
 /// The input sets one model is instantiated with, as PRODUCTION enumerates
 /// them (`#[cfg(test)]` accessor only, mirroring `db::dep_graph`'s
@@ -1646,7 +1709,7 @@ pub(crate) fn module_input_sets_for(
 /// Enumerate all module instances in a project, starting from the main model.
 /// Returns a map from model name to the set of distinct input sets that model
 /// is instantiated with.
-fn enumerate_module_instances(
+pub(crate) fn enumerate_module_instances(
     db: &dyn Db,
     project: SourceProject,
     main_model_name: &str,
@@ -1661,8 +1724,25 @@ fn enumerate_module_instances(
     let no_inputs = BTreeSet::new();
     modules.insert(main_ident, [no_inputs].into_iter().collect());
 
-    enumerate_module_instances_inner(db, project, main_model_name, &mut modules)?;
+    enumerate_module_instances_inner(db, project, main_model_name, &mut modules, true)?;
 
+    Ok(modules)
+}
+
+/// Enumerate the module keys reachable through explicit and ordinary
+/// generated variables, excluding LTM-only helpers. The ordinary dependency
+/// graph contains exactly this universe; keeping LTM discovery out also keeps
+/// its warning accumulator owned by LTM assembly rather than replayed through
+/// a dependency-query edge.
+pub(crate) fn enumerate_initial_dependency_module_instances(
+    db: &dyn Db,
+    project: SourceProject,
+    main_model_name: &str,
+) -> Result<ModuleInstanceMap, String> {
+    let main_ident = Ident::<Canonical>::new(main_model_name);
+    let mut modules: ModuleInstanceMap = HashMap::new();
+    modules.insert(main_ident, [BTreeSet::new()].into_iter().collect());
+    enumerate_module_instances_inner(db, project, main_model_name, &mut modules, false)?;
     Ok(modules)
 }
 
@@ -1671,6 +1751,7 @@ fn enumerate_module_instances_inner(
     project: SourceProject,
     model_name: &str,
     modules: &mut ModuleInstanceMap,
+    include_ltm: bool,
 ) -> Result<(), String> {
     use crate::common::{Canonical, Ident};
 
@@ -1710,7 +1791,7 @@ fn enumerate_module_instances_inner(
         modules.entry(key).or_default().insert(inputs);
 
         if is_new {
-            enumerate_module_instances_inner(db, project, sub_model_name, modules)?;
+            enumerate_module_instances_inner(db, project, sub_model_name, modules, include_ltm)?;
         }
     }
 
@@ -1731,13 +1812,7 @@ fn enumerate_module_instances_inner(
                 name, sub_model_name,
             ));
         }
-        let module_ident_context = model_module_ident_context(db, *source_model, project, vec![]);
-        let parsed = parse_source_variable_with_module_context(
-            db,
-            meta.parent_source_var,
-            project,
-            module_ident_context,
-        );
+        let parsed = parse_source_variable(db, meta.parent_source_var, project);
         let inputs: BTreeSet<Ident<Canonical>> =
             if let Some(dm_module) = meta.find_in(parsed).and_then(|iv| iv.module()) {
                 module_input_set(
@@ -1754,7 +1829,7 @@ fn enumerate_module_instances_inner(
         modules.entry(key).or_default().insert(inputs);
 
         if is_new {
-            enumerate_module_instances_inner(db, project, sub_model_name, modules)?;
+            enumerate_module_instances_inner(db, project, sub_model_name, modules, include_ltm)?;
         }
     }
 
@@ -1767,7 +1842,7 @@ fn enumerate_module_instances_inner(
     // never contain module-function calls, so there are usually none). Drive
     // the loop from the salsa-cached module-typed projection; each implicit
     // variable rides on its meta, so no parent equation is (re-)parsed here.
-    if project.ltm_enabled(db) {
+    if include_ltm && project.ltm_enabled(db) {
         let ltm_implicit = ltm::model_ltm_implicit_var_info(db, *source_model, project);
         let mut module_typed: Vec<(&String, &crate::db::LtmImplicitVarMeta)> = ltm_implicit
             .iter()
@@ -1804,7 +1879,13 @@ fn enumerate_module_instances_inner(
                 modules.entry(key).or_default().insert(inputs);
 
                 if is_new {
-                    enumerate_module_instances_inner(db, project, sub_model_name, modules)?;
+                    enumerate_module_instances_inner(
+                        db,
+                        project,
+                        sub_model_name,
+                        modules,
+                        include_ltm,
+                    )?;
                 }
             }
         }

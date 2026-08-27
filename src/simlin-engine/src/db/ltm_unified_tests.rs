@@ -180,6 +180,99 @@ fn module_output_bare_in_reducer_recurses() {
     );
 }
 
+/// Generated LTM equations freeze a qualified module output with `PREVIOUS`.
+/// This value gate follows the synthesized equation through assembly and the
+/// VM: the module block's first slot is deliberately 777 while the live output
+/// changes with the stock, so reading flattened slot zero would produce a
+/// visibly different link score.
+#[test]
+fn generated_ltm_qualified_module_output_snapshot_reads_its_port() {
+    use salsa::Setter;
+
+    let input = datamodel::Variable::Aux(datamodel::Aux {
+        ident: "input".to_string(),
+        equation: datamodel::Equation::Scalar("0".to_string()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat {
+            can_be_module_input: true,
+            ..datamodel::Compat::default()
+        },
+    });
+    let project = datamodel::Project {
+        name: "ltm_qualified_output_values".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 3.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            x_model(
+                "main",
+                vec![
+                    x_stock("level", "10", &["growth"], &[], None),
+                    x_aux("combined", "producer.z_output", None),
+                    x_flow("growth", "combined / 10", None),
+                    x_module("producer", &[("level", "producer.input")], None),
+                ],
+            ),
+            x_model(
+                "producer",
+                vec![
+                    x_aux("a_padding", "777", None),
+                    input,
+                    x_aux("z_output", "input * 2", None),
+                ],
+            ),
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    sync.project.set_ltm_enabled(&mut db).to(true);
+    let model = sync.models["main"].source;
+    let ltm = model_ltm_variables(&db, model, sync.project);
+    let score = ltm
+        .vars
+        .iter()
+        .find(|var| var.name.contains("producer\u{2192}combined"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the module-to-aux link score must be generated; got {:?}",
+                ltm.vars.iter().map(|var| &var.name).collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        score
+            .equation
+            .source_text()
+            .contains("PREVIOUS(\"producer\u{b7}z_output\")"),
+        "the generated score must freeze the qualified port, got {}",
+        score.equation.source_text()
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("the generated qualified-output score must compile");
+    let score_offset = compiled
+        .get_offset(&crate::common::Ident::new(&score.name))
+        .expect("the generated link score must have a result slot");
+    let mut vm = crate::vm::Vm::new(compiled).expect("the LTM model must build a VM");
+    vm.run_to_end().expect("the LTM model must simulate");
+    let results = vm.into_results();
+    let actual: Vec<f64> = results.iter().map(|row| row[score_offset]).collect();
+    assert_eq!(actual, [0.0, 1.0, 1.0, 1.0]);
+}
+
 #[test]
 fn test_model_ltm_variables_passthrough_module() {
     let db = SimlinDb::default();

@@ -107,14 +107,6 @@ const ROWS: &[CaptureRow] = &[
         rewritten: None,
     },
     CaptureRow {
-        covers: "a module-backed base: a stdlib-call aux is captured by NAME, because the \
-                 call is rewritten inside that aux's own parse, not inside this one",
-        parent: Parent::Scalar,
-        equation: "PREVIOUS(smoothed, 0)",
-        captures: &[("$⁚lagged⁚0⁚arg0", CaptureKind::Previous, "smoothed", &[])],
-        rewritten: None,
-    },
-    CaptureRow {
         covers: "two captures in one equation: the walk counter is shared and increments once \
                  per capture, so the second is `1`",
         parent: Parent::Scalar,
@@ -248,15 +240,12 @@ fn model_for(row: &CaptureRow) -> (TestProject, &'static str) {
 
 /// The captures one variable's production parse synthesized, in walk order.
 ///
-/// Read through `parse_source_variable_with_module_context` under the model's
-/// own module-ident context -- the same call, with the same context, that
-/// `model_implicit_var_info` makes -- so these are the captures the compile
-/// sees, not a re-derivation.
+/// Read through the production per-variable parse, so these are the captures
+/// the compiler sees rather than a re-derivation.
 fn captures_of(db: &SimlinDb, sync: &SyncResult, model_name: &str, var: &str) -> Vec<Capture> {
     let model = sync.models[model_name].source;
     let source_var = model.variables(db)[var];
-    let ctx = model_module_ident_context(db, model, sync.project, vec![]);
-    parse_source_variable_with_module_context(db, source_var, sync.project, ctx)
+    parse_source_variable(db, source_var, sync.project)
         .implicit_vars
         .iter()
         .filter_map(ImplicitVar::capture)
@@ -796,15 +785,13 @@ SAVEPER  = TIME STEP
         .map(|(_, m)| m.source)
         .expect("the macro model must sync");
 
-    let ctx = model_module_ident_context(&db, macro_model, sync.project, vec![]);
     let body_var = macro_model.variables(&db)["lagsum"];
-    let captures: Vec<Capture> =
-        parse_source_variable_with_module_context(&db, body_var, sync.project, ctx)
-            .implicit_vars
-            .iter()
-            .filter_map(ImplicitVar::capture)
-            .cloned()
-            .collect();
+    let captures: Vec<Capture> = parse_source_variable(&db, body_var, sync.project)
+        .implicit_vars
+        .iter()
+        .filter_map(ImplicitVar::capture)
+        .cloned()
+        .collect();
 
     assert_eq!(
         captures

@@ -636,7 +636,6 @@ fn test_init_feedback_does_not_create_dt_cycle() {
         &db,
         a_var,
         sync.project,
-        crate::db::ModuleIdentContext::new(&db, vec![]),
         ModuleInputSet::empty(&db),
     );
     let model = sync.models["main"].source;

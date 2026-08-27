@@ -3,25 +3,26 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 //! The one statement of what `PREVIOUS`/`INIT` can read directly out of the
-//! snapshot regions, and therefore of when the parse must synthesize a capture
-//! helper instead.
+//! snapshot regions.
 //!
-//! Two stages ask the same question about the same call and must never answer
-//! it differently:
+//! Two stages apply the same addressability rule to the facts available in
+//! their own representation:
 //!
-//! * the parse (`builtins_visitor`), over the source `Expr0` argument, decides
-//!   whether to leave the argument in place or replace it with a reference to a
-//!   synthesized `$⁚{parent}⁚{n}⁚arg0` capture helper;
+//! * the context-free source parse (`builtins_visitor`), over `Expr0`, captures
+//!   computed expressions, dynamic indices, modules synthesized in that walk,
+//!   and typed macro formal parameters;
 //! * codegen (`compiler::codegen::static_slot` and
 //!   `Compiler::snapshot_static_view`), over the lowered `Expr` argument,
 //!   decides whether to emit a direct `LoadPrev`/`LoadInitial` against a fixed
 //!   slot, a static view over the snapshot region, or a loud refusal.
 //!
-//! When those two drift, the dependency graph and the bytecode disagree about
-//! what a variable reads -- the GH #568 failure class. Both call
-//! [`SnapshotArg::access`], so the rule exists once; each stage only classifies
-//! its own representation into [`SnapshotArg`], which is the part that cannot
-//! be shared because the two representations are different languages.
+//! Both call [`SnapshotArg::access`], so the storage rule exists once. Each
+//! stage still classifies its own representation because only lowering knows
+//! resolved dependency shapes. A source reference that later resolves to a
+//! bound module input therefore remains uncaptured at parse time and refuses
+//! loudly at lowering; making the parse depend on model instance wiring would
+//! destroy per-variable cache identity. Ordinary variables and qualified
+//! module output ports resolve to slots in lowering.
 //!
 //! What this module does NOT decide: whether an addressable reference is
 //! *admissible* in the position it appears. Codegen keeps three refusals of
@@ -58,9 +59,8 @@ pub(crate) enum SnapshotIndex {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SnapshotArg {
     /// The argument is a reference to one variable's stored values. False for
-    /// a computed expression, a temp, and a module-backed name (a module
-    /// instance occupies a slot range whose sub-variable a fixed offset cannot
-    /// name).
+    /// a computed expression, a temp, and a resolved module input or bare
+    /// module instance.
     base_names_storage: bool,
     /// At least one subscript index is read at run time.
     any_index_dynamic: bool,
@@ -120,9 +120,10 @@ impl SnapshotArg {
     /// variable's storage whose every index resolves before the run is
     /// addressable: a [`SnapshotAccess::Slot`] when the indices pin one
     /// element, a [`SnapshotAccess::View`] when at least one dimension is left
-    /// standing. Everything else is a [`SnapshotAccess::Capture`] -- the parse
-    /// must hoist it into a capture helper, and codegen must refuse a direct
-    /// read of it rather than address the wrong storage.
+    /// standing. Everything else is a [`SnapshotAccess::Capture`]. Source
+    /// parsing hoists such syntax when it can identify it context-free;
+    /// lowering refuses any unresolved non-storage shape rather than address
+    /// the wrong slot.
     pub(crate) fn access(self) -> SnapshotAccess {
         if !self.base_names_storage || self.any_index_dynamic {
             SnapshotAccess::Capture
@@ -144,9 +145,9 @@ pub(crate) enum SnapshotAccess {
     /// A static view over the snapshot region, with at least one dimension
     /// standing (`Compiler::snapshot_static_view`).
     View,
-    /// Nothing addressable. The parse synthesizes a capture helper, whose own
-    /// slot is then a `Slot` for the rewritten call; codegen refuses a direct
-    /// read.
+    /// Nothing addressable. Context-free source syntax may be rewritten to a
+    /// capture helper, whose own slot is then a `Slot`; otherwise lowering
+    /// refuses the direct read.
     Capture,
 }
 

@@ -17,10 +17,9 @@ use crate::common::{Canonical, Ident};
 use crate::ltm::strip_subscript;
 
 use crate::db::{
-    Db, LoopCircuitsResult, ModuleIdentContext, ModuleInputSet, SourceModel, SourceProject,
-    SourceVariable, SourceVariableKind, TieredCircuitsResult, model_causal_edges,
-    model_module_ident_context, parse_source_variable_with_module_context, variable_dimensions,
-    variable_direct_dependencies,
+    Db, LoopCircuitsResult, ModuleInputSet, SourceModel, SourceProject, SourceVariable,
+    SourceVariableKind, TieredCircuitsResult, model_causal_edges, parse_source_variable,
+    variable_dimensions, variable_direct_dependencies,
 };
 
 /// Find the output ports for a model by scanning other models' variable
@@ -45,9 +44,6 @@ pub(super) fn find_model_output_ports(
     let model_name = model.name(db);
     let project_models = project.models(db);
     let middot = '\u{00B7}';
-    // The old no-arg `variable_direct_dependencies` used a literally-empty
-    // module-ident context and the `None`-inputs path; reproduce that exactly.
-    let empty_ctx = ModuleIdentContext::new(db, vec![]);
     let empty_inputs = ModuleInputSet::empty(db);
     let mut output_ports: HashSet<Ident<Canonical>> = HashSet::new();
 
@@ -71,10 +67,8 @@ pub(super) fn find_model_output_ports(
 
         // Scan dependencies for module·internal_var references
         let other_vars = other_model.variables(db);
-        let module_ctx = model_module_ident_context(db, *other_model, project, vec![]);
         for source_var in other_vars.values() {
-            let deps =
-                variable_direct_dependencies(db, *source_var, project, empty_ctx, empty_inputs);
+            let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
             for dep in &deps.dt_deps {
                 if let Some(dot_pos) = dep.find(middot) {
                     let module_part = &dep[..dot_pos];
@@ -87,14 +81,12 @@ pub(super) fn find_model_output_ports(
 
             // Also check implicit variable deps (SMOOTH/DELAY expansion
             // creates helper auxes whose deps may reference module outputs)
-            let parsed =
-                parse_source_variable_with_module_context(db, *source_var, project, module_ctx);
+            let parsed = parse_source_variable(db, *source_var, project);
             for implicit_dm_var in &parsed.implicit_vars {
                 if implicit_dm_var.is_module() {
                     continue;
                 }
-                let deps =
-                    variable_direct_dependencies(db, *source_var, project, empty_ctx, empty_inputs);
+                let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
                 for iv_dep in &deps.implicit_vars {
                     for dep in &iv_dep.dt_deps {
                         if let Some(dot_pos) = dep.find(middot) {
