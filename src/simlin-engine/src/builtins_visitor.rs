@@ -19,7 +19,7 @@ use crate::datamodel;
 use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
 use crate::eqn_err;
 use crate::module_functions::{
-    MacroRegistry, ModuleFunctionDescriptor, is_renamed_builtin_macro_collision, stdlib_descriptor,
+    MacroCallResolution, MacroRegistry, ModuleFunctionDescriptor, stdlib_descriptor,
 };
 use crate::snapshot_arg::{SnapshotAccess, SnapshotArg, SnapshotIndex};
 
@@ -347,11 +347,10 @@ pub struct BuiltinVisitor<'a> {
     /// `INITIAL -> INIT` / `SAMPLE IF TRUE -> PREVIOUS` / `DELAY N -> DELAYN`
     /// / `SMOOTH N -> SMTHN` rename makes such a body literally read
     /// `init = init(x)` or `delayn = delayn(...)`; without this exception the
-    /// macro-shadows-everything precedence (`resolve_macro` below) would
-    /// re-resolve the call to the macro forever (a salsa module-map cycle).
-    /// `module_functions`' `collect_called_macros` suppresses the matching
-    /// false recursion edge using the *same* predicate, so the two halves
-    /// agree by construction.
+    /// macro-shadows-everything precedence would re-resolve the call to the
+    /// macro forever (a salsa module-map cycle). `MacroRegistry::resolve_call`
+    /// owns that exception and is read by both this visitor and recursion
+    /// analysis.
     enclosing_model: Option<&'a str>,
     /// `true` only when this visitor is walking ONE slot's equation of a
     /// per-element (`Ast::Arrayed`) variable -- distinct slots have DISTINCT
@@ -465,25 +464,6 @@ impl<'a> BuiltinVisitor<'a> {
     fn with_per_element_equation(mut self, per_element_equation: bool) -> Self {
         self.per_element_equation = per_element_equation;
         self
-    }
-
-    /// #554 (+ follow-up): is `func` (a raw call name) the enclosing macro's
-    /// own same-canonical-name renamed builtin -- i.e. the MDL importer's
-    /// renamed `INITIAL`/`SAMPLE IF TRUE` (opcode-backed) or
-    /// `DELAY N`/`SMOOTH N`/... (stdlib-module-backed) builtin appearing
-    /// inside the like-named macro's body? Such a call must resolve to the
-    /// builtin (the opcode for `init`/`previous`, the distinct `stdlib⁚...`
-    /// module for `delayn`/...), NOT (recursively) to the macro. Shares
-    /// `is_renamed_builtin_macro_collision` with
-    /// `module_functions::collect_called_macros` so the recursion-edge
-    /// suppression and this expansion exception cannot drift apart.
-    fn is_enclosing_macro_renamed_builtin_self_call(&self, func: &str) -> bool {
-        let Some(enclosing) = self.enclosing_model else {
-            return false;
-        };
-        let call = canonicalize(func);
-        let enclosing = canonicalize(enclosing);
-        call == enclosing && is_renamed_builtin_macro_collision(call.as_ref())
     }
 
     /// Set the module identifiers for PREVIOUS routing.
@@ -1029,13 +1009,10 @@ impl<'a> BuiltinVisitor<'a> {
     /// Expand one module-function call into an [`ImplicitModule`] plus a
     /// [`HoistedArg`] for each computed argument, returning a reference to the
     /// module's primary output. The descriptor owns the target model, ordered
-    /// input ports, primary output, and macro-vs-stdlib arity rule.
-    ///
-    /// Arity: a project macro is strict -- `args.len()` must equal
-    /// `descriptor.parameter_ports.len()`, else `BadBuiltinArgs` over the
-    /// call's span. Stdlib functions keep their lenient behavior (a trailing
-    /// port like `SMTH1`'s `initial_value` may be unwired), so no arity
-    /// check is applied when `!descriptor.is_macro`.
+    /// input ports, and primary output. Registered-macro arity is validated at
+    /// the resolver boundary before this function so expanding and passthrough
+    /// macros share the same call contract; stdlib descriptors remain lenient
+    /// about unwired trailing ports.
     ///
     /// `func` is used only to derive the synthetic name; routing is entirely
     /// descriptor-driven.
@@ -1047,21 +1024,6 @@ impl<'a> BuiltinVisitor<'a> {
         loc: crate::builtins::Loc,
     ) -> Result<Expr0, EquationError> {
         use Expr0::*;
-
-        if descriptor.is_macro && args.len() != descriptor.parameter_ports.len() {
-            // Macro arity is strict; the span covers the whole call so the
-            // diagnostic identifies the macro in context (macros.AC5.1).
-            return eqn_err!(
-                BadBuiltinArgs,
-                loc.start,
-                loc.end,
-                format!(
-                    "macro {func} takes exactly {} argument(s), but {} were given",
-                    descriptor.parameter_ports.len(),
-                    args.len()
-                )
-            );
-        }
 
         let subscript_suffix = self.subscript_suffix();
         let suffix = (!subscript_suffix.is_empty()).then(|| subscript_suffix.clone());
@@ -1127,6 +1089,36 @@ impl<'a> BuiltinVisitor<'a> {
         Ok(Var(RawIdent::new_from_str(&module_output_name), loc))
     }
 
+    /// Enforce the declared call contract for every registered macro route.
+    ///
+    /// A passthrough macro deliberately uses builtin lowering after this
+    /// check, but it still has strict macro arity at external callsites. A
+    /// renamed-builtin self-call is not passed here because it denotes the
+    /// builtin inside the macro body and therefore follows builtin arity.
+    fn validate_registered_macro_arity(
+        descriptor: &ModuleFunctionDescriptor,
+        func: &str,
+        arg_count: usize,
+        loc: crate::builtins::Loc,
+    ) -> Result<(), EquationError> {
+        debug_assert!(descriptor.is_macro);
+        if arg_count == descriptor.parameter_ports.len() {
+            return Ok(());
+        }
+
+        // The span covers the whole call so the diagnostic identifies the
+        // macro in context (macros.AC5.1).
+        eqn_err!(
+            BadBuiltinArgs,
+            loc.start,
+            loc.end,
+            format!(
+                "macro {func} takes exactly {} argument(s), but {arg_count} were given",
+                descriptor.parameter_ports.len()
+            )
+        )
+    }
+
     fn walk(&mut self, expr: Expr0) -> Result<Expr0, EquationError> {
         use Expr0::*;
         use std::mem;
@@ -1147,59 +1139,20 @@ impl<'a> BuiltinVisitor<'a> {
                 self.self_allowed = orig_self_allowed;
                 let args = args?;
 
-                // #554 (+ follow-up) exception to the macro-shadows-everything
-                // precedence below: when expanding a macro body, a call whose
-                // canonical name equals the *enclosing* macro's own canonical
-                // name AND is a Vensim-MDL-importer-renamed builtin --
-                // opcode-backed (`init`/`previous`) or stdlib-module-backed
-                // (`delayn`/`smthn`/...) -- is the importer's renamed builtin
-                // (`INITIAL` -> `INIT`, `SAMPLE IF TRUE` -> `PREVIOUS`,
-                // `DELAY N` -> `DELAYN`, `SMOOTH N` -> `SMTHN`), NOT a
-                // recursive macro call (Vensim macros cannot recurse; the
-                // source wrote the distinct builtin name). It must resolve to
-                // the builtin, so we skip `resolve_macro` and fall through:
-                // for `init`/`previous` to the PREVIOUS/INIT intrinsic routing
-                // (-> the LoadInitial/LoadPrev opcode), for `delayn`/... to
-                // `rewrite_alias_module_call` + `stdlib_descriptor` (-> a
-                // DISTINCT `stdlib⁚delay1`/... module whose fixed body never
-                // references the user macro). Without this an INVOKED
-                // such-macro would infinite-loop / form a salsa module-map
-                // cycle: the body's `init(x)` / `delayn(...)` would re-resolve
-                // to the macro forever. `module_functions::collect_called_macros`
-                // suppresses the mirror false recursion edge with the same
-                // shared predicate, so the registry build *and* this expansion
-                // stay consistent (#554 + follow-up).
-                let is_renamed_builtin_self_call =
-                    self.is_enclosing_macro_renamed_builtin_self_call(&func);
-
                 // Macro-shadows-everything precedence (Vensim's rule): a
                 // project macro is resolved here, BEFORE alias
                 // normalization / modulo / previous / init / is_builtin_fn
                 // / the stdlib lookup. A macro named `SSHAPE` or
                 // `RAMP FROM TO` therefore expands as the macro even though
-                // it parsed as `CallKind::Builtin`. `func` is the raw call
-                // name (resolve_macro canonicalizes internally).
+                // it parsed as `CallKind::Builtin`.
                 //
-                // The #554 self-call exception (`is_renamed_builtin_self_call`)
-                // suppresses resolution for a renamed-builtin call inside the
-                // like-named macro's own body, so it routes to the intrinsic
-                // rather than recursing into the macro.
-                let descriptor = if is_renamed_builtin_self_call {
-                    None
-                } else {
-                    self.macro_registry.resolve_macro(&func)
-                };
-
-                // #591-c1: a *genuine passthrough* macro
-                // (`:MACRO: INIT(x) = INITIAL(x)`, stored after the importer's
-                // INITIAL -> INIT rename as `init = init(x)`) is NOT expanded
-                // into a per-element synthetic module (which mis-orders /
-                // mis-propagates its value). Only a NON-passthrough resolved
-                // descriptor expands here; a passthrough descriptor leaves
-                // `func`/`args` untouched and falls through to the
-                // renamed-builtin intrinsic routing below -- exactly as the
-                // #554 self-call exception does inside a macro body, here
-                // generalized from the macro body to the call site.
+                // `resolve_call` owns the two exceptions to expansion. A
+                // genuine passthrough macro validates its declared arity and
+                // then falls through at an external callsite (#591-c1), while
+                // a same-named importer-renamed builtin falls through inside
+                // its enclosing macro (#554) under builtin arity.
+                // Recursion analysis calls the same resolver, so its graph
+                // cannot disagree with this visitor about which calls expand.
                 //
                 // The fall-through is sound because of the self-call invariant
                 // the classifier guarantees: `passthrough.is_some()` implies
@@ -1208,14 +1161,26 @@ impl<'a> BuiltinVisitor<'a> {
                 // (`classify_passthrough`). So `func` here canonicalizes to the
                 // opcode-backed builtin (e.g. `init`) and routes to the right
                 // intrinsic below -- `init` -> `LoadInitial`, with the existing
-                // `hoist_capture` hoisting for an expression argument
-                // (`init_needs_temp_arg`). The macro body did no work beyond the
-                // bare call, so collapsing to the opcode loses nothing.
-                if let Some(descriptor) = descriptor
-                    && descriptor.passthrough.is_none()
+                // `hoist_capture` hoisting for an expression argument. The
+                // macro body did no work beyond the bare call, so collapsing
+                // to the opcode loses nothing. A renamed stdlib-module self
+                // call instead reaches `rewrite_alias_module_call` and then
+                // creates a typed `ImplicitModule` through the ordinary stdlib
+                // expansion below.
+                match self
+                    .macro_registry
+                    .resolve_call(&func, self.enclosing_model)
                 {
-                    let descriptor = descriptor.clone();
-                    return self.expand_module_function(&descriptor, &func, args, loc);
+                    MacroCallResolution::Expand(descriptor) => {
+                        Self::validate_registered_macro_arity(descriptor, &func, args.len(), loc)?;
+                        let descriptor = descriptor.clone();
+                        return self.expand_module_function(&descriptor, &func, args, loc);
+                    }
+                    MacroCallResolution::Passthrough(descriptor) => {
+                        Self::validate_registered_macro_arity(descriptor, &func, args.len(), loc)?;
+                    }
+                    MacroCallResolution::RenamedBuiltinSelfCall
+                    | MacroCallResolution::Unresolved => {}
                 }
 
                 let (func, args) = rewrite_alias_module_call(func, args, loc)?;

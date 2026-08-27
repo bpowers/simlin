@@ -532,6 +532,19 @@ impl ImplicitVar {
         }
     }
 
+    /// Build the parse-stage variable represented by this typed helper.
+    ///
+    /// Every compile-stage consumer, including LTM, enters through this
+    /// exhaustive dispatch so adding a helper form cannot leave one consumer
+    /// reconstructing it through a different representation.
+    pub(crate) fn variable_stage0(&self, dimensions: &DimensionsContext) -> VariableStage0 {
+        match self {
+            ImplicitVar::Capture(capture) => capture.variable_stage0(dimensions),
+            ImplicitVar::HoistedArg(arg) => arg.variable_stage0(dimensions),
+            ImplicitVar::Module(module) => module.variable_stage0(),
+        }
+    }
+
     pub fn capture(&self) -> Option<&Capture> {
         match self {
             ImplicitVar::Capture(c) => Some(c),

@@ -444,13 +444,11 @@ impl ModelStage0 {
             .map(|v| parse_var(&ctx, v, &mut implicit_vars, |mi| Ok(Some(mi.clone()))))
             .collect();
 
-        variable_list.extend(implicit_vars.into_iter().map(|iv| match iv {
-            crate::capture::ImplicitVar::Capture(capture) => {
-                capture.variable_stage0(&dimensions_ctx)
-            }
-            crate::capture::ImplicitVar::HoistedArg(arg) => arg.variable_stage0(&dimensions_ctx),
-            crate::capture::ImplicitVar::Module(module) => module.variable_stage0(),
-        }));
+        variable_list.extend(
+            implicit_vars
+                .into_iter()
+                .map(|iv| iv.variable_stage0(&dimensions_ctx)),
+        );
 
         let variables: HashMap<Ident<Canonical>, _> = variable_list
             .into_iter()

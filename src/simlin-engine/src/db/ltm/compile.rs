@@ -832,11 +832,7 @@ fn lower_ltm_variable(
         } else if let Some(implicit_dep) = find_implicit_dm(dep_name) {
             // Nested implicits of an implicit are registered (and compiled)
             // in their own right; here only the dep's own dimensions matter.
-            let dep_parsed = match implicit_dep {
-                crate::capture::ImplicitVar::Capture(capture) => capture.variable_stage0(dim_ctx),
-                crate::capture::ImplicitVar::HoistedArg(arg) => arg.variable_stage0(dim_ctx),
-                crate::capture::ImplicitVar::Module(module) => module.variable_stage0(),
-            };
+            let dep_parsed = implicit_dep.variable_stage0(dim_ctx);
             stage0_vars.insert(Ident::new(dep_name), dep_parsed);
         } else if let Some(ltm_dims) = find_arrayed_ltm_dep(dep_name) {
             // An arrayed sibling LTM var (the GH #995 freeze helper): a
@@ -1615,11 +1611,7 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
     let converted_dims = project_converted_dimensions(db, project);
 
     // Every helper carries enough parsed data to build its stage directly.
-    let parsed_implicit = match implicit_dm_var {
-        crate::capture::ImplicitVar::Capture(capture) => capture.variable_stage0(dim_context),
-        crate::capture::ImplicitVar::HoistedArg(arg) => arg.variable_stage0(dim_context),
-        crate::capture::ImplicitVar::Module(module) => module.variable_stage0(),
-    };
+    let parsed_implicit = implicit_dm_var.variable_stage0(dim_context);
     if parsed_implicit
         .equation_errors()
         .is_some_and(|e| !e.is_empty())

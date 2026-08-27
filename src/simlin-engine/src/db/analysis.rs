@@ -3632,11 +3632,7 @@ fn reconstruct_implicit_variable(
     }
 
     // The remaining arms carry their bodies as AST subtrees.
-    let parsed_imp = match implicit_var {
-        ImplicitVar::Capture(capture) => capture.variable_stage0(scope.dimensions),
-        ImplicitVar::HoistedArg(arg) => arg.variable_stage0(scope.dimensions),
-        ImplicitVar::Module(_) => unreachable!("the module arm returned above"),
-    };
+    let parsed_imp = implicit_var.variable_stage0(scope.dimensions);
     crate::model::lower_variable(scope, &parsed_imp)
 }
 

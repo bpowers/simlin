@@ -91,12 +91,10 @@ pub(crate) fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
 /// Vensim MDL importer's builtin-rename can collide with a same-canonical-name
 /// user macro.
 ///
-/// This set is exactly `{init, previous}`, and it is the SINGLE SOURCE OF
-/// TRUTH shared by the macro-recursion check here (`collect_called_macros`,
-/// which must not record a false `self -> self` edge for such a wrap) and the
-/// `builtins_visitor` macro-expansion precedence (which must resolve such a
-/// call to the intrinsic, not recurse into the macro forever). Keeping one
-/// predicate guarantees the two sites agree by construction.
+/// This set is exactly `{init, previous}`, and it feeds the single
+/// [`MacroRegistry::resolve_call`] decision read by macro-recursion analysis
+/// and the expansion visitor. A false `self -> self` edge and recursive
+/// expansion are therefore excluded by the same decision.
 ///
 /// Why these two names specifically (cross-ref #554):
 /// - `ast/expr1.rs` lowers exactly two opcode-backed intrinsics by name:
@@ -154,8 +152,9 @@ pub(crate) fn is_renamed_opcode_intrinsic(canonical: &str) -> bool {
 ///   wrote the distinct name `DELAY N`).
 ///
 /// TERMINATION (verified against `builtins_visitor::BuiltinVisitor::walk`):
-/// when Part B skips the macro-shadows-everything `resolve_macro` for such a
-/// self-call, the call falls through to `rewrite_alias_module_call` then
+/// when [`MacroRegistry::resolve_call`] returns
+/// `RenamedBuiltinSelfCall`, the call falls through to
+/// `rewrite_alias_module_call` then
 /// `stdlib_descriptor`, producing a `Variable::Module` whose `model_name` is
 /// `"stdlib⁚{name}"`. The U+205A separator is not a legal Vensim identifier
 /// character and the importer never mints that prefix for a user model, so
@@ -177,15 +176,27 @@ pub(crate) fn is_renamed_stdlib_module_builtin(canonical: &str) -> bool {
 /// (opcode-backed *or* stdlib-module-backed) that a same-canonical-name user
 /// macro's body can legitimately reference without it being recursion.
 ///
-/// Used by BOTH halves so they cannot drift (the #554 design property): Part
-/// A (`collect_called_macros`, here) must not record a false `self -> self`
-/// recursion edge for such a wrap, and Part B
-/// (`builtins_visitor::BuiltinVisitor::walk`) must resolve such a self-call
-/// to the builtin/intrinsic (an opcode for `init`/`previous`, the stdlib
-/// module for `delayn`/`smthn`/...) rather than re-entering the macro
-/// forever. Both terminate (see each member predicate's doc).
+/// Consumed by the same-name check inside [`MacroRegistry::resolve_call`].
+/// Both recursion analysis and `BuiltinVisitor::walk` read that result, so a
+/// call cannot be a suppressed recursion edge in one and an expanded macro in
+/// the other. Both fall-through paths terminate (see each member predicate's
+/// doc).
 pub(crate) fn is_renamed_builtin_macro_collision(canonical: &str) -> bool {
     is_renamed_opcode_intrinsic(canonical) || is_renamed_stdlib_module_builtin(canonical)
+}
+
+/// Whether a call inside a macro body is the importer's renamed builtin, not
+/// a recursive invocation of the enclosing same-named macro.
+///
+/// This is the one comparison used by call routing and recursion analysis.
+/// Both names are canonicalized here so neither consumer can accidentally
+/// apply a different spelling rule around the #554 exception.
+fn is_renamed_builtin_self_call(call_name: &str, enclosing_model: Option<&str>) -> bool {
+    let Some(enclosing_model) = enclosing_model else {
+        return false;
+    };
+    let call = canonicalize(call_name);
+    call == canonicalize(enclosing_model) && is_renamed_builtin_macro_collision(call.as_ref())
 }
 
 /// A *genuine passthrough* macro classification: a single-parameter macro whose
@@ -351,6 +362,27 @@ pub(crate) fn stdlib_descriptor(name: &str) -> Option<ModuleFunctionDescriptor> 
 pub(crate) struct MacroRegistry {
     /// canonical macro name -> descriptor
     macros: HashMap<String, ModuleFunctionDescriptor>,
+}
+
+/// The exhaustive routing decision for one call before ordinary builtin
+/// lowering.
+///
+/// `Passthrough` and `RenamedBuiltinSelfCall` both preserve the call's parsed
+/// function and arguments and continue through builtin handling, but they are
+/// distinct decisions: the former applies at an external callsite and retains
+/// the registered descriptor so the visitor can enforce the macro's public
+/// arity, while the latter takes precedence inside the same-named macro body
+/// and uses the builtin's arity. Keeping the reasons explicit makes the
+/// collision rule auditable without duplicating it in the visitor.
+pub(crate) enum MacroCallResolution<'a> {
+    /// Instantiate the registered macro model.
+    Expand(&'a ModuleFunctionDescriptor),
+    /// Collapse a genuine passthrough macro to its renamed builtin.
+    Passthrough(&'a ModuleFunctionDescriptor),
+    /// Route an importer-renamed self-call in a macro body to the builtin.
+    RenamedBuiltinSelfCall,
+    /// No project macro claims this call name.
+    Unresolved,
 }
 
 impl MacroRegistry {
@@ -602,6 +634,27 @@ impl MacroRegistry {
         self.macros.get(canonical.as_ref())
     }
 
+    /// Resolve one call with macro precedence, passthrough collapse, and the
+    /// #554 same-name renamed-builtin exception applied in one place.
+    pub(crate) fn resolve_call(
+        &self,
+        call_name: &str,
+        enclosing_model: Option<&str>,
+    ) -> MacroCallResolution<'_> {
+        if is_renamed_builtin_self_call(call_name, enclosing_model) {
+            return MacroCallResolution::RenamedBuiltinSelfCall;
+        }
+
+        let Some(descriptor) = self.resolve_macro(call_name) else {
+            return MacroCallResolution::Unresolved;
+        };
+        if descriptor.passthrough.is_some() {
+            MacroCallResolution::Passthrough(descriptor)
+        } else {
+            MacroCallResolution::Expand(descriptor)
+        }
+    }
+
     /// Detect a recursion cycle among the registered macros.
     ///
     /// For each macro model, every body variable's equation text is parsed
@@ -662,7 +715,7 @@ impl MacroRegistry {
                         continue;
                     };
                     let mut called: std::collections::BTreeSet<String> = Default::default();
-                    collect_called_macros(&ast, &from, &self.macros, &mut called);
+                    collect_called_macros(&ast, &from, self, &mut called);
                     if let Some(set) = edges.get_mut(&from) {
                         set.extend(called);
                     }
@@ -705,9 +758,9 @@ fn equation_formulas(eq: &datamodel::Equation) -> Vec<&str> {
 }
 
 /// Walk an `Expr0` AST and record every `App` whose canonicalized function
-/// name is a key in `macros` (i.e. resolves to a registered macro), producing
-/// the macro-call edges out of `enclosing` (the canonical name of the macro
-/// whose body this AST is).
+/// name resolves through [`MacroRegistry::resolve_call`] to an expanded macro,
+/// producing the macro-call edges out of `enclosing` (the canonical name of
+/// the macro whose body this AST is).
 ///
 /// #554 (+ follow-up) exception (precisely scoped): a call is NOT recorded as
 /// a macro edge when the called name canonicalizes to `enclosing`'s OWN
@@ -736,7 +789,7 @@ fn equation_formulas(eq: &datamodel::Equation) -> Vec<&str> {
 fn collect_called_macros(
     expr: &Expr0,
     enclosing: &str,
-    macros: &HashMap<String, ModuleFunctionDescriptor>,
+    registry: &MacroRegistry,
     out: &mut std::collections::BTreeSet<String>,
 ) {
     use crate::ast::IndexExpr0;
@@ -746,42 +799,43 @@ fn collect_called_macros(
         Var(_, _) => {}
         App(UntypedBuiltinFn(func, args), _) => {
             let canonical = canonicalize(func);
-            // #554 (+ follow-up): suppress ONLY the same-named-renamed-builtin
-            // self-edge. Any other macro-resolving call (including a self-call
-            // of a macro whose name is NOT a renamed builtin, preserving
-            // macros.AC5.2) records its edge.
-            let is_renamed_builtin_self_wrap = canonical.as_ref() == enclosing
-                && is_renamed_builtin_macro_collision(canonical.as_ref());
-            if !is_renamed_builtin_self_wrap && macros.contains_key(canonical.as_ref()) {
+            // The registry owns the same precedence the production visitor
+            // uses. Only a call that really expands records an edge;
+            // passthroughs and renamed-builtin self-calls both terminate in
+            // builtin handling and therefore have no macro edge.
+            if matches!(
+                registry.resolve_call(func, Some(enclosing)),
+                MacroCallResolution::Expand(_)
+            ) {
                 out.insert(canonical.into_owned());
             }
             for arg in args {
-                collect_called_macros(arg, enclosing, macros, out);
+                collect_called_macros(arg, enclosing, registry, out);
             }
         }
         Subscript(_, args, _) => {
             for idx in args {
                 match idx {
                     IndexExpr0::Range(l, r, _) => {
-                        collect_called_macros(l, enclosing, macros, out);
-                        collect_called_macros(r, enclosing, macros, out);
+                        collect_called_macros(l, enclosing, registry, out);
+                        collect_called_macros(r, enclosing, registry, out);
                     }
-                    IndexExpr0::Expr(e) => collect_called_macros(e, enclosing, macros, out),
+                    IndexExpr0::Expr(e) => collect_called_macros(e, enclosing, registry, out),
                     IndexExpr0::Wildcard(_)
                     | IndexExpr0::StarRange(_, _)
                     | IndexExpr0::DimPosition(_, _) => {}
                 }
             }
         }
-        Op1(_, r, _) => collect_called_macros(r, enclosing, macros, out),
+        Op1(_, r, _) => collect_called_macros(r, enclosing, registry, out),
         Op2(_, l, r, _) => {
-            collect_called_macros(l, enclosing, macros, out);
-            collect_called_macros(r, enclosing, macros, out);
+            collect_called_macros(l, enclosing, registry, out);
+            collect_called_macros(r, enclosing, registry, out);
         }
         If(cond, t, f, _) => {
-            collect_called_macros(cond, enclosing, macros, out);
-            collect_called_macros(t, enclosing, macros, out);
-            collect_called_macros(f, enclosing, macros, out);
+            collect_called_macros(cond, enclosing, registry, out);
+            collect_called_macros(t, enclosing, registry, out);
+            collect_called_macros(f, enclosing, registry, out);
         }
     }
 }
@@ -1035,6 +1089,79 @@ mod tests {
         let models = vec![plain_model("main"), macro_model("mymacro", &["a"], "a")];
         let registry = MacroRegistry::build(&models).expect("builds");
         assert!(registry.resolve_macro("not_a_macro").is_none());
+    }
+
+    /// Every arm of macro-call routing, including the two ways a registered
+    /// macro deliberately falls through to builtin handling.
+    ///
+    /// The fixtures use the same `MacroRegistry::build` classifier production
+    /// uses. The `init` row is intentionally read twice: outside the macro it
+    /// is a genuine passthrough; inside its own body the enclosing-macro rule
+    /// takes precedence and identifies the importer-renamed intrinsic.
+    #[test]
+    fn resolve_call_covers_every_routing_arm_and_precedence() {
+        #[derive(Clone, Copy)]
+        enum ExpectedRoute {
+            Expand(&'static str),
+            Passthrough(&'static str, usize),
+            RenamedBuiltinSelfCall,
+            Unresolved,
+        }
+
+        let models = vec![
+            plain_model("main"),
+            macro_model("ordinary", &["x"], "x + 1"),
+            macro_model("init", &["x"], "init(x)"),
+            macro_model("previous", &["x", "fallback"], "previous(x, fallback) + 1"),
+        ];
+        let registry = MacroRegistry::build(&models).expect("the route fixture builds");
+        let rows = [
+            ("ordinary", None, ExpectedRoute::Expand("ordinary")),
+            ("init", None, ExpectedRoute::Passthrough("init", 1)),
+            ("INIT", Some("init"), ExpectedRoute::RenamedBuiltinSelfCall),
+            (
+                "previous",
+                Some("PREVIOUS"),
+                ExpectedRoute::RenamedBuiltinSelfCall,
+            ),
+            ("missing", None, ExpectedRoute::Unresolved),
+        ];
+
+        for (call, enclosing, expected) in rows {
+            match (registry.resolve_call(call, enclosing), expected) {
+                (MacroCallResolution::Expand(descriptor), ExpectedRoute::Expand(model_name)) => {
+                    assert_eq!(descriptor.model_name, model_name, "{call}: expanded model")
+                }
+                (
+                    MacroCallResolution::Passthrough(descriptor),
+                    ExpectedRoute::Passthrough(model_name, arity),
+                ) => {
+                    assert_eq!(
+                        descriptor.model_name, model_name,
+                        "{call}: passthrough model"
+                    );
+                    assert_eq!(
+                        descriptor.parameter_ports.len(),
+                        arity,
+                        "{call}: passthrough descriptor must retain declared arity"
+                    );
+                }
+                (
+                    MacroCallResolution::RenamedBuiltinSelfCall,
+                    ExpectedRoute::RenamedBuiltinSelfCall,
+                )
+                | (MacroCallResolution::Unresolved, ExpectedRoute::Unresolved) => {}
+                (actual, _) => {
+                    let actual = match actual {
+                        MacroCallResolution::Expand(_) => "expand",
+                        MacroCallResolution::Passthrough(_) => "passthrough",
+                        MacroCallResolution::RenamedBuiltinSelfCall => "renamed builtin self-call",
+                        MacroCallResolution::Unresolved => "unresolved",
+                    };
+                    panic!("{call}: unexpected route {actual}")
+                }
+            }
+        }
     }
 
     #[test]

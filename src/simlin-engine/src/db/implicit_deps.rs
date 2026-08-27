@@ -3,7 +3,6 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use super::*;
-use crate::capture::ImplicitVar;
 use std::collections::{BTreeSet, HashMap};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,11 +67,7 @@ pub(super) fn extract_implicit_var_deps(
             }
 
             // Both non-module arms carry their bodies as AST subtrees.
-            let parsed_implicit = match implicit_var {
-                ImplicitVar::Capture(capture) => capture.variable_stage0(dim_context),
-                ImplicitVar::HoistedArg(arg) => arg.variable_stage0(dim_context),
-                ImplicitVar::Module(_) => unreachable!("the module arm returned above"),
-            };
+            let parsed_implicit = implicit_var.variable_stage0(dim_context);
 
             let models = HashMap::new();
             let scope = crate::model::ScopeStage0 {

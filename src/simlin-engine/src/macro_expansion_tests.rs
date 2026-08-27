@@ -13,12 +13,14 @@
 // arithmetic each macro performs is kept trivial so expected values are
 // hand-verifiable and documented inline.
 //
-// MDL note: a `NAME(arg)` call with *exactly one* argument is rewritten by
-// the MDL converter to `LOOKUP(NAME, arg)` (the lookup-invocation
-// heuristic, `mdl/xmile_compat.rs`), so a single-arg call never reaches the
-// macro resolver as a function call. Every macro here therefore takes *two*
-// parameters, matching the bundled `macro_*` fixtures (all `(input,
-// parameter)`); this is a pre-existing MDL behavior, not a Phase 3 concern.
+// MDL note: a symbol-kind `NAME(arg)` call with *exactly one* argument is
+// rewritten by the MDL converter to `LOOKUP(NAME, arg)` (the
+// lookup-invocation heuristic, `mdl/xmile_compat.rs`), so a single-arg call
+// never reaches the macro resolver as a function call. Most macros here
+// therefore take *two* parameters, matching the bundled `macro_*` fixtures
+// (all `(input, parameter)`). `DELAY1` is builtin-kind and supplies the MDL
+// one-parameter row below. `PREVIOUS` is symbol-kind in MDL, so its unary
+// passthrough row uses XMILE, where `PREVIOUS(x)` is a function call.
 
 use crate::common::ErrorCode;
 use crate::compat::open_vensim;
@@ -77,8 +79,15 @@ fn mdl(body: &str) -> String {
 /// return the compile `Result`.
 fn compile_mdl(source: &str) -> crate::Result<crate::vm::CompiledSimulation> {
     let project = open_vensim(source).expect("MDL must parse into a datamodel project");
+    compile_datamodel(&project)
+}
+
+/// Compile an imported datamodel through the production incremental path.
+fn compile_datamodel(
+    project: &crate::datamodel::Project,
+) -> crate::Result<crate::vm::CompiledSimulation> {
     let mut db = SimlinDb::default();
-    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let sync = sync_from_datamodel_incremental(&mut db, project, None);
     compile_project_incremental(&db, sync.project, "main")
 }
 
@@ -100,8 +109,13 @@ fn run_mdl_var(source: &str, var: &str) -> Vec<f64> {
 /// Collect all diagnostics for a `.mdl` source via the salsa diagnostic path.
 fn diagnostics_for(source: &str) -> Vec<crate::db::Diagnostic> {
     let project = open_vensim(source).expect("MDL must parse into a datamodel project");
+    diagnostics_for_datamodel(&project)
+}
+
+/// Collect diagnostics for an imported datamodel through salsa.
+fn diagnostics_for_datamodel(project: &crate::datamodel::Project) -> Vec<crate::db::Diagnostic> {
     let mut db = SimlinDb::default();
-    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let sync = sync_from_datamodel_incremental(&mut db, project, None);
     collect_all_diagnostics(&db, sync.project)
 }
 
@@ -439,6 +453,243 @@ y = MYMACRO(a * 2 + b, 4)
         reparsed != expected,
         "the nonzero source span must distinguish the subtree from print/reparse"
     );
+}
+
+/// The production importer and salsa parser exercise every successful macro
+/// call route and leave only typed helpers behind.
+///
+/// The rows are the successful variants of `MacroCallResolution`: ordinary
+/// expansion, external passthrough, and an enclosing macro's renamed-builtin
+/// self-call. `Unresolved` is the diagnostic path pinned by
+/// `ac5_6_unknown_function_name_is_unknown_builtin`; genuine recursion is
+/// pinned by the AC5.2 tests above.
+#[test]
+fn production_macro_routes_leave_the_expected_typed_helpers() {
+    use crate::capture::ImplicitVar;
+    use crate::db::{
+        model_module_ident_context, parse_source_variable_with_module_context, sync_from_datamodel,
+    };
+
+    let source = mdl(r#":MACRO: INIT(x)
+INIT = INITIAL(x)
+	~	dmnl
+	~	genuine renamed-builtin passthrough
+	|
+
+:END OF MACRO:
+:MACRO: DELAYN(Input, DelayTime, Init)
+DELAYN = DELAY N(Input, DelayTime, Init, 1)
+	~	dmnl
+	~	renamed stdlib-module self-call
+	|
+
+:END OF MACRO:
+:MACRO: ORDINARY(a, b)
+ORDINARY = a + b
+	~	dmnl
+	~	ordinary macro
+	|
+
+:END OF MACRO:
+k = 3
+	~	dmnl
+	~	|
+passthrough caller = INITIAL(k * 2)
+	~	dmnl
+	~	|
+ordinary caller = ORDINARY(k * 2, 1)
+	~	dmnl
+	~	|
+"#);
+    let project = open_vensim(&source).expect("the routing fixture must import");
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let helpers = |model_name: &str, var_name: &str| {
+        let synced_model = &sync.models[model_name];
+        let source_var = synced_model.variables[var_name].source;
+        let context =
+            model_module_ident_context(&db, synced_model.source, sync.project, Vec::new());
+        parse_source_variable_with_module_context(&db, source_var, sync.project, context)
+            .implicit_vars
+            .to_vec()
+    };
+
+    let passthrough = helpers("main", "passthrough_caller");
+    assert!(
+        matches!(passthrough.as_slice(), [ImplicitVar::Capture(capture)]
+        if capture.ident() == "$⁚passthrough_caller⁚0⁚arg0"
+            && capture.kind() == crate::capture::CaptureKind::Init)
+    );
+
+    let ordinary = helpers("main", "ordinary_caller");
+    assert!(matches!(
+        ordinary.as_slice(),
+        [ImplicitVar::HoistedArg(arg), ImplicitVar::HoistedArg(literal), ImplicitVar::Module(module)]
+            if arg.ident() == "$⁚ordinary_caller⁚0⁚arg0"
+                && literal.ident() == "$⁚ordinary_caller⁚0⁚arg1"
+                && module.model_name() == "ordinary"
+    ));
+
+    let init_body = helpers("init", "init");
+    assert!(
+        matches!(init_body.as_slice(), [ImplicitVar::Capture(capture)]
+        if capture.ident() == "$⁚init⁚0⁚arg0"
+            && capture.kind() == crate::capture::CaptureKind::Init),
+        "the macro body's same-named INIT call must reach the intrinsic capture path, not \
+         instantiate itself"
+    );
+
+    let delayn_body = helpers("delayn", "delayn");
+    assert!(matches!(
+        delayn_body.as_slice(),
+        [ImplicitVar::Module(module)]
+            if module.model_name() == "stdlib⁚delay1"
+                && module.references().len() == 3
+    ));
+}
+
+/// A passthrough macro still owns the public call contract even though its
+/// valid calls continue through builtin lowering. These rows are the
+/// one-parameter passthroughs whose corresponding builtins accept both the
+/// declared one argument and the otherwise-valid two-argument form. The
+/// invalid form must therefore be rejected by macro arity validation rather
+/// than silently compiling as the builtin.
+#[test]
+fn passthrough_macros_enforce_declared_arity_before_builtin_fallthrough() {
+    #[derive(Clone, Copy)]
+    enum SourceFormat {
+        Mdl,
+        Xmile,
+    }
+
+    struct Row {
+        macro_name: &'static str,
+        second_arg: &'static str,
+        source_format: SourceFormat,
+    }
+
+    let rows = [
+        Row {
+            macro_name: "DELAY1",
+            second_arg: "2",
+            source_format: SourceFormat::Mdl,
+        },
+        Row {
+            macro_name: "PREVIOUS",
+            second_arg: "0",
+            // Unary PREVIOUS is valid engine/XMILE syntax, but not a native
+            // Vensim builtin. The MDL converter consequently applies its
+            // one-argument graphical-function heuristic and imports
+            // PREVIOUS(x) as LOOKUP(previous, x). XMILE is the production
+            // source path that can represent this valid macro contract.
+            source_format: SourceFormat::Xmile,
+        },
+    ];
+
+    for row in rows {
+        let project_for = |call_args: &str| match row.source_format {
+            SourceFormat::Mdl => {
+                let source = mdl(&format!(
+                    r#":MACRO: {name}(x)
+{name} = {name}(x)
+	~	dmnl
+	~	genuine passthrough
+	|
+
+:END OF MACRO:
+input = 10
+	~	dmnl
+	~	|
+out = {name}({call_args})
+	~	dmnl
+	~	|
+"#,
+                    name = row.macro_name,
+                ));
+                open_vensim(&source).expect("the MDL arity row must import")
+            }
+            SourceFormat::Xmile => {
+                let source = format!(
+                    r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><vendor>Simlin</vendor><product>arity test</product><name>main</name></header>
+  <sim_specs><start>0</start><stop>2</stop><dt>1</dt></sim_specs>
+  <model name="main"><variables>
+    <aux name="input"><eqn>10</eqn></aux>
+    <aux name="out"><eqn>{name}({call_args})</eqn></aux>
+  </variables></model>
+  <macro name="{name}">
+    <parm>x</parm>
+    <eqn>{name}(x)</eqn>
+  </macro>
+</xmile>"#,
+                    name = row.macro_name,
+                );
+                crate::compat::open_xmile(&mut source.as_bytes())
+                    .expect("the XMILE arity row must import")
+            }
+        };
+
+        let valid_project = project_for("input");
+        compile_datamodel(&valid_project).unwrap_or_else(|error| {
+            panic!(
+                "one-argument {} passthrough must retain builtin semantics: {error:?}; diagnostics: {:#?}",
+                row.macro_name,
+                diagnostics_for_datamodel(&valid_project),
+            )
+        });
+
+        let invalid_project = project_for(&format!("input, {}", row.second_arg));
+        let registry = crate::module_functions::MacroRegistry::build(&invalid_project.models)
+            .expect("the passthrough registry must build");
+        let descriptor = registry
+            .resolve_macro(row.macro_name)
+            .expect("the imported macro must have a descriptor");
+        assert!(
+            descriptor.passthrough.is_some(),
+            "the production importer must classify {} as a genuine passthrough",
+            row.macro_name
+        );
+        let declared_arity = descriptor.parameter_ports.len();
+        assert_eq!(
+            declared_arity, 1,
+            "the test row must derive a one-parameter descriptor from production import"
+        );
+
+        let error = compile_datamodel(&invalid_project).expect_err(&format!(
+            "{} with two arguments must violate the registered macro contract",
+            row.macro_name
+        ));
+        assert_eq!(error.code, ErrorCode::NotSimulatable);
+
+        let diagnostics = diagnostics_for_datamodel(&invalid_project);
+        let arity = diagnostics.iter().find(|diagnostic| {
+            diagnostic.severity == DiagnosticSeverity::Error
+                && diagnostic.model == "main"
+                && diagnostic.variable.as_deref() == Some("out")
+                && matches!(
+                    &diagnostic.error,
+                    DiagnosticError::Equation(error)
+                        if error.code == ErrorCode::BadBuiltinArgs
+                )
+        });
+        let arity = arity.unwrap_or_else(|| {
+            panic!(
+                "{} must report BadBuiltinArgs on main.out; diagnostics: {diagnostics:#?}",
+                row.macro_name
+            )
+        });
+        let DiagnosticError::Equation(error) = &arity.error else {
+            unreachable!("the diagnostic predicate requires an equation error")
+        };
+        assert_eq!(
+            error.details.as_deref().unwrap_or_default(),
+            format!(
+                "macro {} takes exactly {declared_arity} argument(s), but 2 were given",
+                row.macro_name.to_ascii_lowercase()
+            )
+        );
+    }
 }
 
 /// `contains_module_call` macro-awareness (item 4 of Task 3): with a

@@ -20,7 +20,6 @@ use std::collections::{BTreeSet, HashMap};
 use salsa::Accumulator;
 
 use super::*;
-use crate::capture::ImplicitVar;
 use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::fragment::{DepShape, FragmentInput, lower_fragment};
 use crate::db::var_fragment::{
@@ -363,11 +362,7 @@ fn lower_implicit_var<'db>(
     let dim_context = project_dimensions_context(db, project);
 
     // Every helper carries parsed data, so no helper is lexed back from text.
-    let parsed_implicit = match implicit_var {
-        ImplicitVar::Capture(capture) => capture.variable_stage0(dim_context),
-        ImplicitVar::HoistedArg(arg) => arg.variable_stage0(dim_context),
-        ImplicitVar::Module(module) => module.variable_stage0(),
-    };
+    let parsed_implicit = implicit_var.variable_stage0(dim_context);
 
     if parsed_implicit
         .equation_errors()

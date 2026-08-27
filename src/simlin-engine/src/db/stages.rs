@@ -493,13 +493,13 @@ pub(crate) fn model_stage0(db: &dyn Db, model: SourceModel, project: SourceProje
         implicit_dm.extend(parsed.implicit_vars.iter().cloned());
     }
 
-    // Synthesized helpers have no `SourceVariable`; each carries enough parsed
+    // Implicit helpers have no `SourceVariable`; each carries enough parsed
     // data to build its parse-stage form directly.
-    var_list.extend(implicit_dm.into_iter().map(|iv| match iv {
-        crate::capture::ImplicitVar::Capture(capture) => capture.variable_stage0(dim_ctx),
-        crate::capture::ImplicitVar::HoistedArg(arg) => arg.variable_stage0(dim_ctx),
-        crate::capture::ImplicitVar::Module(module) => module.variable_stage0(),
-    }));
+    var_list.extend(
+        implicit_dm
+            .into_iter()
+            .map(|iv| iv.variable_stage0(dim_ctx)),
+    );
 
     let variables: HashMap<Ident<Canonical>, VariableStage0> = var_list
         .into_iter()

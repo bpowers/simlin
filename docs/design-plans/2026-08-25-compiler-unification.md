@@ -898,6 +898,67 @@ text representation:
   `is_stock` field for every variable. Retiring that field belongs to Phase 8's
   dependency-shape work.
 
+**Phase 7.3b macro fall-throughs.** `MacroRegistry::resolve_call` is the one
+exhaustive routing decision for a parsed call: `Expand`, `Passthrough`,
+`RenamedBuiltinSelfCall`, or `Unresolved`. The expansion visitor and the macro
+recursion graph both read it. The precedence is explicit: inside a macro, its
+same-canonical-name importer-renamed builtin is a
+`RenamedBuiltinSelfCall` even when the macro's descriptor is also classified
+as a passthrough; at an external callsite that descriptor is `Passthrough`.
+Both preserve the already-walked function and arguments and continue through
+ordinary builtin handling, but only `Passthrough` retains the registered
+descriptor: an external call must first match the macro's exact declared
+arity. `RenamedBuiltinSelfCall` is the builtin spelled inside the macro body,
+so it follows builtin arity instead. A non-passthrough macro validates the
+same declared arity and still expands before every builtin, alias, or stdlib
+decision; genuine recursion still fails the registry build before expansion.
+
+The successful production rows go through MDL import, salsa sync, the model
+module context, and the production variable parse. An external `INITIAL(k *
+2)` call in the presence of `:MACRO: INIT(x) = INITIAL(x)` yields exactly one
+typed `Capture`; the macro body's own renamed `INIT(x)` also yields a typed
+capture because a macro input is not a static snapshot slot, never a recursive
+module instance. An ordinary macro with two computed arguments yields two
+`HoistedArg`s followed by its `ImplicitModule`. A `DELAYN` macro body wrapping
+`DELAY N(..., 1)` yields the distinct typed `stdlib⁚delay1` module and its
+three port references. These rows preserve callsite id, argument position,
+helper order, source-subtree identity, and module wiring.
+
+The collision-arity rows exercise the production source importers and salsa
+compile path, derive the one-parameter contract from each imported descriptor,
+and require a valid unary control beside the invalid binary call. `DELAY1` is
+an MDL row. `PREVIOUS` is an XMILE row because unary `PREVIOUS(x)` is valid
+engine/XMILE syntax but is not a native Vensim builtin: the MDL converter
+treats that symbol-kind one-argument spelling as a graphical-function
+invocation and imports `LOOKUP(previous, x)`. Both descriptors must classify
+as genuine passthroughs; `DELAY1(input, 2)` and `PREVIOUS(input, 0)` are valid
+builtin arities but invalid macro arities, and fail as `BadBuiltinArgs`
+attributed to the caller rather than compiling through builtin fall-through.
+
+`ImplicitVar::variable_stage0` is the one exhaustive conversion used by every
+compile-stage consumer, including both LTM sites, dependency extraction,
+fragment compilation, analysis reconstruction, whole-model unit staging, and
+the database-free oracle. The text-boundary audit has four intentional
+survivors and no implicit-module helper reconstruction:
+
+- `capture.rs` prints a capture or hoisted argument only into the
+  `Variable::eqn` source projection used by diagnostics and LTM's documented
+  failed-lowering fallback; the carried `Expr0` remains authoritative.
+- `MacroRegistry::build` parses user-authored macro body formulas for
+  passthrough classification and recursion validation. Those are project
+  source equations, not synthesized helper text.
+- `LtmArm::new` parses generator output once at the GH #965 generation
+  boundary and stores that AST beside diagnostic text. LTM parsing and both
+  fragment consumers carry the AST; they do not parse the text again.
+- `db/ltm/compile.rs` has one dims-only zero-bodied `datamodel::Aux` parsed for
+  an arrayed sibling LTM synthetic variable. It supplies only dimensions to a
+  lowering scope and is neither a module-function helper nor derived from one.
+
+`print_eqn` and `make_temp_arg` remain absent from `builtins_visitor.rs`, and
+`ImplicitVar::Synthesized` remains absent. `ModuleIdentContext` and the
+context-keyed parse entry points intentionally remain for 7.4; this chunk does
+not claim AC3.1 or AC2.4.
+
 **Phase 7.1 probe.** The execution-count probe chunk 7.1 owed AC3.1 is
 `db::exec_probe::ProbedDb`: a `SimlinDb` built over salsa storage carrying an
 event callback, which records every `EventKind::WillExecute` database key and
@@ -1470,6 +1531,7 @@ hash is not available to it.
 
 | phase | commit | cold compile Ir | slots | opcodes (flow / stock / init) | literals / GFs / temps / views | notes |
 |---|---|---:|---:|---|---|---|
+| 7.3b | `engine: centralize macro call routing` | 8.7284 G (mean of 5, +/-0.02%), +0.04% against the saved 7.3a binary re-measured in the same session (8.7249 G, mean of 5, +/-0.03%), inside the channel's noise floor and not investigated | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical to 7.3a on C-LEARN, plain and under `CLEARN_LTM=1`: 56,829 total opcodes plain and 938,368 with LTM, including the complete top-25 histogram, post-fusion totals and fused-binop tables, 371 names and 7 modules; the release LTM run also preserves every user-model series. `MacroRegistry::resolve_call` is the one exhaustive decision read by expansion and recursion analysis, with explicit `Expand`, `Passthrough`, `RenamedBuiltinSelfCall` and `Unresolved` arms; both registered-macro outcomes retain a descriptor long enough for one visitor-boundary exact-arity check, while renamed self-calls deliberately use builtin arity; `ImplicitVar::variable_stage0` is the one typed conversion at all seven consumers, including both LTM sites. The production MDL/salsa parse row pins the helper order and exact typed shape for ordinary expansion, external INIT passthrough, the INIT macro body's renamed-intrinsic self-call and the DELAYN macro body's renamed-stdlib self-call. Production MDL `DELAY1` and XMILE `PREVIOUS` passthrough rows derive their one-argument contract from the imported descriptor, compile valid unary calls, and attribute builtin-acceptable binary calls to the caller as `BadBuiltinArgs`/`NotSimulatable`. The compile-stage text audit finds no implicit-module helper reparse; the intentional source/diagnostic and LTM-generator boundaries are recorded in the Phase 7.3b note. `ModuleIdentContext` remains wholly owned by 7.4. The arity correction changes only declared-invalid macro calls, so the valid-route artifact, release-LTM, and performance gates were not repeated. Validation: engine lib 5691 passed / 2 ignored, integration 776 passed / 16 ignored, VM allocation 4 passed, doctests 2 passed / 1 ignored; the focused macro, capture, implicit-module, four-constructor fragment-input and 14-test determinism suites are green; the ignored release `clearn_with_ltm_simulates_model_vars_identically` gate is green; clippy with all targets/features and rustfmt are green |
 | 7.3a | `engine: implicit modules carry parsed data` | 8.7253 G (median of 5; range 8.7159-8.7290), +0.33% against the base tree (the 7.2 chunk staged on `8b9ef311`) re-measured in the same session (8.6966 G, median of 5; range 8.6857-8.7009; interleaved pairs +0.456 / +0.372 / +0.484 / +0.173 / +0.223%). Each binary's spread is about 0.15-0.17%, so the delta is outside the channel's noise but below the one-percent threshold for investigation. A current-artifact verification measured 8.7213 G (mean of 5, +/-0.02%). `size_of::<ImplicitVar>()` remains 144 bytes because `Capture` is still the largest variant; a later performance pass owns the residual | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | C-LEARN artifacts remain identical, plain and under `CLEARN_LTM=1`: 56,829 total opcodes plain and 938,368 with LTM, including the full histograms, post-fusion tables, 371 names, and 7 modules. A call is a typed `capture::ImplicitModule` plus one `capture::HoistedArg` per non-identifier argument; the old `ImplicitVar::Synthesized` text carrier is absent. `ImplicitModule` derives its ident and port destinations from logical callsite inputs `(parent, id, call_name, suffix)` plus source-to-port wiring, while current resolution remains name-keyed through `ImplicitVarMeta::{name,index_hint}`. Production-derived stdlib and macro tests require exact nonzero-span `Expr0` subtree identity. The complete ordered 3x3 `ImplicitVar` pair matrix pins same-arm dedup and all six loud cross-arm collisions; a production ACTIVE INITIAL fixture pins the reachable hoisted-argument/capture collision through parsing, diagnostic collection, and compile refusal. Within one visitor, `insert_implicit_var` is the only map mutation and refuses conflicting definitions before `IndexMap` can replace the first; the production `ARG1(k, k * 2)` macro regression pins the module/second-argument collision through diagnostic collection and compile refusal. `expand_module_function` serves stdlib and macro calls, so 7.3b retains only macro passthrough and GH #554. `print_eqn` is absent from `builtins_visitor.rs`; `make_temp_arg` is absent from `src/simlin-engine/src`; `substitute_dimension_refs` remains the AST-to-AST pre-hoist source-semantics rewrite documented above. The base/working-tree differential sweep over all 509 models found 396 byte-identical and 110 identically refused; the three nondeterministic models (`arrays_cname`, `arrays_varname`, `subscript_transposition`) produced the same two-output set on both binaries across 12 resamples, so no model moved. Current validation: engine lib 5688 passed / 2 ignored, integration 776 passed / 16 ignored, VM allocation 4 passed, doctests 2 passed / 1 ignored; focused implicit-module, capture, macro, fragment-determinism, and stage suites are green; clippy with all targets/features and rustfmt are green |
 | baseline | `867f2e63` | 10.788 G (median of 9; range 10.778-10.791) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | retired instructions, `perf stat -e instructions` (user space, whole process: parse, one measured compile, five `CLEARN_COMPILE_ITERS` compiles, one VM run), `CLEARN_PROFILE=compile`; release `opt-level=3` + LTO, mimalloc; 371 names, 7 modules; 1174 initials |
 | 1 | `engine: one signature table of per-builtin facts` | 10.753 G (median of 4; range 10.748-10.755), -0.30% (interleaved pairs -0.34 / -0.28 / -0.34%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN: every count above, the 371 names and 7 modules, and the full opcode histogram; same channel and flags as the baseline row; the saving is `try_map_ref` lowering `Expr2` builtins without cloning them; four edge-shape divergences, pinned (Additional Considerations, "Phase 1 semantic divergences") |
