@@ -662,126 +662,6 @@ fn consistency_violation_none_for_init_only_resolved_scc_not_dt_instrumented() {
     );
 }
 
-// `array_producing_vars` membership over four cases. Both positive cases
-// are independently required: each defends `array_producing_vars` against
-// a different way of under-counting.
-//   case-1 (POS) top-level-scalar `= VECTOR ELM MAP(...)` -- the shape
-//     the scalar path does NOT hoist (`App` lives in `AssignCurr`);
-//     guards against an impl narrowed to only the compiler hoist-set.
-//   case-2 (POS) array-producing builtin nested so the compiler hoists
-//     it into a separate `AssignTemp` (`App` lives ONLY in the hoisted
-//     `AssignTemp`, NOT in `AssignCurr`/main); guards against an impl
-//     that sources only `AssignCurr` and drops hoisted temps.
-//   case-3 (NEG) plain scalar -- soundness.
-//   case-4 (NEG) merely references the VEM var -- its OWN lowered `Expr`
-//     has only a `Var` slot read, no `App`; soundness.
-// VEM shapes are the known-good `tests/integration/compiler_vector.rs` fixtures
-// (`vector_elm_map(source[*], offsets[*])` and the nested
-// `max(vector_elm_map(...), 15)` hoisting form) so the model compiles and
-// the only thing under test is the membership set.
-#[test]
-fn array_producing_vars_flags_exactly_the_two_positive_cases() {
-    let project = TestProject::new("array_producing_vars_fixture")
-        .indexed_dimension("D", 3)
-        .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
-        .array_with_ranges("offsets[D]", vec![("1", "0"), ("2", "2"), ("3", "1")])
-        // case-1 POSITIVE: top-level array-producing (scalar path does
-        // NOT hoist; `App` in `AssignCurr`).
-        .aux("case1_vem", "vector_elm_map(source[*], offsets[*])", None)
-        // case-2 POSITIVE: VEM nested inside `max(...)` -> the compiler
-        // hoists the VEM into a separate `AssignTemp`; `App` lives ONLY
-        // in the hoisted temp, `AssignCurr` reads it back.
-        .array_aux(
-            "case2_hoisted[D]",
-            "max(vector_elm_map(source[*], offsets[*]), 15)",
-        )
-        // case-3 NEGATIVE: plain scalar, no array-producing builtin.
-        .aux("case3_plain", "1 + 2", None)
-        // case-4 NEGATIVE: merely references the VEM var element-wise;
-        // case4_ref's OWN lowered Expr is `Op2(+, Var(off), 1)` -- a slot
-        // read another var filled, NOT an inline array-producing `App`.
-        .array_aux("case4_ref[D]", "case1_vem + 1");
-    let dm = project.build_datamodel();
-
-    let db = SimlinDb::default();
-    let result = sync_from_datamodel(&db, &dm);
-    let model = result.models["main"].source;
-
-    let got = array_producing_vars(&db, model, result.project);
-
-    let expected: BTreeSet<crate::common::Ident<crate::common::Canonical>> = [
-        crate::common::Ident::new("case1_vem"),
-        crate::common::Ident::new("case2_hoisted"),
-    ]
-    .into_iter()
-    .collect();
-    assert_eq!(
-        got, expected,
-        "array_producing_vars must be EXACTLY {{case1_vem, case2_hoisted}}: \
-         both positives flagged (top-level-scalar AND hoisted-AssignTemp), \
-         both negatives not"
-    );
-
-    // Lowered-shape regression guards. Sourced from the same engine
-    // per-variable production lowering `array_producing_vars` consumes
-    // (`var_noninitial_lowered_exprs` ->
-    // `crate::db::var_fragment::explicit_fragment_input` +
-    // `compiler::fragment::lower_fragment`), partitioned by
-    // top-level element kind, then the same production predicate
-    // (`exprs_contain_array_producing_builtin`) applied per partition --
-    // no re-implementation of the array-producing recursion.
-    use crate::compiler::Expr;
-    let vem_in = |exprs: &[Expr], want_temp: bool| -> bool {
-        let part: Vec<Expr> = exprs
-            .iter()
-            .filter(|e| {
-                if want_temp {
-                    matches!(e, Expr::AssignTemp(..))
-                } else {
-                    matches!(e, Expr::AssignCurr(..))
-                }
-            })
-            .cloned()
-            .collect();
-        crate::compiler::exprs_contain_array_producing_builtin(&part)
-    };
-
-    // case-1 (inverse of case-2): the array-producing `App` must live
-    // inside an `AssignCurr`/main element AND NOT inside any hoisted
-    // `AssignTemp`. The bare-scalar declaration lowers to
-    // `[AssignCurr(off, App(VEM,…))]` -- the scalar path does NOT hoist a
-    // top-level array-producing builtin -- so this is distinct from
-    // case-2 by construction. If the `App` is instead in a hoisted
-    // `AssignTemp`, the scalar lowering changed unexpectedly: surface it
-    // immediately, do NOT paper over.
-    let c1 = var_noninitial_lowered_exprs(&db, model, result.project, "case1_vem");
-    let c1_in_curr = vem_in(&c1, false);
-    let c1_in_temp = vem_in(&c1, true);
-    assert!(
-        c1_in_curr && !c1_in_temp,
-        "case-1 shape (inverse of case-2): the VECTOR ELM MAP App must \
-         be in an AssignCurr/main element AND NOT in any hoisted \
-         AssignTemp (in_curr={c1_in_curr}, in_temp={c1_in_temp}, \
-         elems={}). in_temp=true means the scalar lowering changed \
-         unexpectedly -- surface immediately, do not work around.",
-        c1.len()
-    );
-
-    // case-2: the array-producing `App` must live ONLY in the hoisted
-    // `AssignTemp`, never directly in `AssignCurr` (the `AssignCurr`
-    // reads the temp back).
-    let c2 = var_noninitial_lowered_exprs(&db, model, result.project, "case2_hoisted");
-    let c2_in_curr = vem_in(&c2, false);
-    let c2_in_temp = vem_in(&c2, true);
-    assert!(
-        c2_in_temp && !c2_in_curr,
-        "case-2 shape: the VECTOR ELM MAP App must be ONLY in a hoisted \
-         AssignTemp and NEVER in AssignCurr \
-         (in_curr={c2_in_curr}, in_temp={c2_in_temp}, elems={})",
-        c2.len()
-    );
-}
-
 // ── Per-element dt SCC resolution (the cycle-gate refinement) ───────────
 //
 // `resolve_recurrence_sccs(.., SccPhase::Dt)` identifies the offending
@@ -1883,6 +1763,83 @@ fn resolve_dt_genuine_element_two_cycle_is_unresolved() {
         dep_graph.resolved_sccs.is_empty(),
         "a genuine multi-variable element 2-cycle resolves nothing"
     );
+}
+
+/// Parse one of the SCC/temp dominance rows through the Vensim importer.  The
+/// terse `~~|` spelling is intentional: these are the exact source equations
+/// that exposed the bad production result, not a hand-built lowered fragment.
+fn scc_temp_dominance_project(direction: &str) -> TestProject {
+    let mdl = format!(
+        "{{UTF-8}}\n\
+         D: d1,d2 ~~|\n\
+         {direction}\
+         a[D] = VECTOR SORT ORDER(b[D],dir_arg) ~~|\n\
+         b[d1] = a[d2] ~~|\n\
+         b[d2] = 10 ~~|\n\
+         INITIAL TIME = 0 ~~|\n\
+         FINAL TIME = 1 ~~|\n\
+         SAVEPER = 1 ~~|\n\
+         TIME STEP = 1 ~~|\n"
+    );
+    let mdl = mdl.replace("dir_arg", if direction.is_empty() { "1" } else { "dir[D]" });
+    TestProject::from_datamodel(
+        crate::open_vensim(&mdl).expect("the SCC/temp dominance MDL row must import"),
+    )
+}
+
+/// An array-producing builtin whose cached temp is shared by two reorderable
+/// element segments must never let SCC refinement move the consumer before the
+/// definition.  Both rows are genuine element cycles and therefore have to be
+/// rejected with a variable-attributed `CircularDependency`; before the guard,
+/// the invariant-direction row compiled and silently simulated `a=[0,0]`.
+#[test]
+fn cross_segment_array_temp_sccs_are_rejected_loudly() {
+    let rows = [
+        ("invariant direction", ""),
+        ("element-varying direction", "dir[D] = 1,1 ~~|\n"),
+    ];
+
+    for (name, direction) in rows {
+        let project = scc_temp_dominance_project(direction);
+        let errors = project.error_diagnostics();
+        assert!(
+            errors.iter().any(|(location, code)| {
+                location.starts_with("main.")
+                    && *code == crate::common::ErrorCode::CircularDependency
+            }),
+            "{name}: the production compile must return an attributed \
+             CircularDependency, got {errors:?}"
+        );
+        assert!(
+            project.run_vm().is_err(),
+            "{name}: a rejected SCC must never reach VM evaluation"
+        );
+    }
+}
+
+/// A temp is safe in a resolved SCC when its complete definition and every
+/// read stay in the same element segment.  This row exercises the supported
+/// side of that boundary through Vensim parse, SCC refinement, compilation,
+/// and VM evaluation: `a[d2]` creates the whole-variable self dependency, but
+/// the sort temp used by `a[d1]` is local to `a[d1]`'s segment.
+#[test]
+fn element_local_array_temp_remains_resolvable() {
+    let mdl = "{UTF-8}\n\
+        D: d1,d2 ~~|\n\
+        input[D] = 2,1 ~~|\n\
+        a[d1] = SUM(VECTOR SORT ORDER(input[D],1)) ~~|\n\
+        a[d2] = a[d1] + 1 ~~|\n\
+        INITIAL TIME = 0 ~~|\n\
+        FINAL TIME = 1 ~~|\n\
+        SAVEPER = 1 ~~|\n\
+        TIME STEP = 1 ~~|\n";
+    let project = TestProject::from_datamodel(
+        crate::open_vensim(mdl).expect("the element-local temp MDL row must import"),
+    );
+
+    // VECTOR SORT ORDER uses zero-based source indices: [2,1] -> [1,0],
+    // whose sum is 1; the recurrence then produces 2 for d2.
+    assert_eq!(project.vm_result("a"), vec![1.0, 2.0]);
 }
 
 #[test]

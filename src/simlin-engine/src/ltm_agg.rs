@@ -458,8 +458,8 @@ pub enum AxisRead {
     ///
     /// Structurally the same pair as [`AxisRead::Iterated`]; the difference is
     /// the RESOLUTION RULE, which is why it is a separate variant rather than a
-    /// flag. The iterated spelling folds its index to an ordinal
-    /// (`ast::expr3`'s Pass 1) and never consults the declared element map;
+    /// flag. `compiler::subscript` binds the iterated spelling positionally and
+    /// never consults the declared element map;
     /// this one survives to `IndexOp::ActiveDimRef` and
     /// `compiler::subscript::build_view_from_ops` resolves it name-first, then
     /// through the map -- so the two read DIFFERENT source elements wherever a
@@ -499,8 +499,9 @@ pub enum AxisRead {
 ///
 ///   The POSITIONAL correspondence is the right one here and not merely the
 ///   historical one: this helper serves an [`AxisRead::Iterated`] axis, whose
-///   index spells a dimension the equation ITERATES, and `ast::expr3`'s Pass 1
-///   folds that to an ordinal without consulting any declared element map
+///   index spells a dimension the equation ITERATES, and
+///   `compiler::subscript` binds that positionally without consulting any
+///   declared element map
 ///   (GH #997). Being positional it is also a bijection (index-identity, equal
 ///   cardinality), so every source element has exactly one preimage; the
 ///   inversion is still written generally and declines (returns `None`) if a

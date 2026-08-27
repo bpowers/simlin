@@ -1743,7 +1743,7 @@ fn an_unrelated_equation_edit_does_not_regenerate_every_link_score() {
 /// mapping to `cop`.
 ///
 /// It COMPILES because `cop` is the dimension the equation ITERATES, so
-/// `ast::expr3`'s Pass 1 folds the index to that dimension's ordinal and it
+/// `compiler::subscript` binds the index to that dimension's ordinal and it
 /// indexes `agg`'s storage raw: `target[c1]` reads `agg`'s FIRST element, by
 /// POSITION, consulting neither names nor mappings
 /// (`mapped_reference_semantics_tests`' `no_mapping_equal_cardinality` measures
@@ -2229,7 +2229,7 @@ fn a_lookup_table_index_is_element_pinned_in_a_per_element_partial() {
 /// with DISJOINT element names and no declared mapping -- so that dep has no
 /// projectable element and its dimension-name subscript would survive into the
 /// scalar partial. The read itself is POSITIONAL (`region` is the iterated
-/// dimension, folded to an ordinal by Pass 1), which is what makes an unrelated
+/// dimension, bound positionally by `compiler::subscript`), which is what makes an unrelated
 /// pair legal; see `an_uncoverable_arrayed_dep_declines_the_edge_loudly` for
 /// the full mechanism and for why this shape rather than an explicit element
 /// map (GH #997 made the latter projectable). Nothing exotic: a 2-D read and an

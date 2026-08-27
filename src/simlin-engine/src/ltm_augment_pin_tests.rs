@@ -1549,7 +1549,7 @@ fn per_element_pin_colliding_element_name_verdict_enumeration() {
 /// directions.
 ///
 /// The correspondence is the POSITIONAL one because every index here spells a
-/// dimension the target ITERATES, which `ast::expr3`'s Pass 1 folds to an ordinal
+/// dimension the target ITERATES, which `compiler::subscript` binds to an ordinal
 /// (GH #997). An element-mapped pair therefore pins too -- and pins to the
 /// ORDINAL's element, not the map's.
 ///

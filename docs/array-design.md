@@ -20,19 +20,13 @@ The simlin-engine implements comprehensive array support following the XMILE v1.
 
 Array expressions go through a multi-phase compilation pipeline:
 
-1. **Parser (Expr0 -> Expr1)**: Captures all XMILE array syntax
-2. **Type Checker (Expr1 -> Expr2)**: Computes array bounds, validates dimensions
-3. **Pass 0 (Expr2 -> Expr2)**: Normalizes array expressions
-   - Expands bare array references to explicit subscripts
-   - Normalizes wildcards (e.g., `*` to `dim.*`)
-   - Ensures all Var references can be treated as scalars in later phases
-4. **Pass 1 (Expr2 -> Expr3)**: Generates temp array assignments
-   - Creates `AssignTemp` expressions for complex array builtin arguments
-   - Handles expressions that don't need A2A-element-specific behavior
-5. **Compiler (Expr3 -> Expr)**: Creates optimized expressions
-   - Resolves static subscripts into `ArrayView` instances
-   - Generates `StaticSubscript`, `TempArray`, `TempArrayElement` expressions
-6. **Bytecode Generation**: Emits VM opcodes
+1. **Parser (`Expr0`)**: Captures all XMILE array syntax.
+2. **Builtin typing (`Expr0 -> Expr1`)**: Resolves builtin names and signatures.
+3. **Array typing (`Expr1 -> Expr2`)**: Computes array bounds, validates dimensions, and normalizes bare references and wildcards.
+4. **Structural lowering (`Expr2 -> Expr3`)**: Preserves array structure for the compiler; this pass does not allocate temps or emit `AssignTemp`.
+5. **Reference lowering (`Expr3 -> compiler::Expr`)**: Resolves static subscripts and active apply-to-all coordinates into final `ArrayView` geometry.
+6. **Folding and materialization**: Constant folding runs first. `compiler::array_operand` is then the sole materializer of computed array operands and array-producing builtin results, inserting `AssignTemp`, `TempArray`, and `TempArrayElement` only after subscript resolution.
+7. **Bytecode generation**: Emits VM opcodes.
    - View stack operations for array access
    - Iteration loops for element-wise operations
    - Reduction opcodes for array builtins
@@ -92,7 +86,6 @@ Indexed dimensions (e.g., numeric dimensions like `Periods(5)`) can use position
 #### Type Checker
 - Array bounds propagation
 - Dimension compatibility validation
-- Temp ID allocation for intermediate results
 
 #### Compiler
 - `ArrayView` abstraction for zero-copy array operations
@@ -102,6 +95,8 @@ Indexed dimensions (e.g., numeric dimensions like `Periods(5)`) can use position
 - Transpose support
 - Dimension position handling
 - Expression rewriting for array builtins
+- One `TempAllocator` per variable lowering
+- Post-resolution materialization in `compiler::array_operand`
 - All expression types: `StaticSubscript`, `TempArray`, `TempArrayElement`, `AssignTemp`
 
 #### Bytecode VM

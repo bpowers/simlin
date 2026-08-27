@@ -234,6 +234,136 @@ pub(crate) enum SymbolicOpcode {
     },
 }
 
+/// Require every scratch-temp lifetime in `member`'s symbolic program to be
+/// contained by one per-element assignment segment.
+///
+/// Resolved recurrence SCCs reorder those segments while preserving the
+/// opcodes *inside* each segment. A temp touched by two segments therefore has
+/// no dominance guarantee after interleaving: its consumer may move before its
+/// definition. Conversely, a temp whose complete set of touches is contained
+/// by one segment moves as one unit, so its original definition-before-use
+/// order is preserved. A "touch" includes both direct temp-id opcodes and a
+/// `PushStaticView` whose backing storage is that temp; the latter is how most
+/// array-producing builtin results are consumed.
+///
+/// The final member write terminates the final segment. Any trailing cleanup
+/// opcodes belong to that same segment, matching SCC assembly's
+/// `segment_member_by_element` contract. An invalid view id is a malformed
+/// fragment and is rejected rather than treated as a non-temp view.
+pub(crate) fn validate_segment_local_temps(
+    member: &str,
+    code: &[SymbolicOpcode],
+    static_views: &[SymbolicStaticView],
+) -> Result<(), String> {
+    let write_element = |op: &SymbolicOpcode| {
+        matches!(
+            op,
+            SymbolicOpcode::AssignCurr { var }
+                | SymbolicOpcode::AssignConstCurr { var, .. }
+                | SymbolicOpcode::BinOpAssignCurr { var, .. }
+                if var.name.as_str() == member
+        )
+    };
+    let Some(last_write) = code.iter().rposition(write_element) else {
+        // The caller owns the separate "element sourceable" refusal. There is
+        // no reorderable boundary here at which a temp could cross.
+        return Ok(());
+    };
+
+    let mut segment = 0usize;
+    let mut owner_by_temp: HashMap<u32, usize> = HashMap::new();
+    for (pc, op) in code.iter().enumerate() {
+        let direct_temp = match op {
+            SymbolicOpcode::LoadTempConst { temp_id, .. } => Some(*temp_id as u32),
+            SymbolicOpcode::BeginIter {
+                write_temp_id,
+                has_write_temp: true,
+            }
+            | SymbolicOpcode::VectorElmMap { write_temp_id, .. }
+            | SymbolicOpcode::VectorSortOrder { write_temp_id }
+            | SymbolicOpcode::Rank { write_temp_id }
+            | SymbolicOpcode::LookupArray { write_temp_id, .. }
+            | SymbolicOpcode::AllocateAvailable { write_temp_id }
+            | SymbolicOpcode::AllocateByPriority { write_temp_id } => Some(*write_temp_id as u32),
+            SymbolicOpcode::PushStaticView { view_id } => {
+                let view = static_views.get(*view_id as usize).ok_or_else(|| {
+                    format!(
+                        "SCC member `{member}` pushes static view {view_id}, but its fragment has \
+                         only {} views; keeping CircularDependency",
+                        static_views.len()
+                    )
+                })?;
+                match &view.base {
+                    SymStaticViewBase::Temp(temp_id) => Some(*temp_id),
+                    SymStaticViewBase::Var(_)
+                    | SymStaticViewBase::PrevVar(_)
+                    | SymStaticViewBase::InitialVar(_) => None,
+                }
+            }
+            // Exhaustive by design: a new symbolic opcode cannot silently
+            // acquire a temp operand without classifying its SCC lifetime.
+            SymbolicOpcode::Op2 { .. }
+            | SymbolicOpcode::Not { .. }
+            | SymbolicOpcode::LoadConstant { .. }
+            | SymbolicOpcode::LoadVar { .. }
+            | SymbolicOpcode::SymLoadPrev { .. }
+            | SymbolicOpcode::SymLoadInitial { .. }
+            | SymbolicOpcode::LoadGlobalVar { .. }
+            | SymbolicOpcode::PushSubscriptIndex { .. }
+            | SymbolicOpcode::LoadSubscript { .. }
+            | SymbolicOpcode::SetCond { .. }
+            | SymbolicOpcode::If { .. }
+            | SymbolicOpcode::Ret
+            | SymbolicOpcode::LoadModuleInput { .. }
+            | SymbolicOpcode::EvalModule { .. }
+            | SymbolicOpcode::AssignCurr { .. }
+            | SymbolicOpcode::Apply { .. }
+            | SymbolicOpcode::Lookup { .. }
+            | SymbolicOpcode::LookupDirect { .. }
+            | SymbolicOpcode::AssignConstCurr { .. }
+            | SymbolicOpcode::BinOpAssignCurr { .. }
+            | SymbolicOpcode::BinOpAssignNext { .. }
+            | SymbolicOpcode::PushVarViewDirect { .. }
+            | SymbolicOpcode::ViewSubscriptDynamic { .. }
+            | SymbolicOpcode::ViewRangeDynamic { .. }
+            | SymbolicOpcode::PopView { .. }
+            | SymbolicOpcode::BeginIter {
+                has_write_temp: false,
+                ..
+            }
+            | SymbolicOpcode::LoadIterViewAt { .. }
+            | SymbolicOpcode::StoreIterElement { .. }
+            | SymbolicOpcode::NextIterOrJump { .. }
+            | SymbolicOpcode::EndIter { .. }
+            | SymbolicOpcode::ArraySum { .. }
+            | SymbolicOpcode::ArrayMax { .. }
+            | SymbolicOpcode::ArrayMin { .. }
+            | SymbolicOpcode::ArrayMean { .. }
+            | SymbolicOpcode::ArrayStddev { .. }
+            | SymbolicOpcode::ArraySize { .. }
+            | SymbolicOpcode::VectorSelect { .. } => None,
+        };
+
+        if let Some(temp_id) = direct_temp
+            && let Some(owner) = owner_by_temp.insert(temp_id, segment)
+            && owner != segment
+        {
+            return Err(format!(
+                "SCC member `{member}` uses temp {temp_id} in per-element segments \
+                 {owner} and {segment}; segment reordering cannot preserve its definition \
+                 dominance, so keeping CircularDependency"
+            ));
+        }
+
+        // Cleanup after the final write remains part of the final segment.
+        if pc < last_write && write_element(op) {
+            segment += 1;
+        }
+    }
+
+    Ok(())
+}
+
 /// Symbolic version of `ByteCode`. Contains the literal pool (unchanged)
 /// and symbolic opcodes.
 ///
@@ -1068,11 +1198,11 @@ pub(crate) fn resolve_static_view(
         // nothing ever wrote: the writer's `as TempId` lands on `id % 256`
         // while this read lands on `id`, and the program is well-formed either
         // way -- wrong numbers with no diagnostic. Reject it in the resolution
-        // layer, where the concrete program is produced (#583 is the real fix:
-        // the id namespace is too small for a per-element hoist over a few
-        // hundred elements). The write-side narrowing is deliberately left
-        // unguarded; the temp bullet under "Standing invariants of the
-        // compiler" in the crate's CLAUDE.md states the rule.
+        // layer, where the concrete program is produced. Per-element
+        // materialization reuses one bounded id range; this guard covers a
+        // fragment that genuinely needs more than 256 concurrent temps. The
+        // temp bullet under "Standing invariants of the compiler" in the
+        // crate's CLAUDE.md states the rule.
         SymStaticViewBase::Temp(id) => {
             if *id > TempId::MAX as u32 {
                 return Err(format!(
@@ -2401,6 +2531,134 @@ mod tests {
     /// A symbolic reference to `name`'s element `elem`.
     fn sref(name: &str, elem: usize) -> SymVarRef {
         SymVarRef::new(Ident::new(name), elem)
+    }
+
+    /// Every opcode variant that carries a temp id directly. The view-backed
+    /// channel is separate below because its id lives in `static_views` rather
+    /// than in the opcode. Keeping this table next to the exhaustive production
+    /// match makes it clear which temp-bearing variants the behavioral rows
+    /// exercise.
+    fn direct_temp_touches() -> Vec<SymbolicOpcode> {
+        vec![
+            SymbolicOpcode::LoadTempConst {
+                temp_id: 0,
+                index: 0,
+            },
+            SymbolicOpcode::BeginIter {
+                write_temp_id: 0,
+                has_write_temp: true,
+            },
+            SymbolicOpcode::VectorElmMap {
+                write_temp_id: 0,
+                full_source_len: 2,
+            },
+            SymbolicOpcode::VectorSortOrder { write_temp_id: 0 },
+            SymbolicOpcode::Rank { write_temp_id: 0 },
+            SymbolicOpcode::LookupArray {
+                base_gf: 0,
+                table_count: 1,
+                mode: LookupMode::Interpolate,
+                write_temp_id: 0,
+            },
+            SymbolicOpcode::AllocateAvailable { write_temp_id: 0 },
+            SymbolicOpcode::AllocateByPriority { write_temp_id: 0 },
+        ]
+    }
+
+    #[test]
+    fn every_direct_temp_touch_crossing_an_element_segment_is_rejected() {
+        for touch in direct_temp_touches() {
+            let name = format!("{touch:?}");
+            let code = vec![
+                touch,
+                SymbolicOpcode::AssignCurr { var: sref("a", 0) },
+                SymbolicOpcode::LoadTempConst {
+                    temp_id: 0,
+                    index: 0,
+                },
+                SymbolicOpcode::AssignCurr { var: sref("a", 1) },
+            ];
+            assert!(
+                validate_segment_local_temps("a", &code, &[]).is_err(),
+                "{name} must be classified as a temp touch"
+            );
+        }
+    }
+
+    #[test]
+    fn view_backed_temp_touches_obey_the_same_segment_boundary() {
+        let views = [SymbolicStaticView {
+            base: SymStaticViewBase::Temp(0),
+            dims: SmallVec::from_slice(&[2]),
+            strides: SmallVec::from_slice(&[1]),
+            offset: 0,
+            sparse: SmallVec::new(),
+            dim_ids: SmallVec::from_slice(&[0]),
+        }];
+        let code = vec![
+            SymbolicOpcode::VectorSortOrder { write_temp_id: 0 },
+            SymbolicOpcode::AssignCurr { var: sref("a", 0) },
+            SymbolicOpcode::PushStaticView { view_id: 0 },
+            SymbolicOpcode::AssignCurr { var: sref("a", 1) },
+        ];
+        assert!(validate_segment_local_temps("a", &code, &views).is_err());
+
+        let malformed = vec![
+            SymbolicOpcode::PushStaticView { view_id: 1 },
+            SymbolicOpcode::AssignCurr { var: sref("a", 0) },
+        ];
+        assert!(
+            validate_segment_local_temps("a", &malformed, &views).is_err(),
+            "an invalid view id must fail loud rather than disappear from the temp scan"
+        );
+    }
+
+    #[test]
+    fn element_local_temp_lifetimes_preserve_dominance() {
+        for touch in direct_temp_touches() {
+            let name = format!("{touch:?}");
+            let code = vec![
+                touch,
+                SymbolicOpcode::LoadTempConst {
+                    temp_id: 0,
+                    index: 0,
+                },
+                SymbolicOpcode::AssignCurr { var: sref("a", 0) },
+                SymbolicOpcode::AssignCurr { var: sref("a", 1) },
+            ];
+            assert!(
+                validate_segment_local_temps("a", &code, &[]).is_ok(),
+                "{name} and its consumer remain ordered inside segment zero"
+            );
+        }
+
+        // Cleanup after the final write belongs to that final segment, just as
+        // `segment_member_by_element` emits it.
+        let trailing = vec![
+            SymbolicOpcode::AssignCurr { var: sref("a", 0) },
+            SymbolicOpcode::VectorSortOrder { write_temp_id: 0 },
+            SymbolicOpcode::AssignCurr { var: sref("a", 1) },
+            SymbolicOpcode::LoadTempConst {
+                temp_id: 0,
+                index: 0,
+            },
+        ];
+        assert!(validate_segment_local_temps("a", &trailing, &[]).is_ok());
+
+        // A read-only iteration carries an irrelevant placeholder temp id.
+        let read_only = vec![
+            SymbolicOpcode::BeginIter {
+                write_temp_id: 0,
+                has_write_temp: false,
+            },
+            SymbolicOpcode::AssignCurr { var: sref("a", 0) },
+            SymbolicOpcode::BeginIter {
+                write_temp_id: 0,
+                has_write_temp: false,
+            },
+            SymbolicOpcode::AssignCurr { var: sref("a", 1) },
+        ];
+        assert!(validate_segment_local_temps("a", &read_only, &[]).is_ok());
     }
 
     fn simple_layout() -> VariableLayout {

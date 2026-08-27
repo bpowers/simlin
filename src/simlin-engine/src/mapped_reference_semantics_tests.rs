@@ -174,12 +174,11 @@ use crate::test_common::TestProject;
 #[derive(Copy, Clone)]
 enum Spelling {
     /// `target[State] = x[State]` -- the subscript names the dimension the
-    /// equation ITERATES. Pass 1 (`ast::expr3::Pass1Context`) folds an
-    /// active dimension name to that dimension's ordinal, which then indexes
-    /// the source's storage raw.
+    /// equation ITERATES. `compiler::subscript` binds an active dimension name
+    /// to that dimension's ordinal, which then indexes the source storage raw.
     IteratedDim,
     /// `target[State] = x[Region]` -- the subscript names a dimension that is
-    /// NOT active, here the source's own. It survives pass 1 as an
+    /// NOT active, here the source's own. It retains mapped resolution intent as an
     /// `IndexExpr3::Dimension`, is normalized to an `IndexOp::ActiveDimRef`
     /// by the free function `compiler::subscript::normalize_subscripts3`, and
     /// is resolved in that module's `build_view_from_ops`, whose
@@ -710,7 +709,7 @@ fn fixture_discriminates() {
 /// Control: with NO mapping declared at all, at equal cardinality.
 ///
 /// The point is that two of the four spellings do not require a mapping to
-/// exist. `IteratedDim` never consults one (pass 1 folds the active
+/// exist. `IteratedDim` never consults one (subscript lowering binds the active
 /// dimension to an ordinal and indexes the source raw), and
 /// `BareInEquation` falls back to a whole-array broadcast -- so a
 /// cross-dimension read between two dimensions declared to have NOTHING to
@@ -835,6 +834,22 @@ fn assert_no_mapping_cases(
             }
         }
     }
+}
+
+/// The final `match_axes` precedence rung is size-only and applies only to
+/// indexed dimensions. This production equation reaches that rung: neither
+/// axis name nor a declaration relates A and B, so `source[B]` follows A's
+/// ordinal. The named-dimension twin is exhaustively refused by
+/// `no_mapping_equal_cardinality`; equal cardinality never erases named
+/// element meaning.
+#[test]
+fn unrelated_indexed_dimensions_match_by_size_only() {
+    let project = TestProject::new("indexed_size_only")
+        .indexed_dimension("A", 3)
+        .indexed_dimension("B", 3)
+        .array_with_ranges("source[B]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+        .array_aux("target[A]", "source[B]");
+    project.assert_vm_result("target", &[10.0, 20.0, 30.0]);
 }
 
 /// The two subscript-less spellings disagree, and this is the single
@@ -1162,45 +1177,15 @@ fn two_iterated_axes_on_one_target_dimension_read_the_diagonal() {
     );
 }
 
-/// The boundary of the rule above: a TARGET that repeats the dimension.
-///
-/// `cube[D1,D1] = pop[D1,D1]` resolves BOTH of the reference's indices to the
-/// target's FIRST `D1` axis, so `cube[r1,r2]` reads `pop[r1,r1]` -- four reads,
-/// which are NOT a diagonal in the target's own element tuple. Every
-/// per-element derivation addresses a target axis by dimension NAME, and this
-/// target has two coordinates for one name.
-///
-/// **Why the retarget is narrowed to a singly-named target dimension, and what
-/// that costs.** The reason is the SCORE surface, not the edges. `RefShape`
-/// decides both, and `emit_per_element_link_scores` refuses a repeated-dimension
-/// target outright, so retargeting this shape would convert an emitted `Bare`
-/// link score into the loud per-element skip -- on every edge into or out of a
-/// repeated-dimension variable, with the loops through them dropped. That is a
-/// product decision about a shape this change is not about. On EDGES the
-/// retarget would be better, and the assertions below say so rather than hiding
-/// it: `Bare` emits 12 edges covering 2 of the 4 real reads, `PerElement` would
-/// emit exactly those same 2 and no phantoms. Both miss the same two real reads,
-/// so the retarget removes phantoms without fixing the missing half -- the half
-/// that breaks loop discovery.
-///
-/// **Pre-existing residual, pinned rather than fixed.** The missing half is
-/// `db::analysis::expand_same_element` keying target positions by dimension NAME
-/// (`HashMap<&str, usize>`), so a target repeating `D1` records only its LAST
-/// axis and both source axes claim it. Fixing it means teaching that function
-/// about repeated dimensions on either side -- the third instance of "a
-/// dimension name is not an axis identity" here after GH #974 and GH #986 --
-/// which changes the arm every ordinary bare arrayed reference uses plus
-/// `ltm_finding::expand_a2a_link_offsets`. Doing it there lets the edges and the
-/// scores move together instead of trading one for the other.
-///
-/// **Blast radius, measured.** Vensim REJECTS a repeated-dimension declaration
-/// ("DimA appears more than once on LHS", `vensim-probes/repeated_dimension.mdl`
-/// in Vensim DSS 2026-08-04), so no MDL-imported model reaches this residual and
-/// it is confined to hand-authored XMILE/JSON/protobuf. The XMILE v1.0 spec does
-/// exemplify the declaration, so the shape stays legitimate and the residual
-/// stays worth fixing -- just not urgent, and not from an importer.
+/// A repeated target dimension still denotes two positional axes. Execution can
+/// represent that shape, so `cube[D1,D1] = pop[D1,D1]` must read
+/// `pop[r_i,r_j]`. LTM's score equations currently address a target element by
+/// dimension name and cannot distinguish those two positions. The analysis path
+/// therefore classifies the reference per element and refuses it with the
+/// established repeated-dimension warning rather than emitting a plausible score
+/// for a different set of reads.
 #[test]
-fn a_repeated_target_dimension_reads_the_first_axis_on_both_sides() {
+fn a_repeated_target_dimension_reads_each_axis_and_ltm_declines_loudly() {
     let project = TestProject::new("square_owner_reads")
         .named_dimension("D1", &["r1", "r2"])
         .array_with_ranges(
@@ -1216,45 +1201,23 @@ fn a_repeated_target_dimension_reads_the_first_axis_on_both_sides() {
     let results = project.run_vm().expect("must compile and run");
     for (cell, want) in [
         ("cube[r1,r1]", 11.0),
-        ("cube[r1,r2]", 11.0),
-        ("cube[r2,r1]", 22.0),
+        ("cube[r1,r2]", 12.0),
+        ("cube[r2,r1]", 21.0),
         ("cube[r2,r2]", 22.0),
     ] {
         assert_eq!(
             *results[cell].last().expect("empty series"),
             want,
-            "{cell}: both indices resolve to the target's FIRST D1 axis"
+            "{cell}: each index occurrence resolves to its corresponding target axis"
         );
     }
 
-    // The DISCRIMINATOR for the narrowing. Both of the above hold under the
-    // retarget too -- `PerElement` drops the same real edge and, being phantom-
-    // free, would satisfy the first line and fail the second only incidentally.
-    // What actually separates the two is that `Bare` keeps this edge SCOREABLE.
-    // Under the retarget `pop -> cube` gets no link-score variable and a loud
-    // per-element skip instead, so this assertion is what the narrowing is for.
     let scored = square_owner_link_score_names();
     assert!(
-        scored
+        !scored
             .iter()
             .any(|n| n.ends_with("link_score\u{205A}pop\u{2192}cube")),
-        "the narrowing keeps this edge on the Bare emitter, which scores it; \
-         retargeting it to PerElement replaces the score with a loud skip. \
-         got: {scored:?}"
-    );
-
-    // The RESIDUAL's current behaviour, in both its directions. Neither line is
-    // a statement of what should be true: a fix to `expand_same_element` reds
-    // this test and has to restate what became true, which is the point of
-    // pinning a defect rather than leaving it silent.
-    let edges = edges_from(&project, "pop[");
-    assert!(
-        !edges.contains(&"pop[r1,r1] -> cube[r1,r2]".to_string()),
-        "residual (missing): a real read still has no edge; got {edges:?}"
-    );
-    assert!(
-        edges.contains(&"pop[r1,r1] -> cube[r2,r1]".to_string()),
-        "residual (phantom): a read that never happens still has one; got {edges:?}"
+        "an unrepresentable repeated-axis score must be absent, got: {scored:?}"
     );
 }
 

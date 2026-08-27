@@ -1415,8 +1415,9 @@ impl<'module> Compiler<'module> {
                     }
                     // Array-producing builtins write a temp through an opcode
                     // of their own and are emitted only from an `AssignTemp`
-                    // (below). Reached here when the equation wasn't hoisted
-                    // (e.g., mixed builtin types in an Arrayed equation).
+                    // (below). Reached here only when the materializer could
+                    // not prove a storage shape and deliberately left the call
+                    // for this attributed refusal.
                     BuiltinFn::Rank(_, _)
                     | BuiltinFn::VectorElmMap(_, _)
                     | BuiltinFn::VectorSortOrder(_, _)
@@ -1645,8 +1646,8 @@ impl<'module> Compiler<'module> {
                         }
                         // Per-element arrayed-GF lookup (GH #580 Bug B):
                         // `g[D!](index)` where each element of `g` carries its
-                        // own table. The hoisting pass (`mod.rs`) wraps this in
-                        // an `AssignTemp` whose view is the GF array's view, so
+                        // own table. `array_operand` wraps this in an
+                        // `AssignTemp` whose view is the GF array's view, so
                         // here we push that array as a view (for the element
                         // count + per-element flat offsets), evaluate the
                         // shared scalar `index`, and emit `LookupArray` to fill

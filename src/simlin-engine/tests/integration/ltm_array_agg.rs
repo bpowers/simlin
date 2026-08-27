@@ -695,8 +695,8 @@ fn variable_backed_partial_reduce_loop_scores_finite_and_sustained() {
 ///    scalar target) used to FAIL fragment compilation and was stubbed to a
 ///    constant `0` with an `Assembly` Warning: `compile_ltm_equation_fragment`
 ///    lowered the equation with an empty `ScopeStage0.models`, so the
-///    `pop[*] * scale` Op2 never got its Expr2 `ArrayBounds` and Pass-1 temp
-///    decomposition never hoisted it out of the reducer. The agg now compiles
+///    `pop[*] * scale` Op2 never got its Expr2 `ArrayBounds`, so final
+///    materialization could not give the reducer a view. The agg now compiles
 ///    and tracks the inlined reducer's value -- asserted below, and pinned in
 ///    detail by `scalar_target_agg_value_matches_inlined_reducer`.
 ///
@@ -878,10 +878,10 @@ fn scalar_feeder_scalar_target_loop_compiles_and_is_well_formed() {
 
 /// GH #738 round 2: the syntactic gate that decides whether an LTM
 /// fragment's lowering needs the dependency-aware scope must cover EVERY
-/// Pass-1 temp-decomposition site, not just the agg-hoistable reducer set.
+/// array-operand materialization site, not just the agg-hoistable reducer set.
 /// `SIZE` is the demonstrated divergence: it is never hoisted into a
-/// `$⁚ltm⁚agg⁚{n}` (its link score is constant 0), but Pass-1 decomposes
-/// its argument exactly like `SUM`'s, so a fragment whose equation embeds
+/// `$⁚ltm⁚agg⁚{n}` (its link score is constant 0), but it consumes its
+/// array argument exactly like `SUM`, so a fragment whose equation embeds
 /// `SIZE(<array expression>)` still needs Expr2 bounds.
 ///
 /// The reachable shape: `grow = scale * SIZE(pop[*] * 2)`. The
@@ -4497,7 +4497,7 @@ fn whole_rhs_bare_reducer_stays_scored() {
 /// and no mapping to it.
 ///
 /// The model COMPILES because `State` is the dimension the equation ITERATES,
-/// so `ast::expr3`'s Pass 1 folds the index to that dimension's ordinal and it
+/// so `compiler::subscript` binds the index to that dimension's ordinal and it
 /// indexes `Region`'s storage raw -- a POSITIONAL read consulting neither names
 /// nor mappings, and the shape
 /// `mapped_reference_semantics_tests::no_mapping_equal_cardinality` measures.
@@ -4652,7 +4652,7 @@ fn declined_sliced_reducer_edge_skips_loudly() {
 /// scores.
 ///
 /// `SUM(matrix[State,*])` names the dimension the equation ITERATES, which
-/// `ast::expr3`'s Pass 1 folds to an ordinal
+/// `compiler::subscript` binds to an ordinal
 /// (`mapped_reference_semantics_tests`' `(Permuted, IteratedDim)` cell, measured
 /// against the VM), so the slots are POSITIONAL and the declared map is not
 /// consulted. The map here is the reverse permutation (CA -> east), so the
@@ -9807,11 +9807,15 @@ fn gh526_natural_and_mapped_deps_keep_changed_first_collapse() {
 /// `discovery` mode. The duplicated-dim sources `expected_skipped` (the
 /// canonical co-source `cube`, plus the feeder `frac` when present) must each
 /// surface exactly one loud edge-level Warning, emit NO per-element link
-/// score, and drag NO loop score into existence.
+/// score, and drag NO loop score into existence. `repeated_targets` lists
+/// additional edges whose TARGET repeats an axis; simulation addresses those
+/// axes positionally, but today's LTM score name cannot represent the
+/// occurrence and must decline independently.
 fn assert_square_source_loudly_skipped(
     project: &datamodel::Project,
     discovery: bool,
     expected_skipped: &[&str],
+    repeated_targets: &[(&str, &str)],
 ) {
     let mode = if discovery { "discovery" } else { "exhaustive" };
     let mut db = SimlinDb::default();
@@ -9889,11 +9893,34 @@ fn assert_square_source_loudly_skipped(
              got: {square:?}"
         );
     }
+    let repeated: Vec<&str> = warnings
+        .iter()
+        .filter_map(|w| match &w.error {
+            DiagnosticError::Assembly(m) if m.contains("repeats a dimension in its subscripts") => {
+                Some(m.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        repeated.len(),
+        repeated_targets.len(),
+        "{mode}: expected one repeated-target warning per declared edge; got: {repeated:?}"
+    );
+    for (src, dst) in repeated_targets {
+        assert!(
+            repeated
+                .iter()
+                .any(|m| m.contains(&format!("{src} -> {dst}"))),
+            "{mode}: the {src} -> {dst} edge must surface a repeated-target warning; \
+             got: {repeated:?}"
+        );
+    }
     // No OTHER Assembly warning (no fragment-failure cascade).
     assert_eq!(
         warnings.len(),
-        expected_skipped.len(),
-        "{mode}: the only Assembly warnings are the loud square-source skips; \
+        expected_skipped.len() + repeated_targets.len(),
+        "{mode}: the only Assembly warnings are the declared loud shape skips; \
          got: {:?}",
         warnings.iter().map(|w| &w.error).collect::<Vec<_>>()
     );
@@ -9956,8 +9983,8 @@ fn square_source_with_feeder_fixture() -> datamodel::Project {
 /// skipped, and loops through it drop -- in both modes.
 #[test]
 fn square_source_whole_rhs_declines_and_skips_loudly() {
-    assert_square_source_loudly_skipped(&square_source_whole_rhs_fixture(), false, &["cube"]);
-    assert_square_source_loudly_skipped(&square_source_whole_rhs_fixture(), true, &["cube"]);
+    assert_square_source_loudly_skipped(&square_source_whole_rhs_fixture(), false, &["cube"], &[]);
+    assert_square_source_loudly_skipped(&square_source_whole_rhs_fixture(), true, &["cube"], &[]);
 }
 
 /// Inline spelling (`x[D1] = base[D1] + SUM(cube[D1,D1,*])`): identical
@@ -9965,8 +9992,8 @@ fn square_source_whole_rhs_declines_and_skips_loudly() {
 /// shape-expressiveness phase and was reachable on `main`).
 #[test]
 fn square_source_inline_declines_and_skips_loudly() {
-    assert_square_source_loudly_skipped(&square_source_inline_fixture(), false, &["cube"]);
-    assert_square_source_loudly_skipped(&square_source_inline_fixture(), true, &["cube"]);
+    assert_square_source_loudly_skipped(&square_source_inline_fixture(), false, &["cube"], &[]);
+    assert_square_source_loudly_skipped(&square_source_inline_fixture(), true, &["cube"], &[]);
 }
 
 /// With-feeder spelling (`x[D1] = 1 + SUM(cube[D1,D1,*] * frac[D1,D1])`):
@@ -9979,11 +10006,13 @@ fn square_source_with_feeder_declines_and_skips_loudly() {
         &square_source_with_feeder_fixture(),
         false,
         &["cube", "frac"],
+        &[],
     );
     assert_square_source_loudly_skipped(
         &square_source_with_feeder_fixture(),
         true,
         &["cube", "frac"],
+        &[],
     );
 }
 
@@ -10008,8 +10037,8 @@ fn square_owner_whole_rhs_declines_and_skips_loudly() {
             .array_flow("x[D1,D1]", "SUM(cube[D1, D1, *])", None)
             .build_datamodel()
     }
-    assert_square_source_loudly_skipped(&fixture(), false, &["cube"]);
-    assert_square_source_loudly_skipped(&fixture(), true, &["cube"]);
+    assert_square_source_loudly_skipped(&fixture(), false, &["cube"], &[("pop", "cube")]);
+    assert_square_source_loudly_skipped(&fixture(), true, &["cube"], &[("pop", "cube")]);
 }
 
 // ---------------------------------------------------------------------------

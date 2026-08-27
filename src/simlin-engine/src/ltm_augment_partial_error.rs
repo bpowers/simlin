@@ -91,7 +91,7 @@ pub(crate) enum PartialEquationErrorKind {
     /// meaningless (`vm_vector_sort_order` on a 1-element view is rank 0
     /// always). Today such a fragment also fails codegen loudly
     /// ("array-producing builtin outside AssignTemp context"); declining at
-    /// generation keeps the drop loud even if a future Pass-1 widening
+    /// generation keeps the drop loud even if a future materializer widening
     /// (option A) makes the fragment compile -- which would otherwise convert
     /// it into a silent constant-0 partial. The element pin belongs on the
     /// RESULT (the A2A-shaped whole-array score, which stays emitted), never
@@ -157,7 +157,7 @@ impl PartialEquationError {
 /// scalar fragment cannot hold. The order-statistic subset (everything but
 /// ELM MAP) is additionally a semantic trap: pinning its argument to one
 /// element changes the ranking rather than selecting a slot, so those must
-/// stay declined even if a future Pass-1 widening makes the fragment
+/// stay declined even if a future materializer widening makes the fragment
 /// compile. Deliberately NOT in the set: `VECTOR SELECT`, whose selection
 /// reduces to a scalar (per-element pinning of the non-reduced axes is
 /// exactly right). This is the same result-type distinction

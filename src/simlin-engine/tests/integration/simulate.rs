@@ -1132,6 +1132,7 @@ fn a_repeated_active_dimension_pairs_each_occurrence_with_its_own_axis() {
         )
         .array_with_ranges("vec[D]", vec![("d1", "1"), ("d2", "10"), ("d3", "100")])
         .array_aux("o[D,D]", "square[*, *]")
+        .array_aux("o_explicit[D,D]", "square[D, D]")
         .array_aux("o_vec[D,D]", "vec[*]")
         .array_aux("o_vec_bare[D,D]", "vec")
         .array_aux("o_mul[D,D]", "square[*, *] * vec[*]")
@@ -1146,6 +1147,12 @@ fn a_repeated_active_dimension_pairs_each_occurrence_with_its_own_axis() {
         ("o[d3,d3]", 33.0),
     ] {
         assert_eq!(cell(&row, name), value, "{name} must be square[d_i,d_j]");
+        let explicit = name.replace("o[", "o_explicit[");
+        assert_eq!(
+            cell(&row, &explicit),
+            value,
+            "each explicit Dimension(D) occurrence must bind its own active axis"
+        );
     }
     for (name, value) in [
         ("o_vec[d1,d3]", 1.0),

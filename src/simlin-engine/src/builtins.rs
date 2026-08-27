@@ -153,12 +153,11 @@ pub enum BuiltinFn<Expr> {
 pub enum ArgKind {
     /// A scalar value, evaluated once per element of the enclosing equation.
     Scalar,
-    /// An array the builtin consumes as one operand: Pass 1
-    /// (`ast::expr3::Pass1Context`) materializes a computed expression in this
-    /// position into a temp, the post-lowering materializer
-    /// (`compiler::array_operand`) does the same for what Pass 1 could not
-    /// see, codegen reads the position as a view, and `Expr2` lowering lets
-    /// sub-expressions inside it union disjoint named dimensions
+    /// An array the builtin consumes as one operand. Subscript lowering first
+    /// resolves the operand's axes, `compiler::array_operand` materializes a
+    /// computed expression in this position into a temp, and codegen reads the
+    /// position as a view. `Expr2` lowering lets sub-expressions inside it union
+    /// disjoint named dimensions
     /// (`SUM(a[*] + h[*])` over `a[DimA]` and `h[DimC]` is a cross-product
     /// sum).
     ///
@@ -183,12 +182,11 @@ pub enum ArgKind {
     ///   `out[COP] = LOOKUP(g, t)` over `g[COP]` applies each element's table
     ///   and `out[COP] = SUM(LOOKUP(g, t))` over `g[COP, ROW]` sums the
     ///   element's row (pinned in `per_element_gf_tests`);
-    /// - Pass 1 (`ast::expr3::Pass1Context`) neither rewrites the position nor
-    ///   reads an apply-to-all reference out of it; its one table-aware step is
-    ///   the arrayed-GF apply decomposition, which reads the table's bounds;
-    /// - `Context::lower_builtin_expr3` lowers it in the enclosing context;
-    /// - `compiler::array_operand::materialize_view_operands` leaves it alone
-    ///   (a temp carries no graphical functions);
+    /// - `Context::lower_builtin_expr3` preserves unmatched table axes while
+    ///   lowering the table in the enclosing context;
+    /// - `compiler::array_operand` leaves the table identity alone (a temp
+    ///   carries no graphical functions) and materializes an array-valued
+    ///   lookup result when its consumer needs storage;
     /// - codegen reads the table's base off the lowered reference
     ///   (`extract_table_info`, `arrayed_lookup_table_info`);
     /// - dependency and causal walkers see it as
@@ -200,8 +198,7 @@ pub enum ArgKind {
     Ident,
 }
 
-/// The shape of a builtin's result, as the apply-to-all hoister and the array
-/// materializer read it.
+/// The shape of a builtin's result, as the array materializer reads it.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ResultKind {

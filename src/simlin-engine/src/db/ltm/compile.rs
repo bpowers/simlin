@@ -568,51 +568,42 @@ struct LoweredLtmVariable {
 
 /// `true` when the lowered AST contains a construct whose compilation
 /// consumes the Expr2 `ArrayBounds` that only the dependency-aware
-/// lowering scope can recover -- i.e. a Pass-1 temp-decomposition site.
+/// lowering scope can recover -- an array operand or lookup table position.
 ///
 /// This is [`lower_ltm_variable`]'s gate for the scoped re-lower, and it
-/// must be sound against `ast::expr3`'s Pass-1 decomposition set -- NOT
-/// the agg-hoistable reducer set (`ltm_agg::reducer_kind_from_name`),
+/// must be sound against `BuiltinFn::arg_kinds` -- not the aggregate-node
+/// reducer set (`ltm_agg::reducer_kind_from_name`),
 /// which differs: `SIZE` is never hoisted into an agg (its link score is
-/// constant 0) yet Pass-1 decomposes its argument exactly like `SUM`'s, and
+/// constant 0) yet consumes an array argument exactly like `SUM`, and
 /// `RANK` -- array-valued, routed through its own LTM agg path (GH #776) --
-/// has a Pass-1-decomposed array argument too (`ArgKind::Array`, GH #995).
+/// also has an `ArgKind::Array` argument (GH #995).
 /// Deriving the original (text-scan) gate from
 /// the wrong set silently stubbed any fragment embedding
 /// `SIZE(<array expression>)` -- the demonstrated GH #738 round-2
 /// regression, pinned by
 /// `ltm_array_agg::size_reducer_previous_helper_compiles_and_is_correct`.
-fn ast_contains_pass1_decomposition_site(ast: &crate::ast::Ast<crate::ast::Expr2>) -> bool {
+fn ast_requires_array_operand_bounds(ast: &crate::ast::Ast<crate::ast::Expr2>) -> bool {
     use crate::ast::Ast;
     match ast {
-        Ast::Scalar(e) | Ast::ApplyToAll(_, e) => expr_contains_pass1_decomposition_site(e),
+        Ast::Scalar(e) | Ast::ApplyToAll(_, e) => expr_requires_array_operand_bounds(e),
         Ast::Arrayed(_, elements, default, _) => {
-            elements
-                .values()
-                .any(expr_contains_pass1_decomposition_site)
+            elements.values().any(expr_requires_array_operand_bounds)
                 || default
                     .as_ref()
-                    .is_some_and(expr_contains_pass1_decomposition_site)
+                    .is_some_and(expr_requires_array_operand_bounds)
         }
     }
 }
 
-/// Expression-level walk for [`ast_contains_pass1_decomposition_site`].
+/// Expression-level walk for [`ast_requires_array_operand_bounds`].
 ///
-/// Sound BY CONSTRUCTION: a Pass-1 decomposition site is a builtin with a
-/// non-scalar argument position in the signature table
-/// (`BuiltinFn::arg_kinds`) -- an array operand, which
-/// `transform_builtin_inner`'s `maybe_decompose_array_arg_inner` turns into an
-/// `AssignTemp` (`SUM` / 1-arg `MEAN` / `STDDEV` / `SIZE` / 1-arg `MIN` / 1-arg
-/// `MAX` / `RANK` / `VECTOR SELECT` / `VECTOR ELM MAP` / `VECTOR SORT ORDER` /
-/// `ALLOCATE AVAILABLE` / `ALLOCATE BY PRIORITY`), or a lookup's table
-/// position, which `transform_inner`'s arrayed-GF apply decomposition reads (a
-/// LOOKUP-family call whose *table* operand carries multi-element bounds;
-/// flagged for every lookup since the table's arrayedness is exactly what the
-/// recovered bounds determine). Pass 1 reads the same kinds, so the gate
-/// cannot drift from it, and a new `BuiltinFn` variant is classified in the
-/// table or fails to compile there.
-/// `pass1_gate_covers_each_decomposition_builtin` pins the classification.
+/// Sound by construction: every builtin with a non-scalar argument position
+/// in `BuiltinFn::arg_kinds` needs its source dimensions while subscript
+/// lowering constructs the operand view. That includes every array operand
+/// and every lookup table position. The final materializer consumes the same
+/// signature rows, so a new `BuiltinFn` variant must state its argument kinds
+/// before it compiles. `array_operand_bounds_gate_covers_each_consumer` pins
+/// the exhaustive classification.
 ///
 /// The one bounds consumer deliberately NOT gated on is the non-A2A Op2
 /// dimension-reordering pass (`compiler::context`'s Op2 lowering): it
@@ -622,15 +613,14 @@ fn ast_contains_pass1_decomposition_site(ast: &crate::ast::Ast<crate::ast::Expr2
 /// lowers with `active_dimension` set, which skips the pass). A gated-out
 /// fragment therefore compiles byte-identically to its empty-scope
 /// (pre-GH #738) lowering.
-fn expr_contains_pass1_decomposition_site(expr: &crate::ast::Expr2) -> bool {
+fn expr_requires_array_operand_bounds(expr: &crate::ast::Expr2) -> bool {
     use crate::ast::{Expr2, IndexExpr2};
     match expr {
         Expr2::Const(..) | Expr2::Var(..) => false,
         Expr2::Subscript(_, indices, _, _) => indices.iter().any(|idx| match idx {
-            IndexExpr2::Expr(e) => expr_contains_pass1_decomposition_site(e),
+            IndexExpr2::Expr(e) => expr_requires_array_operand_bounds(e),
             IndexExpr2::Range(l, r, _) => {
-                expr_contains_pass1_decomposition_site(l)
-                    || expr_contains_pass1_decomposition_site(r)
+                expr_requires_array_operand_bounds(l) || expr_requires_array_operand_bounds(r)
             }
             IndexExpr2::Wildcard(_)
             | IndexExpr2::StarRange(_, _)
@@ -645,21 +635,21 @@ fn expr_contains_pass1_decomposition_site(expr: &crate::ast::Expr2) -> bool {
             {
                 return true;
             }
-            // A decomposition site can hide anywhere in a non-decomposing
-            // builtin's arguments (`ABS(SUM(a[*] * 2))`).
+            // An array consumer can hide anywhere in a scalar builtin's
+            // arguments (`ABS(SUM(a[*] * 2))`).
             builtin
                 .args()
                 .into_iter()
-                .any(expr_contains_pass1_decomposition_site)
+                .any(expr_requires_array_operand_bounds)
         }
-        Expr2::Op1(_, e, _, _) => expr_contains_pass1_decomposition_site(e),
+        Expr2::Op1(_, e, _, _) => expr_requires_array_operand_bounds(e),
         Expr2::Op2(_, l, r, _, _) => {
-            expr_contains_pass1_decomposition_site(l) || expr_contains_pass1_decomposition_site(r)
+            expr_requires_array_operand_bounds(l) || expr_requires_array_operand_bounds(r)
         }
         Expr2::If(c, t, f, _, _) => {
-            expr_contains_pass1_decomposition_site(c)
-                || expr_contains_pass1_decomposition_site(t)
-                || expr_contains_pass1_decomposition_site(f)
+            expr_requires_array_operand_bounds(c)
+                || expr_requires_array_operand_bounds(t)
+                || expr_requires_array_operand_bounds(f)
         }
     }
 }
@@ -668,21 +658,19 @@ fn expr_contains_pass1_decomposition_site(expr: &crate::ast::Expr2) -> bool {
 /// resolve the dimensions of its model-variable dependencies (GH #738).
 ///
 /// Expr1 -> Expr2 lowering computes each subexpression's `ArrayBounds` via
-/// `ArrayContext::get_dimensions`, which reads `ScopeStage0.models`. Pass-1
-/// temp decomposition (`Pass1Context::needs_decomposition`) gates on those
-/// bounds: a reducer over an array *expression* (`SUM(pop[*] * scale)`) is
-/// hoisted into an `AssignTemp` only when the Op2 carries them. With an
-/// empty scope the bounds are never computed, the array expression stays
-/// inline under the reducer, and codegen rejects the fragment ("Cannot push
-/// view for expression type ..."), silently stubbing the LTM variable to a
-/// constant 0. Mirrors `explicit_fragment_input`'s minimal-`ModelStage0`
-/// construction for ordinary per-variable fragments.
+/// `ArrayContext::get_dimensions`, which reads `ScopeStage0.models`. The final
+/// array-operand materializer needs those bounds to size a computed operand
+/// such as `SUM(pop[*] * scale)`. With an empty scope the bounds are absent and
+/// codegen rejects the inline expression instead of guessing a view, which
+/// would silently stub the LTM variable to zero. This mirrors
+/// `explicit_fragment_input`'s minimal `ModelStage0` construction for ordinary
+/// per-variable fragments.
 ///
 /// Strategy: lower once with an empty scope (cheap, and byte-identical to
 /// the populated-scope lowering when no dependency is arrayed -- the scope
 /// only feeds `get_dimensions`, which returns `None` for scalars either
-/// way); only when the lowered AST contains a Pass-1 temp-decomposition
-/// site ([`ast_contains_pass1_decomposition_site`]) AND an arrayed
+/// way); only when the lowered AST contains an array operand or table position
+/// ([`ast_requires_array_operand_bounds`]) AND an arrayed
 /// dependency is present, re-lower with a scope carrying the parsed Stage0
 /// variables of self plus the deps. The dependency identifier set is
 /// scope-independent (the scope affects only bounds metadata), so the
@@ -737,15 +725,12 @@ fn lower_ltm_variable(
         None => (BTreeSet::new(), BTreeSet::new()),
     };
 
-    // Structural gate: without a Pass-1 temp-decomposition site in the
-    // lowered AST, the Expr2 bounds the scoped re-lower would recover
+    // Structural gate: without an array consumer in the lowered AST, the
+    // Expr2 bounds the scoped re-lower would recover
     // cannot change the compile outcome -- skip the per-dep arrayedness
     // lookups and the second lowering entirely (the common case: most
     // link/loop scores contain no reducer even on heavily arrayed models).
-    if !prelim
-        .ast()
-        .is_some_and(ast_contains_pass1_decomposition_site)
-    {
+    if !prelim.ast().is_some_and(ast_requires_array_operand_bounds) {
         return LoweredLtmVariable {
             variable: prelim,
             dep_idents,
@@ -789,8 +774,8 @@ fn lower_ltm_variable(
     let dm_var_is_arrayed = |v: &crate::capture::ImplicitVar| !v.equation_dims().is_empty();
     // An ARRAYED sibling LTM var referenced as a dep -- today that is the
     // GH #995 freeze helper, a whole-array operand of a vector builtin
-    // (`VECTOR SELECT("$⁚ltm⁚freeze⁚…", …)`). The Pass-1 temp decomposition
-    // below can only materialize a computed array argument (`helper * k`) if
+    // (`VECTOR SELECT("$⁚ltm⁚freeze⁚…", …)`). The final materializer
+    // can only materialize a computed array argument (`helper * k`) if
     // the lowering scope knows the helper's dims; without them the reference
     // lowers as a scalar and codegen rejects the fragment ("expected array
     // expression"). Same registry lookup (and the same safety argument) as
@@ -1660,8 +1645,8 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
     } else {
         // Same dependency-aware lowering scope as `ltm_fragment_input` (GH
         // #738): a synthesized helper aux whose equation embeds a reducer over
-        // an array expression needs its deps' dimensions resolvable for Pass-1
-        // temp decomposition. The classification comes back from the same
+        // an array expression needs its deps' dimensions resolvable for final
+        // materialization. The classification comes back from the same
         // lowering, so the lowered AST is not walked again.
         let LoweredLtmVariable {
             variable: lowered,
@@ -1854,8 +1839,8 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
 }
 
 #[cfg(test)]
-mod pass1_gate_tests {
-    use super::expr_contains_pass1_decomposition_site;
+mod array_operand_bounds_gate_tests {
+    use super::expr_requires_array_operand_bounds;
     use crate::ast::{Expr2, IndexExpr2, Loc};
     use crate::builtins::BuiltinFn;
     use crate::common::{Canonical, Ident};
@@ -1872,19 +1857,13 @@ mod pass1_gate_tests {
         Expr2::App(builtin, None, Loc::default())
     }
 
-    /// The guard test tying the gate to Pass-1's decomposition set
-    /// (`ast::expr3::Pass1Context::transform_builtin_inner` /
-    /// `transform_inner`'s arrayed-GF apply): every builtin Pass-1
-    /// decomposes must flag the gate, and the non-decomposing near-misses
-    /// (n-ary MEAN, 2-arg MIN/MAX) must not flag it on their own. The
-    /// signature table is the compile-time half of this guard -- a new
-    /// `BuiltinFn` variant fails to build until its argument kinds are
-    /// stated there -- while this test pins the classification of the
-    /// existing variants so a refactor cannot silently flip one (the
-    /// round-2 GH #738 regression was exactly such a divergence: the gate
-    /// was derived from the agg-hoistable reducer set, which omits SIZE).
+    /// Every builtin whose signature consumes an array or table must flag the
+    /// gate, while the scalar near-misses (n-ary MEAN, 2-arg MIN/MAX) must not
+    /// flag it on their own. The signature table makes new variants exhaustive;
+    /// this test pins the classification of existing variants. SIZE is an
+    /// important row because a reducer-only list once omitted it (GH #738).
     #[test]
-    fn pass1_gate_covers_each_decomposition_builtin() {
+    fn array_operand_bounds_gate_covers_each_consumer() {
         let decomposing: Vec<(&str, BuiltinFn<Expr2>)> = vec![
             ("sum", BuiltinFn::Sum(c())),
             ("mean_1arg", BuiltinFn::Mean(vec![*c()])),
@@ -1918,14 +1897,14 @@ mod pass1_gate_tests {
         ];
         for (name, builtin) in decomposing {
             assert!(
-                expr_contains_pass1_decomposition_site(&app(builtin)),
-                "{name} is a Pass-1 decomposition site and must flag the gate"
+                expr_requires_array_operand_bounds(&app(builtin)),
+                "{name} consumes array bounds and must flag the gate"
             );
         }
 
         let decomposing_rank = app(BuiltinFn::Rank(c(), c()));
         assert!(
-            expr_contains_pass1_decomposition_site(&decomposing_rank),
+            expr_requires_array_operand_bounds(&decomposing_rank),
             "RANK's array argument decomposes like VECTOR SORT ORDER's"
         );
 
@@ -1941,20 +1920,19 @@ mod pass1_gate_tests {
         ];
         for (name, builtin) in non_decomposing {
             assert!(
-                !expr_contains_pass1_decomposition_site(&app(builtin)),
-                "{name} is not a Pass-1 decomposition site and must not flag the gate alone"
+                !expr_requires_array_operand_bounds(&app(builtin)),
+                "{name} consumes no array bounds and must not flag the gate alone"
             );
         }
     }
 
-    /// A decomposition site nested inside a non-decomposing construct
+    /// An array consumer nested inside a scalar construct
     /// (a builtin argument, an Op2 operand, a subscript index) must still
-    /// flag the gate -- the walk recurses everywhere Pass-1's transform
-    /// recurses.
+    /// flag the gate because the materializer walks every expression edge.
     #[test]
-    fn pass1_gate_finds_nested_decomposition_sites() {
+    fn array_operand_bounds_gate_finds_nested_consumers() {
         let nested_in_builtin = app(BuiltinFn::Abs(Box::new(app(BuiltinFn::Sum(c())))));
-        assert!(expr_contains_pass1_decomposition_site(&nested_in_builtin));
+        assert!(expr_requires_array_operand_bounds(&nested_in_builtin));
 
         let nested_in_op2 = Expr2::Op2(
             crate::ast::BinaryOp::Mul,
@@ -1963,7 +1941,7 @@ mod pass1_gate_tests {
             None,
             Loc::default(),
         );
-        assert!(expr_contains_pass1_decomposition_site(&nested_in_op2));
+        assert!(expr_requires_array_operand_bounds(&nested_in_op2));
 
         let nested_in_subscript = Expr2::Subscript(
             Ident::<Canonical>::new("a"),
@@ -1971,7 +1949,7 @@ mod pass1_gate_tests {
             None,
             Loc::default(),
         );
-        assert!(expr_contains_pass1_decomposition_site(&nested_in_subscript));
+        assert!(expr_requires_array_operand_bounds(&nested_in_subscript));
 
         let plain = Expr2::Op2(
             crate::ast::BinaryOp::Add,
@@ -1980,6 +1958,6 @@ mod pass1_gate_tests {
             None,
             Loc::default(),
         );
-        assert!(!expr_contains_pass1_decomposition_site(&plain));
+        assert!(!expr_requires_array_operand_bounds(&plain));
     }
 }

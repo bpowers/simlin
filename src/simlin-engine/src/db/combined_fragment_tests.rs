@@ -324,6 +324,64 @@ fn combined_fragment_keeps_disjoint_temp_ranges_across_interleaved_segments() {
     assert_eq!(sizes.get(&1), Some(&8), "ecc's temp size at its own slot 1");
 }
 
+/// Assembly repeats the temp-liveness check even though production dependency
+/// analysis already refuses this verdict. This fixture is intentionally
+/// hand-built: it represents a stale or bypassed `ResolvedScc`, the only input
+/// on which the transformation-boundary defense can fire. The production
+/// parse -> dependency-graph path is covered by
+/// `dep_graph_tests::cross_segment_array_temp_sccs_are_rejected_loudly`.
+#[test]
+fn combined_fragment_rejects_a_stale_cross_segment_temp_verdict() {
+    let vector_view = |base| SymbolicStaticView {
+        base,
+        dims: SmallVec::from_slice(&[2]),
+        strides: SmallVec::from_slice(&[1]),
+        offset: 0,
+        sparse: SmallVec::new(),
+        dim_ids: SmallVec::from_slice(&[0]),
+    };
+    let fragment = PerVarBytecodes {
+        symbolic: SymbolicByteCode {
+            literals: vec![1.0],
+            code: vec![
+                // The normal VectorSortOrder emission shape: source view,
+                // scalar direction, temp write, then source-view cleanup.
+                SymbolicOpcode::PushStaticView { view_id: 0 },
+                SymbolicOpcode::LoadConstant { id: 0 },
+                SymbolicOpcode::VectorSortOrder { write_temp_id: 0 },
+                SymbolicOpcode::PopView {},
+                SymbolicOpcode::AssignConstCurr {
+                    var: vref("a", 0),
+                    literal_id: 0,
+                },
+                // The second member segment consumes that temp through the
+                // same static-view form codegen uses for TempArray.
+                SymbolicOpcode::PushStaticView { view_id: 1 },
+                SymbolicOpcode::ArraySum {},
+                SymbolicOpcode::AssignCurr { var: vref("a", 1) },
+                SymbolicOpcode::Ret,
+            ],
+        },
+        graphical_functions: vec![],
+        module_decls: vec![],
+        static_views: vec![
+            vector_view(SymStaticViewBase::Var(vref("input", 0))),
+            vector_view(SymStaticViewBase::Temp(0)),
+        ],
+        temp_sizes: vec![(0, 2)],
+        dim_lists: vec![],
+    };
+    let mut fragments = HashMap::new();
+    fragments.insert(id("a"), fragment);
+
+    let err = combine_scc_fragment(&scc(vec![(id("a"), 0), (id("a"), 1)]), &fragments)
+        .expect_err("assembly must reject a temp whose definition crosses segment boundaries");
+    assert!(
+        err.contains("uses temp 0 in per-element segments 0 and 1"),
+        "expected the assembly liveness backstop, got: {err}"
+    );
+}
+
 #[test]
 fn combined_fragment_static_view_var_base_survives_verbatim() {
     let frags = two_member_fragments();

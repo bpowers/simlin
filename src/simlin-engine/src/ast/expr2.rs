@@ -703,7 +703,7 @@ impl Expr2 {
                     (UnaryOp::Transpose, Some(bounds)) => {
                         // Transpose reverses both dimensions and dimension names.
                         // Preserving names is critical: when this expression gets
-                        // decomposed into a TempArray by Pass1, the temp view's
+                        // decomposed into a TempArray by final materialization, the temp view's
                         // dim_ids must match the source view's transposed dim_ids
                         // for the VM's LoadIterViewAt dimension matching to succeed.
                         let mut transposed_dims = bounds.dims().to_vec();

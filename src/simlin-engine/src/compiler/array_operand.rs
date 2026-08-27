@@ -2,158 +2,240 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Materialization of computed array operands (GH #995).
+//! The single materialization pass for lowered array expressions.
 //!
-//! Codegen consumes an array-valued operand as a **view over storage**
-//! ([`super::codegen::Compiler::walk_expr_as_view`]): a `StaticSubscript`, a
-//! `TempArray`, a whole `Var`, or a dynamic `Subscript`, and nothing else. A
-//! *computed* array -- `vals[D] * 2`, `NOT ...`, an `IF` selecting between two
-//! arrays, an elementwise `ABS(...)`, a nested array-producing builtin -- is
-//! none of those, so it has to be evaluated into a temp of its own before the
-//! builtin that reads it. Codegen already knows how to do that: an
-//! `AssignTemp` whose body is not one of the array-producing opcodes lowers to
-//! a `BeginIter` loop that evaluates the body element by element.
+//! Subscript resolution runs before this module. Consequently every source
+//! view is concrete and every apply-to-all element has its final scalar
+//! arguments. This pass then establishes codegen's array contract: an array
+//! operand is a view over variable, snapshot, or temp storage, and every
+//! array-producing builtin is the right-hand side of one `AssignTemp`.
 //!
-//! [`super::context::Context::lower`]'s Pass 1
-//! ([`crate::ast::Pass1Context`]) materializes the operands it can see,
-//! but it works on `Expr3`, *before* subscripts are resolved, so two shapes get
-//! past it:
-//!
-//! * an operand still carrying an unresolved apply-to-all dimension reference.
-//!   `vals[D]` inside a vector builtin only means "the whole array" after
-//!   [`super::context::Context::with_vector_builtin_wildcards`] promotes its
-//!   `ActiveDimRef` to a `Wildcard`, which happens during lowering, after Pass
-//!   1; Pass 1 sees an unresolved reference and defers to pass 2.
-//! * an operand the *type checker* bounded as a scalar for the same reason:
-//!   `vals[D] * 2` carries `ArrayBounds: None`, so Pass 1's
-//!   `needs_decomposition` declines it before the deferral even matters.
-//!
-//! This pass is the backstop, and it runs on the fully lowered fragment, where
-//! the promotion has happened and every view is concrete.
-//!
-//! # Why it is safe
-//!
-//! It rewrites **only** operands codegen would have rejected: [`is_view`] is
-//! the negation of `walk_expr_as_view`'s accepting arms, so a fragment that
-//! compiles today passes through untouched, temp count included.
-//!
-//! Where it does fire it costs one temp per materialized operand, which on the
-//! per-element hoisting path (one temp per array ELEMENT already) doubles temp
-//! consumption. That runs into the `u8` `TempId` namespace above ~128 elements
-//! -- and a materialized operand is read through a static VIEW, the one place a
-//! temp id is not narrowed to `u8`. `symbolic::resolve_static_view` rejects
-//! that combination loudly rather than letting the two narrowings disagree;
-//! #583 is the real fix. Measured max temps per fragment across the checked-in
-//! corpus and C-LEARN: 21, unchanged by this pass.
-//!
-//! # What still declines
-//!
-//! Four limits are worth knowing before reading a "this shape does not
-//! compile" report as a bug in this pass:
-//!
-//! * An operand only materializes if [`super::find_expr_array_view`] can
-//!   derive a shape for it. That function's `App` arm reads each builtin's
-//!   `ResultKind` to decide which arguments propagate an array shape; the ones
-//!   that propagate none (the reducers, `VECTOR SELECT`, the `Lookup` family)
-//!   are explained there.
-//! * That shape is the JOIN of every array in the operand -- the view they all
-//!   broadcast into -- so an operand mixing INCOMPARABLE shapes (`row[e]` and
-//!   `col[d]`, neither containing the other) has none, and declines. The union
-//!   `[e,d]` would compile, but nothing in the operand says whether it is
-//!   `[e,d]` or `[d,e]`, and the temp's axis order is the axis
-//!   `VECTOR SORT ORDER` sorts along. Declining leaves the loud codegen
-//!   rejection; guessing would leave a plausible array of wrong numbers.
-//! * An operand carrying a REPEATED-dimension view (`matrix[d,d]`) declines --
-//!   mixed with another shape, and as the operand's SOLE shape. `[d,d]` can say
-//!   "contains `d` at size 3" but not WHICH `d`, and every layer that projects
-//!   between an array and a temp matches by name and takes the first hit:
-//!   `super::project_var_index_to_temp` gives both axes the same coordinate, so
-//!   `out[i,j]` would read `temp[i,i]`, and `codegen::array_view_to_static_temp`
-//!   keys `DimId`s the same way. There is no shape to give.
-//!
-//!   The refusal lives HERE and in `codegen::snapshot_static_view` -- the two
-//!   positions that can be loud about it -- and deliberately not inside
-//!   `super::join_array_views`, even though that reads as the tidier home for
-//!   it. `super::find_expr_array_view` has four consumers and the other three
-//!   substitute the VARIABLE's own view for a `None`, silently and at a
-//!   possibly different SIZE: refusing in the join sized the temp of
-//!   `out[d] = SUM(VECTOR SORT ORDER(matrix[d,d], 1))` at `out`'s three slots
-//!   while the sort order still wrote nine, and the VM indexed past the temp.
-//!   That equation returns numbers at the merge base, so the tidier home cost a
-//!   process abort on a shape that worked.
-//!
-//!   This costs nothing that worked: measured at the MERGE BASE `ccf7ed34`,
-//!   `VECTOR SORT ORDER(matrix[d,d] * 2, 1)` does not compile, and neither does
-//!   the `PREVIOUS`/`INIT` spelling `codegen::snapshot_static_view` refuses on
-//!   the same grounds. Both became compilable on this branch, and both compiled
-//!   to first-axis-wins garbage until this refusal. Reading a repeated dimension
-//!   DIRECTLY is a different matter and is untouched: `out[d,d] = matrix[d,d]`
-//!   and `VECTOR SORT ORDER(matrix[d,d], 1)` compile at the merge base, to those
-//!   same wrong numbers, and remain exactly as they were -- a disclosed residual
-//!   whose blast radius is now MEASURED: Vensim REJECTS the declaration -- run in Vensim DSS 2026-08-04, `vensim-probes/repeated_dimension.mdl` refuses to simulate with "DimA appears more than once on LHS" -- so no MDL-imported model can contain this shape and the residual is confined to hand-authored XMILE/JSON/protobuf. It is NOT illegitimate, though: the XMILE v1.0 spec exemplifies the declaration (`docs/reference/xmile-v1.0.html`, "A 2D non-apply-to-all array with dimensions X by X, where X is size 2", verified in-repo), so a conformant file may carry it and Simlin must keep reading it. The spec exemplifies only the DECLARATION, with per-element equations; it says nothing about what a REFERENCE such as `sq[X,X]` means, which is the part that is wrong here. Pinned by
-//!   `array_operand_materialization_tests::a_repeated_dimension_read_directly_is_a_pre_existing_residual`,
-//!   whose fix belongs in the projection rather than here.
+//! Each top-level assignment owns an allocator element scope. Sequential array
+//! elements therefore reuse one dense id range. An exact final expression and
+//! output view may reuse the first write to that recycled slot when recursive
+//! purity proves it stable. Definitions that depend on the assignment target
+//! or mutable evaluation state are never shared. Resolved SCC assembly rejects
+//! any temp whose definition and uses cross reorderable element segments.
 
 use crate::ast::{ArrayView, TempAllocator};
-use crate::builtins::ArgKind;
+use crate::builtins::{ArgKind, BuiltinSig, Invariance, ResultKind};
+use crate::common::{Canonical, CanonicalDimensionName, CanonicalElementName, Ident};
 use crate::compiler::expr::{BuiltinFn, Expr, SubscriptIndex};
+use crate::dimensions::{Axis, AxisMatch, Dimension, DimensionsContext, match_axes_partial};
 
-/// Rewrite `exprs` so every array operand codegen reads as a view actually is
-/// one, splicing an `AssignTemp` in front of the expression that needs it.
-///
-/// `temps` is the fragment's allocator. Every element scope the lowering
-/// opened has ended by the time this runs, so each id it issues lies above
-/// every temp the lowered code writes: a materialized temp spliced into an
-/// element's code can never alias the element's own, still-live temps.
-pub(super) fn materialize_computed_array_operands(
+#[derive(Clone, Copy)]
+enum ValueUse<'a> {
+    Scalar,
+    Array { target: Option<&'a ArrayView> },
+    Element { index: usize, view: &'a ArrayView },
+}
+
+/// Materialize every computed array operand and array-producing result after
+/// subscript resolution.
+pub(super) fn materialize_arrays(
     exprs: Vec<Expr>,
+    target_view: Option<&ArrayView>,
+    dimensions: &DimensionsContext,
     temps: &TempAllocator,
 ) -> Vec<Expr> {
-    let mut out: Vec<Expr> = Vec::with_capacity(exprs.len());
+    let scopes = temps.element_scopes();
+    let assigned_targets = exprs
+        .iter()
+        .filter_map(|expr| match expr {
+            Expr::AssignCurr(dst, _) | Expr::AssignNext(dst, _) => Some(dst.name.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut definitions = DefinitionCache::new(assigned_targets);
+    let mut out = Vec::with_capacity(exprs.len());
     for expr in exprs {
-        // Hoisted assignments are emitted immediately before the expression
-        // that reads them, and in the order they were allocated, so a nested
-        // materialization's temp is always written before the outer one that
-        // consumes it.
-        let mut hoisted = Vec::new();
-        let expr = rewrite(expr, temps, &mut hoisted);
-        out.extend(hoisted);
+        scopes.begin_element();
+        let mut before = Vec::new();
+        let expr = match expr {
+            Expr::AssignCurr(dst, rhs) => {
+                let usage = target_view.map_or(ValueUse::Scalar, |view| ValueUse::Element {
+                    index: dst.element_offset,
+                    view,
+                });
+                Expr::AssignCurr(
+                    dst,
+                    Box::new(rewrite(
+                        *rhs,
+                        usage,
+                        dimensions,
+                        temps,
+                        &mut definitions,
+                        &mut before,
+                    )),
+                )
+            }
+            Expr::AssignNext(dst, rhs) => {
+                let usage = target_view.map_or(ValueUse::Scalar, |view| ValueUse::Element {
+                    index: dst.element_offset,
+                    view,
+                });
+                Expr::AssignNext(
+                    dst,
+                    Box::new(rewrite(
+                        *rhs,
+                        usage,
+                        dimensions,
+                        temps,
+                        &mut definitions,
+                        &mut before,
+                    )),
+                )
+            }
+            other => rewrite(
+                other,
+                ValueUse::Scalar,
+                dimensions,
+                temps,
+                &mut definitions,
+                &mut before,
+            ),
+        };
+        out.extend(before);
         out.push(expr);
     }
     out
 }
 
-fn rewrite(expr: Expr, temps: &TempAllocator, hoisted: &mut Vec<Expr>) -> Expr {
+fn rewrite(
+    expr: Expr,
+    usage: ValueUse<'_>,
+    dimensions: &DimensionsContext,
+    temps: &TempAllocator,
+    definitions: &mut DefinitionCache,
+    before: &mut Vec<Expr>,
+) -> Expr {
     match expr {
         Expr::App(builtin, loc) => {
-            // Bottom-up: an operand that is itself a builtin call is rewritten
-            // (and, if it needs it, materialized) before this level looks at
-            // it, so a nested array-producing builtin arrives here as a
-            // `TempArray` rather than as an un-viewable `App`.
-            let builtin = builtin.map(|arg| rewrite(arg, temps, hoisted));
-            Expr::App(materialize_view_operands(builtin, temps, hoisted), loc)
+            // Capture the stable signature name before `map_with_kinds`
+            // consumes the builtin.
+            let name = builtin.name().to_ascii_lowercase().replace(' ', "_");
+            let result_target = match usage {
+                ValueUse::Array { target } => target,
+                ValueUse::Element { view, .. } => Some(view),
+                ValueUse::Scalar => None,
+            };
+            let shape_from = match builtin.result_kind() {
+                ResultKind::Array { shape_from } => Some(shape_from as usize),
+                ResultKind::Scalar | ResultKind::Elementwise => None,
+            };
+            let mut position = 0usize;
+            let builtin = builtin.map_with_kinds(|arg, kind| {
+                let child_usage = match kind {
+                    ArgKind::Array { .. } => ValueUse::Array {
+                        target: (shape_from == Some(position))
+                            .then_some(result_target)
+                            .flatten(),
+                    },
+                    ArgKind::Scalar | ArgKind::Table => usage,
+                    ArgKind::Ident => {
+                        unreachable!("an identifier payload is not an expression argument")
+                    }
+                };
+                let arg = rewrite(arg, child_usage, dimensions, temps, definitions, before);
+                let policy = operand_policy(&name, position, kind);
+                position += 1;
+                match policy {
+                    OperandPolicy::Materialize => {
+                        let target = match child_usage {
+                            ValueUse::Array { target } => target,
+                            ValueUse::Scalar | ValueUse::Element { .. } => None,
+                        };
+                        materialize_operand(arg, target, dimensions, temps, definitions, before)
+                    }
+                    OperandPolicy::Identity => arg,
+                    OperandPolicy::NotExpression => {
+                        unreachable!("BuiltinFn::map_with_kinds does not visit identifier payloads")
+                    }
+                }
+            });
+            materialize_result(
+                Expr::App(builtin, loc),
+                usage,
+                dimensions,
+                temps,
+                definitions,
+                before,
+            )
         }
-        Expr::Op1(op, inner, loc) => Expr::Op1(op, Box::new(rewrite(*inner, temps, hoisted)), loc),
+        Expr::Op1(op, inner, loc) => Expr::Op1(
+            op,
+            Box::new(rewrite(
+                *inner,
+                usage,
+                dimensions,
+                temps,
+                definitions,
+                before,
+            )),
+            loc,
+        ),
         Expr::Op2(op, lhs, rhs, loc) => Expr::Op2(
             op,
-            Box::new(rewrite(*lhs, temps, hoisted)),
-            Box::new(rewrite(*rhs, temps, hoisted)),
+            Box::new(rewrite(*lhs, usage, dimensions, temps, definitions, before)),
+            Box::new(rewrite(*rhs, usage, dimensions, temps, definitions, before)),
             loc,
         ),
         Expr::If(cond, then_expr, else_expr, loc) => Expr::If(
-            Box::new(rewrite(*cond, temps, hoisted)),
-            Box::new(rewrite(*then_expr, temps, hoisted)),
-            Box::new(rewrite(*else_expr, temps, hoisted)),
+            Box::new(rewrite(
+                *cond,
+                usage,
+                dimensions,
+                temps,
+                definitions,
+                before,
+            )),
+            Box::new(rewrite(
+                *then_expr,
+                usage,
+                dimensions,
+                temps,
+                definitions,
+                before,
+            )),
+            Box::new(rewrite(
+                *else_expr,
+                usage,
+                dimensions,
+                temps,
+                definitions,
+                before,
+            )),
             loc,
         ),
         Expr::Subscript(base, indices, bounds, loc) => {
             let indices = indices
                 .into_iter()
                 .map(|idx| match idx {
-                    SubscriptIndex::Single(e) => SubscriptIndex::Single(rewrite(e, temps, hoisted)),
+                    SubscriptIndex::Single(e) => SubscriptIndex::Single(rewrite(
+                        e,
+                        ValueUse::Scalar,
+                        dimensions,
+                        temps,
+                        definitions,
+                        before,
+                    )),
                     SubscriptIndex::Range(start, end) => SubscriptIndex::Range(
-                        rewrite(start, temps, hoisted),
-                        rewrite(end, temps, hoisted),
+                        rewrite(
+                            start,
+                            ValueUse::Scalar,
+                            dimensions,
+                            temps,
+                            definitions,
+                            before,
+                        ),
+                        rewrite(
+                            end,
+                            ValueUse::Scalar,
+                            dimensions,
+                            temps,
+                            definitions,
+                            before,
+                        ),
                     ),
                 })
                 .collect();
@@ -164,18 +246,32 @@ fn rewrite(expr: Expr, temps: &TempAllocator, hoisted: &mut Vec<Expr>) -> Expr {
             model_name,
             input_set,
             args.into_iter()
-                .map(|arg| rewrite(arg, temps, hoisted))
+                .map(|arg| {
+                    rewrite(
+                        arg,
+                        ValueUse::Scalar,
+                        dimensions,
+                        temps,
+                        definitions,
+                        before,
+                    )
+                })
                 .collect(),
         ),
-        Expr::AssignCurr(dst, rhs) => {
-            Expr::AssignCurr(dst, Box::new(rewrite(*rhs, temps, hoisted)))
-        }
-        Expr::AssignNext(dst, rhs) => {
-            Expr::AssignNext(dst, Box::new(rewrite(*rhs, temps, hoisted)))
-        }
-        Expr::AssignTemp(id, rhs, view) => {
-            Expr::AssignTemp(id, Box::new(rewrite(*rhs, temps, hoisted)), view)
-        }
+        Expr::AssignTemp(id, rhs, view) => Expr::AssignTemp(
+            id,
+            Box::new(rewrite(
+                *rhs,
+                ValueUse::Array {
+                    target: Some(&view),
+                },
+                dimensions,
+                temps,
+                definitions,
+                before,
+            )),
+            view,
+        ),
         leaf @ (Expr::Const(_, _)
         | Expr::Var(_, _)
         | Expr::StaticSubscript(_, _, _)
@@ -183,161 +279,373 @@ fn rewrite(expr: Expr, temps: &TempAllocator, hoisted: &mut Vec<Expr>) -> Expr {
         | Expr::TempArrayElement(_, _, _, _)
         | Expr::Dt(_)
         | Expr::ModuleInput(_, _)) => leaf,
-    }
-}
-
-/// Materialize every view-requiring operand position: the table's
-/// `ArgKind::Array` positions, which are exactly the positions codegen reads
-/// through `walk_expr_as_view` (the reducers' argument, `VECTOR SELECT`'s two
-/// arrays, the array-producing builtins' array arguments), minus the one
-/// position below that is deliberately left alone. A lookup's table
-/// (`ArgKind::Table`) is read as a view too, but it must name a whole
-/// *variable*: codegen resolves it to a `base_gf` by ident
-/// (`arrayed_lookup_table_info`), and a temp has no graphical functions
-/// attached to it. n-ary `MEAN` has no array position -- it averages scalars --
-/// so `MEAN(a * b)` over two scalars passes through untouched while the
-/// single-argument `MEAN(matrix[E,*] * 2)` materializes like every other
-/// reducer.
-fn materialize_view_operands(
-    builtin: BuiltinFn,
-    temps: &TempAllocator,
-    hoisted: &mut Vec<Expr>,
-) -> BuiltinFn {
-    // ALLOCATE AVAILABLE's priority-profile argument is deliberately NOT
-    // materialized. Its view is rewritten during lowering by
-    // `context::Context::expand_pp_view_for_allocate`, which re-expands a
-    // collapsed reference such as `pp[D,1]` back to the variable's full
-    // requester x XPriority array because the allocator always reads all
-    // four profile columns. That helper only understands a direct variable
-    // reference, so a computed profile array has no defined shape here:
-    // materializing `pp[D,1] + adj[D,1]` would silently hand the VM a
-    // one-column-per-requester temp. Leaving it alone keeps the loud
-    // codegen rejection instead.
-    let exempt_profile = matches!(builtin, BuiltinFn::AllocateAvailable(_, _, _));
-    // Materializing an ELM MAP *source* deliberately changes which storage
-    // the mapping ranges over, and the choice is this: the temp.
-    //
-    // The rule for a VARIABLE source is DOCUMENTED and ground-truthed. The
-    // Vensim reference page for VECTOR ELM MAP (retrieved 2026-08-02) says
-    // the function "returns the value of the variable that is offset from
-    // vec by the specified amount", and that an offset "outside the range of
-    // the variable" yields `:NA:`; its multi-subscript example spells the
-    // offset as a flat index over the whole variable
-    // (`(sub-1)*ELMCOUNT(tub)*ELMCOUNT(gub) + ...`). Real Vensim output
-    // agrees: in `test/sdeverywhere/models/vector/`,
-    // `f[DimA,DimB] = VECTOR ELM MAP(d[DimA,B1], a[DimA])` prints
-    // `1,1,5,5,6,6`, and `f[A2,B1] = 5 = d[A2,B2]` -- the mapping read past
-    // its own `B1` slice into the next row. `vm_vector_elm_map.rs`
-    // implements exactly that with a `source_is_full_array` test: a strict
-    // slice keeps a per-element base and can read across rows, a full
-    // contiguous source has `base_i == 0`.
-    //
-    // A COMPUTED source is a Simlin EXTENSION. Vensim rejects the shape
-    // outright -- run in Vensim DSS on 2026-08-04,
-    // `vensim-probes/elm_map_computed_source.mdl` refuses to simulate with
-    // "Argument 1 to function VECTOR ELM MAP must be a normal variable". So
-    // there is no Vensim behaviour to match here, and the question is not
-    // "which rule does Vensim use" but "what shall this mean in Simlin".
-    //
-    // It means the HELPER-EQUIVALENT thing: an inline expression behaves
-    // exactly as the same values pre-assigned to a named variable, which is
-    // the spelling that IS legal Vensim. A materialized operand is a fresh
-    // contiguous temp and so is full-array by construction, which confines
-    // the mapping to the computed array -- exactly what
-    // `VECTOR ELM MAP(helper[A1], offs)` does when `helper` holds those
-    // values. That definition is deliberate; the temp has no "rest of the
-    // variable" to run into, so nothing else is even expressible. Pinned by
-    // `array_operand_materialization_tests::materializing_an_elm_map_source_confines_the_mapping_to_the_temp`.
-    let mut position = 0usize;
-    builtin.map_with_kinds(|arg, kind| {
-        let is_profile = exempt_profile && position == 1;
-        position += 1;
-        match kind {
-            ArgKind::Array { .. } if !is_profile => materialize_view_operand(arg, temps, hoisted),
-            ArgKind::Array { .. } | ArgKind::Scalar | ArgKind::Table => arg,
-            ArgKind::Ident => unreachable!("an identifier payload is not an expression argument"),
+        Expr::AssignCurr(_, _) | Expr::AssignNext(_, _) => {
+            unreachable!("assignments only occur at fragment top level")
         }
-    })
+    }
 }
 
-/// Move `operand` into a temp of its own and return the `TempArray` reference
-/// that replaces it, or return it unchanged when it is already a view or when
-/// no array shape can be derived for it.
-///
-/// A bare array-valued `PREVIOUS`/`INIT` is left alone for the same reason a
-/// `StaticSubscript` is: it already IS a view, over a snapshot buffer rather
-/// than over `curr` (GH #995, [`is_snapshot_view`]). Materializing it would
-/// spend a temp to copy an array that codegen can address directly.
-fn materialize_view_operand(operand: Expr, temps: &TempAllocator, hoisted: &mut Vec<Expr>) -> Expr {
-    if is_view(&operand) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OperandPolicy {
+    Materialize,
+    Identity,
+    NotExpression,
+}
+
+fn operand_policy(name: &str, position: usize, kind: ArgKind) -> OperandPolicy {
+    match kind {
+        // ALLOCATE AVAILABLE's profile is expanded during lowering to the
+        // complete requester x priority view. A computed profile has no
+        // defined expansion, so preserve codegen's loud rejection.
+        ArgKind::Array { .. } if name == "allocate_available" && position == 1 => {
+            OperandPolicy::Identity
+        }
+        ArgKind::Array { .. } => OperandPolicy::Materialize,
+        ArgKind::Scalar | ArgKind::Table => OperandPolicy::Identity,
+        ArgKind::Ident => OperandPolicy::NotExpression,
+    }
+}
+
+fn materialize_operand(
+    mut operand: Expr,
+    target: Option<&ArrayView>,
+    dimensions: &DimensionsContext,
+    temps: &TempAllocator,
+    definitions: &mut DefinitionCache,
+    before: &mut Vec<Expr>,
+) -> Expr {
+    if is_view(&operand) || is_snapshot_view(&operand) {
         return operand;
     }
-    if is_snapshot_view(&operand) {
-        return operand;
-    }
-    // The operand's shape is the JOIN of its subexpressions' shapes, which is
-    // what makes `small[d] + wide[e,d]` and `wide[e,d] + small[d]` the same
-    // array (`super::find_expr_array_view`). `None` covers both "no shape" and
-    // "two shapes neither of which contains the other"; declining leaves the
-    // operand for codegen to reject, exactly as the deliberately
-    // unmaterialized profile position above does, rather than guessing an
-    // axis order.
-    let Some(source_view) = super::find_expr_array_view(&operand) else {
+    let Some(source_view) = super::find_array_operand_view(&mut operand, target, dimensions) else {
+        // An incomparable or unknown shape remains for codegen's structured
+        // rejection. Inventing an axis order would silently mis-broadcast.
         return operand;
     };
-    // A repeated dimension name is refused as a TEMP's shape even when it is the
-    // operand's sole shape (`super::view_repeats_a_dimension`). The refusal lives
-    // here rather than inside the join because `find_expr_array_view` has four
-    // consumers and only this one is loud: the three hoisters in `super` fall
-    // back to the VARIABLE's own view, so a `None` there silently reshapes a
-    // temp instead of declining -- measured, `out[d] = SUM(VECTOR SORT
-    // ORDER(matrix[d,d], 1))` sized a 9-element sort order's temp at 3 and the
-    // VM indexed past it. Refusing at the one site that produces a diagnostic
-    // keeps the direct spellings byte-identical to the merge base, which is all
-    // this refusal ever claimed.
-    if super::view_repeats_a_dimension(&source_view) {
+    if source_view.dims.is_empty() || super::view_repeats_a_dimension(&source_view) {
         return operand;
     }
-    if source_view.dims.is_empty() {
-        return operand;
-    }
-
-    // The temp is fresh compact storage; only the SHAPE of the producing
-    // expression carries over. (Codegen normalizes a temp's view to compact
-    // row-major strides anyway -- `array_view_to_static_temp` -- so passing a
-    // sliced source view would merely be misleading, not wrong.)
-    let view = if source_view.dim_names.len() == source_view.dims.len() {
-        ArrayView::contiguous_with_names(source_view.dims, source_view.dim_names)
-    } else {
-        ArrayView::contiguous(source_view.dims)
-    };
-
+    let view = compact_view(source_view);
     let loc = operand.get_loc();
-    let temp_id = temps.alloc();
-    hoisted.push(Expr::AssignTemp(temp_id, Box::new(operand), view.clone()));
-    Expr::TempArray(temp_id, view, loc)
+    let id = definitions.materialize(operand, &view, temps, before);
+    Expr::TempArray(id, view, loc)
 }
 
-/// True when `expr` is an array-valued `PREVIOUS`/`INIT` -- a fifth view shape
-/// `codegen::walk_expr_as_view` accepts, over one of the VM's snapshot buffers
-/// rather than over `curr` (GH #995).
-///
-/// Kept separate from [`is_view`] because the two are decided differently:
-/// `is_view` is a pure shape test on the `Expr` variant, while this one depends
-/// on the ARGUMENT's shape -- `PREVIOUS(vals[D])` is a view and
-/// `PREVIOUS(matrix[E,1])` is a scalar. Both are decided by
-/// [`super::snapshot_view_arg`], shared with codegen, so the pass and the
-/// emitter cannot disagree about which calls take the array route. An argument
-/// codegen cannot express as a snapshot view is a loud rejection THERE, and
-/// declining to materialize here is what keeps it loud: a temp built around a
-/// `PREVIOUS` its `BeginIter` body cannot emit would be a wrong number in place
-/// of a diagnostic.
+fn materialize_result(
+    expr: Expr,
+    usage: ValueUse<'_>,
+    dimensions: &DimensionsContext,
+    temps: &TempAllocator,
+    definitions: &mut DefinitionCache,
+    before: &mut Vec<Expr>,
+) -> Expr {
+    let Expr::App(builtin, _) = &expr else {
+        unreachable!()
+    };
+    let (source_view, requires_axis) = match builtin.result_kind() {
+        // A collapsed source is still a one-element array result. Codegen's
+        // array-producing opcode therefore still needs an `AssignTemp` even
+        // when the view has zero surviving axes.
+        ResultKind::Array { shape_from } => {
+            let inferred = super::find_expr_array_view(&expr);
+            if inferred.is_none() && has_array_shape(builtin.args()[shape_from as usize]) {
+                // A runtime-sized range or incomparable collection of views
+                // cannot be represented by one fixed temp view. Preserve the
+                // raw call for codegen's structured rejection rather than
+                // pretending it is the degenerate one-element result.
+                return expr;
+            }
+            (
+                Some(inferred.unwrap_or_else(|| ArrayView::contiguous(Vec::new()))),
+                false,
+            )
+        }
+        ResultKind::Scalar => (arrayed_lookup_view(builtin), true),
+        ResultKind::Elementwise => (None, true),
+    };
+    let Some(source_view) = source_view else {
+        return expr;
+    };
+    if requires_axis && source_view.dims.is_empty() {
+        return expr;
+    }
+    let view = compact_view(source_view);
+    let loc = expr.get_loc();
+    let id = definitions.materialize(expr, &view, temps, before);
+    match usage {
+        ValueUse::Array { .. } => Expr::TempArray(id, view, loc),
+        ValueUse::Element {
+            index,
+            view: target_view,
+        } => match project_element(index, target_view, &view, dimensions) {
+            Some(element) => Expr::TempArrayElement(id, view.clone(), element, loc),
+            // Every result axis must correspond to a target axis. Keeping the
+            // view makes codegen report its canonical "array where a single
+            // value is required" diagnostic; choosing coordinate zero here
+            // would silently accept `out[COP] = LOOKUP(g[COP,ROW], Time)`.
+            None => Expr::TempArray(id, view, loc),
+        },
+        ValueUse::Scalar => Expr::TempArray(id, view, loc),
+    }
+}
+
+#[derive(Clone, PartialEq)]
+struct CachedDefinition {
+    expr: Expr,
+    view: ArrayView,
+}
+
+/// Definitions cached by recycled physical temp id for one phase's ordered
+/// assignment sequence. A cache hit is dominated by the first write because
+/// materialization emits that write before its assignment, and a slot's entry
+/// is replaced whenever an intervening element gives the id another meaning.
+struct DefinitionCache {
+    assigned_targets: Vec<Ident<Canonical>>,
+    by_temp: Vec<Option<CachedDefinition>>,
+}
+
+impl DefinitionCache {
+    fn new(assigned_targets: Vec<Ident<Canonical>>) -> Self {
+        Self {
+            assigned_targets,
+            by_temp: Vec::new(),
+        }
+    }
+
+    fn materialize(
+        &mut self,
+        expr: Expr,
+        view: &ArrayView,
+        temps: &TempAllocator,
+        before: &mut Vec<Expr>,
+    ) -> u32 {
+        let reusable = definition_is_reusable(&expr, &self.assigned_targets);
+        let definition = CachedDefinition {
+            expr: expr.clone(),
+            view: view.clone(),
+        };
+        let id = temps.alloc();
+        let slot = id as usize;
+        if self.by_temp.len() <= slot {
+            self.by_temp.resize_with(slot + 1, || None);
+        }
+        if reusable && self.by_temp[slot].as_ref() == Some(&definition) {
+            return id;
+        }
+        self.by_temp[slot] = reusable.then_some(definition);
+        before.push(Expr::AssignTemp(id, Box::new(expr), view.clone()));
+        id
+    }
+}
+
+/// Whether one resolved definition is stable for the rest of this phase's
+/// assignment sequence. `BuiltinSig::invariance` is the semantic boundary:
+/// only pure calls qualify. The lookup family qualifies: its table identity
+/// selects immutable entries in `CompiledContext::graphical_functions`, and
+/// both VM and wasm lookup opcodes only read those entries. Target reads,
+/// module evaluation and nested temps can observe state that an earlier
+/// assignment or materialization changed, so none can be reused.
+fn definition_is_reusable(expr: &Expr, assigned_targets: &[Ident<Canonical>]) -> bool {
+    let reads_assigned_target = |name: &Ident<Canonical>| assigned_targets.contains(name);
+    match expr {
+        Expr::Const(_, _) | Expr::Dt(_) | Expr::ModuleInput(_, _) => true,
+        Expr::Var(var, _) | Expr::StaticSubscript(var, _, _) => !reads_assigned_target(&var.name),
+        Expr::Subscript(var, indices, _, _) => {
+            !reads_assigned_target(&var.name)
+                && indices.iter().all(|index| match index {
+                    SubscriptIndex::Single(expr) => definition_is_reusable(expr, assigned_targets),
+                    SubscriptIndex::Range(start, end) => {
+                        definition_is_reusable(start, assigned_targets)
+                            && definition_is_reusable(end, assigned_targets)
+                    }
+                })
+        }
+        Expr::App(builtin, _) => {
+            signature_definition_is_reusable(builtin.signature())
+                && builtin
+                    .args()
+                    .iter()
+                    .all(|arg| definition_is_reusable(arg, assigned_targets))
+        }
+        Expr::Op1(_, inner, _) => definition_is_reusable(inner, assigned_targets),
+        Expr::Op2(_, lhs, rhs, _) => {
+            definition_is_reusable(lhs, assigned_targets)
+                && definition_is_reusable(rhs, assigned_targets)
+        }
+        Expr::If(cond, then_expr, else_expr, _) => {
+            definition_is_reusable(cond, assigned_targets)
+                && definition_is_reusable(then_expr, assigned_targets)
+                && definition_is_reusable(else_expr, assigned_targets)
+        }
+        Expr::TempArray(_, _, _)
+        | Expr::TempArrayElement(_, _, _, _)
+        | Expr::EvalModule(_, _, _, _)
+        | Expr::AssignCurr(_, _)
+        | Expr::AssignNext(_, _)
+        | Expr::AssignTemp(_, _, _) => false,
+    }
+}
+
+fn signature_definition_is_reusable(signature: &BuiltinSig) -> bool {
+    signature.invariance == Invariance::Pure
+}
+
+/// Whether an expression contains evidence of an array shape that the view
+/// inference above failed to represent. Absence is meaningful: an array
+/// builtin over scalar/fixed-element inputs has a real one-element result.
+fn has_array_shape(expr: &Expr) -> bool {
+    if super::find_expr_array_view(expr).is_some() {
+        return true;
+    }
+    match expr {
+        Expr::Subscript(_, indices, _, _) => indices
+            .iter()
+            .any(|index| matches!(index, SubscriptIndex::Range(..))),
+        Expr::App(builtin, _) => builtin.args().into_iter().any(has_array_shape),
+        Expr::Op1(_, inner, _) => has_array_shape(inner),
+        Expr::Op2(_, lhs, rhs, _) => has_array_shape(lhs) || has_array_shape(rhs),
+        Expr::If(cond, then_expr, else_expr, _) => {
+            has_array_shape(cond) || has_array_shape(then_expr) || has_array_shape(else_expr)
+        }
+        Expr::AssignTemp(_, inner, _) | Expr::AssignCurr(_, inner) | Expr::AssignNext(_, inner) => {
+            has_array_shape(inner)
+        }
+        Expr::EvalModule(_, _, _, args) => args.iter().any(has_array_shape),
+        Expr::Const(_, _)
+        | Expr::Var(_, _)
+        | Expr::StaticSubscript(_, _, _)
+        | Expr::TempArray(_, _, _)
+        | Expr::TempArrayElement(_, _, _, _)
+        | Expr::Dt(_)
+        | Expr::ModuleInput(_, _) => false,
+    }
+}
+
+/// Lookup over an array of graphical functions is array-valued despite the
+/// lookup family's ordinary scalar signature. Codegen selects `LookupArray`
+/// precisely when the table view retains an axis.
+fn arrayed_lookup_view(builtin: &BuiltinFn) -> Option<ArrayView> {
+    let table = match builtin {
+        BuiltinFn::Lookup(table, _, _)
+        | BuiltinFn::LookupForward(table, _, _)
+        | BuiltinFn::LookupBackward(table, _, _) => table.as_ref(),
+        _ => return None,
+    };
+    super::find_expr_array_view(table)
+}
+
+fn compact_view(view: ArrayView) -> ArrayView {
+    if view.dim_names.len() == view.dims.len() {
+        ArrayView::contiguous_with_names(view.dims, view.dim_names)
+    } else {
+        ArrayView::contiguous(view.dims)
+    }
+}
+
+/// Project a target's row-major element onto a result temp. The shared matcher
+/// allocates axes one-to-one, so repeated names pair by occurrence:
+/// `[D,D] -> [D,D]` is `0->0, 1->1`, never `0->0, 1->0`.
+fn project_element(
+    index: usize,
+    target: &ArrayView,
+    result: &ArrayView,
+    dimensions: &DimensionsContext,
+) -> Option<usize> {
+    let target_coords = coordinates(index, &target.dims);
+    let mapping = if target.dim_names.len() == target.dims.len()
+        && result.dim_names.len() == result.dims.len()
+        && target.dim_names.iter().all(|name| !name.is_empty())
+        && result.dim_names.iter().all(|name| !name.is_empty())
+    {
+        let result_axes: Vec<_> = result
+            .dim_names
+            .iter()
+            .zip(&result.dims)
+            .map(|(name, &len)| Axis::named(name, len))
+            .collect();
+        let target_axes: Vec<_> = target
+            .dim_names
+            .iter()
+            .zip(&target.dims)
+            .map(|(name, &len)| Axis::named(name, len))
+            .collect();
+        match_axes_partial(&result_axes, &target_axes, dimensions)
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else if result.dims == target.dims {
+        (0..result.dims.len())
+            .map(|axis| Some((axis, crate::dimensions::AxisMatch::Exact)))
+            .collect()
+    } else {
+        vec![None; result.dims.len()]
+    };
+
+    let result_coords: Option<Vec<usize>> = mapping
+        .into_iter()
+        .enumerate()
+        .map(|(result_axis, matched)| {
+            let (target_axis, relation) = matched?;
+            match relation {
+                AxisMatch::Exact | AxisMatch::BySize => Some(target_coords[target_axis]),
+                AxisMatch::Mapped { .. } | AxisMatch::Subdimension => {
+                    let target_name = target.dim_names.get(target_axis)?;
+                    let result_name = result.dim_names.get(result_axis)?;
+                    mapped_coordinate(
+                        target_coords[target_axis],
+                        target_name,
+                        result_name,
+                        dimensions,
+                    )
+                }
+            }
+        })
+        .collect();
+    Some(linear_index(&result_coords?, &result.dims))
+}
+
+/// Translate a target coordinate through the same name-first, then declared
+/// mapping rule used when lowering a source read. Axis pairing alone is not
+/// enough for an explicit element map: the target's ordinal may select a
+/// differently-positioned source element.
+fn mapped_coordinate(
+    target_coord: usize,
+    target_name: &str,
+    result_name: &str,
+    dimensions: &DimensionsContext,
+) -> Option<usize> {
+    let target_dim = dimensions.get(&CanonicalDimensionName::from_raw(target_name))?;
+    let result_dim = dimensions.get(&CanonicalDimensionName::from_raw(result_name))?;
+    let target_element = match target_dim {
+        Dimension::Named(_, named) => named.elements.get(target_coord)?.clone(),
+        Dimension::Indexed(_, size) if target_coord < *size as usize => {
+            CanonicalElementName::from_raw(&(target_coord + 1).to_string())
+        }
+        Dimension::Indexed(..) => return None,
+    };
+    let result_element = dimensions.resolve_mapped_read(result_dim, target_dim, &target_element)?;
+    result_dim.get_offset(&result_element)
+}
+
+fn coordinates(mut index: usize, dims: &[usize]) -> Vec<usize> {
+    let mut coords = vec![0; dims.len()];
+    for axis in (0..dims.len()).rev() {
+        coords[axis] = index % dims[axis];
+        index /= dims[axis];
+    }
+    coords
+}
+
+fn linear_index(coords: &[usize], dims: &[usize]) -> usize {
+    coords
+        .iter()
+        .zip(dims)
+        .fold(0, |index, (&coord, &len)| index * len + coord)
+}
+
 fn is_snapshot_view(expr: &Expr) -> bool {
     matches!(expr, Expr::App(builtin, _) if super::snapshot_view_arg(builtin).is_some())
 }
 
-/// The four expression shapes `codegen::walk_expr_as_view` accepts. Anything
-/// else is a codegen error, which is exactly the set this pass rewrites.
 fn is_view(expr: &Expr) -> bool {
     matches!(
         expr,
@@ -346,4 +654,164 @@ fn is_view(expr: &Expr) -> bool {
             | Expr::Var(_, _)
             | Expr::Subscript(_, _, _, _)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::Loc;
+    use crate::compiler::VarRef;
+
+    /// The signature table is the exhaustive row source. Result semantics are
+    /// exercised end-to-end by `array_tests` and
+    /// `array_operand_materialization_tests`; arrayed lookup's extra result
+    /// shape is exercised by `per_element_gf_tests` because it depends on a
+    /// production graphical-function registry rather than a signature row.
+    #[test]
+    fn every_signature_row_has_an_explicit_materialization_policy() {
+        let mut array_results = Vec::new();
+        for sig in BuiltinSig::ALL {
+            if matches!(sig.result, ResultKind::Array { .. }) {
+                array_results.push(sig.name);
+            }
+            for (position, &kind) in sig.arg_kinds.iter().enumerate() {
+                let policy = operand_policy(sig.name, position, kind);
+                match kind {
+                    ArgKind::Array { .. } if sig.name == "allocate_available" && position == 1 => {
+                        assert_eq!(policy, OperandPolicy::Identity);
+                    }
+                    ArgKind::Array { .. } => {
+                        assert_eq!(policy, OperandPolicy::Materialize);
+                    }
+                    ArgKind::Scalar | ArgKind::Table => {
+                        assert_eq!(policy, OperandPolicy::Identity);
+                    }
+                    ArgKind::Ident => assert_eq!(policy, OperandPolicy::NotExpression),
+                }
+            }
+        }
+        assert_eq!(
+            array_results,
+            [
+                "rank",
+                "vector_elm_map",
+                "vector_sort_order",
+                "allocate_available",
+                "allocate_by_priority",
+            ]
+        );
+    }
+
+    /// `BuiltinSig::ALL` is also the exhaustive source for definition reuse.
+    /// Pure functions are eligible, including the three immutable-table
+    /// lookup rows. Each mutable-time class is ineligible even when its
+    /// resolved argument tree is textually equal.
+    #[test]
+    fn every_signature_row_has_an_explicit_definition_reuse_class() {
+        let mut reusable = Vec::new();
+        let mut table = Vec::new();
+        let mut time_dependent = Vec::new();
+        let mut lagged = Vec::new();
+        let mut snapshot = Vec::new();
+        for sig in BuiltinSig::ALL {
+            let eligible = signature_definition_is_reusable(sig);
+            match (sig.invariance, sig.arg_kinds.contains(&ArgKind::Table)) {
+                (Invariance::Pure, false) => {
+                    assert!(eligible, "{} is a pure value function", sig.name);
+                    reusable.push(sig.name);
+                }
+                (Invariance::Pure, true) => {
+                    assert!(eligible, "{} only reads immutable table identity", sig.name);
+                    reusable.push(sig.name);
+                    table.push(sig.name);
+                }
+                (Invariance::TimeDependent, _) => {
+                    assert!(!eligible, "{} reads mutable time", sig.name);
+                    time_dependent.push(sig.name);
+                }
+                (Invariance::Lagged, _) => {
+                    assert!(!eligible, "{} reads the previous snapshot", sig.name);
+                    lagged.push(sig.name);
+                }
+                (Invariance::Snapshot, _) => {
+                    assert!(!eligible, "{} reads the initial snapshot", sig.name);
+                    snapshot.push(sig.name);
+                }
+            }
+        }
+        assert_eq!(
+            reusable.len() + time_dependent.len() + lagged.len() + snapshot.len(),
+            BuiltinSig::ALL.len()
+        );
+        assert_eq!(table, ["lookup", "lookup_forward", "lookup_backward"]);
+        assert_eq!(time_dependent, ["pulse", "ramp", "step", "time"]);
+        assert_eq!(lagged, ["previous"]);
+        assert_eq!(snapshot, ["init"]);
+        assert_eq!(reusable.len(), 38);
+    }
+
+    #[test]
+    fn definition_reuse_rejects_mutable_and_temp_dependent_expression_classes() {
+        let loc = Loc::default();
+        let c = || Expr::Const(1.0, loc);
+        let target = Ident::new("out");
+        let assigned_targets = [target.clone()];
+
+        assert!(definition_is_reusable(
+            &Expr::App(BuiltinFn::Abs(Box::new(c())), loc),
+            &assigned_targets
+        ));
+        assert!(!definition_is_reusable(
+            &Expr::App(BuiltinFn::Time, loc),
+            &assigned_targets
+        ));
+        assert!(!definition_is_reusable(
+            &Expr::App(BuiltinFn::Previous(Box::new(c()), Box::new(c())), loc),
+            &assigned_targets
+        ));
+        assert!(!definition_is_reusable(
+            &Expr::App(BuiltinFn::Init(Box::new(c())), loc),
+            &assigned_targets
+        ));
+        assert!(definition_is_reusable(
+            &Expr::App(BuiltinFn::Lookup(Box::new(c()), Box::new(c()), loc), loc),
+            &assigned_targets
+        ));
+        assert!(!definition_is_reusable(
+            &Expr::TempArray(0, ArrayView::contiguous(vec![1]), loc),
+            &assigned_targets
+        ));
+        assert!(!definition_is_reusable(
+            &Expr::EvalModule(
+                Ident::new("m"),
+                Ident::new("submodel"),
+                Default::default(),
+                vec![c()],
+            ),
+            &assigned_targets
+        ));
+        assert!(!definition_is_reusable(
+            &Expr::Var(VarRef::base(target), loc),
+            &assigned_targets
+        ));
+    }
+
+    #[test]
+    fn repeated_axes_project_by_occurrence() {
+        let dimensions = DimensionsContext::default();
+        let target =
+            ArrayView::contiguous_with_names(vec![2, 2], vec!["d".to_owned(), "d".to_owned()]);
+        assert_eq!(project_element(0, &target, &target, &dimensions), Some(0));
+        assert_eq!(project_element(1, &target, &target, &dimensions), Some(1));
+        assert_eq!(project_element(2, &target, &target, &dimensions), Some(2));
+        assert_eq!(project_element(3, &target, &target, &dimensions), Some(3));
+    }
+
+    #[test]
+    fn unmatched_result_axis_cannot_be_projected_to_coordinate_zero() {
+        let dimensions = DimensionsContext::default();
+        let target = ArrayView::contiguous_with_names(vec![3], vec!["cop".to_owned()]);
+        let result = ArrayView::contiguous_with_names(vec![2], vec!["row".to_owned()]);
+        assert_eq!(project_element(0, &target, &result, &dimensions), None);
+    }
 }

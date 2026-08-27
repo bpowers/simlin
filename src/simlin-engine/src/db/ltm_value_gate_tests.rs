@@ -273,7 +273,7 @@ fn a_disjoint_dim_element_subscript_arm_is_not_zeroed() {
 ///
 /// `growth[la] = base * 0.03` reads no link source and nothing that varies, so
 /// every link into `growth` omits that slot and
-/// `compiler::expand_arrayed_with_hoisting` lowers it to one
+/// `compiler::expand_arrayed` lowers it to one
 /// `AssignCurr(off, Const(0.0))`. Asserting exact equality rather than a
 /// tolerance is what makes this catch the omission claiming a slot it should
 /// not have: a near-zero residual would pass a tolerance and is precisely the

@@ -3703,12 +3703,12 @@ mod vector_elm_map_tests {
     }
 }
 
-mod arrayed_except_hoisting_tests {
+mod arrayed_except_materialization_tests {
     use crate::test_common::TestProject;
 
     /// Arrayed equation with a default that uses an array-producing builtin
     /// and an element override (EXCEPT semantics). The override must not be
-    /// silently replaced by the default during A2A hoisting.
+    /// silently replaced by the default during per-element lowering.
     fn make_except_project(name: &str) -> TestProject {
         TestProject::new(name)
             .indexed_dimension("D", 3)
@@ -3745,11 +3745,10 @@ mod arrayed_except_hoisting_tests {
         );
     }
 
-    /// Verify that A2A hoisting works correctly by checking that the model
-    /// compiles and produces correct results. If hoisting were broken,
-    /// the vector_elm_map default equation would produce incorrect values.
+    /// The production compiler must preserve the EXCEPT override while
+    /// materializing the default's array-producing result.
     #[test]
-    fn arrayed_except_hoists_correctly() {
+    fn arrayed_except_compiles_and_simulates() {
         let project = make_except_project("arrayed_except_hoist");
         project.assert_compiles_incremental();
         project.assert_vm_result("result", &[30.0, 10.0, 42.0]);
@@ -3757,9 +3756,9 @@ mod arrayed_except_hoisting_tests {
 }
 
 /// When the first element is an override constant and later elements use the
-/// default (which contains an array-producing builtin), the hoisting detection
-/// must scan beyond the first element to find the builtin.
-mod first_element_override_hoisting_tests {
+/// default (which contains an array-producing builtin), every element must be
+/// lowered from its own selected equation.
+mod first_element_override_materialization_tests {
     use crate::test_common::TestProject;
 
     fn make_project(name: &str) -> TestProject {
@@ -3802,7 +3801,7 @@ mod first_element_override_hoisting_tests {
 /// When all elements are specified (no default) and some have builtins while
 /// others are constants, only elements with builtins should get TempArrayElement
 /// reads. Elements with constants must be lowered normally.
-mod mixed_element_hoisting_tests {
+mod mixed_element_materialization_tests {
     use crate::test_common::TestProject;
 
     fn make_project(name: &str) -> TestProject {
@@ -3846,9 +3845,9 @@ mod mixed_element_hoisting_tests {
 
 /// When the default equation has a NESTED array-producing builtin (e.g.,
 /// `10 + vector_elm_map(...)`) and element 1 is overridden, element 0 must
-/// use the override value, not the hoisting expression. The nested hoisting
-/// path must probe each element individually, including element 0.
-mod nested_hoisting_first_override_tests {
+/// use the override value, not the default expression. Nested array results
+/// are materialized only after each element selects its own equation.
+mod nested_materialization_first_override_tests {
     use crate::test_common::TestProject;
 
     fn make_project(name: &str) -> TestProject {
@@ -3891,7 +3890,7 @@ mod nested_hoisting_first_override_tests {
 
 /// When an override element wraps the SAME nested builtin with different
 /// arithmetic (e.g., default = `10 + vem(...)`, override = `100 + vem(...)`),
-/// each element must use its OWN AST, not the first hoisting expression.
+/// each element must use its OWN AST.
 mod nested_override_different_wrapping_tests {
     use crate::test_common::TestProject;
 
@@ -3935,7 +3934,7 @@ mod nested_override_different_wrapping_tests {
 }
 
 /// When the default is a top-level builtin but an override wraps it (nested),
-/// the override must be handled via nested hoisting instead of failing codegen.
+/// the override's nested result must materialize instead of failing codegen.
 mod toplevel_default_nested_override_tests {
     use crate::test_common::TestProject;
 
@@ -3978,8 +3977,8 @@ mod toplevel_default_nested_override_tests {
 }
 
 /// When the default uses one array-producing builtin and an override uses a
-/// completely different one (e.g., VEM vs VSO), each must get its own AssignTemp
-/// blocks with independent temp IDs.
+/// completely different one (e.g., VEM vs VSO), each must retain its own
+/// evaluation semantics.
 mod different_builtin_override_tests {
     use crate::test_common::TestProject;
 
@@ -4066,8 +4065,8 @@ mod vector_op_invalid_view_tests {
 }
 
 /// When a vector builtin's scalar argument depends on the active A2A dimension,
-/// each element must be hoisted with its own AssignTemp (per-element hoisting).
-/// Without this, the first element's scalar value is reused for all elements.
+/// each element must materialize from its own resolved expression. Sharing the
+/// first element's result would reuse its scalar argument for every element.
 #[cfg(test)]
 mod flag_split_tests {
     use crate::test_common::TestProject;
@@ -4774,8 +4773,8 @@ TIME STEP = 1 ~~|
 /// This is the minimized, model-agnostic form of the six C-LEARN vars
 /// (`global_rs_co2_ff`, `rs_global_ch4/n2o/pfc/sf6` -- `SUM(RS X[COP!](Time/One
 /// year))`; `rs_ff_co2_ff_aggregated` -- `VECTOR SELECT(..., RS CO2 FF[COP!](
-/// Time/One year)*..., ...)`). The fix hoists the applied arrayed GF into an
-/// `AssignTemp`/`TempArray` (recognized as array-producing) and emits a
+/// Time/One year)*..., ...)`). The applied arrayed GF materializes into an
+/// `AssignTemp`/`TempArray`, and codegen emits a
 /// dedicated per-element-lookup opcode (`LookupArray`) that fills the temp,
 /// so the reducer/vector op reads a genuine array view.
 #[cfg(test)]

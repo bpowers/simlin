@@ -477,6 +477,90 @@ fn assert_matches_vm(sim: CompiledSimulation, artifact: &WasmArtifact) -> usize 
     checked
 }
 
+/// The wasm backend consumes the same sparse mapped-view geometry as the VM.
+/// The row source is shared with the production VM test, and exhausts the
+/// declaration-direction x positional/permuted correspondence product; this
+/// test adds actual wasm execution and value parity for every row.
+#[test]
+fn mapped_computed_operands_match_vm_in_wasm() {
+    for (project, _, _) in
+        crate::array_operand_materialization_tests::mapped_computed_operand_projects()
+    {
+        let datamodel = project.build_datamodel();
+        let sim = compile_sim(&datamodel, "main");
+        let artifact = compile_simulation(&sim).expect("mapped operand wasm codegen");
+        let checked = assert_matches_vm(sim, &artifact);
+        assert!(checked >= 5, "mapped fixture variables must reach wasm");
+    }
+
+    let project = crate::array_operand_materialization_tests::mapped_axis_tie_project();
+    let datamodel = project.build_datamodel();
+    let sim = compile_sim(&datamodel, "main");
+    let artifact = compile_simulation(&sim).expect("mapped tie wasm codegen");
+    let wasm_data = run_artifact_results(&artifact);
+    for (name, expected) in [
+        ("out[a1,b1]", 1.0),
+        ("out[a1,b2]", 0.0),
+        ("out[a2,b1]", 1.0),
+        ("out[a2,b2]", 0.0),
+    ] {
+        let off = artifact
+            .layout
+            .var_offsets
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+            .map(|(_, offset)| *offset)
+            .unwrap_or_else(|| panic!("{name} missing from wasm layout"));
+        for chunk in 0..artifact.layout.n_chunks {
+            assert_eq!(
+                wasm_data[chunk * artifact.layout.n_slots + off],
+                expected,
+                "{name} must use Source -> DimA, the first same-rung target"
+            );
+        }
+    }
+    assert_matches_vm(sim, &artifact);
+}
+
+/// Repeated target axes reach wasm through the same production parse,
+/// subscript resolution, and materializer fixture as the VM test. Absolute
+/// values prevent backend parity from blessing the same occurrence-allocation
+/// error twice.
+#[test]
+fn repeated_axes_match_absolute_values_and_vm_in_wasm() {
+    let project = crate::array_operand_materialization_tests::repeated_axis_project();
+    let datamodel = project.build_datamodel();
+    let sim = compile_sim(&datamodel, "main");
+    let artifact = compile_simulation(&sim).expect("repeated-axis wasm codegen");
+    let wasm_data = run_artifact_results(&artifact);
+    let expected = [
+        ("out[d1,d1]", 11.0),
+        ("out[d1,d2]", 12.0),
+        ("out[d2,d1]", 21.0),
+        ("out[d3,d2]", 32.0),
+        ("sorted[d1,d1]", 0.0),
+        ("sorted[d1,d3]", 2.0),
+        ("sorted[d3,d2]", 1.0),
+    ];
+    for (name, expected) in expected {
+        let off = artifact
+            .layout
+            .var_offsets
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+            .map(|(_, offset)| *offset)
+            .unwrap_or_else(|| panic!("{name} missing from wasm layout"));
+        for chunk in 0..artifact.layout.n_chunks {
+            assert_eq!(
+                wasm_data[chunk * artifact.layout.n_slots + off],
+                expected,
+                "{name} must preserve its source-axis occurrence"
+            );
+        }
+    }
+    assert_matches_vm(sim, &artifact);
+}
+
 /// End-to-end VM parity for the `AllocateAvailable` opcode on the real
 /// `allocate.xmile` corpus model. The model's supply ramps from 0 to 10
 /// over the run while total demand is 9, so the recorded series sweep all

@@ -17,12 +17,11 @@ pub(crate) mod symbolic;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use crate::ast::{ArrayView, Ast, BinaryOp, Loc, TempAllocator};
-use crate::builtins::{ArgKind, ResultKind};
+use crate::ast::{ArrayView, Ast, BinaryOp, Loc, SparseInfo};
+use crate::builtins::ResultKind;
 #[cfg(test)]
 use crate::common::ErrorCode;
-use crate::common::{Canonical, CanonicalElementName, Ident, Result};
-#[cfg(test)]
+use crate::common::{Canonical, CanonicalDimensionName, CanonicalElementName, Ident, Result};
 use crate::dimensions::DimensionsContext;
 use crate::dimensions::{Axis, Dimension, NoAxisRelations, SubscriptIterator, match_axes_partial};
 use crate::sim_err;
@@ -37,7 +36,6 @@ pub(crate) use self::codegen::ModuleCtx;
 #[cfg(test)]
 pub(crate) use self::codegen::lowered_snapshot_arg;
 pub(crate) use self::context::Context;
-use self::context::DimensionRefs;
 pub(crate) use self::expr::{BuiltinFn, Expr, SubscriptIndex, Table, VarRef};
 
 /// The total slot count of the variable a reference addresses **in whole**,
@@ -75,6 +73,16 @@ pub(crate) type VarSizes = HashMap<VarRef, usize>;
 pub struct Var {
     pub(crate) ident: Ident<Canonical>,
     pub(crate) ast: Vec<Expr>,
+}
+
+struct LoweredAssignments {
+    exprs: Vec<Expr>,
+}
+
+impl LoweredAssignments {
+    fn new(exprs: Vec<Expr>) -> Self {
+        Self { exprs }
+    }
 }
 
 /// A `Context` over hand-built dependency shapes for the unit tests of
@@ -563,16 +571,16 @@ fn stock_update_shape_guard_rejects_only_non_binary_updates() {
 impl Var {
     pub(crate) fn new(ctx: &Context, var: &Variable) -> Result<Self> {
         // if this variable is overriden by a module input, our expression is easy
-        let ast: Vec<Expr> = if let Some((input_idx, _ident)) = ctx
+        let lowered = if let Some((input_idx, _ident)) = ctx
             .inputs
             .iter()
             .enumerate()
             .find(|(_i, n)| n.as_str() == var.ident())
         {
-            vec![Expr::AssignCurr(
+            LoweredAssignments::new(vec![Expr::AssignCurr(
                 ctx.get_ref(&Ident::new(var.ident()))?,
                 Box::new(Expr::ModuleInput(input_idx, Loc::default())),
-            )]
+            )])
         } else {
             match &var.kind {
                 VarKind::Module { model_name, inputs } => {
@@ -585,12 +593,12 @@ impl Var {
                         .into_iter()
                         .map(|mi| Ok(Expr::Var(ctx.get_ref(&mi.src)?, Loc::default())))
                         .collect::<Result<Vec<_>>>()?;
-                    vec![Expr::EvalModule(
+                    LoweredAssignments::new(vec![Expr::EvalModule(
                         var.ident.clone(),
                         model_name.clone(),
                         input_set,
                         inputs,
-                    )]
+                    )])
                 }
                 VarKind::Stock { init_ast: ast, .. } => {
                     let base = ctx.get_base_ref(&Ident::new(var.ident()))?;
@@ -599,24 +607,17 @@ impl Var {
                             return sim_err!(EmptyEquation, var.ident().to_string());
                         }
                         match ast.as_ref().unwrap() {
-                            Ast::Scalar(ast) => {
-                                let mut exprs = ctx.lower(ast, DimensionRefs::Resolve)?;
-                                let main_expr = exprs.pop().unwrap();
-                                let main_expr = hoist_nested_array_builtins_in_scalar(
-                                    main_expr, &mut exprs, &ctx.temps,
-                                );
-                                exprs.push(Expr::AssignCurr(base, Box::new(main_expr)));
-                                exprs
-                            }
-                            Ast::ApplyToAll(dims, ast) => {
-                                expand_a2a_with_hoisting(ctx, dims, ast, &base)?
-                            }
+                            Ast::Scalar(ast) => LoweredAssignments::new(vec![Expr::AssignCurr(
+                                base,
+                                Box::new(ctx.lower(ast)?),
+                            )]),
+                            Ast::ApplyToAll(dims, ast) => expand_a2a(ctx, dims, ast, &base)?,
                             Ast::Arrayed(
                                 dims,
                                 elements,
                                 default_ast,
                                 apply_default_for_missing,
-                            ) => expand_arrayed_with_hoisting(
+                            ) => expand_arrayed(
                                 ctx,
                                 dims,
                                 elements,
@@ -630,10 +631,10 @@ impl Var {
                             return sim_err!(EmptyEquation, var.ident().to_string());
                         };
                         match ast {
-                            Ast::Scalar(_) => vec![Expr::AssignNext(
+                            Ast::Scalar(_) => LoweredAssignments::new(vec![Expr::AssignNext(
                                 base.clone(),
                                 Box::new(ctx.build_stock_update_expr(&base, var)?),
-                            )],
+                            )]),
                             Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _, _) => {
                                 let active_dims = Arc::<[Dimension]>::from(dims.clone());
                                 let exprs: Result<Vec<Expr>> = SubscriptIterator::new(dims)
@@ -653,7 +654,7 @@ impl Var {
                                         ))
                                     })
                                     .collect();
-                                exprs?
+                                LoweredAssignments::new(exprs?)
                             }
                         }
                     }
@@ -685,21 +686,14 @@ impl Var {
                     if ast.is_none() {
                         return sim_err!(EmptyEquation, var.ident().to_string());
                     }
-                    let exprs = match ast.as_ref().unwrap() {
-                        Ast::Scalar(ast) => {
-                            let mut exprs = ctx.lower(ast, DimensionRefs::Resolve)?;
-                            let main_expr = exprs.pop().unwrap();
-                            let main_expr = hoist_nested_array_builtins_in_scalar(
-                                main_expr, &mut exprs, &ctx.temps,
-                            );
-                            exprs.push(Expr::AssignCurr(base.clone(), Box::new(main_expr)));
-                            exprs
-                        }
-                        Ast::ApplyToAll(dims, ast) => {
-                            expand_a2a_with_hoisting(ctx, dims, ast, &base)?
-                        }
+                    let mut lowered = match ast.as_ref().unwrap() {
+                        Ast::Scalar(ast) => LoweredAssignments::new(vec![Expr::AssignCurr(
+                            base.clone(),
+                            Box::new(ctx.lower(ast)?),
+                        )]),
+                        Ast::ApplyToAll(dims, ast) => expand_a2a(ctx, dims, ast, &base)?,
                         Ast::Arrayed(dims, elements, default_ast, apply_default_for_missing) => {
-                            expand_arrayed_with_hoisting(
+                            expand_arrayed(
                                 ctx,
                                 dims,
                                 elements,
@@ -715,7 +709,8 @@ impl Var {
                     // shapes (GH #909). (A standalone lookup-only table has no
                     // input and is handled above; ordinary auxes have no
                     // tables.)
-                    apply_implicit_with_lookup(exprs, &base, tables)
+                    lowered.exprs = apply_implicit_with_lookup(lowered.exprs, &base, tables);
+                    lowered
                 }
             }
         };
@@ -724,12 +719,23 @@ impl Var {
         // `0 - x` form every negative literal lowers to). Runs here -- the
         // single chokepoint every per-variable fragment lowering funnels
         // through -- so both backends (VM and wasmgen) see the folded form.
-        let ast: Vec<Expr> = ast.into_iter().map(fold::fold_constants).collect();
+        let LoweredAssignments { exprs } = lowered;
+        let ast: Vec<Expr> = exprs
+            .into_iter()
+            .map(fold::fold_constants)
+            .map(|expr| fold_scalar_source_elm_maps(ctx, expr))
+            .collect();
         // Discharge codegen's "an array operand is a view over storage"
         // contract (GH #995). Runs at the same chokepoint and after folding,
         // so it sees the final tree both backends consume and never
         // materializes something folding would have collapsed.
-        let ast = array_operand::materialize_computed_array_operands(ast, &ctx.temps);
+        let target_view = var.get_dimensions().map(array_view_from_dims);
+        let ast = array_operand::materialize_arrays(
+            ast,
+            target_view.as_ref(),
+            ctx.dimensions_ctx,
+            &ctx.temps,
+        );
         check_stock_updates_are_emittable(&ast, var.ident())?;
         // The allocator's count is the fragment's temp count: every id it
         // issued and kept is written by the lowered expressions, and nothing
@@ -841,8 +847,8 @@ fn check_stock_updates_are_emittable(ast: &[Expr], ident: &str) -> Result<()> {
 /// a diagnostic for this class, are the open remainder of GH #905.
 ///
 /// Only the per-element `AssignCurr` nodes the expansion paths emit are
-/// rewritten; hoisted pre-computations (`AssignTemp`) feed those assignments
-/// and stay untouched. The table reference is
+/// rewritten. Final array materialization runs afterward, so any `AssignTemp`
+/// it introduces sees the already-wrapped lookup expression. The table reference is
 /// `Expr::Var(base.offset_by(table_idx))`: codegen's `extract_table_info` reads
 /// the owning variable's name straight off the reference -- exactly the
 /// resolution an explicit `LOOKUP(var[elem], x)` call site gets -- and emits the
@@ -860,11 +866,11 @@ fn apply_implicit_with_lookup(
         .into_iter()
         .map(|expr| match expr {
             // The guard filters nothing in practice: every `AssignCurr` a
-            // Var fragment emits targets this variable at or after its base
-            // (pre-computations are `AssignTemp`). It exists purely as
-            // defense so a hypothetical assignment to a *different* variable,
-            // or one before the base, could never wrap against a nonsense
-            // element index.
+            // Var fragment emits targets this variable at or after its base;
+            // temp materialization runs after this rewrite. The guard exists
+            // purely as defense so a hypothetical assignment to a different
+            // variable, or one before the base, could never wrap against a
+            // nonsense element index.
             Expr::AssignCurr(dst, value)
                 if dst.name == base.name && dst.element_offset >= base.element_offset =>
             {
@@ -896,43 +902,6 @@ fn apply_implicit_with_lookup(
             other => other,
         })
         .collect()
-}
-
-/// For scalar equations, hoist nested array-producing builtins only where the
-/// parent expects an array value (reducers/vector array args). Scalar-argument
-/// positions are left unchanged so existing structured compile errors are
-/// preserved instead of forcing scalar-element rewrites.
-fn hoist_nested_array_builtins_in_scalar(
-    main_expr: Expr,
-    exprs: &mut Vec<Expr>,
-    temps: &TempAllocator,
-) -> Expr {
-    if is_array_producing_builtin(&main_expr) || !contains_array_producing_builtin(&main_expr) {
-        return main_expr;
-    }
-
-    let mut hoisted = Vec::new();
-    let placeholder_view = ArrayView::contiguous(vec![1]);
-    let rewritten = replace_nested_builtins_for_element(
-        main_expr,
-        0,
-        &placeholder_view,
-        temps,
-        &mut hoisted,
-        NestedBuiltinArgMode::ScalarContext,
-    );
-    exprs.extend(hoisted);
-    rewritten
-}
-
-/// Check if an expression is an array-producing builtin that needs whole-array
-/// evaluation rather than per-element scalar evaluation
-/// (`ResultKind::Array`: a dedicated opcode writes the result into a temp).
-fn is_array_producing_builtin(expr: &Expr) -> bool {
-    matches!(
-        expr,
-        Expr::App(builtin, _) if matches!(builtin.result_kind(), ResultKind::Array { .. })
-    )
 }
 
 /// Which snapshot buffer an array-valued `PREVIOUS`/`INIT` reads (GH #995).
@@ -978,7 +947,7 @@ pub(super) fn snapshot_view_arg(builtin: &BuiltinFn) -> Option<(&Expr, SnapshotR
     is_array.then_some((arg, region))
 }
 
-/// Extract the output ArrayView from an expression.  For array-producing builtins, the
+/// Extract the output ArrayView from an expression. For array-producing builtins, the
 /// output dimensions come from the builtin's "shaping" argument:
 ///   VectorElmMap(_, offset)    -> offset's view
 ///   VectorSortOrder(arr, _)    -> arr's view
@@ -995,39 +964,261 @@ pub(super) fn snapshot_view_arg(builtin: &BuiltinFn) -> Option<(&Expr, SnapshotR
 /// elements and return the sort order of three NaNs, while the commuted
 /// `wide[e,d] + small[d]` -- the same array -- returned the right answer.
 ///
-/// `None` means one of two things: no subexpression carries an array shape, or
-/// two of them carry shapes neither of which contains the other. A view that
-/// REPEATS a dimension name (`matrix[d,d]`) is NOT one of them -- as an
-/// expression's sole shape it is returned like any other. That shape is refused
-/// as a TEMP's shape, but the refusal lives at the one call site that can be
-/// loud about it ([`array_operand::materialize_view_operand`]) rather than here;
-/// see [`view_repeats_a_dimension`] for why the difference matters.
-///
-/// The four call sites do NOT all treat `None` the same way, and only one of
-/// them is loud:
-///
-/// * [`array_operand::materialize_view_operand`] declines to materialize, which
-///   leaves codegen to reject the operand with a diagnostic attributed to the
-///   variable. This is the loud one.
-/// * the three apply-to-all / arrayed hoisting sites SUBSTITUTE the variable's
-///   own view (`unwrap_or_else(|| var_view.clone())`) with no diagnostic, and
-///   the substituted view can be a DIFFERENT SIZE from the array the hoisted
-///   builtin writes. That is a live hazard, not a latent one: while this
-///   function refused a sole repeated-dimension view, `out[d] =
-///   SUM(VECTOR SORT ORDER(matrix[d,d], 1))` sized the sort order's temp at
-///   `out`'s three slots and the VM indexed past it -- a panic, which under
-///   `panic = abort` takes the host process with it. Any future `None` this
-///   function learns to return must be checked against these three sites, or
-///   given to them as an `Err` instead.
-/// * [`snapshot_view_arg`] reads only `is_empty()`, so a `None` classifies the
-///   call as SCALAR and it compiles to `LoadPrev`/`LoadInitial`. Reaching it
-///   needs a `PREVIOUS`/`INIT` whose argument survived `builtins_visitor`'s
-///   helper rewriting as a multi-shape expression, which the array-shaped
-///   passthrough predicate does not admit.
+/// `None` means either no subexpression carries an array shape or the shapes
+/// have no unambiguous containing view. The sole materializer treats that as a
+/// loud refusal by leaving the expression for codegen's attributed diagnostic;
+/// it never substitutes the enclosing variable's shape. A view that repeats a
+/// dimension name (`matrix[d,d]`) is still returned when it is the expression's
+/// sole shape, then refused only if projecting it through temp storage would
+/// lose occurrence identity. See [`view_repeats_a_dimension`].
 pub(super) fn find_expr_array_view(expr: &Expr) -> Option<ArrayView> {
     let mut views = Vec::new();
     collect_expr_array_views(expr, &mut views);
     join_array_views(views)
+}
+
+/// The shape of a computed array operand, including the cross-product union
+/// that Expr2 permits inside array arguments.
+///
+/// Containment remains the first rule. For disjoint named axes, an enclosing
+/// target supplies the semantic order; a scalar reducer has no observable
+/// result-axis order, so source traversal order is sufficient. Unnamed or
+/// repeated axes cannot be unioned without guessing identity.
+pub(super) fn find_array_operand_view(
+    expr: &mut Expr,
+    target: Option<&ArrayView>,
+    dimensions: &DimensionsContext,
+) -> Option<ArrayView> {
+    let mut views = Vec::new();
+    collect_expr_array_views(expr, &mut views);
+    if let Some(view) = join_array_views(views.clone()) {
+        return Some(view);
+    }
+
+    for view in &views {
+        if view.dim_names.len() != view.dims.len()
+            || view.dim_names.iter().any(|name| name.is_empty())
+            || view_repeats_a_dimension(view)
+        {
+            return None;
+        }
+    }
+    if views.is_empty() {
+        return None;
+    }
+
+    if let Some(target) = target {
+        let target_axes = declared_view_axes(target, dimensions)?;
+        let mut covered = vec![false; target_axes.len()];
+        for view in &views {
+            let source_axes = declared_view_axes(view, dimensions)?;
+            for (source_axis, matched) in match_axes_partial(&source_axes, &target_axes, dimensions)
+                .into_iter()
+                .enumerate()
+            {
+                let (target_axis, relation) = matched?;
+                if matches!(relation, crate::dimensions::AxisMatch::Exact)
+                    && view.dims[source_axis] != target.dims[target_axis]
+                {
+                    // A range keeps its parent's name. Equal names with
+                    // different extents are slices, not the same axis.
+                    return None;
+                }
+                covered[target_axis] = true;
+            }
+        }
+        let names: Vec<_> = target
+            .dim_names
+            .iter()
+            .enumerate()
+            .filter(|(axis, _)| covered[*axis])
+            .map(|(_, name)| name.clone())
+            .collect();
+        let dims: Vec<_> = target
+            .dims
+            .iter()
+            .enumerate()
+            .filter(|(axis, _)| covered[*axis])
+            .map(|(_, len)| *len)
+            .collect();
+        if dims.is_empty() {
+            return None;
+        }
+        let output = ArrayView::contiguous_with_names(dims, names);
+        let aligned = align_array_operand_views(expr.clone(), &output, dimensions)?;
+        *expr = aligned;
+        return Some(output);
+    }
+
+    // A scalar consumer supplies no semantic target order. Preserve the
+    // established cross-product rule for unrelated named axes; a mapped join
+    // without a target is refused because choosing an axis would choose which
+    // element correspondence the expression follows.
+    let mut axes: Vec<(String, usize)> = Vec::new();
+    for view in views {
+        for (name, len) in view.dim_names.into_iter().zip(view.dims) {
+            if let Some((_, existing_len)) = axes.iter().find(|(existing, _)| *existing == name) {
+                if *existing_len != len {
+                    return None;
+                }
+            } else {
+                axes.push((name, len));
+            }
+        }
+    }
+    let (names, dims): (Vec<_>, Vec<_>) = axes.into_iter().unzip();
+    Some(ArrayView::contiguous_with_names(dims, names))
+}
+
+fn declared_view_axes<'a>(
+    view: &'a ArrayView,
+    dimensions: &'a DimensionsContext,
+) -> Option<Vec<Axis<'a>>> {
+    if view.dim_names.len() != view.dims.len() {
+        return None;
+    }
+    view.dim_names
+        .iter()
+        .zip(&view.dims)
+        .map(|(name, &len)| {
+            if name.is_empty() {
+                return None;
+            }
+            let canonical = CanonicalDimensionName::from_raw(name);
+            match dimensions.get(&canonical) {
+                Some(dim) if dim.len() == len => Some(Axis::of(dim)),
+                Some(_) => None,
+                None => Some(Axis::named(name, len)),
+            }
+        })
+        .collect()
+}
+
+/// Retarget the view-bearing positions of one computed operand onto `output`.
+/// The recursion deliberately mirrors `collect_expr_array_views`: a scalar
+/// builtin is a nested reduction and keeps its own independent view geometry.
+fn align_array_operand_views(
+    expr: Expr,
+    output: &ArrayView,
+    dimensions: &DimensionsContext,
+) -> Option<Expr> {
+    Some(match expr {
+        Expr::StaticSubscript(base, view, loc) => {
+            Expr::StaticSubscript(base, align_array_view(view, output, dimensions)?, loc)
+        }
+        Expr::TempArray(id, view, loc) => {
+            Expr::TempArray(id, align_array_view(view, output, dimensions)?, loc)
+        }
+        Expr::App(builtin, loc) => {
+            let builtin = match builtin {
+                BuiltinFn::Previous(arg, fallback) => BuiltinFn::Previous(
+                    Box::new(align_array_operand_views(*arg, output, dimensions)?),
+                    fallback,
+                ),
+                BuiltinFn::Init(arg) => BuiltinFn::Init(Box::new(align_array_operand_views(
+                    *arg, output, dimensions,
+                )?)),
+                other => match other.result_kind() {
+                    ResultKind::Array { .. } | ResultKind::Elementwise => {
+                        let mut failed = false;
+                        let mapped = other.map(|arg| {
+                            align_array_operand_views(arg.clone(), output, dimensions)
+                                .unwrap_or_else(|| {
+                                    failed = true;
+                                    arg
+                                })
+                        });
+                        if failed {
+                            return None;
+                        }
+                        mapped
+                    }
+                    ResultKind::Scalar => other,
+                },
+            };
+            Expr::App(builtin, loc)
+        }
+        Expr::Op1(op, inner, loc) => Expr::Op1(
+            op,
+            Box::new(align_array_operand_views(*inner, output, dimensions)?),
+            loc,
+        ),
+        Expr::Op2(op, lhs, rhs, loc) => Expr::Op2(
+            op,
+            Box::new(align_array_operand_views(*lhs, output, dimensions)?),
+            Box::new(align_array_operand_views(*rhs, output, dimensions)?),
+            loc,
+        ),
+        Expr::If(cond, then_expr, else_expr, loc) => Expr::If(
+            Box::new(align_array_operand_views(*cond, output, dimensions)?),
+            Box::new(align_array_operand_views(*then_expr, output, dimensions)?),
+            Box::new(align_array_operand_views(*else_expr, output, dimensions)?),
+            loc,
+        ),
+        other => other,
+    })
+}
+
+/// Express `view` in `output`'s axis identities. A mapped axis is represented
+/// as a sparse view whose offsets are the canonical executed-read
+/// correspondence, so VM and wasm share the element translation.
+fn align_array_view(
+    mut view: ArrayView,
+    output: &ArrayView,
+    dimensions: &DimensionsContext,
+) -> Option<ArrayView> {
+    let source_axes = declared_view_axes(&view, dimensions)?;
+    let target_axes = declared_view_axes(output, dimensions)?;
+    for (source_axis, matched) in match_axes_partial(&source_axes, &target_axes, dimensions)
+        .into_iter()
+        .enumerate()
+    {
+        let (target_axis, relation) = matched?;
+        let target_name = &output.dim_names[target_axis];
+        let target_len = output.dims[target_axis];
+        match relation {
+            crate::dimensions::AxisMatch::Exact => {
+                if view.dims[source_axis] != target_len {
+                    return None;
+                }
+            }
+            crate::dimensions::AxisMatch::Mapped { .. } => {
+                let source_name = &view.dim_names[source_axis];
+                let correspondence = dimensions.executed_read_correspondence(
+                    &CanonicalDimensionName::from_raw(target_name),
+                    &CanonicalDimensionName::from_raw(source_name),
+                )?;
+                if correspondence.len() != target_len {
+                    return None;
+                }
+                let source_dim = dimensions.get(&CanonicalDimensionName::from_raw(source_name))?;
+                let mut offsets: Vec<usize> = correspondence
+                    .iter()
+                    .map(|element| source_dim.get_offset(element))
+                    .collect::<Option<_>>()?;
+                if let Some(existing) = view.sparse.iter().find(|s| s.dim_index == source_axis) {
+                    offsets = offsets
+                        .into_iter()
+                        .map(|offset| existing.parent_offsets.get(offset).copied())
+                        .collect::<Option<_>>()?;
+                }
+                view.sparse.retain(|s| s.dim_index != source_axis);
+                view.sparse.push(SparseInfo {
+                    dim_index: source_axis,
+                    parent_offsets: offsets,
+                });
+                view.dims[source_axis] = target_len;
+            }
+            crate::dimensions::AxisMatch::BySize => {
+                debug_assert_eq!(view.dims[source_axis], target_len);
+            }
+            // The production DimensionsContext deliberately withholds the
+            // partial subdimension rung for element-resolving callers.
+            crate::dimensions::AxisMatch::Subdimension => return None,
+        }
+        view.dim_names[source_axis] = target_name.clone();
+    }
+    Some(view)
 }
 
 /// The narrowest of `views` that every one of them broadcasts into, or `None`
@@ -1062,36 +1253,14 @@ fn join_array_views(views: Vec<ArrayView>) -> Option<ArrayView> {
 
 /// True when `view` names one dimension more than once (`matrix[d,d]`).
 ///
-/// Such a view is a perfectly good ARRAY -- nine well-defined cells -- and this
-/// says nothing about reading it directly. What it cannot be is the shape of a
-/// temp that a computed operand is evaluated into, or of a snapshot region a
-/// `PREVIOUS`/`INIT` view addresses, because every layer that projects between
-/// an array and a temp does so BY DIMENSION NAME and takes the first match:
-/// [`project_var_index_to_temp`] gives both `d` axes the same coordinate (so
-/// `out[i,j]` reads `temp[i,i]`), and `codegen::array_view_to_static_temp` keys
-/// `DimId`s by name, so the runtime broadcast has the same blind spot. Neither
-/// can say WHICH `d` is meant.
-///
-/// It has exactly TWO callers, and both are positions that can refuse LOUDLY:
-/// [`array_operand::materialize_view_operand`] (which leaves codegen to reject
-/// the operand) and `codegen::snapshot_static_view` (which returns an `Err` of
-/// its own). It deliberately does NOT live inside [`join_array_views`], because
-/// [`find_expr_array_view`]'s other three consumers turn a `None` into a silent
-/// substitution of the variable's own view -- and for `out[d] =
-/// SUM(VECTOR SORT ORDER(matrix[d,d], 1))` that substituted a three-slot temp
-/// for a nine-element sort order and the VM indexed past it. Refusing at the
-/// loud sites refuses exactly the same equations and costs no others.
-///
-/// Scope, deliberately: this refuses only what GH #995 newly made compilable.
-/// A repeated dimension read DIRECTLY (`out[d,d] = VECTOR SORT ORDER(matrix[d,d],
-/// 1)`, or even `out[d,d] = matrix[d,d]`) compiles at the merge base and still
-/// does, to the same first-axis-wins numbers -- measured, and pinned as a
-/// disclosed residual by
-/// `array_operand_materialization_tests::a_repeated_dimension_read_directly_is_a_pre_existing_residual`.
-/// Widening the refusal to cover it would be a fix to a pre-existing defect
-/// riding on an unrelated change, and the right fix is to make the projection
-/// axis-identity-aware rather than to refuse the shape -- the more so because
-/// the shape is legitimate: Vensim REJECTS the declaration -- run in Vensim DSS 2026-08-04, `vensim-probes/repeated_dimension.mdl` refuses to simulate with "DimA appears more than once on LHS" -- so no MDL-imported model can contain this shape and the residual is confined to hand-authored XMILE/JSON/protobuf. It is NOT illegitimate, though: the XMILE v1.0 spec exemplifies the declaration (`docs/reference/xmile-v1.0.html`, "A 2D non-apply-to-all array with dimensions X by X, where X is size 2", verified in-repo), so a conformant file may carry it and Simlin must keep reading it. The spec exemplifies only the DECLARATION, with per-element equations; it says nothing about what a REFERENCE such as `sq[X,X]` means, which is the part that is wrong here.
+/// Such a view is a valid array with distinct positional axes. Direct
+/// apply-to-all reads retain those occurrences and pair them positionally.
+/// Computed operands and snapshot views still cannot use it as storage because
+/// VM temp broadcasts identify axes by `DimId`; two equal names cannot say
+/// which occurrence a coordinate belongs to. Both callers refuse loudly rather
+/// than collapsing the axes. XMILE 1.0 section 4.1 explicitly demonstrates a
+/// two-dimensional `X by X` array, so repeated declarations cannot be rejected
+/// globally merely to simplify temp projection.
 pub(super) fn view_repeats_a_dimension(view: &ArrayView) -> bool {
     (1..view.dim_names.len())
         .any(|i| !view.dim_names[i].is_empty() && view.dim_names[..i].contains(&view.dim_names[i]))
@@ -1240,660 +1409,85 @@ fn collect_expr_array_views(expr: &Expr, out: &mut Vec<ArrayView>) {
     }
 }
 
-/// Given a variable's linear element index and its dimensions, compute the
-/// corresponding index into a temp array whose dimensions are a subset.
-///
-/// For example, variable dims = [DimA(3), DimB(2)] and temp dims = [DimA(3)]:
-///   var_idx 0 (A1,B1) -> temp_idx 0 (A1)
-///   var_idx 1 (A1,B2) -> temp_idx 0 (A1)
-///   var_idx 2 (A2,B1) -> temp_idx 1 (A2)
-///   etc.
-///
-/// Matching is done by dimension name. Dimensions in the temp that are not
-/// in the variable are iterated at position 0 (should not occur in practice).
-fn project_var_index_to_temp(var_idx: usize, var_view: &ArrayView, temp_view: &ArrayView) -> usize {
-    // Decompose var_idx into per-dimension coordinates (row-major)
-    let mut remaining = var_idx;
-    let var_ndims = var_view.dims.len();
-    let mut var_coords: Vec<usize> = vec![0; var_ndims];
-    for d in (0..var_ndims).rev() {
-        var_coords[d] = remaining % var_view.dims[d];
-        remaining /= var_view.dims[d];
-    }
-
-    // Build temp coordinates by matching dimension names
-    let temp_ndims = temp_view.dims.len();
-    let mut temp_coords: Vec<usize> = vec![0; temp_ndims];
-    for (td, temp_name) in temp_view.dim_names.iter().enumerate() {
-        if temp_name.is_empty() {
-            continue;
-        }
-        for (vd, var_name) in var_view.dim_names.iter().enumerate() {
-            if var_name == temp_name {
-                temp_coords[td] = var_coords[vd];
-                break;
-            }
-        }
-    }
-
-    // Recompose into linear index (row-major)
-    let mut temp_idx = 0;
-    let mut stride = 1;
-    for d in (0..temp_ndims).rev() {
-        temp_idx += temp_coords[d] * stride;
-        stride *= temp_view.dims[d];
-    }
-    temp_idx
-}
-
-/// Recursively check whether any subexpression is an array-producing builtin.
-fn contains_array_producing_builtin(expr: &Expr) -> bool {
-    if is_array_producing_builtin(expr) {
-        return true;
-    }
-    match expr {
-        Expr::Op2(_, lhs, rhs, _) => {
-            contains_array_producing_builtin(lhs) || contains_array_producing_builtin(rhs)
-        }
-        Expr::Op1(_, inner, _) | Expr::AssignTemp(_, inner, _) | Expr::AssignCurr(_, inner) => {
-            contains_array_producing_builtin(inner)
-        }
-        Expr::If(cond, t, f, _) => {
-            contains_array_producing_builtin(cond)
-                || contains_array_producing_builtin(t)
-                || contains_array_producing_builtin(f)
-        }
-        Expr::App(builtin, _) => builtin
-            .args()
-            .into_iter()
-            .any(contains_array_producing_builtin),
-        _ => false,
-    }
-}
-
-/// Test-only wrapper exposing the production recursive
-/// array-producing-builtin predicate (`contains_array_producing_builtin`,
-/// which delegates to the private `is_array_producing_builtin`): true iff
-/// any element of a variable's lowered per-element `Expr` list is, or
-/// contains, an array-producing builtin (VectorElmMap/VectorSortOrder/
-/// Rank/AllocateAvailable/AllocateByPriority), including nested as a
-/// subexpression or hoisted into an `AssignTemp`.
-/// `crate::db::dep_graph::array_producing_vars` reuses this exact
-/// predicate rather than re-implementing the recursion.
-#[cfg(test)]
-pub(crate) fn exprs_contain_array_producing_builtin(exprs: &[Expr]) -> bool {
-    exprs.iter().any(contains_array_producing_builtin)
-}
-
-#[cfg(test)]
-mod exprs_contain_array_producing_builtin_tests {
-    use super::*;
-
-    fn vr(name: &str) -> VarRef {
-        VarRef::base(Ident::new(name))
-    }
-
-    fn vem() -> Expr {
-        // A minimal array-producing builtin call (args are irrelevant to
-        // the predicate; only the `BuiltinFn` discriminant matters).
-        Expr::App(
-            BuiltinFn::VectorElmMap(
-                Box::new(Expr::Const(0.0, Loc::default())),
-                Box::new(Expr::Const(0.0, Loc::default())),
-            ),
-            Loc::default(),
-        )
-    }
-
-    #[test]
-    fn flags_top_level_array_producing_element() {
-        // The scalar-lowering shape `AssignCurr(off, VECTOR ELM MAP(...))`
-        // -- the top-level case the scalar path does NOT hoist:
-        // `contains_ ⊇ is_` catches the top-level `App`.
-        let exprs = vec![Expr::AssignCurr(vr("dst"), Box::new(vem()))];
-        assert!(exprs_contain_array_producing_builtin(&exprs));
-    }
-
-    #[test]
-    fn flags_array_producing_only_in_a_hoisted_assign_temp() {
-        // The incomplete-sourcing guard: the `App` lives ONLY in a
-        // hoisted `AssignTemp` (a non-first element); `AssignCurr` reads
-        // the temp. `.iter().any` over the COMPLETE list + the
-        // `AssignTemp` recursion must still flag it.
-        let exprs = vec![
-            Expr::AssignCurr(
-                vr("dst"),
-                Box::new(Expr::TempArray(
-                    0,
-                    ArrayView::contiguous(vec![1]),
-                    Loc::default(),
-                )),
-            ),
-            Expr::AssignTemp(0, Box::new(vem()), ArrayView::contiguous(vec![1])),
-        ];
-        assert!(exprs_contain_array_producing_builtin(&exprs));
-    }
-
-    #[test]
-    fn does_not_flag_plain_exprs() {
-        let exprs = vec![
-            Expr::AssignCurr(vr("a"), Box::new(Expr::Const(1.0, Loc::default()))),
-            Expr::AssignCurr(vr("b"), Box::new(Expr::Var(vr("a"), Loc::default()))),
-        ];
-        assert!(!exprs_contain_array_producing_builtin(&exprs));
-    }
-
-    #[test]
-    fn does_not_flag_empty_list() {
-        assert!(!exprs_contain_array_producing_builtin(&[]));
-    }
-}
-
-/// How a subexpression is consumed while [`replace_nested_builtins_for_element`]
-/// walks an expression.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum NestedBuiltinArgMode {
-    /// Expression is consumed as a scalar for the current A2A element.
-    ScalarElement,
-    /// Expression is consumed as a scalar in non-A2A context; nested
-    /// array-producing builtins should remain untouched in this position.
-    ScalarContext,
-    /// Expression is consumed as an array value (e.g., SUM arg) and must keep
-    /// full-array semantics.
-    ArrayValue,
-}
-
-impl NestedBuiltinArgMode {
-    fn scalar_child_mode(self) -> Self {
-        match self {
-            NestedBuiltinArgMode::ScalarElement | NestedBuiltinArgMode::ArrayValue => {
-                NestedBuiltinArgMode::ScalarElement
-            }
-            NestedBuiltinArgMode::ScalarContext => NestedBuiltinArgMode::ScalarContext,
-        }
-    }
-}
-
-/// Replace array-producing builtins in an expression tree with reads of
-/// hoisted temps. Each builtin is moved into an `AssignTemp` of its own,
-/// pushed onto `hoisted` with an id from `temps`, and replaced by a read
-/// projected from the variable's element index `var_idx` through the
-/// builtin's own `ArrayView`, which handles nested builtins operating on
-/// different dimensions. An element-invariant expression is rewritten once
-/// and re-pointed at each other element with [`rebind_hoisted_reads`].
-fn replace_nested_builtins_for_element(
-    expr: Expr,
-    var_idx: usize,
-    var_view: &ArrayView,
-    temps: &TempAllocator,
-    hoisted: &mut Vec<Expr>,
-    arg_mode: NestedBuiltinArgMode,
-) -> Expr {
-    if is_array_producing_builtin(&expr) {
-        if matches!(arg_mode, NestedBuiltinArgMode::ScalarContext) {
-            return expr;
-        }
-        let id = temps.alloc();
-        let loc = expr.get_loc();
-        let builtin_view = find_expr_array_view(&expr).unwrap_or_else(|| var_view.clone());
-        hoisted.push(Expr::AssignTemp(id, Box::new(expr), builtin_view.clone()));
-        return match arg_mode {
-            NestedBuiltinArgMode::ScalarElement => {
-                let element_idx = project_var_index_to_temp(var_idx, var_view, &builtin_view);
-                Expr::TempArrayElement(id, builtin_view, element_idx, loc)
-            }
-            NestedBuiltinArgMode::ArrayValue => Expr::TempArray(id, builtin_view, loc),
-            NestedBuiltinArgMode::ScalarContext => {
-                unreachable!("ScalarContext array builtins should return without rewriting")
-            }
-        };
-    }
-    match expr {
-        Expr::Op2(op, lhs, rhs, loc) => Expr::Op2(
-            op,
-            Box::new(replace_nested_builtins_for_element(
-                *lhs, var_idx, var_view, temps, hoisted, arg_mode,
-            )),
-            Box::new(replace_nested_builtins_for_element(
-                *rhs, var_idx, var_view, temps, hoisted, arg_mode,
-            )),
-            loc,
-        ),
-        Expr::Op1(op, inner, loc) => Expr::Op1(
-            op,
-            Box::new(replace_nested_builtins_for_element(
-                *inner, var_idx, var_view, temps, hoisted, arg_mode,
-            )),
-            loc,
-        ),
-        Expr::If(cond, t, f, loc) => Expr::If(
-            Box::new(replace_nested_builtins_for_element(
-                *cond, var_idx, var_view, temps, hoisted, arg_mode,
-            )),
-            Box::new(replace_nested_builtins_for_element(
-                *t, var_idx, var_view, temps, hoisted, arg_mode,
-            )),
-            Box::new(replace_nested_builtins_for_element(
-                *f, var_idx, var_view, temps, hoisted, arg_mode,
-            )),
-            loc,
-        ),
-        // Descend into builtin arguments while preserving whether each argument
-        // expects a scalar element or a full array value: an array operand
-        // (`ArgKind::Array`) is consumed whole and the scalar positions beside
-        // it per element; a builtin with no array operand passes the enclosing
-        // mode through to every argument.
-        Expr::App(builtin, loc) => {
-            let scalar_child_mode = arg_mode.scalar_child_mode();
-            let rewritten = if builtin.has_array_operand() {
-                builtin.map_with_kinds(|sub_expr, kind| {
-                    let mode = match kind {
-                        ArgKind::Array { .. } => NestedBuiltinArgMode::ArrayValue,
-                        ArgKind::Scalar | ArgKind::Table => scalar_child_mode,
-                        ArgKind::Ident => {
-                            unreachable!("an identifier payload is not an expression argument")
-                        }
-                    };
-                    replace_nested_builtins_for_element(
-                        sub_expr, var_idx, var_view, temps, hoisted, mode,
-                    )
-                })
-            } else {
-                builtin.map(|sub_expr| {
-                    replace_nested_builtins_for_element(
-                        sub_expr, var_idx, var_view, temps, hoisted, arg_mode,
-                    )
-                })
-            };
-            Expr::App(rewritten, loc)
-        }
-        other => other,
-    }
-}
-
-/// Re-point the hoisted-temp reads of an element-invariant expression at
-/// element `var_idx`.
-///
-/// The shared hoisting branches rewrite an expression once with
-/// [`replace_nested_builtins_for_element`]; every other element evaluates the
-/// same expression (`expression_depends_on_active_dimension` has checked that
-/// the lowered forms are identical) and reads the same temps at its own
-/// projected index. Only `TempArrayElement` carries an element index -- a
-/// whole-array read (`TempArray`, a reducer's operand) is the same for every
-/// element -- and the walk covers exactly the positions the hoister rewrites:
-/// the operands of `Op1`/`Op2`/`If` and builtin arguments.
-fn rebind_hoisted_reads(expr: Expr, var_idx: usize, var_view: &ArrayView) -> Expr {
-    match expr {
-        Expr::TempArrayElement(id, view, _, loc) => {
-            let element_idx = project_var_index_to_temp(var_idx, var_view, &view);
-            Expr::TempArrayElement(id, view, element_idx, loc)
-        }
-        Expr::Op2(op, lhs, rhs, loc) => Expr::Op2(
-            op,
-            Box::new(rebind_hoisted_reads(*lhs, var_idx, var_view)),
-            Box::new(rebind_hoisted_reads(*rhs, var_idx, var_view)),
-            loc,
-        ),
-        Expr::Op1(op, inner, loc) => Expr::Op1(
-            op,
-            Box::new(rebind_hoisted_reads(*inner, var_idx, var_view)),
-            loc,
-        ),
-        Expr::If(cond, t, f, loc) => Expr::If(
-            Box::new(rebind_hoisted_reads(*cond, var_idx, var_view)),
-            Box::new(rebind_hoisted_reads(*t, var_idx, var_view)),
-            Box::new(rebind_hoisted_reads(*f, var_idx, var_view)),
-            loc,
-        ),
-        Expr::App(builtin, loc) => Expr::App(
-            builtin.map(|arg| rebind_hoisted_reads(arg, var_idx, var_view)),
-            loc,
-        ),
-        other => other,
-    }
-}
-
-/// Construct a contiguous ArrayView from A2A dimensions.
+/// Construct a contiguous ArrayView from declared dimensions.
 fn array_view_from_dims(dims: &[Dimension]) -> ArrayView {
     let dim_sizes: Vec<usize> = dims.iter().map(|d| d.len()).collect();
     let dim_names: Vec<String> = dims.iter().map(|d| d.name().to_string()).collect();
     ArrayView::contiguous_with_names(dim_sizes, dim_names)
 }
 
-/// Which of an arrayed equation's arms an element evaluates: its own explicit
-/// equation, or the EXCEPT default.
-///
-/// This is the identity the hoisting path keys on. An explicit arm belongs to
-/// exactly one element; the default is the one arm several elements share, so
-/// it is the arm whose hoist is emitted once and read per element.
-#[derive(Clone, PartialEq, Eq, Hash)]
-enum ArrayedArm {
-    Explicit(CanonicalElementName),
-    Default,
+/// Lower one expression for every apply-to-all element. Array operands are
+/// intentionally left intact; [`array_operand::materialize_arrays`] owns the
+/// only post-resolution materialization pass.
+fn expand_a2a(
+    ctx: &Context,
+    dims: &[Dimension],
+    ast: &crate::ast::Expr2,
+    base: &VarRef,
+) -> Result<LoweredAssignments> {
+    let active_dims = Arc::<[Dimension]>::from(dims.to_vec());
+    let mut elements = SubscriptIterator::new(dims);
+    let Some(first_subscripts) = elements.next() else {
+        return Ok(LoweredAssignments::new(Vec::new()));
+    };
+    let first_ctx = ctx.with_active_subscripts(active_dims.clone(), &first_subscripts);
+    let prepared = first_ctx.prepare(ast)?;
+    let first = Expr::AssignCurr(base.clone(), Box::new(first_ctx.lower_prepared(&prepared)?));
+    let rest = elements.enumerate().map(|(i, subscripts)| {
+        let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+        let value = elem_ctx.lower_prepared(&prepared)?;
+        Ok(Expr::AssignCurr(base.offset_by(i + 1), Box::new(value)))
+    });
+    let exprs: Vec<Expr> = std::iter::once(Ok(first))
+        .chain(rest)
+        .collect::<Result<_>>()?;
+    Ok(LoweredAssignments::new(exprs))
 }
 
-/// The arm element `key` evaluates and its equation, or `None` when the
-/// element has no explicit equation and no default applies to it.
-fn arrayed_arm<'e>(
-    elements: &'e HashMap<CanonicalElementName, crate::ast::Expr2>,
-    default_ast: Option<&'e crate::ast::Expr2>,
-    apply_default_for_missing: bool,
-    key: &CanonicalElementName,
-) -> Option<(ArrayedArm, &'e crate::ast::Expr2)> {
-    if let Some(ast) = elements.get(key) {
-        return Some((ArrayedArm::Explicit(key.clone()), ast));
-    }
-    if apply_default_for_missing {
-        return default_ast.map(|ast| (ArrayedArm::Default, ast));
-    }
-    None
-}
-
-/// How an arm that several elements evaluate is hoisted: once, with each
-/// element's reads re-pointed at its own index, or per element when the arm's
-/// lowered form varies with the active element.
-enum ArmHoist {
-    Shared(Expr),
-    PerElement,
-}
-
-/// Handle the Arrayed expansion, detecting array-producing builtins in
-/// per-element expressions and hoisting them into AssignTemp pre-computations.
-///
-/// When a per-element expression is (or contains) an array-producing builtin
-/// like VectorElmMap, VectorSortOrder, or AllocateAvailable, the builtin must
-/// be evaluated once for the whole array and stored in temp. Each element then
-/// reads its result via TempArrayElement.
-///
-/// The elements are lowered in order, each in its own temp scope. The first
-/// one whose lowered form contains an array-producing builtin switches the
-/// whole equation to the hoisting path: everything lowered so far is dropped
-/// along with the temp ids it took, and that element's arm is the one hoisted
-/// for every element that shares it. The first element alone cannot decide
-/// this -- it may be a constant override while a later element uses a default
-/// that contains the builtin.
-fn expand_arrayed_with_hoisting(
+/// Lower the explicit or default equation selected by each arrayed element.
+/// Missing elements without an applicable default retain the established zero
+/// fill; diagnostics for that source shape are produced before this stage.
+fn expand_arrayed(
     ctx: &Context,
     dims: &[Dimension],
     elements: &HashMap<CanonicalElementName, crate::ast::Expr2>,
     default_ast: Option<&crate::ast::Expr2>,
     apply_default_for_missing: bool,
     base: &VarRef,
-) -> Result<Vec<Expr>> {
+) -> Result<LoweredAssignments> {
     let active_dims = Arc::<[Dimension]>::from(dims.to_vec());
-    let mark = ctx.temps.mark();
-    let scopes = ctx.temps.element_scopes();
-
-    let mut exprs: Vec<Expr> = Vec::new();
-    for (i, subscripts) in SubscriptIterator::new(dims).enumerate() {
-        scopes.begin_element();
-        let key = CanonicalElementName::from_raw(&subscripts.join(","));
-        let Some((arm, ast)) = arrayed_arm(elements, default_ast, apply_default_for_missing, &key)
-        else {
-            exprs.push(Expr::AssignCurr(
-                base.offset_by(i),
-                Box::new(Expr::Const(0.0, Loc::default())),
-            ));
-            continue;
-        };
-        let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
-        let mut elem_exprs = elem_ctx.lower(ast, DimensionRefs::Resolve)?;
-        let main_expr = elem_exprs.pop().unwrap();
-        if contains_array_producing_builtin(&main_expr) {
-            drop(scopes);
-            ctx.temps.discard_since(mark);
-            return expand_arrayed_hoisted(
-                ctx,
-                dims,
-                elements,
-                default_ast,
-                apply_default_for_missing,
-                base,
-                &active_dims,
-                arm,
-                ast,
-            );
-        }
-        elem_exprs.push(Expr::AssignCurr(base.offset_by(i), Box::new(main_expr)));
-        exprs.extend(elem_exprs);
-    }
-    Ok(exprs)
-}
-
-/// Handle the A2A expansion for a single lowered expression, detecting
-/// array-producing builtins and hoisting them into AssignTemp pre-computations.
-///
-/// Returns the complete list of expressions (pre-expressions + AssignTemp +
-/// per-element AssignCurr nodes).
-///
-/// Element 0 is lowered first to detect the expression shape. Without an
-/// array-producing builtin, the elements are lowered one after another, each
-/// in its own temp scope; with one, element 0's lowering is dropped along with
-/// its temp ids and the hoisting path lowers afresh.
-fn expand_a2a_with_hoisting(
-    ctx: &Context,
-    dims: &[Dimension],
-    ast: &crate::ast::Expr2,
-    base: &VarRef,
-) -> Result<Vec<Expr>> {
-    let active_dims = Arc::<[Dimension]>::from(dims.to_vec());
-    let mark = ctx.temps.mark();
-    let scopes = ctx.temps.element_scopes();
-
-    let first_subscripts: Vec<String> = SubscriptIterator::new(dims).next().unwrap_or_default();
-    let first_ctx = ctx.with_active_subscripts(active_dims.clone(), &first_subscripts);
-    let mut first_exprs = first_ctx.lower(ast, DimensionRefs::Resolve)?;
-    let main_expr = first_exprs.pop().unwrap();
-
-    if contains_array_producing_builtin(&main_expr) {
-        // Re-lower with `DimensionRefs::Preserve` so that
-        // IndexExpr3::Dimension references survive Pass 1 and reach
-        // normalize_subscripts3 as ActiveDimRef.  Inside array-producing
-        // builtins (lowered with preserve_wildcards_for_iteration)
-        // ActiveDimRef is kept as Wildcard, preserving full array views.
-        // Without this, Pass 1 resolves Dimension to a constant index
-        // based on the first element's active subscripts, collapsing
-        // array arguments to scalars.
-        drop(scopes);
-        ctx.temps.discard_since(mark);
-        let mut first_exprs = first_ctx.lower(ast, DimensionRefs::Preserve)?;
-        let main_expr = first_exprs.pop().unwrap();
-        return expand_a2a_hoisted(ctx, dims, ast, base, &active_dims, first_exprs, main_expr);
-    }
-
-    // Not an array-producing builtin: the standard per-element loop, starting
-    // from the already-lowered element 0.
-    first_exprs.push(Expr::AssignCurr(base.clone(), Box::new(main_expr)));
-    let mut all_exprs = first_exprs;
-    for (i, subscripts) in SubscriptIterator::new(dims).enumerate().skip(1) {
-        scopes.begin_element();
-        let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
-        let mut exprs = elem_ctx.lower(ast, DimensionRefs::Resolve)?;
-        let main_expr = exprs.pop().unwrap();
-        exprs.push(Expr::AssignCurr(base.offset_by(i), Box::new(main_expr)));
-        all_exprs.extend(exprs);
-    }
-    Ok(all_exprs)
-}
-
-/// Detect whether an array-producing builtin's lowered expression depends on
-/// the active A2A dimension (e.g. `dir[D]` varies per element), by lowering
-/// the equation for every element and comparing each against the first.
-///
-/// The lowerings are probes. Each element is lowered in its own temp scope, so
-/// identical expressions number their temps identically and compare equal,
-/// and the whole probe is discarded afterwards, so none of its ids reaches the
-/// fragment. Early-exits on the first mismatch, so dimension-dependent
-/// expressions are typically O(1). For dimension-independent expressions, the
-/// O(N) cost is acceptable at compile time since SD model arrays are small.
-fn expression_depends_on_active_dimension(
-    ctx: &Context,
-    dims: &[Dimension],
-    ast: &crate::ast::Expr2,
-    active_dims: &Arc<[Dimension]>,
-) -> Result<bool> {
-    let mark = ctx.temps.mark();
-    let mut reference: Option<Expr> = None;
-    let mut depends = false;
-    {
-        let scopes = ctx.temps.element_scopes();
-        for subscripts in SubscriptIterator::new(dims) {
-            scopes.begin_element();
-            let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
-            let mut elem_exprs = elem_ctx.lower(ast, DimensionRefs::Preserve)?;
-            let elem_main = elem_exprs.pop().unwrap();
-            match &reference {
-                None => reference = Some(elem_main),
-                Some(first) => {
-                    if *first != elem_main {
-                        depends = true;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    ctx.temps.discard_since(mark);
-    Ok(depends)
-}
-
-/// Inner function for `expand_a2a_with_hoisting` when array-producing builtins
-/// are detected. Handles both top-level and nested array-producing builtins.
-fn expand_a2a_hoisted(
-    ctx: &Context,
-    dims: &[Dimension],
-    ast: &crate::ast::Expr2,
-    base: &VarRef,
-    active_dims: &Arc<[Dimension]>,
-    first_exprs: Vec<Expr>,
-    main_expr: Expr,
-) -> Result<Vec<Expr>> {
-    if is_array_producing_builtin(&main_expr) {
-        let needs_per_element =
-            expression_depends_on_active_dimension(ctx, dims, ast, active_dims)?;
-
-        if needs_per_element {
-            return expand_a2a_per_element_hoisted(
-                ctx,
-                dims,
-                ast,
-                base,
-                active_dims,
-                first_exprs,
-                main_expr,
-            );
-        }
-
-        let temp_id = ctx.temps.alloc();
-        let var_view = array_view_from_dims(dims);
-        let builtin_view = find_expr_array_view(&main_expr).unwrap_or_else(|| var_view.clone());
-        let total_elements: usize = dims.iter().map(|d| d.len()).product();
-        let loc = main_expr.get_loc();
-
-        let mut result = first_exprs;
-        result.push(Expr::AssignTemp(
-            temp_id,
-            Box::new(main_expr),
-            builtin_view.clone(),
-        ));
-        for i in 0..total_elements {
-            let temp_idx = project_var_index_to_temp(i, &var_view, &builtin_view);
-            result.push(Expr::AssignCurr(
-                base.offset_by(i),
-                Box::new(Expr::TempArrayElement(
-                    temp_id,
-                    builtin_view.clone(),
-                    temp_idx,
-                    loc,
-                )),
-            ));
-        }
-        Ok(result)
-    } else if contains_array_producing_builtin(&main_expr) {
-        // The top-level expression is not an array-producing builtin, but it
-        // contains one nested inside (e.g. `10 + VECTOR ELM MAP(...)`).
-        let needs_per_element =
-            expression_depends_on_active_dimension(ctx, dims, ast, active_dims)?;
-
-        let var_view = array_view_from_dims(dims);
-        let mut result = first_exprs;
-
-        if needs_per_element {
-            // Scalar args vary by element: each element gets its own
-            // AssignTemp blocks so the nested builtin is re-evaluated. The
-            // element's Pass 1 pre-expressions are kept as well; their ids come
-            // from the fragment allocator like every other temp's.
-            for (i, subscripts) in SubscriptIterator::new(dims).enumerate() {
-                let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
-                let mut elem_exprs = elem_ctx.lower(ast, DimensionRefs::Preserve)?;
-                let elem_main = elem_exprs.pop().unwrap();
-                result.extend(elem_exprs);
-
-                // GH #578: fold any scalar-source / constant-offset ELM MAP
-                // nested in this element's expression to a direct read before
-                // the array-builtin hoister runs; whatever array-producing
-                // builtins remain are hoisted normally.
-                let elem_main = fold_scalar_source_elm_maps(ctx, elem_main);
-
-                let mut hoisted = Vec::new();
-                let elem_rewritten = replace_nested_builtins_for_element(
-                    elem_main,
-                    i,
-                    &var_view,
-                    &ctx.temps,
-                    &mut hoisted,
-                    NestedBuiltinArgMode::ScalarElement,
-                );
-                result.extend(hoisted);
-                result.push(Expr::AssignCurr(
-                    base.offset_by(i),
-                    Box::new(elem_rewritten),
-                ));
-            }
-        } else {
-            // Scalar args are constant: hoist once from element 0, then point
-            // every element's reads at its own index in the shared temps.
-            let mut hoisted = Vec::new();
-            let rewritten = replace_nested_builtins_for_element(
-                main_expr,
-                0,
-                &var_view,
-                &ctx.temps,
-                &mut hoisted,
-                NestedBuiltinArgMode::ScalarElement,
-            );
-            result.extend(hoisted);
-            let total_elements: usize = dims.iter().map(|d| d.len()).product();
-            for i in 0..total_elements {
-                result.push(Expr::AssignCurr(
-                    base.offset_by(i),
-                    Box::new(rebind_hoisted_reads(rewritten.clone(), i, &var_view)),
-                ));
-            }
-        }
-        Ok(result)
+    let mut subscripts = SubscriptIterator::new(dims);
+    let Some(first_subscripts) = subscripts.next() else {
+        return Ok(LoweredAssignments::new(Vec::new()));
+    };
+    let preparation_ctx = ctx.with_active_subscripts(active_dims.clone(), &first_subscripts);
+    let default_prepared = if apply_default_for_missing {
+        default_ast
+            .map(|ast| preparation_ctx.prepare(ast))
+            .transpose()?
     } else {
-        unreachable!("expand_a2a_hoisted called without array-producing builtin")
-    }
+        None
+    };
+    let all_subscripts = std::iter::once(first_subscripts).chain(subscripts);
+    let exprs: Vec<Expr> = all_subscripts
+        .enumerate()
+        .map(|(i, subscripts)| {
+            let key = CanonicalElementName::from_raw(&subscripts.join(","));
+            let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
+            let value = if let Some(ast) = elements.get(&key) {
+                let prepared = elem_ctx.prepare(ast)?;
+                elem_ctx.lower_prepared(&prepared)?
+            } else if let Some(prepared) = &default_prepared {
+                elem_ctx.lower_prepared(prepared)?
+            } else {
+                Expr::Const(0.0, Loc::default())
+            };
+            Ok(Expr::AssignCurr(base.offset_by(i), Box::new(value)))
+        })
+        .collect::<Result<_>>()?;
+    Ok(LoweredAssignments::new(exprs))
 }
 
-/// GH #578: fold a single element of `VECTOR ELM MAP(scalar_source, offset)`
-/// into a direct read when the source is a fully-collapsed element reference
-/// and the per-element offset is a compile-time constant.
-///
-/// Genuine Vensim maps the result over the source variable's FULL row-major
-/// storage from the base the element reference establishes:
-/// `result = source_full[base + round(offset)]`. When `source` is a scalar
-/// `StaticSubscript` (its `view.offset` is the element's flat index and `off`
-/// is the variable base) and `offset` folds to a constant, the whole read is
-/// known at compile time: it is the variable slot `off + base + round(offset)`,
-/// or `:NA:` (NaN) if that flat index is outside `[0, full_source_len)`.
-///
-/// This is what lets a scalar-source / expression-offset ELM MAP compile at
-/// all: the array-producing ELM MAP opcode needs a *view* offset, but here the
-/// per-element offset lowers to a `Const` (e.g. `(DimA - 1)` -> `0, 1, 2`),
-/// which is not a view. Returns `None` for any shape this fold does not cover
-/// (non-scalar source, non-constant offset), leaving the normal path to run.
 fn try_fold_scalar_source_elm_map(ctx: &Context, main_expr: &Expr) -> Option<Expr> {
     let Expr::App(BuiltinFn::VectorElmMap(source, offset), loc) = main_expr else {
         return None;
@@ -1925,8 +1519,8 @@ fn try_fold_scalar_source_elm_map(ctx: &Context, main_expr: &Expr) -> Option<Exp
 /// MAP nested in arithmetic (`10 + VECTOR ELM MAP(x[three], (DimA-1))`) folds
 /// too (GH #578).
 ///
-/// Recursion is restricted to `Op2`/`If`, which propagate a scalar-value
-/// context to their operands in this per-element lowering (unary minus is
+/// Recursion is restricted to scalar-value wrappers (`Assign*`, `Op2`, and
+/// `If`; unary minus is
 /// already lowered to `Op2(Sub, 0, x)`). It deliberately does NOT descend into
 /// `Expr::App` arguments: a reducer like `SUM(elm_map_array)` consumes the ELM
 /// MAP as an *array*, and folding it to a single element there would be wrong.
@@ -1935,6 +1529,12 @@ fn fold_scalar_source_elm_maps(ctx: &Context, expr: Expr) -> Expr {
         return folded;
     }
     match expr {
+        Expr::AssignCurr(dst, value) => {
+            Expr::AssignCurr(dst, Box::new(fold_scalar_source_elm_maps(ctx, *value)))
+        }
+        Expr::AssignNext(dst, value) => {
+            Expr::AssignNext(dst, Box::new(fold_scalar_source_elm_maps(ctx, *value)))
+        }
         Expr::Op2(op, l, r, loc) => Expr::Op2(
             op,
             Box::new(fold_scalar_source_elm_maps(ctx, *l)),
@@ -1951,209 +1551,6 @@ fn fold_scalar_source_elm_maps(ctx: &Context, expr: Expr) -> Expr {
     }
 }
 
-/// Per-element hoisting for array-producing builtins whose scalar arguments
-/// depend on the active dimension (e.g. `vector_sort_order(vals[*], dir[D])`).
-/// Each element gets its own AssignTemp so the builtin is re-evaluated with
-/// the correct scalar argument value for that element.
-#[allow(clippy::too_many_arguments)]
-fn expand_a2a_per_element_hoisted(
-    ctx: &Context,
-    dims: &[Dimension],
-    ast: &crate::ast::Expr2,
-    base: &VarRef,
-    active_dims: &Arc<[Dimension]>,
-    first_exprs: Vec<Expr>,
-    first_main_expr: Expr,
-) -> Result<Vec<Expr>> {
-    let var_view = array_view_from_dims(dims);
-    let mut result = first_exprs;
-    let mut first_main_expr = Some(first_main_expr);
-
-    for (i, subscripts) in SubscriptIterator::new(dims).enumerate() {
-        let main_expr = match first_main_expr.take() {
-            Some(first) => first,
-            None => {
-                let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
-                let mut elem_exprs = elem_ctx.lower(ast, DimensionRefs::Preserve)?;
-                let main = elem_exprs.pop().unwrap();
-                // Keep the element's pre-expressions (intermediate temps from
-                // complex subexpressions); their ids come from the fragment
-                // allocator, so they are distinct from everything emitted so
-                // far and the main expression's references stay aligned.
-                result.extend(elem_exprs);
-                main
-            }
-        };
-
-        // GH #578: a scalar-source ELM MAP with a per-element constant offset
-        // folds to a direct slot read (or :NA:), so the array-producing opcode
-        // -- which requires a *view* offset the constant cannot supply -- is
-        // skipped entirely. If the fold collapses the whole element expression
-        // to a scalar (no array-producing builtin left), emit it directly with
-        // no temp consumed.
-        let main_expr = fold_scalar_source_elm_maps(ctx, main_expr);
-        if !contains_array_producing_builtin(&main_expr) {
-            result.push(Expr::AssignCurr(base.offset_by(i), Box::new(main_expr)));
-            continue;
-        }
-
-        let temp_id = ctx.temps.alloc();
-        let builtin_view = find_expr_array_view(&main_expr).unwrap_or_else(|| var_view.clone());
-        let loc = main_expr.get_loc();
-        let temp_idx = project_var_index_to_temp(i, &var_view, &builtin_view);
-
-        result.push(Expr::AssignTemp(
-            temp_id,
-            Box::new(main_expr),
-            builtin_view.clone(),
-        ));
-        result.push(Expr::AssignCurr(
-            base.offset_by(i),
-            Box::new(Expr::TempArrayElement(temp_id, builtin_view, temp_idx, loc)),
-        ));
-    }
-
-    Ok(result)
-}
-
-/// Handle Arrayed equations where the hoisting arm coexists with other arms
-/// (EXCEPT semantics). An element whose arm lowers to an expression containing
-/// an array-producing builtin reads hoisted temps; every other element is
-/// lowered normally.
-///
-/// The hoisting arm is classified up front and, when its lowered form does not
-/// vary with the element, hoisted once at the first element's subscripts --
-/// whichever arm that element itself evaluates -- for every element that
-/// shares it. The EXCEPT default, when it is a different arm, is classified
-/// the first time an element evaluates it. An explicit arm belongs to exactly
-/// one element, so it is hoisted in place and shared with nothing.
-#[allow(clippy::too_many_arguments)]
-fn expand_arrayed_hoisted(
-    ctx: &Context,
-    dims: &[Dimension],
-    elements: &HashMap<CanonicalElementName, crate::ast::Expr2>,
-    default_ast: Option<&crate::ast::Expr2>,
-    apply_default_for_missing: bool,
-    base: &VarRef,
-    active_dims: &Arc<[Dimension]>,
-    hoisting_arm: ArrayedArm,
-    hoisting_ast: &crate::ast::Expr2,
-) -> Result<Vec<Expr>> {
-    let first_subscripts: Vec<String> = SubscriptIterator::new(dims).next().unwrap_or_default();
-    let first_ctx = ctx.with_active_subscripts(active_dims.clone(), &first_subscripts);
-    let mut first_exprs = first_ctx.lower(hoisting_ast, DimensionRefs::Preserve)?;
-    let main_expr = first_exprs.pop().unwrap();
-    let var_view = array_view_from_dims(dims);
-
-    if !contains_array_producing_builtin(&main_expr) {
-        unreachable!("expand_arrayed_hoisted called without array-producing builtin")
-    }
-
-    let hoisting_dim_dependent =
-        expression_depends_on_active_dimension(ctx, dims, hoisting_ast, active_dims)?;
-    let mut result = first_exprs;
-
-    // The arms several elements can share, and how each is hoisted.
-    let mut shared: HashMap<ArrayedArm, ArmHoist> = HashMap::new();
-    let hoisting_hoist = if hoisting_dim_dependent {
-        ArmHoist::PerElement
-    } else {
-        let mut hoisted = Vec::new();
-        let rewritten = replace_nested_builtins_for_element(
-            main_expr,
-            0,
-            &var_view,
-            &ctx.temps,
-            &mut hoisted,
-            NestedBuiltinArgMode::ScalarElement,
-        );
-        result.extend(hoisted);
-        ArmHoist::Shared(rewritten)
-    };
-    shared.insert(hoisting_arm, hoisting_hoist);
-
-    for (i, subscripts) in SubscriptIterator::new(dims).enumerate() {
-        let key = CanonicalElementName::from_raw(&subscripts.join(","));
-        let Some((arm, ast)) = arrayed_arm(elements, default_ast, apply_default_for_missing, &key)
-        else {
-            result.push(Expr::AssignCurr(
-                base.offset_by(i),
-                Box::new(Expr::Const(0.0, Loc::default())),
-            ));
-            continue;
-        };
-        let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
-
-        // Classify the element's arm by its ordinary lowering. A plain arm
-        // keeps that lowering; a hoisting arm drops it along with its temp
-        // ids and is lowered again below, preserving dimension references.
-        let mark = ctx.temps.mark();
-        let mut elem_exprs = elem_ctx.lower(ast, DimensionRefs::Resolve)?;
-        let elem_main = elem_exprs.pop().unwrap();
-        if !contains_array_producing_builtin(&elem_main) {
-            result.extend(elem_exprs);
-            result.push(Expr::AssignCurr(base.offset_by(i), Box::new(elem_main)));
-            continue;
-        }
-        ctx.temps.discard_since(mark);
-
-        if matches!(arm, ArrayedArm::Default) && !shared.contains_key(&arm) {
-            // The first element evaluating the EXCEPT default when it is not
-            // the hoisting arm: classify it, and hoist it here for every
-            // later element that evaluates it.
-            let hoist = if expression_depends_on_active_dimension(ctx, dims, ast, active_dims)? {
-                ArmHoist::PerElement
-            } else {
-                let mut elem_exprs = elem_ctx.lower(ast, DimensionRefs::Preserve)?;
-                let elem_main = elem_exprs.pop().unwrap();
-                result.extend(elem_exprs);
-                let mut hoisted = Vec::new();
-                let rewritten = replace_nested_builtins_for_element(
-                    elem_main,
-                    i,
-                    &var_view,
-                    &ctx.temps,
-                    &mut hoisted,
-                    NestedBuiltinArgMode::ScalarElement,
-                );
-                result.extend(hoisted);
-                ArmHoist::Shared(rewritten)
-            };
-            shared.insert(arm.clone(), hoist);
-        }
-
-        if let Some(ArmHoist::Shared(rewritten)) = shared.get(&arm) {
-            result.push(Expr::AssignCurr(
-                base.offset_by(i),
-                Box::new(rebind_hoisted_reads(rewritten.clone(), i, &var_view)),
-            ));
-            continue;
-        }
-
-        // The element hoists on its own: an arm whose lowered form varies
-        // with the element, or an explicit arm of this element alone.
-        let mut elem_exprs = elem_ctx.lower(ast, DimensionRefs::Preserve)?;
-        let elem_main = elem_exprs.pop().unwrap();
-        result.extend(elem_exprs);
-        let mut hoisted = Vec::new();
-        let elem_rewritten = replace_nested_builtins_for_element(
-            elem_main,
-            i,
-            &var_view,
-            &ctx.temps,
-            &mut hoisted,
-            NestedBuiltinArgMode::ScalarElement,
-        );
-        result.extend(hoisted);
-        result.push(Expr::AssignCurr(
-            base.offset_by(i),
-            Box::new(elem_rewritten),
-        ));
-    }
-    Ok(result)
-}
-
-/// Crate-visible wrapper for extract_temp_sizes.
 pub(crate) fn extract_temp_sizes_pub(expr: &Expr, temp_sizes_map: &mut HashMap<u32, usize>) {
     extract_temp_sizes(expr, temp_sizes_map);
 }

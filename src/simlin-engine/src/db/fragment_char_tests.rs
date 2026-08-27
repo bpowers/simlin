@@ -1113,10 +1113,10 @@ fn char_dynamic_view_and_arrayed_stock() {
 // Fixture 4: an array reducer plus two array-PRODUCING vector builtins.
 //
 // `total = SUM(arr[*])` is the reducer family (view push, reduce opcode, view
-// pop). `order` and `ranked` are array-producing builtins, which the A2A
-// hoisting path pre-computes once into an `AssignTemp` and then reads back
-// per element -- so this fixture is what pins `temp_sizes`, the temp-carrying
-// opcodes, and (via the universal ordering assertion) their determinism.
+// pop). The post-resolution materializer gives `order` and `ranked`'s
+// array-producing builtins temp storage immediately before their readers, so
+// this fixture pins `temp_sizes`, the temp-carrying opcodes and (via the
+// universal ordering assertion) their determinism.
 // ---------------------------------------------------------------------------
 
 fn array_ops_model() -> datamodel::Project {

@@ -874,9 +874,9 @@ impl DimensionsContext {
     /// `crate::mapped_reference_semantics_tests`:
     ///
     /// * a subscript naming a dimension the equation ITERATES
-    ///   (`target[State] = x[State]`, `x` over `Region`). `ast::expr3`'s
-    ///   Pass 1 folds the active dimension's name to that dimension's ordinal,
-    ///   which then indexes the source's storage raw.
+    ///   (`target[State] = x[State]`, `x` over `Region`).
+    ///   `compiler::subscript` binds the active dimension's name to that
+    ///   dimension's ordinal, which then indexes the source storage raw.
     /// * a BARE reference inside an equation body (`target[State] = x`).
     ///   `compiler::context`'s `lower_pass0` rewrites it into the spelling
     ///   above before anything resolves it, so the two are one rule.

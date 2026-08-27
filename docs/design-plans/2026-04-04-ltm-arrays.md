@@ -83,7 +83,7 @@ Extend Simlin's LTM (Loops That Matter) implementation to support arrayed/subscr
 
 - **LTM (Loops That Matter)**: A feedback loop dominance analysis method that scores causal links and loops in a system dynamics model to determine which feedback loops drive behavior at each point in a simulation. Described in Eberlein and Schoenberg (2020).
 - **Arrayed variable / subscripted variable**: A variable defined over one or more dimensions (e.g., `population[Region]`), representing multiple values indexed by dimension elements. Called "subscripted" in Vensim terminology and "arrayed" in XMILE/Simlin terminology.
-- **A2A (Apply to All)**: An equation mode where a single equation template is evaluated independently for each element of a dimension. The compiler expands the template into per-element bytecode via `expand_a2a_with_hoisting`. Represented as `Equation::ApplyToAll(dims, eqn)` in the AST.
+- **A2A (Apply to All)**: An equation mode where a single equation template is evaluated independently for each element of a dimension. The compiler resolves the prepared template for each element, then `compiler::array_operand` materializes computed array operands from the final expressions. Represented as `Equation::ApplyToAll(dims, eqn)` in the AST.
 - **Element-level causal graph**: The expanded graph where each array element becomes its own node (e.g., `population[NYC]`, `population[Boston]`), enabling feedback loop detection at element granularity rather than variable granularity.
 - **Link score**: A synthetic variable measuring how strongly one variable influences another at each timestep, computed via ceteris paribus re-evaluation (varying one input while holding all others at their previous values via `PREVIOUS()`).
 - **Loop score**: The product of link scores around a feedback loop at each timestep, representing the loop's overall strength.
@@ -190,7 +190,7 @@ Four localized changes enable A2A LTM synthetic variables:
 
 4. **`compile_ltm_equation_fragment`** (`src/simlin-engine/src/db_ltm.rs`): The mini-layout assigns `size` based on actual dimension sizes instead of hardcoding 1. The `ScopeStage0` receives dimension context so the lowering pipeline can resolve dimension names and trigger A2A expansion.
 
-The equation TEXT is unchanged. For A2A link scores, the same ceteris paribus formula applies per element via the compiler's existing `expand_a2a_with_hoisting`. No new A2A expansion code is needed.
+The equation TEXT is unchanged. For A2A link scores, the same ceteris paribus formula applies through the compiler's ordinary per-element expansion and post-resolution materialization. No LTM-specific A2A expansion code is needed.
 
 ### Salsa Pipeline Integration
 
@@ -225,7 +225,7 @@ The design follows several established patterns in the codebase:
 
 **LTM variable generation** (`src/simlin-engine/src/db_ltm.rs`): The unified `model_ltm_variables` function already generates link scores, loop scores, and composite scores for any model. The extension adds dimension awareness to `LtmSyntheticVar` and handles element-level edge classification within the same function.
 
-**A2A equation compilation** (`src/simlin-engine/src/compiler/mod.rs`): The compiler already expands `Ast::ApplyToAll(dims, expr)` into per-element bytecode via `expand_a2a_with_hoisting`. The LTM pipeline change reuses this by producing `Equation::ApplyToAll` instead of `Equation::Scalar`, triggering the same expansion path.
+**A2A equation compilation** (`src/simlin-engine/src/compiler/mod.rs`): The compiler expands `Ast::ApplyToAll(dims, expr)` into final per-element expressions and `compiler::array_operand` materializes their computed array operands. The LTM pipeline reuses this by producing `Equation::ApplyToAll` instead of `Equation::Scalar`, triggering the same expansion path.
 
 **Module composite scoring** (`docs/design-plans/2026-03-29-ltm-module-scoring.md`): The recently-completed module scoring design established the pattern of uniform LTM treatment for all models. This design extends that principle: every model receives element-level LTM treatment when it has arrayed variables.
 

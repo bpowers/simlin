@@ -875,6 +875,16 @@ fn symbolic_phase_element_order(
         )?;
         let member_name = member.as_str();
 
+        // SCC assembly may interleave this member's per-element segments in a
+        // different order. Only temps whose complete lifetime is local to one
+        // segment can retain definition dominance under that transform.
+        crate::compiler::symbolic::validate_segment_local_temps(
+            member_name,
+            &frag.symbolic.code,
+            &frag.static_views,
+        )
+        .ok()?;
+
         // Reads accumulated since the previous per-element write of THIS
         // member, as (read-name, read-element) pairs. A read is an
         // in-SCC edge source only if its name is an SCC member.
@@ -1401,52 +1411,12 @@ pub(crate) fn resolve_recurrence_sccs(
     }
 }
 
-/// The set of main-model variables whose own production-lowered
-/// per-element `Vec<Expr>` is, or recursively contains, an
-/// array-producing builtin
-/// (VectorElmMap/VectorSortOrder/Rank/AllocateAvailable/AllocateByPriority).
-///
-/// The universe is the identical `build_var_info(.., &[])` keyset
-/// `dt_cycle_sccs` iterates, on the same `(db, model, project)` triple,
-/// so a caller can intersect `{multi ∪ self_loops}` with this set over
-/// one shared universe. Each variable's lowered `Vec<Expr>` is sourced
-/// from the engine's own per-variable production lowering via
-/// `var_noninitial_lowered_exprs` (never a re-derivation), and the
-/// complete list is fed to
-/// `crate::compiler::exprs_contain_array_producing_builtin`. Sourcing the
-/// real lowering output -- not a hoist-set subset -- is what makes the
-/// membership test complete: `var_noninitial_lowered_exprs` aborts (never
-/// silent-skips) on any universe variable whose production lowered exprs
-/// cannot be sourced, because a silent skip would under-count and produce
-/// a false negative. Sorted/byte-stable.
-#[cfg(test)]
-pub(crate) fn array_producing_vars(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-) -> BTreeSet<Ident<Canonical>> {
-    // The identical universe `dt_cycle_sccs` uses -- the same
-    // `build_var_info(.., &[])` keyset on the same `(db, model, project)`
-    // triple -- so a caller intersects `{multi ∪ self_loops}` and this
-    // set over one universe.
-    let (var_info, _all_init_referenced) = build_var_info(db, model, project, &[]);
-
-    let mut out: BTreeSet<Ident<Canonical>> = BTreeSet::new();
-    for name in var_info.keys() {
-        let exprs = var_noninitial_lowered_exprs(db, model, project, name.as_str());
-        if crate::compiler::exprs_contain_array_producing_builtin(&exprs) {
-            out.insert(name.clone());
-        }
-    }
-    out
-}
-
 /// The engine's OWN per-variable production-lowered non-initial (dt/flow)
 /// `Vec<Expr>` for the canonical `var_name`.
 ///
-/// Two test surfaces read it: `array_producing_vars` below, and
-/// `test_common::TestProject::flow_exprs`, through which every structural
-/// lowering assertion in the crate constrains the production fragment compiler.
+/// `test_common::TestProject::flow_exprs` and the test-only invariance oracles
+/// read this accessor, so every structural lowering assertion constrains the
+/// production fragment compiler rather than a hand-built `Expr`.
 ///
 /// Sourced through the explicit constructor of `FragmentInput`
 /// (`crate::db::var_fragment::explicit_fragment_input`) and
@@ -1459,20 +1429,11 @@ pub(crate) fn array_producing_vars(
 /// non-initial phase is the dt phase, so membership is
 /// dt-phase-consistent with the cycle set it is intersected against.
 ///
-/// Aborts (panics -- never silent-skip) when a universe variable's
+/// Aborts (panics -- never substitutes an empty fragment) when a variable's
 /// non-initial production lowered exprs cannot be sourced: no
 /// `SourceVariable` (an implicit SMOOTH/DELAY/INIT helper -- the explicit
 /// constructor has no entry for it), `ExplicitFragment::Fatal` (the variable
 /// did not lower at all), or the non-initial phase's lowering errored.
-///
-/// The abort must fire on *any* incomplete sourcing, not merely a
-/// whole-variable `Fatal`: an incompletely-sourced production `Vec<Expr>`
-/// makes `array_producing_vars` miss an array-producing `App` the
-/// complete lowering would have, a false negative that lets
-/// `{multi ∪ self_loops} ∩ array_producing_vars` under-include. The
-/// conservative superset (abort on any phase `Var::new` Err, including
-/// an initial-only error) is preferred -- strictly safer, with no
-/// spurious-abort downside on a well-formed model.
 #[cfg(test)]
 pub(crate) fn var_noninitial_lowered_exprs(
     db: &dyn Db,
@@ -1488,8 +1449,7 @@ pub(crate) fn var_noninitial_lowered_exprs(
         panic!(
             "var_noninitial_lowered_exprs: var {var_name:?} has no \
              SourceVariable (an implicit SMOOTH/DELAY/INIT helper) -- \
-             abort, never silent-skip (a silent skip would under-count \
-             array-producing membership)"
+             this accessor cannot derive the production explicit fragment"
         );
     };
 

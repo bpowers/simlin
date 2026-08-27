@@ -1328,12 +1328,12 @@ fn array_valued_table_apply_assigned_to_one_slot_is_refused_not_aborted() {
             "out",
         ),
     ];
-    for (project, var) in rows {
+    for (row, (project, var)) in rows.into_iter().enumerate() {
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &project, None);
         assert!(
             compile_project_incremental(&db, sync.project, "main").is_err(),
-            "{var}: an array used as one value must not compile"
+            "row {row}, {var}: an array used as one value must not compile"
         );
         let diagnostics = collect_all_diagnostics(&db, sync.project);
         let attributed: Vec<String> = diagnostics
@@ -1354,7 +1354,7 @@ fn array_valued_table_apply_assigned_to_one_slot_is_refused_not_aborted() {
                             if reason.contains("where a single value is required")
                     )
             }),
-            "{var}: the refusal must be attributed to the variable; errors: {attributed:?}"
+            "row {row}, {var}: the refusal must be attributed to the variable; errors: {attributed:?}"
         );
     }
 }

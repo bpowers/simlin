@@ -13,7 +13,7 @@
 //! those fragments fail codegen loudly ("array-producing builtin outside
 //! AssignTemp context" -- 21 VECTOR SORT ORDER fragments on C-LEARN, plus 84
 //! VECTOR ELM MAP ones on the sibling reason below); any change that made
-//! them compile (e.g. widening Pass-1 materialization, GH #995 option A)
+//! them compile (e.g. widening array-operand materialization, GH #995 option A)
 //! would convert the loud drop into a silent constant-0 partial. Option C
 //! therefore declines the edge at generation, with a warning naming the
 //! shape, BEFORE any such widening can land.
@@ -29,7 +29,7 @@
 //! What is deliberately NOT declined:
 //! * the A2A/whole-array-shaped score of the same target (`effective_target_
 //!   year -> target_order` on C-LEARN): its arms keep the dimension-name
-//!   spelling, the A2A hoisting evaluates the builtin over the full array,
+//!   spelling, final materialization evaluates the builtin over the full array,
 //!   and the slot read selects this element's rank -- compilable and
 //!   semantically right;
 //! * `VECTOR SELECT`: its selection reduces to a scalar, so per-element
@@ -156,7 +156,7 @@ fn loops_through_the_declined_rank_edge_are_dropped() {
 
 /// The whole-array (A2A-shaped) score of the SAME rank-like target keeps
 /// compiling: `vals -> order` holds the builtin's argument live at full
-/// array width, which the A2A hoisting evaluates correctly.
+/// array width, which the final materializer evaluates correctly.
 #[test]
 fn whole_array_score_of_the_rank_target_still_compiles() {
     let datamodel = rank_target_fixture().build_datamodel();

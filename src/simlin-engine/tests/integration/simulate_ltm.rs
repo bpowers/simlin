@@ -7245,7 +7245,7 @@ fn build_disjoint_dim_unscoreable_model(name: &str) -> simlin_engine::datamodel:
 /// The `[a,y]` slot's INSTRUMENT moved with GH #977 and its claim did not. It
 /// used to be a materialized guard form whose ratio evaluated to a trivial
 /// zero; that partial is provably `PREVIOUS(target)`, so the slot is now
-/// OMITTED from the element map and `compiler::expand_arrayed_with_hoisting`
+/// OMITTED from the element map and `compiler::expand_arrayed`
 /// lowers it to a single constant-zero assign. The VM assertion below is
 /// therefore tightened from "~0" to exactly zero -- what the omission promises,
 /// and the check that would catch it dropping a slot that was not a structural

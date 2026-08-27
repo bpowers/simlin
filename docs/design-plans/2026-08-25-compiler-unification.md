@@ -563,21 +563,35 @@ Phase 3 (one lowering entry). (a) then (b), as two chunks.
 **Done when:** AC2.3; `rg "Pass1Context" src/` empty; corpus, array tests,
 and wasm parity green; ledger row (opcode/temp counts may change; explained).
 
-Part (a) is done: `dimensions::match_axes` is the one precedence, the
-Subscript arm is five named steps, `lower`/`lower_preserving_dimensions` are
-one function under `DimensionRefs`, and GH #1027 is fixed. Part (b) -- the
-single materialization pass and the deletion of Pass 1 hoisting -- is what
-remains, and inherits one lowering entry point with an explicit mode.
+Both parts are done. `dimensions::match_axes` owns axis precedence and
+one-to-one occurrence allocation; the Subscript arm is five named steps and
+uses one lowering entry point with an explicit dimension-reference mode.
+`compiler::array_operand::materialize_arrays`, after subscript resolution, is
+the one owner of computed array operands and array-producing results. It
+derives every operand decision from `BuiltinSig::ALL`, with the
+`ALLOCATE AVAILABLE` priority-profile identity arm explicit because codegen
+alone knows how to expand that direct variable view.
 
-One shape is waiting for it. Resolving a `Dimension(d)` subscript picks the
-first active axis named `d` for EVERY occurrence, so with `square[D,D]` holding
-`10i+j` both `o[D,D] = square` and `o[D,D] = square[D,D]` read the diagonal
-`square[d_i,d_i]` -- measured identical on the pre-change and the post-change
-CLI, so it is pre-existing and outside 6(a), but 6(a)'s corrected
-`square[*,*]` (divergence 7) now disagrees with both. The single
-materialization pass has to resolve each `Dimension(d)` occurrence against its
-own active axis, which is the same positional property `match_axes_partial`
-already states.
+Plain apply-to-all and arrayed equations prepare each source expression once,
+then resolve that prepared tree for each active element. Each final assignment
+opens a `TempAllocator::element_scopes` scope, so its materialized temps use one
+dense id range. A phase-local definition cache keeps the first dominating
+write at a recycled physical slot when the resolved expression and view are
+identical and recursively pure. Time-dependent, lagged, snapshot,
+nested-temp, module-evaluation and assignment-target definitions stay local to
+their assignment. No source-tree metadata or pointer identity determines a
+temp id or reuse verdict; id remapping, probe lowering, and replay paths do not
+participate. Resolved SCC assembly refuses any temp definition or read spanning
+per-element segments, because segment order otherwise cannot prove that its
+write dominates every read. Repeated active-axis occurrences are paired positionally
+(`square[D,D]` reads `square[d_i,d_j]`), while a genuinely mapped reference
+retains mapped intent and translates the selected element through the canonical
+`DimensionsContext::executed_read_correspondence`. Same-rung mapping ties take
+target declaration order; an incomplete relation refuses rather than addressing
+a nonexistent ordinal. LTM's semantic edge classification follows that same
+occurrence-sensitive projection; the name-keyed score layout cannot represent
+a target that repeats a dimension and declines it with an attributed warning.
+The Phase 6b semantic notes below state the artifact and refusal boundaries.
 <!-- END_PHASE_6 -->
 
 <!-- START_PHASE_7 -->
@@ -1377,8 +1391,9 @@ files:
   id)` in `compiler/context.rs` (14 rows), and
   `sim_err!(ArrayReferenceNeedsExplicitSubscripts, ident)` in the same file (5
   rows). An identifier is more than a bare code and less than an explanation.
-  Those two files are Phase 6(b)'s to rewrite, and the sentences belong in that
-  rewrite rather than ahead of it: the sites move.
+  These are content choices at stable diagnostic sites, independent of array
+  materialization ownership; changing them requires a diagnostic-text contract
+  rather than another lowering mechanism.
 
 **Phase 6a semantic divergences.** Making `dimensions::match_axes` the one
 axis-matching precedence, and fixing GH #1027, changed how eight shapes
@@ -1595,10 +1610,111 @@ channel; and the Subscript arm's active-dimension lookup iterated a `HashMap`
 for its mapping arms, so two active dimensions both matching one source axis
 were separated by hash order -- the positional allocation is deterministic.
 
-**Risks.** Phase 6(b) and Phase 7 are the two places where artifact shape
-changes are expected; both rely on the corpus as oracle and must report opcode
-and temp deltas in the ledger. Phase 7 changes salsa keying; the determinism
-suites and the execution-count tests are the guard.
+**Phase 6b semantic divergences.** The materialization owner change preserves
+the genuine-output corpus but deliberately changes two observable compiler
+contracts.
+
+1. A dimension reference is occurrence-sensitive. With `square[D,D]` holding
+   `10i+j`, `out[D,D] = square[D,D]` reads `square[d_i,d_j]`; the old
+   independent lookups selected active axis zero twice and read
+   `square[d_i,d_i]`. The same allocation covers an implicit whole-variable
+   read, wildcard/range forms, exact name, mapping, subdimension/element-map,
+   size-only fallback, and no-match refusal. `active_dimension_refs` retains
+   only the positional-vs-mapped intent; allocation is
+   `dimensions::match_axes_partial`. A computed operand aligns that match with
+   `DimensionsContext::executed_read_correspondence`, including both mapping
+   declaration directions and explicit element maps. Same-rung ties take
+   target declaration order, and an incomplete correspondence refuses. Source
+   reference element translation still uses
+   `DimensionsContext::resolve_mapped_read`. Production parse and subscript
+   resolution feed the exhaustive matrices in
+   `mapped_reference_semantics_tests` and
+   `array_operand_materialization_tests`; the shared repeated-axis production
+   fixture asserts absolute VM values, absolute wasm values, and backend
+   parity.
+2. Materialized work is owned after subscript resolution, rather than by a
+   speculative pre-subscript hoist. A phase-local cache reuses a recycled temp
+   slot's first write only when both the complete final expression and output
+   view are identical and the expression is recursively reusable. Eligibility
+   reads `BuiltinSig::invariance`: all pure builtin rows qualify (including
+   lookup, whose compiled graphical-function tables are immutable); the
+   time-dependent, lagged and snapshot rows, nested temps, module evaluation
+   and assignment-target reads do not. The cache is discarded at the phase
+   boundary, and reuse is checked only at the physical slot the allocator
+   assigns to the current definition. Resolved SCC assembly refuses a temp touched by more than one exact
+   per-element segment; no combined SCC can reorder a read ahead of its write.
+   Thus `VECTOR SORT ORDER(vals[D], 1)` over 300 elements emits one dominating
+   write, while `VECTOR SORT ORDER(vals[D], dir[D])` emits 300 element-specific
+   writes. A repeated target-axis fixture has three row definitions, not nine
+   cell definitions. The fixtures assert both bytecode counts and VM results.
+
+Every builtin row is accounted for from `BuiltinSig::ALL`: five array-result
+builtins are materialized, every `ArgKind::Array` position is materialized
+except `ALLOCATE AVAILABLE`'s profile identity arm, and scalar, table, and
+identifier positions are explicit non-materialization rows. Lookup tables need
+one further execution distinction: a scalar `@N` table subscript resolves to
+that element, while an arrayed lookup keeps a wildcard until the materializer
+can build the graphical-function array result. The GF matrix pins fixed,
+wildcard, mapped, per-element, scalar-result, and loud unmatched-projection
+forms.
+
+LTM records a repeated projected source occurrence as `PerElement`, so its
+causal edges follow the values simulation reads. A score target that itself
+repeats a dimension remains unrepresentable by the name-keyed score layout and
+is refused with one attributed warning per edge; the integration fixture
+separates that warning from the existing square-source refusal and asserts no
+silent score or warning cascade in exhaustive and discovery modes.
+
+**Risks.** Array materialization deliberately remains compile-time
+per-element expansion. A later loop-form lowering must preserve the same
+post-subscript shape and refusal contracts. Phase 7 changes salsa keying; the
+determinism suites and the execution-count tests are the guard.
+
+### GH #1025 current-state handoff
+
+The issue update must **replace**, not append to, its stale implementation and
+eligibility sections: those sections name expansion helpers that no longer
+exist and exclude array-producing builtins, which would leave the measured
+C-LEARN residual untouched. The replacement text to post after this branch is
+authorized is:
+
+> Phase 6b gives array materialization one owner:
+> `compiler::array_operand`, after subscript resolution and constant folding.
+> Apply-to-all equations still compile to one final scalar assignment per
+> element. The current loop-form design excludes array-producing builtins from
+> its batched eligibility, so it does not recover the execution shape Phase 6b
+> exposes on C-LEARN.
+>
+> The concrete residual is four equations: `sorted_target_active`,
+> `sorted_target_type`, `sorted_target_value`, and `sorted_target_year`. Each
+> has seven COP-coordinate-specific final source slices. Against exact base
+> `c666c4a6`, plain C-LEARN therefore has 24 extra `VectorElmMap`, 48 extra
+> `PushStaticView`, and 48 extra `PopView` in each of flow and initial bytecode
+> (`+120/+120` opcodes and `+96` static views overall). LTM initial bytecode has
+> the same additions; its flow bytecode independently removes 32 maps and 64
+> of each view opcode, so LTM's net artifact is `-160` flow, `+120` initial and
+> `-16` views.
+>
+> Five alternating exact-base/current plain `RUN_ITERS=20` measurements put the
+> run channel at `+6.865%`. Five alternating LTM rounds with `RUN_ITERS=20` and a matching
+> zero control for every binary/round put one added LTM run at 19.4937 G base
+> versus 19.6967 G current retired instructions: `+1.0413%`, or +203.0 M per
+> run (paired range `+1.0095%..+1.0715%`). Phase 6b intentionally does not
+> recover batched whole-array execution. This is accepted temporarily because
+> loop-form/batched lowering is explicitly sequenced after compiler cleanup,
+> not because either regression is small.
+>
+> Extend #1025 so batched array-producing builtins are in scope. Start with a
+> production-derived `VectorElmMap` row whose source and offset views vary by
+> the outer apply-to-all coordinate but form one runtime-iterable definition.
+> TDD must pin VM and wasm values, the exact map/view opcode classes above,
+> plain and LTM artifact counts, and five-round control-subtracted run cost.
+> The existing Phase 6b matrices remain fallback gates: EXCEPT arms,
+> mappings/subranges, repeated axes, snapshots, tables/dimension names,
+> per-element graphical functions, reducers, assignment-target/stateful reads,
+> and resolved SCCs must either preserve their current semantics or decline
+> loudly. Acceptance is removal of the four `sorted_target_*` duplicate groups
+> without restoring pre-resolution probing or a second materialization owner.
 
 ## Measured
 
@@ -1609,6 +1725,7 @@ hash is not available to it.
 
 | phase | commit | cold compile Ir | slots | opcodes (flow / stock / init) | literals / GFs / temps / views | notes |
 |---|---|---:|---:|---|---|---|
+| 6b | `engine: materialize arrays after subscript resolution` | The last five-round interleaved measurement is 8.6836 G instructions on the whole-process channel against the exact `c666c4a6` base at 8.5902 G, +1.087%. Isolating five extra compiles by subtracting otherwise identical `CLEARN_COMPILE_ITERS=0` runs from `=5` measures 1.1475 G per compile against 1.1487 G, -0.103%. The remaining cost is execution: the plain `CLEARN_RUN_ITERS=20` channel measures 32.8113 G against 30.7036 G, +6.865%, or +105.39 M instructions per VM construction/run. For LTM, five alternating exact-base/current rounds each pair `RUN_ITERS=20` with its binary's zero control: one added run averages 19.4937 G base versus 19.6967 G current, +1.0413% or +203.0 M instructions/run; every paired delta is positive, range +1.0095%..+1.0715%. Phase 6b does not recover batched whole-array execution. The regressions are accepted temporarily because the owner sequenced loop-form/batched lowering after compiler cleanup, not because they are small. Compile allocation count falls 1,996,628 -> 1,989,055 and allocated bytes fall 245.0 -> 223.0 MiB. The residual plain definitions are the four `sorted_target_*` equations: each of their seven COP coordinates has a distinct final source slice, so the final-expression cache cannot group them. Removing that work at the final materializer would require recovering one pre-resolution iteration-shaped definition, which is the probe/early-hoist ownership this phase excludes; loop-form lowering is the known general alternative, and the GH #1025 handoff above makes batched array-producing builtins part of its acceptance scope | 5215 plain / 30123 LTM | plain 30814 / 1477 / 24915; LTM 908217 / 1477 / 28771 | plain 1740 / 162 / 28 / 739; LTM 16749 / 162 / 28 / 2850 | Plain C-LEARN has 57,206 total opcodes, +120 flow and +120 initial against `c666c4a6`. Each phase adds exactly 24 `VectorElmMap`, 48 `PushStaticView` and 48 `PopView`: every extra map consumes its source and offset views. LTM has 938,465 total, -160 flow and +120 initial; its flow removes 32 maps and 64 of each view opcode while its initial phase adds the same 24 maps and 48 of each view opcode as plain, for a net -8 `VectorElmMap`, -16 `PushStaticView` and -16 `PopView`. Static-view table counts therefore move +96 plain and -16 LTM. Plain temp slots remain 28; LTM temp slots fall from 441 to 28. Stock opcodes, slots, literals, GFs, dimensions, names, modules, initial counts, every user-model series and VM/wasm parity are unchanged. `compiler::array_operand` is the one post-subscript materializer; its exact-definition cache reuses only the allocator's same physical slot; `TempAllocator` is the one allocator; resolved SCC assembly refuses cross-segment temp liveness. Validation: engine lib 5,676 passed / 2 ignored, integration 776 passed / 16 ignored, VM allocation 4 passed, doctests 2 passed / 1 ignored; the materializer invariant/varying/repeated-axis counts, SCC refusal/local control, mapped VM/wasm, per-element-GF, fragment-characterization and 12-repeat determinism matrices are green. Workspace all-target/all-feature clippy with warnings denied, rustfmt, retired-helper zero-searches and `git diff --check` are green |
 | 7.4 | `engine: parse source without model context` | 8.5872 G (median of 5; range 8.5869-8.5901), -1.60% against the saved 7.3b binary re-measured in the same session (8.7266 G, median of 5; range 8.7167-8.7307). An interleaved five-round wall-clock comparison measured the compile loop at -0.6%, inside that channel's noise floor | 5215 | 30694 / 1477 / 24795 | 1740 / 162 / 28 / 643 | C-LEARN adds 137 initial opcodes, 16 initial fragments and 8 literals against 7.3b, both plain (56,966 total opcodes, 1,190 initials) and under `CLEARN_LTM=1` (938,505 total, 1,960 initials, 16,749 literals); the correction seeds qualified child outputs that callers read during initialization. Flow/stock opcodes, slots, names, modules, temps, views, the complete post-fusion flow profile and every user-model series are unchanged. `parse_source_variable(var, project)` is the one source parse query; `ModuleIdentContext`, the model-context constructors, contextual/empty twin parses, D2's pre-parse equation probes and LTM's parallel module-ident set are absent. The AC3.1 first-instance probe executes explicit `[delay_time, flow, initial_value, input, k, output, smoothed]`, its two helpers and six distinct parses; `k` legitimately gains initial bytecode through the new module's initial closure and `probe` stays cached. A second SMTH1 executes/parses only `smoothed2` and its two new helpers. Production-derived D1 rows pin qualified scalar, array-element and nested ports by VM value; same-key unions within and across roots, distinct input sets, active-initial, stock, implicit-module and resolved-SCC rows pin the cross-model initial fixed point; wasm pins parity and an absolute value; and PREVIOUS-only plus unrelated child outputs remain absent. Bound module inputs and direct or LTM bare-module reads refuse both PREVIOUS and INIT loudly with attributed diagnostics instead of reading flattened slot zero. The fixed point consumes pure dependency facts: one per-model trigger emits at most one attributed cycle diagnostic, so a valid main neither inherits nor duplicates an unrelated draft's cycle. The execution probe runs all 11 initial graph keys once each; after an unrelated revision neither graph nor cycle-emitter body reruns, while the eleven `model_all_diagnostics` bodies replay the cached single draft row for whole-project and CLI collection. DFS roots and successors are both canonical, so the first attribution is stable across declaration rotations, fresh databases and revisions; this changes only `Diagnostic.variable` for an unresolved graph, never a compilable artifact. Macro formal parameters retain typed-registry-derived captures. D3's generated-LTM three-way shadowing stays pinned through `ltm_model_var_names`; general source classification remains 7.5. Validation: engine lib 5,699 passed / 2 ignored, integration 776 passed / 16 ignored (genuine-output, VM/wasm and LTM corpora included), VM allocation 4 passed, doctests 2 passed / 1 ignored, release C-LEARN LTM parity green, both determinism modules pass 12 consecutive invocations, and the qualified-INIT VM row is green through `run_initials`, reset, a second `run_initials` and the complete run; legacy-symbol and graph-accumulator zero-searches, all-target/all-feature clippy, rustfmt and `git diff --check` are green. The accumulator-ownership and DFS-root-order corrections do not alter bytecode-producing logic, seed sets or SCC verdicts, so the artifact and performance measurements were not repeated after those review-only fixes |
 | 7.3b | `engine: centralize macro call routing` | 8.7284 G (mean of 5, +/-0.02%), +0.04% against the saved 7.3a binary re-measured in the same session (8.7249 G, mean of 5, +/-0.03%), inside the channel's noise floor and not investigated | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical to 7.3a on C-LEARN, plain and under `CLEARN_LTM=1`: 56,829 total opcodes plain and 938,368 with LTM, including the complete top-25 histogram, post-fusion totals and fused-binop tables, 371 names and 7 modules; the release LTM run also preserves every user-model series. `MacroRegistry::resolve_call` is the one exhaustive decision read by expansion and recursion analysis, with explicit `Expand`, `Passthrough`, `RenamedBuiltinSelfCall` and `Unresolved` arms; both registered-macro outcomes retain a descriptor long enough for one visitor-boundary exact-arity check, while renamed self-calls deliberately use builtin arity; `ImplicitVar::variable_stage0` is the one typed conversion at all seven consumers, including both LTM sites. The production MDL/salsa parse row pins the helper order and exact typed shape for ordinary expansion, external INIT passthrough, the INIT macro body's renamed-intrinsic self-call and the DELAYN macro body's renamed-stdlib self-call. Production MDL `DELAY1` and XMILE `PREVIOUS` passthrough rows derive their one-argument contract from the imported descriptor, compile valid unary calls, and attribute builtin-acceptable binary calls to the caller as `BadBuiltinArgs`/`NotSimulatable`. The compile-stage text audit finds no implicit-module helper reparse; the intentional source/diagnostic and LTM-generator boundaries are recorded in the Phase 7.3b note. `ModuleIdentContext` remains wholly owned by 7.4. The arity correction changes only declared-invalid macro calls, so the valid-route artifact, release-LTM, and performance gates were not repeated. Validation: engine lib 5691 passed / 2 ignored, integration 776 passed / 16 ignored, VM allocation 4 passed, doctests 2 passed / 1 ignored; the focused macro, capture, implicit-module, four-constructor fragment-input and 14-test determinism suites are green; the ignored release `clearn_with_ltm_simulates_model_vars_identically` gate is green; clippy with all targets/features and rustfmt are green |
 | 7.3a | `engine: implicit modules carry parsed data` | 8.7253 G (median of 5; range 8.7159-8.7290), +0.33% against the base tree (the 7.2 chunk staged on `8b9ef311`) re-measured in the same session (8.6966 G, median of 5; range 8.6857-8.7009; interleaved pairs +0.456 / +0.372 / +0.484 / +0.173 / +0.223%). Each binary's spread is about 0.15-0.17%, so the delta is outside the channel's noise but below the one-percent threshold for investigation. A current-artifact verification measured 8.7213 G (mean of 5, +/-0.02%). `size_of::<ImplicitVar>()` remains 144 bytes because `Capture` is still the largest variant; a later performance pass owns the residual | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | C-LEARN artifacts remain identical, plain and under `CLEARN_LTM=1`: 56,829 total opcodes plain and 938,368 with LTM, including the full histograms, post-fusion tables, 371 names, and 7 modules. A call is a typed `capture::ImplicitModule` plus one `capture::HoistedArg` per non-identifier argument; the old `ImplicitVar::Synthesized` text carrier is absent. `ImplicitModule` derives its ident and port destinations from logical callsite inputs `(parent, id, call_name, suffix)` plus source-to-port wiring, while current resolution remains name-keyed through `ImplicitVarMeta::{name,index_hint}`. Production-derived stdlib and macro tests require exact nonzero-span `Expr0` subtree identity. The complete ordered 3x3 `ImplicitVar` pair matrix pins same-arm dedup and all six loud cross-arm collisions; a production ACTIVE INITIAL fixture pins the reachable hoisted-argument/capture collision through parsing, diagnostic collection, and compile refusal. Within one visitor, `insert_implicit_var` is the only map mutation and refuses conflicting definitions before `IndexMap` can replace the first; the production `ARG1(k, k * 2)` macro regression pins the module/second-argument collision through diagnostic collection and compile refusal. `expand_module_function` serves stdlib and macro calls, so 7.3b retains only macro passthrough and GH #554. `print_eqn` is absent from `builtins_visitor.rs`; `make_temp_arg` is absent from `src/simlin-engine/src`; `substitute_dimension_refs` remains the AST-to-AST pre-hoist source-semantics rewrite documented above. The base/working-tree differential sweep over all 509 models found 396 byte-identical and 110 identically refused; the three nondeterministic models (`arrays_cname`, `arrays_varname`, `subscript_transposition`) produced the same two-output set on both binaries across 12 resamples, so no model moved. Current validation: engine lib 5688 passed / 2 ignored, integration 776 passed / 16 ignored, VM allocation 4 passed, doctests 2 passed / 1 ignored; focused implicit-module, capture, macro, fragment-determinism, and stage suites are green; clippy with all targets/features and rustfmt are green |

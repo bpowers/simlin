@@ -23,7 +23,7 @@ pub(crate) enum ZeroSlotPolicy {
     /// Drop the arm when the transformed partial is PROVABLY `PREVIOUS(target)`
     /// ([`partial_is_provably_previous_target`], GH #977). The omitted slot is
     /// then absent from the `Arrayed` element map, and
-    /// `compiler::expand_arrayed_with_hoisting` lowers an absent slot to a
+    /// `compiler::expand_arrayed` lowers an absent slot to a
     /// single `AssignCurr(off, Const(0.0))` -- one opcode in place of a full
     /// guard form that recomputes the same zero the long way.
     ///

@@ -119,8 +119,8 @@ fn round_applies_elementwise_over_arrays() {
 
 #[test]
 fn round_inside_a_reducer_compiles_and_reduces() {
-    // ROUND under SUM exercises the array-operand materialization path (an
-    // elementwise computed operand is hoisted into a temp).
+    // ROUND under SUM exercises the array-operand materialization path: the
+    // elementwise computed operand becomes a temp view.
     let got = TestProject::new("round_reduce")
         .with_sim_time(0.0, 1.0, 1.0)
         .named_dimension("d", &["a", "b"])

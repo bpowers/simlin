@@ -757,8 +757,14 @@ fn var_phase_symbolic_fragment_memo(
 fn segment_member_by_element(
     member: &str,
     code: &[crate::compiler::symbolic::SymbolicOpcode],
+    static_views: &[crate::compiler::symbolic::SymbolicStaticView],
 ) -> Result<HashMap<usize, Vec<crate::compiler::symbolic::SymbolicOpcode>>, String> {
     use crate::compiler::symbolic::SymbolicOpcode;
+
+    // The dependency-graph verdict applies the same validation before it
+    // records a ResolvedScc. Repeat it at the transformation boundary so a
+    // stale or hand-built verdict cannot bypass the dominance invariant.
+    crate::compiler::symbolic::validate_segment_local_temps(member, code, static_views)?;
 
     // Strip a trailing Ret -- the combined fragment appends a single Ret.
     let end = if code.last() == Some(&SymbolicOpcode::Ret) {
@@ -959,7 +965,8 @@ pub(crate) fn combine_scc_fragment(
         // opcodes (identical contract to the Task 4 verdict builder), then
         // renumber every opcode of every segment by THIS member's offsets
         // and GF remap.
-        let segments = segment_member_by_element(member.as_str(), &frag.symbolic.code)?;
+        let segments =
+            segment_member_by_element(member.as_str(), &frag.symbolic.code, &frag.static_views)?;
         for (elem, ops) in segments {
             let mut renumbered = Vec::with_capacity(ops.len());
             for op in &ops {

@@ -7,16 +7,15 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::ast::{
-    self, ArrayView, BinaryOp, Expr3, Expr3LowerContext, IndexExpr3, Loc, Pass1Context,
-    TempAllocator,
+    self, ArrayView, BinaryOp, Expr3, Expr3LowerContext, IndexExpr3, Loc, TempAllocator,
 };
 use crate::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, ErrorCode, ErrorKind, Ident, IdentMap,
     Result, canonicalize,
 };
 use crate::dimensions::{
-    Axis, AxisMatch, Dimension, DimensionsContext, DirectMappingsOnly, SubdimensionRelations,
-    axes_of, match_axes_partial,
+    Axis, AxisMatch, Dimension, DimensionsContext, DirectMappingsOnly, NoAxisRelations,
+    SubdimensionRelations, axes_of, match_axes_partial,
 };
 use crate::variable::{VarKind, Variable};
 use crate::{Error, sim_err};
@@ -25,26 +24,10 @@ use super::dimensions::{UnaryOp, allocate_implicit_axes, axis_reordering};
 use super::expr::{BuiltinFn, Expr, SubscriptIndex, VarRef};
 use super::fragment::{DepKind, DepShape, ModelShape};
 use super::subscript::{
-    IndexOp, Subscript3Config, ViewBuildConfig, ViewBuildResult, build_view_from_ops,
-    normalize_subscripts3,
+    ActiveDimensionRef, ActiveRefMode, IndexOp, Subscript3Config, ViewBuildConfig, ViewBuildResult,
+    active_dimension_refs, build_view_from_ops, match_active_axes, normalize_subscripts3,
 };
 use crate::builtins::ArgKind;
-
-/// What Pass 1 does with a subscript that names an active apply-to-all
-/// dimension, the one axis on which [`Context::lower`]'s two callers differ.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum DimensionRefs {
-    /// Fold it to the active element's index, so an expression that would
-    /// otherwise be deferred can be decomposed into temps here.
-    Resolve,
-    /// Leave it as an `IndexExpr3::Dimension`, so
-    /// [`super::subscript::normalize_subscripts3`] turns it into an
-    /// `IndexOp::ActiveDimRef` that an array-producing builtin's
-    /// wildcard-preserving context can promote back to a whole axis. What an
-    /// `Ast::Arrayed` equation containing `VECTOR ELM MAP`,
-    /// `VECTOR SORT ORDER` or a sibling needs.
-    Preserve,
-}
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
@@ -592,14 +575,14 @@ impl Context<'_> {
         }
     }
 
-    /// Lower an `Expr2` to the compiler's `Expr` list: pass 0, then `Expr3`,
-    /// then Pass 1 temp decomposition, then `lower_from_expr3` over the temp
-    /// assignments and the main expression, which is last.
-    pub(super) fn lower(
-        &self,
-        expr: &ast::Expr2,
-        dimension_refs: DimensionRefs,
-    ) -> Result<Vec<Expr>> {
+    /// Normalize and classify an expression before active-element resolution.
+    ///
+    /// Preparation depends on the active axis set, because it decides which
+    /// bare-array axes become dimension references and which remain wildcards.
+    /// It does not depend on the current element of those axes. Apply-to-all
+    /// expansion can therefore prepare one source equation once and resolve
+    /// the returned `Expr3` separately for every element.
+    pub(super) fn prepare(&self, expr: &ast::Expr2) -> Result<Expr3> {
         // Pass 0: normalize bare arrays into explicit subscripts.
         let normalized = self.lower_pass0(expr);
 
@@ -607,35 +590,23 @@ impl Context<'_> {
         // Carry the reason across, never the span: an `Error` renders its
         // `details` to the user as prose, and a span rendered as prose ("Error
         // at 8:10") displaces the sentence the raising site wrote.
-        let expr3 = Expr3::from_expr2(&normalized, self).map_err(|e| Error {
+        Expr3::from_expr2(&normalized, self).map_err(|e| Error {
             kind: ErrorKind::Model,
             code: e.code,
             details: e.details,
-        })?;
+        })
+    }
 
-        // Pass 1: temp decomposition. The apply-to-all context is exactly what
-        // resolves a dimension reference to a concrete element index, so
-        // withholding it is how `DimensionRefs::Preserve` preserves them.
-        let mut pass1_ctx = match (
-            dimension_refs,
-            &self.active_dimension,
-            &self.active_subscript,
-        ) {
-            (DimensionRefs::Resolve, Some(dims), Some(subs)) => {
-                Pass1Context::with_a2a_context(dims, subs, &self.temps)
-            }
-            _ => Pass1Context::new(&self.temps),
-        };
-        let transformed = pass1_ctx.transform(expr3);
-        let assignments = pass1_ctx.take_assignments();
+    /// Resolve one prepared expression for this context's active element.
+    pub(super) fn lower_prepared(&self, expr: &Expr3) -> Result<Expr> {
+        self.lower_from_expr3(expr)
+    }
 
-        let mut result: Vec<Expr> = assignments
-            .iter()
-            .map(|a| self.lower_from_expr3(a))
-            .collect::<Result<Vec<_>>>()?;
-        result.push(self.lower_from_expr3(&transformed)?);
-
-        Ok(result)
+    /// Lower an `Expr2` through subscript resolution to the compiler's `Expr`.
+    /// Array materialization happens once, on this resolved representation, in
+    /// `compiler::array_operand`.
+    pub(super) fn lower(&self, expr: &ast::Expr2) -> Result<Expr> {
+        self.lower_prepared(&self.prepare(expr)?)
     }
 
     pub(super) fn fold_flows(&self, flows: &[Ident<Canonical>]) -> Result<Option<Expr>> {
@@ -824,17 +795,6 @@ impl Expr3LowerContext for Context<'_> {
     }
 }
 
-/// Result of applying pass 1 to an expression.
-/// Contains the transformed expression and any temp assignments that must be
-/// evaluated before the main expression.
-#[allow(dead_code)]
-pub struct Pass1Result {
-    /// Temp assignments in order of dependency (first should be evaluated first)
-    pub assignments: Vec<Expr>,
-    /// The main expression (references temps via TempArray)
-    pub expr: Expr,
-}
-
 impl Context<'_> {
     /// Create a context with transposed active dimensions for transpose operations.
     /// Used when processing expressions under a Transpose operator in A2A context.
@@ -887,33 +847,9 @@ impl Context<'_> {
     }
 
     /// Lower an Expr3 to compiler's Expr representation.
-    /// Handles all Expr3 variants directly, including pass-1 specific variants
-    /// (TempArray, AssignTemp, etc.) and common expression types.
+    /// Handles the resolved expression variants directly.
     pub(super) fn lower_from_expr3(&self, expr: &Expr3) -> Result<Expr> {
         match expr {
-            // Handle Expr3-specific variants directly
-            Expr3::StaticSubscript(id, view, _, loc) => {
-                let base = self.get_base_ref(id)?;
-                Ok(Expr::StaticSubscript(base, view.clone(), *loc))
-            }
-
-            Expr3::TempArray(id, view, loc) => Ok(Expr::TempArray(*id, view.clone(), *loc)),
-
-            Expr3::TempArrayElement(id, view, idx, loc) => {
-                Ok(Expr::TempArrayElement(*id, view.clone(), *idx, *loc))
-            }
-
-            Expr3::AssignTemp(id, inner, view) => {
-                // AssignTemp content was hoisted out of an array reducer
-                // (SUM, MEAN, etc.) by Pass 1.  It may contain
-                // cross-dimension wildcards (e.g. c[*] with DimA in a
-                // DimB context) that must be preserved, so lower in a
-                // wildcard-preserving context.
-                let lowered_inner = self.with_preserved_wildcards().lower_from_expr3(inner)?;
-                Ok(Expr::AssignTemp(*id, Box::new(lowered_inner), view.clone()))
-            }
-
-            // Handle common variants directly (no longer converting to Expr2)
             Expr3::Const(_, n, loc) => Ok(Expr::Const(n.value(), *loc)),
 
             Expr3::Var(id, _, loc) => {
@@ -1338,6 +1274,23 @@ impl Context<'_> {
             dimensions_ctx: self.dimensions_ctx,
             active_dimension: self.active_dimension.as_deref(),
         };
+        // A vector builtin's all-placeholder spelling denotes the complete
+        // operand before any target-axis allocation is needed. This includes
+        // a source that repeats a placeholder more times than the target does:
+        // `SUM(VECTOR SORT ORDER(square[D,D], 1))` still sorts the complete
+        // square. Every mixed spelling goes through ordinary occurrence-aware
+        // normalization below, so `matrix[D,*]`, ranges and fixed elements
+        // remain restricted slices. The semantic rows are
+        // `arrayed_vector_sort_order_per_slice_tests` and
+        // `vector_builtin_subscripts_preserve_explicit_restrictions`.
+        if self.promote_active_dim_ref
+            && !indices.is_empty()
+            && active_dimension_refs(indices, &config)
+                .into_iter()
+                .all(|active_ref| active_ref.is_some())
+        {
+            return Ok(Some(vec![IndexOp::Wildcard; indices.len()]));
+        }
         let Some(mut operations) = normalize_subscripts3(indices, &config) else {
             return Ok(None);
         };
@@ -1405,13 +1358,25 @@ impl Context<'_> {
         }
 
         if self.preserves_axes_for_iteration(operations) {
-            // Only an ARRAY-PRODUCING builtin promotes an `ActiveDimRef` back
-            // to a whole-axis wildcard; a reducer keeps the concrete offset
-            // `build_view_from_ops` resolved.
+            // An array-producing builtin promotes active-dimension references
+            // only when they are the expression's entire subscript spelling:
+            // `vals[D]` and `matrix[D1,D2]` denote the whole input. Any other
+            // index is an explicit restriction: `matrix[D,*]` is the current
+            // row, `matrix[D,1:2]` a row slice, and `matrix[D,first]` one cell.
+            // XMILE v1.0 section 3.7.1 defines a dimension name in an A2A
+            // subscript as the current element's placeholder, and its slicing
+            // section defines `A[1,*]` as row one, all columns. Promoting the
+            // placeholder beside such a restriction changes that specified
+            // slice into the whole matrix.
+            let all_active_refs = operations
+                .iter()
+                .all(|op| matches!(op, IndexOp::ActiveDimRef(_)));
             let preserved_ops: Vec<IndexOp> = operations
                 .iter()
                 .map(|op| match op {
-                    IndexOp::ActiveDimRef(_) if self.promote_active_dim_ref => IndexOp::Wildcard,
+                    IndexOp::ActiveDimRef(_) if self.promote_active_dim_ref && all_active_refs => {
+                        IndexOp::Wildcard
+                    }
                     other => other.clone(),
                 })
                 .collect();
@@ -1872,10 +1837,45 @@ impl Context<'_> {
         }
 
         let orig_dims: Vec<usize> = dims.iter().map(|d| d.len()).collect();
+        let config = Subscript3Config {
+            dims,
+            all_dimensions: self.dimensions,
+            dimensions_ctx: self.dimensions_ctx,
+            active_dimension: self.active_dimension.as_deref(),
+        };
+        let explicit_active_refs = active_dimension_refs(indices, &config);
+        let source_active_refs = self
+            .active_dimension
+            .as_deref()
+            .map(|active_dims| {
+                // StarRange dynamic fallback names its SOURCE axis. Keep the
+                // canonical exact/size precedence but do not invent a declared
+                // mapping for a wildcard that the explicit index did not name.
+                match_active_axes(&axes_of(dims), active_dims, &NoAxisRelations)
+                    .into_iter()
+                    .map(|matched| {
+                        matched.map(|(axis, _)| ActiveDimensionRef {
+                            axis,
+                            mode: ActiveRefMode::Positional,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| vec![None; indices.len()]);
         let args: Result<Vec<_>> = indices
             .iter()
             .enumerate()
-            .map(|(i, arg)| self.lower_index_expr3(arg, id, i, dims, &orig_dims, loc))
+            .map(|(i, arg)| {
+                self.lower_index_expr3(
+                    arg,
+                    id,
+                    i,
+                    dims,
+                    &orig_dims,
+                    explicit_active_refs[i].or(source_active_refs[i]),
+                    loc,
+                )
+            })
             .collect();
         Ok(Expr::Subscript(base, args?, orig_dims, loc))
     }
@@ -1900,7 +1900,10 @@ impl Context<'_> {
     /// array operand (`Array { whole: true }`) also promotes active-dimension
     /// references back to wildcards, so `vals[DimA]` inside
     /// `VECTOR SORT ORDER` keeps its full array view. A scalar, and a lookup's
-    /// table reference, lower in the enclosing context.
+    /// scalar lowers in the enclosing context. A lookup's table reference
+    /// preserves unmatched axes: active axes still select the current table,
+    /// while a remaining table axis makes the lookup array-valued and must be
+    /// consumed by a reducer/vector operand rather than one scalar slot.
     fn lower_builtin_expr3(
         &self,
         builtin: &crate::builtins::BuiltinFn<Expr3>,
@@ -1926,14 +1929,19 @@ impl Context<'_> {
         }
 
         let mut whole_ctx: Option<Context<'_>> = None;
+        let mut preserved_ctx: Option<Context<'_>> = None;
         let mut lowered = builtin.try_map_ref_with_kinds(|arg, kind| match kind {
-            ArgKind::Array { whole: false } => {
-                self.with_preserved_wildcards().lower_from_expr3(arg)
-            }
+            ArgKind::Scalar => self.lower_from_expr3(arg),
+            ArgKind::Table if self.active_dimension.is_some() => preserved_ctx
+                .get_or_insert_with(|| self.with_preserved_wildcards())
+                .lower_from_expr3(arg),
+            ArgKind::Table => self.lower_from_expr3(arg),
+            ArgKind::Array { whole: false } => preserved_ctx
+                .get_or_insert_with(|| self.with_preserved_wildcards())
+                .lower_from_expr3(arg),
             ArgKind::Array { whole: true } => whole_ctx
                 .get_or_insert_with(|| self.with_vector_builtin_wildcards())
                 .lower_from_expr3(arg),
-            ArgKind::Scalar | ArgKind::Table => self.lower_from_expr3(arg),
             ArgKind::Ident => unreachable!("an identifier payload is not an expression argument"),
         })?;
         // ALLOCATE AVAILABLE reads all four XPriority columns for each
@@ -2008,6 +2016,7 @@ impl Context<'_> {
         i: usize,
         dims: &[Dimension],
         _orig_dims: &[usize],
+        active_ref: Option<ActiveDimensionRef>,
         _loc: Loc,
     ) -> Result<SubscriptIndex> {
         match idx {
@@ -2019,7 +2028,6 @@ impl Context<'_> {
                         id.as_str().to_string()
                     );
                 }
-                let active_dims = self.active_dimension.as_ref().unwrap();
                 let active_subscripts = self.active_subscript.as_ref().unwrap();
                 let dim = &dims[i];
 
@@ -2027,25 +2035,24 @@ impl Context<'_> {
                 let parent_name = crate::common::CanonicalDimensionName::from_raw(dim.name());
 
                 if subdim_name.as_str() == parent_name.as_str() {
-                    // Full dimension - find matching active dimension
-                    for (active_dim, active_subscript) in active_dims.iter().zip(active_subscripts)
-                    {
-                        if active_dim.name() == dim.name() {
-                            if let Dimension::Named(_, _) = dim
-                                && let Some(subscript_off) = dim.get_offset(active_subscript)
-                            {
-                                return Ok(SubscriptIndex::Single(Expr::Const(
-                                    (subscript_off + 1) as f64,
-                                    *star_loc,
-                                )));
-                            } else if let Dimension::Indexed(_, _) = dim
-                                && let Ok(idx_val) = active_subscript.as_str().parse::<usize>()
-                            {
-                                return Ok(SubscriptIndex::Single(Expr::Const(
-                                    idx_val as f64,
-                                    *star_loc,
-                                )));
-                            }
+                    // The whole subscript list allocated active axes once, so
+                    // repeated names select distinct occurrences here too.
+                    if let Some(active_ref) = active_ref {
+                        let active_subscript = &active_subscripts[active_ref.axis];
+                        if let Dimension::Named(_, _) = dim
+                            && let Some(subscript_off) = dim.get_offset(active_subscript)
+                        {
+                            return Ok(SubscriptIndex::Single(Expr::Const(
+                                (subscript_off + 1) as f64,
+                                *star_loc,
+                            )));
+                        } else if let Dimension::Indexed(_, _) = dim
+                            && let Ok(idx_val) = active_subscript.as_str().parse::<usize>()
+                        {
+                            return Ok(SubscriptIndex::Single(Expr::Const(
+                                idx_val as f64,
+                                *star_loc,
+                            )));
                         }
                     }
                 }
@@ -2169,26 +2176,21 @@ impl Context<'_> {
                                 id.as_str().to_string()
                             );
                         }
-                        let active_dims = self.active_dimension.as_ref().unwrap();
                         let active_subscripts = self.active_subscript.as_ref().unwrap();
-
-                        for (active_dim, active_subscript) in
-                            active_dims.iter().zip(active_subscripts)
-                        {
-                            if &*canonicalize(active_dim.name()) == ident.as_str() {
-                                if let Some(offset) = dim.get_offset(active_subscript) {
-                                    return Ok(SubscriptIndex::Single(Expr::Const(
-                                        (offset + 1) as f64,
-                                        *var_loc,
-                                    )));
-                                } else if let Ok(idx_val) =
-                                    active_subscript.as_str().parse::<usize>()
-                                {
-                                    return Ok(SubscriptIndex::Single(Expr::Const(
-                                        idx_val as f64,
-                                        *var_loc,
-                                    )));
-                                }
+                        if let Some(active_ref) = active_ref {
+                            let active_dims = self.active_dimension.as_ref().unwrap();
+                            let active_dim = &active_dims[active_ref.axis];
+                            let active_subscript = &active_subscripts[active_ref.axis];
+                            if let Some(offset) = self.resolve_active_ref_offset(
+                                dim,
+                                active_dim,
+                                active_subscript,
+                                active_ref.mode,
+                            ) {
+                                return Ok(SubscriptIndex::Single(Expr::Const(
+                                    (offset + 1) as f64,
+                                    *var_loc,
+                                )));
                             }
                         }
                     }
@@ -2223,95 +2225,18 @@ impl Context<'_> {
                 let active_dims = self.active_dimension.as_ref().unwrap();
                 let active_subscripts = self.active_subscript.as_ref().unwrap();
 
-                // Find the active dimension this index names, then resolve the
-                // element it selects on THIS source axis. Which active
-                // dimension: by name first, then through a declared mapping in
-                // either direction -- the pairing
-                // `compiler::subscript::normalize_subscripts3` makes on the
-                // static path. Which element: the shared executed rule
-                // (`DimensionsContext::resolve_mapped_read`, GH #997).
-                //
-                // Both halves used to be spelled out here as two separate
-                // loops, and the second one consulted the mapping WITHOUT
-                // trying the active element's own name against this axis
-                // first -- a divergence from the two static sites that would
-                // have read a different element for a mapped pair whose two
-                // dimensions share element names. Instrumenting all three
-                // arms found this one resolving nothing across the lib suite,
-                // but it is reachable -- measured at 8 references in the
-                // integration corpus -- so the divergence was latent rather
-                // than absent. Routing it through the shared rule removes it.
-                //
-                // One behaviour changed for a reference that ALREADY compiled,
-                // and it is a fix rather than a wash: where a source axis's
-                // dimension maps to two active dimensions and the index names
-                // one of them, the old second loop could pair it with the OTHER
-                // (it tested only that a mapping existed, in either direction,
-                // and took the first active dimension that had one). The
-                // candidate order below names the one the index spells first,
-                // matching what `normalize_subscripts3` picks on the static
-                // path for the same reference.
-                // Candidates in `normalize_subscripts3`'s order -- every active
-                // dimension the index NAMES, then every one it reaches through
-                // a declared mapping -- and the first that resolves wins.
-                //
-                // The two used to be separate passes distinguished by a
-                // `Pairing` enum whose only reader was a numeric fallback: for
-                // an INDEXED active dimension whose numeral the source axis did
-                // not declare, the by-name pass emitted the raw 1-based index.
-                // Both are gone. The fallback is measured DEAD -- zero
-                // executions across the lib and integration corpora, where the
-                // by-name candidate is reached 8 times and every one resolves
-                // by name identity -- and its static twin `build_view_from_ops`
-                // has no such fallback at all, so keeping it was the same class
-                // of latent divergence GH #997 removed from the rest of this
-                // arm. Both paths now REFUSE an unresolvable subscript rather
-                // than one of them inventing an index -- the codes still
-                // differ (`MismatchedDimensions` here, `Generic` there), which
-                // is worth tidying but is not what the fallback was about.
-                // (The gate was not structurally vacuous: a NAMED dimension may
-                // declare a mapping toward an indexed one, which puts an
-                // indexed active dimension in the mapping candidates. It is
-                // empirically dead, which is the stronger reason to drop it.)
-                //
-                // The ORDER survives as a chained iterator rather than as a
-                // documented property, because it costs nothing and mirrors
-                // `normalize_subscripts3`. No reference in either corpus has
-                // two candidates: this arm is entered 12 times, 8 with a single
-                // by-name candidate (every one resolving by name identity) and
-                // 4 with none at all (the `no_mapping_*` refusal cells of
-                // `crate::mapped_reference_semantics_tests`). The two-candidate
-                // shape -- a target iterating both a dimension and something
-                // mapped to it -- is nevertheless REACHABLE, and not by the
-                // route one would guess: Pass 1 folds an active dimension's
-                // name to an ordinal only when it runs, and
-                // `DimensionRefs::Preserve` skips it, which is exactly how
-                // all 8 corpus references (`LOOKUP` table arguments with an
-                // `@N` sibling) arrive here naming an ACTIVE dimension. A
-                // fixture of that shape reaches this loop with two candidates.
-                // What is unmeasured is whether the two ever resolve to
-                // DIFFERENT elements in a model that compiles; the order is
-                // chosen to match the static path either way.
-                let sub_dim_name = CanonicalDimensionName::from_raw(name.as_str());
-                let by_name = active_dims
-                    .iter()
-                    .zip(active_subscripts)
-                    .filter(|(ad, _)| ad.canonical_name().as_str() == name.as_str());
-                let by_mapping = active_dims
-                    .iter()
-                    .zip(active_subscripts)
-                    .filter(|(ad, _)| ad.canonical_name().as_str() != name.as_str())
-                    .filter(|(ad, _)| {
-                        let adn = ad.canonical_name();
-                        self.dimensions_ctx.has_mapping_to(&sub_dim_name, adn)
-                            || self.dimensions_ctx.has_mapping_to(adn, &sub_dim_name)
-                    });
-                for (active_dim, active_subscript) in by_name.chain(by_mapping) {
-                    if let Some(resolved) =
-                        self.dimensions_ctx
-                            .resolve_mapped_read(dim, active_dim, active_subscript)
-                        && let Some(offset) = dim.get_offset(&resolved)
-                    {
+                // The same occurrence allocation used by static normalization
+                // selects the active axis. Element translation then follows
+                // the shared mapped-read rule.
+                if let Some(active_ref) = active_ref {
+                    let active_dim = &active_dims[active_ref.axis];
+                    let active_subscript = &active_subscripts[active_ref.axis];
+                    if let Some(offset) = self.resolve_active_ref_offset(
+                        dim,
+                        active_dim,
+                        active_subscript,
+                        active_ref.mode,
+                    ) {
                         return Ok(SubscriptIndex::Single(Expr::Const(
                             (offset + 1) as f64,
                             *dim_loc,
@@ -2321,6 +2246,26 @@ impl Context<'_> {
 
                 sim_err!(MismatchedDimensions, id.as_str().to_string())
             }
+        }
+    }
+
+    /// Resolve one retained active-axis reference without losing whether its
+    /// syntax selected an ordinal placeholder or a declared correspondence.
+    fn resolve_active_ref_offset(
+        &self,
+        source_dim: &Dimension,
+        active_dim: &Dimension,
+        active_subscript: &CanonicalElementName,
+        mode: ActiveRefMode,
+    ) -> Option<usize> {
+        match mode {
+            ActiveRefMode::Positional => active_dim
+                .get_offset(active_subscript)
+                .filter(|&ordinal| ordinal < source_dim.len()),
+            ActiveRefMode::Mapped => self
+                .dimensions_ctx
+                .resolve_mapped_read(source_dim, active_dim, active_subscript)
+                .and_then(|element| source_dim.get_offset(&element)),
         }
     }
 }
@@ -2408,11 +2353,8 @@ fn test_lower() {
         (ast::BinaryOp::And, BinaryOp::And),
         (ast::BinaryOp::Or, BinaryOp::Or),
     ] {
-        let mut output_exprs = context
-            .lower(&lower_if(op), DimensionRefs::Resolve)
-            .expect("lowers");
-        // The last element is the main expression
-        assert_eq!(expected(lowered_op), output_exprs.pop().unwrap());
+        let output_expr = context.lower(&lower_if(op)).expect("lowers");
+        assert_eq!(expected(lowered_op), output_expr);
     }
 }
 
@@ -2440,6 +2382,58 @@ fn test_with_active_subscripts_reuses_dimension_storage() {
     ));
     assert_eq!(ctx_a.active_subscript.as_ref().unwrap()[0].as_str(), "1");
     assert_eq!(ctx_b.active_subscript.as_ref().unwrap()[0].as_str(), "2");
+}
+
+#[test]
+fn one_prepared_array_expression_resolves_for_each_active_element() {
+    use crate::ast::ArrayBounds;
+    use crate::common::CanonicalDimensionName;
+
+    let dims_ctx = DimensionsContext::default();
+    let dims = vec![Dimension::Indexed(
+        CanonicalDimensionName::from_raw("letters"),
+        3,
+    )];
+    let mut deps: IdentMap<Ident<Canonical>, DepShape> = Default::default();
+    deps.insert(Ident::new("source"), DepShape::var(dims.clone()));
+    let inputs = BTreeSet::new();
+    let var_sizes = super::fragment::reference_extents(&deps);
+    let base = test_context(&dims, &dims_ctx, &deps, &var_sizes, &inputs);
+    let active_dims = Arc::<[Dimension]>::from(dims.clone());
+    let first_ctx = base.with_active_subscripts(active_dims.clone(), &["1"]);
+    let second_ctx = base.with_active_subscripts(active_dims, &["2"]);
+    let source = ast::Expr2::Var(
+        Ident::new("source"),
+        Some(ArrayBounds::Named {
+            name: "source".to_owned(),
+            dims: vec![3],
+            dim_names: Some(vec!["letters".to_owned()]),
+        }),
+        Loc::default(),
+    );
+
+    let prepared = first_ctx.prepare(&source).expect("preparation succeeds");
+    let first = first_ctx
+        .lower_prepared(&prepared)
+        .expect("first element resolves");
+    let second = second_ctx
+        .lower_prepared(&prepared)
+        .expect("second element resolves from the same prepared expression");
+
+    let offset = |expr: Expr| match expr {
+        Expr::Var(var, _) => {
+            assert_eq!(var.name.as_str(), "source");
+            var.element_offset
+        }
+        Expr::StaticSubscript(var, view, _) => {
+            assert_eq!(var.name.as_str(), "source");
+            assert!(view.dims.is_empty());
+            var.element_offset + view.offset
+        }
+        other => panic!("expected a collapsed source read, got {other:?}"),
+    };
+    assert_eq!(offset(first), 0);
+    assert_eq!(offset(second), 1);
 }
 
 #[test]

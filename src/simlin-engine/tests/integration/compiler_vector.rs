@@ -2,22 +2,21 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Structural compiler tests for array-producing builtin hoisting (A2A).
+//! Semantic compiler tests for array-producing builtins in A2A equations.
 //!
 //! These tests verify that VectorSortOrder, VectorElmMap, and AllocateAvailable
-//! are hoisted into AssignTemp pre-computations when used in array (A2A) context,
-//! rather than being evaluated redundantly per element.
+//! reach VM execution through post-resolution array materialization. The
+//! internal temp shape is covered by `array_operand_materialization_tests`.
 
 use simlin_engine::test_common::TestProject;
 
 // ---------------------------------------------------------------------------
-// AC4.1 - VectorSortOrder: AssignTemp hoisting in array context
+// AC4.1 - VectorSortOrder in array context
 // ---------------------------------------------------------------------------
 
 #[test]
 fn vector_sort_order_a2a_produces_correct_results() {
-    // VectorSortOrder in array context must be hoisted into AssignTemp;
-    // verify via behavioral assertion that the VM produces correct values.
+    // Verify the complete A2A lowering and VM result.
     let project = TestProject::new("vso_a2a_struct")
         .indexed_dimension("D", 3)
         .array_with_ranges("vals[D]", vec![("1", "30"), ("2", "10"), ("3", "20")])
@@ -28,13 +27,12 @@ fn vector_sort_order_a2a_produces_correct_results() {
 }
 
 // ---------------------------------------------------------------------------
-// AC4.2 - VectorElmMap: AssignTemp hoisting in array context
+// AC4.2 - VectorElmMap in array context
 // ---------------------------------------------------------------------------
 
 #[test]
 fn vector_elm_map_a2a_produces_correct_results() {
-    // VectorElmMap in array context must be hoisted into AssignTemp;
-    // verify via behavioral assertion that the VM produces correct values.
+    // Verify the complete A2A lowering and VM result.
     let project = TestProject::new("vem_a2a_struct")
         .indexed_dimension("D", 3)
         .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
@@ -113,7 +111,7 @@ fn nested_vector_sort_order_inside_sum_in_array_context_vm() {
 }
 
 // ---------------------------------------------------------------------------
-// AC4.3 - AllocateAvailable: AssignTemp hoisting in array context
+// AC4.3 - AllocateAvailable in array context
 // ---------------------------------------------------------------------------
 //
 // The pp (priority profile) array has layout [n_requesters, 4] where each row
@@ -158,8 +156,7 @@ fn make_alloc_project(name: &str) -> TestProject {
 
 #[test]
 fn allocate_available_a2a_produces_correct_results() {
-    // AllocateAvailable in array context must be hoisted into AssignTemp;
-    // verify via behavioral assertion that the VM produces correct values.
+    // Verify the complete A2A lowering and VM result.
     let project = make_alloc_project("alloc_a2a_struct");
     project.assert_compiles_incremental();
     project.assert_vm_scalar_result("total_alloc", 40.0);

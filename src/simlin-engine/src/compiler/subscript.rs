@@ -5,7 +5,8 @@
 use crate::ast::{ArrayView, Expr3, IndexExpr3, SparseInfo};
 use crate::common::{CanonicalDimensionName, CanonicalElementName, ErrorCode, ErrorKind, Result};
 use crate::dimensions::{
-    Axis, Dimension, DimensionsContext, DirectMappingsOnly, axes_of, match_axes_partial,
+    Axis, AxisIndexName, AxisMatch, AxisRelations, Dimension, DimensionsContext,
+    DirectMappingsOnly, axes_of, match_axes_partial, resolve_axis_index_name,
 };
 use crate::{Error, sim_err};
 
@@ -45,7 +46,51 @@ pub(crate) enum IndexOp {
     },
     /// Reference to an active A2A dimension by index.
     /// Used when a dimension name appears as a subscript in A2A context
-    ActiveDimRef(usize),
+    ActiveDimRef(ActiveDimensionRef),
+}
+
+/// A subscript dimension's retained resolution intent.
+///
+/// XMILE 1.0 section 3.7.1 defines a dimension name in an apply-to-all
+/// subscript as the current element's positional placeholder. Thus `x[State]`
+/// in a `target[State]` equation selects the active State ordinal even when
+/// `x` is declared over a mapped `Region`. A different dimension name paired
+/// through a declared mapping follows name/mapping resolution instead. The
+/// exhaustive executed distinction is `mapped_reference_semantics_tests`'s
+/// four-spelling matrix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ActiveDimensionRef {
+    pub(crate) axis: usize,
+    pub(crate) mode: ActiveRefMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ActiveRefMode {
+    Positional,
+    Mapped,
+}
+
+/// Allocate source-axis occurrences to active axes with the canonical matcher.
+///
+/// The canonical one-to-one result is kept wherever possible. Only surplus
+/// source occurrences retry independently, which preserves the diagonal
+/// meaning of two source axes supplied by one active axis without making
+/// repeated target axes collapse onto their first occurrence. The repeated-
+/// source and repeated-target rows are production-derived in
+/// `mapped_reference_semantics_tests`.
+pub(crate) fn match_active_axes(
+    source: &[Axis<'_>],
+    active_dims: &[Dimension],
+    relations: &dyn AxisRelations,
+) -> Vec<Option<(usize, AxisMatch)>> {
+    let target = axes_of(active_dims);
+    let mut matches = match_axes_partial(source, &target, relations);
+    for (source_idx, matched) in matches.iter_mut().enumerate() {
+        if matched.is_none() {
+            *matched = match_axes_partial(&[source[source_idx]], &target, relations)[0].clone();
+        }
+    }
+    matches
 }
 
 /// Result of building an ArrayView from IndexOp operations.
@@ -94,29 +139,66 @@ impl Subscript3Config<'_> {
     fn dimension_named(&self, name: &str) -> Option<&Dimension> {
         self.all_dimensions.iter().find(|d| d.name() == name)
     }
+}
 
-    /// The position in the active apply-to-all dimensions that a subscript
-    /// naming the dimension `name` reads, or `None` outside an apply-to-all
-    /// body or when no active axis corresponds.
-    ///
-    /// The correspondence is [`crate::dimensions::match_axes_partial`], the
-    /// engine's one axis-matching precedence, over the single named axis.
-    /// Only the DIRECT declared mappings are admitted, because the element
-    /// this resolves to is `build_view_from_ops`'s `ActiveDimRef` arm reading
-    /// the active element off the source axis.
-    fn active_dim_ref(&self, name: &str) -> Option<usize> {
-        let active_dims = self.active_dimension?;
-        let source = [Axis::named(name, 0)];
-        match_axes_partial(
-            &source,
-            &axes_of(active_dims),
-            &DirectMappingsOnly(self.dimensions_ctx),
-        )
-        .into_iter()
-        .next()
-        .flatten()
-        .map(|(active_idx, _)| active_idx)
+/// Pair every dimension-reference occurrence in `args` with an active axis in
+/// one allocation. A target may repeat a dimension (`out[D,D]`); treating each
+/// `Dimension(D)` independently would select active axis zero twice. The
+/// matcher instead pairs the first occurrence with the first active `D`, the
+/// second with the second, and never allocates one active axis twice.
+pub(crate) fn active_dimension_refs(
+    args: &[IndexExpr3],
+    config: &Subscript3Config<'_>,
+) -> Vec<Option<ActiveDimensionRef>> {
+    let Some(active_dims) = config.active_dimension else {
+        return vec![None; args.len()];
+    };
+    let mut positions = Vec::new();
+    let mut refs = Vec::new();
+    for (i, arg) in args.iter().enumerate() {
+        let Some(parent_dim) = config.dims.get(i) else {
+            continue;
+        };
+        let name = match arg {
+            IndexExpr3::Dimension(name, _) => name.as_str(),
+            IndexExpr3::Expr(Expr3::Var(name, _, _)) => name.as_str(),
+            _ => continue,
+        };
+        // Use the engine's single element-vs-dimension precedence rule. Every
+        // declared dimension is a candidate here; match_active_axes decides
+        // whether it is active directly or through a declared mapping.
+        if !matches!(
+            resolve_axis_index_name(name, parent_dim, |candidate| {
+                config.dimension_named(candidate).is_some()
+            }),
+            AxisIndexName::IteratedDim
+        ) {
+            continue;
+        }
+        let Some(dim) = config.dimension_named(name) else {
+            continue;
+        };
+        positions.push(i);
+        refs.push(Axis::of(dim));
     }
+
+    let matches = match_active_axes(
+        &refs,
+        active_dims,
+        &DirectMappingsOnly(config.dimensions_ctx),
+    );
+
+    let mut out = vec![None; args.len()];
+    for (arg_pos, matched) in positions.into_iter().zip(matches) {
+        out[arg_pos] = matched.map(|(axis, relation)| ActiveDimensionRef {
+            axis,
+            mode: match relation {
+                AxisMatch::Exact | AxisMatch::BySize => ActiveRefMode::Positional,
+                AxisMatch::Mapped { .. } | AxisMatch::Subdimension => ActiveRefMode::Mapped,
+            },
+        });
+    }
+    out
 }
 
 /// Normalize IndexExpr3 subscripts to IndexOp operations.
@@ -133,6 +215,7 @@ pub(crate) fn normalize_subscripts3(
     config: &Subscript3Config,
 ) -> Option<Vec<IndexOp>> {
     let mut operations = Vec::with_capacity(args.len());
+    let active_refs = active_dimension_refs(args, config);
 
     for (i, arg) in args.iter().enumerate() {
         if i >= config.dims.len() {
@@ -249,7 +332,7 @@ pub(crate) fn normalize_subscripts3(
                         {
                             IndexOp::Single(idx)
                         } else if config.dimension_named(ident.as_str()).is_some() {
-                            IndexOp::ActiveDimRef(config.active_dim_ref(ident.as_str())?)
+                            IndexOp::ActiveDimRef(active_refs[i]?)
                         } else {
                             // Not a known element or dimension - need dynamic handling
                             return None;
@@ -267,7 +350,7 @@ pub(crate) fn normalize_subscripts3(
                 {
                     IndexOp::Single(idx)
                 } else {
-                    IndexOp::ActiveDimRef(config.active_dim_ref(name.as_str())?)
+                    IndexOp::ActiveDimRef(active_refs[i]?)
                 }
             }
         };
@@ -375,7 +458,7 @@ pub(crate) fn build_view_from_ops(
                 dim_mapping.push(Some(i));
                 single_indices.push(0); // No static offset for sparse dimensions
             }
-            IndexOp::ActiveDimRef(active_idx) => {
+            IndexOp::ActiveDimRef(active_ref) => {
                 // Reference to active A2A dimension - resolve to concrete offset
                 let active_subscripts = config.active_subscript.ok_or_else(|| {
                     Error::new(
@@ -384,29 +467,40 @@ pub(crate) fn build_view_from_ops(
                         Some("ActiveDimRef without active subscript context".to_string()),
                     )
                 })?;
-                let subscript = &active_subscripts[*active_idx];
+                let active_dims = config.active_dimension.ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Model,
+                        ErrorCode::Generic,
+                        Some("ActiveDimRef without active dimension context".to_string()),
+                    )
+                })?;
+                let active_dim = &active_dims[active_ref.axis];
+                let subscript = &active_subscripts[active_ref.axis];
                 let dim = &config.dims[i];
 
-                let offset = dim.get_offset(subscript).or_else(|| {
-                    // The active element's own name is not declared on this
-                    // source axis, so the reference resolves through the
-                    // shared executed rule (GH #997): the declared mapping,
-                    // then a mapped parent of the active subdimension.
-                    // `normalize_subscripts3` already picked the active
-                    // dimension, so this is one call rather than a search.
-                    //
-                    // The mapped-parent step is new here (it was already in
-                    // `get_implicit_subscript_off`, the other executed site).
-                    // Unifying can only resolve a reference that previously
-                    // failed to compile: the shared rule tries name and then
-                    // mapping first, which is exactly what this arm did, and
-                    // reaches the parent step only where both missed.
-                    let dims_ctx = config.dimensions_ctx?;
-                    let active_dims = config.active_dimension?;
-                    let active_dim = &active_dims[*active_idx];
-                    let resolved = dims_ctx.resolve_mapped_read(dim, active_dim, subscript)?;
-                    dim.get_offset(&resolved)
-                });
+                let offset = match active_ref.mode {
+                    ActiveRefMode::Positional => active_dim
+                        .get_offset(subscript)
+                        .filter(|&ordinal| ordinal < orig_dims[i]),
+                    ActiveRefMode::Mapped => dim.get_offset(subscript).or_else(|| {
+                        // The active element's own name is not declared on this
+                        // source axis, so the reference resolves through the
+                        // shared executed rule (GH #997): the declared mapping,
+                        // then a mapped parent of the active subdimension.
+                        // `normalize_subscripts3` already picked the active
+                        // dimension, so this is one call rather than a search.
+                        //
+                        // The mapped-parent step is new here (it was already in
+                        // `get_implicit_subscript_off`, the other executed site).
+                        // Unifying can only resolve a reference that previously
+                        // failed to compile: the shared rule tries name and then
+                        // mapping first, which is exactly what this arm did, and
+                        // reaches the parent step only where both missed.
+                        let dims_ctx = config.dimensions_ctx?;
+                        let resolved = dims_ctx.resolve_mapped_read(dim, active_dim, subscript)?;
+                        dim.get_offset(&resolved)
+                    }),
+                };
 
                 if let Some(offset) = offset {
                     single_indices.push(offset);
