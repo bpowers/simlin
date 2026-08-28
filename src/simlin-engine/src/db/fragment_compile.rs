@@ -459,21 +459,22 @@ pub(crate) fn implicit_fragment_input<'db>(
     // Every name the helper references: both phases' data-flow dependencies,
     // the lookup tables it calls (layout references, not data-flow deps --
     // issue #606), and a stock helper's inflows and outflows.
-    let mut all_names: BTreeSet<&str> = helper_deps
+    let mut shape_heads: BTreeSet<Ident<Canonical>> = helper_deps
         .into_iter()
-        .flat_map(|iv| {
-            iv.dt_deps
-                .iter()
-                .chain(iv.initial_deps.iter())
-                .chain(iv.referenced_tables.iter())
-        })
-        .map(String::as_str)
+        .flat_map(|iv| iv.dependencies.iter())
+        .map(|dependency| dependency.target.local_node().clone())
         .collect();
+    if let Some(iv) = helper_deps {
+        shape_heads.extend(iv.referenced_tables.iter().map(|name| {
+            let (head, _) = dep_head(name);
+            Ident::new(head)
+        }));
+    }
     if let crate::variable::VarKind::Stock {
         inflows, outflows, ..
     } = &lowered.kind
     {
-        all_names.extend(inflows.iter().chain(outflows.iter()).map(Ident::as_str));
+        shape_heads.extend(inflows.iter().chain(outflows.iter()).cloned());
     }
 
     let self_shape = if meta.is_module {
@@ -490,8 +491,8 @@ pub(crate) fn implicit_fragment_input<'db>(
     };
     let mut dep_shapes: IdentMap<Ident<Canonical>, DepShape> = Default::default();
     dep_shapes.insert(var_ident.clone(), self_shape);
-    for dep_name in &all_names {
-        let (head, _qualified) = dep_head(dep_name);
+    for dep_name in &shape_heads {
+        let head = dep_name.as_str();
         if head == implicit_name || is_implicit_global(head) || dep_shapes.contains_key(head) {
             continue;
         }
@@ -521,9 +522,9 @@ pub(crate) fn implicit_fragment_input<'db>(
             _ => {}
         }
     }
-    for dep_name in &all_names {
-        let (head, qualified) = dep_head(dep_name);
-        if qualified || tables.contains_key(head) {
+    for dep_name in &shape_heads {
+        let head = dep_name.as_str();
+        if tables.contains_key(head) {
             continue;
         }
         if let Some(dep_sv) = model_variable_by_name(db, model, head.to_string()) {

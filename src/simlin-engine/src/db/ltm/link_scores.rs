@@ -1172,7 +1172,7 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
                 let class = crate::variable::classify_dependencies(ast, target_ast_dims, None);
                 (
                     Some(crate::patch::expr2_to_expr0(expr)),
-                    class.all,
+                    class.all_names(),
                     class.referenced_tables,
                 )
             }
@@ -1186,7 +1186,7 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
                         );
                         (
                             Some(crate::patch::expr2_to_expr0(expr)),
-                            class.all,
+                            class.all_names(),
                             class.referenced_tables,
                         )
                     }
@@ -1832,7 +1832,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         Ast::ApplyToAll(_, expr) => {
             let elem_eqn = crate::patch::expr2_to_expr0(expr);
             let elem_dep_class = crate::variable::classify_dependencies(ast, target_ast_dims, None);
-            let elem_deps = elem_dep_class.all.clone();
+            let elem_deps = elem_dep_class.all_names();
             let pinnable = pinnable_deps(&elem_deps, &elem_dep_class.referenced_tables);
             for element in &elements {
                 match build_var(
@@ -1871,7 +1871,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                         );
                         (
                             Some(crate::patch::expr2_to_expr0(expr)),
-                            class.all,
+                            class.all_names(),
                             class.referenced_tables,
                         )
                     }
@@ -3003,7 +3003,7 @@ fn emit_per_element_link_scores(
     let a2a_parts: Option<ElemEqnParts> = if let Ast::ApplyToAll(_, expr) = ast {
         let eqn = crate::patch::expr2_to_expr0(expr);
         let class = crate::variable::classify_dependencies(ast, target_ast_dims, None);
-        let deps = class.all.clone();
+        let deps = class.all_names();
         let pinnable = pinnable_deps(&deps, &class.referenced_tables);
         Some((eqn, deps, pinnable))
     } else {
@@ -3070,7 +3070,7 @@ fn emit_per_element_link_scores(
                             target_ast_dims,
                             None,
                         );
-                        let deps = class.all.clone();
+                        let deps = class.all_names();
                         let pinnable = pinnable_deps(&deps, &class.referenced_tables);
                         Some((eqn, deps, pinnable))
                     }
@@ -4221,7 +4221,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                             target_ast_dims,
                             None,
                         )
-                        .all;
+                        .all_names();
                         slot_deps.insert(agg_canonical.clone());
                         for other_agg in reducer_subst.values() {
                             slot_deps.insert(Ident::<Canonical>::new(other_agg));

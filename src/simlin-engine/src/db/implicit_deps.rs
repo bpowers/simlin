@@ -21,19 +21,39 @@ pub struct ImplicitVarDeps {
     /// consumer must make the storage live before it enters initials.
     pub initial_seed_required: bool,
     pub model_name: Option<String>,
-    pub dt_deps: BTreeSet<String>,
-    pub initial_deps: BTreeSet<String>,
-    /// Names read through INIT in the helper's dt definition. These seed the
-    /// initial snapshot even when the helper itself is flow-only.
-    pub init_referenced_vars: BTreeSet<String>,
-    pub dt_init_only_referenced_vars: BTreeSet<String>,
-    pub dt_previous_referenced_vars: BTreeSet<String>,
-    pub initial_previous_referenced_vars: BTreeSet<String>,
+    pub dependencies: BTreeSet<DepRef>,
     /// Lookup tables referenced via `LOOKUP(table, x)` -- layout references, not
-    /// data-flow deps. Kept out of `dt_deps`/`initial_deps` (no ordering/causal
+    /// data-flow deps. Kept out of `dependencies` (no ordering/causal
     /// edge) but needed by the implicit-var fragment compiler's metadata +
     /// tables map (issue #606). Mirrors `VariableDeps::referenced_tables`.
     pub referenced_tables: BTreeSet<String>,
+}
+
+impl ImplicitVarDeps {
+    pub fn phase(&self, phase: DepPhase) -> impl Iterator<Item = &DepRef> {
+        self.dependencies
+            .iter()
+            .filter(move |dependency| dependency.phase == phase)
+    }
+
+    pub fn dt_causal(&self) -> impl Iterator<Item = &DepRef> {
+        self.phase(DepPhase::Dt)
+            .filter(|dependency| dependency.lag != crate::variable::DepLag::Initial)
+    }
+
+    pub fn dt_initial_reads(&self) -> impl Iterator<Item = &DepRef> {
+        self.phase(DepPhase::Dt)
+            .filter(|dependency| dependency.lag == crate::variable::DepLag::Initial)
+    }
+
+    pub fn dt_previous_reads(&self) -> impl Iterator<Item = &DepRef> {
+        self.phase(DepPhase::Dt)
+            .filter(|dependency| dependency.lag == crate::variable::DepLag::Previous)
+    }
+
+    pub fn dt_previous_only_targets(&self) -> BTreeSet<DepTarget> {
+        crate::db::query::dt_previous_only_targets(&self.dependencies)
+    }
 }
 
 /// `dim_context` and `converted_dims` are two views of the *same* project
@@ -41,6 +61,9 @@ pub struct ImplicitVarDeps {
 /// from the per-project salsa caches, so they are consistent by construction.
 /// Passing inconsistent views would silently misclassify dependencies.
 pub(super) fn extract_implicit_var_deps(
+    db: &dyn Db,
+    owner_model: Option<SourceModel>,
+    project: SourceProject,
     parsed: &ParsedVariableResult,
     dim_context: &crate::dimensions::DimensionsContext,
     converted_dims: &[crate::dimensions::Dimension],
@@ -59,10 +82,24 @@ pub(super) fn extract_implicit_var_deps(
             // Module-type implicit vars have no AST -- extract deps from
             // their module reference src fields instead.
             if let Some(m) = implicit_var.module() {
-                let refs: BTreeSet<String> = m
+                let refs: BTreeSet<DepTarget> = m
                     .references()
                     .iter()
-                    .map(|mr| canonicalize(&mr.src).into_owned())
+                    .map(|mr| {
+                        let canonical = canonicalize(&mr.src);
+                        let local = canonical.strip_prefix('\u{00b7}').unwrap_or(&canonical);
+                        if canonical.starts_with('\u{00b7}') {
+                            DepTarget::local(Ident::new(local))
+                        } else {
+                            crate::db::query::resolve_dependency_target(
+                                db,
+                                owner_model,
+                                project,
+                                Some(&parsed.implicit_vars),
+                                &Ident::new(canonical.as_ref()),
+                            )
+                        }
+                    })
                     .collect();
                 return ImplicitVarDeps {
                     name: implicit_name,
@@ -71,12 +108,16 @@ pub(super) fn extract_implicit_var_deps(
                     flow_required: true,
                     initial_seed_required: true,
                     model_name: Some(m.model_name().to_string()),
-                    dt_deps: refs.clone(),
-                    initial_deps: refs,
-                    init_referenced_vars: BTreeSet::new(),
-                    dt_init_only_referenced_vars: BTreeSet::new(),
-                    dt_previous_referenced_vars: BTreeSet::new(),
-                    initial_previous_referenced_vars: BTreeSet::new(),
+                    dependencies: [DepPhase::Dt, DepPhase::Init]
+                        .into_iter()
+                        .flat_map(|phase| {
+                            refs.iter().cloned().map(move |target| DepRef {
+                                target,
+                                phase,
+                                lag: crate::variable::DepLag::Current,
+                            })
+                        })
+                        .collect(),
                     // A module never references a lookup table via LOOKUP(...).
                     referenced_tables: BTreeSet::new(),
                 };
@@ -107,6 +148,27 @@ pub(super) fn extract_implicit_var_deps(
                 None => crate::variable::DepClassification::default(),
             };
 
+            let dt_tables = dt_classification.referenced_tables.clone();
+            let init_tables = init_classification.referenced_tables.clone();
+            let dependencies = crate::db::query::resolved_dependencies(
+                db,
+                owner_model,
+                project,
+                Some(&parsed.implicit_vars),
+                DepPhase::Dt,
+                dt_classification,
+            )
+            .into_iter()
+            .chain(crate::db::query::resolved_dependencies(
+                db,
+                owner_model,
+                project,
+                Some(&parsed.implicit_vars),
+                DepPhase::Init,
+                init_classification,
+            ))
+            .collect();
+
             ImplicitVarDeps {
                 name: implicit_name,
                 is_stock: parsed_implicit.is_stock(),
@@ -121,25 +183,8 @@ pub(super) fn extract_implicit_var_deps(
                     .map(|capture| capture.kind().needs_initials())
                     .unwrap_or(true),
                 model_name: None,
-                dt_deps: dt_classification
-                    .all
-                    .into_iter()
-                    .map(|id| id.to_string())
-                    .collect(),
-                initial_deps: init_classification
-                    .all
-                    .into_iter()
-                    .map(|id| id.to_string())
-                    .collect(),
-                init_referenced_vars: dt_classification.init_referenced,
-                dt_init_only_referenced_vars: dt_classification.init_only,
-                dt_previous_referenced_vars: dt_classification.previous_only,
-                initial_previous_referenced_vars: init_classification.previous_only,
-                referenced_tables: dt_classification
-                    .referenced_tables
-                    .into_iter()
-                    .chain(init_classification.referenced_tables)
-                    .collect(),
+                dependencies,
+                referenced_tables: dt_tables.into_iter().chain(init_tables).collect(),
             }
         })
         .collect()

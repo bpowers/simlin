@@ -512,19 +512,22 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
         source_project,
         empty_inputs,
     );
-    // Combine dt and initial deps from the variable itself plus any
+    // Combine every phase/lag occurrence from the variable itself plus any
     // implicit variables. Implicit vars arise from SMOOTH/DELAY expansion
-    // and carry the transitive public deps we need.
+    // and carry the transitive public deps we need. Incoming links are local
+    // model variables, so a qualified child output must not alias a same-named
+    // local variable through its terminal identity.
     let source_vars = source_model.variables(&*db_locked);
     let mut all_deps = std::collections::BTreeSet::new();
-    for dep in var_deps.dt_deps.iter().chain(var_deps.initial_deps.iter()) {
-        all_deps.insert(dep.clone());
-    }
-    // For implicit module variables, also include their dependencies
-    // (these are the public inputs to SMOOTH/DELAY modules).
-    for implicit in &var_deps.implicit_vars {
-        for dep in implicit.dt_deps.iter().chain(implicit.initial_deps.iter()) {
-            all_deps.insert(dep.clone());
+    let dependencies = var_deps.dependencies.iter().chain(
+        var_deps
+            .implicit_vars
+            .iter()
+            .flat_map(|implicit| &implicit.dependencies),
+    );
+    for dependency in dependencies {
+        if dependency.target.module_path.is_empty() {
+            all_deps.insert(dependency.target.variable.as_str().to_owned());
         }
     }
     // Filter to only include public variables -- those that exist

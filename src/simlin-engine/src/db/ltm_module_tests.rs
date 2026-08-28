@@ -227,6 +227,36 @@ fn test_ltm_smooth_model_compiles_with_ltm() {
         "LTM vars should include at least one link_score variable"
     );
 
+    // LTM link equations consume the module instance synthesized while the
+    // source equation was parsed. Drive the generated equation back through
+    // the production LTM parser, structured-target resolver and fragment-input
+    // constructor: no LTM-owned module registry is needed or reachable here.
+    let source_module_name = model_implicit_var_info(&db, source_model, source_project)
+        .iter()
+        .find_map(|(name, meta)| meta.is_module.then_some(name.as_str()))
+        .expect("SMTH1 source parse should synthesize a module instance");
+    let qualified_output = format!("{source_module_name}·output");
+    let consumer = ltm_vars
+        .vars
+        .iter()
+        .find(|var| var.equation.source_text().contains(&qualified_output))
+        .expect("an LTM equation should retain the source module-output read");
+    let input = ltm_fragment_input(
+        &db,
+        &consumer.name,
+        &consumer.equation,
+        source_model,
+        source_project,
+    )
+    .expect("generated LTM equation should lower");
+    assert!(
+        matches!(
+            input.deps[source_module_name].kind,
+            crate::compiler::fragment::DepKind::Module { .. }
+        ),
+        "the source implicit module must resolve structurally, not as a flat scalar"
+    );
+
     let n_slots_ltm = compute_layout(&db, source_model, source_project).n_slots;
     source_project.set_ltm_enabled(&mut db).to(false);
     let n_slots_no_ltm = compute_layout(&db, source_model, source_project).n_slots;

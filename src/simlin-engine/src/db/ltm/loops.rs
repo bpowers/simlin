@@ -83,7 +83,6 @@ pub(super) fn find_model_output_ports(
 ) -> Vec<Ident<Canonical>> {
     let model_name = model.name(db);
     let project_models = project.models(db);
-    let middot = '\u{00B7}';
     let empty_inputs = ModuleInputSet::empty(db);
     let mut output_ports: HashSet<Ident<Canonical>> = HashSet::new();
 
@@ -111,19 +110,19 @@ pub(super) fn find_model_output_ports(
         let flow_members =
             crate::db::model_flow_member_names(db, *other_model, project, empty_inputs);
 
-        // Scan dependencies for module·internal_var references.
+        // Scan structured dependencies for module output references.
         let other_vars = other_model.variables(db);
         for source_var in other_vars.values() {
             let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
-            for dep in
-                crate::db::dt_causal_dependencies(&deps.dt_deps, &deps.dt_init_only_referenced_vars)
-            {
-                if let Some(dot_pos) = dep.find(middot) {
-                    let module_part = &dep[..dot_pos];
-                    let internal_var = &dep[dot_pos + middot.len_utf8()..];
-                    if module_var_names.contains(module_part) {
-                        output_ports.insert(Ident::new(internal_var));
-                    }
+            for dep in crate::db::dt_causal_dependencies(deps) {
+                if dep
+                    .target
+                    .module_path
+                    .first()
+                    .is_some_and(|module| module_var_names.contains(module.as_str()))
+                    && let Some(output) = dep.target.within_first_module_ident()
+                {
+                    output_ports.insert(output);
                 }
             }
 
@@ -134,16 +133,15 @@ pub(super) fn find_model_output_ports(
                 if !flow_members.contains(implicit_dep.name.as_str()) {
                     continue;
                 }
-                for dep in crate::db::dt_causal_dependencies(
-                    &implicit_dep.dt_deps,
-                    &implicit_dep.dt_init_only_referenced_vars,
-                ) {
-                    if let Some(dot_pos) = dep.find(middot) {
-                        let module_part = &dep[..dot_pos];
-                        let internal_var = &dep[dot_pos + middot.len_utf8()..];
-                        if module_var_names.contains(module_part) {
-                            output_ports.insert(Ident::new(internal_var));
-                        }
+                for dep in implicit_dep.dt_causal() {
+                    if dep
+                        .target
+                        .module_path
+                        .first()
+                        .is_some_and(|module| module_var_names.contains(module.as_str()))
+                        && let Some(output) = dep.target.within_first_module_ident()
+                    {
+                        output_ports.insert(output);
                     }
                 }
             }

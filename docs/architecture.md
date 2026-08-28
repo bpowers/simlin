@@ -16,6 +16,12 @@ Core simulation engine. Compiles, type-checks, unit-checks, and simulates SD mod
   `db::parse_source_variable(variable, project)`. Its key contains only the
   variable and project-global language contexts; model shape and instance
   wiring are resolved later during lowering.
+- Source scheduling crosses the database boundary as `DepRef`: a canonical
+  terminal variable, its complete module-instance path, evaluation phase, and
+  lag. Module paths are proven against project and implicit-module metadata;
+  they are not inferred by splitting the `·` spelling shared with dimension
+  elements. Runlists, sparse child initialization, causal/LTM graphs and
+  fragment dependency shapes consume this relation.
 - Simulations run on a stack-based bytecode VM (`vm.rs`) with `PREVIOUS`/`INIT` intrinsic opcodes
 - An alternative WebAssembly code-generation backend (`wasmgen/`) lowers a compiled model to one self-contained wasm module (no host imports) for fast repeated re-simulation; the VM stays the correctness oracle (every emitted module is checked against it). Surfaced through libsimlin `simlin_model_compile_to_wasm`
 - `builtins.rs` defines builtin functions (including `PREVIOUS`, `INIT`); stateful module functions (TREND, SMOOTH3) are model definitions in `stdlib/*.stmx`, generated into `stdlib.gen.rs`

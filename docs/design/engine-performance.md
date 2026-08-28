@@ -770,6 +770,27 @@ initial-phase membership changes, while an unrelated dependent remains cached.
 The remaining structural cost is therefore graph/runlist verification and
 genuinely changed phase membership, not model-wide parse identity.
 
+Dependency scheduling itself is one structured relation. The Expr2 classifier
+records canonical occurrences and lag; the salsa dependency query attaches dt
+or init phase and a metadata-proven full module-instance path. Graph, sparse
+initial-output, causal/LTM and fragment-shape consumers project from those
+fields rather than splitting and re-interning composite strings. Every module
+path segment is selected through per-name model and variable projections; an
+unrelated structural edit may revalidate those projections, but backdating
+stops before the unchanged reader's dependency query executes. `PREVIOUS`
+state uses the same occurrence relation: a target is lag-only when it has a
+Previous occurrence and no Current occurrence; an Initial fallback or sibling
+snapshot does not cancel it.
+
+Against the exact `af201c7f` binary, five alternating paired rounds pinned to
+one performance core and subtracting a matching zero-extra-compile control put
+the plain compile median at 0.99120 G retired instructions versus 1.02325 G
+(-3.13% by the per-side medians; median paired delta -3.18%, range
+-3.50%..-2.01%). LTM is 10.95372 G versus 11.14736 G (-1.74%; median paired
+delta -1.99%, range -2.21%..-0.37%). The broader ranges are recorded rather
+than assigned to a mechanism. Both medians remain reductions with the lag,
+module-layout and per-name-firewall correctness cases included.
+
 ### C5. `Compiler::intern_name` — the top allocation site, blocked on artifact identity
 
 320,650 allocations per cold C-LEARN compile, ~10% of all 3.24M, from two

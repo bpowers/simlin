@@ -290,26 +290,27 @@ pub(crate) fn explicit_fragment_input<'db>(
     // value rather than called via `LOOKUP(table, x)` -- has no scalar value of
     // its own and is rejected (issue #606). After the table-reference /
     // data-flow-dependency split (`referenced_tables`), a lookup-only table can
-    // ONLY reach `dt_deps` / `initial_deps` via such a bare `Var(table)`
+    // ONLY reach the structured data dependencies via such a bare `Var(table)`
     // reference (a real call lands in `referenced_tables`), so its presence in
     // the dependency sets is exactly this error.
     {
-        let referenced: BTreeSet<&String> = deps
-            .dt_deps
-            .iter()
-            .chain(deps.initial_deps.iter())
-            .collect();
+        let referenced: BTreeSet<&crate::db::DepTarget> =
+            deps.dependencies.iter().map(|dep| &dep.target).collect();
         let bare_table_diags: Vec<Diagnostic> = referenced
             .into_iter()
             .filter_map(|dep| {
-                let dep_sv = resolve_var(dep)?;
+                if !dep.module_path.is_empty() {
+                    return None;
+                }
+                let dep_name = dep.variable.as_str();
+                let dep_sv = resolve_var(dep_name)?;
                 crate::db::source_var_is_table_only(db, dep_sv).then(|| {
                     diagnostic(DiagnosticError::Model(crate::common::Error::new(
                         crate::common::ErrorKind::Model,
                         crate::common::ErrorCode::LookupReferencedWithoutArgument,
                         Some(format!(
-                            "'{dep}' is a lookup table and must be called with an \
-                             argument, e.g. {dep}(x) or LOOKUP({dep}, x)"
+                            "'{dep_name}' is a lookup table and must be called with an \
+                             argument, e.g. {dep_name}(x) or LOOKUP({dep_name}, x)"
                         )),
                     )))
                 })
@@ -331,13 +332,14 @@ pub(crate) fn explicit_fragment_input<'db>(
     // reference -- codegen needs the table's identity -- not a data-flow
     // dependency, so it lives in `referenced_tables`, issue #606), and a
     // stock's inflows and outflows (read by its update expression).
-    let mut all_names: BTreeSet<&str> = deps
-        .dt_deps
+    let data_targets: BTreeSet<&crate::db::DepTarget> =
+        deps.dependencies.iter().map(|dep| &dep.target).collect();
+    let mut local_names: BTreeSet<String> = data_targets
         .iter()
-        .chain(deps.initial_deps.iter())
-        .chain(deps.referenced_tables.iter())
-        .map(String::as_str)
+        .filter(|target| target.module_path.is_empty())
+        .map(|target| target.variable.as_str().to_owned())
         .collect();
+    local_names.extend(deps.referenced_tables.iter().cloned());
     let stock_flows: Vec<String> = if var.kind(db) == SourceVariableKind::Stock {
         var.inflows(db)
             .iter()
@@ -347,7 +349,7 @@ pub(crate) fn explicit_fragment_input<'db>(
     } else {
         Vec::new()
     };
-    all_names.extend(stock_flows.iter().map(String::as_str));
+    local_names.extend(stock_flows.iter().cloned());
 
     // Lower the variable to `Expr2`. A module instance is its wiring (it has no
     // equation to lower); everything else lowers against a scope holding the
@@ -372,14 +374,10 @@ pub(crate) fn explicit_fragment_input<'db>(
         let mut stage0_vars: HashMap<Ident<Canonical>, crate::model::VariableStage0> =
             HashMap::new();
         stage0_vars.insert(Ident::new(&var_ident), parsed.variable.clone());
-        for dep_name in &all_names {
-            let (head, qualified) = dep_head(dep_name);
-            if qualified {
-                continue;
-            }
-            if let Some(dep_sv) = resolve_var(head) {
+        for dep_name in &local_names {
+            if let Some(dep_sv) = resolve_var(dep_name) {
                 let dep_parsed = parse_source_variable(db, dep_sv, project);
-                stage0_vars.insert(Ident::new(head), dep_parsed.variable.clone());
+                stage0_vars.insert(Ident::new(dep_name), dep_parsed.variable.clone());
             }
         }
         let mini_model = crate::model::ModelStage0 {
@@ -436,8 +434,9 @@ pub(crate) fn explicit_fragment_input<'db>(
     };
     let mut dep_shapes: IdentMap<Ident<Canonical>, DepShape> = Default::default();
     dep_shapes.insert(self_ident.clone(), self_shape);
-    for dep_name in &all_names {
-        let (head, qualified) = dep_head(dep_name);
+    for target in &data_targets {
+        let head = target.local_node().as_str();
+        let qualified = !target.module_path.is_empty();
         if head == var_ident.as_str() || is_implicit_global(head) || dep_shapes.contains_key(head) {
             continue;
         }
@@ -480,6 +479,23 @@ pub(crate) fn explicit_fragment_input<'db>(
             }
         }
     }
+    for flow in &stock_flows {
+        if flow == &var_ident || dep_shapes.contains_key(flow.as_str()) {
+            continue;
+        }
+        if let Some(dep_sv) = resolve_var(flow) {
+            dep_shapes.insert(Ident::new(flow), source_dep_shape(db, dep_sv, project));
+        }
+    }
+    for table_name in &deps.referenced_tables {
+        let (head, qualified) = dep_head(table_name);
+        if qualified || dep_shapes.contains_key(head) {
+            continue;
+        }
+        if let Some(dep_sv) = resolve_var(head) {
+            dep_shapes.insert(Ident::new(head), source_dep_shape(db, dep_sv, project));
+        }
+    }
     // The implicit module instances this variable's parse synthesized
     // (`INIT(x)` creates `$⁚x⁚0⁚init`, whose output the rewritten equation
     // reads as `$⁚x⁚0⁚init·output`): the read relocates through the instance.
@@ -515,15 +531,14 @@ pub(crate) fn explicit_fragment_input<'db>(
             _ => {}
         }
     }
-    for dep_name in &all_names {
-        let (head, qualified) = dep_head(dep_name);
-        if qualified || tables.contains_key(head) {
+    for dep_name in &local_names {
+        if tables.contains_key(dep_name.as_str()) {
             continue;
         }
-        if let Some(dep_sv) = resolve_var(head) {
+        if let Some(dep_sv) = resolve_var(dep_name) {
             let dep_tables = extract_tables_from_source_var(db, &dep_sv, project);
             if !dep_tables.is_empty() {
-                tables.insert(Ident::new(head), dep_tables);
+                tables.insert(Ident::new(dep_name), dep_tables);
             }
         }
     }

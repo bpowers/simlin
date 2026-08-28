@@ -90,9 +90,9 @@ fn ltm_dependency_shape(
 /// - Implicit helper/module variables created during parsing
 /// - Implicit time/dt/initial_time/final_time variables
 ///
-/// Parsed LTM equations may synthesize helper auxes for PREVIOUS/INIT
-/// and may also expand stdlib module calls, so those implicit vars need
-/// to be handled the same way as in `compile_var_fragment`.
+/// Parsed LTM equations may synthesize helper auxes for PREVIOUS/INIT. Source
+/// stdlib modules have already been expanded before LTM equation generation;
+/// their qualified output reads resolve through the source implicit registry.
 ///
 /// The equation is sourced from the per-shape query
 /// [`link_score_equation_text_shaped`] with the `Bare` shape -- the SAME query
@@ -548,14 +548,14 @@ impl Drop for ForcePartialEquationErrorGuard {
 
 /// Result of [`lower_ltm_variable`]: the lowered variable plus the
 /// dependency classification of its lowered AST, computed once during
-/// lowering. Callers reuse `dep_idents`/`referenced_tables` to build their
+/// lowering. Callers reuse `dep_targets`/`referenced_tables` to build their
 /// dependency shapes instead of re-running `classify_dependencies` on the
 /// returned variable -- the classification is a per-fragment AST walk, and
 /// duplicating it across every LTM fragment was a measurable slice of
 /// C-LEARN's LTM compile time.
 struct LoweredLtmVariable {
     variable: crate::variable::Variable,
-    /// `classify_dependencies(..).all` of the lowered AST
+    /// Structurally resolved dependency targets of the lowered AST
     /// (`Variable::ast()`, which for the Aux-parsed Vars LTM produces is
     /// the dt AST). Identifier sets are lowering-scope-independent, so
     /// this is valid for the returned `variable` whether or not the
@@ -583,9 +583,21 @@ struct LoweredLtmVariable {
     /// This does NOT explain the separately-reported nondeterministic
     /// *invalidation* of `compile_ltm_var_fragment`: salsa verifies a
     /// dependency SET, which an ordering cannot alter.
-    dep_idents: BTreeSet<Ident<Canonical>>,
+    dep_targets: BTreeSet<crate::db::DepTarget>,
     /// `classify_dependencies(..).referenced_tables` of the same AST.
     referenced_tables: BTreeSet<String>,
+}
+
+fn source_implicit_module_model_name(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    head: &str,
+) -> Option<String> {
+    model_implicit_var_by_name(db, model, project, head.to_string())
+        .filter(|meta| meta.is_module)
+        .and_then(|meta| meta.model_name)
+        .map(|model_name| canonicalize(&model_name).into_owned())
 }
 
 /// `true` when the lowered AST contains a construct whose compilation
@@ -742,8 +754,23 @@ fn lower_ltm_variable(
     let classification = prelim
         .ast()
         .map(|ast| crate::variable::classify_dependencies(ast, &[], None));
-    let (dep_idents, referenced_tables) = match classification {
-        Some(c) => (c.all.into_iter().collect(), c.referenced_tables),
+    let (dep_targets, referenced_tables) = match classification {
+        Some(c) => (
+            c.occurrences
+                .into_iter()
+                .map(|occurrence| {
+                    crate::db::query::resolve_dependency_target_with_module_lookup(
+                        db,
+                        Some(model),
+                        project,
+                        Some(equation_implicits),
+                        &occurrence.ident,
+                        |head| source_implicit_module_model_name(db, model, project, head),
+                    )
+                })
+                .collect(),
+            c.referenced_tables,
+        ),
         None => (BTreeSet::new(), BTreeSet::new()),
     };
 
@@ -755,7 +782,7 @@ fn lower_ltm_variable(
     if !prelim.ast().is_some_and(ast_requires_array_operand_bounds) {
         return LoweredLtmVariable {
             variable: prelim,
-            dep_idents,
+            dep_targets,
             referenced_tables,
         };
     }
@@ -766,9 +793,10 @@ fn lower_ltm_variable(
     // are not flat variables and keep resolving to scalar (None) exactly
     // as before.
     let mut dep_names: BTreeSet<&str> = BTreeSet::new();
-    for dep in dep_idents
+    for dep in dep_targets
         .iter()
-        .map(|d| d.as_str())
+        .filter(|target| target.module_path.is_empty())
+        .map(|target| target.variable.as_str())
         .chain(referenced_tables.iter().map(|s| s.as_str()))
     {
         let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
@@ -828,7 +856,7 @@ fn lower_ltm_variable(
     if !any_arrayed_dep {
         return LoweredLtmVariable {
             variable: prelim,
-            dep_idents,
+            dep_targets,
             referenced_tables,
         };
     }
@@ -887,7 +915,7 @@ fn lower_ltm_variable(
     };
     LoweredLtmVariable {
         variable: crate::model::lower_variable(&scope, parsed_variable),
-        dep_idents,
+        dep_targets,
         referenced_tables,
     }
 }
@@ -948,7 +976,7 @@ pub(crate) fn ltm_fragment_input<'db>(
     // computed so the lowered AST is not walked again here.
     let LoweredLtmVariable {
         variable: lowered,
-        dep_idents,
+        dep_targets,
         referenced_tables,
     } = lower_ltm_variable(db, &parsed.variable, &parsed.implicit_vars, model, project);
 
@@ -975,8 +1003,8 @@ pub(crate) fn ltm_fragment_input<'db>(
                 .unwrap_or_default(),
         ),
     );
-    for dep in &dep_idents {
-        let (head, _qualified) = dep_head(dep.as_str());
+    for dep in &dep_targets {
+        let head = dep.local_node().as_str();
         if head == var_name_canonical || is_implicit_global(head) || deps.contains_key(head) {
             continue;
         }
@@ -1629,7 +1657,20 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
         );
         for mr in dm_module.references() {
             let src = canonicalize(&mr.src);
-            let (head, qualified) = dep_head(&src);
+            let target = if let Some(local) = src.strip_prefix('\u{00b7}') {
+                crate::db::DepTarget::local(Ident::new(local))
+            } else {
+                crate::db::query::resolve_dependency_target_with_module_lookup(
+                    db,
+                    Some(model),
+                    project,
+                    None,
+                    &Ident::new(src.as_ref()),
+                    |head| source_implicit_module_model_name(db, model, project, head),
+                )
+            };
+            let head = target.local_node().as_str();
+            let qualified = !target.module_path.is_empty();
             if head == implicit_name || is_implicit_global(head) || deps.contains_key(head) {
                 continue;
             }
@@ -1661,7 +1702,7 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
         // lowering, so the lowered AST is not walked again.
         let LoweredLtmVariable {
             variable: lowered,
-            dep_idents,
+            dep_targets,
             referenced_tables,
         } = lower_ltm_variable(db, &parsed_implicit, &[], model, project);
         // An arrayed capture helper occupies one slot per element.
@@ -1677,13 +1718,14 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
         // No lowered AST -> no dependency shapes: if the scoped re-lower
         // surfaced an equation error, `lowered.ast()` is `None` and the
         // fragment compiles to nothing anyway.
-        let (dep_idents, referenced_tables) = if lowered.ast().is_some() {
-            (dep_idents, referenced_tables)
+        let (dep_targets, referenced_tables) = if lowered.ast().is_some() {
+            (dep_targets, referenced_tables)
         } else {
             (BTreeSet::new(), BTreeSet::new())
         };
-        for dep in &dep_idents {
-            let (head, qualified) = dep_head(dep.as_str());
+        for dep in &dep_targets {
+            let head = dep.local_node().as_str();
+            let qualified = !dep.module_path.is_empty();
             if head == implicit_name || is_implicit_global(head) || deps.contains_key(head) {
                 continue;
             }

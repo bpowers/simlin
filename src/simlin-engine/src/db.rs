@@ -86,10 +86,10 @@ pub use input::{
 
 mod query;
 pub use query::{
-    ImplicitVarMeta, ModuleReferenceGraph, ParsedVariableResult, UnitsContextResult, VariableDeps,
-    model_implicit_var_info, parse_source_variable, project_converted_dimensions,
-    project_datamodel_dims, project_dimensions_context, project_module_graph,
-    project_units_context, project_units_context_result, variable_dimensions,
+    DepPhase, DepRef, DepTarget, ImplicitVarMeta, ModuleReferenceGraph, ParsedVariableResult,
+    UnitsContextResult, VariableDeps, model_implicit_var_info, parse_source_variable,
+    project_converted_dimensions, project_datamodel_dims, project_dimensions_context,
+    project_module_graph, project_units_context, project_units_context_result, variable_dimensions,
     variable_direct_dependencies, variable_relevant_dimensions, variable_size,
 };
 pub(crate) use query::{
@@ -613,34 +613,30 @@ pub fn model_module_output_ports(
     model: SourceModel,
     project: SourceProject,
 ) -> HashMap<String, Vec<String>> {
-    let middot = '\u{00B7}';
     let empty_inputs = ModuleInputSet::empty(db);
     let flow_members = model_flow_member_names(db, model, project, empty_inputs);
     let mut ports: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
-    let record = |dep: &str, ports: &mut HashMap<String, std::collections::BTreeSet<String>>| {
-        if let Some(dot_pos) = dep.find(middot) {
-            let module_part = &dep[..dot_pos];
-            let internal_var = &dep[dot_pos + middot.len_utf8()..];
-            if !module_part.is_empty() && !internal_var.is_empty() {
-                ports
-                    .entry(module_part.to_string())
-                    .or_default()
-                    .insert(internal_var.to_string());
-            }
+    let record = |dep: &DepRef, ports: &mut HashMap<String, std::collections::BTreeSet<String>>| {
+        if let (Some(module), Some(output)) = (
+            dep.target.module_path.first(),
+            dep.target.within_first_module_ident(),
+        ) {
+            ports
+                .entry(module.as_str().to_owned())
+                .or_default()
+                .insert(output.as_str().to_owned());
         }
     };
     for source_var in model.variables(db).values() {
         let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
-        for dep in dt_causal_dependencies(&deps.dt_deps, &deps.dt_init_only_referenced_vars) {
+        for dep in dt_causal_dependencies(deps) {
             record(dep, &mut ports);
         }
         for iv_deps in &deps.implicit_vars {
             if !flow_members.contains(iv_deps.name.as_str()) {
                 continue;
             }
-            for dep in
-                dt_causal_dependencies(&iv_deps.dt_deps, &iv_deps.dt_init_only_referenced_vars)
-            {
+            for dep in iv_deps.dt_causal() {
                 record(dep, &mut ports);
             }
         }

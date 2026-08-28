@@ -73,13 +73,9 @@ pub(crate) struct VarInfo {
     /// saved output, because it is a static table indexed by callers, not a
     /// value-bearing variable (issue #606).
     pub(crate) is_table_only: bool,
-    /// Interned canonical dt-phase deps. `Ident<Canonical>` `Ord` is
-    /// lexicographic, so this `BTreeSet` iterates in the SAME order as the
-    /// former `BTreeSet<String>` (byte-stability preserved), while `Clone`
-    /// is an Arc-refcount bump (the O(V^2) transitive-closure clones become
-    /// cheap) and `Hash`/`Eq` are value-based.
+    /// Canonical model-local nodes that impose same-step dt ordering.
     pub(crate) dt_deps: BTreeSet<Ident<Canonical>>,
-    /// Interned canonical init-phase deps (same rationale as `dt_deps`).
+    /// Canonical model-local nodes that impose initialization ordering.
     pub(crate) initial_deps: BTreeSet<Ident<Canonical>>,
 }
 
@@ -132,19 +128,15 @@ pub(crate) struct VarInfo {
 ///   This exactly reproduces the inlined init logic `compute_inner` ran
 ///   (`info.initial_deps.iter().filter(|dep| var_info.contains_key(dep))`).
 ///
-/// In both phases module-targeted deps are KEPT -- a module node has no
+/// In both phases module-targeted deps are kept -- a module node has no
 /// successors so Tarjan cannot route a cycle through it, matching
 /// `compute_inner` exactly (its `!dep_info.is_module` guard governs only
 /// transitive *absorption*, not which deps the loop iterates). Lagged deps
 /// are already absent (pruned when the phase's dep set is built in
-/// `build_var_info`: `dt_previous_referenced_vars` from `dt_deps`,
-/// `initial_previous_referenced_vars` from `initial_deps`). The returned
-/// references borrow `var_info`'s interned dep keys and iterate in
-/// `BTreeSet` (lexicographic) order -- the same order the former
-/// `BTreeSet<String>` produced -- so the relation is byte-stable across
-/// runs. Returning `&Ident<Canonical>` (not `&str`) lets `compute_inner`
-/// Arc-clone a successor into the transitive set instead of allocating a
-/// fresh `String`.
+/// `build_var_info`: only `Current` occurrences enter dt ordering, while init
+/// ordering keeps `Current` and `Initial`). The returned references borrow
+/// `var_info`'s interned dep keys and iterate in deterministic lexicographic
+/// order.
 pub(crate) fn walk_successors<'a>(
     var_info: &'a FxHashMap<Ident<Canonical>, VarInfo>,
     name: &str,
@@ -211,25 +203,6 @@ pub(crate) fn build_var_info(
     let mut var_info: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
     let mut all_init_referenced: FxHashSet<Ident<Canonical>> = FxHashSet::default();
 
-    // Normalize a raw dep string to the bare variable/module ident it
-    // imposes an ordering edge on, then intern it. A `submodel·subvar`
-    // dependency collapses to its leading `submodel` module name (the dt
-    // chain-break filter `keep_dt_dep` runs first); a leading `·` separator
-    // is stripped. Both the prefix slice and the whole string are canonical
-    // substrings of an already-canonical dep, so `from_str_unchecked`
-    // (intern, no re-canonicalization scan) is sound.
-    let normalize_dep = |dep: &str| -> Ident<Canonical> {
-        let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
-        if let Some(dot_pos) = effective.find('\u{00B7}') {
-            Ident::from_str_unchecked(&effective[..dot_pos])
-        } else {
-            Ident::from_str_unchecked(effective)
-        }
-    };
-    let normalize_deps = |deps: &BTreeSet<String>| -> BTreeSet<Ident<Canonical>> {
-        deps.iter().map(|d| normalize_dep(d)).collect()
-    };
-
     let project_models = project.models(db);
 
     // Per-variable deps, computed once and reused (salsa-cached). A pre-pass
@@ -265,10 +238,41 @@ pub(crate) fn build_var_info(
         }
     }
 
+    // A qualified stock output is a prior-timestep read in the dt phase, so it
+    // imposes no same-step edge. `DepTarget` has already proven every module
+    // path segment against production metadata; this walk follows those
+    // segments without parsing or canonicalizing a composite string.
+    let target_is_stock = |target: &crate::db::DepTarget| -> bool {
+        let Some(first_instance) = target.module_path.first() else {
+            return false;
+        };
+        let Some(first_model_name) = module_instance_model.get(first_instance.as_str()) else {
+            return false;
+        };
+        let Some(mut current_model) = project_models.get(first_model_name.as_str()).copied() else {
+            return false;
+        };
+        for instance in target.module_path.iter().skip(1) {
+            let vars = current_model.variables(db);
+            let Some(module) = vars.get(instance.as_str()) else {
+                return false;
+            };
+            if module.kind(db) != SourceVariableKind::Module {
+                return false;
+            }
+            let next_model_name = canonicalize(module.model_name(db));
+            let Some(next_model) = project_models.get(next_model_name.as_ref()).copied() else {
+                return false;
+            };
+            current_model = next_model;
+        }
+        current_model
+            .variables(db)
+            .get(target.variable.as_str())
+            .is_some_and(|variable| variable.kind(db) == SourceVariableKind::Stock)
+    };
+
     for (name, deps) in &var_deps {
-        let init_only_dt = deps.dt_init_only_referenced_vars.clone();
-        let lagged_dt_previous = deps.dt_previous_referenced_vars.clone();
-        let lagged_initial_previous = deps.initial_previous_referenced_vars.clone();
         let kind = source_vars[name.as_str()].kind(db);
         // A `submodel·subvar` dependency whose `subvar` is a Stock is read
         // from the PRIOR timestep in the dt phase (a stock breaks the
@@ -281,9 +285,9 @@ pub(crate) fn build_var_info(
         // reader, not just module variables: a NON-module variable that reads
         // a stock submodel output (e.g. `v = SMOOTH(...)·output`, the SMOOTH
         // output being an INTEG stock) must likewise drop the dt edge.
-        // Otherwise `normalize_deps` collapses `submodel·output` to the bare
-        // `submodel` module name and the reader gains a spurious `reader ->
-        // module` dt edge; combined with the module being a sink in the cycle
+        // Otherwise `DepTarget::local_node` selects the module instance and
+        // the reader gains a spurious `reader -> module` dt edge; combined
+        // with the module being a sink in the cycle
         // relation (`walk_successors`) but carrying its input src as a
         // direct dep in `dt_dependencies`, this forms an ordering cycle invisible
         // to cycle detection that `topo_sort_str` breaks arbitrarily -- sometimes
@@ -291,40 +295,17 @@ pub(crate) fn build_var_info(
         // each flows step (C-LEARN's `emissions_with_stopped_growth` drop-to-0,
         // #591-c1). The init phase keeps the edge (stocks do not break the chain
         // there), so only `dt_deps` is filtered.
-        let keep_dt_dep = |dep: &str| -> bool {
-            let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
-            if let Some(dot_pos) = effective.find('\u{00B7}') {
-                let module_name = &effective[..dot_pos];
-                let var_name = &effective[dot_pos + '\u{00B7}'.len_utf8()..];
-                // Resolve `module_name` to a submodel: it is either a module
-                // INSTANCE (the common case -- a synthesized stdlib/macro
-                // instance, keyed by its own ident) or, for a nested-module
-                // reference, already a MODEL name. Try the instance map first,
-                // then fall back to a direct model-name lookup.
-                let sub_canonical = canonicalize(module_name);
-                let sub_model = module_instance_model
-                    .get(module_name)
-                    .and_then(|m| project_models.get(m.as_str()))
-                    .or_else(|| project_models.get(sub_canonical.as_ref()));
-                if let Some(sub_model) = sub_model {
-                    let sub_vars = sub_model.variables(db);
-                    if let Some(sub_var) = sub_vars.get(var_name) {
-                        return sub_var.kind(db) != SourceVariableKind::Stock;
-                    }
-                }
-            }
-            true
-        };
-        let mut dt_deps: BTreeSet<String> = deps
-            .dt_deps
-            .iter()
-            .filter(|d| keep_dt_dep(d))
-            .cloned()
+        let dt_deps: BTreeSet<Ident<Canonical>> = deps
+            .phase(crate::db::DepPhase::Dt)
+            .filter(|dependency| dependency.lag == crate::variable::DepLag::Current)
+            .filter(|dependency| !target_is_stock(&dependency.target))
+            .map(|dependency| dependency.target.local_node().clone())
             .collect();
-        dt_deps.retain(|dep| !init_only_dt.contains(dep));
-        dt_deps.retain(|dep| !lagged_dt_previous.contains(dep));
-        let mut initial_deps = deps.initial_deps.clone();
-        initial_deps.retain(|dep| !lagged_initial_previous.contains(dep));
+        let initial_deps: BTreeSet<Ident<Canonical>> = deps
+            .phase(crate::db::DepPhase::Init)
+            .filter(|dependency| dependency.lag != crate::variable::DepLag::Previous)
+            .map(|dependency| dependency.target.local_node().clone())
+            .collect();
 
         var_info.insert(
             // `source_vars` keys are canonical (canonicalized at sync time),
@@ -336,20 +317,13 @@ pub(crate) fn build_var_info(
                 flow_required: true,
                 initial_seed_required: true,
                 is_table_only: crate::db::source_var_is_table_only(db, source_vars[name.as_str()]),
-                dt_deps: normalize_deps(&dt_deps),
-                initial_deps: normalize_deps(&initial_deps),
+                dt_deps,
+                initial_deps,
             },
         );
         all_init_referenced.extend(
-            deps.init_referenced_vars
-                .iter()
-                // Initials runlist candidates are model-local variables. A
-                // qualified output therefore seeds its module instance, whose
-                // initials program populates the nested output slot before the
-                // parent's LoadInitial snapshots it. Keeping the composite
-                // name here cannot match `var_names` and silently leaves the
-                // nested initial value unwritten.
-                .map(|d| normalize_dep(d)),
+            deps.dt_initial_reads()
+                .map(|dependency| dependency.target.local_node().clone()),
         );
 
         // Include implicit variables from this variable's deps result.
@@ -360,16 +334,17 @@ pub(crate) fn build_var_info(
         for implicit in &deps.implicit_vars {
             // Same stock-submodel-output dt chain-break as above (an implicit
             // var can also read a stock submodel output).
-            let mut dt_deps: BTreeSet<String> = implicit
-                .dt_deps
-                .iter()
-                .filter(|d| keep_dt_dep(d))
-                .cloned()
+            let dt_deps: BTreeSet<Ident<Canonical>> = implicit
+                .phase(crate::db::DepPhase::Dt)
+                .filter(|dependency| dependency.lag == crate::variable::DepLag::Current)
+                .filter(|dependency| !target_is_stock(&dependency.target))
+                .map(|dependency| dependency.target.local_node().clone())
                 .collect();
-            dt_deps.retain(|dep| !implicit.dt_init_only_referenced_vars.contains(dep));
-            dt_deps.retain(|dep| !implicit.dt_previous_referenced_vars.contains(dep));
-            let mut initial_deps = implicit.initial_deps.clone();
-            initial_deps.retain(|dep| !implicit.initial_previous_referenced_vars.contains(dep));
+            let initial_deps: BTreeSet<Ident<Canonical>> = implicit
+                .phase(crate::db::DepPhase::Init)
+                .filter(|dependency| dependency.lag != crate::variable::DepLag::Previous)
+                .map(|dependency| dependency.target.local_node().clone())
+                .collect();
             var_info.insert(
                 // `implicit.name` is canonicalized in `extract_implicit_var_deps`.
                 Ident::from_str_unchecked(&implicit.name),
@@ -380,15 +355,14 @@ pub(crate) fn build_var_info(
                     initial_seed_required: implicit.initial_seed_required,
                     // Implicit SMOOTH/DELAY/TREND internals are never lookup tables.
                     is_table_only: false,
-                    dt_deps: normalize_deps(&dt_deps),
-                    initial_deps: normalize_deps(&initial_deps),
+                    dt_deps,
+                    initial_deps,
                 },
             );
             all_init_referenced.extend(
                 implicit
-                    .init_referenced_vars
-                    .iter()
-                    .map(|dependency| normalize_dep(dependency)),
+                    .dt_initial_reads()
+                    .map(|dependency| dependency.target.local_node().clone()),
             );
         }
     }
@@ -813,19 +787,11 @@ enum SccVerdict {
 /// PREVIOUS/INIT strip (the element-level analogue of the variable-level
 /// strip), `phase`-awarely:
 /// - `SymLoadPrev` (PREVIOUS, `prev_values` snapshot, prior timestep):
-///   contributes NO element edge in EITHER phase -- the analogue of
-///   `build_var_info` retaining `dt_deps` against `lagged_dt_previous`
-///   (`deps.dt_previous_referenced_vars`, `db/dep_graph.rs:262`) AND
-///   `initial_deps` against `lagged_initial_previous`
-///   (`deps.initial_previous_referenced_vars`, `:264`).
+///   contributes NO element edge in EITHER phase, matching the exclusion of
+///   `DepLag::Previous` from both ordering projections.
 /// - `SymLoadInitial` (INIT, `initial_values` snapshot): NO edge in
-///   `SccPhase::Dt` -- the analogue of `dt_deps` being retained against
-///   `init_only_dt` (`deps.dt_init_only_referenced_vars`, `:261`); but
-///   KEEPS the edge in `SccPhase::Initial`, because `build_var_info`
-///   strips ONLY `lagged_initial_previous` from `initial_deps` (`:264`)
-///   and does NOT strip INIT-refs (an `INIT(x)` read during the
-///   initial-value computation is a genuine init-phase ordering edge;
-///   `init_referenced_vars` feeds the Initials runlist, not a strip).
+///   `SccPhase::Dt`, but KEEPS the edge in `SccPhase::Initial`: `Initial`
+///   occurrences seed initialization and participate in its ordering.
 /// - `LoadVar`/`LoadSubscript`/`PushVarViewDirect` and a `Var`-based
 ///   `PushStaticView`: current-value reads, kept unchanged -- the reads
 ///   `build_var_info` never strips. (These are ALL the `SymVarRef`-carrying
@@ -960,11 +926,7 @@ fn symbolic_phase_element_order(
                 // ── PREVIOUS (`prev_values` snapshot, prior timestep):
                 // NEVER a current-timestep ordering edge, in EITHER phase.
                 // This is the element-level analogue of `build_var_info`
-                // stripping `lagged_dt_previous`
-                // (`deps.dt_previous_referenced_vars`) from `dt_deps`
-                // (`db/dep_graph.rs:262`) AND `lagged_initial_previous`
-                // (`deps.initial_previous_referenced_vars`) from
-                // `initial_deps` (`:264`) -- both phases. Contributing no
+                // excluding `DepLag::Previous` in both phases. Contributing no
                 // edge makes the element graph MATCH the engine's actual
                 // per-phase relation; it cannot drop a genuine-cycle edge
                 // because a genuine current-timestep element cycle is a
@@ -973,17 +935,10 @@ fn symbolic_phase_element_order(
                 // value (the AC4 soundness argument; see the fn rustdoc).
                 SymbolicOpcode::SymLoadPrev { .. } => {}
                 // ── INIT (`initial_values` snapshot): PHASE-AWARE. In the
-                // dt graph it is NOT a current-dt ordering edge -- the
-                // element-level analogue of `build_var_info` stripping
-                // `init_only_dt` (`deps.dt_init_only_referenced_vars`)
-                // from `dt_deps` (`db/dep_graph.rs:261`). In the init
+                // dt graph it is NOT a current-dt ordering edge. In the init
                 // graph it IS a genuine init-phase dependency: an INIT(x)
-                // read during the initial-value computation orders x's
-                // initial value before this element, and `build_var_info`
-                // strips ONLY `lagged_initial_previous` from `initial_deps`
-                // (`:264`) -- it does NOT strip INIT-refs (those feed
-                // `init_referenced_vars`, the Initials runlist, not a
-                // strip). Excluding it in `Dt` cannot drop a genuine dt
+                // read during initial-value computation orders x's initial
+                // value before this element. Excluding it in `Dt` cannot drop a genuine dt
                 // cycle (same AC4 argument: it is an initial-snapshot read,
                 // not a current-dt-timestep value); keeping it in
                 // `Initial` is required so a genuine init element cycle
@@ -1600,13 +1555,8 @@ pub struct ResolvedScc {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelDepGraphResult {
-    /// Interned-ident-keyed dependency maps, on the std `HashMap` (default
-    /// hasher) -- only the hot internal working maps in
-    /// `model_dependency_graph_impl` use FxHash.
-    /// `Ident<Canonical>` keys/values are cheap Arc-refcount clones and the
-    /// `BTreeSet`s iterate in the same lexicographic order the former
-    /// `BTreeSet<String>` did, so a consumer probing by `&str` (via
-    /// `Borrow<str>`) sees byte-identical behavior.
+    /// Canonical model-local dependency maps. The sorted values make runlist
+    /// construction deterministic; hot temporary maps use FxHash internally.
     pub dt_dependencies: HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
     pub initial_dependencies: HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
     pub runlist_initials: Vec<String>,
@@ -1666,11 +1616,11 @@ struct ProjectInitialOutputRequirements {
 /// time. PREVIOUS-only reads are removed by the same classification field the
 /// model graph consumes; they read history and must not seed child initials.
 struct InitialDependencyFacts {
-    by_var: BTreeMap<Ident<Canonical>, BTreeSet<String>>,
+    by_var: BTreeMap<Ident<Canonical>, BTreeSet<crate::db::DepTarget>>,
     /// Raw INIT referents from dt definitions. A definition need not itself
     /// run in initials for its later flow program to read the frozen value, so
     /// these are project roots rather than ordinary initial-dependency edges.
-    init_referenced: BTreeSet<String>,
+    init_referenced: BTreeSet<crate::db::DepTarget>,
 }
 
 /// Derive each definition's initial dependency paths and the raw dt INIT roots
@@ -1685,15 +1635,28 @@ fn initial_dependency_facts(
     let mut init_referenced = BTreeSet::new();
     for (name, source_var) in model.variables(db) {
         let deps = variable_direct_dependencies(db, *source_var, project, module_inputs);
-        init_referenced.extend(deps.init_referenced_vars.iter().cloned());
-        let mut initial = deps.initial_deps.clone();
-        initial.retain(|dep| !deps.initial_previous_referenced_vars.contains(dep));
+        init_referenced.extend(
+            deps.dt_initial_reads()
+                .map(|dependency| dependency.target.clone()),
+        );
+        let initial = deps
+            .phase(crate::db::DepPhase::Init)
+            .filter(|dependency| dependency.lag != crate::variable::DepLag::Previous)
+            .map(|dependency| dependency.target.clone())
+            .collect();
         paths.insert(Ident::from_str_unchecked(name), initial);
 
         for implicit in &deps.implicit_vars {
-            init_referenced.extend(implicit.init_referenced_vars.iter().cloned());
-            let mut initial = implicit.initial_deps.clone();
-            initial.retain(|dep| !implicit.initial_previous_referenced_vars.contains(dep));
+            init_referenced.extend(
+                implicit
+                    .dt_initial_reads()
+                    .map(|dependency| dependency.target.clone()),
+            );
+            let initial = implicit
+                .phase(crate::db::DepPhase::Init)
+                .filter(|dependency| dependency.lag != crate::variable::DepLag::Previous)
+                .map(|dependency| dependency.target.clone())
+                .collect();
             paths.insert(Ident::from_str_unchecked(&implicit.name), initial);
         }
     }
@@ -1703,8 +1666,8 @@ fn initial_dependency_facts(
     }
 }
 
-/// Route a qualified dependency path out of `current_key`. A nested path such
-/// as `m·n·out` both seeds `n` in `m`'s model and `out` in `n`'s model. The
+/// Route a qualified dependency target out of `current_key`. A nested target
+/// such as `[m, n] / out` both seeds `n` in `m`'s model and `out` in `n`'s model. The
 /// caller's ordinary dependency closure already schedules the first module
 /// (`m`); only the suffix is an external requirement.
 fn route_initial_output_requirement(
@@ -1712,65 +1675,53 @@ fn route_initial_output_requirement(
     project: SourceProject,
     known_keys: &BTreeSet<ModuleCompilationKey>,
     current_key: &ModuleCompilationKey,
-    path: &str,
+    target: &crate::db::DepTarget,
     requirements: &mut ProjectInitialOutputRequirements,
     pending: &mut VecDeque<(ModuleCompilationKey, Ident<Canonical>)>,
 ) -> bool {
-    let path = path.strip_prefix('\u{00B7}').unwrap_or(path);
-    let Some((instance, suffix)) = path.split_once('\u{00B7}') else {
-        return false;
-    };
-    let Some(current_model) = project.models(db).get(current_key.model_name.as_str()) else {
-        return false;
-    };
-    let Some(target) =
-        crate::db::assemble::module_instance_target(db, *current_model, project, instance)
-    else {
-        return false;
-    };
-    let target_inputs: Vec<String> = target
-        .inputs
-        .iter()
-        .map(|input| input.as_str().to_owned())
-        .collect();
-    let target_key = ModuleCompilationKey::new(target.model_name, &target_inputs);
-    if !known_keys.contains(&target_key) {
+    if target.module_path.is_empty() {
         return false;
     }
 
-    if let Some((nested_instance, _)) = suffix.split_once('\u{00B7}') {
-        if !route_initial_output_requirement(
+    let mut key = current_key.clone();
+    for (index, instance) in target.module_path.iter().enumerate() {
+        let Some(current_model) = project.models(db).get(key.model_name.as_str()) else {
+            return false;
+        };
+        let Some(instance_target) = crate::db::assemble::module_instance_target(
             db,
+            *current_model,
             project,
-            known_keys,
-            &target_key,
-            suffix,
-            requirements,
-            pending,
-        ) {
+            instance.as_str(),
+        ) else {
+            return false;
+        };
+        let target_inputs: Vec<String> = instance_target
+            .inputs
+            .iter()
+            .map(|input| input.as_str().to_owned())
+            .collect();
+        let target_key = ModuleCompilationKey::new(instance_target.model_name, &target_inputs);
+        if !known_keys.contains(&target_key) {
             return false;
         }
-        let nested_instance = Ident::from_str_unchecked(nested_instance);
+
+        let required = target
+            .module_path
+            .get(index + 1)
+            .unwrap_or(&target.variable)
+            .clone();
         if requirements
             .by_module
             .entry(target_key.clone())
             .or_default()
-            .insert(nested_instance.clone())
+            .insert(required.clone())
         {
-            pending.push_back((target_key, nested_instance));
+            pending.push_back((target_key.clone(), required));
         }
-        return true;
+        key = target_key;
     }
 
-    let output = Ident::from_str_unchecked(suffix);
-    if requirements
-        .by_module
-        .entry(target_key.clone())
-        .or_default()
-        .insert(output.clone())
-    {
-        pending.push_back((target_key, output));
-    }
     true
 }
 
@@ -1837,10 +1788,7 @@ fn project_initial_output_requirements(
     // for an initial-dependency walk to encounter their owner.
     for (key, dependencies) in &init_referenced_by_key {
         for dependency in dependencies {
-            let dependency = dependency
-                .strip_prefix('\u{00B7}')
-                .unwrap_or(dependency.as_str());
-            if dependency.contains('\u{00B7}') {
+            if !dependency.module_path.is_empty() {
                 route_initial_output_requirement(
                     db,
                     project,
@@ -1851,7 +1799,7 @@ fn project_initial_output_requirements(
                     &mut pending,
                 );
             } else {
-                pending.push_back((key.clone(), Ident::from_str_unchecked(dependency)));
+                pending.push_back((key.clone(), dependency.variable.clone()));
             }
         }
     }
@@ -1864,10 +1812,7 @@ fn project_initial_output_requirements(
             continue;
         };
         for dependency in paths {
-            let dependency = dependency
-                .strip_prefix('\u{00B7}')
-                .unwrap_or(dependency.as_str());
-            if dependency.contains('\u{00B7}') {
+            if !dependency.module_path.is_empty() {
                 route_initial_output_requirement(
                     db,
                     project,
@@ -1878,7 +1823,7 @@ fn project_initial_output_requirements(
                     &mut pending,
                 );
             } else {
-                pending.push_back((key.clone(), Ident::from_str_unchecked(dependency)));
+                pending.push_back((key.clone(), dependency.variable.clone()));
             }
         }
     }
@@ -1984,32 +1929,31 @@ pub(crate) fn model_flow_lagged_dependencies<'db>(
     model: SourceModel,
     project: SourceProject,
     module_inputs: ModuleInputSet<'db>,
-) -> BTreeMap<String, BTreeSet<String>> {
+) -> BTreeMap<Ident<Canonical>, BTreeSet<crate::db::DepTarget>> {
     let flow_members = model_flow_member_names(db, model, project, module_inputs);
     let mut lagged = BTreeMap::new();
 
     for (name, source_var) in model.variables(db).iter() {
         let deps = variable_direct_dependencies(db, *source_var, project, module_inputs);
+        let previous_only = deps.dt_previous_only_targets();
         if flow_members.contains(name.as_str())
             && !matches!(
                 source_var.kind(db),
                 SourceVariableKind::Stock | SourceVariableKind::Module
             )
-            && !deps.dt_previous_referenced_vars.is_empty()
+            && !previous_only.is_empty()
         {
-            lagged.insert(name.clone(), deps.dt_previous_referenced_vars.clone());
+            lagged.insert(Ident::from_str_unchecked(name), previous_only);
         }
 
         for implicit in &deps.implicit_vars {
+            let previous_only = implicit.dt_previous_only_targets();
             if flow_members.contains(implicit.name.as_str())
                 && !implicit.is_stock
                 && !implicit.is_module
-                && !implicit.dt_previous_referenced_vars.is_empty()
+                && !previous_only.is_empty()
             {
-                lagged.insert(
-                    implicit.name.clone(),
-                    implicit.dt_previous_referenced_vars.clone(),
-                );
+                lagged.insert(Ident::from_str_unchecked(&implicit.name), previous_only);
             }
         }
     }

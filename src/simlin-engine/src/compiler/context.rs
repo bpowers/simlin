@@ -312,8 +312,16 @@ impl Context<'_> {
     /// segment names no sub-model variable -- is a loud `DoesNotExist`, never a
     /// silent slot 0.
     fn resolve<'d, 'n>(&'d self, ident: &'n Ident<Canonical>) -> Result<Resolved<'d, 'n>> {
-        let does_not_exist = || Error::new(ErrorKind::Simulation, ErrorCode::DoesNotExist, None);
         let ident_str = ident.as_str();
+        let does_not_exist = || {
+            Error::new(
+                ErrorKind::Simulation,
+                ErrorCode::DoesNotExist,
+                Some(format!(
+                    "'{ident_str}' does not resolve through dependency shapes"
+                )),
+            )
+        };
         let Some(pos) = ident_str.find('\u{00B7}') else {
             let shape = self.deps.get(ident).ok_or_else(does_not_exist)?;
             return Ok(Resolved {

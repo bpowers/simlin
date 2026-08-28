@@ -136,7 +136,8 @@ pub use self::patch::{
 pub use self::queue_compile::build_sim;
 pub use self::results::{Method, Results, Specs as SimSpecs};
 pub use self::variable::{
-    DepClassification, Variable, classify_dependencies, identifier_set, previous_referenced_idents,
+    DepClassification, DepLag, DependencyOccurrence, Variable, classify_dependencies,
+    identifier_set,
 };
 pub use self::vm::{CompiledSimulation, Vm};
 pub use self::vm_profile::BytecodeProfile;

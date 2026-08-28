@@ -839,6 +839,41 @@ fn test_ltm_enabled_reset_after_incremental_metadata() {
     );
 }
 
+#[test]
+fn test_no_input_dynamic_module_is_not_layout_constant() {
+    use simlin_engine::datamodel;
+    use simlin_engine::layout::compute_metadata;
+    use simlin_engine::test_common::TestProject;
+
+    let mut project = TestProject::new("no input dynamic module").build_datamodel();
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Module(datamodel::Module {
+            ident: "clock".to_string(),
+            model_name: "dynamic child".to_string(),
+            documentation: String::new(),
+            units: None,
+            references: vec![],
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        }));
+    let mut child = TestProject::new("dynamic child")
+        .scalar_aux("out", "TIME")
+        .build_datamodel()
+        .models
+        .remove(0);
+    child.name = "dynamic child".to_string();
+    project.models.push(child);
+
+    let metadata = compute_metadata(&project, MAIN_MODEL, None).unwrap();
+    assert!(metadata.dep_graph["clock"].is_empty());
+    assert!(
+        !metadata.constants.contains("clock"),
+        "a module's empty parent-side input set says nothing about dynamic state in its child model"
+    );
+}
+
 /// Codex review regression (PR #472): every detected loop's
 /// `importance_series` must have length exactly `results.step_count`,
 /// regardless of the partition stride that

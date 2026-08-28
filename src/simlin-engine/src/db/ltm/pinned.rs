@@ -358,8 +358,10 @@ fn order_pinned_cycle(
 
 /// Whether any edge `from -> to` of the ordered cycle is a PREVIOUS-lagged
 /// reference: `to` references `from` ONLY inside `PREVIOUS(...)` in its dt
-/// equation (`dt_previous_referenced_vars`, the `previous_only`
-/// classification). Such an edge is the one-DT memory that lets a stockless
+/// equation (the `previous_only` projection: `Previous` targets minus
+/// `Current` targets). An `Initial` fallback or sibling snapshot does not
+/// cancel a lagged edge because it is not an instantaneous read. Such
+/// an edge is the one-DT memory that lets a stockless
 /// cycle compile -- and `PREVIOUS` retains state (LTM ref section 7), so the
 /// cycle is a genuine feedback loop the pin validation must accept (GH #749).
 ///
@@ -374,11 +376,10 @@ fn order_pinned_cycle(
 /// state is deliberately invisible here, mirroring `model_is_stateless`'s
 /// parent-level-only lagged leg (GH #773). A module as the edge SOURCE is
 /// fine: `reader = PREVIOUS(sub.output, 0)` is a parent-level lag of the
-/// module's output, recorded in previous_only as the UN-normalized
-/// `sub·output` -- while the cycle node is the module-normalized `sub` --
-/// so each entry is collapsed through the same `normalize_module_ref_str`
-/// the causal-edge builder applies before comparing. Uses the same empty
-/// empty input set as `model_causal_edges`, so the per-variable dependency
+/// module's output retains structural target `{ module_path: [sub],
+/// variable: output }`, while the cycle node is `sub`; both the causal-edge
+/// builder and this check therefore compare `DepTarget::local_node()`. Uses
+/// the same empty input set as `model_causal_edges`, so the per-variable dependency
 /// queries are shared salsa cache hits.
 fn cycle_has_lagged_edge(
     db: &dyn Db,
@@ -394,7 +395,7 @@ fn cycle_has_lagged_edge(
             .get(to.as_str())
             .into_iter()
             .flatten()
-            .any(|dep| crate::db::analysis::normalize_module_ref_str(dep) == from.as_str())
+            .any(|dep| dep.local_node() == from)
     })
 }
 

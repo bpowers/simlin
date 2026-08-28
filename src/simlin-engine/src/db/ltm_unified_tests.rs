@@ -920,45 +920,55 @@ fn test_stockless_previous_lagged_cycle_is_not_stateless() {
     use crate::db::{LtmMode, model_ltm_mode};
     use salsa::Setter;
 
-    for discovery in [false, true] {
-        let project = crate::test_common::TestProject::new("prev_cycle_gate")
-            .aux("a", "PREVIOUS(b, 0)", None)
-            .aux("b", "a * 0.5 + 1", None)
-            .build_datamodel();
-        let mut db = SimlinDb::default();
-        let (source_project, model) = {
-            let sync = sync_from_datamodel(&db, &project);
-            (sync.project, sync.models["main"].source)
-        };
-        source_project.set_ltm_enabled(&mut db).to(true);
-        source_project.set_ltm_discovery_mode(&mut db).to(discovery);
+    for (case, equation) in [
+        ("previous", "PREVIOUS(b, 0)"),
+        ("same-target fallback", "PREVIOUS(b, b)"),
+        ("previous plus init", "PREVIOUS(b, 0) + INIT(b)"),
+    ] {
+        for discovery in [false, true] {
+            let mut project = crate::test_common::TestProject::new("prev_cycle_gate")
+                .aux("a", equation, None)
+                .aux("b", "a * 0.5 + 1", None)
+                .build_datamodel();
+            let datamodel::Variable::Aux(b) = &mut project.models[0].variables[1] else {
+                unreachable!()
+            };
+            b.compat.active_initial = Some("1".to_string());
+            let mut db = SimlinDb::default();
+            let (source_project, model) = {
+                let sync = sync_from_datamodel(&db, &project);
+                (sync.project, sync.models["main"].source)
+            };
+            source_project.set_ltm_enabled(&mut db).to(true);
+            source_project.set_ltm_discovery_mode(&mut db).to(discovery);
 
-        let mode = model_ltm_mode(&db, model, source_project);
-        let ltm = model_ltm_variables(&db, model, source_project);
-        assert_eq!(ltm.mode, mode, "the two surfaces must agree on the mode");
-        let expected = if discovery {
-            LtmMode::Discovery
-        } else {
-            LtmMode::Exhaustive
-        };
-        assert_eq!(
-            mode, expected,
-            "a PREVIOUS-lagged cycle is state, so the normal mode gates apply \
-             (discovery={discovery})"
-        );
-        assert!(
-            ltm.vars.iter().any(|v| v.name.contains("link_score")),
-            "the lagged cycle's edges must be scored (discovery={discovery}); got: {:?}",
-            ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
-        );
-        if !discovery {
+            let mode = model_ltm_mode(&db, model, source_project);
+            let ltm = model_ltm_variables(&db, model, source_project);
+            assert_eq!(ltm.mode, mode, "the two surfaces must agree on the mode");
+            let expected = if discovery {
+                LtmMode::Discovery
+            } else {
+                LtmMode::Exhaustive
+            };
+            assert_eq!(
+                mode, expected,
+                "a PREVIOUS-lagged cycle is state, so the normal mode gates apply \
+             ({case}, discovery={discovery})"
+            );
             assert!(
-                ltm.vars
-                    .iter()
-                    .any(|v| v.name.contains("\u{205A}loop_score\u{205A}")),
-                "exhaustive mode must emit the lagged loop's loop_score; got: {:?}",
+                ltm.vars.iter().any(|v| v.name.contains("link_score")),
+                "the lagged cycle's edges must be scored ({case}, discovery={discovery}); got: {:?}",
                 ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
             );
+            if !discovery {
+                assert!(
+                    ltm.vars
+                        .iter()
+                        .any(|v| v.name.contains("\u{205A}loop_score\u{205A}")),
+                    "exhaustive mode must emit the lagged loop's loop_score ({case}); got: {:?}",
+                    ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+                );
+            }
         }
     }
 }
@@ -975,6 +985,9 @@ fn test_stockless_captured_previous_cycle_is_state_for_scores_and_pins() {
 
     for (label, a_equation, with_values) in [
         ("direct", "PREVIOUS(b, 0)", false),
+        ("direct fallback", "PREVIOUS(b, b)", false),
+        ("direct previous init", "PREVIOUS(b, 0) + INIT(b)", false),
+        ("captured fallback", "PREVIOUS(b * 1, b)", false),
         ("captured-index", "values[PREVIOUS(b * 0 + 1, 1)]", true),
     ] {
         let mut builder = crate::test_common::TestProject::new(label);
@@ -995,7 +1008,12 @@ fn test_stockless_captured_previous_cycle_is_state_for_scores_and_pins() {
             match variable {
                 datamodel::Variable::Stock(stock) => stock.uid = Some(uid),
                 datamodel::Variable::Flow(flow) => flow.uid = Some(uid),
-                datamodel::Variable::Aux(aux) => aux.uid = Some(uid),
+                datamodel::Variable::Aux(aux) => {
+                    aux.uid = Some(uid);
+                    if aux.ident == "b" {
+                        aux.compat.active_initial = Some("1".to_string());
+                    }
+                }
                 datamodel::Variable::Module(module) => module.uid = Some(uid),
             }
         }

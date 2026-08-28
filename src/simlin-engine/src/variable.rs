@@ -1292,29 +1292,41 @@ where
     }
 }
 
-/// Result of classifying all dependency categories from a single AST walk.
+/// When an equation reads a dependency's value.
+///
+/// This is occurrence-level rather than a property of the referenced name: one
+/// equation may read the same variable both currently and through PREVIOUS or
+/// INIT. Keeping those occurrences separate lets downstream scheduling select
+/// the relation it needs without reconstructing it through set subtraction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DepLag {
+    Current,
+    Previous,
+    Initial,
+}
+
+/// One canonical identifier occurrence and its snapshot relation.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DependencyOccurrence {
+    pub ident: Ident<Canonical>,
+    pub lag: DepLag,
+}
+
+/// Result of classifying all dependency occurrences from a single AST walk.
 #[derive(Default)]
 pub struct DepClassification {
-    /// All referenced identifiers (current + lagged + init-only).
-    /// Dimension names are filtered out.
-    pub all: HashSet<Ident<Canonical>>,
-    /// Idents appearing as direct args to INIT() calls.
-    pub init_referenced: BTreeSet<String>,
-    /// Idents appearing as direct args to PREVIOUS() calls.
-    pub previous_referenced: BTreeSet<String>,
-    /// Idents referenced ONLY inside PREVIOUS() -- not outside it.
-    pub previous_only: BTreeSet<String>,
-    /// Idents referenced ONLY inside INIT() or PREVIOUS() -- not outside either.
-    pub init_only: BTreeSet<String>,
+    /// Every data dependency occurrence. Dimension names and elements are
+    /// filtered out.
+    pub occurrences: BTreeSet<DependencyOccurrence>,
     /// Standalone lookup tables referenced via `LOOKUP(table, x)`. A table
     /// reference is a *layout* reference (codegen needs the table variable's
     /// offset for the table-identity reverse-map), NOT a data-flow dependency:
-    /// it is kept OUT of `all` so it never creates a runlist-ordering or
+    /// it is kept out of `occurrences` so it never creates a runlist-ordering or
     /// causal/LTM edge, and is reunited with the dependency set only when the
     /// fragment compiler builds its metadata + tables map (issue #606).
     ///
     /// **A consumer wanting a table reference reads THIS FIELD; it is not, and
-    /// must not be, in `all`.** GH #606 justified the exclusion purely in terms
+    /// must not be, in `occurrences`.** GH #606 justified the exclusion purely in terms
     /// of runlist ordering and said nothing about the other questions a caller
     /// can ask, which is how a later consumer came to read the omission as the
     /// information being unavailable. It is not: this field rides the same
@@ -1335,7 +1347,7 @@ pub struct DepClassification {
     ///   widens the per-element PIN candidates with this field while leaving the
     ///   ceteris-paribus wrap's dep set alone.
     ///
-    /// Moving these into `all` and filtering at the consumers was measured and
+    /// Moving these into `occurrences` and filtering at consumers was measured and
     /// rejected: five consumer families see them, four must filter them out, and
     /// the first one to break is compilation itself (a lookup-only holder has no
     /// value slot, so the fragment compiler refuses -- `lookup_only_tests`).
@@ -1344,32 +1356,25 @@ pub struct DepClassification {
     pub referenced_tables: BTreeSet<String>,
 }
 
-/// Unified AST walker that computes all dependency categories in a single pass.
+impl DepClassification {
+    /// Every referenced canonical name, independent of lag.
+    pub fn all_names(&self) -> HashSet<Ident<Canonical>> {
+        self.occurrences
+            .iter()
+            .map(|occurrence| occurrence.ident.clone())
+            .collect()
+    }
+}
+
+/// AST walker that records each canonical dependency occurrence with its lag.
 ///
-/// Maintains two boolean flags (`in_previous`, `in_init`) to track whether the
-/// current position is inside a PREVIOUS() or INIT() call. Accumulates identifiers
-/// into multiple sets:
-///
-/// - `all`: every referenced identifier, with dimension names filtered (same as
-///   `IdentifierSetVisitor`)
-/// - `init_referenced` / `previous_referenced`: direct Var/Subscript args of
-///   INIT() / PREVIOUS() calls
-/// - `non_previous`: idents seen outside any PREVIOUS() context
-/// - `non_init`: idents seen outside both INIT() and PREVIOUS() context
-///
-/// After walking, derived sets are computed:
-/// - `previous_only = previous_referenced - non_previous`
-/// - `init_only = init_referenced - non_init`
-///
-/// The walker preserves `IdentifierSetVisitor`'s behaviors: dimension-name
-/// filtering from index expressions, `IsModuleInput` branch selection via
-/// `module_inputs`, and `IndexExpr2::Range` endpoint walking.
+/// PREVIOUS arguments are `Previous`, INIT arguments and PREVIOUS fallbacks are
+/// `Initial`, and all other reads are `Current`. Dimension names and elements
+/// in index expressions are syntax rather than data dependencies. Module-input
+/// conditionals select the production branch when an input set is available;
+/// range endpoints are ordinary expression positions and are visited.
 struct ClassifyVisitor<'a> {
-    all: HashSet<Ident<Canonical>>,
-    init_referenced: BTreeSet<String>,
-    previous_referenced: BTreeSet<String>,
-    non_previous: BTreeSet<String>,
-    non_init: BTreeSet<String>,
+    occurrences: BTreeSet<DependencyOccurrence>,
     referenced_tables: BTreeSet<String>,
     dimensions: &'a [Dimension],
     module_inputs: Option<&'a BTreeSet<Ident<Canonical>>>,
@@ -1425,17 +1430,18 @@ impl ClassifyVisitor<'_> {
         }
     }
 
-    /// Record an identifier string into the flag-dependent sets.
-    fn record_ident(&mut self, ident_str: &str) {
-        if !self.in_previous {
-            self.non_previous.insert(ident_str.to_owned());
-        }
-        // PREVIOUS() context also excludes from non_init, matching the existing
-        // behavior of init_only_referenced_idents_with_module_inputs where
-        // BuiltinFn::Previous sets in_init=true.
-        if !self.in_init && !self.in_previous {
-            self.non_init.insert(ident_str.to_owned());
-        }
+    fn record_ident(&mut self, ident: &Ident<Canonical>) {
+        let lag = if self.in_previous {
+            DepLag::Previous
+        } else if self.in_init {
+            DepLag::Initial
+        } else {
+            DepLag::Current
+        };
+        self.occurrences.insert(DependencyOccurrence {
+            ident: ident.clone(),
+            lag,
+        });
     }
 
     fn walk(&mut self, e: &Expr2) {
@@ -1448,20 +1454,11 @@ impl ClassifyVisitor<'_> {
                     .iter()
                     .any(|dim| id.as_str() == dim.canonical_name().as_str());
                 if !is_dimension {
-                    self.all.insert(id.clone());
-                    if self.in_init && !self.in_previous {
-                        self.init_referenced.insert(id.to_string());
-                    }
+                    self.record_ident(id);
                 }
-                self.record_ident(id.as_str());
             }
             Expr2::App(builtin, _, _) => match builtin {
                 BuiltinFn::Previous(arg, fallback) => {
-                    if let Expr2::Var(ident, _, _) | Expr2::Subscript(ident, _, _, _) = arg.as_ref()
-                    {
-                        self.previous_referenced.insert(ident.to_string());
-                    }
-
                     let old = self.in_previous;
                     self.in_previous = true;
                     self.walk(arg);
@@ -1481,7 +1478,7 @@ impl ClassifyVisitor<'_> {
                 _ => {
                     walk_builtin_expr(builtin, |contents| match contents {
                         BuiltinContents::Ident(id, _loc) => {
-                            self.all.insert(Ident::new(id));
+                            self.record_ident(&Ident::new(id));
                         }
                         BuiltinContents::Expr(expr) => self.walk(expr),
                         // A graphical-function table reference is a *layout*
@@ -1502,11 +1499,7 @@ impl ClassifyVisitor<'_> {
                 }
             },
             Expr2::Subscript(id, args, _, _) => {
-                self.all.insert(id.clone());
-                if self.in_init && !self.in_previous {
-                    self.init_referenced.insert(id.to_string());
-                }
-                self.record_ident(id.as_str());
+                self.record_ident(id);
                 args.iter().for_each(|arg| self.walk_index(arg));
             }
             Expr2::Op2(_, l, r, _, _) => {
@@ -1536,29 +1529,17 @@ impl ClassifyVisitor<'_> {
     }
 }
 
-/// Classify all dependency categories of an AST in a single walk.
+/// Classify the AST's data reads by canonical identity and lag in one walk.
 ///
-/// Returns a `DepClassification` with five sets:
-/// - `all`: every referenced identifier (dimension names filtered)
-/// - `init_referenced` / `previous_referenced`: direct args of INIT/PREVIOUS calls
-/// - `previous_only`: idents referenced ONLY inside PREVIOUS (not outside)
-/// - `init_only`: idents referenced ONLY inside INIT or PREVIOUS (not outside either)
-///
-/// This replaces five separate functions that previously required up to 10 calls
-/// per variable. The walker applies `IsModuleInput` branch selection when
-/// `module_inputs` is provided, and filters dimension/element names from index
-/// expressions.
+/// Module paths and evaluation phase require database metadata and are attached
+/// by `db::variable_direct_dependencies`; this layer deliberately owns neither.
 pub fn classify_dependencies(
     ast: &Ast<Expr2>,
     dimensions: &[Dimension],
     module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
 ) -> DepClassification {
     let mut visitor = ClassifyVisitor {
-        all: HashSet::new(),
-        init_referenced: BTreeSet::new(),
-        previous_referenced: BTreeSet::new(),
-        non_previous: BTreeSet::new(),
-        non_init: BTreeSet::new(),
+        occurrences: BTreeSet::new(),
         referenced_tables: BTreeSet::new(),
         dimensions,
         module_inputs,
@@ -1577,22 +1558,8 @@ pub fn classify_dependencies(
             }
         }
     }
-    let previous_only = visitor
-        .previous_referenced
-        .difference(&visitor.non_previous)
-        .cloned()
-        .collect();
-    let init_only = visitor
-        .init_referenced
-        .difference(&visitor.non_init)
-        .cloned()
-        .collect();
     DepClassification {
-        all: visitor.all,
-        init_referenced: visitor.init_referenced,
-        previous_referenced: visitor.previous_referenced,
-        previous_only,
-        init_only,
+        occurrences: visitor.occurrences,
         referenced_tables: visitor.referenced_tables,
     }
 }
@@ -1602,14 +1569,7 @@ pub fn identifier_set(
     dimensions: &[Dimension],
     module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
 ) -> HashSet<Ident<Canonical>> {
-    classify_dependencies(ast, dimensions, module_inputs).all
-}
-
-/// Collect variable identifiers referenced by `PREVIOUS(x)` calls in an AST.
-///
-/// These identifiers are lagged dependencies (t-1), not same-step edges.
-pub fn previous_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
-    classify_dependencies(ast, &[], None).previous_referenced
+    classify_dependencies(ast, dimensions, module_inputs).all_names()
 }
 
 /// Build an `Ast<Expr2>` from a scalar equation string via parse + lower.
@@ -1638,8 +1598,9 @@ pub(crate) fn scalar_ast(eqn: &str) -> Ast<Expr2> {
 ///
 /// Covers all combinations of reference form (direct, PREVIOUS, INIT, mixed,
 /// both-lagged) x context (scalar, isModuleInput, ApplyToAll, subscript range),
-/// plus all 7 prior bug-fix edge cases. Each case asserts all 5 fields of
-/// `DepClassification`.
+/// plus every `IndexExpr2` arm and the prior bug-fix edge cases. Each case
+/// asserts the complete occurrence relation and its four scheduling
+/// projections.
 #[test]
 fn test_classify_dependencies_matrix() {
     use crate::common::CanonicalElementName;
@@ -1762,6 +1723,73 @@ fn test_classify_dependencies_matrix() {
             dimensions: vec![],
             module_inputs: None,
             expected_all: ["arr", "const"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: [].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: [].into(),
+        },
+        DepTestCase {
+            label: "direct_index_expr",
+            ast: Ast::Scalar(Expr2::Subscript(
+                Ident::new("arr"),
+                vec![IndexExpr2::Expr(Expr2::Var(Ident::new("index"), None, loc))],
+                None,
+                loc,
+            )),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["arr", "index"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: [].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: [].into(),
+        },
+        DepTestCase {
+            label: "direct_wildcard",
+            ast: Ast::Scalar(Expr2::Subscript(
+                Ident::new("arr"),
+                vec![IndexExpr2::Wildcard(loc)],
+                None,
+                loc,
+            )),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["arr"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: [].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: [].into(),
+        },
+        DepTestCase {
+            label: "direct_star_range",
+            ast: Ast::Scalar(Expr2::Subscript(
+                Ident::new("arr"),
+                vec![IndexExpr2::StarRange(
+                    crate::common::CanonicalDimensionName::from_raw("dim1"),
+                    loc,
+                )],
+                None,
+                loc,
+            )),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["arr"].into(),
+            expected_init_referenced: [].into(),
+            expected_previous_referenced: [].into(),
+            expected_previous_only: [].into(),
+            expected_init_only: [].into(),
+        },
+        DepTestCase {
+            label: "direct_dimension_position",
+            ast: Ast::Scalar(Expr2::Subscript(
+                Ident::new("arr"),
+                vec![IndexExpr2::DimPosition(1, loc)],
+                None,
+                loc,
+            )),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["arr"].into(),
             expected_init_referenced: [].into(),
             expected_previous_referenced: [].into(),
             expected_previous_only: [].into(),
@@ -2000,9 +2028,8 @@ fn test_classify_dependencies_matrix() {
         },
         // -- Reference form: both-lagged (PREVIOUS + INIT) --
         DepTestCase {
-            // Edge case 6: PREVIOUS + INIT combined -- b is init_only
-            // (PREVIOUS context also counts as init-excluded).
-            // b is NOT previous_only because INIT(b) walks b outside PREVIOUS context.
+            // Initial snapshot reads do not create a same-step edge, so they
+            // do not cancel the discrete state carried by PREVIOUS.
             label: "both_lagged_scalar",
             ast: scalar_ast("PREVIOUS(b) + INIT(b)"),
             dimensions: vec![],
@@ -2010,7 +2037,18 @@ fn test_classify_dependencies_matrix() {
             expected_all: ["b"].into(),
             expected_init_referenced: ["b"].into(),
             expected_previous_referenced: ["b"].into(),
-            expected_previous_only: [].into(),
+            expected_previous_only: ["b"].into(),
+            expected_init_only: ["b"].into(),
+        },
+        DepTestCase {
+            label: "previous_fallback_same_target",
+            ast: scalar_ast("PREVIOUS(b, b)"),
+            dimensions: vec![],
+            module_inputs: None,
+            expected_all: ["b"].into(),
+            expected_init_referenced: ["b"].into(),
+            expected_previous_referenced: ["b"].into(),
+            expected_previous_only: ["b"].into(),
             expected_init_only: ["b"].into(),
         },
         DepTestCase {
@@ -2025,8 +2063,8 @@ fn test_classify_dependencies_matrix() {
             expected_init_only: ["b"].into(),
         },
         DepTestCase {
-            // Same semantics as both_lagged_scalar: INIT(b) walks b outside
-            // PREVIOUS context, so b is NOT previous_only.
+            // Same semantics as both_lagged_scalar: neither snapshot read is
+            // a current occurrence.
             label: "both_lagged_a2a",
             ast: Ast::ApplyToAll(vec![dim1.clone()], {
                 let prev = Expr2::App(
@@ -2055,15 +2093,14 @@ fn test_classify_dependencies_matrix() {
             expected_all: ["b"].into(),
             expected_init_referenced: ["b"].into(),
             expected_previous_referenced: ["b"].into(),
-            expected_previous_only: [].into(),
+            expected_previous_only: ["b"].into(),
             expected_init_only: ["b"].into(),
         },
         DepTestCase {
             // both-lagged x isModuleInput: the active (then) branch is
             // PREVIOUS(a) + INIT(a).  a is in both previous_referenced and
-            // init_referenced.  INIT(a) walks a outside PREVIOUS context, so
-            // a ends up in non_previous, making previous_only empty.  a is
-            // never walked outside any lagged context, so init_only={a}.
+            // init_referenced. Neither lag is a current read, so a is both
+            // previous-only and initial-only.
             label: "both_lagged_ismoduleinput",
             ast: scalar_ast("if isModuleInput(input) then PREVIOUS(a) + INIT(a) else b"),
             dimensions: vec![],
@@ -2071,7 +2108,7 @@ fn test_classify_dependencies_matrix() {
             expected_all: ["a"].into(),
             expected_init_referenced: ["a"].into(),
             expected_previous_referenced: ["a"].into(),
-            expected_previous_only: [].into(),
+            expected_previous_only: ["a"].into(),
             expected_init_only: ["a"].into(),
         },
         DepTestCase {
@@ -2180,52 +2217,54 @@ fn test_classify_dependencies_matrix() {
             classify_dependencies(&case.ast, &case.dimensions, case.module_inputs.as_ref());
 
         // Convert all to HashSet<&str> for comparison
-        let got_all: HashSet<&str> = result.all.iter().map(|id| id.as_str()).collect();
+        let all = result.all_names();
+        let got_all: HashSet<&str> = all.iter().map(|id| id.as_str()).collect();
         assert_eq!(case.expected_all, got_all, "case '{}': all", case.label);
 
-        let got_init_ref: BTreeSet<&str> =
-            result.init_referenced.iter().map(|s| s.as_str()).collect();
+        let lag_names = |lag| {
+            result
+                .occurrences
+                .iter()
+                .filter(|occurrence| occurrence.lag == lag)
+                .map(|occurrence| occurrence.ident.as_str())
+                .collect::<BTreeSet<_>>()
+        };
+        let got_current = lag_names(DepLag::Current);
+        let got_init_ref = lag_names(DepLag::Initial);
         assert_eq!(
             case.expected_init_referenced, got_init_ref,
             "case '{}': init_referenced",
             case.label
         );
 
-        let got_prev_ref: BTreeSet<&str> = result
-            .previous_referenced
-            .iter()
-            .map(|s| s.as_str())
-            .collect();
+        let got_prev_ref = lag_names(DepLag::Previous);
         assert_eq!(
             case.expected_previous_referenced, got_prev_ref,
             "case '{}': previous_referenced",
             case.label
         );
 
-        let got_prev_only: BTreeSet<&str> =
-            result.previous_only.iter().map(|s| s.as_str()).collect();
+        let got_prev_only: BTreeSet<_> = got_prev_ref.difference(&got_current).copied().collect();
         assert_eq!(
             case.expected_previous_only, got_prev_only,
             "case '{}': previous_only",
             case.label
         );
 
-        let got_init_only: BTreeSet<&str> = result.init_only.iter().map(|s| s.as_str()).collect();
+        let got_init_only: BTreeSet<_> = got_init_ref.difference(&got_current).copied().collect();
         assert_eq!(
             case.expected_init_only, got_init_only,
             "case '{}': init_only",
             case.label
         );
 
-        // Structural invariant: `all` (as strings) must be a superset of
-        // init_referenced union previous_referenced.
-        // This is the fragment context invariant (edge case 5): compile_var_fragment
-        // uses `all` for dt_deps, so it must include INIT/PREVIOUS args.
-        let init_prev_union: HashSet<&str> = result
-            .init_referenced
+        // Structural invariant: all occurrence names must be a superset of the
+        // Initial and Previous projections. Fragment dependency shapes need
+        // snapshot operands even when they impose no same-step ordering edge.
+        let init_prev_union: HashSet<&str> = got_init_ref
             .iter()
-            .chain(result.previous_referenced.iter())
-            .map(|s| s.as_str())
+            .chain(got_prev_ref.iter())
+            .copied()
             .collect();
         assert!(
             got_all.is_superset(&init_prev_union),

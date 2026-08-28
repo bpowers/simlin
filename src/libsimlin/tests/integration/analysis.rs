@@ -246,6 +246,79 @@ fn test_get_incoming_links() {
 }
 
 #[test]
+fn test_get_incoming_links_does_not_alias_module_output_to_local_terminal() {
+    use simlin_engine::datamodel;
+
+    let mut project = TestProject::new("module_link_identity")
+        .aux("output", "7", None)
+        .aux("child.output", "99", None)
+        .aux("reader", "child.output", None)
+        .build_datamodel();
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Module(datamodel::Module {
+            ident: "child".to_string(),
+            model_name: "child_model".to_string(),
+            documentation: String::new(),
+            units: None,
+            references: vec![],
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+    project.models.push(datamodel::Model {
+        name: "child_model".to_string(),
+        sim_specs: None,
+        variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+            ident: "output".to_string(),
+            equation: datamodel::Equation::Scalar("42".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        })],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    });
+
+    let project = engine_serde::serialize(&project).unwrap();
+    let mut buf = Vec::new();
+    project.encode(&mut buf).unwrap();
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let project = simlin_project_open_protobuf(buf.as_ptr(), buf.len(), &mut err);
+        expect_no_error(err, "project open");
+
+        let model = simlin_project_get_model(project, ptr::null(), &mut err);
+        expect_no_error(err, "get model");
+
+        let reader = CString::new("reader").unwrap();
+        let mut count = 0;
+        simlin_model_get_incoming_links(
+            model,
+            reader.as_ptr(),
+            ptr::null_mut(),
+            0,
+            &mut count,
+            &mut err,
+        );
+        expect_no_error(err, "get incoming links");
+        assert_eq!(
+            count, 0,
+            "a proven child output must alias neither its local terminal nor its raw qualified source spelling"
+        );
+
+        simlin_model_unref(model);
+        simlin_project_unref(project);
+    }
+}
+
+#[test]
 fn test_get_incoming_links_with_private_variables() {
     // Test that private variables (starting with $⁚) are not exposed in incoming links
     // Create a model with a SMOOTH function which internally creates private variables

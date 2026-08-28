@@ -4545,32 +4545,13 @@ pub fn compute_metadata(
         let var_ident = canonicalize(var.get_ident()).into_owned();
         dep_graph.entry(var_ident.clone()).or_default();
 
-        // Modules derive dependencies from their reference bindings
-        // rather than from equation parsing.
-        if let datamodel::Variable::Module(module) = var {
-            for reference in &module.references {
-                let src_ident = canonicalize(&reference.src).into_owned();
-                if let Some(src_ident) =
-                    rendered_dependency_ident(&src_ident, &var_ident, &all_idents)
-                {
-                    dep_graph
-                        .entry(var_ident.clone())
-                        .or_default()
-                        .insert(src_ident.clone());
-                    reverse_dep_graph
-                        .entry(src_ident)
-                        .or_default()
-                        .insert(var_ident.clone());
-                }
-            }
-            continue;
-        }
-
         // Use salsa dependency extraction when the source model and
-        // variable are available. Only fall back to string heuristics
-        // when the variable is not in the source model, or when the
-        // equation failed to parse (no AST). If parsing succeeded but
-        // deps are empty, the variable is a genuine constant.
+        // variable are available. This includes modules: their structured
+        // dependencies come from reference bindings in the same query rather
+        // than a parallel raw-string path. Only fall back to string heuristics
+        // when the variable is not in the source model, or when a non-module
+        // equation failed to parse (no AST). If parsing succeeded but deps are
+        // empty, the variable is a genuine constant.
         let deps: Vec<String> = source_model
             .and_then(|sm| {
                 let sv = sm.variables(db).get(&var_ident)?.to_owned();
@@ -4578,14 +4559,13 @@ pub fn compute_metadata(
                 let var_deps =
                     crate::db::variable_direct_dependencies(db, sv, source_project, empty_inputs);
                 let mut combined: Vec<String> = var_deps
-                    .dt_deps
+                    .dependencies
                     .iter()
-                    .chain(var_deps.initial_deps.iter())
-                    .cloned()
+                    .map(|dependency| dependency.target.local_node().as_str().to_owned())
                     .collect();
                 combined.sort();
                 combined.dedup();
-                if combined.is_empty() {
+                if combined.is_empty() && !matches!(var, datamodel::Variable::Module(_)) {
                     // Check whether the equation actually parsed. If the AST
                     // is None, the equation has syntax errors and we fall back
                     // to string heuristics for approximate layout deps.
@@ -4614,7 +4594,12 @@ pub fn compute_metadata(
             .into_iter()
             .collect();
 
-        if deps.is_empty() && !matches!(var, datamodel::Variable::Stock(_)) {
+        if deps.is_empty()
+            && !matches!(
+                var,
+                datamodel::Variable::Stock(_) | datamodel::Variable::Module(_)
+            )
+        {
             constants.insert(var_ident.clone());
         }
 

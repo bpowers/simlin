@@ -1424,19 +1424,6 @@ pub struct CyclePartitionsResult {
     pub stock_partition: HashMap<String, usize>,
 }
 
-/// Normalize a dependency/reference name by stripping a leading middot
-/// (XMILE parent-scope refs like `.area` canonicalize to `·area`) and then
-/// truncating at the first remaining middot to collapse `module·output`
-/// qualifiers down to the module variable name.
-pub(super) fn normalize_module_ref_str(s: &str) -> String {
-    let effective = s.strip_prefix('\u{00B7}').unwrap_or(s);
-    if let Some(pos) = effective.find('\u{00B7}') {
-        effective[..pos].to_string()
-    } else {
-        effective.to_string()
-    }
-}
-
 /// Construct a lightweight CausalGraph from a CausalEdgesResult.
 /// Variables and module_graphs are empty -- suitable for graph algorithms
 /// (circuit finding, SCC computation) but not for polarity analysis.
@@ -1637,17 +1624,22 @@ pub fn model_causal_edges(
                 }
             }
             SourceVariableKind::Module => {
-                let self_prefix = format!("{name}\u{00B7}");
-                for mr in source_var.module_refs(db).iter() {
-                    let canonical_src = canonicalize(&mr.src).into_owned();
-                    // Skip output refs where src is within the module's own
-                    // namespace (Stella imports include these); normalizing
-                    // them would create false self-loops.
-                    if canonical_src.starts_with(&self_prefix) {
+                for dependency in deps.dt_causal() {
+                    // Stella imports can include the instance's own outputs
+                    // among its input references. Those are sinks, not
+                    // parent-side inputs, and must not create self-loops.
+                    if dependency
+                        .target
+                        .module_path
+                        .first()
+                        .is_some_and(|instance| instance.as_str() == name)
+                    {
                         continue;
                     }
-                    let normalized = normalize_module_ref_str(&canonical_src);
-                    edges.entry(normalized).or_default().insert(name.clone());
+                    edges
+                        .entry(dependency.target.local_node().as_str().to_owned())
+                        .or_default()
+                        .insert(name.clone());
                 }
                 let model_name = source_var.model_name(db);
                 if !model_name.is_empty() {
@@ -1655,10 +1647,8 @@ pub fn model_causal_edges(
                 }
             }
             _ => {
-                for dep in
-                    super::dt_causal_dependencies(&deps.dt_deps, &deps.dt_init_only_referenced_vars)
-                {
-                    let normalized = normalize_module_ref_str(dep);
+                for dep in super::dt_causal_dependencies(deps) {
+                    let normalized = dep.target.local_node().as_str().to_owned();
                     edges.entry(normalized).or_default().insert(name.clone());
                 }
             }
@@ -1673,12 +1663,16 @@ pub fn model_causal_edges(
                 continue;
             }
             if implicit_dep.is_module {
-                let self_prefix = format!("{imp_name}\u{00B7}");
-                for dep in &implicit_dep.dt_deps {
-                    if dep.starts_with(&self_prefix) {
+                for dep in implicit_dep.dt_causal() {
+                    if dep
+                        .target
+                        .module_path
+                        .first()
+                        .is_some_and(|instance| instance.as_str() == imp_name)
+                    {
                         continue;
                     }
-                    let normalized = normalize_module_ref_str(dep);
+                    let normalized = dep.target.local_node().as_str().to_owned();
                     edges
                         .entry(normalized)
                         .or_default()
@@ -1690,11 +1684,8 @@ pub fn model_causal_edges(
                 continue;
             }
 
-            for dep in super::dt_causal_dependencies(
-                &implicit_dep.dt_deps,
-                &implicit_dep.dt_init_only_referenced_vars,
-            ) {
-                let normalized = normalize_module_ref_str(dep);
+            for dep in implicit_dep.dt_causal() {
+                let normalized = dep.target.local_node().as_str().to_owned();
                 edges
                     .entry(normalized)
                     .or_default()

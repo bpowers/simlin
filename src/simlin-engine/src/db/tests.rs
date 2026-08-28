@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::datamodel;
+use crate::variable::DepLag;
 use salsa::plumbing::AsId;
 
 /// Parse one source variable (test convenience).
@@ -18,6 +19,15 @@ fn parse_var_no_module_ctx(
 /// Direct dependencies with no module inputs (test convenience).
 fn deps_no_inputs(db: &dyn Db, var: SourceVariable, project: SourceProject) -> &VariableDeps {
     variable_direct_dependencies(db, var, project, ModuleInputSet::empty(db))
+}
+
+fn local_dependency_names(deps: &VariableDeps, phase: DepPhase) -> BTreeSet<String> {
+    deps.phase(phase)
+        .map(|dependency| {
+            assert!(dependency.target.module_path.is_empty());
+            dependency.target.variable.to_string()
+        })
+        .collect()
 }
 
 pub(crate) fn simple_project() -> datamodel::Project {
@@ -585,8 +595,14 @@ fn test_variable_direct_dependencies_constant() {
     let pop_var = result.models["main"].variables["population"].source;
     let deps = deps_no_inputs(&db, pop_var, result.project);
 
-    assert!(deps.dt_deps.is_empty(), "constant has no deps");
-    assert!(deps.initial_deps.is_empty(), "constant has no initial deps");
+    assert!(
+        local_dependency_names(deps, DepPhase::Dt).is_empty(),
+        "constant has no deps"
+    );
+    assert!(
+        local_dependency_names(deps, DepPhase::Init).is_empty(),
+        "constant has no initial deps"
+    );
 }
 
 #[test]
@@ -647,12 +663,463 @@ fn test_variable_direct_dependencies_with_refs() {
     let deps = deps_no_inputs(&db, births_var, result.project);
 
     assert_eq!(
-        deps.dt_deps,
+        local_dependency_names(deps, DepPhase::Dt),
         ["population", "rate"]
             .iter()
             .map(|s| s.to_string())
             .collect::<BTreeSet<_>>()
     );
+}
+
+#[test]
+fn structured_dependencies_resolve_module_paths_without_confusing_dimension_elements() {
+    fn aux(name: &str, equation: datamodel::Equation) -> datamodel::Variable {
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: name.to_string(),
+            equation,
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        })
+    }
+
+    fn module(name: &str, model_name: &str) -> datamodel::Variable {
+        datamodel::Variable::Module(datamodel::Module {
+            ident: name.to_string(),
+            model_name: model_name.to_string(),
+            documentation: String::new(),
+            units: None,
+            references: vec![],
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        })
+    }
+
+    fn model(name: &str, variables: Vec<datamodel::Variable>) -> datamodel::Model {
+        datamodel::Model {
+            name: name.to_string(),
+            sim_specs: None,
+            variables,
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }
+    }
+
+    let project = datamodel::Project {
+        name: "structured deps".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![datamodel::Dimension::named(
+            "d".to_string(),
+            vec!["e".to_string(), "f".to_string()],
+        )],
+        units: vec![],
+        models: vec![
+            model(
+                "main",
+                vec![
+                    module("d", "leaf"),
+                    module("left", "middle"),
+                    module("right", "middle"),
+                    aux(
+                        "arr",
+                        datamodel::Equation::ApplyToAll(vec!["d".to_string()], "1".to_string()),
+                    ),
+                    aux(
+                        "reader",
+                        datamodel::Equation::Scalar(
+                            "d.e + arr[d.e] + left.inner.out + right.inner.out".to_string(),
+                        ),
+                    ),
+                ],
+            ),
+            model("middle", vec![module("inner", "leaf")]),
+            model(
+                "leaf",
+                vec![
+                    aux("e", datamodel::Equation::Scalar("2".to_string())),
+                    aux("out", datamodel::Equation::Scalar("3".to_string())),
+                ],
+            ),
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let synced = sync_from_datamodel(&db, &project);
+    let reader = synced.models["main"].variables["reader"].source;
+    let deps = deps_no_inputs(&db, reader, synced.project);
+    let dt: BTreeSet<_> = deps
+        .dependencies
+        .iter()
+        .filter(|dependency| dependency.phase == DepPhase::Dt)
+        .map(|dependency| {
+            (
+                dependency
+                    .target
+                    .module_path
+                    .iter()
+                    .map(|segment| segment.as_str())
+                    .collect::<Vec<_>>(),
+                dependency.target.variable.as_str(),
+                dependency.lag,
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        dt,
+        [
+            (vec![], "arr", DepLag::Current),
+            (vec!["left", "inner"], "out", DepLag::Current),
+            (vec!["right", "inner"], "out", DepLag::Current),
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert!(
+        dt.iter()
+            .all(|(path, variable, _)| !(path.is_empty() && *variable == "d\u{00b7}e")),
+        "the dimension-qualified d·e index is not a variable dependency"
+    );
+
+    let module_project = datamodel::Project {
+        name: "same spelling module dep".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            model(
+                "main",
+                vec![
+                    module("d", "leaf"),
+                    aux("reader", datamodel::Equation::Scalar("d.e".to_string())),
+                ],
+            ),
+            model(
+                "leaf",
+                vec![aux("e", datamodel::Equation::Scalar("2".to_string()))],
+            ),
+        ],
+        source: None,
+        ai_information: None,
+    };
+    let module_db = SimlinDb::default();
+    let module_synced = sync_from_datamodel(&module_db, &module_project);
+    let reader = module_synced.models["main"].variables["reader"].source;
+    let deps = deps_no_inputs(&module_db, reader, module_synced.project);
+    assert!(deps.dependencies.contains(&DepRef {
+        target: DepTarget {
+            module_path: vec![Ident::new("d")],
+            variable: Ident::new("e"),
+        },
+        phase: DepPhase::Dt,
+        lag: DepLag::Current,
+    }));
+}
+
+#[test]
+fn structured_dependency_resolver_covers_every_metadata_branch() {
+    fn aux(name: &str, equation: &str) -> datamodel::Variable {
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: name.to_string(),
+            equation: datamodel::Equation::Scalar(equation.to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        })
+    }
+    fn module(name: &str, model_name: &str, references: &[(&str, &str)]) -> datamodel::Variable {
+        datamodel::Variable::Module(datamodel::Module {
+            ident: name.to_string(),
+            model_name: model_name.to_string(),
+            documentation: String::new(),
+            units: None,
+            references: references
+                .iter()
+                .map(|(src, dst)| datamodel::ModuleReference {
+                    src: (*src).to_string(),
+                    dst: (*dst).to_string(),
+                })
+                .collect(),
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        })
+    }
+    fn model(name: &str, variables: Vec<datamodel::Variable>) -> datamodel::Model {
+        datamodel::Model {
+            name: name.to_string(),
+            sim_specs: None,
+            variables,
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        }
+    }
+
+    let project = datamodel::Project {
+        name: "resolver metadata branches".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            model(
+                "main",
+                vec![
+                    aux("local", "1"),
+                    module("deep", "level one", &[]),
+                    module("missing_model", "absent model", &[]),
+                    module("bound", "leaf", &[(".local", "bound.input")]),
+                    aux("deep_reader", "deep.next.inner.out"),
+                    aux("missing_model_reader", "missing_model.inner.out"),
+                    aux("missing_intermediate_reader", "deep.nope.out"),
+                    aux("nonmodule_intermediate_reader", "deep.not_module.out"),
+                    aux("missing_leaf_reader", "deep.next.inner.missing_leaf"),
+                    aux("same_parse_implicit", "SMTH1(local, 2)"),
+                ],
+            ),
+            model(
+                "level one",
+                vec![module("next", "level two", &[]), aux("not_module", "1")],
+            ),
+            model("level two", vec![module("inner", "leaf", &[])]),
+            model("leaf", vec![aux("input", "0"), aux("out", "TIME")]),
+        ],
+        source: None,
+        ai_information: None,
+    };
+    let db = SimlinDb::default();
+    let synced = sync_from_datamodel(&db, &project);
+    let main = &synced.models["main"];
+
+    // These rows enumerate every explicit-path metadata outcome in
+    // `resolve_dependency_target_with_module_lookup`. Parser context/index
+    // arms are exhaustively pinned by `variable::test_classify_dependencies_matrix`;
+    // the adjacent module-vs-dimension test pins their shared `d·e` spelling.
+    let cases = [
+        (
+            "proven depth-three path",
+            "deep_reader",
+            vec!["deep", "next", "inner"],
+            "out",
+        ),
+        (
+            "missing target model",
+            "missing_model_reader",
+            vec![],
+            "missing_model·inner·out",
+        ),
+        (
+            "missing intermediate",
+            "missing_intermediate_reader",
+            vec![],
+            "deep·nope·out",
+        ),
+        (
+            "non-module intermediate",
+            "nonmodule_intermediate_reader",
+            vec![],
+            "deep·not_module·out",
+        ),
+        (
+            "missing terminal leaf",
+            "missing_leaf_reader",
+            vec!["deep", "next", "inner"],
+            "missing_leaf",
+        ),
+    ];
+    for (label, reader_name, expected_path, expected_variable) in cases {
+        let deps = deps_no_inputs(&db, main.variables[reader_name].source, synced.project);
+        let targets: BTreeSet<_> = deps
+            .phase(DepPhase::Dt)
+            .filter(|dependency| dependency.lag == DepLag::Current)
+            .map(|dependency| &dependency.target)
+            .collect();
+        assert_eq!(targets.len(), 1, "{label}: {targets:?}");
+        let target = targets.iter().next().unwrap();
+        assert_eq!(
+            target
+                .module_path
+                .iter()
+                .map(Ident::as_str)
+                .collect::<Vec<_>>(),
+            expected_path,
+            "{label}"
+        );
+        assert_eq!(target.variable.as_str(), expected_variable, "{label}");
+    }
+
+    let bound = deps_no_inputs(&db, main.variables["bound"].source, synced.project);
+    assert!(bound.phase(DepPhase::Dt).any(|dependency| {
+        dependency.target.module_path.is_empty() && dependency.target.variable.as_str() == "local"
+    }));
+
+    let same_parse = deps_no_inputs(
+        &db,
+        main.variables["same_parse_implicit"].source,
+        synced.project,
+    );
+    assert!(same_parse.phase(DepPhase::Dt).any(|dependency| {
+        dependency.target.module_path.len() == 1
+            && dependency.target.module_path[0]
+                .as_str()
+                .contains("same_parse_implicit")
+            && dependency.target.variable.as_str() == "output"
+    }));
+
+    let diagnostics = collect_all_diagnostics(&db, synced.project);
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.variable.as_deref() == Some("missing_leaf_reader")
+                && matches!(
+                &diagnostic.error,
+                DiagnosticError::Equation(crate::common::EquationError {
+                    code: crate::common::ErrorCode::DoesNotExist,
+                    details: Some(details),
+                    ..
+                }) if details.contains("deep·next·inner·missing_leaf")
+                )
+        }),
+        "the structurally retained missing leaf must reach the production diagnostic: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn structured_dependencies_cross_every_phase_and_lag_arm_from_production_lowering() {
+    let project = crate::test_common::TestProject::new("structured phase lag")
+        .scalar_aux("a", "1")
+        .scalar_aux("b", "2")
+        .scalar_aux("c", "3")
+        .scalar_aux("reader", "a + PREVIOUS(b, 0) + INIT(c)")
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let synced = sync_from_datamodel(&db, &project);
+    let reader = synced.models["main"].variables["reader"].source;
+    let deps = deps_no_inputs(&db, reader, synced.project);
+    let actual: BTreeSet<_> = deps
+        .dependencies
+        .iter()
+        .map(|dependency| {
+            (
+                dependency.phase,
+                dependency.lag,
+                dependency.target.variable.to_string(),
+            )
+        })
+        .collect();
+    let expected: BTreeSet<_> = [DepPhase::Dt, DepPhase::Init]
+        .into_iter()
+        .flat_map(|phase| {
+            [
+                (phase, DepLag::Current, "a".to_string()),
+                (phase, DepLag::Previous, "b".to_string()),
+                (phase, DepLag::Initial, "c".to_string()),
+            ]
+        })
+        .collect();
+
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn initial_fallbacks_do_not_cancel_previous_only_targets() {
+    let mut project = crate::test_common::TestProject::new("lagged fallback targets")
+        .named_dimension("D", &["one", "two"])
+        .array_const("values[D]", 1.0)
+        .scalar_aux("b", "1")
+        .scalar_aux("direct", "PREVIOUS(b, b) + INIT(b)")
+        .scalar_aux("captured", "values[PREVIOUS(b * 0 + 1, b)]")
+        .scalar_aux(
+            "qualified",
+            "PREVIOUS(child.out, child.out) + INIT(child.out)",
+        )
+        .build_datamodel();
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Module(datamodel::Module {
+            ident: "child".to_string(),
+            model_name: "child model".to_string(),
+            documentation: String::new(),
+            units: None,
+            references: vec![],
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        }));
+    project.models.push(datamodel::Model {
+        name: "child model".to_string(),
+        sim_specs: None,
+        variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+            ident: "out".to_string(),
+            equation: datamodel::Equation::Scalar("1".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        })],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    });
+    let db = SimlinDb::default();
+    let synced = sync_from_datamodel(&db, &project);
+    let main = &synced.models["main"];
+
+    let direct = deps_no_inputs(&db, main.variables["direct"].source, synced.project);
+    let direct_previous = direct.dt_previous_only_targets();
+    assert_eq!(direct_previous.len(), 1);
+    let direct_target = direct_previous.iter().next().unwrap();
+    assert!(direct_target.module_path.is_empty());
+    assert_eq!(direct_target.variable.as_str(), "b");
+
+    let captured = deps_no_inputs(&db, main.variables["captured"].source, synced.project);
+    let captured_previous = captured.dt_previous_only_targets();
+    assert_eq!(captured_previous.len(), 1);
+    let captured_target = captured_previous.iter().next().unwrap();
+    assert!(captured_target.module_path.is_empty());
+    assert!(
+        captured_target.variable.as_str().contains("captured"),
+        "the parent PREVIOUS must retain the production capture identity: {captured_target:?}"
+    );
+    let capture = captured
+        .implicit_vars
+        .iter()
+        .find(|implicit| implicit.name == captured_target.variable.as_str())
+        .expect("the structured parent target must name its production implicit row");
+    assert!(capture.dt_previous_only_targets().is_empty());
+    assert!(capture.dt_causal().any(|dependency| {
+        dependency.lag == DepLag::Current
+            && dependency.target.module_path.is_empty()
+            && dependency.target.variable.as_str() == "b"
+    }));
+
+    let qualified = deps_no_inputs(&db, main.variables["qualified"].source, synced.project);
+    let qualified_previous = qualified.dt_previous_only_targets();
+    assert_eq!(qualified_previous.len(), 1);
+    let qualified_target = qualified_previous.iter().next().unwrap();
+    assert_eq!(
+        qualified_target
+            .module_path
+            .iter()
+            .map(Ident::as_str)
+            .collect::<Vec<_>>(),
+        vec!["child"]
+    );
+    assert_eq!(qualified_target.variable.as_str(), "out");
 }
 
 #[test]
@@ -691,8 +1158,8 @@ fn test_variable_direct_dependencies_stock() {
     let deps = deps_no_inputs(&db, stock_var, result.project);
 
     // Stock's init equation references "initial_value"
-    assert!(deps.dt_deps.contains("initial_value"));
-    assert!(deps.initial_deps.contains("initial_value"));
+    assert!(local_dependency_names(deps, DepPhase::Dt).contains("initial_value"));
+    assert!(local_dependency_names(deps, DepPhase::Init).contains("initial_value"));
 }
 
 #[test]
@@ -739,7 +1206,7 @@ fn test_variable_direct_dependencies_module() {
     let deps = deps_no_inputs(&db, mod_var, result.project);
 
     assert_eq!(
-        deps.dt_deps,
+        local_dependency_names(deps, DepPhase::Dt),
         ["input_x", "input_y"]
             .iter()
             .map(|s| s.to_string())
@@ -815,13 +1282,16 @@ fn test_incrementality_same_deps_no_recompute() {
     let (beta_dt_before, beta_init_before) = {
         let deps = deps_no_inputs(&db, beta_src, source_project);
         assert_eq!(
-            deps.dt_deps,
+            local_dependency_names(deps, DepPhase::Dt),
             ["alpha", "gamma"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect::<BTreeSet<_>>()
         );
-        (deps.dt_deps.clone(), deps.initial_deps.clone())
+        (
+            local_dependency_names(deps, DepPhase::Dt),
+            local_dependency_names(deps, DepPhase::Init),
+        )
     };
 
     let graph_before = model_dependency_graph(
@@ -840,8 +1310,14 @@ fn test_incrementality_same_deps_no_recompute() {
 
     // Beta's deps should be the same (alpha, gamma)
     let beta_deps_after = deps_no_inputs(&db, beta_src, source_project);
-    assert_eq!(beta_dt_before, beta_deps_after.dt_deps);
-    assert_eq!(beta_init_before, beta_deps_after.initial_deps);
+    assert_eq!(
+        beta_dt_before,
+        local_dependency_names(beta_deps_after, DepPhase::Dt)
+    );
+    assert_eq!(
+        beta_init_before,
+        local_dependency_names(beta_deps_after, DepPhase::Init)
+    );
 
     // The dep graph should be returned from cache (pointer-equal)
     let graph_after = model_dependency_graph(
@@ -1102,6 +1578,109 @@ fn test_model_dependency_graph_stock_breaks_chain() {
 }
 
 #[test]
+fn qualified_dependency_resolution_is_firewalled_by_name() {
+    use crate::db::exec_probe::ProbedDb;
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module_named, x_project};
+
+    let project_with = |owner_extra: bool, intermediate_extra: bool, project_extra: bool| {
+        let leaf = x_model("leaf", vec![x_aux("out", "TIME", None)]);
+        let mut middle_vars = vec![x_module_named("inner", "leaf", &[], None)];
+        if intermediate_extra {
+            middle_vars.push(x_aux("unrelated_middle", "1", None));
+        }
+        let middle = x_model("middle", middle_vars);
+        let mut main_vars = vec![
+            x_module_named("outer", "middle", &[], None),
+            x_aux(
+                "reader",
+                "outer.inner.out + SMTH1(outer.inner.out, 2)",
+                None,
+            ),
+        ];
+        if owner_extra {
+            main_vars.push(x_aux("unrelated_owner", "1", None));
+        }
+        let main = x_model("main", main_vars);
+        let mut models = vec![main, middle, leaf];
+        if project_extra {
+            models.push(x_model(
+                "unrelated project model",
+                vec![x_aux("value", "1", None)],
+            ));
+        }
+        x_project(sim_specs_with_units("month"), &models)
+    };
+
+    let measure = |owner_extra: bool, intermediate_extra: bool, project_extra: bool| {
+        let mut probed = ProbedDb::new();
+        let base = project_with(false, false, false);
+        let state1 = sync_from_datamodel_incremental(probed.db_mut(), &base, None);
+        let sync1 = state1.to_sync_result();
+        let reader1 = sync1.models["main"].variables["reader"].source;
+        let deps = variable_direct_dependencies(
+            probed.db(),
+            reader1,
+            sync1.project,
+            ModuleInputSet::empty(probed.db()),
+        )
+        .clone();
+        assert!(deps.dependencies.iter().any(|dependency| {
+            dependency.target.variable.as_str() == "out"
+                && dependency
+                    .target
+                    .module_path
+                    .iter()
+                    .map(Ident::as_str)
+                    .eq(["outer", "inner"])
+        }));
+        assert!(deps.implicit_vars.iter().any(|implicit| {
+            implicit.is_module
+                && implicit.dependencies.iter().any(|dependency| {
+                    dependency.target.variable.as_str() == "out"
+                        && dependency
+                            .target
+                            .module_path
+                            .iter()
+                            .map(Ident::as_str)
+                            .eq(["outer", "inner"])
+                })
+        }));
+
+        probed.reset();
+        let edited = project_with(owner_extra, intermediate_extra, project_extra);
+        let state2 = sync_from_datamodel_incremental(probed.db_mut(), &edited, Some(&state1));
+        let sync2 = state2.to_sync_result();
+        let reader2 = sync2.models["main"].variables["reader"].source;
+        assert!(
+            reader1 == reader2,
+            "the unchanged reader must retain its input handle"
+        );
+        let after = variable_direct_dependencies(
+            probed.db(),
+            reader2,
+            sync2.project,
+            ModuleInputSet::empty(probed.db()),
+        );
+        assert_eq!(&deps, after);
+        probed.counts()
+    };
+
+    for (label, owner_extra, intermediate_extra, project_extra) in [
+        ("owner", true, false, false),
+        ("intermediate", false, true, false),
+        ("project", false, false, true),
+    ] {
+        let counts = measure(owner_extra, intermediate_extra, project_extra);
+        assert_eq!(
+            counts.get("variable_direct_dependencies"),
+            None,
+            "an unrelated {label}-model structural edit may revalidate per-name projections, \
+             but must not execute the unchanged reader's dependency query: {counts:#?}"
+        );
+    }
+}
+
+#[test]
 fn test_model_dependency_cycle_reporting_trigger_emits_once() {
     let db = SimlinDb::default();
     let project = datamodel::Project {
@@ -1172,13 +1751,6 @@ fn test_model_dependency_cycle_reporting_trigger_emits_once() {
 }
 
 use crate::testutils::feedback_loop_project;
-
-#[test]
-fn test_normalize_module_ref_str() {
-    assert_eq!(normalize_module_ref_str("foo\u{00B7}output"), "foo");
-    assert_eq!(normalize_module_ref_str("plain_name"), "plain_name");
-    assert_eq!(normalize_module_ref_str(""), "");
-}
 
 #[test]
 fn test_generate_max_abs_selection_small_counts() {
@@ -1569,9 +2141,9 @@ fn test_model_causal_edges_skips_internal_module_refs() {
 fn test_model_causal_edges_normalizes_leading_middot_parent_refs() {
     // A submodel's module instance can reference parent-scope variables via
     // leading-dot syntax (e.g. ".area"), which canonicalizes to a leading
-    // middot ("·area").  normalize_module_ref_str must strip the leading
-    // middot before truncating at the module qualifier, otherwise "·area"
-    // yields an empty-string key.
+    // middot ("·area"). The structured resolver must retain it as the
+    // local target `area`; treating the separator as a module-path segment
+    // would yield an empty graph node.
     let db = SimlinDb::default();
     let project = datamodel::Project {
         name: "parent_ref_edges".to_string(),

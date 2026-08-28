@@ -642,11 +642,15 @@ fn test_init_feedback_does_not_create_dt_cycle() {
     let dep_graph = model_dependency_graph(&db, model, sync.project, ModuleInputSet::empty(&db));
 
     assert!(
-        deps.dt_deps.contains("b"),
+        deps.phase(crate::db::DepPhase::Dt).any(|dependency| {
+            dependency.target.module_path.is_empty() && dependency.target.variable.as_str() == "b"
+        }),
         "INIT(b) should remain in direct deps for fragment compilation context"
     );
     assert!(
-        deps.init_referenced_vars.contains("b"),
+        deps.dt_initial_reads().any(|dependency| {
+            dependency.target.module_path.is_empty() && dependency.target.variable.as_str() == "b"
+        }),
         "INIT(b) should still track b for initials runlist seeding"
     );
     assert!(
