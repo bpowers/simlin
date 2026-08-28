@@ -2129,7 +2129,7 @@ TIME STEP = 1 ~~|
 ///
 /// This is the test the first version of the fix needed and did not have. The
 /// wrap freezes an ident only if it is in `other_deps`, and `other_deps` comes
-/// from `variable::identifier_set`, whose `BuiltinContents::LookupTable` arm
+/// from `variable::expression_transform_names`, whose table-input projection
 /// never walks the table expression -- so `idx`, referenced only as a table
 /// index, is not a dependency of `y` and the freeze could not fire. The unit
 /// tests supplied `idx` by hand and passed on an input production cannot

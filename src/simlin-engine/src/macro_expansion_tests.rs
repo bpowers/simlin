@@ -1391,6 +1391,42 @@ y=
     }
 }
 
+/// A project-macro invocation lowers through an implicit module, so the root
+/// run-invariance classifier keeps the caller in the dynamic suffix even when
+/// the macro body and actual arguments are constant. This production MDL row
+/// pins the same conservative module boundary as stdlib modules while still
+/// requiring the exact constant result.
+#[test]
+fn project_macro_call_is_conservatively_dynamic_for_run_invariance() {
+    use crate::common::{Canonical, Ident};
+
+    let source = mdl(r#":MACRO: ADD(a, b)
+ADD = a + b
+	~	dmnl
+	~	constant macro
+	|
+
+:END OF MACRO:
+k = 2
+	~	dmnl
+	~	|
+y = ADD(k, 3)
+	~	dmnl
+	~	|
+"#);
+    let compiled = compile_mdl(&source).expect("macro model must compile");
+    let y = Ident::<Canonical>::new("y");
+    let y_offset = compiled.get_offset(&y).expect("macro output offset");
+    assert!(
+        !compiled.invariant_flow_offsets().contains(&y_offset),
+        "an EvalModule caller remains conservatively dynamic"
+    );
+
+    let mut vm = Vm::new(compiled).expect("VM creation");
+    vm.run_to_end().expect("macro model must run");
+    assert_eq!(vm.get_series(&y).expect("y series"), [5.0, 5.0, 5.0]);
+}
+
 /// A computed argument and its macro instance can derive the same helper name
 /// when the macro itself is named for that argument position. Both are real
 /// evaluation units, so overwriting either one would wire the macro input to

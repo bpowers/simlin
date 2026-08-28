@@ -1402,6 +1402,7 @@ fn test_calculate_polarity_all_unknown_links() {
         edges: HashMap::new(),
         stocks: HashSet::new(),
         variables: std::sync::Arc::new(HashMap::new()),
+        dependency_targets: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     };
 
@@ -1433,6 +1434,7 @@ fn test_calculate_polarity_mixed_unknown_and_known() {
         edges: HashMap::new(),
         stocks: HashSet::new(),
         variables: std::sync::Arc::new(HashMap::new()),
+        dependency_targets: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     };
 
@@ -1491,6 +1493,7 @@ fn test_calculate_polarity_all_known_links() {
         edges: HashMap::new(),
         stocks: HashSet::new(),
         variables: std::sync::Arc::new(HashMap::new()),
+        dependency_targets: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     };
 
@@ -3070,6 +3073,7 @@ fn test_enumerate_pathways_to_outputs_non_standard_output() {
         edges,
         stocks: HashSet::new(),
         variables: std::sync::Arc::new(HashMap::new()),
+        dependency_targets: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     };
 
@@ -3109,6 +3113,7 @@ fn test_enumerate_pathways_to_outputs_standard_output() {
         edges,
         stocks: HashSet::new(),
         variables: std::sync::Arc::new(HashMap::new()),
+        dependency_targets: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     };
 
@@ -3154,6 +3159,7 @@ fn test_enumerate_module_pathways_deeper_than_legacy_cap() {
         edges,
         stocks: HashSet::new(),
         variables: std::sync::Arc::new(HashMap::new()),
+        dependency_targets: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     };
 
@@ -3217,6 +3223,7 @@ fn diamond_chain_graph(n: usize, permute: bool) -> CausalGraph {
         edges,
         stocks: HashSet::new(),
         variables: std::sync::Arc::new(HashMap::new()),
+        dependency_targets: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     }
 }
@@ -3383,6 +3390,7 @@ fn module_pathways_work_bounded_on_dead_end_frontier() {
         edges,
         stocks: HashSet::new(),
         variables: std::sync::Arc::new(HashMap::new()),
+        dependency_targets: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     };
 
@@ -3431,6 +3439,7 @@ fn enrich_with_module_stocks_falls_back_to_all_stocks_on_truncation() {
         edges: sub_edges,
         stocks: sub_stocks,
         variables: std::sync::Arc::new(HashMap::new()),
+        dependency_targets: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     };
 
@@ -3458,6 +3467,7 @@ fn enrich_with_module_stocks_falls_back_to_all_stocks_on_truncation() {
         edges: HashMap::new(),
         stocks: HashSet::new(),
         variables: std::sync::Arc::new(parent_variables),
+        dependency_targets: std::sync::Arc::new(HashMap::new()),
         module_graphs,
     };
 
@@ -3507,6 +3517,7 @@ fn tiny_cycle_graph() -> CausalGraph {
         edges,
         stocks: HashSet::new(),
         variables: std::sync::Arc::new(HashMap::new()),
+        dependency_targets: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     }
 }
@@ -3559,6 +3570,7 @@ fn build_causal_graph(edges: &[(&str, &[&str])]) -> CausalGraph {
         edges: map,
         stocks: HashSet::new(),
         variables: std::sync::Arc::new(HashMap::new()),
+        dependency_targets: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     }
 }
@@ -3589,6 +3601,7 @@ fn indexed_graph_empty_round_trip() {
         edges,
         stocks: HashSet::new(),
         variables: std::sync::Arc::new(HashMap::new()),
+        dependency_targets: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     };
     let circuits = cg
@@ -3771,6 +3784,7 @@ fn johnson_empty_graph_no_circuits() {
         edges: HashMap::new(),
         stocks: HashSet::new(),
         variables: std::sync::Arc::new(HashMap::new()),
+        dependency_targets: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     };
     let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
@@ -4664,6 +4678,7 @@ fn graph_from_edges(edges: &[(&str, &str)]) -> CausalGraph {
         edges: map,
         stocks: HashSet::new(),
         variables: std::sync::Arc::new(HashMap::new()),
+        dependency_targets: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     }
 }
@@ -4810,6 +4825,7 @@ fn build_graph_from_pairs(n: usize, pairs: &[(u8, u8)]) -> CausalGraph {
         edges: map,
         stocks: HashSet::new(),
         variables: std::sync::Arc::new(HashMap::new()),
+        dependency_targets: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     }
 }

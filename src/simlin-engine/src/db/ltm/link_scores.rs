@@ -42,12 +42,12 @@ use super::parse::{ltm_equation_dimensions, retarget_ltm_equation_dims};
 /// job); whether it can actually be pinned AT a given element is the
 /// projection's answer, not this filter's.
 ///
-/// `tables` carries the equation's `LOOKUP` TABLE holders, which are NOT in
-/// `deps` and must still be pinned (GH #984). A graphical-function holder is
-/// deliberately absent from the dependency set -- `classify_dependencies` puts
-/// it in `referenced_tables` and keeps it out of `all` (GH #606) so a table
-/// reference creates no runlist-ordering or causal edge -- and pinning is a
-/// COMPILABILITY obligation, not an attribution one: `tbl[region]` reaching a
+/// `tables` carries the equation's `LOOKUP` table holders, which are not value
+/// rewrite candidates and must still be pinned (GH #984).
+/// `expression_transform_names` puts a graphical-function holder in
+/// `table_holders`, not `value_candidates`. Scheduling independently reads
+/// `DepRef`, where a static table creates no runlist or causal edge. Pinning is
+/// a COMPILABILITY obligation, not an attribution one: `tbl[region]` reaching a
 /// scalar fragment with its dimension-name index intact does not lower
 /// (`DimensionInScalarContext`), so the whole link score is dropped. Widening
 /// only the PIN candidates keeps the two obligations separate: the holder gets
@@ -57,14 +57,10 @@ use super::parse::{ltm_equation_dimensions, retarget_ltm_equation_dims};
 /// that causal claim was here and is false. The head is protected structurally,
 /// by `wrap_non_matching_in_previous`'s `LOOKUP` arm: it routes argument 0 to
 /// `freeze_lookup_table_indices`, which rewrites INDICES and leaves the ident
-/// alone REGARDLESS of `other_deps`. Verified by widening the wrap's dep set
-/// with `referenced_tables` and re-running: series bit-identical, whole suite
-/// green. (Freezing it would indeed fail -- a table-only variable has no value
+/// alone regardless of the value rewrite candidates. A table-only variable has no value
 /// slot, so `LOOKUP(PREVIOUS(tbl), x)` is `DoesNotExist` -- but nothing here is
-/// what prevents it.) Keeping the sets apart is an ATTRIBUTION decision, stated
-/// above: a table cannot vary, so it must earn no edge. Recorded precisely
-/// because the false version told the next reader that a future widening of the
-/// dep set would be dangerous, when it is merely wrong for a different reason.
+/// what prevents that rewrite. Keeping the sets apart is also an attribution
+/// rule: immutable table data cannot carry a causal edge or link score.
 ///
 /// What this does NOT establish: that a table argument is always pinnable this
 /// way. Every one of C-LEARN's 413 occurrences is the IDENTITY shape -- the
@@ -1169,25 +1165,24 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
         let canonical_elem = crate::common::CanonicalElementName::from_raw(element);
         let (elem_eqn, elem_deps, elem_tables) = match ast {
             Ast::ApplyToAll(_, expr) => {
-                let class = crate::variable::classify_dependencies(ast, target_ast_dims, None);
+                let inputs = crate::variable::expression_transform_names(ast, target_ast_dims);
                 (
                     Some(crate::patch::expr2_to_expr0(expr)),
-                    class.all_names(),
-                    class.referenced_tables,
+                    inputs.value_candidates,
+                    inputs.table_holders,
                 )
             }
             Ast::Arrayed(_, per_elem, default_expr, _) => {
                 match per_elem.get(&canonical_elem).or(default_expr.as_ref()) {
                     Some(expr) => {
-                        let class = crate::variable::classify_dependencies(
+                        let inputs = crate::variable::expression_transform_names(
                             &Ast::Scalar(expr.clone()),
                             target_ast_dims,
-                            None,
                         );
                         (
                             Some(crate::patch::expr2_to_expr0(expr)),
-                            class.all_names(),
-                            class.referenced_tables,
+                            inputs.value_candidates,
+                            inputs.table_holders,
                         )
                     }
                     // A hole at this element: no sensitivity, score 0.
@@ -1831,9 +1826,9 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         // pin PROJECTION varies per element, and that is `build_var`'s job.
         Ast::ApplyToAll(_, expr) => {
             let elem_eqn = crate::patch::expr2_to_expr0(expr);
-            let elem_dep_class = crate::variable::classify_dependencies(ast, target_ast_dims, None);
-            let elem_deps = elem_dep_class.all_names();
-            let pinnable = pinnable_deps(&elem_deps, &elem_dep_class.referenced_tables);
+            let elem_inputs = crate::variable::expression_transform_names(ast, target_ast_dims);
+            let elem_deps = elem_inputs.value_candidates;
+            let pinnable = pinnable_deps(&elem_deps, &elem_inputs.table_holders);
             for element in &elements {
                 match build_var(
                     element,
@@ -1864,15 +1859,14 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                     std::collections::BTreeSet<String>,
                 ) = match slot {
                     Some(expr) => {
-                        let class = crate::variable::classify_dependencies(
+                        let inputs = crate::variable::expression_transform_names(
                             &Ast::Scalar(expr.clone()),
                             target_ast_dims,
-                            None,
                         );
                         (
                             Some(crate::patch::expr2_to_expr0(expr)),
-                            class.all_names(),
-                            class.referenced_tables,
+                            inputs.value_candidates,
+                            inputs.table_holders,
                         )
                     }
                     // No slot and no default: the target has a hole at
@@ -3002,9 +2996,9 @@ fn emit_per_element_link_scores(
     // per-slot for Arrayed -- mirroring `try_scalar_to_arrayed_link_scores`).
     let a2a_parts: Option<ElemEqnParts> = if let Ast::ApplyToAll(_, expr) = ast {
         let eqn = crate::patch::expr2_to_expr0(expr);
-        let class = crate::variable::classify_dependencies(ast, target_ast_dims, None);
-        let deps = class.all_names();
-        let pinnable = pinnable_deps(&deps, &class.referenced_tables);
+        let inputs = crate::variable::expression_transform_names(ast, target_ast_dims);
+        let deps = inputs.value_candidates;
+        let pinnable = pinnable_deps(&deps, &inputs.table_holders);
         Some((eqn, deps, pinnable))
     } else {
         None
@@ -3065,13 +3059,12 @@ fn emit_per_element_link_scores(
                 match slot {
                     Some(expr) => {
                         let eqn = crate::patch::expr2_to_expr0(expr);
-                        let class = crate::variable::classify_dependencies(
+                        let inputs = crate::variable::expression_transform_names(
                             &Ast::Scalar(expr.clone()),
                             target_ast_dims,
-                            None,
                         );
-                        let deps = class.all_names();
-                        let pinnable = pinnable_deps(&deps, &class.referenced_tables);
+                        let deps = inputs.value_candidates;
+                        let pinnable = pinnable_deps(&deps, &inputs.table_holders);
                         Some((eqn, deps, pinnable))
                     }
                     // No slot, no default: a hole -- this element has no
@@ -3808,7 +3801,8 @@ pub(super) fn emit_agg_to_target_link_scores(
             .as_ref()?
             .for_element(&crate::common::CanonicalElementName::from_raw(element))
     };
-    let base_deps = crate::variable::identifier_set(ast, target_ast_dims, None);
+    let base_inputs = crate::variable::expression_transform_names(ast, target_ast_dims);
+    let base_deps = base_inputs.value_candidates;
     let mut all_deps = base_deps.clone();
     all_deps.insert(agg_canonical.clone());
     // When `to` hoists 2+ reducers (e.g. `x = SUM(a[*]) / SUM(b[*])`), the
@@ -3819,8 +3813,7 @@ pub(super) fn emit_agg_to_target_link_scores(
     for other_agg in reducer_subst.values() {
         all_deps.insert(Ident::<Canonical>::new(other_agg));
     }
-    let table_holders =
-        crate::variable::classify_dependencies(ast, target_ast_dims, None).referenced_tables;
+    let table_holders = base_inputs.table_holders;
     let pinnable_deps =
         pinnable_arrayed_deps(db, model, project, &all_deps, &table_holders, |_| true);
     // An arrayed agg (`result_dims` non-empty) is element-pinned in the
@@ -4216,12 +4209,11 @@ pub(super) fn emit_agg_to_target_link_scores(
                         // agg name so they are all PREVIOUS-wrapped (ceteris
                         // paribus); the reducer-source vars are already in the
                         // own-slot deps.
-                        let mut slot_deps = crate::variable::classify_dependencies(
+                        let mut slot_deps = crate::variable::expression_transform_names(
                             &Ast::Scalar(slot_expr.clone()),
                             target_ast_dims,
-                            None,
                         )
-                        .all_names();
+                        .value_candidates;
                         slot_deps.insert(agg_canonical.clone());
                         for other_agg in reducer_subst.values() {
                             slot_deps.insert(Ident::<Canonical>::new(other_agg));

@@ -60,8 +60,7 @@ use crate::db::{
 /// the init AST -- notably `delay_time` in `delay1`/`delay3`, which is
 /// multiplied against the value-branch result -- are *coefficients*, not
 /// value-equivalents, and their units legitimately differ.  Grabbing every
-/// identifier (as an earlier version of this code did via `identifier_set`
-/// and then `collect_idents`) conflates these roles.
+/// identifier with a whole-AST name collection conflates these roles.
 ///
 /// We walk the AST looking for any `If(App(IsModuleInput(_)), t, f)` subtree
 /// and, on the first match, record *only the bare `Var` identifiers* that
@@ -347,9 +346,9 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
                 // multiplied by `delay_time`, which is a coefficient whose units
                 // are independent.  We specifically extract the identifiers that
                 // sit in the value branches of the `if isModuleInput(...)` test
-                // (see `init_value_equivalence_group`); the simple textual
-                // `identifier_set` would also return `delay_time`, which is what
-                // produced the spurious delay3 mismatches in World3.
+                // (see `init_value_equivalence_group`); a whole-AST name walk
+                // would also return `delay_time` and create spurious unit
+                // equivalences.
                 let stock_init_deps: Vec<HashSet<Ident<Canonical>>> = submodel
                     .variables
                     .values()

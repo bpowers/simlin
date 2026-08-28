@@ -482,6 +482,7 @@ fn expand_pin_on_element_graph(
         edges: sub_edges,
         stocks: sub_stocks,
         variables: std::sync::Arc::new(HashMap::new()),
+        dependency_targets: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     };
 

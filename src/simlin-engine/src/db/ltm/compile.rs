@@ -367,7 +367,8 @@ pub fn link_score_equation_text_shaped<'db>(
                 Ast::Scalar(_) => &[],
                 Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _, _) => dims,
             };
-            crate::variable::identifier_set(ast, target_ast_dims, None)
+            crate::variable::expression_transform_names(ast, target_ast_dims)
+                .value_candidates
                 .into_iter()
                 .filter_map(|dep| {
                     let dims = super::endpoint_dimensions(db, dep.as_str(), model, project)?;
@@ -787,23 +788,17 @@ fn lower_ltm_variable(
         };
     }
 
-    // Dependencies of the LTM equation (data-flow deps plus referenced
-    // lookup tables -- an arrayed graphical function's per-element apply
-    // also needs its dimensions resolved). `·`-dotted module-output refs
-    // are not flat variables and keep resolving to scalar (None) exactly
-    // as before.
-    let mut dep_names: BTreeSet<&str> = BTreeSet::new();
-    for dep in dep_targets
+    // Local values plus lookup holders whose array shape may affect the scoped
+    // re-lower. Qualified outputs remain structured and are excluded by their
+    // non-empty module path. A metadata-unresolved qualified token can remain
+    // a local identity; the ordinary per-name lookups below simply find no
+    // declared shape for it.
+    let mut local_shape_candidates: BTreeSet<Ident<Canonical>> = dep_targets
         .iter()
         .filter(|target| target.module_path.is_empty())
-        .map(|target| target.variable.as_str())
-        .chain(referenced_tables.iter().map(|s| s.as_str()))
-    {
-        let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
-        if !effective.contains('\u{00B7}') {
-            dep_names.insert(effective);
-        }
-    }
+        .map(|target| target.variable.clone())
+        .collect();
+    local_shape_candidates.extend(referenced_tables.iter().map(|name| Ident::new(name)));
 
     let ltm_implicit_info = model_ltm_implicit_var_info(db, model, project);
     // Resolve a dep that is an LTM-parse-time implicit helper aux to its
@@ -845,13 +840,13 @@ fn lower_ltm_variable(
         (!lsv.dimensions.is_empty()).then(|| lsv.dimensions.clone())
     };
 
-    let any_arrayed_dep = dep_names.iter().any(|name| {
-        model_variable_by_name(db, model, (*name).to_string())
+    let any_arrayed_dep = local_shape_candidates.iter().any(|name| {
+        model_variable_by_name(db, model, name.as_str().to_string())
             .is_some_and(|sv| !variable_dimensions(db, sv, project).is_empty())
-            || find_implicit_dm(name)
+            || find_implicit_dm(name.as_str())
                 .as_ref()
                 .is_some_and(dm_var_is_arrayed)
-            || find_arrayed_ltm_dep(name).is_some()
+            || find_arrayed_ltm_dep(name.as_str()).is_some()
     });
     if !any_arrayed_dep {
         return LoweredLtmVariable {
@@ -866,21 +861,21 @@ fn lower_ltm_variable(
     let units_ctx = project_units_context(db, project);
     let mut stage0_vars: HashMap<Ident<Canonical>, crate::model::VariableStage0> = HashMap::new();
     stage0_vars.insert(Ident::new(parsed_variable.ident()), parsed_variable.clone());
-    for dep_name in &dep_names {
-        if let Some(dep_sv) = model_variable_by_name(db, model, (*dep_name).to_string()) {
+    for dep_name in &local_shape_candidates {
+        if let Some(dep_sv) = model_variable_by_name(db, model, dep_name.as_str().to_string()) {
             let dep_parsed = parse_source_variable(db, dep_sv, project);
-            stage0_vars.insert(Ident::new(dep_name), dep_parsed.variable.clone());
-        } else if let Some(implicit_dep) = find_implicit_dm(dep_name) {
+            stage0_vars.insert(dep_name.clone(), dep_parsed.variable.clone());
+        } else if let Some(implicit_dep) = find_implicit_dm(dep_name.as_str()) {
             // Nested implicits of an implicit are registered (and compiled)
             // in their own right; here only the dep's own dimensions matter.
             let dep_parsed = implicit_dep.variable_stage0(dim_ctx);
-            stage0_vars.insert(Ident::new(dep_name), dep_parsed);
-        } else if let Some(ltm_dims) = find_arrayed_ltm_dep(dep_name) {
+            stage0_vars.insert(dep_name.clone(), dep_parsed);
+        } else if let Some(ltm_dims) = find_arrayed_ltm_dep(dep_name.as_str()) {
             // An arrayed sibling LTM var (the GH #995 freeze helper): a
             // zero-bodied dims-only stub -- only the dep's dimensions matter
             // to the lowering, exactly like the implicit branch above.
             let stub = datamodel::Variable::Aux(datamodel::Aux {
-                ident: (*dep_name).to_string(),
+                ident: dep_name.as_str().to_string(),
                 equation: datamodel::Equation::ApplyToAll(ltm_dims, "0".to_string()),
                 documentation: String::new(),
                 units: None,
@@ -893,7 +888,7 @@ fn lower_ltm_variable(
             let dep_ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
             let dep_parsed =
                 crate::variable::parse_var(&dep_ctx, &stub, &mut nested, |mi| Ok(Some(mi.clone())));
-            stage0_vars.insert(Ident::new(dep_name), dep_parsed);
+            stage0_vars.insert(dep_name.clone(), dep_parsed);
         }
     }
 
@@ -1137,7 +1132,7 @@ pub(crate) fn compile_ltm_equation_fragment(
         },
         // LTM synthetic vars use PREVIOUS -- always dynamic; not classified
         // for run-invariance.
-        flow_invariance: None,
+        flow_locally_invariant: None,
     })
 }
 
@@ -1656,19 +1651,14 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
             module_dep_shape(db, project, dm_module.model_name()),
         );
         for mr in dm_module.references() {
-            let src = canonicalize(&mr.src);
-            let target = if let Some(local) = src.strip_prefix('\u{00b7}') {
-                crate::db::DepTarget::local(Ident::new(local))
-            } else {
-                crate::db::query::resolve_dependency_target_with_module_lookup(
-                    db,
-                    Some(model),
-                    project,
-                    None,
-                    &Ident::new(src.as_ref()),
-                    |head| source_implicit_module_model_name(db, model, project, head),
-                )
-            };
+            let target = crate::db::query::resolve_dependency_target_with_module_lookup(
+                db,
+                Some(model),
+                project,
+                None,
+                &Ident::new(&mr.src),
+                |head| source_implicit_module_model_name(db, model, project, head),
+            );
             let head = target.local_node().as_str();
             let qualified = !target.module_path.is_empty();
             if head == implicit_name || is_implicit_global(head) || deps.contains_key(head) {
@@ -1908,7 +1898,7 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         },
         // LTM implicit helpers are always dynamic; not classified for
         // run-invariance.
-        flow_invariance: None,
+        flow_locally_invariant: None,
     })
 }
 

@@ -16,7 +16,7 @@ use crate::common::{Canonical, Ident, RawIdent};
 use crate::datamodel::{self, Equation};
 use crate::lexer::LexerType;
 use crate::ltm::{Loop, normalize_module_ref, split_node_subscript, strip_subscript};
-use crate::variable::{VarKind, Variable, identifier_set};
+use crate::variable::{VarKind, Variable, expression_transform_names};
 use std::collections::{HashMap, HashSet};
 
 use crate::db::LtmEquation;
@@ -909,21 +909,20 @@ fn wrap_non_matching_in_previous(
 ///   already static, and anything else is `BadTable` at codegen (the table
 ///   argument must select exactly one element), so there is nothing here to
 ///   decide about it;
-/// - the descent's dep set is WIDENED with the idents appearing in these
+/// - the descent's value rewrite candidates are widened with the idents appearing in these
 ///   indices, and without that the freeze does not fire at all. The wrap freezes
-///   an ident only when it is in `other_deps`, and `other_deps` comes from
-///   `variable::classify_dependencies`, whose `BuiltinContents::LookupTable` arm
+///   an ident only when it is in `other_deps`. The base candidates come from
+///   `variable::expression_transform_names`, whose table-holder projection
 ///   records the table's ident and **never walks the table expression** -- so an
-///   index variable referenced ONLY inside a table argument (the issue's own
-///   `LOOKUP(g[idx], x)`) is not a dependency and was returned live. Widening is
+///   index variable referenced only inside a table argument
+///   (`LOOKUP(g[idx], x)`) is not a base candidate and would remain live. Widening is
 ///   scoped to this argument's own indices, so nothing else in the equation sees
 ///   the added names, and the element / dimension-name guards in
 ///   [`wrap_index_non_matching_in_previous`] run BEFORE the `other_deps` check --
 ///   so adding an element or dimension name to the set cannot make it wrap. (The
-///   dep set itself is left alone: dropping a table index from a variable's
-///   dependencies is arguably an engine bug in its own right, but it is a
-///   runlist-ordering question, not this rule's, and fixing it there is a
-///   separate change);
+///   base candidate set itself is left alone. Scheduling identity is an
+///   independent `DepRef` question and is never inferred from this transform
+///   membership;
 /// - element QUALIFICATION is suppressed (`skip_element_qualification`). A
 ///   literal element index is static either way, and leaving it verbatim keeps
 ///   this change to the reads it is about: on the `PerElement` path the row
@@ -1632,8 +1631,8 @@ fn wrap_live_shaped_in_previous(
 /// input, so both the changed-first partial and the changed-last frozen
 /// evaluation are fed through `LOOKUP({gf_table_ref}, ...)` to keep the
 /// numerator commensurable with the (gf-output-units) target deltas. The
-/// reference is a *layout* reference (`classify_dependencies` records it
-/// in `referenced_tables`, not `all`), so it adds no causal edge. `None`
+/// reference is a *layout* reference (`expression_transform_names` records it
+/// in `table_holders`, not `value_candidates`), so it adds no causal edge. `None`
 /// leaves the partial unwrapped (an ordinary target).
 ///
 /// `zero_slot_policy` decides what happens when the changed-first wrap froze
@@ -2413,9 +2412,9 @@ fn subscript_idents_in_expr0(
 /// shared A2A body for an `Equation::ApplyToAll` target, or the matching
 /// per-element slot (or the default slot) for an `Equation::Arrayed` one. `reducer_subst` maps each hoisted reducer's
 /// canonical text to its agg name; it is empty for a true scalar `from`. `to_deps`
-/// is the full dependency set of that equation (computed with the target's AST
-/// dimensions so element-name subscripts are not mistaken for variables), plus
-/// the agg names. `to_deps_to_subscript` is the pin table for the subset of
+/// is the equation's complete value rewrite-candidate membership (computed
+/// with the target's AST dimensions so element-name subscripts are not mistaken
+/// for values), plus the agg names. `to_deps_to_subscript` is the pin table for the subset of
 /// `to_deps` that must be element-pinned -- the arrayed deps whose every
 /// declared dimension this target element projects onto, each mapped to the
 /// element IT reads (see [`DepElementPin`]; the target self-reference is pinned
@@ -2767,7 +2766,7 @@ pub(crate) fn generate_per_element_link_equation(
 /// held-live reducer to a bare agg name, each frozen `PREVIOUS(SUM(..))` to
 /// `PREVIOUS(agg)`. This keeps the wrap on the target's own equation (so the
 /// occurrence IR can drive it in stage 2) with byte-identical output. `to_deps`
-/// is the (over-approximating is fine) dependency set that includes `to`'s own
+/// is the (over-approximating is fine) rewrite-candidate set that includes `to`'s own
 /// reducer-source vars and the agg names.
 ///
 /// For an *arrayed* target the per-target-element form is produced by
@@ -3493,9 +3492,9 @@ fn arrayed_target_dim_names(
 /// doesn't reference `from` falls back to `SUM(from)` while a slot that
 /// does gets the exact slice the partial isolated.
 /// `target_ast_dims` are the target variable's AST dimensions, passed to
-/// `classify_dependencies` so literal element-name subscripts (e.g.
+/// `expression_transform_names` so literal element-name subscripts (e.g.
 /// `[Boston]`) are recognized as dimension references and excluded from the
-/// dep set -- otherwise the PREVIOUS wrapper would treat the element name
+/// rewrite-candidate set -- otherwise the PREVIOUS wrapper would treat the element name
 /// as a variable reference and wrap it inside the subscript.
 #[allow(clippy::too_many_arguments)] // threads the link-score generation context
 fn build_arrayed_link_score_equation(
@@ -3531,11 +3530,11 @@ fn build_arrayed_link_score_equation(
     };
     // A subscript like `source[m]` where `m` is an element of *`source`'s*
     // dimension `D3` (disjoint from the target's `D1 x D2`) is not filtered
-    // by `classify_dependencies(..., target_ast_dims, ...)` -- `target_ast_dims`
+    // by `expression_transform_names(..., target_ast_dims)` -- `target_ast_dims`
     // covers `D1`/`D2`, not `D3` -- so `m` (and `D3` itself if spelled) leaks
-    // into the dep set as a phantom variable and gets PREVIOUS-wrapped inside
+    // into the rewrite candidates as a phantom variable and gets PREVIOUS-wrapped inside
     // the subscript (`source[PREVIOUS(m)]`). Strip the source's element names
-    // and dimension names from the dep set so the partial sees only real deps.
+    // and dimension names from the candidates so the partial sees only real values.
     let source_dim_token_set: HashSet<&str> = source_dim_elements
         .iter()
         .flatten()
@@ -3569,22 +3568,20 @@ fn build_arrayed_link_score_equation(
                          freeze_helpers: &mut Vec<ArrayFreezeHelper>|
      -> Result<Option<String>, PartialEquationError> {
         let elem_eqn = crate::patch::expr2_to_expr0(expr);
-        // Per-element dependency set: walk *only this slot's* expression
-        // (the union over all elements -- what `identifier_set` on the
+        // Per-element rewrite candidates: walk *only this slot's* expression
+        // (the union over all elements -- what `expression_transform_names` on the
         // whole `Ast::Arrayed` returns -- would over-freeze refs absent
         // from this slot). Pass the target's dimensions so literal
         // element-name subscripts of the *target*'s dims are filtered out;
         // strip the *source*'s dim/element names afterward (see above).
-        let classified = crate::variable::classify_dependencies(
+        let deps_e: HashSet<Ident<Canonical>> = crate::variable::expression_transform_names(
             &crate::ast::Ast::Scalar(expr.clone()),
             target_ast_dims,
-            None,
-        );
-        let deps_e: HashSet<Ident<Canonical>> = classified
-            .all_names()
-            .into_iter()
-            .filter(|d| !source_dim_token_set.contains(d.as_str()))
-            .collect();
+        )
+        .value_candidates
+        .into_iter()
+        .filter(|d| !source_dim_token_set.contains(d.as_str()))
+        .collect();
         let occ = slot_occurrences.for_slot(slot);
         shaped_guard_form_text(
             &elem_eqn,
@@ -3692,10 +3689,10 @@ fn scalar_or_a2a_target_expr(target_var: &Variable) -> Result<Expr0, PartialEqua
     }
 }
 
-/// The dependency set for a Scalar/A2A target's ceteris-paribus partial.
+/// The value rewrite candidates for a Scalar/A2A target's ceteris-paribus partial.
 ///
-/// `identifier_set` is called with the target's own AST dimensions so the
-/// target's dimension and element names are filtered out of the dep set --
+/// `expression_transform_names` is called with the target's own AST dimensions so the
+/// target's dimension and element names are filtered out of the candidates --
 /// with empty dims (the pre-GH#759 behavior) subscript-index identifiers
 /// like the iterated dim `D1` in `matrix[D1, c1]` leaked in as phantom
 /// deps, and the PREVIOUS wrapper froze them inside the subscript
@@ -3716,7 +3713,7 @@ fn scalar_or_a2a_target_expr(target_var: &Variable) -> Result<Expr0, PartialEqua
 /// subscript, is over-stripped and left unfrozen (live) in the partial.
 /// This is a pre-existing characteristic shared with
 /// [`build_arrayed_link_score_equation`]'s identical per-slot strip and with
-/// the engine's own dependency extraction (`classify_dependencies` filters
+/// the transform input extraction (`expression_transform_names` filters
 /// the same names against its dims) -- not a new failure class introduced
 /// here.
 fn scalar_or_a2a_target_deps(
@@ -3738,7 +3735,8 @@ fn scalar_or_a2a_target_deps(
         .map(String::as_str)
         .chain(source_dim_names.iter().map(String::as_str))
         .collect();
-    identifier_set(ast, target_ast_dims, None)
+    expression_transform_names(ast, target_ast_dims)
+        .value_candidates
         .into_iter()
         .filter(|d| !source_dim_token_set.contains(d.as_str()))
         .collect()

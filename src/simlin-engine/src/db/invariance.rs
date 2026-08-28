@@ -7,27 +7,27 @@
 //! `model_flows_invariant` decides which of a module's flow-phase variables are
 //! *run-invariant* -- their value is identical at every timestep, so they can be
 //! evaluated once per `run_to` (B2) rather than per step. The per-variable
-//! evidence is precomputed inside the already-cached `compile_var_fragment`
-//! (`assemble::compute_flow_invariance_support`, over the engine's own lowered
-//! `Vec<Expr>` -- no second lowering) and carried on
-//! `VarFragmentResult.flow_invariance` as `FlowInvarianceSupport`:
+//! evidence has two owners:
 //!
-//!  * `locally_pure` -- the shared classifier (`crate::compiler::invariance`)
+//!  * `VarFragmentResult.flow_locally_invariant` -- the shared classifier
+//!    (`crate::compiler::invariance`)
 //!    run with an all-`Invariant` offset callback, so it flags only variant
 //!    *builtins* (TIME / PULSE / RAMP / STEP / PREVIOUS / EvalModule /
 //!    ModuleInput);
-//!  * `dep_names` -- the variables the FLOW exprs actually read
-//!    (`collect_expr_refs`, reading the owning variable's name straight off
-//!    each reference; `INIT()` arguments are skipped because the init buffer
-//!    is frozen).
+//!  * `VariableDeps.dependencies` -- the authoritative source dependency
+//!    relation. Only local `Dt`/`Current` targets enter the transitive fixpoint.
+//!    `Dt`/`Initial` reads use the frozen initial-values buffer, and
+//!    `Dt`/`Previous` already make the local compiler verdict variant.
 //!
 //! This query is then just the fixpoint over the dependency graph:
-//! `invariant(v) iff locally_pure(v) && dep_names(v) ⊆ invariant-set`, so the
-//! whole burden of catching variant *dependencies* (stocks, dynamic auxes,
-//! module outputs) rides on `dep_names`. That set used to be recovered by
-//! reverse-mapping slot offsets through a private per-fragment layout, with a
-//! `debug_assert!` guarding the silent-drop case; references now carry the name
-//! and there is no lookup left to fail. The end-to-end bit-constancy oracle
+//! `invariant(v) iff locally_invariant(v) && current_deps(v) ⊆ invariant-set`.
+//! `current_deps` is the complete source relation, including both arms of an
+//! eager conditional even when constant folding later discards one. Such a
+//! flow may be safely under-hoisted, but never wrongly hoisted: validation,
+//! runlist and cycle semantics remain defined by the complete source program.
+//! The burden of catching variant *dependencies* (stocks, dynamic auxes,
+//! module outputs) therefore rides on the phase/lag/path-typed source relation
+//! rather than a second compiler-IR identity walk. The end-to-end bit-constancy oracle
 //! (`tests/integration/simulate.rs` `oracle_*`) still pins the production
 //! mechanism.
 //!
@@ -56,7 +56,8 @@ use std::sync::Arc;
 use crate::common::{Canonical, Ident};
 use crate::db::dep_graph::build_var_info;
 use crate::db::{
-    Db, ModuleInputSet, SourceModel, SourceProject, compile_var_fragment, model_dependency_graph,
+    Db, DepPhase, ModuleInputSet, SourceModel, SourceProject, compile_var_fragment,
+    model_dependency_graph, variable_direct_dependencies,
 };
 
 /// The set of a module's flow-phase variables that are run-invariant, by
@@ -130,30 +131,41 @@ pub(crate) fn model_flows_invariant<'db>(
             continue;
         };
 
-        // Use the already-cached `compile_var_fragment` result (a salsa cache
-        // hit -- `assemble_module` triggers compilation before this query
-        // runs) rather than re-lowering the fragment. The
-        // `flow_invariance` field was pre-computed there at no extra cost.
+        // Use the already-cached fragment result for the compiler-local verdict
+        // (a salsa cache hit -- assembly triggers compilation first) and the
+        // authoritative source query for dependency identity.
         let Some(result) = compile_var_fragment(db, *svar, model, project, module_inputs) else {
             // Compilation failed; treat as variant by omission.
             continue;
         };
-        let Some(inv_support) = &result.flow_invariance else {
+        let Some(locally_invariant) = result.flow_locally_invariant else {
             // Variable is not in the flows runlist or noninitial lowering failed.
             continue;
         };
+        let deps = variable_direct_dependencies(db, *svar, project, module_inputs);
 
         // A variable is invariant iff:
         // (1) its own expression contains no TIME/PULSE/etc. (locally_pure),
-        // (2) every dep it references is already classified invariant.
+        // (2) every instantaneous dt dependency is already invariant.
         //
-        // Stock and module deps are never in `invariant` (the loop skips
-        // adding them), so the transitive variant propagation is automatic.
-        if inv_support.locally_pure
-            && inv_support
-                .dep_names
+        // INIT reads are frozen after initialization and therefore never enter
+        // this relation. PREVIOUS reads already make (1) false. A qualified
+        // target has no local invariant node, while stocks and modules are
+        // never inserted, so all three remain default-variant.
+        if locally_invariant
+            && deps
+                .dependencies
                 .iter()
-                .all(|dep| invariant.contains(dep.as_str()))
+                .filter(|dep| {
+                    dep.phase == DepPhase::Dt
+                        && dep.lag == crate::variable::DepLag::Current
+                        && !(dep.target.module_path.is_empty()
+                            && dep.target.variable == var_canonical)
+                })
+                .all(|dep| {
+                    dep.target.module_path.is_empty()
+                        && invariant.contains(dep.target.variable.as_str())
+                })
         {
             invariant.insert(var_name.clone());
         }
@@ -188,8 +200,8 @@ mod tests {
     /// (`var_noninitial_lowered_exprs`), in runlist order. The callback reads
     /// the owning variable's name straight off the reference, then classifies
     /// it by kind (stock/module -> variant) and by the accumulated invariant
-    /// set -- the fixpoint `model_flows_invariant` computes from the
-    /// `FlowInvarianceSupport` that `compile_var_fragment` precomputes.
+    /// set -- the fixpoint `model_flows_invariant` computes from the fragment's
+    /// compiler-local verdict and the source dependency relation.
     /// Restricted to scalar variables (no array temps) so one variable's flow
     /// statement list is exactly its lowered exprs.
     fn direct_classifier_invariant_set(
@@ -254,11 +266,10 @@ mod tests {
         invariant
     }
 
-    /// `model_flows_invariant`'s fixpoint over the precomputed per-fragment
-    /// support agrees with the shared classifier run directly over each
-    /// variable's production-lowered exprs. This guards the `locally_pure` /
-    /// `dep_names` precomputation against drifting from the classifier it
-    /// summarizes.
+    /// On an ordinary scalar fixture with no constant-selected branch, the
+    /// structured-source fixpoint agrees with a direct classification of each
+    /// production-lowered fragment. Constant-selected branches are the
+    /// deliberate conservative exception pinned separately below.
     #[test]
     fn precomputed_support_agrees_with_the_direct_classifier_run() {
         let tp = TestProject::new("main")
@@ -307,6 +318,378 @@ mod tests {
         assert!(!salsa.contains("ramping"));
         assert!(!salsa.contains("reads_stock"));
         assert!(!salsa.contains("inflow"));
+    }
+
+    /// The production invariance equation has exactly two inputs:
+    ///
+    /// `compiler-local invariant && every local Dt/Current target invariant`.
+    ///
+    /// This fixture crosses current, previous and initial occurrences both
+    /// alone and mixed on one referent. It derives those rows through
+    /// `variable_direct_dependencies`, then checks the model verdict rather
+    /// than hand-building either side of the relation.
+    #[test]
+    fn invariance_propagates_only_instantaneous_dt_targets() {
+        let tp = TestProject::new("invariance phase lag")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .aux("k", "10", None)
+            .aux("dynamic", "TIME", None)
+            .aux("initial_only", "INIT(dynamic)", None)
+            .aux("previous_only", "PREVIOUS(k, 0)", None)
+            .aux("current_k_initial_dynamic", "k + INIT(dynamic)", None)
+            .aux(
+                "current_and_initial_dynamic",
+                "dynamic + INIT(dynamic)",
+                None,
+            )
+            .aux("previous_and_initial_k", "PREVIOUS(k, INIT(k))", None);
+        let project_dm = tp.build_datamodel();
+        let db = SimlinDb::default();
+        let synced = sync_from_datamodel(&db, &project_dm);
+        let model = synced.models["main"].source;
+        let no_inputs = ModuleInputSet::empty(&db);
+
+        let occurrence_rows =
+            |name: &str| -> BTreeSet<(DepPhase, crate::variable::DepLag, String)> {
+                let source = synced.models["main"].variables[name].source;
+                crate::db::variable_direct_dependencies(&db, source, synced.project, no_inputs)
+                    .dependencies
+                    .iter()
+                    .map(|dep| (dep.phase, dep.lag, dep.target.variable.to_string()))
+                    .collect()
+            };
+        assert_eq!(
+            occurrence_rows("initial_only"),
+            [DepPhase::Dt, DepPhase::Init]
+                .into_iter()
+                .map(|phase| (phase, crate::variable::DepLag::Initial, "dynamic".into()))
+                .collect()
+        );
+        assert_eq!(
+            occurrence_rows("current_and_initial_dynamic"),
+            [DepPhase::Dt, DepPhase::Init]
+                .into_iter()
+                .flat_map(|phase| {
+                    [
+                        (phase, crate::variable::DepLag::Current, "dynamic".into()),
+                        (phase, crate::variable::DepLag::Initial, "dynamic".into()),
+                    ]
+                })
+                .collect()
+        );
+        assert_eq!(
+            occurrence_rows("previous_and_initial_k"),
+            [DepPhase::Dt, DepPhase::Init]
+                .into_iter()
+                .flat_map(|phase| {
+                    [
+                        (phase, crate::variable::DepLag::Previous, "k".into()),
+                        (phase, crate::variable::DepLag::Initial, "k".into()),
+                    ]
+                })
+                .collect()
+        );
+
+        let invariant = model_flows_invariant(&db, model, synced.project, true, no_inputs);
+        assert!(invariant.contains("k"));
+        assert!(
+            invariant.contains("initial_only"),
+            "INIT reads the frozen initial buffer, so a dynamic referent does not propagate"
+        );
+        assert!(invariant.contains("current_k_initial_dynamic"));
+        assert!(!invariant.contains("dynamic"));
+        assert!(!invariant.contains("current_and_initial_dynamic"));
+        assert!(
+            !invariant.contains("previous_only") && !invariant.contains("previous_and_initial_k"),
+            "PREVIOUS is locally variant regardless of an invariant referent or INIT fallback"
+        );
+    }
+
+    /// Constant folding may erase a branch from emitted bytecode, but the
+    /// source dependency relation deliberately retains both eager branches for
+    /// validation, runlists and cycle detection. Invariance consumes that
+    /// complete relation, so a dynamic dependency in either arm safely keeps
+    /// the reader in the per-step suffix even when the condition is constant.
+    ///
+    /// The rows come from production parsing/dependency resolution and the
+    /// verdict comes from production fragment lowering; no dependency set or
+    /// compiler expression is synthesized by the fixture.
+    #[test]
+    fn constant_selected_dynamic_branches_are_conservatively_variant() {
+        let tp = TestProject::new("constant branch invariance")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .aux("k", "10", None)
+            .aux("dynamic", "TIME", None)
+            .aux("select_true", "IF 1 THEN k ELSE dynamic", None)
+            .aux("select_false", "IF 0 THEN dynamic ELSE k", None);
+        let project_dm = tp.build_datamodel();
+        let db = SimlinDb::default();
+        let synced = sync_from_datamodel(&db, &project_dm);
+        let model = synced.models["main"].source;
+        let no_inputs = ModuleInputSet::empty(&db);
+
+        for reader in ["select_true", "select_false"] {
+            let source = synced.models["main"].variables[reader].source;
+            let current_targets: BTreeSet<String> =
+                variable_direct_dependencies(&db, source, synced.project, no_inputs)
+                    .phase(DepPhase::Dt)
+                    .filter(|dep| dep.lag == crate::variable::DepLag::Current)
+                    .map(|dep| dep.target.variable.to_string())
+                    .collect();
+            assert_eq!(
+                current_targets,
+                ["dynamic".to_string(), "k".to_string()]
+                    .into_iter()
+                    .collect(),
+                "{reader}: dependency extraction must retain both eager branches"
+            );
+
+            let fragment = compile_var_fragment(&db, source, model, synced.project, no_inputs)
+                .as_ref()
+                .expect("production fragment");
+            assert_eq!(
+                fragment.flow_locally_invariant,
+                Some(true),
+                "{reader}: constant folding removes the dynamic branch from the emitted fragment"
+            );
+        }
+
+        let invariant = model_flows_invariant(&db, model, synced.project, true, no_inputs);
+        assert!(invariant.contains("k"));
+        assert!(!invariant.contains("dynamic"));
+        assert!(!invariant.contains("select_true"));
+        assert!(!invariant.contains("select_false"));
+    }
+
+    /// Array materialization and lookup-table layout references reach the same
+    /// production fragment classifier as scalar equations. The table holder is
+    /// intentionally absent from `DepRef`; only the lookup index participates
+    /// in local invariance, while an array value dependency propagates through
+    /// the ordinary `Dt/Current` relation.
+    #[test]
+    fn production_array_and_lookup_rows_use_local_builtin_facts_and_structured_values() {
+        let table = datamodel::GraphicalFunction {
+            kind: datamodel::GraphicalFunctionKind::Continuous,
+            x_points: Some(vec![0.0, 1.0]),
+            y_points: vec![3.0, 4.0],
+            x_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+            y_scale: datamodel::GraphicalFunctionScale { min: 3.0, max: 4.0 },
+        };
+        let tp = TestProject::new("array lookup invariance")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .named_dimension("D", &["a", "b"])
+            .array_const("arr[D]", 2.0)
+            .scalar_aux("sum_arr", "SUM(arr[*])")
+            .scalar_aux("sum_time", "SUM(arr[*]) + TIME")
+            .aux_with_gf("table", "", table)
+            .scalar_aux("lookup_const", "LOOKUP(table, 0.5)")
+            .scalar_aux("lookup_time", "LOOKUP(table, TIME)");
+        let project_dm = tp.build_datamodel();
+        let db = SimlinDb::default();
+        let synced = sync_from_datamodel(&db, &project_dm);
+        let model = synced.models["main"].source;
+        let no_inputs = ModuleInputSet::empty(&db);
+
+        let sum_source = synced.models["main"].variables["sum_arr"].source;
+        let sum_deps = variable_direct_dependencies(&db, sum_source, synced.project, no_inputs);
+        assert!(sum_deps.phase(DepPhase::Dt).any(|dep| {
+            dep.lag == crate::variable::DepLag::Current
+                && dep.target.module_path.is_empty()
+                && dep.target.variable.as_str() == "arr"
+        }));
+
+        let lookup_source = synced.models["main"].variables["lookup_const"].source;
+        let lookup_deps =
+            variable_direct_dependencies(&db, lookup_source, synced.project, no_inputs);
+        assert!(lookup_deps.dependencies.is_empty());
+        assert_eq!(lookup_deps.referenced_tables, ["table".to_string()].into());
+
+        let invariant = model_flows_invariant(&db, model, synced.project, true, no_inputs);
+        for name in ["arr", "sum_arr", "lookup_const"] {
+            assert!(invariant.contains(name), "{name} must be run-invariant");
+        }
+        for name in ["sum_time", "lookup_time"] {
+            assert!(!invariant.contains(name), "{name} must remain dynamic");
+        }
+        assert!(
+            !invariant.contains("table"),
+            "lookup-only holders are layout data, not flow variables"
+        );
+    }
+
+    /// The two decision classes behind C-LEARN's additional invariant slots:
+    /// an applied per-element graphical-function array has immutable table
+    /// holders rather than value dependencies, and a pure reducer propagates
+    /// the resulting array's verdict to its scalar result.
+    ///
+    /// The MDL is parsed and lowered through production. The assertions derive
+    /// dependency rows, table holders, compiler-local verdicts, final offsets,
+    /// and VM series from those production paths. Dynamic-index twins prove
+    /// that table immutability does not hide a time-dependent lookup input or
+    /// make its downstream reducer invariant.
+    #[test]
+    fn per_element_lookup_holders_and_their_reducer_are_structurally_invariant() {
+        let project_dm = crate::open_vensim(
+            "{UTF-8}\n\
+D: A1, A2 ~~|\n\
+g[A1]( (0,1),(1,2) ) ~~|\n\
+g[A2]( (0,10),(1,20) ) ~~|\n\
+drive = 0.5 ~~|\n\
+out[D] = g[D](drive) ~~|\n\
+total = SUM(out[D!]) ~~|\n\
+dynamic_out[D] = g[D](TIME) ~~|\n\
+dynamic_total = SUM(dynamic_out[D!]) ~~|\n\
+INITIAL TIME = 0 ~~|\n\
+FINAL TIME = 2 ~~|\n\
+SAVEPER = 1 ~~|\n\
+TIME STEP = 1 ~~|\n",
+        )
+        .expect("production MDL parse");
+        let db = SimlinDb::default();
+        let synced = sync_from_datamodel(&db, &project_dm);
+        let model = synced.models["main"].source;
+        let no_inputs = ModuleInputSet::empty(&db);
+
+        let source = |name: &str| synced.models["main"].variables[name].source;
+        for reader in ["out", "dynamic_out"] {
+            let deps = variable_direct_dependencies(&db, source(reader), synced.project, no_inputs);
+            let current: BTreeSet<String> = deps
+                .phase(DepPhase::Dt)
+                .filter(|dep| dep.lag == crate::variable::DepLag::Current)
+                .map(|dep| dep.target.variable.to_string())
+                .collect();
+            assert_eq!(
+                current,
+                if reader == "out" {
+                    ["drive".to_string()].into_iter().collect()
+                } else {
+                    BTreeSet::new()
+                },
+                "{reader}: only value dependencies belong in the source relation"
+            );
+            assert_eq!(
+                deps.referenced_tables,
+                ["g".to_string()].into_iter().collect(),
+                "{reader}: every per-element table is one immutable layout holder"
+            );
+        }
+
+        for (reader, expected) in [
+            ("out", Some(true)),
+            ("total", Some(true)),
+            ("dynamic_out", Some(false)),
+            ("dynamic_total", Some(true)),
+        ] {
+            let fragment =
+                compile_var_fragment(&db, source(reader), model, synced.project, no_inputs)
+                    .as_ref()
+                    .expect("production fragment");
+            assert_eq!(
+                fragment.flow_locally_invariant, expected,
+                "{reader}: compiler-local builtin/time classification"
+            );
+        }
+
+        let invariant = model_flows_invariant(&db, model, synced.project, true, no_inputs);
+        for name in ["drive", "out", "total"] {
+            assert!(invariant.contains(name), "{name}: invariant source closure");
+        }
+        for name in ["g", "dynamic_out", "dynamic_total"] {
+            assert!(
+                !invariant.contains(name),
+                "{name}: table-only or dynamic source closure"
+            );
+        }
+
+        let compiled = crate::db::compile_project_incremental(&db, synced.project, "main")
+            .expect("production compile");
+        let invariant_offsets: BTreeSet<usize> =
+            compiled.invariant_flow_offsets().into_iter().collect();
+        for name in ["out[a1]", "out[a2]", "total"] {
+            let off = compiled
+                .get_offset(&Ident::new(name))
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert!(invariant_offsets.contains(&off), "{name}: invariant prefix");
+        }
+        for name in ["dynamic_out[a1]", "dynamic_out[a2]", "dynamic_total"] {
+            let off = compiled
+                .get_offset(&Ident::new(name))
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert!(!invariant_offsets.contains(&off), "{name}: dynamic suffix");
+        }
+
+        let mut vm = crate::Vm::new(compiled).expect("VM");
+        vm.run_to_end().expect("VM run");
+        for (name, expected) in [
+            ("out[a1]", vec![1.5, 1.5, 1.5]),
+            ("out[a2]", vec![15.0, 15.0, 15.0]),
+            ("total", vec![16.5, 16.5, 16.5]),
+            ("dynamic_out[a1]", vec![1.0, 2.0, 2.0]),
+            ("dynamic_out[a2]", vec![10.0, 20.0, 20.0]),
+            ("dynamic_total", vec![11.0, 22.0, 22.0]),
+        ] {
+            assert_eq!(
+                vm.get_series(&Ident::new(name)).expect(name),
+                expected,
+                "{name}: exact lookup/reducer values"
+            );
+        }
+    }
+
+    /// An unrelated equation edit may rebuild the model fixpoint, but its
+    /// source dependency reads remain per-variable firewall queries. The only
+    /// dependency body allowed to execute is the edited variable's.
+    #[test]
+    fn unrelated_flow_edit_does_not_reextract_unchanged_invariance_dependencies() {
+        use crate::db::exec_probe::ProbedDb;
+        use crate::db::sync_from_datamodel_incremental;
+
+        let project_with = |unrelated: &str| {
+            TestProject::new("invariance dependency firewall")
+                .with_sim_time(0.0, 5.0, 1.0)
+                .aux("k", "10", None)
+                .aux("derived", "k * 2", None)
+                .aux("unrelated", unrelated, None)
+                .build_datamodel()
+        };
+        let mut probed = ProbedDb::new();
+        let base = project_with("1");
+        let state1 = sync_from_datamodel_incremental(probed.db_mut(), &base, None);
+        let sync1 = state1.to_sync_result();
+        let model = sync1.models["main"].source;
+        let first = model_flows_invariant(
+            probed.db(),
+            model,
+            sync1.project,
+            true,
+            ModuleInputSet::empty(probed.db()),
+        );
+        assert!(first.contains("k") && first.contains("derived"));
+
+        let edited = project_with("2");
+        let state2 = sync_from_datamodel_incremental(probed.db_mut(), &edited, Some(&state1));
+        let sync2 = state2.to_sync_result();
+        assert!(
+            sync2.models["main"].source == model,
+            "incremental sync must retain the model input"
+        );
+        probed.reset();
+        let second = model_flows_invariant(
+            probed.db(),
+            model,
+            sync2.project,
+            true,
+            ModuleInputSet::empty(probed.db()),
+        );
+        assert!(second.contains("k") && second.contains("derived"));
+        let counts = probed.counts();
+        assert_eq!(
+            counts
+                .get("variable_direct_dependencies")
+                .map(|(executions, distinct)| (*executions, *distinct)),
+            Some((1, 1)),
+            "only the edited `unrelated` dependency query may execute: {counts:#?}"
+        );
     }
 
     /// A non-root module is never classified (B1/B2 scope is the root only).

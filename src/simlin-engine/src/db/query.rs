@@ -363,6 +363,28 @@ impl DepTarget {
     }
 }
 
+/// The unique real output below one first-hop module instance.
+///
+/// The returned identity is relative to `module`: `port` for `module·port`
+/// and `inner·port` for `module·inner·port`. Synthetic LTM terminals are
+/// not user-model exit ports. Distinct paths remain distinct even when their
+/// leaf names match; zero or several outputs are ambiguous.
+pub(crate) fn unique_module_output<'a>(
+    targets: impl IntoIterator<Item = &'a DepTarget>,
+    module: &Ident<Canonical>,
+) -> Option<Ident<Canonical>> {
+    let mut outputs = targets
+        .into_iter()
+        .filter(|target| target.module_path.first() == Some(module))
+        .filter(|target| !target.variable.as_str().starts_with('$'))
+        .filter_map(DepTarget::within_first_module_ident);
+    let output = outputs.next()?;
+    if outputs.any(|other| other != output) {
+        return None;
+    }
+    Some(output)
+}
+
 /// One phase- and lag-specific dependency occurrence.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DepRef {
@@ -592,19 +614,7 @@ fn variable_direct_dependencies_impl(
                 .module_refs(db)
                 .iter()
                 .map(|mr| {
-                    let canonical = canonicalize(&mr.src);
-                    let local = canonical.strip_prefix('\u{00b7}').unwrap_or(&canonical);
-                    if canonical.starts_with('\u{00b7}') {
-                        DepTarget::local(Ident::new(local))
-                    } else {
-                        resolve_dependency_target(
-                            db,
-                            owner_model,
-                            project,
-                            None,
-                            &Ident::new(canonical.as_ref()),
-                        )
-                    }
+                    resolve_dependency_target(db, owner_model, project, None, &Ident::new(&mr.src))
                 })
                 .collect();
             VariableDeps {

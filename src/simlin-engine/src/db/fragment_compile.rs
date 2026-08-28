@@ -294,13 +294,13 @@ pub fn compile_var_fragment<'db>(
         _ => None,
     };
 
-    // Pre-compute flow invariance support for `model_flows_invariant` (GH
-    // #712). Stored on the salsa-cached result so the topological fixpoint
-    // pass in `model_flows_invariant` can read it without re-lowering. Only
-    // meaningful for vars in the flows runlist.
-    let flow_invariance = match &noninitial {
+    // Pre-compute the compiler-local flow verdict for
+    // `model_flows_invariant` (GH #712). The salsa-cached result avoids a
+    // second lowering; source `DepRef`s supply transitive identity separately.
+    // Only meaningful for vars in the flows runlist.
+    let flow_locally_invariant = match &noninitial {
         Some(lowered) if in_flows_runlist => {
-            crate::db::assemble::compute_flow_invariance_support(lowered, &var_ident_canonical)
+            crate::db::assemble::flow_is_locally_invariant(lowered)
         }
         _ => None,
     };
@@ -317,7 +317,7 @@ pub fn compile_var_fragment<'db>(
             flow_bytecodes,
             stock_bytecodes,
         },
-        flow_invariance,
+        flow_locally_invariant,
     })
 }
 
@@ -647,7 +647,7 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
                     flow_bytecodes: None,
                     stock_bytecodes: None,
                 },
-                flow_invariance: None,
+                flow_locally_invariant: None,
             });
         }
     };
@@ -710,6 +710,6 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
         },
         // Implicit helpers (SMOOTH/DELAY/TREND) are always dynamic; the
         // run-invariance analysis only applies to explicit source variables.
-        flow_invariance: None,
+        flow_locally_invariant: None,
     })
 }

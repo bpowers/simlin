@@ -2892,13 +2892,13 @@ fn discovery_no_agg_model_unaffected_by_stitching() {
 /// strip element subscripts before its name-sensitive lookups. Discovery
 /// runs on the ELEMENT-LEVEL graph, so an arrayed loop edge carries
 /// subscripts (`s[nyc] -> m -> growth[nyc]`); the bare `ModuleInput.src`
-/// (`s`) and bare-keyed `variables()` map (`growth`) only match after
+/// (`s`) and bare-keyed dependency-target map (`growth`) only match after
 /// stripping `[nyc]`. The exhaustive twin already strips at
 /// db/ltm/mod.rs:438-485, so this restores parity.
 ///
 /// Genuine red-green of exactly the matching code: a real compiled
 /// multi-output module project supplies the element graph, the module
-/// sub-graph + variable map, the `m·$⁚ltm⁚path⁚input_val⁚{idx}` pathway
+/// sub-graph + structured dependency map, the `m·$⁚ltm⁚path⁚input_val⁚{idx}` pathway
 /// series, and the emission-derived port map; we hand a `links` chain whose
 /// non-module nodes carry `[nyc]` subscripts (as the element graph would
 /// for an arrayed loop). Before the fix the exact `== link.from` /
@@ -3076,7 +3076,7 @@ fn recompute_strips_element_subscripts_before_port_match() {
     let series = series.expect(
         "recompute must resolve the entry/exit ports after stripping the `[nyc]` subscripts \
              from `s[nyc]` (entry match vs bare ModuleInput.src `s`) and `growth[nyc]` (exit \
-             reader lookup in the bare-keyed variables map); before the fix the exact match \
+             reader lookup in the bare-keyed dependency-target map); before the fix the exact match \
              returns None and the wrong-signed neg composite stands. PR #705 r3353758167.",
     );
     // The loop reads m·pos (positive gain); the recomputed series follows

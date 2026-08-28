@@ -221,155 +221,27 @@ pub(crate) fn module_instance_target(
     None
 }
 
-/// Pre-computed invariance data for the flow phase, stored on
-/// `VarFragmentResult` so `model_flows_invariant` can run its topological
-/// fixpoint pass without re-lowering the fragment (the compile-time
-/// regression fix, GH #712).
-///
-/// `locally_pure`: the variable's flow-phase expression is invariant assuming
-/// every dependency is invariant — i.e., no `TIME`/`PULSE`/`RAMP`/`STEP`/
-/// `PREVIOUS`/`EvalModule`/`ModuleInput` appears anywhere in the AST. If
-/// `false`, the variable is definitely variant regardless of deps.
-///
-/// `dep_names`: the canonical names of every dependency whose offset is
-/// referenced in the flow-phase expression (excluding the variable's own
-/// offset, which is a self-reference). `model_flows_invariant` checks that
-/// all of these are in the accumulated invariant set.
-///
-/// Together, `locally_pure && dep_names ⊆ invariant` is exactly the
-/// per-variable verdict the topological pass needs, with no re-lowering.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct FlowInvarianceSupport {
-    pub locally_pure: bool,
-    pub dep_names: std::sync::Arc<std::collections::BTreeSet<String>>,
-}
-
 /// Result of per-variable compilation: symbolic bytecodes for each phase.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct VarFragmentResult {
     pub fragment: crate::compiler::symbolic::CompiledVarFragment,
-    /// Invariance support for the flow phase. `None` when the variable has
-    /// no flow phase (not in the flows runlist) or when the noninitial
-    /// lowering failed. Used by `model_flows_invariant` to avoid re-lowering.
-    pub flow_invariance: Option<FlowInvarianceSupport>,
+    /// Whether the lowered flow expression is invariant assuming every data
+    /// dependency is invariant. `None` when there is no successfully lowered
+    /// flow phase. Dependency identity is deliberately absent: the authoritative
+    /// phase/lag/path relation is `VariableDeps.dependencies`.
+    pub flow_locally_invariant: Option<bool>,
 }
 
-/// Walk `exprs` and push the NAME of every variable referenced by a `Var`,
-/// `Subscript`, or `StaticSubscript` node into `out`.
+/// Classify the lowered flow expression's local relation to simulation time.
 ///
-/// This is NOT the same as calling `exprs_are_invariant`: it collects names
-/// without returning a verdict. It is used by `compute_flow_invariance_support`
-/// to determine which variables are actually referenced in the *flow*
-/// expression (as opposed to the init expression, which must not pollute the
-/// dep_names set).
-///
-/// The walk is exhaustive over every `Expr` variant; a builtin's arguments
-/// are walked or skipped by its signature's `Invariance` class.
-fn collect_expr_refs(exprs: &[crate::compiler::Expr], out: &mut HashSet<Ident<Canonical>>) {
-    use crate::builtins::Invariance;
-    use crate::compiler::Expr;
-    use crate::compiler::expr::SubscriptIndex;
-
-    fn walk(expr: &Expr, out: &mut HashSet<Ident<Canonical>>) {
-        match expr {
-            // Leaf: referenced variable.
-            Expr::Var(var, _)
-            | Expr::Subscript(var, _, _, _)
-            | Expr::StaticSubscript(var, _, _) => {
-                out.insert(var.name.clone());
-                // For Subscript, also walk the index expressions (they may
-                // reference other variables).
-                if let Expr::Subscript(_, indices, _, _) = expr {
-                    for idx in indices {
-                        match idx {
-                            SubscriptIndex::Single(e) => walk(e, out),
-                            SubscriptIndex::Range(s, e) => {
-                                walk(s, out);
-                                walk(e, out);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // No slot reference in these leaves.
-            Expr::Const(_, _)
-            | Expr::Dt(_)
-            | Expr::TempArray(_, _, _)
-            | Expr::TempArrayElement(_, _, _, _)
-            | Expr::ModuleInput(_, _) => {}
-
-            // Compound expressions: recurse into subexpressions.
-            Expr::Op2(_, l, r, _) => {
-                walk(l, out);
-                walk(r, out);
-            }
-            Expr::Op1(_, operand, _) => walk(operand, out),
-            Expr::If(cond, t, f, _) => {
-                walk(cond, out);
-                walk(t, out);
-                walk(f, out);
-            }
-            Expr::AssignCurr(_, rhs) | Expr::AssignNext(_, rhs) => walk(rhs, out),
-            Expr::AssignTemp(_, rhs, _) => walk(rhs, out),
-
-            // Module evaluation: walk the argument expressions.
-            Expr::EvalModule(_, _, _, args) => {
-                for arg in args {
-                    walk(arg, out);
-                }
-            }
-
-            // Builtins: walk every argument expression, except where the
-            // builtin's invariance class says the argument is not a dt-time
-            // read. `INIT(a)`: the initial-values buffer is frozen after the
-            // initials phase -- `INIT(dynamic_var)` is run-invariant
-            // regardless of what `a` references, so `a` is NOT a dependency
-            // here (mirroring `builtin_is_invariant`, which returns `true`
-            // without walking the argument). `PREVIOUS` is already variant
-            // (caught by `locally_pure`), and its argument is skipped for the
-            // same consistency with the invariance classifier.
-            Expr::App(builtin, _) => match builtin.signature().invariance {
-                Invariance::Snapshot | Invariance::Lagged => {}
-                Invariance::Pure | Invariance::TimeDependent => {
-                    for arg in builtin.args() {
-                        walk(arg, out);
-                    }
-                }
-            },
-        }
-    }
-
-    for expr in exprs {
-        walk(expr, out);
-    }
-}
-
-/// Compute `FlowInvarianceSupport` for a variable's flow phase, for use by
-/// `model_flows_invariant` (GH #712).
-///
-/// `locally_pure` is determined by running `exprs_are_invariant` with a
-/// callback that always returns `Invariant` (so only TIME/PULSE/etc. in the
-/// expression can make it `false`).
-///
-/// `dep_names` is determined by walking the *flow* expression (`flow_var.ast`)
-/// and reading the owning variable's name off every reference. This is precise:
-/// it considers only flow-expression references, not init-only deps that were
-/// never read at dt time. Using the fragment's whole dependency set would
-/// over-approximate: a variable `v` with `y = INIT(k)` in its init equation
-/// would include `k` in dep_names even though `k` does not appear in `v`'s flow
-/// expression, causing `k` being variant to incorrectly classify `v` as variant
-/// too.
-///
-/// Returns `None` if `flow_var` is an `Err` (noninitial lowering failed) or
-/// the expression list is empty.
-pub(crate) fn compute_flow_invariance_support(
+/// The callback treats every variable reference as invariant because source
+/// dependency identity, phase and lag are already owned by `DepRef`. This walk
+/// owns only facts introduced or made precise by compiler lowering: constant
+/// folding, temps, module-input loads/evaluation, and builtin time behavior.
+pub(crate) fn flow_is_locally_invariant(
     flow_var: &Result<crate::compiler::Var, crate::common::Error>,
-    var_ident_canonical: &Ident<Canonical>,
-) -> Option<FlowInvarianceSupport> {
+) -> Option<bool> {
     use crate::compiler::invariance::{RefClass, exprs_are_invariant};
-    use std::collections::BTreeSet;
-    use std::sync::Arc;
 
     let flow_var = match flow_var {
         Ok(v) => v,
@@ -379,34 +251,9 @@ pub(crate) fn compute_flow_invariance_support(
         return None;
     }
 
-    // Structural purity check: does the expression contain any variant
-    // builtins (TIME, PULSE, RAMP, STEP, PREVIOUS, EvalModule, ModuleInput)?
-    // All reference lookups return Invariant so only the builtin arms matter.
-    let locally_pure = exprs_are_invariant(&flow_var.ast, &|_var| RefClass::Invariant);
-
-    // Walk the flow expression to collect only the variables actually
-    // referenced there (not init-only deps).
-    //
-    // This used to reverse-map each referenced slot offset through the
-    // fragment's private offset layout, with a `debug_assert!` guarding the case
-    // where an offset resolved to no owner -- a silently dropped dependency
-    // would be INVISIBLE to the invariance fixpoint, the over-classification
-    // direction. Reading the name off the reference removes the failure mode
-    // rather than guarding it: there is no lookup left to fail.
-    let mut referenced: HashSet<Ident<Canonical>> = HashSet::new();
-    collect_expr_refs(&flow_var.ast, &mut referenced);
-
-    // The variable's own references are self-references, never dependencies.
-    let dep_names: BTreeSet<String> = referenced
-        .iter()
-        .filter(|name| *name != var_ident_canonical)
-        .map(|name| name.as_str().to_string())
-        .collect();
-
-    Some(FlowInvarianceSupport {
-        locally_pure,
-        dep_names: Arc::new(dep_names),
-    })
+    Some(exprs_are_invariant(&flow_var.ast, &|_var| {
+        RefClass::Invariant
+    }))
 }
 
 /// Flatten a phase's temp-id -> size map into the `(temp_id, size)` vector

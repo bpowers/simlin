@@ -28,8 +28,9 @@ use crate::ltm::strip_subscript;
 
 use super::{
     Db, SourceModel, SourceProject, SourceVariable, SourceVariableKind, compute_layout,
-    model_causal_edges, model_implicit_var_by_name, model_variable_by_name, project_datamodel_dims,
-    project_dimensions_context, reconstruct_single_variable, variable_dimensions,
+    model_causal_edges, model_dt_dependency_targets, model_implicit_var_by_name,
+    model_variable_by_name, project_datamodel_dims, project_dimensions_context,
+    reconstruct_single_variable, variable_dimensions,
 };
 
 mod compile;
@@ -439,39 +440,6 @@ struct ModuleLinkOverrides {
     alias_vars: Vec<super::LtmSyntheticVar>,
 }
 
-/// Read the output port a (non-module) variable `y` reads off module `m`.
-///
-/// `y`'s equation references the module output via interpunct notation
-/// `m·{port}`; return `{port}`. LTM-internal references (`m·$⁚ltm⁚…`) are
-/// excluded -- the loop traverses a real model output, never a synthetic.
-/// Returns the unique such port, or `None` when `y` reads zero or several
-/// (a multi-output read in one variable is ambiguous and left to the base
-/// link score's fallback).
-fn module_exit_port_for_reader(
-    module_name: &str,
-    reader: &crate::variable::Variable,
-) -> Option<String> {
-    let ast = reader.ast()?;
-    let deps = crate::variable::identifier_set(ast, &[], None);
-    let prefix = format!("{module_name}\u{00B7}");
-    let mut found: Option<String> = None;
-    for dep in deps {
-        let Some(port) = dep.as_str().strip_prefix(&prefix) else {
-            continue;
-        };
-        // Skip the module's synthetic LTM internals (`m·$⁚ltm⁚…`).
-        if port.starts_with('$') {
-            continue;
-        }
-        if found.is_some() {
-            // Two distinct output ports read by the same variable: ambiguous.
-            return None;
-        }
-        found = Some(port.to_string());
-    }
-    found
-}
-
 /// The selection equation + accumulator helpers that pick the pathway with the
 /// largest absolute score among `pathway_refs` (already parent-qualified +
 /// quoted-bare names like `m·$⁚ltm⁚path⁚input_val⁚0`).
@@ -568,6 +536,7 @@ fn compute_module_link_overrides(
     let mut overrides: LoopLinkOverrides = HashMap::new();
     let mut alias_by_name: std::collections::BTreeMap<String, super::LtmSyntheticVar> =
         std::collections::BTreeMap::new();
+    let dependency_targets = model_dt_dependency_targets(db, model, project);
 
     // Resolve a module variable's sub-model name and recompute its pathway map,
     // cached per-module so repeated links across loops don't re-enumerate.
@@ -640,10 +609,9 @@ fn compute_module_link_overrides(
             // `from` feeds MORE THAN ONE input port of the module, the collapsed
             // `from -> module` edge is genuinely ambiguous (no single entry
             // pathway to override against), so skip it and leave the base link
-            // score (its composite reference) in place -- mirroring
-            // `module_exit_port_for_reader`'s multi-match -> None semantics and
-            // the discovery-side `recompute_module_input_edge_series` (GH #698 /
-            // PR #705 r3353459409).
+            // score (its composite reference) in place -- mirroring the
+            // structured output projection's multi-match -> None semantics and
+            // the discovery-side `recompute_module_input_edge_series` (GH #698).
             let module_var = reconstruct_single_variable(db, model, project, module_name);
             let Some(crate::variable::VarKind::Module { inputs, .. }) =
                 module_var.as_ref().map(|v| &v.kind)
@@ -664,55 +632,14 @@ fn compute_module_link_overrides(
 
             // Exit port from the next link `(m → y)`.
             let y = strip_subscript(next.to.as_str());
-            let exit_port = {
-                let y_is_module = edges_result.dynamic_modules.contains_key(y)
-                    || source_vars
-                        .get(y)
-                        .is_some_and(|sv| sv.kind(db) == SourceVariableKind::Module);
-                if y_is_module {
-                    // `y` is a module: m's output feeds y's input port(s). y's
-                    // ModuleInput src is the qualified `m·{port}`; the exit port
-                    // is the `{port}` whose normalized ref is `m`. If `y` reads
-                    // TWO DISTINCT output ports of `m` on different inputs, the
-                    // collapsed `m -> y` edge has no unique exit port -- decline
-                    // (ambiguous) and leave the base link score in place,
-                    // mirroring `module_exit_port_for_reader`'s multi-match ->
-                    // None semantics and the discovery-side
-                    // `recompute_module_input_edge_series` (GH #698 / PR #705
-                    // r3353597299). Two inputs naming the SAME `m·port` are NOT
-                    // ambiguous: a unique distinct port is fine.
-                    let y_var = reconstruct_single_variable(db, model, project, y);
-                    let module_ident = Ident::<Canonical>::new(module_name);
-                    match y_var.map(|v| v.kind) {
-                        Some(crate::variable::VarKind::Module { inputs: y_in, .. }) => {
-                            let mut exit: Option<String> = None;
-                            let mut ambiguous = false;
-                            for inp in &y_in {
-                                if normalize_module_ref(&inp.src) != module_ident {
-                                    continue;
-                                }
-                                let Some((_, port)) = inp.src.as_str().split_once('\u{00B7}')
-                                else {
-                                    continue;
-                                };
-                                match &exit {
-                                    Some(prev) if prev != port => {
-                                        ambiguous = true;
-                                        break;
-                                    }
-                                    Some(_) => {}
-                                    None => exit = Some(port.to_string()),
-                                }
-                            }
-                            if ambiguous { None } else { exit }
-                        }
-                        _ => None,
-                    }
-                } else {
-                    reconstruct_single_variable(db, model, project, y)
-                        .and_then(|y_var| module_exit_port_for_reader(module_name, &y_var))
-                }
-            };
+            // Exit identity is the same for an auxiliary reader, an explicit
+            // module reader, and a parse-synthesized module reader: the unique
+            // structured dt target whose first instance is `module_name`.
+            let module_ident = Ident::<Canonical>::new(module_name);
+            let exit_port = dependency_targets
+                .get(&Ident::new(y))
+                .and_then(|targets| crate::db::unique_module_output(targets.iter(), &module_ident))
+                .map(|port| port.as_str().to_string());
             let Some(exit_port) = exit_port else {
                 continue;
             };

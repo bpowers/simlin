@@ -922,7 +922,7 @@ fn per_element_pin_lowers_structurally_inside_a_lookup_table_arg() {
 ///
 /// **`idx` is deliberately NOT in the declared dep set**, and that is the whole
 /// difference between a fixture and an oracle here. Production derives the wrap's
-/// dep set from `variable::identifier_set`, whose `BuiltinContents::LookupTable`
+/// dep set from `variable::expression_transform_names`, whose table-input projection
 /// arm does not walk the table expression, so an index variable referenced only
 /// inside a table argument is NOT a dependency -- asserted below on the fixture's
 /// own equation rather than assumed. Declaring `idx` a dep would make the freeze
@@ -959,7 +959,8 @@ fn per_element_pin_freezes_a_runtime_table_arg_index() {
         // dependency and `idx` is not. Checked against the extractor itself, so
         // the fixture cannot drift from what production supplies.
         assert!(
-            !crate::variable::identifier_set(&crate::variable::scalar_ast(&eqn), &[], None)
+            !crate::variable::expression_transform_names(&crate::variable::scalar_ast(&eqn), &[])
+                .value_candidates
                 .contains(&Ident::<Canonical>::new("idx")),
             "{label}: production's dep extractor must NOT report a table-only \
              index as a dependency, or this fixture is testing the ordinary \
@@ -1170,7 +1171,7 @@ type PinIndexCell<'a> = (&'a str, &'a str, Option<&'a str>, Option<&'a str>);
 /// table argument, which the IR records NOTHING for.
 ///
 /// The declared dep list is `["input"]` and NOT `["input", "idx"]`, matching what
-/// `variable::identifier_set` reports for these equations: a variable appearing
+/// `variable::expression_transform_names` reports for these equations: a variable appearing
 /// only as a table-argument subscript index is not a dependency, so a row that
 /// declared it would exercise the ordinary other-dep freeze instead of the
 /// table-index one. `per_element_pin_freezes_a_runtime_table_arg_index` asserts

@@ -1356,16 +1356,6 @@ pub struct DepClassification {
     pub referenced_tables: BTreeSet<String>,
 }
 
-impl DepClassification {
-    /// Every referenced canonical name, independent of lag.
-    pub fn all_names(&self) -> HashSet<Ident<Canonical>> {
-        self.occurrences
-            .iter()
-            .map(|occurrence| occurrence.ident.clone())
-            .collect()
-    }
-}
-
 /// AST walker that records each canonical dependency occurrence with its lag.
 ///
 /// PREVIOUS arguments are `Previous`, INIT arguments and PREVIOUS fallbacks are
@@ -1564,12 +1554,37 @@ pub fn classify_dependencies(
     }
 }
 
-pub fn identifier_set(
+/// Names an expression transform may inspect or substitute.
+///
+/// This deliberately cannot represent scheduling facts: it carries no phase,
+/// lag or metadata-resolved module path. LTM's ceteris-paribus transforms use
+/// `value_candidates` to decide which subexpressions to freeze and
+/// `table_holders` to resolve immutable lookup dimensions. This type cannot
+/// express a scheduling row: it has no phase, lag, resolved module path or
+/// target. Dependency graphs and runlists consume `db::DepRef` instead.
+pub(crate) struct ExpressionTransformNames {
+    pub(crate) value_candidates: HashSet<Ident<Canonical>>,
+    pub(crate) table_holders: BTreeSet<String>,
+}
+
+/// Extract the name membership needed by expression rewriting and pinning.
+///
+/// The absence of a module-input argument is intentional: a transform sees the
+/// syntax it rewrites, while instance-specific branch selection and structural
+/// identity belong to production dependency extraction.
+pub(crate) fn expression_transform_names(
     ast: &Ast<Expr2>,
     dimensions: &[Dimension],
-    module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
-) -> HashSet<Ident<Canonical>> {
-    classify_dependencies(ast, dimensions, module_inputs).all_names()
+) -> ExpressionTransformNames {
+    let classification = classify_dependencies(ast, dimensions, None);
+    ExpressionTransformNames {
+        value_candidates: classification
+            .occurrences
+            .into_iter()
+            .map(|occurrence| occurrence.ident)
+            .collect(),
+        table_holders: classification.referenced_tables,
+    }
 }
 
 /// Build an `Ast<Expr2>` from a scalar equation string via parse + lower.
@@ -2217,7 +2232,11 @@ fn test_classify_dependencies_matrix() {
             classify_dependencies(&case.ast, &case.dimensions, case.module_inputs.as_ref());
 
         // Convert all to HashSet<&str> for comparison
-        let all = result.all_names();
+        let all: HashSet<_> = result
+            .occurrences
+            .iter()
+            .map(|occurrence| occurrence.ident.clone())
+            .collect();
         let got_all: HashSet<&str> = all.iter().map(|id| id.as_str()).collect();
         assert_eq!(case.expected_all, got_all, "case '{}': all", case.label);
 

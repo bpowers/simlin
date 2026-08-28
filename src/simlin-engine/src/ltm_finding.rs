@@ -1965,37 +1965,6 @@ pub fn discovery_graph_stats(
     }
 }
 
-/// Read the output port a (non-module) variable `reader` reads off module
-/// instance `module_name` via interpunct notation `m·{port}`, ignoring the
-/// module's synthetic LTM internals (`m·$⁚ltm⁚…`). Returns the unique such
-/// port, or `None` when the reader reads zero or several (ambiguous).
-///
-/// This is the post-simulation twin of `db::ltm::module_exit_port_for_reader`
-/// (the exhaustive-mode override's exit-port determinator); both must agree so
-/// discovery and exhaustive select the same pathway for the same loop edge.
-fn discovery_module_exit_port(
-    module_name: &Ident<Canonical>,
-    reader: &crate::variable::Variable,
-) -> Option<Ident<Canonical>> {
-    let ast = reader.ast()?;
-    let deps = crate::variable::identifier_set(ast, &[], None);
-    let prefix = format!("{}\u{00B7}", module_name.as_str());
-    let mut found: Option<Ident<Canonical>> = None;
-    for dep in deps {
-        let Some(port) = dep.as_str().strip_prefix(&prefix) else {
-            continue;
-        };
-        if port.starts_with('$') {
-            continue;
-        }
-        if found.is_some() {
-            return None;
-        }
-        found = Some(Ident::new(port));
-    }
-    found
-}
-
 /// Recompute a module-input loop edge's link-score series from the sub-model's
 /// per-pathway scores, selecting the pathway(s) that terminate at the exit port
 /// the loop actually traverses (GH #698).
@@ -2080,7 +2049,7 @@ fn recompute_module_input_edge_series_for(
     // keeps the base composite link score -- the documented pre-existing
     // approximation -- rather than silently picking the first matching port and
     // recomputing against its (possibly wrong-signed) pathway. This mirrors the
-    // multi-match -> ambiguous semantics of `discovery_module_exit_port` and the
+    // multi-match -> ambiguous semantics of the structured output projection and the
     // exhaustive twin `compute_module_link_overrides` (GH #698 / PR #705
     // r3353459409).
     let module_var = causal_graph.variables().get(module_name)?;
@@ -2097,37 +2066,7 @@ fn recompute_module_input_edge_series_for(
     }
 
     // Exit port, resolved off the reader `y` supplied by the caller.
-    let y_var = causal_graph.variables().get(exit_reader)?;
-    let exit_port = match &y_var.kind {
-        // `y` is itself a module: m's output feeds y's input port(s). y's
-        // ModuleInput src is the qualified `m·{port}`; the exit port is the
-        // `{port}` whose normalized ref is `m`. If `y` reads TWO DISTINCT
-        // output ports of `m` on different inputs (`m·early -> y.p` AND
-        // `m·late -> y.q`), the collapsed `m -> y` edge has no unique exit
-        // port -- decline (ambiguous) and fall back to the base composite,
-        // mirroring the non-module `discovery_module_exit_port` arm and the
-        // exhaustive twin (GH #698 / PR #705 r3353597299). Two inputs naming
-        // the SAME `m·port` are NOT ambiguous: a unique distinct port is fine.
-        VarKind::Module { inputs: y_in, .. } => {
-            let mut exit: Option<Ident<Canonical>> = None;
-            for inp in y_in {
-                if normalize_module_ref(&inp.src) != *module_name {
-                    continue;
-                }
-                let Some((_, port)) = inp.src.as_str().split_once('\u{00B7}') else {
-                    continue;
-                };
-                let port = Ident::<Canonical>::new(port);
-                match &exit {
-                    Some(prev) if *prev != port => return None, // two distinct ports
-                    Some(_) => {}                               // same port repeated: fine
-                    None => exit = Some(port),
-                }
-            }
-            exit
-        }
-        _ => discovery_module_exit_port(module_name, y_var),
-    }?;
+    let exit_port = causal_graph.unique_module_output(exit_reader, module_name)?;
 
     // Recompute the sub-model's pathway map over the same sorted output-port
     // set the sub-model emitted against, so pathway indices match index-for-

@@ -288,13 +288,20 @@ For a link from `x` to `z` where `z = f(x, y, ...)`:
 
 1. Get the equation text of `z`, preferring the post-compilation AST (via
    `expr2_to_string`) over the original `eqn` field. This ensures that
-   identifiers in the equation match those in the dependency set (important for
-   modules: the `eqn` field holds the original text like `SMTH1(x, 5)` while
-   the AST holds the expanded form like `$⁚s⁚0⁚smth1·output`).
-2. Compute the dependency set from the AST via `identifier_set()`.
+   identifiers in the equation match the syntax transformation membership
+   derived from the same expanded AST (important for modules: the `eqn` field
+   holds the original text like `SMTH1(x, 5)` while the AST holds the expanded
+   value candidate `$⁚s⁚0⁚smth1·output`).
+2. Compute syntax-only transformation membership from the AST via
+   `expression_transform_names()`. Its `value_candidates` are the value
+   references eligible for ceteris-paribus freezing; its `table_holders` are
+   immutable graphical-function holders used only for lookup layout and are
+   not frozen as values. This projection cannot carry scheduling identity:
+   causal edges and evaluation ordering consume the phase-, lag-, and
+   module-path-aware `DepRef` relation extracted by the compiler database.
 3. Build the ceteris-paribus partial equation using `build_partial_equation()`,
    which parses the equation into an `Expr0` AST, recursively walks the tree
-   wrapping variable references in `PREVIOUS()` for all dependencies except `x`
+   wrapping `value_candidates` in `PREVIOUS()` except `x`
    (`wrap_deps_in_previous`), and prints the result back to equation text. This
    AST-based approach avoids the pitfalls of text-based replacement (e.g.,
    replacing `x` inside `x_rate`, or corrupting function names like `MAX`).

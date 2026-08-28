@@ -2052,17 +2052,13 @@ fn test_pinned_loop_through_stockless_passthrough_still_rejected() {
 /// GH #971: when a target reads MORE THAN ONE output of a single module
 /// instance, `module_link_score_equation`'s module->variable branch holds ONE
 /// output live (its change is what the score attributes) and freezes the
-/// rest. The live output was formerly chosen by an arbitrary `.find()` over
-/// `identifier_set`'s per-process-random `HashSet`, so the emitted score --
-/// and every loop score through it -- flapped between processes. The fix
-/// selects the DOCUMENT-order-first output from the reference-site IR's
-/// per-occurrence enumeration (`OccurrenceRef::ModuleOutput`, walk order).
+/// rest. The DOCUMENT-order-first output comes from the reference-site IR's
+/// per-occurrence enumeration (`OccurrenceRef::ModuleOutput`, walk order), so
+/// the choice is deterministic and follows source evaluation order.
 ///
 /// This pins the fix by building two models that differ ONLY in the order the
-/// target reads the module's two outputs and asserting they hold DIFFERENT
-/// sources live. That distinguishes document order from BOTH stable-but-wrong
-/// alternatives: an alphabetical sort would pick `out_a` in both, and the old
-/// hash order could not depend on reading order at all. The live source is
+/// target reads the module's two outputs and asserting they hold different
+/// sources live. An alphabetical sort would pick `out_a` in both. The live source is
 /// identifiable because it -- and only it -- drives the guard form's SIGN
 /// normalizer `(src - PREVIOUS(src))`; the frozen output appears solely inside
 /// a `PREVIOUS(...)`.

@@ -1937,11 +1937,11 @@ fn test_partial_equation_lookup_table_arg_not_wrapped() {
 ///
 /// **The dep set is DERIVED, not declared**, and that is what makes this an
 /// oracle. Production builds the wrap's `other_deps` from
-/// `variable::identifier_set`, whose `BuiltinContents::LookupTable` arm records
+/// `variable::expression_transform_names`, whose table-input projection records
 /// the table's ident and never walks the table expression -- so `idx` is not a
 /// dependency of `y = LOOKUP(g[idx], x)` and the wrap's ordinary
 /// `other_deps.contains(..)` freeze can never fire for it. Calling
-/// `identifier_set` here rather than hand-writing `deps_set(&[.., "idx", ..])`
+/// `expression_transform_names` here rather than hand-writing `deps_set(&[.., "idx", ..])`
 /// is the difference between testing the fix and testing an input production
 /// cannot produce: the first version of this fix passed a hand-written set and
 /// shipped without firing at all.
@@ -1976,8 +1976,11 @@ fn test_partial_equation_lookup_table_index_is_frozen() {
             let equation = format!("{func}({table_arg}, food / subsistence)");
             // Production's dep set for this exact equation, through the exact
             // function production calls.
-            let deps =
-                crate::variable::identifier_set(&crate::variable::scalar_ast(&equation), &[], None);
+            let deps = crate::variable::expression_transform_names(
+                &crate::variable::scalar_ast(&equation),
+                &[],
+            )
+            .value_candidates;
             let partial = build_partial_equation_shaped(
                 &equation,
                 &deps,
@@ -2000,11 +2003,11 @@ fn test_partial_equation_lookup_table_index_is_frozen() {
     // ident, so the freeze there cannot be coming from the ordinary other-dep
     // path. This is the fact the whole test hangs on, so it is asserted rather
     // than described.
-    let deps = crate::variable::identifier_set(
+    let deps = crate::variable::expression_transform_names(
         &crate::variable::scalar_ast("lookup(g[idx], food / subsistence)"),
         &[],
-        None,
-    );
+    )
+    .value_candidates;
     assert!(
         !deps.contains(&Ident::<Canonical>::new("idx")),
         "production's dep extractor must NOT report a table-only index as a \
@@ -2809,7 +2812,7 @@ fn partial_equation_element_index_in_wrapped_dep_not_wrapped() {
     // Equation: `gwp_of_hfc[hfc134a] * input`, live source `input`
     // (scalar). `gwp_of_hfc` is an other-dep (must be wrapped); its
     // index `hfc134a` is an element of the `hfc_type` dimension and --
-    // because `identifier_set` over-collects subscript identifiers --
+    // because the transform-input walk over-collects subscript identifiers --
     // also lands in the dep set.
     let deps = deps_set(&["gwp_of_hfc", "hfc134a", "input"]);
     let live = Ident::new("input");

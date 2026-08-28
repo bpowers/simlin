@@ -94,7 +94,7 @@ pub use query::{
 };
 pub(crate) use query::{
     canonical_module_input_set, dt_causal_dependencies, model_implicit_var_by_name,
-    model_variable_by_name,
+    model_variable_by_name, unique_module_output,
 };
 
 mod sync;
@@ -742,30 +742,20 @@ fn module_composite_ports(
 /// DOCUMENT order (left-to-right over `to`'s reconstructed AST), or `None`
 /// when `to` reads no output of `module`.
 ///
-/// This is the deterministic replacement (GH #971) for
-/// [`module_link_score_equation`]'s former pick -- an arbitrary
-/// `{module}·`-prefixed dependency out of `identifier_set`'s `HashSet`, whose
-/// iteration order is per-process random. When `to` reads MORE THAN ONE
-/// output of one module instance the choice decides which output's change the
-/// link score attributes (the others are frozen), so the random pick made the
-/// emitted score -- and every loop score through it -- flap between processes.
-/// The reference-site IR already enumerates the module-output composites as
+/// When `to` reads more than one output of one module instance, source order
+/// decides which output's change the link score attributes while the others
+/// are frozen (GH #971). The reference-site IR enumerates those composites as
 /// `OccurrenceRef::ModuleOutput` occurrences in the walk's stable
-/// left-to-right order, so taking the first that names `module` is a
-/// reproducible choice over the SAME set the old scan considered.
+/// left-to-right order, so taking the first that names `module` is reproducible.
 ///
-/// `None` no longer conflates a WIDTH-suppressed reference with a genuine
-/// absence. The occurrence stream is complete in that respect for every model
-/// that reaches here, because the LTM front door
+/// `None` means a genuine absence because the occurrence stream is complete
+/// for every model that reaches here. The LTM front door
 /// (`db::ltm_ir::model_ltm_reference_sites`' `site_width_rejection`, GH
 /// #978/#979) refuses a model holding an equation whose `SiteId` paths could not
-/// name every child, and `model_ltm_variables` then emits no link score for it
-/// at all. Until that check existed, an over-arity builtin child had its
-/// occurrence suppressed and looked identical here to "reads no output", so the
-/// caller silently approximated the first with the signed magnitude-1
-/// `black_box_unit_transfer_equation`.
+/// name every child, and `model_ltm_variables` emits no link score for a model
+/// that fails that check.
 ///
-/// One PRE-EXISTING source of `None` survives, deliberately and unrelated to
+/// One deliberate source of `None` is unrelated to
 /// width: the walker skips a `LOOKUP` table argument as static data without
 /// recursing (`ltm_ir.rs`, `BuiltinContents::LookupTable(_) => {}`), and
 /// `OccurrenceRef::ModuleOutput` is minted only in the arms it reaches by
@@ -934,14 +924,10 @@ pub(crate) fn module_link_score_equation(
         // Which output to hold live (GH #971): the target's per-name
         // reference-site projection enumerates every module-output
         // composite `to` reads, in DOCUMENT order, so take the first that
-        // names `from` -- a deterministic pick across processes. This is the
-        // single source of the live-output choice: the former
-        // `identifier_set().find()` fallback scan (a per-process-random
-        // `HashSet` walk kept behind a loud marker while GH #971 proved the IR
-        // pick dominant) is deleted. A `None` here means the IR recorded no
-        // module-output occurrence for `to` -- a genuine structural miss that
-        // falls through to the unit transfer, exactly as an unlocatable
-        // reference always did.
+        // names `from` -- a deterministic pick across processes and the single
+        // source of the live-output choice. A `None` here means the IR recorded
+        // no module-output occurrence for `to`, so the unit-transfer fallback
+        // is the only sound equation available.
         let to_occurrences = crate::db::ltm_ir::model_ltm_occurrences_by_name(
             db,
             model,

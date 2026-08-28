@@ -18,7 +18,7 @@
 //! Callers interact with this type to find loops, compute cycle partitions,
 //! materialize per-link polarities, and traverse module pathways.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::common::{Canonical, Ident};
 use crate::variable::{VarKind, Variable};
@@ -139,6 +139,15 @@ pub struct CausalGraph {
     /// LTM compile (once per query that needs polarity or module structure)
     /// while the variables in it do not change between those builds.
     pub(crate) variables: std::sync::Arc<HashMap<Ident<Canonical>, Variable>>,
+    /// Authoritative dt dependency targets for each explicit or
+    /// parse-synthesized graph reader.
+    ///
+    /// Full module-instance paths are retained so discovery can select the
+    /// output a loop actually traverses without reparsing `module·port`
+    /// spelling from a reconstructed AST. Lightweight graph constructors leave
+    /// this empty alongside `variables`.
+    pub(crate) dependency_targets:
+        std::sync::Arc<HashMap<Ident<Canonical>, BTreeSet<crate::db::DepTarget>>>,
     /// Module instances and their internal graphs
     pub(crate) module_graphs: HashMap<Ident<Canonical>, Box<CausalGraph>>,
 }
@@ -154,11 +163,24 @@ impl CausalGraph {
         &self.stocks
     }
 
-    /// Read-only access to the variable map (name -> `Variable`), used by the
-    /// discovery-mode per-exit-port pathway recompute (GH #698) to find a
-    /// module instance's input ports and the port a downstream reader reads.
+    /// Read-only access to reconstructed variables for polarity analysis and
+    /// module-input metadata used by the discovery-mode pathway recompute
+    /// (GH #698). Exit selection uses [`Self::dependency_targets`] through
+    /// [`Self::unique_module_output`]; this map does not supply or reconstruct
+    /// scheduling identity.
     pub(crate) fn variables(&self) -> &HashMap<Ident<Canonical>, Variable> {
         &self.variables
+    }
+
+    /// The unique real output below `module` read by `reader`, relative to that
+    /// first instance (`port` for `module·port`, `inner·port` for a nested
+    /// path). Multiple distinct outputs are ambiguous and return `None`.
+    pub(crate) fn unique_module_output(
+        &self,
+        reader: &Ident<Canonical>,
+        module: &Ident<Canonical>,
+    ) -> Option<Ident<Canonical>> {
+        crate::db::unique_module_output(self.dependency_targets.get(reader)?.iter(), module)
     }
 
     /// The recursively-built internal causal graph for a dynamic-module

@@ -27,8 +27,8 @@ use crate::datamodel;
 
 use super::{
     Db, LtmMode, ModuleInputSet, SourceModel, SourceProject, SourceVariableKind,
-    build_module_inputs, model_ltm_mode, parse_source_variable, project_datamodel_dims,
-    project_dimensions_context, variable_direct_dependencies,
+    build_module_inputs, model_implicit_var_info, model_ltm_mode, parse_source_variable,
+    project_datamodel_dims, project_dimensions_context, variable_direct_dependencies,
 };
 
 /// Causal edge structure for a model, built from variable dependency sets
@@ -1447,6 +1447,7 @@ pub fn causal_graph_from_edges(result: &CausalEdgesResult) -> crate::ltm::Causal
         edges,
         stocks,
         variables: std::sync::Arc::new(HashMap::new()),
+        dependency_targets: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     }
 }
@@ -1479,12 +1480,14 @@ pub(crate) fn causal_graph_with_modules(
     let stocks: HashSet<Ident<Canonical>> =
         edges_result.stocks.iter().map(|s| Ident::new(s)).collect();
 
-    let (variables, module_graphs) = model_variables_and_module_graphs(db, model, project);
+    let (variables, dependency_targets, module_graphs) =
+        model_variables_and_module_graphs(db, model, project);
 
     crate::ltm::CausalGraph {
         edges,
         stocks,
         variables,
+        dependency_targets,
         module_graphs,
     }
 }
@@ -1495,8 +1498,60 @@ type CausalGraphModuleData = (
     std::sync::Arc<
         HashMap<crate::common::Ident<crate::common::Canonical>, crate::variable::Variable>,
     >,
+    std::sync::Arc<
+        HashMap<crate::common::Ident<crate::common::Canonical>, BTreeSet<crate::db::DepTarget>>,
+    >,
     HashMap<crate::common::Ident<crate::common::Canonical>, Box<crate::ltm::CausalGraph>>,
 );
+
+/// Project each explicit or parse-synthesized graph reader to its
+/// metadata-resolved dt dependency targets.
+///
+/// Discovery needs this relation after simulation, when no database handle is
+/// available. Carrying the existing `DepTarget` rows on `CausalGraph` preserves
+/// complete instance paths and keeps module-output identity out of reconstructed
+/// equation strings. All lags participate: the exit port a loop traverses is an
+/// identity question independent of whether the source read is current,
+/// previous or initial.
+#[salsa::tracked(returns(clone))]
+pub(crate) fn model_dt_dependency_targets(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> std::sync::Arc<
+    HashMap<crate::common::Ident<crate::common::Canonical>, BTreeSet<crate::db::DepTarget>>,
+> {
+    let no_inputs = ModuleInputSet::empty(db);
+    let mut by_reader: HashMap<_, BTreeSet<_>> = model
+        .variables(db)
+        .iter()
+        .map(|(name, source_var)| {
+            let targets = variable_direct_dependencies(db, *source_var, project, no_inputs)
+                .phase(crate::db::DepPhase::Dt)
+                .map(|dep| dep.target.clone())
+                .collect();
+            (crate::common::Ident::new(name), targets)
+        })
+        .collect();
+
+    // Parse-synthesized helpers/modules are graph nodes too. Their structured
+    // rows live under the parent variable's production dependency result.
+    for (name, meta) in model_implicit_var_info(db, model, project).iter() {
+        let parent = variable_direct_dependencies(db, meta.parent_source_var, project, no_inputs);
+        let Some(implicit) = parent.implicit_vars.iter().find(|deps| deps.name == *name) else {
+            continue;
+        };
+        by_reader.insert(
+            crate::common::Ident::new(name),
+            implicit
+                .phase(crate::db::DepPhase::Dt)
+                .map(|dep| dep.target.clone())
+                .collect(),
+        );
+    }
+
+    std::sync::Arc::new(by_reader)
+}
 
 /// Build the `(variables, module_graphs)` pair a CausalGraph needs for
 /// polarity analysis, stock enrichment, and the discovery-mode per-exit-port
@@ -1523,6 +1578,7 @@ fn model_variables_and_module_graphs(
 
     let edges_result = model_causal_edges(db, model, project);
     let variables = reconstruct_model_variables(db, model, project);
+    let dependency_targets = model_dt_dependency_targets(db, model, project);
 
     let project_models = project.models(db);
     let mut module_graphs: HashMap<Ident<Canonical>, Box<crate::ltm::CausalGraph>> = HashMap::new();
@@ -1546,18 +1602,21 @@ fn model_variables_and_module_graphs(
                 .map(|s| Ident::new(s))
                 .collect();
             let sub_variables = reconstruct_model_variables(db, *sub_source_model, project);
+            let sub_dependency_targets =
+                model_dt_dependency_targets(db, *sub_source_model, project);
 
             let sub_graph = crate::ltm::CausalGraph {
                 edges: sub_edges,
                 stocks: sub_stocks,
                 variables: sub_variables,
+                dependency_targets: sub_dependency_targets,
                 module_graphs: HashMap::new(),
             };
             module_graphs.insert(Ident::new(module_var_name), Box::new(sub_graph));
         }
     }
 
-    (variables, module_graphs)
+    (variables, dependency_targets, module_graphs)
 }
 
 /// Element-level CausalGraph (as [`causal_graph_from_element_edges`]) ENRICHED
@@ -1574,8 +1633,10 @@ pub fn causal_graph_from_element_edges_with_modules(
     element_edges: &ElementCausalEdgesResult,
 ) -> crate::ltm::CausalGraph {
     let mut graph = causal_graph_from_element_edges(element_edges);
-    let (variables, module_graphs) = model_variables_and_module_graphs(db, model, project);
+    let (variables, dependency_targets, module_graphs) =
+        model_variables_and_module_graphs(db, model, project);
     graph.variables = variables;
+    graph.dependency_targets = dependency_targets;
     graph.module_graphs = module_graphs;
     graph
 }
@@ -2995,6 +3056,7 @@ pub fn causal_graph_from_element_edges(
         edges,
         stocks,
         variables: std::sync::Arc::new(HashMap::new()),
+        dependency_targets: std::sync::Arc::new(HashMap::new()),
         module_graphs: HashMap::new(),
     }
 }
@@ -3316,6 +3378,7 @@ pub fn model_loop_circuits_tiered(
             edges: sub_edge_idents,
             stocks: sub_stocks,
             variables: std::sync::Arc::new(HashMap::new()),
+            dependency_targets: std::sync::Arc::new(HashMap::new()),
             module_graphs: HashMap::new(),
         };
         let scc = graph.largest_scc_size();

@@ -782,6 +782,22 @@ state uses the same occurrence relation: a target is lag-only when it has a
 Previous occurrence and no Current occurrence; an Initial fallback or sibling
 snapshot does not cancel it.
 
+Run-invariance composes that source relation with one compiler-local fact. A
+compiled flow fragment records whether its lowered expression is invariant
+when every data reference is assumed invariant; this owns constant folding,
+temps, module evaluation/input loads, and `BuiltinSig::invariance`, but no
+dependency identity. The model fixpoint is exactly `compiler-local invariant &&
+every local Dt/Current DepRef target invariant`. Initial reads use frozen
+storage, while Previous is locally lagged and therefore variant. The source
+relation deliberately retains both eager conditional arms for validation,
+runlists, and cycles, so a constant-discarded dynamic arm causes a safe
+under-hoist. LTM expression transforms receive only value rewrite candidates
+and lookup-table holders through a crate-private type that cannot represent a
+phase, lag, module path, or scheduling target. Causal-graph module exits carry
+the same complete `DepTarget` paths used during compilation, including nested
+instances; discovery does not recover an exit by splitting reconstructed AST
+names.
+
 Against the exact `af201c7f` binary, five alternating paired rounds pinned to
 one performance core and subtracting a matching zero-extra-compile control put
 the plain compile median at 0.99120 G retired instructions versus 1.02325 G
@@ -790,6 +806,31 @@ the plain compile median at 0.99120 G retired instructions versus 1.02325 G
 delta -1.99%, range -2.21%..-0.37%). The broader ranges are recorded rather
 than assigned to a mechanism. Both medians remain reductions with the lag,
 module-layout and per-name-firewall correctness cases included.
+
+Against exact `4d5302d6`, five alternating pinned-core rounds with a matching
+zero-extra-work control per binary and round put one plain compile at 0.98292 G
+retired instructions versus 0.98821 G (-0.54% by per-side medians; median
+paired delta -0.49%, range -0.61%..-0.17%). LTM compile is 10.94342 G versus
+10.93254 G (+0.10%; median paired delta +0.04%, range -0.06%..+0.27%), inside
+the channel's noise floor. The same protocol on complete runs measures
++0.38% plain (range +0.37%..+0.41%) and +0.32% LTM (+0.29%..+0.35%). Both are
+below the one-percent runtime gate for the conservative conditional rule, and
+the C-LEARN oracle classifies 883 invariant slots versus 868 at the base, with
+zero varying slots on either side.
+
+The identity-level diff has no removals and exactly fifteen additions. Offsets
+902--908 are `forestry_emissions_at_start_year`'s seven COP elements: each
+reads the immutable `historical_forestry_lookup` table at an index derived
+only from the constant `forestry_start_year` and `one_year`. Offsets 2371--2377
+are `projected_population_in_target_year`'s seven COP elements: the three UN
+population tables are immutable layout holders, while every value dependency
+is run-invariant (`billion_people`, the INIT-frozen target year, the constant
+scenario, the two scenario weights, and `one_year`). Offset 2370 is
+`projected_global_population_in_target_year`, a pure SUM of that invariant
+array. The production-derived lookup/reducer matrix in `db/invariance.rs`
+crosses per-element graphical functions and their reducer with TIME-indexed
+negative controls, then pins source dependency rows, table holders,
+compiler-local verdicts, final invariant offsets, and exact VM series.
 
 ### C5. `Compiler::intern_name` — the top allocation site, blocked on artifact identity
 
@@ -913,7 +954,7 @@ a data verdict in round 3 (2026-06-04):
   landed** (classification + flow-runlist partition + split metadata,
   behavior-neutral; see
   [the design note](/docs/design-plans/2026-06-04-time-invariant-hoisting.md)):
-  the run-invariant flow vars are classified (C-LEARN: 868 invariant slots
+  the run-invariant flow vars are classified (C-LEARN: 883 invariant slots
   of the root flow phase, oracle-verified bit-constant with 0 violations;
   WORLD3: 78) and reordered into a contiguous flow-runlist prefix, with the
   prefix opcode length recorded on `CompiledModule`. B1 still runs the whole

@@ -736,6 +736,10 @@ fn structured_dependencies_resolve_module_paths_without_confusing_dimension_elem
                             "d.e + arr[d.e] + left.inner.out + right.inner.out".to_string(),
                         ),
                     ),
+                    aux(
+                        "ambiguous_reader",
+                        datamodel::Equation::Scalar("left.inner.out + left.inner.e".to_string()),
+                    ),
                 ],
             ),
             model("middle", vec![module("inner", "leaf")]),
@@ -787,6 +791,43 @@ fn structured_dependencies_resolve_module_paths_without_confusing_dimension_elem
         dt.iter()
             .all(|(path, variable, _)| !(path.is_empty() && *variable == "d\u{00b7}e")),
         "the dimension-qualified d·e index is not a variable dependency"
+    );
+    assert_eq!(
+        crate::db::unique_module_output(
+            deps.phase(DepPhase::Dt)
+                .map(|dependency| &dependency.target),
+            &Ident::new("left"),
+        )
+        .as_ref()
+        .map(Ident::as_str),
+        Some("inner·out"),
+        "the full nested path below the selected left root is retained"
+    );
+    assert_eq!(
+        crate::db::unique_module_output(
+            deps.phase(DepPhase::Dt)
+                .map(|dependency| &dependency.target),
+            &Ident::new("right"),
+        )
+        .as_ref()
+        .map(Ident::as_str),
+        Some("inner·out"),
+        "the equal leaf below a distinct root is selected independently"
+    );
+    let ambiguous = deps_no_inputs(
+        &db,
+        synced.models["main"].variables["ambiguous_reader"].source,
+        synced.project,
+    );
+    assert_eq!(
+        crate::db::unique_module_output(
+            ambiguous
+                .phase(DepPhase::Dt)
+                .map(|dependency| &dependency.target),
+            &Ident::new("left"),
+        ),
+        None,
+        "two distinct full outputs below one root are ambiguous"
     );
 
     let module_project = datamodel::Project {
@@ -977,6 +1018,22 @@ fn structured_dependency_resolver_covers_every_metadata_branch() {
                 .contains("same_parse_implicit")
             && dependency.target.variable.as_str() == "output"
     }));
+    let implicit_module = same_parse
+        .phase(DepPhase::Dt)
+        .find_map(|dependency| dependency.target.module_path.first())
+        .expect("SMTH1 must expose its production implicit module path")
+        .clone();
+    let graph_targets = model_dt_dependency_targets(&db, main.source, synced.project);
+    assert_eq!(
+        crate::db::unique_module_output(
+            graph_targets[&Ident::new("same_parse_implicit")].iter(),
+            &implicit_module,
+        )
+        .as_ref()
+        .map(Ident::as_str),
+        Some("output"),
+        "the graph projection preserves a parse-synthesized module instance as a structured path"
+    );
 
     let diagnostics = collect_all_diagnostics(&db, synced.project);
     assert!(
@@ -1678,6 +1735,62 @@ fn qualified_dependency_resolution_is_firewalled_by_name() {
              but must not execute the unchanged reader's dependency query: {counts:#?}"
         );
     }
+}
+
+/// Rebuilding the whole-model graph projection after an unrelated equation
+/// edit must reuse every unchanged reader's structured dependency memo. The
+/// projection itself legitimately executes once because one row changed; only
+/// that edited source variable may re-enter dependency extraction.
+#[test]
+fn causal_graph_dependency_projection_reuses_unchanged_reader_queries() {
+    use crate::db::exec_probe::ProbedDb;
+
+    let project_with = |unrelated: &str| {
+        crate::test_common::TestProject::new("graph dependency firewall")
+            .scalar_aux("source", "1")
+            .scalar_aux("reader", "source")
+            .scalar_aux("unrelated", unrelated)
+            .build_datamodel()
+    };
+    let mut probed = ProbedDb::new();
+    let base = project_with("1");
+    let state1 = sync_from_datamodel_incremental(probed.db_mut(), &base, None);
+    let sync1 = state1.to_sync_result();
+    let model = sync1.models["main"].source;
+    let before = model_dt_dependency_targets(probed.db(), model, sync1.project).clone();
+    assert_eq!(
+        before[&Ident::new("reader")],
+        [DepTarget::local(Ident::new("source"))]
+            .into_iter()
+            .collect()
+    );
+
+    let edited = project_with("source + 1");
+    let state2 = sync_from_datamodel_incremental(probed.db_mut(), &edited, Some(&state1));
+    let sync2 = state2.to_sync_result();
+    assert!(
+        sync2.models["main"].source == model,
+        "incremental sync must retain the model input"
+    );
+    probed.reset();
+    let after = model_dt_dependency_targets(probed.db(), model, sync2.project);
+    assert_eq!(after[&Ident::new("reader")], before[&Ident::new("reader")]);
+
+    let counts = probed.counts();
+    assert_eq!(
+        counts
+            .get("model_dt_dependency_targets")
+            .map(|(executions, distinct)| (*executions, *distinct)),
+        Some((1, 1)),
+        "the whole projection must update once: {counts:#?}"
+    );
+    assert_eq!(
+        counts
+            .get("variable_direct_dependencies")
+            .map(|(executions, distinct)| (*executions, *distinct)),
+        Some((1, 1)),
+        "only the edited `unrelated` variable may re-extract dependencies: {counts:#?}"
+    );
 }
 
 #[test]

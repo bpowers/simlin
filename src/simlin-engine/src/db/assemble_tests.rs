@@ -621,6 +621,19 @@ fn each_program_emits_in_runlist_order_then_the_ltm_tail() {
         .collect();
     let mut implicit_tail: Vec<String> = ltm_implicit.keys().cloned().collect();
     implicit_tail.sort();
+    assert!(
+        synthetic_tail
+            .iter()
+            .chain(implicit_tail.iter())
+            .all(|name| !invariant.contains(name)),
+        "LTM synthetic and implicit helpers are always outside the root invariant fixpoint"
+    );
+    assert!(
+        sccs.iter()
+            .flat_map(|scc| scc.members.iter())
+            .all(|member| !invariant.contains(member.as_str())),
+        "resolved SCC members are conservatively dynamic"
+    );
     let is_ltm =
         |name: &str| synthetic_tail.iter().any(|n| n == name) || ltm_implicit.contains_key(name);
 

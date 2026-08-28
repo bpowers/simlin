@@ -3884,6 +3884,73 @@ fn partition_places_invariant_vars_before_dynamic() {
     }
 }
 
+/// A constant-selected conditional retains both source dependencies for
+/// validation and scheduling, even though compiler folding erases the unused
+/// branch. Run-invariance therefore keeps both readers in the dynamic suffix:
+/// a safe under-hoist whose VM values, reset behavior and wasm values remain
+/// exact. Recompiling the same production model must make the same partition.
+#[test]
+fn constant_selected_dynamic_branch_underhoist_is_deterministic_across_backends_and_reset() {
+    use simlin_engine::common::{Canonical, Ident};
+
+    let datamodel = simlin_engine::test_common::TestProject::new("constant branch underhoist")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .aux("k", "10", None)
+        .aux("dynamic", "TIME", None)
+        .aux("select_true", "IF 1 THEN k ELSE dynamic", None)
+        .aux("select_false", "IF 0 THEN dynamic ELSE k", None)
+        .build_datamodel();
+
+    let ident = |name: &str| Ident::<Canonical>::from_unchecked(name.to_string());
+    let compiled = compile_vm(&datamodel);
+    let invariant_offsets = compiled.invariant_flow_offsets();
+    let split = compiled.flows_invariant_opcode_len();
+    for name in ["select_true", "select_false"] {
+        let off = compiled.get_offset(&ident(name)).expect(name);
+        assert!(
+            !invariant_offsets.contains(&off),
+            "{name} must remain in the conservative dynamic suffix"
+        );
+    }
+    let compiled_again = compile_vm(&datamodel);
+    assert_eq!(compiled_again.flows_invariant_opcode_len(), split);
+    assert_eq!(compiled_again.invariant_flow_offsets(), invariant_offsets);
+
+    let mut vm = Vm::new(compiled).expect("vm");
+    vm.run_to_end().expect("first run");
+    let first_selected: Vec<Vec<f64>> = ["select_true", "select_false"]
+        .into_iter()
+        .map(|name| vm.get_series(&ident(name)).expect(name))
+        .collect();
+    for name in ["select_true", "select_false"] {
+        assert_eq!(vm.get_series(&ident(name)).expect(name), [10.0, 10.0, 10.0]);
+    }
+    assert_eq!(
+        vm.get_series(&ident("dynamic")).expect("dynamic"),
+        [0.0, 1.0, 2.0]
+    );
+
+    vm.reset();
+    vm.run_to_end().expect("run after reset");
+    for (name, first) in ["select_true", "select_false"]
+        .into_iter()
+        .zip(first_selected)
+    {
+        assert_eq!(
+            vm.get_series(&ident(name)).expect(name),
+            first,
+            "{name}: reset must reproduce the first run exactly"
+        );
+    }
+
+    let reset_results = vm.into_results();
+    let outcome = ensure_wasm_matches(&datamodel, "main", &reset_results, &[]);
+    assert!(
+        matches!(outcome, WasmRunOutcome::Ran),
+        "constant-selected conditionals must run through wasm, got {outcome:?}"
+    );
+}
+
 /// Heavy soundness oracle on C-LEARN: assert ZERO of the invariant-classified
 /// slots vary, and report the count for comparison against the prototype's
 /// 678/1368.
