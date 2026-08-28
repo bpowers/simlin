@@ -4785,7 +4785,7 @@ fn assert_agg_fragments_compile(eqn: &str, failures: &[String]) {
 /// GH #738: the synthetic agg hoisted for `SUM(pop[*] * scale)` with a
 /// *scalar* target must compile. Before the fix,
 /// `compile_ltm_equation_fragment` lowered the agg's equation with an empty
-/// `ScopeStage0.models`, so the `pop[*] * scale` Op2 never got its Expr2
+/// `LoweringScope.models`, so the `pop[*] * scale` Op2 never got its Expr2
 /// `ArrayBounds` and final array-operand materialization never hoisted it -- codegen
 /// then rejected the inline Op2 under SUM and the agg was silently stubbed
 /// to a constant 0, corrupting every score routed through it.

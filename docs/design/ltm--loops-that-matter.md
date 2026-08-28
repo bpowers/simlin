@@ -47,21 +47,24 @@ supported via element-level graph expansion (see "Array Support" below).
 pub struct CausalGraph {
     edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
     stocks: HashSet<Ident<Canonical>>,
-    variables: HashMap<Ident<Canonical>, Variable>,
+    variables: Arc<HashMap<Ident<Canonical>, Arc<Variable>>>,
+    dependency_targets: Arc<HashMap<Ident<Canonical>, BTreeSet<DepTarget>>>,
     module_graphs: HashMap<Ident<Canonical>, Box<CausalGraph>>,
 }
 ```
 
-The adjacency-list representation of a model's causal structure. Built from a
-`ModelStage1` by `CausalGraph::from_model()`, which:
+The adjacency-list representation of a model's causal structure. The salsa
+analysis queries build it from structured `DepTarget` rows, shared
+per-variable lowering handles, and recursively derived module graph data.
+Those inputs:
 
-- Creates edges from each variable's equation dependencies to the variable itself
-- Handles stocks specially: edges come from inflows and outflows, not from the
+- create edges from each variable's equation dependencies to the variable itself;
+- handle stocks specially: edges come from inflows and outflows, not from the
   stock's initial-value equation
-- For modules classified as `DynamicModule`, recursively builds sub-graphs
+- recursively build sub-graphs for modules classified as `DynamicModule`
   (`module_graphs`) to enable cross-module loop detection and module stock
   enrichment
-- Normalizes module output references (e.g. `module·output`) to point to the
+- normalize module output references (e.g. `module·output`) to point to the
   module node itself via `normalize_module_ref()`
 
 ### Link (`ltm.rs`)
@@ -572,12 +575,10 @@ module's sub-graph enumerates no pathways and is harmless. (This is why the
 prior `classify_module_for_ltm` stock gate on sub-graph construction is gone.)
 The element-level module nodes are keyed by the bare module instance name --
 the same key `module_graphs` and the module `Variable` use -- so the recompute's
-lookups resolve. `reconstruct_model_variables` reconstructs a module instance
-through `reconstruct_implicit_variable` (not the generic parse+lower path, which
-resolves inputs against an empty `scope.models` and so drops them), so the
-recompute can read a module's entry/exit ports off its preserved `ModuleInput`s
--- the same fix `reconstruct_single_variable` already applied for the exhaustive
-override.
+lookups resolve. `model_lowered_variables` clones the exact `Arc` payload owned
+by each explicit or implicit lowering memo. Module lowering parses the ordinary
+kind-independent fields and replaces only `VarKind::Module`'s resolved wiring,
+so the recompute sees preserved `ModuleInput`s without retaining a second AST.
 
 Because the discovery graph is element-level, an arrayed loop's non-module
 nodes carry element subscripts (`s[nyc] → m → growth[nyc]`).

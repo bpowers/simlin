@@ -591,11 +591,11 @@ mod expand_maps_to_chains_tests {
 /// `project_units_context` is therefore a salsa PROJECTION over the result, not
 /// a plain accessor: it re-executes but backdates on the equal `Context`, so its
 /// readers are left alone. With a plain accessor every reader takes a dependency
-/// on the whole result and rebuilds on each keystroke -- measured here as
-/// `model_stage0` rebuilds, since it reads the context and nothing else that
-/// this edit touches.
+/// on the whole result and rebuilds on each keystroke -- measured here at the
+/// production per-variable `lowered_source_variable` projection.
 #[test]
 fn unit_definition_error_only_change_does_not_invalidate_context_readers() {
+    use crate::db::exec_probe::ProbedDb;
     use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_project};
 
     let project_with_malformed_unit = |eqn: &str| {
@@ -612,21 +612,27 @@ fn unit_definition_error_only_change_does_not_invalidate_context_readers() {
         dm
     };
 
-    let mut db = SimlinDb::default();
+    let mut db = ProbedDb::new();
     let first = project_with_malformed_unit("widget/");
-    let state1 = sync_from_datamodel_incremental(&mut db, &first, None);
+    let state1 = sync_from_datamodel_incremental(db.db_mut(), &first, None);
     let sync1 = state1.to_sync_result();
-    let _ = model_stage0(&db, sync1.models["main"].source, sync1.project);
+    let x1 = sync1.models["main"].variables["x"].source;
+    let _ = lowered_source_variable(db.db(), x1, sync1.models["main"].source, sync1.project);
 
     // Control: re-syncing the identical project rebuilds nothing, so a rebuild
     // below is attributable to the edit and not to the re-sync itself.
-    reset_query_executions();
-    let state2 = sync_from_datamodel_incremental(&mut db, &first, Some(&state1));
+    db.reset();
+    let state2 = sync_from_datamodel_incremental(db.db_mut(), &first, Some(&state1));
     let sync2 = state2.to_sync_result();
-    let _ = model_stage0(&db, sync2.models["main"].source, sync2.project);
+    let _ = lowered_source_variable(
+        db.db(),
+        sync2.models["main"].variables["x"].source,
+        sync2.models["main"].source,
+        sync2.project,
+    );
     assert_eq!(
-        query_executions().stage0,
-        0,
+        db.counts().get("lowered_source_variable"),
+        None,
         "re-syncing an unchanged project must not rebuild anything"
     );
 
@@ -634,32 +640,37 @@ fn unit_definition_error_only_change_does_not_invalidate_context_readers() {
     // handle and mutates its fields, so `sync2.project` and `sync3.project` are
     // the same salsa input -- reading through it after the edit yields the NEW
     // value for both.
-    let ctx_before = project_units_context(&db, sync2.project).clone();
-    let errors_before = project_units_context_result(&db, sync2.project)
+    let ctx_before = project_units_context(db.db(), sync2.project).clone();
+    let errors_before = project_units_context_result(db.db(), sync2.project)
         .definition_errors
         .clone();
 
     // A DIFFERENT malformed equation for the same unit: both are rejected.
     let second = project_with_malformed_unit("widget * ");
-    reset_query_executions();
-    let state3 = sync_from_datamodel_incremental(&mut db, &second, Some(&state2));
+    db.reset();
+    let state3 = sync_from_datamodel_incremental(db.db_mut(), &second, Some(&state2));
     let sync3 = state3.to_sync_result();
 
     assert_eq!(
-        *project_units_context(&db, sync3.project),
+        *project_units_context(db.db(), sync3.project),
         ctx_before,
         "the fixture must leave the units context unchanged, or it proves nothing"
     );
-    let errors_after = &project_units_context_result(&db, sync3.project).definition_errors;
+    let errors_after = &project_units_context_result(db.db(), sync3.project).definition_errors;
     assert_ne!(
         errors_after, &errors_before,
         "the fixture must change the definition errors, or it proves nothing"
     );
 
-    let _ = model_stage0(&db, sync3.models["main"].source, sync3.project);
+    let _ = lowered_source_variable(
+        db.db(),
+        sync3.models["main"].variables["x"].source,
+        sync3.models["main"].source,
+        sync3.project,
+    );
     assert_eq!(
-        query_executions().stage0,
-        0,
+        db.counts().get("lowered_source_variable"),
+        None,
         "a change to the unit-definition errors alone must not rebuild a reader \
          of the units context; errors are now {errors_after:?}"
     );

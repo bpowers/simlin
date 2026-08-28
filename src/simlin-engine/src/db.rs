@@ -34,7 +34,7 @@ use std::collections::BTreeSet;
 // * `assemble`   -- module/simulation assembly + flattened-offset map.
 // * `dep_graph`  -- the dependency-graph cycle gate + its result types.
 // * `analysis`   -- causal-graph analysis tracked functions.
-// * `stages`     -- the two cached model-compilation stages (Stage0/Stage1).
+// * `model_scope` -- lightweight module topology for model-wide unit analysis.
 // * `ltm` / `ltm_ir` / `macro_registry` / `units` -- LTM (a `ltm/` directory:
 //   mod/parse/compile/loops/link_scores), the reference-site IR, the macro
 //   registry, and the unit-check pass.
@@ -58,18 +58,13 @@ pub(crate) use invariance::model_flows_invariant;
 // (`model_ltm_reference_sites`) it compares the Expr0 partial builder against.
 pub(crate) mod ltm_ir;
 mod macro_registry;
-mod stages;
-pub(crate) use stages::{
-    model_scope_models, model_scope_stage0, model_stage0, model_stage1, source_model_is_stdlib,
-};
-// Test-only: the execution counters for the two stage queries and the unit-check
-// pass, so `stages_tests` can prove each model's stages are BUILT at most once
-// per revision (GH #966), and that an unrelated model's edit re-executes none of
-// the three -- claims pointer equality of a `returns(ref)` memo cannot support.
-#[cfg(test)]
-pub(crate) use stages::{QueryExecutions, query_executions, reset_query_executions};
+mod model_scope;
+pub(crate) use model_scope::{model_scope_models, source_model_is_stdlib};
 mod units;
+#[cfg(test)]
+pub(crate) use units::unit_model;
 mod var_fragment;
+pub(crate) use var_fragment::lowered_source_variable;
 
 mod diagnostic;
 pub use diagnostic::{
@@ -110,8 +105,8 @@ pub(crate) use layout::flattened_offsets;
 pub(crate) use layout::module_dep_shape;
 
 mod fragment_compile;
-pub(crate) use fragment_compile::compile_implicit_var_fragment;
 pub use fragment_compile::compile_var_fragment;
+pub(crate) use fragment_compile::{compile_implicit_var_fragment, lowered_implicit_variable};
 // Test-only: the per-thread record of which fragment-compiler bodies ran, so
 // `fragment_char_tests` can prove a layout-only edit did or did not recompile
 // a fragment. Pointer equality of a memo cannot prove that -- salsa backdates
@@ -185,7 +180,7 @@ pub use analysis::RefShape;
 pub use analysis::causal_graph_from_edges;
 pub use analysis::causal_graph_from_element_edges;
 pub use analysis::causal_graph_from_element_edges_with_modules;
-pub(crate) use analysis::reconstruct_model_variables;
+pub(crate) use analysis::model_lowered_variables;
 // The variable-level graph with module sub-graphs, for tests outside `db` that
 // pin edge normalization and polarity on the production graph constructor.
 pub(crate) use analysis::causal_graph_with_modules;
@@ -681,7 +676,7 @@ pub(super) fn find_model_output_ports_for_module(
     project: SourceProject,
     module_var_name: &str,
 ) -> Vec<String> {
-    if reconstruct_single_variable(db, model, project, module_var_name).is_some_and(|variable| {
+    if lowered_variable_by_name(db, model, project, module_var_name).is_some_and(|variable| {
         matches!(
             variable.kind,
             crate::variable::VarKind::Module { ref model_name, .. }
@@ -819,8 +814,8 @@ pub(crate) fn module_link_score_equation(
     project: SourceProject,
     from_name: &str,
     to_name: &str,
-    from_var: Option<&crate::variable::Variable>,
-    to_var: &crate::variable::Variable,
+    from_var: Option<&std::sync::Arc<crate::variable::Variable>>,
+    to_var: &std::sync::Arc<crate::variable::Variable>,
 ) -> Option<LtmEquation> {
     use crate::common::{Canonical, Ident};
 
@@ -866,8 +861,8 @@ pub(crate) fn module_link_score_equation(
         // Explicit and implicit module instances share this per-name
         // reconstruction, so resolving one edge never reads the whole causal
         // graph merely to recover its sub-model name.
-        let module_var = reconstruct_single_variable(db, model, project, module_name)?;
-        let crate::variable::VarKind::Module { model_name, .. } = module_var.kind else {
+        let module_var = lowered_variable_by_name(db, model, project, module_name)?;
+        let crate::variable::VarKind::Module { model_name, .. } = &module_var.kind else {
             return None;
         };
         let sub_model_name = canonicalize(model_name.as_str());
@@ -944,7 +939,7 @@ pub(crate) fn module_link_score_equation(
             Some(output_ref) => {
                 let output_ident = Ident::<Canonical>::new(&output_ref);
                 let mut all_vars = HashMap::new();
-                all_vars.insert(to_ident.clone(), to_var.clone());
+                all_vars.insert(to_ident.clone(), std::sync::Arc::clone(to_var));
                 let dim_ctx = project_dimensions_context(db, project);
                 // The target's per-occurrence access-shape IR. The live source
                 // here is a `module·port` composite (an `OccurrenceRef::ModuleOutput`),
@@ -1468,11 +1463,11 @@ mod module_wiring_tests;
 #[cfg(test)]
 mod prev_init_tests;
 #[cfg(test)]
-mod stages_tests;
-#[cfg(test)]
 mod temp_allocation_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod unit_model_tests;
 #[cfg(test)]
 mod variable_dimensions_tests;
 #[cfg(test)]

@@ -30,7 +30,7 @@ use crate::db::var_fragment::{
 //
 // Pointer equality of a memo does NOT prove a query body did not run: salsa
 // backdates a re-executed query whose value compares equal and keeps the memo
-// address (the trap `db::stages` documents at length). For the fragment
+// address. For the fragment
 // compilers that matters even more than it did there, because a fragment is
 // *designed* to be layout-independent -- so a layout-only edit produces an
 // EQUAL fragment whether or not the expensive compile re-ran, and every
@@ -42,8 +42,8 @@ use crate::db::var_fragment::{
 // ("an *unchanged* fragment is reused"), so an aggregate count cannot say
 // whether the one re-execution was the edited variable or an unrelated one.
 //
-// Thread-local rather than a global atomic, for the same reasons as
-// `db::stages`: no lock, and a parallel test run cannot charge one test's
+// Thread-local rather than a global atomic: there is no lock, and a parallel
+// test run cannot charge one test's
 // work to another. The same caveat applies -- the record happens INSIDE the
 // body, on whatever thread salsa ran it, so anyone introducing query
 // parallelism here must move this to a shared atomic in the same change.
@@ -338,17 +338,19 @@ pub fn compile_var_fragment<'db>(
 /// input through, so the accessor's relation is the engine's relation by
 /// construction.
 ///
-/// Returns the helper's canonical name and the lowered variable. Loud-safe
-/// `None` (never panics): this parse synthesized no helper of that name, the
+/// Returns the lowered variable. Loud-safe `None` (never panics): this parse
+/// synthesized no helper of that name, the
 /// module branch's datamodel variable is not actually a `Module`, or the
 /// implicit var has equation errors. (`lower_variable` itself is total -- any
 /// lowering error surfaces as `None` here, see below.)
-fn lower_implicit_var(
+#[salsa::tracked(returns(ref))]
+pub(crate) fn lowered_implicit_variable(
     db: &dyn Db,
-    meta: &ImplicitVarMeta,
     model: SourceModel,
     project: SourceProject,
-) -> Option<(String, crate::variable::Variable)> {
+    implicit_var_name: String,
+) -> Option<std::sync::Arc<crate::variable::Variable>> {
+    let meta = &model_implicit_var_by_name(db, model, project, implicit_var_name)?;
     let parsed = parse_source_variable(db, meta.parent_source_var, project);
     let implicit_var = meta.find_in(parsed)?;
     let implicit_name = canonicalize(implicit_var.ident()).into_owned();
@@ -356,7 +358,7 @@ fn lower_implicit_var(
     let dim_context = project_dimensions_context(db, project);
 
     // Every helper carries parsed data, so no helper is lexed back from text.
-    let parsed_implicit = implicit_var.variable_stage0(dim_context);
+    let parsed_implicit = implicit_var.parsed_variable(dim_context);
 
     if parsed_implicit
         .equation_errors()
@@ -369,9 +371,8 @@ fn lower_implicit_var(
     // need a populated models map to validate the sources against.
     let lowered = if meta.is_module {
         let dm_module = implicit_var.module()?;
-        crate::variable::Variable::module_instance(
-            Ident::new(&implicit_name),
-            Ident::new(dm_module.model_name()),
+        crate::model::resolve_parsed_module(
+            &parsed_implicit,
             build_module_inputs(
                 model.name(db),
                 &module_input_prefix(&implicit_name),
@@ -380,10 +381,10 @@ fn lower_implicit_var(
                     .iter()
                     .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
             ),
-        )
+        )?
     } else {
         let models = HashMap::new();
-        let scope = crate::model::ScopeStage0 {
+        let scope = crate::model::LoweringScope {
             models: &models,
             dimensions: dim_context,
             model_name: "",
@@ -407,7 +408,7 @@ fn lower_implicit_var(
         lowered
     };
 
-    Some((implicit_name, lowered))
+    Some(std::sync::Arc::new(lowered))
 }
 
 /// Why [`implicit_fragment_input`] produced no input.
@@ -438,8 +439,10 @@ pub(crate) fn implicit_fragment_input<'db>(
     project: SourceProject,
     module_input_names: &[String],
 ) -> Result<FragmentInput<'db>, ImplicitInputError> {
-    let (implicit_name, lowered) =
-        lower_implicit_var(db, meta, model, project).ok_or(ImplicitInputError::Absent)?;
+    let implicit_name = meta.name.clone();
+    let lowered = lowered_implicit_variable(db, model, project, implicit_name.clone())
+        .as_ref()
+        .ok_or(ImplicitInputError::Absent)?;
     let var_ident: Ident<Canonical> = Ident::new(&implicit_name);
 
     let dim_context = project_dimensions_context(db, project);
@@ -535,8 +538,10 @@ pub(crate) fn implicit_fragment_input<'db>(
         }
     }
 
+    // The named implicit-lowering memo owns this Arc for the returned input's
+    // lifetime, so the ordinary helper path can share it without another AST.
     Ok(FragmentInput::new(
-        lowered,
+        std::borrow::Cow::Borrowed(lowered),
         dep_shapes,
         tables,
         canonical_module_input_set(module_input_names),

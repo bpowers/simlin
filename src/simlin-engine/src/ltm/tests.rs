@@ -493,7 +493,7 @@ fn test_polarity_div_denominator_value_sign_guards_numerator_polarity() {
         },
     };
     let mut vars = HashMap::new();
-    vars.insert(ttc.clone(), ttc_variable);
+    vars.insert(ttc.clone(), std::sync::Arc::new(ttc_variable));
     let expr = op2(BinaryOp::Div, var("x"), var("ttc"));
     assert_eq!(
         analyze_link_polarity(&Ast::Scalar(expr), &x_var, &vars),
@@ -1009,7 +1009,7 @@ fn test_lookup_table_polarity_defensive_subscript_branches() {
         let mut vars = HashMap::new();
         vars.insert(
             Ident::new("curve"),
-            gf_var_for_test("curve", vec![region.clone()], tables),
+            std::sync::Arc::new(gf_var_for_test("curve", vec![region.clone()], tables)),
         );
         vars
     };
@@ -1049,11 +1049,11 @@ fn test_lookup_table_polarity_defensive_subscript_branches() {
     let mut multi_dim_vars = HashMap::new();
     multi_dim_vars.insert(
         Ident::new("curve"),
-        gf_var_for_test(
+        std::sync::Arc::new(gf_var_for_test(
             "curve",
             vec![region.clone(), other.clone()],
             vec![increasing.clone(), increasing.clone()],
-        ),
+        )),
     );
     let multi_dim_lookup = Ast::Scalar(Expr2::App(
         BuiltinFn::Lookup(
@@ -3460,7 +3460,7 @@ fn enrich_with_module_stocks_falls_back_to_all_stocks_on_truncation() {
         },
     };
     let mut parent_variables = HashMap::new();
-    parent_variables.insert(Ident::new("mod_node"), module_var);
+    parent_variables.insert(Ident::new("mod_node"), std::sync::Arc::new(module_var));
     let mut module_graphs = HashMap::new();
     module_graphs.insert(Ident::new("mod_node"), Box::new(sub_graph));
     let parent = CausalGraph {

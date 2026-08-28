@@ -7,8 +7,9 @@ use std::hash::{Hash, Hasher};
 /// The numeric value of a `Const` node in any of the four AST layers, compared
 /// by **bit pattern** rather than by IEEE equality.
 ///
-/// `Expr0`..`Expr3` (and everything holding one: `ModelStage0`/`ModelStage1`,
-/// `db::query::ParsedVariableResult`, `db::ltm::LtmEquation`,
+/// `Expr0`..`Expr3` (and everything holding one:
+/// `db::query::ParsedVariableResult`, the per-variable lowered projections,
+/// `db::ltm::LtmEquation`,
 /// `ltm_agg::AggNodesResult`, ...) derive `PartialEq`. Salsa decides whether to
 /// *backdate* a re-executed tracked function's memo by comparing the old value
 /// with the new one via `PartialEq` (`values_equal`). A bare `f64` makes that
@@ -80,8 +81,7 @@ use std::hash::{Hash, Hasher};
 ///   `PerVarBytecodes::graphical_functions` (GH #642);
 /// * `variable::Table`'s `x`/`y: Vec<f64>` lookup points and its two
 ///   `datamodel::GraphicalFunctionScale`s, which ride on `VarKind::Aux` into
-///   the same `ModelStage0` / `ModelStage1` / `db::query::ParsedVariableResult`
-///   memos this type's fix serves.
+///   the same parse and per-variable lowering memos this type serves.
 ///
 /// Both keep the derived, IEEE-based `PartialEq`. That is an accepted state, not
 /// an open defect -- **what is accepted is the cost of NOT converting them, not
@@ -237,12 +237,11 @@ mod literal_tests {
 /// The same property one level up, through the PUBLIC parse API: an `Expr0`
 /// built twice from identical NaN-bearing text is equal to itself and backdates.
 ///
-/// `Expr0` is the layer that rides on `db::query::ParsedVariableResult` and
-/// `ModelStage0` (GH #987) and on `db::ltm::LtmArm` (GH #981). The higher
-/// layers are covered where they are consumed: `Expr2` by
-/// `ltm_agg::tests::a_nan_literal_in_a_reducer_does_not_defeat_agg_backdating`
-/// and by `db::stages_tests`' whole-project value oracle, and `LtmEquation` by
-/// `db::ltm::equation`'s own probe.
+/// `Expr0` is retained by `db::query::ParsedVariableResult` (GH #987) and by
+/// `db::ltm::LtmArm` (GH #981). The higher layers are covered where they are
+/// consumed: `Expr2` by the per-variable lowering query and
+/// `ltm_agg::tests::a_nan_literal_in_a_reducer_does_not_defeat_agg_backdating`,
+/// and `LtmEquation` by `db::ltm::equation`'s own probe.
 #[cfg(test)]
 mod literal_ast_tests {
     use crate::ast::Expr0;

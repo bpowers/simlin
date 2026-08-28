@@ -369,7 +369,7 @@ fn a_snapshot_capture_retains_apply_to_all_storage() {
         .into_iter()
         .next()
         .expect("nested PREVIOUS must synthesize its outer capture");
-    let built = capture.variable_stage0(dimensions);
+    let built = capture.parsed_variable(dimensions);
 
     assert!(
         matches!(built.ast(), Some(Ast::ApplyToAll(_, _))),
@@ -527,7 +527,7 @@ fn a_capture_holds_the_argument_subtree_itself() {
 /// equation built.
 ///
 /// This is the equivalence the whole chunk rests on: every consumer that used
-/// to re-parse a helper's equation text now calls `Capture::variable_stage0`,
+/// to re-parse a helper's equation text now calls `Capture::parsed_variable`,
 /// so if the two disagree the dependency graph, the layout and the bytecode
 /// all move. The `datamodel::Variable` on the right is built by the recipe the
 /// parse used to build it with -- the capture's own ident, its argument
@@ -575,7 +575,7 @@ fn a_capture_builds_the_variable_parsing_its_printed_equation_built() {
                 "{what}: `{eqn}` -- a capture body must synthesize no further helpers"
             );
 
-            let built = capture.variable_stage0(dim_ctx);
+            let built = capture.parsed_variable(dim_ctx);
             let id = capture.ident();
             assert_eq!(
                 built.ident, reparsed.ident,

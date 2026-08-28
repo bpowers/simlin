@@ -11,7 +11,7 @@ use crate::common::{
     Canonical, EquationError, ErrorCode, Ident, Result, UnitError, UnitResult, canonicalize,
 };
 use crate::datamodel::UnitMap;
-use crate::model::ModelStage1;
+use crate::model::UnitModel;
 use crate::units::{Context, UnitOp, Units, combine};
 use crate::variable::{VarKind, Variable};
 
@@ -34,7 +34,7 @@ pub(crate) fn literal_exponent(expr: &Expr2) -> Option<f64> {
 }
 
 struct UnitEvaluator<'a> {
-    model: &'a ModelStage1,
+    model: &'a UnitModel,
     inferred_units: &'a HashMap<Ident<Canonical>, UnitMap>,
     // units for module inputs
     time: Variable,
@@ -496,7 +496,7 @@ fn time_variable(ctx: &Context) -> Variable {
 pub fn evaluate_expr_units(
     ctx: &Context,
     inferred_units: &HashMap<Ident<Canonical>, UnitMap>,
-    model: &ModelStage1,
+    model: &UnitModel,
     expr: &Expr2,
 ) -> UnitResult<Units> {
     let evaluator = UnitEvaluator {
@@ -514,7 +514,7 @@ pub fn evaluate_expr_units(
 pub fn check(
     ctx: &Context,
     inferred_units: &HashMap<Ident<Canonical>, UnitMap>,
-    model: &ModelStage1,
+    model: &UnitModel,
 ) -> Result<StdResult<(), UnitErrorList>> {
     use UnitError::{ConsistencyError, DefinitionError};
     let mut errors: Vec<(Ident<Canonical>, UnitError)> = vec![];
@@ -541,7 +541,7 @@ pub fn check(
     // its per-instance iteration order used to decide the ORDER of the
     // per-variable consistency errors -- an observable of the diagnostics
     // collection. The GH #595/#633 recipe: sort before iterating.
-    let mut sorted_vars: Vec<(&Ident<Canonical>, &Variable)> = model.variables.iter().collect();
+    let mut sorted_vars: Vec<_> = model.variables.iter().collect();
     sorted_vars.sort_unstable_by_key(|(id, _)| id.as_str());
     for (ident, var) in sorted_vars {
         if var.table().is_some() {

@@ -30,6 +30,7 @@
 //!   *phase-local* -- only that phase's bytecode is dropped while the other
 //!   phases still compile; the caller reports it per phase.
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 
 use crate::canonicalize;
@@ -200,6 +201,77 @@ pub(crate) fn flow_is_special_stock_driven(
     })
 }
 
+/// Lower one source variable to `Expr2` through the same dependency-granular
+/// context used by fragment compilation.
+///
+/// Unit analysis and fragment compilation both read this tracked projection.
+/// The memo owns one lowered variable, rather than embedding a second copy in a
+/// cached whole-model value, and its dependency lookups are firewalled by name.
+#[salsa::tracked(returns(ref))]
+pub(crate) fn lowered_source_variable(
+    db: &dyn Db,
+    var: SourceVariable,
+    model: SourceModel,
+    project: SourceProject,
+) -> std::sync::Arc<crate::variable::Variable> {
+    let var_ident = var.ident(db).clone();
+    let model_name = model.name(db);
+    let parsed = parse_source_variable(db, var, project);
+    if var.kind(db) == SourceVariableKind::Module {
+        return std::sync::Arc::new(
+            crate::model::resolve_parsed_module(
+                &parsed.variable,
+                build_module_inputs(
+                    model_name,
+                    &module_input_prefix(&canonicalize(&var_ident)),
+                    var.module_refs(db)
+                        .iter()
+                        .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
+                ),
+            )
+            .expect("a source variable classified Module parses to VarKind::Module"),
+        );
+    }
+
+    let deps = variable_direct_dependencies(db, var, project, ModuleInputSet::empty(db));
+    let mut local_names: BTreeSet<String> = deps
+        .dependencies
+        .iter()
+        .filter(|dependency| dependency.target.module_path.is_empty())
+        .map(|dependency| dependency.target.variable.as_str().to_owned())
+        .collect();
+    local_names.extend(deps.referenced_tables.iter().cloned());
+    if var.kind(db) == SourceVariableKind::Stock {
+        local_names.extend(
+            var.inflows(db)
+                .iter()
+                .chain(var.outflows(db).iter())
+                .map(|flow| canonicalize(flow).into_owned()),
+        );
+    }
+
+    let mut parsed_vars = HashMap::new();
+    parsed_vars.insert(Ident::new(&var_ident), Cow::Borrowed(&parsed.variable));
+    for dep_name in local_names {
+        if let Some(dep_var) = model_variable_by_name(db, model, dep_name.clone()) {
+            let dep_parsed = parse_source_variable(db, dep_var, project);
+            parsed_vars.insert(Ident::new(&dep_name), Cow::Borrowed(&dep_parsed.variable));
+        }
+    }
+    let lowering_model = crate::model::LoweringModel {
+        variables: parsed_vars,
+    };
+    let models = [(Ident::new(model_name), lowering_model)]
+        .into_iter()
+        .collect();
+    let scope = crate::model::LoweringScope {
+        models: &models,
+        dimensions: project_dimensions_context(db, project),
+        model_name,
+    };
+    std::sync::Arc::new(crate::model::lower_variable(&scope, &parsed.variable))
+}
+
 /// Build the fragment input of one source variable: parse it, lower its
 /// equation to `Expr2`, and resolve the shape of every name it references.
 ///
@@ -350,54 +422,7 @@ pub(crate) fn explicit_fragment_input<'db>(
         Vec::new()
     };
     local_names.extend(stock_flows.iter().cloned());
-
-    // Lower the variable to `Expr2`. A module instance is its wiring (it has no
-    // equation to lower); everything else lowers against a scope holding the
-    // parsed forms of its dependencies, which is what lets `Expr2`'s array
-    // bounds resolve for a dependency (`SUM(arr[*] + 1)` needs `arr`'s
-    // dimensions at the Op2). The scope is built from the parsed dependencies
-    // rather than a whole-model stage so the fragment depends on exactly the
-    // variables it reads.
-    let lowered = if var.kind(db) == SourceVariableKind::Module {
-        crate::variable::Variable::module_instance(
-            Ident::new(&var_ident),
-            Ident::new(var.model_name(db)),
-            build_module_inputs(
-                model_name,
-                &module_input_prefix(&canonicalize(&var_ident)),
-                var.module_refs(db)
-                    .iter()
-                    .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
-            ),
-        )
-    } else {
-        let mut stage0_vars: HashMap<Ident<Canonical>, crate::model::VariableStage0> =
-            HashMap::new();
-        stage0_vars.insert(Ident::new(&var_ident), parsed.variable.clone());
-        for dep_name in &local_names {
-            if let Some(dep_sv) = resolve_var(dep_name) {
-                let dep_parsed = parse_source_variable(db, dep_sv, project);
-                stage0_vars.insert(Ident::new(dep_name), dep_parsed.variable.clone());
-            }
-        }
-        let mini_model = crate::model::ModelStage0 {
-            ident: Ident::new(model_name),
-            display_name: model_name.to_string(),
-            variables: stage0_vars,
-            implicit: false,
-            // Single-variable fragment compilation only; not a macro template.
-            is_macro: false,
-            macro_params: vec![],
-        };
-        let mut models: HashMap<Ident<Canonical>, &crate::model::ModelStage0> = HashMap::new();
-        models.insert(Ident::new(model_name), &mini_model);
-        let scope = crate::model::ScopeStage0 {
-            models: &models,
-            dimensions: dim_context,
-            model_name,
-        };
-        crate::model::lower_variable(&scope, &parsed.variable)
-    };
+    let lowered = lowered_source_variable(db, var, model, project);
 
     // Errors introduced during AST lowering (e.g. `MismatchedDimensions` from
     // the Expr2/Expr3 lowering) land on the lowered variable, not the parsed
@@ -545,8 +570,10 @@ pub(crate) fn explicit_fragment_input<'db>(
 
     ExplicitFragment::Ready {
         unit_diags,
+        // The salsa memo owns this Arc for at least the input's query-scoped
+        // lifetime; borrowing it keeps compilation on that exact payload.
         input: Box::new(FragmentInput::new(
-            lowered,
+            Cow::Borrowed(lowered),
             dep_shapes,
             tables,
             canonical_module_input_set(module_input_names),

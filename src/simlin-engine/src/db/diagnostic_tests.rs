@@ -1016,6 +1016,49 @@ fn test_compile_var_fragment_malformed_unit_string() {
     );
 }
 
+/// Module instances use the same parsed/lowered diagnostic channel as every
+/// other source kind. Resolving their wiring must not replace the common
+/// fields that carry a malformed declared-unit error.
+#[test]
+fn module_malformed_unit_string_survives_wiring_resolution() {
+    let project = crate::testutils::x_project(
+        datamodel::SimSpecs::default(),
+        &[
+            crate::testutils::x_model(
+                "main",
+                vec![crate::testutils::x_module_named(
+                    "instance",
+                    "child",
+                    &[],
+                    Some("bad units here!!!"),
+                )],
+            ),
+            crate::testutils::x_model("child", vec![crate::testutils::x_aux("out", "1", None)]),
+        ],
+    );
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let source = sync.models["main"].variables["instance"].source;
+    let lowered =
+        crate::db::lowered_source_variable(&db, source, sync.models["main"].source, sync.project);
+    assert_eq!(
+        lowered.unit_errors.len(),
+        1,
+        "production module lowering must retain its parsed unit error"
+    );
+
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.model == "main"
+                && diagnostic.variable.as_deref() == Some("instance")
+                && matches!(diagnostic.error, DiagnosticError::Unit(_))
+                && diagnostic.severity == DiagnosticSeverity::Error
+        }),
+        "the retained module unit error must reach diagnostics: {diagnostics:?}"
+    );
+}
+
 /// A reference to a name that is neither a declared variable nor an
 /// implicit/module variable surfaces as an `UnknownDependency`
 /// equation error. This site is reached from the dependency walk and
@@ -3198,18 +3241,23 @@ fn variable_error_fields_are_the_lowering_channel() {
         .build_datamodel();
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &dm);
-    let stage0 = crate::db::model_stage0(&db, sync.models["main"].source, sync.project);
+    let bad_unit = crate::db::parse_source_variable(
+        &db,
+        sync.models["main"].variables["bad_unit_var"].source,
+        sync.project,
+    );
+    let bad_eqn = crate::db::parse_source_variable(
+        &db,
+        sync.models["main"].variables["bad_eqn_var"].source,
+        sync.project,
+    );
 
     assert!(
-        stage0.variables[&crate::common::Ident::new("bad_unit_var")]
-            .unit_errors()
-            .is_some(),
+        bad_unit.variable.unit_errors().is_some(),
         "parsing must record the malformed unit string on the variable"
     );
     assert!(
-        stage0.variables[&crate::common::Ident::new("bad_eqn_var")]
-            .equation_errors()
-            .is_some(),
+        bad_eqn.variable.equation_errors().is_some(),
         "parsing must record the equation syntax error on the variable"
     );
 
@@ -3240,18 +3288,17 @@ fn variable_error_fields_are_the_lowering_channel() {
         .build_datamodel();
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &dm);
-    let bad = crate::common::Ident::new("bad");
+    let bad = sync.models["main"].variables["bad"].source;
+    let parsed = crate::db::parse_source_variable(&db, bad, sync.project);
 
     assert!(
-        crate::db::model_stage0(&db, sync.models["main"].source, sync.project).variables[&bad]
-            .equation_errors()
-            .is_none(),
+        parsed.variable.equation_errors().is_none(),
         "the fixture must isolate a LOWERING error: parsing sees nothing wrong"
     );
-    let lowered_errors = crate::db::model_stage1(&db, sync.models["main"].source, sync.project)
-        .variables[&bad]
-        .equation_errors()
-        .expect("lowering must record the dimension mismatch on the variable");
+    let lowered_errors =
+        crate::db::lowered_source_variable(&db, bad, sync.models["main"].source, sync.project)
+            .equation_errors()
+            .expect("lowering must record the dimension mismatch on the variable");
     assert!(
         lowered_errors
             .iter()

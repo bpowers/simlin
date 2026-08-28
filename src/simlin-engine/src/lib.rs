@@ -129,7 +129,6 @@ pub mod wasmgen;
 pub mod xmile;
 
 pub use self::common::{Error, ErrorCode, ErrorKind, Result, canonicalize};
-pub use self::model::ModelStage1;
 pub use self::patch::{
     ModelOperation, ModelPatch, ProjectOperation, ProjectPatch, apply_patch, is_view_only_patch,
 };

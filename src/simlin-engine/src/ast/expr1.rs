@@ -8,7 +8,7 @@ pub use crate::builtins::Loc;
 use crate::builtins::{BuiltinFn, BuiltinSig, UntypedBuiltinFn};
 use crate::common::{Canonical, EquationResult, Ident};
 use crate::eqn_err;
-use crate::model::ScopeStage0;
+use crate::model::LoweringScope;
 
 /// IndexExpr1 represents a parsed equation, after calls to
 /// builtin functions have been checked/resolved.
@@ -38,7 +38,7 @@ impl IndexExpr1 {
         Ok(expr)
     }
 
-    pub(crate) fn constify_dimensions(self, scope: &ScopeStage0) -> Self {
+    pub(crate) fn constify_dimensions(self, scope: &LoweringScope) -> Self {
         match self {
             IndexExpr1::Wildcard(loc) => IndexExpr1::Wildcard(loc),
             IndexExpr1::StarRange(id, loc) => IndexExpr1::StarRange(id, loc),
@@ -281,7 +281,7 @@ impl Expr1 {
     // If you use a dimension name, like the "Boston" element from a "Cities" dimension,
     // we will replace that variable-name-looking string with the constant offset of that
     // dimension element.
-    pub(crate) fn constify_dimensions(self, scope: &ScopeStage0) -> Self {
+    pub(crate) fn constify_dimensions(self, scope: &LoweringScope) -> Self {
         match self {
             Expr1::Const(s, n, loc) => Expr1::Const(s, n, loc),
             Expr1::Var(id, loc) => {

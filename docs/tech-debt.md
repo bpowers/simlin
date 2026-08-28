@@ -143,19 +143,19 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Owner**: unassigned
 - **Last reviewed**: 2026-08-08
 
-### 17. Embedded Error Fields on Variable/ModelStage Types
+### 17. Embedded Error Fields on Variable
 
 - **Component**: simlin-engine
 - **Severity**: RESOLVED (2026-07-26) -- **the original premise was half wrong; do not act on it**
-- **Description**: This entry used to claim that the `errors`/`unit_errors` fields on `Variable` and the `errors` field on `ModelStage0`/`ModelStage1` were all "redundant with the salsa incremental compilation pipeline ... dead weight carried through the monolithic compilation path", and that removing them would simplify the data model. Every read site was classified before acting, and the four fields fall into two very different groups.
+- **Description**: `Variable::errors` and `Variable::unit_errors` are live error channels, not residue from a whole-model compiler.
 
-  **`Variable::errors` and `Variable::unit_errors` are LIVE error channels, not residue.** They are how parsing and lowering report a failure on a variable, and the salsa diagnostics are *downstream* of them: `db::var_fragment::explicit_fragment_input` reads `parsed.variable.unit_errors()` (the malformed-`<units>`-string rows), `parsed.variable.equation_errors()` (parse errors, where the conveyor/queue driven-flow `EmptyEquation` suppression applies) and `lowered.equation_errors()` (`MismatchedDimensions` and everything else `lower_ast` raises), and turns each entry into a `Diagnostic`. Emptying the lowered read makes every dimension-mismatch diagnostic vanish; emptying the parsed read turns a spec-sanctioned empty equation on a conveyor-driven flow into a phantom error. Deleting these fields without first replacing the channel would silently drop diagnostics. The claim is now pinned as a test rather than left as prose: `db::diagnostic_tests::variable_error_fields_are_the_lowering_channel` asserts both that the stage's value carries the error in the field and that the matching diagnostic reaches `collect_all_diagnostics`.
+  **`Variable::errors` and `Variable::unit_errors` are LIVE error channels, not residue.** They are how parsing and lowering report a failure on a variable, and the salsa diagnostics are *downstream* of them: `db::var_fragment::explicit_fragment_input` reads `parsed.variable.unit_errors()` (the malformed-`<units>`-string rows), `parsed.variable.equation_errors()` (parse errors, where the conveyor/queue driven-flow `EmptyEquation` suppression applies) and `lowered.equation_errors()` (`MismatchedDimensions` and everything else `lower_ast` raises), and turns each entry into a `Diagnostic`. Emptying the lowered read makes every dimension-mismatch diagnostic vanish; emptying the parsed read turns a spec-sanctioned empty equation on a conveyor-driven flow into a phantom error. Deleting these fields without first replacing the channel would silently drop diagnostics. The claim is pinned as a test rather than left as prose: `db::diagnostic_tests::variable_error_fields_are_the_lowering_channel` asserts both that the per-variable lowering query's value carries the error in the field and that the matching diagnostic reaches `collect_all_diagnostics`.
 
-  **`ModelStage0` and `ModelStage1` carry no error fields.** The duplicate-canonical-ident collision (GH #891) is derived once per model by `db::diagnostic::model_duplicate_variables` and reported by `emit_duplicate_variable_diagnostics` (and as the hard error in `compile_project_incremental`); there is no whole-model simulatability gate reading a stage-level error list: `compile_project_incremental` is the only compiler, and its cycle gate (`db/dep_graph.rs`) decides whether a resolved recurrence SCC compiles.
+  Whole-model parsed/lowered AST stages do not exist. The duplicate-canonical-ident collision (GH #891) is derived once per model by `db::diagnostic::model_duplicate_variables` and reported by `emit_duplicate_variable_diagnostics` (and as the hard error in `compile_project_incremental`); there is no whole-model simulatability gate: `compile_project_incremental` is the only compiler, and its cycle gate (`db/dep_graph.rs`) decides whether a resolved recurrence SCC compiles.
 
   Test helpers report `collect_all_diagnostics` (`test_common::TestProject::error_diagnostics` for the `(location, code)` view): the production source of truth, which carries the unknown-dependency, bare-lookup-table and assembly diagnostics and a source location on every row, and has no model-level `VariablesHaveErrors` roll-up (the code stays in the numbered FFI enum with no producer).
 - **Owner**: unassigned
-- **Last reviewed**: 2026-08-26
+- **Last reviewed**: 2026-08-28
 
 ### 18. Dimension-Granularity Incremental Invalidation
 

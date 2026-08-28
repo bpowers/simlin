@@ -52,7 +52,7 @@ use crate::common::{
 };
 use crate::datamodel;
 use crate::dimensions::{Dimension, DimensionsContext};
-use crate::model::VariableStage0;
+use crate::model::ParsedVariable;
 use crate::variable::{VarKind, Variable, get_dimensions};
 
 /// The name a synthesized helper of `parent` is filed under.
@@ -249,9 +249,9 @@ impl Capture {
     /// * `ltm_augment::scalar_or_a2a_target_expr` falls back to
     ///   `scalar_eqn_text_or_zero` and RE-PARSES this text whenever the target
     ///   has no lowered AST. A capture can reach it that way:
-    ///   `db::analysis::reconstruct_implicit_variable` lowers every capture
-    ///   through `model::lower_variable`, which is total and discards the AST
-    ///   on a lowering error.
+    ///   `db::lowered_implicit_variable` lowers every capture through
+    ///   `model::lower_variable`, which is total and discards the AST on a
+    ///   lowering error.
     ///
     /// So this text is parsed again on one path, and the deleted round trip is
     /// the one on the COMPILE path, not every round trip in the engine. LTM's
@@ -297,7 +297,7 @@ impl Capture {
     /// shape and let ordinary lowering resolve its body per element. A second
     /// generation of helpers is impossible -- a capture body is already
     /// walked -- and is asserted rather than assumed.
-    pub(crate) fn variable_stage0(&self, dimensions: &DimensionsContext) -> VariableStage0 {
+    pub(crate) fn parsed_variable(&self, dimensions: &DimensionsContext) -> ParsedVariable {
         let mut errors: Vec<EquationError> = Vec::new();
         let ast = if self.dims.is_empty() {
             Some(Ast::Scalar(self.arg.clone()))
@@ -310,7 +310,7 @@ impl Capture {
                 }
             }
         };
-        subtree_variable_stage0(
+        subtree_parsed_variable(
             &self.ident,
             ast,
             self.datamodel_equation(),
@@ -330,13 +330,13 @@ impl Capture {
 /// normalization. Snapshot-only shaped helpers remain `Ast::ApplyToAll`; a
 /// nested helper generation would violate the argument-first walk order and is
 /// therefore asserted.
-fn subtree_variable_stage0(
+fn subtree_parsed_variable(
     ident: &str,
     ast: Option<Ast<Expr0>>,
     eqn: datamodel::Equation,
     mut errors: Vec<EquationError>,
     dimensions: &DimensionsContext,
-) -> VariableStage0 {
+) -> ParsedVariable {
     let ident = Ident::<Canonical>::new(ident);
     let ast = ast.and_then(|ast| {
         match instantiate_implicit_modules(
@@ -517,7 +517,7 @@ impl HoistedArg {
             })
     }
 
-    pub(crate) fn variable_stage0(&self, dimensions: &DimensionsContext) -> VariableStage0 {
+    pub(crate) fn parsed_variable(&self, dimensions: &DimensionsContext) -> ParsedVariable {
         let arg = match &self.active_element {
             Some(active) => {
                 let active_elements: Vec<_> = active
@@ -538,7 +538,7 @@ impl HoistedArg {
             }
             None => self.arg.clone(),
         };
-        subtree_variable_stage0(
+        subtree_parsed_variable(
             &self.ident,
             Some(Ast::Scalar(arg.clone())),
             datamodel::Equation::Scalar(print_eqn(&arg)),
@@ -620,7 +620,7 @@ impl ImplicitModule {
         self.suffix.as_deref()
     }
 
-    pub(crate) fn variable_stage0(&self) -> VariableStage0 {
+    pub(crate) fn parsed_variable(&self) -> ParsedVariable {
         Variable {
             ident: Ident::<Canonical>::new(&self.ident),
             units: None,
@@ -668,11 +668,11 @@ impl ImplicitVar {
     /// Every compile-stage consumer, including LTM, enters through this
     /// exhaustive dispatch so adding a helper form cannot leave one consumer
     /// reconstructing it through a different representation.
-    pub(crate) fn variable_stage0(&self, dimensions: &DimensionsContext) -> VariableStage0 {
+    pub(crate) fn parsed_variable(&self, dimensions: &DimensionsContext) -> ParsedVariable {
         match self {
-            ImplicitVar::Capture(capture) => capture.variable_stage0(dimensions),
-            ImplicitVar::HoistedArg(arg) => arg.variable_stage0(dimensions),
-            ImplicitVar::Module(module) => module.variable_stage0(),
+            ImplicitVar::Capture(capture) => capture.parsed_variable(dimensions),
+            ImplicitVar::HoistedArg(arg) => arg.parsed_variable(dimensions),
+            ImplicitVar::Module(module) => module.parsed_variable(),
         }
     }
 

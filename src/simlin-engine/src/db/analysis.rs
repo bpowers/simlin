@@ -17,18 +17,19 @@
 //! - model_element_loop_circuits, model_element_cycle_partitions
 //!   (element-level loop and partition analysis)
 //! - model_detected_loops (matches LTM augmentation loop IDs)
-//! - reconstruct_model_variables, reconstruct_single_variable
+//! - shared lowered-variable handles for causal and polarity graphs
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use crate::canonicalize;
-use crate::capture::ImplicitVar;
 use crate::datamodel;
 
 use super::{
     Db, LtmMode, ModuleInputSet, SourceModel, SourceProject, SourceVariableKind,
-    build_module_inputs, model_implicit_var_info, model_ltm_mode, parse_source_variable,
-    project_datamodel_dims, project_dimensions_context, variable_direct_dependencies,
+    lowered_implicit_variable, lowered_source_variable, model_implicit_var_info, model_ltm_mode,
+    model_variable_by_name, project_datamodel_dims, project_dimensions_context,
+    variable_direct_dependencies,
 };
 
 /// Causal edge structure for a model, built from variable dependency sets
@@ -1495,9 +1496,7 @@ pub(crate) fn causal_graph_with_modules(
 /// The `(variables, module_graphs)` maps a CausalGraph carries for polarity
 /// analysis, stock enrichment, and the GH #698 per-exit-port recompute.
 type CausalGraphModuleData = (
-    std::sync::Arc<
-        HashMap<crate::common::Ident<crate::common::Canonical>, crate::variable::Variable>,
-    >,
+    std::sync::Arc<crate::variable::LoweredVariableMap>,
     std::sync::Arc<
         HashMap<crate::common::Ident<crate::common::Canonical>, BTreeSet<crate::db::DepTarget>>,
     >,
@@ -1577,7 +1576,7 @@ fn model_variables_and_module_graphs(
     use std::collections::HashSet;
 
     let edges_result = model_causal_edges(db, model, project);
-    let variables = reconstruct_model_variables(db, model, project);
+    let variables = model_lowered_variables(db, model, project);
     let dependency_targets = model_dt_dependency_targets(db, model, project);
 
     let project_models = project.models(db);
@@ -1601,7 +1600,7 @@ fn model_variables_and_module_graphs(
                 .iter()
                 .map(|s| Ident::new(s))
                 .collect();
-            let sub_variables = reconstruct_model_variables(db, *sub_source_model, project);
+            let sub_variables = model_lowered_variables(db, *sub_source_model, project);
             let sub_dependency_targets =
                 model_dt_dependency_targets(db, *sub_source_model, project);
 
@@ -3546,189 +3545,63 @@ pub fn model_element_cycle_partitions(
     }
 }
 
-/// Reconstruct `Variable` objects from salsa-tracked parse results for
-/// all variables in a model (including implicit variables).
+/// Collect shared handles to every explicit and parse-synthesized lowered
+/// variable in a model.
 ///
-/// Cached, and returning a SHARED map, because it is expensive and repeated:
-/// it lowers every variable in the model, and the LTM pipeline builds a causal
-/// graph once per query that needs polarity or module structure. On a world3
-/// LTM compile it ran 923 times and was 58% of all instructions executed.
-/// Nothing between those calls can change its answer -- it reads only the
-/// model's variable set and the per-variable parse memos -- so the repetition
-/// was pure recomputation.
+/// Causal, polarity, and LTM graph algorithms need a model-wide name map. The
+/// map owns only cloned `Arc` handles: each payload is the exact value owned by
+/// its per-variable lowering memo, so retaining a graph never retains a second
+/// lowered AST copy. Explicit variables take precedence over compiler-created
+/// helper names, matching source name resolution.
 #[salsa::tracked(returns(clone))]
-pub(crate) fn reconstruct_model_variables(
+pub(crate) fn model_lowered_variables(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
-) -> std::sync::Arc<
-    HashMap<crate::common::Ident<crate::common::Canonical>, crate::variable::Variable>,
-> {
+) -> Arc<crate::variable::LoweredVariableMap> {
     use crate::common::{Canonical, Ident};
 
-    let source_vars = model.variables(db);
-    // The canonicalized dimension context comes from the project-global
-    // salsa-cached query; every parse and lowering below reads that one value.
-    let dim_context = project_dimensions_context(db, project);
-    let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
-        dimensions: dim_context,
-        model_name: "",
-    };
+    let mut variables: HashMap<Ident<Canonical>, Arc<crate::variable::Variable>> = HashMap::new();
+    for (name, source_var) in model.variables(db) {
+        variables.insert(
+            Ident::new(name),
+            Arc::clone(lowered_source_variable(db, *source_var, model, project)),
+        );
+    }
 
-    let mut variables: HashMap<Ident<Canonical>, crate::variable::Variable> = HashMap::new();
-
-    for (name, source_var) in source_vars.iter() {
-        // Explicit module instances take the same direct-construction path as
-        // implicit ones: the generic parse+lower path resolves module inputs
-        // against `scope.models`, which is EMPTY here, so `resolve_module_input`
-        // drops every input and the reconstructed `Variable::Module` carries
-        // `inputs: []`. The discovery-mode per-exit-port pathway recompute (GH
-        // #698) matches the loop edge's source against those inputs to find the
-        // module's entry port; with the inputs lost it bails and falls back to
-        // the wrong-signed composite. (`reconstruct_single_variable` already
-        // takes this branch for the exhaustive override; both reconstructions
-        // must keep module wiring.)
-        if source_var.kind(db) == crate::db::SourceVariableKind::Module {
-            let lowered = module_instance_from_refs(
-                model.name(db),
-                Ident::new(source_var.ident(db)),
-                Ident::new(source_var.model_name(db)),
-                source_var.module_refs(db),
-            );
-            variables.insert(Ident::new(name), lowered);
+    let mut implicit_names: Vec<_> = model_implicit_var_info(db, model, project)
+        .keys()
+        .cloned()
+        .collect();
+    implicit_names.sort();
+    for name in implicit_names {
+        if variables.contains_key(&Ident::new(&name)) {
             continue;
         }
-
-        let parsed = parse_source_variable(db, *source_var, project);
-        let lowered = crate::model::lower_variable(&scope, &parsed.variable);
-        variables.insert(Ident::new(name), lowered);
-
-        // Add implicit variables (module instances from SMOOTH/DELAY expansion)
-        for implicit_var in &parsed.implicit_vars {
-            let imp_name = canonicalize(implicit_var.ident()).into_owned();
-            // `or_insert_with`, not `insert`: an explicit variable wins a
-            // canonical-name collision with a synthesized implicit one. That
-            // is the precedence `reconstruct_single_variable` had when it
-            // searched explicit variables first, and it now reads this map.
-            // Unreachable today -- implicit names carry the reserved `$⁚`
-            // prefix -- so this fixes no bug; it keeps the two from being
-            // able to differ.
-            variables
-                .entry(Ident::new(&imp_name))
-                .or_insert_with(|| reconstruct_implicit_variable(db, model, &scope, implicit_var));
+        if let Some(lowered) = lowered_implicit_variable(db, model, project, name.clone()) {
+            variables.insert(Ident::new(&name), Arc::clone(lowered));
         }
     }
 
-    std::sync::Arc::new(variables)
+    Arc::new(variables)
 }
 
-/// Reconstruct a single `Variable` by name from a model's parse results.
-///
-/// A projection of [`reconstruct_model_variables`] rather than its own
-/// parse-and-lower: the map that query caches already holds every explicit and
-/// implicit variable, built by the same construction against the same scope.
-/// Deriving one from the other is not merely cheaper (the LTM link-score
-/// emitter calls this once per link, and on C-LEARN that is 6,721 times) --
-/// it also means the two can no longer disagree about what a name resolves
-/// to, which they could when each searched the model its own way.
-///
-/// Returns None if the name doesn't match any variable in the model.
-///
-/// A `&str`-taking wrapper over the tracked query below, so that no caller has
-/// to own its name to ask.
-pub(super) fn reconstruct_single_variable(
+/// Resolve one lowered variable without depending on a model-wide lowered map.
+/// Explicit source variables win over compiler-created helpers, and both paths
+/// clone only the handle owned by the corresponding per-variable memo.
+pub(super) fn lowered_variable_by_name(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
     var_name: &str,
-) -> Option<crate::variable::Variable> {
-    reconstruct_named_variable(db, model, project, var_name.to_string())
-}
-
-/// The salsa FIREWALL over [`reconstruct_model_variables`], and the reason
-/// this is a tracked query rather than a plain map lookup.
-///
-/// The map is whole-model: any variable's equation edit changes it, because it
-/// holds every variable's LOWERED form. A caller that reads it directly
-/// therefore depends on every variable in the model -- which for
-/// `link_score_equation_text_shaped` (tracked per `(from, to, shape)`, and
-/// documented as "recomputed only when the involved variables change") meant
-/// one unrelated edit regenerated EVERY link score. On C-LEARN that is 6,721
-/// of them per keystroke.
-///
-/// This query still reads the whole map and so still re-executes on any edit,
-/// but its VALUE is one variable, so salsa backdates it whenever that variable
-/// is untouched and no reader re-runs. Same shape, and the same reason, as
-/// `db::query::model_variable_by_name` over `SourceModel::variables`.
-///
-/// Pinned by `db::ltm_tests::an_unrelated_equation_edit_does_not_regenerate_
-/// every_link_score`, which counts query-body entries -- pointer equality
-/// cannot see this, since backdating leaves the memo in place either way.
-#[salsa::tracked(returns(clone))]
-fn reconstruct_named_variable(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-    var_name: String,
-) -> Option<crate::variable::Variable> {
-    reconstruct_model_variables(db, model, project)
-        .get(&crate::common::Ident::<crate::common::Canonical>::new(
-            &var_name,
-        ))
-        .cloned()
-}
-
-/// Reconstruct an implicit (compiler-generated) variable from its datamodel form.
-///
-/// Module instances need special handling: `parse_var` does not preserve the
-/// `references` list from the datamodel, so input wiring (built via
-/// `build_module_inputs`) would be lost.  We short-circuit that case and
-/// construct `Variable::Module` directly from the stored `ModuleReference`s.
-fn reconstruct_implicit_variable(
-    db: &dyn Db,
-    model: SourceModel,
-    scope: &crate::model::ScopeStage0<'_>,
-    implicit_var: &ImplicitVar,
-) -> crate::variable::Variable {
-    use crate::common::{Canonical, Ident};
-
-    if let Some(dm_module) = implicit_var.module() {
-        return module_instance_from_refs(
-            model.name(db),
-            Ident::<Canonical>::new(implicit_var.ident()),
-            Ident::new(dm_module.model_name()),
-            dm_module.references(),
-        );
+) -> Option<Arc<crate::variable::Variable>> {
+    let name = canonicalize(var_name).into_owned();
+    if let Some(source_var) = model_variable_by_name(db, model, name.clone()) {
+        return Some(Arc::clone(lowered_source_variable(
+            db, source_var, model, project,
+        )));
     }
-
-    // The remaining arms carry their bodies as AST subtrees.
-    let parsed_imp = implicit_var.variable_stage0(scope.dimensions);
-    crate::model::lower_variable(scope, &parsed_imp)
-}
-
-/// A module instance's lowered form, built straight from its stored
-/// `ModuleReference`s.
-///
-/// `parse_var` does not preserve the `references` list, so a module that went
-/// through the generic parse+lower path would lose its input wiring; both
-/// reconstructions (explicit and implicit) therefore short-circuit to this.
-fn module_instance_from_refs(
-    parent_model_name: &str,
-    ident: crate::common::Ident<crate::common::Canonical>,
-    model_name: crate::common::Ident<crate::common::Canonical>,
-    references: &[datamodel::ModuleReference],
-) -> crate::variable::Variable {
-    let module_var_prefix = format!("{}·", ident.as_str());
-    let inputs = build_module_inputs(
-        parent_model_name,
-        &module_var_prefix,
-        references
-            .iter()
-            .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
-    );
-    crate::variable::Variable::module_instance(ident, model_name, inputs)
+    lowered_implicit_variable(db, model, project, name).clone()
 }
 
 #[cfg(test)]

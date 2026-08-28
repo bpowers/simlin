@@ -21,7 +21,7 @@ use crate::db::SourceVariableKind;
 use crate::dimensions::{Dimension, DimensionsContext};
 use crate::lexer::LexerType;
 #[cfg(test)]
-use crate::model::ScopeStage0;
+use crate::model::LoweringScope;
 use crate::module_functions::MacroRegistry;
 use crate::units::parse_units;
 use crate::{ErrorCode, eqn_err, units};
@@ -29,8 +29,8 @@ use crate::{ErrorCode, eqn_err, units};
 /// A graphical function's points, as the compiler and the VM read them.
 ///
 /// The `f64`s keep the derived (IEEE) `PartialEq`, so a lookup table holding a
-/// NaN y-point makes this -- and every `ModelStage0` / `ModelStage1` /
-/// `db::query::ParsedVariableResult` carrying it -- unequal to a bit-identical
+/// NaN y-point makes every `db::query::ParsedVariableResult` or
+/// `db::lowered_source_variable` result carrying it unequal to a bit-identical
 /// rebuild, defeating salsa backdating. The XMILE reader admits one, since
 /// `f64::from_str` accepts `"NaN"` in a `<ypts>` list unvalidated. Accepted
 /// knowingly, on the same terms as the bytecode types: see the "Float equality
@@ -137,6 +137,10 @@ pub struct Variable<MI = ModuleInput, E = Expr2> {
     pub unit_errors: Vec<UnitError>,
     pub kind: VarKind<MI, E>,
 }
+
+/// A name-indexed view of lowered variables that shares the payloads owned by
+/// per-variable query memos.
+pub(crate) type LoweredVariableMap = HashMap<Ident<Canonical>, std::sync::Arc<Variable>>;
 
 impl<MI, E> Variable<MI, E> {
     pub fn ident(&self) -> &str {
@@ -952,9 +956,8 @@ fn parse_equation(
 /// `SourceVariable`'s split input fields (`db::input::variable_source`), which
 /// is why nothing between the salsa inputs and the parse has to re-assemble --
 /// and deep-clone -- a kind-tagged `datamodel::Variable` per parse. The
-/// non-salsa paths (the `ModelStage0` oracle, and every path that parses a
-/// synthesized implicit `datamodel::Variable`) come through the
-/// `From<&datamodel::Variable>` impl below.
+/// non-salsa paths that parse synthesized `datamodel::Variable` values come
+/// through the `From<&datamodel::Variable>` impl below.
 ///
 /// `equation` is a `Cow` for one producer-specific rewrite: a conveyor stock's
 /// `<eqn>` may be a §7.2 explicit init list (`"100, 200, 300"`), which is not a
@@ -1108,10 +1111,9 @@ where
     // * only helpers of the SAME parent can collide, since a synthesized name
     //   embeds its parent's ident (`$⁚{parent}⁚{n}⁚…`) and two parents sharing a
     //   canonical name is already a `DuplicateVariable` model error (GH #885);
-    // * `model::ModelStage0` passes ONE vector across every variable of a model,
-    //   so seeding from it would make each variable pay for every helper minted
-    //   before it -- quadratic in the model, which is the shape this map exists
-    //   to remove in the first place.
+    // * batch parsers may pass one vector across multiple variables, so seeding
+    //   from it would make each variable pay for every helper minted before it
+    //   -- quadratic in the model, which is the shape this map avoids.
     let mut implicit_index: HashMap<Ident<Canonical>, usize> = HashMap::new();
 
     // Resolve the default at use (an empty `'static` registry) rather than
@@ -1601,7 +1603,7 @@ pub(crate) fn scalar_ast(eqn: &str) -> Ast<Expr2> {
         None,
     );
     assert!(err.is_empty(), "parse error in test equation: {eqn}");
-    let scope = ScopeStage0 {
+    let scope = LoweringScope {
         models: &Default::default(),
         dimensions: &Default::default(),
         model_name: "test",

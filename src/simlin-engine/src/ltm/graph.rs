@@ -134,17 +134,15 @@ pub struct CausalGraph {
     pub(crate) stocks: HashSet<Ident<Canonical>>,
     /// Variables in the model for polarity analysis.
     ///
-    /// Shared rather than owned: the map is the salsa-cached
-    /// `db::reconstruct_model_variables`, and a graph is built many times per
-    /// LTM compile (once per query that needs polarity or module structure)
-    /// while the variables in it do not change between those builds.
-    pub(crate) variables: std::sync::Arc<HashMap<Ident<Canonical>, Variable>>,
+    /// The map and each payload are shared: graph retention clones no lowered
+    /// AST owned by the per-variable query memos.
+    pub(crate) variables: std::sync::Arc<crate::variable::LoweredVariableMap>,
     /// Authoritative dt dependency targets for each explicit or
     /// parse-synthesized graph reader.
     ///
     /// Full module-instance paths are retained so discovery can select the
     /// output a loop actually traverses without reparsing `module·port`
-    /// spelling from a reconstructed AST. Lightweight graph constructors leave
+    /// spelling from a lowered AST. Lightweight graph constructors leave
     /// this empty alongside `variables`.
     pub(crate) dependency_targets:
         std::sync::Arc<HashMap<Ident<Canonical>, BTreeSet<crate::db::DepTarget>>>,
@@ -163,12 +161,12 @@ impl CausalGraph {
         &self.stocks
     }
 
-    /// Read-only access to reconstructed variables for polarity analysis and
+    /// Read-only access to lowered variables for polarity analysis and
     /// module-input metadata used by the discovery-mode pathway recompute
     /// (GH #698). Exit selection uses [`Self::dependency_targets`] through
     /// [`Self::unique_module_output`]; this map does not supply or reconstruct
     /// scheduling identity.
-    pub(crate) fn variables(&self) -> &HashMap<Ident<Canonical>, Variable> {
+    pub(crate) fn variables(&self) -> &crate::variable::LoweredVariableMap {
         &self.variables
     }
 
@@ -468,7 +466,7 @@ impl CausalGraph {
                 Some(g) => g,
                 None => continue,
             };
-            let module_var = match self.variables.get(node) {
+            let module_var = match self.variables.get(node).map(AsRef::as_ref) {
                 Some(Variable {
                     kind: VarKind::Module { inputs, .. },
                     ..

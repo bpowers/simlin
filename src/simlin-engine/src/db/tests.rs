@@ -3816,7 +3816,7 @@ fn variable_source_producers_agree_for_every_source_variable_kind() {
 /// parse error.
 ///
 /// The `datamodel::Variable` producer deliberately does NOT apply it: that path
-/// parses synthesized implicit variables and the `ModelStage0` oracle, neither
+/// parses synthesized implicit variables and test-only datamodel values, neither
 /// of which is ever a conveyor, and the ordinary compile path hard-rejects an
 /// un-expanded conveyor marker before reading the equation at all.
 #[test]

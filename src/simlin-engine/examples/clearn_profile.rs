@@ -24,6 +24,8 @@
 //!   CLEARN_RUN_ITERS      extra run-only iterations (default 0)
 //!   CLEARN_PROFILE        "compile" | "run" | "both" (default both) -- which
 //!                         extra-iteration loop(s) to execute
+//!   CLEARN_RESIDENCY      "1" to report retained bytes while dropping the
+//!                         artifact, database, and sync state independently
 
 use std::alloc::{GlobalAlloc, Layout};
 
@@ -37,7 +39,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use simlin_engine::db::{
-    SimlinDb, compile_project_incremental, set_project_ltm_enabled, sync_from_datamodel_incremental,
+    PersistentSyncState, SimlinDb, compile_project_incremental, set_project_ltm_enabled,
+    sync_from_datamodel_incremental,
 };
 use simlin_engine::{CompiledSimulation, Vm, open_vensim};
 
@@ -158,13 +161,57 @@ fn model_path() -> String {
     )
 }
 
-fn compile_once(datamodel: &simlin_engine::datamodel::Project, ltm: bool) -> CompiledSimulation {
+struct RetainedCompile {
+    db: SimlinDb,
+    sync: PersistentSyncState,
+    compiled: CompiledSimulation,
+}
+
+fn compile_retained(datamodel: &simlin_engine::datamodel::Project, ltm: bool) -> RetainedCompile {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
     if ltm {
         set_project_ltm_enabled(&mut db, sync.project, true);
     }
-    compile_project_incremental(&db, sync.project, "main").unwrap()
+    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    RetainedCompile { db, sync, compiled }
+}
+
+fn compile_once(datamodel: &simlin_engine::datamodel::Project, ltm: bool) -> CompiledSimulation {
+    compile_retained(datamodel, ltm).compiled
+}
+
+fn print_residency(label: &str, baseline: usize) {
+    let live = LIVE_BYTES.load(Ordering::Relaxed);
+    let delta = live as i64 - baseline as i64;
+    println!(
+        "residency {label:<20} live {:>12} bytes ({:>8.2} MiB) | delta {delta:>+12} bytes ({:>+8.2} MiB)",
+        live,
+        mib(live),
+        delta as f64 / (1024.0 * 1024.0),
+    );
+}
+
+/// Attribute retained compile memory while dropping each real owner in a
+/// fixed order. `sync` intentionally remains alive after the database drop so
+/// its tracked handles have an independently observable state.
+fn residency_census(datamodel: &simlin_engine::datamodel::Project, ltm: bool) {
+    let baseline = LIVE_BYTES.load(Ordering::Relaxed);
+    print_residency("baseline", baseline);
+    let retained = compile_retained(datamodel, ltm);
+    println!(
+        "  residency artifact slots: {}",
+        retained.compiled.n_slots()
+    );
+    print_residency("db+sync+artifact", baseline);
+
+    let RetainedCompile { db, sync, compiled } = retained;
+    drop(compiled);
+    print_residency("db+sync", baseline);
+    drop(db);
+    print_residency("sync", baseline);
+    drop(sync);
+    print_residency("after all drops", baseline);
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
@@ -180,7 +227,8 @@ fn main() {
     let run_iters = env_usize("CLEARN_RUN_ITERS", 0);
     let which = std::env::var("CLEARN_PROFILE").unwrap_or_else(|_| "both".to_string());
     let ltm = std::env::var("CLEARN_LTM").is_ok_and(|v| v != "0");
-    if std::env::var("CLEARN_COUNT_ALLOCS").is_ok_and(|v| v != "0") {
+    let residency = std::env::var("CLEARN_RESIDENCY").is_ok_and(|v| v != "0");
+    if residency || std::env::var("CLEARN_COUNT_ALLOCS").is_ok_and(|v| v != "0") {
         COUNTING_ON.store(true, Ordering::Relaxed);
     }
 
@@ -203,6 +251,10 @@ fn main() {
         "  models: {n_models}, datamodel variables: {n_vars}, dims: {}",
         datamodel.dimensions.len()
     );
+
+    if residency {
+        residency_census(&datamodel, ltm);
+    }
 
     let compiled = phase("compile (salsa)", || compile_once(&datamodel, ltm));
     println!("  n_slots (root): {}", compiled.n_slots());

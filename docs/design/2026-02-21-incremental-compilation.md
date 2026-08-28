@@ -2,18 +2,14 @@
 
 ## Summary
 
-Simlin's simulation engine currently recompiles the entire model from scratch on
-every edit -- parsing all equations, recomputing all dependencies, and
-regenerating all bytecode even when only a single variable changed. This design
-replaces that monolithic pipeline with an incremental one built on salsa, a
-framework for demand-driven incremental computation. The core idea is to
-decompose each compilation stage (parsing, lowering, dependency analysis,
-bytecode generation) into fine-grained, per-variable tracked functions whose
-results salsa automatically caches and selectively invalidates. When a user
-edits one equation in a 100-variable model, only that variable's compilation
-stages re-execute; everything else is served from cache.
+Simlin's simulation engine uses salsa for demand-driven incremental
+compilation. Parsing, lowering, dependency extraction, and bytecode generation
+are fine-grained per-variable queries whose results salsa caches and
+selectively invalidates. A one-equation edit re-executes that variable's work;
+unchanged variables retain their parse, lowered AST, and symbolic fragment
+memos.
 
-A key technical challenge is that the current bytecode uses raw integer offsets,
+A key technical boundary is that executable bytecode uses raw integer offsets,
 which shift whenever a variable is added or removed -- invalidating every cached
 fragment. The design solves this with "symbolic bytecode": per-variable
 compilation emits opcodes that reference variables by identity rather than by
@@ -30,7 +26,7 @@ the model.
 
 ## Definition of Done
 
-1. **Incremental compilation via salsa**: simlin-engine's compilation pipeline (datamodel -> ModelStage0 -> ModelStage1 -> dependency analysis -> compiler::Module -> bytecode) uses salsa tracked functions and tracked structs so that model edits (equation changes, constant changes, variable add/remove, dimension changes, module connection changes) only recompute affected portions of the pipeline.
+1. **Incremental compilation via salsa**: simlin-engine's compilation pipeline (source inputs -> per-variable parse/lower/dependency queries -> symbolic fragments -> assembly -> bytecode) uses salsa tracked functions and tracked structs so that model edits (equation changes, constant changes, variable add/remove, dimension changes, module connection changes) only recompute affected portions of the pipeline.
 
 2. **LTM integration**: Both LTM modes (exhaustive and discovery) have their synthetic variable generation incrementalized as salsa tracked functions -- causal graph construction, loop detection, and link/loop/relative score variable generation only recompute when their actual inputs change. The post-simulation `discover_loops()` algorithm remains as-is.
 
@@ -95,7 +91,9 @@ the model.
 - **`SourceVariable` / `SourceModel` / `SourceProject`**: The salsa input types that decompose the monolithic `datamodel::Project` into fine-grained pieces. Each `SourceVariable` holds one variable's equation, kind, and metadata.
 - **`SimlinDb`**: The salsa database struct that holds all compilation state. It lives inside `SimlinProject` and persists across FFI calls.
 - **`datamodel::Project`**: The canonical serializable representation of a Simlin model. It remains the source of truth for persistence; the salsa database is a derived compilation cache.
-- **`ModelStage0` / `ModelStage1`**: The current monolithic compilation stages. Stage0 parses all equations; Stage1 resolves modules and lowers the AST. This design replaces them with per-variable tracked functions.
+- **per-variable lowering memo**: `lowered_source_variable` or
+  `lowered_implicit_variable`, each owning one shared `Arc<Variable<Expr2>>`
+  payload consumed by fragments, unit analysis, and LTM graph views.
 - **stdlib dynamic modules**: Built-in model definitions (SMOOTH, DELAY, TREND) that implement stateful functions as sub-models. Their internal causal graphs are static, so LTM scores for them compute once.
 
 ## Architecture
@@ -142,25 +140,25 @@ values get cheap integer-based copy and comparison.
 
 ### Tracked Pipeline
 
-Each compilation stage becomes a tracked function:
+The compilation stages are tracked functions:
 
 ```
 SourceVariable (input)
     |
     v
-parse_variable(db, model, var) -> ParsedVariable          [per-variable]
+parse_source_variable(db, var, project) -> ParsedVariable [per-variable]
     |
     v
-lower_variable(db, model, var) -> LoweredVariable          [per-variable]
+lowered_source_variable(db, var, model, project) -> Arc<Variable<Expr2>>
     |
     v
-variable_dependencies(db, model, var) -> DependencySet      [per-variable]
+variable_direct_dependencies(db, var, project, inputs) -> VariableDeps
     |
     v
 model_dependency_graph(db, model) -> (DepMap, Runlists)     [per-model]
     |
     v
-compile_variable(db, model, var) -> CompiledVarFragment     [per-variable]
+compile_var_fragment(db, var, model, project, inputs) -> CompiledVarFragment
     |                                (symbolic opcodes)
     v
 compute_layout(db, model) -> VariableLayout                 [per-model]
@@ -246,8 +244,7 @@ post-simulation `discover_loops()` is unchanged.
 
 ### Error Handling
 
-Errors move from struct fields (`ModelStage1.errors`, `Variable.errors`) to a
-`#[salsa::accumulator]`:
+Compilation diagnostics use a `#[salsa::accumulator]`:
 
 ```rust
 #[salsa::accumulator]
@@ -258,9 +255,11 @@ pub struct CompilationDiagnostic {
 }
 ```
 
-Tracked functions `accumulate()` errors as a side channel. Callers collect via
-`compile::accumulated::<CompilationDiagnostic>(db)`. Errors don't affect whether
-downstream queries need recomputation.
+Tracked functions accumulate diagnostics as a side channel, and collection
+queries drain them into the public `Diagnostic` form. Parse and unit-parse
+failures also remain on `Variable.errors` and `Variable.unit_errors` until
+fragment construction translates them. These channels must stay explicit until
+diagnostics are unified end to end; no model-wide AST owner centralizes them.
 
 ### libsimlin Integration
 
@@ -287,22 +286,20 @@ tracked functions. Historical f32 golden test data is updated where needed.
 
 ### Current Pipeline Structure
 
-The current pipeline uses a multi-stage transformation:
-`datamodel::Project` -> `ModelStage0` (parse equations) -> `ModelStage1`
-(resolve modules, lower AST) -> `set_dependencies` (transitive deps,
-runlists) -> `Module<F>` (assign offsets, lower expressions) ->
-`CompiledModule<F>` (emit bytecode) -> `CompiledSimulation<F>` (assemble).
-
-Each stage is a monolithic per-model operation. `ModelStage0::new` parses all
-variables at once; `ModelStage1::new` lowers all at once; `Module::new` compiles
-all variables in the model.
+The pipeline is
+`datamodel::Project` -> salsa source inputs -> per-variable parse and Expr2
+lowering -> structured dependency/runlist facts -> per-variable symbolic
+fragments -> assembly -> `CompiledSimulation`. Whole-model queries retain
+layouts, topology, graphs, diagnostics and other lightweight facts, not a
+second collection of equation ASTs. Consumers that require a name map clone
+the `Arc` handles from the per-variable lowering memos.
 
 ### Variable Type System
 
-Variables use a generic enum `Variable<M, E>` that specializes across stages:
-`Variable<datamodel::ModuleReference, Expr0>` in Stage0,
-`Variable<ModuleInput, Expr2>` in Stage1. The new design preserves this
-pattern but wraps each stage's output in salsa tracked structs.
+Variables use a generic `Variable<M, E>` that specializes parsed and lowered
+forms. Parsed values use `Expr0`; production lowering memos use
+`Variable<ModuleInput, Expr2>`. The generic mapping remains local to a
+variable, never a cached whole-model stage.
 
 ### Offset Assignment
 
@@ -329,9 +326,10 @@ LTM treatment through the salsa tracked function graph.
 
 ### Error Storage
 
-Errors are currently stored as fields on `ModelStage1` and `Variable`. This
-mixes error state with computed state. The new design diverges by using salsa
-accumulators, which separate error collection from computation results.
+Parse and unit-parse errors remain on each `Variable`; compiler, dependency,
+unit-inference and assembly diagnostics use salsa accumulators. Diagnostic
+collection translates both into one public surface. This is the residual
+diagnostics boundary, not a reason to introduce a model-wide variable owner.
 
 ## Implementation Phases
 
@@ -389,9 +387,8 @@ not yet read.
 <!-- START_PHASE_3 -->
 ### Phase 3: Per-Variable Parsing and Lowering
 
-**Goal:** Decompose `ModelStage0::new` and `ModelStage1::new` into per-variable
-salsa tracked functions so equation edits only reparse/relower the affected
-variable.
+**Goal:** Keep parsing and lowering in per-variable salsa tracked functions so
+equation edits only reparse/relower the affected variable.
 
 **Components:**
 - `parse_variable` tracked function in `src/simlin-engine/src/model.rs` or new
@@ -401,8 +398,8 @@ variable.
   context, module definitions; returns lowered `Expr2` AST
 - Tracked struct wrappers (`ParsedVariable`, `LoweredVariable`) satisfying
   salsa's `Clone + Eq + Hash + Update` requirements
-- Orchestrator functions that call per-variable tracked functions for all
-  variables in a model, replacing the current monolithic constructors
+- Narrow consumers that select per-variable tracked results directly, with
+  whole-model algorithms carrying shared handles rather than cloned payloads
 - `CompilationDiagnostic` accumulator for parse/lower errors
 
 **Dependencies:** Phase 2
@@ -424,8 +421,8 @@ that don't change dependencies skip dependency recomputation.
 - `model_dependency_graph` tracked function -- per-model, aggregates
   per-variable dependency sets, computes transitive dependencies, produces
   topologically sorted runlists
-- Replaces current `set_dependencies()` method on `ModelStage1` and the
-  `all_deps()` recursive function
+- Keeps dependency ordering in the structured per-model graph rather than on a
+  lowered model object
 - Circular dependency detection as a separate validation pass using
   accumulators
 

@@ -3237,7 +3237,7 @@ fn arrayed_var_from_text(
 
     let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let mut implicit_vars = Vec::new();
-    let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
+    let parsed = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
         &crate::variable::ParseContext::new(
             &crate::dimensions::DimensionsContext::from(dims),
             &units_ctx,
@@ -3248,12 +3248,12 @@ fn arrayed_var_from_text(
     );
     let dim_ctx = crate::dimensions::DimensionsContext::from(dims);
     let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
+    let scope = crate::model::LoweringScope {
         models: &models,
         dimensions: &dim_ctx,
         model_name: "test",
     };
-    crate::model::lower_variable(&scope, &stage0)
+    crate::model::lower_variable(&scope, &parsed)
 }
 
 /// Look up the slot equation for `element` in an `Equation::Arrayed`,
@@ -3309,7 +3309,7 @@ fn scalar_aux_from_text(ident: &str, eqn_text: &str) -> Variable {
     });
     let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let mut implicit_vars = Vec::new();
-    let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
+    let parsed = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
         &crate::variable::ParseContext::new(
             &crate::dimensions::DimensionsContext::default(),
             &units_ctx,
@@ -3320,12 +3320,12 @@ fn scalar_aux_from_text(ident: &str, eqn_text: &str) -> Variable {
     );
     let dim_ctx = crate::dimensions::DimensionsContext::from(&[][..]);
     let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
+    let scope = crate::model::LoweringScope {
         models: &models,
         dimensions: &dim_ctx,
         model_name: "test",
     };
-    crate::model::lower_variable(&scope, &stage0)
+    crate::model::lower_variable(&scope, &parsed)
 }
 
 /// GH #311 end-to-end through the generator chain: a target whose
@@ -3343,8 +3343,8 @@ fn generate_link_score_equation_for_link_empty_target_is_err() {
     let from_var = scalar_aux_from_text("source", "1");
 
     let mut all_vars = HashMap::new();
-    all_vars.insert(from.clone(), from_var);
-    all_vars.insert(to.clone(), to_var.clone());
+    all_vars.insert(from.clone(), std::sync::Arc::new(from_var));
+    all_vars.insert(to.clone(), std::sync::Arc::new(to_var.clone()));
 
     let result = generate_link_score_equation_for_link(
         &from,
@@ -3377,9 +3377,12 @@ fn generate_link_score_equation_for_link_normal_target_is_ok() {
     let other_var = scalar_aux_from_text("other", "2");
 
     let mut all_vars = HashMap::new();
-    all_vars.insert(from.clone(), from_var);
-    all_vars.insert(Ident::<Canonical>::new("other"), other_var);
-    all_vars.insert(to.clone(), to_var.clone());
+    all_vars.insert(from.clone(), std::sync::Arc::new(from_var));
+    all_vars.insert(
+        Ident::<Canonical>::new("other"),
+        std::sync::Arc::new(other_var),
+    );
+    all_vars.insert(to.clone(), std::sync::Arc::new(to_var.clone()));
 
     let equation = generate_link_score_equation_for_link(
         &from,
@@ -3506,7 +3509,7 @@ fn lower_dm_var(
 ) -> Variable {
     let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
     let mut implicit_vars = Vec::new();
-    let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
+    let parsed = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
         &crate::variable::ParseContext::new(
             &crate::dimensions::DimensionsContext::from(dims),
             &units_ctx,
@@ -3517,12 +3520,12 @@ fn lower_dm_var(
     );
     let dim_ctx = crate::dimensions::DimensionsContext::from(dims);
     let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
+    let scope = crate::model::LoweringScope {
         models: &models,
         dimensions: &dim_ctx,
         model_name: "test",
     };
-    crate::model::lower_variable(&scope, &stage0)
+    crate::model::lower_variable(&scope, &parsed)
 }
 
 /// GH #910: a scalar WITH-LOOKUP target's link-score partial must be
@@ -3538,9 +3541,12 @@ fn link_score_for_with_lookup_scalar_target_wraps_partial_in_lookup() {
     let other_var = scalar_aux_from_text("other", "2");
 
     let mut all_vars = HashMap::new();
-    all_vars.insert(from.clone(), from_var);
-    all_vars.insert(Ident::<Canonical>::new("other"), other_var);
-    all_vars.insert(to.clone(), to_var.clone());
+    all_vars.insert(from.clone(), std::sync::Arc::new(from_var));
+    all_vars.insert(
+        Ident::<Canonical>::new("other"),
+        std::sync::Arc::new(other_var),
+    );
+    all_vars.insert(to.clone(), std::sync::Arc::new(to_var.clone()));
 
     let equation = generate_link_score_equation_for_link(
         &from,
@@ -3582,8 +3588,8 @@ fn link_score_for_with_lookup_a2a_target_pins_shared_table() {
     let from_var = scalar_aux_from_text("source", "1");
 
     let mut all_vars = HashMap::new();
-    all_vars.insert(from.clone(), from_var);
-    all_vars.insert(to.clone(), to_var.clone());
+    all_vars.insert(from.clone(), std::sync::Arc::new(from_var));
+    all_vars.insert(to.clone(), std::sync::Arc::new(to_var.clone()));
 
     let equation = generate_link_score_equation_for_link(
         &from,
@@ -3631,8 +3637,8 @@ fn link_score_for_with_lookup_arrayed_target_wraps_per_slot() {
     let from_var = scalar_aux_from_text("source", "1");
 
     let mut all_vars = HashMap::new();
-    all_vars.insert(from.clone(), from_var);
-    all_vars.insert(to.clone(), to_var.clone());
+    all_vars.insert(from.clone(), std::sync::Arc::new(from_var));
+    all_vars.insert(to.clone(), std::sync::Arc::new(to_var.clone()));
 
     let equation = generate_link_score_equation_for_link(
         &from,
@@ -3960,7 +3966,7 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
         uid: None,
         compat: crate::datamodel::Compat::default(),
     });
-    let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
+    let parsed = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
         &crate::variable::ParseContext::new(
             &crate::dimensions::DimensionsContext::from(dims.as_slice()),
             &units_ctx,
@@ -3971,12 +3977,12 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
     );
     let dim_ctx = crate::dimensions::DimensionsContext::from(dims.as_slice());
     let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
+    let scope = crate::model::LoweringScope {
         models: &models,
         dimensions: &dim_ctx,
         model_name: "test",
     };
-    let a2a_to = crate::model::lower_variable(&scope, &stage0);
+    let a2a_to = crate::model::lower_variable(&scope, &parsed);
     let to_a2a = Ident::<Canonical>::new("a2a_target");
     let equation = generate_auxiliary_to_auxiliary_equation(
         &from,

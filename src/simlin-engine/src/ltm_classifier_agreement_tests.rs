@@ -151,8 +151,8 @@ use crate::db::ltm_ir::{
     model_ltm_reference_sites,
 };
 use crate::db::{
-    DiagnosticSeverity, SimlinDb, collect_all_diagnostics, project_dimensions_context,
-    reconstruct_model_variables, sync_from_datamodel,
+    DiagnosticSeverity, SimlinDb, collect_all_diagnostics, model_lowered_variables,
+    project_dimensions_context, sync_from_datamodel,
 };
 use crate::dimensions::{Dimension, DimensionsContext};
 use crate::ltm_agg::{AxisRead, ReducerKind, reducer_kind_from_name};
@@ -240,7 +240,7 @@ fn expr0_reducer_routing_twin_matches_production() {
 /// themselves are classified afterward by the two families' own classifiers.
 fn collect_expr0_occurrences(
     expr: &Expr0,
-    variables: &HashMap<Ident<Canonical>, Variable>,
+    variables: &crate::variable::LoweredVariableMap,
     in_reducer: bool,
     path: &mut Vec<u16>,
     out: &mut Vec<Expr0Occurrence>,
@@ -351,7 +351,7 @@ fn collect_expr0_occurrences(
 /// The Expr2 dimension list of a source variable (empty for a scalar / absent
 /// source), the shared input both `source_dim_names` and `source_dim_elements`
 /// derive from.
-fn source_dims_of(variables: &HashMap<Ident<Canonical>, Variable>, source: &str) -> Vec<Dimension> {
+fn source_dims_of(variables: &crate::variable::LoweredVariableMap, source: &str) -> Vec<Dimension> {
     variables
         .get(&Ident::<Canonical>::new(source))
         .and_then(|v| v.get_dimensions())
@@ -381,7 +381,7 @@ fn target_iterated_dims_of(to_var: &Variable) -> Vec<String> {
 fn classify_expr0_occurrence(
     occ: &Expr0Occurrence,
     to_var: &Variable,
-    variables: &HashMap<Ident<Canonical>, Variable>,
+    variables: &crate::variable::LoweredVariableMap,
     dim_ctx: &DimensionsContext,
 ) -> (RefShape, Vec<OccurrenceAxis>) {
     let Some(indices) = &occ.indices else {
@@ -437,7 +437,7 @@ fn classify_expr0_occurrence(
 fn expr0_occurrences_for_target(
     to_name: &str,
     to_var: &Variable,
-    variables: &HashMap<Ident<Canonical>, Variable>,
+    variables: &crate::variable::LoweredVariableMap,
 ) -> Vec<Expr0Occurrence> {
     let mut out = Vec::new();
     let Some(ast) = to_var.ast() else {
@@ -644,7 +644,7 @@ fn pin_edge(compared: &ComparedShapes, from: &str, to: &str, expected: &[RefShap
 fn assert_occurrence_stream_aligns(
     to_str: &str,
     to_var: &Variable,
-    variables: &HashMap<Ident<Canonical>, Variable>,
+    variables: &crate::variable::LoweredVariableMap,
     dim_ctx: &DimensionsContext,
     ir: &crate::db::ltm_ir::LtmReferenceSitesResult,
     expr0_occs: &[Expr0Occurrence],
@@ -753,7 +753,7 @@ fn assert_occurrence_streams_align(tp: &TestProject) {
          silently vacate the alignment sweep (empty occurrence stream): {errors:?}"
     );
 
-    let variables = reconstruct_model_variables(&db, model, project);
+    let variables = model_lowered_variables(&db, model, project);
     let dim_ctx = project_dimensions_context(&db, project);
     let ir = model_ltm_reference_sites(&db, model, project);
 
@@ -809,7 +809,7 @@ fn assert_lowering_matches_reparse_everywhere(tp: &TestProject) -> usize {
          contributes no slot to the sweep: {errors:?}"
     );
 
-    let variables = reconstruct_model_variables(&db, model, project);
+    let variables = model_lowered_variables(&db, model, project);
     let mut names: Vec<&Ident<Canonical>> = variables.keys().collect();
     names.sort();
     let mut slots = 0usize;
@@ -1033,7 +1033,7 @@ fn assert_classifier_families_agree(tp: &TestProject) -> ComparedShapes {
     let model = sync.models["main"].source;
     let project = sync.project;
 
-    let variables = reconstruct_model_variables(&db, model, project);
+    let variables = model_lowered_variables(&db, model, project);
     let dim_ctx = project_dimensions_context(&db, project);
 
     // Anchor: the edges the IR (`model_ltm_reference_sites`) records must be
@@ -1592,7 +1592,7 @@ fn agree_reducer_wildcard_is_excluded_but_classified_wildcard() {
     let sync = sync_from_datamodel(&db, &datamodel);
     let model = sync.models["main"].source;
     let project = sync.project;
-    let variables = reconstruct_model_variables(&db, model, project);
+    let variables = model_lowered_variables(&db, model, project);
     let dim_ctx = project_dimensions_context(&db, project);
 
     let to_var = &variables[&Ident::<Canonical>::new("total_star")];

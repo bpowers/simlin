@@ -2391,7 +2391,7 @@ fn equation_only_edit_recompiles_only_the_edited_fragment() {
     );
 
     // ...but the blast radius is one hop wide, not zero: `explicit_fragment_input`
-    // builds its dependency-granular mini `ModelStage0` by PARSING each
+    // builds its dependency-granular mini `LoweringModel` by PARSING each
     // dependency, so a consumer's fragment depends on its dependencies'
     // equation text and not merely on their shape. Editing `k`'s constant
     // therefore recompiles `probe` as well.
@@ -2423,7 +2423,7 @@ fn equation_only_edit_recompiles_only_the_edited_fragment() {
         explicit_execs(&k_execs),
         vec!["k", "probe"],
         "editing `k` recompiles `k` AND its one consumer `probe`, whose mini \
-         ModelStage0 re-parses `k`; it must not reach any further"
+         LoweringModel re-parses `k`; it must not reach any further"
     );
 }
 

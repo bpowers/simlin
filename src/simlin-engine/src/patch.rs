@@ -9,7 +9,6 @@ use crate::common::{
     Canonical, CanonicalElementName, Error, ErrorCode, ErrorKind, Ident, RawIdent, Result,
 };
 use crate::datamodel::{self, Variable};
-use std::collections::HashMap;
 
 /// A patch to apply to a project. Contains project-level operations
 /// (like changing sim specs or adding models) and per-model patches
@@ -527,8 +526,7 @@ fn apply_rename_variable(
         .models
         .get(&*canonicalize(model_name))
         .ok_or_else(|| Error::new(ErrorKind::Model, ErrorCode::BadModelName, None))?;
-    let compiled_vars =
-        crate::db::reconstruct_model_variables(&db, source_model.source, sync.project);
+    let compiled_vars = crate::db::model_lowered_variables(&db, source_model.source, sync.project);
 
     let model = get_model_mut(project, model_name)?;
 
@@ -635,7 +633,7 @@ fn retarget_parent_module_dst(
 
 fn rename_model_equations(
     model: &mut datamodel::Model,
-    compiled_vars: &HashMap<Ident<Canonical>, crate::variable::Variable>,
+    compiled_vars: &crate::variable::LoweredVariableMap,
     old_ident: &Ident<Canonical>,
     new_ident: &Ident<Canonical>,
 ) {

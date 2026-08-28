@@ -4,22 +4,15 @@
 
 // pattern: Imperative Shell
 //
-// Salsa-tracked unit-checking orchestration: it reads the cached
-// ModelStage0/ModelStage1 representations (`db::stages`), runs the pure unit
-// inference (`units_infer`) and consistency checking (`units_check`) cores,
-// and accumulates the resulting diagnostics. The dimensional-analysis logic
-// itself is the Functional Core in `units.rs`/`units_infer.rs`/`units_check.rs`;
-// this module only wires it into the salsa graph.
+// Salsa-tracked orchestration borrows the per-variable lowering memos into a
+// stack-local `UnitModel`, runs the pure inference (`units_infer`) and
+// consistency (`units_check`) cores, and accumulates their diagnostics. No
+// whole-model equation value crosses a query boundary.
 //
-// It constructs no model stage of its own -- `db::stages` owns that -- with ONE
-// deliberate carve-out: `check_conveyor_param_units` clones the cached Stage0,
-// inserts its synthetic `<len>`/`<capacity>`/`<in_limit>`/leak-fraction auxes
-// into the clone, and calls `ModelStage1::new` on the result. That
-// `ModelStage1::new` call is NOT an unmigrated construction site and must not be
-// replaced with a read of `db::stages::model_stage1`: the whole point is that
-// the augmented stage is a throwaway. Those auxes exist only to be unit-checked,
-// and adding them to a cached stage would feed their constraints into every
-// other reader of that memo -- inference and the ordinary unit check included.
+// Conveyor parameter expressions are the one transient augmentation. They are
+// parsed and lowered after the ordinary unit model is built, then borrowed only
+// by that parameter check; they must never join the cached per-variable inputs
+// or contribute constraints to ordinary inference.
 
 //! Per-model unit inference and checking as a salsa-tracked query.
 //!
@@ -38,6 +31,7 @@
 //! `db::model_all_diagnostics` reaches it via `crate::db::units::...`.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use salsa::Accumulator;
 
@@ -45,9 +39,40 @@ use crate::common::{Canonical, Ident};
 use crate::datamodel;
 use crate::db::{
     CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceModel,
-    SourceProject, SourceVariable, model_scope_models, model_scope_stage0, model_stage0,
-    model_stage1, project_dimensions_context, project_units_context, source_model_is_stdlib,
+    SourceProject, SourceVariable, lowered_implicit_variable, lowered_source_variable,
+    model_implicit_var_info, model_scope_models, project_dimensions_context, project_units_context,
+    source_model_is_stdlib,
 };
+
+/// Build one transient unit-analysis view from memo-owned per-variable lowered
+/// values. The view clones only `Arc` handles and is never cached itself.
+pub(crate) fn unit_model(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> crate::model::UnitModel {
+    let mut variables = HashMap::new();
+    for source_var in model.variables(db).values() {
+        let lowered = lowered_source_variable(db, *source_var, model, project);
+        variables.insert(lowered.ident.clone(), std::sync::Arc::clone(lowered));
+    }
+    let mut implicit_names: Vec<_> = model_implicit_var_info(db, model, project)
+        .keys()
+        .cloned()
+        .collect();
+    implicit_names.sort_unstable();
+    for name in implicit_names {
+        if let Some(lowered) = lowered_implicit_variable(db, model, project, name).as_ref() {
+            variables.insert(lowered.ident.clone(), std::sync::Arc::clone(lowered));
+        }
+    }
+    crate::model::UnitModel {
+        name: Ident::new(model.name(db)),
+        variables,
+        is_macro: model.macro_spec(db).is_some(),
+        macro_params: crate::model::macro_param_idents(model.macro_spec(db).as_ref()),
+    }
+}
 
 /// Collect the identifiers that must share units because they sit in the
 /// "value branches" of an `if isModuleInput(x) then x else y` conditional.
@@ -161,43 +186,24 @@ fn init_value_equivalence_group(
 /// Per-model tracked function that performs unit inference and checking,
 /// accumulating unit warnings/errors through the salsa accumulator.
 ///
-/// Reads the salsa-cached `ModelStage1` (`db::stages`) of every model in this
-/// one's module-reachable scope, then runs the same unit inference and checking
-/// pipeline as the old `run_default_model_checks` callback. Unit mismatches are
-/// accumulated as DiagnosticSeverity::Warning to match the old-path behavior
-/// where unit issues don't block simulation.
-///
-/// This function used to BUILD both stages for every project model on every
-/// call, so collecting a project's diagnostics was quadratic in the model count
-/// (GH #966). It then read the cached queries for every project model, which
-/// fixed the builds but left the reads quadratic and, worse, made this check
-/// depend on every model in the project -- so any edit anywhere re-ran every
-/// model's unit check. It now reads `db::model_scope_models`: this model plus the
-/// models it can reach through module instantiation, which is exactly what
-/// `units_infer` can consult (`self.models.get(model_name)`, for module targets,
-/// recursing along the same edges) plus what the stdlib-argument check below
-/// looks up (this model's own direct module targets).
+/// Borrows the per-variable lowered values for this model and its transitive
+/// module targets into stack-local views. This is exactly the graph
+/// `units_infer` can consult while following module inputs and outputs; an
+/// unrelated model is outside the query's dependency cone (GH #966).
+/// Unit mismatches accumulate as warnings because they do not block simulation.
 ///
 /// Stdlib (implicit) models are skipped because they are generic
 /// templates that only make sense when instantiated with specific inputs.
 #[salsa::tracked]
 pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject) {
     use crate::common::{ErrorCode, ErrorKind};
-    use crate::model::ModelStage1;
-
-    #[cfg(test)]
-    crate::db::stages::note_unit_check_execution();
 
     // Skip stdlib models -- they are generic and unit checking doesn't
     // apply until instantiated with concrete inputs.
     //
-    // The test is `db::stages`', shared rather than re-spelled here (GH #988).
-    // This gate used to accept the bare `stdlib\u{205A}` prefix while the stage
-    // query additionally required the suffix to name a real stdlib model, so
-    // the two disagreed about an imported `stdlib\u{205A}<unknown>` model: it
-    // was skipped here but staged as a user model there. The strict rule is the
-    // right one for both -- such a model is a user model, and this gate exists
-    // to skip generic templates, which it is not -- so it is now unit-checked.
+    // The shared gate requires the suffix to name a real stdlib model. An
+    // imported `stdlib\u{205A}<unknown>` model is therefore treated as a user
+    // model and checked rather than mistaken for a generic template (GH #988).
     if source_model_is_stdlib(db, model) {
         return;
     }
@@ -214,16 +220,14 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
     let model_name = model.name(db).clone();
     let units_ctx = project_units_context(db, project);
 
-    // Read the lowered stage of every model in this one's module-reachable
-    // scope, so that cross-module unit inference constraints (module
+    // Borrow each model in this one's module-reachable scope, so that
+    // cross-module unit inference constraints (module
     // inputs/outputs) can resolve submodel variable types. A stdlib model is in
     // the map when this model instantiates one, on the same rule as any other
     // module target.
     //
-    // The map is built from `model_scope_models`' resolved handles WITHOUT the
-    // self-entry repair `model_scope_stage0` performs, because the lookup below
-    // depends on the difference. Be precise about what that difference is: what
-    // can be missing is the NAME, not this handle. `model_scope_models` seeds the
+    // The map is built from `model_scope_models`' resolved handles. What can be
+    // missing is the NAME, not this handle. `model_scope_models` seeds the
     // scope with `project.models(db)`'s entry for the root's canonical name
     // whenever the project holds that name, so
     //
@@ -231,23 +235,21 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
     //     handle was renamed or deleted while a caller kept it), and the lookup
     //     below then returns `None` -- the signal that there is nothing to check;
     //   - if a DIFFERENT handle occupies the name, the map holds that other
-    //     model's Stage1 and `target_model` is that model, not this one.
-    //
-    // Both behaviours predate the scope narrowing -- the whole-project map was
-    // keyed the same way -- and neither is changed by it.
-    let models_s1: HashMap<Ident<Canonical>, &ModelStage1> = model_scope_models(db, model, project)
-        .values()
-        .map(|src_model| {
-            let s1 = model_stage1(db, *src_model, project);
-            (s1.name.clone(), s1)
-        })
-        .collect();
+    //     model's unit view and `target_model` is that model, not this one.
+    let unit_models: HashMap<Ident<Canonical>, crate::model::UnitModel> =
+        model_scope_models(db, model, project)
+            .values()
+            .map(|src_model| {
+                let unit_model = unit_model(db, *src_model, project);
+                (unit_model.name.clone(), unit_model)
+            })
+            .collect();
 
     // Find the target model in the lowered map. A `SourceModel` whose canonical
     // name the project no longer holds has nothing to check here.
     let target_ident = Ident::<Canonical>::new(&model_name);
-    let target_model = match models_s1.get(&target_ident) {
-        Some(m) => *m,
+    let target_model = match unit_models.get(&target_ident) {
+        Some(m) => m,
         None => return,
     };
 
@@ -270,7 +272,7 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
     // produce hundreds of internal constraint contradictions, and emitting one
     // warning each would flood the report. The full conflict list remains
     // available on the `InferenceResult` for callers that want it.
-    let inference = crate::units_infer::infer(&models_s1, units_ctx, target_model);
+    let inference = crate::units_infer::infer(&unit_models, units_ctx, target_model);
     if has_declared_units && !inference.conflicts.is_empty() {
         // The diagnostic detail is user-facing (it reaches the GUI's error
         // panel): a plain-language sentence naming the involved variables,
@@ -333,7 +335,7 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
                 if !sub_model_name.as_str().starts_with("stdlib\u{205A}") {
                     continue;
                 }
-                let submodel = match models_s1.get(sub_model_name) {
+                let submodel = match unit_models.get(sub_model_name) {
                     Some(m) => m,
                     None => continue,
                 };
@@ -475,8 +477,8 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
 /// error, so the model still simulates through `queue_compile::build_vm`.
 ///
 /// A conveyor's `<len>`/`<capacity>`/`<in_limit>` and its leak flows' fractions
-/// are expression STRINGS on the stock/flow `datamodel::Compat`, not
-/// `ModelStage1` variables, so they must be parsed and lowered here to be
+/// are expression strings on the stock/flow `datamodel::Compat`, not ordinary
+/// variables, so they must be parsed and lowered here to be
 /// unit-checked. We synthesize one hidden aux per parameter expression, lower
 /// them together in the target model's context (so their variable references
 /// resolve to real declared-or-inferred units), then compare each computed unit
@@ -502,15 +504,15 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
 /// (a `DoesNotExist` verdict), never reported as a mismatch.
 // The lowered target model, its model name and the inferred-units map are all
 // already resolved by the single caller (`check_model_units`), so they are
-// passed rather than re-derived. The Stage0 scope and the dimension queries are
-// read here instead, ONCE, and only past the early return below: a model with no
-// conveyor -- almost every model -- then pays nothing for them at all.
+// passed rather than re-derived. The transient parsed scope and dimension query
+// are built only past the early return below, so a model with no conveyor pays
+// nothing for them.
 fn check_conveyor_param_units(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
     model_name: &str,
-    target_model: &crate::model::ModelStage1,
+    target_model: &crate::model::UnitModel,
     units_ctx: &crate::units::Context,
     inferred_units: &HashMap<Ident<Canonical>, crate::datamodel::UnitMap>,
 ) {
@@ -665,62 +667,112 @@ fn check_conveyor_param_units(
         return;
     }
 
-    // Lower every synthesized parameter aux in the target model's context. We
-    // build a throwaway augmented ModelStage1 from a CLONE of the cached Stage0
-    // rather than perturbing either the real `target_model` (which drives
-    // inference and the ordinary unit check) or the cached stage itself: the
-    // synthetic auxes must not add constraints to the model under analysis, and
-    // must never reach another reader of the memo.
+    // Lower every synthesized parameter aux in the target model's context. The
+    // scope borrows source parse memos and owns only the generated helpers, so
+    // the expressions never enter the model's cached unit-analysis inputs.
     let dim_ctx = project_dimensions_context(db, project);
-    let mut aug_ms0 = model_stage0(db, model, project).clone();
+    let make_lowering_model = |source_model: SourceModel| {
+        let mut variables = HashMap::new();
+        for source_var in source_model.variables(db).values() {
+            let parsed = crate::db::parse_source_variable(db, *source_var, project);
+            variables.insert(
+                parsed.variable.ident.clone(),
+                std::borrow::Cow::Borrowed(&parsed.variable),
+            );
+            for implicit in &parsed.implicit_vars {
+                let parsed_implicit = implicit.parsed_variable(dim_ctx);
+                variables.insert(
+                    parsed_implicit.ident.clone(),
+                    std::borrow::Cow::Owned(parsed_implicit),
+                );
+            }
+        }
+        crate::model::LoweringModel { variables }
+    };
+    let mut lowering_models: HashMap<Ident<Canonical>, crate::model::LoweringModel<'_>> =
+        model_scope_models(db, model, project)
+            .values()
+            .map(|source_model| {
+                (
+                    Ident::new(source_model.name(db)),
+                    make_lowering_model(*source_model),
+                )
+            })
+            .collect();
+    lowering_models
+        .entry(Ident::new(model_name))
+        .or_insert_with(|| make_lowering_model(model));
+
     let synth_ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
     for dm_var in &synth_dm_vars {
         let mut dummy: Vec<crate::capture::ImplicitVar> = Vec::new();
         let vs0 =
             crate::variable::parse_var(&synth_ctx, dm_var, &mut dummy, |mi| Ok(Some(mi.clone())));
-        aug_ms0.variables.insert(Ident::new(vs0.ident()), vs0);
+        lowering_models
+            .get_mut(&Ident::new(model_name))
+            .expect("the target lowering scope contains itself")
+            .variables
+            .insert(Ident::new(vs0.ident()), std::borrow::Cow::Owned(vs0));
     }
-    // The scope holds each reachable model's UNAUGMENTED Stage0 -- including the
-    // target's, so the synthetic auxes stay invisible to dimension resolution
-    // exactly as they were before the stages were cached. It is the same scope
-    // `model_stage1` lowers the real variables in, so a parameter expression
-    // resolves a `module·output` reference exactly as an ordinary equation does.
-    let models_s0 = model_scope_stage0(db, model, project);
-    let scope = crate::model::ScopeStage0 {
-        models: &models_s0,
+    let scope = crate::model::LoweringScope {
+        models: &lowering_models,
         dimensions: dim_ctx,
-        model_name: aug_ms0.ident.as_str(),
+        model_name,
     };
-    let aug_s1 = crate::model::ModelStage1::new(&scope, &aug_ms0);
+    let lowered_params: HashMap<Ident<Canonical>, Arc<crate::variable::Variable>> = synth_params
+        .iter()
+        .map(|param| {
+            let parsed = &lowering_models[&Ident::new(model_name)].variables[&param.ident];
+            (
+                param.ident.clone(),
+                Arc::new(crate::model::lower_variable(&scope, parsed)),
+            )
+        })
+        .collect();
+    let mut unit_variables = target_model.variables.clone();
+    unit_variables.extend(
+        lowered_params
+            .iter()
+            .map(|(name, variable)| (name.clone(), Arc::clone(variable))),
+    );
+    let aug_unit_model = crate::model::UnitModel {
+        name: target_model.name.clone(),
+        variables: unit_variables,
+        is_macro: target_model.is_macro,
+        macro_params: target_model.macro_params.clone(),
+    };
 
     for param in &synth_params {
         // Extract the lowered parameter expression. A malformed expression has
         // no AST (it surfaces as a separate compile error), so there is nothing
         // to unit-check -- skip it.
-        let expr = match aug_s1.variables.get(&param.ident).and_then(|v| v.ast()) {
+        let expr = match lowered_params.get(&param.ident).and_then(|v| v.ast()) {
             Some(Ast::Scalar(expr)) | Some(Ast::ApplyToAll(_, expr)) => expr,
             _ => continue,
         };
 
-        let diagnostic_detail =
-            match crate::units_check::evaluate_expr_units(units_ctx, inferred_units, &aug_s1, expr)
-            {
-                // A determinate unit that disagrees with what the block requires.
-                Ok(Units::Explicit(actual)) if actual != param.expected => Some(format!(
-                    "conveyor '{}' {}: computed units '{}' don't match the expected units '{}'",
-                    param.stock, param.label, actual, param.expected
-                )),
-                // Matches, or a pure constant (compatible with any expected unit).
-                Ok(_) => None,
-                // A dependency's units are unknown -- skip, not a dimensional error.
-                Err(UnitError::ConsistencyError(ErrorCode::DoesNotExist, _, _)) => None,
-                // An internal dimensional inconsistency in the expression itself
-                // (e.g. adding incompatible units); surface it against the conveyor.
-                Err(err) => Some(format!(
-                    "conveyor '{}' {}: {}",
-                    param.stock, param.label, err
-                )),
-            };
+        let diagnostic_detail = match crate::units_check::evaluate_expr_units(
+            units_ctx,
+            inferred_units,
+            &aug_unit_model,
+            expr,
+        ) {
+            // A determinate unit that disagrees with what the block requires.
+            Ok(Units::Explicit(actual)) if actual != param.expected => Some(format!(
+                "conveyor '{}' {}: computed units '{}' don't match the expected units '{}'",
+                param.stock, param.label, actual, param.expected
+            )),
+            // Matches, or a pure constant (compatible with any expected unit).
+            Ok(_) => None,
+            // A dependency's units are unknown -- skip, not a dimensional error.
+            Err(UnitError::ConsistencyError(ErrorCode::DoesNotExist, _, _)) => None,
+            // An internal dimensional inconsistency in the expression itself
+            // (e.g. adding incompatible units); surface it against the conveyor.
+            Err(err) => Some(format!(
+                "conveyor '{}' {}: {}",
+                param.stock, param.label, err
+            )),
+        };
 
         if let Some(detail) = diagnostic_detail {
             CompilationDiagnostic(Diagnostic {

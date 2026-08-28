@@ -24,7 +24,7 @@ use std::collections::HashSet;
 use super::*;
 use crate::ast::print_eqn;
 use crate::capture::{ImplicitModule, ImplicitVar, synthetic_ident};
-use crate::model::VariableStage0;
+use crate::model::ParsedVariable;
 use crate::test_common::TestProject;
 use crate::variable::{ParseContext, VarKind, parse_var};
 
@@ -1318,14 +1318,14 @@ fn every_synthesized_module_targets_a_real_stdlib_model_and_port() {
     }
 }
 
-/// Every typed helper's `variable_stage0` agrees with `parse_var` over an
+/// Every typed helper's `parsed_variable` agrees with `parse_var` over an
 /// equivalent datamodel source.
 ///
 /// Inputs come from the production salsa parse. The test-only datamodel value
 /// is built field-for-field from the emitted helper and passed through the same
 /// `parse_var` production entry point ordinary variables use.
 #[test]
-fn every_helper_stage0_matches_parsing_its_equivalent_datamodel_variable() {
+fn every_helper_parsed_value_matches_its_equivalent_datamodel_variable() {
     for row in ROWS {
         let (tp, var) = model_for(row);
         let dm = tp.build_datamodel();
@@ -1339,7 +1339,7 @@ fn every_helper_stage0_matches_parsing_its_equivalent_datamodel_variable() {
             let (actual, equivalent) = match &helper {
                 ImplicitVar::Capture(_) => continue,
                 ImplicitVar::HoistedArg(arg) => (
-                    arg.variable_stage0(dim_ctx),
+                    arg.parsed_variable(dim_ctx),
                     datamodel::Variable::Aux(datamodel::Aux {
                         ident: arg.ident().to_string(),
                         equation: datamodel::Equation::Scalar(print_eqn(arg.arg())),
@@ -1352,7 +1352,7 @@ fn every_helper_stage0_matches_parsing_its_equivalent_datamodel_variable() {
                     }),
                 ),
                 ImplicitVar::Module(module) => (
-                    module.variable_stage0(),
+                    module.parsed_variable(),
                     datamodel::Variable::Module(datamodel::Module {
                         ident: module.ident().to_string(),
                         model_name: module.model_name().to_string(),
@@ -1373,16 +1373,16 @@ fn every_helper_stage0_matches_parsing_its_equivalent_datamodel_variable() {
                 nested.is_empty(),
                 "a helper must not synthesize another helper"
             );
-            assert_stage0_equivalent(row, helper.ident(), &actual, &expected);
+            assert_parsed_equivalent(row, helper.ident(), &actual, &expected);
         }
     }
 }
 
-fn assert_stage0_equivalent(
+fn assert_parsed_equivalent(
     row: &ModuleRow,
     ident: &str,
-    actual: &VariableStage0,
-    expected: &VariableStage0,
+    actual: &ParsedVariable,
+    expected: &ParsedVariable,
 ) {
     let what = row.covers;
     assert_eq!(actual.ident, expected.ident, "{what}: ident of {ident}");

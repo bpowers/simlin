@@ -1798,12 +1798,9 @@ fn a_dimension_name_index_is_not_frozen_when_the_axis_is_known() {
 /// score's memo looks untouched whether its body ran or not. The counter lives
 /// in `db::ltm::compile` beside the query.
 ///
-/// The failure this pins is not hypothetical. Routing
-/// `reconstruct_single_variable` straight through the whole-model
-/// `reconstruct_model_variables` map -- which is what a naive "read the cached
-/// map" refactor does -- makes every link score depend on every variable's
-/// lowered form, so ONE unrelated equation edit regenerates all of them. On a
-/// model with thousands of links that is a full LTM rebuild per keystroke.
+/// Each endpoint lookup must stay on the direct per-variable lowering query.
+/// Reading a whole-model lowered map here would make every link score depend on
+/// every equation and turn one unrelated edit into a full LTM rebuild.
 #[test]
 fn an_unrelated_equation_edit_does_not_regenerate_every_link_score() {
     use crate::db::{
@@ -1930,7 +1927,7 @@ fn unrelated_snapshot_helper_does_not_regenerate_implicit_endpoint_score() {
 }
 
 /// Module-edge scores consume per-target occurrences, per-instance output
-/// ports, and the module instance's per-name reconstruction. Adding a hidden
+/// ports, and the module instance's per-name lowered handle. Adding a hidden
 /// helper and a new output read for a different module must not execute an
 /// unchanged fallback score.
 #[test]

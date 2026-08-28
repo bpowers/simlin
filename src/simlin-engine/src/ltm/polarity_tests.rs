@@ -102,12 +102,18 @@ fn test_provable_value_sign() {
     // parsed `-5` is a negation of the literal 5. The end-to-end twin
     // (`test_mul_negative_constant_valued_cofactor_flips`, which goes
     // through the real parse) is what pins that correspondence.
-    let mut variables: HashMap<Ident<Canonical>, Variable> = HashMap::new();
-    variables.insert(Ident::new("k_neg"), scalar_var("k_neg", neg(cnst(5.0))));
-    variables.insert(Ident::new("k_pos"), scalar_var("k_pos", cnst(5.0)));
+    let mut variables: crate::variable::LoweredVariableMap = HashMap::new();
+    variables.insert(
+        Ident::new("k_neg"),
+        std::sync::Arc::new(scalar_var("k_neg", neg(cnst(5.0)))),
+    );
+    variables.insert(
+        Ident::new("k_pos"),
+        std::sync::Arc::new(scalar_var("k_pos", cnst(5.0))),
+    );
     variables.insert(
         Ident::new("k_dyn"),
-        scalar_var(
+        std::sync::Arc::new(scalar_var(
             "k_dyn",
             Expr2::Op2(
                 BinaryOp::Mul,
@@ -116,7 +122,7 @@ fn test_provable_value_sign() {
                 None,
                 Loc::default(),
             ),
-        ),
+        )),
     );
 
     let vars = Some(&variables);

@@ -5289,13 +5289,10 @@ mod cross_module_array_reference_tests {
     /// is an array, and the Expr2 -> Expr3 lowering has to see its dimensions to
     /// resolve the wildcard.
     ///
-    /// It did not, so `SUM(m.arr[*])` -- the ordinary way to reduce over a
-    /// sub-model's arrayed output, and the shape `db::stages_tests`'
-    /// `arrayed_module_project` fixture is built from -- was rejected as
-    /// `CantSubscriptScalar` and the whole variable failed to compile. That
-    /// fixture never noticed because it stops at Stage1 lowering, which uses
-    /// `ast::ArrayContext`, whose own `get_dimensions` always followed the
-    /// module variable.
+    /// This production compilation assertion is load-bearing: a shape-only
+    /// unit-analysis walk does not prove that fragment dependency shapes reach
+    /// Expr2 -> Expr3 lowering. Without the qualified array shape this equation
+    /// is rejected as `CantSubscriptScalar`.
     #[test]
     fn a_wildcard_subscript_on_a_cross_module_array_compiles_and_reduces() {
         let project = xmod_project("0", "SUM(sub.avals[*])");

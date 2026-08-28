@@ -101,7 +101,7 @@ fn smooth_loop_fixture() -> TestProject {
 
 /// A module instance feeds ONLY the element it was minted for.
 ///
-/// `growth`'s reconstructed AST is `Arrayed(["region"], {north:
+/// `growth`'s lowered AST is `Arrayed(["region"], {north:
 /// "$⁚growth⁚0⁚smth1⁚north·output" * 0.1, south: ...})` -- the north slot
 /// references the north instance and nothing else -- so the broadcast to
 /// `growth[south]` has no reference behind it at all.

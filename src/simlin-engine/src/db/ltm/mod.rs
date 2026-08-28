@@ -28,9 +28,9 @@ use crate::ltm::strip_subscript;
 
 use super::{
     Db, SourceModel, SourceProject, SourceVariable, SourceVariableKind, compute_layout,
-    model_causal_edges, model_dt_dependency_targets, model_implicit_var_by_name,
-    model_variable_by_name, project_datamodel_dims, project_dimensions_context,
-    reconstruct_single_variable, variable_dimensions,
+    lowered_variable_by_name, model_causal_edges, model_dt_dependency_targets,
+    model_implicit_var_by_name, model_variable_by_name, project_datamodel_dims,
+    project_dimensions_context, variable_dimensions,
 };
 
 mod compile;
@@ -612,7 +612,7 @@ fn compute_module_link_overrides(
             // score (its composite reference) in place -- mirroring the
             // structured output projection's multi-match -> None semantics and
             // the discovery-side `recompute_module_input_edge_series` (GH #698).
-            let module_var = reconstruct_single_variable(db, model, project, module_name);
+            let module_var = lowered_variable_by_name(db, model, project, module_name);
             let Some(crate::variable::VarKind::Module { inputs, .. }) =
                 module_var.as_ref().map(|v| &v.kind)
             else {

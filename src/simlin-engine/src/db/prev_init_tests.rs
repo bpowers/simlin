@@ -1129,17 +1129,15 @@ fn a_bound_module_init_capture_is_initials_only() {
 /// `SnapshotElementCase::ALL x SnapshotBuiltin::ALL` is intentional: adding a
 /// new case or intrinsic expands the production matrix automatically.
 ///
-/// Every row is synced from a datamodel project, compared with the independent
-/// datamodel-driven Stage0 constructor, and then compiled and run when it names
-/// a slot. Missing names and a mapped target's element that the referenced axis
-/// does not declare allocate a capture and refuse loudly. Numeric, dimension-
+/// Every row is synced from a datamodel project, then compiled and run when it
+/// names a slot. Missing names and a mapped target's element that the referenced
+/// axis does not declare allocate a capture and refuse loudly. Numeric, dimension-
 /// spanning, dynamic-variable, expression, module-output, and non-storage
 /// module-input arms are outside this name-resolution alphabet; the general
 /// parse/codegen agreement table and refusal matrices below enumerate them.
 #[test]
 fn snapshot_element_name_matrix_covers_both_intrinsics() {
     use crate::bytecode::Opcode;
-    use crate::model::ModelStage0;
     use crate::test_common::TestProject;
 
     #[derive(Clone, Copy, Debug)]
@@ -1269,21 +1267,6 @@ fn snapshot_element_name_matrix_covers_both_intrinsics() {
                 captures.len(),
                 usize::from(selected.is_none()),
                 "{case:?} / {} source capture decision",
-                builtin.name()
-            );
-
-            // The test oracle derives its axis from the real datamodel
-            // equation and its qualified position from DimensionsContext.
-            let oracle = ModelStage0::new_in_project(
-                &project.models,
-                &project.models[0],
-                &project.dimensions,
-                project_units_context(&db, sync.project),
-                false,
-            );
-            assert!(
-                *model_stage0(&db, model, sync.project) == oracle,
-                "{case:?} / {} salsa and datamodel Stage0",
                 builtin.name()
             );
 

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use crate::builtins::{BuiltinContents, UntypedBuiltinFn, walk_builtin_expr};
 use crate::common::{CanonicalElementName, EquationResult, canonicalize};
 use crate::dimensions::Dimension;
-use crate::model::{ModelStage0, ScopeStage0};
+use crate::model::{LoweringModel, LoweringScope};
 use crate::variable::{VarKind, Variable};
 use unicode_xid::UnicodeXID;
 
@@ -110,9 +110,9 @@ impl Ast<Expr2> {
     }
 }
 
-/// Context for AST lowering that provides dimension information from ScopeStage0
+/// Context for AST lowering that provides dimension information from LoweringScope
 struct ArrayContext<'a> {
-    scope: &'a ScopeStage0<'a>,
+    scope: &'a LoweringScope<'a>,
     model_name: &'a str,
     next_temp_id: u32,
     is_array: bool,
@@ -122,7 +122,7 @@ struct ArrayContext<'a> {
 }
 
 impl<'a> ArrayContext<'a> {
-    fn new(scope: &'a ScopeStage0<'a>, model_name: &'a str) -> Self {
+    fn new(scope: &'a LoweringScope<'a>, model_name: &'a str) -> Self {
         Self {
             scope,
             model_name,
@@ -132,7 +132,7 @@ impl<'a> ArrayContext<'a> {
         }
     }
 
-    fn with_array_context(scope: &'a ScopeStage0<'a>, model_name: &'a str) -> Self {
+    fn with_array_context(scope: &'a LoweringScope<'a>, model_name: &'a str) -> Self {
         Self {
             scope,
             model_name,
@@ -142,8 +142,8 @@ impl<'a> ArrayContext<'a> {
         }
     }
 
-    fn get_model(&self, model_name: &str) -> Option<&'a ModelStage0> {
-        self.scope.models.get(&*canonicalize(model_name)).copied()
+    fn get_model(&self, model_name: &str) -> Option<&'a LoweringModel<'a>> {
+        self.scope.models.get(&*canonicalize(model_name))
     }
 
     fn get_variable(
@@ -173,6 +173,7 @@ impl<'a> ArrayContext<'a> {
             self.get_model(model_name)?
                 .variables
                 .get(&*canonicalize(ident))
+                .map(|variable| variable.as_ref())
         }
     }
 }
@@ -231,7 +232,7 @@ impl<'a> Expr2Context for ArrayContext<'a> {
     }
 }
 
-pub(crate) fn lower_ast(scope: &ScopeStage0, ast: &Ast<Expr0>) -> EquationResult<Ast<Expr2>> {
+pub(crate) fn lower_ast(scope: &LoweringScope, ast: &Ast<Expr0>) -> EquationResult<Ast<Expr2>> {
     match ast {
         Ast::Scalar(expr) => {
             let mut ctx = ArrayContext::new(scope, scope.model_name);
@@ -1854,7 +1855,8 @@ mod ast_tests {
     use super::*;
     use crate::common::{Ident, canonicalize};
     use crate::datamodel;
-    use crate::model::ModelStage0;
+    use crate::model::LoweringModel;
+    use std::borrow::Cow;
     use std::collections::HashMap;
 
     #[test]
@@ -1888,21 +1890,33 @@ mod ast_tests {
             macro_spec: None,
         };
 
-        let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-        let model_s0 = ModelStage0::new(
-            &model_datamodel,
-            std::slice::from_ref(&dim),
-            &units_ctx,
-            false,
+        let project = datamodel::Project {
+            name: "expr2_context".to_string(),
+            sim_specs: datamodel::SimSpecs::default(),
+            dimensions: vec![dim],
+            units: vec![],
+            models: vec![model_datamodel],
+            source: None,
+            ai_information: None,
+        };
+        let db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel(&db, &project);
+        let parsed = crate::db::parse_source_variable(
+            &db,
+            sync.models["test_model"].variables["population"].source,
+            sync.project,
         );
+        let model = LoweringModel {
+            variables: HashMap::from([(Ident::new("population"), Cow::Borrowed(&parsed.variable))]),
+        };
 
         let mut models = HashMap::new();
-        models.insert(Ident::new("test_model"), &model_s0);
+        models.insert(Ident::new("test_model"), model);
 
-        let dims_ctx = crate::dimensions::DimensionsContext::from(&[dim]);
-        let scope = ScopeStage0 {
+        let dims_ctx = crate::db::project_dimensions_context(&db, sync.project);
+        let scope = LoweringScope {
             models: &models,
-            dimensions: &dims_ctx,
+            dimensions: dims_ctx,
             model_name: "test_model",
         };
 
@@ -1978,21 +1992,44 @@ mod ast_tests {
             macro_spec: None,
         };
 
-        let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-        let model_s0 = ModelStage0::new(
-            &model_datamodel,
-            &[dim1.clone(), dim2.clone()],
-            &units_ctx,
-            false,
+        let project = datamodel::Project {
+            name: "expr2_dimension_mismatch".to_string(),
+            sim_specs: datamodel::SimSpecs::default(),
+            dimensions: vec![dim1, dim2],
+            units: vec![],
+            models: vec![model_datamodel],
+            source: None,
+            ai_information: None,
+        };
+        let db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel(&db, &project);
+        let regional = crate::db::parse_source_variable(
+            &db,
+            sync.models["test_model"].variables["regional_data"].source,
+            sync.project,
         );
+        let product = crate::db::parse_source_variable(
+            &db,
+            sync.models["test_model"].variables["product_data"].source,
+            sync.project,
+        );
+        let model = LoweringModel {
+            variables: HashMap::from([
+                (
+                    Ident::new("regional_data"),
+                    Cow::Borrowed(&regional.variable),
+                ),
+                (Ident::new("product_data"), Cow::Borrowed(&product.variable)),
+            ]),
+        };
 
         let mut models = HashMap::new();
-        models.insert(Ident::new("test_model"), &model_s0);
+        models.insert(Ident::new("test_model"), model);
 
-        let dims_ctx = crate::dimensions::DimensionsContext::from(&[dim1, dim2]);
-        let scope = ScopeStage0 {
+        let dims_ctx = crate::db::project_dimensions_context(&db, sync.project);
+        let scope = LoweringScope {
             models: &models,
-            dimensions: &dims_ctx,
+            dimensions: dims_ctx,
             model_name: "test_model",
         };
 

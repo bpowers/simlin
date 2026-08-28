@@ -1209,8 +1209,8 @@ fn push_whitespace_folded_lowercase(out: &mut String, part: &str) {
 ///
 /// [`canonicalize`] collapses case, whitespace, and underscores, so
 /// `Attrition`/`attrition` or `net flow`/`net_flow` are the SAME variable
-/// identifier -- every canonical-keyed map downstream (salsa sync, ModelStage0)
-/// silently keeps only one such twin. Callers use the returned groups to
+/// identifier -- every canonical-keyed map downstream (salsa sync and parsed
+/// lowering scopes) silently keeps only one such twin. Callers use the groups to
 /// reject the model loudly instead. Group order follows the first occurrence
 /// of each colliding canonical so diagnostics are deterministic for a given
 /// declaration order.

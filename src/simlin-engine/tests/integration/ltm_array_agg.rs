@@ -694,7 +694,7 @@ fn variable_backed_partial_reduce_loop_scores_finite_and_sustained() {
 ///    `SUM(pop[*] * scale)` (arrayed `pop` times scalar `scale`, reduced to a
 ///    scalar target) used to FAIL fragment compilation and was stubbed to a
 ///    constant `0` with an `Assembly` Warning: `compile_ltm_equation_fragment`
-///    lowered the equation with an empty `ScopeStage0.models`, so the
+///    lowered the equation with an empty `LoweringScope.models`, so the
 ///    `pop[*] * scale` Op2 never got its Expr2 `ArrayBounds`, so final
 ///    materialization could not give the reducer a view. The agg now compiles
 ///    and tracks the inlined reducer's value -- asserted below, and pinned in

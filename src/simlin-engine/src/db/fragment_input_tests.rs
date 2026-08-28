@@ -193,6 +193,12 @@ fn explicit_constructor_is_compile_var_fragments_input() {
     else {
         panic!("usesub must lower");
     };
+    let lowered = lowered_source_variable(&db, var, model, sync.project);
+    assert!(matches!(&input.target, std::borrow::Cow::Borrowed(_)));
+    assert!(
+        std::sync::Arc::ptr_eq(input.target.as_ref(), lowered),
+        "the explicit constructor borrows the production lowering memo payload"
+    );
 
     let arr = &input.deps["arr"];
     assert!(
@@ -256,6 +262,14 @@ fn implicit_constructor_is_compile_implicit_var_fragments_input() {
             &[],
         )
         .unwrap_or_else(|_| panic!("{name} has a fragment input"));
+        let lowered = lowered_implicit_variable(&db, model, sync.project, name.clone())
+            .as_ref()
+            .unwrap_or_else(|| panic!("{name} has a production lowering memo"));
+        assert!(matches!(&input.target, std::borrow::Cow::Borrowed(_)));
+        assert!(
+            std::sync::Arc::ptr_eq(input.target.as_ref(), lowered),
+            "{name}: ordinary implicit construction borrows its production memo payload"
+        );
         // Every phase the emitter's runlist gate admitted is the constructor's
         // input lowered for that phase; the module instance is the one helper
         // that carries all three.
@@ -315,6 +329,11 @@ fn ltm_constructor_is_compile_ltm_equation_fragments_input() {
             sync.project,
         )
         .unwrap_or_else(|reason| panic!("{}: {reason}", ltm_var.name));
+        assert!(
+            matches!(&input.target, std::borrow::Cow::Owned(_)),
+            "{}: an LTM synthetic equation is transient and must transfer ownership",
+            ltm_var.name
+        );
         assert_eq!(
             lower_and_emit(&input, false),
             production.fragment.flow_bytecodes,
@@ -350,6 +369,10 @@ fn ltm_implicit_constructor_is_compile_ltm_implicit_var_fragments_input() {
         let input =
             crate::db::ltm::ltm_implicit_fragment_input(&db, meta, model, sync.project, &[])
                 .unwrap_or_else(|| panic!("{name} has a fragment input"));
+        assert!(
+            matches!(&input.target, std::borrow::Cow::Owned(_)),
+            "{name}: an LTM helper is synthesized from a transient LTM parse and must be owned"
+        );
         let capture = meta.variable.capture();
         let expected_flow = (!meta.is_stock
             && capture.is_none_or(|capture| capture.kind().needs_flows()))

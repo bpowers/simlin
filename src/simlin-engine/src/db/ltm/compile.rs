@@ -28,9 +28,9 @@ use crate::db::var_fragment::{
 use crate::db::{
     Db, LtmLinkId, LtmSyntheticVar, RefShape, SourceModel, SourceProject, VarFragmentResult,
     build_module_inputs, canonical_module_input_set, compile_phase_to_per_var_bytecodes,
-    extract_tables_from_source_var, model_implicit_var_by_name, model_variable_by_name,
-    module_dep_shape, module_input_prefix, parse_source_variable, project_converted_dimensions,
-    project_dimensions_context, project_units_context, reconstruct_single_variable,
+    extract_tables_from_source_var, lowered_variable_by_name, model_implicit_var_by_name,
+    model_variable_by_name, module_dep_shape, module_input_prefix, parse_source_variable,
+    project_converted_dimensions, project_dimensions_context, project_units_context,
     variable_dimensions,
 };
 
@@ -150,8 +150,8 @@ pub fn compile_ltm_var_fragment(
 // body-entry count can check it: salsa BACKDATES a re-executed query whose
 // value compares equal, so the memo neither moves nor changes and pointer
 // equality reads identical whether the body ran or not. Thread-local for the
-// same reasons `db::stages`' counters are -- see the note there, including the
-// warning about what happens if this subtree is ever parallelized.
+// same reason the fragment execution record is thread-local: parallel query
+// execution would require moving this measurement to shared atomic state.
 #[cfg(test)]
 thread_local! {
     static SHAPED_LINK_SCORE_EXECUTIONS: std::cell::Cell<usize> = const {
@@ -277,12 +277,12 @@ pub fn link_score_equation_text_shaped<'db>(
     let from_ident = Ident::<Canonical>::new(from_name);
     let to_ident = Ident::<Canonical>::new(to_name);
 
-    let from_var = reconstruct_single_variable(db, model, project, from_name);
+    let from_var = lowered_variable_by_name(db, model, project, from_name);
     // A target that cannot be reconstructed is a benign structural skip
     // (degenerate edge), NOT a partial-equation failure -- no `Warning`, no
     // unscoreable-edge recording. Loop scores through such an edge are
     // unaffected, exactly as the pre-GH #780 `None` behaved.
-    let Some(to_var) = reconstruct_single_variable(db, model, project, to_name) else {
+    let Some(to_var) = lowered_variable_by_name(db, model, project, to_name) else {
         return ShapedLinkScore::NoVariable;
     };
 
@@ -689,16 +689,16 @@ fn expr_requires_array_operand_bounds(expr: &crate::ast::Expr2) -> bool {
     }
 }
 
-/// Lower a parsed LTM Stage0 variable with a lowering scope that can
+/// Lower one parsed LTM variable with a transient scope that can
 /// resolve the dimensions of its model-variable dependencies (GH #738).
 ///
 /// Expr1 -> Expr2 lowering computes each subexpression's `ArrayBounds` via
-/// `ArrayContext::get_dimensions`, which reads `ScopeStage0.models`. The final
+/// `ArrayContext::get_dimensions`, which reads `LoweringScope.models`. The final
 /// array-operand materializer needs those bounds to size a computed operand
 /// such as `SUM(pop[*] * scale)`. With an empty scope the bounds are absent and
 /// codegen rejects the inline expression instead of guessing a view, which
 /// would silently stub the LTM variable to zero. This mirrors
-/// `explicit_fragment_input`'s minimal `ModelStage0` construction for ordinary
+/// `explicit_fragment_input`'s minimal `LoweringModel` construction for ordinary
 /// per-variable fragments.
 ///
 /// Strategy: lower once with an empty scope (cheap, and byte-identical to
@@ -706,7 +706,7 @@ fn expr_requires_array_operand_bounds(expr: &crate::ast::Expr2) -> bool {
 /// only feeds `get_dimensions`, which returns `None` for scalars either
 /// way); only when the lowered AST contains an array operand or table position
 /// ([`ast_requires_array_operand_bounds`]) AND an arrayed
-/// dependency is present, re-lower with a scope carrying the parsed Stage0
+/// dependency is present, re-lower with a scope carrying the parsed
 /// variables of self plus the deps. The dependency identifier set is
 /// scope-independent (the scope affects only bounds metadata), so the
 /// classification computed on the preliminary lowering is returned
@@ -731,14 +731,14 @@ fn expr_requires_array_operand_bounds(expr: &crate::ast::Expr2) -> bool {
 /// module-output refs likewise stay outside (they are not flat variables).
 fn lower_ltm_variable(
     db: &dyn Db,
-    parsed_variable: &crate::model::VariableStage0,
+    parsed_variable: &crate::model::ParsedVariable,
     equation_implicits: &[crate::capture::ImplicitVar],
     model: SourceModel,
     project: SourceProject,
 ) -> LoweredLtmVariable {
     let dim_context = project_dimensions_context(db, project);
     let empty_models = HashMap::new();
-    let empty_scope = crate::model::ScopeStage0 {
+    let empty_scope = crate::model::LoweringScope {
         models: &empty_models,
         dimensions: dim_context,
         model_name: "",
@@ -748,7 +748,7 @@ fn lower_ltm_variable(
     // Classify dependencies ONCE on the preliminary lowering; the set is
     // scope-independent, so it serves both the re-lower decision below and
     // the caller's dependency-shape construction. `Variable::ast()` is the
-    // right (and only needed) source: every LTM Stage0 input here is an
+    // right (and only needed) source: every parsed LTM input here is an
     // Aux-parsed Var whose dt AST is its sole AST, and even a hypothetical
     // stock-shaped input is covered because `ast()` returns a Stock's init
     // AST.
@@ -859,17 +859,17 @@ fn lower_ltm_variable(
     let model_name_str = model.name(db);
     let dim_ctx = project_dimensions_context(db, project);
     let units_ctx = project_units_context(db, project);
-    let mut stage0_vars: HashMap<Ident<Canonical>, crate::model::VariableStage0> = HashMap::new();
-    stage0_vars.insert(Ident::new(parsed_variable.ident()), parsed_variable.clone());
+    let mut parsed_vars: HashMap<Ident<Canonical>, crate::model::ParsedVariable> = HashMap::new();
+    parsed_vars.insert(Ident::new(parsed_variable.ident()), parsed_variable.clone());
     for dep_name in &local_shape_candidates {
         if let Some(dep_sv) = model_variable_by_name(db, model, dep_name.as_str().to_string()) {
             let dep_parsed = parse_source_variable(db, dep_sv, project);
-            stage0_vars.insert(dep_name.clone(), dep_parsed.variable.clone());
+            parsed_vars.insert(dep_name.clone(), dep_parsed.variable.clone());
         } else if let Some(implicit_dep) = find_implicit_dm(dep_name.as_str()) {
             // Nested implicits of an implicit are registered (and compiled)
             // in their own right; here only the dep's own dimensions matter.
-            let dep_parsed = implicit_dep.variable_stage0(dim_ctx);
-            stage0_vars.insert(dep_name.clone(), dep_parsed);
+            let dep_parsed = implicit_dep.parsed_variable(dim_ctx);
+            parsed_vars.insert(dep_name.clone(), dep_parsed);
         } else if let Some(ltm_dims) = find_arrayed_ltm_dep(dep_name.as_str()) {
             // An arrayed sibling LTM var (the GH #995 freeze helper): a
             // zero-bodied dims-only stub -- only the dep's dimensions matter
@@ -888,22 +888,20 @@ fn lower_ltm_variable(
             let dep_ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
             let dep_parsed =
                 crate::variable::parse_var(&dep_ctx, &stub, &mut nested, |mi| Ok(Some(mi.clone())));
-            stage0_vars.insert(dep_name.clone(), dep_parsed);
+            parsed_vars.insert(dep_name.clone(), dep_parsed);
         }
     }
 
-    let mini_model = crate::model::ModelStage0 {
-        ident: Ident::new(model_name_str),
-        display_name: model_name_str.to_string(),
-        variables: stage0_vars,
-        implicit: false,
-        // Single-variable fragment lowering only; not a macro template.
-        is_macro: false,
-        macro_params: vec![],
+    let mini_model = crate::model::LoweringModel {
+        variables: parsed_vars
+            .into_iter()
+            .map(|(name, variable)| (name, std::borrow::Cow::Owned(variable)))
+            .collect(),
     };
-    let mut models: HashMap<Ident<Canonical>, &crate::model::ModelStage0> = HashMap::new();
-    models.insert(Ident::new(model_name_str), &mini_model);
-    let scope = crate::model::ScopeStage0 {
+    let models = [(Ident::new(model_name_str), mini_model)]
+        .into_iter()
+        .collect();
+    let scope = crate::model::LoweringScope {
         models: &models,
         dimensions: dim_context,
         model_name: model_name_str,
@@ -1046,8 +1044,10 @@ pub(crate) fn ltm_fragment_input<'db>(
             .or_insert_with(|| source_dep_shape(db, table_sv, project));
     }
 
+    // This variable is lowered from the transient synthesized equation above;
+    // no per-variable memo owns it, so the input must carry its Arc.
     Ok(FragmentInput::new(
-        lowered,
+        std::borrow::Cow::Owned(std::sync::Arc::new(lowered)),
         deps,
         tables,
         BTreeSet::new(),
@@ -1226,7 +1226,8 @@ pub(crate) fn compile_ltm_synthetic_fragment(
             //     the var to zero).
             // (d) Aggregate-node link score (from = $⁚ltm⁚agg⁚n, or to =
             //     $⁚ltm⁚agg⁚n): compile directly. The (from, to)-keyed salsa
-            //     path would `reconstruct_single_variable` the synthetic agg
+            //     path would fail to resolve the synthetic agg through the
+            //     explicit-or-implicit per-name lowering query,
             //     name, get `None`, and emit a degenerate ceteris-paribus
             //     equation against the *target's* original (reducer-bearing)
             //     equation -- which the agg name appears nowhere in -- so the
@@ -1290,10 +1291,8 @@ pub(crate) fn compile_ltm_synthetic_fragment(
 /// Keyed by INDEX rather than by name because the index is what both walkers
 /// already have, and because it keeps this a salsa FIREWALL: the query reads
 /// the whole-model `model_ltm_variables`, so it re-executes on any edit, but its
-/// VALUE is one fragment -- so salsa backdates it whenever that variable's
-/// fragment is unchanged and `assemble_module` is not re-run. Same shape, and
-/// the same reason, as `reconstruct_named_variable` over
-/// `reconstruct_model_variables`.
+/// VALUE is one fragment, so salsa backdates it whenever that variable's
+/// fragment is unchanged and `assemble_module` is not re-run.
 ///
 /// An out-of-range index yields `None`, which is also what a variable whose
 /// fragment failed to compile yields; callers treat both as "no fragment",
@@ -1631,7 +1630,7 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
     let converted_dims = project_converted_dimensions(db, project);
 
     // Every helper carries enough parsed data to build its stage directly.
-    let parsed_implicit = implicit_dm_var.variable_stage0(dim_context);
+    let parsed_implicit = implicit_dm_var.parsed_variable(dim_context);
     if parsed_implicit
         .equation_errors()
         .is_some_and(|e| !e.is_empty())
@@ -1748,8 +1747,10 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
         lowered
     };
 
+    // LTM helper metadata and its lowered value are local to this constructor,
+    // unlike ordinary parse helpers backed by `lowered_implicit_variable`.
     Some(FragmentInput::new(
-        lowered,
+        std::borrow::Cow::Owned(std::sync::Arc::new(lowered)),
         deps,
         tables,
         canonical_module_input_set(module_input_names),

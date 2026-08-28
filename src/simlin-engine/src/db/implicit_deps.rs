@@ -124,10 +124,10 @@ pub(super) fn extract_implicit_var_deps(
             }
 
             // Both non-module arms carry their bodies as AST subtrees.
-            let parsed_implicit = implicit_var.variable_stage0(dim_context);
+            let parsed_implicit = implicit_var.parsed_variable(dim_context);
 
             let models = HashMap::new();
-            let scope = crate::model::ScopeStage0 {
+            let scope = crate::model::LoweringScope {
                 models: &models,
                 dimensions: dim_context,
                 model_name: "",

@@ -558,29 +558,17 @@ the top allocation site is not the parser at all but `Compiler::intern_name`
 figure below (3.86M transient allocations) predates the salsa pipeline and no
 longer describes the code.
 
-### C1. Arena-allocate the transient parse AST
+### C2. Lowered-variable residency
 
-The equation parser builds `Expr0` with `Box` children + `Vec` args — 3.86M+
-transient heap allocations, all lowered to `VariableStage0` and dropped.
-Allocating the AST in a per-parse arena (a `bumpalo`-style bump allocator; the
-engine carries no such dependency) would turn these into pointer bumps. The constraint: the salsa-cached result
-(`ParsedVariableResult`) must be owned/`'static`, so the arena can only back the
-transient parse→lower step, with the cached value being the owned lowered form.
-Much of this benefit is captured more cheaply by mimalloc (B); pursue the arena
-only if profiling after B still shows the parser as a hotspot.
-
-- Effort: large (thread an arena through the parser; verify nothing cached
-  retains an arena reference). Risk: medium.
-
-### C2. Halve `reconstruct_variable` — MOOT
-
-`reconstruct_variable` is the salsa-cached `reconstruct_model_variables`, and
-every caller is on the LTM / analysis / patch path; it does not appear in an
-ordinary compile profile. Source parsing reads a borrowed `VariableSource`
-and has one query key, `(SourceVariable, SourceProject)`. Layout derives
-declared dimensions from the source equation without demanding a second parse,
-and module-call classification happens during the one AST walk rather than a
-whole-model equation pre-scan.
+Each explicit or parse-synthesized variable has one salsa-owned
+`Arc<Variable<Expr2>>` lowering payload. Fragment compilation, unit analysis,
+causal/polarity graphs, LTM IR, and patch rewriting share that payload. A graph
+that needs model-wide lookup retains only an `Ident -> Arc<Variable>` map;
+per-link and other per-name consumers select the explicit or implicit lowering
+memo directly so an unrelated edit cannot reach them through a coarse map.
+Source parsing reads a borrowed `VariableSource`, layout derives declared
+dimensions without demanding another parse, and module-call classification is
+part of the production AST walk.
 
 ### C3. `canonicalize` — the lever is call elimination, not a faster slow path
 
@@ -872,10 +860,10 @@ short of it rather than taking a ~2-3%.
    `PREVIOUS`-heavy forms pay most: post-fusion flow opcodes −44.3%, retired
    instructions −28.3% on C-LEARN and −33.6% on WORLD3-03. An instruction/branch
    win, not a predictor win.
-6. ~~**C2 / C3**~~ — answered, and not as proposed: C2 is moot (the function
-   is salsa-cached and off the ordinary compile path) and C3's two halves are
-   already done or the wrong lever. The compile round 3 section above records
-   what the profile actually pointed at, and what it cost.
+6. ~~**C2 / C3**~~ — C2's AST duplication is absent: model-wide readers share
+   per-variable Arc payloads, and C3's two halves are already done or the wrong
+   lever. The compile round 3 section above records what the profile actually
+   pointed at, and what it cost.
 7. **C4 (parallel fan-out)** — the largest remaining compile lever and the only
    one that needs a design rather than a fix. Read its two hazards before
    starting; both are silent, and one is a process abort.

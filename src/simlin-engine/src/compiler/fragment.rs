@@ -25,6 +25,7 @@
 //! [`DepKind::Module`] carries -- recursively, so a nested `m·n·x` resolves
 //! through the chain of shapes.
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
@@ -118,7 +119,12 @@ pub(crate) struct ShapeEntry {
 /// besides the phase. Built by one of the four constructors in `db/`.
 pub(crate) struct FragmentInput<'a> {
     /// The variable being lowered, in its `Expr2` form.
-    pub target: Variable,
+    ///
+    /// Explicit and parse-synthesized variables borrow their tracked lowering
+    /// memo. LTM equations, which exist only for this fragment construction,
+    /// remain owned. Keeping both behind one `Cow` prevents compilation from
+    /// retaining a second copy of a production equation tree.
+    pub target: Cow<'a, std::sync::Arc<Variable>>,
     /// The shape of every name the target can reference, its own included.
     pub deps: IdentMap<Ident<Canonical>, DepShape>,
     /// Graphical-function tables, keyed by the variable that declares them:
@@ -139,7 +145,7 @@ pub(crate) struct FragmentInput<'a> {
 
 impl<'a> FragmentInput<'a> {
     pub(crate) fn new(
-        target: Variable,
+        target: Cow<'a, std::sync::Arc<Variable>>,
         deps: IdentMap<Ident<Canonical>, DepShape>,
         tables: HashMap<Ident<Canonical>, Vec<Table>>,
         module_inputs: BTreeSet<Ident<Canonical>>,
@@ -193,7 +199,10 @@ pub(crate) fn lower_fragment(input: &FragmentInput<'_>, is_initial: bool) -> Res
         var_sizes: &input.var_sizes,
         inputs: &input.module_inputs,
     };
-    Var::new(&Context::new(core, is_initial), &input.target)
+    Var::new(
+        &Context::new(core, is_initial),
+        input.target.as_ref().as_ref(),
+    )
 }
 
 /// The extent of every variable a reference over `deps` can address **in

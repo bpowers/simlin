@@ -155,10 +155,10 @@ impl IndexExpr2 {
 /// builtin functions have been checked/resolved.
 ///
 /// `Eq` is derived for the reason spelled out on [`crate::ast::Expr0`]: this is
-/// the layer that rides on `ModelStage1` and `ltm_agg::AggNodesResult`, whose
-/// salsa backdating is decided by comparing a memo with its own rebuild, so a
-/// field that is not equal to itself defeats it. `Eq` makes that a compile-time
-/// property rather than a convention.
+/// the layer retained by per-variable lowering and by
+/// `ltm_agg::AggNodesResult`. Salsa backdating compares a memo with its own
+/// rebuild, so a field that is not equal to itself defeats it. `Eq` makes that
+/// a compile-time property rather than a convention.
 #[allow(dead_code)]
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(PartialEq, Eq, Clone)]

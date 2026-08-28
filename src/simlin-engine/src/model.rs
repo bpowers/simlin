@@ -2,6 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::ast::{Ast, Expr0, Expr2, lower_ast};
@@ -11,48 +12,9 @@ use crate::variable::{ModuleInput, VarKind, Variable};
 use crate::{datamodel, eqn_err};
 
 #[cfg(test)]
-use {
-    crate::builtins_visitor::SnapshotIndexResolver,
-    crate::common::canonicalize,
-    crate::datamodel::Dimension,
-    crate::units::Context,
-    crate::variable::{ParseContext, parse_var},
-};
-
-#[cfg(test)]
 use crate::testutils::{x_aux, x_flow, x_model, x_module, x_stock};
 
-#[cfg(test)]
-struct DatamodelSnapshotIndexResolver<'a> {
-    model: &'a datamodel::Model,
-    dimensions: &'a DimensionsContext,
-}
-
-#[cfg(test)]
-impl SnapshotIndexResolver for DatamodelSnapshotIndexResolver<'_> {
-    fn snapshot_axis(&self, base: &str, axis: usize) -> Option<crate::dimensions::Dimension> {
-        let canonical_base = canonicalize(base);
-        let base = self
-            .model
-            .variables
-            .iter()
-            .find(|var| canonicalize(var.get_ident()) == canonical_base)?;
-        let equation = base.get_equation()?;
-        let dimension_names = match equation {
-            datamodel::Equation::Scalar(_) => &[][..],
-            datamodel::Equation::ApplyToAll(names, _)
-            | datamodel::Equation::Arrayed(names, _, _, _) => names.as_slice(),
-        };
-        let dimensions = crate::variable::get_dimensions(self.dimensions, dimension_names).ok()?;
-        dimensions.get(axis).cloned()
-    }
-
-    fn qualified_snapshot_position(&self, index: &str) -> Option<u32> {
-        self.dimensions.lookup(&canonicalize(index))
-    }
-}
-
-pub type VariableStage0 = Variable<datamodel::ModuleReference, Expr0>;
+pub type ParsedVariable = Variable<datamodel::ModuleReference, Expr0>;
 
 /// Canonical formal-parameter names of a macro (empty for a non-macro model).
 /// Unit inference lowers a macro body's parameter-named unit declarations
@@ -67,57 +29,31 @@ pub(crate) fn macro_param_idents(
         .unwrap_or_default()
 }
 
-/// ModelStage0 converts a datamodel::Model to one with a map of canonicalized
-/// identifiers to Variables where module dependencies haven't been resolved.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
-pub struct ModelStage0 {
-    pub ident: Ident<Canonical>,
-    pub display_name: String,
-    pub variables: HashMap<Ident<Canonical>, VariableStage0>,
-    /// implicit is true if this model was implicitly added to the project
-    /// by virtue of it being in the stdlib (or some similar reason)
-    pub implicit: bool,
-    /// is_macro is true if this model is a macro definition. A macro is a
-    /// polymorphic template: its body variables' declared units may name the
-    /// macro's formal parameters (a Vensim idiom -- e.g. `~ xfrom` inside
-    /// RAMP FROM TO), so unit inference must treat those as polymorphic rather
-    /// than concrete base units.
-    pub is_macro: bool,
-    /// Canonical formal-parameter names when `is_macro` is true (empty
-    /// otherwise). Lets unit inference recognize which identifiers in a macro
-    /// body's unit declarations are parameters and lower them to the
-    /// corresponding metavariables (GH #619).
-    pub macro_params: Vec<Ident<Canonical>>,
+/// A transient, dependency-granular set of parsed variables used while one
+/// variable is lowered. It is never a salsa result and never owns a whole
+/// source model.
+pub(crate) struct LoweringModel<'a> {
+    pub variables: HashMap<Ident<Canonical>, Cow<'a, ParsedVariable>>,
 }
 
-/// A model's variables lowered to `Expr2`: a [`ModelStage0`] resolved against
-/// the project's dimension context and the module inputs of the models in its
-/// lowering scope (`db::stages::model_stage1`). Unit inference and checking
-/// read it; simulation compiles per variable and never builds one.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
-pub struct ModelStage1 {
+/// A stack-local unit-analysis view over memo-owned per-variable lowered data.
+///
+/// This type never crosses a tracked-query boundary: its map clones handles to
+/// the one `Expr2` value retained for each variable, so model-wide inference
+/// can walk a coherent module scope without creating another owned equation
+/// tree.
+pub(crate) struct UnitModel {
     pub name: Ident<Canonical>,
-    pub display_name: String,
-    pub variables: HashMap<Ident<Canonical>, Variable>,
-    /// implicit is true if this model was implicitly added to the project
-    /// by virtue of it being in the stdlib (or some similar reason)
-    pub implicit: bool,
-    /// is_macro is true if this model is a macro definition; see
-    /// `ModelStage0::is_macro`. Inference treats a macro body's declared units
-    /// as polymorphic rather than concrete base units.
+    pub variables: HashMap<Ident<Canonical>, std::sync::Arc<Variable>>,
     pub is_macro: bool,
-    /// Canonical formal-parameter names when `is_macro` is true (empty
-    /// otherwise); see `ModelStage0::macro_params` (GH #619).
     pub macro_params: Vec<Ident<Canonical>>,
 }
 
 fn resolve_relative<'a>(
-    models: &'a HashMap<Ident<Canonical>, &'a ModelStage0>,
+    models: &'a HashMap<Ident<Canonical>, LoweringModel<'a>>,
     model_name: &str,
     ident: &str,
-) -> Option<&'a VariableStage0> {
+) -> Option<&'a ParsedVariable> {
     let ident = if model_name == "main" && ident.starts_with('·') {
         &ident['·'.len_utf8()..]
     } else {
@@ -140,14 +76,13 @@ fn resolve_relative<'a>(
     }
 }
 
-/// lower_variable takes a stage 0 variable and turns it into a stage 1 variable.
-/// This involves resolving both module inputs and dimension indexes.
+/// Resolve one parsed variable's module inputs and dimension indexes.
 ///
 /// Everything but `kind` carries over unchanged, so this is a map over the
 /// kind: lower the ASTs a `Stock`/`Aux` holds, resolve the input wiring a
 /// `Module` holds, and append whatever each raised to the variable's error
 /// channel.
-pub(crate) fn lower_variable(scope: &ScopeStage0, var_s0: &VariableStage0) -> Variable {
+pub(crate) fn lower_variable(scope: &LoweringScope, var_s0: &ParsedVariable) -> Variable {
     let mut errors = var_s0.errors.clone();
     let mut lower = |ast: &Option<Ast<Expr0>>| -> Option<Ast<Expr2>> {
         ast.as_ref().and_then(|ast| match lower_ast(scope, ast) {
@@ -228,10 +163,36 @@ pub(crate) fn lower_variable(scope: &ScopeStage0, var_s0: &VariableStage0) -> Va
     }
 }
 
+/// Resolve only a parsed module's input wiring, preserving every field shared
+/// by all variable kinds.
+///
+/// Module references change representation from datamodel strings to
+/// canonical [`ModuleInput`] pairs. Units and both error channels are parse
+/// results and must pass through exactly like they do in [`lower_variable`].
+pub(crate) fn resolve_parsed_module(
+    parsed: &ParsedVariable,
+    inputs: Vec<ModuleInput>,
+) -> Option<Variable> {
+    let VarKind::Module { model_name, .. } = &parsed.kind else {
+        return None;
+    };
+    Some(Variable {
+        ident: parsed.ident.clone(),
+        units: parsed.units.clone(),
+        eqn: parsed.eqn.clone(),
+        errors: parsed.errors.clone(),
+        unit_errors: parsed.unit_errors.clone(),
+        kind: VarKind::Module {
+            model_name: model_name.clone(),
+            inputs,
+        },
+    })
+}
+
 // parent_module_name is the name of the model that has the module instantiation,
 // _not_ the name of the model this module instantiates
 pub(crate) fn resolve_module_input<'a>(
-    models: &HashMap<Ident<Canonical>, &ModelStage0>,
+    models: &HashMap<Ident<Canonical>, LoweringModel<'_>>,
     parent_model_name: &str,
     ident: &str,
     orig_src: &'a str,
@@ -283,131 +244,10 @@ pub(crate) fn resolve_module_input<'a>(
     }
 }
 
-#[cfg(test)]
-impl ModelStage0 {
-    /// Stage a model that stands alone, resolving module-function calls against
-    /// its OWN macro definitions only.
-    ///
-    /// Correct for the many single-model test fixtures, and for a macro body
-    /// staged in isolation (its own `macro_spec` is in the registry, so a
-    /// self-call resolves). NOT correct for a model that CALLS a macro defined
-    /// in a sibling model -- use [`ModelStage0::new_in_project`] there.
-    pub fn new(
-        x_model: &datamodel::Model,
-        dimensions: &[Dimension],
-        units_ctx: &Context,
-        implicit: bool,
-    ) -> Self {
-        Self::new_in_project(
-            std::slice::from_ref(x_model),
-            x_model,
-            dimensions,
-            units_ctx,
-            implicit,
-        )
-    }
-
-    /// The datamodel-driven Stage0 constructor: no salsa database, everything
-    /// derived from `x_model` plus the project's macro definitions.
-    ///
-    /// This is the independent twin of the salsa-native
-    /// `db::stages::model_stage0`: both share `parse_var`, while this path
-    /// derives the macro registry and duplicate-ident errors without salsa.
-    ///
-    /// `project_models` is the whole project's model list, only so that the
-    /// `MacroRegistry` matches the project-wide one `db::macro_registry`'s query
-    /// builds. Passing just `x_model` (what the [`ModelStage0::new`] wrapper
-    /// does) leaves a caller of a sibling-defined macro unclassified and its
-    /// call unexpanded, which silently makes the oracle disagree with the query
-    /// for reasons that have nothing to do with the code under test.
-    pub fn new_in_project(
-        project_models: &[datamodel::Model],
-        x_model: &datamodel::Model,
-        dimensions: &[Dimension],
-        units_ctx: &Context,
-        implicit: bool,
-    ) -> Self {
-        let mut implicit_vars: Vec<crate::capture::ImplicitVar> = Vec::new();
-
-        let macro_registry = crate::module_functions::MacroRegistry::build(project_models)
-            .expect("test fixture macro set must be valid");
-
-        // #554: a macro-marked model's body variables get the model name as
-        // `enclosing_model` so a renamed `init`/`previous` builtin inside the
-        // like-named macro resolves to the intrinsic, not the macro.
-        let enclosing_model: Option<&str> =
-            x_model.macro_spec.as_ref().map(|_| x_model.name.as_str());
-        // One context for the whole model: `parse_var*` needs the canonical
-        // form, and building it per variable is what the salsa path stopped
-        // doing (it reads the cached `project_dimensions_context` instead).
-        let dimensions_ctx = DimensionsContext::from(dimensions);
-        let snapshot_index_resolver = DatamodelSnapshotIndexResolver {
-            model: x_model,
-            dimensions: &dimensions_ctx,
-        };
-        let ctx = ParseContext {
-            dimensions: &dimensions_ctx,
-            units_ctx,
-            macro_registry: Some(&macro_registry),
-            enclosing_model,
-            snapshot_index_resolver: Some(&snapshot_index_resolver),
-        };
-        let mut variable_list: Vec<VariableStage0> = x_model
-            .variables
-            .iter()
-            .map(|v| parse_var(&ctx, v, &mut implicit_vars, |mi| Ok(Some(mi.clone()))))
-            .collect();
-
-        variable_list.extend(
-            implicit_vars
-                .into_iter()
-                .map(|iv| iv.variable_stage0(&dimensions_ctx)),
-        );
-
-        let variables: HashMap<Ident<Canonical>, _> = variable_list
-            .into_iter()
-            .map(|v| (Ident::new(v.ident()), v))
-            .collect();
-
-        Self {
-            ident: Ident::new(&x_model.name),
-            display_name: x_model.name.clone(),
-            variables,
-            implicit,
-            is_macro: x_model.macro_spec.is_some(),
-            macro_params: macro_param_idents(x_model.macro_spec.as_ref()),
-        }
-    }
-}
-
-pub(crate) struct ScopeStage0<'a> {
-    pub models: &'a HashMap<Ident<Canonical>, &'a ModelStage0>,
+pub(crate) struct LoweringScope<'a> {
+    pub models: &'a HashMap<Ident<Canonical>, LoweringModel<'a>>,
     pub dimensions: &'a DimensionsContext,
     pub model_name: &'a str,
-}
-
-impl ModelStage1 {
-    pub(crate) fn new(scope: &ScopeStage0, model_s0: &ModelStage0) -> Self {
-        // Create a new scope with the model name for this specific model
-        let model_scope = ScopeStage0 {
-            models: scope.models,
-            dimensions: scope.dimensions,
-            model_name: model_s0.ident.as_str(),
-        };
-
-        ModelStage1 {
-            name: model_s0.ident.clone(),
-            display_name: model_s0.display_name.clone(),
-            variables: model_s0
-                .variables
-                .iter()
-                .map(|(ident, v)| (ident.clone(), lower_variable(&model_scope, v)))
-                .collect(),
-            implicit: model_s0.implicit,
-            is_macro: model_s0.is_macro,
-            macro_params: model_s0.macro_params.clone(),
-        }
-    }
 }
 
 #[test]
@@ -467,40 +307,26 @@ fn test_module_parse() {
         ],
     );
 
-    let mut implicit_vars: Vec<crate::capture::ImplicitVar> = Vec::new();
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-
-    let owned_models: HashMap<Ident<Canonical>, ModelStage0> = vec![
-        ("main".to_string(), &main_model),
-        ("lynxes".to_string(), &lynxes_model),
-        ("hares".to_string(), &hares_model),
-    ]
-    .into_iter()
-    .map(|(name, m)| {
-        (
-            Ident::new(&name),
-            ModelStage0::new(m, &[], &units_ctx, false),
-        )
-    })
-    .collect();
-    let models: HashMap<Ident<Canonical>, &ModelStage0> =
-        owned_models.iter().map(|(k, v)| (k.clone(), v)).collect();
-
-    let hares_var = &main_model.variables[2];
-    assert_eq!("hares", hares_var.get_ident());
-
-    let dims_ctx = DimensionsContext::default();
-    let ctx = ParseContext::new(&dims_ctx, &units_ctx);
-    let actual = parse_var(&ctx, hares_var, &mut implicit_vars, |mi| {
-        resolve_module_input(&models, "main", hares_var.get_ident(), &mi.src, &mi.dst)
-    });
+    let project = datamodel::Project {
+        name: "module_parse".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![main_model, lynxes_model, hares_model],
+        source: None,
+        ai_information: None,
+    };
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, &project);
+    let source = sync.models["main"].variables["hares"].source;
+    let actual =
+        crate::db::lowered_source_variable(&db, source, sync.models["main"].source, sync.project);
     assert!(actual.equation_errors().is_none());
-    assert!(implicit_vars.is_empty());
-    assert_eq!(expected, actual);
+    assert_eq!(&expected, actual.as_ref());
 }
 
-/// `lower_variable` carries EVERY field of a Stage0 variable into its Stage1
-/// twin, for every `VarKind`.
+/// Per-variable lowering carries every kind-independent field into the
+/// compiled projection, for every `VarKind`.
 ///
 /// Lowering rewrites exactly two things -- a `Stock`/`Aux` AST from `Expr0` to
 /// `Expr2`, and a `Module`'s input wiring from `datamodel::ModuleReference`s to
@@ -509,12 +335,10 @@ fn test_module_parse() {
 /// dropped from one arm would have been invisible; this pins the pass-through
 /// per kind.
 ///
-/// The rows ARE the `VarKind` enumeration: one variable of each kind, plus both
-/// `Aux` sub-shapes (flow and non-flow), driven through the production parse
-/// (`ModelStage0::new_in_project`) and the production lowering
-/// (`ModelStage1::new`). Both destructurings below are exhaustive -- no `..` --
-/// so a new field on any variant fails to compile here until it is either
-/// asserted or explicitly excused.
+/// The rows are the `VarKind` enumeration: one variable of each kind, plus both
+/// `Aux` sub-shapes (flow and non-flow), driven through the production
+/// per-variable parse and lowering queries. Both destructurings below are
+/// exhaustive, so a new field fails to compile here until it is asserted.
 #[test]
 fn lower_variable_preserves_every_field_of_every_kind() {
     use crate::variable::VarKind;
@@ -530,31 +354,33 @@ fn lower_variable_preserves_every_field_of_every_kind() {
             x_flow("fill", "1", Some("widgets/time")),
             x_flow("drain", "level * 0.1", None),
             x_aux("rate", "level / 2", Some("widgets")),
-            x_module("sub", &[("rate", "sub.port")], None),
+            crate::testutils::x_module_named(
+                "sub_with_units",
+                "sub",
+                &[("rate", "sub_with_units.port")],
+                Some("widgets"),
+            ),
+            crate::testutils::x_module_named(
+                "sub_bad_units",
+                "sub",
+                &[("rate", "sub_bad_units.port")],
+                Some("bad units here!!!"),
+            ),
         ],
     );
 
-    let units_ctx = Context::new(&[], &Default::default()).0;
-    let project_models = vec![main_model.clone(), sub_model.clone()];
-    let owned_s0: HashMap<Ident<Canonical>, ModelStage0> = project_models
-        .iter()
-        .map(|m| {
-            (
-                Ident::new(&m.name),
-                ModelStage0::new_in_project(&project_models, m, &[], &units_ctx, false),
-            )
-        })
-        .collect();
-    let models: HashMap<Ident<Canonical>, &ModelStage0> =
-        owned_s0.iter().map(|(k, v)| (k.clone(), v)).collect();
-    let dimensions_ctx = DimensionsContext::default();
-    let scope = ScopeStage0 {
-        models: &models,
-        dimensions: &dimensions_ctx,
-        model_name: "main",
+    let project = datamodel::Project {
+        name: "lowering_field_preservation".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![main_model.clone(), sub_model],
+        source: None,
+        ai_information: None,
     };
-    let s0 = &owned_s0[&Ident::<Canonical>::new("main")];
-    let s1 = ModelStage1::new(&scope, s0);
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, &project);
+    let source_model = sync.models["main"].source;
 
     // Every kind of the enumeration must actually be exercised; a fixture that
     // silently stopped producing one would otherwise make this test vacuous.
@@ -563,11 +389,12 @@ fn lower_variable_preserves_every_field_of_every_kind() {
     let mut seen_aux = false;
     let mut seen_module = false;
 
-    for (ident, parsed) in s0.variables.iter() {
-        let lowered = s1
-            .variables
-            .get(ident)
-            .unwrap_or_else(|| panic!("{ident} was dropped by lowering"));
+    for source_variable in &main_model.variables {
+        let ident = source_variable.get_ident();
+        let source = sync.models["main"].variables[ident].source;
+        let parsed_result = crate::db::parse_source_variable(&db, source, sync.project);
+        let parsed = &parsed_result.variable;
+        let lowered = crate::db::lowered_source_variable(&db, source, source_model, sync.project);
 
         // The five kind-independent fields pass through verbatim.
         assert_eq!(parsed.ident, lowered.ident, "{ident}: ident");
@@ -649,9 +476,8 @@ fn lower_variable_preserves_every_field_of_every_kind() {
                 seen_module = true;
                 assert_eq!(p_model, l_model, "{ident}: model_name");
                 // Inputs are RESOLVED by lowering, not passed through: the
-                // Stage0 form is a `datamodel::ModuleReference` and the Stage1
-                // form a `(src, dst)` pair of canonical idents. What must not
-                // change is that every reference produces exactly one input.
+                // Parsing retains `datamodel::ModuleReference`; lowering
+                // resolves each one to a canonical `(src, dst)` pair.
                 assert_eq!(p_inputs.len(), l_inputs.len(), "{ident}: input count");
                 let wiring: Vec<(&str, &str)> = l_inputs
                     .iter()
@@ -659,11 +485,7 @@ fn lower_variable_preserves_every_field_of_every_kind() {
                     .collect();
                 // `resolve_module_input` strips the instance prefix from the
                 // destination, so `sub.port` binds the sub-model's own `port`.
-                assert_eq!(
-                    wiring,
-                    vec![("rate", "port")],
-                    "{ident}: resolved module wiring"
-                );
+                assert_eq!(wiring, vec![("rate", "port")], "{ident}: wiring");
             }
             _ => panic!("{ident}: lowering changed the variable's kind"),
         }
@@ -673,6 +495,18 @@ fn lower_variable_preserves_every_field_of_every_kind() {
         seen_stock && seen_flow && seen_aux && seen_module,
         "the fixture must exercise every VarKind (stock {seen_stock}, flow {seen_flow}, \
          aux {seen_aux}, module {seen_module})"
+    );
+    let valid = sync.models["main"].variables["sub_with_units"].source;
+    let valid = crate::db::lowered_source_variable(&db, valid, source_model, sync.project);
+    assert!(valid.units.is_some(), "declared module units must survive");
+    assert!(valid.unit_errors.is_empty());
+    let malformed = sync.models["main"].variables["sub_bad_units"].source;
+    let malformed = crate::db::lowered_source_variable(&db, malformed, source_model, sync.project);
+    assert!(malformed.units.is_none());
+    assert_eq!(
+        malformed.unit_errors.len(),
+        1,
+        "the module's malformed units must survive lowering"
     );
 }
 
@@ -751,7 +585,6 @@ fn test_init_expression_vm() {
 
 #[test]
 fn test_previous_module_input_declaration_does_not_change_parse_shape() {
-    let units_ctx = Context::new(&[], &Default::default()).0;
     let module_input = datamodel::Variable::Aux(datamodel::Aux {
         ident: "input".to_string(),
         equation: datamodel::Equation::Scalar("0".to_string()),
@@ -765,16 +598,31 @@ fn test_previous_module_input_declaration_does_not_change_parse_shape() {
             ..datamodel::Compat::default()
         },
     });
-    let model = x_model(
+    let main = x_model(
         "main",
         vec![module_input, x_aux("lagged", "PREVIOUS(input)", None)],
     );
-    let parsed = ModelStage0::new(&model, &[], &units_ctx, false);
+    let project = datamodel::Project {
+        name: "module_input_parse_shape".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![main],
+        source: None,
+        ai_information: None,
+    };
+    let db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, &project);
+    let parsed = crate::db::parse_source_variable(
+        &db,
+        sync.models["main"].variables["lagged"].source,
+        sync.project,
+    );
     assert!(
         !parsed
-            .variables
-            .keys()
-            .any(|ident| ident.as_str().starts_with("$⁚lagged⁚0⁚arg0")),
+            .implicit_vars
+            .iter()
+            .any(|implicit| implicit.ident().starts_with("$⁚lagged⁚0⁚arg0")),
         "source parsing cannot depend on whether another model binds `input` as a module port"
     );
 }
@@ -837,10 +685,6 @@ fn test_incremental_compile_previous_of_module_backed_var() {
     );
 }
 
-// Salsa stores any `'static` value as a tracked-fn `returns(ref)` result and
-// backdates its memo by `PartialEq`, so `ModelStage0`/`ModelStage1`/`Error`
-// need no opt-in beyond the `PartialEq` they derive. A lowered
-// `compiler::Expr` is equally cacheable: it references variables by NAME
-// (`compiler::VarRef`), carries no offsets, and addresses are assigned exactly
-// once at assembly by `symbolic::resolve_module` -- so caching one across a
-// layout change is sound.
+// A lowered `compiler::Expr` is cacheable across layout changes: it references
+// variables by name (`compiler::VarRef`) and carries no offsets. Assembly
+// assigns addresses exactly once through `symbolic::resolve_module`.
