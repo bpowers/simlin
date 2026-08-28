@@ -12,7 +12,7 @@
 //! `builtins_visitor::walk` and both branches of its `hoist_capture`.
 
 use super::*;
-use crate::ast::{Expr0, print_eqn};
+use crate::ast::{Ast, Expr0, print_eqn};
 use crate::capture::{Capture, CaptureKind, ImplicitVar};
 use crate::lexer::LexerType;
 use crate::test_common::TestProject;
@@ -23,8 +23,8 @@ use crate::test_common::TestProject;
 enum Parent {
     /// A scalar aux named `lagged`.
     Scalar,
-    /// An apply-to-all aux `out[d]`: one equation, walked once per element
-    /// because the body contains `PREVIOUS`/`INIT` (`contains_module_call`).
+    /// An apply-to-all aux `out[d]`: one shaped equation walked once. A
+    /// PREVIOUS/INIT call alone does not require per-element module expansion.
     ApplyToAll,
     /// A per-element arrayed aux `out[d]` whose slots carry the SAME text but
     /// are distinct equations, so a capture of one slot must not be able to
@@ -110,54 +110,22 @@ const ROWS: &[CaptureRow] = &[
         rewritten: None,
     },
     CaptureRow {
-        covers: "hoist_capture scalar branch inside apply-to-all: one capture per element, \
-                 each carrying its element suffix. Substitution is a no-op on this body -- \
-                 the index is a VARIABLE, not a dimension -- so the three bodies are equal \
-                 and only the suffixes tell the captures apart",
+        covers: "hoist_capture apply-to-all branch: a dynamic index retains the parent's \
+                 storage shape in one helper, so an arrayed index can still resolve in the \
+                 helper's active dimension context",
         parent: Parent::ApplyToAll,
         equation: "PREVIOUS(vals[idx], 0)",
-        captures: &[
-            ("$⁚out⁚0⁚arg0⁚e1", CaptureKind::Previous, "vals[idx]", &[]),
-            ("$⁚out⁚0⁚arg0⁚e2", CaptureKind::Previous, "vals[idx]", &[]),
-            ("$⁚out⁚0⁚arg0⁚e3", CaptureKind::Previous, "vals[idx]", &[]),
-        ],
-        rewritten: Some(
-            "the scalar branch substitutes, even where the substitution changes nothing",
-        ),
+        captures: &[("$⁚out⁚0⁚arg0", CaptureKind::Previous, "vals[idx]", &["d"])],
+        rewritten: None,
     },
     CaptureRow {
-        covers: "hoist_capture scalar branch inside apply-to-all, with the substitution \
-                 actually firing: a dimension reference in the body is rewritten to the \
-                 active element, so each element's capture holds a DIFFERENT body. This is \
-                 the one arm where the capture is deliberately not the source subtree",
+        covers: "hoist_capture apply-to-all branch: an active dimension stays structural \
+                 in the helper body instead of being reconstructed as one expression per \
+                 element",
         parent: Parent::ApplyToAll,
-        // `Op2`, so the routing's pre-substitution (which only fires on a bare
-        // `Subscript` arg0) does not run and `hoist_capture` owns the whole
-        // substitution; `k` is the bare variable reference and `vals[d]` the
-        // subscript, which together select the SCALAR branch over the arrayed
-        // one (`arg_has_bare_var_ref && !arg_has_subscript`).
         equation: "PREVIOUS(vals[d] * k, 0)",
-        captures: &[
-            (
-                "$⁚out⁚0⁚arg0⁚e1",
-                CaptureKind::Previous,
-                "vals[d·e1] * k",
-                &[],
-            ),
-            (
-                "$⁚out⁚0⁚arg0⁚e2",
-                CaptureKind::Previous,
-                "vals[d·e2] * k",
-                &[],
-            ),
-            (
-                "$⁚out⁚0⁚arg0⁚e3",
-                CaptureKind::Previous,
-                "vals[d·e3] * k",
-                &[],
-            ),
-        ],
-        rewritten: Some("substitute_dimension_refs rewrites the body per element"),
+        captures: &[("$⁚out⁚0⁚arg0", CaptureKind::Previous, "vals[d] * k", &["d"])],
+        rewritten: None,
     },
     CaptureRow {
         covers: "hoist_capture ARRAYED branch (GH #541): a bare arrayed name inside the \
@@ -252,6 +220,162 @@ fn captures_for(row: &CaptureRow) -> Vec<Capture> {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &dm);
     captures_of(&db, &sync, "main", var)
+}
+
+/// Snapshot opcodes do not erase an apply-to-all equation's structural shape.
+///
+/// The call rows are the two snapshot intrinsics crossed with the two routing
+/// outcomes they can take: a direct storage read and a computed expression
+/// that needs a capture. The stdlib row is the control proving that a genuine
+/// module call still takes the per-element `Arrayed` path. Every value is read
+/// from the production parse rather than from a hand-built AST.
+#[test]
+fn snapshot_only_apply_to_all_equations_remain_apply_to_all() {
+    let rows = [
+        ("PREVIOUS direct", "PREVIOUS(vals[d], 0)", 0usize),
+        ("INIT direct", "INIT(vals[d])", 0),
+        ("PREVIOUS capture", "PREVIOUS(vals[d] * k, 0)", 1),
+        ("INIT capture", "INIT(vals[d] * k)", 1),
+        ("nested PREVIOUS capture", "PREVIOUS(PREVIOUS(vals), 0)", 1),
+    ];
+
+    for (label, equation, expected_captures) in rows {
+        let project = TestProject::new(label)
+            .named_dimension("d", &["e1", "e2", "e3"])
+            .array_aux("vals[d]", "10")
+            .scalar_aux("k", "2")
+            .array_aux("out[d]", equation)
+            .build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        let model = sync.models["main"].source;
+        let source = model.variables(&db)["out"];
+        let parsed = parse_source_variable(&db, source, sync.project);
+
+        assert!(
+            matches!(parsed.variable.ast(), Some(Ast::ApplyToAll(_, _))),
+            "{label}: `{equation}` must retain ApplyToAll; got {}",
+            parsed.variable.ast().map(print_ast).unwrap_or_default()
+        );
+        assert_eq!(
+            parsed
+                .implicit_vars
+                .iter()
+                .filter(|helper| helper.capture().is_some())
+                .count(),
+            expected_captures,
+            "{label}: `{equation}` capture count"
+        );
+    }
+
+    let project = TestProject::new("module control")
+        .named_dimension("d", &["e1", "e2", "e3"])
+        .array_aux("vals[d]", "10")
+        .array_aux("out[d]", "PREVIOUS(vals[d], 0) + SMTH1(vals[d], 2)")
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let model = sync.models["main"].source;
+    let source = model.variables(&db)["out"];
+    let parsed = parse_source_variable(&db, source, sync.project);
+    assert!(
+        matches!(parsed.variable.ast(), Some(Ast::Arrayed(_, _, _, _))),
+        "a genuine stdlib module still requires per-element instantiation"
+    );
+}
+
+/// Both expression children of a range index inherit an explicit element
+/// equation's active dimension. The outer PREVIOUS capture forces
+/// `substitute_dimension_refs` to traverse the complete subscript after the
+/// endpoint snapshots have been rewritten; each endpoint's `D` must become
+/// the current qualified element exactly once.
+#[test]
+fn explicit_element_range_endpoints_substitute_and_capture_once() {
+    let equation = "PREVIOUS(SUM(data[PREVIOUS(lo + 0, 1) + D - 1:INIT(hi + 0) + D - 1]) + 0, 0)";
+    let project = TestProject::new("range_endpoint_snapshots")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("D", &["a", "b"])
+        .indexed_dimension("Index", 5)
+        .array_aux("data[Index]", "Index")
+        .scalar_aux("lo", "1")
+        .scalar_aux("hi", "3")
+        .array_with_ranges_direct(
+            "out",
+            vec!["D".to_string()],
+            vec![("a", equation), ("b", equation)],
+            None,
+        );
+
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let source = sync.models["main"].source.variables(&db)["out"];
+    let parsed = parse_source_variable(&db, source, sync.project);
+    let captures: std::collections::BTreeMap<String, String> = parsed
+        .implicit_vars
+        .iter()
+        .filter_map(|implicit| implicit.capture())
+        .map(|capture| (capture.ident().to_string(), print_eqn(capture.arg())))
+        .collect();
+    let mut expected_names: Vec<String> = ["a", "b"]
+        .into_iter()
+        .flat_map(|element| (0..3).map(move |id| format!("$⁚out⁚{id}⁚arg0⁚{element}")))
+        .collect();
+    expected_names.sort();
+    assert_eq!(
+        captures.keys().cloned().collect::<Vec<_>>(),
+        expected_names,
+        "two endpoint captures plus one outer capture per explicit body, with no double visit"
+    );
+    for element in ["a", "b"] {
+        let outer = &captures[&format!("$⁚out⁚2⁚arg0⁚{element}")];
+        let qualified = format!("d·{element}");
+        assert_eq!(
+            outer.matches(&qualified).count(),
+            4,
+            "each Range endpoint must qualify its helper access and arithmetic dimension: {outer}"
+        );
+        assert!(
+            outer.contains(&format!("$⁚out⁚0⁚arg0⁚{element}"))
+                && outer.contains(&format!("$⁚out⁚1⁚arg0⁚{element}")),
+            "the outer capture must retain both endpoint snapshot reads: {outer}"
+        );
+    }
+
+    let results = project.run_vm().expect("range snapshot fixture must run");
+    assert_eq!(results["out[a]"], [0.0, 6.0, 6.0]);
+    assert_eq!(results["out[b]"], [0.0, 9.0, 9.0]);
+}
+
+/// The shaped capture built from a nested snapshot remains `ApplyToAll` when
+/// it is converted to the parse-stage variable consumed by dependency and
+/// fragment compilation. The capture's stage constructor runs the same
+/// implicit-expansion visitor as a source variable, so this pins both
+/// production boundaries to the same structural result.
+#[test]
+fn a_snapshot_capture_retains_apply_to_all_storage() {
+    let row = ROWS
+        .iter()
+        .find(|row| {
+            row.parent == Parent::ApplyToAll && row.equation == "PREVIOUS(PREVIOUS(vals), 0)"
+        })
+        .expect("the exhaustive capture rows include nested PREVIOUS");
+    let (project, variable) = model_for(row);
+    let datamodel = project.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let dimensions = project_dimensions_context(&db, sync.project);
+    let capture = captures_of(&db, &sync, "main", variable)
+        .into_iter()
+        .next()
+        .expect("nested PREVIOUS must synthesize its outer capture");
+    let built = capture.variable_stage0(dimensions);
+
+    assert!(
+        matches!(built.ast(), Some(Ast::ApplyToAll(_, _))),
+        "a shaped capture containing only a snapshot opcode must remain ApplyToAll; got {}",
+        built.ast().map(print_ast).unwrap_or_default()
+    );
 }
 
 /// Every capture-synthesizing arm, by what the capture is filed under, which
@@ -647,11 +771,10 @@ fn print_ast(ast: &crate::ast::Ast<Expr0>) -> String {
 /// `lower_fragment` and the same codegen, so what is left to differ is whether
 /// the capture handed lowering the argument -- which is the claim.
 ///
-/// Scalar rows only: an apply-to-all or per-element row's capture is one slot
-/// of an unrolled parent and has no single-aux sibling to compare against.
-/// Those shapes are pinned instead by the checked-in fragment goldens
-/// (`db/fragment_char_golden/prev_init.txt` and its neighbours), which render
-/// every capture's whole bytecode.
+/// Scalar rows only: apply-to-all captures additionally need their declared
+/// shape, active-dimension resolution, and mapped-axis semantics compared.
+/// Those are pinned by the production parse/stage tests above and the VM/WASM
+/// dynamic-index integration fixture.
 #[test]
 fn a_captures_fragment_is_its_argument_compiled() {
     use crate::db::fragment_compile::compile_implicit_var_fragment;

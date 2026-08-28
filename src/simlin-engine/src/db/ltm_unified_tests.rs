@@ -963,6 +963,91 @@ fn test_stockless_previous_lagged_cycle_is_not_stateless() {
     }
 }
 
+/// A non-trivial PREVIOUS argument is represented by production parsing as a
+/// flow-live capture. The capture is part of the causal cycle and owns its
+/// lagged dependency, so both automatic scoring and a user pin over the two
+/// source variables must recognize the same discrete state as the direct
+/// PREVIOUS control above.
+#[test]
+fn test_stockless_captured_previous_cycle_is_state_for_scores_and_pins() {
+    use crate::db::{LtmMode, model_ltm_mode, model_pinned_loops};
+    use salsa::Setter;
+
+    for (label, a_equation, with_values) in [
+        ("direct", "PREVIOUS(b, 0)", false),
+        ("captured-index", "values[PREVIOUS(b * 0 + 1, 1)]", true),
+    ] {
+        let mut builder = crate::test_common::TestProject::new(label);
+        if with_values {
+            builder = builder
+                .named_dimension("D", &["one", "two"])
+                .array_const("values[D]", 1.0);
+        }
+        let mut project = builder
+            .aux("a", a_equation, None)
+            .aux("b", "a * 0.5 + 1", None)
+            .build_datamodel();
+        let model = &mut project.models[0];
+        let mut uid_by_name = HashMap::new();
+        for (uid, variable) in model.variables.iter_mut().enumerate() {
+            let uid = uid as i32 + 1;
+            uid_by_name.insert(variable.get_ident().to_string(), uid);
+            match variable {
+                datamodel::Variable::Stock(stock) => stock.uid = Some(uid),
+                datamodel::Variable::Flow(flow) => flow.uid = Some(uid),
+                datamodel::Variable::Aux(aux) => aux.uid = Some(uid),
+                datamodel::Variable::Module(module) => module.uid = Some(uid),
+            }
+        }
+        model.loop_metadata.push(datamodel::LoopMetadata {
+            uids: vec![uid_by_name["a"], uid_by_name["b"]],
+            deleted: false,
+            name: format!("{label} previous"),
+            description: String::new(),
+        });
+
+        let mut db = SimlinDb::default();
+        let (source_project, source_model) = {
+            let sync = sync_from_datamodel(&db, &project);
+            (sync.project, sync.models["main"].source)
+        };
+        source_project.set_ltm_enabled(&mut db).to(true);
+        source_project.set_ltm_discovery_mode(&mut db).to(true);
+
+        assert_eq!(
+            model_ltm_mode(&db, source_model, source_project),
+            LtmMode::Discovery,
+            "{label}: a flow-live PREVIOUS is discrete state, so the user mode applies"
+        );
+        let ltm = model_ltm_variables(&db, source_model, source_project);
+        assert!(
+            ltm.vars.iter().any(|v| v.name.contains("link_score")),
+            "{label}: the lagged cycle must emit link scores: {:?}",
+            ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+        );
+        assert!(
+            ltm.vars
+                .iter()
+                .any(|v| v.name.contains("\u{205A}loop_score\u{205A}")),
+            "{label}: the pin must emit a loop score: {:?}",
+            ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
+        );
+
+        let pinned = model_pinned_loops(&db, source_model, source_project);
+        assert!(
+            pinned.invalid.is_empty(),
+            "{label}: a pin over source variables must traverse compiler captures: {:?}",
+            pinned.invalid
+        );
+        assert_eq!(
+            pinned.loops.len(),
+            1,
+            "{label}: the source loop has one pin"
+        );
+        assert_eq!(pinned.loops[0].name, format!("{label} previous"));
+    }
+}
+
 /// GH #749 (the gate stays conservative): PREVIOUS state only matters when
 /// it is on a dt-phase reference. A stock-free, PREVIOUS-free model is
 /// still stateless and takes the early bail -- this guards the new lagged
@@ -2084,12 +2169,10 @@ fn build_loops_for_test(project: &TestProject) -> Vec<crate::ltm::Loop> {
         return vec![];
     }
     let var_graph = causal_graph_with_modules(&db, model, sync.project);
-    let source_vars = model.variables(&db);
     let dm_dims = project_datamodel_dims(&db, sync.project);
     build_element_level_loops(
         circuits,
         &var_graph,
-        source_vars,
         &db,
         model,
         sync.project,
@@ -2367,12 +2450,10 @@ fn edge_aliasing_bare_and_fixed_index_to_same_source_element() {
         vec![]
     } else {
         let var_graph = causal_graph_with_modules(&db, model, source_project);
-        let source_vars = model.variables(&db);
         let dm_dims = project_datamodel_dims(&db, source_project);
         build_element_level_loops(
             circuits,
             &var_graph,
-            source_vars,
             &db,
             model,
             source_project,
@@ -3150,12 +3231,10 @@ fn scalar_feeder_cycle_routes_through_agg_node() {
 
     let tiered = model_loop_circuits_tiered(&db, model, sync.project);
     let var_graph = causal_graph_with_modules(&db, model, sync.project);
-    let source_vars = model.variables(&db);
     let dm_dims = project_datamodel_dims(&db, sync.project);
     let (loops, _truncated) = build_loops_from_tiered(
         tiered,
         &var_graph,
-        source_vars,
         &db,
         model,
         sync.project,
@@ -3716,12 +3795,10 @@ fn cross_agg_two_petal_loops_match_pre_fix_content() {
 
     let tiered = crate::db::model_loop_circuits_tiered(&db, model, sync.project);
     let var_graph = causal_graph_with_modules(&db, model, sync.project);
-    let source_vars = model.variables(&db);
     let dm_dims = project_datamodel_dims(&db, sync.project);
     let (loops, truncated_aggs) = build_loops_from_tiered(
         tiered,
         &var_graph,
-        source_vars,
         &db,
         model,
         sync.project,
@@ -3944,12 +4021,10 @@ fn cross_agg_loop_recovery_handles_subscripted_agg_node() {
 
     let tiered = crate::db::model_loop_circuits_tiered(&db, model, sync.project);
     let var_graph = causal_graph_with_modules(&db, model, sync.project);
-    let source_vars = model.variables(&db);
     let dm_dims = project_datamodel_dims(&db, sync.project);
     let (loops, truncated_aggs) = build_loops_from_tiered(
         tiered,
         &var_graph,
-        source_vars,
         &db,
         model,
         sync.project,

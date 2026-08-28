@@ -48,8 +48,8 @@
 //! fixture with an arrayed output.
 
 use crate::db::{
-    DiagnosticError, SimlinDb, collect_all_diagnostics, model_element_causal_edges,
-    model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel,
+    DiagnosticError, SimlinDb, collect_all_diagnostics, model_edge_shapes,
+    model_element_causal_edges, model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel,
     sync_from_datamodel_incremental,
 };
 use crate::test_common::TestProject;
@@ -491,25 +491,12 @@ fn a_module_instance_scores_no_element_but_its_own() {
     }
 }
 
-/// The GH #541 ARRAYED capture helper is not element-bound, and the emitter's
-/// `dimensions.is_empty()` guard must keep it out.
-///
-/// That helper is synthesized for a bare arrayed reference under an
-/// apply-to-all expansion; it is a real `Equation::ApplyToAll` array, carries no
-/// element suffix, and is referenced as `helper[<elem>]` -- so the per-element
-/// pin belongs on the REFERENCE, not on a per-element score of the helper. It
-/// reaches this emitter through the same "absent from `source_vars`" door every
-/// implicit variable does, so only the guard tells them apart.
-///
-/// PRE-EXISTING DEFECT this fixture also exposes, deliberately left alone: the
-/// arrayed helper's own link scores do not compile (`expected array variable
-/// '$⁚growth⁚1⁚arg0' to have dimensions`), so its edges read constant 0 and both
-/// loop scores here are dropped. Measured at `main` with this exact fixture: 5
-/// such failures, identical. It belongs to the arrayed-implicit-helper emitter
-/// -- the same residual family as the mirror-direction edges the branch
-/// discloses -- not to the per-element instance work, and folding it in would
-/// mean a second emitter with its own dimension handling. The assertions here
-/// are scoped so they hold regardless of whether that is fixed.
+/// A dimensioned capture helper is not element-bound. It is one
+/// `Equation::ApplyToAll` array, carries no element suffix, and is referenced as
+/// `helper[<elem>]`, so the element belongs on the reference and source side of
+/// each score name. The per-element-module emitter sees it through the same
+/// implicit namespace as scalar helpers; the production metadata dimensions
+/// are the discriminator.
 #[test]
 fn an_arrayed_capture_helper_is_not_treated_as_element_bound() {
     // A real feedback loop, so LTM actually emits link scores here -- without a
@@ -575,18 +562,12 @@ fn an_arrayed_capture_helper_is_not_treated_as_element_bound() {
     }
 }
 
-/// An ARRAYED capture helper's own link scores must compile.
-///
-/// `ImplicitVarMeta::dimensions` exists so the fragment compiler's dep-stub
-/// builder can give an arrayed implicit helper its real array shape -- its own
-/// rustdoc says so, naming the GH #541 helper as the reason. The LTM fragment
-/// compiler consulted it for LTM-side parse helpers and NOT for the model's own
-/// implicit vars, which got a scalar `VarKind::Aux` stub with `ast: None`. A
-/// consuming `helper[dim·elem]` subscript then failed lowering with "expected
-/// array variable ... to have dimensions", so every score touching the helper
-/// read a constant 0 and took the loop scores with it.
+/// A dimensioned capture is one arrayed endpoint everywhere LTM observes it:
+/// the element graph, link-score variables, loop topology, fragment dependency
+/// shapes, layout, and simulation values all derive from its production
+/// `ImplicitVarMeta::dimensions` row.
 #[test]
-fn an_arrayed_capture_helpers_scores_compile() {
+fn an_arrayed_capture_endpoint_has_one_shape_through_ltm() {
     let project = TestProject::new("arrayed_capture_helper_compiles")
         .with_sim_time(0.0, 10.0, 0.25)
         .named_dimension("Region", &["north", "south"])
@@ -601,6 +582,29 @@ fn an_arrayed_capture_helpers_scores_compile() {
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
 
+    let model = sync.models["main"].source_model;
+    let implicit = crate::db::model_implicit_var_info(&db, model, sync.project);
+    let helper = "$⁚growth⁚1⁚arg0";
+    assert_eq!(implicit[helper].dimensions, ["region"]);
+
+    let ltm = model_ltm_variables(&db, model, sync.project);
+    let stock_to_capture = ltm
+        .vars
+        .iter()
+        .find(|v| v.name == format!("$⁚ltm⁚link_score⁚stock→{helper}"))
+        .expect("stock-to-capture score");
+    assert_eq!(stock_to_capture.dimensions, ["Region"]);
+    let capture_loop = ltm
+        .vars
+        .iter()
+        .find(|v| v.name == "$⁚ltm⁚loop_score⁚u1")
+        .expect("capture loop score");
+    assert_eq!(capture_loop.dimensions, ["Region"]);
+    assert!(
+        ltm.vars.iter().all(|v| v.name != "$⁚ltm⁚loop_score⁚u2"),
+        "the two compatible element loops share one dimensioned score"
+    );
+
     let failures: Vec<String> = collect_all_diagnostics(&db, sync.project)
         .iter()
         .filter_map(|d| match &d.error {
@@ -611,47 +615,429 @@ fn an_arrayed_capture_helpers_scores_compile() {
         })
         .collect();
 
-    // What this fix establishes: no fragment fails because the HELPER ITSELF
-    // has no shape. Before it, `$⁚growth⁚1⁚arg0` was stubbed as a size-1 scalar
-    // and every consumer's `helper[dim·elem]` subscript failed lowering.
-    let helper_shape_failures: Vec<&String> = failures
-        .iter()
-        .filter(|m| m.contains("expected array variable '$⁚growth⁚1⁚arg0'"))
-        .collect();
     assert!(
-        helper_shape_failures.is_empty(),
-        "an arrayed implicit helper must get a dimension-aware dep stub; {} \
-         fragment(s) still fail on the HELPER's shape:\n{}",
-        helper_shape_failures.len(),
+        failures.is_empty(),
+        "every score and loop touching the shaped capture must compile:\n{}",
         failures.join("\n")
     );
 
-    // SCOPE, stated rather than implied. This fixture still has failures, and
-    // they are two OTHER root causes, both left for separate work:
-    //
-    //  * an array-valued `PREVIOUS` in a SCALAR operand position. GH #995's
-    //    Phase C3 gave `PREVIOUS` an array form, but only where an array is
-    //    expected: this fixture's capture helper is `h[Region] = PREVIOUS(stock)`
-    //    over a bare arrayed `stock`, whose right-hand side lowers to a
-    //    whole-array view being assigned element by element. Making that work is
-    //    a LOWERING question -- a bare arrayed name in an apply-to-all body
-    //    should resolve per element -- not a view question, so C3 changed the
-    //    message here and not the outcome.
-    //  * the loop builder subscripts `{helper}[elem]→growth` as though it were
-    //    dimensioned, while the emitter gives it none -- an emitter/consumer
-    //    shape disagreement that survives independently of the above.
-    //
-    // Asserting zero failures here would make this test a hostage to both.
-    // Enumerating the classes it DOES tolerate is what keeps it from silently
-    // absorbing a new one.
-    for msg in &failures {
+    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
+        .expect("the LTM fixture must compile");
+    let offset = compiled.offsets[&crate::common::Ident::new(capture_loop.name.as_str())];
+    let mut vm = crate::vm::Vm::new(compiled).expect("VM creation");
+    vm.run_to_end().expect("simulation");
+    let results = vm.into_results();
+    let slots: Vec<Vec<f64>> = (0..2)
+        .map(|slot| {
+            (0..results.step_count)
+                .map(|step| results.data[step * results.step_size + offset + slot])
+                .collect()
+        })
+        .collect();
+    assert_eq!(slots[0], slots[1]);
+    assert_eq!(slots[0].len(), 41);
+    assert_eq!(&slots[0][..3], &[0.0, 0.0, 0.0]);
+    assert!((slots[0][3] - 0.022346368715091925).abs() < 1e-15);
+    assert!((slots[0][40] - 0.010328893875739318).abs() < 1e-15);
+    assert!(
+        slots[0]
+            .iter()
+            .any(|value| value.is_finite() && *value != 0.0),
+        "a compiled capture loop must not read a zero-filled fallback: {slots:?}"
+    );
+}
+
+/// A shaped capture can itself be the variable-backed result of a partial
+/// reducer. The projection feeder into that hidden endpoint has only
+/// per-row/per-slot score names, so tiered cycle classification must route the
+/// loop through the element graph instead of composing a nonexistent Bare
+/// score. The target shape comes from the same production implicit metadata as
+/// the element graph and score emitter.
+#[test]
+fn shaped_capture_reducer_projection_feeder_uses_element_loops() {
+    let project = TestProject::new("capture_projection_feeder")
+        .with_sim_time(0.0, 6.0, 1.0)
+        .named_dimension("D1", &["r1", "r2"])
+        .named_dimension("D2", &["c1", "c2"])
+        .array_aux("matrix[D1,D2]", "1 + D1 + D2")
+        .array_aux("frac[D1]", "1 + 0.01 * lagged[D1]")
+        .array_aux("lagged[D1]", "PREVIOUS(SUM(matrix[D1, *] * frac[D1]), 0)");
+    let datamodel = project.build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let model = sync.models["main"].source_model;
+    let capture = "$⁚lagged⁚0⁚arg0";
+
+    let implicit = crate::db::model_implicit_var_info(&db, model, sync.project);
+    assert_eq!(
+        implicit[capture].dimensions,
+        ["d1"],
+        "the real snapshot construction must retain the reducer result shape"
+    );
+
+    let shapes = model_edge_shapes(&db, model, sync.project);
+    assert!(
+        shapes
+            .agg_routed_edges
+            .contains(&("frac".to_string(), capture.to_string())),
+        "the projection feeder into a hidden shaped reducer must avoid the Bare fast path: {:#?}",
+        shapes.agg_routed_edges
+    );
+
+    let ltm = model_ltm_variables(&db, model, sync.project);
+    let loop_vars: Vec<_> = ltm
+        .vars
+        .iter()
+        .filter(|variable| variable.name.starts_with("$⁚ltm⁚loop_score⁚"))
+        .collect();
+    assert_eq!(
+        loop_vars.len(),
+        2,
+        "the per-row score identities force two diagonal element circuits: {:?}",
+        loop_vars
+            .iter()
+            .map(|variable| &variable.name)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        loop_vars
+            .iter()
+            .all(|variable| variable.dimensions.is_empty()),
+        "these are scalar per-row circuits, not one grouped A2A loop"
+    );
+    for element in ["r1", "r2"] {
+        let score = format!("$⁚ltm⁚link_score⁚frac[{element}]→{capture}[{element}]");
         assert!(
-            msg.contains(
-                "an array-valued PREVIOUS/INIT is only meaningful where an array is expected"
-            ) || msg.contains("expected array variable '$⁚ltm⁚link_score⁚"),
-            "unexpected residual failure class -- this test tolerates only the \
-             scalar-position array-PREVIOUS class and the loop-builder shape \
-             disagreement:\n{msg}"
+            ltm.vars.iter().any(|variable| variable.name == score),
+            "the projection feeder has one real per-row score: {score}"
+        );
+        assert!(
+            loop_vars
+                .iter()
+                .any(|variable| variable.equation.source_text().contains(&score)),
+            "an element loop must consume the emitted score {score}: {:?}",
+            loop_vars
+                .iter()
+                .map(|variable| variable.equation.source_text())
+                .collect::<Vec<_>>()
+        );
+    }
+    let nonexistent_bare = format!("\"$⁚ltm⁚link_score⁚frac→{capture}\"");
+    assert!(
+        loop_vars
+            .iter()
+            .all(|variable| !variable.equation.source_text().contains(&nonexistent_bare)),
+        "no loop may reference the nonexistent Bare projection-feeder score"
+    );
+
+    let failures: Vec<String> = collect_all_diagnostics(&db, sync.project)
+        .into_iter()
+        .filter_map(|diagnostic| match diagnostic.error {
+            DiagnosticError::Assembly(message) if message.contains("failed to compile") => {
+                Some(message)
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "every per-row score and scalar loop must compile: {failures:#?}"
+    );
+
+    let observed_names: Vec<String> = ["r1", "r2"]
+        .into_iter()
+        .map(|element| format!("$⁚ltm⁚link_score⁚frac[{element}]→{capture}[{element}]"))
+        .chain(loop_vars.iter().map(|variable| variable.name.clone()))
+        .collect();
+    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
+        .expect("projection-feeder LTM fixture must compile");
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation");
+    vm.run_to_end().expect("simulation");
+    let results = vm.into_results();
+    for name in observed_names {
+        let offset = compiled.offsets[&crate::common::Ident::new(name.as_str())];
+        let series: Vec<f64> = (0..results.step_count)
+            .map(|step| results.data[step * results.step_size + offset])
+            .collect();
+        assert_eq!(
+            series,
+            [0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            "{name} must execute the exact per-row score rather than a zero stub"
+        );
+    }
+}
+
+/// An explicit Arrayed override does not consume the equation's default.
+/// A shaped PREVIOUS capture used by that default remains one structural
+/// helper, but only missing slots read it; broadcasting its read into the
+/// override would manufacture a feedback loop and score that cannot affect
+/// the simulated value.
+#[test]
+fn shaped_snapshot_default_scores_only_missing_elements() {
+    let mut datamodel = TestProject::new("shaped_snapshot_default_topology")
+        .with_sim_time(0.0, 4.0, 1.0)
+        .named_dimension("D", &["a", "b"])
+        .array_aux("y[D]", "x[D] * 0.5 + 1")
+        .build_datamodel();
+    datamodel.models[0]
+        .variables
+        .push(crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+            ident: "x".to_string(),
+            equation: crate::datamodel::Equation::Arrayed(
+                vec!["D".to_string()],
+                vec![("a".to_string(), "1".to_string(), None, None)],
+                Some("PREVIOUS(y[D] * 2, 0)".to_string()),
+                true,
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: crate::datamodel::Compat::default(),
+        }));
+    let mut uid_by_name = std::collections::HashMap::new();
+    for (index, variable) in datamodel.models[0].variables.iter_mut().enumerate() {
+        let uid = index as i32 + 1;
+        uid_by_name.insert(variable.get_ident().to_string(), uid);
+        match variable {
+            crate::datamodel::Variable::Stock(stock) => stock.uid = Some(uid),
+            crate::datamodel::Variable::Flow(flow) => flow.uid = Some(uid),
+            crate::datamodel::Variable::Aux(aux) => aux.uid = Some(uid),
+            crate::datamodel::Variable::Module(module) => module.uid = Some(uid),
+        }
+    }
+    datamodel.models[0]
+        .loop_metadata
+        .push(crate::datamodel::LoopMetadata {
+            uids: vec![uid_by_name["x"], uid_by_name["y"]],
+            deleted: false,
+            name: "missing default slot".to_string(),
+            description: String::new(),
+        });
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let model = sync.models["main"].source_model;
+    let capture = "$⁚x⁚0⁚arg0";
+    let implicit = crate::db::model_implicit_var_info(&db, model, sync.project);
+    assert_eq!(implicit[capture].dimensions, ["d"]);
+    assert_eq!(
+        implicit
+            .keys()
+            .filter(|name| name.as_str() == capture)
+            .count(),
+        1,
+        "the missing slots share one structural capture"
+    );
+
+    let element_edges = model_element_causal_edges(&db, model, sync.project);
+    assert!(
+        element_edges.edges[&format!("{capture}[b]")].contains("x[b]"),
+        "the missing slot consumes its capture"
+    );
+    assert!(
+        !element_edges
+            .edges
+            .get(&format!("{capture}[a]"))
+            .is_some_and(|targets| targets.contains("x[a]")),
+        "the explicit override must not inherit the default's capture edge"
+    );
+
+    let edge_shapes = model_edge_shapes(&db, model, sync.project);
+    assert!(
+        edge_shapes
+            .target_restricted_edges
+            .contains(&(capture.to_string(), "x".to_string())),
+        "the classifier must retain the missing-slot restriction: {edge_shapes:#?}"
+    );
+    let pinned = crate::db::model_pinned_loops(&db, model, sync.project);
+    assert!(pinned.invalid.is_empty(), "the production pin is valid");
+    assert_eq!(pinned.loops.len(), 1);
+    assert_eq!(pinned.loops[0].loops.len(), 1);
+    let pinned_loop = &pinned.loops[0].loops[0];
+    assert!(
+        pinned_loop.dimensions.is_empty()
+            && pinned_loop.links.iter().all(|link| {
+                link.from.as_str().contains("[b]") && link.to.as_str().contains("[b]")
+            }),
+        "the pin expands to the one real b-slot circuit: {pinned_loop:#?}"
+    );
+
+    let ltm = model_ltm_variables(&db, model, sync.project);
+    let loop_vars: Vec<_> = ltm
+        .vars
+        .iter()
+        .filter(|variable| variable.name.starts_with("$⁚ltm⁚loop_score⁚"))
+        .collect();
+    assert!(
+        loop_vars
+            .iter()
+            .any(|variable| variable.equation.source_text().contains("[b]")),
+        "the missing b slot's real lagged loop must be scored: {:?}",
+        loop_vars
+            .iter()
+            .map(|variable| variable.equation.source_text())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        loop_vars
+            .iter()
+            .all(|variable| !variable.equation.source_text().contains("[a]")),
+        "no loop may be emitted for overridden slot a: {:?}",
+        loop_vars
+            .iter()
+            .map(|variable| variable.equation.source_text())
+            .collect::<Vec<_>>()
+    );
+
+    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
+        .expect("the shaped default and its LTM scores compile");
+    let mut vm = crate::Vm::new(compiled).expect("vm");
+    vm.run_to_end().expect("simulation");
+    let results = vm.into_results();
+    let x_a = results.offsets["x[a]"];
+    let x_b = results.offsets["x[b]"];
+    let series = |offset| {
+        (0..results.step_count)
+            .map(|step| results.data[step * results.step_size + offset])
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(series(x_a), [1.0; 5]);
+    assert_eq!(series(x_b), [0.0, 2.0, 4.0, 6.0, 8.0]);
+    for variable in loop_vars {
+        let offset = results.offsets[variable.name.as_str()];
+        let values = series(offset);
+        assert_eq!(values[0], 0.0);
+        assert!(
+            values[1..].iter().all(|value| (*value - 1.0).abs() < 1e-12),
+            "the isolated b loop score is exactly one after startup: {values:?}"
+        );
+    }
+}
+
+/// An Arrayed default whose apply flag is false is inert source text and must
+/// not synthesize capture storage.
+#[test]
+fn inactive_snapshot_default_mints_no_capture() {
+    let mut datamodel = TestProject::new("inactive_snapshot_default")
+        .named_dimension("D", &["a", "b"])
+        .array_const("y[D]", 1.0)
+        .build_datamodel();
+    datamodel.models[0]
+        .variables
+        .push(crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+            ident: "x".to_string(),
+            equation: crate::datamodel::Equation::Arrayed(
+                vec!["D".to_string()],
+                vec![("a".to_string(), "1".to_string(), None, None)],
+                Some("PREVIOUS(y[D] * 2, 0)".to_string()),
+                false,
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: crate::datamodel::Compat::default(),
+        }));
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    let implicit =
+        crate::db::model_implicit_var_info(&db, sync.models["main"].source, sync.project);
+    assert!(
+        implicit.keys().all(|name| !name.starts_with("$⁚x⁚")),
+        "an inactive default has no production capture: {:?}",
+        implicit.keys().collect::<Vec<_>>()
+    );
+}
+
+/// A default has no consumer when every declared storage slot has an explicit
+/// body. Both helper-producing call families must remain absent even when the
+/// apply flag is true: snapshot storage is shared only across real missing
+/// slots, and module instances are inherently per missing slot.
+#[test]
+fn fully_overridden_defaults_mint_no_implicit_helpers() {
+    for (label, default) in [
+        ("snapshot", "PREVIOUS(y[D] * 2, 0)"),
+        ("module", "SMTH1(y[D], 1, 0)"),
+    ] {
+        let mut datamodel = TestProject::new(label)
+            .named_dimension("D", &["a", "b"])
+            .array_const("y[D]", 1.0)
+            .build_datamodel();
+        datamodel.models[0]
+            .variables
+            .push(crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+                ident: "x".to_string(),
+                equation: crate::datamodel::Equation::Arrayed(
+                    vec!["D".to_string()],
+                    vec![
+                        ("a".to_string(), "1".to_string(), None, None),
+                        ("b".to_string(), "2".to_string(), None, None),
+                    ],
+                    Some(default.to_string()),
+                    true,
+                ),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: crate::datamodel::Compat::default(),
+            }));
+
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let implicit =
+            crate::db::model_implicit_var_info(&db, sync.models["main"].source, sync.project);
+        assert!(
+            implicit.keys().all(|name| !name.starts_with("$⁚x⁚")),
+            "{label}: a fully shadowed default has no production helper: {:?}",
+            implicit.keys().collect::<Vec<_>>()
+        );
+    }
+}
+
+/// Dimensionless Arrayed input is a valid partially-edited XMILE shape. The
+/// no-element-context fallback must honor an inactive default just like the
+/// ordinary dimensioned branch does.
+#[test]
+fn dimensionless_inactive_defaults_mint_no_implicit_helpers() {
+    for (label, default) in [
+        ("snapshot", "PREVIOUS(1 + TIME, 0)"),
+        ("module", "SMTH1(1 + TIME, 1, 0)"),
+    ] {
+        let mut datamodel = TestProject::new(label).build_datamodel();
+        datamodel.models[0]
+            .variables
+            .push(crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+                ident: "x".to_string(),
+                equation: crate::datamodel::Equation::Arrayed(
+                    vec![],
+                    vec![],
+                    Some(default.to_string()),
+                    false,
+                ),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: crate::datamodel::Compat::default(),
+            }));
+
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let implicit =
+            crate::db::model_implicit_var_info(&db, sync.models["main"].source, sync.project);
+        assert!(
+            implicit.keys().all(|name| !name.starts_with("$⁚x⁚")),
+            "{label}: inactive dimensionless source text must not enter the visitor: {:?}",
+            implicit.keys().collect::<Vec<_>>()
         );
     }
 }

@@ -1349,7 +1349,7 @@ fn snapshot_element_name_matrix_covers_both_intrinsics() {
 /// the target equation's apply-to-all dimension and an element of `vals`'
 /// unrelated `Selector` axis. Spanning wins for capture addressability, so the
 /// original array-shaped argument and its source locations survive the
-/// per-element parse untouched. Lowering then applies the ordinary
+/// structural apply-to-all parse untouched. Lowering then applies the ordinary
 /// element-first subscript rule and each target element reads the same concrete
 /// `vals[Active]` slot. The complete intrinsic alphabet is exercised because
 /// PREVIOUS and INIT take separate opcode paths.
@@ -1416,33 +1416,30 @@ fn active_dimension_name_that_is_an_axis_element_spans_first_for_both_intrinsics
             "{} spans-first classification must not allocate a capture",
             builtin.name()
         );
-        let Ast::Arrayed(_, elements, None, false) = parsed
+        let Ast::ApplyToAll(_, expr) = parsed
             .variable
             .ast()
-            .expect("the per-element snapshot equation must have an AST")
+            .expect("the structural snapshot equation must have an AST")
         else {
-            panic!("{} must expand to production arrayed AST", builtin.name())
+            panic!(
+                "{} must retain its production ApplyToAll AST",
+                builtin.name()
+            )
         };
-        assert_eq!(elements.len(), 2, "the target has two production slots");
-        for expr in elements.values() {
-            let Expr0::App(UntypedBuiltinFn(_, args), _) = expr else {
-                panic!(
-                    "{} target element must remain a snapshot call",
-                    builtin.name()
-                )
-            };
-            assert!(
-                args[0] == *raw_arg,
-                "{} spans-first must retain the exact source argument subtree, including Loc",
-                builtin.name()
-            );
-            assert_eq!(
-                args[0].get_loc(),
-                raw_arg_loc,
-                "{} source argument location",
-                builtin.name()
-            );
-        }
+        let Expr0::App(UntypedBuiltinFn(_, args), _) = expr else {
+            panic!("{} target body must remain a snapshot call", builtin.name())
+        };
+        assert!(
+            args[0] == *raw_arg,
+            "{} spans-first must retain the exact source argument subtree, including Loc",
+            builtin.name()
+        );
+        assert_eq!(
+            args[0].get_loc(),
+            raw_arg_loc,
+            "{} source argument location",
+            builtin.name()
+        );
 
         let compiled = compile_project_incremental(&db, sync.project, "main")
             .expect("the dual-classified snapshot must compile");
@@ -2268,8 +2265,10 @@ fn test_ltm_bare_element_subscripts_no_helpers() {
 /// name the same storage slot and therefore share one arrayed `rate[a1] ->
 /// grow` score over `DimA`. XMILE footnote 9 makes the same-named variable
 /// `b2` irrelevant inside `rate[b2]`, so that read produces a second arrayed
-/// direct score. Only dynamic `idx` retains per-target captures and scalar
-/// score nodes.
+/// direct score. Dynamic `idx` needs capture storage, but the capture and its
+/// score retain the parent's `DimA` extent rather than splitting into scalar
+/// names. This is the fast, non-ignored invariant behind the full-corpus LTM
+/// slot digest: partial scalarization must fail in ordinary CI.
 ///
 /// This fixture exercises PREVIOUS because LTM scores the dt dependency graph.
 /// INIT contributes only initial-phase dependencies; its matching direct and
@@ -2315,11 +2314,8 @@ fn ltm_snapshot_element_reads_preserve_score_topology_and_values() {
     helper_names.sort();
     assert_eq!(
         helper_names,
-        [
-            "$\u{205A}grow\u{205A}0\u{205A}arg0\u{205A}a1",
-            "$\u{205A}grow\u{205A}0\u{205A}arg0\u{205A}b2",
-        ],
-        "only the dynamic source read may allocate captures"
+        ["$\u{205A}grow\u{205A}0\u{205A}arg0"],
+        "the dynamic source read allocates one helper retaining grow's dimensions"
     );
 
     let ltm = model_ltm_variables(&db, model, sync.project);
@@ -2347,30 +2343,70 @@ fn ltm_snapshot_element_reads_preserve_score_topology_and_values() {
         );
     }
 
-    let scalar_capture_scores: Vec<&LtmSyntheticVar> = ltm
+    let capture_scores: Vec<&LtmSyntheticVar> = ltm
         .vars
         .iter()
         .filter(|var| {
             var.name
                 .starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}grow\u{205A}")
-                && var.name.contains("\u{2192}grow[")
+                && var.name.ends_with("\u{2192}grow")
         })
         .collect();
     assert_eq!(
-        scalar_capture_scores.len(),
-        2,
-        "one dynamic callsite times two target elements remains scalar scores"
-    );
-    assert!(
-        scalar_capture_scores
+        capture_scores.len(),
+        1,
+        "one shaped dynamic callsite must have one score; relevant names: {:?}",
+        ltm.vars
             .iter()
-            .all(|score| score.dimensions.is_empty()),
-        "capture score variables are scalar"
+            .filter(|var| var.name.contains("arg0"))
+            .map(|var| (&var.name, &var.dimensions))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        capture_scores[0].dimensions,
+        ["DimA"],
+        "the capture score must inherit the compatible endpoint dimensions"
+    );
+    let scalar_capture_score_prefix = format!("{}[", capture_scores[0].name);
+    assert!(
+        ltm.vars
+            .iter()
+            .all(|var| !var.name.starts_with(&scalar_capture_score_prefix)),
+        "the dimensioned capture score must not coexist with per-element scalar scores"
     );
 
     let compiled = compile_project_incremental(&db, sync.project, "main")
         .expect("the production LTM fixture must compile");
     let offsets = compiled.offsets.clone();
+    let capture_base = offsets[&Ident::new(helper_names[0].as_str())];
+    let capture_score_base = offsets[&Ident::new(&capture_scores[0].name)];
+    let shaped_writes: Vec<usize> = compiled.modules[&compiled.root]
+        .compiled_flows
+        .code
+        .iter()
+        .filter_map(|opcode| match opcode {
+            crate::bytecode::Opcode::AssignCurr { off }
+            | crate::bytecode::Opcode::AssignConstCurr { off, .. }
+            | crate::bytecode::Opcode::BinOpAssignCurr { off, .. }
+                if ((*off as usize) >= capture_base && (*off as usize) < capture_base + 2)
+                    || ((*off as usize) >= capture_score_base
+                        && (*off as usize) < capture_score_base + 2) =>
+            {
+                Some(*off as usize)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shaped_writes,
+        [
+            capture_base,
+            capture_base + 1,
+            capture_score_base,
+            capture_score_base + 1,
+        ],
+        "the capture and its score must each write every contiguous layout slot exactly once"
+    );
     let mut vm = crate::vm::Vm::new(compiled).expect("vm");
     vm.run_to_end()
         .expect("the production LTM fixture must run");
@@ -2416,13 +2452,546 @@ fn ltm_snapshot_element_reads_preserve_score_topology_and_values() {
             &expected_grow,
         );
     }
-    for score in scalar_capture_scores {
-        assert_series(
-            &format!("scalar capture score {}", score.name),
-            &results[&score.name],
-            &expected_score,
+    for score in capture_scores {
+        for (slot, target_element) in ["a1", "b2"].into_iter().enumerate() {
+            assert_series(
+                &format!("capture score {}[{target_element}]", score.name),
+                &direct_values(&score.name, slot),
+                &expected_score,
+            );
+        }
+    }
+}
+
+/// A dimensioned capture is an ordinary shaped LTM endpoint. Compatible
+/// capture-to-parent edges inherit that shape (covered with exact values by
+/// `ltm_snapshot_element_reads_preserve_score_topology_and_values`), while an
+/// incompatible array source feeding the capture is declined loudly. The
+/// endpoint dimensions come through the per-name
+/// `model_implicit_var_by_name` firewall over the same production metadata
+/// layout and fragment compilation consume; no test-only dependency shape is
+/// assembled here.
+#[test]
+fn an_incompatible_dimensioned_capture_edge_has_no_scalar_score_fallback() {
+    use salsa::Setter;
+
+    use crate::db::{DiagnosticError, DiagnosticSeverity, model_implicit_var_info};
+    use crate::test_common::TestProject;
+
+    let project = TestProject::new("incompatible_capture_endpoint")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("SourceDim", &["s1", "s2"])
+        .named_dimension("TargetDim", &["t1", "t2"])
+        .array_aux("vals[SourceDim]", "10 * SourceDim + TIME")
+        .aux("idx", "1 + MIN(TIME, 1)", None)
+        .scalar_aux("scale", "2")
+        .array_aux("out[TargetDim]", "PREVIOUS(vals[idx] * scale, 0)")
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    sync.project.set_ltm_enabled(&mut db).to(true);
+    sync.project.set_ltm_discovery_mode(&mut db).to(true);
+    let model = sync.models["main"].source;
+    let implicit = model_implicit_var_info(&db, model, sync.project);
+    let capture_name = "$\u{205A}out\u{205A}0\u{205A}arg0";
+    let capture = implicit
+        .get(capture_name)
+        .expect("the production parse must register the dynamic snapshot capture");
+    assert_eq!(
+        capture.dimensions,
+        ["targetdim"],
+        "the endpoint metadata must retain the parent's ApplyToAll shape"
+    );
+
+    let ltm = model_ltm_variables(&db, model, sync.project);
+    let incompatible_score =
+        format!("$\u{205A}ltm\u{205A}link_score\u{205A}vals\u{2192}{capture_name}");
+    assert!(
+        !ltm.vars.iter().any(|var| var.name == incompatible_score),
+        "an incompatible dimensioned edge must not survive as a scalar score"
+    );
+    let compatible_score =
+        format!("$\u{205A}ltm\u{205A}link_score\u{205A}{capture_name}\u{2192}out");
+    let compatible = ltm
+        .vars
+        .iter()
+        .find(|var| var.name == compatible_score)
+        .expect("the compatible capture-to-parent edge must still be scored");
+    assert_eq!(compatible.dimensions, ["TargetDim"]);
+    let scalar_to_capture_scores: Vec<_> = ["t1", "t2"]
+        .map(|element| {
+            let name = format!(
+                "$\u{205A}ltm\u{205A}link_score\u{205A}scale\u{2192}{capture_name}[{element}]"
+            );
+            ltm.vars.iter().find(|var| var.name == name)
+        })
+        .into_iter()
+        .collect();
+    assert!(
+        scalar_to_capture_scores.iter().all(Option::is_some),
+        "each dimensioned capture slot must retain its scalar-source edge; relevant names: {:?}",
+        ltm.vars
+            .iter()
+            .filter(|var| var.name.contains("scale") && var.name.contains(capture_name))
+            .map(|var| &var.name)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        scalar_to_capture_scores
+            .iter()
+            .flatten()
+            .all(|score| score.dimensions.is_empty()),
+        "the scalar-to-arrayed convention owns one scalar score per target slot"
+    );
+
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
+    let warnings: Vec<&str> = diagnostics
+        .iter()
+        .filter_map(
+            |diagnostic| match (&diagnostic.severity, &diagnostic.error) {
+                (DiagnosticSeverity::Warning, DiagnosticError::Assembly(message))
+                    if message.contains("vals") && message.contains(capture_name) =>
+                {
+                    Some(message.as_str())
+                }
+                _ => None,
+            },
+        )
+        .collect();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "the incompatible edge must produce exactly one attributed warning; diagnostics: {diagnostics:#?}"
+    );
+    assert!(
+        warnings[0].contains("dimensions do not correspond")
+            && warnings[0].contains("no link-score variable"),
+        "the warning must state the loud-skip contract: {}",
+        warnings[0]
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("declining only the LTM edge must not reject the model");
+    let offsets = compiled.offsets.clone();
+    let mut vm = crate::vm::Vm::new(compiled).expect("VM creation");
+    vm.run_to_end().expect("simulation");
+    let raw = vm.into_results();
+    let results = crate::test_common::collect_results(&raw);
+    for element in ["t1", "t2"] {
+        assert_eq!(
+            results[&format!("out[{element}]")],
+            [0.0, 20.0, 42.0, 44.0],
+            "the shaped capture must retain the dynamic source value for {element}"
         );
     }
+    for score in scalar_to_capture_scores.into_iter().flatten() {
+        assert_eq!(
+            results[&score.name], [0.0; 4],
+            "a constant scalar source has a present but identically-zero per-slot score"
+        );
+    }
+    let compatible_base = offsets[&Ident::new(&compatible.name)];
+    for slot in 0..2 {
+        let series: Vec<f64> = (0..raw.step_count)
+            .map(|step| raw.data[step * raw.step_size + compatible_base + slot])
+            .collect();
+        assert_eq!(
+            series,
+            [0.0, 1.0, 1.0, 1.0],
+            "the capture-to-parent score must execute for slot {slot}"
+        );
+    }
+}
+
+/// A fixed source element can feed an apply-to-all capture whose storage axes
+/// are disjoint from the source axis. The disjoint emitter must read both
+/// endpoint shapes from production metadata: one dimensioned score represents
+/// the fixed source element across every capture slot, with no bare scalar
+/// fallback.
+#[test]
+fn a_fixed_disjoint_source_scores_every_dimensioned_capture_slot() {
+    use salsa::Setter;
+
+    use crate::db::model_implicit_var_info;
+    use crate::test_common::TestProject;
+
+    let project = TestProject::new("disjoint_capture_endpoint")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("SourceDim", &["s1", "s2"])
+        .named_dimension("TargetDim", &["t1", "t2"])
+        .array_aux("vals[SourceDim]", "10 * SourceDim + TIME")
+        .array_aux(
+            "out[TargetDim]",
+            "PREVIOUS(vals[SourceDim.s1] * TargetDim, 0)",
+        )
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    sync.project.set_ltm_enabled(&mut db).to(true);
+    sync.project.set_ltm_discovery_mode(&mut db).to(true);
+    let model = sync.models["main"].source;
+    let capture_name = "$\u{205A}out\u{205A}0\u{205A}arg0";
+    assert_eq!(
+        model_implicit_var_info(&db, model, sync.project)[capture_name].dimensions,
+        ["targetdim"]
+    );
+
+    let score_name =
+        format!("$\u{205A}ltm\u{205A}link_score\u{205A}vals[s1]\u{2192}{capture_name}");
+    let ltm = model_ltm_variables(&db, model, sync.project);
+    let score = ltm
+        .vars
+        .iter()
+        .find(|variable| variable.name == score_name)
+        .expect("the fixed source element must have one dimensioned score");
+    assert_eq!(score.dimensions, ["TargetDim"]);
+    assert!(
+        ltm.vars.iter().all(|variable| {
+            variable.name != format!("{score_name}[t1]")
+                && variable.name != format!("{score_name}[t2]")
+                && variable.name
+                    != format!("$\u{205A}ltm\u{205A}link_score\u{205A}vals\u{2192}{capture_name}")
+        }),
+        "the dimensioned fixed-index score must have no per-slot or bare scalar companion"
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("the disjoint shaped capture fixture must compile");
+    let offsets = compiled.offsets.clone();
+    let mut vm = crate::vm::Vm::new(compiled).expect("VM creation");
+    vm.run_to_end().expect("simulation");
+    let raw = vm.into_results();
+    let results = crate::test_common::collect_results(&raw);
+    assert_eq!(results["out[t1]"], [0.0, 10.0, 11.0, 12.0]);
+    assert_eq!(results["out[t2]"], [0.0, 20.0, 22.0, 24.0]);
+    let score_base = offsets[&Ident::new(&score.name)];
+    for slot in 0..2 {
+        let series: Vec<f64> = (0..raw.step_count)
+            .map(|step| raw.data[step * raw.step_size + score_base + slot])
+            .collect();
+        assert_eq!(
+            series,
+            [0.0, 1.0, 1.0, 1.0],
+            "the fixed-index score must execute for capture slot {slot}"
+        );
+    }
+}
+
+/// LTM's causal graph is a dt-phase graph. Snapshot syntax can put a name in
+/// an equation's raw dependency set without making it a current-value edge:
+/// INIT reads initial storage, and PREVIOUS reads lagged storage. The graph must
+/// consume the same pruned direct dependencies and promoted flow runlist as
+/// compilation, including helpers that have no `SourceVariable` of their own.
+///
+/// This fixture is intentionally production-built and mixed: shaped INIT and
+/// PREVIOUS captures, an ordinary current consumer that promotes one INIT
+/// capture, per-element SMTH1 instances, and a per-element project macro. The
+/// incompatible INIT-only source/capture axes also prove that an excluded edge
+/// cannot leak far enough into LTM to emit a warning.
+#[test]
+fn ltm_causal_edges_follow_the_production_flow_phase_boundary() {
+    use salsa::Setter;
+
+    use crate::db::{DiagnosticError, DiagnosticSeverity, model_causal_edges};
+    use crate::test_common::TestProject;
+    use crate::testutils::x_aux;
+
+    let mut project = TestProject::new("ltm_snapshot_phase_boundary")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("D", &["a", "b"])
+        .named_dimension("SourceAxis", &["s1", "s2"])
+        .named_dimension("TargetAxis", &["t1", "t2"])
+        .array_aux("values[D]", "10 * D + TIME")
+        .array_aux("source[SourceAxis]", "100 * SourceAxis + TIME")
+        .scalar_aux("idx", "1 + MIN(TIME, 1)")
+        .array_aux("direct_init[D]", "INIT(values[D])")
+        .array_aux("init_only[TargetAxis]", "INIT(source[idx] * TargetAxis)")
+        .array_aux("promoted[D]", "INIT(values[D] * 3)")
+        .array_aux("current_reader[D]", "\"$⁚promoted⁚0⁚arg0\"")
+        .array_aux("lagged[D]", "PREVIOUS(values[D] * 4, 0)")
+        .array_aux("smoothed[D]", "SMTH1(values[D], 1, 0)")
+        .array_aux("macroed[D]", "scaled(values[D], 2)")
+        .build_datamodel();
+    project.models.push(datamodel::Model {
+        name: "scaled".to_string(),
+        sim_specs: None,
+        variables: vec![
+            x_aux("scaled", "input * factor", None),
+            x_aux("input", "0", None),
+            x_aux("factor", "0", None),
+        ],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: Some(datamodel::MacroSpec {
+            parameters: vec!["input".to_string(), "factor".to_string()],
+            primary_output: "scaled".to_string(),
+            additional_outputs: vec![],
+        }),
+    });
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    sync.project.set_ltm_enabled(&mut db).to(true);
+    sync.project.set_ltm_discovery_mode(&mut db).to(true);
+    let model = sync.models["main"].source;
+    let edges = model_causal_edges(&db, model, sync.project);
+    let has_edge = |from: &str, to: &str| {
+        edges
+            .edges
+            .get(from)
+            .is_some_and(|targets| targets.contains(to))
+    };
+
+    let init_only_capture = "$⁚init_only⁚0⁚arg0";
+    assert!(
+        !has_edge("values", "direct_init"),
+        "a direct INIT read is not a dt causal edge: {:#?}",
+        edges.edges
+    );
+    assert!(
+        !has_edge("source", init_only_capture)
+            && !has_edge(init_only_capture, "init_only")
+            && !edges.edges.contains_key(init_only_capture),
+        "INIT-only storage and its snapshot consumer are not dt causal edges: {:#?}",
+        edges.edges
+    );
+
+    let promoted_capture = "$⁚promoted⁚0⁚arg0";
+    assert!(
+        has_edge("values", promoted_capture)
+            && has_edge(promoted_capture, "current_reader")
+            && !has_edge(promoted_capture, "promoted"),
+        "an ordinary current reader promotes the INIT helper, but INIT itself stays non-causal: {:#?}",
+        edges.edges
+    );
+
+    let previous_capture = "$⁚lagged⁚0⁚arg0";
+    assert!(
+        has_edge("values", previous_capture) && has_edge(previous_capture, "lagged"),
+        "LTM deliberately retains PREVIOUS's discrete-state link and its flow storage: {:#?}",
+        edges.edges
+    );
+
+    for (model_name, parent) in [("stdlib⁚smth1", "smoothed"), ("scaled", "macroed")] {
+        let instances: Vec<&str> = edges
+            .dynamic_modules
+            .iter()
+            .filter(|(_, target_model)| target_model.as_str() == model_name)
+            .map(|(instance, _)| instance.as_str())
+            .collect();
+        assert_eq!(
+            instances.len(),
+            2,
+            "the A2A {model_name} call must materialize one instance per element: {:?}",
+            edges.dynamic_modules
+        );
+        for instance in instances {
+            let value_inputs: Vec<&str> = edges
+                .edges
+                .get("values")
+                .into_iter()
+                .flatten()
+                .filter(|input| has_edge(input, instance))
+                .map(String::as_str)
+                .collect();
+            assert!(
+                value_inputs.len() == 1 && has_edge(instance, parent),
+                "module/macro flow edges must survive through one materialized input: values -> {value_inputs:?} -> {instance} -> {parent}; {:#?}",
+                edges.edges
+            );
+        }
+    }
+
+    let ltm = model_ltm_variables(&db, model, sync.project);
+    assert!(
+        ltm.vars
+            .iter()
+            .all(|variable| !variable.name.contains(init_only_capture)),
+        "an INIT-only helper must not produce link-score variables: {:?}",
+        ltm.vars
+            .iter()
+            .filter(|variable| variable.name.contains(init_only_capture))
+            .map(|variable| &variable.name)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        ltm.vars
+            .iter()
+            .any(|variable| variable.name.contains(promoted_capture)),
+        "the promoted helper must remain visible to LTM"
+    );
+    assert!(
+        ltm.vars
+            .iter()
+            .any(|variable| variable.name.contains(previous_capture)),
+        "PREVIOUS's flow storage must remain visible to LTM"
+    );
+
+    let excluded_warnings: Vec<String> = collect_all_diagnostics(&db, sync.project)
+        .into_iter()
+        .filter_map(
+            |diagnostic| match (&diagnostic.severity, &diagnostic.error) {
+                (DiagnosticSeverity::Warning, DiagnosticError::Assembly(message))
+                    if message.contains(init_only_capture) =>
+                {
+                    Some(message.clone())
+                }
+                _ => None,
+            },
+        )
+        .collect();
+    assert!(
+        excluded_warnings.is_empty(),
+        "an excluded INIT-only edge cannot emit LTM warnings: {excluded_warnings:#?}"
+    );
+}
+
+/// Reducers inside flow-dead INIT capture storage do not belong to LTM's dt
+/// IR. This uses RANK because its array-valued synthetic-agg arm is distinct
+/// from scalar reducers: retaining the hidden subtree would allocate an agg
+/// even though the causal graph correctly excludes every edge touching it.
+#[test]
+fn init_only_rank_capture_registers_no_ltm_aggregate_or_score() {
+    use crate::test_common::TestProject;
+    use salsa::Setter;
+
+    let project = TestProject::new("init_only_rank_ltm")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("D", &["a", "b"])
+        .stock("level", "10", &["growth"], &[], None)
+        .flow("growth", "level * 0.1", None)
+        .array_aux("values[D]", "10 * D")
+        .array_aux("frozen[D]", "INIT(RANK(values[*], 1))")
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    sync.project.set_ltm_enabled(&mut db).to(true);
+    let model = sync.models["main"].source;
+    let capture = "$⁚frozen⁚0⁚arg0";
+
+    let implicit = crate::db::model_implicit_var_info(&db, model, sync.project);
+    assert_eq!(
+        implicit[capture].dimensions,
+        ["d"],
+        "the production snapshot visitor must construct the shaped helper"
+    );
+    let membership = crate::db::dep_graph::implicit_var_runlist_membership(
+        &db,
+        model,
+        sync.project,
+        capture.to_string(),
+        crate::db::ModuleInputSet::empty(&db),
+    );
+    assert!(
+        !membership.flows,
+        "an INIT-only capture must be absent from the production flow runlist"
+    );
+
+    let aggs = crate::ltm_agg::enumerate_agg_nodes(&db, model, sync.project);
+    assert!(
+        aggs.aggs.iter().all(|agg| agg.name != capture) && !aggs.by_var.contains_key(capture),
+        "a flow-dead helper cannot register an aggregate: {:?}",
+        aggs.by_var
+    );
+    let ltm = model_ltm_variables(&db, model, sync.project);
+    assert!(
+        ltm.vars
+            .iter()
+            .any(|variable| variable.name.starts_with("$⁚ltm⁚loop_score⁚")),
+        "the stock loop keeps the LTM front door active"
+    );
+    assert!(
+        ltm.vars.iter().all(|variable| {
+            !variable.name.contains(capture) && !variable.name.starts_with("$⁚ltm⁚agg⁚")
+        }),
+        "the INIT-only RANK subtree must emit no aggregate or link score: {:?}",
+        ltm.vars
+            .iter()
+            .map(|variable| &variable.name)
+            .collect::<Vec<_>>()
+    );
+    let leaked_warnings: Vec<String> = collect_all_diagnostics(&db, sync.project)
+        .into_iter()
+        .filter_map(|diagnostic| match diagnostic.error {
+            DiagnosticError::Assembly(message)
+                if message.contains(capture) || message.contains("RANK") =>
+            {
+                Some(message)
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        leaked_warnings.is_empty(),
+        "flow-dead reducer syntax cannot emit LTM warnings: {leaked_warnings:#?}"
+    );
+}
+
+/// The occurrence-width guard applies to equations that can participate in dt
+/// scores. A flow-dead INIT helper is still compiled for initial storage, but
+/// its syntax cannot reject an otherwise scoreable stock loop from LTM.
+#[test]
+fn over_wide_init_only_capture_does_not_reject_ltm_occurrences() {
+    use salsa::Setter;
+
+    use crate::db::ltm_ir::{SiteChildrenLimitGuard, model_ltm_reference_sites};
+    use crate::test_common::TestProject;
+
+    let project = TestProject::new("init_only_width_ltm")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .stock("level", "10", &["growth"], &[], None)
+        .flow("growth", "level * 0.1", None)
+        .scalar_aux("a", "1")
+        .scalar_aux("b", "2")
+        .scalar_aux("c", "3")
+        .scalar_aux("d", "4")
+        .scalar_aux("frozen", "INIT(MEAN(a, b, c, d))")
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    sync.project.set_ltm_enabled(&mut db).to(true);
+    let model = sync.models["main"].source;
+    let capture = "$⁚frozen⁚0⁚arg0";
+    let membership = crate::db::dep_graph::implicit_var_runlist_membership(
+        &db,
+        model,
+        sync.project,
+        capture.to_string(),
+        crate::db::ModuleInputSet::empty(&db),
+    );
+    assert!(!membership.flows, "fixture needs a flow-dead capture");
+
+    let _guard = SiteChildrenLimitGuard::new(3);
+    let sites = model_ltm_reference_sites(&db, model, sync.project);
+    assert_eq!(
+        sites.site_width_rejection, None,
+        "the four-argument dead helper is outside the dt occurrence IR"
+    );
+    let ltm = model_ltm_variables(&db, model, sync.project);
+    assert!(
+        ltm.vars
+            .iter()
+            .any(|variable| variable.name.starts_with("$⁚ltm⁚loop_score⁚")),
+        "the unrelated stock loop remains scoreable"
+    );
+    let width_warnings: Vec<String> = collect_all_diagnostics(&db, sync.project)
+        .into_iter()
+        .filter_map(|diagnostic| match diagnostic.error {
+            DiagnosticError::Assembly(message)
+                if message.contains("more than the 3 distinct children") =>
+            {
+                Some(message)
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        width_warnings.is_empty(),
+        "dead INIT syntax cannot reject valid LTM scores: {width_warnings:#?}"
+    );
 }
 
 use crate::snapshot_arg::SnapshotAccess;

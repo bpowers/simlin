@@ -20,10 +20,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::common::{Canonical, Ident};
 use crate::db::{
-    CycleClass, Db, LoopCircuitsResult, ModuleInputSet, SourceModel, SourceProject, SourceVariable,
-    SourceVariableKind, causal_graph_with_modules, classify_cycle, model_edge_shapes,
-    model_element_causal_edges, project_datamodel_dims, variable_dimensions,
-    variable_direct_dependencies,
+    CycleClass, Db, LoopCircuitsResult, ModuleInputSet, SourceModel, SourceProject,
+    causal_graph_with_modules, classify_cycle, model_edge_shapes, model_element_causal_edges,
+    model_flow_lagged_dependencies, model_flow_member_names, model_implicit_var_info,
+    project_datamodel_dims,
 };
 use crate::ltm::{Loop, strip_subscript};
 
@@ -125,8 +125,15 @@ pub(crate) fn model_pinned_loops(
     // Classification inputs: per-edge access shapes and per-variable
     // dimensions, the same data the tiered enumerator classifies cycles with.
     let edge_shapes = model_edge_shapes(db, model, project);
-    let source_vars = model.variables(db);
     let dm_dims = project_datamodel_dims(db, project);
+    let empty_inputs = ModuleInputSet::empty(db);
+    let flow_members = model_flow_member_names(db, model, project, empty_inputs);
+    let transparent_helpers: HashSet<Ident<Canonical>> =
+        model_implicit_var_info(db, model, project)
+            .keys()
+            .filter(|name| flow_members.contains(name.as_str()))
+            .map(|name| Ident::new(name))
+            .collect();
 
     let mut result = PinnedLoopsResult::default();
     for (idx, spec) in specs.iter().enumerate() {
@@ -148,7 +155,7 @@ pub(crate) fn model_pinned_loops(
         let vars: HashSet<Ident<Canonical>> =
             spec.variables.iter().map(|v| Ident::new(v)).collect();
 
-        let Some(cycle) = graph.order_variable_cycle(&vars) else {
+        let Some(cycle) = order_pinned_cycle(&graph, &vars, &transparent_helpers) else {
             result.invalid.push((
                 spec.name.clone(),
                 format!(
@@ -193,7 +200,7 @@ pub(crate) fn model_pinned_loops(
         let has_stock = !graph
             .enrich_with_module_stocks(&cycle, parent_stocks)
             .is_empty();
-        if !has_stock && !cycle_has_lagged_edge(db, project, source_vars, &cycle) {
+        if !has_stock && !cycle_has_lagged_edge(db, model, project, &cycle) {
             result.invalid.push((
                 spec.name.clone(),
                 format!(
@@ -205,15 +212,21 @@ pub(crate) fn model_pinned_loops(
             continue;
         }
 
-        // Dimension-classify the cycle (GH #653). Module nodes report empty
-        // dimensions, matching the tiered enumerator's treatment of modules
-        // as scalar graph nodes.
+        // Dimension-classify every explicit or hidden endpoint from the same
+        // authoritative projection used by element loops and link scores.
+        // Precomputing once avoids entering the per-name salsa query again for
+        // each classifier lookup. Modules/unknown nodes report empty dims,
+        // matching the tiered enumerator's scalar treatment of modules.
         let cycle_strs: Vec<String> = cycle.iter().map(|c| c.as_str().to_string()).collect();
+        let cycle_dimensions: HashMap<String, Vec<crate::dimensions::Dimension>> = cycle_strs
+            .iter()
+            .filter_map(|name| {
+                super::endpoint_dimensions(db, name, model, project)
+                    .map(|dimensions| (name.clone(), dimensions))
+            })
+            .collect();
         let dim_lookup = |name: &str| -> Vec<crate::dimensions::Dimension> {
-            source_vars
-                .get(name)
-                .map(|sv| variable_dimensions(db, *sv, project).to_vec())
-                .unwrap_or_default()
+            cycle_dimensions.get(name).cloned().unwrap_or_default()
         };
         let loops = match classify_cycle(&cycle_strs, edge_shapes, &dim_lookup) {
             // PureScalar: the pre-#653 scalar construction is correct.
@@ -222,15 +235,7 @@ pub(crate) fn model_pinned_loops(
                 vec![build_a2a_pin_loop(&graph, &cycle, id, &dimensions, dm_dims)]
             }
             CycleClass::CrossElementOrMixed => {
-                match expand_pin_on_element_graph(
-                    db,
-                    model,
-                    project,
-                    &graph,
-                    &cycle,
-                    source_vars,
-                    dm_dims,
-                ) {
+                match expand_pin_on_element_graph(db, model, project, &graph, &cycle, dm_dims) {
                     Ok(mut loops) => {
                         // A pin expanded through a hoisted reducer carries
                         // synthetic-agg hops, which come back Unknown-polarity
@@ -264,6 +269,93 @@ pub(crate) fn model_pinned_loops(
     result
 }
 
+/// Recover a pinned cycle while treating flow-live compiler helpers as
+/// transparent path nodes.
+///
+/// Pins contain datamodel variable UIDs, so a parser-generated capture cannot
+/// be named by the user even when it lies between two pinned source variables
+/// in the production causal graph. The search must visit every pinned variable
+/// exactly once, may visit any subset of the supplied helpers, and may not use
+/// an unpinned source variable as an intermediary. Sorted DFS preserves the
+/// deterministic lexicographic choice made by `CausalGraph::order_variable_cycle`.
+fn order_pinned_cycle(
+    graph: &crate::ltm::CausalGraph,
+    required: &HashSet<Ident<Canonical>>,
+    transparent_helpers: &HashSet<Ident<Canonical>>,
+) -> Option<Vec<Ident<Canonical>>> {
+    if required.len() < 2 {
+        return None;
+    }
+
+    let start = required
+        .iter()
+        .min_by(|a, b| a.as_str().cmp(b.as_str()))?
+        .clone();
+    let mut path = vec![start.clone()];
+    let mut visited = HashSet::from([start.clone()]);
+
+    fn visit(
+        graph: &crate::ltm::CausalGraph,
+        start: &Ident<Canonical>,
+        required: &HashSet<Ident<Canonical>>,
+        transparent_helpers: &HashSet<Ident<Canonical>>,
+        required_seen: usize,
+        path: &mut Vec<Ident<Canonical>>,
+        visited: &mut HashSet<Ident<Canonical>>,
+    ) -> bool {
+        let current = path.last().expect("a pinned-cycle path is never empty");
+        let Some(successors) = graph.edges().get(current) else {
+            return false;
+        };
+        let mut successors: Vec<&Ident<Canonical>> = successors
+            .iter()
+            .filter(|next| required.contains(*next) || transparent_helpers.contains(*next))
+            .collect();
+        successors.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        successors.dedup();
+
+        for next in successors {
+            if next == start {
+                if required_seen == required.len() {
+                    return true;
+                }
+                continue;
+            }
+            if visited.contains(next) {
+                continue;
+            }
+            let next_required_seen = required_seen + usize::from(required.contains(next));
+            visited.insert(next.clone());
+            path.push(next.clone());
+            if visit(
+                graph,
+                start,
+                required,
+                transparent_helpers,
+                next_required_seen,
+                path,
+                visited,
+            ) {
+                return true;
+            }
+            path.pop();
+            visited.remove(next);
+        }
+        false
+    }
+
+    visit(
+        graph,
+        &start,
+        required,
+        transparent_helpers,
+        1,
+        &mut path,
+        &mut visited,
+    )
+    .then_some(path)
+}
+
 /// Whether any edge `from -> to` of the ordered cycle is a PREVIOUS-lagged
 /// reference: `to` references `from` ONLY inside `PREVIOUS(...)` in its dt
 /// equation (`dt_previous_referenced_vars`, the `previous_only`
@@ -290,25 +382,18 @@ pub(crate) fn model_pinned_loops(
 /// queries are shared salsa cache hits.
 fn cycle_has_lagged_edge(
     db: &dyn Db,
+    model: SourceModel,
     project: SourceProject,
-    source_vars: &HashMap<String, SourceVariable>,
     cycle: &[Ident<Canonical>],
 ) -> bool {
     let empty_inputs = ModuleInputSet::empty(db);
+    let lagged = model_flow_lagged_dependencies(db, model, project, empty_inputs);
     cycle.iter().enumerate().any(|(i, from)| {
         let to = &cycle[(i + 1) % cycle.len()];
-        let Some(sv) = source_vars.get(to.as_str()) else {
-            return false;
-        };
-        if matches!(
-            sv.kind(db),
-            SourceVariableKind::Stock | SourceVariableKind::Module
-        ) {
-            return false;
-        }
-        variable_direct_dependencies(db, *sv, project, empty_inputs)
-            .dt_previous_referenced_vars
-            .iter()
+        lagged
+            .get(to.as_str())
+            .into_iter()
+            .flatten()
             .any(|dep| crate::db::analysis::normalize_module_ref_str(dep) == from.as_str())
     })
 }
@@ -357,14 +442,12 @@ fn assign_pin_ids(loops: &mut [Loop], pin_id: &str) {
 /// On success the returned loops carry the enumerator's `r{n}`/`b{n}`/`u{n}`
 /// ids; the caller re-assigns pin-derived ids. On failure the returned string
 /// completes the sentence "pinned loop '{name}' ..." in the diagnostic.
-#[allow(clippy::too_many_arguments)]
 fn expand_pin_on_element_graph(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
     var_graph: &crate::ltm::CausalGraph,
     cycle: &[Ident<Canonical>],
-    source_vars: &HashMap<String, SourceVariable>,
     dm_dims: &[crate::datamodel::Dimension],
 ) -> Result<Vec<Loop>, String> {
     let pin_var_set: HashSet<&str> = cycle.iter().map(|c| c.as_str()).collect();
@@ -455,7 +538,6 @@ fn expand_pin_on_element_graph(
     let (loops, _truncated_aggs) = build_element_level_loops(
         &filtered,
         var_graph,
-        source_vars,
         db,
         model,
         project,

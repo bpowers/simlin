@@ -318,6 +318,41 @@ fn mymacro_registry() -> crate::module_functions::MacroRegistry {
         .expect("valid single-macro registry")
 }
 
+/// Registry whose calls exercise every `MacroCallResolution` arm. These are
+/// real macro models passed through `MacroRegistry::build`, including the
+/// importer's renamed opcode and stdlib self-call shapes.
+fn routing_macro_registry() -> crate::module_functions::MacroRegistry {
+    let macro_model = |name: &str, parameters: &[&str], equation: &str| {
+        let mut variables = vec![mk_aux(name, equation)];
+        variables.extend(parameters.iter().map(|parameter| mk_aux(parameter, "0")));
+        crate::datamodel::Model {
+            name: name.to_string(),
+            sim_specs: None,
+            variables,
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: Some(crate::datamodel::MacroSpec {
+                parameters: parameters.iter().map(|name| (*name).to_string()).collect(),
+                primary_output: name.to_string(),
+                additional_outputs: vec![],
+            }),
+        }
+    };
+    crate::module_functions::MacroRegistry::build(&[
+        macro_model("ordinary", &["x"], "x + 1"),
+        macro_model("init", &["x"], "init(x)"),
+        macro_model("previous", &["x", "fallback"], "previous(x, fallback) + 1"),
+        macro_model(
+            "delayn",
+            &["input", "delaytime", "initial", "order"],
+            "delayn(input, delaytime, initial, order)",
+        ),
+        macro_model("smth1", &["x"], "x + 1"),
+    ])
+    .expect("the exhaustive routing registry is production-valid")
+}
+
 /// Structural: `y = MYMACRO(a, b)` expands into a synthetic
 /// `Variable::Module` whose `model_name` is the macro's model, with one
 /// `ModuleReference` per parameter (the `dst` ports are the macro's
@@ -724,13 +759,16 @@ out = {name}({call_args})
     }
 }
 
-/// `contains_module_call` macro-awareness (item 4 of Task 3): with a
-/// registry containing macro `MYMACRO`, it returns `true` for an *arrayed*
-/// macro `App` (`MYMACRO(x[Dim], k)`), `true` for a stdlib call
-/// (`SMTH1(x, 5)`), and `false` for a plain arithmetic expression
-/// (`a + b`).
+/// Every source call family that can appear in an apply-to-all body, by
+/// whether it requires one module instance per element.
+///
+/// The rows are the complete set of routes owned by `BuiltinVisitor::walk`:
+/// project macros and stdlib calls synthesize modules, while opcode-backed
+/// PREVIOUS/INIT and ordinary builtins do not. Keeping the snapshot rows in
+/// this matrix prevents the expansion gate from drifting back to treating a
+/// storage read as module instantiation.
 #[test]
-fn contains_module_call_is_macro_aware() {
+fn per_element_requirements_cover_every_call_route() {
     use crate::ast::Expr0;
 
     let registry = mymacro_registry();
@@ -740,18 +778,259 @@ fn contains_module_call_is_macro_aware() {
             .expect("non-empty")
     };
 
-    assert!(
-        crate::builtins_visitor::contains_module_call(&parse("MYMACRO(x[Dim], k)"), &registry),
-        "an arrayed macro App must be recognized by the apply-to-all gate",
+    let rows = [
+        ("project macro", "MYMACRO(x[Dim], k)", true, true),
+        ("stdlib module", "SMTH1(x, 5)", true, true),
+        ("DELAY alias", "DELAY(x, 5)", true, true),
+        ("DELAYN alias", "DELAYN(x, 5, 1)", true, true),
+        ("SMTHN alias", "SMTHN(x, 5, 1)", true, true),
+        ("PREVIOUS opcode", "PREVIOUS(x)", false, true),
+        ("INIT opcode", "INIT(x)", false, true),
+        (
+            "binary union of module and snapshot",
+            "PREVIOUS(x) + SMTH1(x, 5)",
+            true,
+            true,
+        ),
+        (
+            "snapshot in a dynamic subscript",
+            "x[PREVIOUS(i)]",
+            false,
+            true,
+        ),
+        ("snapshot below unary op", "-PREVIOUS(x)", false, true),
+        (
+            "snapshot below conditional",
+            "IF flag THEN INIT(x) ELSE y",
+            false,
+            true,
+        ),
+        (
+            "snapshot below ordinary builtin",
+            "ABS(PREVIOUS(x))",
+            false,
+            true,
+        ),
+        ("ordinary builtin", "ABS(x)", false, false),
+        ("plain expression", "a + b", false, false),
+        ("constant", "1", false, false),
+        ("variable", "x", false, false),
+    ];
+    for (label, equation, module_instance, arrayed_element_context) in rows {
+        let requirements =
+            crate::builtins_visitor::per_element_requirements(&parse(equation), &registry, None);
+        assert_eq!(
+            requirements.requires_module_instance(),
+            module_instance,
+            "{label}: `{equation}` module instance"
+        );
+        assert_eq!(
+            requirements.requires_arrayed_element_context(),
+            arrayed_element_context,
+            "{label}: `{equation}` arrayed element context"
+        );
+    }
+}
+
+/// A genuine passthrough macro is an opcode call at an external callsite; it
+/// must not force apply-to-all module expansion merely because a macro owns
+/// the same name. This is the red gate for using `resolve_call` rather than a
+/// raw `resolve_macro` membership test in the classifier.
+#[test]
+fn external_passthrough_macro_keeps_snapshot_apply_to_all_shape() {
+    use crate::ast::{Ast, Expr0};
+
+    let registry = routing_macro_registry();
+    let expression = Expr0::new("INIT(x + 1)", crate::lexer::LexerType::Equation)
+        .expect("parse")
+        .expect("non-empty");
+    let requirements =
+        crate::builtins_visitor::per_element_requirements(&expression, &registry, None);
+    assert!(!requirements.requires_module_instance());
+    assert!(requirements.requires_arrayed_element_context());
+
+    let source_dimension =
+        crate::datamodel::Dimension::named("d".to_string(), vec!["a".to_string(), "b".to_string()]);
+    let dimensions = vec![crate::dimensions::Dimension::from(&source_dimension)];
+    let (transformed, implicit) = crate::builtins_visitor::instantiate_implicit_modules(
+        "out",
+        Ast::ApplyToAll(dimensions.clone(), expression),
+        None,
+        None,
+        &registry,
+        None,
+    )
+    .expect("the production visitor expands the passthrough call");
+    assert!(matches!(transformed, Ast::ApplyToAll(ref dims, _) if dims == &dimensions));
+    assert_eq!(
+        implicit.len(),
+        1,
+        "one shaped INIT capture, not two modules"
     );
-    assert!(
-        crate::builtins_visitor::contains_module_call(&parse("SMTH1(x, 5)"), &registry),
-        "a stdlib call must still be recognized by the apply-to-all gate",
-    );
-    assert!(
-        !crate::builtins_visitor::contains_module_call(&parse("a + b"), &registry),
-        "a plain arithmetic expression is not a module call",
-    );
+    assert!(matches!(
+        implicit[0],
+        crate::capture::ImplicitVar::Capture(_)
+    ));
+}
+
+/// The A2A expansion gate consumes the same exhaustive router decision as the
+/// visitor. `Expand`, `Passthrough`, `RenamedBuiltinSelfCall`, and `Unresolved`
+/// are all exercised; the renamed-self arm has separate opcode and stdlib rows
+/// because those fall through to different storage/module behavior.
+#[test]
+fn apply_to_all_requirements_follow_every_macro_call_resolution_arm() {
+    use crate::ast::{Ast, Expr0};
+    use crate::module_functions::MacroCallResolution;
+
+    #[derive(Clone, Copy)]
+    enum Route {
+        Expand,
+        Passthrough,
+        RenamedBuiltinSelfCall,
+        Unresolved,
+    }
+
+    let registry = routing_macro_registry();
+    let source_dimension =
+        crate::datamodel::Dimension::named("d".to_string(), vec!["a".to_string(), "b".to_string()]);
+    let dimensions = vec![crate::dimensions::Dimension::from(&source_dimension)];
+    let rows = [
+        ("Expand", "ORDINARY(x)", None, Route::Expand, true, false),
+        (
+            "Passthrough",
+            "INIT(x + 1)",
+            None,
+            Route::Passthrough,
+            false,
+            true,
+        ),
+        (
+            "Passthrough stdlib module",
+            "DELAYN(x, 5, 1, 1)",
+            None,
+            Route::Passthrough,
+            true,
+            false,
+        ),
+        (
+            "Renamed opcode self-call",
+            "INIT(x + 1)",
+            Some("init"),
+            Route::RenamedBuiltinSelfCall,
+            false,
+            true,
+        ),
+        (
+            "Renamed stdlib self-call",
+            "DELAYN(x, 5, 1, 0)",
+            Some("delayn"),
+            Route::RenamedBuiltinSelfCall,
+            true,
+            false,
+        ),
+        (
+            "Unresolved ordinary builtin",
+            "ABS(x)",
+            None,
+            Route::Unresolved,
+            false,
+            false,
+        ),
+        (
+            "Expand macro shadowing stdlib",
+            "SMTH1(x)",
+            None,
+            Route::Expand,
+            true,
+            false,
+        ),
+    ];
+
+    for (label, equation, enclosing, expected_route, module, snapshot) in rows {
+        let expression = Expr0::new(equation, crate::lexer::LexerType::Equation)
+            .expect("parse")
+            .expect("non-empty");
+        let call_name = match &expression {
+            Expr0::App(crate::builtins::UntypedBuiltinFn(name, _), _) => name.as_str(),
+            other => panic!("{label} fixture is not a call: {other:?}"),
+        };
+        assert!(
+            matches!(
+                (registry.resolve_call(call_name, enclosing), expected_route),
+                (MacroCallResolution::Expand(_), Route::Expand)
+                    | (MacroCallResolution::Passthrough(_), Route::Passthrough)
+                    | (
+                        MacroCallResolution::RenamedBuiltinSelfCall,
+                        Route::RenamedBuiltinSelfCall
+                    )
+                    | (MacroCallResolution::Unresolved, Route::Unresolved)
+            ),
+            "{label}: authoritative router arm"
+        );
+
+        let requirements =
+            crate::builtins_visitor::per_element_requirements(&expression, &registry, enclosing);
+        assert_eq!(requirements.requires_module_instance(), module, "{label}");
+        assert_eq!(
+            requirements.requires_arrayed_element_context(),
+            module || snapshot,
+            "{label}"
+        );
+        let (transformed, implicit) = crate::builtins_visitor::instantiate_implicit_modules(
+            "out",
+            Ast::ApplyToAll(dimensions.clone(), expression),
+            None,
+            None,
+            &registry,
+            enclosing,
+        )
+        .unwrap_or_else(|error| panic!("{label}: production A2A expansion failed: {error:?}"));
+        assert_eq!(
+            matches!(transformed, Ast::Arrayed(..)),
+            module,
+            "{label}: only a module-bearing route materializes element bodies"
+        );
+        if label == "Expand macro shadowing stdlib" {
+            let modules: Vec<_> = implicit.iter().filter_map(|var| var.module()).collect();
+            assert_eq!(modules.len(), 2, "one project-macro instance per element");
+            assert!(modules.iter().all(|module| {
+                module.model_name() == "smth1" && module.references().len() == 1
+            }));
+        }
+    }
+}
+
+/// `IndexExpr0` is an exhaustive five-arm syntax tree. Only `Expr` and
+/// `Range` contain child expressions, and both range endpoints participate in
+/// implicit expansion just as a standalone dynamic index does.
+#[test]
+fn per_element_requirements_cover_every_index_expression_variant() {
+    use crate::ast::Expr0;
+
+    let registry = mymacro_registry();
+    let parse = |s: &str| {
+        Expr0::new(s, crate::lexer::LexerType::Equation)
+            .expect("parse")
+            .expect("non-empty")
+    };
+    let rows = [
+        ("Wildcard", "vals[*]", false),
+        ("StarRange", "vals[*:Dim]", false),
+        ("Range left endpoint", "vals[PREVIOUS(lo + 0, 0):hi]", true),
+        ("Range right endpoint", "vals[lo:INIT(hi + 0)]", true),
+        ("DimPosition", "vals[@1]", false),
+        ("Expr", "vals[PREVIOUS(index, 0)]", true),
+    ];
+
+    for (variant, equation, snapshot) in rows {
+        let requirements =
+            crate::builtins_visitor::per_element_requirements(&parse(equation), &registry, None);
+        assert_eq!(
+            requirements.requires_arrayed_element_context(),
+            snapshot,
+            "{variant}: `{equation}`"
+        );
+    }
 }
 
 /// macros.AC2.1 smoke: a trivial single-output macro `M(a, b) = a * b`

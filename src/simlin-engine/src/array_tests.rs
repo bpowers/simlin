@@ -4707,16 +4707,13 @@ TIME STEP = 1 ~~|
     }
 
     /// Part B (loud-safe companion -- AC7.5 / "no silent miscompile"): when a
-    /// helper lifted out of an `INITIAL(...)`-wrapped A2A parent references a
-    /// dimension that genuinely has *no* mapping to the parent dimension, the
-    /// cross-dimension subscript cannot be element-resolved and lowers to
-    /// `DimensionInScalarContext`. `lower_variable` then discards the helper's
-    /// AST; without the post-lower re-check in `lower_implicit_var` the helper
-    /// would carry an `ast == None` that `Var::new` later rejects as
-    /// `EmptyEquation`. Either way the residual must surface as a **clean,
-    /// named error** -- the failing compile `Err` must name the specific
-    /// `$⁚out⁚…⁚arg0⁚…` helper -- never a silent all-`None` fragment that reads
-    /// a wrong value. (Surfacing the residual through the per-variable
+    /// shaped helper lifted out of an `INITIAL(...)`-wrapped A2A parent
+    /// references a dimension that genuinely has *no* mapping to the parent
+    /// dimension, ordinary A2A lowering cannot pair the axes. The residual
+    /// must surface as a **clean, named error** -- the failing compile `Err`
+    /// must name the one `$⁚out⁚…⁚arg0` helper -- never a scalar fallback or a
+    /// silent all-`None` fragment that reads a wrong value. (Surfacing the
+    /// residual through the per-variable
     /// diagnostic API rather than only the aggregate `Err` is a separate,
     /// pre-existing concern tracked as GH #466.)
     #[test]
@@ -4745,12 +4742,12 @@ TIME STEP = 1 ~~|
         let err =
             compile_result.expect_err("an unmappable cross-dimension helper must not compile");
         let msg = format!("{err:?}");
-        // Loud: the failure must NAME the specific per-element helper of `out`,
+        // Loud: the failure must NAME the shaped helper of `out`,
         // not be a silent miscompile into a wrong value or an opaque generic
         // error with no offending variable.
         assert!(
-            msg.contains("⁚out⁚") && msg.contains("⁚arg0⁚"),
-            "the compile Err must name the offending `$⁚out⁚…⁚arg0⁚…` helper \
+            msg.contains("⁚out⁚") && msg.contains("⁚arg0"),
+            "the compile Err must name the offending `$⁚out⁚…⁚arg0` helper \
              (loud, actionable -- AC7.5); got: {msg}"
         );
     }

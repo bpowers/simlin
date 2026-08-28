@@ -52,43 +52,108 @@ pub(crate) fn empty_macro_registry() -> &'static MacroRegistry {
     &EMPTY_MACRO_REGISTRY
 }
 
-/// Check if the expression contains any **module-function** call that needs
-/// per-element expansion in A2A context: a stdlib function, a project macro
-/// (consulted via `macro_registry`), or `init`/`previous` (which may need
-/// per-element temp vars though they create no standalone module).
+/// What one equation body requires from the implicit-expansion walk.
 ///
-/// This is the recognition predicate that gates the `Ast::ApplyToAll` /
-/// `Ast::Arrayed` per-element expansion paths in `instantiate_implicit_modules`.
-/// Macro-awareness is what lets an *arrayed* macro invocation enter the
-/// per-element path (a scalar macro call expands via `walk()`'s `App`-arm
-/// change regardless); Phase 4's arrayed fixtures exercise this end-to-end.
-pub(crate) fn contains_module_call(expr: &Expr0, macro_registry: &MacroRegistry) -> bool {
+/// Module functions need one synthesized instance per active element, so an
+/// apply-to-all equation containing one must be expanded to explicit element
+/// bodies. PREVIOUS/INIT are opcode-backed storage reads: a structural
+/// apply-to-all body and any capture it needs retain that shape, while an
+/// already-explicit `Ast::Arrayed` equation still walks each distinct body in
+/// its element context.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PerElementRequirements {
+    module_instance: bool,
+    snapshot: bool,
+}
+
+impl PerElementRequirements {
+    pub(crate) const fn requires_module_instance(self) -> bool {
+        self.module_instance
+    }
+
+    pub(crate) const fn requires_arrayed_element_context(self) -> bool {
+        self.module_instance || self.snapshot
+    }
+
+    fn union(self, other: Self) -> Self {
+        Self {
+            module_instance: self.module_instance || other.module_instance,
+            snapshot: self.snapshot || other.snapshot,
+        }
+    }
+}
+
+/// Classify every implicit-expansion call in an expression once.
+pub(crate) fn per_element_requirements(
+    expr: &Expr0,
+    macro_registry: &MacroRegistry,
+    enclosing_model: Option<&str>,
+) -> PerElementRequirements {
     use Expr0::*;
     match expr {
-        Const(_, _, _) => false,
-        Var(_, _) => false,
+        Const(_, _, _) | Var(_, _) => PerElementRequirements::default(),
         App(UntypedBuiltinFn(func, args), _) => {
-            if crate::builtins::is_stdlib_module_function(func.as_str())
-                || macro_registry.resolve_macro(func).is_some()
-                || matches!(func.as_str(), "init" | "previous")
-            {
-                return true;
-            }
-            args.iter().any(|a| contains_module_call(a, macro_registry))
+            let own = match macro_registry.resolve_call(func, enclosing_model) {
+                MacroCallResolution::Expand(_) => PerElementRequirements {
+                    module_instance: true,
+                    snapshot: false,
+                },
+                MacroCallResolution::Passthrough(_)
+                | MacroCallResolution::RenamedBuiltinSelfCall
+                | MacroCallResolution::Unresolved => {
+                    if crate::builtins::is_stdlib_module_function(func.as_str()) {
+                        PerElementRequirements {
+                            module_instance: true,
+                            snapshot: false,
+                        }
+                    } else if matches!(func.as_str(), "init" | "previous") {
+                        PerElementRequirements {
+                            module_instance: false,
+                            snapshot: true,
+                        }
+                    } else {
+                        PerElementRequirements::default()
+                    }
+                }
+            };
+            args.iter().fold(own, |requirements, arg| {
+                requirements.union(per_element_requirements(
+                    arg,
+                    macro_registry,
+                    enclosing_model,
+                ))
+            })
         }
-        Subscript(_, args, _) => args.iter().any(|idx| match idx {
-            IndexExpr0::Expr(e) => contains_module_call(e, macro_registry),
-            _ => false,
-        }),
-        Op1(_, r, _) => contains_module_call(r, macro_registry),
-        Op2(_, l, r, _) => {
-            contains_module_call(l, macro_registry) || contains_module_call(r, macro_registry)
-        }
-        If(cond, t, f, _) => {
-            contains_module_call(cond, macro_registry)
-                || contains_module_call(t, macro_registry)
-                || contains_module_call(f, macro_registry)
-        }
+        Subscript(_, args, _) => args.iter().fold(
+            PerElementRequirements::default(),
+            |requirements, index| match index {
+                IndexExpr0::Range(start, end, _) => requirements
+                    .union(per_element_requirements(
+                        start,
+                        macro_registry,
+                        enclosing_model,
+                    ))
+                    .union(per_element_requirements(
+                        end,
+                        macro_registry,
+                        enclosing_model,
+                    )),
+                IndexExpr0::Expr(expr) => requirements.union(per_element_requirements(
+                    expr,
+                    macro_registry,
+                    enclosing_model,
+                )),
+                IndexExpr0::Wildcard(_)
+                | IndexExpr0::StarRange(_, _)
+                | IndexExpr0::DimPosition(_, _) => requirements,
+            },
+        ),
+        Op1(_, r, _) => per_element_requirements(r, macro_registry, enclosing_model),
+        Op2(_, l, r, _) => per_element_requirements(l, macro_registry, enclosing_model)
+            .union(per_element_requirements(r, macro_registry, enclosing_model)),
+        If(cond, t, f, _) => per_element_requirements(cond, macro_registry, enclosing_model)
+            .union(per_element_requirements(t, macro_registry, enclosing_model))
+            .union(per_element_requirements(f, macro_registry, enclosing_model)),
     }
 }
 
@@ -184,7 +249,7 @@ fn get_dimension_names(dimensions: &[Dimension]) -> Vec<CanonicalDimensionName> 
 ///
 /// `Ast::Arrayed` stores its slots in a `HashMap`, and both expansion paths in
 /// `instantiate_implicit_modules` read that order into something observable.
-/// The module-call path unions each slot's synthesized helpers into one vector,
+/// The element-context path unions each slot's synthesized helpers into one vector,
 /// whose ORDER rides two salsa-cached values with derived `PartialEq`
 /// (`ParsedVariableResult::implicit_vars` and `VariableDeps::implicit_vars`),
 /// so an unstable order defeats backdating and makes the compiled artifact
@@ -194,16 +259,11 @@ fn get_dimension_names(dimensions: &[Dimension]) -> Vec<CanonicalDimensionName> 
 ///
 /// The other path walks every slot with ONE visitor, so the `n` counter that
 /// names each synthesized helper (`$⁚v⁚{n}⁚arg0`) is handed out in iteration
-/// order. It is taken when `!any_module_call || dimensions.is_empty()`, and the
-/// two disjuncts are NOT alike:
+/// order. It is taken when no body requires module/snapshot element context or
+/// when `dimensions.is_empty()`, and the two conditions are NOT alike:
 ///
-/// * `!any_module_call` is inert. `contains_module_call` is true for every
-///   construct that can synthesize a helper at all -- a stdlib call, a macro,
-///   `init`, `previous` -- since the sole `hoist_capture` call site sits inside
-///   the PREVIOUS/INIT routing branch, and the only other producer is
-///   `expand_module_function`, whose macro and stdlib call sites are gated by
-///   the same predicates `contains_module_call` consults. With no module call
-///   there is nothing to name.
+/// * A call-free (or ordinary-builtin-only) equation may still grow helpers as
+///   its builtin surface evolves. Any such ids are allocated in this order.
 /// * `dimensions.is_empty()` is LIVE, and not a degenerate path: an `<aux>`
 ///   carrying `<element subscript=…>` children with no `<dimensions>` sibling
 ///   is an ordinary XMILE document, `xmile::variables`' `convert_equation!`
@@ -369,10 +429,10 @@ pub struct BuiltinVisitor<'a> {
     /// for DIFFERENT bodies -- a silent collision that made a later slot read an
     /// earlier slot's capture (PR #668). When this flag is set, the arrayed
     /// capture appends the slot's element suffix (like the scalar captures
-    /// always have), so distinct slots never collide. Set ONLY by
-    /// the `Ast::Arrayed` branch of `instantiate_implicit_modules`; NOT by its
-    /// `default_expr` visitor (which uses `::new`, has no `active_subscript`, and
-    /// so never reaches the arrayed-helper branch).
+    /// always have), so distinct slots never collide. Explicit slots and
+    /// module-bearing default bodies materialized for missing slots set it;
+    /// one snapshot-only default remains a structural shaped body and has no
+    /// active subscript or per-element identity.
     per_element_equation: bool,
 }
 
@@ -435,6 +495,32 @@ impl<'a> BuiltinVisitor<'a> {
             dimensions: dimensions.to_vec(),
             dimension_names: get_dimension_names(dimensions),
             active_subscript: Some(subscript.to_vec()),
+            dimensions_ctx,
+            model_var_names: None,
+            snapshot_index_resolver: None,
+            macro_registry: &EMPTY_MACRO_REGISTRY,
+            enclosing_model: None,
+            per_element_equation: false,
+        }
+    }
+
+    /// Create a visitor for one structural apply-to-all body without choosing
+    /// an active element. Snapshot captures inherit these dimensions and
+    /// lowering resolves the body per element later; module calls cannot use
+    /// this context because their instances are inherently per element.
+    fn new_with_apply_to_all_context(
+        variable_name: &'a str,
+        dimensions: &[Dimension],
+        dimensions_ctx: Option<&'a DimensionsContext>,
+    ) -> Self {
+        Self {
+            variable_name,
+            vars: Default::default(),
+            n: 0,
+            self_allowed: false,
+            dimensions: dimensions.to_vec(),
+            dimension_names: get_dimension_names(dimensions),
+            active_subscript: None,
             dimensions_ctx,
             model_var_names: None,
             snapshot_index_resolver: None,
@@ -786,6 +872,11 @@ impl<'a> BuiltinVisitor<'a> {
                     .into_iter()
                     .map(|idx| match idx {
                         IndexExpr0::Expr(e) => IndexExpr0::Expr(self.substitute_dimension_refs(e)),
+                        IndexExpr0::Range(start, end, loc) => IndexExpr0::Range(
+                            self.substitute_dimension_refs(start),
+                            self.substitute_dimension_refs(end),
+                            loc,
+                        ),
                         other => other,
                     })
                     .collect();
@@ -918,10 +1009,11 @@ impl<'a> BuiltinVisitor<'a> {
     /// Hoist a `PREVIOUS`/`INIT` argument into a [`Capture`] and return the
     /// reference expression the caller substitutes for the argument.
     ///
-    /// Outside A2A context (`active_subscript == None`), or when the captured
-    /// argument carries no bare variable reference, the capture is scalar: it
-    /// holds the (dimension-substituted) argument and the reference is a bare
-    /// `Var`.
+    /// A structural apply-to-all walk has declared dimensions but no active
+    /// element. It produces one shaped capture holding the untouched argument,
+    /// and the rewritten call reads the capture as a bare array-valued `Var`;
+    /// ordinary apply-to-all lowering resolves mappings and subdimensions for
+    /// each destination element.
     ///
     /// In A2A context, when the argument contains a bare variable reference
     /// (`arg_has_bare_var_ref`) AND no subscript at all (`arg_has_subscript`),
@@ -934,10 +1026,11 @@ impl<'a> BuiltinVisitor<'a> {
     /// element of the enclosing apply-to-all produces the same capture, which
     /// `instantiate_implicit_modules` deduplicates into one.
     ///
-    /// Any subscripted arg takes the scalar path instead (see
-    /// `arg_has_subscript`): `substitute_dimension_refs` translates each
-    /// subscript per element, which avoids the arrayed capture's
-    /// subscript-interaction bugs (the C-LEARN regression).
+    /// In an explicitly per-element walk, a subscripted argument takes the
+    /// scalar path (see `arg_has_subscript`): `substitute_dimension_refs`
+    /// translates each subscript for the active element. A scalar equation has
+    /// neither declared dimensions nor an active element and also produces a
+    /// scalar capture.
     fn hoist_capture(&mut self, kind: CaptureKind, arg: Expr0) -> Result<Expr0, EquationError> {
         let loc = crate::builtins::Loc::default();
 
@@ -996,6 +1089,23 @@ impl<'a> BuiltinVisitor<'a> {
             return Ok(Expr0::Subscript(RawIdent::new_from_str(&id), indices, loc));
         }
 
+        // A snapshot-only apply-to-all body is one shaped equation. Keeping the
+        // argument untouched leaves active-dimension, mapping and subdimension
+        // resolution at the ordinary apply-to-all lowering boundary. A scalar
+        // result broadcasts across the capture's declared slots.
+        if active_subscript.is_none() && !self.dimensions.is_empty() {
+            let dims: Vec<String> = self
+                .dimension_names
+                .iter()
+                .map(|dimension| dimension.as_str().to_string())
+                .collect();
+            let capture = Capture::new(self.variable_name, self.n, kind, arg, None, dims);
+            let id = capture.ident().to_string();
+            self.insert_implicit_var(ImplicitVar::Capture(capture))?;
+            self.n += 1;
+            return Ok(Expr0::Var(RawIdent::new_from_str(&id), loc));
+        }
+
         let transformed_arg = if self.active_subscript.is_some() {
             self.substitute_dimension_refs(arg)
         } else {
@@ -1022,7 +1132,7 @@ impl<'a> BuiltinVisitor<'a> {
         let result: IndexExpr0 = match expr {
             Wildcard(_) => expr,
             StarRange(_, _) => expr,
-            Range(_, _, _) => expr,
+            Range(start, end, loc) => Range(self.walk(start)?, self.walk(end)?, loc),
             DimPosition(_, _) => expr,
             Expr(expr) => Expr(self.walk(expr)?),
         };
@@ -1356,7 +1466,7 @@ impl<'a> BuiltinVisitor<'a> {
 /// `macro_registry` carries the per-project macros: a call name resolving
 /// there expands as a macro (shadowing an identically named builtin/stdlib
 /// func) and an *arrayed* macro invocation rides the per-element path via
-/// `contains_module_call`.
+/// `per_element_requirements`.
 ///
 /// `enclosing_model` is the owning model's name when `variable_name` is a
 /// macro-marked model's body variable (`None` otherwise). It drives the #554
@@ -1413,9 +1523,12 @@ pub(crate) fn instantiate_implicit_modules_with_resolver(
             Ok((Ast::Scalar(transformed), vars))
         }
         Ast::ApplyToAll(dimensions, ast) => {
-            // Check if expression contains a module-function call (stdlib or
-            // macro) - if so, expand to per-element modules.
-            if contains_module_call(&ast, macro_registry) && !dimensions.is_empty() {
+            // A real module instance owns per-element state and wiring, so its
+            // enclosing equation must expose explicit element bodies.
+            if per_element_requirements(&ast, macro_registry, enclosing_model)
+                .requires_module_instance()
+                && !dimensions.is_empty()
+            {
                 let mut all_vars = Vec::new();
                 let mut elements = HashMap::new();
 
@@ -1444,26 +1557,30 @@ pub(crate) fn instantiate_implicit_modules_with_resolver(
                     dedup_vars_by_ident(all_vars)?,
                 ))
             } else {
-                // No module-function calls - original behavior
-                let mut builtin_visitor = BuiltinVisitor::new(variable_name)
-                    .with_dimensions_ctx(dimensions_ctx)
-                    .with_model_var_names(model_var_names)
-                    .with_snapshot_index_resolver(snapshot_index_resolver)
-                    .with_macro_registry(macro_registry)
-                    .with_enclosing_model(enclosing_model);
+                // Snapshot-only bodies retain their structural equation shape.
+                let mut builtin_visitor = BuiltinVisitor::new_with_apply_to_all_context(
+                    variable_name,
+                    &dimensions,
+                    dimensions_ctx,
+                )
+                .with_model_var_names(model_var_names)
+                .with_snapshot_index_resolver(snapshot_index_resolver)
+                .with_macro_registry(macro_registry)
+                .with_enclosing_model(enclosing_model);
                 let transformed = builtin_visitor.walk(ast)?;
                 let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();
                 Ok((Ast::ApplyToAll(dimensions, transformed), vars))
             }
         }
         Ast::Arrayed(dimensions, elements, default_expr, apply_default_to_missing) => {
-            let any_module_call = elements
-                .values()
-                .any(|e| contains_module_call(e, macro_registry))
-                || default_expr
-                    .as_ref()
-                    .is_some_and(|e| contains_module_call(e, macro_registry));
-            if any_module_call && !dimensions.is_empty() {
+            let any_per_element_call = elements.values().any(|e| {
+                per_element_requirements(e, macro_registry, enclosing_model)
+                    .requires_arrayed_element_context()
+            }) || default_expr.as_ref().is_some_and(|e| {
+                per_element_requirements(e, macro_registry, enclosing_model)
+                    .requires_arrayed_element_context()
+            });
+            if any_per_element_call && !dimensions.is_empty() {
                 let mut all_vars = Vec::new();
                 let mut new_elements = HashMap::new();
                 for (subscript_key, equation) in elements_in_stable_order(elements) {
@@ -1490,25 +1607,67 @@ pub(crate) fn instantiate_implicit_modules_with_resolver(
                     new_elements.insert(subscript_key, transformed);
                     all_vars.extend(visitor.vars.values().cloned());
                 }
-                let transformed_default = if let Some(default_expr) = default_expr {
-                    let mut default_visitor = BuiltinVisitor::new(variable_name)
-                        .with_dimensions_ctx(dimensions_ctx)
+                let transformed_default = None;
+                let transformed_apply_default = false;
+                if apply_default_to_missing && let Some(default_expr) = default_expr {
+                    let missing_subscripts: Vec<(CanonicalElementName, Vec<String>)> =
+                        SubscriptIterator::new(&dimensions)
+                            .filter_map(|subscript| {
+                                let key = CanonicalElementName::from_raw(&subscript.join(","));
+                                (!new_elements.contains_key(&key)).then_some((key, subscript))
+                            })
+                            .collect();
+                    let requirements =
+                        per_element_requirements(&default_expr, macro_registry, enclosing_model);
+                    if requirements.requires_module_instance() {
+                        // A module instance owns scalar state and input wiring,
+                        // so one default body cannot serve several active
+                        // elements. Materialize exactly the missing slots the
+                        // compiler would otherwise select the default for.
+                        for (subscript_key, subscript) in missing_subscripts {
+                            let mut visitor = BuiltinVisitor::new_with_subscript_context(
+                                variable_name,
+                                &dimensions,
+                                &subscript,
+                                dimensions_ctx,
+                            )
+                            .with_model_var_names(model_var_names)
+                            .with_snapshot_index_resolver(snapshot_index_resolver)
+                            .with_macro_registry(macro_registry)
+                            .with_enclosing_model(enclosing_model)
+                            .with_per_element_equation(true);
+                            let transformed = visitor.walk(default_expr.clone())?;
+                            new_elements.insert(subscript_key, transformed);
+                            all_vars.extend(visitor.vars.values().cloned());
+                        }
+                    } else if !missing_subscripts.is_empty() {
+                        // Snapshot storage retains the Arrayed variable's
+                        // declared axes, but the rewritten read belongs
+                        // only to slots for which the default applies.
+                        // Transform once to mint one shaped capture, then
+                        // materialize that read into the missing bodies.
+                        let mut visitor = BuiltinVisitor::new_with_apply_to_all_context(
+                            variable_name,
+                            &dimensions,
+                            dimensions_ctx,
+                        )
                         .with_model_var_names(model_var_names)
                         .with_snapshot_index_resolver(snapshot_index_resolver)
                         .with_macro_registry(macro_registry)
                         .with_enclosing_model(enclosing_model);
-                    let transformed = default_visitor.walk(default_expr)?;
-                    all_vars.extend(default_visitor.vars.values().cloned());
-                    Some(transformed)
-                } else {
-                    None
-                };
+                        let transformed = visitor.walk(default_expr)?;
+                        all_vars.extend(visitor.vars.values().cloned());
+                        for (subscript_key, _) in missing_subscripts {
+                            new_elements.insert(subscript_key, transformed.clone());
+                        }
+                    }
+                }
                 Ok((
                     Ast::Arrayed(
                         dimensions,
                         new_elements,
                         transformed_default,
-                        apply_default_to_missing,
+                        transformed_apply_default,
                     ),
                     dedup_vars_by_ident(all_vars)?,
                 ))
@@ -1529,11 +1688,12 @@ pub(crate) fn instantiate_implicit_modules_with_resolver(
                             builtin_visitor.walk(equation).map(|ast| (subscript, ast))
                         })
                         .collect();
-                let transformed_default = if let Some(default_expr) = default_expr {
-                    Some(builtin_visitor.walk(default_expr)?)
-                } else {
-                    None
-                };
+                let transformed_default =
+                    if apply_default_to_missing && let Some(default_expr) = default_expr {
+                        Some(builtin_visitor.walk(default_expr)?)
+                    } else {
+                        None
+                    };
                 let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();
                 Ok((
                     Ast::Arrayed(

@@ -794,17 +794,18 @@ to user equations, together with the QUALIFIED-element form
 `PREVIOUS(vals[Dim.elem])`, whose qualified dimension supplies a 1-based
 position that is applied to the referenced variable's own axis (measured in
 chunk 7.1, "Phase 7.1 predicate"); 7.5b takes INIT-only captures out of flows
-while unioning shared snapshot storage's demands. The remaining subchunks keep
-`ApplyToAll` instead of rewriting to `Arrayed` for an apply-to-all body that
-merely contains `PREVIOUS`/`INIT` (D14), and hoist `DELAYN`'s duplicated input
-argument once.
+while unioning shared snapshot storage's demands; 7.5c keeps `ApplyToAll`
+instead of rewriting to `Arrayed` for an apply-to-all body that merely contains
+`PREVIOUS`/`INIT` (D14). The remaining subchunk hoists `DELAYN`'s duplicated
+input argument once.
 
 **Phase 7.2 captures.** A `capture::Capture` is a `PREVIOUS`/`INIT` argument
 hoisted into its own unit of evaluation: `(id, kind, arg, suffix, dims)`, where
 `arg` is the argument's `Expr0` subtree exactly as the parse's walk left it,
-`id` is the walk counter the visitor was at, `suffix` is the active
-apply-to-all element when the parent is expanded per element, and `dims` is
-non-empty only for the GH #541 arrayed capture. `capture::ImplicitVar` is the
+`id` is the walk counter the visitor was at, and `dims` is the canonical
+storage shape. A structural apply-to-all snapshot has all enclosing axes and no
+active-element `suffix`; an explicitly per-element or module-expanded body can
+carry a suffix for element-specific storage. `capture::ImplicitVar` is the
 ordered list a parse produces: a `Capture`, a `HoistedArg`, or an
 `ImplicitModule`. Each arm carries parsed data directly.
 
@@ -826,24 +827,20 @@ by `(parent, id)`.
 things it deliberately keeps rather than simplifies, because dropping either
 would change the compiled artifact rather than the representation. It fills the
 `Variable::eqn` field by printing the subtree, because that field is source
-text by definition and LTM's link-score generator has TWO readers of it:
+text by definition and LTM's link-score generator has two readers of it:
 `ltm_augment::target_equation_dims`, which takes an arrayed target's
 datamodel-cased dimension names off it (a target reporting no dimensions gets a
 scalar link score), and `ltm_augment::scalar_or_a2a_target_expr`, which falls
 back to `scalar_eqn_text_or_zero` and RE-PARSES that text whenever the target
 has no lowered AST -- reachable for a capture, because
 `db::analysis::reconstruct_implicit_variable` lowers every capture through the
-total `model::lower_variable`, which discards the AST on a lowering error. So
-what this chunk deletes is the round trip on the COMPILE path, not every round
-trip in the engine: LTM's ordinary link-score generation still prints the
-target's LOWERED body (`patch::expr2_to_expr0` + `print_eqn`) and re-parses it
-in `db::ltm::equation::LtmArm::new`, the GH #965 generated-text boundary, which
-applies to every variable and to captures alike. And it runs the body through
-`instantiate_implicit_modules`, whose per-element gate fires on a bare
-`PREVIOUS`/`INIT` as well as on a module call, so an arrayed capture holding one
-becomes an `Ast::Arrayed` of identical elements rather than staying an
-`Ast::ApplyToAll` (D14 -- keeping the `ApplyToAll` is a shape change with its
-own ledger row).
+total `model::lower_variable`, which discards the AST on a lowering error. It
+runs the body through `instantiate_implicit_modules`, where real module calls
+instantiate per element but snapshot-only storage retains `Ast::ApplyToAll`.
+LTM's ordinary link-score generation still prints the target's lowered body
+(`patch::expr2_to_expr0` + `print_eqn`) and re-parses it in
+`db::ltm::equation::LtmArm::new`, the GH #965 generated-text boundary, which
+applies to every variable and to captures alike.
 
 One representation difference survives, and it is not observable. A capture
 keeps the SOURCE spelling of an identifier where a re-parse kept the lexer's:
@@ -1195,11 +1192,12 @@ general parse/codegen table, phase-runlist/layout fixture, and module refusal
 tables. A separate LTM discovery fixture pins the topology consequence: bare
 and qualified reads of `a1` coalesce into one dimensioned score variable, the
 same-named `b2` element produces another dimensioned score, and only dynamic
-reads retain per-target scalar captures and scores; both user and score series
-are asserted. INIT is outside that fixture's dt-score boundary and remains
-covered by the shared PREVIOUS/INIT matrix. C-LEARN carries the same shape independently: 35
-scalar/per-element score names coalesce, their declared extent grows by 278
-slots, and removing 26 source captures yields a net +252-slot LTM layout.
+reads retain a storage capture and its dimensioned score; both user and score
+series are asserted. INIT is outside that fixture's dt-score boundary and
+remains covered by the shared PREVIOUS/INIT matrix. C-LEARN carries the same
+shape independently: 35 scalar/per-element score names coalesce, their declared
+extent grows by 278 slots, and removing 26 source captures yields a net
++252-slot LTM layout.
 
 **Phase 7.5b capture phase membership.** `CaptureKind` states the storage's
 phase demand: PREVIOUS refreshes in flows for the next committed snapshot and
@@ -1246,6 +1244,81 @@ slots, assembled assignment targets, VM initialization/reset/rerun values and
 user-variable VM/WASM parity. The fragment characterizations state the
 intended shape: INIT capture helpers are initial-only, and generated LTM
 PREVIOUS helpers are flow-only.
+
+**Phase 7.5c structural snapshot storage.** `PerElementRequirements` is the
+single recursive classification of calls that need per-element parse work. It
+uses the same `resolve_call` / `MacroCallResolution` router as expansion, then
+applies the opcode, stdlib and project-macro fallthroughs. A real stdlib or
+project macro needs a distinct module instance for each active element and
+converts its enclosing `Ast::ApplyToAll` to explicit `Ast::Arrayed` bodies;
+PREVIOUS/INIT need snapshot storage but retain a structural apply-to-all body.
+The structural visitor has the declared axes but no active element, so it
+creates one capture carrying those axes, the untouched argument and no suffix.
+Ordinary apply-to-all lowering remains the one place that resolves active axes,
+mappings, repeated axes and proper subdimensions. `Capture::variable_stage0`
+constructs the same `Ast::ApplyToAll`, so parse metadata, layout and fragment
+lowering consume one stored shape. Both endpoints of `IndexExpr0::Range`
+participate in classification, dimension substitution and capture walking.
+
+An explicit `Ast::Arrayed` preserves the element context of each body. A
+snapshot-only default is transformed once in structural context and its capture
+read is inserted only into missing storage slots. A module-bearing default is
+materialized independently for each missing slot. An inactive default, or an
+active default with no holes, is never visited and cannot synthesize storage or
+module instances. Thus downstream dependency, LTM and aggregate walkers see the
+same missing-slot restriction as compilation rather than an unrestricted
+default expression.
+
+`db::ltm::endpoint_dimensions` is the one projection of an ordinary causal
+endpoint's declared shape. It reads an explicit non-module variable or the real
+`model_implicit_var_by_name` entry used by fragment compilation; `Some([])` is a
+scalar and `None` is a module or unknown name. The per-name query is an
+incrementality firewall: adding an unrelated source helper may revalidate the
+projection but cannot execute an unchanged endpoint's score query.
+Element-graph, link-score and loop routing all consume that projection. The LTM
+fragment compiler's broader `ltm_dependency_shape` additionally covers LTM
+implicit and synthetic namespaces, so absence from `SourceModel::variables`
+never implies a scalar dependency. Compatible capture edges inherit their
+dimensions; disjoint fixed-element sources route across every target slot;
+incompatible axes emit one deterministic warning and no scalar score fallback.
+
+`model_flow_member_names` and `dt_causal_dependencies` are the shared phase
+projection for LTM causal edges, aggregate registration, reference sites and
+module-output ports. INIT-only source and parent edges stay outside scoring;
+an ordinary current read promotes a capture and its source relation, while the
+parent INIT edge remains excluded. PREVIOUS-only state stays in the causal graph
+and in both stateless and pinned-cycle lag classification. Aggregate width
+rejection applies only to causal sites, so dead INIT syntax neither allocates
+LTM storage nor disables otherwise scoreable analysis. The per-edge link-score
+query reads per-name occurrences, per-module output ports and the module's own
+reconstructed variable; unrelated helpers or module ports do not invalidate it.
+Whole-model loop builders cache endpoint dimensions locally instead of entering
+the per-name salsa projection for every circuit edge.
+
+`EdgeShapesResult::target_restricted_edges` records a bare edge whose observed
+`target_element` sites cover only a strict subset of the target storage. Such an
+edge takes the element graph's slow path even when endpoint dimensions match,
+so a materialized missing-only snapshot or module-call default cannot
+manufacture loop or pin slots for overridden elements. Pinned-cycle
+classification uses the same endpoint dimensions and restriction decision as
+discovery. Compatible, fixed-disjoint,
+scalar-broadcast and incompatible shaped endpoints therefore have one topology
+source of truth.
+
+The production-derived matrix pins both source intrinsics; scalar, dynamic,
+fixed and array-valued reads; mapped, repeated and proper-subdimension axes;
+explicit/default/implicit/module definitions; stock, initial and flow phases;
+LTM scores, loops, pins and SCC assembly; every call-router and index-expression
+arm; initialization reset; and exact VM/WASM values. Focused endpoint fixtures
+derive captures through the production implicit-metadata path, assert every
+capture and score slot is written exactly once, and require compatible,
+fixed-disjoint, scalar-broadcast and loud incompatible topology. Phase fixtures
+cover direct INIT, computed INIT capture, current-read promotion, PREVIOUS-only
+state, module ports, aggregates and width rejection. Execution-count fixtures
+pin the per-name and per-module firewalls. C-LEARN's all-slot digest and exact
+warning surface complement those fast tests with every emitted LTM slot and all
+production warnings. Dynamic range bounds have exact VM values; wasm's existing
+`ViewRangeDynamic` limitation is an explicit unsupported skip.
 
 **Phase 1 semantic divergences.** Making the signature table the one statement
 of per-builtin facts changed how four edge shapes compile. None occurs in the
@@ -1799,6 +1872,7 @@ hash is not available to it.
 
 | phase | commit | cold compile Ir | slots | opcodes (flow / stock / init) | literals / GFs / temps / views | notes |
 |---|---|---:|---:|---|---|---|
+| 7.5c | `engine: retain shaped snapshot captures` | Against the exact saved 7.5b binary, five paired control-subtracted rounds put one plain compile at 1.02097 G instructions current versus 1.13250 G base, -9.8485% (paired range -9.9812%..-9.7160%), and one LTM compile at 11.3083 G versus 13.4659 G, -16.0228% (-16.1638%..-15.8714%). Cycles / branches / branch misses move -9.7455% / -9.6711% / -10.8682% plain and -15.3566% / -16.0980% / -16.4733% LTM | 5189 plain / 28490 LTM | plain 28637 / 1477 / 24711; LTM 830380 / 1477 / 24711 | plain 1358 / 162 / 28 / 725; LTM 13113 / 162 / 28 / 2334 | `PerElementRequirements` consumes the authoritative macro router and separates real stdlib/project-macro instances from opcode-backed PREVIOUS/INIT storage. Snapshot-only apply-to-all equations retain one structural `Ast::ApplyToAll`; explicit/default equations preserve active element coverage; module defaults materialize only missing bodies; inactive or fully overridden defaults mint no helper. Both `IndexExpr0::Range` endpoints participate in classification, substitution and walking. `endpoint_dimensions` reads explicit variables and the per-name `model_implicit_var_by_name` firewall and is the shared shape source for causal edges, element graphs, scores, loops and pins; broad loop construction caches those shapes. `model_flow_member_names` plus `dt_causal_dependencies` make causal edges, aggregate/reference-site discovery and module ports phase-aware while retaining PREVIOUS-only state. Target-restricted bare edges take the element slow path, so a materialized missing-only snapshot or module-call default cannot manufacture override-slot loops. Per-edge module scores use per-name occurrences, per-module ports and per-name reconstructed module metadata. Against 7.5b, plain keeps flow/stock artifacts fixed while initials fall 126, literals fall 165 and result-offset identities fall 132. Under LTM, root slots move 30375 -> 28490, emitted variables 7128 -> 5561, result offsets 16012 -> 13800, flow opcodes fall 73910, literals fall 3330, static views fall 112 and post-fusion flow+stock falls 34077 (418540 -> 384463); stocks, GFs, temps, dimensions, names and modules are unchanged. Generated LTM implicit helpers move from 738 scalar variables / 738 slots to 225 shaped variables / 759 slots. The checked-in 7.5b digest's 20892 slots first become 21156 through +278 structural extents and -14 fixed-slice declines. Phase-aware discovery then removes 1864 zero link-score slots and 28 INIT-only freezer slots, leaving 19264. Fourteen freezer slots are zero; the other fourteen are the two `effective_target_year` elements in each of seven COP regions, maximum 4000. All 19264 post-shaping/pre-phase-filter survivor maxima are identical. The exact warning pin covers one established discovery switch, 17 established incompatible-dimension declines and five established rank-like declines; there are no added `last_set_target_year` warnings. Release C-LEARN preserves every user-model series with LTM off and on. Final-binary execution is 1.38436 G current versus 1.40780 G base per plain run, -1.6651% (paired range -1.6791%..-1.6549%), and 17.7597 G versus 19.1676 G per LTM run, -7.3449% (-7.3729%..-7.3175%); cycles / branches / branch misses move -0.7613% / +0.0393% / -1.8155% plain and -6.8262% / -6.8936% / -6.5532% LTM. `RuntimeView::dense_linear_start` remains explicitly inlined because it is reachable from the per-element generic addressing path, preventing an out-of-line call there. The production-derived matrix crosses PREVIOUS and INIT; scalar, dynamic, fixed, array-valued, mapped, repeated and proper-subdimension operands; explicit/default/implicit/module, stock/init/flow, LTM score/loop/pin and SCC routes; initialization reset; exact VM/WASM values; every `MacroCallResolution` and `IndexExpr0` arm; per-name/per-module execution-count firewalls; phase-dead aggregate/port exclusion; and loud incompatible topology. Validation: engine lib 5716 passed / 2 ignored; integration 782 passed / 16 ignored, including genuine-output, VM/WASM and LTM corpora; VM allocation 4 passed; doctests 2 passed / 1 ignored; release C-LEARN parity, complete-warning guard and all-slot digest are green; both determinism modules pass 12 consecutive invocations; all-target/all-feature engine clippy with warnings denied, rustfmt and `git diff --check` are green |
 | 7.5b | `engine: compile captures only in required phases` | Against the exact saved 7.5a binary, five paired control-subtracted rounds put one plain compile at 1.13212 G instructions current versus 1.14225 G base, -0.888% (paired range -0.975%..-0.807%), and one LTM compile at 13.4573 G versus 13.4923 G, -0.259% (-0.420%..-0.137%); both are below the plan's 1% investigation threshold | 5189 plain / 30375 LTM | plain 28637 / 1477 / 24837; LTM 904290 / 1477 / 24837 | plain 1523 / 162 / 28 / 725; LTM 16443 / 162 / 28 / 2446 | A capture carries an exhaustive PREVIOUS, INIT or combined phase demand. Definition dedup unions the demand when dt and active-initial parsing mint the same positional helper in either intrinsic order; mismatched bodies or helper forms still refuse loudly. INIT-only helpers retain their initial fragment and layout slot but leave the flow runlist unless a per-step definition's production dt dependency closure contains a current-value read of that helper; PREVIOUS/INIT snapshot edges cannot promote themselves, and a dependency reachable only from another INIT-only helper remains initial-only. Symmetrically, an initial-shaped PREVIOUS body does not seed itself, while an independent live initial consumer pulls it through the ordinary closure. Raw dt INIT referents from explicit and implicit live definitions are first-class project initialization roots, so local and nested qualified captures plus mixed live flows populate exactly the demanded child output while unrelated outputs remain sparse. The post-init current slot is deliberately backend-private and dead: VM internal results may contain zero where wasm retains the initialized scratch value, while user variables agree; naming the hidden helper from a live definition creates a real current dependency, restores its flow fragment and makes both backends agree on the now-observable slot. LTM implicit compilation applies the same demand directly because those helpers bypass the ordinary model graph. C-LEARN slots and result offsets are unchanged (5032 plain / 16012 LTM). Plain removes 2,125 flow opcodes, 217 literals and 14 views; LTM removes the same 2,125 flow opcodes plus 3,856 initial opcodes and 770 initial programs from redundant generated-PREVIOUS initialization, with 584 fewer literals and 404 fewer views. Totals move 57,076 -> 54,951 plain and 936,585 -> 930,604 LTM; post-fusion flow moves 17,037 -> 15,942 plain and 418,560 -> 417,465 LTM. Names, modules, GFs, temps and dimensions are unchanged. Release C-LEARN preserves every user-model series with LTM off and on. Control-subtracted execution is 1.40792 G current versus 1.45267 G base per plain run, -3.080% (paired range -3.103%..-3.068%), and 19.1659 G versus 19.2109 G per LTM run, -0.234% (-0.260%..-0.215%); every pair improves. The production-derived matrix crosses both source capture kinds with computed scalar, dynamic-element, array-valued and initial-backed storage; explicit, module, macro and typed/generated-LTM routes; both intrinsic orders of phase union; live cross-phase promotion and dead INIT-only dependency chains; local and qualified INIT-referent propagation with sparse child outputs; implicit runlists; exact fragments and opcodes; active initialization, reset and rerun; and user-variable VM/wasm parity. Validation: engine lib 5,693 passed / 2 ignored; integration 776 passed / 16 ignored, including genuine-output, VM/wasm and LTM corpora; VM allocation 4 passed; doctests 2 passed / 1 ignored; release C-LEARN LTM parity is green; both determinism modules pass 12 consecutive invocations; all-target/all-feature engine clippy with warnings denied, rustfmt and `git diff --check` are green |
 | 7.5a | `engine: read static element snapshots directly` | Against the exact saved Phase 6b binary, five paired control-subtracted rounds put one plain compile at 1.14007 G instructions current versus 1.14676 G base, -0.583% (paired range -0.838%..-0.492%), and one LTM compile at 13.4423 G versus 13.5152 G, -0.539% (-0.962%..-0.296%); both are below the plan's 1% investigation threshold | 5189 plain / 30375 LTM | plain 30762 / 1477 / 24837; LTM 906415 / 1477 / 28693 | plain 1740 / 162 / 28 / 739; LTM 17027 / 162 / 28 / 2850 | Static bare and qualified element indices in source PREVIOUS/INIT calls use one production `SnapshotIndexResolver`. Salsa and the datamodel oracle derive only the referenced axis and qualified 1-based position; `dimensions::resolve_snapshot_axis_index` owns the final decision through the canonical name/position helpers. XMILE footnote 9 makes an owning-axis bare element win over a same-named source variable, while generated LTM equations retain their conservative whole-generated-surface shadowing rule. A qualified position can come from an unrelated dimension. The per-qualified-name salsa projection reexecutes after any dimension-vector edit but backdates an unchanged result before parse; moving or removing the selected element invalidates parse. The exhaustive production matrix crosses both intrinsics with same-name collision, unrelated qualification, missing qualified/bare names, globally ambiguous bare names, mapped axes and a proper subdimension; the missing and mapped-target-only arms capture then refuse loudly. The source-reachable dual `SpansDimension`/`Static` row keeps spans-first addressability, exact source locations and zero captures, then lowers to two direct element-first reads with pinned VM values for both intrinsics. C-LEARN's corrected profile is identical to the initial 7.5a profile, so it contains no affected same-name collision: plain removes 26 captures, 52 flow opcodes and 78 initial opcodes from Phase 6b (57,206 -> 57,076 total; initials 1,190 -> 1,164), with every table count unchanged. Under LTM those captures disappear too, while 35 scalar/per-element link-score names coalesce into dimensioned score variables whose declared extent is +278 slots: net slots +252, literals +278, flow opcodes -1,802 and initial opcodes -78 (938,465 -> 936,585 total; initials 1,960 -> 1,934). The post-fusion flow count is 17,063 -> 17,037 plain and 419,166 -> 418,560 LTM. The integration guard pins 7,128 LTM variables and the 30,375-slot ceiling distance. A production-derived fixture pins the same mechanism without C-LEARN names: one two-slot `rate[a1]→grow` score coalesces bare+qualified reads, same-named `rate[b2]` is a second two-slot direct score, and the one dynamic callsite retains two scalar scores; exact user and score series are preserved. Release C-LEARN user series are identical with LTM off and on. Control-subtracted execution is 1.45260 G current versus 1.49290 G base per plain run, -2.699% (five paired rounds -2.735%..-2.684%), and 31.9781 G versus 32.6132 G per LTM run, -1.947% (all five pairs improve, -2.093%..-1.403%). AC3 additionally adds an unrelated variable and a second SMTH1 through production sync: only each new variable parses, and the existing bare-element probe and fragments remain memoized. Validation: engine lib 5,681 passed / 2 ignored; integration 776 passed / 16 ignored, including genuine-output, VM/wasm and LTM corpora; VM allocation 4 passed; doctests 2 passed / 1 ignored; both determinism modules pass 12 consecutive invocations; all-target/all-feature engine clippy with warnings denied, rustfmt and `git diff --check` are green |
 | 6b | `engine: materialize arrays after subscript resolution` | The last five-round interleaved measurement is 8.6836 G instructions on the whole-process channel against the exact `c666c4a6` base at 8.5902 G, +1.087%. Isolating five extra compiles by subtracting otherwise identical `CLEARN_COMPILE_ITERS=0` runs from `=5` measures 1.1475 G per compile against 1.1487 G, -0.103%. The remaining cost is execution: the plain `CLEARN_RUN_ITERS=20` channel measures 32.8113 G against 30.7036 G, +6.865%, or +105.39 M instructions per VM construction/run. For LTM, five alternating exact-base/current rounds each pair `RUN_ITERS=20` with its binary's zero control: one added run averages 19.4937 G base versus 19.6967 G current, +1.0413% or +203.0 M instructions/run; every paired delta is positive, range +1.0095%..+1.0715%. Phase 6b does not recover batched whole-array execution. The regressions are accepted temporarily because the owner sequenced loop-form/batched lowering after compiler cleanup, not because they are small. Compile allocation count falls 1,996,628 -> 1,989,055 and allocated bytes fall 245.0 -> 223.0 MiB. The residual plain definitions are the four `sorted_target_*` equations: each of their seven COP coordinates has a distinct final source slice, so the final-expression cache cannot group them. Removing that work at the final materializer would require recovering one pre-resolution iteration-shaped definition, which is the probe/early-hoist ownership this phase excludes; loop-form lowering is the known general alternative, and the GH #1025 handoff above makes batched array-producing builtins part of its acceptance scope | 5215 plain / 30123 LTM | plain 30814 / 1477 / 24915; LTM 908217 / 1477 / 28771 | plain 1740 / 162 / 28 / 739; LTM 16749 / 162 / 28 / 2850 | Plain C-LEARN has 57,206 total opcodes, +120 flow and +120 initial against `c666c4a6`. Each phase adds exactly 24 `VectorElmMap`, 48 `PushStaticView` and 48 `PopView`: every extra map consumes its source and offset views. LTM has 938,465 total, -160 flow and +120 initial; its flow removes 32 maps and 64 of each view opcode while its initial phase adds the same 24 maps and 48 of each view opcode as plain, for a net -8 `VectorElmMap`, -16 `PushStaticView` and -16 `PopView`. Static-view table counts therefore move +96 plain and -16 LTM. Plain temp slots remain 28; LTM temp slots fall from 441 to 28. Stock opcodes, slots, literals, GFs, dimensions, names, modules, initial counts, every user-model series and VM/wasm parity are unchanged. `compiler::array_operand` is the one post-subscript materializer; its exact-definition cache reuses only the allocator's same physical slot; `TempAllocator` is the one allocator; resolved SCC assembly refuses cross-segment temp liveness. Validation: engine lib 5,676 passed / 2 ignored, integration 776 passed / 16 ignored, VM allocation 4 passed, doctests 2 passed / 1 ignored; the materializer invariant/varying/repeated-axis counts, SCC refusal/local control, mapped VM/wasm, per-element-GF, fragment-characterization and 12-repeat determinism matrices are green. Workspace all-target/all-feature clippy with warnings denied, rustfmt, retired-helper zero-searches and `git diff --check` are green |

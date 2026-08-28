@@ -3218,9 +3218,10 @@ fn generate_dimensioned_loop_score_equation(
 }
 
 /// The live source's declared dimension names (canonical, in declaration
-/// order) -- looked up from the model's variable map; empty for a scalar
-/// source or one not in the map (an implicit SMOOTH/DELAY var, scalar by
-/// construction). Used to build the GH #511 [`IteratedDimCtx`].
+/// order) -- looked up from the reconstructed model-variable map, which
+/// includes compiler-generated captures and module-function helpers. Empty
+/// for a scalar source or an unknown name. Used to build the GH #511
+/// [`IteratedDimCtx`].
 fn source_dim_names_for(
     from: &Ident<Canonical>,
     all_vars: &HashMap<Ident<Canonical>, Variable>,

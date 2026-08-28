@@ -11152,7 +11152,7 @@ fn test_whole_rhs_mapped_reducer_routes_through_synthetic_agg() {
 ///
 /// The sub-second half is `db::ltm_value_gate_tests`, which pins exact values on
 /// small fixtures built around the known ways an arm-level change zeroes a
-/// score. It cannot show that the same change leaves 7,153 real variables alone,
+/// score. It cannot show that the same change leaves 5,561 real variables alone,
 /// and C-LEARN is the only model in the repo at that scale. Hence this: same
 /// property, real model, `#[ignore]`d purely for runtime (~3 s release on top of
 /// a release build, against the 3-minute debug-build cap in
@@ -11160,12 +11160,14 @@ fn test_whole_rhs_mapped_reducer_routes_through_synthetic_agg() {
 ///
 /// It covers **every element of every LTM variable**, not one per variable.
 /// `Results::offsets` is keyed by variable and carries no extent, so the obvious
-/// walk samples only each arrayed score's FIRST element -- 7,000 of 20,892 LTM
-/// slots here, blind to 1,772 slots that carry non-zero scores and to the other
-/// 87% of the damage the positive control below inflicts. Extents come from each
-/// variable's declared dimensions instead.
+/// walk samples only each arrayed score's first element -- 5,561 of 19,264 LTM
+/// slots here. Extents come from each variable's declared dimensions
+/// instead. The non-ignored
+/// `ltm_snapshot_element_reads_preserve_score_topology_and_values` test is the
+/// fast structural counterpart: it rejects a dimensioned capture score that is
+/// split into scalar names or does not write every declared element.
 ///
-/// The digest is deliberately NOT a checked-in series slab -- 20,892 slots x 251
+/// The digest is deliberately not a checked-in series slab -- 19,264 slots x 251
 /// steps is tens of MB of golden nobody would read. It is a small set of numbers
 /// that move under exactly the failures this gate exists for:
 ///
@@ -11186,8 +11188,8 @@ fn test_whole_rhs_mapped_reducer_routes_through_synthetic_agg() {
 /// * `identity_digest` -- the same stream bound to slot IDENTITY. The sums above
 ///   are permutation-invariant, so two slots exchanging maxima leaves them and
 ///   both counts exactly unchanged; only this moves. See `slot_digests`, and
-///   `permuting_two_slots_moves_only_the_identity_digest`, which constructs that
-///   swap rather than asserting the property.
+///   `the_digest_sees_both_a_value_swap_and_a_rebinding`, which constructs both
+///   failure modes rather than asserting the property.
 ///
 /// Quantizing is what makes the pin usable rather than a per-run coin flip: raw
 /// f64 maxima carry last-bit noise across allocator and layout changes, and a
@@ -11202,28 +11204,23 @@ fn test_whole_rhs_mapped_reducer_routes_through_synthetic_agg() {
 /// equal weight, so the 743 slots whose maxima sit near 1.0 are visible at all;
 /// under a raw magnitude sum the three 1e15 slots drown them.
 ///
-/// **"It passes" and "it constrains the code" are different claims, so both
-/// were measured.** Three runs of this digest, same binary, differing only in
-/// `ltm_augment_zero_slot`:
+/// The focused `db::ltm_value_gate_tests` supply the positive controls for
+/// structural-zero omission: they force each arm-level failure on a small
+/// production-derived fixture and pin the exact score series. This corpus gate
+/// complements them by binding every real C-LEARN LTM slot's identity and
+/// maximum; neither gate substitutes for the other.
 ///
-/// * predicate as shipped -- `nonzero_slots` 3,141 of 20,892.
-/// * `ZeroSlotPolicy::Materialize` forced everywhere, i.e. GH #977's omission
-///   disabled -- **identical in every pinned number**. That is this gate's other
-///   job: it is the reproducible, checked-in form of the whole-slab differential
-///   that established the omission's value-neutrality on C-LEARN, which
-///   previously existed only as a throwaway probe nobody could re-run. Note the
-///   scope this now carries: value-neutrality is established over all 20,892 LTM
-///   slots, where the pre-widening walk could only speak for the 7,000 it
-///   sampled.
-/// * `partial_is_provably_previous_target` forced to `true`, so every arm is
-///   omitted whether or not it is a structural zero -- `nonzero_slots` falls to
-///   2,527 and every magnitude number moves. **614** slots carrying real scores
-///   go to zero; the pre-widening walk saw 82 of them, an eighth of the
-///   damage.
-///
-/// The third run is what makes the second meaningful. Without it, "unchanged
-/// when the omission is disabled" would be equally consistent with a digest that
-/// cannot see the omission at all.
+/// The checked-in Phase 7.5b pin has 20,892 slots. Structural capture shaping
+/// adds 278 element slots and declines 14 fixed-slice slots, producing 21,156
+/// slots before phase-aware discovery. The phase filter then removes 1,864
+/// zero-valued link-score slots and 28 INIT-only freezer slots. Fourteen freezer
+/// slots are zero; the other fourteen are the two `effective_target_year`
+/// elements for each of seven COP regions, each with maximum magnitude 4,000.
+/// All 19,264 identities shared with the post-shaping, pre-phase-filter
+/// artifact retain exactly the same maxima. Release user series, rather than
+/// hidden score identity, are the parity boundary against the exact 7.5b
+/// binary. This accounting distinguishes removal of dead initial-phase scoring
+/// from a live score being silently zeroed.
 ///
 /// Run with:
 ///   cargo test -p simlin-engine --release --test integration -- --ignored \
@@ -11256,12 +11253,11 @@ fn clearn_ltm_slot_maxima_digest() {
     vm.run_to_end()
         .expect("C-LEARN must simulate with LTM enabled");
     let results = vm.into_results();
-
     // Which result slots belong to LTM. `Results::offsets` is one entry per
     // VARIABLE and carries no extent -- `flattened_offsets` keys an arrayed LTM
     // score once, at its base slot -- so reading one slot
     // per entry would sample only the FIRST element of every arrayed score. On
-    // C-LEARN that is ~7,000 of 21,045 LTM slots across 1,088 arrayed
+    // C-LEARN that is 5,561 of 19,264 LTM slots across dimensioned
     // variables, and a regression in any later element would leave every pinned
     // number unchanged. The extent therefore comes from each variable's own
     // declared dimensions, resolved through the project's dimension context.
@@ -11297,9 +11293,10 @@ fn clearn_ltm_slot_maxima_digest() {
         let width = match ltm_widths.get(name) {
             Some(&w) => w,
             None => {
-                // An LTM-prefixed slot the metadata does not describe: an
-                // implicit helper, which is scalar. Counted so a change in that
-                // population is visible rather than silently absorbed.
+                // An LTM-prefixed slot the metadata does not describe. The
+                // expected count is zero, so width 1 is only a sentinel that
+                // lets the coverage assertion report the unknown identity;
+                // it is not a scalar-shape fallback.
                 unknown_extent += 1;
                 1
             }
@@ -11396,9 +11393,9 @@ fn clearn_ltm_slot_maxima_digest() {
 /// moves the mantissa alone would miss.
 ///
 /// It removes the overflow hazard by construction rather than by clamping: at
-/// 7,000 slots the sums are bounded by 7e12 and ~2.2e6, both far inside `i64`,
-/// where the absolute form fed a saturating `f64 -> i128` cast that would have
-/// failed silently.
+/// 19,264 slots the mantissa sum is below 1.93e13, far inside `i64`. The
+/// absolute form fed a saturating `f64 -> i128` cast that would have failed
+/// silently.
 fn nine_significant_digits(x: f64) -> (i64, i64) {
     if x == 0.0 || !x.is_finite() {
         return (0, 0);
@@ -11539,10 +11536,10 @@ fn the_digest_sees_both_a_value_swap_and_a_rebinding() {
 }
 
 /// Pinned by `clearn_ltm_slot_maxima_digest`; see its rustdoc before changing.
-const CLEARN_LTM_SLOTS: usize = 20_892;
+const CLEARN_LTM_SLOTS: usize = 19_264;
 const CLEARN_LTM_UNKNOWN_EXTENT: usize = 0;
-const CLEARN_LTM_NONZERO_SLOTS: usize = 3_141;
-const CLEARN_LTM_FINITE_SLOTS: usize = 20_892;
-const CLEARN_LTM_MANTISSA_DIGEST: i64 = 798_101_758_590;
-const CLEARN_LTM_EXPONENT_DIGEST: i64 = 2_254;
-const CLEARN_LTM_IDENTITY_DIGEST: u64 = 11_438_420_344_658_315_382;
+const CLEARN_LTM_NONZERO_SLOTS: usize = 3_106;
+const CLEARN_LTM_FINITE_SLOTS: usize = 19_264;
+const CLEARN_LTM_MANTISSA_DIGEST: i64 = 790_401_758_590;
+const CLEARN_LTM_EXPONENT_DIGEST: i64 = 2_212;
+const CLEARN_LTM_IDENTITY_DIGEST: u64 = 7_484_877_280_482_623_718;

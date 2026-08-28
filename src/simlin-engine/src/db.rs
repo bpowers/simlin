@@ -93,7 +93,8 @@ pub use query::{
     variable_direct_dependencies, variable_relevant_dimensions, variable_size,
 };
 pub(crate) use query::{
-    canonical_module_input_set, model_implicit_var_by_name, model_variable_by_name,
+    canonical_module_input_set, dt_causal_dependencies, model_implicit_var_by_name,
+    model_variable_by_name,
 };
 
 mod sync;
@@ -140,6 +141,7 @@ pub use dep_graph::{
     ModelDepGraphResult, ResolvedScc, RunlistMembership, SccPhase, model_dependency_graph,
     var_runlist_membership,
 };
+pub(crate) use dep_graph::{model_flow_lagged_dependencies, model_flow_member_names};
 
 mod ltm;
 use ltm::*;
@@ -600,12 +602,11 @@ pub(super) fn black_box_unit_transfer_equation(from_ref: &str, to_ref: &str) -> 
 /// `module·port` dependency references), each port list sorted for
 /// determinism.
 ///
-/// One cached pass over the model's variable dependency sets (mirroring the
-/// scan `db::ltm::loops::find_model_output_ports` does across *parent*
-/// models for a sub-model's ports, but scoped to module instances within
-/// this model). Implicit-helper deps are included for the same reason as
-/// there: SMOOTH/DELAY expansion synthesizes helper auxes whose deps may be
-/// the only readers of a module output.
+/// One cached pass over the model's phase-classified dependency facts, scoped
+/// to module instances within this model. INIT-only reads are not dt output
+/// pathways. Hidden helpers contribute only when the production flow runlist
+/// evaluates them; PREVIOUS-only reads remain causal. This is the same shared
+/// phase boundary used by parent-model output-port discovery.
 #[salsa::tracked(returns(ref))]
 pub fn model_module_output_ports(
     db: &dyn Db,
@@ -614,6 +615,7 @@ pub fn model_module_output_ports(
 ) -> HashMap<String, Vec<String>> {
     let middot = '\u{00B7}';
     let empty_inputs = ModuleInputSet::empty(db);
+    let flow_members = model_flow_member_names(db, model, project, empty_inputs);
     let mut ports: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
     let record = |dep: &str, ports: &mut HashMap<String, std::collections::BTreeSet<String>>| {
         if let Some(dot_pos) = dep.find(middot) {
@@ -629,11 +631,16 @@ pub fn model_module_output_ports(
     };
     for source_var in model.variables(db).values() {
         let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
-        for dep in deps.dt_deps.iter().chain(deps.initial_deps.iter()) {
+        for dep in dt_causal_dependencies(&deps.dt_deps, &deps.dt_init_only_referenced_vars) {
             record(dep, &mut ports);
         }
         for iv_deps in &deps.implicit_vars {
-            for dep in &iv_deps.dt_deps {
+            if !flow_members.contains(iv_deps.name.as_str()) {
+                continue;
+            }
+            for dep in
+                dt_causal_dependencies(&iv_deps.dt_deps, &iv_deps.dt_init_only_referenced_vars)
+            {
                 record(dep, &mut ports);
             }
         }
@@ -642,6 +649,22 @@ pub fn model_module_output_ports(
         .into_iter()
         .map(|(module, port_set)| (module, port_set.into_iter().collect()))
         .collect()
+}
+
+/// Output ports read from one module instance, projected from
+/// [`model_module_output_ports`] so an unrelated instance's port edit can be
+/// backdated before it reaches a per-edge link-score query.
+#[salsa::tracked(returns(ref))]
+pub(crate) fn model_module_output_ports_by_name(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    module_name: String,
+) -> Vec<String> {
+    model_module_output_ports(db, model, project)
+        .get(&module_name)
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Find output ports of a specific module variable by examining which
@@ -660,18 +683,23 @@ pub(super) fn find_model_output_ports_for_module(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
-    edges: &CausalEdgesResult,
     module_var_name: &str,
 ) -> Vec<String> {
-    if let Some(model_name) = edges.dynamic_modules.get(module_var_name)
-        && model_name.starts_with("stdlib\u{205A}")
-    {
+    if reconstruct_single_variable(db, model, project, module_var_name).is_some_and(|variable| {
+        matches!(
+            variable.kind,
+            crate::variable::VarKind::Module { ref model_name, .. }
+                if model_name.as_str().starts_with("stdlib\u{205A}")
+        )
+    }) {
         return vec!["output".to_string()];
     }
-    model_module_output_ports(db, model, project)
-        .get(module_var_name)
-        .cloned()
-        .unwrap_or_else(|| vec!["output".to_string()])
+    let ports = model_module_output_ports_by_name(db, model, project, module_var_name.to_string());
+    if ports.is_empty() {
+        vec!["output".to_string()]
+    } else {
+        ports.clone()
+    }
 }
 
 /// For a module variable in `model`, return the set of internal input
@@ -758,10 +786,7 @@ pub(crate) fn module_output_ref_in_document_order(
     module: &str,
     to_name: &str,
 ) -> Option<String> {
-    let ref_sites = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
-    ref_sites
-        .occurrences
-        .get(to_name)?
+    crate::db::ltm_ir::model_ltm_occurrences_by_name(db, model, project, to_name.to_string())
         .iter()
         .find_map(|occ| match &occ.reference {
             crate::db::ltm_ir::OccurrenceRef::ModuleOutput {
@@ -831,8 +856,7 @@ pub(crate) fn module_link_score_equation(
     // score is fixed exactly by `model_ltm_variables`'s per-exit-port pathway
     // selection, not by this port choice.
     let module_output_ref = |module_name: &str| -> String {
-        let edges = model_causal_edges(db, model, project);
-        let ports = find_model_output_ports_for_module(db, model, project, edges, module_name);
+        let ports = find_model_output_ports_for_module(db, model, project, module_name);
         let port = ports
             .first()
             .cloned()
@@ -853,23 +877,14 @@ pub(crate) fn module_link_score_equation(
     // and the caller falls back to the unit transfer.
     let composite_ref_for_port = |module_name: &str, port: &str| -> Option<String> {
         let project_models = project.models(db);
-        // Resolve the sub-model name. Explicit module variables live in
-        // `model.variables`; implicit ones (SMOOTH/DELAY expansions) are
-        // not source vars but are recorded in the edges' module->model map
-        // -- which is also where stdlib instances resolve from. Consult the
-        // edge map first so both kinds are covered.
-        let edges = model_causal_edges(db, model, project);
-        let sub_model_name = edges
-            .dynamic_modules
-            .get(module_name)
-            .cloned()
-            .or_else(|| {
-                model
-                    .variables(db)
-                    .get(module_name)
-                    .map(|v| v.model_name(db).to_string())
-            })?;
-        let sub_model_name = canonicalize(&sub_model_name);
+        // Explicit and implicit module instances share this per-name
+        // reconstruction, so resolving one edge never reads the whole causal
+        // graph merely to recover its sub-model name.
+        let module_var = reconstruct_single_variable(db, model, project, module_name)?;
+        let crate::variable::VarKind::Module { model_name, .. } = module_var.kind else {
+            return None;
+        };
+        let sub_model_name = canonicalize(model_name.as_str());
         let sub_model = project_models.get(sub_model_name.as_ref())?;
         if module_composite_ports(db, *sub_model, project).contains(port) {
             Some(format!(
@@ -920,8 +935,8 @@ pub(crate) fn module_link_score_equation(
         // partial on that equation (the exact link score); fall back to
         // the unit transfer if the reference can't be located.
         //
-        // Which output to hold live (GH #971): the reference-site IR
-        // (`model_ltm_reference_sites`) enumerates every module-output
+        // Which output to hold live (GH #971): the target's per-name
+        // reference-site projection enumerates every module-output
         // composite `to` reads, in DOCUMENT order, so take the first that
         // names `from` -- a deterministic pick across processes. This is the
         // single source of the live-output choice: the former
@@ -931,8 +946,18 @@ pub(crate) fn module_link_score_equation(
         // module-output occurrence for `to` -- a genuine structural miss that
         // falls through to the unit transfer, exactly as an unlocatable
         // reference always did.
-        let from_output =
-            module_output_ref_in_document_order(db, model, project, from_name, to_name);
+        let to_occurrences = crate::db::ltm_ir::model_ltm_occurrences_by_name(
+            db,
+            model,
+            project,
+            to_name.to_string(),
+        );
+        let from_output = to_occurrences.iter().find_map(|occ| match &occ.reference {
+            crate::db::ltm_ir::OccurrenceRef::ModuleOutput {
+                module, composite, ..
+            } if module == from_name => Some(composite.clone()),
+            _ => None,
+        });
         match from_output {
             Some(output_ref) => {
                 let output_ident = Ident::<Canonical>::new(&output_ref);
@@ -946,15 +971,9 @@ pub(crate) fn module_link_score_equation(
                 // recursion when the composite is read bare inside a reducer
                 // (`to = SUM(arr[*] * module·port)`) -- an empty stream froze the
                 // reducer whole, silently converting a would-be loud degradation
-                // into a clean-compiling zero. This branch already read
-                // `model_ltm_reference_sites` (via `module_output_ref_in_document_order`
-                // above), so threading the stream adds no new salsa dependency.
-                let ref_sites = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
-                let to_occurrences: &[crate::db::ltm_ir::OccurrenceSite] = ref_sites
-                    .occurrences
-                    .get(to_name)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
+                // into a clean-compiling zero. The same per-name occurrence
+                // projection chose the live port, so threading it into the
+                // partial adds no coarse dependency.
                 // No dep-dims table is threaded (see below), so the GH #995
                 // array-freeze materializer cannot fire and this stays empty.
                 let mut freeze_helpers = Vec::new();

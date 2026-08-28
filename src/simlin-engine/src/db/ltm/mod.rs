@@ -28,8 +28,8 @@ use crate::ltm::strip_subscript;
 
 use super::{
     Db, SourceModel, SourceProject, SourceVariable, SourceVariableKind, compute_layout,
-    model_causal_edges, project_datamodel_dims, project_dimensions_context,
-    reconstruct_single_variable,
+    model_causal_edges, model_implicit_var_by_name, model_variable_by_name, project_datamodel_dims,
+    project_dimensions_context, reconstruct_single_variable, variable_dimensions,
 };
 
 mod compile;
@@ -111,6 +111,32 @@ use link_scores::{
 };
 pub(crate) use loops::recover_agg_hop_polarities;
 pub(crate) use parse::parse_ltm_equation;
+
+/// The declared dimensions of one causal-graph endpoint.
+///
+/// Explicit variables and compiler-generated source helpers share this
+/// projection so LTM never reconstructs endpoint shape from whether a name
+/// happens to occur in `SourceModel::variables`. `None` is a module or an
+/// unknown name; `Some([])` is a genuine scalar. Implicit dimensions come
+/// from `model_implicit_var_by_name`, the same per-name firewall fragment
+/// compilation consumes.
+pub(super) fn endpoint_dimensions(
+    db: &dyn Db,
+    name: &str,
+    model: SourceModel,
+    project: SourceProject,
+) -> Option<Vec<crate::dimensions::Dimension>> {
+    if let Some(source) = model_variable_by_name(db, model, name.to_string()) {
+        return (source.kind(db) != SourceVariableKind::Module)
+            .then(|| variable_dimensions(db, source, project).clone());
+    }
+
+    let meta = model_implicit_var_by_name(db, model, project, name.to_string())?;
+    if meta.is_module {
+        return None;
+    }
+    crate::variable::get_dimensions(project_dimensions_context(db, project), &meta.dimensions).ok()
+}
 
 /// The single integration method the assembled simulation actually runs, when
 /// it is NOT Euler.
@@ -265,8 +291,8 @@ fn model_is_stateless(
         && !modules_carry_state(db, project, edges)
 }
 
-/// Whether any of the model's own (parent-level) variables carries a
-/// PREVIOUS-lagged dt dependency -- the lagged-state leg of
+/// Whether any flow-live definition in the model carries a PREVIOUS-lagged dt
+/// dependency -- the lagged-state leg of
 /// [`model_is_stateless`] (GH #749).
 ///
 /// Checks `previous_only` references (`dt_previous_referenced_vars`): a
@@ -283,25 +309,14 @@ fn model_is_stateless(
 /// stock/lag parity: a no-feedback STOCK model never bailed either, and
 /// discovery's contract is "score all edges of any state-carrying model".
 ///
-/// Deliberately parent-level only: module-INTERNAL lagged state is not
-/// counted (mirroring pin validation, which cannot see inside a module's
-/// pathway either), so the scored and pinned surfaces agree on that shape
-/// -- both treat a module whose only state is PREVIOUS as stateless
-/// (GH #773). A parent-level lag OF a module output (`PREVIOUS(m.out)`)
-/// IS counted: the previous_only entry is the parent variable's own.
-///
-/// Uses the same empty input set as `model_causal_edges`, so the per-variable
-/// dependency queries are shared salsa cache hits.
+/// The shared projection includes explicit variables and parser-generated
+/// captures, since a PREVIOUS nested in an index can place the model's only
+/// lagged edge on the hidden capture row. Module-INTERNAL lagged state remains
+/// outside this model-local relation (GH #773); [`modules_carry_state`] owns
+/// recursive module state. A parent-level lag of a module output is included.
 fn model_has_lagged_dt_deps(db: &dyn Db, model: SourceModel, project: SourceProject) -> bool {
     let empty_inputs = super::ModuleInputSet::empty(db);
-    model.variables(db).values().any(|sv| {
-        !matches!(
-            sv.kind(db),
-            SourceVariableKind::Stock | SourceVariableKind::Module
-        ) && !super::variable_direct_dependencies(db, *sv, project, empty_inputs)
-            .dt_previous_referenced_vars
-            .is_empty()
-    })
+    !super::model_flow_lagged_dependencies(db, model, project, empty_inputs).is_empty()
 }
 
 /// Whether any module instance this model references (transitively) carries
@@ -1432,7 +1447,6 @@ pub fn model_ltm_variables(
             let (mut detected, truncated_aggs) = build_loops_from_tiered(
                 tiered,
                 &var_graph,
-                source_vars,
                 db,
                 model,
                 project,

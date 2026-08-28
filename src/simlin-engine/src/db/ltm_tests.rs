@@ -1865,6 +1865,167 @@ fn an_unrelated_equation_edit_does_not_regenerate_every_link_score() {
     );
 }
 
+/// A source snapshot capture is an LTM endpoint even though it is absent from
+/// `SourceModel::variables`. Resolving that one endpoint must depend on the
+/// by-name implicit projection: adding a different snapshot helper changes the
+/// whole implicit map but cannot invalidate an already-scored capture edge.
+#[test]
+fn unrelated_snapshot_helper_does_not_regenerate_implicit_endpoint_score() {
+    use crate::db::exec_probe::ProbedDb;
+    use crate::db::sync_from_datamodel_incremental;
+
+    let project_with = |unrelated: bool| {
+        let mut project = TestProject::new("implicit_endpoint_incrementality")
+            .with_sim_time(0.0, 3.0, 1.0)
+            .named_dimension("d", &["a", "b"])
+            .array_aux("vals[d]", "10 * d + TIME")
+            .array_aux("idx[d]", "d")
+            .array_aux("out[d]", "PREVIOUS(vals[idx[d]] * 2, 0)")
+            .scalar_aux("k", "3");
+        if unrelated {
+            project = project.scalar_aux("unrelated", "PREVIOUS(k * 3, 0)");
+        }
+        project.build_datamodel()
+    };
+
+    let mut db = ProbedDb::new();
+    let base = project_with(false);
+    let state = sync_from_datamodel_incremental(db.db_mut(), &base, None);
+    let model = state.models["main"].source_model;
+    let capture = "$\u{205A}out\u{205A}0\u{205A}arg0";
+    {
+        let link_id = LtmLinkId::new(db.db(), capture.to_string(), "out".to_string());
+        assert!(matches!(
+            link_score_equation_text_shaped(db.db(), link_id, RefShape::Bare, model, state.project,),
+            ShapedLinkScore::Scored { .. }
+        ));
+    }
+
+    let edited = project_with(true);
+    let state2 = sync_from_datamodel_incremental(db.db_mut(), &edited, Some(&state));
+    assert!(
+        state2.models["main"].source_model == model,
+        "incremental sync must preserve the owning model input"
+    );
+    db.reset();
+    let same_link_id = LtmLinkId::new(db.db(), capture.to_string(), "out".to_string());
+    assert!(matches!(
+        link_score_equation_text_shaped(
+            db.db(),
+            same_link_id,
+            RefShape::Bare,
+            model,
+            state2.project,
+        ),
+        ShapedLinkScore::Scored { .. }
+    ));
+    let counts = db.counts();
+    assert_eq!(
+        counts.get("link_score_equation_text_shaped"),
+        None,
+        "an unrelated implicit helper may revalidate the by-name firewall, but \
+         must not execute the unchanged implicit-endpoint score query; \
+         executions: {counts:#?}"
+    );
+}
+
+/// Module-edge scores consume per-target occurrences, per-instance output
+/// ports, and the module instance's per-name reconstruction. Adding a hidden
+/// helper and a new output read for a different module must not execute an
+/// unchanged fallback score.
+#[test]
+fn unrelated_module_port_and_helper_do_not_regenerate_module_edge_score() {
+    use crate::db::exec_probe::ProbedDb;
+    use crate::db::sync_from_datamodel_incremental;
+    use crate::testutils::{x_aux, x_model, x_module_named};
+
+    let project_with = |edited: bool| {
+        let unrelated = if edited {
+            "m2.out_b + PREVIOUS(k * 3, 0)"
+        } else {
+            "m2.out_a"
+        };
+        datamodel::Project {
+            name: "module_edge_incrementality".to_string(),
+            sim_specs: datamodel::SimSpecs::default(),
+            dimensions: vec![],
+            units: vec![],
+            models: vec![
+                x_model(
+                    "main",
+                    vec![
+                        x_aux("driver", "1", None),
+                        x_aux("reader", "m1.out_a", None),
+                        x_aux("unrelated", unrelated, None),
+                        x_aux("k", "2", None),
+                        x_module_named("m1", "child", &[("driver", "m1.input")], None),
+                        x_module_named("m2", "child", &[("driver", "m2.input")], None),
+                    ],
+                ),
+                x_model(
+                    "child",
+                    vec![
+                        datamodel::Variable::Aux(datamodel::Aux {
+                            ident: "input".to_string(),
+                            equation: datamodel::Equation::Scalar("0".to_string()),
+                            documentation: String::new(),
+                            units: None,
+                            gf: None,
+                            ai_state: None,
+                            uid: None,
+                            compat: datamodel::Compat {
+                                can_be_module_input: true,
+                                ..datamodel::Compat::default()
+                            },
+                        }),
+                        // Pathway-free outputs force the parent link score to
+                        // use its module-output fallback.
+                        x_aux("out_a", "10", None),
+                        x_aux("out_b", "20", None),
+                    ],
+                ),
+            ],
+            source: None,
+            ai_information: None,
+        }
+    };
+
+    let mut db = ProbedDb::new();
+    let base = project_with(false);
+    let state = sync_from_datamodel_incremental(db.db_mut(), &base, None);
+    let model = state.models["main"].source_model;
+    let link_id = LtmLinkId::new(db.db(), "driver".to_string(), "m1".to_string());
+    assert!(matches!(
+        link_score_equation_text_shaped(db.db(), link_id, RefShape::Bare, model, state.project,),
+        ShapedLinkScore::Scored { .. }
+    ));
+
+    let edited = project_with(true);
+    let state2 = sync_from_datamodel_incremental(db.db_mut(), &edited, Some(&state));
+    assert!(
+        state2.models["main"].source_model == model,
+        "incremental sync must preserve the owning model input"
+    );
+    db.reset();
+    let same_link_id = LtmLinkId::new(db.db(), "driver".to_string(), "m1".to_string());
+    assert!(matches!(
+        link_score_equation_text_shaped(
+            db.db(),
+            same_link_id,
+            RefShape::Bare,
+            model,
+            state2.project,
+        ),
+        ShapedLinkScore::Scored { .. }
+    ));
+    let counts = db.counts();
+    assert_eq!(
+        counts.get("link_score_equation_text_shaped"),
+        None,
+        "an unrelated module-port/helper edit may revalidate per-name projections, but must not execute the unchanged module-edge score; executions: {counts:#?}"
+    );
+}
+
 /// An arrayed dep the per-element pin table cannot cover must make the edge
 /// decline LOUDLY, not produce a score computed around a hole.
 ///

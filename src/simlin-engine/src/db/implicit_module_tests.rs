@@ -36,11 +36,14 @@ enum Parent {
     /// A scalar aux named `out`.
     Scalar,
     /// An apply-to-all aux `out[d]`: one equation, walked once per element
-    /// because the body contains a module call (`contains_module_call`).
+    /// because the body contains a module call (`per_element_requirements`).
     ApplyToAll,
     /// A per-element arrayed aux `out[d]` whose slots carry the SAME text but
     /// are distinct equations.
     PerElement,
+    /// An arrayed aux whose default applies only to slots without an explicit
+    /// body. Module instances must exist for those missing slots alone.
+    ArrayedDefault,
 }
 
 /// One module-function call shape, plus everything a consumer reads off the
@@ -269,6 +272,24 @@ const ROWS: &[ModuleRow] = &[
              $⁚out⁚0⁚arg1⁚e3->$⁚out⁚0⁚smth1⁚e3.delay_time]",
         ],
     },
+    ModuleRow {
+        covers: "an arrayed default: module-bearing defaults materialize only the missing \
+                 element bodies, never the explicit override",
+        parent: Parent::ArrayedDefault,
+        equation: "SMTH1(vals[d], 2)",
+        helpers: &[
+            "$⁚out⁚0⁚arg0⁚e2 = aux vals[d·e2]",
+            "$⁚out⁚0⁚arg1⁚e2 = aux 2",
+            "$⁚out⁚0⁚smth1⁚e2 = module stdlib⁚smth1 \
+             [$⁚out⁚0⁚arg0⁚e2->$⁚out⁚0⁚smth1⁚e2.input, \
+             $⁚out⁚0⁚arg1⁚e2->$⁚out⁚0⁚smth1⁚e2.delay_time]",
+            "$⁚out⁚0⁚arg0⁚e3 = aux vals[d·e3]",
+            "$⁚out⁚0⁚arg1⁚e3 = aux 2",
+            "$⁚out⁚0⁚smth1⁚e3 = module stdlib⁚smth1 \
+             [$⁚out⁚0⁚arg0⁚e3->$⁚out⁚0⁚smth1⁚e3.input, \
+             $⁚out⁚0⁚arg1⁚e3->$⁚out⁚0⁚smth1⁚e3.delay_time]",
+        ],
+    },
 ];
 
 /// One synthesized helper, rendered as what a consumer is entitled to read off
@@ -325,6 +346,10 @@ fn model_for(row: &ModuleRow) -> (TestProject, &'static str) {
                     ("e3", row.equation),
                 ],
             ),
+            "out",
+        ),
+        Parent::ArrayedDefault => (
+            base.array_with_default_and_overrides("out[d]", row.equation, vec![("e1", "999")]),
             "out",
         ),
     }

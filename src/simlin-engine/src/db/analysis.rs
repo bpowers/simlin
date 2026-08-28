@@ -1596,11 +1596,14 @@ pub fn causal_graph_from_element_edges_with_modules(
 /// Build the causal edge structure for a model from salsa-tracked
 /// dependency sets and structural variable info.
 ///
-/// Reads `variable_direct_dependencies` (establishing salsa dep on dep
-/// sets) and `parse_source_variable` (for implicit variable details like
-/// module input refs). Salsa backdating ensures that when equation text
-/// changes without changing the resulting edge structure, the cached
-/// result is reused and downstream graph algorithms are skipped.
+/// Reads the same phase-classified dependency facts and implicit-helper
+/// runlist membership as compilation. An `INIT`-only reference is an initial
+/// snapshot dependency, not a dt causal edge; a `PREVIOUS`-only reference is
+/// retained because LTM models that discrete-state link. Hidden capture
+/// storage contributes its own source edges only when its production runlist
+/// membership evaluates it during flows. Salsa backdating ensures that when
+/// equation text changes without changing the resulting edge structure, the
+/// cached result is reused and downstream graph algorithms are skipped.
 #[salsa::tracked(returns(ref))]
 pub fn model_causal_edges(
     db: &dyn Db,
@@ -1609,12 +1612,14 @@ pub fn model_causal_edges(
 ) -> CausalEdgesResult {
     let source_vars = model.variables(db);
     let empty_inputs = ModuleInputSet::empty(db);
+    let flow_members = super::model_flow_member_names(db, model, project, empty_inputs);
     let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut stocks = BTreeSet::new();
     let mut dynamic_modules = HashMap::new();
 
     for (name, source_var) in source_vars.iter() {
         let kind = source_var.kind(db);
+        let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
 
         match kind {
             SourceVariableKind::Stock => {
@@ -1650,51 +1655,50 @@ pub fn model_causal_edges(
                 }
             }
             _ => {
-                let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
-                for dep in &deps.dt_deps {
+                for dep in
+                    super::dt_causal_dependencies(&deps.dt_deps, &deps.dt_init_only_referenced_vars)
+                {
                     let normalized = normalize_module_ref_str(dep);
                     edges.entry(normalized).or_default().insert(name.clone());
                 }
             }
         }
 
-        // Include implicit variables (module instances from SMOOTH/DELAY expansion)
-        let parsed = parse_source_variable(db, *source_var, project);
-        for implicit_var in &parsed.implicit_vars {
-            let imp_name = canonicalize(implicit_var.ident()).into_owned();
+        // The dependency extractor is the production source of truth for
+        // implicit identity, module wiring, and phase classification. Never
+        // reconstruct a second view by walking the parsed variables here.
+        for implicit_dep in &deps.implicit_vars {
+            let imp_name = &implicit_dep.name;
+            if !flow_members.contains(imp_name.as_str()) {
+                continue;
+            }
+            if implicit_dep.is_module {
+                let self_prefix = format!("{imp_name}\u{00B7}");
+                for dep in &implicit_dep.dt_deps {
+                    if dep.starts_with(&self_prefix) {
+                        continue;
+                    }
+                    let normalized = normalize_module_ref_str(dep);
+                    edges
+                        .entry(normalized)
+                        .or_default()
+                        .insert(imp_name.clone());
+                }
+                if let Some(model_name) = &implicit_dep.model_name {
+                    dynamic_modules.insert(imp_name.clone(), model_name.clone());
+                }
+                continue;
+            }
 
-            match implicit_var.module() {
-                Some(m) => {
-                    let self_prefix = format!("{imp_name}\u{00B7}");
-                    for mr in m.references() {
-                        let canonical_src = canonicalize(&mr.src).into_owned();
-                        if canonical_src.starts_with(&self_prefix) {
-                            continue;
-                        }
-                        let normalized = normalize_module_ref_str(&canonical_src);
-                        edges
-                            .entry(normalized)
-                            .or_default()
-                            .insert(imp_name.clone());
-                    }
-                    dynamic_modules.insert(imp_name.clone(), m.model_name().to_string());
-                }
-                None => {
-                    // For implicit flows/auxes, get deps from the parent's
-                    // variable_direct_dependencies result.
-                    let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
-                    if let Some(implicit_dep) =
-                        deps.implicit_vars.iter().find(|iv| iv.name == imp_name)
-                    {
-                        for dep in &implicit_dep.dt_deps {
-                            let normalized = normalize_module_ref_str(dep);
-                            edges
-                                .entry(normalized)
-                                .or_default()
-                                .insert(imp_name.clone());
-                        }
-                    }
-                }
+            for dep in super::dt_causal_dependencies(
+                &implicit_dep.dt_deps,
+                &implicit_dep.dt_init_only_referenced_vars,
+            ) {
+                let normalized = normalize_module_ref_str(dep);
+                edges
+                    .entry(normalized)
+                    .or_default()
+                    .insert(imp_name.clone());
             }
         }
     }
@@ -1755,6 +1759,12 @@ pub struct EdgeShapesResult {
     /// feeder); an arrayed reducer argument is `Wildcard` and already
     /// classifies as cross-element on shape alone.
     pub agg_routed_edges: BTreeSet<(String, String)>,
+    /// Edges whose classified sites are all narrowed to explicit
+    /// `Ast::Arrayed` slots and cover only a strict subset of the target's
+    /// storage. A grouped A2A loop would invent the missing slot edges, so
+    /// these edges must be enumerated from the element graph even when every
+    /// site's access shape is `Bare`.
+    pub target_restricted_edges: BTreeSet<(String, String)>,
 }
 
 /// Tag every variable-level edge with the set of `RefShape`s observed
@@ -1802,6 +1812,9 @@ pub fn model_edge_shapes(
 
     let mut edge_shapes: HashMap<(String, String), BTreeSet<RefShape>> = HashMap::new();
     let mut agg_routed_edges: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut target_restricted_edges: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut endpoint_dims_cache: HashMap<String, Vec<crate::dimensions::Dimension>> =
+        HashMap::new();
     let agg_nodes = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
     for (from_name, to_set) in &variable_edges.edges {
         for to_name in to_set {
@@ -1839,6 +1852,32 @@ pub fn model_edge_shapes(
                 set.insert(RefShape::Bare);
             }
             edge_shapes.insert((from_name.clone(), to_name.clone()), set);
+            // A default rewritten only into missing `Ast::Arrayed` slots is
+            // represented by target-element-narrowed sites. Preserve that
+            // storage restriction here: projecting only `shape` would turn a
+            // Bare edge feeding one missing slot into a full A2A edge and mint
+            // phantom cycles through the overridden slots.
+            if let Some(sites) = sites
+                && !sites.is_empty()
+                && sites.iter().all(|site| site.target_element.is_some())
+            {
+                let target_elements: BTreeSet<&str> = sites
+                    .iter()
+                    .filter_map(|site| site.target_element.as_deref())
+                    .collect();
+                let to_dims = endpoint_dims_cache
+                    .entry(to_name.clone())
+                    .or_insert_with(|| {
+                        super::ltm::endpoint_dimensions(db, to_name, model, project)
+                            .unwrap_or_default()
+                    });
+                let target_slot_count = to_dims.iter().fold(1usize, |count, dim| {
+                    count.saturating_mul(dimension_element_names(dim).len())
+                });
+                if !to_dims.is_empty() && target_elements.len() < target_slot_count {
+                    target_restricted_edges.insert((from_name.clone(), to_name.clone()));
+                }
+            }
             // Record edges with a ThroughAgg-routed site: the element graph
             // routes them through a synthetic agg node, so the cycle
             // classifier must keep cycles traversing them off the fast path
@@ -1860,11 +1899,11 @@ pub fn model_edge_shapes(
             // score derivation, and the slow-path loop routing consult.
             // Inert pre-T5: the identical-slices acceptance could never
             // produce a projection-feeder source.
-            let to_dims = source_vars
-                .get(to_name)
-                .filter(|sv| sv.kind(db) != super::SourceVariableKind::Module)
-                .map(|sv| super::variable_dimensions(db, *sv, project).as_slice())
-                .unwrap_or(&[]);
+            let to_dims = endpoint_dims_cache
+                .entry(to_name.clone())
+                .or_insert_with(|| {
+                    super::ltm::endpoint_dimensions(db, to_name, model, project).unwrap_or_default()
+                });
             if crate::ltm_agg::variable_backed_reduce_agg(agg_nodes, from_name, to_name, to_dims)
                 .is_some_and(|a| a.source_is_projection_feeder(from_name))
             {
@@ -1876,6 +1915,7 @@ pub fn model_edge_shapes(
     EdgeShapesResult {
         edge_shapes,
         agg_routed_edges,
+        target_restricted_edges,
     }
 }
 
@@ -1950,7 +1990,9 @@ pub enum CycleClass {
 ///    Bare-shaped cases are a *scalar feeder* of a hoisted reducer
 ///    (`scale` in `SUM(pop[*] * scale)`) and the same-dims projection
 ///    feeder (`frac[D1]` in `SUM(matrix[D1,*] * frac[D1])`); arrayed
-///    reducer arguments are `Wildcard` and already caught by rule 1.
+///    reducer arguments are `Wildcard` and already caught by rule 1. An edge
+///    in `target_restricted_edges` likewise takes the slow path because a
+///    grouped A2A loop would invent edges for unreferenced target slots.
 /// 3. If every variable has an empty dimension list (all scalar),
 ///    `PureScalar`.
 /// 4. If every variable has the *same* non-empty dimension list,
@@ -1981,7 +2023,9 @@ pub(crate) fn classify_cycle(
         // its shapes are all Bare (a scalar feeder of a hoisted reducer) --
         // the loop must traverse the `from → $⁚ltm⁚agg⁚{n} → to` element
         // hops so its score composes the agg-half link scores (GH #737).
-        if edge_shapes.agg_routed_edges.contains(&key) {
+        if edge_shapes.agg_routed_edges.contains(&key)
+            || edge_shapes.target_restricted_edges.contains(&key)
+        {
             return CycleClass::CrossElementOrMixed;
         }
         let shapes = match edge_shapes.edge_shapes.get(&key) {
@@ -2091,10 +2135,7 @@ pub fn model_element_causal_edges(
         if let Some(dims) = cache.get(name) {
             return dims.clone();
         }
-        let dims = source_vars
-            .get(name)
-            .map(|sv| super::variable_dimensions(db, *sv, project).to_vec())
-            .unwrap_or_default();
+        let dims = super::ltm::endpoint_dimensions(db, name, model, project).unwrap_or_default();
         cache.insert(name.to_string(), dims.clone());
         dims
     };
@@ -2590,11 +2631,9 @@ pub fn model_detected_loops(
             partitions: parts,
         };
     }
-    let source_vars = model.variables(db);
     let (mut loops, _truncated_aggs) = crate::db::ltm::build_loops_from_tiered(
         tiered,
         &graph,
-        source_vars,
         db,
         model,
         project,
@@ -3148,8 +3187,6 @@ pub fn model_loop_circuits_tiered(
     }
 
     let edge_shapes = model_edge_shapes(db, model, project);
-    let source_vars = model.variables(db);
-
     // Per-variable dimension lookup. Cached locally because a variable
     // can appear in many cycles; the salsa-tracked `variable_dimensions`
     // is itself memoized but the per-call HashMap lookup avoids
@@ -3159,10 +3196,7 @@ pub fn model_loop_circuits_tiered(
         if let Some(dims) = dim_cache.get(name) {
             return dims.clone();
         }
-        let dims = source_vars
-            .get(name)
-            .map(|sv| super::variable_dimensions(db, *sv, project).to_vec())
-            .unwrap_or_default();
+        let dims = super::ltm::endpoint_dimensions(db, name, model, project).unwrap_or_default();
         dim_cache.insert(name.to_string(), dims.clone());
         dims
     };
@@ -5020,6 +5054,7 @@ mod classify_cycle_tests {
         EdgeShapesResult {
             edge_shapes,
             agg_routed_edges: BTreeSet::new(),
+            target_restricted_edges: BTreeSet::new(),
         }
     }
 
@@ -5056,6 +5091,34 @@ mod classify_cycle_tests {
         edges
             .agg_routed_edges
             .insert(("scale".to_string(), "grow".to_string()));
+        assert_eq!(
+            classify_cycle(&cycle, &edges, &lookup),
+            CycleClass::CrossElementOrMixed
+        );
+    }
+
+    /// A Bare reference present in only one explicit Arrayed slot is not an
+    /// A2A edge. The production IR carries that restriction separately from
+    /// access shape, and the classifier must preserve it.
+    #[test]
+    fn target_restricted_bare_edge_forces_slow_path() {
+        let dim = make_dim("region");
+        let cycle = vec!["source".to_string(), "target".to_string()];
+        let mut edges = shapes_with(&[
+            ("source", "target", &[RefShape::Bare]),
+            ("target", "source", &[RefShape::Bare]),
+        ]);
+        let dims = vec![dim];
+        let lookup = dim_lookup(&["source", "target"], &dims);
+        assert_eq!(
+            classify_cycle(&cycle, &edges, &lookup),
+            CycleClass::PureSameElementA2A {
+                dimensions: vec!["region".to_string()]
+            }
+        );
+        edges
+            .target_restricted_edges
+            .insert(("source".to_string(), "target".to_string()));
         assert_eq!(
             classify_cycle(&cycle, &edges, &lookup),
             CycleClass::CrossElementOrMixed

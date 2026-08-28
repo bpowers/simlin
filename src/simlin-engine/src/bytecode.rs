@@ -265,7 +265,11 @@ impl RuntimeView {
     /// Hot-path significance: the per-element `flat_offset` /
     /// `offset_for_iter_index` arithmetic (index decompose + stride dot
     /// product) collapses to `start + k` for these views, so iteration and
-    /// reduction loops over them can be plain linear scans (GH #603).
+    /// reduction loops over them can be plain linear scans (GH #603). Keep
+    /// this explicitly inlined: it is reachable from the per-element generic
+    /// addressing path, and relying on LTO's global inlining budget lets
+    /// unrelated compiler-only code put an out-of-line call on that path.
+    #[inline(always)]
     pub fn dense_linear_start(&self) -> Option<usize> {
         if !self.sparse.is_empty() {
             return None;

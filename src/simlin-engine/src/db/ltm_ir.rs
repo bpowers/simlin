@@ -30,7 +30,9 @@
 use std::collections::HashMap;
 
 use crate::common::{Canonical, Ident};
-use crate::db::{Db, RefShape, SourceModel, SourceProject, reconstruct_model_variables};
+use crate::db::{
+    Db, ModuleInputSet, RefShape, SourceModel, SourceProject, reconstruct_model_variables,
+};
 
 // ── AST-walker helpers (moved from db/analysis.rs) ─────────────────────────
 
@@ -1656,7 +1658,8 @@ pub(crate) struct LtmReferenceSitesResult {
     pub site_width_rejection: Option<SiteWidthRejection>,
 }
 
-/// Classify every causal-edge reference site in `model` exactly once.
+/// Classify every flow-phase causal-edge reference site in `model` exactly
+/// once.
 ///
 /// Salsa-tracked: a pure function of `(db, model, project)` consuming the
 /// same reconstructed ASTs and the same `enumerate_agg_nodes` result the
@@ -1672,9 +1675,13 @@ pub(crate) struct LtmReferenceSitesResult {
 /// key check prevents a hoisted sibling reducer from claiming a declined
 /// sibling read on the same `(from, to)` edge (GH #793).
 ///
-/// This is also the LTM front door (GH #978/#979): each target equation is
-/// checked for `SiteId` addressability BEFORE its walk pushes a single path
-/// component, and the first failure is reported on
+/// Hidden storage absent from the production flow runlist is outside the dt
+/// IR: its INIT-only syntax cannot mint routing state or reject unrelated LTM
+/// scoring. Every flow-live target is still walked in full, including
+/// non-causal occurrences needed to freeze the other inputs of a real scored
+/// edge. This is also the LTM front door (GH #978/#979): each live target
+/// equation is checked for `SiteId` addressability BEFORE its walk pushes a
+/// single path component, and the first failure is reported on
 /// [`LtmReferenceSitesResult::site_width_rejection`]. A rejected equation
 /// contributes no occurrence at all, so no recorded `SiteId` can be a path two
 /// children share, and `model_ltm_variables` refuses to score the model.
@@ -1691,6 +1698,8 @@ pub(crate) fn model_ltm_reference_sites(
     // sliced reducer).
     let agg_nodes = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
     let variables = reconstruct_model_variables(db, model, project);
+    let empty_inputs = ModuleInputSet::empty(db);
+    let flow_members = crate::db::model_flow_member_names(db, model, project, empty_inputs);
 
     // Dimension context for the #511 iterated-subscript recognition: the
     // mapped-dimension case (`State[i]` over a source declared with
@@ -1730,6 +1739,9 @@ pub(crate) fn model_ltm_reference_sites(
     let mut site_width_rejection: Option<SiteWidthRejection> = None;
 
     for to_name in to_names {
+        if !flow_members.contains(to_name.as_str()) {
+            continue;
+        }
         let to_var = &variables[to_name];
         let to_name_str = to_name.as_str();
 
@@ -1904,6 +1916,28 @@ pub(crate) fn model_ltm_reference_sites(
         occurrences,
         site_width_rejection,
     }
+}
+
+/// Resolve one target equation's ordered reference occurrences.
+///
+/// This is the per-name firewall over [`model_ltm_reference_sites`]. Per-edge
+/// link-score queries only consume the target they score; depending on the
+/// whole map would re-execute every unchanged score whenever an unrelated
+/// equation adds or removes an implicit helper and the reconstructed model/IR
+/// changes. The projection may revalidate, but salsa backdates it when this
+/// target's occurrence stream is unchanged.
+#[salsa::tracked(returns(ref))]
+pub(crate) fn model_ltm_occurrences_by_name(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    target: String,
+) -> Vec<OccurrenceSite> {
+    model_ltm_reference_sites(db, model, project)
+        .occurrences
+        .get(&target)
+        .cloned()
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

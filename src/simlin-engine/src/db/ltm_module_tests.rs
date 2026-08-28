@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::datamodel;
-use crate::testutils::{x_aux, x_flow, x_model, x_module, x_stock};
+use crate::testutils::{x_aux, x_flow, x_model, x_module, x_module_named, x_stock};
 
 /// AC1.1: A model with SMTH1 in a feedback loop generates LTM synthetic
 /// variables including link_score entries when LTM is enabled, and the
@@ -405,6 +405,122 @@ fn test_multi_output_port_module_ports_are_sorted() {
         "find_model_output_ports must return its multi-output-port set in \
          canonical-name-sorted order regardless of read/declaration/hash order; \
          with 6 ports a random drain hits sorted order with probability 1/720"
+    );
+}
+
+/// Output-port discovery is a dt-phase projection of production dependency
+/// facts, not a scan of every syntactic module-output name. Direct and
+/// computed INIT-only reads do not create pathways. A current read of hidden
+/// INIT capture storage makes that storage flow-live and restores its source
+/// port, while PREVIOUS storage remains flow-live by definition.
+#[test]
+fn model_output_ports_follow_explicit_and_implicit_flow_liveness() {
+    let project = datamodel::Project {
+        name: "phase_aware_output_ports".to_string(),
+        sim_specs: datamodel::SimSpecs {
+            start: 0.0,
+            stop: 3.0,
+            dt: datamodel::Dt::Dt(1.0),
+            save_step: None,
+            sim_method: datamodel::SimMethod::Euler,
+            time_units: None,
+        },
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            x_model(
+                "main",
+                vec![
+                    x_module_named("m", "child", &[], None),
+                    x_aux("direct_init", "INIT(m.init_direct)", None),
+                    x_aux("init_only", "INIT(m.init_capture * 2)", None),
+                    x_aux("promoted", "INIT(m.promoted * 3)", None),
+                    x_aux("current_reader", "\"$⁚promoted⁚0⁚arg0\"", None),
+                    x_aux("lagged", "PREVIOUS(m.previous * 4, 0)", None),
+                    x_aux("current", "m.current", None),
+                    x_aux("smoothed", "SMTH1(m.smooth_input, 1, 0)", None),
+                ],
+            ),
+            x_model(
+                "child",
+                vec![
+                    x_aux("init_direct", "1", None),
+                    x_aux("init_capture", "2", None),
+                    x_aux("promoted", "3", None),
+                    x_aux("previous", "4", None),
+                    x_aux("current", "5", None),
+                    x_aux("smooth_input", "6", None),
+                ],
+            ),
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let ports = sub_model_output_ports(&db, sync.models["child"].source, sync.project);
+    let names: Vec<&str> = ports.iter().map(Ident::as_str).collect();
+    assert_eq!(
+        names,
+        ["current", "previous", "promoted", "smooth_input"],
+        "only current and flow-live snapshot storage reads are dt output ports"
+    );
+}
+
+/// The within-parent module-port index consumed by module link-score fallback
+/// follows the same phase boundary as cross-parent output-port discovery.
+/// INIT-only reads must not choose an output for a dt score, while promoted
+/// INIT storage, PREVIOUS storage, current reads, and implicit-module inputs do.
+#[test]
+fn local_module_output_ports_follow_flow_liveness() {
+    let project = datamodel::Project {
+        name: "local_phase_aware_output_ports".to_string(),
+        sim_specs: datamodel::SimSpecs::default(),
+        dimensions: vec![],
+        units: vec![],
+        models: vec![
+            x_model(
+                "main",
+                vec![
+                    x_module_named("m", "child", &[], None),
+                    x_aux("direct_init", "INIT(m.init_direct)", None),
+                    x_aux("init_only", "INIT(m.init_capture * 2)", None),
+                    x_aux("promoted", "INIT(m.promoted * 3)", None),
+                    x_aux("current_reader", "\"$⁚promoted⁚0⁚arg0\"", None),
+                    x_aux("lagged", "PREVIOUS(m.previous * 4, 0)", None),
+                    x_aux("current", "m.current", None),
+                    x_aux("smoothed", "SMTH1(m.smooth_input, 1, 0)", None),
+                ],
+            ),
+            x_model(
+                "child",
+                vec![
+                    x_aux("init_direct", "1", None),
+                    x_aux("init_capture", "2", None),
+                    x_aux("promoted", "3", None),
+                    x_aux("previous", "4", None),
+                    x_aux("current", "5", None),
+                    x_aux("smooth_input", "6", None),
+                ],
+            ),
+        ],
+        source: None,
+        ai_information: None,
+    };
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let ports = model_module_output_ports_by_name(
+        &db,
+        sync.models["main"].source,
+        sync.project,
+        "m".to_string(),
+    );
+    assert_eq!(
+        ports.as_slice(),
+        ["current", "previous", "promoted", "smooth_input"],
+        "only current and flow-live snapshot storage reads are local dt output ports"
     );
 }
 

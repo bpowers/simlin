@@ -125,8 +125,8 @@ use crate::ast::{Ast, BinaryOp, Expr2, IndexExpr2};
 use crate::builtins::BuiltinFn;
 use crate::common::{Canonical, Ident, canonicalize};
 use crate::db::{
-    Db, LtmLinkId, SourceModel, SourceProject, project_datamodel_dims, project_dimensions_context,
-    reconstruct_model_variables,
+    Db, LtmLinkId, ModuleInputSet, SourceModel, SourceProject, project_datamodel_dims,
+    project_dimensions_context, reconstruct_model_variables,
 };
 
 /// Prefix for synthetic aggregate-node names: `$⁚ltm⁚agg⁚{n}`.
@@ -763,7 +763,7 @@ impl AggNode {
     }
 }
 
-/// The result of enumerating every aggregate node in a model.
+/// The result of enumerating every aggregate node in a model's flow phase.
 ///
 /// Deterministic by construction so salsa caches it stably: `aggs` is in
 /// first-encounter order over the canonical-sorted variable list,
@@ -816,11 +816,16 @@ impl AggNodesResult {
     }
 }
 
-/// Enumerate every aggregate node (maximal reducer subexpression) in `model`.
+/// Enumerate every aggregate node (maximal reducer subexpression) evaluated in
+/// `model`'s flow phase.
 ///
-/// Salsa-tracked: a pure function of `(db, model, project)` consuming the same
-/// reconstructed ASTs the element-graph walker uses, so both consumers see an
-/// identical map.
+/// Flow-dead hidden INIT storage is compiled for the initial phase but cannot
+/// contribute a dt causal edge, aggregate auxiliary, or link score. Target
+/// membership comes from the production dependency graph; once a target is
+/// flow-live its complete syntax is walked so real scored edges can still
+/// freeze non-causal occurrences in that equation. Salsa-tracked: a pure
+/// function of `(db, model, project)` consuming the same reconstructed ASTs the
+/// element-graph walker uses, so both consumers see an identical map.
 #[salsa::tracked(returns(ref))]
 pub fn enumerate_agg_nodes(
     db: &dyn Db,
@@ -828,6 +833,8 @@ pub fn enumerate_agg_nodes(
     project: SourceProject,
 ) -> AggNodesResult {
     let variables = reconstruct_model_variables(db, model, project);
+    let empty_inputs = ModuleInputSet::empty(db);
+    let flow_members = crate::db::model_flow_member_names(db, model, project, empty_inputs);
     let dm_dims = project_datamodel_dims(db, project);
     // Dimension context for the GH #534 mapped-iterated-axis recognition
     // (`compute_read_slice`'s `has_mapping_to` direction gate +
@@ -846,6 +853,9 @@ pub fn enumerate_agg_nodes(
     let mut next_synthetic_n: usize = 0usize;
 
     for var_name in var_names {
+        if !flow_members.contains(var_name.as_str()) {
+            continue;
+        }
         let var = &variables[var_name];
         let Some(ast) = var.ast() else {
             // Stocks (init-only AST) and modules have no dt-equation to walk.

@@ -1945,6 +1945,78 @@ pub fn model_dependency_graph<'db>(
     graph
 }
 
+/// Canonical names evaluated by the production flow runlist for one model and
+/// module-input context.
+///
+/// Whole-model LTM consumers use this set to exclude hidden INIT-only storage
+/// before walking its definition. The source is the compiler dependency graph,
+/// so PREVIOUS's required refresh, current-read promotion, modules, and normal
+/// explicit variables follow exactly the same liveness decision as fragment
+/// compilation. The set projection is memoized once rather than rebuilt or
+/// linearly scanned per helper by each consumer.
+#[salsa::tracked(returns(ref))]
+pub(crate) fn model_flow_member_names<'db>(
+    db: &'db dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    module_inputs: ModuleInputSet<'db>,
+) -> BTreeSet<String> {
+    model_dependency_graph(db, model, project, module_inputs)
+        .runlist_flows
+        .iter()
+        .cloned()
+        .collect()
+}
+
+/// PREVIOUS-only dt dependencies for definitions evaluated by the production
+/// flow runlist, keyed by the definition that owns the lagged read.
+///
+/// Parser-generated captures are ordinary runlist members but do not appear in
+/// `SourceModel::variables`. A PREVIOUS nested in an index or another captured
+/// expression can therefore own the model's only discrete-state edge. Keeping
+/// explicit and implicit rows in one projection gives LTM's stateless gate and
+/// pinned-loop validator the same phase-aware answer as compilation. Module
+/// internals remain outside this model-local relation; their state is handled
+/// by LTM's module graph traversal.
+#[salsa::tracked(returns(ref))]
+pub(crate) fn model_flow_lagged_dependencies<'db>(
+    db: &'db dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    module_inputs: ModuleInputSet<'db>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let flow_members = model_flow_member_names(db, model, project, module_inputs);
+    let mut lagged = BTreeMap::new();
+
+    for (name, source_var) in model.variables(db).iter() {
+        let deps = variable_direct_dependencies(db, *source_var, project, module_inputs);
+        if flow_members.contains(name.as_str())
+            && !matches!(
+                source_var.kind(db),
+                SourceVariableKind::Stock | SourceVariableKind::Module
+            )
+            && !deps.dt_previous_referenced_vars.is_empty()
+        {
+            lagged.insert(name.clone(), deps.dt_previous_referenced_vars.clone());
+        }
+
+        for implicit in &deps.implicit_vars {
+            if flow_members.contains(implicit.name.as_str())
+                && !implicit.is_stock
+                && !implicit.is_module
+                && !implicit.dt_previous_referenced_vars.is_empty()
+            {
+                lagged.insert(
+                    implicit.name.clone(),
+                    implicit.dt_previous_referenced_vars.clone(),
+                );
+            }
+        }
+    }
+
+    lagged
+}
+
 /// Add externally-required variables and their model-local initial closure to
 /// a base graph, then emit the same deterministic dependency/SCC order used by
 /// the model-local runlist builder.

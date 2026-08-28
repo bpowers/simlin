@@ -145,15 +145,15 @@ pub struct Capture {
     /// callsite data; current downstream lookup remains keyed by `ident`.
     id: usize,
     kind: CaptureKind,
-    /// The argument, exactly as the walk left it -- already dimension-
-    /// substituted for a scalar capture in an apply-to-all body, and
-    /// deliberately NOT substituted for an arrayed one, so a bare arrayed name
-    /// inside it keeps its array shape (GH #541).
+    /// The argument, exactly as the walk left it. A scalar capture from an
+    /// explicitly per-element walk is dimension-substituted; a shaped capture
+    /// is not, so active axes, mappings and subdimensions remain available to
+    /// ordinary apply-to-all lowering (including GH #541's bare arrayed name).
     arg: Expr0,
     /// The active apply-to-all element, when this capture is one element's own.
     suffix: Option<String>,
-    /// The canonical dimension names an arrayed capture applies over; empty for
-    /// a scalar one. An arrayed capture occupies one slot per element and is
+    /// The canonical dimension names a shaped capture applies over; empty for
+    /// a scalar one. A shaped capture occupies one slot per element and is
     /// read back per element by the rewritten call, so every consumer that
     /// lays it out or subscripts it needs its declared shape.
     dims: Vec<String>,
@@ -162,8 +162,8 @@ pub struct Capture {
 impl Capture {
     /// Mint the capture for one `PREVIOUS`/`INIT` call of `parent`.
     ///
-    /// `dims` empty makes a scalar capture; non-empty makes the arrayed one
-    /// (GH #541), whose body is held unsubstituted over those dimensions.
+    /// `dims` empty makes a scalar capture; non-empty makes a shaped one whose
+    /// body is held unsubstituted over those dimensions.
     pub(crate) fn new(
         parent: &str,
         id: usize,
@@ -287,16 +287,11 @@ impl Capture {
     /// than rendering a snippet.
     ///
     /// The body goes through `instantiate_implicit_modules` because a parse of
-    /// it does, and the visitor is not a no-op on it: its
-    /// per-element gate fires on a bare `PREVIOUS`/`INIT` as well as on a
-    /// module call, so an ARRAYED capture whose body holds one becomes an
-    /// `Ast::Arrayed` of identical elements rather than staying an
-    /// `Ast::ApplyToAll`. That expansion decides the fragment's shape, so
-    /// skipping it here would change the compiled artifact. (Keeping the
-    /// `ApplyToAll` is a deliberate shape change with its own ledger row, not
-    /// a side effect of moving the body off text.) A second generation of
-    /// helpers is impossible -- a capture body is already walked -- and is
-    /// asserted rather than assumed.
+    /// it does. A module call still requires one instance per active element;
+    /// PREVIOUS/INIT alone preserve the capture's `Ast::ApplyToAll` storage
+    /// shape and let ordinary lowering resolve its body per element. A second
+    /// generation of helpers is impossible -- a capture body is already
+    /// walked -- and is asserted rather than assumed.
     pub(crate) fn variable_stage0(&self, dimensions: &DimensionsContext) -> VariableStage0 {
         let mut errors: Vec<EquationError> = Vec::new();
         let ast = if self.dims.is_empty() {
@@ -326,10 +321,10 @@ impl Capture {
 /// Captures and hoisted module-call arguments are plain, non-negative,
 /// non-flow auxes with no graphical function, units, or separate initial
 /// equation. Their bodies have already been walked as part of the parent, but
-/// `instantiate_implicit_modules` still owns the apply-to-all expansion shape:
-/// an arrayed helper containing `PREVIOUS`/`INIT` becomes the same per-element
-/// `Ast::Arrayed` form an ordinary parse produces. A nested helper generation
-/// would violate the argument-first walk order and is therefore asserted.
+/// `instantiate_implicit_modules` still owns module instantiation and snapshot
+/// normalization. Snapshot-only shaped helpers remain `Ast::ApplyToAll`; a
+/// nested helper generation would violate the argument-first walk order and is
+/// therefore asserted.
 fn subtree_variable_stage0(
     ident: &str,
     ast: Option<Ast<Expr0>>,

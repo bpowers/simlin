@@ -344,6 +344,21 @@ pub struct VariableDeps {
     pub referenced_tables: BTreeSet<String>,
 }
 
+/// Iterate the dependencies that are causal during normal dt evaluation.
+///
+/// `dt_deps` deliberately retains snapshot-only names for initial storage and
+/// dependency diagnostics. LTM's dt graph removes only the names read
+/// exclusively through `INIT`; `PREVIOUS` remains a causal discrete-state
+/// link. Both explicit [`VariableDeps`] and implicit-helper dependency rows
+/// use this projection so graph and pathway consumers cannot disagree about
+/// the phase boundary.
+pub(crate) fn dt_causal_dependencies<'a>(
+    dt_deps: &'a BTreeSet<String>,
+    dt_init_only_referenced_vars: &'a BTreeSet<String>,
+) -> impl Iterator<Item = &'a String> {
+    dt_deps.difference(dt_init_only_referenced_vars)
+}
+
 pub(crate) fn canonical_module_input_set(
     module_input_names: &[String],
 ) -> BTreeSet<Ident<Canonical>> {

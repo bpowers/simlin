@@ -967,6 +967,361 @@ fn ensure_wasm_matches_runs_supported_scalar_model() {
     );
 }
 
+/// A computed snapshot argument in one apply-to-all body retains that body's
+/// storage shape. The arrayed index is the discriminator: reconstructing a
+/// scalar helper has no active `d` and cannot select a different source slot
+/// for each target element. PREVIOUS and INIT are both pinned because they
+/// populate the shared shape in different execution phases, and the same
+/// model must agree under VM and wasm execution.
+#[test]
+fn shaped_snapshot_captures_preserve_arrayed_dynamic_indices_in_both_backends() {
+    use simlin_engine::common::{Canonical, Ident};
+
+    let datamodel = simlin_engine::test_common::TestProject::new("shaped_snapshots")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("d", &["e1", "e2", "e3"])
+        .array_aux("vals[d]", "10 * d + TIME")
+        .array_with_ranges("idx[d]", vec![("e1", "1"), ("e2", "2"), ("e3", "3")])
+        .array_aux("lagged[d]", "PREVIOUS(vals[idx[d]] * 2, -1)")
+        .array_aux("initial[d]", "INIT(vals[idx[d]] * 3)")
+        .build_datamodel();
+
+    // Initialization is a reusable execution phase, not a one-shot artifact
+    // of `run_to_end`. The shaped INIT capture must be repopulated at the same
+    // element offsets after reset. PREVIOUS's current output is still the
+    // zeroed flow slot until the first flow pass consumes its fallback.
+    let mut initial_vm = Vm::new(compile_vm(&datamodel)).expect("vm");
+    let initial_offsets: Vec<_> = ["e1", "e2", "e3"]
+        .into_iter()
+        .map(|element| {
+            let lagged = initial_vm
+                .get_offset(&Ident::<Canonical>::from_unchecked(format!(
+                    "lagged[{element}]"
+                )))
+                .expect("lagged result offset");
+            let initial = initial_vm
+                .get_offset(&Ident::<Canonical>::from_unchecked(format!(
+                    "initial[{element}]"
+                )))
+                .expect("initial result offset");
+            (lagged, initial)
+        })
+        .collect();
+    for pass in 0..2 {
+        initial_vm.run_initials().expect("initialization");
+        for ((lagged, initial), expected_initial) in initial_offsets.iter().zip([30.0, 60.0, 90.0])
+        {
+            assert_eq!(initial_vm.get_value_now(*lagged), 0.0);
+            assert_eq!(initial_vm.get_value_now(*initial), expected_initial);
+        }
+        if pass == 0 {
+            initial_vm.reset();
+        }
+    }
+
+    let vm = vm_results(&datamodel);
+    let series = |name: &str| {
+        let offset = vm.offsets[&Ident::<Canonical>::from_unchecked(name.to_string())];
+        (0..vm.step_count)
+            .map(|step| vm.data[step * vm.step_size + offset])
+            .collect::<Vec<_>>()
+    };
+    for (element, base) in [("e1", 10.0), ("e2", 20.0), ("e3", 30.0)] {
+        assert_eq!(
+            series(&format!("lagged[{element}]")),
+            [-1.0, base * 2.0, (base + 1.0) * 2.0, (base + 2.0) * 2.0],
+            "PREVIOUS capture at {element} must use that element's dynamic index"
+        );
+        assert_eq!(
+            series(&format!("initial[{element}]")),
+            [base * 3.0; 4],
+            "INIT capture at {element} must freeze that element's initial selection"
+        );
+    }
+
+    let outcome = ensure_wasm_matches(&datamodel, "main", &vm, &[]);
+    assert!(
+        matches!(outcome, WasmRunOutcome::Ran),
+        "the shaped snapshot model must run through wasm, got {outcome:?}"
+    );
+}
+
+/// Shaped PREVIOUS/INIT storage uses the compiler's ordinary axis matcher.
+/// This matrix pins the nontrivial accepted shapes: a declared positional
+/// mapping, a proper named subdimension projected from its parent, and two
+/// repeated target axes that must remain distinct by position. Each fixture is
+/// production-built and compared through both execution backends.
+#[test]
+fn shaped_snapshot_captures_preserve_mapped_subdimension_and_repeated_axes() {
+    use simlin_engine::common::{Canonical, Ident};
+
+    let mapped = simlin_engine::test_common::TestProject::new("shaped_snapshot_mapping")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("Target", &["t1", "t2"])
+        .named_dimension_with_mapping("Source", &["s1", "s2"], "Target")
+        .array_with_ranges("vals[Source]", vec![("s1", "10"), ("s2", "20")])
+        .array_aux("lagged[Target]", "PREVIOUS(vals * 2, -1)")
+        .array_aux("initial[Target]", "INIT(vals * 3)")
+        .build_datamodel();
+    let subdimension = simlin_engine::test_common::TestProject::new("shaped_snapshot_subdim")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("Parent", &["p1", "p2", "p3"])
+        .named_dimension("Sub", &["p2", "p3"])
+        .array_with_ranges(
+            "vals[Parent]",
+            vec![("p1", "10"), ("p2", "20"), ("p3", "30")],
+        )
+        .array_aux("lagged[Sub]", "PREVIOUS(vals[*:Sub] * 2, -1)")
+        .array_aux("initial[Sub]", "INIT(vals[*:Sub] * 3)")
+        .build_datamodel();
+    let repeated = simlin_engine::test_common::TestProject::new("shaped_snapshot_repeated")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("D", &["d1", "d2"])
+        .array_with_ranges(
+            "vals[D,D]",
+            vec![
+                ("d1,d1", "11"),
+                ("d1,d2", "12"),
+                ("d2,d1", "21"),
+                ("d2,d2", "22"),
+            ],
+        )
+        .array_aux("lagged[D,D]", "PREVIOUS(vals[*,*] * 2, -1)")
+        .array_aux("initial[D,D]", "INIT(vals[*,*] * 3)")
+        .build_datamodel();
+
+    let rows = [
+        ("mapped", mapped, vec![("t1", 10.0), ("t2", 20.0)]),
+        (
+            "proper subdimension",
+            subdimension,
+            vec![("p2", 20.0), ("p3", 30.0)],
+        ),
+        (
+            "repeated axes",
+            repeated,
+            vec![
+                ("d1,d1", 11.0),
+                ("d1,d2", 12.0),
+                ("d2,d1", 21.0),
+                ("d2,d2", 22.0),
+            ],
+        ),
+    ];
+
+    for (label, datamodel, elements) in rows {
+        let vm = vm_results(&datamodel);
+        let series = |name: &str| {
+            let offset = vm.offsets[&Ident::<Canonical>::from_unchecked(name.to_string())];
+            (0..vm.step_count)
+                .map(|step| vm.data[step * vm.step_size + offset])
+                .collect::<Vec<_>>()
+        };
+        for (element, base) in elements {
+            assert_eq!(
+                series(&format!("lagged[{element}]")),
+                [-1.0, base * 2.0, base * 2.0],
+                "{label}: PREVIOUS[{element}]"
+            );
+            assert_eq!(
+                series(&format!("initial[{element}]")),
+                [base * 3.0; 3],
+                "{label}: INIT[{element}]"
+            );
+        }
+        assert!(
+            matches!(
+                ensure_wasm_matches(&datamodel, "main", &vm, &[]),
+                WasmRunOutcome::Ran
+            ),
+            "{label}: wasm must execute the same shaped storage"
+        );
+    }
+}
+
+/// An XMILE array may combine a default `<eqn>` with explicit `<element>`
+/// overrides. The compiler evaluates that default separately for every missing
+/// element, so a computed PREVIOUS/INIT argument in the default must retain the
+/// array's active dimension just like an apply-to-all body does.
+#[test]
+fn xmile_arrayed_snapshot_defaults_keep_each_missing_elements_storage() {
+    use simlin_engine::common::{Canonical, Ident};
+    use std::io::BufReader;
+
+    let source = r#"<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>snapshot defaults</name><vendor>Simlin</vendor><product version="0.1" lang="en">Simlin</product></header>
+  <sim_specs method="euler"><start>0</start><stop>3</stop><dt>1</dt></sim_specs>
+  <dimensions><dim name="D"><elem name="a"/><elem name="b"/><elem name="c"/></dim></dimensions>
+  <model>
+    <variables>
+      <aux name="vals">
+        <eqn>10 * D + TIME</eqn>
+        <dimensions><dim name="D"/></dimensions>
+      </aux>
+      <aux name="lagged">
+        <eqn>PREVIOUS(vals[D] * 2, -1)</eqn>
+        <element subscript="a"><eqn>101</eqn></element>
+        <dimensions><dim name="D"/></dimensions>
+      </aux>
+      <aux name="initial">
+        <eqn>INIT(vals[D] * 3)</eqn>
+        <element subscript="a"><eqn>201</eqn></element>
+        <dimensions><dim name="D"/></dimensions>
+      </aux>
+    </variables>
+  </model>
+</xmile>"#;
+    let datamodel = xmile::project_from_reader(&mut BufReader::new(source.as_bytes()))
+        .expect("the production XMILE reader accepts an EXCEPT default");
+    let vm = vm_results(&datamodel);
+    let series = |name: &str| {
+        let offset = vm.offsets[&Ident::<Canonical>::from_unchecked(name.to_string())];
+        (0..vm.step_count)
+            .map(|step| vm.data[step * vm.step_size + offset])
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(series("lagged[a]"), [101.0; 4]);
+    assert_eq!(series("initial[a]"), [201.0; 4]);
+    for (element, base) in [("b", 20.0), ("c", 30.0)] {
+        assert_eq!(
+            series(&format!("lagged[{element}]")),
+            [-1.0, base * 2.0, (base + 1.0) * 2.0, (base + 2.0) * 2.0],
+            "the PREVIOUS default at {element} must read that element's capture"
+        );
+        assert_eq!(
+            series(&format!("initial[{element}]")),
+            [base * 3.0; 4],
+            "the INIT default at {element} must freeze that element's capture"
+        );
+    }
+
+    let outcome = ensure_wasm_matches(&datamodel, "main", &vm, &[]);
+    assert!(
+        matches!(outcome, WasmRunOutcome::Ran),
+        "the XMILE snapshot-default model must run through wasm, got {outcome:?}"
+    );
+}
+
+/// Module-backed defaults need one synthesized instance for every missing
+/// element, while an explicit element body remains authoritative. This XMILE
+/// fixture covers both the stdlib and project-macro routers and checks their
+/// user-visible values under both execution backends.
+#[test]
+fn xmile_arrayed_module_defaults_materialize_only_missing_elements() {
+    use simlin_engine::common::{Canonical, Ident};
+    use std::io::BufReader;
+
+    let source = r#"<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>module defaults</name><vendor>Simlin</vendor><product version="0.1" lang="en">Simlin</product></header>
+  <sim_specs method="euler"><start>0</start><stop>3</stop><dt>1</dt></sim_specs>
+  <dimensions><dim name="D"><elem name="a"/><elem name="b"/><elem name="c"/></dim></dimensions>
+  <model>
+    <variables>
+      <aux name="vals">
+        <eqn>10 * D + TIME</eqn>
+        <dimensions><dim name="D"/></dimensions>
+      </aux>
+      <aux name="smoothed">
+        <eqn>SMTH1(vals[D], 1, 0)</eqn>
+        <element subscript="a"><eqn>301</eqn></element>
+        <dimensions><dim name="D"/></dimensions>
+      </aux>
+      <aux name="doubled">
+        <eqn>DOUBLE(vals[D], 0)</eqn>
+        <element subscript="a"><eqn>401</eqn></element>
+        <dimensions><dim name="D"/></dimensions>
+      </aux>
+    </variables>
+  </model>
+  <macro name="DOUBLE">
+    <eqn>DOUBLE</eqn>
+    <parm>input</parm><parm>unused</parm>
+    <variables>
+      <aux name="DOUBLE"><eqn>input * 2 + unused * 0</eqn></aux>
+    </variables>
+  </macro>
+</xmile>"#;
+    let datamodel = xmile::project_from_reader(&mut BufReader::new(source.as_bytes()))
+        .expect("the production XMILE reader accepts macro-backed EXCEPT defaults");
+    let vm = vm_results(&datamodel);
+    let series = |name: &str| {
+        let offset = vm.offsets[&Ident::<Canonical>::from_unchecked(name.to_string())];
+        (0..vm.step_count)
+            .map(|step| vm.data[step * vm.step_size + offset])
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(series("smoothed[a]"), [301.0; 4]);
+    assert_eq!(series("doubled[a]"), [401.0; 4]);
+    for (element, base) in [("b", 20.0), ("c", 30.0)] {
+        assert_eq!(
+            series(&format!("smoothed[{element}]")),
+            [0.0, base, base + 1.0, base + 2.0],
+            "the SMTH1 default at {element} must own an element-specific module"
+        );
+        assert_eq!(
+            series(&format!("doubled[{element}]")),
+            [
+                base * 2.0,
+                (base + 1.0) * 2.0,
+                (base + 2.0) * 2.0,
+                (base + 3.0) * 2.0
+            ],
+            "the DOUBLE default at {element} must own an element-specific module"
+        );
+    }
+
+    let outcome = ensure_wasm_matches(&datamodel, "main", &vm, &[]);
+    assert!(
+        matches!(outcome, WasmRunOutcome::Ran),
+        "the XMILE module-default model must run through wasm, got {outcome:?}"
+    );
+}
+
+/// Range bounds are expression children, not syntax-only metadata. A snapshot
+/// call in either bound must be expanded before lowering; otherwise the raw
+/// PREVIOUS reaches subscript normalization and the model is not simulatable.
+#[test]
+fn snapshot_in_dynamic_range_bound_runs_in_vm_and_wasm_declines_loudly() {
+    use simlin_engine::common::{Canonical, Ident};
+
+    let datamodel = simlin_engine::test_common::TestProject::new("snapshot_range")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("d", &["a", "b", "c"])
+        .array_with_ranges("vals[d]", vec![("a", "10"), ("b", "20"), ("c", "30")])
+        .scalar_aux("lo", "1 + TIME")
+        .scalar_aux("hi", "3")
+        .scalar_aux("moving_hi", "2 + MIN(TIME, 1)")
+        .scalar_aux("ranged", "SUM(vals[PREVIOUS(lo + 0, 1):hi])")
+        .scalar_aux("ranged_right", "SUM(vals[1:INIT(moving_hi + 0)])")
+        .build_datamodel();
+    let vm = vm_results(&datamodel);
+    let offset = vm.offsets[&Ident::<Canonical>::from_unchecked("ranged".to_string())];
+    let series = (0..vm.step_count)
+        .map(|step| vm.data[step * vm.step_size + offset])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        series,
+        [60.0, 60.0, 50.0, 30.0],
+        "ranged must range from the previous step's lower bound"
+    );
+    let right_offset = vm.offsets[&Ident::<Canonical>::from_unchecked("ranged_right".to_string())];
+    let right_series = (0..vm.step_count)
+        .map(|step| vm.data[step * vm.step_size + right_offset])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        right_series, [30.0; 4],
+        "ranged_right must freeze the initial upper bound"
+    );
+
+    let outcome = ensure_wasm_matches(&datamodel, "main", &vm, &[]);
+    assert!(
+        matches!(outcome, WasmRunOutcome::Skipped(ref reason) if reason.contains("ViewRangeDynamic")),
+        "wasm's existing dynamic-view limitation must remain an explicit skip, got {outcome:?}"
+    );
+}
+
 /// GH #1027: a star range over a NON-CONTIGUOUS subdimension survives a
 /// transpose, both as the operand of a reducer and read per element.
 ///
@@ -5825,7 +6180,7 @@ fn simulates_macro_multi_output_mdl() {
 // Phase 4 / Task 2: arrayed (apply-to-all) macro invocation
 //
 // Phase 3 made `instantiate_implicit_modules`'s apply-to-all path
-// macro-aware (`contains_module_call`), so an arrayed macro invocation
+// macro-aware (`per_element_requirements`), so an arrayed macro invocation
 // `out[Region] = SCALE(inp[Region], factor)` rides the EXISTING per-element
 // module-expansion machinery -- one independent synthetic Variable::Module
 // per dimension element -- with no new mechanism. These tests verify that
@@ -6651,14 +7006,11 @@ fn corpus_clearn_macros_import() {
 /// runs by default; that is the fix for the problem this paragraph describes.
 ///
 /// Layout impact (the resource this gate protects -- #654's VM limit of 65,536
-/// u16 result slots, NOT `wasmgen::lower`'s unrelated `MAX_UNROLL_UNITS`): the
-/// per-step result-row width is **30,123 slots**, 46% of the ceiling, with
-/// 35,413 free. Both numbers come from
-/// `examples/ltm_slot_width.rs`, so re-deriving them is a command rather than a
-/// reconstruction -- and they are the CURRENT totals: the transition records
-/// below quote earlier values as the left-hand side of a move, which is what
-/// they are for. This header is the budget statement against the #654 ceiling,
-/// so a stale figure here is the one that misleads.
+/// u16 result slots, not `wasmgen::lower`'s unrelated `MAX_UNROLL_UNITS`): the
+/// per-step result-row width is **28,490 slots**, with 37,046 free. Both
+/// figures come from `examples/ltm_slot_width.rs`; the count alone cannot
+/// recover the width because shaped variables occupy their full declared
+/// extent.
 ///
 /// It last moved twice in the GH #995 burndown. The array-freeze
 /// materializer took the count 6,800 -> 6,858 (+58 content-named
@@ -6721,19 +7073,24 @@ fn corpus_clearn_macros_import() {
 /// terms, which is why the emission is accepted; if the margin were tight, the
 /// right move would be to sequence #996 behind #995 instead.
 ///
-/// The current surface is 7,128 LTM variables in a 30,375-slot root layout.
-/// Static bare or qualified element snapshots are direct source references,
-/// not scalar captures: 35 scalar/per-element score names coalesce into
-/// dimensioned variables whose total declared extent is 278 slots wider. The
-/// same classification removes 26 user capture slots, for a net layout change
-/// of +252. The remaining margin is 35,161 slots against the 65,536-slot
-/// ceiling.
+/// The current surface is 5,561 LTM variables. Phase-aware discovery excludes
+/// INIT-only syntax unless an ordinary current read promotes its capture into
+/// the flow runlist. The warning surface is one established discovery-mode
+/// switch, 17 established incompatible-dimension declines and five established
+/// rank-like partials whose array-producing equations cannot be projected onto
+/// one target element. Pinning every warning's model, variable and complete
+/// message makes both phase exclusion and diagnostic determinism observable.
+/// There is no shaped-snapshot scalar fallback and no `last_set_target_year`
+/// decline.
 ///
 /// The pin below catches emission changes in EITHER direction, and re-deriving
 /// it means re-measuring BOTH numbers, not just the count.
 #[test]
 fn clearn_ltm_var_count_guardrail() {
-    use simlin_engine::db::{model_ltm_variables, set_project_ltm_enabled};
+    use simlin_engine::db::{
+        DiagnosticError, DiagnosticSeverity, collect_all_diagnostics, model_ltm_variables,
+        set_project_ltm_enabled,
+    };
 
     let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
     let contents = std::fs::read_to_string(mdl_path)
@@ -6754,7 +7111,7 @@ fn clearn_ltm_var_count_guardrail() {
         })
         .sum();
     assert_eq!(
-        total, 7128,
+        total, 5561,
         "C-LEARN's emitted LTM var count moved; if this is an intentional \
          emission change, re-derive the layout-slot impact (the #654 \
          ceiling) and update this pin with the new numbers"
@@ -6763,9 +7120,94 @@ fn clearn_ltm_var_count_guardrail() {
         .expect("C-LEARN must compile with LTM enabled");
     assert_eq!(
         compiled.n_slots(),
-        30_375,
+        28_490,
         "C-LEARN's LTM layout width moved; re-derive its distance from the \
          65,536-slot ceiling together with the emitted variable count"
+    );
+
+    let mut warnings: Vec<(String, Option<String>, String)> =
+        collect_all_diagnostics(&db, sync.project)
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Warning)
+            .map(|diagnostic| {
+                let message = match &diagnostic.error {
+                    DiagnosticError::Assembly(message) => message.clone(),
+                    other => format!("{other:?}"),
+                };
+                (
+                    diagnostic.model.clone(),
+                    diagnostic.variable.clone(),
+                    message,
+                )
+            })
+            .collect();
+    warnings.sort();
+
+    let discovery = "LTM analysis auto-switched from exhaustive to discovery mode: the variable-level causal graph's largest SCC has 149 nodes, exceeding MAX_LTM_SCC_NODES = 50.  Variable-level Johnson at this scale would enumerate millions of circuits (see docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md and docs/design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md). Per-loop scores are found and ranked post-simulation from the recorded link scores; see docs/design/ltm--loops-that-matter.md for the two-tier strategy.";
+    let incompatible_reason = "could not be computed: both variables are arrayed but their dimensions do not correspond -- an unmapped pair, or a mapped one whose two reference spellings read different source elements, which cannot share one per-target-element score slot -- so the conservative score has no compilable shape; this edge will have no link-score variable and feedback loops through it will not be scored";
+    let incompatible_edges = [
+        "co2_equivalent_emissions -> aggregated_co2eq_emissions",
+        "co2_equivalent_emissions -> semi_agg_co2eq_emissions",
+        "co2_ff_emissions -> aggregated_co2_ff_emissions",
+        "co2_ff_emissions -> semi_agg_co2_ff_emissions",
+        "co2_ff_emissions -> top_of_stacked_co2_ff",
+        "co2_forestry_net_emissions -> aggregated_forestry_emissions",
+        "co2_forestry_net_emissions -> semi_agg_forestry_emissions",
+        "cumulative_co2 -> aggregated_cumulative_co2",
+        "cumulative_co2 -> semi_agg_cumulative_co2",
+        "fraction_of_cumulative_emissions -> aggregated_fraction_of_cumulative_emissions",
+        "fraction_of_cumulative_emissions -> semi_agg_fraction_of_cumulative_emissions",
+        "fraction_of_cumulative_emissions -> top_of_stacked_cum_fraction",
+        "gdp -> aggregated_gdp",
+        "gdp -> semi_agg_gdp",
+        "gwp_of_hfc -> rs_co2eq_nonforest_emissions",
+        "population -> aggregated_population",
+        "population -> semi_agg_population",
+    ];
+    let rank_reason = "applies an array-producing builtin (VECTOR SORT ORDER, RANK, ALLOCATE, or VECTOR ELM MAP), whose array result a per-element scalar partial cannot hold -- and for the order-statistic builtins the scalarization would also pin the ranked array down to a single element, whose order statistic is meaningless (a 1-element rank is always 0). The edge is declined -- and dependent loop scores dropped -- rather than scored with a plausible-looking constant; where the same target has a compiling whole-array (A2A-shaped) score, that score carries the edge's attribution instead (GH #995).";
+    let rank_declines = [
+        (
+            "$⁚ltm⁚link_score⁚ascending→target_order[oecd_us,t1]",
+            "vector_sort_order(effective_target_year[cop, target], ascending)",
+        ),
+        (
+            "$⁚ltm⁚link_score⁚effective_target_year[oecd_us,t1]→sorted_target_year[oecd_us,t1]",
+            "vector_elm_map(effective_target_year[cop, t1], target_order[cop, target])",
+        ),
+        (
+            "$⁚ltm⁚link_score⁚target_is_active[oecd_us,t1]→sorted_target_active[oecd_us,t1]",
+            "vector_elm_map(target_is_active[cop, t1], target_order[cop, target])",
+        ),
+        (
+            "$⁚ltm⁚link_score⁚target_type[oecd_us,t1]→sorted_target_type[oecd_us,t1]",
+            "vector_elm_map(target_type[cop, t1], target_order[cop, target])",
+        ),
+        (
+            "$⁚ltm⁚link_score⁚target_value[oecd_us,t1]→sorted_target_value[oecd_us,t1]",
+            "vector_elm_map(target_value[cop, t1], target_order[cop, target])",
+        ),
+    ];
+    let mut expected = vec![("main".to_string(), None, discovery.to_string())];
+    expected.extend(incompatible_edges.into_iter().map(|edge| {
+        (
+            "main".to_string(),
+            None,
+            format!("LTM link score for edge {edge} {incompatible_reason}"),
+        )
+    }));
+    expected.extend(rank_declines.into_iter().map(|(name, equation)| {
+        (
+            "main".to_string(),
+            Some(name.to_string()),
+            format!(
+                "LTM link-score variable '{name}' could not be generated: the target's equation '{equation}' {rank_reason}"
+            ),
+        )
+    }));
+    expected.sort();
+    assert_eq!(
+        warnings, expected,
+        "C-LEARN's complete warning surface moved"
     );
 }
 
@@ -6781,8 +7223,8 @@ fn clearn_ltm_var_count_guardrail() {
 /// partial is skipped rather than emitted wrong -- so the failure mode is a
 /// hole in the attribution, with no numeric test to catch it.
 ///
-/// C-LEARN had 50 such failures before #912/#913; the remaining 28
-/// partial-equation warnings are the separately-tracked non-parse kinds.
+/// C-LEARN had 50 such failures before #912/#913; non-parse declines are
+/// separately classified by `examples/ltm_declined_edges.rs`.
 // Run with: cargo test --release -- --ignored clearn_ltm_partials_all_parse
 #[test]
 #[ignore]

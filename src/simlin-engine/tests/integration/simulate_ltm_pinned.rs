@@ -1895,6 +1895,56 @@ fn stockless_previous_lagged_pin_scored_in_discovery_mode() {
     );
 }
 
+/// A structural PREVIOUS capture inside an apply-to-all loop is a shaped
+/// causal endpoint. Pin metadata can name only the two source variables, so
+/// pin resolution traverses the hidden capture and must retain its dimension
+/// when classifying the cycle. The diagonal family is one dimensioned pin,
+/// not two unrelated scalar pins.
+#[test]
+fn shaped_previous_capture_pin_is_one_dimensioned_loop() {
+    let mut project = TestProject::new("shaped_previous_pin")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("D", &["east", "west"])
+        .array_aux("a[D]", "PREVIOUS(b * 2, 0)")
+        .array_aux("b[D]", "a * 0.5 + 1")
+        .build_datamodel();
+    assign_uids(&mut project);
+    pin_loop(&mut project, "main", "shaped lag", &["a", "b"]);
+
+    let (results, loop_partitions, ltm_vars) = run_ltm_discovery(&project);
+    let pin_name = "$\u{205A}ltm\u{205A}loop_score\u{205A}pin1";
+    let pin_var = ltm_vars
+        .iter()
+        .find(|var| var.name == pin_name)
+        .unwrap_or_else(|| {
+            panic!(
+                "the shaped capture pin must emit one pin1 score; got {:?}",
+                ltm_vars
+                    .iter()
+                    .filter(|var| var.name.contains("loop_score\u{205A}pin"))
+                    .map(|var| (&var.name, &var.dimensions))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(pin_var.dimensions, ["D"]);
+    assert_eq!(
+        loop_partitions.get("pin1"),
+        Some(&vec![None, None]),
+        "the two shaped slots are one diagonal pin family"
+    );
+
+    let base = results.offsets[pin_name];
+    for slot in 0..2 {
+        for step in 1..results.step_count {
+            let score = results.data[step * results.step_size + base + slot];
+            assert!(
+                (score - 1.0).abs() < 1e-12,
+                "slot {slot} step {step}: the isolated lag loop score must be 1, got {score}"
+            );
+        }
+    }
+}
+
 /// GH #749 (the exhaustive side, no pin needed for the disagreement): the
 /// enumerator and the scored surface must AGREE on the PREVIOUS-lagged
 /// cycle. The model is stock-free, so pre-#749 the stateless early return
