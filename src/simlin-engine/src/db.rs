@@ -134,6 +134,8 @@ pub use assemble::{assemble_module, assemble_simulation};
 #[cfg(test)]
 pub(crate) use assemble::combine_scc_fragment;
 
+#[cfg(test)]
+pub(crate) use dep_graph::implicit_var_runlist_membership;
 pub use dep_graph::{
     ModelDepGraphResult, ResolvedScc, RunlistMembership, SccPhase, model_dependency_graph,
     var_runlist_membership,

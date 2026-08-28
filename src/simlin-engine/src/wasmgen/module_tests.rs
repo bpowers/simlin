@@ -1005,6 +1005,59 @@ fn compile_simulation_init_from_flow_matches_vm() {
     );
 }
 
+/// A computed INIT argument uses a synthesized capture that is populated only
+/// by initials. The frozen user value must match the VM and remain stable when
+/// the same wasm instance runs twice; no flow program is needed to refresh the
+/// capture between steps or runs. Backend-private helper slots need not retain
+/// the same dead post-initial value: VM result capture clears an unwritten
+/// flow slot while wasm linear memory retains it, but no expression can observe
+/// that storage unless a current consumer promotes the helper into flows.
+#[test]
+fn compile_simulation_init_capture_without_flow_refresh_matches_vm_and_reruns() {
+    let datamodel = crate::test_common::TestProject::new("init_capture_wasm")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .aux("driver", "1 + TIME", None)
+        .aux("frozen", "INIT(driver * 2)", None)
+        .build_datamodel();
+
+    let sim = compile_sim(&datamodel, "main");
+    let artifact = compile_simulation(&sim).expect("wasm codegen");
+    let runs = run_artifact_results_repeated(&artifact, 2);
+    assert_eq!(runs[0], runs[1], "re-running the instance must reseed INIT");
+
+    let mut vm = Vm::new(sim).expect("vm creation");
+    vm.run_to_end().expect("vm run");
+    let vm_results = vm.into_results();
+    for name in ["driver", "frozen"] {
+        let wasm_offset = artifact
+            .layout
+            .var_offsets
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+            .map(|(_, offset)| *offset)
+            .unwrap_or_else(|| panic!("{name} wasm offset"));
+        let vm_offset = vm_results.offsets[&Ident::new(name)];
+        for (run_index, run) in runs.iter().enumerate() {
+            for step in 0..artifact.layout.n_chunks {
+                let wasm = run[step * artifact.layout.n_slots + wasm_offset];
+                let vm = vm_results.data[step * vm_results.step_size + vm_offset];
+                assert_eq!(wasm, vm, "{name}, run {run_index}, step {step}");
+            }
+        }
+    }
+    let frozen_offset = artifact
+        .layout
+        .var_offsets
+        .iter()
+        .find(|(name, _)| name == "frozen")
+        .map(|(_, offset)| *offset)
+        .expect("frozen offset");
+    assert!(runs.iter().all(|run| {
+        (0..artifact.layout.n_chunks)
+            .all(|step| run[step * artifact.layout.n_slots + frozen_offset] == 2.0)
+    }));
+}
+
 /// Task 1: `INIT(x)` referenced from *another initial equation* reads
 /// `curr` during the initials phase (the snapshot is taken only after
 /// initials run). `seed` is computed during initials, and `derived`'s

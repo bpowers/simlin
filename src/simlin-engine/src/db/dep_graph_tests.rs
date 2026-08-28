@@ -39,6 +39,10 @@ fn vi_for_test(is_stock: bool, is_module: bool, dt_deps: &[&str]) -> VarInfo {
     VarInfo {
         is_stock,
         is_module,
+        // This fixture exercises only `walk_successors`; ordinary variables
+        // are flow-required, matching the production explicit-variable arm.
+        flow_required: true,
+        initial_seed_required: true,
         is_table_only: false,
         dt_deps: dt_deps
             .iter()
@@ -156,6 +160,10 @@ fn vi_init_for_test(is_stock: bool, is_module: bool, initial_deps: &[&str]) -> V
     VarInfo {
         is_stock,
         is_module,
+        // This fixture exercises only the phase relation; use the production
+        // explicit-variable scheduling value for the unrelated field.
+        flow_required: true,
+        initial_seed_required: true,
         is_table_only: false,
         dt_deps: BTreeSet::new(),
         initial_deps: initial_deps

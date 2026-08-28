@@ -350,15 +350,22 @@ fn ltm_implicit_constructor_is_compile_ltm_implicit_var_fragments_input() {
         let input =
             crate::db::ltm::ltm_implicit_fragment_input(&db, meta, model, sync.project, &[])
                 .unwrap_or_else(|| panic!("{name} has a fragment input"));
+        let capture = meta.variable.capture();
+        let expected_flow = (!meta.is_stock
+            && capture.is_none_or(|capture| capture.kind().needs_flows()))
+        .then(|| lower_and_emit(&input, false))
+        .flatten();
         assert_eq!(
-            lower_and_emit(&input, false),
-            production.fragment.flow_bytecodes,
-            "{name}: the flow fragment is the constructor's input lowered and emitted"
+            expected_flow, production.fragment.flow_bytecodes,
+            "{name}: the flow fragment is the constructor's input lowered and emitted when demanded"
         );
+        let expected_initial = capture
+            .is_none_or(|capture| capture.kind().needs_initials())
+            .then(|| lower_and_emit(&input, true))
+            .flatten();
         assert_eq!(
-            lower_and_emit(&input, true),
-            production.fragment.initial_bytecodes,
-            "{name}: the initial fragment likewise"
+            expected_initial, production.fragment.initial_bytecodes,
+            "{name}: the initial fragment likewise, when demanded"
         );
     }
 }

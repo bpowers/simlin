@@ -10,9 +10,22 @@ pub struct ImplicitVarDeps {
     pub name: String,
     pub is_stock: bool,
     pub is_module: bool,
+    /// Whether the helper's own definition must be evaluated in flows even
+    /// when no current-value dependency points at it. PREVIOUS captures need
+    /// this refresh for the next snapshot; INIT-only captures do not. Other
+    /// helper forms retain their ordinary per-step evaluation.
+    pub flow_required: bool,
+    /// Whether an initial-only dependency relation makes this definition an
+    /// initials root by itself. PREVIOUS capture storage has an initial-shaped
+    /// body only because that body is also lowered for flows; another initial
+    /// consumer must make the storage live before it enters initials.
+    pub initial_seed_required: bool,
     pub model_name: Option<String>,
     pub dt_deps: BTreeSet<String>,
     pub initial_deps: BTreeSet<String>,
+    /// Names read through INIT in the helper's dt definition. These seed the
+    /// initial snapshot even when the helper itself is flow-only.
+    pub init_referenced_vars: BTreeSet<String>,
     pub dt_init_only_referenced_vars: BTreeSet<String>,
     pub dt_previous_referenced_vars: BTreeSet<String>,
     pub initial_previous_referenced_vars: BTreeSet<String>,
@@ -55,9 +68,12 @@ pub(super) fn extract_implicit_var_deps(
                     name: implicit_name,
                     is_stock: false,
                     is_module: true,
+                    flow_required: true,
+                    initial_seed_required: true,
                     model_name: Some(m.model_name().to_string()),
                     dt_deps: refs.clone(),
                     initial_deps: refs,
+                    init_referenced_vars: BTreeSet::new(),
                     dt_init_only_referenced_vars: BTreeSet::new(),
                     dt_previous_referenced_vars: BTreeSet::new(),
                     initial_previous_referenced_vars: BTreeSet::new(),
@@ -96,6 +112,14 @@ pub(super) fn extract_implicit_var_deps(
                 is_stock: parsed_implicit.is_stock(),
                 // The module arm returned above, so nothing here is one.
                 is_module: false,
+                flow_required: implicit_var
+                    .capture()
+                    .map(|capture| capture.kind().needs_flows())
+                    .unwrap_or(true),
+                initial_seed_required: implicit_var
+                    .capture()
+                    .map(|capture| capture.kind().needs_initials())
+                    .unwrap_or(true),
                 model_name: None,
                 dt_deps: dt_classification
                     .all
@@ -107,6 +131,7 @@ pub(super) fn extract_implicit_var_deps(
                     .into_iter()
                     .map(|id| id.to_string())
                     .collect(),
+                init_referenced_vars: dt_classification.init_referenced,
                 dt_init_only_referenced_vars: dt_classification.init_only,
                 dt_previous_referenced_vars: dt_classification.previous_only,
                 initial_previous_referenced_vars: init_classification.previous_only,

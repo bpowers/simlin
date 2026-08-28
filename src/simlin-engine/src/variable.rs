@@ -1165,8 +1165,9 @@ where
                             // variable, and a scan here is the same O(k^2) shape
                             // `ImplicitVarMeta::index_hint` exists to remove --
                             // measured at +30% on N=800 before this map.
-                            match implicit_index.get(&ident).map(|i| &implicit_vars[*i]) {
-                                Some(existing) if existing.same_definition(&new_var) => {}
+                            match implicit_index.get(&ident).copied() {
+                                Some(index)
+                                    if implicit_vars[index].merge_same_definition(&new_var) => {}
                                 Some(_) => {
                                     // `DuplicateVariable` rather than the
                                     // `Generic` its within-one-pass twin uses:

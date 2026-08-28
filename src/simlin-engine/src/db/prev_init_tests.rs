@@ -474,8 +474,8 @@ fn user_element_snapshots_are_direct_for_both_intrinsics() {
     flow_helpers.sort_unstable();
     assert_eq!(
         flow_helpers,
-        ["$⁚init_dynamic⁚0⁚arg0", "$⁚prev_dynamic⁚0⁚arg0"],
-        "only dynamic captures may enter the flow runlist"
+        ["$⁚prev_dynamic⁚0⁚arg0"],
+        "an INIT-only capture is initialized once; only PREVIOUS needs its capture refreshed"
     );
 
     let compiled = tp
@@ -486,10 +486,25 @@ fn user_element_snapshots_are_direct_for_both_intrinsics() {
         crate::vm::IMPLICIT_VAR_COUNT + 2 + 8 + 2,
         "layout is two array slots, eight explicit scalar slots and exactly two dynamic captures"
     );
+    let init_capture_offset = compiled
+        .get_offset(&Ident::new("$⁚init_dynamic⁚0⁚arg0"))
+        .expect("INIT capture keeps its initial-values storage slot");
+    let previous_capture_offset = compiled
+        .get_offset(&Ident::new("$⁚prev_dynamic⁚0⁚arg0"))
+        .expect("PREVIOUS capture keeps its committed-values storage slot");
     let root = compiled
         .modules
         .get(&compiled.root)
         .expect("the compiled root module exists");
+    let flow_writes = crate::compiler::symbolic::extract_assign_curr_offsets(&root.compiled_flows);
+    assert!(
+        !flow_writes.contains(&init_capture_offset),
+        "INIT capture slot must have no assembled flow assignment"
+    );
+    assert!(
+        flow_writes.contains(&previous_capture_offset),
+        "PREVIOUS capture slot must still be refreshed in assembled flows"
+    );
     let previous_reads = root
         .compiled_flows
         .code
@@ -520,6 +535,594 @@ fn user_element_snapshots_are_direct_for_both_intrinsics() {
     assert_eq!(values["init_qualified"], [10.0, 10.0, 10.0]);
     assert_eq!(values["prev_dynamic"], [-3.0, 10.0, 21.0]);
     assert_eq!(values["init_dynamic"], [10.0, 10.0, 10.0]);
+}
+
+/// Capture scheduling is the product of the complete source intrinsic
+/// alphabet and every storage shape the production visitor can synthesize.
+/// The rows are built by the real parse/dependency/fragment pipeline: computed
+/// scalars, runtime-selected elements, and array-valued nested snapshots.
+#[test]
+fn every_capture_kind_has_the_right_phases_for_every_storage_shape() {
+    use crate::capture::CaptureKind;
+    use crate::test_common::TestProject;
+
+    #[derive(Clone, Copy, Debug)]
+    enum StorageShape {
+        ComputedScalar,
+        DynamicElement,
+        ArrayValued,
+        InitialBacked,
+    }
+
+    impl StorageShape {
+        const ALL: [StorageShape; 4] = [
+            StorageShape::ComputedScalar,
+            StorageShape::DynamicElement,
+            StorageShape::ArrayValued,
+            StorageShape::InitialBacked,
+        ];
+
+        fn argument(self) -> &'static str {
+            match self {
+                StorageShape::ComputedScalar => "k * 2",
+                StorageShape::DynamicElement => "vals[idx]",
+                StorageShape::ArrayValued => "PREVIOUS(vals)",
+                StorageShape::InitialBacked => "INIT(k) + 1",
+            }
+        }
+    }
+
+    for kind in CaptureKind::SOURCE_KINDS {
+        let builtin = match kind {
+            CaptureKind::Previous => SnapshotBuiltin::Previous,
+            CaptureKind::Init => SnapshotBuiltin::Init,
+            CaptureKind::PreviousAndInit => {
+                unreachable!("the combined kind is produced only by phase merging")
+            }
+        };
+        for shape in StorageShape::ALL {
+            let equation = builtin.call(shape.argument());
+            let base = TestProject::new("capture_phase_matrix")
+                .with_sim_time(0.0, 2.0, 1.0)
+                .named_dimension("d", &["e1", "e2"])
+                .aux("k", "3", None)
+                .aux("idx", "1 + MIN(TIME, 1)", None)
+                .array_with_ranges("vals[d]", vec![("e1", "10"), ("e2", "20")]);
+            let tp = match shape {
+                StorageShape::ArrayValued => base.array_aux("target[d]", &equation),
+                StorageShape::ComputedScalar
+                | StorageShape::DynamicElement
+                | StorageShape::InitialBacked => base.aux("target", &equation, None),
+            };
+            let db = SimlinDb::default();
+            let sync = sync_from_datamodel(&db, &tp.build_datamodel());
+            let model = sync.models["main"].source;
+            let helpers = model_implicit_var_info(&db, model, sync.project);
+            let captures: Vec<_> = helpers
+                .values()
+                .filter_map(|meta| {
+                    meta.find_in(parse_source_variable(
+                        &db,
+                        meta.parent_source_var,
+                        sync.project,
+                    ))
+                    .and_then(|helper| helper.capture())
+                })
+                .collect();
+            assert_eq!(
+                captures.len(),
+                1,
+                "{kind:?}/{shape:?}: production parse must synthesize one outer capture"
+            );
+            assert_eq!(captures[0].kind(), kind, "{kind:?}/{shape:?}");
+
+            let name = captures[0].ident().to_string();
+            let membership = crate::db::dep_graph::implicit_var_runlist_membership(
+                &db,
+                model,
+                sync.project,
+                name.clone(),
+                ModuleInputSet::empty(&db),
+            );
+            assert_eq!(
+                membership.initials,
+                kind.needs_initials(),
+                "{kind:?}/{shape:?}: initials membership"
+            );
+            assert_eq!(
+                membership.flows,
+                kind.needs_flows(),
+                "{kind:?}/{shape:?}: flows membership"
+            );
+            assert!(!membership.stocks, "{kind:?}/{shape:?}");
+
+            let fragment = compile_implicit_var_fragment(
+                &db,
+                model,
+                sync.project,
+                name,
+                ModuleInputSet::empty(&db),
+            )
+            .as_ref()
+            .unwrap_or_else(|| panic!("{kind:?}/{shape:?}: capture fragment"));
+            assert_eq!(
+                fragment.fragment.initial_bytecodes.is_some(),
+                kind.needs_initials(),
+                "{kind:?}/{shape:?}: initial fragment"
+            );
+            assert_eq!(
+                fragment.fragment.flow_bytecodes.is_some(),
+                kind.needs_flows(),
+                "{kind:?}/{shape:?}: flow fragment"
+            );
+            assert!(fragment.fragment.stock_bytecodes.is_none());
+        }
+    }
+}
+
+/// A PREVIOUS capture can use an INIT value in its flow body without needing
+/// its own initial fragment. The helper's dependency facts must nevertheless
+/// seed INIT's referent before `initial_values` freezes; otherwise every flow
+/// evaluation observes the default zero snapshot.
+#[test]
+fn a_previous_capture_flow_seeds_its_local_init_referent() {
+    use crate::test_common::TestProject;
+
+    let helper = "$⁚out⁚0⁚arg0";
+    let tp = TestProject::new("previous_capture_local_init_referent")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .aux("k", "3", None)
+        .aux("out", "PREVIOUS(INIT(k) + 1, -7)", None);
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &tp.build_datamodel());
+    let graph = model_dependency_graph(
+        &db,
+        sync.models["main"].source,
+        sync.project,
+        ModuleInputSet::empty(&db),
+    );
+    assert!(graph.runlist_initials.iter().any(|name| name == "k"));
+    assert!(!graph.runlist_initials.iter().any(|name| name == helper));
+
+    let values = tp.run_vm().expect("the local INIT referent compiles");
+    assert_eq!(values["out"], [-7.0, 4.0, 4.0, 4.0]);
+}
+
+/// Qualified INIT referents discovered only inside a PREVIOUS capture must
+/// seed the module instance, allowing the project-level initial fixed point to
+/// populate the selected child output before the root snapshot freezes.
+#[test]
+fn a_previous_capture_flow_seeds_its_qualified_module_init_referent() {
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module, x_project};
+
+    let child = x_model(
+        "child",
+        vec![x_aux("needed", "3", None), x_aux("unrelated", "99", None)],
+    );
+    let main = x_model(
+        "main",
+        vec![
+            x_module("child", &[], None),
+            x_aux("out", "PREVIOUS(INIT(child.needed) + 1, -7)", None),
+        ],
+    );
+    let mut specs = sim_specs_with_units("month");
+    specs.stop = 3.0;
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &x_project(specs, &[main, child]));
+    let graph = model_dependency_graph(
+        &db,
+        sync.models["main"].source,
+        sync.project,
+        ModuleInputSet::empty(&db),
+    );
+    assert!(graph.runlist_initials.iter().any(|name| name == "child"));
+    assert!(
+        !graph
+            .runlist_initials
+            .iter()
+            .any(|name| name == "$⁚out⁚0⁚arg0")
+    );
+    let child_graph = model_dependency_graph(
+        &db,
+        sync.models["child"].source,
+        sync.project,
+        ModuleInputSet::empty(&db),
+    );
+    assert!(
+        child_graph
+            .runlist_initials
+            .iter()
+            .any(|name| name == "needed")
+    );
+    assert!(
+        !child_graph
+            .runlist_initials
+            .iter()
+            .any(|name| name == "unrelated"),
+        "qualified propagation remains sparse"
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+    vm.run_to_end().expect("qualified INIT referent runs");
+    let values = crate::test_common::collect_results(&vm.into_results());
+    assert_eq!(values["out"], [-7.0, 4.0, 4.0, 4.0]);
+}
+
+/// An INIT read in an otherwise live flow is not itself part of the root
+/// initials runlist. Its raw qualified referent is nevertheless a first-class
+/// project seed and must populate only the selected child output.
+#[test]
+fn a_mixed_live_flow_seeds_its_qualified_module_init_referent() {
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module, x_project};
+
+    let child = x_model(
+        "child",
+        vec![x_aux("needed", "3", None), x_aux("unrelated", "99", None)],
+    );
+    let main = x_model(
+        "main",
+        vec![
+            x_module("child", &[], None),
+            x_aux("driver", "10 + TIME", None),
+            x_aux("out", "driver + INIT(child.needed)", None),
+        ],
+    );
+    let mut specs = sim_specs_with_units("month");
+    specs.stop = 3.0;
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &x_project(specs, &[main, child]));
+    let child_graph = model_dependency_graph(
+        &db,
+        sync.models["child"].source,
+        sync.project,
+        ModuleInputSet::empty(&db),
+    );
+    assert!(
+        child_graph
+            .runlist_initials
+            .iter()
+            .any(|name| name == "needed")
+    );
+    assert!(
+        !child_graph
+            .runlist_initials
+            .iter()
+            .any(|name| name == "unrelated"),
+        "a raw qualified INIT fact must not widen the whole child model"
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+    vm.run_to_end().expect("mixed flow runs");
+    let values = crate::test_common::collect_results(&vm.into_results());
+    assert_eq!(values["out"], [13.0, 14.0, 15.0, 16.0]);
+}
+
+/// The dt and active-initial passes restart the positional counter. When they
+/// produce the same storage definition for different snapshot consumers, the
+/// helper is shared and its phase requirements are unioned rather than treated
+/// as a conflicting definition.
+#[test]
+fn a_positional_capture_shared_by_init_and_previous_unions_its_phases() {
+    use crate::capture::CaptureKind;
+    use crate::test_common::TestProject;
+
+    struct Row {
+        dt_equation: &'static str,
+        active_initial: &'static str,
+        initial_out: f64,
+        expected_out: [f64; 3],
+        expected_observed: [f64; 3],
+    }
+
+    // The order is the parser's first-seen capture kind. Cover both source
+    // kinds so unioning cannot accidentally depend on which helper is retained.
+    let rows = [
+        Row {
+            dt_equation: "INIT(k * 2)",
+            active_initial: "PREVIOUS(k * 2, -7)",
+            initial_out: -7.0,
+            expected_out: [2.0, 2.0, 2.0],
+            expected_observed: [-7.0, -7.0, -7.0],
+        },
+        Row {
+            dt_equation: "PREVIOUS(k * 2, -7)",
+            active_initial: "INIT(k * 2)",
+            initial_out: 2.0,
+            expected_out: [-7.0, 2.0, 4.0],
+            expected_observed: [2.0, 2.0, 2.0],
+        },
+    ];
+
+    for row in rows {
+        let mut project = TestProject::new("capture_phase_union")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .aux("k", "1 + TIME", None)
+            .aux("out", row.dt_equation, None)
+            .aux("observed_initial", "INIT(out)", None)
+            .build_datamodel();
+        let out = project.models[0]
+            .variables
+            .iter_mut()
+            .find(|variable| variable.get_ident() == "out")
+            .expect("out source variable");
+        let datamodel::Variable::Aux(out) = out else {
+            unreachable!("the fixture builds out as an aux")
+        };
+        out.compat.active_initial = Some(row.active_initial.to_string());
+
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        let model = sync.models["main"].source;
+        let out = sync.models["main"].variables["out"].source;
+        let parsed = parse_source_variable(&db, out, sync.project);
+        assert!(
+            parsed.variable.errors.is_empty(),
+            "same storage with two consumers is not a helper-definition collision"
+        );
+        let captures: Vec<_> = parsed
+            .implicit_vars
+            .iter()
+            .filter_map(|helper| helper.capture())
+            .collect();
+        assert_eq!(captures.len(), 1, "the positional storage is deduplicated");
+        assert_eq!(captures[0].kind(), CaptureKind::PreviousAndInit);
+        let name = captures[0].ident().to_string();
+        let membership = crate::db::dep_graph::implicit_var_runlist_membership(
+            &db,
+            model,
+            sync.project,
+            name.clone(),
+            ModuleInputSet::empty(&db),
+        );
+        assert_eq!(
+            membership,
+            crate::db::dep_graph::RunlistMembership {
+                initials: true,
+                flows: true,
+                stocks: false,
+            }
+        );
+        let fragment = compile_implicit_var_fragment(
+            &db,
+            model,
+            sync.project,
+            name,
+            ModuleInputSet::empty(&db),
+        )
+        .as_ref()
+        .expect("the shared capture compiles");
+        assert_eq!(
+            (
+                fragment.fragment.initial_bytecodes.is_some(),
+                fragment.fragment.flow_bytecodes.is_some(),
+                fragment.fragment.stock_bytecodes.is_some(),
+            ),
+            (true, true, false),
+            "the shared capture has exactly the unioned phases"
+        );
+
+        let compiled = compile_project_incremental(&db, sync.project, "main").expect("compiles");
+        let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+        let out_offset = vm.get_offset(&Ident::new("out")).expect("out offset");
+        let observed_offset = vm
+            .get_offset(&Ident::new("observed_initial"))
+            .expect("observed_initial offset");
+        vm.run_initials().expect("initialization");
+        assert_eq!(vm.get_value_now(out_offset), row.initial_out);
+        assert_eq!(vm.get_value_now(observed_offset), row.initial_out);
+        vm.reset();
+        vm.run_initials().expect("initialization after reset");
+        assert_eq!(vm.get_value_now(out_offset), row.initial_out);
+        assert_eq!(vm.get_value_now(observed_offset), row.initial_out);
+        vm.run_to_end().expect("complete run");
+        let values = crate::test_common::collect_results(&vm.into_results());
+        assert_eq!(values["out"], row.expected_out);
+        assert_eq!(values["observed_initial"], row.expected_observed);
+    }
+}
+
+/// INIT is only the default consumer of its capture. A real current-value
+/// reference to the same production helper storage promotes it into flows, so
+/// removing the redundant INIT refresh cannot stale an independently consumed
+/// value.
+#[test]
+fn a_current_value_consumer_promotes_an_init_capture_into_flows() {
+    use crate::test_common::TestProject;
+
+    let helper = "$⁚frozen⁚0⁚arg0";
+    let observer_eqn = format!("\"{helper}\"");
+    let tp = TestProject::new("init_capture_current_consumer")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .aux("k", "1 + TIME", None)
+        .aux("frozen", "INIT(k * 2)", None)
+        .aux("observer", &observer_eqn, None);
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &tp.build_datamodel());
+    let model = sync.models["main"].source;
+    let membership = crate::db::dep_graph::implicit_var_runlist_membership(
+        &db,
+        model,
+        sync.project,
+        helper.to_string(),
+        ModuleInputSet::empty(&db),
+    );
+    assert!(membership.initials && membership.flows && !membership.stocks);
+
+    let values = tp
+        .run_vm()
+        .expect("the quoted production helper reference compiles");
+    assert_eq!(values["frozen"], [2.0, 2.0, 2.0]);
+    assert_eq!(values["observer"], [2.0, 4.0, 6.0]);
+}
+
+/// PREVIOUS storage is flow-only by default, but an independently live
+/// initial expression can consume the helper's current value before the first
+/// snapshot. The normal initial dependency closure promotes that storage just
+/// as the dt closure promotes INIT storage in the preceding test.
+#[test]
+fn an_initial_value_consumer_promotes_a_previous_capture_into_initials() {
+    use crate::test_common::TestProject;
+
+    let helper = "$⁚lagged⁚0⁚arg0";
+    let initial = format!("\"{helper}\"");
+    let tp = TestProject::new("previous_capture_initial_consumer")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .aux("k", "1 + TIME", None)
+        .aux("lagged", "PREVIOUS(k * 2, -7)", None)
+        .stock("level", &initial, &[], &[], None);
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &tp.build_datamodel());
+    let model = sync.models["main"].source;
+    let membership = crate::db::dep_graph::implicit_var_runlist_membership(
+        &db,
+        model,
+        sync.project,
+        helper.to_string(),
+        ModuleInputSet::empty(&db),
+    );
+    assert_eq!(
+        membership,
+        crate::db::dep_graph::RunlistMembership {
+            initials: true,
+            flows: true,
+            stocks: false,
+        }
+    );
+
+    let values = tp.run_vm().expect("the initial consumer compiles");
+    assert_eq!(values["lagged"], [-7.0, 2.0, 4.0]);
+    assert_eq!(values["level"], [2.0, 2.0, 2.0]);
+}
+
+/// A current dependency inside another INIT-only capture is needed while
+/// initials run, but neither definition is live after the snapshot freezes.
+/// Deriving the promotion set from every graph node would spuriously refresh
+/// the inner helper; it must start at production definitions that already have
+/// a dt consumer and follow their transitive dependency relation instead.
+#[test]
+fn an_init_only_capture_dependency_does_not_promote_its_input() {
+    use crate::test_common::TestProject;
+
+    let inner_helper = "$⁚inner⁚0⁚arg0";
+    let outer_helper = "$⁚outer⁚0⁚arg0";
+    let outer_eqn = format!("INIT(\"{inner_helper}\" + 1)");
+    let tp = TestProject::new("init_capture_dead_dependency")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .aux("k", "1 + TIME", None)
+        .aux("inner", "INIT(k * 2)", None)
+        .aux("outer", &outer_eqn, None);
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &tp.build_datamodel());
+    let model = sync.models["main"].source;
+    for helper in [inner_helper, outer_helper] {
+        let membership = crate::db::dep_graph::implicit_var_runlist_membership(
+            &db,
+            model,
+            sync.project,
+            helper.to_string(),
+            ModuleInputSet::empty(&db),
+        );
+        assert_eq!(
+            membership,
+            crate::db::dep_graph::RunlistMembership {
+                initials: true,
+                flows: false,
+                stocks: false,
+            },
+            "{helper} is reachable only from INIT consumers"
+        );
+    }
+
+    let values = tp.run_vm().expect("the INIT-only dependency chain runs");
+    assert_eq!(values["inner"], [2.0, 2.0, 2.0]);
+    assert_eq!(values["outer"], [3.0, 3.0, 3.0]);
+}
+
+/// A computed INIT argument inside a bound module is still a capture owned by
+/// the child model. Its input-set-specific graph seeds the helper only during
+/// initialization, and repeated root initialization observes the same bound
+/// value without adding a child-flow refresh.
+#[test]
+fn a_bound_module_init_capture_is_initials_only() {
+    use crate::capture::CaptureKind;
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module, x_project};
+
+    let mut input = x_aux("input", "0", None);
+    let datamodel::Variable::Aux(input_aux) = &mut input else {
+        unreachable!("x_aux constructs an aux")
+    };
+    input_aux.compat.can_be_module_input = true;
+    let mut output = x_aux("out", "INIT(input * 2)", None);
+    let datamodel::Variable::Aux(output_aux) = &mut output else {
+        unreachable!("x_aux constructs an aux")
+    };
+    output_aux.compat.active_initial = Some("INIT(input * 2)".to_string());
+    let child = x_model("child", vec![input, output]);
+    let main = x_model(
+        "main",
+        vec![
+            x_aux("source", "3 + TIME", None),
+            x_module("child", &[("source", "child.input")], None),
+            x_aux("observed", "INIT(child.out)", None),
+        ],
+    );
+    let mut specs = sim_specs_with_units("month");
+    specs.stop = 2.0;
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &x_project(specs, &[main, child]));
+    let child_model = sync.models["child"].source;
+    let child_out = sync.models["child"].variables["out"].source;
+    let parsed = parse_source_variable(&db, child_out, sync.project);
+    let captures: Vec<_> = parsed
+        .implicit_vars
+        .iter()
+        .filter_map(|helper| helper.capture())
+        .collect();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].kind(), CaptureKind::Init);
+    let helper_name = captures[0].ident().to_string();
+
+    let input_sets = crate::db::assemble::module_input_sets_for(&db, sync.project, "main", "child");
+    assert_eq!(input_sets.len(), 1, "the fixture has one child instance");
+    let inputs = ModuleInputSet::from_canonical_set(&db, &input_sets[0]);
+    let membership = crate::db::dep_graph::implicit_var_runlist_membership(
+        &db,
+        child_model,
+        sync.project,
+        helper_name.clone(),
+        inputs,
+    );
+    assert_eq!(
+        membership,
+        crate::db::dep_graph::RunlistMembership {
+            initials: true,
+            flows: false,
+            stocks: false,
+        }
+    );
+    let fragment =
+        compile_implicit_var_fragment(&db, child_model, sync.project, helper_name, inputs)
+            .as_ref()
+            .expect("the bound capture compiles");
+    assert!(fragment.fragment.initial_bytecodes.is_some());
+    assert!(fragment.fragment.flow_bytecodes.is_none());
+
+    let compiled = compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+    let observed_offset = vm
+        .get_offset(&Ident::new("observed"))
+        .expect("observed offset");
+    vm.run_initials().expect("initialization");
+    assert_eq!(vm.get_value_now(observed_offset), 6.0);
+    vm.reset();
+    vm.run_initials().expect("initialization after reset");
+    assert_eq!(vm.get_value_now(observed_offset), 6.0);
+    vm.run_to_end().expect("runs");
+    let values = crate::test_common::collect_results(&vm.into_results());
+    assert_eq!(values["observed"], [6.0, 6.0, 6.0]);
 }
 
 /// The complete source-name resolution alphabet for element snapshots.

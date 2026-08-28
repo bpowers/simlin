@@ -300,7 +300,7 @@ impl Expr0 {
     /// two copies came from. The apply-to-all expansion walks one cloned body
     /// per element, and the dt and initial passes walk one equation twice, so
     /// that question is asked on every model with a capture in an arrayed
-    /// equation. See [`crate::capture::Capture::same_definition`].
+    /// equation. See [`crate::capture::Capture::merge_same_definition`].
     pub(crate) fn eq_ignoring_loc(&self, other: &Expr0) -> bool {
         match (self, other) {
             (Expr0::Const(ls, ln, _), Expr0::Const(rs, rn, _)) => ls == rs && ln == rn,

@@ -462,7 +462,9 @@ y = MYMACRO(a * 2 + b, 4)
 #[test]
 fn production_macro_routes_leave_the_expected_typed_helpers() {
     use crate::capture::ImplicitVar;
-    use crate::db::{parse_source_variable, sync_from_datamodel};
+    use crate::db::{
+        ModuleInputSet, compile_implicit_var_fragment, parse_source_variable, sync_from_datamodel,
+    };
 
     let source = mdl(r#":MACRO: INIT(x)
 INIT = INITIAL(x)
@@ -531,6 +533,43 @@ ordinary caller = ORDINARY(k * 2, 1)
          parameter is non-storage and therefore receives a typed capture rather than \
          instantiating the macro recursively"
     );
+
+    // Both INIT routes use the ordinary production graph/fragment boundary:
+    // the caller owns scalar capture storage, while the macro body owns the
+    // same shape over its formal module input. Neither storage unit needs a
+    // per-step flow refresh.
+    for (model_name, capture, inputs) in [
+        (
+            "main",
+            passthrough[0].capture().expect("passthrough capture"),
+            ModuleInputSet::empty(&db),
+        ),
+        (
+            "init",
+            init_body[0].capture().expect("macro-body capture"),
+            ModuleInputSet::from_names(&db, &["x".to_string()]),
+        ),
+    ] {
+        let model = sync.models[model_name].source;
+        let helper_name = capture.ident().to_string();
+        let membership = crate::db::implicit_var_runlist_membership(
+            &db,
+            model,
+            sync.project,
+            helper_name.clone(),
+            inputs,
+        );
+        assert!(membership.initials, "{model_name}: INIT helper initials");
+        assert!(!membership.flows, "{model_name}: INIT helper not flows");
+        let fragment = compile_implicit_var_fragment(&db, model, sync.project, helper_name, inputs)
+            .as_ref()
+            .unwrap_or_else(|| panic!("{model_name}: capture fragment"));
+        assert!(
+            fragment.fragment.initial_bytecodes.is_some(),
+            "{model_name}"
+        );
+        assert!(fragment.fragment.flow_bytecodes.is_none(), "{model_name}");
+    }
 
     let delayn_body = helpers("delayn", "delayn");
     assert!(matches!(

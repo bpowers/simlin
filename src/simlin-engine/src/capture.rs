@@ -79,31 +79,54 @@ pub(crate) fn synthetic_ident(parent: &str, n: usize, part: &str, suffix: Option
     }
 }
 
-/// Which builtin's argument a capture holds.
+/// Which snapshot builtin uses a capture's storage.
 ///
-/// The two differ in how the dependency graph schedules them -- a `Previous`
-/// capture carries no edge from its parent in either phase, an `Init` capture
-/// keeps the parent's initial edge and is seeded into the initials runlist --
-/// but that difference is derived from the parent's own classification rather
-/// than read from here. This field records what the call was, so a later
-/// change that wants to treat the two differently (taking `Init` captures out
-/// of the flows runlist, which is a shape change with its own ledger row) has
-/// the fact in hand rather than having to re-derive it from the parent's AST.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+/// This is also the capture's phase demand: `Previous` storage refreshes in
+/// flows before the next snapshot commit, while `Init` storage is populated in
+/// initials before the frozen snapshot is taken. The combined arm is reachable
+/// when a variable's dt and active-initial equations mint the same positional
+/// capture with the same body for different snapshot builtins. One storage
+/// definition then serves both consumers and its phase requirements are their
+/// union.
+#[cfg_attr(any(test, feature = "debug-derive"), derive(Debug))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CaptureKind {
     Previous,
     Init,
+    PreviousAndInit,
 }
 
 impl CaptureKind {
-    /// The builtin this capture was hoisted out of, spelled as a model writes
-    /// it. No production caller: `Debug` is feature-gated crate-wide, so the
-    /// tests that pin each capture shape's kind need a printable spelling.
+    /// The two source-level snapshot consumers. The combined arm is produced
+    /// only by merging these across a variable's dt/initial parse passes.
+    #[cfg(test)]
+    pub(crate) const SOURCE_KINDS: [CaptureKind; 2] = [CaptureKind::Previous, CaptureKind::Init];
+
+    /// The snapshot consumer spelled as a model writes it, with a distinct
+    /// label for storage shared by both consumers.
     pub fn as_str(self) -> &'static str {
         match self {
             CaptureKind::Previous => "PREVIOUS",
             CaptureKind::Init => "INIT",
+            CaptureKind::PreviousAndInit => "PREVIOUS+INIT",
+        }
+    }
+
+    /// Whether this capture must be refreshed before each snapshot commit.
+    pub(crate) const fn needs_flows(self) -> bool {
+        matches!(self, CaptureKind::Previous | CaptureKind::PreviousAndInit)
+    }
+
+    /// Whether this capture must be populated before `initial_values` is frozen.
+    pub(crate) const fn needs_initials(self) -> bool {
+        matches!(self, CaptureKind::Init | CaptureKind::PreviousAndInit)
+    }
+
+    const fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (CaptureKind::Previous, CaptureKind::Previous) => CaptureKind::Previous,
+            (CaptureKind::Init, CaptureKind::Init) => CaptureKind::Init,
+            _ => CaptureKind::PreviousAndInit,
         }
     }
 }
@@ -185,7 +208,7 @@ impl Capture {
         &self.dims
     }
 
-    /// Do these two captures define the same value?
+    /// Merge another use of this capture when it defines the same value.
     ///
     /// Source position is deliberately excluded. Definition equality is based
     /// on the BODY, not where the body was written: the apply-to-all
@@ -196,12 +219,15 @@ impl Capture {
     /// on a model that compiles today. `PartialEq` keeps positions, because
     /// salsa uses it to decide whether a re-parse changed anything and a moved
     /// span does change the diagnostics.
-    pub(crate) fn same_definition(&self, other: &Self) -> bool {
-        self.ident == other.ident
-            && self.kind == other.kind
+    pub(crate) fn merge_same_definition(&mut self, other: &Self) -> bool {
+        let same_value = self.ident == other.ident
             && self.suffix == other.suffix
             && self.dims == other.dims
-            && self.arg.eq_ignoring_loc(&other.arg)
+            && self.arg.eq_ignoring_loc(&other.arg);
+        if same_value {
+            self.kind = self.kind.union(other.kind);
+        }
+        same_value
     }
 
     /// The `datamodel::Equation` this capture stands for.
@@ -585,13 +611,12 @@ impl ImplicitVar {
         }
     }
 
-    /// Do these two helpers define the same thing? The question the
-    /// synthesized-helper dedup asks when two of them claim one name; see
-    /// [`Capture::same_definition`] for why a capture answers it without
-    /// consulting source positions.
-    pub(crate) fn same_definition(&self, other: &Self) -> bool {
+    /// Merge another helper when it defines the same value. Capture consumers
+    /// are unioned so one positional storage unit can serve both INIT and
+    /// PREVIOUS; the other helper forms have no phase-specific use to merge.
+    pub(crate) fn merge_same_definition(&mut self, other: &Self) -> bool {
         match (self, other) {
-            (ImplicitVar::Capture(a), ImplicitVar::Capture(b)) => a.same_definition(b),
+            (ImplicitVar::Capture(a), ImplicitVar::Capture(b)) => a.merge_same_definition(b),
             (ImplicitVar::HoistedArg(a), ImplicitVar::HoistedArg(b)) => a.same_definition(b),
             (ImplicitVar::Module(a), ImplicitVar::Module(b)) => a.same_definition(b),
             (ImplicitVar::Capture(_), ImplicitVar::HoistedArg(_) | ImplicitVar::Module(_))

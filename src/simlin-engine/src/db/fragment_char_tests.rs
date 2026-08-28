@@ -1522,7 +1522,7 @@ fn char_prev_and_init() {
         prev_init_model(),
         FixtureExpect::plain(
             &[
-                ("main::$⁚init_expr⁚0⁚arg0", "initial+flow"),
+                ("main::$⁚init_expr⁚0⁚arg0", "initial"),
                 ("main::$⁚prev_expr⁚0⁚arg0", "flow"),
                 ("main::init_direct", "initial+flow"),
                 ("main::init_expr", "initial+flow"),
@@ -1530,14 +1530,13 @@ fn char_prev_and_init() {
                 ("main::prev_expr", "flow"),
                 ("main::x", "initial+flow"),
             ],
-            "`INIT(...)` reads the frozen initial-values buffer, so everything \
-             an INIT argument reaches must also be evaluated in the initials \
-             phase: `x`, the `INIT(x + 1)` capture helper, and the two INIT \
-             consumers. `PREVIOUS` reads the PRIOR step's committed values, \
-             which the initials phase has not produced, so both PREVIOUS \
-             consumers and the `PREVIOUS(x + 1)` capture helper are flow-only \
-             -- the asymmetry between the two synthesized `arg0` helpers is \
-             the load-bearing detail here.",
+            "`INIT(...)` reads the frozen initial-values buffer, so its capture \
+             helper is evaluated once in the initials phase and omitted from \
+             flows. `PREVIOUS` reads the prior step's committed values, so its \
+             capture helper is refreshed in flows and omitted from initials. \
+             The two synthesized `arg0` helpers therefore occupy disjoint \
+             phases; `x` and the INIT consumers still run in initials and \
+             flows because their own equations are needed in both.",
             &[
                 // x = 2 * time -> 0, 2, 4.
                 (0, "x", 0.0),
@@ -1661,18 +1660,9 @@ fn char_ltm_fragments_exhaustive() {
         FixtureExpect {
             models: &[("main", &[])],
             phases: &[
-                (
-                    "main::$⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0",
-                    "initial+flow",
-                ),
-                (
-                    "main::$⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0",
-                    "initial+flow",
-                ),
-                (
-                    "main::$⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0",
-                    "initial+flow",
-                ),
+                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0", "flow"),
+                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0", "flow"),
+                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0", "flow"),
                 ("main::$⁚ltm⁚link_score⁚growth→level", "flow"),
                 ("main::$⁚ltm⁚link_score⁚level→growth", "flow"),
                 ("main::$⁚ltm⁚loop_score⁚r1", "flow"),
@@ -1686,9 +1676,10 @@ fn char_ltm_fragments_exhaustive() {
                   `rate→growth`, a causal edge no circuit traverses, gets no \
                   score here (contrast the discovery fixture). Every synthetic \
                   is a scalar aux, hence flow-only. Only the `growth→level` \
-                  score synthesizes PREVIOUS capture helpers, and those land in \
-                  the initials runlist because a stock's initial equation \
-                  reaches them.",
+                  score synthesizes PREVIOUS capture helpers. Those helpers \
+                  refresh the next committed snapshot in flows; PREVIOUS's \
+                  fallback supplies the first step, so they need no initial \
+                  fragment.",
             spot_checks: LTM_LOOP_SPOT_CHECKS,
             ltm: FixtureLtm::Exhaustive,
             expect_one_resolved_scc: false,
@@ -1704,18 +1695,9 @@ fn char_ltm_fragments_discovery() {
         FixtureExpect {
             models: &[("main", &[])],
             phases: &[
-                (
-                    "main::$⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0",
-                    "initial+flow",
-                ),
-                (
-                    "main::$⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0",
-                    "initial+flow",
-                ),
-                (
-                    "main::$⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0",
-                    "initial+flow",
-                ),
+                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0", "flow"),
+                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0", "flow"),
+                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0", "flow"),
                 ("main::$⁚ltm⁚link_score⁚growth→level", "flow"),
                 ("main::$⁚ltm⁚link_score⁚level→growth", "flow"),
                 ("main::$⁚ltm⁚link_score⁚rate→growth", "flow"),
@@ -1731,9 +1713,9 @@ fn char_ltm_fragments_discovery() {
                   Every score is a scalar aux, hence flow-only. Only the \
                   `growth→level` score -- the stock-update edge, whose \
                   ceteris-paribus numerator re-integrates the stock -- \
-                  synthesizes PREVIOUS capture helpers, and those land in the \
-                  initials runlist because a stock's initial equation reaches \
-                  them.",
+                  synthesizes PREVIOUS capture helpers. Those helpers refresh \
+                  the next committed snapshot in flows; PREVIOUS's fallback \
+                  supplies the first step, so they need no initial fragment.",
             spot_checks: LTM_LOOP_SPOT_CHECKS,
             ltm: FixtureLtm::Discovery,
             expect_one_resolved_scc: false,

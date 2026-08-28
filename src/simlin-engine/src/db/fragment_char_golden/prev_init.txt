@@ -8,7 +8,7 @@
   prev_direct: [2, 3)
   prev_expr: [3, 4)
   x: [4, 5)
-== main::$⁚init_expr⁚0⁚arg0 [implicit-helper] : initial+flow ==
+== main::$⁚init_expr⁚0⁚arg0 [implicit-helper] : initial ==
   initial:
     literals: [1.0]
     temp_sizes: []
@@ -21,18 +21,7 @@
       0001  LoadConstant #0 (=1.0)
       0002  BinOpAssignCurr Add $⁚init_expr⁚0⁚arg0@0
       0003  Ret
-  flow:
-    literals: [1.0]
-    temp_sizes: []
-    dim_lists: []
-    graphical_functions: []
-    module_decls: []
-    static_views: []
-    code:
-      0000  LoadVar x@0
-      0001  LoadConstant #0 (=1.0)
-      0002  BinOpAssignCurr Add $⁚init_expr⁚0⁚arg0@0
-      0003  Ret
+  flow: <no fragment>
   stock: <no fragment>
 == main::$⁚prev_expr⁚0⁚arg0 [implicit-helper] : flow ==
   initial: <no fragment>
@@ -167,7 +156,7 @@
     time = 0.0
     x = 0.0
   step 1:
-    $⁚init_expr⁚0⁚arg0 = 3.0
+    $⁚init_expr⁚0⁚arg0 = 0.0
     $⁚prev_expr⁚0⁚arg0 = 3.0
     dt = 1.0
     final_time = 2.0
@@ -179,7 +168,7 @@
     time = 1.0
     x = 2.0
   step 2:
-    $⁚init_expr⁚0⁚arg0 = 5.0
+    $⁚init_expr⁚0⁚arg0 = 0.0
     $⁚prev_expr⁚0⁚arg0 = 5.0
     dt = 1.0
     final_time = 2.0

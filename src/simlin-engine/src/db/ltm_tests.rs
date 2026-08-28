@@ -10,6 +10,136 @@ use crate::db::{
 };
 use crate::test_common::TestProject;
 
+/// The typed LTM parser accepts both snapshot consumers even though today's
+/// score generator emits PREVIOUS captures only. Drive every source capture
+/// kind through that parser and the production metadata constructor, then pin
+/// the helper compiler and diagnostic predicate to the required phase.
+#[test]
+fn typed_ltm_capture_helpers_emit_exactly_their_required_phase() {
+    use salsa::Setter;
+
+    use super::{
+        LtmEquation, compile_ltm_implicit_var_fragment, ltm_implicit_var_meta, ltm_model_var_names,
+        parse_ltm_equation,
+    };
+    use crate::capture::{CaptureKind, ImplicitVar};
+
+    let project = TestProject::new("ltm_capture_phases")
+        .aux("k", "1 + TIME", None)
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    sync.project.set_ltm_enabled(&mut db).to(true);
+    let model = sync.models["main"].source;
+
+    for kind in CaptureKind::SOURCE_KINDS {
+        let text = match kind {
+            CaptureKind::Previous => "PREVIOUS(k * 2, -7)",
+            CaptureKind::Init => "INIT(k * 2)",
+            CaptureKind::PreviousAndInit => {
+                unreachable!("the combined kind is produced by cross-phase merging")
+            }
+        };
+        let parent = format!("$⁚ltm_capture_phase⁚{}", kind.as_str());
+        let parsed = parse_ltm_equation(
+            &parent,
+            &LtmEquation::scalar(text.to_string()),
+            crate::db::project_dimensions_context(&db, sync.project),
+            Some(ltm_model_var_names(&db, model, sync.project)),
+        );
+        assert!(parsed.variable.errors.is_empty(), "{kind:?}");
+        let helpers: Vec<&ImplicitVar> = parsed
+            .implicit_vars
+            .iter()
+            .filter(|helper| helper.capture().is_some())
+            .collect();
+        assert_eq!(helpers.len(), 1, "{kind:?}: one production parse capture");
+        assert_eq!(helpers[0].capture().unwrap().kind(), kind);
+        let meta = ltm_implicit_var_meta(&db, sync.project, &parent, helpers[0]);
+        let mut reason = None;
+        let fragment = compile_ltm_implicit_var_fragment(
+            &db,
+            &meta,
+            model,
+            sync.project,
+            &[],
+            Some(&mut reason),
+        )
+        .unwrap_or_else(|| panic!("{kind:?}: helper fragment"));
+        assert!(reason.is_none(), "{kind:?}: {reason:?}");
+        assert_eq!(
+            fragment.fragment.initial_bytecodes.is_some(),
+            kind.needs_initials(),
+            "{kind:?}: initial fragment"
+        );
+        assert_eq!(
+            fragment.fragment.flow_bytecodes.is_some(),
+            kind.needs_flows(),
+            "{kind:?}: flow fragment"
+        );
+        assert!(super::compile::ltm_implicit_fragment_compiled_ok(
+            &meta,
+            Some(&fragment)
+        ));
+
+        let mut missing_required = fragment.clone();
+        if kind.needs_initials() {
+            missing_required.fragment.initial_bytecodes = None;
+        } else {
+            missing_required.fragment.flow_bytecodes = None;
+        }
+        assert!(
+            !super::compile::ltm_implicit_fragment_compiled_ok(&meta, Some(&missing_required)),
+            "{kind:?}: a missing required phase must warn"
+        );
+    }
+}
+
+/// Generated LTM scores currently synthesize only nested PREVIOUS captures.
+/// Pin that real generator row so later additions must extend the phase table
+/// deliberately rather than inheriting an unconditional two-phase compile.
+#[test]
+fn generated_ltm_capture_helpers_are_flow_only() {
+    use salsa::Setter;
+
+    use super::{compile_ltm_implicit_var_fragment, model_ltm_implicit_var_info};
+    use crate::capture::CaptureKind;
+
+    let project = TestProject::new("generated_ltm_capture_phases")
+        .stock("level", "100", &["growth"], &[], None)
+        .flow("growth", "level * rate", None)
+        .aux("rate", "0.1", None)
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    sync.project.set_ltm_enabled(&mut db).to(true);
+    let model = sync.models["main"].source;
+    let info = model_ltm_implicit_var_info(&db, model, sync.project);
+    let captures: Vec<_> = info
+        .values()
+        .filter(|meta| meta.variable.capture().is_some())
+        .collect();
+    assert!(
+        !captures.is_empty(),
+        "the flow-to-stock score must mint nested PREVIOUS storage"
+    );
+    for meta in captures {
+        assert_eq!(
+            meta.variable.capture().unwrap().kind(),
+            CaptureKind::Previous,
+            "current generated LTM equations have no INIT source"
+        );
+        let fragment = compile_ltm_implicit_var_fragment(&db, meta, model, sync.project, &[], None)
+            .expect("generated helper fragment");
+        assert!(fragment.fragment.initial_bytecodes.is_none());
+        assert!(fragment.fragment.flow_bytecodes.is_some());
+        assert!(super::compile::ltm_implicit_fragment_compiled_ok(
+            meta,
+            Some(&fragment)
+        ));
+    }
+}
+
 #[test]
 fn test_ltm_bare_module_snapshot_refuses_both_intrinsics_loudly() {
     use crate::db::prev_init_tests::SnapshotBuiltin;

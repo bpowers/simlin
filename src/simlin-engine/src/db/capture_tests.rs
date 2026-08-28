@@ -667,13 +667,33 @@ fn a_captures_fragment_is_its_argument_compiled() {
         // The sibling holds the captured argument as an ordinary equation.
         let arg_text = row.captures[0].2;
         let tp = tp.aux("sibling", arg_text, None);
-        let dm = tp.build_datamodel();
+        let kind = row.captures[0].1;
+        // A plain aux has no initial AST. Give the INIT row the same active
+        // initial body and make it production-reachable through a real INIT
+        // consumer, so both sides compile in the phase the capture requires.
+        let tp = if kind.needs_initials() {
+            tp.aux("initial_consumer", "INIT(sibling)", None)
+        } else {
+            tp
+        };
+        let mut dm = tp.build_datamodel();
+        if kind.needs_initials() {
+            let sibling = dm.models[0]
+                .variables
+                .iter_mut()
+                .find(|variable| variable.get_ident() == "sibling")
+                .expect("sibling variable");
+            let crate::datamodel::Variable::Aux(sibling) = sibling else {
+                unreachable!("the fixture builds sibling as an aux")
+            };
+            sibling.compat.active_initial = Some(arg_text.to_string());
+        }
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &dm);
         let model = sync.models["main"].source;
 
         let capture_ident = row.captures[0].0;
-        let capture_bc = compile_implicit_var_fragment(
+        let capture_fragment = &compile_implicit_var_fragment(
             &db,
             model,
             sync.project,
@@ -682,13 +702,16 @@ fn a_captures_fragment_is_its_argument_compiled() {
         )
         .as_ref()
         .unwrap_or_else(|| panic!("{what}: `{eqn}` -- the capture must compile"))
-        .fragment
-        .flow_bytecodes
-        .as_ref()
-        .unwrap_or_else(|| panic!("{what}: `{eqn}` -- the capture must have a flow fragment"));
+        .fragment;
+        let capture_bc = if kind.needs_initials() {
+            capture_fragment.initial_bytecodes.as_ref()
+        } else {
+            capture_fragment.flow_bytecodes.as_ref()
+        }
+        .unwrap_or_else(|| panic!("{what}: `{eqn}` -- capture required-phase fragment"));
 
         let sibling_sv = model.variables(&db)["sibling"];
-        let sibling_bc = compile_var_fragment(
+        let sibling_fragment = &compile_var_fragment(
             &db,
             sibling_sv,
             model,
@@ -697,10 +720,13 @@ fn a_captures_fragment_is_its_argument_compiled() {
         )
         .as_ref()
         .unwrap_or_else(|| panic!("{what}: `{eqn}` -- the sibling must compile"))
-        .fragment
-        .flow_bytecodes
-        .as_ref()
-        .unwrap_or_else(|| panic!("{what}: `{eqn}` -- the sibling must have a flow fragment"));
+        .fragment;
+        let sibling_bc = if kind.needs_initials() {
+            sibling_fragment.initial_bytecodes.as_ref()
+        } else {
+            sibling_fragment.flow_bytecodes.as_ref()
+        }
+        .unwrap_or_else(|| panic!("{what}: `{eqn}` -- sibling required-phase fragment"));
 
         assert_eq!(
             format!("{capture_bc:?}").replace(capture_ident, "SELF"),

@@ -232,7 +232,7 @@ fn elements_in_stable_order(
 
 /// Collapse entries that repeat an earlier entry's identifier, preserving
 /// first-occurrence order -- but ONLY when the duplicates define the same
-/// thing (`ImplicitVar::same_definition`).
+/// thing (`ImplicitVar::merge_same_definition`).
 ///
 /// The per-element apply-to-all expansion runs a fresh `BuiltinVisitor` per
 /// element and unions every visitor's synthesized helpers. Lookup-key behavior
@@ -257,14 +257,15 @@ fn elements_in_stable_order(
 fn dedup_vars_by_ident(
     vars: Vec<ImplicitVar>,
 ) -> std::result::Result<Vec<ImplicitVar>, EquationError> {
-    let mut seen: HashMap<Ident<Canonical>, ImplicitVar> = HashMap::new();
+    let mut seen: HashMap<Ident<Canonical>, usize> = HashMap::new();
     let mut deduped: Vec<ImplicitVar> = Vec::with_capacity(vars.len());
     for v in vars {
         let ident = Ident::new(v.ident());
-        match seen.get(&ident) {
-            Some(existing) if existing.same_definition(&v) => {
+        match seen.get(&ident).copied() {
+            Some(index) if deduped[index].merge_same_definition(&v) => {
                 // Same-definition duplicate (the `Ast::ApplyToAll` suffix-less
-                // arrayed helper): drop it, keeping the first occurrence.
+                // arrayed helper): drop it. A capture also unions its snapshot
+                // consumers into the retained first occurrence.
             }
             Some(_) => {
                 // Same name, different content: a synthesized-helper id
@@ -277,7 +278,7 @@ fn dedup_vars_by_ident(
                 );
             }
             None => {
-                seen.insert(ident, v.clone());
+                seen.insert(ident, deduped.len());
                 deduped.push(v);
             }
         }
@@ -403,19 +404,20 @@ impl<'a> BuiltinVisitor<'a> {
     /// map so an error can never change which helper later checks observe.
     fn insert_implicit_var(&mut self, implicit_var: ImplicitVar) -> Result<(), EquationError> {
         let ident = Ident::<Canonical>::new(implicit_var.ident());
-        match self.vars.get(&ident) {
-            Some(existing) if existing.same_definition(&implicit_var) => Ok(()),
-            Some(_) => eqn_err!(
-                DuplicateVariable,
-                0,
-                0,
-                format!("two different synthesized helpers both claim the name '{ident}'")
-            ),
-            None => {
-                self.vars.insert(ident, implicit_var);
+        if let Some(existing) = self.vars.get_mut(&ident) {
+            return if existing.merge_same_definition(&implicit_var) {
                 Ok(())
-            }
+            } else {
+                eqn_err!(
+                    DuplicateVariable,
+                    0,
+                    0,
+                    format!("two different synthesized helpers both claim the name '{ident}'")
+                )
+            };
         }
+        self.vars.insert(ident, implicit_var);
+        Ok(())
     }
 
     /// Create a visitor with A2A subscript context for per-element module creation
@@ -1845,11 +1847,11 @@ mod tests {
     /// equation and its initial equation a compile error.
     #[test]
     fn capture_definition_equality_ignores_source_position() {
-        let spaced = capture("h", 0, "a + b");
+        let mut spaced = capture("h", 0, "a + b");
         let tight = capture("h", 0, "a+b");
         assert_ne!(spaced, tight, "PartialEq keeps positions, for salsa");
         assert!(
-            spaced.same_definition(&tight),
+            spaced.merge_same_definition(&tight),
             "the dedup question ignores them"
         );
         let out = dedup_vars_by_ident(vec![spaced, tight])

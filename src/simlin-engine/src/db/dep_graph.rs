@@ -61,6 +61,14 @@ use crate::db::{
 pub(crate) struct VarInfo {
     pub(crate) is_stock: bool,
     pub(crate) is_module: bool,
+    /// The definition itself requires per-step evaluation. An INIT-only
+    /// capture is false; it may still enter flows when another current-value
+    /// expression depends on its storage.
+    pub(crate) flow_required: bool,
+    /// Whether the generic initial-backed-definition heuristic may seed this
+    /// variable. PREVIOUS captures require initials only when another live
+    /// initial expression reaches them.
+    pub(crate) initial_seed_required: bool,
     /// A standalone lookup-only table: excluded from every runlist and from the
     /// saved output, because it is a static table indexed by callers, not a
     /// value-bearing variable (issue #606).
@@ -325,6 +333,8 @@ pub(crate) fn build_var_info(
             VarInfo {
                 is_stock: kind == SourceVariableKind::Stock,
                 is_module: kind == SourceVariableKind::Module,
+                flow_required: true,
+                initial_seed_required: true,
                 is_table_only: crate::db::source_var_is_table_only(db, source_vars[name.as_str()]),
                 dt_deps: normalize_deps(&dt_deps),
                 initial_deps: normalize_deps(&initial_deps),
@@ -366,11 +376,19 @@ pub(crate) fn build_var_info(
                 VarInfo {
                     is_stock: implicit.is_stock,
                     is_module: implicit.is_module,
+                    flow_required: implicit.flow_required,
+                    initial_seed_required: implicit.initial_seed_required,
                     // Implicit SMOOTH/DELAY/TREND internals are never lookup tables.
                     is_table_only: false,
                     dt_deps: normalize_deps(&dt_deps),
                     initial_deps: normalize_deps(&initial_deps),
                 },
+            );
+            all_init_referenced.extend(
+                implicit
+                    .init_referenced_vars
+                    .iter()
+                    .map(|dependency| normalize_dep(dependency)),
             );
         }
     }
@@ -1647,26 +1665,42 @@ struct ProjectInitialOutputRequirements {
 /// project-level propagation can cross one concrete module instance at a
 /// time. PREVIOUS-only reads are removed by the same classification field the
 /// model graph consumes; they read history and must not seed child initials.
-fn initial_dependency_paths(
+struct InitialDependencyFacts {
+    by_var: BTreeMap<Ident<Canonical>, BTreeSet<String>>,
+    /// Raw INIT referents from dt definitions. A definition need not itself
+    /// run in initials for its later flow program to read the frozen value, so
+    /// these are project roots rather than ordinary initial-dependency edges.
+    init_referenced: BTreeSet<String>,
+}
+
+/// Derive each definition's initial dependency paths and the raw dt INIT roots
+/// through the production explicit and implicit dependency extractors.
+fn initial_dependency_facts(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
     module_inputs: ModuleInputSet<'_>,
-) -> BTreeMap<Ident<Canonical>, BTreeSet<String>> {
+) -> InitialDependencyFacts {
     let mut paths = BTreeMap::new();
+    let mut init_referenced = BTreeSet::new();
     for (name, source_var) in model.variables(db) {
         let deps = variable_direct_dependencies(db, *source_var, project, module_inputs);
+        init_referenced.extend(deps.init_referenced_vars.iter().cloned());
         let mut initial = deps.initial_deps.clone();
         initial.retain(|dep| !deps.initial_previous_referenced_vars.contains(dep));
         paths.insert(Ident::from_str_unchecked(name), initial);
 
         for implicit in &deps.implicit_vars {
+            init_referenced.extend(implicit.init_referenced_vars.iter().cloned());
             let mut initial = implicit.initial_deps.clone();
             initial.retain(|dep| !implicit.initial_previous_referenced_vars.contains(dep));
             paths.insert(Ident::from_str_unchecked(&implicit.name), initial);
         }
     }
-    paths
+    InitialDependencyFacts {
+        by_var: paths,
+        init_referenced,
+    }
 }
 
 /// Route a qualified dependency path out of `current_key`. A nested path such
@@ -1778,16 +1812,16 @@ fn project_initial_output_requirements(
     }
 
     let mut paths_by_key = BTreeMap::new();
+    let mut init_referenced_by_key = BTreeMap::new();
     let mut pending = VecDeque::new();
     for key in &known_keys {
         let Some(model) = project.models(db).get(key.model_name.as_str()) else {
             continue;
         };
         let module_inputs = ModuleInputSet::from_names(db, &key.module_inputs);
-        paths_by_key.insert(
-            key.clone(),
-            initial_dependency_paths(db, *model, project, module_inputs),
-        );
+        let facts = initial_dependency_facts(db, *model, project, module_inputs);
+        init_referenced_by_key.insert(key.clone(), facts.init_referenced);
+        paths_by_key.insert(key.clone(), facts.by_var);
         for name in &base_model_dependency_graph(db, *model, project, module_inputs)
             .graph
             .runlist_initials
@@ -1797,6 +1831,30 @@ fn project_initial_output_requirements(
     }
 
     let mut requirements = ProjectInitialOutputRequirements::default();
+    // INIT reads in a live dt definition need their referents populated before
+    // the frozen snapshot exists even when that definition does not belong to
+    // the initials runlist. Route these raw paths as roots rather than waiting
+    // for an initial-dependency walk to encounter their owner.
+    for (key, dependencies) in &init_referenced_by_key {
+        for dependency in dependencies {
+            let dependency = dependency
+                .strip_prefix('\u{00B7}')
+                .unwrap_or(dependency.as_str());
+            if dependency.contains('\u{00B7}') {
+                route_initial_output_requirement(
+                    db,
+                    project,
+                    &known_keys,
+                    key,
+                    dependency,
+                    &mut requirements,
+                    &mut pending,
+                );
+            } else {
+                pending.push_back((key.clone(), Ident::from_str_unchecked(dependency)));
+            }
+        }
+    }
     let mut visited = BTreeSet::new();
     while let Some((key, name)) = pending.pop_front() {
         if !visited.insert((key.clone(), name.clone())) {
@@ -2846,7 +2904,9 @@ fn model_dependency_graph_impl(
                         !i.is_table_only
                             && (i.is_stock
                                 || i.is_module
-                                || (i.dt_deps.is_empty() && !i.initial_deps.is_empty()))
+                                || (i.initial_seed_required
+                                    && i.dt_deps.is_empty()
+                                    && !i.initial_deps.is_empty()))
                     })
                     .unwrap_or(false)
                     || all_init_referenced.contains(n.as_str())
@@ -2918,6 +2978,35 @@ fn model_dependency_graph_impl(
         .map(|s| canonicalize(s).into_owned())
         .collect();
     let runlist_flows = {
+        // Most variables are flow candidates by kind. INIT-only captures are
+        // the exception: they are initialized once unless some current-value
+        // expression also reads their storage. The dependency union is built
+        // from production classification after INIT/PREVIOUS-only edges have
+        // been removed, so a lagged/snapshot read cannot accidentally promote
+        // the capture while a genuine dt consumer does.
+        //
+        // Without that genuine consumer, the capture's post-initial `curr`
+        // slot is dead: INIT reads the separately frozen `initial_values`
+        // region. The VM may expose 0 for the unwritten scratch slot in saved
+        // internal results while wasm retains its initialized linear-memory
+        // value; neither is user-observable. Naming the synthesized helper
+        // directly creates a normal dt dependency here and restores a flow
+        // write, making the slot live and backend-parity constrained.
+        let current_dependencies: FxHashSet<&str> = dt_dependencies
+            .iter()
+            // A dependency reachable only from another INIT-only capture is
+            // initial-phase work, not a reason to make either helper live in
+            // flows. Start from definitions that already require per-step
+            // evaluation; their transitive sets then promote the complete
+            // current-value chain they actually execute.
+            .filter(|(name, _)| {
+                var_info
+                    .get(name.as_str())
+                    .is_some_and(|info| info.flow_required && !info.is_table_only)
+            })
+            .map(|(_, dependencies)| dependencies)
+            .flat_map(|dependencies| dependencies.iter().map(|dependency| dependency.as_str()))
+            .collect();
         let flow_names: Vec<&String> = var_names
             .iter()
             .filter(|n| {
@@ -2926,7 +3015,11 @@ fn model_dependency_graph_impl(
                     .get(n.as_str())
                     // A lookup-only table is a static table, not a flow: it is
                     // never lowered and emits no bytecode (issue #606).
-                    .map(|i| (is_input || !i.is_stock) && !i.is_table_only)
+                    .map(|i| {
+                        (is_input || !i.is_stock)
+                            && !i.is_table_only
+                            && (i.flow_required || current_dependencies.contains(n.as_str()))
+                    })
                     .unwrap_or(false)
             })
             .collect();

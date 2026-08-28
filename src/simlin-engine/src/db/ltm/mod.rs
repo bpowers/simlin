@@ -860,52 +860,61 @@ pub fn model_ltm_implicit_var_info(
             Some(model_var_names),
         );
 
-        let project_models = project.models(db);
-
         for implicit_var in parsed.implicit_vars.iter() {
             let im_name = canonicalize(implicit_var.ident()).into_owned();
-            let is_module = implicit_var.is_module();
-            let is_stock = implicit_var.is_stock();
-            let model_name = implicit_var.module().map(|m| m.model_name().to_string());
-            let size = if is_module {
-                model_name
-                    .as_deref()
-                    .and_then(|mn| {
-                        let sub_canonical = canonicalize(mn);
-                        project_models
-                            .get(sub_canonical.as_ref())
-                            .map(|sm| compute_layout(db, *sm, project).n_slots)
-                    })
-                    .unwrap_or(1)
-            } else {
-                // A non-module helper is usually a scalar aux (1 slot), but
-                // an ARRAYED capture helper -- the GH #541 arrayed
-                // `PREVIOUS`/`INIT` capture, extended to array-valued builtin
-                // subtrees like `rank(pop, 1)` by GH #742 -- occupies
-                // product(dim lengths) slots. Laid out at size 1 it would
-                // overlap its successors' slots and consumers would read it
-                // as scalar.
-                ltm_implicit_helper_size(
-                    crate::db::project_dimensions_context(db, project),
-                    implicit_var,
-                )
-            };
-
             result.insert(
                 im_name,
-                LtmImplicitVarMeta {
-                    ltm_parent_name: ltm_var.name.clone(),
-                    is_stock,
-                    is_module,
-                    model_name,
-                    size,
-                    variable: implicit_var.clone(),
-                },
+                ltm_implicit_var_meta(db, project, &ltm_var.name, implicit_var),
             );
         }
     }
 
     result
+}
+
+/// Derive the layout/compiler metadata for one helper returned by the typed
+/// LTM equation parser. Keeping this as the sole constructor makes the query,
+/// fragment compiler tests, and future generated helper forms agree on module
+/// sizing and array capture extent.
+fn ltm_implicit_var_meta(
+    db: &dyn Db,
+    project: SourceProject,
+    ltm_parent_name: &str,
+    implicit_var: &crate::capture::ImplicitVar,
+) -> LtmImplicitVarMeta {
+    let is_module = implicit_var.is_module();
+    let is_stock = implicit_var.is_stock();
+    let model_name = implicit_var.module().map(|m| m.model_name().to_string());
+    let size = if is_module {
+        model_name
+            .as_deref()
+            .and_then(|model_name| {
+                let canonical = canonicalize(model_name);
+                project
+                    .models(db)
+                    .get(canonical.as_ref())
+                    .map(|model| compute_layout(db, *model, project).n_slots)
+            })
+            .unwrap_or(1)
+    } else {
+        // A non-module helper is usually a scalar aux (1 slot), but an ARRAYED
+        // capture helper occupies product(dim lengths) slots. Laid out at size
+        // 1 it would overlap its successors' slots and consumers would read it
+        // as scalar.
+        ltm_implicit_helper_size(
+            crate::db::project_dimensions_context(db, project),
+            implicit_var,
+        )
+    };
+
+    LtmImplicitVarMeta {
+        ltm_parent_name: ltm_parent_name.to_string(),
+        is_stock,
+        is_module,
+        model_name,
+        size,
+        variable: implicit_var.clone(),
+    }
 }
 
 /// Slot count of a non-module LTM implicit helper: 1 for a scalar one,

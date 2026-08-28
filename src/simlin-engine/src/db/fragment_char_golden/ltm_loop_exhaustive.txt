@@ -10,18 +10,8 @@
   growth: [0, 1)
   level: [1, 2)
   rate: [2, 3)
-== main::$⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0 [ltm-implicit-helper] : initial+flow ==
-  initial:
-    literals: []
-    temp_sizes: []
-    dim_lists: []
-    graphical_functions: []
-    module_decls: []
-    static_views: []
-    code:
-      0000  LoadGlobalVar off=0 (time)
-      0001  AssignCurr $⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0@0
-      0002  Ret
+== main::$⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0 [ltm-implicit-helper] : flow ==
+  initial: <no fragment>
   flow:
     literals: []
     temp_sizes: []
@@ -34,19 +24,8 @@
       0001  AssignCurr $⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0@0
       0002  Ret
   stock: <no fragment>
-== main::$⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0 [ltm-implicit-helper] : initial+flow ==
-  initial:
-    literals: [0.0]
-    temp_sizes: []
-    dim_lists: []
-    graphical_functions: []
-    module_decls: []
-    static_views: []
-    code:
-      0000  LoadConstant #0 (=0.0)
-      0001  LoadPrev growth@0
-      0002  AssignCurr $⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0@0
-      0003  Ret
+== main::$⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0 [ltm-implicit-helper] : flow ==
+  initial: <no fragment>
   flow:
     literals: [0.0]
     temp_sizes: []
@@ -60,19 +39,8 @@
       0002  AssignCurr $⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0@0
       0003  Ret
   stock: <no fragment>
-== main::$⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0 [ltm-implicit-helper] : initial+flow ==
-  initial:
-    literals: [0.0]
-    temp_sizes: []
-    dim_lists: []
-    graphical_functions: []
-    module_decls: []
-    static_views: []
-    code:
-      0000  LoadConstant #0 (=0.0)
-      0001  LoadPrev level@0
-      0002  AssignCurr $⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0@0
-      0003  Ret
+== main::$⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0 [ltm-implicit-helper] : flow ==
+  initial: <no fragment>
   flow:
     literals: [0.0]
     temp_sizes: []
