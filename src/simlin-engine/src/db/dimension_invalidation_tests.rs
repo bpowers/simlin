@@ -18,6 +18,102 @@
 use super::*;
 use crate::datamodel;
 
+/// A qualified snapshot selector depends on the one qualified name it uses,
+/// not the project's complete dimension context. The selector dimension is
+/// deliberately unrelated to `vals`' declared axis: qualification constifies
+/// to a 1-based position, and subscript normalization applies that position to
+/// the referenced axis.
+#[test]
+fn qualified_snapshot_position_has_per_name_invalidation() {
+    use crate::db::exec_probe::ProbedDb;
+    use crate::test_common::TestProject;
+
+    let base = TestProject::new("qualified_snapshot_invalidation")
+        .named_dimension("Data", &["d1", "d2", "d3"])
+        .named_dimension("Selector", &["s1", "s2", "s3"])
+        .named_dimension("Unrelated", &["u1", "u2"])
+        .array_with_ranges("vals[Data]", vec![("d1", "10"), ("d2", "20"), ("d3", "30")])
+        .scalar_aux("probe", "PREVIOUS(vals[Selector.s2], 0)")
+        .build_datamodel();
+
+    let parse_probe = |db: &ProbedDb, sync: &SyncResult| {
+        parse_source_variable(
+            db.db(),
+            sync.models["main"].variables["probe"].source,
+            sync.project,
+        );
+    };
+
+    let mut db = ProbedDb::new();
+    let state1 = sync_from_datamodel_incremental(db.db_mut(), &base, None);
+    parse_probe(&db, &state1.to_sync_result());
+
+    let mut unrelated_edit = base.clone();
+    unrelated_edit.dimensions[2] =
+        datamodel::Dimension::named("Unrelated".to_string(), vec!["u1".into(), "u3".into()]);
+    db.reset();
+    let state2 = sync_from_datamodel_incremental(db.db_mut(), &unrelated_edit, Some(&state1));
+    parse_probe(&db, &state2.to_sync_result());
+    assert_eq!(
+        db.counts().get("parse_source_variable"),
+        None,
+        "an unrelated dimension edit must backdate the qualified-position projection before parse"
+    );
+    assert_eq!(
+        db.counts()
+            .get("project_qualified_snapshot_position")
+            .map(|(runs, _)| *runs),
+        Some(1),
+        "the per-name projection must re-check the vector input before salsa can backdate it"
+    );
+
+    let mut position_edit = unrelated_edit.clone();
+    position_edit.dimensions[1] = datamodel::Dimension::named(
+        "Selector".to_string(),
+        vec!["s2".into(), "s1".into(), "s3".into()],
+    );
+    db.reset();
+    let state3 = sync_from_datamodel_incremental(db.db_mut(), &position_edit, Some(&state2));
+    parse_probe(&db, &state3.to_sync_result());
+    assert_eq!(
+        db.counts()
+            .get("parse_source_variable")
+            .map(|(runs, _)| *runs),
+        Some(1),
+        "moving the selected element must invalidate the source parse"
+    );
+    assert_eq!(
+        db.counts()
+            .get("project_qualified_snapshot_position")
+            .map(|(runs, _)| *runs),
+        Some(1),
+        "moving the selected element must change the per-name projection"
+    );
+
+    let mut name_edit = position_edit.clone();
+    name_edit.dimensions[1] = datamodel::Dimension::named(
+        "Selector".to_string(),
+        vec!["renamed".into(), "s1".into(), "s3".into()],
+    );
+    db.reset();
+    let state4 = sync_from_datamodel_incremental(db.db_mut(), &name_edit, Some(&state3));
+    parse_probe(&db, &state4.to_sync_result());
+    assert_eq!(
+        db.counts()
+            .get("parse_source_variable")
+            .map(|(runs, _)| *runs),
+        Some(1),
+        "removing the selected qualified name must invalidate the source parse"
+    );
+    assert_eq!(
+        db.counts()
+            .get("project_qualified_snapshot_position")
+            .map(|(runs, _)| *runs),
+        Some(1),
+        "removing the selected element must change the per-name projection to None"
+    );
+}
+
 /// Parse one source variable (test convenience).
 fn parse_var_no_module_ctx(
     db: &dyn Db,

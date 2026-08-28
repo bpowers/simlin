@@ -6721,19 +6721,13 @@ fn corpus_clearn_macros_import() {
 /// terms, which is why the emission is accepted; if the margin were tight, the
 /// right move would be to sequence #996 behind #995 instead.
 ///
-/// It moved UPWARD again, 6,848 -> 7,163 (+315) and 29,808 -> 30,123 slots, when
-/// the MDL importer stopped exploding a single apply-to-all equation into N
-/// identical per-element slots (`mdl::convert::apply_to_all_tests`). C-LEARN is
-/// imported from MDL, so its element-mapped aggregation variables
-/// (`annual_reduction_aggregated`, `annual_reduction_semi_agg`, ...) now arrive
-/// as `Ast::ApplyToAll` and reach the per-element mapped-row emitter this branch
-/// fixed, instead of sitting in per-slot equations whose sites contribute only
-/// to their own element. The change is STRICTLY ADDITIVE -- measured by diffing
-/// the emitted name sets with `examples/ltm_var_dump.rs`: 315 added, **0
-/// removed** -- and every added name is a `<source>[<row>] -> <target>[<elem>]`
-/// mapped score, i.e. exactly the GH #997 shape. Declines are unchanged (5,
-/// same names, all rank-like-partial) and the margin is still wide: 35,413 free
-/// against the 65,536-slot ceiling.
+/// The current surface is 7,128 LTM variables in a 30,375-slot root layout.
+/// Static bare or qualified element snapshots are direct source references,
+/// not scalar captures: 35 scalar/per-element score names coalesce into
+/// dimensioned variables whose total declared extent is 278 slots wider. The
+/// same classification removes 26 user capture slots, for a net layout change
+/// of +252. The remaining margin is 35,161 slots against the 65,536-slot
+/// ceiling.
 ///
 /// The pin below catches emission changes in EITHER direction, and re-deriving
 /// it means re-measuring BOTH numbers, not just the count.
@@ -6760,10 +6754,18 @@ fn clearn_ltm_var_count_guardrail() {
         })
         .sum();
     assert_eq!(
-        total, 7163,
+        total, 7128,
         "C-LEARN's emitted LTM var count moved; if this is an intentional \
          emission change, re-derive the layout-slot impact (the #654 \
          ceiling) and update this pin with the new numbers"
+    );
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("C-LEARN must compile with LTM enabled");
+    assert_eq!(
+        compiled.n_slots(),
+        30_375,
+        "C-LEARN's LTM layout width moved; re-derive its distance from the \
+         65,536-slot ceiling together with the emitted variable count"
     );
 }
 

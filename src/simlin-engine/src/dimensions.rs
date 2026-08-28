@@ -255,6 +255,46 @@ pub fn resolve_axis_index_position(position: f64, axis_dim: &Dimension) -> Optio
     }
 }
 
+/// A source PREVIOUS/INIT subscript reduced to the facts needed to decide
+/// whether it names one concrete element of the referenced axis.
+pub(crate) enum SnapshotAxisIndex<'a> {
+    /// An unqualified identifier as written inside the brackets.
+    Bare(&'a str),
+    /// The 1-based position obtained from a qualified `dimension·element`.
+    QualifiedPosition(u32),
+}
+
+/// Resolve a source PREVIOUS/INIT index to the concrete element it selects.
+///
+/// This is the shared final decision for both the salsa source parser and the
+/// datamodel-driven test oracle. A bare name is resolved by
+/// [`resolve_axis_index_name`], so an element declared by the referenced axis
+/// wins even when the model also declares a variable with that name. That
+/// precedence is required by XMILE footnote 9
+/// (`docs/reference/xmile-v1.0.html`): an element name hides a same-named
+/// variable within that subscript.
+///
+/// A qualified name has already been reduced to its position in the dimension
+/// it names. [`resolve_axis_index_position`] deliberately applies that position
+/// to the referenced variable's own axis; the qualifying dimension need not be
+/// that axis. Missing axes, unknown qualified names, and out-of-range positions
+/// stay unresolved so capture/lowering can refuse rather than invent a slot.
+pub(crate) fn resolve_snapshot_axis_index(
+    axis_dim: Option<&Dimension>,
+    index: SnapshotAxisIndex<'_>,
+) -> Option<String> {
+    let axis_dim = axis_dim?;
+    match index {
+        SnapshotAxisIndex::Bare(name) => match resolve_axis_index_name(name, axis_dim, |_| false) {
+            AxisIndexName::Element(element) => Some(element),
+            AxisIndexName::IteratedDim | AxisIndexName::Unresolved => None,
+        },
+        SnapshotAxisIndex::QualifiedPosition(position) => {
+            resolve_axis_index_position(position as f64, axis_dim)
+        }
+    }
+}
+
 impl Dimension {
     pub fn len(&self) -> usize {
         match self {

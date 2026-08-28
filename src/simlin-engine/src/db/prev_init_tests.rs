@@ -142,67 +142,14 @@ fn test_nested_previous_does_not_create_false_cycle_via_helper_deps() {
 /// subscript compiles to a direct LoadPrev at that element's slot -- no
 /// implicit helper aux is synthesized.
 ///
-/// The qualified form is unambiguous: a dimension name can never collide with
-/// a variable name (XMILE 3.7.1), so `DimA.a2` inside a subscript is always
-/// the element constant, never a variable reference. Bare element names stay
-/// on the helper path: XMILE allows element names to shadow variable names,
-/// so `arr[a2]` could in principle be a dynamic index through a variable
-/// named `a2`.
-///
-/// The "no helper" assertion runs against `parse_var` with the project
-/// dimensions in scope -- the same way the LTM equation parse path
-/// (`parse_ltm_equation`) and the per-element A2A path call it. The salsa
-/// parse path for *user* scalar variables deliberately passes no dimensions
-/// (dimension-granularity invalidation: a dimension edit must not re-parse
-/// every scalar variable), so user scalar equations keep the helper-aux
-/// rewrite there; values are identical either way, pinned by the VM half of
-/// this test.
+/// The production source resolver reduces `DimA.a2` to its 1-based position,
+/// then applies that position to the referenced axis by
+/// `dimensions::resolve_axis_index_position`. This fixture derives both facts
+/// through sync and the real parse query before pinning VM values.
 #[test]
 fn test_previous_qualified_element_subscript_no_helper() {
     use crate::test_common::TestProject;
 
-    // Parse-level contract: with dimensions in scope, no helper is created.
-    let dims = vec![datamodel::Dimension::named(
-        "DimA".to_string(),
-        vec!["a1".to_string(), "a2".to_string()],
-    )];
-    let aux = datamodel::Variable::Aux(datamodel::Aux {
-        ident: "lagged".to_string(),
-        equation: datamodel::Equation::Scalar("PREVIOUS(base_val[DimA.a2], 0)".to_string()),
-        documentation: String::new(),
-        units: None,
-        gf: None,
-        ai_state: None,
-        uid: None,
-        compat: datamodel::Compat::default(),
-    });
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let mut implicit_vars: Vec<crate::capture::ImplicitVar> = Vec::new();
-    let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
-        crate::variable::parse_var(
-            &crate::variable::ParseContext::new(
-                &crate::dimensions::DimensionsContext::from(dims.as_slice()),
-                &units_ctx,
-            ),
-            &aux,
-            &mut implicit_vars,
-            |mi| Ok(Some(mi.clone())),
-        );
-    assert!(
-        parsed.equation_errors().is_none(),
-        "equation should parse cleanly: {:?}",
-        parsed.equation_errors()
-    );
-    assert!(
-        implicit_vars.is_empty(),
-        "qualified-element PREVIOUS must not synthesize helper vars; got: {:?}",
-        implicit_vars
-            .iter()
-            .map(|v| v.ident().to_string())
-            .collect::<Vec<_>>()
-    );
-
-    // End-to-end values through the production (salsa) compile path.
     let tp = TestProject::new("prev_qualified_elem")
         .with_sim_time(0.0, 3.0, 1.0)
         .named_dimension("DimA", &["a1", "a2"])
@@ -210,6 +157,14 @@ fn test_previous_qualified_element_subscript_no_helper() {
         .aux("lagged", "PREVIOUS(base_val[DimA.a2], 0)", None);
 
     tp.assert_compiles_incremental();
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &tp.build_datamodel());
+    let info = model_implicit_var_info(&db, sync.models["main"].source, sync.project);
+    assert!(
+        info.is_empty(),
+        "qualified-element PREVIOUS must not synthesize helper vars"
+    );
 
     // Values: the explicit fallback (0) at t=0, then base_val[a2] = 20.
     let vm = tp.run_vm().expect("VM should run");
@@ -354,54 +309,9 @@ fn test_previous_a2a_iterated_dimension_no_helpers() {
 
 /// INIT with a qualified-element subscript also compiles directly to
 /// LoadInitial -- the same static-resolution rule PREVIOUS uses.
-///
-/// Like the PREVIOUS twin above, the "no helper" half of this test runs
-/// `parse_var` with dimensions in scope (the LTM / per-element parse
-/// configuration); the VM half pins values through the production path.
 #[test]
 fn test_init_qualified_element_subscript_no_helper() {
     use crate::test_common::TestProject;
-
-    // Parse-level contract: with dimensions in scope, no helper is created.
-    let dims = vec![datamodel::Dimension::named(
-        "DimA".to_string(),
-        vec!["a1".to_string(), "a2".to_string()],
-    )];
-    let aux = datamodel::Variable::Aux(datamodel::Aux {
-        ident: "frozen".to_string(),
-        equation: datamodel::Equation::Scalar("INIT(growing[DimA.a2])".to_string()),
-        documentation: String::new(),
-        units: None,
-        gf: None,
-        ai_state: None,
-        uid: None,
-        compat: datamodel::Compat::default(),
-    });
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let mut implicit_vars: Vec<crate::capture::ImplicitVar> = Vec::new();
-    let parsed: crate::variable::Variable<datamodel::ModuleReference, crate::ast::Expr0> =
-        crate::variable::parse_var(
-            &crate::variable::ParseContext::new(
-                &crate::dimensions::DimensionsContext::from(dims.as_slice()),
-                &units_ctx,
-            ),
-            &aux,
-            &mut implicit_vars,
-            |mi| Ok(Some(mi.clone())),
-        );
-    assert!(
-        parsed.equation_errors().is_none(),
-        "equation should parse cleanly: {:?}",
-        parsed.equation_errors()
-    );
-    assert!(
-        implicit_vars.is_empty(),
-        "qualified-element INIT must not synthesize helper vars; got: {:?}",
-        implicit_vars
-            .iter()
-            .map(|v| v.ident().to_string())
-            .collect::<Vec<_>>()
-    );
 
     // growing[DimA] grows each step; INIT freezes the t=0 value.
     let tp = TestProject::new("init_qualified_elem")
@@ -415,6 +325,14 @@ fn test_init_qualified_element_subscript_no_helper() {
 
     tp.assert_compiles_incremental();
 
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &tp.build_datamodel());
+    let info = model_implicit_var_info(&db, sync.models["main"].source, sync.project);
+    assert!(
+        info.is_empty(),
+        "qualified-element INIT must not synthesize helper vars"
+    );
+
     let vm = tp.run_vm().expect("VM should run");
     let frozen = vm.get("frozen").expect("frozen not in VM results");
     for (step, val) in frozen.iter().enumerate() {
@@ -425,22 +343,23 @@ fn test_init_qualified_element_subscript_no_helper() {
     }
 }
 
-/// The complete bare-element classification at the remaining generated-LTM
-/// parse boundary: an unshadowed element is static, a same-named variable is
-/// conservative, and an ordinary source parse has no model-name input and is
-/// conservative too. The model name sets and source equation are obtained
-/// through the same sync/query functions production uses.
+/// The complete bare-element precedence at the generated-LTM boundary and the
+/// ordinary XMILE source path, for both snapshot intrinsics. Source equations
+/// follow XMILE footnote 9: an element of the referenced axis wins over a
+/// same-named variable. Generated LTM equations retain their conservative
+/// helper-aware shadowing dialect. The model name sets and equations are
+/// obtained through the same sync/query functions production uses.
 #[test]
 fn bare_element_snapshot_shadowing_has_all_three_production_rows() {
     use crate::db::ltm::{LtmEquation, ltm_model_var_names, parse_ltm_equation};
     use crate::test_common::TestProject;
 
-    let classify = |shadowed: bool| {
+    let classify = |builtin: SnapshotBuiltin, shadowed: bool| {
         let mut tp = TestProject::new("bare_element_shadowing")
             .named_dimension("DimA", &["a1", "b2"])
             .named_dimension("DimB", &["b2", "x1"])
             .array_aux("base_val[DimA]", "1")
-            .aux("lagged", "PREVIOUS(base_val[b2], 0)", None);
+            .aux("lagged", &builtin.call("base_val[b2]"), None);
         if shadowed {
             tp = tp.aux("b2", "1", None);
         }
@@ -463,8 +382,505 @@ fn bare_element_snapshot_shadowing_has_all_three_production_rows() {
         (ltm.implicit_vars.len(), source.implicit_vars.len())
     };
 
-    assert_eq!(classify(false), (0, 1), "unshadowed LTM / source rows");
-    assert_eq!(classify(true), (1, 1), "shadowed LTM / source rows");
+    for builtin in SnapshotBuiltin::ALL {
+        assert_eq!(
+            classify(builtin, false),
+            (0, 0),
+            "{} unshadowed LTM / source rows",
+            builtin.name()
+        );
+        assert_eq!(
+            classify(builtin, true),
+            (1, 0),
+            "{} generated-LTM shadow / XMILE element-first source rows",
+            builtin.name()
+        );
+    }
+}
+
+/// User equations resolve bare and qualified element indices before deciding
+/// whether a PREVIOUS/INIT argument needs capture storage. This is one
+/// production fixture for all four direct arms, plus both dynamic-index
+/// controls: the parse/capture map, dependency runlists, layout slots, concrete
+/// opcodes and VM values all come from the same salsa compile.
+#[test]
+fn user_element_snapshots_are_direct_for_both_intrinsics() {
+    use crate::bytecode::Opcode;
+    use crate::db::dep_graph::model_dependency_graph;
+    use crate::test_common::TestProject;
+
+    let tp = TestProject::new("user_element_snapshots")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("d", &["e1", "e2"])
+        .array_with_ranges("vals[d]", vec![("e1", "10 + TIME"), ("e2", "20 + TIME")])
+        .aux("idx", "1 + MIN(TIME, 1)", None)
+        // XMILE footnote 9: inside `vals[...]`, the declared element `e2`
+        // hides this same-named variable.
+        .aux("e2", "1", None)
+        .aux("prev_bare", "PREVIOUS(vals[e2], -1)", None)
+        .aux("prev_qualified", "PREVIOUS(vals[d.e1], -2)", None)
+        .aux("init_bare", "INIT(vals[e2])", None)
+        .aux("init_qualified", "INIT(vals[d.e1])", None)
+        .aux("prev_dynamic", "PREVIOUS(vals[idx], -3)", None)
+        .aux("init_dynamic", "INIT(vals[idx])", None);
+
+    let dm = tp.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &dm);
+    let model = sync.models["main"].source;
+    let helpers = model_implicit_var_info(&db, model, sync.project);
+    let mut capture_parents: Vec<&str> = helpers
+        .values()
+        .filter_map(|meta| {
+            meta.find_in(parse_source_variable(
+                &db,
+                meta.parent_source_var,
+                sync.project,
+            ))
+            .and_then(|implicit| implicit.capture())
+            .map(|_| meta.parent_source_var.ident(&db).as_str())
+        })
+        .collect();
+    capture_parents.sort_unstable();
+    assert_eq!(
+        capture_parents,
+        ["init_dynamic", "prev_dynamic"],
+        "only runtime-indexed snapshot arguments allocate capture storage"
+    );
+
+    let graph = model_dependency_graph(
+        &db,
+        model,
+        sync.project,
+        crate::db::ModuleInputSet::empty(&db),
+    );
+    let initial_helpers: Vec<_> = graph
+        .runlist_initials
+        .iter()
+        .filter(|name| name.starts_with('$'))
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        initial_helpers,
+        ["$⁚init_dynamic⁚0⁚arg0"],
+        "INIT's dynamic capture is the only initial-phase helper"
+    );
+    let mut flow_helpers: Vec<_> = graph
+        .runlist_flows
+        .iter()
+        .filter(|name| name.starts_with('$'))
+        .map(String::as_str)
+        .collect();
+    flow_helpers.sort_unstable();
+    assert_eq!(
+        flow_helpers,
+        ["$⁚init_dynamic⁚0⁚arg0", "$⁚prev_dynamic⁚0⁚arg0"],
+        "only dynamic captures may enter the flow runlist"
+    );
+
+    let compiled = tp
+        .compile_incremental()
+        .expect("the direct and captured snapshot rows must compile together");
+    assert_eq!(
+        compiled.n_slots(),
+        crate::vm::IMPLICIT_VAR_COUNT + 2 + 8 + 2,
+        "layout is two array slots, eight explicit scalar slots and exactly two dynamic captures"
+    );
+    let root = compiled
+        .modules
+        .get(&compiled.root)
+        .expect("the compiled root module exists");
+    let previous_reads = root
+        .compiled_flows
+        .code
+        .iter()
+        .filter(|op| matches!(op, Opcode::LoadPrev { .. } | Opcode::LoadPrevConst { .. }))
+        .count();
+    let initial_reads = root
+        .compiled_flows
+        .code
+        .iter()
+        .filter(|op| {
+            matches!(
+                op,
+                Opcode::LoadInitial { .. } | Opcode::AssignInitialCurr { .. }
+            )
+        })
+        .count();
+    assert_eq!(
+        previous_reads, 3,
+        "two direct and one captured PREVIOUS read"
+    );
+    assert_eq!(initial_reads, 3, "two direct and one captured INIT read");
+
+    let values = tp.run_vm().expect("the snapshot matrix must simulate");
+    assert_eq!(values["prev_bare"], [-1.0, 20.0, 21.0]);
+    assert_eq!(values["prev_qualified"], [-2.0, 10.0, 11.0]);
+    assert_eq!(values["init_bare"], [20.0, 20.0, 20.0]);
+    assert_eq!(values["init_qualified"], [10.0, 10.0, 10.0]);
+    assert_eq!(values["prev_dynamic"], [-3.0, 10.0, 21.0]);
+    assert_eq!(values["init_dynamic"], [10.0, 10.0, 10.0]);
+}
+
+/// The complete source-name resolution alphabet for element snapshots.
+/// `SnapshotElementCase::ALL x SnapshotBuiltin::ALL` is intentional: adding a
+/// new case or intrinsic expands the production matrix automatically.
+///
+/// Every row is synced from a datamodel project, compared with the independent
+/// datamodel-driven Stage0 constructor, and then compiled and run when it names
+/// a slot. Missing names and a mapped target's element that the referenced axis
+/// does not declare allocate a capture and refuse loudly. Numeric, dimension-
+/// spanning, dynamic-variable, expression, module-output, and non-storage
+/// module-input arms are outside this name-resolution alphabet; the general
+/// parse/codegen agreement table and refusal matrices below enumerate them.
+#[test]
+fn snapshot_element_name_matrix_covers_both_intrinsics() {
+    use crate::bytecode::Opcode;
+    use crate::model::ModelStage0;
+    use crate::test_common::TestProject;
+
+    #[derive(Clone, Copy, Debug)]
+    enum SnapshotElementCase {
+        SameNameVariableCollision,
+        UnrelatedAxisQualification,
+        MissingQualifiedName,
+        MissingBareName,
+        GloballyAmbiguousBareName,
+        MappedAxisOwnElement,
+        MappedTargetOnlyElement,
+        SubdimensionOwnElement,
+    }
+
+    impl SnapshotElementCase {
+        const ALL: [Self; 8] = [
+            Self::SameNameVariableCollision,
+            Self::UnrelatedAxisQualification,
+            Self::MissingQualifiedName,
+            Self::MissingBareName,
+            Self::GloballyAmbiguousBareName,
+            Self::MappedAxisOwnElement,
+            Self::MappedTargetOnlyElement,
+            Self::SubdimensionOwnElement,
+        ];
+
+        fn fixture(self) -> (TestProject, &'static str, Option<f64>) {
+            match self {
+                Self::SameNameVariableCollision => (
+                    TestProject::new("snapshot_same_name_collision")
+                        .with_sim_time(0.0, 2.0, 1.0)
+                        .named_dimension("Data", &["d1", "d2"])
+                        .array_with_ranges("vals[Data]", vec![("d1", "10"), ("d2", "20")])
+                        // XMILE footnote 9: this variable is hidden only in
+                        // the `vals[d2]` subscript below.
+                        .aux("d2", "1", None),
+                    "d2",
+                    Some(20.0),
+                ),
+                Self::UnrelatedAxisQualification => (
+                    TestProject::new("snapshot_unrelated_qualification")
+                        .with_sim_time(0.0, 2.0, 1.0)
+                        .named_dimension("Data", &["d1", "d2", "d3"])
+                        .named_dimension("Selector", &["s1", "s2", "s3"])
+                        .array_with_ranges(
+                            "vals[Data]",
+                            vec![("d1", "10"), ("d2", "20"), ("d3", "30")],
+                        ),
+                    "Selector.s2",
+                    Some(20.0),
+                ),
+                Self::MissingQualifiedName => (
+                    TestProject::new("snapshot_missing_qualified")
+                        .with_sim_time(0.0, 2.0, 1.0)
+                        .named_dimension("Data", &["d1", "d2"])
+                        .named_dimension("Selector", &["s1", "s2"])
+                        .array_with_ranges("vals[Data]", vec![("d1", "10"), ("d2", "20")]),
+                    "Selector.absent",
+                    None,
+                ),
+                Self::MissingBareName => (
+                    TestProject::new("snapshot_missing_bare")
+                        .with_sim_time(0.0, 2.0, 1.0)
+                        .named_dimension("Data", &["d1", "d2"])
+                        .array_with_ranges("vals[Data]", vec![("d1", "10"), ("d2", "20")]),
+                    "absent",
+                    None,
+                ),
+                Self::GloballyAmbiguousBareName => (
+                    TestProject::new("snapshot_ambiguous_bare")
+                        .with_sim_time(0.0, 2.0, 1.0)
+                        .named_dimension("Data", &["shared", "d2"])
+                        .named_dimension("Other", &["o1", "shared"])
+                        .array_with_ranges("vals[Data]", vec![("shared", "10"), ("d2", "20")]),
+                    "shared",
+                    Some(10.0),
+                ),
+                Self::MappedAxisOwnElement => (
+                    TestProject::new("snapshot_mapped_own")
+                        .with_sim_time(0.0, 2.0, 1.0)
+                        .named_dimension("Target", &["t1", "t2"])
+                        .named_dimension_with_mapping("Source", &["s1", "s2"], "Target")
+                        .array_with_ranges("vals[Source]", vec![("s1", "10"), ("s2", "20")]),
+                    "s2",
+                    Some(20.0),
+                ),
+                Self::MappedTargetOnlyElement => (
+                    TestProject::new("snapshot_mapped_target_only")
+                        .with_sim_time(0.0, 2.0, 1.0)
+                        .named_dimension("Target", &["t1", "t2"])
+                        .named_dimension_with_mapping("Source", &["s1", "s2"], "Target")
+                        .array_with_ranges("vals[Source]", vec![("s1", "10"), ("s2", "20")]),
+                    "t2",
+                    None,
+                ),
+                Self::SubdimensionOwnElement => (
+                    // Named subdimensions are established by element
+                    // containment: Sub=[p2,p3] is a proper subset of Parent.
+                    TestProject::new("snapshot_subdimension")
+                        .with_sim_time(0.0, 2.0, 1.0)
+                        .named_dimension("Parent", &["p1", "p2", "p3"])
+                        .named_dimension("Sub", &["p2", "p3"])
+                        .array_with_ranges("vals[Sub]", vec![("p2", "10"), ("p3", "20")]),
+                    "p3",
+                    Some(20.0),
+                ),
+            }
+        }
+    }
+
+    for case in SnapshotElementCase::ALL {
+        for builtin in SnapshotBuiltin::ALL {
+            let (base, index, selected) = case.fixture();
+            let target = format!("{}_out", builtin.name().to_ascii_lowercase());
+            let equation = builtin.call(&format!("vals[{index}]"));
+            let tp = base.aux(&target, &equation, None);
+            let project = tp.build_datamodel();
+            let db = SimlinDb::default();
+            let sync = sync_from_datamodel(&db, &project);
+            let model = sync.models["main"].source;
+            let target_var = sync.models["main"].variables[&target].source;
+            let captures: Vec<_> = model_implicit_var_info(&db, model, sync.project)
+                .values()
+                .filter(|meta| meta.parent_source_var == target_var)
+                .collect();
+            assert_eq!(
+                captures.len(),
+                usize::from(selected.is_none()),
+                "{case:?} / {} source capture decision",
+                builtin.name()
+            );
+
+            // The test oracle derives its axis from the real datamodel
+            // equation and its qualified position from DimensionsContext.
+            let oracle = ModelStage0::new_in_project(
+                &project.models,
+                &project.models[0],
+                &project.dimensions,
+                project_units_context(&db, sync.project),
+                false,
+            );
+            assert!(
+                *model_stage0(&db, model, sync.project) == oracle,
+                "{case:?} / {} salsa and datamodel Stage0",
+                builtin.name()
+            );
+
+            let compiled = compile_project_incremental(&db, sync.project, "main");
+            let Some(selected) = selected else {
+                let error = compiled.expect_err("an unresolved element name must refuse loudly");
+                assert_eq!(
+                    error.code,
+                    crate::common::ErrorCode::NotSimulatable,
+                    "{case:?} / {} refusal class",
+                    builtin.name()
+                );
+                continue;
+            };
+
+            let compiled = compiled.unwrap_or_else(|error| {
+                panic!(
+                    "{case:?} / {} concrete element must compile: {error:?}",
+                    builtin.name()
+                )
+            });
+            let root = &compiled.modules[&compiled.root];
+            let direct_ops = root
+                .compiled_flows
+                .code
+                .iter()
+                .filter(|opcode| match builtin {
+                    SnapshotBuiltin::Previous => {
+                        matches!(
+                            opcode,
+                            Opcode::LoadPrev { .. } | Opcode::LoadPrevConst { .. }
+                        )
+                    }
+                    SnapshotBuiltin::Init => matches!(opcode, Opcode::LoadInitial { .. }),
+                })
+                .count();
+            assert_eq!(
+                direct_ops,
+                1,
+                "{case:?} / {} must emit one direct snapshot read",
+                builtin.name()
+            );
+
+            let mut vm = crate::vm::Vm::new(compiled).expect("matrix VM");
+            vm.run_to_end()
+                .unwrap_or_else(|error| panic!("{case:?} / {} VM run: {error:?}", builtin.name()));
+            let values = crate::test_common::collect_results(&vm.into_results());
+            let expected = match builtin {
+                SnapshotBuiltin::Previous => vec![-7.0, selected, selected],
+                SnapshotBuiltin::Init => vec![selected; 3],
+            };
+            assert_eq!(
+                values[&target],
+                expected,
+                "{case:?} / {} selected value",
+                builtin.name()
+            );
+        }
+    }
+}
+
+/// A bare index can satisfy both source classifications at once: `Active` is
+/// the target equation's apply-to-all dimension and an element of `vals`'
+/// unrelated `Selector` axis. Spanning wins for capture addressability, so the
+/// original array-shaped argument and its source locations survive the
+/// per-element parse untouched. Lowering then applies the ordinary
+/// element-first subscript rule and each target element reads the same concrete
+/// `vals[Active]` slot. The complete intrinsic alphabet is exercised because
+/// PREVIOUS and INIT take separate opcode paths.
+#[test]
+fn active_dimension_name_that_is_an_axis_element_spans_first_for_both_intrinsics() {
+    use crate::ast::{Ast, Expr0};
+    use crate::builtins::UntypedBuiltinFn;
+    use crate::bytecode::Opcode;
+    use crate::dimensions::{SnapshotAxisIndex, resolve_snapshot_axis_index};
+    use crate::test_common::TestProject;
+
+    for builtin in SnapshotBuiltin::ALL {
+        let equation = builtin.call("vals[Active]");
+        let raw = Expr0::new(&equation, crate::lexer::LexerType::Equation)
+            .expect("the source equation must lex")
+            .expect("the source equation must parse");
+        let Expr0::App(UntypedBuiltinFn(_, raw_args), _) = raw else {
+            panic!("the fixture equation must be one snapshot call")
+        };
+        let raw_arg = &raw_args[0];
+        let raw_arg_loc = raw_arg.get_loc();
+        assert!(
+            raw_arg_loc.start > 0 && raw_arg_loc.end > raw_arg_loc.start,
+            "{} fixture needs a nonzero source span, got {raw_arg_loc}",
+            builtin.name()
+        );
+
+        let target = format!("{}_out", builtin.name().to_ascii_lowercase());
+        let tp = TestProject::new("snapshot_spans_before_static")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .named_dimension("Active", &["a1", "a2"])
+            .named_dimension("Selector", &["Active", "fixed"])
+            .array_with_ranges(
+                "vals[Selector]",
+                vec![("Active", "10 + TIME"), ("fixed", "20 + TIME")],
+            )
+            .array_aux(&format!("{target}[Active]"), &equation);
+        let project = tp.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        let vals = sync.models["main"].variables["vals"].source;
+        let out = sync.models["main"].variables[&target].source;
+
+        let source_axes = variable_dimensions(&db, vals, sync.project);
+        assert_eq!(source_axes.len(), 1, "the source fixture has one axis");
+        assert_eq!(
+            resolve_snapshot_axis_index(source_axes.first(), SnapshotAxisIndex::Bare("Active")),
+            Some("active".to_string()),
+            "{} the raw name is also a static source-axis element",
+            builtin.name()
+        );
+        let target_axes = variable_dimensions(&db, out, sync.project);
+        assert_eq!(target_axes.len(), 1, "the target fixture has one axis");
+        assert_eq!(
+            target_axes[0].name(),
+            "active",
+            "{} the same raw name is the active apply-to-all dimension",
+            builtin.name()
+        );
+
+        let parsed = parse_source_variable(&db, out, sync.project);
+        assert!(
+            parsed.implicit_vars.is_empty(),
+            "{} spans-first classification must not allocate a capture",
+            builtin.name()
+        );
+        let Ast::Arrayed(_, elements, None, false) = parsed
+            .variable
+            .ast()
+            .expect("the per-element snapshot equation must have an AST")
+        else {
+            panic!("{} must expand to production arrayed AST", builtin.name())
+        };
+        assert_eq!(elements.len(), 2, "the target has two production slots");
+        for expr in elements.values() {
+            let Expr0::App(UntypedBuiltinFn(_, args), _) = expr else {
+                panic!(
+                    "{} target element must remain a snapshot call",
+                    builtin.name()
+                )
+            };
+            assert!(
+                args[0] == *raw_arg,
+                "{} spans-first must retain the exact source argument subtree, including Loc",
+                builtin.name()
+            );
+            assert_eq!(
+                args[0].get_loc(),
+                raw_arg_loc,
+                "{} source argument location",
+                builtin.name()
+            );
+        }
+
+        let compiled = compile_project_incremental(&db, sync.project, "main")
+            .expect("the dual-classified snapshot must compile");
+        let root = &compiled.modules[&compiled.root];
+        let direct_reads = root
+            .compiled_flows
+            .code
+            .iter()
+            .filter(|opcode| match builtin {
+                SnapshotBuiltin::Previous => {
+                    matches!(
+                        opcode,
+                        Opcode::LoadPrev { .. } | Opcode::LoadPrevConst { .. }
+                    )
+                }
+                SnapshotBuiltin::Init => matches!(opcode, Opcode::LoadInitial { .. }),
+            })
+            .count();
+        assert_eq!(
+            direct_reads,
+            2,
+            "{} must emit one direct read per target element",
+            builtin.name()
+        );
+
+        let mut vm = crate::vm::Vm::new(compiled).expect("dual-classification VM");
+        vm.run_to_end().expect("dual-classification VM run");
+        let results = crate::test_common::collect_results(&vm.into_results());
+        let expected = match builtin {
+            SnapshotBuiltin::Previous => [-7.0, 10.0, 11.0],
+            SnapshotBuiltin::Init => [10.0, 10.0, 10.0],
+        };
+        for element in ["a1", "a2"] {
+            assert_eq!(
+                results[&format!("{target}[{element}]")],
+                expected,
+                "{} element-first VM value for {element}",
+                builtin.name()
+            );
+        }
+    }
 }
 
 /// Qualified module output ports name ordinary stored values after lowering.
@@ -1243,6 +1659,169 @@ fn test_ltm_bare_element_subscripts_no_helpers() {
     );
 }
 
+/// A source capture is a causal node from LTM's point of view, so changing a
+/// statically addressed snapshot into a direct read must also change the score
+/// topology in one specific way. The bare and qualified spellings of `a1`
+/// name the same storage slot and therefore share one arrayed `rate[a1] ->
+/// grow` score over `DimA`. XMILE footnote 9 makes the same-named variable
+/// `b2` irrelevant inside `rate[b2]`, so that read produces a second arrayed
+/// direct score. Only dynamic `idx` retains per-target captures and scalar
+/// score nodes.
+///
+/// This fixture exercises PREVIOUS because LTM scores the dt dependency graph.
+/// INIT contributes only initial-phase dependencies; its matching direct and
+/// capture decisions are covered by
+/// `user_element_snapshots_are_direct_for_both_intrinsics` and the exhaustive
+/// parse/codegen agreement table below.
+#[test]
+fn ltm_snapshot_element_reads_preserve_score_topology_and_values() {
+    use salsa::Setter;
+
+    use crate::db::{model_implicit_var_info, model_ltm_variables};
+    use crate::test_common::{TestProject, collect_results};
+
+    let project = TestProject::new("ltm_snapshot_element_topology")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("DimA", &["a1", "b2"])
+        .aux("idx", "2", None)
+        // XMILE footnote 9 makes the element name win inside `rate[...]` even
+        // though this same-named model variable exists.
+        .aux("b2", "2", None)
+        .array_with_ranges(
+            "rate[DimA]",
+            vec![("a1", "0.01 + TIME * 0.001"), ("b2", "0.02 + TIME * 0.001")],
+        )
+        .array_flow(
+            "grow[DimA]",
+            "pop[DimA] * (PREVIOUS(rate[a1], 0) + PREVIOUS(rate[DimA.a1], 0) + PREVIOUS(rate[idx], 0) + PREVIOUS(rate[b2], 0))",
+            None,
+        )
+        .array_stock("pop[DimA]", "100", &["grow"], &[], None)
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    sync.project.set_ltm_enabled(&mut db).to(true);
+    sync.project.set_ltm_discovery_mode(&mut db).to(true);
+    let model = sync.models["main"].source;
+
+    let mut helper_names: Vec<String> = model_implicit_var_info(&db, model, sync.project)
+        .keys()
+        .cloned()
+        .collect();
+    helper_names.sort();
+    assert_eq!(
+        helper_names,
+        [
+            "$\u{205A}grow\u{205A}0\u{205A}arg0\u{205A}a1",
+            "$\u{205A}grow\u{205A}0\u{205A}arg0\u{205A}b2",
+        ],
+        "only the dynamic source read may allocate captures"
+    );
+
+    let ltm = model_ltm_variables(&db, model, sync.project);
+    let direct_names = [
+        "$\u{205A}ltm\u{205A}link_score\u{205A}rate[a1]\u{2192}grow",
+        "$\u{205A}ltm\u{205A}link_score\u{205A}rate[b2]\u{2192}grow",
+    ];
+    for direct_name in direct_names {
+        let direct_scores: Vec<&LtmSyntheticVar> = ltm
+            .vars
+            .iter()
+            .filter(|var| var.name == direct_name)
+            .collect();
+        assert_eq!(
+            direct_scores.len(),
+            1,
+            "each concrete source element must have one coalesced score"
+        );
+        assert_eq!(direct_scores[0].dimensions, ["DimA"]);
+        assert!(
+            ltm.vars.iter().all(|var| {
+                var.name != format!("{direct_name}[a1]") && var.name != format!("{direct_name}[b2]")
+            }),
+            "the direct score must use its declared extent, not scalar names"
+        );
+    }
+
+    let scalar_capture_scores: Vec<&LtmSyntheticVar> = ltm
+        .vars
+        .iter()
+        .filter(|var| {
+            var.name
+                .starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}$\u{205A}grow\u{205A}")
+                && var.name.contains("\u{2192}grow[")
+        })
+        .collect();
+    assert_eq!(
+        scalar_capture_scores.len(),
+        2,
+        "one dynamic callsite times two target elements remains scalar scores"
+    );
+    assert!(
+        scalar_capture_scores
+            .iter()
+            .all(|score| score.dimensions.is_empty()),
+        "capture score variables are scalar"
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("the production LTM fixture must compile");
+    let offsets = compiled.offsets.clone();
+    let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+    vm.run_to_end()
+        .expect("the production LTM fixture must run");
+    let raw = vm.into_results();
+    let direct_values = |name: &str, slot: usize| {
+        let direct_base = offsets[&Ident::new(name)];
+        (0..raw.step_count)
+            .map(|step| raw.data[step * raw.step_size + direct_base + slot])
+            .collect::<Vec<_>>()
+    };
+    let expected_score = [0.0, 1.0, 0.5102040816326536, 0.4789272030651341];
+    let assert_series = |label: &str, actual: &[f64], expected: &[f64]| {
+        assert_eq!(actual.len(), expected.len(), "{label} series length");
+        for (step, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1e-12,
+                "{label} at step {step}: expected {expected}, got {actual}"
+            );
+        }
+    };
+    for name in direct_names {
+        for (slot, target_element) in ["a1", "b2"].into_iter().enumerate() {
+            assert_series(
+                &format!("{name}[{target_element}]"),
+                &direct_values(name, slot),
+                &expected_score,
+            );
+        }
+    }
+
+    let results = collect_results(&raw);
+    let expected_pop = [100.0, 100.0, 106.0, 112.784];
+    let expected_grow = [0.0, 6.0, 6.784, 7.669312000000001];
+    for element in ["a1", "b2"] {
+        assert_series(
+            &format!("pop[{element}]"),
+            &results[&format!("pop[{element}]")],
+            &expected_pop,
+        );
+        assert_series(
+            &format!("grow[{element}]"),
+            &results[&format!("grow[{element}]")],
+            &expected_grow,
+        );
+    }
+    for score in scalar_capture_scores {
+        assert_series(
+            &format!("scalar capture score {}", score.name),
+            &results[&score.name],
+            &expected_score,
+        );
+    }
+}
+
 use crate::snapshot_arg::SnapshotAccess;
 
 /// One `PREVIOUS`/`INIT` argument shape, and what each of the two decisions
@@ -1298,16 +1877,14 @@ struct AgreementRow {
 ///   inputs and bare modules are the non-storage lowering rows pinned for both
 ///   intrinsics by the two refusal-table tests above and the LTM twin.
 /// * An index that is BOTH `SpansDimension` and `Static` -- a name that is an
-///   active apply-to-all dimension and also an element of some other
-///   dimension. No corpus model reaches it: the branch of `index_is_static`
-///   that accepts a bare name at all needs the model's variable-name set,
-///   which only the LTM parse supplies, so only an LTM synthetic whose
-///   iterated dimension's name is also another dimension's element could
-///   (`ltm_augment::wrap_non_matching_in_previous` wraps such a reference
-///   without normalizing it); spans-first is what the replaced code did. The
-///   precedence is stated once in `SnapshotArg::subscripted` and pinned by its
-///   own test there, over the classified-index alphabet that is that
-///   function's actual domain.
+///   active apply-to-all dimension and also an element of another referenced
+///   axis -- is source-reachable through the per-name resolver and generated-
+///   LTM-reachable through its full dimension context. Spans-first precedence
+///   is pinned over the classified-index alphabet by
+///   `snapshot_arg::tests::the_index_fold_covers_every_combination`, and the
+///   production source derivation, preserved locations, zero-capture verdict,
+///   direct opcodes and VM values are pinned by
+///   `active_dimension_name_that_is_an_axis_element_spans_first_for_both_intrinsics`.
 /// * Lowered temporary arrays and position-specific view refusals are not
 ///   source-classification rows. Their typed-error propagation is covered by
 ///   `compiler::codegen::tests::previous_of_non_var_inside_subscript_index_is_err_not_panic`
@@ -1350,17 +1927,9 @@ fn every_prev_init_argument_shape_agrees_between_the_parse_and_codegen() {
                      codegen: collapsed StaticSubscript",
             a2a: false,
             equation: "PREVIOUS(vals[d.e2], 0)",
-            captures: true,
+            captures: false,
             codegen: Some(SnapshotAccess::Slot),
-            divergence: Some(
-                "a qualified `dimension.element` index folds to a constant regardless of \
-                 context, but the branch of `index_is_static` that recognizes one needs \
-                 the qualified dimension in `dimensions_ctx`, and the parse narrows that \
-                 context to the variable's own relevant dimensions and their map chains \
-                 -- empty for a SCALAR variable (a dimension edit must not re-parse every \
-                 unrelated variable). So the same argument captures here and does not in \
-                 the apply-to-all row below, whose own dimension is the qualified one",
-            ),
+            divergence: None,
         },
         AgreementRow {
             covers: "visitor: Subscript, qualified dimension.element, A2A parse. \
@@ -1375,17 +1944,9 @@ fn every_prev_init_argument_shape_agrees_between_the_parse_and_codegen() {
             covers: "visitor: Subscript, bare element name. codegen: collapsed StaticSubscript",
             a2a: false,
             equation: "PREVIOUS(vals[e1], 0)",
-            captures: true,
+            captures: false,
             codegen: Some(SnapshotAccess::Slot),
-            divergence: Some(
-                "XMILE lets an element name shadow a variable name, so without the \
-                 model's variable-name set the parse cannot tell `vals[e1]` from a \
-                 dynamic index through a variable named `e1` and captures \
-                 conservatively. Lowering knows `vals`' declared dimensions and \
-                 resolves the element, so codegen sees a fixed slot. Generalizing the \
-                 LTM path's rule to user equations removes the capture and changes the \
-                 artifact",
-            ),
+            divergence: None,
         },
         AgreementRow {
             covers: "visitor: Subscript, dynamic index. codegen: Expr::Subscript",
@@ -1444,6 +2005,30 @@ fn every_prev_init_argument_shape_agrees_between_the_parse_and_codegen() {
             equation: "INIT(vals[d])",
             captures: false,
             codegen: Some(SnapshotAccess::Slot),
+            divergence: None,
+        },
+        AgreementRow {
+            covers: "INIT twin of the scalar qualified-element row",
+            a2a: false,
+            equation: "INIT(vals[d.e2])",
+            captures: false,
+            codegen: Some(SnapshotAccess::Slot),
+            divergence: None,
+        },
+        AgreementRow {
+            covers: "INIT twin of the scalar bare-element row",
+            a2a: false,
+            equation: "INIT(vals[e1])",
+            captures: false,
+            codegen: Some(SnapshotAccess::Slot),
+            divergence: None,
+        },
+        AgreementRow {
+            covers: "INIT twin of the dynamic-index row",
+            a2a: false,
+            equation: "INIT(vals[idx])",
+            captures: true,
+            codegen: Some(SnapshotAccess::Capture),
             divergence: None,
         },
         AgreementRow {

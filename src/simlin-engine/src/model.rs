@@ -12,6 +12,8 @@ use crate::{datamodel, eqn_err};
 
 #[cfg(test)]
 use {
+    crate::builtins_visitor::SnapshotIndexResolver,
+    crate::common::canonicalize,
     crate::datamodel::Dimension,
     crate::units::Context,
     crate::variable::{ParseContext, parse_var},
@@ -19,6 +21,36 @@ use {
 
 #[cfg(test)]
 use crate::testutils::{x_aux, x_flow, x_model, x_module, x_stock};
+
+#[cfg(test)]
+struct DatamodelSnapshotIndexResolver<'a> {
+    model: &'a datamodel::Model,
+    dimensions: &'a DimensionsContext,
+}
+
+#[cfg(test)]
+impl SnapshotIndexResolver for DatamodelSnapshotIndexResolver<'_> {
+    fn snapshot_axis(&self, base: &str, axis: usize) -> Option<crate::dimensions::Dimension> {
+        let canonical_base = canonicalize(base);
+        let base = self
+            .model
+            .variables
+            .iter()
+            .find(|var| canonicalize(var.get_ident()) == canonical_base)?;
+        let equation = base.get_equation()?;
+        let dimension_names = match equation {
+            datamodel::Equation::Scalar(_) => &[][..],
+            datamodel::Equation::ApplyToAll(names, _)
+            | datamodel::Equation::Arrayed(names, _, _, _) => names.as_slice(),
+        };
+        let dimensions = crate::variable::get_dimensions(self.dimensions, dimension_names).ok()?;
+        dimensions.get(axis).cloned()
+    }
+
+    fn qualified_snapshot_position(&self, index: &str) -> Option<u32> {
+        self.dimensions.lookup(&canonicalize(index))
+    }
+}
 
 pub type VariableStage0 = Variable<datamodel::ModuleReference, Expr0>;
 
@@ -309,11 +341,16 @@ impl ModelStage0 {
         // form, and building it per variable is what the salsa path stopped
         // doing (it reads the cached `project_dimensions_context` instead).
         let dimensions_ctx = DimensionsContext::from(dimensions);
+        let snapshot_index_resolver = DatamodelSnapshotIndexResolver {
+            model: x_model,
+            dimensions: &dimensions_ctx,
+        };
         let ctx = ParseContext {
             dimensions: &dimensions_ctx,
             units_ctx,
             macro_registry: Some(&macro_registry),
             enclosing_model,
+            snapshot_index_resolver: Some(&snapshot_index_resolver),
         };
         let mut variable_list: Vec<VariableStage0> = x_model
             .variables

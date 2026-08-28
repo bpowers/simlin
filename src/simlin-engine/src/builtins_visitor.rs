@@ -16,7 +16,9 @@ use crate::common::{
 };
 #[cfg(test)]
 use crate::datamodel;
-use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
+use crate::dimensions::{
+    Dimension, DimensionsContext, SnapshotAxisIndex, SubscriptIterator, resolve_snapshot_axis_index,
+};
 use crate::eqn_err;
 use crate::module_functions::{
     MacroCallResolution, MacroRegistry, ModuleFunctionDescriptor, stdlib_descriptor,
@@ -29,6 +31,19 @@ use crate::snapshot_arg::{SnapshotAccess, SnapshotArg, SnapshotIndex};
 /// `&MacroRegistry` -- no `Option` handling at the `resolve_macro` call
 /// sites -- while still defaulting to "no macros".
 static EMPTY_MACRO_REGISTRY: LazyLock<MacroRegistry> = LazyLock::new(MacroRegistry::default);
+
+/// Supplies model-local facts for a source PREVIOUS/INIT subscript index.
+///
+/// Numeric indices and active apply-to-all dimensions are properties of the
+/// expression being walked and stay in [`BuiltinVisitor`]. The salsa and
+/// datamodel compilation paths derive these facts through their real inputs;
+/// [`resolve_snapshot_axis_index`] owns the final axis/index decision so the two
+/// paths cannot encode different precedence rules.
+pub(crate) trait SnapshotIndexResolver {
+    fn snapshot_axis(&self, base: &str, axis: usize) -> Option<Dimension>;
+
+    fn qualified_snapshot_position(&self, index: &str) -> Option<u32>;
+}
 
 /// The shared empty macro registry, for parse paths with no project macros
 /// in scope (the `parse_var` convenience wrapper and the many test call
@@ -310,6 +325,10 @@ pub struct BuiltinVisitor<'a> {
     /// cache key depends only on that source variable and project-global
     /// syntax context.
     model_var_names: Option<&'a HashSet<Ident<Canonical>>>,
+    /// Model-local source resolver for ordinary equations. Generated LTM
+    /// equations deliberately use `model_var_names` above: their helper and
+    /// same-named-variable shadowing rules are a separate compilation boundary.
+    snapshot_index_resolver: Option<&'a dyn SnapshotIndexResolver>,
     /// The per-project macro registry. A call name that resolves here is
     /// expanded as a macro -- *before* alias-normalization, `is_builtin_fn`,
     /// or the stdlib lookup -- so a project macro shadows an identically
@@ -368,6 +387,7 @@ impl<'a> BuiltinVisitor<'a> {
             active_subscript: None,
             dimensions_ctx: None,
             model_var_names: None,
+            snapshot_index_resolver: None,
             macro_registry: &EMPTY_MACRO_REGISTRY,
             enclosing_model: None,
             per_element_equation: false,
@@ -415,6 +435,7 @@ impl<'a> BuiltinVisitor<'a> {
             active_subscript: Some(subscript.to_vec()),
             dimensions_ctx,
             model_var_names: None,
+            snapshot_index_resolver: None,
             macro_registry: &EMPTY_MACRO_REGISTRY,
             enclosing_model: None,
             per_element_equation: false,
@@ -453,6 +474,14 @@ impl<'a> BuiltinVisitor<'a> {
         model_var_names: Option<&'a HashSet<Ident<Canonical>>>,
     ) -> Self {
         self.model_var_names = model_var_names;
+        self
+    }
+
+    fn with_snapshot_index_resolver(
+        mut self,
+        resolver: Option<&'a dyn SnapshotIndexResolver>,
+    ) -> Self {
+        self.snapshot_index_resolver = resolver;
         self
     }
 
@@ -511,31 +540,55 @@ impl<'a> BuiltinVisitor<'a> {
     ///
     /// Returns true for:
     ///   * a numeric constant;
-    ///   * a qualified `dimension·element` reference (which
-    ///     `constify_dimensions` folds to a constant during Expr1 lowering,
-    ///     regardless of context);
+    ///   * a qualified `dimension·element` reference known to the
+    ///     ordinary-source resolver or generated equation's dimension context;
     ///   * for an LTM synthetic equation whose model variable-name set is
     ///     supplied, a bare identifier that is a dimension element and is not
     ///     shadowed by a variable or helper synthesized during this walk.
     ///
-    /// The ordinary source parse intentionally receives only the variable's
-    /// relevant dimensions, so a scalar equation still treats a bare element
-    /// conservatively until Phase 7.5 moves the complete verdict to lowering.
-    /// LTM parses receive the project-wide dimension context plus their
-    /// model's name set, preserving both bare-element helper reduction and
-    /// variable shadowing until Phase 7.5 moves the verdict to lowering.
-    fn index_is_static(&self, idx: &IndexExpr0) -> bool {
+    /// Ordinary source parsing delegates model-local resolution through
+    /// `snapshot_index_resolver`. LTM parsing receives the project-wide
+    /// dimension context plus its model's name set and retains its generated
+    /// equation shadowing rule locally.
+    fn index_is_static(&self, base: &str, axis: usize, idx: &IndexExpr0) -> bool {
         match idx {
             IndexExpr0::Expr(Expr0::Const(_, _, _)) => true,
             IndexExpr0::Expr(Expr0::Var(ident, _)) => {
                 let canonical = canonicalize(ident.as_str());
-                let Some(ctx) = self.dimensions_ctx else {
-                    return false;
-                };
-                if ctx.lookup(&canonical).is_some() {
+                if let Some(resolver) = self.snapshot_index_resolver {
+                    let axis_dim = resolver.snapshot_axis(base, axis);
+                    let resolved = if canonical.contains('·') {
+                        resolver
+                            .qualified_snapshot_position(&canonical)
+                            .and_then(|position| {
+                                resolve_snapshot_axis_index(
+                                    axis_dim.as_ref(),
+                                    SnapshotAxisIndex::QualifiedPosition(position),
+                                )
+                            })
+                    } else {
+                        resolve_snapshot_axis_index(
+                            axis_dim.as_ref(),
+                            SnapshotAxisIndex::Bare(&canonical),
+                        )
+                    };
+                    return resolved.is_some();
+                }
+
+                // Generated LTM equations have no source resolver. Preserve
+                // their dialect's established qualified-name and shadowing
+                // classifier: LTM owns the equation text and supplies the
+                // complete dimension and model-variable namespaces below.
+                if self
+                    .dimensions_ctx
+                    .is_some_and(|ctx| ctx.lookup(&canonical).is_some())
+                {
                     return true;
                 }
                 let Some(var_names) = self.model_var_names else {
+                    return false;
+                };
+                let Some(ctx) = self.dimensions_ctx else {
                     return false;
                 };
                 let elem = crate::common::CanonicalElementName::from_raw(&canonical);
@@ -604,10 +657,10 @@ impl<'a> BuiltinVisitor<'a> {
     /// declares as an element -- and what such an index leaves standing is what
     /// the reference means. [`SnapshotArg::subscripted`] carries the same
     /// precedence for the fold; the two must agree.
-    fn classify_snapshot_index(&self, idx: &IndexExpr0) -> SnapshotIndex {
+    fn classify_snapshot_index(&self, base: &str, axis: usize, idx: &IndexExpr0) -> SnapshotIndex {
         if self.index_spans_a_dimension(idx) {
             SnapshotIndex::SpansDimension
-        } else if self.index_is_static(idx) {
+        } else if self.index_is_static(base, axis, idx) {
             SnapshotIndex::Static
         } else {
             SnapshotIndex::Dynamic
@@ -629,7 +682,10 @@ impl<'a> BuiltinVisitor<'a> {
             Expr0::Var(ident, _) if !self.is_module_backed_ident(ident) => SnapshotArg::whole(),
             Expr0::Subscript(id, indices, _) if !self.is_module_backed_ident(id) => {
                 SnapshotArg::subscripted(
-                    indices.iter().map(|idx| self.classify_snapshot_index(idx)),
+                    indices
+                        .iter()
+                        .enumerate()
+                        .map(|(axis, idx)| self.classify_snapshot_index(id.as_str(), axis, idx)),
                 )
             }
             _ => SnapshotArg::not_storage(),
@@ -1308,7 +1364,8 @@ impl<'a> BuiltinVisitor<'a> {
 ///
 /// `model_var_names` is supplied only for generated LTM equations. It keeps
 /// bare-element indices conservative when a same-named model variable exists;
-/// source parsing deliberately passes `None` to keep its cache key local.
+/// ordinary source parsing uses the per-name `SnapshotIndexResolver` entry
+/// point below instead of a whole-model name set.
 ///
 pub fn instantiate_implicit_modules(
     variable_name: &str,
@@ -1318,11 +1375,35 @@ pub fn instantiate_implicit_modules(
     macro_registry: &MacroRegistry,
     enclosing_model: Option<&str>,
 ) -> std::result::Result<(Ast<Expr0>, Vec<ImplicitVar>), EquationError> {
+    instantiate_implicit_modules_with_resolver(
+        variable_name,
+        ast,
+        dimensions_ctx,
+        model_var_names,
+        macro_registry,
+        enclosing_model,
+        None,
+    )
+}
+
+/// Ordinary-source entry point with model-local snapshot-index resolution.
+/// Generated equations use [`instantiate_implicit_modules`] and retain their
+/// path-specific shadowing inputs.
+pub(crate) fn instantiate_implicit_modules_with_resolver(
+    variable_name: &str,
+    ast: Ast<Expr0>,
+    dimensions_ctx: Option<&DimensionsContext>,
+    model_var_names: Option<&HashSet<Ident<Canonical>>>,
+    macro_registry: &MacroRegistry,
+    enclosing_model: Option<&str>,
+    snapshot_index_resolver: Option<&dyn SnapshotIndexResolver>,
+) -> std::result::Result<(Ast<Expr0>, Vec<ImplicitVar>), EquationError> {
     match ast {
         Ast::Scalar(ast) => {
             let mut builtin_visitor = BuiltinVisitor::new(variable_name)
                 .with_dimensions_ctx(dimensions_ctx)
                 .with_model_var_names(model_var_names)
+                .with_snapshot_index_resolver(snapshot_index_resolver)
                 .with_macro_registry(macro_registry)
                 .with_enclosing_model(enclosing_model);
             let transformed = builtin_visitor.walk(ast)?;
@@ -1347,6 +1428,7 @@ pub fn instantiate_implicit_modules(
                         dimensions_ctx,
                     )
                     .with_model_var_names(model_var_names)
+                    .with_snapshot_index_resolver(snapshot_index_resolver)
                     .with_macro_registry(macro_registry)
                     .with_enclosing_model(enclosing_model);
                     let transformed_ast = visitor.walk(ast_clone)?;
@@ -1364,6 +1446,7 @@ pub fn instantiate_implicit_modules(
                 let mut builtin_visitor = BuiltinVisitor::new(variable_name)
                     .with_dimensions_ctx(dimensions_ctx)
                     .with_model_var_names(model_var_names)
+                    .with_snapshot_index_resolver(snapshot_index_resolver)
                     .with_macro_registry(macro_registry)
                     .with_enclosing_model(enclosing_model);
                 let transformed = builtin_visitor.walk(ast)?;
@@ -1394,6 +1477,7 @@ pub fn instantiate_implicit_modules(
                         dimensions_ctx,
                     )
                     .with_model_var_names(model_var_names)
+                    .with_snapshot_index_resolver(snapshot_index_resolver)
                     .with_macro_registry(macro_registry)
                     .with_enclosing_model(enclosing_model)
                     // Per-element slots have distinct equations, so any arrayed
@@ -1408,6 +1492,7 @@ pub fn instantiate_implicit_modules(
                     let mut default_visitor = BuiltinVisitor::new(variable_name)
                         .with_dimensions_ctx(dimensions_ctx)
                         .with_model_var_names(model_var_names)
+                        .with_snapshot_index_resolver(snapshot_index_resolver)
                         .with_macro_registry(macro_registry)
                         .with_enclosing_model(enclosing_model);
                     let transformed = default_visitor.walk(default_expr)?;
@@ -1429,6 +1514,7 @@ pub fn instantiate_implicit_modules(
                 let mut builtin_visitor = BuiltinVisitor::new(variable_name)
                     .with_dimensions_ctx(dimensions_ctx)
                     .with_model_var_names(model_var_names)
+                    .with_snapshot_index_resolver(snapshot_index_resolver)
                     .with_macro_registry(macro_registry)
                     .with_enclosing_model(enclosing_model);
                 // One visitor across every slot, so the `n` counter that names

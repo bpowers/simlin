@@ -348,9 +348,9 @@ fn modules_carry_state(
 /// The model's full variable-name set for generated LTM equation parsing.
 ///
 /// LTM equations use the project-global dimension context. The parallel name
-/// set preserves the existing element-versus-variable shadowing rule until
-/// Phase 7.5 moves that classification to lowering; it is not part of the
-/// source-equation parse cache key.
+/// set preserves their element-versus-variable shadowing rule. It is confined
+/// to the generated-equation path; source equations resolve candidate names
+/// individually through salsa projections instead of depending on this set.
 #[salsa::tracked(returns(ref))]
 pub(super) fn ltm_model_var_names(
     db: &dyn Db,

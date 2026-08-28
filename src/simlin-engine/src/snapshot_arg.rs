@@ -38,8 +38,10 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SnapshotIndex {
     /// Resolves to a fixed element at compile time: a numeric constant, a
-    /// qualified `dimension·element` reference, or a bare element name that no
-    /// variable shadows.
+    /// qualified `dimension·element` reference with a valid position on the
+    /// referenced axis, or a bare element declared by that axis. Generated LTM
+    /// equations apply their own conservative name-shadowing rule before
+    /// constructing this value.
     Static,
     /// Leaves a whole dimension standing -- a wildcard, a star range, or a bare
     /// reference to one of the active apply-to-all dimensions -- so the

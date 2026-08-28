@@ -2491,13 +2491,10 @@ fn a_nested_array_producing_builtin_inside_arithmetic_is_materialized_once() {
 /// view -- a legitimate `VECTOR ELM MAP` base (the mapping ranges over the whole
 /// source variable) and a degenerate one-element `VECTOR SELECT`.
 ///
-/// The SPELLING decides which route the element takes, and the two are
-/// different: a NUMERIC index (`vals[1]`) reaches the view over the snapshot,
-/// while the bare element NAME the issue's table uses (`vals[e1]`) is not
-/// accepted as a static index on the user-equation parse path, so it is read
-/// through a scalar capture helper of extent one instead. Both are asserted
-/// below, each against its own oracle, rather than one standing in for the
-/// other -- the comments on each `compare` call carry the difference.
+/// Numeric (`vals[1]`) and bare-element (`vals[e1]`) spellings both resolve to
+/// the same single-element snapshot view. Both are asserted below because the
+/// former is classified from syntax alone while the latter uses the source
+/// model's per-name axis resolver.
 #[test]
 fn every_row_of_the_issue_995_table_compiles() {
     // The issue's own dimension: element names, so `vals[e1]` is a literal
@@ -2595,25 +2592,17 @@ fn every_row_of_the_issue_995_table_compiles() {
         "VECTOR ELM MAP(PREVIOUS(vals[1]), offs[d])",
         "VECTOR ELM MAP(cap[1], offs[d])",
     );
-    // The SAME element spelled with its bare NAME takes a different route, and
-    // that is the spelling the issue's table uses. `index_is_static` will not
-    // accept an unqualified element name on the user-equation parse path (such a
-    // name can be shadowed by a variable, and the disambiguating check is
-    // deliberately disabled there to stay incremental under renames), so
-    // `builtins_visitor` synthesizes a scalar capture helper and `PREVIOUS`
-    // reads THAT. The source is then the helper -- one slot -- and ELM MAP's
-    // "range over the source variable's full storage" rule applies to it. That
-    // is the same rule a materialized operand follows
-    // (`materializing_an_elm_map_source_confines_the_mapping_to_the_temp`) and
-    // the same answer a practitioner gets by writing the capture out, so it is
-    // self-consistent rather than a second semantics -- but the two spellings DO
-    // mean different things, and only the front end decides which, so both are
-    // pinned rather than one standing in for the other.
+    // The SAME element spelled with its bare NAME is the issue table's exact
+    // row. The source resolver proves `e1` belongs to `vals`' first axis; under
+    // XMILE footnote 9 a same-named model variable would be irrelevant inside
+    // that subscript. It therefore reaches lowering as the same collapsed
+    // `StaticSubscript` as the numeric spelling. The array-valued reference is
+    // the oracle for the previous snapshot, with `[1]` selecting the same view.
     compare(
         "VECTOR ELM MAP with a bare-element-name PREVIOUS base",
-        ("h", "PREVIOUS(vals[e1])"),
+        ("cap[d]", "PREVIOUS(vals[d])"),
         "VECTOR ELM MAP(PREVIOUS(vals[e1]), offs[d])",
-        "VECTOR ELM MAP(h, offs[d])",
+        "VECTOR ELM MAP(cap[1], offs[d])",
     );
     compare(
         "VECTOR SELECT over a single-element PREVIOUS selection",

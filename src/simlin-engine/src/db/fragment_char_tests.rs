@@ -2836,13 +2836,16 @@ fn multi_temp_fragment_is_byte_identical_across_fresh_databases() {
 fn module_helper_add_reparses_only_the_added_variable() {
     use crate::db::exec_probe::ProbedDb;
 
-    // `probe` reads `k`; `smoothed` reads `k` through a SMTH1 instance. The
-    // variable each scenario adds is independent of all three.
+    // `probe` exercises D3's model-local bare-element classifier;
+    // `smoothed` reads `k` through a SMTH1 instance. The variable each
+    // scenario adds is independent of all four existing sources.
     let project_with = |extra: Option<(&str, &str)>| {
         let mut tp = TestProject::new("frag_cache_module_ident_edge")
             .with_sim_time(0.0, 2.0, 1.0)
+            .named_dimension("d", &["e1", "e2"])
+            .array_with_ranges("vals[d]", vec![("e1", "10"), ("e2", "20")])
             .scalar_aux("k", "3")
-            .scalar_aux("probe", "k * 2")
+            .scalar_aux("probe", "PREVIOUS(vals[e2], 0)")
             .scalar_aux("smoothed", "SMTH1(k, 2)");
         if let Some((name, eqn)) = extra {
             tp = tp.scalar_aux(name, eqn);

@@ -8,7 +8,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::ast::Loc;
 use crate::ast::{Ast, Expr0, Expr2, IndexExpr2};
 use crate::builtins::{BuiltinContents, BuiltinFn, walk_builtin_expr};
-use crate::builtins_visitor::{empty_macro_registry, instantiate_implicit_modules};
+use crate::builtins_visitor::{
+    SnapshotIndexResolver, empty_macro_registry, instantiate_implicit_modules_with_resolver,
+};
 use crate::capture::ImplicitVar;
 use crate::common::{
     Canonical, CanonicalElementName, DimensionName, EquationError, EquationResult, Ident,
@@ -1064,6 +1066,10 @@ pub struct ParseContext<'a> {
     /// exception (a macro body's renamed `init`/`previous` builtin must
     /// resolve to the intrinsic, not recurse into the like-named macro).
     pub enclosing_model: Option<&'a str>,
+    /// Model-local resolver for PREVIOUS/INIT element subscripts. Ordinary
+    /// source compilers provide one; generated helper/LTM parses keep their
+    /// own explicitly supplied classification context.
+    pub(crate) snapshot_index_resolver: Option<&'a dyn SnapshotIndexResolver>,
 }
 
 impl<'a> ParseContext<'a> {
@@ -1074,6 +1080,7 @@ impl<'a> ParseContext<'a> {
             units_ctx,
             macro_registry: None,
             enclosing_model: None,
+            snapshot_index_resolver: None,
         }
     }
 }
@@ -1123,13 +1130,14 @@ where
                 // `&'static` empty default coerce to the parameter's
                 // borrow lifetime instead of forcing it to `'static`.
                 let registry = ctx.macro_registry.unwrap_or_else(|| empty_macro_registry());
-                match instantiate_implicit_modules(
+                match instantiate_implicit_modules_with_resolver(
                     ident,
                     ast,
                     Some(dimensions),
                     None,
                     registry,
                     ctx.enclosing_model,
+                    ctx.snapshot_index_resolver,
                 ) {
                     Ok((ast, new_vars)) => {
                         // MERGE rather than append. This closure runs twice per

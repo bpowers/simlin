@@ -99,14 +99,6 @@ const ROWS: &[CaptureRow] = &[
         rewritten: None,
     },
     CaptureRow {
-        covers: "a qualified dimension.element index in a SCALAR parse, which passes no \
-                 dimensions context (the 7.1 divergence)",
-        parent: Parent::Scalar,
-        equation: "PREVIOUS(vals[d.e2], 0)",
-        captures: &[("$⁚lagged⁚0⁚arg0", CaptureKind::Previous, "vals[d·e2]", &[])],
-        rewritten: None,
-    },
-    CaptureRow {
         covers: "two captures in one equation: the walk counter is shared and increments once \
                  per capture, so the second is `1`",
         parent: Parent::Scalar,
