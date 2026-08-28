@@ -43,10 +43,15 @@
 //! hoisted-argument list do not correspond one-to-one.
 
 use crate::ast::{Ast, Expr0, print_eqn};
-use crate::builtins_visitor::{empty_macro_registry, instantiate_implicit_modules};
-use crate::common::{Canonical, EquationError, Ident};
+use crate::builtins_visitor::{
+    ActiveElementRef, empty_macro_registry, instantiate_implicit_modules,
+    substitute_resolved_active_dimension_refs,
+};
+use crate::common::{
+    Canonical, CanonicalDimensionName, CanonicalElementName, EquationError, Ident,
+};
 use crate::datamodel;
-use crate::dimensions::DimensionsContext;
+use crate::dimensions::{Dimension, DimensionsContext};
 use crate::model::VariableStage0;
 use crate::variable::{VarKind, Variable, get_dimensions};
 
@@ -386,6 +391,34 @@ pub struct HoistedArg {
     /// apply-to-all element substitution.
     arg: Expr0,
     suffix: Option<String>,
+    /// The typed element context that produced `suffix`. Source parsing has a
+    /// deliberately narrow dimension context, so a foreign mapped axis in the
+    /// argument can only be projected once fragment construction supplies the
+    /// full project dimensions.
+    active_element: Option<ActiveElementContext>,
+}
+
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
+struct ActiveElementContext {
+    coordinates: Vec<ActiveElementCoordinate>,
+}
+
+/// The complete persistent context for one active rank position. Canonical
+/// names share their interned payloads; no dimension element table is retained
+/// per helper.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
+struct ActiveElementCoordinate {
+    axis: CanonicalDimensionName,
+    element: CanonicalElementName,
+}
+
+#[cfg(test)]
+pub(crate) struct ActiveElementMetadataForTest {
+    pub(crate) coordinates: Vec<(String, String)>,
+    pub(crate) context_size: usize,
+    pub(crate) coordinate_size: usize,
 }
 
 impl HoistedArg {
@@ -401,6 +434,39 @@ impl HoistedArg {
             id,
             arg,
             suffix,
+            active_element: None,
+        }
+    }
+
+    pub(crate) fn new_in_element(
+        parent: &str,
+        id: usize,
+        index: usize,
+        arg: Expr0,
+        dimensions: &[Dimension],
+        subscript: &[String],
+    ) -> Self {
+        assert_eq!(
+            dimensions.len(),
+            subscript.len(),
+            "active dimensions and coordinates are positional"
+        );
+        let rendered_suffix = subscript.join(",").to_lowercase();
+        let suffix = (!rendered_suffix.is_empty()).then_some(rendered_suffix);
+        let coordinates = dimensions
+            .iter()
+            .zip(subscript)
+            .map(|(dimension, element)| ActiveElementCoordinate {
+                axis: dimension.canonical_name().clone(),
+                element: CanonicalElementName::from_raw(element),
+            })
+            .collect();
+        HoistedArg {
+            ident: synthetic_ident(parent, id, &format!("arg{index}"), suffix.as_deref()),
+            id,
+            arg,
+            suffix,
+            active_element: Some(ActiveElementContext { coordinates }),
         }
     }
 
@@ -423,14 +489,59 @@ impl HoistedArg {
     pub(crate) fn same_definition(&self, other: &Self) -> bool {
         self.ident == other.ident
             && self.suffix == other.suffix
+            && self.active_element == other.active_element
             && self.arg.eq_ignoring_loc(&other.arg)
     }
 
+    /// Expose the resident active-element shape to structural tests. The two
+    /// sizes pin the context to one coordinate vector and a coordinate to two
+    /// interned canonical-name handles; a full `Dimension` or second resident
+    /// collection cannot be added without moving this boundary.
+    #[cfg(test)]
+    pub(crate) fn active_element_metadata_for_test(&self) -> Option<ActiveElementMetadataForTest> {
+        self.active_element
+            .as_ref()
+            .map(|active| ActiveElementMetadataForTest {
+                coordinates: active
+                    .coordinates
+                    .iter()
+                    .map(|coordinate| {
+                        (
+                            coordinate.axis.as_str().to_string(),
+                            coordinate.element.as_str().to_string(),
+                        )
+                    })
+                    .collect(),
+                context_size: std::mem::size_of::<ActiveElementContext>(),
+                coordinate_size: std::mem::size_of::<ActiveElementCoordinate>(),
+            })
+    }
+
     pub(crate) fn variable_stage0(&self, dimensions: &DimensionsContext) -> VariableStage0 {
+        let arg = match &self.active_element {
+            Some(active) => {
+                let active_elements: Vec<_> = active
+                    .coordinates
+                    .iter()
+                    .map(|coordinate| ActiveElementRef {
+                        dimension: dimensions
+                            .get(&coordinate.axis)
+                            .expect("an active helper axis must remain in project dimensions"),
+                        element: coordinate.element.as_str(),
+                    })
+                    .collect();
+                substitute_resolved_active_dimension_refs(
+                    self.arg.clone(),
+                    &active_elements,
+                    Some(dimensions),
+                )
+            }
+            None => self.arg.clone(),
+        };
         subtree_variable_stage0(
             &self.ident,
-            Some(Ast::Scalar(self.arg.clone())),
-            datamodel::Equation::Scalar(print_eqn(&self.arg)),
+            Some(Ast::Scalar(arg.clone())),
+            datamodel::Equation::Scalar(print_eqn(&arg)),
             Vec::new(),
             dimensions,
         )

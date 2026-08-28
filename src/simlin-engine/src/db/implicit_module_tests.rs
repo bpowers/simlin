@@ -141,28 +141,151 @@ const ROWS: &[ModuleRow] = &[
     },
     ModuleRow {
         covers: "SMTHN's order argument is consumed by `rewrite_alias_module_call`, which \
-                 rewrites the call to SMTH3 and DEFAULTS the initial value to the input -- so \
-                 the input expression is hoisted TWICE, under two names",
+                 rewrites the call to SMTH3 and leaves the optional initial-value port unwired, \
+                 so the stdlib module defaults it to the one computed input helper",
         parent: Parent::Scalar,
         equation: "SMTHN(k * 2, 4, 3)",
         helpers: &[
             "$⁚out⁚0⁚arg0 = aux k * 2",
             "$⁚out⁚0⁚arg1 = aux 4",
-            "$⁚out⁚0⁚arg2 = aux k * 2",
             "$⁚out⁚0⁚smth3 = module stdlib⁚smth3 [$⁚out⁚0⁚arg0->$⁚out⁚0⁚smth3.input, \
-             $⁚out⁚0⁚arg1->$⁚out⁚0⁚smth3.delay_time, \
-             $⁚out⁚0⁚arg2->$⁚out⁚0⁚smth3.initial_value]",
+             $⁚out⁚0⁚arg1->$⁚out⁚0⁚smth3.delay_time]",
         ],
     },
     ModuleRow {
-        covers: "DELAYN order 1 rewrites to DELAY1, and its defaulted initial value is the \
-                 duplicated input hoist the 7.5 shape list owns",
+        covers: "DELAYN order 1 rewrites to DELAY1, and the omitted trailing port lets the \
+                 stdlib module default initialization to the bare input without a helper",
         parent: Parent::Scalar,
         equation: "DELAYN(k, 2, 1)",
         helpers: &[
             "$⁚out⁚0⁚arg1 = aux 2",
             "$⁚out⁚0⁚delay1 = module stdlib⁚delay1 [k->$⁚out⁚0⁚delay1.input, \
-             $⁚out⁚0⁚arg1->$⁚out⁚0⁚delay1.delay_time, k->$⁚out⁚0⁚delay1.initial_value]",
+             $⁚out⁚0⁚arg1->$⁚out⁚0⁚delay1.delay_time]",
+        ],
+    },
+    ModuleRow {
+        covers: "DELAYN order 1 leaves the optional initial port unwired, so the stdlib module \
+                 defaults to the one computed input helper",
+        parent: Parent::Scalar,
+        equation: "DELAYN(k * 2, 2, 1)",
+        helpers: &[
+            "$⁚out⁚0⁚arg0 = aux k * 2",
+            "$⁚out⁚0⁚arg1 = aux 2",
+            "$⁚out⁚0⁚delay1 = module stdlib⁚delay1 \
+             [$⁚out⁚0⁚arg0->$⁚out⁚0⁚delay1.input, \
+             $⁚out⁚0⁚arg1->$⁚out⁚0⁚delay1.delay_time]",
+        ],
+    },
+    ModuleRow {
+        covers: "DELAYN order 3 uses the same sparse optional-port rule as order 1",
+        parent: Parent::Scalar,
+        equation: "DELAYN(k * 2, 2, 3)",
+        helpers: &[
+            "$⁚out⁚0⁚arg0 = aux k * 2",
+            "$⁚out⁚0⁚arg1 = aux 2",
+            "$⁚out⁚0⁚delay3 = module stdlib⁚delay3 \
+             [$⁚out⁚0⁚arg0->$⁚out⁚0⁚delay3.input, \
+             $⁚out⁚0⁚arg1->$⁚out⁚0⁚delay3.delay_time]",
+        ],
+    },
+    ModuleRow {
+        covers: "an explicit DELAYN initial expression is its own source argument even when \
+                 it prints like the input, so its distinct source span retains a distinct helper",
+        parent: Parent::Scalar,
+        equation: "DELAYN(k * 2, 2, 1, k * 2)",
+        helpers: &[
+            "$⁚out⁚0⁚arg0 = aux k * 2",
+            "$⁚out⁚0⁚arg1 = aux 2",
+            "$⁚out⁚0⁚arg2 = aux k * 2",
+            "$⁚out⁚0⁚delay1 = module stdlib⁚delay1 \
+             [$⁚out⁚0⁚arg0->$⁚out⁚0⁚delay1.input, \
+             $⁚out⁚0⁚arg1->$⁚out⁚0⁚delay1.delay_time, \
+             $⁚out⁚0⁚arg2->$⁚out⁚0⁚delay1.initial_value]",
+        ],
+    },
+    ModuleRow {
+        covers: "a dynamic input expression is evaluated by one input helper while the optional \
+                 initial port remains sparse",
+        parent: Parent::Scalar,
+        equation: "DELAYN(vals[idx] * 2, 2, 1)",
+        helpers: &[
+            "$⁚out⁚0⁚arg0 = aux vals[idx] * 2",
+            "$⁚out⁚0⁚arg1 = aux 2",
+            "$⁚out⁚0⁚delay1 = module stdlib⁚delay1 \
+             [$⁚out⁚0⁚arg0->$⁚out⁚0⁚delay1.input, \
+             $⁚out⁚0⁚arg1->$⁚out⁚0⁚delay1.delay_time]",
+        ],
+    },
+    ModuleRow {
+        covers: "PREVIOUS and INIT nested in the default input keep their own typed captures, \
+                 while the enclosing computed value is hoisted once",
+        parent: Parent::Scalar,
+        equation: "DELAYN(PREVIOUS(k * 2, -1) + INIT(k * 3), 2, 1)",
+        helpers: &[
+            "$⁚out⁚0⁚arg0 = capture[] k * 2",
+            "$⁚out⁚1⁚arg0 = capture[] k * 3",
+            "$⁚out⁚2⁚arg0 = aux previous(\"$⁚out⁚0⁚arg0\", -1) + init(\"$⁚out⁚1⁚arg0\")",
+            "$⁚out⁚2⁚arg1 = aux 2",
+            "$⁚out⁚2⁚delay1 = module stdlib⁚delay1 \
+             [$⁚out⁚2⁚arg0->$⁚out⁚2⁚delay1.input, \
+             $⁚out⁚2⁚arg1->$⁚out⁚2⁚delay1.delay_time]",
+        ],
+    },
+    ModuleRow {
+        covers: "a nested implicit module is expanded first; the outer DELAYN leaves its \
+                 optional initial port to the canonical stdlib fallback",
+        parent: Parent::Scalar,
+        equation: "DELAYN(SMTH1(k, 1) + 1, 2, 1)",
+        helpers: &[
+            "$⁚out⁚0⁚arg1 = aux 1",
+            "$⁚out⁚0⁚smth1 = module stdlib⁚smth1 [k->$⁚out⁚0⁚smth1.input, \
+             $⁚out⁚0⁚arg1->$⁚out⁚0⁚smth1.delay_time]",
+            "$⁚out⁚1⁚arg0 = aux \"$⁚out⁚0⁚smth1·output\" + 1",
+            "$⁚out⁚1⁚arg1 = aux 2",
+            "$⁚out⁚1⁚delay1 = module stdlib⁚delay1 \
+             [$⁚out⁚1⁚arg0->$⁚out⁚1⁚delay1.input, \
+             $⁚out⁚1⁚arg1->$⁚out⁚1⁚delay1.delay_time]",
+        ],
+    },
+    ModuleRow {
+        covers: "two DELAYN callsites with text-equal inputs retain separate callsite ids and \
+                 each supplies only its own module instance's input port",
+        parent: Parent::Scalar,
+        equation: "DELAYN(k * 2, 2, 1) + DELAYN(k * 2, 2, 1)",
+        helpers: &[
+            "$⁚out⁚0⁚arg0 = aux k * 2",
+            "$⁚out⁚0⁚arg1 = aux 2",
+            "$⁚out⁚0⁚delay1 = module stdlib⁚delay1 \
+             [$⁚out⁚0⁚arg0->$⁚out⁚0⁚delay1.input, \
+             $⁚out⁚0⁚arg1->$⁚out⁚0⁚delay1.delay_time]",
+            "$⁚out⁚1⁚arg0 = aux k * 2",
+            "$⁚out⁚1⁚arg1 = aux 2",
+            "$⁚out⁚1⁚delay1 = module stdlib⁚delay1 \
+             [$⁚out⁚1⁚arg0->$⁚out⁚1⁚delay1.input, \
+             $⁚out⁚1⁚arg1->$⁚out⁚1⁚delay1.delay_time]",
+        ],
+    },
+    ModuleRow {
+        covers: "an apply-to-all DELAYN call keeps one computed input helper per element and \
+                 leaves each module's optional initial port unwired",
+        parent: Parent::ApplyToAll,
+        equation: "DELAYN(vals[d] * 2, 2, 1)",
+        helpers: &[
+            "$⁚out⁚0⁚arg0⁚e1 = aux vals[d·e1] * 2",
+            "$⁚out⁚0⁚arg1⁚e1 = aux 2",
+            "$⁚out⁚0⁚delay1⁚e1 = module stdlib⁚delay1 \
+             [$⁚out⁚0⁚arg0⁚e1->$⁚out⁚0⁚delay1⁚e1.input, \
+             $⁚out⁚0⁚arg1⁚e1->$⁚out⁚0⁚delay1⁚e1.delay_time]",
+            "$⁚out⁚0⁚arg0⁚e2 = aux vals[d·e2] * 2",
+            "$⁚out⁚0⁚arg1⁚e2 = aux 2",
+            "$⁚out⁚0⁚delay1⁚e2 = module stdlib⁚delay1 \
+             [$⁚out⁚0⁚arg0⁚e2->$⁚out⁚0⁚delay1⁚e2.input, \
+             $⁚out⁚0⁚arg1⁚e2->$⁚out⁚0⁚delay1⁚e2.delay_time]",
+            "$⁚out⁚0⁚arg0⁚e3 = aux vals[d·e3] * 2",
+            "$⁚out⁚0⁚arg1⁚e3 = aux 2",
+            "$⁚out⁚0⁚delay1⁚e3 = module stdlib⁚delay1 \
+             [$⁚out⁚0⁚arg0⁚e3->$⁚out⁚0⁚delay1⁚e3.input, \
+             $⁚out⁚0⁚arg1⁚e3->$⁚out⁚0⁚delay1⁚e3.delay_time]",
         ],
     },
     ModuleRow {
@@ -333,6 +456,7 @@ fn model_for(row: &ModuleRow) -> (TestProject, &'static str) {
         .named_dimension("d", &["e1", "e2", "e3"])
         .array_with_ranges("vals[d]", vec![("e1", "30"), ("e2", "10"), ("e3", "20")])
         .scalar_aux("k", "3")
+        .scalar_aux("idx", "1")
         .aux("smoothed", "SMTH1(k, 2)", None);
     match row.parent {
         Parent::Scalar => (base.aux("out", row.equation, None), "out"),
@@ -425,6 +549,560 @@ fn computed_stdlib_argument_keeps_the_exact_source_subtree() {
     assert!(
         reparsed != expected,
         "the nonzero source span must distinguish the carried subtree from a print/reparse tree"
+    );
+}
+
+/// An omitted N-ary smooth/delay initial leaves the canonical stdlib port
+/// unwired; it does not manufacture or search for an equal expression.
+///
+/// That distinction is semantic, not merely diagnostic. Explicit arguments
+/// are separate evaluations and can contain stateful or stochastic builtins,
+/// so equal printed text at two source spans must not be coalesced. The
+/// omitted default has no second source span and is implemented by the stdlib
+/// model's input fallback.
+#[test]
+fn omitted_initial_is_sparse_while_explicit_keeps_source_identity() {
+    let default_equation = "DELAYN(k * 2 + 1, 3, 1)";
+    let expected_input = parsed_call_arg(default_equation, 0);
+    let project = TestProject::new("sparse-default-initial")
+        .scalar_aux("k", "3")
+        .aux("out", default_equation, None)
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let helpers = helpers_of(&db, &sync, "main", "out");
+    let hoisted: Vec<_> = helpers
+        .iter()
+        .filter_map(|helper| match helper {
+            ImplicitVar::HoistedArg(arg) => Some(arg),
+            ImplicitVar::Capture(_) | ImplicitVar::Module(_) => None,
+        })
+        .collect();
+    assert_eq!(hoisted.len(), 2, "input and delay-time helpers only");
+    assert_eq!(hoisted[0].ident(), "$⁚out⁚0⁚arg0");
+    assert_eq!(
+        hoisted[0].arg(),
+        &expected_input,
+        "the one input helper keeps the exact parsed subtree, including Loc"
+    );
+    assert!(
+        helpers
+            .iter()
+            .all(|helper| helper.ident() != "$⁚out⁚0⁚arg2"),
+        "the default must not manufacture a second source subtree"
+    );
+    let module = helpers
+        .iter()
+        .find_map(ImplicitVar::module)
+        .expect("DELAYN must expand to a module");
+    let input = module
+        .references()
+        .iter()
+        .find(|reference| reference.dst.ends_with(".input"))
+        .expect("input wiring");
+    assert!(
+        module
+            .references()
+            .iter()
+            .all(|reference| !reference.dst.ends_with(".initial_value")),
+        "the omitted initial value is the stdlib module's unwired-port default"
+    );
+    assert_eq!(input.src, "$⁚out⁚0⁚arg0");
+
+    let explicit_equation = "DELAYN(k * 2 + 1, 3, 1, k * 2 + 1)";
+    let explicit_input = parsed_call_arg(explicit_equation, 0);
+    let explicit_initial = parsed_call_arg(explicit_equation, 3);
+    assert!(explicit_input.eq_ignoring_loc(&explicit_initial));
+    assert_ne!(
+        explicit_input, explicit_initial,
+        "the two source arguments have distinct spans"
+    );
+    let project = TestProject::new("explicit-input-source-identity")
+        .scalar_aux("k", "3")
+        .aux("out", explicit_equation, None)
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let helpers = helpers_of(&db, &sync, "main", "out");
+    let arg0 = helpers
+        .iter()
+        .find_map(|helper| match helper {
+            ImplicitVar::HoistedArg(arg) if arg.ident() == "$⁚out⁚0⁚arg0" => Some(arg),
+            ImplicitVar::Capture(_) | ImplicitVar::HoistedArg(_) | ImplicitVar::Module(_) => None,
+        })
+        .expect("explicit input helper");
+    let arg2 = helpers
+        .iter()
+        .find_map(|helper| match helper {
+            ImplicitVar::HoistedArg(arg) if arg.ident() == "$⁚out⁚0⁚arg2" => Some(arg),
+            ImplicitVar::Capture(_) | ImplicitVar::HoistedArg(_) | ImplicitVar::Module(_) => None,
+        })
+        .expect("explicit initial helper");
+    assert_eq!(arg0.arg(), &explicit_input);
+    assert_eq!(arg2.arg(), &explicit_initial);
+}
+
+/// Per-element helpers retain one lightweight `(axis, coordinate)` record per
+/// rank position, independent of the dimension's cardinality. The project
+/// parser below creates every helper through production apply-to-all expansion;
+/// the test inspects those emitted helpers rather than constructing metadata by
+/// hand. The representation-size assertions make a full `Dimension::Named`
+/// payload or a second resident collection fail this structural boundary.
+#[test]
+fn per_element_hoisted_metadata_scales_with_rank_not_dimension_cardinality() {
+    let elements: Vec<String> = (0..64).map(|i| format!("e{i}")).collect();
+    let element_refs: Vec<&str> = elements.iter().map(String::as_str).collect();
+    let values: Vec<(String, String)> = elements
+        .iter()
+        .enumerate()
+        .map(|(i, element)| (element.clone(), (i + 1).to_string()))
+        .collect();
+    let value_refs: Vec<(&str, &str)> = values
+        .iter()
+        .map(|(element, value)| (element.as_str(), value.as_str()))
+        .collect();
+    let project = TestProject::new("hoisted-metadata-residency")
+        .named_dimension("wide", &element_refs)
+        .array_with_ranges("vals[wide]", value_refs)
+        .array_aux("out[wide]", "DELAYN(vals[wide] * 2, 2, 1)")
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let helpers = helpers_of(&db, &sync, "main", "out");
+    let metadata: Vec<_> = helpers
+        .iter()
+        .filter_map(|helper| match helper {
+            ImplicitVar::HoistedArg(arg) => arg.active_element_metadata_for_test(),
+            ImplicitVar::Capture(_) | ImplicitVar::Module(_) => None,
+        })
+        .collect();
+
+    assert_eq!(metadata.len(), 128, "two computed ports per 64 callsites");
+    let canonical_pair_size = std::mem::size_of::<(
+        crate::common::CanonicalDimensionName,
+        crate::common::CanonicalElementName,
+    )>();
+    let coordinate_vec_size = std::mem::size_of::<
+        Vec<(
+            crate::common::CanonicalDimensionName,
+            crate::common::CanonicalElementName,
+        )>,
+    >();
+    for metadata in metadata {
+        let coordinates = metadata.coordinates;
+        assert_eq!(coordinates.len(), 1, "one coordinate record for rank one");
+        assert_eq!(
+            metadata.context_size, coordinate_vec_size,
+            "the context must contain only its coordinate vector: {coordinates:?}"
+        );
+        assert_eq!(
+            metadata.coordinate_size, canonical_pair_size,
+            "a coordinate must contain only its two canonical names: {coordinates:?}"
+        );
+    }
+}
+
+/// Every refusing arm of DELAYN's source contract is driven through the
+/// production variable parse. The successful three- and four-argument arms,
+/// and both supported literal orders, are the `ROWS` entries above.
+#[test]
+fn every_invalid_delayn_arity_and_order_refuses_loudly() {
+    struct Row {
+        equation: &'static str,
+        code: crate::common::ErrorCode,
+        details: &'static str,
+    }
+    let rows = [
+        Row {
+            equation: "DELAYN(k, 2)",
+            code: crate::common::ErrorCode::BadBuiltinArgs,
+            details: "takes 3 or 4 arguments",
+        },
+        Row {
+            equation: "DELAYN(k, 2, 1, 0, 9)",
+            code: crate::common::ErrorCode::BadBuiltinArgs,
+            details: "takes 3 or 4 arguments",
+        },
+        Row {
+            equation: "DELAYN(k, 2, order)",
+            code: crate::common::ErrorCode::UnknownBuiltin,
+            details: "order argument must be the literal 1 or 3",
+        },
+        Row {
+            equation: "DELAYN(k, 2, 2)",
+            code: crate::common::ErrorCode::UnknownBuiltin,
+            details: "order 2 is not supported",
+        },
+    ];
+
+    for row in rows {
+        let project = TestProject::new("invalid-delayn")
+            .scalar_aux("k", "3")
+            .scalar_aux("order", "1")
+            .aux("out", row.equation, None)
+            .build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        let out = sync.models["main"].variables["out"].source;
+        let parsed = parse_source_variable(&db, out, sync.project);
+        assert!(
+            parsed.variable.errors.iter().any(|error| {
+                error.code == row.code
+                    && error
+                        .details
+                        .as_deref()
+                        .is_some_and(|details| details.contains(row.details))
+            }),
+            "`{}` must produce {:?} containing {:?}: {:?}",
+            row.equation,
+            row.code,
+            row.details,
+            parsed.variable.errors
+        );
+    }
+}
+
+/// Default-input sharing happens after each argument has been resolved into
+/// the source name its module port can read. This matrix covers every ordinary
+/// source shape that changes that resolution: scalar dynamic indexing, a
+/// per-element array, and a mapped proper subdimension.
+#[test]
+fn sparse_initial_survives_dynamic_array_and_mapped_subdimension_routing() {
+    struct Row {
+        covers: &'static str,
+        project: TestProject,
+        expected_modules: usize,
+        expected: &'static [f64],
+    }
+    let rows = [
+        Row {
+            covers: "dynamic scalar input",
+            project: TestProject::new("delayn-dynamic-alias")
+                .with_sim_time(0.0, 0.0, 1.0)
+                .named_dimension("d", &["e1", "e2"])
+                .array_with_ranges("vals[d]", vec![("e1", "10"), ("e2", "20")])
+                .scalar_aux("idx", "2")
+                .aux("out", "DELAYN(vals[idx] * 2, 2, 1)", None),
+            expected_modules: 1,
+            expected: &[40.0],
+        },
+        Row {
+            covers: "ordinary apply-to-all input",
+            project: TestProject::new("delayn-array-alias")
+                .with_sim_time(0.0, 0.0, 1.0)
+                .named_dimension("d", &["e1", "e2"])
+                .array_with_ranges("vals[d]", vec![("e1", "10"), ("e2", "20")])
+                .array_aux("out[d]", "DELAYN(vals[d] * 2, 2, 1)"),
+            expected_modules: 2,
+            expected: &[20.0, 40.0],
+        },
+        Row {
+            covers: "mapped same-cardinality input",
+            project: TestProject::new("delayn-mapped-alias")
+                .with_sim_time(0.0, 0.0, 1.0)
+                .named_dimension("target", &["t1", "t2"])
+                .named_dimension_with_mapping("source", &["s1", "s2"], "target")
+                .array_with_ranges("vals[source]", vec![("s1", "10"), ("s2", "20")])
+                .array_aux("out[target]", "DELAYN(vals[source] * 2, 2, 1)"),
+            expected_modules: 2,
+            expected: &[20.0, 40.0],
+        },
+        Row {
+            covers: "mapped proper-subdimension input",
+            project: TestProject::new("delayn-mapped-subdimension-alias")
+                .with_sim_time(0.0, 0.0, 1.0)
+                .named_dimension("target", &["t1", "t2", "t3"])
+                .named_dimension("subtarget", &["t2", "t3"])
+                .named_dimension_with_mapping("source", &["s1", "s2", "s3"], "target")
+                .array_with_ranges(
+                    "vals[source]",
+                    vec![("s1", "10"), ("s2", "20"), ("s3", "30")],
+                )
+                .array_aux("out[subtarget]", "DELAYN(vals[source] * 2, 2, 1)"),
+            expected_modules: 2,
+            expected: &[40.0, 60.0],
+        },
+        Row {
+            covers: "a foreign mapped dimension used as a value keeps dimension precedence over \
+                     a same-named scalar variable",
+            project: TestProject::new("delayn-mapped-name-collision")
+                .with_sim_time(0.0, 0.0, 1.0)
+                .named_dimension("target", &["t1", "t2", "t3"])
+                .named_dimension("subtarget", &["t2", "t3"])
+                .named_dimension_with_mapping("source", &["s1", "s2", "s3"], "target")
+                .scalar_aux("source", "7")
+                .array_aux("out[subtarget]", "DELAYN(source * 2, 2, 1)"),
+            expected_modules: 2,
+            expected: &[4.0, 6.0],
+        },
+        Row {
+            covers: "a repeated target axis retains both rank coordinates while a bare repeated \
+                     source index follows the engine's first-target-occurrence rule",
+            project: TestProject::new("delayn-repeated-axis")
+                .with_sim_time(0.0, 0.0, 1.0)
+                .named_dimension("d", &["e1", "e2"])
+                .array_with_ranges(
+                    "square[d,d]",
+                    vec![
+                        ("e1,e1", "11"),
+                        ("e1,e2", "12"),
+                        ("e2,e1", "21"),
+                        ("e2,e2", "22"),
+                    ],
+                )
+                .array_aux("out[d,d]", "DELAYN(square[d,d] * 1, 2, 1)"),
+            expected_modules: 4,
+            expected: &[11.0, 11.0, 22.0, 22.0],
+        },
+    ];
+
+    for row in rows {
+        let project = row.project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        if row.covers == "mapped proper-subdimension input" {
+            let ctx = project_dimensions_context(&db, sync.project);
+            let source_name = crate::common::CanonicalDimensionName::from_raw("source");
+            let subtarget_name = crate::common::CanonicalDimensionName::from_raw("subtarget");
+            let source = ctx.get(&source_name).expect("source axis");
+            let subtarget = ctx.get(&subtarget_name).expect("subtarget axis");
+            assert_eq!(
+                ctx.resolve_mapped_read(
+                    source,
+                    subtarget,
+                    &crate::common::CanonicalElementName::from_raw("t2"),
+                )
+                .as_ref()
+                .map(|element| element.as_str()),
+                Some("s2"),
+                "the production dimension context must expose the mapped-parent relation"
+            );
+        }
+        let helpers = helpers_of(&db, &sync, "main", "out");
+        let modules: Vec<_> = helpers.iter().filter_map(ImplicitVar::module).collect();
+        assert_eq!(modules.len(), row.expected_modules, "{}", row.covers);
+        for module in modules {
+            let input = module
+                .references()
+                .iter()
+                .find(|reference| reference.dst.ends_with(".input"))
+                .unwrap_or_else(|| panic!("{}: input port", row.covers));
+            assert!(
+                module
+                    .references()
+                    .iter()
+                    .all(|reference| !reference.dst.ends_with(".initial_value")),
+                "{}: the omitted initial-value port stays sparse",
+                row.covers
+            );
+            assert!(
+                helpers.iter().any(
+                    |helper| matches!(helper, ImplicitVar::HoistedArg(arg) if arg.ident() == input.src)
+                ),
+                "{}: the one computed input is a production hoisted argument",
+                row.covers
+            );
+        }
+
+        let compiled = compile_project_incremental(&db, sync.project, "main").unwrap_or_else(
+            |error| {
+                let descriptions: Vec<_> = helpers.iter().map(describe).collect();
+                let asts: Vec<_> = helpers
+                    .iter()
+                    .filter_map(|helper| match helper {
+                        ImplicitVar::HoistedArg(arg) => Some(format!("{:?}", arg.arg())),
+                        ImplicitVar::Capture(_) | ImplicitVar::Module(_) => None,
+                    })
+                    .collect();
+                let diagnostics = collect_all_diagnostics(&db, sync.project);
+                panic!(
+                    "{} must compile: {error:?}; helpers={descriptions:?}; asts={asts:?}; diagnostics={diagnostics:?}",
+                    row.covers
+                )
+            },
+        );
+        let mut vm = crate::vm::Vm::new(compiled)
+            .unwrap_or_else(|error| panic!("{} VM: {error:?}", row.covers));
+        vm.run_to_end()
+            .unwrap_or_else(|error| panic!("{} must run: {error:?}", row.covers));
+        let values = crate::test_common::collect_results(&vm.into_results());
+        assert_eq!(values["out"], row.expected, "{} values", row.covers);
+    }
+}
+
+/// A qualified module output is resolved before the computed DELAYN input is
+/// hoisted. The one resulting parent helper supplies the input port, while the
+/// stdlib fallback makes that source a sparse initialization requirement too.
+#[test]
+fn sparse_initial_preserves_qualified_module_output_initialization() {
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module, x_project};
+
+    let child = x_model(
+        "child",
+        vec![
+            x_aux("needed", "10 + TIME", None),
+            x_aux("unused", "99", None),
+        ],
+    );
+    let main = x_model(
+        "main",
+        vec![
+            x_module("child", &[], None),
+            x_aux("out", "DELAYN(child.needed * 2, 2, 1)", None),
+        ],
+    );
+    let mut specs = sim_specs_with_units("month");
+    specs.stop = 2.0;
+    let project = x_project(specs, &[main, child]);
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let helpers = helpers_of(&db, &sync, "main", "out");
+    let module = helpers
+        .iter()
+        .filter_map(ImplicitVar::module)
+        .find(|module| module.model_name() == "stdlib⁚delay1")
+        .expect("outer delay module");
+    let input = module
+        .references()
+        .iter()
+        .find(|reference| reference.dst.ends_with(".input"))
+        .expect("input port");
+    assert!(
+        module
+            .references()
+            .iter()
+            .all(|reference| !reference.dst.ends_with(".initial_value")),
+        "the omitted initial-value port must remain unwired"
+    );
+    assert_eq!(input.src, "$⁚out⁚0⁚arg0");
+
+    let child_graph = model_dependency_graph(
+        &db,
+        sync.models["child"].source,
+        sync.project,
+        ModuleInputSet::empty(&db),
+    );
+    assert!(
+        child_graph
+            .runlist_initials
+            .iter()
+            .any(|name| name == "needed")
+    );
+    assert!(
+        !child_graph
+            .runlist_initials
+            .iter()
+            .any(|name| name == "unused"),
+        "the stdlib fallback must not widen qualified initial output demand"
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+    vm.run_to_end().expect("first run");
+    let first = vm.get_series(&Ident::new("out")).expect("first series");
+    assert_eq!(first, [20.0, 20.0, 21.0]);
+    vm.reset();
+    vm.run_to_end().expect("run after reset");
+    let second = vm.get_series(&Ident::new("out")).expect("second series");
+    assert_eq!(second, first);
+}
+
+/// The stdlib DELAY fallback reads its one input in both phases, unioning the
+/// outer helper's demand without widening snapshot storage nested in that
+/// helper. PREVIOUS storage refreshes in flows; INIT storage is populated in
+/// initials; the shared expression and delay time serve both.
+#[test]
+fn sparse_initial_unions_only_the_required_phase_demands() {
+    let project = TestProject::new("delayn-default-phase-union")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .scalar_aux("k", "1 + TIME")
+        .aux(
+            "out",
+            "DELAYN(PREVIOUS(k * 2, -1) + INIT(k * 3), 2, 1)",
+            None,
+        )
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let graph = model_dependency_graph(
+        &db,
+        sync.models["main"].source,
+        sync.project,
+        ModuleInputSet::empty(&db),
+    );
+    let scheduled = |name: &str| {
+        (
+            graph.runlist_initials.iter().any(|item| item == name),
+            graph.runlist_flows.iter().any(|item| item == name),
+        )
+    };
+
+    assert_eq!(scheduled("$⁚out⁚0⁚arg0"), (false, true), "PREVIOUS body");
+    assert_eq!(scheduled("$⁚out⁚1⁚arg0"), (true, false), "INIT body");
+    assert_eq!(
+        scheduled("$⁚out⁚2⁚arg0"),
+        (true, true),
+        "the DELAYN input is read by the stdlib flow and initial equations"
+    );
+    assert_eq!(
+        scheduled("$⁚out⁚2⁚arg1"),
+        (true, true),
+        "the delay time is read by initialization and flow equations"
+    );
+}
+
+/// The sparse default changes only the module-call helper graph. A resolved
+/// element recurrence must remain a resolved SCC and assemble beside the
+/// DELAYN instance without changing its members or phase.
+#[test]
+fn sparse_initial_coexists_with_a_resolved_element_scc() {
+    use crate::db::SccPhase;
+
+    let project = TestProject::new("delayn-alias-with-scc")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("t", &["t1", "t2", "t3"])
+        .array_with_ranges(
+            "ce[t]",
+            vec![("t1", "1"), ("t2", "ecc[t1] + 1"), ("t3", "ecc[t2] + 1")],
+        )
+        .array_with_ranges(
+            "ecc[t]",
+            vec![
+                ("t1", "ce[t1] + 1"),
+                ("t2", "ce[t2] + 1"),
+                ("t3", "ce[t3] + 1"),
+            ],
+        )
+        .aux("out", "DELAYN(ce[t3] * 2, 2, 1)", None)
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let graph = model_dependency_graph(
+        &db,
+        sync.models["main"].source,
+        sync.project,
+        ModuleInputSet::empty(&db),
+    );
+    assert!(!graph.has_cycle, "the element recurrence must resolve");
+    assert_eq!(graph.resolved_sccs.len(), 1);
+    assert_eq!(graph.resolved_sccs[0].phase, SccPhase::Dt);
+    assert_eq!(
+        graph.resolved_sccs[0].members,
+        [Ident::new("ce"), Ident::new("ecc")].into_iter().collect()
+    );
+    assert!(
+        graph
+            .runlist_flows
+            .iter()
+            .any(|name| name == "$⁚out⁚0⁚arg0")
+    );
+
+    let compiled = compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+    vm.run_to_end().expect("runs");
+    assert_eq!(
+        vm.get_series(&Ident::new("out")).expect("out series"),
+        [10.0, 10.0]
     );
 }
 

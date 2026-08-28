@@ -6,8 +6,174 @@
 //! (stdlib SMOOTH/DELAY and user-defined passthrough modules).
 
 use super::*;
+use crate::capture::ImplicitVar;
 use crate::datamodel;
+use crate::test_common::TestProject;
 use crate::testutils::{x_aux, x_flow, x_model, x_module, x_module_named, x_stock};
+
+/// Sparse DELAYN/SMTHN initialization must be indistinguishable from calling
+/// the selected stdlib module directly with its optional port omitted. This
+/// compares the complete emitted LTM name/equation topology and every runtime
+/// slot, in addition to proving no ambiguous-input diagnostic was needed.
+#[test]
+fn ltm_sparse_n_order_initials_match_direct_stdlib_topology_and_series() {
+    use salsa::Setter;
+
+    struct CompiledCase {
+        references: Vec<String>,
+        hoisted: Vec<String>,
+        input_schedule: (bool, bool),
+        ltm_equations: Vec<(String, String, Vec<String>, bool)>,
+        loop_partitions: indexmap::IndexMap<String, Vec<Option<usize>>>,
+        offsets: std::collections::HashMap<Ident<Canonical>, usize>,
+        data: Box<[f64]>,
+    }
+
+    fn compile_case(equation: &str) -> CompiledCase {
+        let project = TestProject::new("ltm_sparse_n_order")
+            .with_sim_time(0.0, 4.0, 1.0)
+            .aux("goal", "100", None)
+            .stock("level", "50", &["adjustment"], &[], None)
+            .aux("delayed", equation, None)
+            .aux("gap", "goal - delayed", None)
+            .flow("adjustment", "gap / 5", None)
+            .build_datamodel();
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        sync.project.set_ltm_enabled(&mut db).to(true);
+        let delayed = sync.models["main"].variables["delayed"].source;
+        let parsed = parse_source_variable(&db, delayed, sync.project);
+        let hoisted: Vec<_> = parsed
+            .implicit_vars
+            .iter()
+            .filter_map(|helper| match helper {
+                ImplicitVar::HoistedArg(arg) => Some(arg.ident().to_string()),
+                ImplicitVar::Capture(_) | ImplicitVar::Module(_) => None,
+            })
+            .collect();
+        let module = parsed
+            .implicit_vars
+            .iter()
+            .find_map(ImplicitVar::module)
+            .expect("stdlib module");
+        let references = module
+            .references()
+            .iter()
+            .map(|reference| {
+                format!(
+                    "{}->{}",
+                    reference.src,
+                    reference.dst.rsplit('.').next().unwrap()
+                )
+            })
+            .collect();
+
+        let graph = model_dependency_graph(
+            &db,
+            sync.models["main"].source,
+            sync.project,
+            ModuleInputSet::empty(&db),
+        );
+        let input_schedule = (
+            graph
+                .runlist_initials
+                .iter()
+                .any(|name| name == "$⁚delayed⁚0⁚arg0"),
+            graph
+                .runlist_flows
+                .iter()
+                .any(|name| name == "$⁚delayed⁚0⁚arg0"),
+        );
+
+        let ltm = model_ltm_variables(&db, sync.models["main"].source, sync.project);
+        let ltm_equations = ltm
+            .vars
+            .iter()
+            .map(|var| {
+                (
+                    var.name.clone(),
+                    var.equation.source_text(),
+                    var.dimensions.clone(),
+                    var.compile_directly,
+                )
+            })
+            .collect();
+        let diagnostics = collect_all_diagnostics(&db, sync.project);
+        assert!(
+            diagnostics.is_empty(),
+            "sparse stdlib inputs must not take the ambiguous-port decline: {diagnostics:?}"
+        );
+
+        let compiled = compile_project_incremental(&db, sync.project, "main")
+            .expect("LTM sparse-port fixture compiles");
+        let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+        vm.run_to_end().expect("LTM sparse-port fixture runs");
+        let results = vm.into_results();
+        CompiledCase {
+            references,
+            hoisted,
+            input_schedule,
+            ltm_equations,
+            loop_partitions: ltm.loop_partitions.clone(),
+            offsets: results.offsets,
+            data: results.data,
+        }
+    }
+
+    for (n_order, direct) in [
+        ("DELAYN(level * 1, 3, 1)", "DELAY1(level * 1, 3)"),
+        ("DELAYN(level * 1, 3, 3)", "DELAY3(level * 1, 3)"),
+        ("SMTHN(level * 1, 3, 1)", "SMTH1(level * 1, 3)"),
+        ("SMTHN(level * 1, 3, 3)", "SMTH3(level * 1, 3)"),
+    ] {
+        let actual = compile_case(n_order);
+        let control = compile_case(direct);
+        assert_eq!(
+            actual.references, control.references,
+            "{n_order}: sparse port topology"
+        );
+        assert_eq!(actual.references.len(), 2, "input and delay_time only");
+        assert!(
+            actual
+                .references
+                .iter()
+                .all(|reference| !reference.ends_with("->initial_value"))
+        );
+        assert_eq!(actual.hoisted, control.hoisted, "{n_order}: one input body");
+        assert_eq!(
+            actual.input_schedule,
+            (true, true),
+            "{n_order}: module fallback reads input in both phases"
+        );
+        assert_eq!(actual.input_schedule, control.input_schedule);
+        assert_eq!(
+            actual.ltm_equations, control.ltm_equations,
+            "{n_order}: exact LTM names, equations, dimensions and compile routing"
+        );
+        assert!(
+            actual
+                .ltm_equations
+                .iter()
+                .any(|(name, _, _, _)| name.contains("link_score")),
+            "{n_order}: control must exercise link-score topology"
+        );
+        assert_eq!(
+            actual.loop_partitions, control.loop_partitions,
+            "{n_order}: loop topology"
+        );
+        assert_eq!(
+            actual.offsets, control.offsets,
+            "{n_order}: result topology"
+        );
+        assert_eq!(actual.data.len(), control.data.len());
+        for (index, (actual, control)) in actual.data.iter().zip(&control.data).enumerate() {
+            assert!(
+                actual == control || (actual.is_nan() && control.is_nan()),
+                "{n_order}: runtime slot {index} differs: {actual} versus {control}"
+            );
+        }
+    }
+}
 
 /// AC1.1: A model with SMTH1 in a feedback loop generates LTM synthetic
 /// variables including link_score entries when LTM is enabled, and the

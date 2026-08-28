@@ -967,6 +967,144 @@ fn ensure_wasm_matches_runs_supported_scalar_model() {
     );
 }
 
+/// DELAYN's omitted initial port makes the stdlib model fall back to its input.
+/// That input helper is live in both execution phases, while PREVIOUS and INIT
+/// nested in its body retain their own snapshot semantics. A reset must rebuild
+/// the same delay state, and wasm must agree with the VM's exact series.
+#[test]
+fn delayn_sparse_initial_preserves_snapshot_phases_reset_and_wasm() {
+    use simlin_engine::common::{Canonical, Ident};
+
+    let datamodel = simlin_engine::test_common::TestProject::new("delayn_sparse_initial")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .aux("k", "1 + TIME", None)
+        .aux(
+            "out",
+            "DELAYN(PREVIOUS(k * 2, -1) + INIT(k * 3), 2, 1)",
+            None,
+        )
+        .build_datamodel();
+    let compiled = compile_vm(&datamodel);
+    let mut vm = Vm::new(compiled).expect("vm");
+    vm.run_to_end().expect("first run");
+    let first = vm
+        .get_series(&Ident::<Canonical>::from_unchecked("out".to_string()))
+        .expect("first out series");
+    assert_eq!(first, [2.0, 2.0, 3.5]);
+    vm.reset();
+    vm.run_to_end().expect("run after reset");
+    let second = vm
+        .get_series(&Ident::<Canonical>::from_unchecked("out".to_string()))
+        .expect("second out series");
+    assert_eq!(second, first);
+
+    let results = vm.into_results();
+    let outcome = ensure_wasm_matches(&datamodel, "main", &results, &[]);
+    assert!(
+        matches!(outcome, WasmRunOutcome::Ran),
+        "the sparse-initial DELAYN model must run through wasm, got {outcome:?}"
+    );
+}
+
+/// DELAYN/SMTHN support orders 1 and 3 by selecting the corresponding stdlib
+/// model. With no explicit initial argument they must leave that model's
+/// `initial_value` port unwired, producing exactly the same values as a direct
+/// DELAY1/DELAY3/SMTH1/SMTH3 call that uses the model's canonical fallback.
+#[test]
+fn n_order_delay_and_smooth_sparse_initials_match_direct_stdlib_controls() {
+    use simlin_engine::common::{Canonical, Ident};
+
+    let body = "PREVIOUS(k * 2, -1) + INIT(k * 3)";
+    let pairs = [
+        ("delayn1", "delay1"),
+        ("delayn3", "delay3"),
+        ("smthn1", "smth1"),
+        ("smthn3", "smth3"),
+    ];
+    let datamodel = simlin_engine::test_common::TestProject::new("sparse_n_order_controls")
+        .with_sim_time(0.0, 4.0, 1.0)
+        .aux("k", "1 + TIME", None)
+        .aux("delayn1", &format!("DELAYN({body}, 2, 1)"), None)
+        .aux("delay1", &format!("DELAY1({body}, 2)"), None)
+        .aux("delayn3", &format!("DELAYN({body}, 3, 3)"), None)
+        .aux("delay3", &format!("DELAY3({body}, 3)"), None)
+        .aux("smthn1", &format!("SMTHN({body}, 2, 1)"), None)
+        .aux("smth1", &format!("SMTH1({body}, 2)"), None)
+        .aux("smthn3", &format!("SMTHN({body}, 3, 3)"), None)
+        .aux("smth3", &format!("SMTH3({body}, 3)"), None)
+        .build_datamodel();
+    let compiled = compile_vm(&datamodel);
+    let mut vm = Vm::new(compiled).expect("vm");
+    vm.run_to_end().expect("first run");
+
+    let first: Vec<_> = pairs
+        .iter()
+        .map(|(alias, direct)| {
+            let alias = vm
+                .get_series(&Ident::<Canonical>::new(alias))
+                .expect("N-order series");
+            let direct = vm
+                .get_series(&Ident::<Canonical>::new(direct))
+                .expect("direct stdlib series");
+            assert_eq!(alias, direct, "{alias:?} must use the stdlib fallback");
+            alias
+        })
+        .collect();
+
+    vm.reset();
+    vm.run_to_end().expect("run after reset");
+    for ((alias, direct), expected) in pairs.iter().zip(&first) {
+        let alias = vm
+            .get_series(&Ident::<Canonical>::new(alias))
+            .expect("reset N-order series");
+        let direct = vm
+            .get_series(&Ident::<Canonical>::new(direct))
+            .expect("reset direct stdlib series");
+        assert_eq!(&alias, expected, "{alias:?} changed after reset");
+        assert_eq!(alias, direct, "reset must preserve sparse-port equivalence");
+    }
+
+    let results = vm.into_results();
+    let outcome = ensure_wasm_matches(&datamodel, "main", &results, &[]);
+    assert!(
+        matches!(outcome, WasmRunOutcome::Ran),
+        "all sparse N-order controls must run through wasm, got {outcome:?}"
+    );
+}
+
+/// A mapped axis that is outside the parsed variable's narrowed dimension key
+/// is projected when the hoisted source is built with the full project
+/// dimensions. Both backends must read the matching source element for each
+/// proper-subdimension output slot.
+#[test]
+fn delayn_sparse_initial_projects_mapped_subdimensions_in_both_backends() {
+    use simlin_engine::common::{Canonical, Ident};
+
+    let datamodel = simlin_engine::test_common::TestProject::new("delayn_mapped_sparse_initial")
+        .with_sim_time(0.0, 0.0, 1.0)
+        .named_dimension("target", &["t1", "t2", "t3"])
+        .named_dimension("subtarget", &["t2", "t3"])
+        .named_dimension_with_mapping("source", &["s1", "s2", "s3"], "target")
+        .array_with_ranges(
+            "vals[source]",
+            vec![("s1", "10"), ("s2", "20"), ("s3", "30")],
+        )
+        .array_aux("out[subtarget]", "DELAYN(vals[source] * 2, 2, 1)")
+        .build_datamodel();
+    let results = vm_results(&datamodel);
+    for (element, expected) in [("t2", 40.0), ("t3", 60.0)] {
+        let offset =
+            results.offsets[&Ident::<Canonical>::from_unchecked(format!("out[{element}]"))];
+        assert_eq!(results.data[offset], expected, "mapped output {element}");
+    }
+
+    let outcome = ensure_wasm_matches(&datamodel, "main", &results, &[]);
+    assert!(
+        matches!(outcome, WasmRunOutcome::Ran),
+        "the mapped DELAYN model must run through wasm, got {outcome:?}"
+    );
+}
+
 /// A computed snapshot argument in one apply-to-all body retains that body's
 /// storage shape. The arrayed index is the discriminator: reconstructing a
 /// scalar helper has no active `d` and cannot select a different source slot

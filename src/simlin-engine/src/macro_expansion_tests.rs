@@ -318,6 +318,147 @@ fn mymacro_registry() -> crate::module_functions::MacroRegistry {
         .expect("valid single-macro registry")
 }
 
+/// Build a production-syncable project whose optional macro shadows one of
+/// the stdlib aliases under test.
+fn alias_macro_project(
+    name: &str,
+    parameters: &[&str],
+    body: Option<&str>,
+    caller: &str,
+) -> crate::datamodel::Project {
+    let mut project = crate::test_common::TestProject::new("alias-routing")
+        .aux("k", "3", None)
+        .aux("out", caller, None)
+        .build_datamodel();
+    if let Some(body) = body {
+        let parameters: Vec<String> = parameters
+            .iter()
+            .map(|parameter| (*parameter).to_string())
+            .collect();
+        project.models.push(crate::datamodel::Model::new_macro(
+            name,
+            &parameters,
+            &[],
+            vec![mk_aux(name, body)],
+        ));
+    }
+    project
+}
+
+/// Parse one source variable through the project registry and production
+/// implicit-helper query, returning the typed products owned by that source.
+fn alias_route_helpers(
+    project: &crate::datamodel::Project,
+    model_name: &str,
+    variable_name: &str,
+) -> Vec<crate::capture::ImplicitVar> {
+    let db = SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel(&db, project);
+    let source = sync.models[model_name].variables[variable_name].source;
+    crate::db::parse_source_variable(&db, source, sync.project)
+        .implicit_vars
+        .to_vec()
+}
+
+/// Name every router arm exhaustively so route-matrix assertions fail to
+/// compile when `MacroCallResolution` grows without a corresponding row.
+fn macro_route_name(route: crate::module_functions::MacroCallResolution<'_>) -> &'static str {
+    use crate::module_functions::MacroCallResolution;
+    match route {
+        MacroCallResolution::Expand(_) => "Expand",
+        MacroCallResolution::Passthrough(_) => "Passthrough",
+        MacroCallResolution::RenamedBuiltinSelfCall => "RenamedBuiltinSelfCall",
+        MacroCallResolution::Unresolved => "Unresolved",
+    }
+}
+
+fn only_implicit_module(
+    helpers: &[crate::capture::ImplicitVar],
+) -> &crate::capture::ImplicitModule {
+    let modules: Vec<_> = helpers
+        .iter()
+        .filter_map(|helper| helper.module())
+        .collect();
+    assert_eq!(modules.len(), 1, "expected exactly one module: {helpers:?}");
+    modules[0]
+}
+
+fn module_port_source<'a>(module: &'a crate::capture::ImplicitModule, port: &str) -> &'a str {
+    module
+        .references()
+        .iter()
+        .find(|reference| reference.dst.rsplit('.').next() == Some(port))
+        .unwrap_or_else(|| {
+            panic!(
+                "module {} has no {port:?} port: {:?}",
+                module.ident(),
+                module.references()
+            )
+        })
+        .src
+        .as_str()
+}
+
+#[derive(Clone, Copy)]
+enum ExpectedInitialWiring {
+    Omitted,
+    Explicit,
+}
+
+/// Assert the normalized stdlib module shape. An omitted initial is represented
+/// by an absent trailing port, while an explicit initial owns a distinct
+/// source even when its expression text matches the input.
+fn assert_stdlib_alias_wiring(
+    helpers: &[crate::capture::ImplicitVar],
+    alias: &str,
+    expected_initial: ExpectedInitialWiring,
+) {
+    let normalized = match alias {
+        "delay" | "delayn" => "delay1",
+        "smthn" => "smth1",
+        other => panic!("the route matrix omitted alias normalization for {other}"),
+    };
+    let module = only_implicit_module(helpers);
+    assert_eq!(module.model_name(), format!("stdlib\u{205A}{normalized}"));
+    let ports: Vec<_> = module
+        .references()
+        .iter()
+        .map(|reference| reference.dst.rsplit('.').next().unwrap())
+        .collect();
+    let all_ports = crate::module_functions::stdlib_args(normalized).unwrap();
+    let expected_ports = match expected_initial {
+        ExpectedInitialWiring::Omitted => &all_ports[..2],
+        ExpectedInitialWiring::Explicit => all_ports,
+    };
+    assert_eq!(ports, expected_ports);
+
+    let input_source = module_port_source(module, "input");
+    let input_helpers = helpers
+        .iter()
+        .filter(|helper| {
+            matches!(helper, crate::capture::ImplicitVar::HoistedArg(arg) if arg.ident() == input_source)
+        })
+        .count();
+    assert_eq!(
+        input_helpers, 1,
+        "the computed input must be evaluated by exactly one helper"
+    );
+
+    match expected_initial {
+        ExpectedInitialWiring::Omitted => assert!(
+            module
+                .references()
+                .iter()
+                .all(|reference| !reference.dst.ends_with(".initial_value")),
+            "the canonical stdlib model supplies omitted-initial fallback semantics"
+        ),
+        ExpectedInitialWiring::Explicit => {
+            let initial_source = module_port_source(module, "initial_value");
+            assert_ne!(input_source, initial_source);
+        }
+    }
+}
+
 /// Registry whose calls exercise every `MacroCallResolution` arm. These are
 /// real macro models passed through `MacroRegistry::build`, including the
 /// importer's renamed opcode and stdlib self-call shapes.
@@ -613,6 +754,195 @@ ordinary caller = ORDINARY(k * 2, 1)
             if module.model_name() == "stdlib⁚delay1"
                 && module.references().len() == 3
     ));
+}
+
+/// `MacroCallResolution` has four arms. The three arms that continue through
+/// alias normalization represent an omitted initial as an unwired trailing
+/// stdlib port; the canonical model then applies its `isModuleInput` fallback.
+/// `Expand` instantiates the project macro with its declared arguments, and a
+/// same-named call in that macro body reaches `RenamedBuiltinSelfCall` and
+/// produces the same sparse stdlib wiring there. Both aliases are covered for
+/// every route through production registry build + salsa parsing.
+#[test]
+fn omitted_initial_port_follows_every_macro_call_resolution_route() {
+    for alias in ["delayn", "smthn"] {
+        let call = format!("{alias}(k * 2, 2, 1)");
+
+        let unresolved = alias_macro_project(alias, &[], None, &call);
+        let unresolved_registry =
+            crate::module_functions::MacroRegistry::build(&unresolved.models).unwrap();
+        assert_eq!(
+            macro_route_name(unresolved_registry.resolve_call(alias, None)),
+            "Unresolved"
+        );
+        assert_stdlib_alias_wiring(
+            &alias_route_helpers(&unresolved, "main", "out"),
+            alias,
+            ExpectedInitialWiring::Omitted,
+        );
+
+        let passthrough_body = format!("{alias}(input, delaytime, order)");
+        let passthrough = alias_macro_project(
+            alias,
+            &["input", "delaytime", "order"],
+            Some(&passthrough_body),
+            &call,
+        );
+        let passthrough_registry =
+            crate::module_functions::MacroRegistry::build(&passthrough.models).unwrap();
+        assert_eq!(
+            macro_route_name(passthrough_registry.resolve_call(alias, None)),
+            "Passthrough"
+        );
+        assert_stdlib_alias_wiring(
+            &alias_route_helpers(&passthrough, "main", "out"),
+            alias,
+            ExpectedInitialWiring::Omitted,
+        );
+        // A genuine DELAYN/SMTHN passthrough necessarily forwards its formal
+        // `order` port. Alias normalization requires a literal order, so that
+        // template body is not a successful stdlib expansion on its own; its
+        // external Passthrough call above is the executable route. Use a
+        // non-passthrough macro with a literal body order for the production
+        // RenamedBuiltinSelfCall row.
+        let expand_body = format!("{alias}(input * 2, delaytime, 1)");
+        let expand = alias_macro_project(
+            alias,
+            &["input", "delaytime", "order"],
+            Some(&expand_body),
+            &call,
+        );
+        let expand_registry =
+            crate::module_functions::MacroRegistry::build(&expand.models).unwrap();
+        assert_eq!(
+            macro_route_name(expand_registry.resolve_call(alias, None)),
+            "Expand"
+        );
+        let external_helpers = alias_route_helpers(&expand, "main", "out");
+        let external_module = only_implicit_module(&external_helpers);
+        assert_eq!(external_module.model_name(), alias);
+        assert_eq!(
+            external_module.references().len(),
+            3,
+            "{alias} Expand must preserve the project macro's three-argument contract; the \
+             stdlib default belongs to the body call"
+        );
+        assert!(
+            external_module
+                .references()
+                .iter()
+                .all(|reference| !reference.dst.ends_with(".initial_value")),
+            "{alias} Expand must not invent a stdlib port on the project-macro instance"
+        );
+        assert_eq!(
+            macro_route_name(expand_registry.resolve_call(alias, Some(alias))),
+            "RenamedBuiltinSelfCall"
+        );
+        assert_stdlib_alias_wiring(
+            &alias_route_helpers(&expand, alias, alias),
+            alias,
+            ExpectedInitialWiring::Omitted,
+        );
+    }
+}
+
+/// An explicit fourth argument is a separate source subtree in every route,
+/// even when it prints identically to the input. The project-macro `Expand`
+/// arm preserves both formal ports, and every fallthrough arm wires distinct
+/// stdlib input and initial-value sources.
+#[test]
+fn explicit_initial_stays_distinct_through_every_macro_call_resolution_route() {
+    for alias in ["delayn", "smthn"] {
+        let call = format!("{alias}(k * 2, 2, 1, k * 2)");
+
+        let unresolved = alias_macro_project(alias, &[], None, &call);
+        let unresolved_registry =
+            crate::module_functions::MacroRegistry::build(&unresolved.models).unwrap();
+        assert_eq!(
+            macro_route_name(unresolved_registry.resolve_call(alias, None)),
+            "Unresolved"
+        );
+        assert_stdlib_alias_wiring(
+            &alias_route_helpers(&unresolved, "main", "out"),
+            alias,
+            ExpectedInitialWiring::Explicit,
+        );
+
+        let passthrough_body = format!("{alias}(input, delaytime, order, initial_value)");
+        let passthrough = alias_macro_project(
+            alias,
+            &["input", "delaytime", "order", "initial_value"],
+            Some(&passthrough_body),
+            &call,
+        );
+        let passthrough_registry =
+            crate::module_functions::MacroRegistry::build(&passthrough.models).unwrap();
+        assert_eq!(
+            macro_route_name(passthrough_registry.resolve_call(alias, None)),
+            "Passthrough"
+        );
+        assert_stdlib_alias_wiring(
+            &alias_route_helpers(&passthrough, "main", "out"),
+            alias,
+            ExpectedInitialWiring::Explicit,
+        );
+        let expand_body = format!("{alias}(input * 2, delaytime, 1, initial_value)");
+        let expand = alias_macro_project(
+            alias,
+            &["input", "delaytime", "order", "initial_value"],
+            Some(&expand_body),
+            &call,
+        );
+        let expand_registry =
+            crate::module_functions::MacroRegistry::build(&expand.models).unwrap();
+        assert_eq!(
+            macro_route_name(expand_registry.resolve_call(alias, None)),
+            "Expand"
+        );
+        let external_helpers = alias_route_helpers(&expand, "main", "out");
+        let external_module = only_implicit_module(&external_helpers);
+        assert_eq!(external_module.model_name(), alias);
+        assert_ne!(
+            module_port_source(external_module, "input"),
+            module_port_source(external_module, "initial_value"),
+            "{alias} Expand: generic macro arguments must retain separate source identity"
+        );
+        assert_eq!(
+            macro_route_name(expand_registry.resolve_call(alias, Some(alias))),
+            "RenamedBuiltinSelfCall"
+        );
+        assert_stdlib_alias_wiring(
+            &alias_route_helpers(&expand, alias, alias),
+            alias,
+            ExpectedInitialWiring::Explicit,
+        );
+    }
+}
+
+/// The importer's `DELAY FIXED` spelling reaches the `delay` rename, which
+/// shares the same trailing-port contract without an order argument: two
+/// arguments leave `initial_value` unwired, while a third argument is an
+/// explicit, separately evaluated source. The empty production registry also
+/// pins that this rename enters through `Unresolved`, like ordinary stdlib
+/// calls rather than through a project macro.
+#[test]
+fn delay_rename_preserves_sparse_and_explicit_initial_wiring() {
+    for (call, expected_initial) in [
+        ("delay(k * 2, 2)", ExpectedInitialWiring::Omitted),
+        ("delay(k * 2, 2, k * 2)", ExpectedInitialWiring::Explicit),
+    ] {
+        let project = alias_macro_project("delay", &[], None, call);
+        let registry = crate::module_functions::MacroRegistry::build(&project.models).unwrap();
+        assert_eq!(
+            macro_route_name(registry.resolve_call("delay", None)),
+            "Unresolved"
+        );
+        assert_stdlib_alias_wiring(
+            &alias_route_helpers(&project, "main", "out"),
+            "delay",
+            expected_initial,
+        );
+    }
 }
 
 /// A passthrough macro still owns the public call contract even though its

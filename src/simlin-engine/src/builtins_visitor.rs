@@ -168,6 +168,215 @@ fn parse_module_order_arg(expr: &Expr0) -> Option<u32> {
     None
 }
 
+/// One borrowed active-axis coordinate used while projecting a scalar helper.
+/// The owned form on [`HoistedArg`] retains only canonical names; full
+/// [`Dimension`] payloads are resolved from [`DimensionsContext`] for this
+/// short-lived replay view.
+pub(crate) struct ActiveElementRef<'a> {
+    pub(crate) dimension: &'a Dimension,
+    pub(crate) element: &'a str,
+}
+
+#[derive(Clone, Copy)]
+enum ActiveElements<'a> {
+    Parsed {
+        dimensions: &'a [Dimension],
+        subscript: &'a [String],
+    },
+    Resolved(&'a [ActiveElementRef<'a>]),
+}
+
+impl<'a> ActiveElements<'a> {
+    fn len(self) -> usize {
+        match self {
+            ActiveElements::Parsed { dimensions, .. } => dimensions.len(),
+            ActiveElements::Resolved(elements) => elements.len(),
+        }
+    }
+
+    fn get(self, index: usize) -> (&'a Dimension, &'a str) {
+        match self {
+            ActiveElements::Parsed {
+                dimensions,
+                subscript,
+            } => (&dimensions[index], &subscript[index]),
+            ActiveElements::Resolved(elements) => {
+                (elements[index].dimension, elements[index].element)
+            }
+        }
+    }
+}
+
+/// Resolve dimension references in a scalar helper body against one active
+/// apply-to-all element.
+///
+/// Source parsing calls this with its deliberately narrowed dimension context;
+/// a [`HoistedArg`] retains the same active element and calls it again when its
+/// parse-stage variable is built with the full project context. The rewrite is
+/// idempotent: a name resolved by the first call is already a qualified element
+/// on the second. This keeps parsing independent of unrelated dimensions while
+/// allowing a foreign mapped axis to resolve at the compile-stage boundary.
+pub(crate) fn substitute_active_dimension_refs(
+    expr: Expr0,
+    dimensions: &[Dimension],
+    subscript: &[String],
+    dimensions_ctx: Option<&DimensionsContext>,
+) -> Expr0 {
+    assert_eq!(
+        dimensions.len(),
+        subscript.len(),
+        "active dimensions and coordinates are positional"
+    );
+    substitute_active_dimension_refs_inner(
+        expr,
+        ActiveElements::Parsed {
+            dimensions,
+            subscript,
+        },
+        dimensions_ctx,
+    )
+}
+
+pub(crate) fn substitute_resolved_active_dimension_refs(
+    expr: Expr0,
+    active_elements: &[ActiveElementRef<'_>],
+    dimensions_ctx: Option<&DimensionsContext>,
+) -> Expr0 {
+    substitute_active_dimension_refs_inner(
+        expr,
+        ActiveElements::Resolved(active_elements),
+        dimensions_ctx,
+    )
+}
+
+fn substitute_active_dimension_refs_inner(
+    expr: Expr0,
+    active_elements: ActiveElements<'_>,
+    dimensions_ctx: Option<&DimensionsContext>,
+) -> Expr0 {
+    use Expr0::*;
+    use std::mem;
+
+    match expr {
+        Const(_, _, _) => expr,
+        Var(ref ident, loc) => {
+            let canonical_name = CanonicalDimensionName::from_raw(ident.as_str());
+            for index in 0..active_elements.len() {
+                let (dimension, element) = active_elements.get(index);
+                if &canonical_name == dimension.canonical_name() {
+                    return match dimension {
+                        Dimension::Indexed(_, _) => {
+                            let value = element.parse().unwrap_or(0.0);
+                            Const(element.to_string(), Literal::new(value), loc)
+                        }
+                        Dimension::Named(_, _) => {
+                            let qualified =
+                                format!("{}·{}", dimension.canonical_name().as_str(), element);
+                            Var(RawIdent::new_from_str(&qualified), loc)
+                        }
+                    };
+                }
+            }
+
+            if let Some(ctx) = dimensions_ctx
+                && let Some(source_axis) = ctx.get(&canonical_name)
+            {
+                for index in 0..active_elements.len() {
+                    let (active_dimension, element) = active_elements.get(index);
+                    let active_element = CanonicalElementName::from_raw(element);
+                    if let Some(source_element) =
+                        ctx.resolve_mapped_read(source_axis, active_dimension, &active_element)
+                    {
+                        let qualified =
+                            format!("{}·{}", canonical_name.as_str(), source_element.as_str());
+                        return Var(RawIdent::new_from_str(&qualified), loc);
+                    }
+                }
+            }
+            expr
+        }
+        App(UntypedBuiltinFn(func, args), loc) => App(
+            UntypedBuiltinFn(
+                func,
+                args.into_iter()
+                    .map(|arg| {
+                        substitute_active_dimension_refs_inner(arg, active_elements, dimensions_ctx)
+                    })
+                    .collect(),
+            ),
+            loc,
+        ),
+        Subscript(id, args, loc) => Subscript(
+            id,
+            args.into_iter()
+                .map(|index| match index {
+                    IndexExpr0::Expr(expr) => {
+                        IndexExpr0::Expr(substitute_active_dimension_refs_inner(
+                            expr,
+                            active_elements,
+                            dimensions_ctx,
+                        ))
+                    }
+                    IndexExpr0::Range(start, end, loc) => IndexExpr0::Range(
+                        substitute_active_dimension_refs_inner(
+                            start,
+                            active_elements,
+                            dimensions_ctx,
+                        ),
+                        substitute_active_dimension_refs_inner(
+                            end,
+                            active_elements,
+                            dimensions_ctx,
+                        ),
+                        loc,
+                    ),
+                    other => other,
+                })
+                .collect(),
+            loc,
+        ),
+        Op1(op, mut rhs, loc) => {
+            *rhs = substitute_active_dimension_refs_inner(
+                mem::take(&mut *rhs),
+                active_elements,
+                dimensions_ctx,
+            );
+            Op1(op, rhs, loc)
+        }
+        Op2(op, mut lhs, mut rhs, loc) => {
+            *lhs = substitute_active_dimension_refs_inner(
+                mem::take(&mut *lhs),
+                active_elements,
+                dimensions_ctx,
+            );
+            *rhs = substitute_active_dimension_refs_inner(
+                mem::take(&mut *rhs),
+                active_elements,
+                dimensions_ctx,
+            );
+            Op2(op, lhs, rhs, loc)
+        }
+        If(mut condition, mut then_expr, mut else_expr, loc) => {
+            *condition = substitute_active_dimension_refs_inner(
+                mem::take(&mut *condition),
+                active_elements,
+                dimensions_ctx,
+            );
+            *then_expr = substitute_active_dimension_refs_inner(
+                mem::take(&mut *then_expr),
+                active_elements,
+                dimensions_ctx,
+            );
+            *else_expr = substitute_active_dimension_refs_inner(
+                mem::take(&mut *else_expr),
+                active_elements,
+                dimensions_ctx,
+            );
+            If(condition, then_expr, else_expr, loc)
+        }
+    }
+}
+
 fn rewrite_alias_module_call(
     func: String,
     args: Vec<Expr0>,
@@ -211,6 +420,8 @@ fn rewrite_alias_module_call(
             format!("{func}'s order argument must be the literal 1 or 3")
         );
     };
+    // XMILE permits arbitrary N, but the engine currently has canonical
+    // stateful module implementations only for first- and third-order forms.
     let rewritten_name = match (func.as_str(), order) {
         ("delayn", 1) => "delay1",
         ("delayn", 3) => "delay3",
@@ -226,11 +437,16 @@ fn rewrite_alias_module_call(
         }
     };
 
-    let init_expr = init.unwrap_or_else(|| input.clone());
-    Ok((
-        rewritten_name.to_string(),
-        vec![input, delay_time, init_expr],
-    ))
+    // XMILE 1.0 section 3.5.3 (`docs/reference/xmile-v1.0.html#_Toc439926074`)
+    // specifies that an omitted initial value uses the input's initial value.
+    // The canonical stdlib delay/smooth models implement that rule through
+    // `isModuleInput(initial_value)`, so absence is represented by leaving the
+    // trailing port unwired.
+    let mut normalized = vec![input, delay_time];
+    if let Some(init) = init {
+        normalized.push(init);
+    }
+    Ok((rewritten_name.to_string(), normalized))
 }
 
 /// Get dimension names from a slice of Dimensions
@@ -789,115 +1005,10 @@ impl<'a> BuiltinVisitor<'a> {
     /// dimension later. The GH #541 arrayed-capture arm is deliberately exempt:
     /// its declared dimensions give lowering the context it needs.
     fn substitute_dimension_refs(&self, expr: Expr0) -> Expr0 {
-        use Expr0::*;
-        use std::mem;
-
-        let subscript = match &self.active_subscript {
-            Some(s) => s,
-            None => return expr,
+        let Some(subscript) = self.active_subscript.as_deref() else {
+            return expr;
         };
-
-        match expr {
-            Const(_, _, _) => expr,
-            Var(ref ident, loc) => {
-                // Check if this var is a dimension name that should be substituted
-                let canonical_name = CanonicalDimensionName::from_raw(ident.as_str());
-                for (i, dim_name) in self.dimension_names.iter().enumerate() {
-                    if &canonical_name == dim_name {
-                        // Check if this is an indexed or named dimension
-                        match &self.dimensions[i] {
-                            Dimension::Indexed(_, _) => {
-                                // For indexed dimensions, the subscript element is a number
-                                // Use it directly as a Const
-                                let val: f64 = subscript[i].parse().unwrap_or(0.0);
-                                return Const(subscript[i].clone(), Literal::new(val), loc);
-                            }
-                            Dimension::Named(_, _) => {
-                                // For named dimensions, use qualified element (dimension·element).
-                                // During constify_dimensions, this gets looked up via
-                                // DimensionsContext::lookup which returns a 1-based index
-                                // (from indexed_elements). The compiler then converts this
-                                // 1-based value to 0-based when processing subscript indices.
-                                let qualified_name =
-                                    format!("{}·{}", dim_name.as_str(), subscript[i]);
-                                return Var(RawIdent::new_from_str(&qualified_name), loc);
-                            }
-                        }
-                    }
-                }
-                // Check dimension mappings: if this dimension maps to one of our parent dimensions,
-                // translate the subscript using positional correspondence.
-                // For example, if DimA maps to DimB and we're processing subscript "b1" of DimB,
-                // translate the reference to DimA to its equivalent element "a1".
-                if let Some(ctx) = self.dimensions_ctx {
-                    for (i, dim_name) in self.dimension_names.iter().enumerate() {
-                        let target_element = CanonicalElementName::from_raw(&subscript[i]);
-
-                        // Try direct/reverse mapping first, including secondary targets.
-                        if let Some(source_element) =
-                            ctx.translate_via_mapping(&canonical_name, dim_name, &target_element)
-                        {
-                            let qualified_name =
-                                format!("{}·{}", canonical_name.as_str(), source_element.as_str());
-                            return Var(RawIdent::new_from_str(&qualified_name), loc);
-                        }
-
-                        // If the active dimension is a subdimension of a mapped target,
-                        // resolve through that mapped parent.
-                        if let Some(parent_dim) =
-                            ctx.find_mapping_parent_of(&canonical_name, dim_name)
-                            && let Some(source_element) = ctx.translate_to_source_via_mapping(
-                                &canonical_name,
-                                parent_dim,
-                                &target_element,
-                            )
-                        {
-                            let qualified_name =
-                                format!("{}·{}", canonical_name.as_str(), source_element.as_str());
-                            return Var(RawIdent::new_from_str(&qualified_name), loc);
-                        }
-                    }
-                }
-                expr
-            }
-            App(UntypedBuiltinFn(func, args), loc) => {
-                let args = args
-                    .into_iter()
-                    .map(|a| self.substitute_dimension_refs(a))
-                    .collect();
-                App(UntypedBuiltinFn(func, args), loc)
-            }
-            Subscript(id, args, loc) => {
-                let args = args
-                    .into_iter()
-                    .map(|idx| match idx {
-                        IndexExpr0::Expr(e) => IndexExpr0::Expr(self.substitute_dimension_refs(e)),
-                        IndexExpr0::Range(start, end, loc) => IndexExpr0::Range(
-                            self.substitute_dimension_refs(start),
-                            self.substitute_dimension_refs(end),
-                            loc,
-                        ),
-                        other => other,
-                    })
-                    .collect();
-                Subscript(id, args, loc)
-            }
-            Op1(op, mut r, loc) => {
-                *r = self.substitute_dimension_refs(mem::take(&mut *r));
-                Op1(op, r, loc)
-            }
-            Op2(op, mut l, mut r, loc) => {
-                *l = self.substitute_dimension_refs(mem::take(&mut *l));
-                *r = self.substitute_dimension_refs(mem::take(&mut *r));
-                Op2(op, l, r, loc)
-            }
-            If(mut cond, mut t, mut f, loc) => {
-                *cond = self.substitute_dimension_refs(mem::take(&mut *cond));
-                *t = self.substitute_dimension_refs(mem::take(&mut *t));
-                *f = self.substitute_dimension_refs(mem::take(&mut *f));
-                If(cond, t, f, loc)
-            }
-        }
+        substitute_active_dimension_refs(expr, &self.dimensions, subscript, self.dimensions_ctx)
     }
 
     /// Get the subscript suffix for module/helper names (e.g., "a2" or "a1,b2")
@@ -1187,13 +1298,23 @@ impl<'a> BuiltinVisitor<'a> {
                 } else {
                     arg
                 };
-                let hoisted = HoistedArg::new(
-                    self.variable_name,
-                    self.n,
-                    i,
-                    transformed_arg,
-                    suffix.clone(),
-                );
+                let hoisted = match self.active_subscript.as_ref() {
+                    Some(subscript) => HoistedArg::new_in_element(
+                        self.variable_name,
+                        self.n,
+                        i,
+                        transformed_arg,
+                        &self.dimensions,
+                        subscript,
+                    ),
+                    None => HoistedArg::new(
+                        self.variable_name,
+                        self.n,
+                        i,
+                        transformed_arg,
+                        suffix.clone(),
+                    ),
+                };
                 let id = hoisted.ident().to_string();
                 self.insert_implicit_var(ImplicitVar::HoistedArg(hoisted))?;
                 id
@@ -1317,7 +1438,6 @@ impl<'a> BuiltinVisitor<'a> {
                     | MacroCallResolution::Unresolved => {}
                 }
 
-                let (func, args) = rewrite_alias_module_call(func, args, loc)?;
                 // MODULO(x, y) is the function-call form of the MOD binary operator
                 if func == "modulo" && args.len() == 2 {
                     let mut it = args.into_iter();
@@ -1412,6 +1532,12 @@ impl<'a> BuiltinVisitor<'a> {
                     // PREVIOUS(var, init) and INIT(var)) and compile to opcodes.
                     return Ok(App(UntypedBuiltinFn(func, args), loc));
                 }
+
+                // Alias normalization is needed only by stdlib-module calls.
+                // Opcode-backed builtins complete their own routing first, so
+                // sparse optional-port normalization cannot perturb their
+                // argument contract.
+                let (func, args) = rewrite_alias_module_call(func, args, loc)?;
 
                 // `stdlib_descriptor` is the authoritative per-name lookup:
                 // it both rejects unknown names (UnknownBuiltin still fires
