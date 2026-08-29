@@ -6,9 +6,8 @@
 //! a concrete `CompiledModule`/`CompiledSimulation`.
 //!
 //! Holds the table extraction helper (`extract_tables_from_source_var`), the
-//! two owners of module input wiring (`build_module_inputs` and
-//! `module_input_set`, the only places a wiring is derived from `(src, dst)`
-//! reference strings), the per-variable emission tail
+//! module input wiring projections (`build_module_inputs` and
+//! `module_input_set`) over one bound-port filter, the per-variable emission tail
 //! (`compile_phase_to_per_var_bytecodes` and the `VarFragmentResult` value),
 //! the production element-graph source `var_phase_symbolic_fragment_prod`,
 //! the resolved recurrence-SCC interleaver (`segment_member_by_element` /
@@ -109,6 +108,18 @@ pub(crate) fn module_input_prefix(instance: &str) -> String {
     format!("{instance}\u{00B7}")
 }
 
+/// Return the bare bound port for one canonical module reference.
+///
+/// A reference binds a port only when its destination is in this instance and
+/// its source is outside it. Both the lowered `ModuleInput` list and the
+/// `(model, input-set)` compilation identity project from this predicate.
+fn bound_module_port<'a>(module_var_prefix: &str, src: &str, dst: &'a str) -> Option<&'a str> {
+    if src.starts_with(module_var_prefix) {
+        return None;
+    }
+    dst.strip_prefix(module_var_prefix)
+}
+
 /// Build module input mappings from raw (src, dst) reference pairs.
 ///
 /// Filters out references where src is an internal module input (starts
@@ -123,11 +134,7 @@ pub(crate) fn build_module_inputs<S1: AsRef<str>, S2: AsRef<str>>(
     refs.filter_map(|(src, dst)| {
         let src = src.as_ref();
         let dst = dst.as_ref();
-        // Skip internal module inputs (src within the module's own namespace)
-        if src.starts_with(module_var_prefix) {
-            return None;
-        }
-        let dst_stripped = dst.strip_prefix(module_var_prefix)?;
+        let dst_stripped = bound_module_port(module_var_prefix, src, dst)?;
         let src_str = if model_name == "main" && src.starts_with('\u{00B7}') {
             &src['\u{00B7}'.len_utf8()..]
         } else {
@@ -141,19 +148,23 @@ pub(crate) fn build_module_inputs<S1: AsRef<str>, S2: AsRef<str>>(
     .collect()
 }
 
-/// The set of ports a module instance's wiring binds: each `dst` of `refs`
-/// with the instance's prefix (`module_input_prefix`) stripped to the bare
-/// sub-model variable name; a `dst` outside the instance's namespace binds
-/// nothing. This is the instance's identity at assembly -- the same
+/// The set of ports a module instance's wiring binds through
+/// [`bound_module_port`], after canonicalizing both endpoints. This is the
+/// instance's identity at assembly -- the same
 /// `stdlib⁚smth1` model compiles to a distinct module per distinct port set,
 /// because `isModuleInput(port)` selects the live branch from it.
 pub(crate) fn module_input_set<S1: AsRef<str>, S2: AsRef<str>>(
     module_var_prefix: &str,
     refs: impl Iterator<Item = (S1, S2)>,
 ) -> BTreeSet<Ident<Canonical>> {
-    refs.filter_map(|(_src, dst)| {
+    refs.filter_map(|(src, dst)| {
+        let src_canonical = canonicalize(src.as_ref());
         let dst_canonical = canonicalize(dst.as_ref());
-        let bare = dst_canonical.strip_prefix(module_var_prefix)?;
+        let bare = bound_module_port(
+            module_var_prefix,
+            src_canonical.as_ref(),
+            dst_canonical.as_ref(),
+        )?;
         Some(Ident::new(bare))
     })
     .collect()
@@ -1575,26 +1586,126 @@ pub(crate) fn enumerate_module_instances(
     let no_inputs = BTreeSet::new();
     modules.insert(main_ident, [no_inputs].into_iter().collect());
 
-    enumerate_module_instances_inner(db, project, main_model_name, &mut modules, true)?;
+    enumerate_module_instances_inner(db, project, main_model_name, &mut modules)?;
 
     Ok(modules)
 }
 
-/// Enumerate the module keys reachable through explicit and ordinary
-/// generated variables, excluding LTM-only helpers. The ordinary dependency
-/// graph contains exactly this universe; keeping LTM discovery out also keeps
-/// its warning facts owned by the LTM diagnostic boundary rather than deriving
-/// them through an initial-dependency query edge.
+/// Enumerate the module keys used by the ordinary dependency graph.
+///
+/// LTM equations are generated from the post-module-expansion source AST, so
+/// they may add PREVIOUS/INIT capture helpers but cannot add module instances.
+/// This is therefore the same module universe as complete assembly without
+/// introducing an LTM query edge into initial dependency analysis.
 pub(crate) fn enumerate_initial_dependency_module_instances(
     db: &dyn Db,
     project: SourceProject,
     main_model_name: &str,
 ) -> Result<ModuleInstanceMap, String> {
-    let main_ident = Ident::<Canonical>::new(main_model_name);
-    let mut modules: ModuleInstanceMap = HashMap::new();
-    modules.insert(main_ident, [BTreeSet::new()].into_iter().collect());
-    enumerate_module_instances_inner(db, project, main_model_name, &mut modules, false)?;
-    Ok(modules)
+    enumerate_module_instances(db, project, main_model_name)
+}
+
+/// One module instance discovered in one of the two compiler-owned namespaces.
+///
+/// The variant retains each namespace's exact missing-target diagnostic.
+/// Everything after that diagnostic is shared by [`record_module_instance`].
+enum ModuleInstanceCandidate<'a> {
+    Explicit {
+        instance_name: &'a str,
+        target_model_name: &'a str,
+        references: &'a [datamodel::ModuleReference],
+    },
+    OrdinaryImplicit {
+        instance_name: &'a str,
+        target_model_name: &'a str,
+        references: &'a [datamodel::ModuleReference],
+    },
+}
+
+impl<'a> ModuleInstanceCandidate<'a> {
+    fn instance_name(&self) -> &'a str {
+        match self {
+            ModuleInstanceCandidate::Explicit { instance_name, .. }
+            | ModuleInstanceCandidate::OrdinaryImplicit { instance_name, .. } => instance_name,
+        }
+    }
+
+    fn target_model_name(&self) -> &'a str {
+        match self {
+            ModuleInstanceCandidate::Explicit {
+                target_model_name, ..
+            }
+            | ModuleInstanceCandidate::OrdinaryImplicit {
+                target_model_name, ..
+            } => target_model_name,
+        }
+    }
+
+    fn references(&self) -> &'a [datamodel::ModuleReference] {
+        match self {
+            ModuleInstanceCandidate::Explicit { references, .. }
+            | ModuleInstanceCandidate::OrdinaryImplicit { references, .. } => references,
+        }
+    }
+
+    /// Resolve the namespace-specific missing-target policy without reducing
+    /// it to a boolean at the shared traversal boundary.
+    fn missing_target_error(self) -> String {
+        match self {
+            ModuleInstanceCandidate::Explicit {
+                target_model_name, ..
+            } => format!(
+                "model '{}' referenced as module but not found",
+                target_model_name,
+            ),
+            ModuleInstanceCandidate::OrdinaryImplicit {
+                instance_name,
+                target_model_name,
+                ..
+            } => format!(
+                "implicit module '{}' references model '{}' which was not found",
+                instance_name, target_model_name,
+            ),
+        }
+    }
+}
+
+/// Validate, record and recursively descend through one discovered module.
+///
+/// The output key is `(canonical target model, canonical bound-port set)`.
+/// A repeated input set is idempotent and a distinct set is retained, but the
+/// target model's own definitions need descending only once because its nested
+/// module candidates do not depend on which parent ports are bound. The model
+/// key therefore also acts as the visited set that terminates a cycle; the
+/// public assembly path rejects reachable cycles with its diagnostic before
+/// enumeration, while this walk remains total on independently queried input.
+fn record_module_instance(
+    db: &dyn Db,
+    project: SourceProject,
+    modules: &mut ModuleInstanceMap,
+    candidate: ModuleInstanceCandidate<'_>,
+) -> Result<(), String> {
+    let target_model_name = candidate.target_model_name();
+    let target_canonical = canonicalize(target_model_name);
+    if !project.models(db).contains_key(target_canonical.as_ref()) {
+        return Err(candidate.missing_target_error());
+    }
+
+    let inputs = module_input_set(
+        &module_input_prefix(candidate.instance_name()),
+        candidate
+            .references()
+            .iter()
+            .map(|reference| (&reference.src, &reference.dst)),
+    );
+    let target_key = Ident::<Canonical>::new(target_model_name);
+    let first_visit = !modules.contains_key(&target_key);
+    modules.entry(target_key).or_default().insert(inputs);
+
+    if first_visit {
+        enumerate_module_instances_inner(db, project, target_model_name, modules)?;
+    }
+    Ok(())
 }
 
 fn enumerate_module_instances_inner(
@@ -1602,10 +1713,7 @@ fn enumerate_module_instances_inner(
     project: SourceProject,
     model_name: &str,
     modules: &mut ModuleInstanceMap,
-    include_ltm: bool,
 ) -> Result<(), String> {
-    use crate::common::{Canonical, Ident};
-
     let project_models = project.models(db);
     let canonical_name = canonicalize(model_name);
     let source_model = project_models
@@ -1613,133 +1721,54 @@ fn enumerate_module_instances_inner(
         .ok_or_else(|| format!("model '{}' not found", model_name))?;
 
     let source_vars = source_model.variables(db);
-    for (var_name, source_var) in source_vars.iter() {
-        if source_var.kind(db) != SourceVariableKind::Module {
-            continue;
-        }
-
-        let sub_model_name = source_var.model_name(db);
-        let sub_canonical = canonicalize(sub_model_name);
-
-        if !project_models.contains_key(sub_canonical.as_ref()) {
-            return Err(format!(
-                "model '{}' referenced as module but not found",
-                sub_model_name,
-            ));
-        }
-
-        let inputs = module_input_set(
-            &module_input_prefix(var_name),
-            source_var
-                .module_refs(db)
-                .iter()
-                .map(|mr| (&mr.src, &mr.dst)),
-        );
-
-        let key = Ident::<Canonical>::new(sub_model_name);
-        let is_new = !modules.contains_key(&key);
-
-        modules.entry(key).or_default().insert(inputs);
-
-        if is_new {
-            enumerate_module_instances_inner(db, project, sub_model_name, modules, include_ltm)?;
-        }
+    let mut explicit_candidates: Vec<_> = source_vars
+        .iter()
+        .filter(|(_, source_var)| source_var.kind(db) == SourceVariableKind::Module)
+        .collect();
+    // Both candidate maps guarantee canonical keys, so their direct key order
+    // is the stable diagnostic order without canonicalizing inside the sort.
+    explicit_candidates.sort_unstable_by_key(|(name, _)| *name);
+    for (var_name, source_var) in explicit_candidates {
+        record_module_instance(
+            db,
+            project,
+            modules,
+            ModuleInstanceCandidate::Explicit {
+                instance_name: var_name,
+                target_model_name: source_var.model_name(db),
+                references: source_var.module_refs(db),
+            },
+        )?;
     }
 
     // Include implicit MODULE variables (e.g. from SMOOTH, DELAY builtins)
     let implicit_info = model_implicit_var_info(db, *source_model, project);
-    for (name, meta) in implicit_info.iter() {
-        if !meta.is_module {
-            continue;
-        }
+    let mut implicit_candidates: Vec<_> = implicit_info
+        .iter()
+        .filter(|(_, meta)| meta.is_module)
+        .collect();
+    implicit_candidates.sort_unstable_by_key(|(name, _)| *name);
+    for (name, meta) in implicit_candidates {
         let sub_model_name = match &meta.model_name {
             Some(n) => n,
             None => continue,
         };
-        let sub_canonical = canonicalize(sub_model_name);
-        if !project_models.contains_key(sub_canonical.as_ref()) {
-            return Err(format!(
-                "implicit module '{}' references model '{}' which was not found",
-                name, sub_model_name,
-            ));
-        }
         let parsed = parse_source_variable(db, meta.parent_source_var, project);
-        let inputs: BTreeSet<Ident<Canonical>> =
-            if let Some(dm_module) = meta.find_in(parsed).and_then(|iv| iv.module()) {
-                module_input_set(
-                    &module_input_prefix(name),
-                    dm_module.references().iter().map(|mr| (&mr.src, &mr.dst)),
-                )
-            } else {
-                BTreeSet::new()
-            };
-
-        let key = Ident::<Canonical>::new(sub_model_name);
-        let is_new = !modules.contains_key(&key);
-
-        modules.entry(key).or_default().insert(inputs);
-
-        if is_new {
-            enumerate_module_instances_inner(db, project, sub_model_name, modules, include_ltm)?;
-        }
-    }
-
-    // Include LTM implicit MODULE variables (e.g. PREVIOUS instances from
-    // feedback loop instrumentation). These are only present when LTM is
-    // enabled. Models without feedback loops produce empty lists.
-    //
-    // Module-typed LTM implicit vars are the only ones that contribute module
-    // instances, and they are rare (in the current architecture LTM equations
-    // never contain module-function calls, so there are usually none). Drive
-    // the loop from the salsa-cached module-typed projection; each implicit
-    // variable rides on its meta, so no parent equation is (re-)parsed here.
-    if include_ltm && project.ltm_enabled(db) {
-        let ltm_implicit = ltm::model_ltm_implicit_var_info(db, *source_model, project);
-        let mut module_typed: Vec<(&String, &crate::db::LtmImplicitVarMeta)> = ltm_implicit
-            .iter()
-            .filter(|(_, meta)| meta.is_module)
-            .collect();
-        // Deterministic processing order: the recursive sub-model discovery
-        // below allocates entries in `modules` as it goes.
-        module_typed.sort_unstable_by(|a, b| a.0.cmp(b.0));
-
-        if !module_typed.is_empty() {
-            for (im_name, im_meta) in module_typed {
-                let sub_model_name = match &im_meta.model_name {
-                    Some(n) => n,
-                    None => continue,
-                };
-                let sub_canonical = canonicalize(sub_model_name);
-                if !project_models.contains_key(sub_canonical.as_ref()) {
-                    continue;
-                }
-
-                let inputs: BTreeSet<Ident<Canonical>> =
-                    if let Some(dm_module) = im_meta.variable.module() {
-                        module_input_set(
-                            &module_input_prefix(im_name),
-                            dm_module.references().iter().map(|mr| (&mr.src, &mr.dst)),
-                        )
-                    } else {
-                        BTreeSet::new()
-                    };
-
-                let key = Ident::<Canonical>::new(sub_model_name);
-                let is_new = !modules.contains_key(&key);
-
-                modules.entry(key).or_default().insert(inputs);
-
-                if is_new {
-                    enumerate_module_instances_inner(
-                        db,
-                        project,
-                        sub_model_name,
-                        modules,
-                        include_ltm,
-                    )?;
-                }
-            }
-        }
+        let references = meta
+            .find_in(parsed)
+            .and_then(|implicit| implicit.module())
+            .map(|module| module.references())
+            .unwrap_or_default();
+        record_module_instance(
+            db,
+            project,
+            modules,
+            ModuleInstanceCandidate::OrdinaryImplicit {
+                instance_name: name,
+                target_model_name: sub_model_name,
+                references,
+            },
+        )?;
     }
 
     Ok(())

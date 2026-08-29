@@ -87,7 +87,7 @@ fn ltm_dependency_shape(
 /// LTM equations are pure aux equations, scalar or dimensioned, that may reference:
 /// - Model variables (stocks, flows, auxes) from the parent model
 /// - Other LTM variables (loop scores referencing link scores)
-/// - Implicit helper/module variables created during parsing
+/// - PREVIOUS/INIT capture helpers created during LTM parsing
 /// - Implicit time/dt/initial_time/final_time variables
 ///
 /// Parsed LTM equations may synthesize helper auxes for PREVIOUS/INIT. Source
@@ -926,12 +926,12 @@ fn lower_ltm_variable(
 /// variables from the parent model, other LTM variables (a loop score reads
 /// link scores; an A2A loop score must see an A2A link score's dimensions so
 /// the compiler emits per-element fetches rather than collapsing every slot to
-/// slot 0, tech-debt #34), implicit helper/module variables synthesized while
+/// slot 0, tech-debt #34), PREVIOUS/INIT capture helpers synthesized while
 /// parsing this or another LTM equation (an ARRAYED capture helper -- the GH
-/// #541 arrayed `PREVIOUS`/`INIT` capture, extended to array-valued builtin
-/// subtrees like `rank(pop, 1)` by GH #742 -- needs its dimensions so the
-/// consuming `helper[dim·elem]` subscript resolves), the model's own
-/// SMOOTH/DELAY instances and capture helpers, and the implicit time globals.
+/// #541 arrayed capture, extended to array-valued builtin subtrees like
+/// `rank(pop, 1)` by GH #742 -- needs its dimensions so the consuming
+/// `helper[dim·elem]` subscript resolves), the model's own SMOOTH/DELAY
+/// instances and ordinary capture helpers, and the implicit time globals.
 /// A name absent from all four namespaces has no shape. It is omitted from the
 /// fragment scope so lowering reports the unknown dependency instead of
 /// inventing scalar storage.

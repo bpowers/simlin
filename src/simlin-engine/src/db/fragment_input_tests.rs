@@ -522,9 +522,10 @@ fn stock_initialized_from_a_stockless_modules_output_reads_its_t0_value() {
     assert_eq!(series["level"], vec![30.0, 30.0, 30.0]);
 }
 
-/// `module_input_set` is the one owner of "which ports does this wiring bind":
-/// a `dst` inside the instance's namespace yields its bare port, a `dst`
-/// outside it is dropped, and the result is a set (sorted, deduplicated).
+/// `module_input_set` projects the shared bound-port policy into an identity:
+/// a `dst` inside the instance's namespace yields its bare port unless `src`
+/// is internal to the same instance, a foreign `dst` is dropped, and the
+/// result is a set (sorted, deduplicated).
 #[test]
 fn module_input_set_strips_the_instance_prefix_and_drops_foreign_targets() {
     let set = crate::db::assemble::module_input_set(
@@ -534,6 +535,7 @@ fn module_input_set_strips_the_instance_prefix_and_drops_foreign_targets() {
             ("b", "other\u{00B7}port"),
             ("c", "m\u{00B7}alpha"),
             ("d", "m\u{00B7}zeta"),
+            ("m\u{00B7}output", "m\u{00B7}internal_input"),
         ]
         .into_iter(),
     );

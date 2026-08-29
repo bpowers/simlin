@@ -21,6 +21,8 @@
 
 use std::collections::{BTreeSet, HashSet};
 
+use salsa::Setter;
+
 use crate::bytecode::{ModuleDeclaration, Opcode};
 use crate::common::{Canonical, Ident, canonicalize};
 use crate::compiler::symbolic::VariableLayout;
@@ -30,7 +32,7 @@ use crate::db::{
     compute_layout, model_dependency_graph, model_flows_invariant, model_implicit_var_info,
     model_ltm_implicit_var_info, model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel,
 };
-use crate::testutils::{x_aux, x_flow, x_model, x_module, x_project, x_stock};
+use crate::testutils::{x_aux, x_flow, x_model, x_module, x_module_named, x_project, x_stock};
 use crate::vm::Vm;
 
 fn sim_specs() -> datamodel::SimSpecs {
@@ -90,6 +92,353 @@ fn x_arrayed(ident: &str, dim: &str, elements: &[(&str, &str)]) -> datamodel::Va
 
 fn key(s: &str) -> Ident<Canonical> {
     Ident::<Canonical>::from_unchecked(s.to_string())
+}
+
+fn enumerated_module_rows(
+    modules: &crate::db::assemble::ModuleInstanceMap,
+) -> Vec<(String, Vec<Vec<String>>)> {
+    let mut rows: Vec<_> = modules
+        .iter()
+        .map(|(model, input_sets)| {
+            let sets = input_sets
+                .iter()
+                .map(|inputs| {
+                    inputs
+                        .iter()
+                        .map(|input| input.as_str().to_string())
+                        .collect()
+                })
+                .collect();
+            (model.as_str().to_string(), sets)
+        })
+        .collect();
+    rows.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    rows
+}
+
+fn enumeration_fixture() -> datamodel::Project {
+    x_project(
+        sim_specs(),
+        &[
+            x_model(
+                "main",
+                vec![
+                    x_aux("source", "3", None),
+                    x_stock("level", "1", &["adjustment"], &[], None),
+                    // The first and third instances have the same target and
+                    // bound-port set. The second has a distinct set. A dst in
+                    // another namespace must not become part of this
+                    // instance's compilation identity.
+                    x_module_named(
+                        "leaf_p",
+                        "leaf",
+                        &[("source", "leaf_p.p"), ("source", "other.q")],
+                        None,
+                    ),
+                    x_module_named("leaf_q", "leaf", &[("source", "leaf_q.q")], None),
+                    x_module_named(
+                        "leaf_p_again",
+                        "leaf",
+                        &[("source", "leaf_p_again.p")],
+                        None,
+                    ),
+                    // Ordinary implicit-module discovery.
+                    x_aux("smoothed", "SMTH1(level, 2)", None),
+                    x_flow("adjustment", "(source - smoothed) / 2", None),
+                ],
+            ),
+            x_model(
+                "leaf",
+                vec![
+                    x_aux("p", "0", None),
+                    x_aux("q", "0", None),
+                    x_aux("out", "p + q", None),
+                    // Nested descent from a model reached through three
+                    // parent instances.
+                    x_module_named("nested", "nested", &[], None),
+                ],
+            ),
+            x_model("nested", vec![x_aux("value", "1", None)]),
+        ],
+    )
+}
+
+/// The two production candidate namespaces feed one `(model, input-set)`
+/// identity. The row is derived from source variables and source parsing; no
+/// dependency or instance map is built by hand.
+#[test]
+fn module_instance_enumeration_covers_both_candidate_namespaces_and_identity_rules() {
+    let project = enumeration_fixture();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    assert!(
+        !model_ltm_variables(&db, sync.models["main"].source, sync.project)
+            .vars
+            .is_empty(),
+        "the fixture must exercise enumeration alongside real LTM instrumentation"
+    );
+
+    let modules = crate::db::assemble::enumerate_module_instances(&db, sync.project, "main")
+        .expect("both module candidate namespaces enumerate");
+    let rows = enumerated_module_rows(&modules);
+
+    assert!(
+        rows.contains(&(
+            "leaf".to_string(),
+            vec![vec!["p".to_string()], vec!["q".to_string()]],
+        )),
+        "same-target instances deduplicate the repeated {{p}} set, retain the distinct {{q}} \
+         set, and ignore the other instance's qualified dst: {rows:?}",
+    );
+    assert!(
+        rows.iter()
+            .any(|(model, sets)| model == "nested" && sets == &[Vec::<String>::new()]),
+        "the leaf target must be descended into exactly far enough to discover its nested model: \
+         {rows:?}",
+    );
+    assert!(
+        rows.iter().any(|(model, sets)| {
+            model == "stdlib⁚smth1"
+                && sets == &[vec!["delay_time".to_string(), "input".to_string()]]
+        }),
+        "the ordinary implicit SMTH1 module and its production-derived ports must enumerate: \
+         {rows:?}",
+    );
+    let initial_modules = crate::db::assemble::enumerate_initial_dependency_module_instances(
+        &db,
+        sync.project,
+        "main",
+    )
+    .expect("the ordinary dependency universe enumerates");
+    assert_eq!(
+        enumerated_module_rows(&initial_modules),
+        rows,
+        "initial dependency analysis and complete assembly share the two live module namespaces"
+    );
+}
+
+/// The datamodel can retain a reference whose source and destination are both
+/// inside one module instance. Production input construction excludes that internal
+/// edge, so enumeration, the emitted declaration and VM module lookup must all
+/// use the target model's empty bound-port identity.
+#[test]
+fn internal_module_reference_is_not_a_bound_input() {
+    let project = x_project(
+        sim_specs(),
+        &[
+            x_model(
+                "main",
+                vec![x_module_named(
+                    "bridge",
+                    "leaf",
+                    &[("bridge.output", "bridge.input")],
+                    None,
+                )],
+            ),
+            x_model(
+                "leaf",
+                vec![
+                    x_aux("input", "2", None),
+                    x_aux("output", "input + 1", None),
+                ],
+            ),
+        ],
+    );
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+
+    let modules = crate::db::assemble::enumerate_module_instances(&db, sync.project, "main")
+        .expect("the internal reference must enumerate");
+    assert_eq!(
+        modules
+            .get(&key("leaf"))
+            .expect("the target model must be discovered"),
+        &[BTreeSet::new()].into_iter().collect(),
+        "an own-prefix source is internal and binds no target-model input"
+    );
+
+    let sim = assemble_simulation(&db, sync.project, "main".to_string())
+        .expect("the production project must compile");
+    let root = sim.modules.get(&sim.root).expect("root compiled module");
+    let eval_ids: Vec<_> = root
+        .compiled_flows
+        .code
+        .iter()
+        .filter_map(|opcode| match opcode {
+            Opcode::EvalModule { id, .. } => Some(*id as usize),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(eval_ids.len(), 1, "the source module emits one evaluation");
+    let declaration = &root.context.modules[eval_ids[0]];
+    assert_eq!(declaration.model_name, key("leaf"));
+    assert!(
+        declaration.input_set.is_empty(),
+        "the EvalModule declaration must use the same empty identity as enumeration"
+    );
+
+    let mut vm = Vm::new((*sim).clone()).expect("the declaration must resolve its compiled child");
+    vm.run_to_end().expect("the internal-reference model runs");
+    assert_constant_series(&vm, "bridge\u{00B7}output", 3.0);
+}
+
+#[test]
+fn explicit_module_missing_target_keeps_its_diagnostic() {
+    let project = x_project(
+        sim_specs(),
+        &[x_model(
+            "main",
+            vec![x_module_named("gone", "missing", &[], None)],
+        )],
+    );
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+
+    let error = crate::db::assemble::enumerate_module_instances(&db, sync.project, "main")
+        .expect_err("an explicit missing target must be refused");
+    assert_eq!(error, "model 'missing' referenced as module but not found");
+}
+
+#[test]
+fn ordinary_implicit_module_missing_target_keeps_its_diagnostic() {
+    let project = x_project(
+        sim_specs(),
+        &[x_model(
+            "main",
+            vec![
+                x_aux("source", "1", None),
+                x_aux("out", "SMTH1(source, 2)", None),
+            ],
+        )],
+    );
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let implicit = model_implicit_var_info(&db, sync.models["main"].source, sync.project);
+    let (instance, target) = implicit
+        .iter()
+        .find_map(|(name, meta)| {
+            meta.model_name
+                .as_ref()
+                .map(|target| (name.clone(), target.clone()))
+        })
+        .expect("SMTH1 must synthesize one module instance");
+    let mut models = sync.project.models(&db).clone();
+    models.remove(canonicalize(&target).as_ref());
+    sync.project.set_models(&mut db).to(models);
+
+    let error = crate::db::assemble::enumerate_module_instances(&db, sync.project, "main")
+        .expect_err("an ordinary implicit missing target must be refused");
+    assert_eq!(
+        error,
+        format!("implicit module '{instance}' references model '{target}' which was not found")
+    );
+}
+
+/// Explicit candidates retain namespace precedence and choose the same first
+/// missing target regardless of source declaration order or fresh HashMap
+/// seeds. The ordinary missing module is present to make the cross-namespace
+/// precedence observable rather than assumed.
+#[test]
+fn multiple_missing_explicit_modules_choose_the_canonical_first_diagnostic() {
+    let explicit = [
+        x_module_named("alpha_instance", "missing_alpha", &[], None),
+        x_module_named("zeta_instance", "missing_zeta", &[], None),
+    ];
+
+    for reverse in [false, true] {
+        for _ in 0..16 {
+            let mut vars = vec![
+                x_aux("source", "1", None),
+                x_aux("ordinary_missing", "SMTH1(source, 2)", None),
+            ];
+            vars.extend(if reverse {
+                explicit.iter().rev().cloned().collect::<Vec<_>>()
+            } else {
+                explicit.to_vec()
+            });
+            let project = x_project(sim_specs(), &[x_model("main", vars)]);
+            let mut db = SimlinDb::default();
+            let sync = sync_from_datamodel(&db, &project);
+            let mut models = sync.project.models(&db).clone();
+            models.remove("stdlib⁚smth1");
+            sync.project.set_models(&mut db).to(models);
+
+            let error = crate::db::assemble::enumerate_module_instances(&db, sync.project, "main")
+                .expect_err("the canonical first explicit target must be refused first");
+            assert_eq!(
+                error, "model 'missing_alpha' referenced as module but not found",
+                "explicit candidates precede ordinary candidates and sort by canonical key"
+            );
+        }
+    }
+}
+
+/// Ordinary implicit candidates are production parse outputs, not a hand-made
+/// metadata map. Reversing their parent declarations and rebuilding with fresh
+/// map seeds must not change which exact missing-module diagnostic wins.
+#[test]
+fn multiple_missing_ordinary_modules_choose_the_canonical_first_diagnostic() {
+    let calls = [
+        x_aux("alpha_delayed", "DELAY1(source, 2)", None),
+        x_aux("zeta_smoothed", "SMTH1(source, 2)", None),
+    ];
+
+    for reverse in [false, true] {
+        for _ in 0..16 {
+            let mut vars = vec![x_aux("source", "1", None)];
+            vars.extend(if reverse {
+                calls.iter().rev().cloned().collect::<Vec<_>>()
+            } else {
+                calls.to_vec()
+            });
+            let project = x_project(sim_specs(), &[x_model("main", vars)]);
+            let mut db = SimlinDb::default();
+            let sync = sync_from_datamodel(&db, &project);
+            let mut models = sync.project.models(&db).clone();
+            models.remove("stdlib⁚delay1");
+            models.remove("stdlib⁚smth1");
+            sync.project.set_models(&mut db).to(models);
+
+            let error = crate::db::assemble::enumerate_module_instances(&db, sync.project, "main")
+                .expect_err("the canonical first ordinary target must be refused first");
+            assert_eq!(
+                error,
+                "implicit module '$⁚alpha_delayed⁚0⁚delay1' references model \
+                 'stdlib⁚delay1' which was not found",
+                "ordinary candidates sort by their canonical production-generated keys"
+            );
+        }
+    }
+}
+
+#[test]
+fn module_instance_enumeration_terminates_on_a_cycle_and_is_order_independent() {
+    let models = [
+        x_model(
+            "main",
+            vec![
+                x_module_named("to_a", "a", &[], None),
+                x_module_named("also_a", "a", &[], None),
+            ],
+        ),
+        x_model("a", vec![x_module_named("to_b", "b", &[], None)]),
+        x_model("b", vec![x_module_named("to_a", "a", &[], None)]),
+    ];
+    let expected = vec![
+        ("a".to_string(), vec![Vec::<String>::new()]),
+        ("b".to_string(), vec![Vec::<String>::new()]),
+        ("main".to_string(), vec![Vec::<String>::new()]),
+    ];
+
+    for project_models in [models.to_vec(), models.into_iter().rev().collect()] {
+        let project = x_project(sim_specs(), &project_models);
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        let modules = crate::db::assemble::enumerate_module_instances(&db, sync.project, "main")
+            .expect("the visited-model identity must terminate recursive enumeration");
+        assert_eq!(enumerated_module_rows(&modules), expected);
+    }
 }
 
 /// The model a module variable instantiates: an explicit `Module` variable's
@@ -413,6 +762,53 @@ fn ltm_project() -> datamodel::Project {
         vec!["d1".to_string(), "d2".to_string()],
     )];
     project
+}
+
+/// Generated LTM equations consume the source model's post-module-expansion
+/// AST. The source SMTH1 therefore remains an ordinary implicit module while
+/// the real LTM score generator may add capture helpers but no second module
+/// namespace.
+#[test]
+fn generated_ltm_helpers_do_not_create_module_instances() {
+    let project = ltm_project();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let model = sync.models["main"].source;
+
+    let source_implicit = model_implicit_var_info(&db, model, sync.project);
+    assert!(
+        source_implicit.values().any(|meta| meta.is_module),
+        "the source SMTH1 call must be expanded into the ordinary module registry"
+    );
+
+    let ltm_implicit = model_ltm_implicit_var_info(&db, model, sync.project);
+    assert!(
+        !ltm_implicit.is_empty(),
+        "the production flow-to-stock score must synthesize PREVIOUS capture helpers"
+    );
+    assert!(
+        ltm_implicit.values().all(|meta| {
+            meta.variable.capture().is_some() && !meta.is_module && meta.model_name.is_none()
+        }),
+        "generated LTM helpers must all be captures, never modules or hoisted module-call \
+         arguments: {}",
+        ltm_implicit
+            .iter()
+            .filter(|(_, meta)| {
+                meta.variable.capture().is_none() || meta.is_module || meta.model_name.is_some()
+            })
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    let modules = crate::db::assemble::enumerate_module_instances(&db, sync.project, "main")
+        .expect("the source module universe enumerates under LTM");
+    assert!(
+        modules.contains_key(&Ident::<Canonical>::new("stdlib⁚smth1")),
+        "qualified LTM reads of the source SMTH1 output resolve through its ordinary instance"
+    );
 }
 
 /// Under LTM the results-offset map is still the assembled layout, now with

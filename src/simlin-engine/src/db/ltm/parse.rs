@@ -28,14 +28,16 @@ use crate::db::ParsedVariableResult;
 use super::LtmEquation;
 
 /// Parse an LTM synthetic variable's typed equation into a
-/// `Variable<ModuleInput, Expr0>` plus any implicit helper/module variables the
-/// PREVIOUS/INIT and stdlib-module expansion visitor synthesizes.
+/// `Variable<ModuleInput, Expr0>` plus the implicit PREVIOUS/INIT capture
+/// helpers its visitor synthesizes.
 ///
 /// The equation is already a parsed AST (`LtmEquation`), so this only resolves
 /// its dimension names to `Dimension`s (building the flow-phase `Ast<Expr0>`)
 /// and runs `instantiate_implicit_modules` -- the exact visitor the ordinary
-/// `variable::parse_var` runs -- so PREVIOUS/INIT capture
-/// auxes and stdlib module calls expand identically.
+/// `variable::parse_var` runs -- for PREVIOUS/INIT capture auxes. Production
+/// LTM equations are generated from the post-module-expansion source AST: a
+/// qualified source-module output remains a reference resolved through
+/// `model_implicit_var_info`, never a module call owned by this parser.
 ///
 /// Flow-phase only: LTM synthetic variables are scalar auxes (never stocks),
 /// compiled in the flow phase, and their init phase would only re-run the

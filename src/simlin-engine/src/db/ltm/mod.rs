@@ -734,28 +734,31 @@ pub struct LtmImplicitVarMeta {
     pub ltm_parent_name: String,
     /// Whether this implicit var is a stock
     pub is_stock: bool,
-    /// Whether this implicit var is a module
+    /// Whether the shared generic visitor classified this value as a module.
+    /// Production LTM equations are post-module-expansion, so this is false;
+    /// the typed field keeps generic parser results total at this boundary.
     pub is_module: bool,
-    /// Sub-model name if is_module is true
+    /// Generic visitor target when `is_module` is true; `None` for production
+    /// LTM capture metadata.
     pub model_name: Option<String>,
-    /// Size in slots (for scalar vars: 1; for modules: sub-model n_slots)
+    /// Size in slots. A defensive generic module result uses the sub-model's
+    /// slots, while production capture helpers use their resolved dimensions.
     pub size: usize,
     /// The implicit variable itself, exactly as LTM equation parsing
     /// synthesized it. Carrying it here means downstream consumers
-    /// (`assemble_module`'s LTM-implicit compile loop, the implicit fragment
-    /// compiler, module-instance enumeration) read it directly instead of
-    /// re-parsing the parent LTM equation -- which previously happened 2-3
-    /// times per synthetic variable and was a measurable fraction of LTM
-    /// compile time on large models (GH #655).
+    /// (`assemble_module`'s LTM-implicit compile loop and the implicit fragment
+    /// compiler) read it directly. Re-parsing the parent LTM equation 2-3 times
+    /// per synthetic variable is a measurable fraction of LTM compile time on
+    /// large models (GH #655).
     pub variable: crate::capture::ImplicitVar,
 }
 
 /// Cached implicit variable info for all LTM synthetic variables.
 ///
-/// Parses each LTM equation to discover implicit helper/module variables,
-/// caching the results. Both `compute_layout` and `assemble_module` read
-/// this to allocate slots and compile fragments for those implicit vars
-/// within LTM equations.
+/// Parses each LTM equation to discover PREVIOUS/INIT capture helpers, caching
+/// the results. Production equations are post-module-expansion and therefore
+/// cannot add module instances. Both `compute_layout` and `assemble_module`
+/// read this to allocate slots and compile fragments for those captures.
 ///
 /// **The parse here is DELIBERATELY duplicated** with the one
 /// `compile_ltm_equation_fragment` performs, and that is a measured space-time

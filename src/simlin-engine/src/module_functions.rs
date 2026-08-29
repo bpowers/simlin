@@ -510,21 +510,22 @@ impl MacroRegistry {
         // RESIDUAL: that first step -- builtin expansion and macro expansion
         // being the only synthesisers of implicit module vars -- was ENUMERATED
         // from the code paths above, not proved exhaustively. Nothing
-        // structurally prevents a future implicit-var synthesizer from minting a
-        // `Variable::Module` with a different target, and such a target would be
-        // invisible to the gate again. There are THREE recorders of implicit
-        // module vars today, all fed by the same `expand_module_function`:
-        // `db::query::model_implicit_var_info` and
-        // `db::ltm::model_ltm_implicit_var_info` (both carrying `is_module` +
-        // `model_name`), plus `db::model_scope::model_module_targets`, which
-        // projects topology from the first. Only the first opens a cycle path:
-        // `compute_layout`
-        // recurses on `model_implicit_var_info`'s module entries (Section 2) but
-        // takes `meta.size` verbatim for the LTM ones (Section 3b), and
-        // `model_shape` recurses only through `compute_layout`. So the LTM
-        // recorder is inert for cycle safety -- but it is a place a future edit
-        // could make recursive, which is why it is named here rather than left
-        // out of the enumeration.
+        // structurally prevents a future ordinary implicit-var synthesizer from
+        // minting a `Variable::Module` with a different target, and such a
+        // target would be invisible to the gate again. There are two ordinary
+        // recording projections today, both fed by the same
+        // `expand_module_function`: `db::query::model_implicit_var_info` owns
+        // the parsed module records and `db::model_scope::model_module_targets`
+        // projects topology from them. `compute_layout` recurses through those
+        // ordinary module entries, so they are the only implicit cycle path.
+        //
+        // LTM parsing shares the generic visitor type, but it is not a third
+        // recorder: every production LTM equation consumes the already
+        // module-expanded source AST or combines qualified generated refs.
+        // `parse_ltm_equation` can therefore synthesize PREVIOUS/INIT captures,
+        // while `model_ltm_implicit_var_info` contains capture metadata only and
+        // never contributes module topology. Their rustdocs state this boundary
+        // so adding a new LTM producer cannot silently broaden the cycle proof.
         //
         // The rejection is deliberately BROADER than the cycle, and the cost is
         // REAL, not zero. Measured against the pre-pass code, an explicit module
