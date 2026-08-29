@@ -4,12 +4,11 @@
 
 //! Root-cause harness for LTM synthetic fragments that fail to compile.
 //!
-//! `model_ltm_fragment_diagnostics` reports *that* a generated LTM equation
-//! did not compile, but not why: the three failure points inside
-//! `compile_ltm_equation_fragment` (parse errors, the `Var::new` lowering
-//! `Err`, and codegen returning `None`) all collapse to one `Option::None`.
-//! With ~1,600 failures on a single real model, "which construct is broken"
-//! is not answerable from the warning text alone.
+//! `model_ltm_fragment_diagnostics` reports every generated LTM equation that
+//! did not compile. Parse and lowering failures retain their typed diagnostic
+//! payload; codegen-only failures carry an Assembly reason. With many failures
+//! on one model, this harness groups those reasons by equation structure so a
+//! small number of root causes can be distinguished from a long tail.
 //!
 //! This harness joins the failure list back to the generated equation each
 //! failing variable carries, buckets the equations by the construct they
@@ -219,8 +218,8 @@ fn main() {
     println!("ltm mode: {:?}", ltm.mode);
     println!("synthetic LTM variables emitted: {}", ltm.vars.len());
 
-    // The failure set, harvested exactly as a consumer sees it: the
-    // accumulated warnings from a whole-project diagnostic pass.
+    // The failure set, harvested exactly as a consumer sees it: the emitted
+    // warnings from a whole-project diagnostic pass.
     //
     // `collect_all_diagnostics` covers EVERY model in the project, while `ltm`
     // above is the analyzed model's alone -- and a project carries the spliced
@@ -253,9 +252,8 @@ fn main() {
     let mut reasons: BTreeMap<String, String> = BTreeMap::new();
     let mut other_model_failures: BTreeMap<String, usize> = BTreeMap::new();
     for d in &diagnostics {
-        let msg = match &d.error {
-            simlin_engine::db::DiagnosticError::Assembly(m) => m,
-            _ => continue,
+        let Some(msg) = d.reason() else {
+            continue;
         };
         if !msg.contains("failed to compile") {
             continue;
@@ -609,7 +607,7 @@ fn main() {
     // Are the failing implicit helpers independent causes, or consequences of
     // a parent link score that already failed? A helper is named
     // `$:<parent>:<n>:arg<k>[:<elem>]`; recover the parent and check.
-    println!("\n=== are the 606 failing implicit helpers consequences of a failing parent? ===");
+    println!("\n=== are failing implicit helpers consequences of a failing parent? ===");
     let mut helper_parent_failed = 0usize;
     let mut helper_parent_ok = 0usize;
     let mut helper_parent_unknown = 0usize;

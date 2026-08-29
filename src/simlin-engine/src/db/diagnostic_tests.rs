@@ -42,10 +42,7 @@ fn unrelated_draft_cycle_is_attributed_once_without_leaking_into_main() {
         let main_diagnostics = collect_model_diagnostics(db, main_model, sync.project);
         assert!(
             !main_diagnostics.iter().any(|diagnostic| {
-                matches!(
-                    &diagnostic.error,
-                    DiagnosticError::Model(error) if error.code == ErrorCode::CircularDependency
-                )
+                diagnostic.is(DiagnosticCategory::Model, ErrorCode::CircularDependency)
             }),
             "main must not inherit the unrelated draft cycle: {main_diagnostics:?}"
         );
@@ -54,10 +51,7 @@ fn unrelated_draft_cycle_is_attributed_once_without_leaking_into_main() {
         let cycles: Vec<&Diagnostic> = all
             .iter()
             .filter(|diagnostic| {
-                matches!(
-                    &diagnostic.error,
-                    DiagnosticError::Model(error) if error.code == ErrorCode::CircularDependency
-                )
+                diagnostic.is(DiagnosticCategory::Model, ErrorCode::CircularDependency)
             })
             .collect();
         assert_eq!(
@@ -69,12 +63,9 @@ fn unrelated_draft_cycle_is_attributed_once_without_leaking_into_main() {
         assert_eq!(cycle.model, "draft");
         assert_eq!(cycle.variable.as_deref(), Some("b"));
         assert_eq!(cycle.severity, DiagnosticSeverity::Error);
-        let DiagnosticError::Model(error) = &cycle.error else {
-            unreachable!("the filtered cycle is a model diagnostic")
-        };
-        assert_eq!(error.kind, crate::common::ErrorKind::Model);
-        assert_eq!(error.code, ErrorCode::CircularDependency);
-        assert_eq!(error.details, None);
+        assert_eq!(cycle.category, DiagnosticCategory::Model);
+        assert_eq!(cycle.code, ErrorCode::CircularDependency);
+        assert_eq!(cycle.details, None);
 
         let formatted = collect_formatted_errors(&all, &project);
         let formatted_cycles: Vec<_> = formatted
@@ -208,11 +199,7 @@ fn dependency_cycle_attribution_is_stable_across_insertion_orders_and_revisions(
                 let cycles: Vec<_> = collect_model_diagnostics(db, model, sync.project)
                     .into_iter()
                     .filter(|diagnostic| {
-                        matches!(
-                            &diagnostic.error,
-                            DiagnosticError::Model(error)
-                                if error.code == ErrorCode::CircularDependency
-                        )
+                        diagnostic.is(DiagnosticCategory::Model, ErrorCode::CircularDependency)
                     })
                     .collect();
                 assert_eq!(
@@ -342,7 +329,7 @@ fn test_model_all_diagnostics_triggers_all_sources() {
     // Check for equation error from syntax error
     let has_equation_error = diags.iter().any(|d| {
         d.variable.as_deref() == Some("broken_syntax")
-            && matches!(&d.error, DiagnosticError::Equation(_))
+            && d.category == DiagnosticCategory::Equation
             && d.severity == DiagnosticSeverity::Error
     });
     assert!(
@@ -353,12 +340,9 @@ fn test_model_all_diagnostics_triggers_all_sources() {
     // Check for BadTable compilation error from mismatched x/y points
     let has_bad_table = diags.iter().any(|d| {
         d.variable.as_deref() == Some("bad_table_var")
-            && matches!(
-                &d.error,
-                DiagnosticError::Model(crate::common::Error {
-                    code: crate::common::ErrorCode::BadTable,
-                    ..
-                })
+            && d.is(
+                DiagnosticCategory::Model,
+                crate::common::ErrorCode::BadTable,
             )
             && d.severity == DiagnosticSeverity::Error
     });
@@ -367,20 +351,10 @@ fn test_model_all_diagnostics_triggers_all_sources() {
         "should have a BadTable error for 'bad_table_var'; got: {diags:?}"
     );
 
-    // Check for unit-related warning. The unit inference failure surfaces
-    // as a DiagnosticError::Model with ErrorCode::UnitMismatch at Warning
-    // severity (model-level inference error). Per-variable unit checking
-    // errors would surface as DiagnosticError::Unit.
-    let has_unit_warning = diags.iter().any(|d| {
-        d.severity == DiagnosticSeverity::Warning
-            && matches!(
-                &d.error,
-                DiagnosticError::Model(crate::common::Error {
-                    code: crate::common::ErrorCode::UnitMismatch,
-                    ..
-                }) | DiagnosticError::Unit(_)
-            )
-    });
+    // Check for a warning from one of the complete unit-diagnostic categories.
+    let has_unit_warning = diags
+        .iter()
+        .any(|d| d.severity == DiagnosticSeverity::Warning && d.category.is_unit());
     assert!(
         has_unit_warning,
         "should have a unit warning for the unit mismatch; got: {diags:?}"
@@ -460,16 +434,13 @@ fn test_ac2_1_accumulator_parity_with_old_path() {
     let diags = collect_all_diagnostics(&db, sync.project);
     let mut error_codes: HashSet<ErrorCode> = HashSet::new();
     for d in &diags {
-        if d.severity == DiagnosticSeverity::Error {
-            match &d.error {
-                DiagnosticError::Equation(err) => {
-                    error_codes.insert(err.code);
-                }
-                DiagnosticError::Model(err) => {
-                    error_codes.insert(err.code);
-                }
-                _ => {}
-            }
+        if d.severity == DiagnosticSeverity::Error
+            && matches!(
+                d.category,
+                DiagnosticCategory::Equation | DiagnosticCategory::Model
+            )
+        {
+            error_codes.insert(d.code);
         }
     }
 
@@ -529,12 +500,9 @@ fn test_ac2_2_bad_table_specific_error() {
 
     let has_bad_table = diags.iter().any(|d| {
         d.variable.as_deref() == Some("lookup_var")
-            && matches!(
-                &d.error,
-                DiagnosticError::Model(crate::common::Error {
-                    code: crate::common::ErrorCode::BadTable,
-                    ..
-                })
+            && d.is(
+                DiagnosticCategory::Model,
+                crate::common::ErrorCode::BadTable,
             )
             && d.severity == DiagnosticSeverity::Error
     });
@@ -583,12 +551,9 @@ fn test_ac2_3_empty_equation() {
 
     let has_empty_equation = diags.iter().any(|d| {
         d.variable.as_deref() == Some("my_stock")
-            && matches!(
-                &d.error,
-                DiagnosticError::Equation(crate::common::EquationError {
-                    code: crate::common::ErrorCode::EmptyEquation,
-                    ..
-                })
+            && d.is(
+                DiagnosticCategory::Equation,
+                crate::common::ErrorCode::EmptyEquation,
             )
             && d.severity == DiagnosticSeverity::Error
     });
@@ -682,15 +647,10 @@ fn test_ac2_4_mismatched_dimensions() {
     let has_mismatch = diags.iter().any(|d| {
         d.model == "main"
             && d.severity == DiagnosticSeverity::Error
+            && d.code == crate::common::ErrorCode::MismatchedDimensions
             && matches!(
-                &d.error,
-                DiagnosticError::Equation(crate::common::EquationError {
-                    code: crate::common::ErrorCode::MismatchedDimensions,
-                    ..
-                }) | DiagnosticError::Model(crate::common::Error {
-                    code: crate::common::ErrorCode::MismatchedDimensions,
-                    ..
-                })
+                d.category,
+                DiagnosticCategory::Equation | DiagnosticCategory::Model
             )
     });
     assert!(
@@ -768,17 +728,7 @@ fn test_ac2_5_unit_warnings_severity() {
     // Unit issues should be present as warnings, not errors
     let unit_warnings: Vec<_> = diags
         .iter()
-        .filter(|d| {
-            d.severity == DiagnosticSeverity::Warning
-                && matches!(
-                    &d.error,
-                    DiagnosticError::Unit(_)
-                        | DiagnosticError::Model(crate::common::Error {
-                            code: crate::common::ErrorCode::UnitMismatch,
-                            ..
-                        })
-                )
-        })
+        .filter(|d| d.severity == DiagnosticSeverity::Warning && d.category.is_unit())
         .collect();
 
     assert!(
@@ -789,9 +739,7 @@ fn test_ac2_5_unit_warnings_severity() {
     // Verify none of the unit diagnostics have Error severity
     let unit_errors: Vec<_> = diags
         .iter()
-        .filter(|d| {
-            d.severity == DiagnosticSeverity::Error && matches!(&d.error, DiagnosticError::Unit(_))
-        })
+        .filter(|d| d.severity == DiagnosticSeverity::Error && d.category.is_unit())
         .collect();
 
     assert!(
@@ -934,12 +882,9 @@ fn test_ac2_7_assembly_errors_accumulated() {
     // what `collect_all_diagnostics` returns here.
     let diags = collect_all_diagnostics(&db, sync.project);
     let has_circular = diags.iter().any(|d| {
-        matches!(
-            &d.error,
-            DiagnosticError::Model(crate::common::Error {
-                code: crate::common::ErrorCode::CircularDependency,
-                ..
-            })
+        d.is(
+            DiagnosticCategory::Model,
+            crate::common::ErrorCode::CircularDependency,
         )
     });
     assert!(
@@ -967,7 +912,7 @@ fn test_ac2_7_assembly_errors_accumulated() {
 
 /// A syntactically malformed unit string surfaces as a `Unit`
 /// diagnostic at Error severity. This is a *unit-string parse* failure
-/// (stored on the parsed variable's `unit_errors`), distinct from the
+/// (stored on the parsed variable's diagnostic channel), distinct from the
 /// unit-*checking* dimensional mismatches in
 /// `test_ac2_5_unit_warnings_severity`, which are Warnings. The variable
 /// is otherwise well-formed, so this site accumulates without aborting
@@ -1005,15 +950,60 @@ fn test_compile_var_fragment_malformed_unit_string() {
     let sync = sync_from_datamodel(&db, &project);
     let diags = collect_all_diagnostics(&db, sync.project);
 
-    let has_unit_error = diags.iter().any(|d| {
-        d.variable.as_deref() == Some("bad_unit_var")
-            && matches!(&d.error, DiagnosticError::Unit(_))
-            && d.severity == DiagnosticSeverity::Error
-    });
+    let unit_error = diags
+        .iter()
+        .find(|d| d.variable.as_deref() == Some("bad_unit_var"))
+        .unwrap_or_else(|| panic!("expected a unit diagnostic for 'bad_unit_var': {diags:?}"));
+    assert!(unit_error.is(
+        DiagnosticCategory::UnitDefinition,
+        crate::common::ErrorCode::UnrecognizedToken,
+    ));
+    assert_eq!(unit_error.severity, DiagnosticSeverity::Error);
     assert!(
-        has_unit_error,
-        "expected a Unit syntax error at Error severity for 'bad_unit_var'; got: {diags:?}"
+        unit_error
+            .details
+            .as_deref()
+            .is_some_and(|details| details.contains("bad units here!!!")),
+        "the definition error must retain the malformed source text: {unit_error:?}"
     );
+}
+
+/// A stock/flow dimensional disagreement is a consistency failure, not a
+/// malformed unit definition. The production unit checker owns both classes;
+/// this row and the malformed-string control above pin their category split.
+#[test]
+fn stock_flow_declared_unit_mismatch_is_unit_consistency() {
+    use crate::common::ErrorCode;
+    use crate::test_common::TestProject;
+
+    let project = TestProject::new("stock_flow_diagnostic_kind")
+        .with_time_units("month")
+        .unit("widgets", None)
+        .unit("gadgets", None)
+        .stock_with_units("inventory", "100", &["production"], &[], Some("widgets"))
+        .flow_with_units("production", "1", Some("gadgets/month"))
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
+    let mismatch = diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.variable.as_deref() == Some("production")
+                && diagnostic.code == ErrorCode::UnitMismatch
+        })
+        .unwrap_or_else(|| panic!("production stock/flow fixture must mismatch: {diagnostics:?}"));
+
+    assert_eq!(mismatch.category, DiagnosticCategory::UnitConsistency);
+    assert_eq!(mismatch.severity, DiagnosticSeverity::Warning);
+    assert_eq!(
+        mismatch.details.as_deref(),
+        Some(
+            "expected units 'gadgets/month' to match the units expected by the attached stock \
+             inventory (widgets/month)"
+        )
+    );
+    assert_eq!(mismatch.location, Some(crate::builtins::Loc::default()));
 }
 
 /// Module instances use the same parsed/lowered diagnostic channel as every
@@ -1042,7 +1032,11 @@ fn module_malformed_unit_string_survives_wiring_resolution() {
     let lowered =
         crate::db::lowered_source_variable(&db, source, sync.models["main"].source, sync.project);
     assert_eq!(
-        lowered.unit_errors.len(),
+        lowered
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.category.is_unit())
+            .count(),
         1,
         "production module lowering must retain its parsed unit error"
     );
@@ -1052,7 +1046,7 @@ fn module_malformed_unit_string_survives_wiring_resolution() {
         diagnostics.iter().any(|diagnostic| {
             diagnostic.model == "main"
                 && diagnostic.variable.as_deref() == Some("instance")
-                && matches!(diagnostic.error, DiagnosticError::Unit(_))
+                && diagnostic.category.is_unit()
                 && diagnostic.severity == DiagnosticSeverity::Error
         }),
         "the retained module unit error must reach diagnostics: {diagnostics:?}"
@@ -1098,12 +1092,9 @@ fn test_compile_var_fragment_unknown_dependency() {
 
     let has_unknown_dep = diags.iter().any(|d| {
         d.variable.as_deref() == Some("x")
-            && matches!(
-                &d.error,
-                DiagnosticError::Equation(crate::common::EquationError {
-                    code: crate::common::ErrorCode::UnknownDependency,
-                    ..
-                })
+            && d.is(
+                DiagnosticCategory::Equation,
+                crate::common::ErrorCode::UnknownDependency,
             )
     });
     assert!(
@@ -1184,14 +1175,8 @@ fn test_compile_var_fragment_per_phase_var_new_failure() {
     let has_per_phase_failure = diags.iter().any(|d| {
         d.variable.as_deref() == Some("y")
             && d.severity == DiagnosticSeverity::Error
-            && matches!(
-                &d.error,
-                DiagnosticError::Equation(crate::common::EquationError {
-                    start: 0,
-                    end: 0,
-                    ..
-                })
-            )
+            && d.location == Some(crate::builtins::Loc::default())
+            && d.category == DiagnosticCategory::Equation
     });
     assert!(
         has_per_phase_failure,
@@ -1199,10 +1184,157 @@ fn test_compile_var_fragment_per_phase_var_new_failure() {
     );
 }
 
+/// The same explicit source defect can be reached through both production
+/// runlists. `level` requires `y` while compiling initials and `reader`
+/// requires it while compiling flows; both phase lowerings reject the same
+/// scalar-as-array `SUM(x[*])`. Phase demand is not diagnostic identity, so
+/// public collection reports the fully attributed source defect once.
+#[test]
+fn explicit_both_phase_failure_emits_one_diagnostic() {
+    use salsa::Setter;
+
+    let project = crate::test_common::TestProject::new("explicit_both_phase_failure")
+        .aux("x", "1", None)
+        .aux("y", "SUM(x[*])", None)
+        .stock("level", "y", &[], &[], None)
+        .aux("reader", "y + TIME", None)
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+
+    let y_failures = |db: &SimlinDb| {
+        collect_all_diagnostics(db, sync.project)
+            .into_iter()
+            .filter(|diagnostic| {
+                diagnostic.model == "main"
+                    && diagnostic.variable.as_deref() == Some("y")
+                    && diagnostic.category == DiagnosticCategory::Equation
+                    && diagnostic.severity == DiagnosticSeverity::Error
+                    && diagnostic.location == Some(crate::builtins::Loc::default())
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = y_failures(&db);
+    assert_eq!(
+        before.len(),
+        1,
+        "initial and flow demand must not duplicate one typed source failure: \
+         {before:#?}"
+    );
+    assert_eq!(
+        before[0].code,
+        crate::common::ErrorCode::CantSubscriptScalar,
+        "the retained row must keep the typed lowering reason: {before:#?}"
+    );
+    assert_eq!(before[0].details, None);
+
+    sync.project
+        .set_name(&mut db)
+        .to("explicit_both_phase_failure_renamed".to_string());
+    assert_eq!(
+        y_failures(&db),
+        before,
+        "an unrelated revision must preserve exact count and producer order"
+    );
+}
+
+/// Pre-fragment diagnostics retain source-field occurrence identity. An aux's
+/// ordinary equation and Vensim ACTIVE INITIAL are parsed independently; the
+/// same malformed text in both fields therefore produces two equal payloads,
+/// and neither is a duplicate merely because full `Diagnostic` equality cannot
+/// distinguish their identical text and span.
+#[test]
+fn identical_current_and_active_initial_parse_errors_both_survive() {
+    let mut project = crate::test_common::TestProject::new("dual_source_parse_errors")
+        .aux("bad", "1 +", None)
+        .aux("clean", "1", None)
+        .build_datamodel();
+    let bad = project.models[0]
+        .variables
+        .iter_mut()
+        .find(|variable| variable.get_ident() == "bad")
+        .expect("fixture bad aux");
+    let datamodel::Variable::Aux(bad) = bad else {
+        panic!("fixture bad variable must be an aux")
+    };
+    bad.compat.active_initial = Some("1 +".to_string());
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let bad_source = sync.models["main"].variables["bad"].source;
+    let local = crate::db::parse_source_variable(&db, bad_source, sync.project)
+        .variable
+        .diagnostics
+        .clone();
+    assert_eq!(local.len(), 2, "both production source fields must parse");
+    assert_eq!(
+        local[0], local[1],
+        "the fixture must exercise equal payloads rather than distinct reasons"
+    );
+
+    let expected = local
+        .into_iter()
+        .map(|diagnostic| diagnostic.with_context("main", Some("bad".to_string())))
+        .collect::<Vec<_>>();
+    let collected = collect_all_diagnostics(&db, sync.project)
+        .into_iter()
+        .filter(|diagnostic| {
+            diagnostic.variable.as_deref() == Some("bad")
+                || diagnostic.variable.as_deref() == Some("clean")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        collected, expected,
+        "the DB boundary must preserve both equal source occurrences in parse order, \
+         while the clean sibling contributes nothing"
+    );
+}
+
+/// Per-fragment coalescing is exact equality, not a one-row-per-variable cap.
+/// This stock's initial phase rejects `SUM(x[*])`, while its stock-update phase
+/// rejects the bare arrayed inflow. Both production phase failures retain
+/// their own typed rows in producer order.
+#[test]
+fn explicit_distinct_phase_failures_both_survive() {
+    let project = crate::test_common::TestProject::new("explicit_distinct_phase_failures")
+        .named_dimension("d", &["a", "b"])
+        .aux("x", "1", None)
+        .array_flow("inflow[d]", "1", None)
+        .stock("level", "SUM(x[*])", &["inflow"], &[], None)
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+
+    let failures = collect_all_diagnostics(&db, sync.project)
+        .into_iter()
+        .filter(|diagnostic| {
+            diagnostic.model == "main"
+                && diagnostic.variable.as_deref() == Some("level")
+                && diagnostic.category == DiagnosticCategory::Equation
+                && diagnostic.severity == DiagnosticSeverity::Error
+        })
+        .collect::<Vec<_>>();
+    let codes = failures
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        codes,
+        vec![
+            crate::common::ErrorCode::CantSubscriptScalar,
+            crate::common::ErrorCode::ArrayReferenceNeedsExplicitSubscripts,
+        ],
+        "distinct initial and stock-update failures must both survive in phase order: \
+         {failures:#?}"
+    );
+    assert_eq!(failures[0].details, None);
+    assert_eq!(failures[1].details.as_deref(), Some("inflow"));
+}
+
 // ---- diagnostics stable across unrelated salsa input changes ----
 //
 // `collect_all_diagnostics` / `collect_model_diagnostics` drain the salsa
-// `CompilationDiagnostic` accumulator via
+// `Diagnostic` accumulator via
 // `model_all_diagnostics::accumulated::<_>(..)`. salsa 0.26's
 // `accumulated_by` does a DFS that prunes any subtree whose root memo's
 // `accumulated_inputs` flag is `Empty`. When `model_all_diagnostics` is
@@ -1284,17 +1416,7 @@ fn unit_warning_fixture() -> datamodel::Project {
 fn count_unit_warnings(diags: &[Diagnostic]) -> usize {
     diags
         .iter()
-        .filter(|d| {
-            d.severity == DiagnosticSeverity::Warning
-                && matches!(
-                    &d.error,
-                    DiagnosticError::Unit(_)
-                        | DiagnosticError::Model(crate::common::Error {
-                            code: crate::common::ErrorCode::UnitMismatch,
-                            ..
-                        })
-                )
-        })
+        .filter(|d| d.severity == DiagnosticSeverity::Warning && d.category.is_unit())
         .count()
 }
 
@@ -1343,6 +1465,135 @@ fn test_diagnostics_stable_across_unrelated_input_change() {
     );
 }
 
+/// A diagnostic collection is intentionally a complete reporting walk, but
+/// changing one source equation must execute only that variable's lowering and
+/// fragment producer. Cached fragments replay their diagnostics into the walk;
+/// they are not recompiled merely because the accumulator payload is shared.
+#[test]
+fn an_equation_edit_recomputes_only_the_affected_variable_diagnostic() {
+    use crate::db::exec_probe::ProbedDb;
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_project};
+    use salsa::Setter;
+
+    let project = x_project(
+        sim_specs_with_units("month"),
+        &[x_model(
+            "main",
+            vec![
+                x_aux("edited", "(", None),
+                x_aux("unchanged", ")", None),
+                x_aux("clean", "1", None),
+            ],
+        )],
+    );
+    let mut probed = ProbedDb::new();
+    let sync = sync_from_datamodel(probed.db(), &project);
+    let before = collect_all_diagnostics(probed.db(), sync.project);
+    let unchanged_before: Vec<_> = before
+        .iter()
+        .filter(|diagnostic| diagnostic.variable.as_deref() == Some("unchanged"))
+        .cloned()
+        .collect();
+    let edited_before: Vec<_> = before
+        .iter()
+        .filter(|diagnostic| diagnostic.variable.as_deref() == Some("edited"))
+        .cloned()
+        .collect();
+    assert_eq!(unchanged_before.len(), 1, "production fixture: {before:?}");
+    assert_eq!(edited_before.len(), 1, "production fixture: {before:?}");
+
+    sync.models["main"].variables["edited"]
+        .source
+        .set_equation(probed.db_mut())
+        .to(datamodel::Equation::Scalar("@".to_string()));
+    probed.reset();
+    let after = collect_all_diagnostics(probed.db(), sync.project);
+    let unchanged_after: Vec<_> = after
+        .iter()
+        .filter(|diagnostic| diagnostic.variable.as_deref() == Some("unchanged"))
+        .cloned()
+        .collect();
+    let edited_after: Vec<_> = after
+        .iter()
+        .filter(|diagnostic| diagnostic.variable.as_deref() == Some("edited"))
+        .cloned()
+        .collect();
+
+    assert_eq!(unchanged_after, unchanged_before);
+    assert_eq!(edited_after.len(), 1, "production fixture: {after:?}");
+    assert_ne!(edited_after, edited_before);
+    let counts = probed.counts();
+    assert_eq!(
+        counts.get("lowered_source_variable"),
+        Some(&(1, 1)),
+        "only the edited variable may rerun source lowering: {counts:?}"
+    );
+    assert_eq!(
+        counts.get("compile_var_fragment"),
+        Some(&(1, 1)),
+        "only the edited variable may rerun its diagnostic-producing fragment: {counts:?}"
+    );
+}
+
+/// A module can have a malformed-unit error from parsing and a wiring warning
+/// from the model diagnostic pass. The one reporting walk must retain both
+/// exactly once, in producer order, even though they attach different variable
+/// identity.
+#[test]
+fn malformed_module_units_do_not_hide_a_wiring_diagnostic() {
+    use crate::common::ErrorCode;
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module_named, x_project};
+
+    let project = x_project(
+        sim_specs_with_units("month"),
+        &[
+            x_model(
+                "main",
+                vec![
+                    x_aux("source", "1", None),
+                    x_module_named(
+                        "child",
+                        "sub",
+                        &[("source", "wrong.port")],
+                        Some("bad units here!!!"),
+                    ),
+                ],
+            ),
+            x_model("sub", vec![x_aux("port", "1", None)]),
+        ],
+    );
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let diagnostics: Vec<_> = collect_all_diagnostics(&db, sync.project)
+        .into_iter()
+        .filter(|diagnostic| {
+            diagnostic.variable.as_deref() == Some("child")
+                || diagnostic.code == ErrorCode::BadModuleInputDst
+        })
+        .collect();
+
+    assert_eq!(diagnostics.len(), 2, "production fixture: {diagnostics:?}");
+    assert!(
+        diagnostics[0].is(
+            DiagnosticCategory::UnitDefinition,
+            ErrorCode::UnrecognizedToken,
+        ),
+        "production fixture: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics[1].is(DiagnosticCategory::Model, ErrorCode::BadModuleInputDst,),
+        "production fixture: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[1].severity, DiagnosticSeverity::Warning);
+    assert_eq!(diagnostics[1].variable, None);
+    assert_eq!(
+        diagnostics[1].details.as_deref(),
+        Some(
+            "module 'child' input wiring target 'wrong.port' does not name an input of model 'sub'"
+        )
+    );
+}
+
 // ---- F15: pass-driven flows are permitted an empty equation ----
 //
 // A conveyor stock's primary/leak outflow and any queue stock's outflow are
@@ -1378,12 +1629,9 @@ fn has_empty_equation(diags: &[Diagnostic], name: &str) -> bool {
     diags.iter().any(|d| {
         d.variable.as_deref() == Some(name)
             && d.severity == DiagnosticSeverity::Error
-            && matches!(
-                &d.error,
-                DiagnosticError::Equation(crate::common::EquationError {
-                    code: crate::common::ErrorCode::EmptyEquation,
-                    ..
-                })
+            && d.is(
+                DiagnosticCategory::Equation,
+                crate::common::ErrorCode::EmptyEquation,
             )
     })
 }
@@ -1613,10 +1861,8 @@ fn test_conveyor_driven_flow_malformed_equation_still_errors() {
     let has_parse_error = diags.iter().any(|d| {
         d.variable.as_deref() == Some("out_f")
             && d.severity == DiagnosticSeverity::Error
-            && matches!(
-                &d.error,
-                DiagnosticError::Equation(e) if e.code != crate::common::ErrorCode::EmptyEquation
-            )
+            && d.category == DiagnosticCategory::Equation
+            && d.code != crate::common::ErrorCode::EmptyEquation
     });
     assert!(
         has_parse_error,
@@ -1934,14 +2180,12 @@ fn conveyor_spec_project(
     }
 }
 
-/// The Warning-severity `Model` diagnostics carrying `code`, in accumulation
-/// order.
+/// The Warning-severity `Model` diagnostics carrying `code`, in emission order.
 fn conveyor_spec_warnings(diags: &[Diagnostic], code: crate::common::ErrorCode) -> Vec<Diagnostic> {
     diags
         .iter()
         .filter(|d| {
-            d.severity == DiagnosticSeverity::Warning
-                && matches!(&d.error, DiagnosticError::Model(err) if err.code == code)
+            d.severity == DiagnosticSeverity::Warning && d.is(DiagnosticCategory::Model, code)
         })
         .cloned()
         .collect()
@@ -1949,10 +2193,8 @@ fn conveyor_spec_warnings(diags: &[Diagnostic], code: crate::common::ErrorCode) 
 
 /// The bare details string of a `Model` diagnostic.
 fn model_diag_details(d: &Diagnostic) -> String {
-    match &d.error {
-        DiagnosticError::Model(err) => err.get_details().unwrap_or_default(),
-        other => panic!("expected a Model diagnostic, got {other:?}"),
-    }
+    assert_eq!(d.category, DiagnosticCategory::Model);
+    d.details.clone().unwrap_or_default()
 }
 
 /// §4.1: a compile-time-constant transit time that is not an integer multiple
@@ -2354,8 +2596,10 @@ fn duplicate_var_diags(diags: &[Diagnostic]) -> Vec<&Diagnostic> {
     diags
         .iter()
         .filter(|d| {
-            matches!(&d.error, DiagnosticError::Model(e)
-                if e.code == crate::common::ErrorCode::DuplicateVariable)
+            d.is(
+                DiagnosticCategory::Model,
+                crate::common::ErrorCode::DuplicateVariable,
+            )
         })
         .collect()
 }
@@ -2435,10 +2679,8 @@ fn test_duplicate_idents_surface_error_diagnostic() {
         Some("attrition"),
         "the diagnostic is attributed to the canonical ident the spellings collide on"
     );
-    let DiagnosticError::Model(e) = &d.error else {
-        unreachable!()
-    };
-    let msg = e.details.as_deref().unwrap_or_default();
+    assert_eq!(d.category, DiagnosticCategory::Model);
+    let msg = d.details.as_deref().unwrap_or_default();
     assert!(
         msg.contains("'Attrition'") && msg.contains("'attrition'"),
         "diagnostic must name both spellings: {msg}"
@@ -2638,6 +2880,11 @@ fn test_unknown_element_subscript_warns() {
         w.variable.as_deref(),
         Some("plain"),
         "the warning must be attributed to the arrayed variable"
+    );
+    assert_eq!(
+        w.element.as_deref(),
+        Some("c"),
+        "the unmatched element remains structural rather than living only in prose"
     );
     let details = model_diag_details(w);
     assert!(
@@ -2841,6 +3088,89 @@ fn test_unknown_element_subscript_deduplicates() {
     );
 }
 
+/// `Diagnostic` equality and hashing retain element identity even when every
+/// presentation field agrees. The two rows come from the production unknown-
+/// element emitter; normalizing their prose isolates the structured field the
+/// set contract must keep.
+#[test]
+fn diagnostic_identity_distinguishes_array_elements() {
+    use std::collections::HashSet;
+
+    let db = SimlinDb::default();
+    let project = arrayed_elements_project(
+        vec![datamodel::Dimension::named(
+            "board".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        )],
+        &["board"],
+        &[("c", "2"), ("d", "3")],
+    );
+    let sync = sync_from_datamodel(&db, &project);
+    let mut warnings = unknown_element_warnings(&collect_all_diagnostics(&db, sync.project));
+    assert_eq!(warnings.len(), 2, "fixture must produce two real rows");
+
+    for warning in &mut warnings {
+        warning.details = None;
+        warning.display_details = None;
+    }
+    assert_eq!(
+        warnings.into_iter().collect::<HashSet<_>>().len(),
+        2,
+        "distinct element instances must never collapse under Eq/Hash"
+    );
+}
+
+/// The same identity contract for module instances. Each project drives the
+/// real structured dependency resolver and fragment compiler to a missing leaf;
+/// normalizing the owner-specific prose leaves only the path distinction.
+#[test]
+fn diagnostic_identity_distinguishes_module_paths() {
+    use std::collections::HashSet;
+
+    use crate::common::ErrorCode;
+    use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module_named, x_project};
+
+    let diagnostic_for = |instance: &str| {
+        let equation = format!("{instance}.missing");
+        let project = x_project(
+            sim_specs_with_units("month"),
+            &[
+                x_model(
+                    "main",
+                    vec![
+                        x_module_named(instance, "leaf", &[], None),
+                        x_aux("reader", &equation, None),
+                    ],
+                ),
+                x_model("leaf", vec![x_aux("present", "1", None)]),
+            ],
+        );
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        collect_all_diagnostics(&db, sync.project)
+            .into_iter()
+            .find(|diagnostic| {
+                diagnostic.variable.as_deref() == Some("reader")
+                    && diagnostic.is(DiagnosticCategory::Equation, ErrorCode::DoesNotExist)
+            })
+            .unwrap_or_else(|| panic!("{instance}: production missing-leaf diagnostic"))
+    };
+
+    let mut left = diagnostic_for("left");
+    let mut right = diagnostic_for("right");
+    assert_eq!(left.module_path, ["left"]);
+    assert_eq!(right.module_path, ["right"]);
+    for diagnostic in [&mut left, &mut right] {
+        diagnostic.details = None;
+        diagnostic.location = None;
+    }
+    assert_eq!(
+        [left, right].into_iter().collect::<HashSet<_>>().len(),
+        2,
+        "distinct module instances must never collapse under Eq/Hash"
+    );
+}
+
 /// The conveyor per-element init lists (GH #889) inherit the same silence:
 /// a typo'd per-element init-list subscript leaves that belt steady-filling
 /// from 0. The sync path substitutes a constant placeholder equation for
@@ -2992,8 +3322,10 @@ fn macro_build_diagnostics(diags: &[Diagnostic]) -> Vec<&Diagnostic> {
     diags
         .iter()
         .filter(|d| {
-            matches!(&d.error, DiagnosticError::Model(e)
-                if e.code == crate::common::ErrorCode::DuplicateMacroName)
+            d.is(
+                DiagnosticCategory::Model,
+                crate::common::ErrorCode::DuplicateMacroName,
+            )
         })
         .collect()
 }
@@ -3118,12 +3450,7 @@ fn conflicting_unit_alias_project() -> datamodel::Project {
 fn unit_definition_diagnostics(diags: &[Diagnostic]) -> Vec<&Diagnostic> {
     diags
         .iter()
-        .filter(|d| {
-            matches!(
-                &d.error,
-                DiagnosticError::Unit(crate::common::UnitError::DefinitionError(_))
-            )
-        })
+        .filter(|d| d.category == DiagnosticCategory::UnitDefinition)
         .collect()
 }
 
@@ -3208,30 +3535,19 @@ fn unit_definition_errors_survive_an_unrelated_input_change() {
     );
 }
 
-/// `Variable::errors` and `Variable::unit_errors` are the CHANNEL by which
-/// parsing and lowering report a failure to the salsa path; they are not
-/// redundant with it (`docs/tech-debt.md` item 17 records why that matters).
-/// The salsa pipeline's diagnostics are DOWNSTREAM of them --
-/// `db::var_fragment::explicit_fragment_input` reads
-/// `parsed.variable.unit_errors()`, `parsed.variable.equation_errors()` and
-/// `lowered.equation_errors()` and turns each entry into a `Diagnostic`. Acting
-/// on the claim would silently drop those diagnostics, so it is pinned here
-/// rather than left as prose: each half asserts BOTH that the stage's value
-/// carries the error in the field AND that the matching diagnostic comes out of
-/// `collect_all_diagnostics`.
-///
-/// Emptying the `unit_errors()` read or the `lowered.equation_errors()` read
-/// reds THIS test. Emptying the `parsed.variable.equation_errors()` read does
-/// NOT -- `lower_variable` clones parse errors forward in all three arms, so the
-/// lowered read catches the same error and this test stays green. What that read
-/// uniquely carries is the conveyor/queue driven-flow `EmptyEquation`
+/// A variable's `diagnostics` are the channel by which parsing and lowering
+/// report failures to the salsa path. The fragment boundary attaches context
+/// and emits those same payloads. This test asserts both the stage-local value
+/// and the public collection so neither half can silently stop forwarding.
+/// The parsed projection uniquely carries the conveyor/queue driven-flow
+/// `EmptyEquation`
 /// suppression, and dropping it reds
 /// `test_conveyor_driven_flow_empty_equation_suppressed`,
 /// `test_conveyor_marker_removal_reinstates_empty_equation` and
 /// `test_queue_driven_outflow_empty_equation_suppressed` instead. Measured, not
 /// assumed.
 #[test]
-fn variable_error_fields_are_the_lowering_channel() {
+fn variable_diagnostics_are_the_lowering_channel() {
     use crate::test_common::TestProject;
 
     // ── parse-time: a malformed `<units>` string, and a syntax error ──
@@ -3253,26 +3569,33 @@ fn variable_error_fields_are_the_lowering_channel() {
     );
 
     assert!(
-        bad_unit.variable.unit_errors().is_some(),
+        bad_unit
+            .variable
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.category.is_unit()),
         "parsing must record the malformed unit string on the variable"
     );
     assert!(
-        bad_eqn.variable.equation_errors().is_some(),
+        bad_eqn
+            .variable
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.category == DiagnosticCategory::Equation),
         "parsing must record the equation syntax error on the variable"
     );
 
     let diags = collect_all_diagnostics(&db, sync.project);
     assert!(
-        diags.iter().any(|d| {
-            d.variable.as_deref() == Some("bad_unit_var")
-                && matches!(&d.error, DiagnosticError::Unit(_))
-        }),
+        diags
+            .iter()
+            .any(|d| { d.variable.as_deref() == Some("bad_unit_var") && d.category.is_unit() }),
         "the recorded unit error must reach collect_all_diagnostics; got: {diags:?}"
     );
     assert!(
         diags.iter().any(|d| {
             d.variable.as_deref() == Some("bad_eqn_var")
-                && matches!(&d.error, DiagnosticError::Equation(_))
+                && d.category == DiagnosticCategory::Equation
         }),
         "the recorded equation error must reach collect_all_diagnostics; got: {diags:?}"
     );
@@ -3292,13 +3615,20 @@ fn variable_error_fields_are_the_lowering_channel() {
     let parsed = crate::db::parse_source_variable(&db, bad, sync.project);
 
     assert!(
-        parsed.variable.equation_errors().is_none(),
+        !parsed
+            .variable
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.category == DiagnosticCategory::Equation),
         "the fixture must isolate a LOWERING error: parsing sees nothing wrong"
     );
-    let lowered_errors =
-        crate::db::lowered_source_variable(&db, bad, sync.models["main"].source, sync.project)
-            .equation_errors()
-            .expect("lowering must record the dimension mismatch on the variable");
+    let lowered =
+        crate::db::lowered_source_variable(&db, bad, sync.models["main"].source, sync.project);
+    let lowered_errors: Vec<_> = lowered
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.category == DiagnosticCategory::Equation)
+        .collect();
     assert!(
         lowered_errors
             .iter()
@@ -3310,8 +3640,10 @@ fn variable_error_fields_are_the_lowering_channel() {
     assert!(
         diags.iter().any(|d| {
             d.variable.as_deref() == Some("bad")
-                && matches!(&d.error, DiagnosticError::Equation(e)
-                    if e.code == crate::common::ErrorCode::MismatchedDimensions)
+                && d.is(
+                    DiagnosticCategory::Equation,
+                    crate::common::ErrorCode::MismatchedDimensions,
+                )
         }),
         "the recorded lowering error must reach collect_all_diagnostics; got: {diags:?}"
     );
@@ -3383,7 +3715,8 @@ fn codegen_rejection_of_an_ordinary_variable_names_the_variable_and_its_reason()
 
     let carries_reason = attributed.iter().any(|d| {
         d.severity == DiagnosticSeverity::Error
-            && matches!(&d.error, DiagnosticError::Assembly(msg) if msg.contains("codegen"))
+            && d.assembly_reason()
+                .is_some_and(|msg| msg.contains("codegen"))
     });
     assert!(
         carries_reason,
@@ -3393,9 +3726,10 @@ fn codegen_rejection_of_an_ordinary_variable_names_the_variable_and_its_reason()
     // The reason must be codegen's actual message, not a generic stand-in:
     // that is the difference between "something failed" and "this construct
     // was refused", and it is the whole point of the reporting form.
-    let names_construct = attributed.iter().any(
-        |d| matches!(&d.error, DiagnosticError::Assembly(msg) if msg.contains("Cannot push view")),
-    );
+    let names_construct = attributed.iter().any(|d| {
+        d.assembly_reason()
+            .is_some_and(|msg| msg.contains("Cannot push view"))
+    });
     assert!(
         names_construct,
         "the reason must name the refused construct; got: {attributed:?}"
@@ -3409,11 +3743,57 @@ fn codegen_rejection_of_an_ordinary_variable_names_the_variable_and_its_reason()
     // the quoted form keeps it from matching an incidental substring.
     let message_names_variable = attributed
         .iter()
-        .any(|d| matches!(&d.error, DiagnosticError::Assembly(msg) if msg.contains("'out'")));
+        .any(|d| d.assembly_reason().is_some_and(|msg| msg.contains("'out'")));
     assert!(
         message_names_variable,
         "the message text must name the variable, not just the `variable` field; got: {attributed:?}"
     );
+}
+
+/// Initial and flow demand can reach the same explicit codegen refusal just as
+/// they can reach the same lowering refusal. The full attributed Assembly
+/// payload is diagnostic identity; the phase that requested it is not.
+#[test]
+fn explicit_both_phase_codegen_failure_emits_one_diagnostic() {
+    let project = crate::test_common::TestProject::new("codegen_both_phase_reject")
+        .named_dimension("d", &["e1", "e2", "e3"])
+        .indexed_dimension("xp", 4)
+        .array_const("request[d]", 10.0)
+        .array_const("pp[d,xp]", 1.0)
+        .array_const("pp_bump[d,xp]", 0.0)
+        .scalar_const("supply", 35.0)
+        .array_aux(
+            "out[d]",
+            "allocate_available(request[d], pp[d,1] + pp_bump[d,1], supply)",
+        )
+        .array_stock("level[d]", "out", &[], &[], None)
+        .array_aux("reader[d]", "out + TIME")
+        .build_datamodel();
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
+    let failures = diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.model == "main"
+                && diagnostic.variable.as_deref() == Some("out")
+                && diagnostic.category == DiagnosticCategory::Assembly
+                && diagnostic.severity == DiagnosticSeverity::Error
+                && diagnostic.assembly_reason().is_some_and(|reason| {
+                    reason.contains("'out'") && reason.contains("Cannot push view")
+                })
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        failures.len(),
+        1,
+        "initial and flow demand must not duplicate one typed codegen failure: \
+         {failures:#?}"
+    );
+    assert_eq!(failures[0].code, crate::common::ErrorCode::NotSimulatable);
+    assert_eq!(failures[0].location, None);
 }
 
 /// The negative control for the two tests around it: a model that compiles
@@ -3442,7 +3822,7 @@ fn a_model_that_compiles_gains_no_codegen_diagnostic() {
 
     let assembly: Vec<&Diagnostic> = diags
         .iter()
-        .filter(|d| matches!(&d.error, DiagnosticError::Assembly(_)))
+        .filter(|d| d.assembly_reason().is_some())
         .collect();
     assert!(
         assembly.is_empty(),
@@ -3509,7 +3889,8 @@ fn codegen_rejection_in_the_initials_phase_is_attributable_too() {
     let carries_reason = diags.iter().any(|d| {
         d.variable.as_deref() == Some("lvl")
             && d.severity == DiagnosticSeverity::Error
-            && matches!(&d.error, DiagnosticError::Assembly(msg) if msg.contains("codegen"))
+            && d.assembly_reason()
+                .is_some_and(|msg| msg.contains("codegen"))
     });
     assert!(
         carries_reason,
@@ -3519,19 +3900,10 @@ fn codegen_rejection_in_the_initials_phase_is_attributable_too() {
 
 // ---- DoD 8: a diagnostic keeps the reason its raising site had ----
 
-/// The `ErrorCode` a diagnostic reports, whatever variant holds it -- the same
-/// projection `libsimlin::patch::diagnostic_to_error_code` makes.
+/// The `ErrorCode` a diagnostic reports -- the same projection
+/// `libsimlin::patch::diagnostic_to_error_code` makes.
 fn diagnostic_code(d: &Diagnostic) -> crate::common::ErrorCode {
-    match &d.error {
-        DiagnosticError::Equation(e) => e.code,
-        DiagnosticError::Model(e) => e.code,
-        DiagnosticError::Unit(u) => match u {
-            crate::common::UnitError::DefinitionError(e) => e.code,
-            crate::common::UnitError::ConsistencyError(code, _, _) => *code,
-            crate::common::UnitError::InferenceError { code, .. } => *code,
-        },
-        DiagnosticError::Assembly(_) => crate::common::ErrorCode::NotSimulatable,
-    }
+    d.code
 }
 
 /// Extract the human-readable reason a diagnostic carries, whatever variant
@@ -3540,16 +3912,7 @@ fn diagnostic_code(d: &Diagnostic) -> crate::common::ErrorCode {
 /// these fields, and libsimlin hands that string to the FFI -- so a test that
 /// reads it is testing the channel users actually see.
 fn diagnostic_reason(d: &Diagnostic) -> Option<String> {
-    match &d.error {
-        DiagnosticError::Equation(e) => e.details.clone(),
-        DiagnosticError::Model(e) => e.details.clone(),
-        DiagnosticError::Unit(u) => match u {
-            crate::common::UnitError::DefinitionError(e) => e.details.clone(),
-            crate::common::UnitError::ConsistencyError(_, _, d) => d.clone(),
-            crate::common::UnitError::InferenceError { details, .. } => details.clone(),
-        },
-        DiagnosticError::Assembly(msg) => Some(msg.clone()),
-    }
+    d.details.clone()
 }
 
 /// Every stage that can put an error into `collect_all_diagnostics` hands on
@@ -3561,9 +3924,9 @@ fn diagnostic_reason(d: &Diagnostic) -> Option<String> {
 /// path (`collect_all_diagnostics`), never a hand-built `Diagnostic`:
 ///
 ///  1. **parse** -- the lexer/parser errors `Expr0::new` returns, carried on
-///     `Variable::errors`. These are code-only BY DESIGN: the reason for a
+///     `Variable::diagnostics`. These are code-only BY DESIGN: the reason for a
 ///     parse failure is the text under `start..end`, which
-///     `errors::format_equation_error` renders as a source snippet, so a
+///     `errors::format_diagnostic_with_datamodel` renders as a source snippet, so a
 ///     raising site writes `details` only when the reason is NOT in the span.
 ///     The row pins that the span is real and no reason is fabricated.
 ///  2. **unit definition (project)** -- a `<units>` declaration the project
@@ -3573,7 +3936,7 @@ fn diagnostic_reason(d: &Diagnostic) -> Option<String> {
 ///     RESOLVE (`units::resolve_equation_unit`). Both name the unit and neither
 ///     shows the declaration anywhere else, so both must carry its text.
 ///  3. **unit string (variable)** -- a variable's own malformed `units`,
-///     carried on `Variable::unit_errors` and replayed as a NON-fatal
+///     carried on `Variable::diagnostics` and replayed as a NON-fatal
 ///     diagnostic by `compile_var_fragment`.
 ///  4. **AST lowering** -- `lower_ast` (`Expr1::from` / `Expr2::from`), whose
 ///     errors land on the LOWERED variable and are read by
@@ -3583,11 +3946,11 @@ fn diagnostic_reason(d: &Diagnostic) -> Option<String> {
 ///  6. **fragment compile** -- `lower_fragment`'s `Err(Error)`, replayed by
 ///     `accumulate_var_compile_error`. This is the `From<Error>` path, and the
 ///     `Error`'s `details` is the reason.
-///  7. **assembly / codegen refusal** -- `DiagnosticError::Assembly`, whose
-///     payload IS a message.
+///  7. **assembly / codegen refusal** -- `DiagnosticCategory::Assembly`, whose
+///     `details` is the complete message.
 ///
 /// Stage 6's twin for a whole-variable table-build failure (`BadTable`) rides
-/// `DiagnosticError::Model` and is covered by row 6's sibling
+/// `DiagnosticCategory::Model` and is covered by row 6's sibling
 /// `test_ac2_2_bad_table_error`; the LTM emitters' `Assembly` rows are covered
 /// by `db::ltm` tests.
 #[test]
@@ -3744,10 +4107,11 @@ fn every_diagnostic_stage_keeps_its_message() {
                         .collect::<Vec<_>>()
                 );
                 assert!(
-                    matching.iter().any(|d| matches!(
-                        &d.error,
-                        DiagnosticError::Equation(e) if e.end > e.start
-                    )),
+                    matching.iter().any(|d| {
+                        d.category == DiagnosticCategory::Equation
+                            && d.location
+                                .is_some_and(|location| location.end > location.start)
+                    }),
                     "{}: a parse diagnostic must carry a real span, since the span IS its \
                      reason; got: {:#?}",
                     row.stage,
@@ -3934,5 +4298,147 @@ fn a_diagnostics_reason_reaches_the_formatted_error() {
             .is_some_and(|m| m.contains("nowhere_var")),
         "the printed message must name the dependency; got {:?}",
         err.message
+    );
+}
+
+/// Every category the incremental compile channel can emit is reached through
+/// its real producer, and both severity arms occur. Import failures happen
+/// before a project reaches salsa and direct `Variable` engine errors are an
+/// adapter-only category, so `DiagnosticCategory::COMPILE_PIPELINE` excludes
+/// exactly those two while `errors` tests cover every `ALL` formatter arm.
+#[test]
+fn compile_pipeline_category_and_severity_matrix_is_production_derived() {
+    use std::collections::HashSet;
+
+    use crate::common::ErrorCode;
+    use crate::test_common::TestProject;
+
+    struct Row {
+        producer: &'static str,
+        project: datamodel::Project,
+        category: DiagnosticCategory,
+        code: ErrorCode,
+        severity: DiagnosticSeverity,
+    }
+
+    let assembly_project = TestProject::new("category-assembly")
+        .named_dimension("d", &["e1", "e2", "e3"])
+        .indexed_dimension("xp", 4)
+        .array_const("request[d]", 10.0)
+        .array_const("pp[d,xp]", 1.0)
+        .array_const("pp_bump[d,xp]", 0.0)
+        .scalar_const("supply", 35.0)
+        .array_stock(
+            "lvl[d]",
+            "allocate_available(request[d], pp[d,1] + pp_bump[d,1], supply)",
+            &[],
+            &[],
+            None,
+        )
+        .build_datamodel();
+
+    let consistency_project = TestProject::new("category-unit-consistency")
+        .with_time_units("seconds")
+        .unit("widgets", None)
+        .unit("gadgets", None)
+        .unit("seconds", None)
+        .aux_with_units("input", "100", Some("widgets"))
+        .aux_with_units("delay_time", "5", Some("seconds"))
+        .aux_with_units("initial", "50", Some("gadgets"))
+        .aux_with_units("smoothed", "SMTH1(input, delay_time, initial)", None)
+        .build_datamodel();
+
+    let rows = [
+        Row {
+            producer: "model conveyor advisory",
+            project: conveyor_spec_project("1.3", datamodel::Dt::Dt(0.25), false, &[], None),
+            category: DiagnosticCategory::Model,
+            code: ErrorCode::ConveyorTransitNotDtMultiple,
+            severity: DiagnosticSeverity::Warning,
+        },
+        Row {
+            producer: "equation parse",
+            project: TestProject::new("category-equation")
+                .aux("bad", "1 +", None)
+                .build_datamodel(),
+            category: DiagnosticCategory::Equation,
+            code: ErrorCode::UnrecognizedEof,
+            severity: DiagnosticSeverity::Error,
+        },
+        Row {
+            producer: "variable unit definition",
+            project: TestProject::new("category-unit-definition")
+                .aux("bad_units", "1", Some("widget!!!"))
+                .build_datamodel(),
+            category: DiagnosticCategory::UnitDefinition,
+            code: ErrorCode::UnrecognizedToken,
+            severity: DiagnosticSeverity::Error,
+        },
+        Row {
+            producer: "stdlib argument consistency",
+            project: consistency_project,
+            category: DiagnosticCategory::UnitConsistency,
+            code: ErrorCode::UnitMismatch,
+            severity: DiagnosticSeverity::Warning,
+        },
+        Row {
+            producer: "model-wide unit inference",
+            project: TestProject::new("category-unit-inference")
+                .unit("apples", None)
+                .unit("oranges", None)
+                .aux_with_units("apples", "10", Some("apples"))
+                .aux_with_units("oranges", "20", Some("oranges"))
+                .aux("bad", "apples + oranges", None)
+                .build_datamodel(),
+            category: DiagnosticCategory::UnitInference,
+            code: ErrorCode::UnitMismatch,
+            severity: DiagnosticSeverity::Warning,
+        },
+        Row {
+            producer: "fragment codegen refusal",
+            project: assembly_project,
+            category: DiagnosticCategory::Assembly,
+            code: ErrorCode::NotSimulatable,
+            severity: DiagnosticSeverity::Error,
+        },
+    ];
+
+    let mut categories = HashSet::new();
+    let mut severities = HashSet::new();
+    for row in rows {
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &row.project);
+        let diagnostics = collect_all_diagnostics(&db, sync.project);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.category == row.category
+                    && diagnostic.code == row.code
+                    && diagnostic.severity == row.severity
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} must emit {:?}/{:?}/{:?}: {diagnostics:#?}",
+                    row.producer, row.category, row.code, row.severity
+                )
+            });
+        assert!(
+            !diagnostic.model.is_empty(),
+            "{} attaches model context at the DB boundary",
+            row.producer
+        );
+        categories.insert(row.category);
+        severities.insert(row.severity);
+    }
+
+    assert_eq!(
+        categories,
+        DiagnosticCategory::COMPILE_PIPELINE.into_iter().collect(),
+        "adding a compile-channel category requires a production row"
+    );
+    assert_eq!(
+        severities,
+        DiagnosticSeverity::ALL.into_iter().collect(),
+        "both severity arms require a production row"
     );
 }

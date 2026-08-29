@@ -61,7 +61,7 @@
 
 use simlin_engine::common::ErrorCode;
 use simlin_engine::db::{
-    Diagnostic, DiagnosticError, SimlinDb, collect_all_diagnostics, compile_project_incremental,
+    Diagnostic, DiagnosticCategory, SimlinDb, collect_all_diagnostics, compile_project_incremental,
     sync_from_datamodel_incremental,
 };
 use simlin_engine::{Vm, open_vensim};
@@ -356,17 +356,13 @@ fn narrower_macro_attributable_diagnostics(
     diags
         .into_iter()
         .filter(|d| {
-            let code = match &d.error {
-                DiagnosticError::Equation(e) => Some(e.code),
-                DiagnosticError::Model(e) => Some(e.code),
-                _ => None,
-            };
+            let code = Some(d.code);
             let is_project_level = d.model.is_empty() && d.variable.is_none();
             let in_macro_model = macro_models.contains(d.model.as_str());
 
             // (1) macro-registry-build error (the #554 cascade class).
             let registry_build_error = is_project_level
-                && matches!(&d.error, DiagnosticError::Model(_))
+                && d.category == DiagnosticCategory::Model
                 && matches!(
                     code,
                     Some(ErrorCode::CircularDependency) | Some(ErrorCode::DuplicateMacroName)
@@ -624,10 +620,8 @@ fn narrower_classifier_flags_registry_error_but_not_in_body_unknown_builtin() {
             d.model.is_empty()
                 && d.variable.is_none()
                 && d.severity == DiagnosticSeverity::Error
-                && matches!(
-                    &d.error,
-                    DiagnosticError::Model(e) if e.code == ErrorCode::CircularDependency
-                )
+                && d.category == DiagnosticCategory::Model
+                && d.code == ErrorCode::CircularDependency
         }),
         "premise: a directly-recursive macro must emit a project-level \
          Model CircularDependency (the registry-build failure); got: \
@@ -676,10 +670,8 @@ fn narrower_classifier_flags_registry_error_but_not_in_body_unknown_builtin() {
         d.severity == DiagnosticSeverity::Error
             && !(d.model.is_empty() && d.variable.is_none())
             && set_b.contains(d.model.as_str())
-            && matches!(
-                &d.error,
-                DiagnosticError::Equation(e) if e.code == ErrorCode::UnknownBuiltin
-            )
+            && d.category == DiagnosticCategory::Equation
+            && d.code == ErrorCode::UnknownBuiltin
     });
     assert!(
         has_in_body_unknown_builtin,

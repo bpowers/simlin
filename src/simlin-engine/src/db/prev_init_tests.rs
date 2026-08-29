@@ -859,7 +859,7 @@ fn a_positional_capture_shared_by_init_and_previous_unions_its_phases() {
         let out = sync.models["main"].variables["out"].source;
         let parsed = parse_source_variable(&db, out, sync.project);
         assert!(
-            parsed.variable.errors.is_empty(),
+            parsed.variable.diagnostics.is_empty(),
             "same storage with two consumers is not a helper-definition collision"
         );
         let captures: Vec<_> = parsed
@@ -2093,14 +2093,13 @@ fn direct_snapshot_of_a_bare_module_refuses_both_intrinsics_loudly() {
                 diag.model == "main"
                     && diag.variable.as_deref() == Some(target.as_str())
                     && diag.severity == DiagnosticSeverity::Error
-                    && matches!(
-                        &diag.error,
-                        DiagnosticError::Equation(error)
-                            if error.code == crate::common::ErrorCode::NotSimulatable
-                                && error.details.as_deref().is_some_and(|details| details.contains(
-                                    "cannot read the bare module instance 'producer'"
-                                ))
+                    && diag.is(
+                        DiagnosticCategory::Equation,
+                        crate::common::ErrorCode::NotSimulatable,
                     )
+                    && diag.details.as_deref().is_some_and(|details| {
+                        details.contains("cannot read the bare module instance 'producer'")
+                    })
             }),
             "{} refusal must be attributed to main/{target}, got {diagnostics:?}",
             builtin.name()
@@ -2163,7 +2162,7 @@ fn bound_module_input_snapshot_refuses_both_intrinsics_loudly() {
         assert_eq!(input_sets.len(), 1, "the fixture has one sub instance");
         let inputs = ModuleInputSet::from_canonical_set(&db, &input_sets[0]);
         let sub_model = sync.models["sub"].source;
-        let diagnostics = compile_var_fragment::accumulated::<CompilationDiagnostic>(
+        let diagnostics = compile_var_fragment::accumulated::<Diagnostic>(
             &db,
             target_var,
             sub_model,
@@ -2171,15 +2170,13 @@ fn bound_module_input_snapshot_refuses_both_intrinsics_loudly() {
             inputs,
         );
         assert!(
-            diagnostics.iter().any(|CompilationDiagnostic(diag)| {
+            diagnostics.iter().any(|diag| {
                 diag.model == "sub"
                     && diag.variable.as_deref() == Some(target.as_str())
                     && diag.severity == DiagnosticSeverity::Error
-                    && matches!(
-                        &diag.error,
-                        DiagnosticError::Assembly(message)
-                            if message.contains(builtin.unaddressable_argument_message())
-                    )
+                    && diag.assembly_reason().is_some_and(|message| {
+                        message.contains(builtin.unaddressable_argument_message())
+                    })
             }),
             "{} refusal must be attributed to sub/{target}, got {diagnostics:?}",
             builtin.name()
@@ -2458,7 +2455,7 @@ fn ltm_snapshot_element_reads_preserve_score_topology_and_values() {
 fn an_incompatible_dimensioned_capture_edge_has_no_scalar_score_fallback() {
     use salsa::Setter;
 
-    use crate::db::{DiagnosticError, DiagnosticSeverity, model_implicit_var_info};
+    use crate::db::{DiagnosticSeverity, model_implicit_var_info};
     use crate::test_common::TestProject;
 
     let project = TestProject::new("incompatible_capture_endpoint")
@@ -2531,16 +2528,12 @@ fn an_incompatible_dimensioned_capture_edge_has_no_scalar_score_fallback() {
     let diagnostics = collect_all_diagnostics(&db, sync.project);
     let warnings: Vec<&str> = diagnostics
         .iter()
-        .filter_map(
-            |diagnostic| match (&diagnostic.severity, &diagnostic.error) {
-                (DiagnosticSeverity::Warning, DiagnosticError::Assembly(message))
-                    if message.contains("vals") && message.contains(capture_name) =>
-                {
-                    Some(message.as_str())
-                }
-                _ => None,
-            },
-        )
+        .filter_map(|diagnostic| {
+            (diagnostic.severity == DiagnosticSeverity::Warning)
+                .then(|| diagnostic.assembly_reason())
+                .flatten()
+                .filter(|message| message.contains("vals") && message.contains(capture_name))
+        })
         .collect();
     assert_eq!(
         warnings.len(),
@@ -2677,7 +2670,7 @@ fn a_fixed_disjoint_source_scores_every_dimensioned_capture_slot() {
 fn ltm_causal_edges_follow_the_production_flow_phase_boundary() {
     use salsa::Setter;
 
-    use crate::db::{DiagnosticError, DiagnosticSeverity, model_causal_edges};
+    use crate::db::{DiagnosticSeverity, model_causal_edges};
     use crate::test_common::TestProject;
     use crate::testutils::x_aux;
 
@@ -2815,16 +2808,13 @@ fn ltm_causal_edges_follow_the_production_flow_phase_boundary() {
 
     let excluded_warnings: Vec<String> = collect_all_diagnostics(&db, sync.project)
         .into_iter()
-        .filter_map(
-            |diagnostic| match (&diagnostic.severity, &diagnostic.error) {
-                (DiagnosticSeverity::Warning, DiagnosticError::Assembly(message))
-                    if message.contains(init_only_capture) =>
-                {
-                    Some(message.clone())
-                }
-                _ => None,
-            },
-        )
+        .filter_map(|diagnostic| {
+            (diagnostic.severity == DiagnosticSeverity::Warning)
+                .then(|| diagnostic.assembly_reason())
+                .flatten()
+                .filter(|message| message.contains(init_only_capture))
+                .map(str::to_owned)
+        })
         .collect();
     assert!(
         excluded_warnings.is_empty(),
@@ -2898,13 +2888,11 @@ fn init_only_rank_capture_registers_no_ltm_aggregate_or_score() {
     );
     let leaked_warnings: Vec<String> = collect_all_diagnostics(&db, sync.project)
         .into_iter()
-        .filter_map(|diagnostic| match diagnostic.error {
-            DiagnosticError::Assembly(message)
-                if message.contains(capture) || message.contains("RANK") =>
-            {
-                Some(message)
-            }
-            _ => None,
+        .filter_map(|diagnostic| {
+            diagnostic
+                .assembly_reason()
+                .filter(|message| message.contains(capture) || message.contains("RANK"))
+                .map(str::to_owned)
         })
         .collect();
     assert!(
@@ -2962,13 +2950,11 @@ fn over_wide_init_only_capture_does_not_reject_ltm_occurrences() {
     );
     let width_warnings: Vec<String> = collect_all_diagnostics(&db, sync.project)
         .into_iter()
-        .filter_map(|diagnostic| match diagnostic.error {
-            DiagnosticError::Assembly(message)
-                if message.contains("more than the 3 distinct children") =>
-            {
-                Some(message)
-            }
-            _ => None,
+        .filter_map(|diagnostic| {
+            diagnostic
+                .assembly_reason()
+                .filter(|message| message.contains("more than the 3 distinct children"))
+                .map(str::to_owned)
         })
         .collect();
     assert!(

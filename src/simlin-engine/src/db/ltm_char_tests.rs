@@ -119,15 +119,13 @@ fn fragment_compile_failures(
     model: SourceModel,
     project: SourceProject,
 ) -> Vec<String> {
-    use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
+    use crate::db::{DiagnosticSeverity, collect_model_diagnostics};
     let mut failures: Vec<String> = collect_model_diagnostics(db, model, project)
         .iter()
         .filter(|d| {
             d.severity == DiagnosticSeverity::Warning
-                && matches!(
-                    &d.error,
-                    DiagnosticError::Assembly(msg) if msg.contains("failed to compile")
-                )
+                && d.reason()
+                    .is_some_and(|msg| msg.contains("failed to compile"))
         })
         .map(|d| d.variable.clone().unwrap_or_default())
         .collect();
@@ -344,7 +342,7 @@ fn per_element_subset_dep_feedback_model() -> datamodel::Project {
 
 #[test]
 fn per_element_subset_dep_scores_are_live_not_silent_zero() {
-    use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
+    use crate::db::{DiagnosticSeverity, collect_model_diagnostics};
     use salsa::Setter;
 
     let project = per_element_subset_dep_feedback_model();
@@ -362,10 +360,8 @@ fn per_element_subset_dep_scores_are_live_not_silent_zero() {
         .iter()
         .filter(|d| {
             d.severity == DiagnosticSeverity::Warning
-                && matches!(
-                    &d.error,
-                    DiagnosticError::Assembly(msg) if msg.contains("failed to compile")
-                )
+                && d.reason()
+                    .is_some_and(|msg| msg.contains("failed to compile"))
         })
         .map(|d| d.variable.clone().unwrap_or_default())
         .collect();
@@ -778,7 +774,7 @@ fn per_element_mapped_feedback_model() -> datamodel::Project {
 
 #[test]
 fn per_element_mapped_occurrence_scores_are_live_not_silent_zero() {
-    use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
+    use crate::db::{DiagnosticSeverity, collect_model_diagnostics};
     use salsa::Setter;
 
     let project = per_element_mapped_feedback_model();
@@ -800,10 +796,8 @@ fn per_element_mapped_occurrence_scores_are_live_not_silent_zero() {
         .iter()
         .filter(|d| {
             d.severity == DiagnosticSeverity::Warning
-                && matches!(
-                    &d.error,
-                    DiagnosticError::Assembly(msg) if msg.contains("failed to compile")
-                )
+                && d.reason()
+                    .is_some_and(|msg| msg.contains("failed to compile"))
         })
         .map(|d| d.variable.clone().unwrap_or_default())
         .collect();
@@ -922,7 +916,7 @@ fn per_element_ambiguous_pin_feedback_model() -> datamodel::Project {
 
 #[test]
 fn per_element_ambiguous_pin_scores_are_live_not_silent_zero() {
-    use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
+    use crate::db::{DiagnosticSeverity, collect_model_diagnostics};
     use salsa::Setter;
 
     let project = per_element_ambiguous_pin_feedback_model();
@@ -939,10 +933,8 @@ fn per_element_ambiguous_pin_scores_are_live_not_silent_zero() {
         .iter()
         .filter(|d| {
             d.severity == DiagnosticSeverity::Warning
-                && matches!(
-                    &d.error,
-                    DiagnosticError::Assembly(msg) if msg.contains("failed to compile")
-                )
+                && d.reason()
+                    .is_some_and(|msg| msg.contains("failed to compile"))
         })
         .map(|d| d.variable.clone().unwrap_or_default())
         .collect();
@@ -1066,7 +1058,7 @@ fn per_element_index_nested_feedback_model() -> datamodel::Project {
 
 #[test]
 fn per_element_index_nested_scores_are_live_not_silent_zero() {
-    use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
+    use crate::db::{DiagnosticSeverity, collect_model_diagnostics};
     use salsa::Setter;
 
     let project = per_element_index_nested_feedback_model();
@@ -1083,10 +1075,8 @@ fn per_element_index_nested_scores_are_live_not_silent_zero() {
         .iter()
         .filter(|d| {
             d.severity == DiagnosticSeverity::Warning
-                && matches!(
-                    &d.error,
-                    DiagnosticError::Assembly(msg) if msg.contains("failed to compile")
-                )
+                && d.reason()
+                    .is_some_and(|msg| msg.contains("failed to compile"))
         })
         .map(|d| d.variable.clone().unwrap_or_default())
         .collect();
@@ -1230,7 +1220,7 @@ fn per_element_dynamic_index_feedback_model() -> datamodel::Project {
 
 #[test]
 fn per_element_dynamic_index_scores_preserve_head_lag() {
-    use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
+    use crate::db::{DiagnosticSeverity, collect_model_diagnostics};
     use salsa::Setter;
 
     let project = per_element_dynamic_index_feedback_model();
@@ -1247,10 +1237,8 @@ fn per_element_dynamic_index_scores_preserve_head_lag() {
         .iter()
         .filter(|d| {
             d.severity == DiagnosticSeverity::Warning
-                && matches!(
-                    &d.error,
-                    DiagnosticError::Assembly(msg) if msg.contains("failed to compile")
-                )
+                && d.reason()
+                    .is_some_and(|msg| msg.contains("failed to compile"))
         })
         .map(|d| d.variable.clone().unwrap_or_default())
         .collect();
@@ -1476,7 +1464,7 @@ fn agg_nested_reducer_feedback_model() -> datamodel::Project {
 
 #[test]
 fn agg_nested_reducer_partial_scores_full_attribution() {
-    use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
+    use crate::db::{DiagnosticSeverity, collect_model_diagnostics};
     use salsa::Setter;
 
     let project = agg_nested_reducer_feedback_model();
@@ -1493,10 +1481,8 @@ fn agg_nested_reducer_partial_scores_full_attribution() {
         .iter()
         .filter(|d| {
             d.severity == DiagnosticSeverity::Warning
-                && matches!(
-                    &d.error,
-                    DiagnosticError::Assembly(msg) if msg.contains("failed to compile")
-                )
+                && d.reason()
+                    .is_some_and(|msg| msg.contains("failed to compile"))
         })
         .map(|d| d.variable.clone().unwrap_or_default())
         .collect();
@@ -1824,7 +1810,7 @@ fn reducer_index_nested_feedback_model() -> datamodel::Project {
 
 #[test]
 fn reducer_index_nested_freeze_preserves_loud_failure_not_silent_compile() {
-    use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
+    use crate::db::{DiagnosticSeverity, collect_model_diagnostics};
     use salsa::Setter;
 
     let project = reducer_index_nested_feedback_model();
@@ -1841,10 +1827,8 @@ fn reducer_index_nested_freeze_preserves_loud_failure_not_silent_compile() {
         .iter()
         .filter(|d| {
             d.severity == DiagnosticSeverity::Warning
-                && matches!(
-                    &d.error,
-                    DiagnosticError::Assembly(msg) if msg.contains("failed to compile")
-                )
+                && d.reason()
+                    .is_some_and(|msg| msg.contains("failed to compile"))
         })
         .filter_map(|d| d.variable.clone())
         .filter(|v| v.contains("link_score\u{205A}from\u{2192}to"))
@@ -2143,7 +2127,7 @@ TIME STEP = 1 ~~|
 /// upstream refusal too so the reason is recorded rather than hidden.
 #[test]
 fn lookup_table_runtime_index_is_frozen_through_the_production_path() {
-    use crate::db::{DiagnosticError, collect_model_diagnostics};
+    use crate::db::collect_model_diagnostics;
 
     let project = crate::open_vensim(&arrayed_gf_lookup_mdl("idx")).expect("the MDL parses");
 
@@ -2154,8 +2138,10 @@ fn lookup_table_runtime_index_is_frozen_through_the_production_path() {
     assert!(
         collect_model_diagnostics(&plain_db, plain.models["main"].source, plain.project)
             .iter()
-            .any(|d| d.variable.as_deref() == Some("y")
-                && matches!(&d.error, DiagnosticError::Equation(_))),
+            .any(|d| {
+                d.variable.as_deref() == Some("y")
+                    && d.category == crate::db::DiagnosticCategory::Equation
+            }),
         "the fixture's whole point is that a runtime table index is refused \
          upstream; if `y` now compiles, replace this text assertion with a \
          numeric one"
@@ -2428,7 +2414,7 @@ fn doubly_mapped_dep_axes_are_allocated_one_to_one() {
 /// a consequence of an unsupported model.
 #[test]
 fn per_element_edge_declines_a_repeated_dimension_target() {
-    use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
+    use crate::db::{DiagnosticSeverity, collect_model_diagnostics};
 
     let project = TestProject::new("per_element_repeated_dim")
         .with_sim_time(0.0, 1.0, 1.0)
@@ -2453,14 +2439,27 @@ fn per_element_edge_declines_a_repeated_dimension_target() {
 
     let (db, model, source_project) = char_fixture_db(&project);
     let diags = collect_model_diagnostics(&db, model, source_project);
-    assert!(
-        diags
+    let declined = diags
+        .iter()
+        .find(|d| {
+            d.severity == DiagnosticSeverity::Warning
+                && d.assembly_reason().is_some_and(|message| {
+                    message.contains("repeats a dimension")
+                        && message.contains("pop")
+                        && message.contains("target")
+                })
+        })
+        .unwrap_or_else(|| {
+            panic!("the edge must be declined with a Warning naming it; got {diags:?}")
+        });
+    assert_eq!(
+        declined
+            .related
             .iter()
-            .any(|d| d.severity == DiagnosticSeverity::Warning
-                && matches!(&d.error, DiagnosticError::Assembly(m)
-                if m.contains("repeats a dimension") && m.contains("pop") && m.contains("target"))),
-        "the edge must be declined with a Warning naming it; got {:?}",
-        diags.iter().map(|d| &d.error).collect::<Vec<_>>()
+            .map(|source| source.variable.as_str())
+            .collect::<Vec<_>>(),
+        ["pop", "target"],
+        "related sources remain in edge direction, never set/hash order"
     );
 
     // ...and no per-element score is emitted for it, rather than a wrong one.

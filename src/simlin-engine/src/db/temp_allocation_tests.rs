@@ -38,7 +38,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::var_fragment::{ExplicitFragment, explicit_fragment_input};
+use super::var_fragment::explicit_fragment_input;
 use super::*;
 use crate::compiler::fragment::lower_fragment;
 use crate::compiler::{Expr, SubscriptIndex};
@@ -146,14 +146,15 @@ fn flow_fragment(project: &TestProject, var: &str) -> (Vec<Expr>, Vec<(u32, usiz
         .get(var)
         .unwrap_or_else(|| panic!("fixture declares `{var}`"));
 
-    let exprs = match explicit_fragment_input(&db, source_var, model, source_project, &[]) {
-        ExplicitFragment::Ready { input, .. } => {
+    let explicit = explicit_fragment_input(&db, source_var, model, source_project, &[]);
+    let exprs = match explicit.input {
+        Some(input) => {
             lower_fragment(&input, false)
                 .unwrap_or_else(|e| panic!("`{var}` must lower: {e:?}"))
                 .ast
         }
-        ExplicitFragment::Fatal { fatal_diags, .. } => {
-            panic!("`{var}` must lower, got {fatal_diags:?}")
+        None => {
+            panic!("`{var}` must lower, got {:?}", explicit.diagnostics)
         }
     };
 

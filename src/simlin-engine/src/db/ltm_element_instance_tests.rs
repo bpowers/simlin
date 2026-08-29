@@ -48,8 +48,8 @@
 //! fixture with an arrayed output.
 
 use crate::db::{
-    DiagnosticError, SimlinDb, collect_all_diagnostics, model_edge_shapes,
-    model_element_causal_edges, model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel,
+    SimlinDb, collect_all_diagnostics, model_edge_shapes, model_element_causal_edges,
+    model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel,
     sync_from_datamodel_incremental,
 };
 use crate::test_common::TestProject;
@@ -247,11 +247,10 @@ fn arrayed_module_loop_emits_no_failing_fragments() {
 
     let failures: Vec<String> = collect_all_diagnostics(&db, sync.project)
         .iter()
-        .filter_map(|d| match &d.error {
-            DiagnosticError::Assembly(msg) if msg.contains("failed to compile") => {
-                Some(format!("{:?}: {msg}", d.variable))
-            }
-            _ => None,
+        .filter_map(|d| {
+            d.reason()
+                .filter(|msg| msg.contains("failed to compile"))
+                .map(|msg| format!("{:?}: {msg}", d.variable))
         })
         .collect();
 
@@ -607,11 +606,10 @@ fn an_arrayed_capture_endpoint_has_one_shape_through_ltm() {
 
     let failures: Vec<String> = collect_all_diagnostics(&db, sync.project)
         .iter()
-        .filter_map(|d| match &d.error {
-            DiagnosticError::Assembly(msg) if msg.contains("failed to compile") => {
-                Some(format!("{:?}: {msg}", d.variable))
-            }
-            _ => None,
+        .filter_map(|d| {
+            d.reason()
+                .filter(|msg| msg.contains("failed to compile"))
+                .map(|msg| format!("{:?}: {msg}", d.variable))
         })
         .collect();
 
@@ -733,11 +731,11 @@ fn shaped_capture_reducer_projection_feeder_uses_element_loops() {
 
     let failures: Vec<String> = collect_all_diagnostics(&db, sync.project)
         .into_iter()
-        .filter_map(|diagnostic| match diagnostic.error {
-            DiagnosticError::Assembly(message) if message.contains("failed to compile") => {
-                Some(message)
-            }
-            _ => None,
+        .filter_map(|diagnostic| {
+            diagnostic
+                .reason()
+                .filter(|message| message.contains("failed to compile"))
+                .map(str::to_owned)
         })
         .collect();
     assert!(
@@ -1047,8 +1045,8 @@ fn dimensionless_inactive_defaults_mint_no_implicit_helpers() {
 ///
 /// `enumerate_pathways_to_outputs` admits up to `MAX_PATHWAYS_PER_PORT` paths
 /// per input port, a converging sub-model shares edges across most of them, and
-/// `collect_model_diagnostics` does not deduplicate accumulator output. Without
-/// the dedup this is one identical row per (pathway x link), which on a real
+/// the returned fact vector does not globally deduplicate output. Without the
+/// edge gate this is one identical row per (pathway x link), which on a real
 /// module graph buries every other diagnostic.
 ///
 /// The fixture is the smallest shape with a SHARED unresolvable edge: the
@@ -1060,6 +1058,7 @@ fn dimensionless_inactive_defaults_mint_no_implicit_helpers() {
 fn an_unresolved_pathway_link_warns_once_per_edge() {
     use crate::datamodel;
     use crate::testutils::{x_aux, x_model};
+    use salsa::Setter;
 
     let input = datamodel::Variable::Aux(datamodel::Aux {
         ident: "input_val".to_string(),
@@ -1128,20 +1127,24 @@ fn an_unresolved_pathway_link_warns_once_per_edge() {
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
 
-    let warnings: Vec<String> = collect_all_diagnostics(&db, sync.project)
-        .iter()
-        .filter_map(|d| match &d.error {
-            DiagnosticError::Assembly(msg) if msg.contains("LTM pathway score") => {
-                Some(msg.clone())
-            }
-            _ => None,
-        })
-        .collect();
+    let collect_warnings = |db: &SimlinDb| {
+        collect_all_diagnostics(db, sync.project)
+            .into_iter()
+            .filter(|d| {
+                d.assembly_reason()
+                    .is_some_and(|msg| msg.contains("LTM pathway score"))
+            })
+            .collect::<Vec<_>>()
+    };
+    let warnings = collect_warnings(&db);
 
     let count_for = |edge: &str| -> usize {
         warnings
             .iter()
-            .filter(|m| m.contains(&format!("for edge {edge}")))
+            .filter(|d| {
+                d.assembly_reason()
+                    .is_some_and(|message| message.contains(&format!("for edge {edge}")))
+            })
             .count()
     };
     // `input_val -> mid` is traversed by BOTH pathways; `mid -> neg` by exactly
@@ -1149,26 +1152,37 @@ fn an_unresolved_pathway_link_warns_once_per_edge() {
     // with pathway multiplicity, which is the whole point of the dedup. Without
     // it the counts are 4 and 2.
     //
-    // Both are >1 because a sub-model's LTM diagnostics are collected twice --
-    // once directly and once through the parent's subtree, since
-    // `model_all_diagnostics` for `main` reaches `diamond`'s
-    // `model_ltm_variables`. That doubling is uniform, pre-existing, and shared
-    // by every LTM sub-model warning; the single-pathway edge doubling too is
-    // what shows it cannot come from pathway multiplicity. Out of scope here.
     let shared = count_for("input_val -> mid");
     let single = count_for("mid -> neg");
-    assert!(
-        shared > 0 && single > 0,
-        "fixture must produce both warnings, else this is vacuous:\n{}",
-        warnings.join("\n")
+    assert_eq!(
+        shared, 1,
+        "shared edge must warn exactly once: {warnings:?}"
     );
     assert_eq!(
-        shared,
-        single,
-        "an edge traversed by two pathways must warn no more often than one \
-         traversed by a single pathway; got {shared} vs {single}:\n{}",
-        warnings.join("\n")
+        single, 1,
+        "single edge must warn exactly once: {warnings:?}"
     );
+    assert_eq!(
+        warnings
+            .iter()
+            .map(|d| {
+                d.related
+                    .iter()
+                    .map(|source| source.variable.as_str())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>(),
+        vec![vec!["input_val", "mid"], vec!["mid", "neg"]],
+        "related sources and first-producer order must remain structural: {warnings:?}"
+    );
+
+    // A revision that no diagnostic producer reads must neither lose nor
+    // duplicate the child facts. This exercises cached pure facts and the
+    // per-model emitter in the same database, not a second fresh database.
+    sync.project
+        .set_name(&mut db)
+        .to("pathway_dedup_renamed".to_string());
+    assert_eq!(collect_warnings(&db), warnings);
 }
 
 /// Each target element's score must hold the port THAT element reads.

@@ -836,8 +836,8 @@ mod tests {
         // Many real-world models have unit errors but should still run.
         // The unit error should be detected and surfaced, but simulation should proceed.
         use crate::db::{
-            DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
-            compile_project_incremental, sync_from_datamodel_incremental,
+            DiagnosticSeverity, SimlinDb, collect_all_diagnostics, compile_project_incremental,
+            sync_from_datamodel_incremental,
         };
 
         let project = TestProject::new("unit_mismatch_runs_test")
@@ -860,24 +860,13 @@ mod tests {
             "Compilation should succeed despite unit mismatch"
         );
 
-        // Diagnostics should surface the unit mismatch (as Unit diagnostic
-        // or as a Model-level UnitMismatch error from inference failure)
+        // Diagnostics should surface the unit mismatch through one of the
+        // authoritative unit categories.
         let diagnostics = collect_all_diagnostics(&db, sync_result.project);
-        let has_unit_issues = diagnostics.iter().any(|d| {
-            matches!(d.error, DiagnosticError::Unit(_))
-                || matches!(
-                    &d.error,
-                    DiagnosticError::Model(e) if e.code == crate::ErrorCode::UnitMismatch
-                )
-        });
-        let has_blocking_errors = diagnostics.iter().any(|d| {
-            d.severity == DiagnosticSeverity::Error
-                && !matches!(d.error, DiagnosticError::Unit(_))
-                && !matches!(
-                    &d.error,
-                    DiagnosticError::Model(e) if e.code == crate::ErrorCode::UnitMismatch
-                )
-        });
+        let has_unit_issues = diagnostics.iter().any(|d| d.category.is_unit());
+        let has_blocking_errors = diagnostics
+            .iter()
+            .any(|d| d.severity == DiagnosticSeverity::Error && !d.category.is_unit());
 
         assert!(
             has_unit_issues,
@@ -908,8 +897,8 @@ mod tests {
     fn test_unit_mismatch_in_stock_allows_simulation() {
         // Test that unit mismatch with stocks also allows simulation
         use crate::db::{
-            DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
-            compile_project_incremental, sync_from_datamodel_incremental,
+            DiagnosticSeverity, SimlinDb, collect_all_diagnostics, compile_project_incremental,
+            sync_from_datamodel_incremental,
         };
 
         let project = TestProject::new("stock_unit_mismatch_runs")
@@ -940,21 +929,10 @@ mod tests {
 
         // Diagnostics should surface the unit mismatch
         let diagnostics = collect_all_diagnostics(&db, sync_result.project);
-        let has_unit_issues = diagnostics.iter().any(|d| {
-            matches!(d.error, DiagnosticError::Unit(_))
-                || matches!(
-                    &d.error,
-                    DiagnosticError::Model(e) if e.code == crate::ErrorCode::UnitMismatch
-                )
-        });
-        let has_blocking_errors = diagnostics.iter().any(|d| {
-            d.severity == DiagnosticSeverity::Error
-                && !matches!(d.error, DiagnosticError::Unit(_))
-                && !matches!(
-                    &d.error,
-                    DiagnosticError::Model(e) if e.code == crate::ErrorCode::UnitMismatch
-                )
-        });
+        let has_unit_issues = diagnostics.iter().any(|d| d.category.is_unit());
+        let has_blocking_errors = diagnostics
+            .iter()
+            .any(|d| d.severity == DiagnosticSeverity::Error && !d.category.is_unit());
 
         assert!(
             has_unit_issues,
@@ -986,7 +964,9 @@ mod tests {
         // panel, so its detail must be a plain-language sentence naming the
         // involved variables -- not the raw `1 == unit-expression`
         // constraint dump (which stays available on `InferenceResult`).
-        use crate::db::{DiagnosticError, SimlinDb, collect_all_diagnostics, sync_from_datamodel};
+        use crate::db::{
+            DiagnosticCategory, SimlinDb, collect_all_diagnostics, sync_from_datamodel,
+        };
 
         let datamodel = TestProject::new("inference-umbrella")
             .unit("apples", None)
@@ -998,11 +978,12 @@ mod tests {
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
         let diagnostics = collect_all_diagnostics(&db, sync.project);
-        let umbrella = diagnostics.iter().find_map(|d| match &d.error {
-            DiagnosticError::Model(e) if e.code == crate::ErrorCode::UnitMismatch => {
-                Some(e.details.clone().unwrap_or_default())
-            }
-            _ => None,
+        let umbrella = diagnostics.iter().find_map(|d| {
+            d.is(
+                DiagnosticCategory::UnitInference,
+                crate::ErrorCode::UnitMismatch,
+            )
+            .then(|| d.reason().unwrap_or_default().to_string())
         });
         let detail = umbrella.expect("expected a model-level unit inference warning");
         assert!(

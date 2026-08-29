@@ -488,11 +488,12 @@ fn expand_pin_on_element_graph(
 
     // Step 2: SCC guard.
     let scc = sub_graph.largest_scc_size();
-    if scc > crate::ltm::MAX_LTM_SCC_NODES {
+    let scc_node_budget = crate::ltm::ltm_scc_node_budget();
+    if scc > scc_node_budget {
         return Err(format!(
             "cannot be scored: its element-level expansion forms a strongly-connected component \
              of {scc} nodes, exceeding the tractable limit of {}",
-            crate::ltm::MAX_LTM_SCC_NODES
+            scc_node_budget
         ));
     }
 

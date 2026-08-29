@@ -36,18 +36,15 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
-use rustc_hash::{FxHashMap, FxHashSet};
-use salsa::Accumulator;
-
 use crate::canonicalize;
+use rustc_hash::{FxHashMap, FxHashSet};
 // `Canonical`/`Ident` are used in production by the element-cycle
 // refinement (`resolve_recurrence_sccs` and friends), not only by the
 // `#[cfg(test)]` SCC accessors.
 use crate::common::{Canonical, Ident};
 use crate::db::{
-    CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ModuleInputSet,
-    SourceModel, SourceProject, SourceVariable, SourceVariableKind, VariableDeps,
-    variable_direct_dependencies,
+    Db, Diagnostic, DiagnosticSeverity, ModuleInputSet, SourceModel, SourceProject, SourceVariable,
+    SourceVariableKind, VariableDeps, variable_direct_dependencies,
 };
 
 /// Per-variable dependency facts used to build the model dependency
@@ -1405,8 +1402,8 @@ pub(crate) fn resolve_recurrence_sccs(
 /// Aborts (panics -- never substitutes an empty fragment) when a variable's
 /// non-initial production lowered exprs cannot be sourced: no
 /// `SourceVariable` (an implicit SMOOTH/DELAY/INIT helper -- the explicit
-/// constructor has no entry for it), `ExplicitFragment::Fatal` (the variable
-/// did not lower at all), or the non-initial phase's lowering errored.
+/// constructor has no entry for it), `ExplicitFragment { input: None }` (input
+/// preparation failed), or the non-initial phase's lowering errored.
 #[cfg(test)]
 pub(crate) fn var_noninitial_lowered_exprs(
     db: &dyn Db,
@@ -1427,7 +1424,9 @@ pub(crate) fn var_noninitial_lowered_exprs(
     };
 
     match explicit_fragment_input(db, *sv, model, project, &[]) {
-        ExplicitFragment::Ready { input, .. } => match lower_fragment(&input, false) {
+        ExplicitFragment {
+            input: Some(input), ..
+        } => match lower_fragment(&input, false) {
             Ok(v) => v.ast,
             Err(e) => panic!(
                 "var_noninitial_lowered_exprs: var {var_name:?} non-initial \
@@ -1435,9 +1434,9 @@ pub(crate) fn var_noninitial_lowered_exprs(
                  lowered exprs (abort, never silent-skip)"
             ),
         },
-        ExplicitFragment::Fatal { .. } => panic!(
-            "var_noninitial_lowered_exprs: var {var_name:?} failed to lower \
-             (ExplicitFragment::Fatal) -- cannot source its production \
+        ExplicitFragment { input: None, .. } => panic!(
+            "var_noninitial_lowered_exprs: var {var_name:?} failed to prepare \
+             its explicit fragment input -- cannot source its production \
              lowered exprs (abort, never silent-skip)"
         ),
     }
@@ -2164,17 +2163,16 @@ fn membership_in(dep_graph: &ModelDepGraphResult, name: &str) -> RunlistMembersh
 /// Accumulate a model-level `CircularDependency` diagnostic for the variable
 /// the pure dependency-graph facts selected to attribute the cycle.
 fn cycle_diagnostic(db: &dyn Db, model: SourceModel, var_name: String) {
-    CompilationDiagnostic(Diagnostic {
-        model: model.name(db).clone(),
-        variable: Some(var_name),
-        error: DiagnosticError::Model(crate::common::Error {
+    Diagnostic::engine(
+        crate::common::Error {
             kind: crate::common::ErrorKind::Model,
             code: crate::common::ErrorCode::CircularDependency,
             details: None,
-        }),
-        severity: DiagnosticSeverity::Error,
-    })
-    .accumulate(db);
+        },
+        DiagnosticSeverity::Error,
+    )
+    .with_context(model.name(db).clone(), Some(var_name))
+    .emit(db);
 }
 
 /// The sole accumulator-owning trigger for an ordinary dependency cycle.

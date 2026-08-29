@@ -33,12 +33,12 @@ use crate::lexer::LexerType;
 /// One equation arm: the authoritative parsed AST plus its diagnostic text.
 ///
 /// See the module docs for why both are carried. `expr` is `None` in two
-/// materially DIFFERENT cases, which [`LtmArm::parse_error`] distinguishes:
+/// materially DIFFERENT cases, which [`LtmArm::parse_errors`] distinguishes:
 ///
 /// - an **empty** equation (`Expr0::new("")` yields `Ok(None)`, e.g. a
 ///   discovery-only stub) -- legitimate, no errors, and dropped from an
 ///   `Arrayed` slot map exactly as `variable::parse_equation` drops it;
-/// - a **failed parse** -- `parse_error` is `Some`, and [`LtmEquation::to_flow_ast`]
+/// - a **failed parse** -- `parse_errors` is non-empty, and [`LtmEquation::to_flow_ast`]
 ///   surfaces it so the fragment is REJECTED rather than silently
 ///   zero-filled.
 ///
@@ -67,17 +67,11 @@ pub struct LtmArm {
     /// #981). Pointer equality would be an optimization on top, never a
     /// substitute.
     pub expr: Option<Arc<Expr0>>,
-    /// `Some` iff `text` FAILED to parse -- never merely because it was empty.
-    /// Preserved (rather than discarded at construction) so the arm that failed
-    /// can reject its whole equation; see the type docs.
-    ///
-    /// The FIRST error only, deliberately: this is a boolean-with-provenance,
-    /// since the emitted diagnostic names the variable and its text rather than
-    /// the parse position, and the whole equation is rejected regardless of how
-    /// many arms or positions failed. Keeping a `Vec` here inflated
-    /// `LtmSyntheticVar` (hence `ShapedLinkScore`) past clippy's
-    /// `large_enum_variant` threshold for data no consumer reads.
-    pub parse_error: Option<EquationError>,
+    /// Non-empty iff `text` failed to parse -- never merely because it was
+    /// empty. Stored behind a slice pointer so the overwhelmingly common clean
+    /// arm stays smaller than an inline `Option<EquationError>`, while every
+    /// parser error and its span remain available to diagnostics.
+    pub parse_errors: Arc<[EquationError]>,
 }
 
 impl LtmArm {
@@ -102,16 +96,14 @@ impl LtmArm {
         // query on the ordinary read path, where aborting on user input is
         // strictly worse than a diagnostic, and libsimlin release builds are
         // panic=abort.
-        let (expr, parse_error) = match Expr0::new(&text, LexerType::Equation) {
-            Ok(expr) => (expr.map(Arc::new), None),
-            // `Expr0::new` reports every position it found; keep the first as
-            // the failure's provenance (see the field docs).
-            Err(errs) => (None, errs.into_iter().next()),
+        let (expr, parse_errors) = match Expr0::new(&text, LexerType::Equation) {
+            Ok(expr) => (expr.map(Arc::new), Arc::<[EquationError]>::from([])),
+            Err(errors) => (None, Arc::from(errors)),
         };
         Self {
             text,
             expr,
-            parse_error,
+            parse_errors,
         }
     }
 }
@@ -279,24 +271,34 @@ impl LtmEquation {
         }
     }
 
-    /// Every arm's retained parse errors, in arm order (elements then default).
-    /// Non-empty means at least one arm's generated text failed to parse -- an
-    /// augmentation-layer bug -- as distinct from an arm that is legitimately
-    /// EMPTY (which carries no error).
-    fn arm_parse_errors(&self) -> Vec<EquationError> {
-        let arms: Vec<&LtmArm> = match self {
-            LtmEquation::Scalar(arm) | LtmEquation::ApplyToAll(_, arm) => vec![arm],
+    /// Every retained parse error in producer order, carrying the raw element
+    /// identity for an `Arrayed` arm. `None` identifies a scalar,
+    /// apply-to-all, or default arm.
+    pub(crate) fn arm_parse_errors_with_elements(&self) -> Vec<(Option<String>, EquationError)> {
+        match self {
+            LtmEquation::Scalar(arm) | LtmEquation::ApplyToAll(_, arm) => arm
+                .parse_errors
+                .iter()
+                .cloned()
+                .map(|error| (None, error))
+                .collect(),
             LtmEquation::Arrayed {
                 elements, default, ..
-            } => elements
-                .iter()
-                .map(|(_, arm)| arm)
-                .chain(default.as_ref())
-                .collect(),
-        };
-        arms.iter()
-            .filter_map(|arm| arm.parse_error.clone())
-            .collect()
+            } => {
+                elements
+                    .iter()
+                    .flat_map(|(element, arm)| {
+                        arm.parse_errors
+                            .iter()
+                            .cloned()
+                            .map(|error| (Some(element.clone()), error))
+                    })
+                    .chain(default.iter().flat_map(|arm| {
+                        arm.parse_errors.iter().cloned().map(|error| (None, error))
+                    }))
+                    .collect()
+            }
+        }
     }
 
     /// Build the flow-phase `Ast<Expr0>` for compilation and the layout
@@ -325,7 +327,11 @@ impl LtmEquation {
         // A generated arm that failed to parse rejects the whole equation,
         // BEFORE any shape-specific assembly -- see the note above on why the
         // `Arrayed` slot map must not simply drop it.
-        let parse_errors = self.arm_parse_errors();
+        let parse_errors: Vec<_> = self
+            .arm_parse_errors_with_elements()
+            .into_iter()
+            .map(|(_, error)| error)
+            .collect();
         if !parse_errors.is_empty() {
             return (None, parse_errors);
         }

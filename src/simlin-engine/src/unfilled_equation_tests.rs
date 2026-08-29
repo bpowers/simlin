@@ -21,7 +21,7 @@ use crate::ast::{Ast, Expr0};
 use crate::common::{CanonicalElementName, ErrorCode};
 use crate::datamodel;
 use crate::db::{
-    Diagnostic, DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
+    Diagnostic, DiagnosticCategory, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
     compile_project_incremental, sync_from_datamodel_incremental,
 };
 use crate::variable::{UnfilledArms, is_nan_literal, unfilled_arms};
@@ -583,8 +583,8 @@ fn diagnostics(project: &datamodel::Project) -> Vec<Diagnostic> {
 fn unfilled_findings(project: &datamodel::Project) -> Vec<(String, String, String)> {
     diagnostics(project)
         .into_iter()
-        .filter_map(|d| match &d.error {
-            DiagnosticError::Model(e) if e.code == ErrorCode::UnfilledEquation => {
+        .filter_map(|d| {
+            if d.is(DiagnosticCategory::Model, ErrorCode::UnfilledEquation) {
                 assert_eq!(
                     DiagnosticSeverity::Warning,
                     d.severity,
@@ -594,10 +594,11 @@ fn unfilled_findings(project: &datamodel::Project) -> Vec<(String, String, Strin
                 Some((
                     d.model.clone(),
                     d.variable.clone().unwrap_or_default(),
-                    e.get_details().unwrap_or_default().to_string(),
+                    d.reason().unwrap_or_default().to_string(),
                 ))
+            } else {
+                None
             }
-            _ => None,
         })
         .collect()
 }
@@ -885,12 +886,17 @@ fn a_sparse_array_of_unfilled_arms_names_the_arms_not_the_variable() {
 fn unknown_subscript_findings(project: &datamodel::Project) -> Vec<(String, String)> {
     diagnostics(project)
         .into_iter()
-        .filter_map(|d| match &d.error {
-            DiagnosticError::Model(e) if e.code == ErrorCode::UnknownElementSubscript => Some((
-                d.variable.clone().unwrap_or_default(),
-                e.get_details().unwrap_or_default().to_string(),
-            )),
-            _ => None,
+        .filter_map(|d| {
+            d.is(
+                DiagnosticCategory::Model,
+                ErrorCode::UnknownElementSubscript,
+            )
+            .then(|| {
+                (
+                    d.variable.clone().unwrap_or_default(),
+                    d.reason().unwrap_or_default().to_string(),
+                )
+            })
         })
         .collect()
 }

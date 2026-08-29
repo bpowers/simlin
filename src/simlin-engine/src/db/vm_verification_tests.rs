@@ -783,8 +783,8 @@ fn test_ltm_reverse_declared_subscripted_link_score_is_diagonal() {
     assert!(
         !diags.iter().any(|d| {
             d.severity == crate::db::DiagnosticSeverity::Warning
-                && matches!(&d.error, crate::db::DiagnosticError::Assembly(msg)
-                    if msg.contains("x -> inflow"))
+                && d.assembly_reason()
+                    .is_some_and(|msg| msg.contains("x -> inflow"))
         }),
         "the x→inflow edge is scoreable now; no Warning may fire: {diags:?}"
     );
@@ -1734,9 +1734,10 @@ fn test_with_lookup_per_element_owner_declines_naming_the_unhoisted_reducer() {
     let diags = crate::db::collect_model_diagnostics(&db, source_model, source_project);
     let messages: Vec<String> = diags
         .iter()
-        .map(|d| match &d.error {
-            crate::db::DiagnosticError::Assembly(m) => m.clone(),
-            other => format!("{other:?}"),
+        .map(|d| {
+            d.reason()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{d:?}"))
         })
         .collect();
     assert!(

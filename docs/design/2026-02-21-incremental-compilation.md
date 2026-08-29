@@ -244,22 +244,43 @@ post-simulation `discover_loops()` is unchanged.
 
 ### Error Handling
 
-Compilation diagnostics use a `#[salsa::accumulator]`:
+Compilation diagnostics use one complete payload as their
+`#[salsa::accumulator]`:
 
 ```rust
 #[salsa::accumulator]
-pub struct CompilationDiagnostic {
-    pub model: ModelId,
-    pub variable: Option<VariableId>,
-    pub error: Error,
+pub struct Diagnostic {
+    pub model: String,
+    pub variable: Option<String>,
+    pub owner: Option<String>,
+    pub module_path: Vec<String>,
+    pub element: Option<String>,
+    pub location: Option<Loc>,
+    pub related: Vec<DiagnosticSource>,
+    pub code: ErrorCode,
+    pub category: DiagnosticCategory,
+    pub display_details: Option<String>,
+    pub details: Option<String>,
+    pub severity: DiagnosticSeverity,
 }
 ```
 
-Tracked functions accumulate diagnostics as a side channel, and collection
-queries drain them into the public `Diagnostic` form. Parse and unit-parse
-failures also remain on `Variable.errors` and `Variable.unit_errors` until
-fragment construction translates them. These channels must stay explicit until
-diagnostics are unified end to end; no model-wide AST owner centralizes them.
+Parsing and lowering create context-free `Diagnostic`s directly on each
+per-variable memo. Fragment construction attaches model and physical-variable
+context exactly once and emits that same type; generated helpers additionally
+carry their user-authored owner. When several runlist phases reach the same
+fully attributed fragment failure, the fragment boundary emits its first
+occurrence; equality includes every structured source and detail field, so
+distinct phase, element, path, or owner failures remain separate. Collection
+drains `Diagnostic` without a translation wrapper. Project-level
+unit-definition and macro-registry failures are memoized values read exactly
+once by `collect_all_diagnostics`, because
+accumulating a project fact under every model would duplicate it and makes it
+vulnerable to Salsa accumulator-DFS pruning after an unrelated revision.
+Recursive LTM queries follow the same ownership rule: each model result carries
+its ordered warning facts as a pure value, recursive callers never import those
+facts, and `model_all_diagnostics` is the sole non-recursive emitter for the
+current model.
 
 ### libsimlin Integration
 
@@ -326,10 +347,13 @@ LTM treatment through the salsa tracked function graph.
 
 ### Error Storage
 
-Parse and unit-parse errors remain on each `Variable`; compiler, dependency,
-unit-inference and assembly diagnostics use salsa accumulators. Diagnostic
-collection translates both into one public surface. This is the residual
-diagnostics boundary, not a reason to introduce a model-wide variable owner.
+Each `Variable` retains context-free `Diagnostic` rows from parsing, lowering,
+and unit parsing. The database boundary attaches model, physical variable,
+user-facing owner, module path, and element context exactly once before
+emitting those rows through the salsa accumulator. Compiler, dependency,
+unit-inference, and assembly producers construct the same payload directly;
+collection merges accumulated rows with project-owned memo facts without a
+translation type or a model-wide variable owner.
 
 ## Implementation Phases
 
@@ -400,7 +424,7 @@ equation edits only reparse/relower the affected variable.
   salsa's `Clone + Eq + Hash + Update` requirements
 - Narrow consumers that select per-variable tracked results directly, with
   whole-model algorithms carrying shared handles rather than cloned payloads
-- `CompilationDiagnostic` accumulator for parse/lower errors
+- `Diagnostic` accumulator and per-variable payload for parse/lower errors
 
 **Dependencies:** Phase 2
 
@@ -512,7 +536,7 @@ compilation results are reused across FFI calls.
   `SimlinDb` as primary compilation state
 - `apply_patch` in `src/libsimlin/src/patch.rs` -- after modifying the
   datamodel, sync affected `SourceVariable`/`SourceModel` inputs on the db.
-  Collect diagnostics via `compile::accumulated::<CompilationDiagnostic>(db)`
+  Collect diagnostics via `db::collect_all_diagnostics(db, project)`
 - `simlin_sim_new` in `src/libsimlin/src/simulation.rs` -- read
   `CompiledSimulation` from db (cache hit if no changes since last patch).
   Snapshot bytecode for VM ownership
@@ -527,27 +551,36 @@ All libsimlin tests and integration tests pass.
 <!-- END_PHASE_7 -->
 
 <!-- START_PHASE_8 -->
-### Phase 8: Error Accumulator Migration
+### Phase 8: Unified Diagnostic Channel
 
-**Goal:** Move all compilation errors from struct fields to salsa accumulators.
+**Goal:** Carry one complete diagnostic payload from parsing and lowering to
+public compilation results, with source context attached and emitted exactly
+once.
 
 **Components:**
-- Remove `errors` field from model and variable structs across
-  `src/simlin-engine/src/model.rs`
-- Remove `unit_errors` and `unit_warnings` fields
-- All error-producing tracked functions (parsing, lowering, dependency
-  analysis, compilation) use `CompilationDiagnostic.accumulate(db)` instead of
-  storing errors on return values
-- `gather_error_details` in `src/libsimlin/src/patch.rs` collects errors via
-  accumulated diagnostics instead of walking struct fields
-- Error types (`EquationError`, `Error`, `UnitError`) gain `Clone + Eq + Hash`
-  derives as needed for accumulator compatibility
+- `Variable::diagnostics` is the context-free memo payload for local parse,
+  lower, and unit failures; equation and unit failures are not split into
+  parallel fields or string-only channels
+- the database boundary attaches model, physical variable, user-authored
+  owner, module path, and element context exactly once before emission
+- tracked producers that already own database context construct the same
+  `Diagnostic` payload; recursive LTM queries return ordered pure facts for a
+  non-recursive per-model owner to emit
+- `Diagnostic` is the Salsa accumulator payload and the source for public
+  formatting and protobuf adapters, preserving category, code, severity,
+  location, related sources, and raw details
+- `EquationError`, `Error`, and `UnitError` remain typed raising-site values
+  converted without loss into `Diagnostic`
+- `gather_error_details` in `src/libsimlin/src/patch.rs` reads
+  `db::collect_all_diagnostics(db, project)` rather than inspecting compiler
+  structs
 
 **Dependencies:** Phase 7
 
-**Done when:** No compilation errors stored as struct fields. All errors
-collected via salsa accumulators. Error reporting in libsimlin produces
-identical results. All tests pass.
+**Done when:** Every compilation diagnostic reaches public collection through
+the single payload, each context is attached once, recursive queries cannot
+multiply emissions, and libsimlin formatting preserves the complete typed
+details in deterministic order.
 <!-- END_PHASE_8 -->
 
 ## Additional Considerations

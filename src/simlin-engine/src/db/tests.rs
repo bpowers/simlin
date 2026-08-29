@@ -1036,19 +1036,35 @@ fn structured_dependency_resolver_covers_every_metadata_branch() {
     );
 
     let diagnostics = collect_all_diagnostics(&db, synced.project);
-    assert!(
-        diagnostics.iter().any(|diagnostic| {
+    let missing_leaf = diagnostics
+        .iter()
+        .find(|diagnostic| {
             diagnostic.variable.as_deref() == Some("missing_leaf_reader")
-                && matches!(
-                &diagnostic.error,
-                DiagnosticError::Equation(crate::common::EquationError {
-                    code: crate::common::ErrorCode::DoesNotExist,
-                    details: Some(details),
-                    ..
-                }) if details.contains("deep·next·inner·missing_leaf")
+                && diagnostic.is(
+                    DiagnosticCategory::Equation,
+                    crate::common::ErrorCode::DoesNotExist,
                 )
-        }),
-        "the structurally retained missing leaf must reach the production diagnostic: {diagnostics:?}"
+                && diagnostic
+                    .details
+                    .as_deref()
+                    .is_some_and(|details| details.contains("deep·next·inner·missing_leaf"))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "the structurally retained missing leaf must reach the production diagnostic: \
+                 {diagnostics:?}"
+            )
+        });
+    assert_eq!(
+        missing_leaf.module_path,
+        ["deep", "next", "inner"],
+        "the diagnostic keeps the resolved module-instance path structural"
+    );
+    assert!(
+        missing_leaf
+            .location
+            .is_some_and(|location| location.end > location.start),
+        "the qualified missing leaf retains its production source span: {missing_leaf:?}"
     );
 }
 
@@ -1847,12 +1863,9 @@ fn test_model_dependency_cycle_reporting_trigger_emits_once() {
     let circular: Vec<_> = diags
         .iter()
         .filter(|diagnostic| {
-            matches!(
-                diagnostic.error,
-                DiagnosticError::Model(crate::common::Error {
-                    code: crate::common::ErrorCode::CircularDependency,
-                    ..
-                })
+            diagnostic.is(
+                DiagnosticCategory::Model,
+                crate::common::ErrorCode::CircularDependency,
             )
         })
         .collect();
@@ -2862,7 +2875,11 @@ fn test_accumulator_parse_error_bad_equation() {
         sync.project,
     );
     assert!(
-        parsed.variable.equation_errors().is_some(),
+        parsed
+            .variable
+            .diagnostics
+            .iter()
+            .any(|d| d.category == DiagnosticCategory::Equation),
         "struct fields should show equation errors for 'if then'"
     );
 
@@ -2873,9 +2890,9 @@ fn test_accumulator_parse_error_bad_equation() {
     assert_eq!(d.model, "main");
     assert_eq!(d.variable.as_deref(), Some("broken"));
     assert!(
-        matches!(&d.error, DiagnosticError::Equation(_)),
+        d.category == DiagnosticCategory::Equation,
         "expected equation error, got {:?}",
-        d.error
+        d
     );
 }
 
@@ -2939,23 +2956,28 @@ fn test_accumulator_parity_with_struct_fields() {
     let accum_diags = collect_all_diagnostics(&db, sync.project);
 
     // Collect from struct fields (parse results)
-    let mut field_equation_errors: HashSet<(String, crate::common::EquationError)> = HashSet::new();
+    let mut field_equation_errors = HashSet::new();
     for (var_name, synced_var) in &sync.models["main"].variables {
         let parsed = parse_var_no_module_ctx(&db, synced_var.source, sync.project);
-        if let Some(errors) = parsed.variable.equation_errors() {
-            for err in errors {
-                field_equation_errors.insert((var_name.clone(), err));
+        for diagnostic in &parsed.variable.diagnostics {
+            if diagnostic.category == DiagnosticCategory::Equation {
+                field_equation_errors.insert((
+                    var_name.clone(),
+                    diagnostic.code,
+                    diagnostic.location,
+                    diagnostic.details.clone(),
+                ));
             }
         }
     }
 
     // Extract equation errors from accumulator
-    let mut accum_equation_errors: HashSet<(String, crate::common::EquationError)> = HashSet::new();
+    let mut accum_equation_errors = HashSet::new();
     for d in &accum_diags {
-        if let DiagnosticError::Equation(err) = &d.error
+        if d.category == DiagnosticCategory::Equation
             && let Some(var) = &d.variable
         {
-            accum_equation_errors.insert((var.clone(), err.clone()));
+            accum_equation_errors.insert((var.clone(), d.code, d.location, d.details.clone()));
         }
     }
 
@@ -3789,11 +3811,11 @@ fn variable_source_producers_agree_for_every_source_variable_kind() {
         _ => panic!("`demand_table` did not parse as an aux"),
     }
     assert!(
-        parsed["demand_table"].errors.is_empty(),
+        parsed["demand_table"].diagnostics.is_empty(),
         "a lookup-only table's empty equation is not an EmptyEquation error"
     );
     assert!(
-        parsed["imported_input"].errors.is_empty(),
+        parsed["imported_input"].diagnostics.is_empty(),
         "`can_be_module_input` suppresses EmptyEquation on an empty equation"
     );
     assert_eq!(

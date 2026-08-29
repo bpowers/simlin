@@ -11,9 +11,9 @@
 //!
 //!   cargo test -p simlin-engine --test integration -- --ignored --nocapture
 
-use simlin_engine::common::{ErrorCode, UnitError};
 use simlin_engine::db::{
-    Diagnostic, DiagnosticError, SimlinDb, collect_all_diagnostics, sync_from_datamodel_incremental,
+    Diagnostic, DiagnosticCategory, SimlinDb, collect_all_diagnostics,
+    sync_from_datamodel_incremental,
 };
 use simlin_engine::open_vensim;
 
@@ -25,28 +25,22 @@ fn load_clearn() -> simlin_engine::datamodel::Project {
 }
 
 fn diag_details(d: &Diagnostic) -> String {
-    match &d.error {
-        DiagnosticError::Unit(UnitError::ConsistencyError(_, _, Some(s))) => s.clone(),
-        DiagnosticError::Unit(UnitError::InferenceError {
-            details: Some(s), ..
-        }) => s.clone(),
-        DiagnosticError::Unit(UnitError::DefinitionError(e)) => {
-            e.details.clone().unwrap_or_default()
-        }
-        DiagnosticError::Unit(other) => format!("{:?}", other),
-        DiagnosticError::Model(e) => e.details.as_deref().unwrap_or("").to_string(),
-        _ => String::new(),
-    }
+    d.display_details
+        .as_ref()
+        .or(d.details.as_ref())
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Is this diagnostic unit-related (either a `Unit` variant or a model-level
 /// `UnitMismatch`)?
 fn is_unit_diag(d: &Diagnostic) -> bool {
-    matches!(&d.error, DiagnosticError::Unit(_))
-        || matches!(
-            &d.error,
-            DiagnosticError::Model(e) if e.code == ErrorCode::UnitMismatch
-        )
+    matches!(
+        d.category,
+        DiagnosticCategory::UnitDefinition
+            | DiagnosticCategory::UnitConsistency
+            | DiagnosticCategory::UnitInference
+    )
 }
 
 /// Regression guard: the C-LEARN unit-error flood (481 spurious diagnostics)

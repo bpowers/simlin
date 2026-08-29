@@ -431,8 +431,8 @@ pub(crate) fn compile_phase_to_per_var_bytecodes_reporting(
 /// - no `SourceVariable` AND not a parent-sourceable synthetic helper
 ///   (absent from `model_implicit_var_info`, or the helper's input or phase
 ///   failed to build): `None` (the loud-safe signal -- AC3.2);
-/// - `ExplicitFragment::Fatal` (the variable did not lower at all):
-///   explicit `return None`;
+/// - `ExplicitFragment { input: None }` (input preparation failed): explicit
+///   `return None`;
 /// - the requested phase's lowering errored (`.ok()?`);
 /// - any `compile_phase_to_per_var_bytecodes` failure (empty exprs, the
 ///   codegen) -- that function is itself total-and-`None`-on-failure.
@@ -512,7 +512,7 @@ fn var_phase_symbolic_fragment_memo(
 ) -> Option<crate::compiler::symbolic::PerVarBytecodes> {
     use crate::compiler::fragment::lower_fragment;
     use crate::db::fragment_compile::implicit_fragment_input;
-    use crate::db::var_fragment::{ExplicitFragment, explicit_fragment_input};
+    use crate::db::var_fragment::explicit_fragment_input;
 
     let var_name = var_name.as_str();
     let source_vars = model.variables(db);
@@ -550,11 +550,8 @@ fn var_phase_symbolic_fragment_memo(
     };
 
     // The variable did not lower at all => `None` (loud-safe).
-    let ExplicitFragment::Ready { input, .. } =
-        explicit_fragment_input(db, *sv, model, project, &[])
-    else {
-        return None;
-    };
+    let prepared = explicit_fragment_input(db, *sv, model, project, &[]);
+    let input = prepared.input?;
     // The phase's lowering errored => cannot source its production lowered
     // exprs => `None` (loud-safe).
     let var = lower_fragment(&input, is_initial).ok()?;
@@ -1586,8 +1583,8 @@ pub(crate) fn enumerate_module_instances(
 /// Enumerate the module keys reachable through explicit and ordinary
 /// generated variables, excluding LTM-only helpers. The ordinary dependency
 /// graph contains exactly this universe; keeping LTM discovery out also keeps
-/// its warning accumulator owned by LTM assembly rather than replayed through
-/// a dependency-query edge.
+/// its warning facts owned by the LTM diagnostic boundary rather than deriving
+/// them through an initial-dependency query edge.
 pub(crate) fn enumerate_initial_dependency_module_instances(
     db: &dyn Db,
     project: SourceProject,

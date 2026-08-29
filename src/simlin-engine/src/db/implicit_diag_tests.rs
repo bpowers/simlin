@@ -25,8 +25,7 @@
 //!   already fail to compile; see the commit message).
 
 use crate::db::{
-    DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
-    sync_from_datamodel_incremental,
+    DiagnosticSeverity, SimlinDb, collect_all_diagnostics, sync_from_datamodel_incremental,
 };
 use crate::test_common::TestProject;
 
@@ -57,12 +56,11 @@ fn implicit_helper_codegen_failure_is_attributed() {
     let diags = collect_all_diagnostics(&db, sync.project);
     let attributed: Vec<&crate::db::Diagnostic> = diags
         .iter()
-        .filter(|d| match &d.error {
-            DiagnosticError::Assembly(msg) => {
+        .filter(|d| {
+            d.assembly_reason().is_some_and(|msg| {
                 msg.contains("$\u{205A}out\u{205A}0\u{205A}arg0")
                     && msg.contains("failed to compile")
-            }
-            _ => false,
+            })
         })
         .collect();
     assert!(
@@ -70,16 +68,16 @@ fn implicit_helper_codegen_failure_is_attributed() {
         "the failing implicit helper must be named in collect_all_diagnostics; got: {:?}",
         diags
             .iter()
-            .map(|d| format!("{:?}: {:?}", d.variable, d.error))
+            .map(|d| format!("{:?}: {d:?}", d.variable))
             .collect::<Vec<_>>()
     );
     for d in &attributed {
         // The name must be IN the message (errors.rs's Assembly arm never
         // renders the `variable` field), and the codegen reason must ride
         // along -- an unexplained failure is the #913 shape this closes.
-        let DiagnosticError::Assembly(msg) = &d.error else {
-            unreachable!()
-        };
+        let msg = d
+            .assembly_reason()
+            .expect("attributed rows are assembly diagnostics");
         assert!(
             msg.contains("used where a single value is required") || msg.contains("codegen"),
             "the refused construct must be named: {msg}"
@@ -89,7 +87,23 @@ fn implicit_helper_codegen_failure_is_attributed() {
             "the PARENT the helper was synthesized for must be named: {msg}"
         );
         assert_eq!(d.severity, DiagnosticSeverity::Error);
-        assert!(d.variable.is_some(), "structured consumers read the field");
+        assert!(
+            d.variable
+                .as_deref()
+                .is_some_and(|name| name.starts_with("$\u{205A}out\u{205A}")),
+            "the physical helper identity remains available to compiler consumers: {d:?}"
+        );
+        assert_eq!(
+            d.owner.as_deref(),
+            Some("out"),
+            "the source owner is attached separately from the generated name"
+        );
+        let formatted = crate::errors::format_diagnostic_with_datamodel(d, &datamodel);
+        assert_eq!(
+            formatted.variable_name.as_deref(),
+            Some("out"),
+            "public formatting points at the user-authored callsite owner"
+        );
     }
     // One row per helper: the two failing phases (initial + flow) refuse the
     // same construct, and identical reasons collapse rather than duplicate.
@@ -121,13 +135,62 @@ fn compiling_smooth_model_gains_no_implicit_diagnostics() {
     let diags = collect_all_diagnostics(&db, sync.project);
     let implicit_rows: Vec<String> = diags
         .iter()
-        .filter_map(|d| match &d.error {
-            DiagnosticError::Assembly(msg) if msg.contains("arg0") => Some(msg.clone()),
-            _ => None,
+        .filter_map(|d| {
+            d.assembly_reason()
+                .filter(|msg| msg.contains("arg0"))
+                .map(str::to_owned)
         })
         .collect();
     assert!(
         implicit_rows.is_empty(),
         "a compiling project must gain no implicit-helper diagnostics: {implicit_rows:?}"
     );
+}
+
+/// `PREVIOUS(1 + D)` in a scalar equation is a real capture: parsing allocates
+/// its helper, then Expr0-to-Expr2 lowering rejects the dimension name in scalar
+/// context. That pre-fragment refusal must retain the same physical/owner/span
+/// identity as a later fragment-lowering failure.
+#[test]
+fn implicit_helper_expr_lowering_failure_is_attributed() {
+    use crate::common::ErrorCode;
+    use crate::db::DiagnosticCategory;
+
+    let datamodel = TestProject::new("implicit_expr_lowering")
+        .named_dimension("D", &["a", "b"])
+        .aux("out", "PREVIOUS(1 + D)", None)
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+    let helpers =
+        crate::db::model_implicit_var_info(&db, sync.models["main"].source_model, sync.project);
+    assert_eq!(
+        helpers.len(),
+        1,
+        "the production parse must allocate a capture"
+    );
+
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
+    let helper = diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.is(
+                DiagnosticCategory::Equation,
+                ErrorCode::DimensionInScalarContext,
+            ) && diagnostic.owner.as_deref() == Some("out")
+                && diagnostic
+                    .variable
+                    .as_deref()
+                    .is_some_and(|name| name.starts_with("$\u{205A}out\u{205A}"))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "the production diagnostic pass must retain the helper's Expr2 refusal: \
+                 {diagnostics:#?}"
+            )
+        });
+    assert_eq!(helper.severity, DiagnosticSeverity::Error);
+    assert_ne!(helper.location, Some(crate::builtins::Loc::default()));
+    let formatted = crate::errors::format_diagnostic_with_datamodel(helper, &datamodel);
+    assert_eq!(formatted.variable_name.as_deref(), Some("out"));
 }

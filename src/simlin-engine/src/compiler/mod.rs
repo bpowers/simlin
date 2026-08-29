@@ -197,8 +197,7 @@ fn test_build_stock_update_expr_inflows_only() {
         ident: Ident::new("stock"),
         units: None,
         eqn: None,
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Stock {
             init_ast: None,
             inflows: vec![Ident::new("inflow")],
@@ -251,8 +250,7 @@ fn test_build_stock_update_expr_outflows_only() {
         ident: Ident::new("stock"),
         units: None,
         eqn: None,
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Stock {
             init_ast: None,
             inflows: vec![],
@@ -304,8 +302,7 @@ fn test_build_stock_update_expr_no_flows() {
         ident: Ident::new("stock"),
         units: None,
         eqn: None,
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Stock {
             init_ast: None,
             inflows: vec![],
@@ -352,8 +349,7 @@ fn test_build_stock_update_expr_multiple_flows() {
         ident: Ident::new("stock"),
         units: None,
         eqn: None,
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Stock {
             init_ast: None,
             inflows: vec![Ident::new("in1"), Ident::new("in2")],
@@ -453,8 +449,7 @@ fn test_arrayed_default_equation_applies_to_missing_elements() {
         ident: Ident::new("x"),
         units: None,
         eqn: None,
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Aux {
             ast: Some(Ast::Arrayed(
                 dims.clone(),

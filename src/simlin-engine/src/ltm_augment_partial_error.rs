@@ -30,7 +30,7 @@ use crate::builtins::UntypedBuiltinFn;
 /// the (db-bearing) caller skip emitting the link-score variable and surface
 /// a `Warning` naming the variable and the offending equation text, the
 /// established "loud failure" pattern in this codebase
-/// (cf. `emit_unscoreable_disjoint_edge_warning`).
+/// (cf. the unscoreable-disjoint-edge warning).
 ///
 /// The text being parsed is itself produced by the engine (`print_eqn` /
 /// `expr2_to_string` over a compiled AST), so `Err` is effectively

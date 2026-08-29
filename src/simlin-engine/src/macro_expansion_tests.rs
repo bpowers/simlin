@@ -25,7 +25,7 @@
 use crate::common::ErrorCode;
 use crate::compat::open_vensim;
 use crate::db::{
-    DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
+    DiagnosticCategory, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
     compile_project_incremental, sync_from_datamodel_incremental,
 };
 use crate::vm::Vm;
@@ -122,10 +122,9 @@ fn diagnostics_for_datamodel(project: &crate::datamodel::Project) -> Vec<crate::
 /// True iff some Error-severity diagnostic carries a `Model` error with the
 /// given code (registry-build errors are project-level `Model` errors).
 fn has_model_error(diags: &[crate::db::Diagnostic], code: ErrorCode) -> bool {
-    diags.iter().any(|d| {
-        d.severity == DiagnosticSeverity::Error
-            && matches!(&d.error, DiagnosticError::Model(e) if e.code == code)
-    })
+    diags
+        .iter()
+        .any(|d| d.severity == DiagnosticSeverity::Error && d.is(DiagnosticCategory::Model, code))
 }
 
 // ── macros.AC5.2: recursion cycle (end-to-end) ─────────────────────────────
@@ -1064,11 +1063,7 @@ out = {name}({call_args})
             diagnostic.severity == DiagnosticSeverity::Error
                 && diagnostic.model == "main"
                 && diagnostic.variable.as_deref() == Some("out")
-                && matches!(
-                    &diagnostic.error,
-                    DiagnosticError::Equation(error)
-                        if error.code == ErrorCode::BadBuiltinArgs
-                )
+                && diagnostic.is(DiagnosticCategory::Equation, ErrorCode::BadBuiltinArgs)
         });
         let arity = arity.unwrap_or_else(|| {
             panic!(
@@ -1076,11 +1071,8 @@ out = {name}({call_args})
                 row.macro_name
             )
         });
-        let DiagnosticError::Equation(error) = &arity.error else {
-            unreachable!("the diagnostic predicate requires an equation error")
-        };
         assert_eq!(
-            error.details.as_deref().unwrap_or_default(),
+            arity.details.as_deref().unwrap_or_default(),
             format!(
                 "macro {} takes exactly {declared_arity} argument(s), but 2 were given",
                 row.macro_name.to_ascii_lowercase()
@@ -1459,14 +1451,11 @@ out = ARG1(k, k * 2)
         diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == DiagnosticSeverity::Error
                 && diagnostic.variable.as_deref() == Some("out")
-                && matches!(
-                    &diagnostic.error,
-                    DiagnosticError::Equation(error)
-                        if error.code == ErrorCode::DuplicateVariable
-                            && error.details.as_deref().is_some_and(
-                                |details| details.contains(collision_name)
-                            )
-                )
+                && diagnostic.is(DiagnosticCategory::Equation, ErrorCode::DuplicateVariable)
+                && diagnostic
+                    .details
+                    .as_deref()
+                    .is_some_and(|details| details.contains(collision_name))
         }),
         "the production diagnostic must name the conflicting helper: {diagnostics:?}"
     );
@@ -1651,10 +1640,7 @@ y=
     assert!(
         diags.iter().any(|d| {
             d.severity == DiagnosticSeverity::Error
-                && matches!(
-                    &d.error,
-                    DiagnosticError::Equation(e) if e.code == ErrorCode::UnknownBuiltin
-                )
+                && d.is(DiagnosticCategory::Equation, ErrorCode::UnknownBuiltin)
         }),
         "an unknown call name must produce an UnknownBuiltin diagnostic, got: {diags:?}",
     );
@@ -1695,24 +1681,22 @@ y=
             .iter()
             .find(|d| {
                 d.severity == DiagnosticSeverity::Error
-                    && matches!(
-                        &d.error,
-                        DiagnosticError::Equation(e) if e.code == ErrorCode::BadBuiltinArgs
-                    )
+                    && d.is(DiagnosticCategory::Equation, ErrorCode::BadBuiltinArgs)
             })
             .unwrap_or_else(|| {
                 panic!(
                     "M called with `{call_args}` must produce a BadBuiltinArgs diagnostic, got: {diags:?}"
                 )
             });
-        if let DiagnosticError::Equation(e) = &arity_diag.error {
-            assert!(
-                e.end > e.start,
-                "the arity error span must cover the macro call (start={}, end={})",
-                e.start,
-                e.end,
-            );
-        }
+        let location = arity_diag
+            .location
+            .expect("an equation diagnostic has a source location");
+        assert!(
+            location.end > location.start,
+            "the arity error span must cover the macro call (start={}, end={})",
+            location.start,
+            location.end,
+        );
     }
 }
 
@@ -2219,15 +2203,15 @@ sibling=
     let macro_attributable: Vec<&crate::db::Diagnostic> = diags
         .iter()
         .filter(|d| {
-            let code = match &d.error {
-                DiagnosticError::Equation(e) => Some(e.code),
-                DiagnosticError::Model(e) => Some(e.code),
-                _ => None,
-            };
+            let code = matches!(
+                d.category,
+                DiagnosticCategory::Equation | DiagnosticCategory::Model
+            )
+            .then_some(d.code);
             let is_project_level = d.model.is_empty() && d.variable.is_none();
             let in_macro_model = macro_models.contains(d.model.as_str());
             let registry_build_error = is_project_level
-                && matches!(&d.error, DiagnosticError::Model(_))
+                && d.category == DiagnosticCategory::Model
                 && matches!(
                     code,
                     Some(ErrorCode::CircularDependency) | Some(ErrorCode::DuplicateMacroName)
@@ -2276,11 +2260,11 @@ sibling=
         if d.severity != DiagnosticSeverity::Error {
             continue;
         }
-        let code = match &d.error {
-            DiagnosticError::Equation(e) => Some(e.code),
-            DiagnosticError::Model(e) => Some(e.code),
-            _ => None,
-        };
+        let code = matches!(
+            d.category,
+            DiagnosticCategory::Equation | DiagnosticCategory::Model
+        )
+        .then_some(d.code);
         assert_eq!(
             code,
             Some(ErrorCode::UnknownBuiltin),

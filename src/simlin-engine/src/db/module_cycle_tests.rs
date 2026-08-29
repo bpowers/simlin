@@ -24,7 +24,7 @@ use crate::analysis::analyze_model;
 use crate::common::ErrorCode;
 use crate::datamodel::{self, Equation, Variable};
 use crate::db::{
-    DiagnosticError, SimlinDb, collect_all_diagnostics, compile_project_incremental,
+    DiagnosticCategory, SimlinDb, collect_all_diagnostics, compile_project_incremental,
     sync_from_datamodel,
 };
 use crate::test_common::TestProject;
@@ -68,9 +68,9 @@ fn model(name: &str, variables: Vec<Variable>) -> datamodel::Model {
 }
 
 fn has_circular_diagnostic(diags: &[crate::db::Diagnostic]) -> bool {
-    diags.iter().any(|d| {
-        matches!(&d.error, DiagnosticError::Model(e) if e.code == ErrorCode::CircularDependency)
-    })
+    diags
+        .iter()
+        .any(|d| d.is(DiagnosticCategory::Model, ErrorCode::CircularDependency))
 }
 
 /// A module that instantiates its own enclosing model: `main` contains a module
@@ -251,9 +251,7 @@ fn cycle_diagnostic_carries_the_display_name_not_the_canonical_key() {
     let circular_models = |diags: &[crate::db::Diagnostic]| -> Vec<String> {
         diags
             .iter()
-            .filter(|d| {
-                matches!(&d.error, DiagnosticError::Model(e) if e.code == ErrorCode::CircularDependency)
-            })
+            .filter(|d| d.is(DiagnosticCategory::Model, ErrorCode::CircularDependency))
             .map(|d| d.model.clone())
             .collect()
     };
@@ -328,8 +326,9 @@ fn unused_draft_cycle_does_not_block_valid_main() {
     );
     // ...and main's own passes still ran, so its own problem is still reported.
     assert!(
-        diags.iter().any(|d| d.model == "main"
-            && matches!(&d.error, DiagnosticError::Model(e) if e.code == ErrorCode::UnitMismatch)),
+        diags.iter().any(|d| {
+            d.model == "main" && d.is(DiagnosticCategory::UnitInference, ErrorCode::UnitMismatch)
+        }),
         "a valid model's own diagnostics must not be hidden by an unrelated \
          draft cycle: {diags:?}"
     );
@@ -458,15 +457,9 @@ fn macro_holding_a_module_is_rejected_instead_of_aborting() {
     let diags = collect_all_diagnostics(&db, sp);
     let rejection = diags
         .iter()
-        .find(|d| {
-            matches!(&d.error, DiagnosticError::Model(e)
-                if e.code == ErrorCode::MacroContainsModule)
-        })
+        .find(|d| d.is(DiagnosticCategory::Model, ErrorCode::MacroContainsModule))
         .unwrap_or_else(|| panic!("expected a MacroContainsModule diagnostic, got {diags:?}"));
-    let message = match &rejection.error {
-        DiagnosticError::Model(e) => e.get_details().unwrap_or_default(),
-        other => panic!("expected a Model error, got {other:?}"),
-    };
+    let message = rejection.reason().unwrap_or_default();
     assert!(
         message.contains("mac") && message.contains("u_hop"),
         "the rejection must name the offending macro and its module variable so the \
@@ -531,10 +524,11 @@ fn rejecting_a_macro_empties_the_registry_so_no_implicit_edge_is_synthesized() {
 
     let diags = collect_all_diagnostics(&db, sync.project);
     assert!(
-        diags.iter().any(|d| d.model == "u"
-            && d.variable.as_deref() == Some("out")
-            && matches!(&d.error, DiagnosticError::Equation(e)
-                if e.code == ErrorCode::UnknownBuiltin)),
+        diags.iter().any(|d| {
+            d.model == "u"
+                && d.variable.as_deref() == Some("out")
+                && d.is(DiagnosticCategory::Equation, ErrorCode::UnknownBuiltin)
+        }),
         "with the registry emptied, `mac(input)` must fall through to UnknownBuiltin \
          -- the visible proof that no implicit module edge was synthesized: {diags:?}",
     );
@@ -662,9 +656,7 @@ fn module_targeting_a_missing_model_errors_without_panicking() {
     let diags = collect_all_diagnostics(&db, sp);
     let dangling: Vec<&crate::db::Diagnostic> = diags
         .iter()
-        .filter(
-            |d| matches!(&d.error, DiagnosticError::Model(e) if e.code == ErrorCode::BadModelName),
-        )
+        .filter(|d| d.is(DiagnosticCategory::Model, ErrorCode::BadModelName))
         .collect();
     assert_eq!(
         dangling.len(),
@@ -709,9 +701,9 @@ fn module_with_an_empty_model_name_is_not_reported_as_dangling() {
     );
     let diags = collect_all_diagnostics(&db, sp);
     assert!(
-        !diags.iter().any(|d| {
-            matches!(&d.error, DiagnosticError::Model(e) if e.code == ErrorCode::BadModelName)
-        }),
+        !diags
+            .iter()
+            .any(|d| d.is(DiagnosticCategory::Model, ErrorCode::BadModelName)),
         "an empty model_name is the freshly-drawn state, not a dangling reference: {diags:?}"
     );
 }

@@ -188,11 +188,9 @@ fn explicit_constructor_is_compile_var_fragments_input() {
             .as_ref()
             .expect("usesub compiles");
 
-    let crate::db::var_fragment::ExplicitFragment::Ready { input, .. } =
-        crate::db::var_fragment::explicit_fragment_input(&db, var, model, sync.project, &[])
-    else {
-        panic!("usesub must lower");
-    };
+    let explicit =
+        crate::db::var_fragment::explicit_fragment_input(&db, var, model, sync.project, &[]);
+    let input = explicit.input.expect("usesub must lower");
     let lowered = lowered_source_variable(&db, var, model, sync.project);
     assert!(matches!(&input.target, std::borrow::Cow::Borrowed(_)));
     assert!(
@@ -210,8 +208,8 @@ fn explicit_constructor_is_compile_var_fragments_input() {
         panic!("the module dependency is a Module shape");
     };
     assert_eq!(
-        **shape,
-        **crate::db::layout::model_shape(&db, producer, sync.project),
+        shape.as_ref(),
+        crate::db::layout::model_shape(&db, producer, sync.project).as_ref(),
         "a module dependency carries the sub-model's shape"
     );
 
@@ -328,7 +326,7 @@ fn ltm_constructor_is_compile_ltm_equation_fragments_input() {
             model,
             sync.project,
         )
-        .unwrap_or_else(|reason| panic!("{}: {reason}", ltm_var.name));
+        .unwrap_or_else(|diagnostics| panic!("{}: {diagnostics:?}", ltm_var.name));
         assert!(
             matches!(&input.target, std::borrow::Cow::Owned(_)),
             "{}: an LTM synthetic equation is transient and must transfer ownership",
@@ -368,7 +366,9 @@ fn ltm_implicit_constructor_is_compile_ltm_implicit_var_fragments_input() {
         .unwrap_or_else(|| panic!("{name} compiles"));
         let input =
             crate::db::ltm::ltm_implicit_fragment_input(&db, meta, model, sync.project, &[])
-                .unwrap_or_else(|| panic!("{name} has a fragment input"));
+                .unwrap_or_else(|diagnostics| {
+                    panic!("{name} has a fragment input: {diagnostics:?}")
+                });
         assert!(
             matches!(&input.target, std::borrow::Cow::Owned(_)),
             "{name}: an LTM helper is synthesized from a transient LTM parse and must be owned"
@@ -414,11 +414,9 @@ fn cross_module_read_offsets_through_the_sub_models_shape() {
         .offset;
 
     let var = model.variables(&db)["pick"];
-    let crate::db::var_fragment::ExplicitFragment::Ready { input, .. } =
-        crate::db::var_fragment::explicit_fragment_input(&db, var, model, sync.project, &[])
-    else {
-        panic!("pick must lower");
-    };
+    let explicit =
+        crate::db::var_fragment::explicit_fragment_input(&db, var, model, sync.project, &[]);
+    let input = explicit.input.expect("pick must lower");
     let DepKind::Module { shape } = &input.deps["sub"].kind else {
         panic!("sub is a module dependency");
     };

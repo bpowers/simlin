@@ -6,7 +6,8 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::ast::{Ast, Expr0, Expr2, lower_ast};
-use crate::common::{Canonical, EquationError, EquationResult, Ident};
+use crate::common::{Canonical, EquationResult, Ident};
+use crate::diagnostic::{Diagnostic, DiagnosticSeverity};
 use crate::dimensions::DimensionsContext;
 use crate::variable::{ModuleInput, VarKind, Variable};
 use crate::{datamodel, eqn_err};
@@ -80,15 +81,15 @@ fn resolve_relative<'a>(
 ///
 /// Everything but `kind` carries over unchanged, so this is a map over the
 /// kind: lower the ASTs a `Stock`/`Aux` holds, resolve the input wiring a
-/// `Module` holds, and append whatever each raised to the variable's error
+/// `Module` holds, and append whatever each raised to the variable's diagnostic
 /// channel.
 pub(crate) fn lower_variable(scope: &LoweringScope, var_s0: &ParsedVariable) -> Variable {
-    let mut errors = var_s0.errors.clone();
+    let mut diagnostics = var_s0.diagnostics.clone();
     let mut lower = |ast: &Option<Ast<Expr0>>| -> Option<Ast<Expr2>> {
         ast.as_ref().and_then(|ast| match lower_ast(scope, ast) {
             Ok(ast) => Some(ast),
             Err(err) => {
-                errors.push(err);
+                diagnostics.push(Diagnostic::equation(err, DiagnosticSeverity::Error));
                 None
             }
         })
@@ -135,16 +136,17 @@ pub(crate) fn lower_variable(scope: &LoweringScope, var_s0: &ParsedVariable) -> 
             let (inputs, input_errors): (Vec<_>, Vec<_>) =
                 resolved.partition(EquationResult::is_ok);
             let inputs: Vec<ModuleInput> = inputs.into_iter().flat_map(|i| i.unwrap()).collect();
-            // Wiring errors are prepended rather than appended. The order is
-            // not observable in production: `parse_var`'s Module arm produces
-            // errors only from its `module_input_mapper`, and every call site
-            // passes the infallible `|mi| Ok(Some(mi.clone()))`, so a module
-            // arrives here with no errors of its own. This is a stated
-            // convention, not a load-bearing one.
-            let mut module_errors: Vec<EquationError> =
-                input_errors.into_iter().map(|e| e.unwrap_err()).collect();
-            module_errors.append(&mut errors);
-            errors = module_errors;
+            // Wiring errors lead in this transient lowering representation.
+            // Explicit source modules use `resolve_parsed_module` and report
+            // invalid wiring through the model diagnostic pass; generated
+            // module inputs come from an infallible mapper. No production
+            // emission order therefore depends on this internal convention.
+            let mut module_diagnostics: Vec<Diagnostic> = input_errors
+                .into_iter()
+                .map(|error| Diagnostic::equation(error.unwrap_err(), DiagnosticSeverity::Error))
+                .collect();
+            module_diagnostics.append(&mut diagnostics);
+            diagnostics = module_diagnostics;
 
             VarKind::Module {
                 model_name: model_name.clone(),
@@ -157,8 +159,7 @@ pub(crate) fn lower_variable(scope: &LoweringScope, var_s0: &ParsedVariable) -> 
         ident: var_s0.ident.clone(),
         units: var_s0.units.clone(),
         eqn: var_s0.eqn.clone(),
-        errors,
-        unit_errors: var_s0.unit_errors.clone(),
+        diagnostics,
         kind,
     }
 }
@@ -167,8 +168,8 @@ pub(crate) fn lower_variable(scope: &LoweringScope, var_s0: &ParsedVariable) -> 
 /// by all variable kinds.
 ///
 /// Module references change representation from datamodel strings to
-/// canonical [`ModuleInput`] pairs. Units and both error channels are parse
-/// results and must pass through exactly like they do in [`lower_variable`].
+/// canonical [`ModuleInput`] pairs. Units and diagnostics are parse results and
+/// must pass through exactly like they do in [`lower_variable`].
 pub(crate) fn resolve_parsed_module(
     parsed: &ParsedVariable,
     inputs: Vec<ModuleInput>,
@@ -180,8 +181,7 @@ pub(crate) fn resolve_parsed_module(
         ident: parsed.ident.clone(),
         units: parsed.units.clone(),
         eqn: parsed.eqn.clone(),
-        errors: parsed.errors.clone(),
-        unit_errors: parsed.unit_errors.clone(),
+        diagnostics: parsed.diagnostics.clone(),
         kind: VarKind::Module {
             model_name: model_name.clone(),
             inputs,
@@ -267,8 +267,7 @@ fn test_module_parse() {
         ident: Ident::new("hares"),
         units: None,
         eqn: None,
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Module {
             model_name: Ident::new("hares"),
             inputs,
@@ -321,7 +320,7 @@ fn test_module_parse() {
     let source = sync.models["main"].variables["hares"].source;
     let actual =
         crate::db::lowered_source_variable(&db, source, sync.models["main"].source, sync.project);
-    assert!(actual.equation_errors().is_none());
+    assert!(actual.diagnostics.is_empty());
     assert_eq!(&expected, actual.as_ref());
 }
 
@@ -396,17 +395,13 @@ fn lower_variable_preserves_every_field_of_every_kind() {
         let parsed = &parsed_result.variable;
         let lowered = crate::db::lowered_source_variable(&db, source, source_model, sync.project);
 
-        // The five kind-independent fields pass through verbatim.
+        // The kind-independent fields pass through verbatim.
         assert_eq!(parsed.ident, lowered.ident, "{ident}: ident");
         assert_eq!(parsed.units, lowered.units, "{ident}: units");
         assert_eq!(parsed.eqn, lowered.eqn, "{ident}: eqn");
         assert_eq!(
-            parsed.unit_errors, lowered.unit_errors,
-            "{ident}: unit_errors"
-        );
-        assert_eq!(
-            parsed.errors, lowered.errors,
-            "{ident}: errors (this fixture raises none, so lowering must add none)"
+            parsed.diagnostics, lowered.diagnostics,
+            "{ident}: diagnostics (this fixture raises none, so lowering must add none)"
         );
 
         match (&parsed.kind, &lowered.kind) {
@@ -499,12 +494,12 @@ fn lower_variable_preserves_every_field_of_every_kind() {
     let valid = sync.models["main"].variables["sub_with_units"].source;
     let valid = crate::db::lowered_source_variable(&db, valid, source_model, sync.project);
     assert!(valid.units.is_some(), "declared module units must survive");
-    assert!(valid.unit_errors.is_empty());
+    assert!(valid.diagnostics.is_empty());
     let malformed = sync.models["main"].variables["sub_bad_units"].source;
     let malformed = crate::db::lowered_source_variable(&db, malformed, source_model, sync.project);
     assert!(malformed.units.is_none());
     assert_eq!(
-        malformed.unit_errors.len(),
+        malformed.diagnostics.len(),
         1,
         "the module's malformed units must survive lowering"
     );

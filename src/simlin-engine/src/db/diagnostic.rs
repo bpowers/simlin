@@ -2,17 +2,16 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Compilation diagnostics: the salsa `CompilationDiagnostic` accumulator,
-//! the typed `Diagnostic` value (severity + per-model/per-variable context),
-//! the per-model triggering query `model_all_diagnostics`, and the drain
-//! helpers `collect_model_diagnostics` / `collect_all_diagnostics`.
+//! Compilation diagnostics: the authoritative `Diagnostic` payload, its salsa
+//! accumulator, the per-model triggering query `model_all_diagnostics`, and
+//! the `collect_model_diagnostics` / `collect_all_diagnostics` drains.
 //!
 //! `model_all_diagnostics` is the single per-model query that drives every
 //! PER-MODEL diagnostic source: it triggers `compile_var_fragment` per variable
 //! (the emission half lives in `db.rs`), the unit-check pass, and -- when LTM
-//! is enabled -- the LTM fragment-diagnostic pass. The two `collect_*` helpers
-//! drain the accumulated `CompilationDiagnostic`s for one model or the whole
-//! synced project.
+//! is enabled -- emits that model's pure LTM warning facts. The two
+//! `collect_*` helpers drain accumulated per-model diagnostics and append the
+//! project-owned facts for one model or the whole synced project.
 //!
 //! Three diagnostics do NOT come from the accumulator. `collect_all_diagnostics`
 //! emits each directly from a memoized derivation, and they differ in how many
@@ -50,45 +49,12 @@
 //! diagnostics whenever the query is validated-but-not-re-executed.
 
 use super::*;
-use crate::common::{EquationError, Error, UnitError};
-
-/// `Debug` is derived rather than left off: every caller that drains this
-/// accumulator wants to print the result in an assertion message, and without
-/// it each one has to map through `.0.clone()` into the printable `Diagnostic`
-/// first. The inner `Diagnostic` is already `Debug`, so the derive costs
-/// nothing.
-#[salsa::accumulator]
-#[derive(Debug)]
-pub struct CompilationDiagnostic(pub Diagnostic);
-
-/// A single compilation diagnostic emitted by tracked functions.
-/// Carries enough context (model name, optional variable name) for
-/// downstream formatting without re-walking the model tree.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
-pub enum DiagnosticSeverity {
-    Error,
-    Warning,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Diagnostic {
-    pub model: String,
-    pub variable: Option<String>,
-    pub error: DiagnosticError,
-    pub severity: DiagnosticSeverity,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum DiagnosticError {
-    Equation(EquationError),
-    Model(Error),
-    Unit(UnitError),
-    Assembly(String),
-}
+use crate::common::{Error, UnitError};
 
 /// Per-model tracked function that triggers diagnostic accumulation from
-/// all compilation stages. The salsa accumulator is the sole error source
-/// for diagnostic reporting -- this function does not read struct fields.
+/// model compilation stages. This trigger emits its rows through the Salsa
+/// accumulator and does not inspect compiler error fields; the collectors also
+/// append the project-owned memo facts described in the module documentation.
 ///
 /// Triggers three diagnostic sources:
 /// 1. `compile_var_fragment` for each variable -- accumulates parse-level
@@ -98,13 +64,14 @@ pub enum DiagnosticError {
 /// 1b. `emit_model_dependency_cycle_diagnostic` -- emits the model's one
 ///     attributed `CircularDependency` row from the pure graph facts.
 /// 2. `check_model_units` -- accumulates unit inference/checking warnings
-/// 3. When LTM is enabled, `model_ltm_fragment_diagnostics` -- accumulates
-///    LTM assembly diagnostics: the auto-flip warning that surfaces when
-///    the element-level largest SCC exceeds `MAX_LTM_SCC_NODES` (emitted
-///    by `model_ltm_variables`, which the fragment-diagnostic pass drives
-///    internally), and a compile-failure warning for any LTM synthetic
-///    variable whose fragment fails to compile. Gated on `ltm_enabled` so
-///    we don't run LTM synthesis on projects that never requested it.
+/// 3. When LTM is enabled, `emit_model_ltm_diagnostics` -- emits only this
+///    model's ordered warning facts from `model_ltm_variables` and
+///    `model_ltm_fragment_diagnostics`. Both derivations are accumulator-free:
+///    a parent may query a child's LTM result while building module scores,
+///    without importing or re-emitting the child's warnings. A typed parse or
+///    lowering failure retains its raising category; codegen-only failures are
+///    assembly diagnostics. Gated on `ltm_enabled` so projects that never
+///    requested LTM pay no LTM synthesis cost here.
 /// 4. `emit_conveyor_spec_warnings` -- the unconditional compile-time
 ///    conveyor advisories: `ConveyorTransitNotDtMultiple` (a constant transit
 ///    time that is not an integer multiple of dt) and
@@ -133,7 +100,7 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // validated-but-skipped.
     //
     // The two `collect_*` helpers drain diagnostics via
-    // `model_all_diagnostics::accumulated::<CompilationDiagnostic>(..)`. salsa
+    // `model_all_diagnostics::accumulated::<Diagnostic>(..)`. salsa
     // 0.26's `accumulated_by` does a DFS that prunes any dependency subtree
     // whose root memo's `accumulated_inputs` flag is `Empty`. That flag is set
     // to `Any` only while the query *executes* (when it reads a child whose
@@ -285,23 +252,34 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // describes the simulation, not an analysis overlay.
     emit_unfilled_equation_warnings(db, model, project);
 
-    // When LTM is enabled, also trigger the LTM diagnostic pass so that
-    // diagnostics accumulated by the LTM pipeline surface through
-    // `collect_all_diagnostics`: the auto-flip-to-discovery warning from
-    // `model_ltm_variables` and the synthetic-fragment compile-failure
-    // warning from `model_ltm_fragment_diagnostics`.
-    // `model_ltm_fragment_diagnostics` drives `model_ltm_variables`
-    // internally, so the auto-flip warning rides along. Without this
-    // call the warnings are invisible even though the LTM pipeline
-    // already emitted them. Gated on `ltm_enabled` so projects that never
-    // requested LTM pay no LTM synthesis cost here. The diagnostic-
+    // When LTM is enabled, emit this model's pure LTM warning facts. The
+    // derivations themselves never write to the salsa accumulator: recursive
+    // parent -> child LTM queries therefore cannot duplicate a child warning
+    // into the parent's accumulator DFS. `collect_all_diagnostics` visits each
+    // model once, and this non-recursive boundary emits only the facts owned by
+    // that model. Gated on `ltm_enabled` so projects that never requested LTM
+    // pay no LTM synthesis cost here. The diagnostic-
     // collection FFI path (`simlin_project_get_errors`) transiently
     // re-enables `ltm_enabled` for callers who created an LTM simulation,
     // so these warnings reach `simlin-mcp`/`libsimlin`/pysimlin (GH #466).
     if project.ltm_enabled(db) {
-        model_ltm_fragment_diagnostics(db, model, project);
+        emit_model_ltm_diagnostics(db, model, project);
         emit_conveyor_ltm_degraded_warnings(db, model);
         emit_queue_ltm_degraded_warnings(db, model);
+    }
+}
+
+/// Emit the current model's pure LTM warning facts from the one
+/// non-recursive diagnostic owner. `model_ltm_variables` may query child
+/// models while deriving module scores, but it never emits or imports their
+/// facts; `collect_all_diagnostics` visits each model and reaches this owner
+/// exactly once.
+fn emit_model_ltm_diagnostics(db: &dyn Db, model: SourceModel, project: SourceProject) {
+    for diagnostic in &model_ltm_variables(db, model, project).diagnostics {
+        diagnostic.clone().emit(db);
+    }
+    for diagnostic in model_ltm_fragment_diagnostics(db, model, project) {
+        diagnostic.clone().emit(db);
     }
 }
 
@@ -337,22 +315,16 @@ pub(crate) fn model_duplicate_variables(
 /// identically.
 fn emit_duplicate_variable_diagnostics(db: &dyn Db, model: SourceModel) {
     use crate::common::{Error, ErrorCode, ErrorKind};
-    use salsa::Accumulator;
 
     let model_name = model.name(db);
     for (canonical, spellings) in model_duplicate_variables(db, model) {
         let msg = crate::common::duplicate_variable_message(model_name, canonical, spellings);
-        CompilationDiagnostic(Diagnostic {
-            model: model_name.clone(),
-            variable: Some(canonical.clone()),
-            error: DiagnosticError::Model(Error::new(
-                ErrorKind::Model,
-                ErrorCode::DuplicateVariable,
-                Some(msg),
-            )),
-            severity: DiagnosticSeverity::Error,
-        })
-        .accumulate(db);
+        Diagnostic::engine(
+            Error::new(ErrorKind::Model, ErrorCode::DuplicateVariable, Some(msg)),
+            DiagnosticSeverity::Error,
+        )
+        .with_context(model_name.clone(), Some(canonical.clone()))
+        .emit(db);
     }
 }
 
@@ -375,14 +347,10 @@ fn emit_duplicate_variable_diagnostics(db: &dyn Db, model: SourceModel) {
 /// The callers live in `model_all_diagnostics` -- NOT inside
 /// `model_ltm_variables` -- specifically because `model_all_diagnostics` is
 /// drained exactly ONCE per model by `collect_all_diagnostics` and is never
-/// invoked transitively across module edges. `model_ltm_variables(parent)`
-/// reaches `model_ltm_variables(child)` through module-composite link scoring,
-/// so a special stock in a module-referenced sub-model would have its
-/// `model_ltm_variables` memo (with the accumulated warning) in BOTH the
-/// parent's and the child's accumulator DFS -- reported twice (the
-/// cross-module double-drain that #866 tracks for the `model_ltm_variables`
-/// warnings). Emitting from the per-model trigger fires exactly once per stock
-/// regardless of module nesting.
+/// invoked transitively across module edges. This is the same ownership rule
+/// as the pure `LtmVariablesResult::diagnostics` facts above: recursive LTM
+/// derivation never owns reporting. Emitting from the per-model trigger fires
+/// exactly once per stock regardless of module nesting.
 ///
 /// Only under LTM: the sole callers sit in `model_all_diagnostics`'s existing
 /// `ltm_enabled` branch. Carried as a `Model` error with the owner's specific
@@ -404,7 +372,6 @@ fn emit_ltm_degraded_warnings(
     doc_ref: &str,
 ) {
     use crate::common::{Error, ErrorKind};
-    use salsa::Accumulator;
 
     let mut names: Vec<String> = model
         .variables(db)
@@ -423,13 +390,12 @@ fn emit_ltm_degraded_warnings(
              INTEG under Euler, so any link or loop score touching '{name}' may be wrong.  \
              Treat scores involving this {noun} as advisory ({doc_ref})."
         );
-        CompilationDiagnostic(Diagnostic {
-            model: model_name.clone(),
-            variable: Some(name),
-            error: DiagnosticError::Model(Error::new(ErrorKind::Model, code, Some(msg))),
-            severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
+        Diagnostic::engine(
+            Error::new(ErrorKind::Model, code, Some(msg)),
+            DiagnosticSeverity::Warning,
+        )
+        .with_context(model_name.clone(), Some(name))
+        .emit(db);
     }
 }
 
@@ -516,7 +482,6 @@ fn emit_conveyor_spec_warnings(db: &dyn Db, model: SourceModel, project: SourceP
         LEAK_FRACTION_SUM_TOLERANCE, LeakFractionSource, clamp_fraction, const_scalar_expr,
         leak_fraction_source, transit_dt_mismatch,
     };
-    use salsa::Accumulator;
 
     let source_vars = model.variables(db);
     let mut conveyors: Vec<&SourceVariable> = source_vars
@@ -549,13 +514,12 @@ fn emit_conveyor_spec_warnings(db: &dyn Db, model: SourceModel, project: SourceP
 
     let model_name = model.name(db);
     let emit = |stock: &str, code: ErrorCode, msg: String| {
-        CompilationDiagnostic(Diagnostic {
-            model: model_name.clone(),
-            variable: Some(stock.to_string()),
-            error: DiagnosticError::Model(Error::new(ErrorKind::Model, code, Some(msg))),
-            severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
+        Diagnostic::engine(
+            Error::new(ErrorKind::Model, code, Some(msg)),
+            DiagnosticSeverity::Warning,
+        )
+        .with_context(model_name.clone(), Some(stock.to_string()))
+        .emit(db);
     };
 
     for svar in conveyors {
@@ -736,7 +700,6 @@ fn emit_unknown_element_subscript_warnings(
     project: SourceProject,
 ) {
     use crate::common::{CanonicalElementName, Error, ErrorCode, ErrorKind};
-    use salsa::Accumulator;
     use std::collections::HashSet;
 
     let source_vars = model.variables(db);
@@ -810,17 +773,17 @@ fn emit_unknown_element_subscript_warnings(
                  the equation is ignored, and any declared element without its own equation \
                  silently evaluates to 0"
             );
-            CompilationDiagnostic(Diagnostic {
-                model: model_name.clone(),
-                variable: Some(var_name.clone()),
-                error: DiagnosticError::Model(Error::new(
+            Diagnostic::engine(
+                Error::new(
                     ErrorKind::Model,
                     ErrorCode::UnknownElementSubscript,
                     Some(msg),
-                )),
-                severity: DiagnosticSeverity::Warning,
-            })
-            .accumulate(db);
+                ),
+                DiagnosticSeverity::Warning,
+            )
+            .with_context(model_name.clone(), Some(var_name.clone()))
+            .with_element(subscript.clone())
+            .emit(db);
         }
     }
 }
@@ -937,7 +900,6 @@ fn equation_is_a_module_input_fallback(
 fn emit_unfilled_equation_warnings(db: &dyn Db, model: SourceModel, project: SourceProject) {
     use crate::common::{Error, ErrorCode, ErrorKind};
     use crate::variable::{UnfilledArms, may_have_unfilled_arms, unfilled_arms};
-    use salsa::Accumulator;
 
     let source_vars = model.variables(db);
     let mut var_names: Vec<&String> = source_vars.keys().collect();
@@ -1002,17 +964,12 @@ fn emit_unfilled_equation_warnings(db: &dyn Db, model: SourceModel, project: Sou
              refuses to simulate a model containing one; our importer stores that placeholder as \
              this NaN literal."
         );
-        CompilationDiagnostic(Diagnostic {
-            model: model_name.clone(),
-            variable: Some(var_name.clone()),
-            error: DiagnosticError::Model(Error::new(
-                ErrorKind::Model,
-                ErrorCode::UnfilledEquation,
-                Some(msg),
-            )),
-            severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
+        Diagnostic::engine(
+            Error::new(ErrorKind::Model, ErrorCode::UnfilledEquation, Some(msg)),
+            DiagnosticSeverity::Warning,
+        )
+        .with_context(model_name.clone(), Some(var_name.clone()))
+        .emit(db);
     }
 }
 
@@ -1058,8 +1015,6 @@ fn fmt_diag_value(v: f64) -> String {
 ///   to the equation checker.
 #[salsa::tracked]
 pub fn model_module_wiring_diagnostics(db: &dyn Db, model: SourceModel, project: SourceProject) {
-    use salsa::Accumulator;
-
     let source_vars = model.variables(db);
     let project_models = project.models(db);
     let model_name = model.name(db);
@@ -1072,17 +1027,12 @@ pub fn model_module_wiring_diagnostics(db: &dyn Db, model: SourceModel, project:
     module_names.sort_unstable();
 
     let emit = |code: crate::common::ErrorCode, message: String| {
-        CompilationDiagnostic(Diagnostic {
-            model: model_name.clone(),
-            variable: None,
-            error: DiagnosticError::Model(Error::new(
-                crate::common::ErrorKind::Model,
-                code,
-                Some(message),
-            )),
-            severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
+        Diagnostic::engine(
+            Error::new(crate::common::ErrorKind::Model, code, Some(message)),
+            DiagnosticSeverity::Warning,
+        )
+        .with_context(model_name.clone(), None)
+        .emit(db);
     };
 
     for module_name in module_names {
@@ -1090,20 +1040,19 @@ pub fn model_module_wiring_diagnostics(db: &dyn Db, model: SourceModel, project:
         let child_canonical = crate::canonicalize(svar.model_name(db));
         let Some(child_model) = project_models.get(child_canonical.as_ref()) else {
             if !child_canonical.is_empty() {
-                CompilationDiagnostic(Diagnostic {
-                    model: model_name.clone(),
-                    variable: Some(module_name.clone()),
-                    error: DiagnosticError::Model(Error::new(
+                Diagnostic::engine(
+                    Error::new(
                         crate::common::ErrorKind::Model,
                         crate::common::ErrorCode::BadModelName,
                         Some(format!(
                             "module '{module_name}' references model '{}', which is not in the project",
                             svar.model_name(db)
                         )),
-                    )),
-                    severity: DiagnosticSeverity::Error,
-                })
-                .accumulate(db);
+                    ),
+                    DiagnosticSeverity::Error,
+                )
+                .with_context(model_name.clone(), Some(module_name.clone()))
+                .emit(db);
             }
             continue;
         };
@@ -1168,19 +1117,16 @@ fn module_cycle_diagnostic(
 ) -> Option<Diagnostic> {
     project_module_graph(db, project)
         .cycle_error_from(model_name)
-        .map(|(code, message)| Diagnostic {
-            model: model_name.to_string(),
-            variable: None,
-            error: DiagnosticError::Model(Error::new(
-                crate::common::ErrorKind::Model,
-                code,
-                Some(message),
-            )),
-            severity: DiagnosticSeverity::Error,
+        .map(|(code, message)| {
+            Diagnostic::engine(
+                Error::new(crate::common::ErrorKind::Model, code, Some(message)),
+                DiagnosticSeverity::Error,
+            )
+            .with_context(model_name, None)
         })
 }
 
-/// Collect all `CompilationDiagnostic`s accumulated during
+/// Collect all `Diagnostic`s accumulated during
 /// `model_all_diagnostics` for a single model.
 ///
 /// A model that reaches a module cycle reports that cycle and nothing else; see
@@ -1193,9 +1139,9 @@ pub fn collect_model_diagnostics(
     if let Some(diagnostic) = module_cycle_diagnostic(db, project, model.name(db)) {
         return vec![diagnostic];
     }
-    model_all_diagnostics::accumulated::<CompilationDiagnostic>(db, model, project)
+    model_all_diagnostics::accumulated::<Diagnostic>(db, model, project)
         .into_iter()
-        .map(|cd| cd.0.clone())
+        .cloned()
         .collect()
 }
 
@@ -1216,12 +1162,13 @@ pub fn collect_all_diagnostics(db: &SimlinDb, project: SourceProject) -> Vec<Dia
     // drained from the accumulator, for the reasons on `UnitsContextResult`.
     for (unit_name, eq_errors) in &project_units_context_result(db, project).definition_errors {
         for eq_err in eq_errors {
-            all.push(Diagnostic {
-                model: String::new(),
-                variable: Some(unit_name.clone()),
-                error: DiagnosticError::Unit(UnitError::DefinitionError(eq_err.clone())),
-                severity: DiagnosticSeverity::Error,
-            });
+            all.push(
+                Diagnostic::unit(
+                    UnitError::DefinitionError(eq_err.clone()),
+                    DiagnosticSeverity::Error,
+                )
+                .with_context(String::new(), Some(unit_name.clone())),
+            );
         }
     }
 
@@ -1229,20 +1176,14 @@ pub fn collect_all_diagnostics(db: &SimlinDb, project: SourceProject) -> Vec<Dia
     // collision) is a single project-level fact, carried as a memoized value on
     // `project_macro_registry` and read here rather than accumulated there.
     // Emitted before the per-model passes so the ordering is deterministic.
-    if let Some((code, message)) = crate::db::macro_registry::project_macro_registry(db, project)
+    if let Some(error) = crate::db::macro_registry::project_macro_registry(db, project)
         .build_error
         .as_ref()
     {
-        all.push(Diagnostic {
-            model: String::new(),
-            variable: None,
-            error: DiagnosticError::Model(Error::new(
-                crate::common::ErrorKind::Model,
-                *code,
-                Some(message.clone()),
-            )),
-            severity: DiagnosticSeverity::Error,
-        });
+        all.push(
+            Diagnostic::engine(error.clone(), DiagnosticSeverity::Error)
+                .with_context(String::new(), None),
+        );
     }
 
     // Sorted (GH #999): `models` is a HashMap, and its per-instance order

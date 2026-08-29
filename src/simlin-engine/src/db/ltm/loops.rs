@@ -1490,7 +1490,7 @@ pub(crate) fn build_element_level_loops(
     // whose internal nodes are pairwise disjoint, in some cyclic order,
     // reconstructs exactly those non-elementary loops -- bounded by
     // `agg_loop_budget` (when it clips, the clipped aggs' names are returned
-    // and the caller accumulates a `Warning` naming them).
+    // and the caller appends a `Warning` fact naming them).
     let (recovered, truncated_aggs) =
         recover_cross_agg_loops(&circuit_strs, var_graph, &endpoint_shapes, agg_loop_budget);
     all_loops.extend(recovered);

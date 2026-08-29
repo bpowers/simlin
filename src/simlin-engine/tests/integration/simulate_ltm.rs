@@ -7390,8 +7390,6 @@ fn test_disjoint_dim_arrayed_target_per_source_element_link_scores() {
 /// variable (no scalar stand-in). The model still compiles and simulates.
 #[test]
 fn test_disjoint_dim_unscoreable_edge_warns_and_emits_no_link_score() {
-    use simlin_engine::db::CompilationDiagnostic;
-
     let project = build_disjoint_dim_unscoreable_model("disjoint_dim_unscoreable");
 
     let mut db = SimlinDb::default();
@@ -7417,21 +7415,27 @@ fn test_disjoint_dim_unscoreable_edge_warns_and_emits_no_link_score() {
             .collect::<Vec<_>>()
     );
 
-    // A Warning diagnostic naming the unscoreable source -> target edge.
-    let diags =
-        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, source_model, sync.project);
-    let has_warning = diags.iter().any(|CompilationDiagnostic(d)| {
+    // The recursive LTM query returns a pure Warning fact. The non-recursive
+    // per-model owner emits that same fact through the public collection path.
+    let is_warning = |d: &simlin_engine::db::Diagnostic| {
         d.severity == simlin_engine::db::DiagnosticSeverity::Warning
-            && matches!(
-                &d.error,
-                simlin_engine::db::DiagnosticError::Assembly(msg)
-                    if msg.contains("source") && msg.contains("target")
-            )
-    });
-    assert!(
-        has_warning,
-        "expected a Warning diagnostic naming the unscoreable source -> target edge; got: {:?}",
-        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+            && d.assembly_reason()
+                .is_some_and(|msg| msg.contains("source") && msg.contains("target"))
+    };
+    let facts = ltm
+        .diagnostics
+        .iter()
+        .filter(|d| is_warning(d))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(facts.len(), 1, "expected one pure edge fact: {facts:?}");
+    let emitted = simlin_engine::db::collect_all_diagnostics(&db, sync.project)
+        .into_iter()
+        .filter(|d| is_warning(d))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        emitted, facts,
+        "the per-model owner must emit the fact once"
     );
 
     // The model still compiles and simulates (a missing link score is graceful).
@@ -7506,7 +7510,7 @@ fn test_disjoint_dynamic_index_loop_scores_dropped() {
         .iter()
         .filter(|d| {
             d.severity == simlin_engine::db::DiagnosticSeverity::Warning
-                && matches!(d.error, simlin_engine::db::DiagnosticError::Assembly(_))
+                && d.assembly_reason().is_some()
         })
         .collect();
     assert_eq!(
@@ -7514,9 +7518,9 @@ fn test_disjoint_dynamic_index_loop_scores_dropped() {
         1,
         "expected exactly one Assembly warning (the unscoreable edge); got: {assembly:?}"
     );
-    let simlin_engine::db::DiagnosticError::Assembly(msg) = &assembly[0].error else {
-        unreachable!("filtered to Assembly above");
-    };
+    let msg = assembly[0]
+        .assembly_reason()
+        .expect("filtered to Assembly above");
     assert!(
         msg.contains("source") && msg.contains("target") && msg.contains("not be scored"),
         "the warning must name the edge and announce the loop drop; got: {msg}"
@@ -10797,11 +10801,8 @@ fn test_mapped_sliced_agg_cross_element_loop_simulates() {
         .iter()
         .filter(|d| {
             d.severity == simlin_engine::db::DiagnosticSeverity::Warning
-                && matches!(
-                    &d.error,
-                    simlin_engine::db::DiagnosticError::Assembly(msg)
-                        if msg.contains("failed to compile")
-                )
+                && d.assembly_reason()
+                    .is_some_and(|msg| msg.contains("failed to compile"))
         })
         .collect();
     assert!(
@@ -10998,11 +10999,8 @@ fn test_mapped_sliced_agg_with_scalar_cofeeder_simulates() {
         .iter()
         .filter(|d| {
             d.severity == simlin_engine::db::DiagnosticSeverity::Warning
-                && matches!(
-                    &d.error,
-                    simlin_engine::db::DiagnosticError::Assembly(msg)
-                        if msg.contains("failed to compile")
-                )
+                && d.assembly_reason()
+                    .is_some_and(|msg| msg.contains("failed to compile"))
         })
         .collect();
     assert!(
@@ -11070,11 +11068,8 @@ fn test_whole_rhs_mapped_reducer_routes_through_synthetic_agg() {
         .iter()
         .filter(|d| {
             d.severity == simlin_engine::db::DiagnosticSeverity::Warning
-                && matches!(
-                    &d.error,
-                    simlin_engine::db::DiagnosticError::Assembly(msg)
-                        if msg.contains("failed to compile")
-                )
+                && d.assembly_reason()
+                    .is_some_and(|msg| msg.contains("failed to compile"))
         })
         .collect();
     assert!(

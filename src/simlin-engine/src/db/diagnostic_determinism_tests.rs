@@ -50,7 +50,7 @@ fn unit_diagnostics_are_reproducible_across_runs() {
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
         let rendered: Vec<String> = collect_all_diagnostics(&db, sync.project)
             .iter()
-            .map(|d| format!("{:?} [{:?}] {:?}", d.variable, d.severity, d.error))
+            .map(|d| format!("{:?} [{:?}] {:?}", d.variable, d.severity, d))
             .collect();
         assert!(
             !rendered.is_empty(),
@@ -156,12 +156,7 @@ fn arrayed_and_multi_model_diagnostics_are_reproducible() {
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
         let rendered: Vec<String> = collect_all_diagnostics(&db, sync.project)
             .iter()
-            .map(|d| {
-                format!(
-                    "{}: {:?} [{:?}] {:?}",
-                    d.model, d.variable, d.severity, d.error
-                )
-            })
+            .map(|d| format!("{}: {:?} [{:?}] {:?}", d.model, d.variable, d.severity, d))
             .collect();
         // Each fixture class must actually surface rows -- a class that
         // produces nothing constrains nothing (the first version of the
@@ -244,7 +239,7 @@ fn conveyor_param_unit_diagnostics_are_reproducible() {
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
         let rendered: Vec<String> = collect_all_diagnostics(&db, sync.project)
             .iter()
-            .map(|d| format!("{:?} [{:?}] {:?}", d.variable, d.severity, d.error))
+            .map(|d| format!("{:?} [{:?}] {:?}", d.variable, d.severity, d))
             .collect();
         for needle in ["belt_a", "belt_b"] {
             assert!(
@@ -284,7 +279,7 @@ fn implicit_helper_diagnostics_are_reproducible() {
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
         let rendered: Vec<String> = collect_all_diagnostics(&db, sync.project)
             .iter()
-            .map(|d| format!("{:?} [{:?}] {:?}", d.variable, d.severity, d.error))
+            .map(|d| format!("{:?} [{:?}] {:?}", d.variable, d.severity, d))
             .collect();
         for needle in ["out_a", "out_b"] {
             assert!(

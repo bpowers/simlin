@@ -723,7 +723,7 @@ pub struct EquationError {
     /// carry it.
     ///
     /// `ErrorCode` names the CLASS of failure and `start..end` points at the
-    /// offending text, which `errors::format_equation_error` renders as a
+    /// offending text, which `errors::format_diagnostic_with_datamodel` renders as a
     /// source snippet -- so a parse error needs no reason: the snippet IS the
     /// reason. A site writes `details` when the reason is NOT visible in the
     /// span: the name that did not resolve, the arity a call missed, the

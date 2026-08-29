@@ -372,12 +372,13 @@ impl ErrorDetailBuilder {
 
 // ── error collection ───────────────────────────────────────────────────
 
-/// Collect all error details from the salsa accumulator diagnostics.
+/// Collect all compiler diagnostic details through the unified collector.
 ///
-/// Uses only `collect_all_diagnostics` (the tracked accumulator path).
-/// If a VM validation error is provided, it is appended to the result.
-/// The caller is responsible for running `compile_project_incremental`
-/// separately and passing the result here.
+/// `collect_all_diagnostics` merges accumulated per-model rows with the
+/// project-owned memo facts before this presentation adapter runs. If a VM
+/// validation error is provided, it is appended to the result. The caller is
+/// responsible for running `compile_project_incremental` separately and
+/// passing the result here.
 ///
 /// The `datamodel` parameter enables snippet/squiggle formatting by
 /// providing variable equation text for equation and unit errors.
@@ -420,19 +421,19 @@ fn first_error_code(
 ) -> Option<SimlinErrorCode> {
     for d in diagnostics {
         if d.severity == engine::db::DiagnosticSeverity::Error {
-            return Some(diagnostic_to_error_code(&d.error));
+            return Some(diagnostic_to_error_code(d));
         }
     }
 
     sim_error.map(|error| SimlinErrorCode::from(error.code))
 }
 
-fn diagnostic_to_error_code(error: &engine::db::DiagnosticError) -> SimlinErrorCode {
-    match error {
-        engine::db::DiagnosticError::Equation(e) => SimlinErrorCode::from(e.code),
-        engine::db::DiagnosticError::Model(e) => SimlinErrorCode::from(e.code),
-        engine::db::DiagnosticError::Unit(_) => SimlinErrorCode::UnitDefinitionErrors,
-        engine::db::DiagnosticError::Assembly(_) => SimlinErrorCode::NotSimulatable,
+fn diagnostic_to_error_code(diagnostic: &engine::db::Diagnostic) -> SimlinErrorCode {
+    match diagnostic.category {
+        engine::db::DiagnosticCategory::UnitDefinition
+        | engine::db::DiagnosticCategory::UnitConsistency
+        | engine::db::DiagnosticCategory::UnitInference => SimlinErrorCode::UnitDefinitionErrors,
+        _ => SimlinErrorCode::from(diagnostic.code),
     }
 }
 
@@ -449,16 +450,15 @@ fn collect_models_with_unit_warnings(
     let mut models_with_warnings = std::collections::HashSet::new();
 
     for d in diagnostics {
-        if d.severity == engine::db::DiagnosticSeverity::Warning {
-            if let engine::db::DiagnosticError::Unit(_) = &d.error {
-                models_with_warnings.insert(d.model.clone());
-            }
-            // Also catch model-level UnitMismatch warnings (from unit inference)
-            if let engine::db::DiagnosticError::Model(e) = &d.error {
-                if e.code == engine::common::ErrorCode::UnitMismatch {
-                    models_with_warnings.insert(d.model.clone());
-                }
-            }
+        if d.severity == engine::db::DiagnosticSeverity::Warning
+            && matches!(
+                d.category,
+                engine::db::DiagnosticCategory::UnitDefinition
+                    | engine::db::DiagnosticCategory::UnitConsistency
+                    | engine::db::DiagnosticCategory::UnitInference
+            )
+        {
+            models_with_warnings.insert(d.model.clone());
         }
     }
 
@@ -541,7 +541,7 @@ pub(crate) unsafe fn apply_project_patch_internal(
     #[cfg(test)]
     invoke_patch_test_hook(PatchHookPoint::StagedSyncWhileDbLocked, project_ref);
 
-    // Collect diagnostics from the tracked accumulator path.
+    // Collect accumulated per-model rows and direct project-owned memo facts.
     let staged_diags = engine::db::collect_all_diagnostics(&db, staged_sp);
 
     // Attempt compilation + VM validation to detect assembly-level errors

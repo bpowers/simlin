@@ -78,7 +78,7 @@ fn roundtrips_model() {
                     "  {}.{} error: {:?}",
                     diag.model,
                     diag.variable.as_deref().unwrap_or("<model>"),
-                    diag.error
+                    diag
                 );
             }
         }

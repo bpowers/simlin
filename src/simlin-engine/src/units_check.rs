@@ -7,9 +7,7 @@ use std::result::Result as StdResult;
 
 use crate::ast::{Ast, BinaryOp, Expr2};
 use crate::builtins::{BuiltinFn, Loc};
-use crate::common::{
-    Canonical, EquationError, ErrorCode, Ident, Result, UnitError, UnitResult, canonicalize,
-};
+use crate::common::{Canonical, ErrorCode, Ident, UnitError, UnitResult, canonicalize};
 use crate::datamodel::UnitMap;
 use crate::model::UnitModel;
 use crate::units::{Context, UnitOp, Units, combine};
@@ -462,8 +460,7 @@ fn time_variable(ctx: &Context) -> Variable {
         ident: Ident::new("time"),
         units: Some(model_time_units(ctx)),
         eqn: None,
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Aux {
             ast: None,
             init_ast: None,
@@ -507,15 +504,14 @@ pub fn evaluate_expr_units(
     evaluator.check(expr)
 }
 
-// check uses the model's variables' equations and unit definitions to
-// calculate the concrete units for each equation.  The outer result
-// indicates if we had a problem running the analysis.  The inner result
-// returns a list of unit problems, if there was one.
+// Check uses the model's variables' equations and unit definitions to
+// calculate the concrete units for each equation, returning every unit problem
+// in deterministic producer order.
 pub fn check(
     ctx: &Context,
     inferred_units: &HashMap<Ident<Canonical>, UnitMap>,
     model: &UnitModel,
-) -> Result<StdResult<(), UnitErrorList>> {
+) -> StdResult<(), UnitErrorList> {
     use UnitError::{ConsistencyError, DefinitionError};
     let mut errors: Vec<(Ident<Canonical>, UnitError)> = vec![];
 
@@ -648,12 +644,11 @@ pub fn check(
                             );
                             errors.push((
                                 Ident::new(var.ident()),
-                                DefinitionError(EquationError::detailed(
+                                ConsistencyError(
                                     ErrorCode::UnitMismatch,
-                                    0,
-                                    0,
-                                    details,
-                                )),
+                                    Loc::default(),
+                                    Some(details),
+                                ),
                             ));
                         }
                     }
@@ -750,5 +745,5 @@ pub fn check(
     // unit definitions to calculate the concrete units for each
     // equation.  If these don't match the units as defined, we
     // log an error.
-    Ok(Err(errors))
+    Err(errors)
 }

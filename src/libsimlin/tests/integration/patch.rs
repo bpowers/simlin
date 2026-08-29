@@ -1719,22 +1719,13 @@ fn test_patch_with_preexisting_unit_warnings_succeeds() {
     let proj = open_project_from_datamodel(&datamodel);
 
     // Verify the project has unit warnings via salsa diagnostics.
-    // Unit mismatch can surface as either a DiagnosticError::Unit (from
-    // units_check) or DiagnosticError::Model with UnitMismatch code (from
-    // units_infer). Both indicate unit-related problems.
     {
         let db = unsafe { (*proj).db.lock().unwrap() };
         let source_project = db.current_source_project().unwrap();
         let diags = engine::db::collect_all_diagnostics(&db, source_project);
-        let has_unit_diags = diags.iter().any(|d| {
-            d.severity == engine::db::DiagnosticSeverity::Warning
-                && (matches!(d.error, engine::db::DiagnosticError::Unit(_))
-                    || matches!(
-                        &d.error,
-                        engine::db::DiagnosticError::Model(e)
-                        if e.code == engine::common::ErrorCode::UnitMismatch
-                    ))
-        });
+        let has_unit_diags = diags
+            .iter()
+            .any(|d| d.severity == engine::db::DiagnosticSeverity::Warning && d.category.is_unit());
         assert!(has_unit_diags, "expected unit warnings in the model");
     }
 
@@ -1834,13 +1825,7 @@ fn test_unrelated_patch_then_sim_specs_keeps_unit_warnings() {
         diags
             .iter()
             .filter(|d| {
-                d.severity == engine::db::DiagnosticSeverity::Warning
-                    && (matches!(d.error, engine::db::DiagnosticError::Unit(_))
-                        || matches!(
-                            &d.error,
-                            engine::db::DiagnosticError::Model(e)
-                            if e.code == engine::common::ErrorCode::UnitMismatch
-                        ))
+                d.severity == engine::db::DiagnosticSeverity::Warning && d.category.is_unit()
             })
             .count()
     };
@@ -1988,10 +1973,9 @@ fn test_patch_introducing_new_unit_warning_rejected() {
         let db = unsafe { (*proj).db.lock().unwrap() };
         let source_project = db.current_source_project().unwrap();
         let diags = engine::db::collect_all_diagnostics(&db, source_project);
-        let has_unit_diags = diags.iter().any(|d| {
-            matches!(d.error, engine::db::DiagnosticError::Unit(_))
-                && d.severity == engine::db::DiagnosticSeverity::Warning
-        });
+        let has_unit_diags = diags
+            .iter()
+            .any(|d| d.category.is_unit() && d.severity == engine::db::DiagnosticSeverity::Warning);
         assert!(!has_unit_diags, "should not have unit warnings initially");
     }
 

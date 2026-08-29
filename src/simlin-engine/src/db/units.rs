@@ -33,15 +33,14 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use salsa::Accumulator;
-
 use crate::common::{Canonical, Ident};
 use crate::datamodel;
+#[cfg(test)]
+use crate::db::DiagnosticCategory;
 use crate::db::{
-    CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceModel,
-    SourceProject, SourceVariable, lowered_implicit_variable, lowered_source_variable,
-    model_implicit_var_info, model_scope_models, project_dimensions_context, project_units_context,
-    source_model_is_stdlib,
+    Db, Diagnostic, DiagnosticSeverity, SourceModel, SourceProject, SourceVariable,
+    lowered_implicit_variable, lowered_source_variable, model_implicit_var_info,
+    model_scope_models, project_dimensions_context, project_units_context, source_model_is_stdlib,
 };
 
 /// Build one transient unit-analysis view from memo-owned per-variable lowered
@@ -196,7 +195,7 @@ fn init_value_equivalence_group(
 /// templates that only make sense when instantiated with specific inputs.
 #[salsa::tracked]
 pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject) {
-    use crate::common::{ErrorCode, ErrorKind};
+    use crate::common::ErrorCode;
 
     // Skip stdlib models -- they are generic and unit checking doesn't
     // apply until instantiated with concrete inputs.
@@ -293,17 +292,10 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
                 inference.conflicts.len()
             )
         };
-        CompilationDiagnostic(Diagnostic {
-            model: model_name.clone(),
-            variable: None,
-            error: DiagnosticError::Model(crate::common::Error {
-                kind: ErrorKind::Model,
-                code: ErrorCode::UnitMismatch,
-                details: Some(detail),
-            }),
-            severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
+        Diagnostic::unit(inference.conflicts[0].clone(), DiagnosticSeverity::Warning)
+            .with_display_details(detail)
+            .with_context(model_name.clone(), None)
+            .emit(db);
     }
     let inferred_units = inference.resolved;
 
@@ -386,28 +378,25 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
                         let (first_src, first_units) = &group_units[0];
                         for (other_src, other_units) in &group_units[1..] {
                             if first_units != other_units {
-                                CompilationDiagnostic(Diagnostic {
-                                    model: model_name.clone(),
-                                    variable: Some(var_ident.to_string()),
-                                    error: DiagnosticError::Unit(
-                                        crate::common::UnitError::ConsistencyError(
-                                            ErrorCode::UnitMismatch,
-                                            crate::builtins::Loc::default(),
-                                            Some(format!(
-                                                "module '{}': argument '{}' has units '{}' \
+                                Diagnostic::unit(
+                                    crate::common::UnitError::ConsistencyError(
+                                        ErrorCode::UnitMismatch,
+                                        crate::builtins::Loc::default(),
+                                        Some(format!(
+                                            "module '{}': argument '{}' has units '{}' \
                                                  but argument '{}' has units '{}' \
                                                  (both feed the same internal variable)",
-                                                var_ident,
-                                                first_src,
-                                                first_units,
-                                                other_src,
-                                                other_units,
-                                            )),
-                                        ),
+                                            var_ident,
+                                            first_src,
+                                            first_units,
+                                            other_src,
+                                            other_units,
+                                        )),
                                     ),
-                                    severity: DiagnosticSeverity::Warning,
-                                })
-                                .accumulate(db);
+                                    DiagnosticSeverity::Warning,
+                                )
+                                .with_context(model_name.clone(), Some(var_ident.to_string()))
+                                .emit(db);
                             }
                         }
                     }
@@ -428,30 +417,13 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
         return;
     }
     match crate::units_check::check(units_ctx, &inferred_units, target_model) {
-        Ok(Ok(())) => {}
-        Ok(Err(errors)) => {
+        Ok(()) => {}
+        Err(errors) => {
             for (ident, err) in errors.into_iter() {
-                CompilationDiagnostic(Diagnostic {
-                    model: model_name.clone(),
-                    variable: Some(ident.to_string()),
-                    error: DiagnosticError::Unit(err),
-                    severity: DiagnosticSeverity::Warning,
-                })
-                .accumulate(db);
+                Diagnostic::unit(err, DiagnosticSeverity::Warning)
+                    .with_context(model_name.clone(), Some(ident.to_string()))
+                    .emit(db);
             }
-        }
-        Err(err) => {
-            CompilationDiagnostic(Diagnostic {
-                model: model_name.clone(),
-                variable: None,
-                error: DiagnosticError::Model(crate::common::Error {
-                    kind: ErrorKind::Model,
-                    code: ErrorCode::Generic,
-                    details: Some(format!("unit checking failed: {}", err)),
-                }),
-                severity: DiagnosticSeverity::Warning,
-            })
-            .accumulate(db);
         }
     }
 
@@ -751,41 +723,53 @@ fn check_conveyor_param_units(
             _ => continue,
         };
 
-        let diagnostic_detail = match crate::units_check::evaluate_expr_units(
+        let diagnostic = match crate::units_check::evaluate_expr_units(
             units_ctx,
             inferred_units,
             &aug_unit_model,
             expr,
         ) {
             // A determinate unit that disagrees with what the block requires.
-            Ok(Units::Explicit(actual)) if actual != param.expected => Some(format!(
-                "conveyor '{}' {}: computed units '{}' don't match the expected units '{}'",
-                param.stock, param.label, actual, param.expected
-            )),
+            Ok(Units::Explicit(actual)) if actual != param.expected => {
+                let details = format!(
+                    "computed units '{}' don't match the expected units '{}'",
+                    actual, param.expected
+                );
+                Some(
+                    Diagnostic::unit(
+                        UnitError::ConsistencyError(
+                            ErrorCode::UnitMismatch,
+                            expr.get_loc(),
+                            Some(details.clone()),
+                        ),
+                        DiagnosticSeverity::Warning,
+                    )
+                    .with_display_details(format!(
+                        "conveyor '{}' {}: {details}",
+                        param.stock, param.label
+                    )),
+                )
+            }
             // Matches, or a pure constant (compatible with any expected unit).
             Ok(_) => None,
             // A dependency's units are unknown -- skip, not a dimensional error.
             Err(UnitError::ConsistencyError(ErrorCode::DoesNotExist, _, _)) => None,
             // An internal dimensional inconsistency in the expression itself
             // (e.g. adding incompatible units); surface it against the conveyor.
-            Err(err) => Some(format!(
-                "conveyor '{}' {}: {}",
-                param.stock, param.label, err
-            )),
+            Err(err) => {
+                let reason = err.to_string();
+                Some(
+                    Diagnostic::unit(err, DiagnosticSeverity::Warning).with_display_details(
+                        format!("conveyor '{}' {}: {reason}", param.stock, param.label),
+                    ),
+                )
+            }
         };
 
-        if let Some(detail) = diagnostic_detail {
-            CompilationDiagnostic(Diagnostic {
-                model: model_name.to_string(),
-                variable: Some(param.stock.clone()),
-                error: DiagnosticError::Unit(UnitError::ConsistencyError(
-                    ErrorCode::UnitMismatch,
-                    crate::builtins::Loc::default(),
-                    Some(detail),
-                )),
-                severity: DiagnosticSeverity::Warning,
-            })
-            .accumulate(db);
+        if let Some(diagnostic) = diagnostic {
+            diagnostic
+                .with_context(model_name.to_string(), Some(param.stock.clone()))
+                .emit(db);
         }
     }
 }
@@ -871,19 +855,19 @@ mod tests {
 
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &project);
-        let diagnostics = check_model_units::accumulated::<CompilationDiagnostic>(
+        let diagnostics = check_model_units::accumulated::<Diagnostic>(
             &db,
             sync.models["a"].source,
             sync.project,
         );
 
         assert!(
-            diagnostics.iter().any(|cd| matches!(
-                &cd.0.error,
-                DiagnosticError::Model(e) if e.code == ErrorCode::UnitMismatch
-            )),
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.category == DiagnosticCategory::UnitInference
+                    && diagnostic.code == ErrorCode::UnitMismatch
+            }),
             "a model's own unit error must still be reported despite the cycle, got: {:?}",
-            diagnostics.iter().map(|cd| &cd.0).collect::<Vec<_>>()
+            diagnostics
         );
     }
 
@@ -949,9 +933,10 @@ mod tests {
 
     /// The human-readable detail text of a `Unit` diagnostic (empty otherwise).
     fn unit_detail(d: &Diagnostic) -> String {
-        match &d.error {
-            DiagnosticError::Unit(unit_err) => unit_err.to_string(),
-            _ => String::new(),
+        if d.category.is_unit() {
+            d.reason().unwrap_or_default().to_string()
+        } else {
+            String::new()
         }
     }
 
@@ -962,10 +947,10 @@ mod tests {
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, project);
         let source = sync.models["main"].source;
-        check_model_units::accumulated::<CompilationDiagnostic>(&db, source, sync.project)
+        check_model_units::accumulated::<Diagnostic>(&db, source, sync.project)
             .into_iter()
-            .map(|cd| cd.0.clone())
             .filter(|d| unit_detail(d).contains("conveyor"))
+            .cloned()
             .collect()
     }
 
@@ -1014,6 +999,73 @@ mod tests {
         assert!(
             detail.contains("students") && detail.contains("<capacity>"),
             "warning should name the conveyor and the offending parameter: {detail}"
+        );
+        assert_eq!(warnings[0].category, DiagnosticCategory::UnitConsistency);
+        assert_eq!(warnings[0].code, crate::common::ErrorCode::UnitMismatch);
+        assert_eq!(
+            warnings[0].location,
+            Some(crate::builtins::Loc {
+                start: 0,
+                end: "bad_cap".len() as u16,
+            }),
+            "the diagnostic location is relative to the production conveyor parameter expression"
+        );
+        assert_eq!(
+            warnings[0].details.as_deref(),
+            Some("computed units 'month' don't match the expected units 'widget'"),
+            "conveyor attribution belongs in display_details, not the raising-site payload"
+        );
+    }
+
+    #[test]
+    fn conveyor_parameter_internal_unit_error_keeps_typed_payload() {
+        // The capacity expression itself is dimensionally inconsistent. This
+        // drives UnitEvaluator's binary-op error through the transient
+        // conveyor-expression lowering path; the wrapper must not replace its
+        // location or raw details with a generic conveyor mismatch.
+        let mut conv = conveyor_with_len("4");
+        let expression = "value_count + duration";
+        conv.capacity = Some(expression.to_string());
+        let stock = conveyor_stock(
+            "students",
+            "1000",
+            &["inflow"],
+            &["graduating"],
+            Some("widget"),
+            conv,
+        );
+        let extra = vec![
+            x_aux("value_count", "1200", Some("widget")),
+            x_aux("duration", "3", Some("month")),
+        ];
+
+        let warnings = conveyor_unit_warnings(&conveyor_project(stock, extra));
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        let warning = &warnings[0];
+        assert_eq!(warning.category, DiagnosticCategory::UnitConsistency);
+        assert_eq!(warning.code, crate::common::ErrorCode::UnitMismatch);
+        assert_eq!(
+            warning.location,
+            Some(crate::builtins::Loc {
+                start: 0,
+                end: expression.len() as u16,
+            })
+        );
+        assert_eq!(
+            warning.details.as_deref(),
+            Some("expected left and right argument units to match, but 'widget' and 'month' don't")
+        );
+        let display = warning
+            .display_details
+            .as_deref()
+            .expect("the conveyor attribution is presentation context");
+        assert!(
+            display.contains("conveyor 'students' <capacity>"),
+            "{display}"
+        );
+        assert!(
+            display.contains(warning.details.as_deref().unwrap()),
+            "{display}"
         );
     }
 

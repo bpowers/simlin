@@ -1300,7 +1300,7 @@ fn bare_two_dim_table_under_a_reducer_sums_the_elements_own_row() {
 /// expression subscripts, so the MDL fixtures these rows share cannot spell it.
 #[test]
 fn array_valued_table_apply_assigned_to_one_slot_is_refused_not_aborted() {
-    use crate::db::{DiagnosticError, DiagnosticSeverity, collect_all_diagnostics};
+    use crate::db::{DiagnosticSeverity, collect_all_diagnostics};
 
     let rows = [
         // The `StaticSubscript` arm: a slice of a variable's storage, not a
@@ -1339,7 +1339,7 @@ fn array_valued_table_apply_assigned_to_one_slot_is_refused_not_aborted() {
         let attributed: Vec<String> = diagnostics
             .iter()
             .filter(|d| d.severity == DiagnosticSeverity::Error)
-            .map(|d| format!("{:?} on {:?}", d.error, d.variable))
+            .map(|d| format!("{d:?} on {:?}", d.variable))
             .collect();
         // The refusal is the `TempArray` arm's, carried verbatim in the
         // assembly diagnostic, and lands on the variable -- not some other
@@ -1348,11 +1348,8 @@ fn array_valued_table_apply_assigned_to_one_slot_is_refused_not_aborted() {
             diagnostics.iter().any(|d| {
                 d.severity == DiagnosticSeverity::Error
                     && d.variable.as_deref() == Some(var)
-                    && matches!(
-                        &d.error,
-                        DiagnosticError::Assembly(reason)
-                            if reason.contains("where a single value is required")
-                    )
+                    && d.assembly_reason()
+                        .is_some_and(|reason| reason.contains("where a single value is required"))
             }),
             "row {row}, {var}: the refusal must be attributed to the variable; errors: {attributed:?}"
         );

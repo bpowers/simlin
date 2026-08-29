@@ -56,7 +56,7 @@ Equation text becomes a running simulation in these stages. Each stage names the
 - `db/query.rs` -- the context-free per-variable source parse, the structured `DepTarget`/`DepRef` scheduling relation, dimension reads, module maps, the module-reference graph, and the firewall queries (`project_model_by_name`, `model_variable_by_name`, `model_implicit_var_by_name`) that let a dependency reader select one model or variable instead of depending directly on a whole map.
 - `db/dep_graph.rs` -- the dependency graph and cycle gate: runlists, the dt/init cycle relation (`walk_successors`), and recurrence-SCC resolution (an SCC whose element-level graph is acyclic is compiled as one interleaved fragment instead of being rejected). `build_var_info` projects ordering directly from `DepRef.phase` and `DepRef.lag`; stocks break dt chains but not init chains, modules remain sinks, and no graph consumer parses qualified text. Raw `INIT` referents from every live dt definition, including implicit captures, are initialization roots even when the definition itself is flow-only. Qualified module-output reads form a project-level fixed point over production `(model, bound-port set)` keys: PREVIOUS-only paths are filtered, every nested module instance remains structural, and each child graph gains only the demanded output seeds plus their local initial dependency closure. VM and wasm module evaluation remains phase-symmetric; child flow programs never run during parent initialization.
 - `db/model_scope.rs` -- the lightweight explicit and parse-synthesized module topology used to build unit analysis's transitive model closure; it retains names and handles only, never equations.
-- `db/diagnostic.rs` -- the `CompilationDiagnostic` accumulator, the typed `Diagnostic`, and the drain functions `collect_model_diagnostics`/`collect_all_diagnostics`.
+- `diagnostic.rs` / `db/diagnostic.rs` -- the authoritative `Diagnostic` payload and salsa accumulator, plus the drain functions `collect_model_diagnostics`/`collect_all_diagnostics`. Recursive LTM queries return ordered warning facts on their model-local results and never accumulate; the non-recursive `model_all_diagnostics` owner emits only the current model's facts, so a parent module cannot duplicate a child's warnings.
 - `db/units.rs`, `db/macro_registry.rs`, `db/invariance.rs` -- the unit-check pass, the macro registry query, and run-invariance classification of flow variables.
 - `db/analysis.rs`, `db/ltm_ir.rs`, `db/ltm/` -- LTM (below).
 
@@ -68,11 +68,18 @@ module-input or runlist/invariance name results, compiler-local names already
 projected from `DepTarget`, analysis graph/result presentation, and test-only
 sets; none is a source dependency relation.
 
-Equation and unit parse/lowering errors still ride `Variable.errors` and
-`Variable.unit_errors` until fragment construction translates them into
-`CompilationDiagnostic`. Unit inference emits through its salsa accumulator.
-Keep those channels explicit until the diagnostic model is unified end to end;
-do not recreate a whole-model equation owner to centralize them.
+Equation and unit parse/lowering failures are `Diagnostic`s from their raising
+site onward. A per-variable `Variable::diagnostics` vector retains the
+context-free payload beside its memoized AST; fragment construction attaches
+model and physical-variable context exactly once before emitting that same type
+through salsa. Identical failures reached by several runlist phases coalesce
+only within that physical fragment, after attribution and by full `Diagnostic`
+equality; the first producer order wins and distinct element/path/owner/detail
+rows remain separate. Generated helpers retain both their physical name and
+their user-authored owner, and qualified/element failures retain structural
+path and element identity. Project-level unit declarations and macro-registry
+failures are read once from their memoized facts by `collect_all_diagnostics`; ordinary
+per-model producers emit through the accumulator in deterministic order.
 
 ### Rules the salsa layer depends on
 
@@ -136,11 +143,11 @@ A conveyor or queue stock is not compiled directly. `conveyor_compile::expand_co
 ## Data model and identifiers
 
 - `datamodel.rs` -- the canonical serializable model: `Project`, `Model` (with optional `MacroSpec`), `Variable`, `Equation` (`Scalar`, `ApplyToAll`, `Arrayed` with an EXCEPT default), `Dimension` with `mappings`, views.
-- `variable.rs` -- the compiler's variable: `Variable { ident, units, eqn, errors, unit_errors, kind }` over `VarKind::{ Stock { init_ast, inflows, outflows, non_negative }, Aux { ast, init_ast, tables, non_negative, is_flow, is_table_only }, Module { model_name, inputs } }`, generic over the module-input type (`ModuleReference` before lowering, `ModuleInput` after) and the expression tier (`Expr0` before, `Expr2` after). `Aux` covers auxiliaries and flows alike -- they lower identically, one slot per element holding one equation's value, and `is_flow` only says where a stock's integration reads it. The two error `Vec`s are LIVE channels, not diagnostics-in-waiting: see `Variable::equation_errors`. `model::lower_variable` is a map over `kind`, so a transformation that only rewrites equations restates no field.
+- `variable.rs` -- the compiler's variable: `Variable { ident, units, eqn, diagnostics, kind }` over `VarKind::{ Stock { init_ast, inflows, outflows, non_negative }, Aux { ast, init_ast, tables, non_negative, is_flow, is_table_only }, Module { model_name, inputs } }`, generic over the module-input type (`ModuleReference` before lowering, `ModuleInput` after) and the expression tier (`Expr0` before, `Expr2` after). `Aux` covers auxiliaries and flows alike -- they lower identically, one slot per element holding one equation's value, and `is_flow` only says where a stock's integration reads it. The diagnostic vector is context-free per-variable data; only the DB emission boundary adds model/variable identity. `model::lower_variable` is a map over `kind`, so a transformation that only rewrites equations restates no field.
 - `common.rs` -- `ErrorCode`, `Error`, `EquationError`, `Result`; the identifier types. An `EquationError` is `{start, end, code, details}`: the code names the CLASS of failure, the span points at the offending text (which `errors.rs` renders as a source snippet), and `details` carries the reason when it is not visible in the span -- the name that did not resolve, the arity a call missed, the identifier a lowering could not shape. A parse error therefore writes no `details`: the snippet is its reason, and every Rust surface renders that snippet. Nothing between a raising site and `collect_all_diagnostics` drops the reason or puts something else in its place: `From<Error> for EquationError` carries `Error::details` across, the compiler's lowering entry points hand a rejection's `details` to the `Error` they build -- never its span, which is a byte offset into a string the user never sees -- and `UnitError::DefinitionError` wraps an `EquationError` rather than keeping a second reason field beside it. `canonicalize` lowercases and normalizes a raw name; `Ident<Canonical>`, `CanonicalDimensionName`, and `CanonicalElementName` are interned, so clone is a refcount bump and equality is pointer equality. Sub-model variables are addressed as `module·var` (U+00B7).
 - `patch.rs` -- `ProjectPatch`/`ModelPatch` operations (upsert, delete, rename, views, stock flows, loop names). A rename reprints every dependent equation through `print_eqn`, so the printer must produce text the lexer reads back; it refuses to rename to a name that contains `"`, which has no spelling.
 - `results.rs` -- `Results` (offsets plus step-major series) and `Specs`.
-- `errors.rs` -- `FormattedError`/`FormattedErrors`, the user-facing rendering shared by libsimlin and the MCP servers. The severity word comes from the diagnostic's severity, and `FormattedError::details` is the bare reason -- populated from whichever of `Error::details`, `EquationError::details` or the `UnitError` variants the diagnostic carries, and handed to the FFI as `SimlinErrorDetail::details` for consumers that render the variable themselves.
+- `errors.rs` -- `FormattedError`/`FormattedErrors`, the user-facing rendering shared by libsimlin and the MCP servers. The severity word comes from the diagnostic's severity, a generated helper is presented under its user-authored owner while its physical name remains on `Diagnostic`, and `FormattedError::details` is the modeler-facing reason handed to the FFI as `SimlinErrorDetail::details`. The authoritative payload retains the producer's complete details and ordered related sources; unit-inference terminal output uses the raw constraint detail while GUI-facing details use its explicit concise rendering.
 
 ## Formats
 

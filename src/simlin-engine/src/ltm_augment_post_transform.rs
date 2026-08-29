@@ -1063,8 +1063,8 @@ pub(super) fn pin_only_source_refs(
 /// references the live reducer instead of the hoisted aggregate node, a
 /// wrong-but-clean-compiling link score (the agg-substitution-omission sibling
 /// of the GH #311 PREVIOUS-omission hazard; GH #661). The db-bearing caller
-/// converts the error into a `Warning` (via `emit_ltm_partial_equation_warning`)
-/// and skips the variable. The failure is effectively unreachable in production
+/// converts the error into the shared LTM partial-equation `Warning` and skips
+/// the variable. The failure is effectively unreachable in production
 /// (the input is a `print_eqn` re-print of an already-parsed AST), so this is
 /// defense-in-depth.
 ///

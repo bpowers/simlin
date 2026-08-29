@@ -104,8 +104,56 @@ pub(crate) use indexed::scc_components;
 /// the largest SCC upper-bounds the worst-case partition size.
 /// Threshold 50 keeps every existing LTM test model on the exhaustive
 /// path while catching dense feedback graphs like WRLD3 (166-node SCC)
-/// well before they reach the cliffs.
+/// well before they reach the cliffs. Production callers obtain the effective
+/// threshold via [`ltm_scc_node_budget`]; tests use
+/// [`LtmSccNodeBudgetGuard`] so threshold behavior is exercised with small
+/// fixtures (per docs/dev/rust.md#test-time-budgets).
 pub const MAX_LTM_SCC_NODES: usize = 50;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only override of [`MAX_LTM_SCC_NODES`], scoped by an active
+    /// [`LtmSccNodeBudgetGuard`].
+    static LTM_SCC_NODE_BUDGET_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The largest SCC that production LTM paths may enumerate exhaustively.
+/// Returns [`MAX_LTM_SCC_NODES`] in production builds; in `#[cfg(test)]`
+/// builds an active [`LtmSccNodeBudgetGuard`] override takes precedence.
+pub(crate) fn ltm_scc_node_budget() -> usize {
+    #[cfg(test)]
+    {
+        if let Some(budget) = LTM_SCC_NODE_BUDGET_OVERRIDE.with(|cell| cell.get()) {
+            return budget;
+        }
+    }
+    MAX_LTM_SCC_NODES
+}
+
+/// Scoped test override for [`ltm_scc_node_budget`].
+///
+/// The consuming queries are salsa-memoized, so the guard must outlive every
+/// query call whose threshold it controls.
+#[cfg(test)]
+pub(crate) struct LtmSccNodeBudgetGuard {
+    previous: Option<usize>,
+}
+
+#[cfg(test)]
+impl LtmSccNodeBudgetGuard {
+    pub(crate) fn new(budget: usize) -> Self {
+        let previous = LTM_SCC_NODE_BUDGET_OVERRIDE.with(|cell| cell.replace(Some(budget)));
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for LtmSccNodeBudgetGuard {
+    fn drop(&mut self) {
+        LTM_SCC_NODE_BUDGET_OVERRIDE.with(|cell| cell.set(self.previous));
+    }
+}
 
 /// Maximum number of elementary circuits Johnson's enumeration may emit on
 /// any production LTM path before the model is treated as too dense for

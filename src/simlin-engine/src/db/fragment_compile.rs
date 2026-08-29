@@ -17,13 +17,11 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use salsa::Accumulator;
-
 use super::*;
 use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::fragment::{DepShape, FragmentInput, lower_fragment};
 use crate::db::var_fragment::{
-    ExplicitFragment, dep_head, explicit_fragment_input, is_implicit_global, model_dep_shape,
+    dep_head, explicit_fragment_input, is_implicit_global, model_dep_shape,
 };
 
 // Test-only per-thread record of which fragment-compiler bodies ran.
@@ -110,6 +108,70 @@ pub(crate) fn note_fragment_execution(kind: FragmentExecKind, name: &str) {
     });
 }
 
+/// Preserve a fragment-lowering error's typed payload and enrich an unresolved
+/// reference from the structured dependency relation that fed the fragment.
+/// The compiler error identifies the rejected spelling; dependency identity,
+/// module path and source location come from `DepTarget` and the lowered AST.
+pub(crate) fn fragment_lowering_diagnostic(
+    error: &crate::Error,
+    target: &crate::variable::Variable,
+    dependency_targets: &[&DepTarget],
+) -> Diagnostic {
+    let unresolved_target = (error.code == crate::ErrorCode::DoesNotExist)
+        .then(|| {
+            let details = error.details.as_deref()?;
+            dependency_targets.iter().find_map(|target| {
+                let qualified = target.qualified_name();
+                (details == format!("'{qualified}' does not resolve through dependency shapes"))
+                    .then_some((*target, qualified))
+            })
+        })
+        .flatten();
+
+    let mut equation_error: crate::common::EquationError = error.clone().into();
+    if let Some((_, qualified)) = &unresolved_target
+        && let Some(location) = target
+            .ast()
+            .and_then(|ast| ast.get_var_loc(qualified))
+            .or_else(|| target.init_ast().and_then(|ast| ast.get_var_loc(qualified)))
+    {
+        equation_error.start = location.start;
+        equation_error.end = location.end;
+    }
+
+    let mut diagnostic = Diagnostic::equation(equation_error, DiagnosticSeverity::Error);
+    if let Some((target, _)) = unresolved_target {
+        diagnostic = diagnostic.with_module_path(
+            target
+                .module_path
+                .iter()
+                .map(|segment| segment.as_str().to_owned())
+                .collect(),
+        );
+    }
+    diagnostic
+}
+
+/// Emit the first phase occurrence of a fully attributed fragment diagnostic.
+///
+/// A source variable or generated helper can be demanded by several runlist
+/// phases. Reaching the same source defect through two phases does not create
+/// two user-facing errors, while failures that differ in any structured field
+/// remain distinct. The vector preserves first-producer order. Pre-fragment
+/// diagnostics do not use this helper: separate source fields remain separate
+/// occurrences even when their payloads happen to compare equal.
+fn emit_phase_fragment_diagnostic_once(
+    db: &dyn Db,
+    reported: &mut Vec<Diagnostic>,
+    diagnostic: Diagnostic,
+) {
+    if reported.contains(&diagnostic) {
+        return;
+    }
+    reported.push(diagnostic.clone());
+    diagnostic.emit(db);
+}
+
 #[salsa::tracked(returns(ref))]
 pub fn compile_var_fragment<'db>(
     db: &'db dyn Db,
@@ -130,27 +192,14 @@ pub fn compile_var_fragment<'db>(
     // takes them as a slice.
     let module_input_names = module_inputs.names(db);
 
-    let (unit_diags, input) =
-        match explicit_fragment_input(db, var, model, project, module_input_names) {
-            ExplicitFragment::Fatal {
-                unit_diags,
-                fatal_diags,
-            } => {
-                // Non-fatal unit diagnostics were recorded before the fatal
-                // site; replay them first to preserve emission order, then
-                // the fatal diagnostic(s), then bail out (whole-variable None).
-                for diag in unit_diags.into_iter().chain(fatal_diags) {
-                    CompilationDiagnostic(diag).accumulate(db);
-                }
-                return None;
-            }
-            ExplicitFragment::Ready { unit_diags, input } => (unit_diags, input),
-        };
-
-    // Malformed-unit diagnostics are non-fatal: record them and continue.
-    for diag in unit_diags {
-        CompilationDiagnostic(diag).accumulate(db);
+    let prepared = explicit_fragment_input(db, var, model, project, module_input_names);
+    for diagnostic in prepared.diagnostics {
+        diagnostic
+            .with_context(model.name(db).clone(), Some(var_ident.clone()))
+            .emit(db);
     }
+    let input = prepared.input?;
+    let mut reported_phase_diagnostics: Vec<Diagnostic> = Vec::new();
 
     // Which runlists this variable belongs to, read through the three-bit
     // projection rather than the whole `ModelDepGraphResult`: the projection
@@ -173,13 +222,12 @@ pub fn compile_var_fragment<'db>(
     // `collect_all_diagnostics` at all. That is the failure mode
     // `compiler::check_stock_updates_are_emittable`'s rustdoc describes, and
     // it is live for every codegen rejection: an ordinary hand-written
-    // `out[d] = VECTOR SORT ORDER(PREVIOUS(vals[d]), 1)` would report zero
-    // diagnostics while failing the build.
+    // `out[d] = ALLOCATE AVAILABLE(request[d], pp[d,1] + bump[d,1], supply)`
+    // reaches the unsupported computed priority-profile view.
     //
-    // The reason rides `DiagnosticError::Assembly`, not `Equation`, because a
-    // codegen refusal has neither a span nor an `ErrorCode` of its own: the
-    // emitter reports it as prose. `Assembly` is the variant whose payload IS
-    // that prose.
+    // The reason rides an `Assembly` diagnostic rather than `Equation`, because
+    // a codegen refusal has neither a source span nor a more specific
+    // `ErrorCode`; the emitter reports its complete reason as prose.
     //
     // The variable name is embedded in that String even though the
     // `Diagnostic` also carries it in `variable`. Structured consumers read
@@ -208,12 +256,14 @@ pub fn compile_var_fragment<'db>(
     // without this hunk, found the added rows land ONLY on projects that
     // already fail to compile -- no project that compiles gains an error.
     // That shape is what the severity rests on, and unlike a row count it
-    // stays true as the corpus grows. (`DiagnosticError::Assembly` maps to
+    // stays true as the corpus grows. (`DiagnosticCategory::Assembly` maps to
     // `FormattedErrorKind::Simulation`, which `FormattedErrors::push` does not
     // count toward `has_model_errors`/`has_variable_errors`, so the CLI's
     // redundant-`NotSimulatable` suppression is unaffected either way.)
     let emit_ctx = input.emit_ctx();
-    let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
+    let compile_phase = |exprs: &[crate::compiler::Expr],
+                         reported_diagnostics: &mut Vec<Diagnostic>|
+     -> Option<PerVarBytecodes> {
         if exprs.is_empty() {
             return None;
         }
@@ -221,15 +271,15 @@ pub fn compile_var_fragment<'db>(
             Ok(bytecodes) => Some(bytecodes),
             Err(reason) => {
                 let ident = var.ident(db);
-                CompilationDiagnostic(Diagnostic {
-                    model: model.name(db).clone(),
-                    variable: Some(ident.clone()),
-                    error: DiagnosticError::Assembly(format!(
-                        "variable '{ident}' failed to compile: {reason}"
-                    )),
-                    severity: DiagnosticSeverity::Error,
-                })
-                .accumulate(db);
+                emit_phase_fragment_diagnostic_once(
+                    db,
+                    reported_diagnostics,
+                    Diagnostic::assembly(
+                        format!("variable '{ident}' failed to compile: {reason}"),
+                        DiagnosticSeverity::Error,
+                    )
+                    .with_context(model.name(db).clone(), Some(ident.clone())),
+                );
                 None
             }
         }
@@ -242,39 +292,54 @@ pub fn compile_var_fragment<'db>(
     // `Equation`, not `Model`: `errors.rs` treats the two variants differently
     // on purpose. The `Equation` arm produces `FormattedErrorKind::Variable`,
     // names the variable in the summary, and -- via
-    // `format_diagnostic_with_datamodel` -> `format_equation_error` -- enriches
-    // the message with a source snippet from the equation text, where the
+    // `format_diagnostic_with_datamodel` enriches the message with a source
+    // snippet from the equation text, where the
     // `Model` arm drops the variable from the summary and gets no snippet
     // (pinned by
     // `db::diagnostic_tests::test_compile_var_fragment_per_phase_var_new_failure`).
     // `EquationError::from` carries `err.details`, so the reason the lowering
     // wrote -- the stock named by `compiler::check_stock_updates_are_emittable`,
     // the identifier a `MismatchedDimensions` could not shape -- rides along
-    // with it. The error has no span, so the conversion leaves `0..0`.
-    let accumulate_var_compile_error = |err: &crate::Error| {
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: Some(var.ident(db).clone()),
-            error: DiagnosticError::Equation(err.clone().into()),
-            severity: DiagnosticSeverity::Error,
-        })
-        .accumulate(db);
-    };
+    // with it. For a rejected dependency, the shared conversion below restores
+    // its structural module path and source span from the dependency relation.
+    let accumulate_var_compile_error =
+        |err: &crate::Error, reported_diagnostics: &mut Vec<Diagnostic>| {
+            let dependencies = (err.code == crate::ErrorCode::DoesNotExist)
+                .then(|| variable_direct_dependencies(db, var, project, ModuleInputSet::empty(db)));
+            let dependency_targets: Vec<_> = dependencies
+                .into_iter()
+                .flat_map(|dependencies| dependencies.dependencies.iter())
+                .map(|dependency| &dependency.target)
+                .collect();
+            emit_phase_fragment_diagnostic_once(
+                db,
+                reported_diagnostics,
+                fragment_lowering_diagnostic(err, input.target.as_ref(), &dependency_targets)
+                    .with_context(model.name(db).clone(), Some(var.ident(db).clone())),
+            );
+        };
 
     // Only the phases the variable's runlist membership admits are lowered; a
     // phase it is not a member of is never compiled, so its lowering outcome
     // is not a diagnostic either.
-    let emit = |lowered: &Result<crate::compiler::Var, crate::Error>| match lowered {
-        Ok(var) => compile_phase(&var.ast),
-        Err(err) => {
-            accumulate_var_compile_error(err);
-            None
+    let emit = |lowered: &Result<crate::compiler::Var, crate::Error>,
+                reported_diagnostics: &mut Vec<Diagnostic>|
+     -> Option<PerVarBytecodes> {
+        match lowered {
+            Ok(var) => compile_phase(&var.ast, reported_diagnostics),
+            Err(err) => {
+                accumulate_var_compile_error(err, reported_diagnostics);
+                None
+            }
         }
     };
 
     // Initial phase: stocks and their deps get compiled with is_initial=true
     let initial_bytecodes = if membership.initials {
-        emit(&lower_fragment(&input, true))
+        emit(
+            &lower_fragment(&input, true),
+            &mut reported_phase_diagnostics,
+        )
     } else {
         None
     };
@@ -290,7 +355,7 @@ pub fn compile_var_fragment<'db>(
     let noninitial = (in_flows_runlist || in_stocks_runlist).then(|| lower_fragment(&input, false));
 
     let flow_bytecodes = match &noninitial {
-        Some(lowered) if in_flows_runlist => emit(lowered),
+        Some(lowered) if in_flows_runlist => emit(lowered, &mut reported_phase_diagnostics),
         _ => None,
     };
 
@@ -306,7 +371,7 @@ pub fn compile_var_fragment<'db>(
     };
 
     let stock_bytecodes = match &noninitial {
-        Some(lowered) if in_stocks_runlist => emit(lowered),
+        Some(lowered) if in_stocks_runlist => emit(lowered, &mut reported_phase_diagnostics),
         _ => None,
     };
 
@@ -338,11 +403,12 @@ pub fn compile_var_fragment<'db>(
 /// input through, so the accessor's relation is the engine's relation by
 /// construction.
 ///
-/// Returns the lowered variable. Loud-safe `None` (never panics): this parse
-/// synthesized no helper of that name, the
-/// module branch's datamodel variable is not actually a `Module`, or the
-/// implicit var has equation errors. (`lower_variable` itself is total -- any
-/// lowering error surfaces as `None` here, see below.)
+/// Returns the lowered variable, including any diagnostics it carries. Loud-
+/// safe `None` (never panics) means only that this parse synthesized no helper
+/// of that name or a module metadata entry did not contain a module. Keeping an
+/// invalid variable as data lets the fragment boundary attribute its original
+/// typed diagnostics instead of replacing them with an aggregate missing-var
+/// string.
 #[salsa::tracked(returns(ref))]
 pub(crate) fn lowered_implicit_variable(
     db: &dyn Db,
@@ -359,13 +425,6 @@ pub(crate) fn lowered_implicit_variable(
 
     // Every helper carries parsed data, so no helper is lexed back from text.
     let parsed_implicit = implicit_var.parsed_variable(dim_context);
-
-    if parsed_implicit
-        .equation_errors()
-        .is_some_and(|e| !e.is_empty())
-    {
-        return None;
-    }
 
     // A module-typed helper is its wiring; `lower_variable`'s module arm would
     // need a populated models map to validate the sources against.
@@ -389,23 +448,7 @@ pub(crate) fn lowered_implicit_variable(
             dimensions: dim_context,
             model_name: "",
         };
-        let lowered = crate::model::lower_variable(&scope, &parsed_implicit);
-
-        // Loud-safe (GH #580): `lower_variable` is total -- on a lowering error
-        // (e.g. an un-translatable cross-dimension subscript surviving into a
-        // scalar helper as `DimensionInScalarContext`) it records the error and
-        // discards the AST rather than failing. The pre-lowering check above
-        // only inspects the *parsed* implicit; a lowering-stage error would
-        // otherwise leave a helper with `ast == None` that `lower_fragment`
-        // rejects as `EmptyEquation`. Bail out with `None` so the error rides
-        // out via the caller's aggregate `missing_vars` string (GH #466 tracks
-        // surfacing assembly-stage errors through the per-variable diagnostic
-        // API).
-        if lowered.equation_errors().is_some() {
-            return None;
-        }
-
-        lowered
+        crate::model::lower_variable(&scope, &parsed_implicit)
     };
 
     Some(std::sync::Arc::new(lowered))
@@ -414,12 +457,14 @@ pub(crate) fn lowered_implicit_variable(
 /// Why [`implicit_fragment_input`] produced no input.
 pub(crate) enum ImplicitInputError {
     /// This parse synthesized no helper of that name, or the helper did not
-    /// parse or lower: nothing to compile, and nothing to attribute beyond the
-    /// caller's batch message.
+    /// contain the expected module metadata. There is no diagnostic payload to
+    /// attribute in either case.
     Absent,
-    /// The helper's graphical-function table failed to build; the reason names
-    /// the table error.
-    Table(String),
+    /// Parsing or Expr0-to-Expr2 lowering rejected the helper. These are the
+    /// original typed diagnostics with source-relative spans.
+    Diagnostics(Vec<Diagnostic>),
+    /// The helper's graphical-function table failed to build.
+    Table(Box<Diagnostic>),
 }
 
 /// Build the fragment input of one implicit helper (a SMOOTH/DELAY/TREND
@@ -443,6 +488,9 @@ pub(crate) fn implicit_fragment_input<'db>(
     let lowered = lowered_implicit_variable(db, model, project, implicit_name.clone())
         .as_ref()
         .ok_or(ImplicitInputError::Absent)?;
+    if lowered.has_fatal_diagnostics() {
+        return Err(ImplicitInputError::Diagnostics(lowered.diagnostics.clone()));
+    }
     let var_ident: Ident<Canonical> = Ident::new(&implicit_name);
 
     let dim_context = project_dimensions_context(db, project);
@@ -518,9 +566,10 @@ pub(crate) fn implicit_fragment_input<'db>(
                 tables.insert(var_ident, ts);
             }
             Err(err) => {
-                return Err(ImplicitInputError::Table(format!(
-                    "its graphical-function table failed to build: {err}"
-                )));
+                return Err(ImplicitInputError::Table(Box::new(Diagnostic::model(
+                    err,
+                    DiagnosticSeverity::Error,
+                ))));
             }
             _ => {}
         }
@@ -613,38 +662,37 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
     // explicit path's (see `compile_var_fragment`): the fragment's absence
     // fails the build, and the corpus sweep shape holds -- added rows land
     // only on projects that already fail to compile.
-    // Identical reasons across phases collapse to ONE row (a helper whose
-    // initial and flow phases refuse the same construct is one defect, and
-    // duplicate rows are user-visible noise); distinct per-phase reasons
-    // each get their own row.
-    let mut reported_reasons: Vec<String> = Vec::new();
-    let mut report = |reason: String| {
-        if reported_reasons.contains(&reason) {
-            return;
+    let input = match implicit_fragment_input(db, meta, model, project, module_input_names) {
+        Ok(input) => input,
+        Err(ImplicitInputError::Absent) => return None,
+        Err(ImplicitInputError::Diagnostics(diagnostics)) => {
+            for diagnostic in diagnostics {
+                diagnostic
+                    .with_context(model.name(db).clone(), Some(meta.name.clone()))
+                    .with_owner(meta.parent_source_var.ident(db).clone())
+                    .emit(db);
+            }
+            return None;
         }
-        reported_reasons.push(reason.clone());
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: Some(meta.name.clone()),
-            error: DiagnosticError::Assembly(format!(
+        // The helper exists but nothing can be emitted for it; report why, and
+        // keep the helper's place in the fragment map (its runlist entries
+        // then surface as missing fragments).
+        Err(ImplicitInputError::Table(diagnostic)) => {
+            let diagnostic = *diagnostic;
+            let reason = diagnostic
+                .reason()
+                .unwrap_or("its graphical-function table was rejected");
+            let display = format!(
                 "implicit variable '{}' (synthesized while parsing '{}') failed to compile: \
                  {reason}",
                 meta.name,
                 meta.parent_source_var.ident(db)
-            )),
-            severity: DiagnosticSeverity::Error,
-        })
-        .accumulate(db);
-    };
-
-    let input = match implicit_fragment_input(db, meta, model, project, module_input_names) {
-        Ok(input) => input,
-        Err(ImplicitInputError::Absent) => return None,
-        // The helper exists but nothing can be emitted for it; report why, and
-        // keep the helper's place in the fragment map (its runlist entries
-        // then surface as missing fragments).
-        Err(ImplicitInputError::Table(reason)) => {
-            report(reason);
+            );
+            diagnostic
+                .with_display_details(display)
+                .with_context(model.name(db).clone(), Some(meta.name.clone()))
+                .with_owner(meta.parent_source_var.ident(db).clone())
+                .emit(db);
             return Some(VarFragmentResult {
                 fragment: CompiledVarFragment {
                     ident: meta.name.clone(),
@@ -657,6 +705,29 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
         }
     };
 
+    // Identical fully attributed diagnostics across runlist phases collapse to
+    // one row (a helper whose initial and flow phases refuse the same construct
+    // is one defect). Pre-fragment source diagnostics above remain untouched;
+    // distinct phase failures retain their own structured rows.
+    let mut reported_phase_diagnostics: Vec<Diagnostic> = Vec::new();
+    let report = |reported_diagnostics: &mut Vec<Diagnostic>, reason: String| {
+        emit_phase_fragment_diagnostic_once(
+            db,
+            reported_diagnostics,
+            Diagnostic::assembly(
+                format!(
+                    "implicit variable '{}' (synthesized while parsing '{}') failed to compile: \
+                     {reason}",
+                    meta.name,
+                    meta.parent_source_var.ident(db)
+                ),
+                DiagnosticSeverity::Error,
+            )
+            .with_context(model.name(db).clone(), Some(meta.name.clone()))
+            .with_owner(meta.parent_source_var.ident(db).clone()),
+        );
+    };
+
     let membership = crate::db::dep_graph::implicit_var_runlist_membership(
         db,
         model,
@@ -664,13 +735,29 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
         meta.name.clone(),
         module_inputs,
     );
+    let parent_dependencies = variable_direct_dependencies(
+        db,
+        meta.parent_source_var,
+        project,
+        ModuleInputSet::empty(db),
+    );
+    let dependency_targets: Vec<_> = parent_dependencies
+        .implicit_vars
+        .iter()
+        .find(|implicit| canonicalize(&implicit.name) == meta.name)
+        .into_iter()
+        .flat_map(|implicit| implicit.dependencies.iter())
+        .map(|dependency| &dependency.target)
+        .collect();
 
     // Runlist-gated phase selection: the Initial phase is compiled only for
     // helpers in `runlist_initials`; the non-initial phase feeds
     // `flow_bytecodes` (non-stock) or `stock_bytecodes` (stock/module), each
     // gated by the corresponding runlist.
     let emit_ctx = input.emit_ctx();
-    let mut phase = |is_initial: bool| -> Option<PerVarBytecodes> {
+    let phase = |is_initial: bool,
+                 reported_diagnostics: &mut Vec<Diagnostic>|
+     -> Option<PerVarBytecodes> {
         match lower_fragment(&input, is_initial) {
             Ok(var) => {
                 match crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting(
@@ -678,30 +765,34 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
                 ) {
                     Ok(bytecodes) => Some(bytecodes),
                     Err(reason) => {
-                        report(reason);
+                        report(reported_diagnostics, reason);
                         None
                     }
                 }
             }
             Err(err) => {
-                report(format!("could not be lowered: {err}"));
+                let diagnostic =
+                    fragment_lowering_diagnostic(&err, input.target.as_ref(), &dependency_targets)
+                        .with_context(model.name(db).clone(), Some(meta.name.clone()))
+                        .with_owner(meta.parent_source_var.ident(db).clone());
+                emit_phase_fragment_diagnostic_once(db, reported_diagnostics, diagnostic);
                 None
             }
         }
     };
 
     let initial_bytecodes = if membership.initials {
-        phase(true)
+        phase(true, &mut reported_phase_diagnostics)
     } else {
         None
     };
     let flow_bytecodes = if !meta.is_stock && membership.flows {
-        phase(false)
+        phase(false, &mut reported_phase_diagnostics)
     } else {
         None
     };
     let stock_bytecodes = if (meta.is_stock || meta.is_module) && membership.stocks {
-        phase(false)
+        phase(false, &mut reported_phase_diagnostics)
     } else {
         None
     };

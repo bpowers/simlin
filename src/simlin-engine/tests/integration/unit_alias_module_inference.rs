@@ -23,25 +23,17 @@
 //!       formal parameters are unitless), exactly as it already skips stdlib
 //!       models.
 
-use simlin_engine::common::UnitError;
 use simlin_engine::db::{
-    Diagnostic, DiagnosticError, SimlinDb, collect_all_diagnostics, sync_from_datamodel_incremental,
+    Diagnostic, SimlinDb, collect_all_diagnostics, sync_from_datamodel_incremental,
 };
 use simlin_engine::test_common::TestProject;
 
 fn diag_details(d: &Diagnostic) -> String {
-    match &d.error {
-        DiagnosticError::Unit(UnitError::ConsistencyError(_, _, Some(s))) => s.clone(),
-        DiagnosticError::Unit(UnitError::InferenceError {
-            details: Some(s), ..
-        }) => s.clone(),
-        DiagnosticError::Unit(UnitError::DefinitionError(e)) => {
-            e.details.clone().unwrap_or_default()
-        }
-        DiagnosticError::Unit(other) => format!("{:?}", other),
-        DiagnosticError::Model(e) => e.details.as_deref().unwrap_or("").to_string(),
-        _ => String::new(),
-    }
+    d.display_details
+        .as_ref()
+        .or(d.details.as_ref())
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Collect every diagnostic (across all models) for a built datamodel.

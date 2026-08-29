@@ -27,7 +27,7 @@ use std::collections::BTreeSet;
 // * `input`      -- the `#[salsa::input]` structs + interned key types.
 // * `query`      -- demand-driven read queries (parse, dims, deps, module map).
 // * `sync`       -- datamodel -> salsa-input sync (fresh + incremental).
-// * `diagnostic` -- the `CompilationDiagnostic` accumulator + drain helpers.
+// * `diagnostic` -- the `Diagnostic` accumulator + drain helpers.
 // * `layout`     -- the per-model body layout query.
 // * `var_fragment` / `fragment_compile` -- the lowering / emission halves of
 //   per-variable compilation.
@@ -67,10 +67,8 @@ mod var_fragment;
 pub(crate) use var_fragment::lowered_source_variable;
 
 mod diagnostic;
-pub use diagnostic::{
-    CompilationDiagnostic, Diagnostic, DiagnosticError, DiagnosticSeverity,
-    collect_all_diagnostics, collect_model_diagnostics, model_all_diagnostics,
-};
+pub use crate::diagnostic::{Diagnostic, DiagnosticCategory, DiagnosticSeverity, DiagnosticSource};
+pub use diagnostic::{collect_all_diagnostics, collect_model_diagnostics, model_all_diagnostics};
 
 mod input;
 pub(crate) use input::source_var_is_table_only;
@@ -522,7 +520,7 @@ pub enum LtmMode {
 /// cross-element-through-aggregate loops (`recover_cross_agg_loops`, GH
 /// #515) hit its loop-count budget (`ltm::MAX_CROSS_AGG_LOOPS`) or its
 /// per-aggregate petal cap, so the recovered loop list is incomplete (a
-/// `CompilationDiagnostic` `Warning` is also emitted then -- the flag is
+/// `Diagnostic` `Warning` is also emitted then -- the flag is
 /// the robust signal, the `Warning`'s reachability being #466's concern).
 /// Always `false` in discovery mode and for models with no synthetic aggs.
 ///
@@ -530,7 +528,7 @@ pub enum LtmMode {
 /// the per-input-port pathway budget (`ltm::MAX_MODULE_PATHWAYS`, GH #649), so
 /// at least one input port's composite link score was computed over a
 /// deterministic prefix of its pathways rather than the complete set -- the
-/// score is degraded, not wrong-by-panic. A `CompilationDiagnostic` `Warning`
+/// score is degraded, not wrong-by-panic. A `Diagnostic` `Warning`
 /// naming the module + clipped port(s) accompanies it; the flag is the robust
 /// signal. Only ever `true` for a model with input ports (a sub-model or a
 /// discovery-mode model) whose pathway count exceeds the budget.
@@ -544,6 +542,10 @@ pub struct LtmVariablesResult {
     pub agg_recovery_truncated: bool,
     pub pathways_truncated: bool,
     pub mode: LtmMode,
+    /// Ordered warning facts produced while deriving this model's LTM
+    /// variables. Recursive model queries never emit these facts; the
+    /// non-recursive diagnostic owner emits each model's facts exactly once.
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 /// Compute the link score equation text for a single causal link.
@@ -1107,8 +1109,8 @@ pub fn set_project_ltm_discovery_mode(db: &mut SimlinDb, project: SourceProject,
 /// value on construction and unconditionally restore the prior value on drop.
 ///
 /// LTM-specific diagnostics (the auto-flip-to-discovery advisory, the
-/// synthetic-fragment compile-failure warnings) only accumulate through
-/// `model_all_diagnostics` -> `model_ltm_variables` when `ltm_enabled` is true.
+/// synthetic-fragment compile-failure warnings) are derived and emitted through
+/// `model_all_diagnostics` -> `model_ltm_variables` only when `ltm_enabled` is true.
 /// A caller that wants to harvest those diagnostics on a db synced with LTM
 /// off must transiently re-enable the flag for the
 /// [`collect_all_diagnostics`] pass and then restore it -- the `SourceProject`
@@ -1225,10 +1227,14 @@ pub fn compile_project_incremental(
     // `NotSimulatable`. The build error's own typed code reaches the diagnostic
     // surface separately: `collect_all_diagnostics` reads this same memoized
     // `build_error` and emits one project-level `Diagnostic` from it.
-    if let Some((_code, msg)) =
-        &crate::db::macro_registry::project_macro_registry(db, project).build_error
+    if let Some(error) = &crate::db::macro_registry::project_macro_registry(db, project).build_error
     {
-        return crate::sim_err!(NotSimulatable, msg.clone());
+        return crate::sim_err!(
+            NotSimulatable,
+            error
+                .get_details()
+                .unwrap_or_else(|| "invalid macro definitions".to_string())
+        );
     }
     // Two variables whose names canonicalize to the same ident silently
     // collapse into one on the canonical-keyed sync maps (last-in-document-

@@ -4348,7 +4348,8 @@ mod array_reducer_tests {
 mod rank_tests {
     use crate::common::ErrorCode;
     use crate::db::{
-        DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics, sync_from_datamodel,
+        DiagnosticCategory, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
+        sync_from_datamodel,
     };
     use crate::open_vensim;
     use crate::test_common::TestProject;
@@ -4362,10 +4363,7 @@ mod rank_tests {
         let has_bad_builtin_args = diags.iter().any(|d| {
             d.variable.as_deref() == Some(var_name)
                 && d.severity == DiagnosticSeverity::Error
-                && matches!(
-                    &d.error,
-                    DiagnosticError::Equation(err) if err.code == ErrorCode::BadBuiltinArgs
-                )
+                && d.is(DiagnosticCategory::Equation, ErrorCode::BadBuiltinArgs)
         });
 
         assert!(
@@ -4620,10 +4618,7 @@ TIME STEP = 1 ~~|
         let has_bad_builtin_args = diags.iter().any(|d| {
             d.variable.as_deref() == Some("result")
                 && d.severity == DiagnosticSeverity::Error
-                && matches!(
-                    &d.error,
-                    DiagnosticError::Equation(err) if err.code == ErrorCode::BadBuiltinArgs
-                )
+                && d.is(DiagnosticCategory::Equation, ErrorCode::BadBuiltinArgs)
         });
 
         assert!(
@@ -4712,13 +4707,15 @@ TIME STEP = 1 ~~|
     /// dimension, ordinary A2A lowering cannot pair the axes. The residual
     /// must surface as a **clean, named error** -- the failing compile `Err`
     /// must name the one `$⁚out⁚…⁚arg0` helper -- never a scalar fallback or a
-    /// silent all-`None` fragment that reads a wrong value. (Surfacing the
-    /// residual through the per-variable
-    /// diagnostic API rather than only the aggregate `Err` is a separate,
-    /// pre-existing concern tracked as GH #466.)
+    /// silent all-`None` fragment that reads a wrong value. The same refusal
+    /// must reach the structured diagnostic API under the helper's physical
+    /// identity and its editable owner.
     #[test]
     fn unresolvable_helper_fails_loudly_not_silently() {
-        use crate::db::{compile_project_incremental, sync_from_datamodel_incremental};
+        use crate::db::{
+            DiagnosticCategory, DiagnosticSeverity, collect_all_diagnostics,
+            compile_project_incremental, sync_from_datamodel_incremental,
+        };
 
         // `Other` has NO mapping to `Big`, so `out[Big] = INITIAL(other[Other])`
         // cannot translate the bare `[other]` subscript per `Big` element. This
@@ -4750,6 +4747,34 @@ TIME STEP = 1 ~~|
             "the compile Err must name the offending `$⁚out⁚…⁚arg0` helper \
              (loud, actionable -- AC7.5); got: {msg}"
         );
+
+        let diagnostics = collect_all_diagnostics(&db, sync.project);
+        let helper = diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.category == DiagnosticCategory::Equation
+                    && diagnostic.severity == DiagnosticSeverity::Error
+                    && diagnostic.owner.as_deref() == Some("out")
+                    && diagnostic
+                        .variable
+                        .as_deref()
+                        .is_some_and(|name| name.contains("⁚arg0"))
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "the production diagnostic pass must retain the helper's lowering refusal: \
+                     {diagnostics:#?}"
+                )
+            });
+        assert_eq!(helper.code, crate::common::ErrorCode::DoesNotExist);
+        assert_ne!(helper.location, Some(crate::builtins::Loc::default()));
+        assert_eq!(
+            helper.details.as_deref(),
+            Some("'other' does not resolve through dependency shapes"),
+            "the typed lowering reason must survive on the helper diagnostic"
+        );
+        let formatted = crate::errors::format_diagnostic_with_datamodel(helper, &datamodel);
+        assert_eq!(formatted.variable_name.as_deref(), Some("out"));
     }
 }
 

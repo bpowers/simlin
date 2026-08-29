@@ -188,21 +188,20 @@ pub(crate) fn shaped_link_score_executions() -> usize {
 ///   [`PartialEquationError`](crate::ltm_augment::PartialEquationError)
 ///   (the GH #311 parse class, the GH #526/T7 both-legs-doomed
 ///   mismatched-dep class, or the GH #779 bare-reducer-feeder decline)
-///   made this `(from, to)` edge unscoreable. The
-///   loud `Warning` was already accumulated by the query; the caller MUST
-///   record the edge in `unscoreable_edges` so loop scores traversing it
-///   are DROPPED (the #758 contract), not stubbed.
+///   made this `(from, to)` edge unscoreable. The variant carries the loud
+///   `Warning` fact; the caller MUST append it in producer order and record the
+///   edge in `unscoreable_edges` so loop scores traversing it are DROPPED (the
+///   #758 contract), not stubbed.
 /// - [`NoVariable`](ShapedLinkScore::NoVariable) -- no variable for benign
 ///   structural reasons (the target could not be reconstructed, or a
 ///   module link has no composite/output to score). NOT an unscoreable
 ///   edge: the caller skips it silently, exactly as the pre-fix `None`
 ///   did, and loop scores through it are unaffected.
 ///
-/// Surfacing the partial-equation signal through the query's RETURN value
-/// (rather than a side channel) keeps it consistent under salsa caching:
-/// the salsa accumulator already replays the `Warning` on every cache hit,
-/// and the caller re-reads this memoized value -- and so re-inserts into
-/// the freshly-rebuilt `unscoreable_edges` set -- on every
+/// Surfacing both the partial-equation signal and its diagnostic through the
+/// query's RETURN value keeps them consistent under salsa caching: the caller
+/// re-reads the memoized value, appends its warning fact, and re-inserts the
+/// edge into the freshly rebuilt `unscoreable_edges` set on every
 /// `model_ltm_variables` evaluation, whether the query body re-ran or not.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
@@ -218,9 +217,10 @@ pub enum ShapedLinkScore {
         var: Box<LtmSyntheticVar>,
         freeze_helpers: Vec<LtmSyntheticVar>,
     },
-    /// A `PartialEquationError` made the edge unscoreable; the warning is
-    /// accumulated and the caller records the edge in `unscoreable_edges`.
-    Unscoreable,
+    /// A `PartialEquationError` made the edge unscoreable. The caller records
+    /// the edge in `unscoreable_edges` and appends this pure warning fact to
+    /// the owning model's ordered diagnostic facts.
+    Unscoreable(crate::db::Diagnostic),
     /// No variable for benign structural reasons; not an unscoreable edge.
     NoVariable,
 }
@@ -401,8 +401,9 @@ pub fn link_score_equation_text_shaped<'db>(
         let err = crate::ltm_augment::PartialEquationError::new(
             "<test-forced partial-equation failure (GH #780)>",
         );
-        super::emit_ltm_partial_equation_warning(db, model, &var_name, &err);
-        return ShapedLinkScore::Unscoreable;
+        return ShapedLinkScore::Unscoreable(super::ltm_partial_equation_warning(
+            db, model, &var_name, from_name, to_name, &err,
+        ));
     }
 
     // The generator returns the equation already tagged with the target's
@@ -443,8 +444,9 @@ pub fn link_score_equation_text_shaped<'db>(
     ) {
         Ok(eqn) => eqn,
         Err(err) => {
-            super::emit_ltm_partial_equation_warning(db, model, &var_name, &err);
-            return ShapedLinkScore::Unscoreable;
+            return ShapedLinkScore::Unscoreable(super::ltm_partial_equation_warning(
+                db, model, &var_name, from_name, to_name, &err,
+            ));
         }
     };
 
@@ -938,29 +940,50 @@ fn lower_ltm_variable(
 /// `Scalar` equation gets 1 slot; an `ApplyToAll`/`Arrayed` equation
 /// gets `product(dim_lengths)` slots and is compiled with the A2A /
 /// per-element expansion the compiler applies to those variants.
+pub(crate) struct LtmFragmentInput<'db> {
+    input: FragmentInput<'db>,
+    dependency_targets: BTreeSet<crate::db::DepTarget>,
+}
+
+impl<'db> std::ops::Deref for LtmFragmentInput<'db> {
+    type Target = FragmentInput<'db>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.input
+    }
+}
+
 pub(crate) fn ltm_fragment_input<'db>(
     db: &'db dyn Db,
     var_name: &str,
     equation: &LtmEquation,
     model: SourceModel,
     project: SourceProject,
-) -> Result<FragmentInput<'db>, String> {
+) -> Result<LtmFragmentInput<'db>, Vec<crate::db::Diagnostic>> {
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
 
     let model_var_names = super::ltm_model_var_names(db, model, project);
 
     let parsed = parse_ltm_equation(var_name, equation, dim_context, Some(model_var_names));
-    if let Some(errs) = parsed.variable.equation_errors()
-        && !errs.is_empty()
-    {
-        return Err(format!(
-            "the generated equation did not parse: {}",
-            errs.iter()
-                .map(|e| format!("{:?} at {}..{}", e.code, e.start, e.end))
-                .collect::<Vec<_>>()
-                .join("; ")
-        ));
+    if parsed.variable.has_fatal_diagnostics() {
+        let arm_diagnostics: Vec<_> = equation
+            .arm_parse_errors_with_elements()
+            .into_iter()
+            .map(|(element, error)| {
+                let diagnostic =
+                    crate::db::Diagnostic::equation(error, crate::db::DiagnosticSeverity::Warning);
+                match element {
+                    Some(element) => diagnostic.with_element(element),
+                    None => diagnostic,
+                }
+            })
+            .collect();
+        return Err(if arm_diagnostics.is_empty() {
+            parsed.variable.diagnostics.clone()
+        } else {
+            arm_diagnostics
+        });
     }
 
     // `lower_ltm_variable` threads the dependencies (model variables and
@@ -1046,15 +1069,18 @@ pub(crate) fn ltm_fragment_input<'db>(
 
     // This variable is lowered from the transient synthesized equation above;
     // no per-variable memo owns it, so the input must carry its Arc.
-    Ok(FragmentInput::new(
-        std::borrow::Cow::Owned(std::sync::Arc::new(lowered)),
-        deps,
-        tables,
-        BTreeSet::new(),
-        Ident::new(model.name(db)),
-        converted_dims,
-        dim_context,
-    ))
+    Ok(LtmFragmentInput {
+        input: FragmentInput::new(
+            std::borrow::Cow::Owned(std::sync::Arc::new(lowered)),
+            deps,
+            tables,
+            BTreeSet::new(),
+            Ident::new(model.name(db)),
+            converted_dims,
+            dim_context,
+        ),
+        dependency_targets: dep_targets,
+    })
 }
 
 /// Compile an arbitrary LTM `Equation` to symbolic bytecodes: its
@@ -1064,21 +1090,18 @@ pub(crate) fn ltm_fragment_input<'db>(
 /// Shared implementation used by `compile_ltm_var_fragment` (link scores)
 /// and the loop/relative score compilation in `assemble_module`.
 ///
-/// `why`, when supplied, receives a human-readable reason on failure. The
-/// three ways this function can fail -- a parse error in the generated text,
-/// a lowering `Err`, and codegen declining to emit -- otherwise all collapse
-/// into the same `None`/`flow_bytecodes: None`, so a caller reporting the
-/// failure could say only *that* it happened. That cost was concrete: ~1,600
-/// failures on one real model with no way to tell which construct was
-/// responsible short of instrumenting this function by hand. Callers that only
-/// want the fragment pass `None` and pay nothing.
+/// `diagnostics`, when supplied, receives the original typed failures in
+/// producer order. Parse and lowering codes, spans, module paths and raw detail
+/// remain intact; codegen refusals, which expose only a reason, become assembly
+/// diagnostics. Callers that only want the fragment pass `None` and pay
+/// nothing.
 pub(crate) fn compile_ltm_equation_fragment(
     db: &dyn Db,
     var_name: &str,
     equation: &LtmEquation,
     model: SourceModel,
     project: SourceProject,
-    mut why: Option<&mut Option<String>>,
+    mut diagnostics: Option<&mut Vec<crate::db::Diagnostic>>,
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::CompiledVarFragment;
 
@@ -1087,9 +1110,9 @@ pub(crate) fn compile_ltm_equation_fragment(
 
     let input = match ltm_fragment_input(db, var_name, equation, model, project) {
         Ok(input) => input,
-        Err(reason) => {
-            if let Some(slot) = why.as_deref_mut() {
-                *slot = Some(reason);
+        Err(failures) => {
+            if let Some(output) = diagnostics.as_deref_mut() {
+                extend_ltm_failures(output, failures, model.name(db), var_name, None);
             }
             return None;
         }
@@ -1098,15 +1121,24 @@ pub(crate) fn compile_ltm_equation_fragment(
     // LTM vars are always flow-phase only (scalar auxes, not stocks)
     let flow_bytecodes = match lower_fragment(&input, false) {
         Ok(var_result) => {
-            if why.is_some() {
+            if diagnostics.is_some() {
                 match crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting(
                     &input.emit_ctx(),
                     &var_result.ast,
                 ) {
                     Ok(bytecodes) => Some(bytecodes),
                     Err(err) => {
-                        if let Some(slot) = why.as_deref_mut() {
-                            *slot = Some(err);
+                        if let Some(output) = diagnostics.as_deref_mut() {
+                            extend_ltm_failures(
+                                output,
+                                [crate::db::Diagnostic::assembly(
+                                    err,
+                                    crate::db::DiagnosticSeverity::Warning,
+                                )],
+                                model.name(db),
+                                var_name,
+                                None,
+                            );
                         }
                         None
                     }
@@ -1116,8 +1148,14 @@ pub(crate) fn compile_ltm_equation_fragment(
             }
         }
         Err(err) => {
-            if let Some(slot) = why {
-                *slot = Some(lowering_failure_reason(&input, &err));
+            if let Some(output) = diagnostics {
+                extend_ltm_failures(
+                    output,
+                    ltm_lowering_diagnostics(&input, &err),
+                    model.name(db),
+                    var_name,
+                    None,
+                );
             }
             None
         }
@@ -1136,29 +1174,53 @@ pub(crate) fn compile_ltm_equation_fragment(
     })
 }
 
-/// The `why` text for a phase that `lower_fragment` refused.
-///
-/// A lowering `Err` of `empty_equation` is usually a MASK: the variable
-/// reached lowering with no AST because the earlier scope-lowering rejected
-/// the equation and left `ast: None`. Report that upstream rejection when it
-/// is there, since "empty equation" describes a formula that was printed in
-/// full.
-fn lowering_failure_reason(input: &FragmentInput<'_>, err: &crate::common::Error) -> String {
-    let lowered_errs = input.target.equation_errors().unwrap_or_default();
-    if lowered_errs.is_empty() {
-        format!("could not be lowered: {err}")
+/// Preserve the raising-stage diagnostics for a phase `lower_fragment`
+/// refused. An empty AST is commonly the consequence of an earlier scoped
+/// lowering error, so those diagnostics take precedence over the derivative
+/// `EmptyEquation` error.
+fn ltm_lowering_diagnostics(
+    input: &LtmFragmentInput<'_>,
+    err: &crate::common::Error,
+) -> Vec<crate::db::Diagnostic> {
+    let lowered_diagnostics: Vec<_> = input
+        .target
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == crate::db::DiagnosticSeverity::Error)
+        .cloned()
+        .collect();
+    if lowered_diagnostics.is_empty() {
+        let dependency_targets: Vec<_> = input.dependency_targets.iter().collect();
+        vec![crate::db::fragment_compile::fragment_lowering_diagnostic(
+            err,
+            input.target.as_ref(),
+            &dependency_targets,
+        )]
     } else {
-        format!(
-            "could not be lowered: {}",
-            lowered_errs
-                .iter()
-                .map(|e| match &e.details {
-                    Some(reason) => format!("{:?} at {}..{}: {reason}", e.code, e.start, e.end),
-                    None => format!("{:?} at {}..{}", e.code, e.start, e.end),
-                })
-                .collect::<Vec<_>>()
-                .join("; ")
-        )
+        lowered_diagnostics
+    }
+}
+
+/// Append failures in first-producer order while collapsing only byte-for-byte
+/// identical payloads. `Diagnostic` equality includes source identity, element,
+/// module path, category, code, span, related sources and raw detail, so two
+/// affected slots or instances cannot collapse accidentally.
+fn extend_ltm_failures(
+    output: &mut Vec<crate::db::Diagnostic>,
+    failures: impl IntoIterator<Item = crate::db::Diagnostic>,
+    model: &str,
+    variable: &str,
+    owner: Option<&str>,
+) {
+    for diagnostic in failures {
+        let mut diagnostic = diagnostic.with_context(model.to_string(), Some(variable.to_string()));
+        if let Some(owner) = owner {
+            diagnostic = diagnostic.with_owner(owner.to_string());
+        }
+        diagnostic.severity = crate::db::DiagnosticSeverity::Warning;
+        if !output.contains(&diagnostic) {
+            output.push(diagnostic);
+        }
     }
 }
 
@@ -1405,7 +1467,7 @@ impl Drop for LtmFragmentFailureGuard {
 
 /// Salsa-tracked diagnostic pass that compiles every LTM synthetic
 /// variable -- and every LTM *implicit helper* (GH #741) -- the way
-/// `assemble_module` does and emits a `Warning` for each one whose
+/// `assemble_module` does and returns a `Warning` fact for each one whose
 /// fragment fails to compile.
 ///
 /// Why this exists: `assemble_module` silently drops a synthetic
@@ -1426,12 +1488,11 @@ impl Drop for LtmFragmentFailureGuard {
 /// every `ltm_enabled` model that hits a single bad fragment. This
 /// mirrors the auto-flip-to-discovery warning in `model_ltm_variables`.
 ///
-/// `model_all_diagnostics` drives this when `ltm_enabled`, so the
-/// warning reaches `collect_all_diagnostics` exactly when the auto-flip
-/// warning does. (GH #466 tracks the separate plumbing gap: the
-/// diagnostic-collection FFI paths leave `ltm_enabled` false by default,
-/// so neither this warning nor the auto-flip warning reaches
-/// `simlin_project_get_errors` today.)
+/// `model_all_diagnostics` drives this when `ltm_enabled` and emits the returned
+/// facts together with `model_ltm_variables`' own facts. Public diagnostic
+/// adapters temporarily restore a project's latched LTM request while
+/// collecting, so the warnings are visible without making LTM part of
+/// intrinsic project compilability.
 ///
 /// Only the layout-independent compile failure is reported here. A
 /// fragment that compiles but whose variable references do not resolve
@@ -1439,12 +1500,15 @@ impl Drop for LtmFragmentFailureGuard {
 /// (`assemble_module`'s `fragment_vars_in_layout` drop), where the root
 /// model emits an equivalent fragment under qualified names -- that drop
 /// is intentionally left silent.
-#[salsa::tracked]
-pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: SourceProject) {
-    use salsa::Accumulator;
+#[salsa::tracked(returns(ref))]
+pub fn model_ltm_fragment_diagnostics(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> Vec<crate::db::Diagnostic> {
+    use crate::db::{Diagnostic, DiagnosticSeverity};
 
-    use crate::db::{CompilationDiagnostic, Diagnostic, DiagnosticError, DiagnosticSeverity};
-
+    let mut diagnostics = Vec::new();
     let ltm_vars = model_ltm_variables(db, model, project);
     for (index, ltm_var) in ltm_vars.vars.iter().enumerate() {
         // Through the memoized per-index query, so this pass READS assembly's
@@ -1460,47 +1524,55 @@ pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: 
         if compiled_ok {
             continue;
         }
-        // Recover WHY. `compile_ltm_synthetic_fragment` discards the reason
-        // (it has three failure legs and one `None`), so re-run the direct
-        // compile with the reason slot wired up. For every variable that took
+        // Recover the typed failure payload. `compile_ltm_synthetic_fragment`
+        // returns only the fragment, so re-run the direct compile with its
+        // diagnostic output wired up. For every variable that took
         // the `compile_direct` branch above -- which is every element-pinned
         // equation, i.e. all of the arrayed-model failures this was written
         // for -- that is the identical call. For one that took the
         // salsa-cached `(from, to)` branch the re-derived equation can differ,
         // so the reason is reported as indicative rather than as the failure.
-        let mut reason: Option<String> = None;
+        let mut failures = Vec::new();
         let direct_agrees = compile_ltm_equation_fragment(
             db,
             &ltm_var.name,
             &ltm_var.equation,
             model,
             project,
-            Some(&mut reason),
+            Some(&mut failures),
         )
         .is_none_or(|r| r.fragment.flow_bytecodes.is_none());
-        let detail = match (&reason, direct_agrees) {
-            (Some(r), true) => format!(" Reason: {r}."),
-            (Some(r), false) => format!(
-                " Reason (from recompiling its own equation, which DOES compile -- \
-                 the cached re-derived equation is what failed): {r}."
-            ),
-            (None, _) => String::new(),
-        };
-        let msg = format!(
+        let base = format!(
             "LTM synthetic variable '{}' failed to compile; it keeps a \
              layout slot but no bytecode, so it evaluates to a constant 0. \
              Any loop or link score derived from it is silently degraded. \
-             This usually means the LTM augmentation layer emitted an \
-             equation the compiler rejected.{}",
-            ltm_var.name, detail,
+             This usually means the LTM augmentation layer emitted an equation \
+             the compiler rejected.",
+            ltm_var.name,
         );
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: Some(ltm_var.name.clone()),
-            error: DiagnosticError::Assembly(msg),
-            severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
+        if failures.is_empty() {
+            diagnostics.push(
+                Diagnostic::assembly(base, DiagnosticSeverity::Warning)
+                    .with_context(model.name(db).clone(), Some(ltm_var.name.clone())),
+            );
+        } else {
+            for diagnostic in failures {
+                let reason = diagnostic.reason().map(|reason| {
+                    if direct_agrees {
+                        format!(" Reason: {reason}.")
+                    } else {
+                        format!(
+                            " Reason (from recompiling its own equation; the cached re-derived \
+                             equation is what failed): {reason}."
+                        )
+                    }
+                });
+                diagnostics.push(
+                    diagnostic
+                        .with_display_details(format!("{base}{}", reason.unwrap_or_default())),
+                );
+            }
+        }
     }
 
     // GH #741: probe the LTM implicit helpers the same way. `assemble_module`
@@ -1531,20 +1603,20 @@ pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: 
     // the assembly loop.
     let ltm_implicit = model_ltm_implicit_var_info(db, model, project);
     if ltm_implicit.is_empty() {
-        return;
+        return diagnostics;
     }
     let mut implicit_names: Vec<&String> = ltm_implicit.keys().collect();
     implicit_names.sort();
     for im_name in implicit_names {
         let meta = &ltm_implicit[im_name];
-        let mut helper_reason: Option<String> = None;
+        let mut helper_failures = Vec::new();
         let fragment = compile_ltm_implicit_var_fragment(
             db,
             meta,
             model,
             project,
             &[],
-            Some(&mut helper_reason),
+            Some(&mut helper_failures),
         );
         // Every phase the helper's value consumers require must have produced
         // bytecode:
@@ -1559,26 +1631,33 @@ pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: 
         if compiled_ok {
             continue;
         }
-        let helper_detail = match &helper_reason {
-            Some(r) => format!(" Reason: {r}."),
-            None => String::new(),
-        };
-        let msg = format!(
+        let base = format!(
             "LTM implicit helper '{}' (synthesized while parsing LTM variable \
              '{}') failed to compile; it keeps a layout slot but no bytecode, \
              so it evaluates to a constant 0. Every link or loop score that \
              reads it is silently degraded. This usually means the LTM \
-             augmentation layer emitted an equation the compiler rejected.{}",
-            im_name, meta.ltm_parent_name, helper_detail,
+             augmentation layer emitted an equation the compiler rejected.",
+            im_name, meta.ltm_parent_name,
         );
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: Some(im_name.clone()),
-            error: DiagnosticError::Assembly(msg),
-            severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
+        if helper_failures.is_empty() {
+            diagnostics.push(
+                Diagnostic::assembly(base, DiagnosticSeverity::Warning)
+                    .with_context(model.name(db).clone(), Some(im_name.clone()))
+                    .with_owner(meta.ltm_parent_name.clone()),
+            );
+        } else {
+            for diagnostic in helper_failures {
+                let reason = diagnostic
+                    .reason()
+                    .map(|reason| format!(" Reason: {reason}."));
+                diagnostics.push(
+                    diagnostic
+                        .with_display_details(format!("{base}{}", reason.unwrap_or_default())),
+                );
+            }
+        }
     }
+    diagnostics
 }
 
 /// Whether an LTM helper emitted its value-bearing phase and every phase a
@@ -1612,16 +1691,15 @@ pub(super) fn ltm_implicit_fragment_compiled_ok(
 /// variables its expression reads (including `module·port` outputs, which
 /// resolve through the module's shape). Names in the sibling LTM-variable and
 /// LTM-helper namespaces retain their declared shapes; a name absent from every
-/// namespace is left unresolved so lowering fails loudly. `None` when the
-/// helper's equation does not parse (the diagnostic pass reports the missing
-/// bytecode).
+/// namespace is left unresolved so lowering fails loudly. A rejected helper
+/// returns its original typed diagnostics to the optional reporting path.
 pub(crate) fn ltm_implicit_fragment_input<'db>(
     db: &'db dyn Db,
     meta: &LtmImplicitVarMeta,
     model: SourceModel,
     project: SourceProject,
     module_input_names: &[String],
-) -> Option<FragmentInput<'db>> {
+) -> Result<LtmFragmentInput<'db>, Vec<crate::db::Diagnostic>> {
     let implicit_dm_var = &meta.variable;
     let implicit_name = canonicalize(implicit_dm_var.ident()).into_owned();
     let var_ident: Ident<Canonical> = Ident::new(&implicit_name);
@@ -1631,20 +1709,26 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
 
     // Every helper carries enough parsed data to build its stage directly.
     let parsed_implicit = implicit_dm_var.parsed_variable(dim_context);
-    if parsed_implicit
-        .equation_errors()
-        .is_some_and(|e| !e.is_empty())
-    {
-        return None;
+    if parsed_implicit.has_fatal_diagnostics() {
+        return Err(parsed_implicit.diagnostics.clone());
     }
 
     let mut deps: IdentMap<Ident<Canonical>, DepShape> = Default::default();
     let mut tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
+    let dependency_targets;
 
     let lowered = if meta.is_module {
         // A module-typed helper is its wiring (a module has no equation); its
         // dependencies are the sources its inputs read.
-        let dm_module = implicit_dm_var.module()?;
+        let Some(dm_module) = implicit_dm_var.module() else {
+            return Err(vec![crate::db::Diagnostic::assembly(
+                format!(
+                    "LTM helper '{implicit_name}' is marked as a module without module metadata"
+                ),
+                crate::db::DiagnosticSeverity::Warning,
+            )]);
+        };
+        let mut module_targets = BTreeSet::new();
         deps.insert(
             var_ident.clone(),
             module_dep_shape(db, project, dm_module.model_name()),
@@ -1658,6 +1742,7 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
                 &Ident::new(&mr.src),
                 |head| source_implicit_module_model_name(db, model, project, head),
             );
+            module_targets.insert(target.clone());
             let head = target.local_node().as_str();
             let qualified = !target.module_path.is_empty();
             if head == implicit_name || is_implicit_global(head) || deps.contains_key(head) {
@@ -1671,7 +1756,7 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
             }
             deps.insert(Ident::new(head), shape);
         }
-        crate::variable::Variable::module_instance(
+        let lowered = crate::variable::Variable::module_instance(
             var_ident,
             Ident::new(dm_module.model_name()),
             build_module_inputs(
@@ -1682,7 +1767,9 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
                     .iter()
                     .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
             ),
-        )
+        );
+        dependency_targets = module_targets;
+        lowered
     } else {
         // Same dependency-aware lowering scope as `ltm_fragment_input` (GH
         // #738): a synthesized helper aux whose equation embeds a reducer over
@@ -1694,6 +1781,7 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
             dep_targets,
             referenced_tables,
         } = lower_ltm_variable(db, &parsed_implicit, &[], model, project);
+        dependency_targets = dep_targets.clone();
         // An arrayed capture helper occupies one slot per element.
         deps.insert(
             var_ident,
@@ -1749,15 +1837,18 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
 
     // LTM helper metadata and its lowered value are local to this constructor,
     // unlike ordinary parse helpers backed by `lowered_implicit_variable`.
-    Some(FragmentInput::new(
-        std::borrow::Cow::Owned(std::sync::Arc::new(lowered)),
-        deps,
-        tables,
-        canonical_module_input_set(module_input_names),
-        Ident::new(model.name(db)),
-        converted_dims,
-        dim_context,
-    ))
+    Ok(LtmFragmentInput {
+        input: FragmentInput::new(
+            std::borrow::Cow::Owned(std::sync::Arc::new(lowered)),
+            deps,
+            tables,
+            canonical_module_input_set(module_input_names),
+            Ident::new(model.name(db)),
+            converted_dims,
+            dim_context,
+        ),
+        dependency_targets,
+    })
 }
 
 /// Compile a single implicit variable from an LTM equation to symbolic
@@ -1776,7 +1867,7 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
     model: SourceModel,
     project: SourceProject,
     module_input_names: &[String],
-    mut why: Option<&mut Option<String>>,
+    mut diagnostics: Option<&mut Vec<crate::db::Diagnostic>>,
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
 
@@ -1801,91 +1892,82 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         }
     }
 
-    let input = ltm_implicit_fragment_input(db, meta, model, project, module_input_names)?;
-    let emit_ctx = input.emit_ctx();
-    let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
-        compile_phase_to_per_var_bytecodes(&emit_ctx, exprs)
+    let input = match ltm_implicit_fragment_input(db, meta, model, project, module_input_names) {
+        Ok(input) => input,
+        Err(failures) => {
+            if let Some(output) = diagnostics.as_deref_mut() {
+                extend_ltm_failures(
+                    output,
+                    failures,
+                    model.name(db),
+                    &implicit_name,
+                    Some(&meta.ltm_parent_name),
+                );
+            }
+            return None;
+        }
     };
-
-    let capture = meta.variable.capture();
-    let capture_needs_initials = capture.is_some_and(|capture| capture.kind().needs_initials());
-    let initial_bytecodes = if capture.is_none_or(|capture| capture.kind().needs_initials()) {
-        match lower_fragment(&input, true) {
-            Ok(var_result) if capture_needs_initials && why.is_some() => {
+    let emit_ctx = input.emit_ctx();
+    let mut compile_phase = |is_initial: bool, report_failure: bool| -> Option<PerVarBytecodes> {
+        match lower_fragment(&input, is_initial) {
+            Ok(var_result) if report_failure && diagnostics.is_some() => {
                 match crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting(
                     &emit_ctx,
                     &var_result.ast,
                 ) {
                     Ok(bytecodes) => Some(bytecodes),
                     Err(err) => {
-                        if let Some(slot) = why.as_deref_mut()
-                            && slot.is_none()
-                        {
-                            *slot = Some(err);
+                        if let Some(output) = diagnostics.as_deref_mut() {
+                            extend_ltm_failures(
+                                output,
+                                [crate::db::Diagnostic::assembly(
+                                    err,
+                                    crate::db::DiagnosticSeverity::Warning,
+                                )],
+                                model.name(db),
+                                &implicit_name,
+                                Some(&meta.ltm_parent_name),
+                            );
                         }
                         None
                     }
                 }
             }
-            Ok(var_result) => compile_phase(&var_result.ast),
+            Ok(var_result) => compile_phase_to_per_var_bytecodes(&emit_ctx, &var_result.ast),
             Err(err) => {
-                if capture_needs_initials
-                    && let Some(slot) = why.as_deref_mut()
-                    && slot.is_none()
-                {
-                    *slot = Some(lowering_failure_reason(&input, &err));
+                if report_failure && let Some(output) = diagnostics.as_deref_mut() {
+                    extend_ltm_failures(
+                        output,
+                        ltm_lowering_diagnostics(&input, &err),
+                        model.name(db),
+                        &implicit_name,
+                        Some(&meta.ltm_parent_name),
+                    );
                 }
                 None
             }
         }
+    };
+
+    let capture = meta.variable.capture();
+    let capture_needs_initials = capture.is_some_and(|capture| capture.kind().needs_initials());
+    let initial_bytecodes = if capture.is_none_or(|capture| capture.kind().needs_initials()) {
+        compile_phase(true, capture_needs_initials)
     } else {
         None
     };
 
-    // Capture the first required-phase failure: that is what
-    // `model_ltm_fragment_diagnostics` gates on, and any missing required
-    // phase leaves one of the helper's snapshot consumers reading zero.
+    // Every required-phase failure is retained. Identical diagnostics from a
+    // combined capture's initial and flow phases collapse in producer order.
     let flow_bytecodes =
         if !meta.is_stock && capture.is_none_or(|capture| capture.kind().needs_flows()) {
-            match lower_fragment(&input, false) {
-                Ok(var_result) => {
-                    if why.is_some() {
-                        match crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting(
-                            &emit_ctx,
-                            &var_result.ast,
-                        ) {
-                            Ok(bytecodes) => Some(bytecodes),
-                            Err(err) => {
-                                if let Some(slot) = why.as_deref_mut()
-                                    && slot.is_none()
-                                {
-                                    *slot = Some(err);
-                                }
-                                None
-                            }
-                        }
-                    } else {
-                        compile_phase(&var_result.ast)
-                    }
-                }
-                Err(err) => {
-                    if let Some(slot) = why
-                        && slot.is_none()
-                    {
-                        *slot = Some(lowering_failure_reason(&input, &err));
-                    }
-                    None
-                }
-            }
+            compile_phase(false, true)
         } else {
             None
         };
 
     let stock_bytecodes = if meta.is_stock || meta.is_module {
-        match lower_fragment(&input, false) {
-            Ok(var_result) => compile_phase(&var_result.ast),
-            Err(_) => None,
-        }
+        compile_phase(false, true)
     } else {
         None
     };

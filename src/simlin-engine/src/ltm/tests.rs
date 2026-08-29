@@ -481,8 +481,7 @@ fn test_polarity_div_denominator_value_sign_guards_numerator_polarity() {
         ident: ttc.clone(),
         units: None,
         eqn: Some(crate::datamodel::Equation::Scalar("5".to_string())),
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: crate::variable::VarKind::Aux {
             ast: Some(Ast::Scalar(cnst(5.0))),
             init_ast: None,
@@ -922,8 +921,7 @@ fn gf_var_for_test(
         ident: Ident::new(ident),
         units: None,
         eqn: None,
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Aux {
             ast: Some(Ast::ApplyToAll(
                 dims,
@@ -3449,8 +3447,7 @@ fn enrich_with_module_stocks_falls_back_to_all_stocks_on_truncation() {
         ident: Ident::new("mod_node"),
         units: None,
         eqn: None,
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Module {
             model_name: Ident::new("sub"),
             inputs: vec![ModuleInput {

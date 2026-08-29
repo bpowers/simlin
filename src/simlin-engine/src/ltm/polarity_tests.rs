@@ -85,8 +85,7 @@ fn test_provable_value_sign() {
         ident: Ident::new(ident),
         units: None,
         eqn: None,
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Aux {
             ast: Some(Ast::Scalar(eq)),
             init_ast: None,

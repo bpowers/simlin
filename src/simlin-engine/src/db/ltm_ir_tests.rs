@@ -2036,9 +2036,7 @@ mod front_door_tests {
     /// both directions on one fixture, so neither half can pass vacuously.
     #[test]
     fn refusal_emits_no_ltm_vars_and_warns_through_the_diagnostic_surface() {
-        use crate::db::{
-            DiagnosticError, DiagnosticSeverity, collect_model_diagnostics, model_ltm_variables,
-        };
+        use crate::db::{DiagnosticSeverity, model_ltm_variables};
         use salsa::Setter;
 
         // A stock/flow feedback loop whose flow equation is a 3-argument `MEAN`:
@@ -2051,17 +2049,14 @@ mod front_door_tests {
                 .scalar_aux("boost", "2")
         };
 
-        let width_warnings = |db: &SimlinDb, model, project| -> Vec<String> {
-            collect_model_diagnostics(db, model, project)
+        let width_warnings = |db: &SimlinDb, model_name: &str, project| -> Vec<String> {
+            crate::db::collect_all_diagnostics(db, project)
                 .into_iter()
-                .filter(|d| d.severity == DiagnosticSeverity::Warning)
-                .filter_map(|d| match d.error {
-                    DiagnosticError::Assembly(msg)
-                        if msg.contains("LTM analysis was skipped for this model") =>
-                    {
-                        Some(msg)
-                    }
-                    _ => None,
+                .filter(|d| d.model == model_name && d.severity == DiagnosticSeverity::Warning)
+                .filter_map(|d| {
+                    d.assembly_reason()
+                        .filter(|msg| msg.contains("LTM analysis was skipped for this model"))
+                        .map(str::to_owned)
                 })
                 .collect()
         };
@@ -2080,25 +2075,40 @@ mod front_door_tests {
                 "the control fixture must be scoreable, or the refusal below proves nothing"
             );
             assert!(
-                width_warnings(&db, model, project).is_empty(),
+                width_warnings(&db, "main", project).is_empty(),
                 "no width warning at the production limit"
             );
         }
 
         // Refusal: no LTM variable at all, plus a Warning naming the variable.
         {
+            use crate::testutils::{x_aux, x_model, x_module};
+
             let _guard = SiteChildrenLimitGuard::new(2);
+            let mut datamodel = fixture().build_datamodel();
+            let mut child = datamodel.models.pop().expect("one warning model");
+            child.name = "wide".to_string();
+            datamodel.models = vec![
+                x_model(
+                    "main",
+                    vec![
+                        x_module("wide", &[], None),
+                        x_aux("reader", "wide·level", None),
+                    ],
+                ),
+                child,
+            ];
             let mut db = SimlinDb::default();
             let (project, model) = {
-                let sync = sync_from_datamodel(&db, &fixture().build_datamodel());
-                (sync.project, sync.models["main"].source)
+                let sync = sync_from_datamodel(&db, &datamodel);
+                (sync.project, sync.models["wide"].source)
             };
             project.set_ltm_enabled(&mut db).to(true);
             assert!(
                 model_ltm_variables(&db, model, project).vars.is_empty(),
                 "a refused model must emit no link, loop, or pathway score"
             );
-            let warnings = width_warnings(&db, model, project);
+            let warnings = width_warnings(&db, "wide", project);
             assert_eq!(
                 warnings.len(),
                 1,
@@ -2117,6 +2127,11 @@ mod front_door_tests {
                 "the warning must describe the axis that actually fired: {}",
                 warnings[0]
             );
+
+            project
+                .set_name(&mut db)
+                .to("wide_nested_renamed".to_string());
+            assert_eq!(width_warnings(&db, "wide", project), warnings);
         }
     }
 

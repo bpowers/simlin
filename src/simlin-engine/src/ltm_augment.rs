@@ -2080,7 +2080,7 @@ pub(crate) fn generate_iterated_feeder_to_agg_equation(
 /// agg -- and hence no repeated-dim feeder slot -- ever reaches here. The bail
 /// is retained as a structural guard in case a future change re-admits the
 /// shape upstream; the live square-source landing is now the loud
-/// cartesian-branch skip (`emit_unscoreable_duplicated_dim_source_warning`).
+/// cartesian-branch duplicated-dimension-source warning and skip.
 fn pin_iterated_dim_indices(expr: Expr0, dims: &[String], parts: &[String]) -> Option<Expr0> {
     /// The unique position of `name` in `dims`: `None` for an ambiguous
     /// (repeated) dim name, `Some(None)` for a name not in `dims` (left

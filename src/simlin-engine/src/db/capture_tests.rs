@@ -583,18 +583,12 @@ fn a_capture_builds_the_variable_parsing_its_printed_equation_built() {
             );
             assert_eq!(built.eqn, reparsed.eqn, "{what}: `{eqn}` -- eqn of {id}");
             assert_eq!(
-                built.errors, reparsed.errors,
-                "{what}: `{eqn}` -- equation errors of {id}"
+                built.diagnostics, reparsed.diagnostics,
+                "{what}: `{eqn}` -- diagnostics of {id}"
             );
             assert_eq!(
                 built.units, reparsed.units,
                 "{what}: `{eqn}` -- units of {id}"
-            );
-            assert!(
-                built.unit_errors == reparsed.unit_errors,
-                "{what}: `{eqn}` -- unit errors of {id} ({} vs {})",
-                built.unit_errors.len(),
-                reparsed.unit_errors.len()
             );
             // The bodies first, printed, because that is the readable failure;
             // then the WHOLE `VarKind`, which additionally covers `tables`,

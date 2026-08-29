@@ -15,17 +15,15 @@
 //! salsa dependencies are exactly the names it looks up.
 //!
 //! Because a plain function cannot accumulate salsa diagnostics, the
-//! diagnostics the constructor would emit are returned **as data**
-//! (`ExplicitFragment`) and replayed by the tracked caller
-//! (`compile_var_fragment`). There are six distinct diagnostic outcomes:
+//! authoritative payloads are returned beside its optional input and emitted
+//! by the tracked caller (`compile_var_fragment`). There are six distinct
+//! outcomes:
 //!
 //! * a malformed unit-string error is *non-fatal* -- it is recorded but
-//!   compilation of the variable continues (carried in `unit_diags`,
-//!   present in both variants);
+//!   compilation of the variable continues;
 //! * an equation parse error, an AST-lowering error, an unknown
 //!   dependency, and a graphical-function table-build error are each
-//!   *fatal* -- they abort this variable's compilation (folded into
-//!   `Fatal { fatal_diags }`, whole-variable `None` at the caller);
+//!   *fatal* -- they return no fragment input while retaining every diagnostic;
 //! * a per-phase lowering failure (`lower_fragment`'s `Err`) is
 //!   *phase-local* -- only that phase's bytecode is dropped while the other
 //!   phases still compile; the caller reports it per phase.
@@ -37,7 +35,7 @@ use crate::canonicalize;
 use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::fragment::{DepShape, FragmentInput};
 use crate::db::{
-    Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ImplicitVarMeta, ModuleInputSet,
+    Db, Diagnostic, DiagnosticCategory, DiagnosticSeverity, ImplicitVarMeta, ModuleInputSet,
     SourceModel, SourceProject, SourceVariable, SourceVariableKind, build_module_inputs,
     canonical_module_input_set, extract_tables_from_source_var, model_implicit_var_by_name,
     model_variable_by_name, module_dep_shape, module_input_prefix, parse_source_variable,
@@ -46,28 +44,11 @@ use crate::db::{
 };
 use crate::dimensions::{Dimension, DimensionsContext};
 
-/// Outcome of [`explicit_fragment_input`]: the fragment's input, or the
-/// diagnostics that stopped it.
-pub(crate) enum ExplicitFragment<'db> {
-    /// The variable failed at a fatal site (equation parse, AST lowering,
-    /// unknown dependency, or table build). `unit_diags` carries any
-    /// non-fatal malformed-unit diagnostics recorded before the fatal site
-    /// (replayed first, preserving emission order); `fatal_diags` carries
-    /// the fatal diagnostic(s). The caller accumulates both and returns
-    /// whole-variable `None`.
-    Fatal {
-        unit_diags: Vec<Diagnostic>,
-        fatal_diags: Vec<Diagnostic>,
-    },
-    /// The variable lowered to `Expr2` and every dependency resolved to a
-    /// shape. `unit_diags` carries any non-fatal malformed-unit diagnostics
-    /// (replayed, compilation continues). Boxed so the two variants are
-    /// close in size; a `FragmentInput` holds the lowered variable and its
-    /// maps inline.
-    Ready {
-        unit_diags: Vec<Diagnostic>,
-        input: Box<FragmentInput<'db>>,
-    },
+/// Result of preparing an explicit fragment. Diagnostics are in production
+/// emission order; `input == None` means one of them is fatal.
+pub(crate) struct ExplicitFragment<'db> {
+    pub diagnostics: Vec<Diagnostic>,
+    pub input: Option<Box<FragmentInput<'db>>>,
 }
 
 /// The four implicit globals lower to `LoadGlobalVar` at fixed absolute slots
@@ -289,21 +270,14 @@ pub(crate) fn explicit_fragment_input<'db>(
     let model_name = model.name(db);
     let parsed = parse_source_variable(db, var, project);
 
-    let diagnostic = |error: DiagnosticError| Diagnostic {
-        model: model_name.clone(),
-        variable: Some(var_ident.clone()),
-        error,
-        severity: DiagnosticSeverity::Error,
-    };
-
     // Unit definition errors are syntax errors in the unit string (e.g. "bad
     // units here!!!") recorded by the parse; they do not stop compilation.
-    let unit_diags: Vec<Diagnostic> = parsed
+    let unit_diagnostics: Vec<Diagnostic> = parsed
         .variable
-        .unit_errors()
-        .into_iter()
-        .flatten()
-        .map(|err| diagnostic(DiagnosticError::Unit(err)))
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.category == DiagnosticCategory::UnitDefinition)
+        .cloned()
         .collect();
 
     // Parse errors are fatal -- every one is accumulated before bailing out.
@@ -321,22 +295,35 @@ pub(crate) fn explicit_fragment_input<'db>(
     // surfaces. `flow_is_special_stock_driven` reads the owning stock's compat
     // through salsa inputs, so removing the `<conveyor>`/`<queue>` marker
     // invalidates this fragment and the `EmptyEquation` Error reappears.
-    if let Some(errors) = parsed.variable.equation_errors()
-        && !errors.is_empty()
-    {
+    let parse_errors: Vec<Diagnostic> = parsed
+        .variable
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.category != DiagnosticCategory::UnitDefinition)
+        .cloned()
+        .collect();
+    if !parse_errors.is_empty() {
         let suppress_empty = var.kind(db) == SourceVariableKind::Flow
-            && errors
+            && parse_errors
                 .iter()
-                .any(|e| e.code == crate::common::ErrorCode::EmptyEquation)
+                .any(|diagnostic| diagnostic.code == crate::common::ErrorCode::EmptyEquation)
             && flow_is_special_stock_driven(db, model, var_ident.clone());
-        let fatal_diags: Vec<Diagnostic> = errors
-            .iter()
-            .filter(|err| !(suppress_empty && err.code == crate::common::ErrorCode::EmptyEquation))
-            .map(|err| diagnostic(DiagnosticError::Equation(err.clone())))
+        let fatal_diagnostics: Vec<Diagnostic> = parse_errors
+            .into_iter()
+            .filter(|diagnostic| {
+                !(suppress_empty && diagnostic.code == crate::common::ErrorCode::EmptyEquation)
+            })
             .collect();
-        return ExplicitFragment::Fatal {
-            unit_diags,
-            fatal_diags,
+        // Even when every parse diagnostic is the marker-sanctioned empty
+        // equation, there is no source AST to compile. Stop preparation after
+        // suppressing those rows; continuing would make `lower_fragment`
+        // manufacture a second EmptyEquation diagnostic for the same flow.
+        return ExplicitFragment {
+            diagnostics: unit_diagnostics
+                .into_iter()
+                .chain(fatal_diagnostics)
+                .collect(),
+            input: None,
         };
     }
 
@@ -377,21 +364,27 @@ pub(crate) fn explicit_fragment_input<'db>(
                 let dep_name = dep.variable.as_str();
                 let dep_sv = resolve_var(dep_name)?;
                 crate::db::source_var_is_table_only(db, dep_sv).then(|| {
-                    diagnostic(DiagnosticError::Model(crate::common::Error::new(
-                        crate::common::ErrorKind::Model,
-                        crate::common::ErrorCode::LookupReferencedWithoutArgument,
-                        Some(format!(
-                            "'{dep_name}' is a lookup table and must be called with an \
+                    Diagnostic::engine(
+                        crate::common::Error::new(
+                            crate::common::ErrorKind::Model,
+                            crate::common::ErrorCode::LookupReferencedWithoutArgument,
+                            Some(format!(
+                                "'{dep_name}' is a lookup table and must be called with an \
                              argument, e.g. {dep_name}(x) or LOOKUP({dep_name}, x)"
-                        )),
-                    )))
+                            )),
+                        ),
+                        DiagnosticSeverity::Error,
+                    )
                 })
             })
             .collect();
         if !bare_table_diags.is_empty() {
-            return ExplicitFragment::Fatal {
-                unit_diags,
-                fatal_diags: bare_table_diags,
+            return ExplicitFragment {
+                diagnostics: unit_diagnostics
+                    .into_iter()
+                    .chain(bare_table_diags)
+                    .collect(),
+                input: None,
             };
         }
     }
@@ -427,15 +420,16 @@ pub(crate) fn explicit_fragment_input<'db>(
     // Errors introduced during AST lowering (e.g. `MismatchedDimensions` from
     // the Expr2/Expr3 lowering) land on the lowered variable, not the parsed
     // one, so they are checked separately.
-    if let Some(errors) = lowered.equation_errors()
-        && !errors.is_empty()
-    {
-        return ExplicitFragment::Fatal {
-            unit_diags,
-            fatal_diags: errors
-                .iter()
-                .map(|err| diagnostic(DiagnosticError::Equation(err.clone())))
-                .collect(),
+    let lowering_diags: Vec<Diagnostic> = lowered
+        .diagnostics
+        .iter()
+        .skip(parsed.variable.diagnostics.len())
+        .cloned()
+        .collect();
+    if !lowering_diags.is_empty() {
+        return ExplicitFragment {
+            diagnostics: unit_diagnostics.into_iter().chain(lowering_diags).collect(),
+            input: None,
         };
     }
 
@@ -490,16 +484,20 @@ pub(crate) fn explicit_fragment_input<'db>(
                     .ast()
                     .and_then(|ast| ast.get_var_loc(head))
                     .unwrap_or_default();
-                return ExplicitFragment::Fatal {
-                    unit_diags,
-                    fatal_diags: vec![diagnostic(DiagnosticError::Equation(
-                        crate::common::EquationError::detailed(
-                            crate::common::ErrorCode::UnknownDependency,
-                            loc.start,
-                            loc.end,
-                            format!("'{head}' is not a variable of model '{model_name}'"),
-                        ),
-                    ))],
+                return ExplicitFragment {
+                    diagnostics: unit_diagnostics
+                        .into_iter()
+                        .chain(std::iter::once(Diagnostic::equation(
+                            crate::common::EquationError::detailed(
+                                crate::common::ErrorCode::UnknownDependency,
+                                loc.start,
+                                loc.end,
+                                format!("'{head}' is not a variable of model '{model_name}'"),
+                            ),
+                            DiagnosticSeverity::Error,
+                        )))
+                        .collect(),
+                    input: None,
                 };
             }
         }
@@ -548,9 +546,15 @@ pub(crate) fn explicit_fragment_input<'db>(
                 tables.insert(self_ident, ts);
             }
             Err(table_err) => {
-                return ExplicitFragment::Fatal {
-                    unit_diags,
-                    fatal_diags: vec![diagnostic(DiagnosticError::Model(table_err))],
+                return ExplicitFragment {
+                    diagnostics: unit_diagnostics
+                        .into_iter()
+                        .chain(std::iter::once(Diagnostic::model(
+                            table_err,
+                            DiagnosticSeverity::Error,
+                        )))
+                        .collect(),
+                    input: None,
                 };
             }
             _ => {}
@@ -568,11 +572,11 @@ pub(crate) fn explicit_fragment_input<'db>(
         }
     }
 
-    ExplicitFragment::Ready {
-        unit_diags,
+    ExplicitFragment {
+        diagnostics: unit_diagnostics,
         // The salsa memo owns this Arc for at least the input's query-scoped
         // lifetime; borrowing it keeps compilation on that exact payload.
-        input: Box::new(FragmentInput::new(
+        input: Some(Box::new(FragmentInput::new(
             Cow::Borrowed(lowered),
             dep_shapes,
             tables,
@@ -580,6 +584,6 @@ pub(crate) fn explicit_fragment_input<'db>(
             Ident::new(model_name),
             converted_dims,
             dim_context,
-        )),
+        ))),
     }
 }

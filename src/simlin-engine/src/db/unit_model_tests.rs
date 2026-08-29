@@ -38,18 +38,14 @@ fn units_and_fragments_share_one_lowered_source_variable_memo() {
 
     let alpha = sync.models["main"].variables["alpha"].source;
     let lowered = lowered_source_variable(probed.db(), alpha, main, sync.project);
-    let fragment_input = match super::var_fragment::explicit_fragment_input(
-        probed.db(),
-        alpha,
-        main,
-        sync.project,
-        &[],
-    ) {
-        super::var_fragment::ExplicitFragment::Ready { input, .. } => input,
-        super::var_fragment::ExplicitFragment::Fatal { fatal_diags, .. } => {
-            panic!("production fragment input failed: {fatal_diags:?}")
-        }
-    };
+    let explicit =
+        super::var_fragment::explicit_fragment_input(probed.db(), alpha, main, sync.project, &[]);
+    let fragment_input = explicit.input.unwrap_or_else(|| {
+        panic!(
+            "production fragment input failed: {:?}",
+            explicit.diagnostics
+        )
+    });
     assert!(
         matches!(fragment_input.target, std::borrow::Cow::Borrowed(_)),
         "the explicit fragment must borrow, rather than clone, the lowering memo"
@@ -335,17 +331,16 @@ fn a_two_hop_unit_conflict_uses_the_transitive_per_variable_views() {
         ["main", "sub_a", "sub_c"]
     );
 
-    let diagnostics = super::units::check_model_units::accumulated::<CompilationDiagnostic>(
+    let diagnostics = super::units::check_model_units::accumulated::<Diagnostic>(
         &db,
         sync.models["main"].source,
         sync.project,
     );
     assert!(
-        diagnostics.iter().any(|diagnostic| matches!(
-            &diagnostic.0.error,
-            DiagnosticError::Model(error)
-                if error.code == crate::common::ErrorCode::UnitMismatch
-        )),
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == crate::common::ErrorCode::UnitMismatch
+                && diagnostic.category.is_unit()
+        }),
         "the widget/gadget conflict closes only through sub_a: {diagnostics:?}"
     );
 }
@@ -374,40 +369,21 @@ fn an_unknown_stdlib_prefixed_user_model_is_unit_checked() {
         !source_model_is_stdlib(&db, user_model),
         "an unknown suffix remains a user model after production sync"
     );
-    let diagnostics = super::units::check_model_units::accumulated::<CompilationDiagnostic>(
-        &db,
-        user_model,
-        sync.project,
-    );
+    let diagnostics =
+        super::units::check_model_units::accumulated::<Diagnostic>(&db, user_model, sync.project);
     assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| match &diagnostic.0.error {
-                DiagnosticError::Model(error) => {
-                    error.code == crate::common::ErrorCode::UnitMismatch
-                }
-                DiagnosticError::Unit(crate::common::UnitError::ConsistencyError(code, _, _)) => {
-                    *code == crate::common::ErrorCode::UnitMismatch
-                }
-                DiagnosticError::Unit(crate::common::UnitError::InferenceError {
-                    code, ..
-                }) => {
-                    *code == crate::common::ErrorCode::UnitMismatch
-                }
-                _ => false,
-            }),
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == crate::common::ErrorCode::UnitMismatch
+                && diagnostic.category.is_unit()
+        }),
         "the user model's widget/gadget mismatch must reach check_model_units: {diagnostics:?}"
     );
 
     let real_stdlib = sync.models["stdlib\u{205a}smth1"].source;
     assert!(source_model_is_stdlib(&db, real_stdlib));
     assert!(
-        super::units::check_model_units::accumulated::<CompilationDiagnostic>(
-            &db,
-            real_stdlib,
-            sync.project,
-        )
-        .is_empty(),
+        super::units::check_model_units::accumulated::<Diagnostic>(&db, real_stdlib, sync.project,)
+            .is_empty(),
         "a real generic stdlib template remains excluded from isolated unit checking"
     );
 }

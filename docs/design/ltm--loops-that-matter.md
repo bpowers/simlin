@@ -1633,10 +1633,12 @@ path silently collapsed the per-element `Equation::Arrayed` to the first
 slot's text, since `link_score_dimensions` returned `[]` for the disjoint
 edge.) If the target references the source via a *non-literal* index (a
 `DynamicIndex` site) the edge is not statically scoreable:
-`emit_unscoreable_disjoint_edge_warning` accumulates a `CompilationDiagnostic`
-`Warning` naming the edge, *no* link-score variable is emitted, and the caller
-does not fall through to the per-shape fallback (which would build the
-misleading scalarized stand-in).
+`unscoreable_disjoint_edge_warning` appends a structured `Diagnostic` fact at
+`Warning` severity naming the edge, *no* link-score variable is emitted, and
+the caller does not fall through to the per-shape fallback (which would build
+the misleading scalarized stand-in). Every edge-warning builder uses the same
+constructor, which records ordered `from, to` related sources independently of
+the message text.
 
 ### Loop Scores
 
@@ -1720,7 +1722,7 @@ model-wide loop-count budget (`MAX_CROSS_AGG_LOOPS = 256`, threaded as
 build the result: exhaustive's `recover_cross_agg_loops` extracts petals from
 Johnson's circuit strings (via `collect_agg_petals`) and turns each stitched
 sequence into a `Loop`, setting `LtmVariablesResult::agg_recovery_truncated` on
-clipping and accumulating a `Warning` (mirroring the auto-flip-to-discovery
+clipping and appending a `Warning` fact (mirroring the auto-flip-to-discovery
 gate), naming the truncated aggs; discovery's `discover_loops_with_graph`
 extracts petals from the discovered element paths, appends the stitched
 sequences back into `all_paths` (so they flow through the identical FoundLoop /
@@ -1986,8 +1988,8 @@ cases remain deliberate carve-outs:
    for the measurements. (The legacy per-loop relative-score equation synthesis
    compounded this with an O(P^2) text blowup; moving the normalization
    post-simulation -- divergence 6 below -- removed that factor from
-   augmentation cost.) Auto-flip emits a `CompilationDiagnostic` at
-   `Warning` severity so callers can surface the fallback to users.
+   augmentation cost.) Auto-flip emits a `Diagnostic` at `Warning` severity
+   so callers can surface the fallback to users.
 
    The node-count gates alone do not bound enumeration cost -- elementary-
    circuit count is super-exponential in SCC *density*, not node count (a

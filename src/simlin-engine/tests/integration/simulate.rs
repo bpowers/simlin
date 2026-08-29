@@ -4505,12 +4505,12 @@ fn compile_diags(mdl: &str) -> (bool, Vec<simlin_engine::db::Diagnostic>) {
 }
 
 fn diag_code(d: &simlin_engine::db::Diagnostic) -> Option<simlin_engine::common::ErrorCode> {
-    use simlin_engine::db::DiagnosticError;
-    match &d.error {
-        DiagnosticError::Equation(e) => Some(e.code),
-        DiagnosticError::Model(e) => Some(e.code),
-        _ => None,
-    }
+    use simlin_engine::db::DiagnosticCategory;
+    matches!(
+        d.category,
+        DiagnosticCategory::Equation | DiagnosticCategory::Model
+    )
+    .then_some(d.code)
 }
 
 /// Issue #559 + element-level cycle resolution (Phase 1) -- the C-LEARN
@@ -6701,7 +6701,6 @@ fn corpus_sstats_multi_output_materializes() {
     // references; the SSTATS macro itself must not produce
     // UnknownBuiltin/BadModelName/BadBuiltinArgs/DuplicateMacroName).
     use simlin_engine::common::ErrorCode;
-    use simlin_engine::db::DiagnosticError;
     let macro_codes = [
         ErrorCode::UnknownBuiltin,
         ErrorCode::BadModelName,
@@ -6710,11 +6709,7 @@ fn corpus_sstats_multi_output_materializes() {
         ErrorCode::CircularDependency,
     ];
     for d in collect_project_diagnostics(&dm) {
-        let code = match &d.error {
-            DiagnosticError::Equation(e) => Some(e.code),
-            DiagnosticError::Model(e) => Some(e.code),
-            _ => None,
-        };
+        let code = diag_code(&d);
         if let Some(c) = code
             && macro_codes.contains(&c)
         {
@@ -6728,7 +6723,7 @@ fn corpus_sstats_multi_output_materializes() {
                  `*_data` GET-DIRECT variable: model={} var={:?} {:?}",
                 d.model,
                 d.variable,
-                d.error
+                d
             );
         }
     }
@@ -6776,7 +6771,7 @@ fn macro_attributable_diagnostics<'a>(
     diags: &'a [simlin_engine::db::Diagnostic],
 ) -> Vec<&'a simlin_engine::db::Diagnostic> {
     use simlin_engine::common::ErrorCode;
-    use simlin_engine::db::{DiagnosticError, DiagnosticSeverity};
+    use simlin_engine::db::{DiagnosticCategory, DiagnosticSeverity};
 
     let macro_models: std::collections::BTreeSet<&str> = dm
         .models
@@ -6796,15 +6791,11 @@ fn macro_attributable_diagnostics<'a>(
         ErrorCode::DuplicateMacroName,
     ];
 
-    let code_of = |d: &simlin_engine::db::Diagnostic| match &d.error {
-        DiagnosticError::Equation(e) => Some(e.code),
-        DiagnosticError::Model(e) => Some(e.code),
-        _ => None,
-    };
+    let code_of = diag_code;
     let is_registry_build_error = |d: &simlin_engine::db::Diagnostic| {
         d.model.is_empty()
             && d.variable.is_none()
-            && matches!(&d.error, DiagnosticError::Model(_))
+            && d.category == DiagnosticCategory::Model
             && matches!(
                 code_of(d),
                 Some(ErrorCode::CircularDependency) | Some(ErrorCode::DuplicateMacroName)
@@ -6857,7 +6848,7 @@ fn macro_attributable_diagnostics<'a>(
 #[test]
 fn macro_attributable_classifier_separates_macro_from_nonmacro() {
     use simlin_engine::common::{Error, ErrorCode, ErrorKind};
-    use simlin_engine::db::{Diagnostic, DiagnosticError, DiagnosticSeverity};
+    use simlin_engine::db::{Diagnostic, DiagnosticSeverity};
 
     // A real macro-marked model named `m` (single-output macro `M`).
     let dm = open_vensim(
@@ -6884,25 +6875,31 @@ fn macro_attributable_classifier_separates_macro_from_nonmacro() {
         .name
         .clone();
 
-    let eq = |code: ErrorCode| {
-        DiagnosticError::Equation(simlin_engine::common::EquationError::new(code, 0, 0))
+    let eq = |model: &str, variable: &str, code: ErrorCode, severity| {
+        Diagnostic::equation(
+            simlin_engine::common::EquationError::new(code, 0, 0),
+            severity,
+        )
+        .with_context(model, Some(variable.to_string()))
     };
-    let model_err =
-        |code: ErrorCode| DiagnosticError::Model(Error::new(ErrorKind::Model, code, None));
+    let model_err = |model: &str, variable: Option<&str>, code: ErrorCode, severity| {
+        Diagnostic::engine(Error::new(ErrorKind::Model, code, None), severity)
+            .with_context(model, variable.map(str::to_string))
+    };
 
     // --- (a) The three macro-error shapes MUST be flagged ---
-    let registry_build = Diagnostic {
-        model: String::new(),
-        variable: None,
-        error: model_err(ErrorCode::CircularDependency),
-        severity: DiagnosticSeverity::Error,
-    };
-    let macro_body_error = Diagnostic {
-        model: macro_model.clone(),
-        variable: Some("m".to_string()),
-        error: eq(ErrorCode::UnknownDependency),
-        severity: DiagnosticSeverity::Error,
-    };
+    let registry_build = model_err(
+        "",
+        None,
+        ErrorCode::CircularDependency,
+        DiagnosticSeverity::Error,
+    );
+    let macro_body_error = eq(
+        &macro_model,
+        "m",
+        ErrorCode::UnknownDependency,
+        DiagnosticSeverity::Error,
+    );
     for d in [&registry_build, &macro_body_error] {
         let flagged = macro_attributable_diagnostics(&dm, std::slice::from_ref(d));
         assert_eq!(
@@ -6915,12 +6912,12 @@ fn macro_attributable_classifier_separates_macro_from_nonmacro() {
     // `UnknownBuiltin` on the macro-invoking `main` variable. Both must be
     // flagged (the resolution failure is macro-attributable *because* the
     // registry error is present).
-    let cascade_resolution_failure = Diagnostic {
-        model: "main".to_string(),
-        variable: Some("x".to_string()),
-        error: eq(ErrorCode::UnknownBuiltin),
-        severity: DiagnosticSeverity::Error,
-    };
+    let cascade_resolution_failure = eq(
+        "main",
+        "x",
+        ErrorCode::UnknownBuiltin,
+        DiagnosticSeverity::Error,
+    );
     let cascade = [registry_build.clone(), cascade_resolution_failure.clone()];
     let flagged = macro_attributable_diagnostics(&dm, &cascade);
     assert_eq!(
@@ -6941,34 +6938,34 @@ fn macro_attributable_classifier_separates_macro_from_nonmacro() {
     );
 
     // --- (b) C-LEARN's allowed NON-macro blockers must NOT be flagged ---
-    let model_logic_cycle = Diagnostic {
-        model: "main".to_string(),
-        variable: Some("previous_emissions_intensity_vs_refyr".to_string()),
-        error: model_err(ErrorCode::CircularDependency),
-        severity: DiagnosticSeverity::Error,
-    };
-    let dim_mismatch = Diagnostic {
-        model: "main".to_string(),
-        variable: Some("c_in_mixed_layer".to_string()),
-        error: eq(ErrorCode::MismatchedDimensions),
-        severity: DiagnosticSeverity::Error,
-    };
+    let model_logic_cycle = model_err(
+        "main",
+        Some("previous_emissions_intensity_vs_refyr"),
+        ErrorCode::CircularDependency,
+        DiagnosticSeverity::Error,
+    );
+    let dim_mismatch = eq(
+        "main",
+        "c_in_mixed_layer",
+        ErrorCode::MismatchedDimensions,
+        DiagnosticSeverity::Error,
+    );
     // Phase 3's documented limitation: a non-time `$` reference surfaces as
     // an ordinary unresolved-reference diagnostic on a `main` variable.
-    let non_time_dollar = Diagnostic {
-        model: "main".to_string(),
-        variable: Some("\"goal_1.5_for_temperature\"".to_string()),
-        error: eq(ErrorCode::DoesNotExist),
-        severity: DiagnosticSeverity::Error,
-    };
+    let non_time_dollar = eq(
+        "main",
+        "\"goal_1.5_for_temperature\"",
+        ErrorCode::DoesNotExist,
+        DiagnosticSeverity::Error,
+    );
     // A unit-inference WARNING on a macro body (formal-parameter port vars
     // have no units) -- an allowed non-macro unit-error blocker.
-    let macro_body_unit_warning = Diagnostic {
-        model: macro_model.clone(),
-        variable: Some("m".to_string()),
-        error: model_err(ErrorCode::UnitMismatch),
-        severity: DiagnosticSeverity::Warning,
-    };
+    let macro_body_unit_warning = model_err(
+        &macro_model,
+        Some("m"),
+        ErrorCode::UnitMismatch,
+        DiagnosticSeverity::Warning,
+    );
     let nonmacro = [
         model_logic_cycle,
         dim_mismatch,
@@ -7293,8 +7290,7 @@ fn corpus_clearn_macros_import() {
 #[test]
 fn clearn_ltm_var_count_guardrail() {
     use simlin_engine::db::{
-        DiagnosticError, DiagnosticSeverity, collect_all_diagnostics, model_ltm_variables,
-        set_project_ltm_enabled,
+        DiagnosticSeverity, collect_all_diagnostics, model_ltm_variables, set_project_ltm_enabled,
     };
 
     let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
@@ -7335,10 +7331,10 @@ fn clearn_ltm_var_count_guardrail() {
             .iter()
             .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Warning)
             .map(|diagnostic| {
-                let message = match &diagnostic.error {
-                    DiagnosticError::Assembly(message) => message.clone(),
-                    other => format!("{other:?}"),
-                };
+                let message = diagnostic
+                    .reason()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("{diagnostic:?}"));
                 (
                     diagnostic.model.clone(),
                     diagnostic.variable.clone(),
@@ -7448,7 +7444,7 @@ fn clearn_ltm_partials_all_parse() {
 
     let unparseable: Vec<String> = collect_all_diagnostics(&db, sync.project)
         .iter()
-        .map(|d| format!("{:?}", d.error))
+        .map(|d| format!("{:?}", d))
         .filter(|msg| msg.contains("did not parse"))
         .collect();
 

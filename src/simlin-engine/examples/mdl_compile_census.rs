@@ -53,7 +53,7 @@ fn main() {
         let mut msgs: Vec<String> = diags
             .iter()
             .filter(|d| d.severity == simlin_engine::db::DiagnosticSeverity::Error)
-            .map(|d| format!("{}:{:?}", d.variable.as_deref().unwrap_or("-"), d.error))
+            .map(|d| format!("{}:{d:?}", d.variable.as_deref().unwrap_or("-")))
             .collect();
         msgs.sort();
         msgs.dedup();

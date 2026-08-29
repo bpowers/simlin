@@ -60,7 +60,7 @@ pub(crate) use compile::{
 // variable's compile directly rather than through a whole-model walk.
 #[cfg(test)]
 pub(crate) use compile::compile_ltm_synthetic_fragment;
-pub(crate) use link_scores::emit_ltm_partial_equation_warning;
+pub(crate) use link_scores::ltm_partial_equation_warning;
 #[cfg(test)]
 pub(crate) use link_scores::ltm_partial_equation_warning_message;
 pub(crate) use loops::build_loops_from_tiered;
@@ -944,11 +944,12 @@ pub fn model_ltm_var_name_index(
 /// PREVIOUS-lagged reference (GH #749 -- a one-DT memory is discrete
 /// state): both fall through to the normal gates like any stock-bearing
 /// model.
-/// This query intentionally accumulates NO diagnostics -- the
-/// auto-flip `Warning`s stay in `model_ltm_variables` so they are emitted once
-/// (a `returns(ref)` tracked query read by multiple callers would otherwise
-/// double-accumulate). `model_ltm_variables` sets its returned `mode` from
-/// this query, so the two never drift.
+/// This query intentionally derives no diagnostics. Auto-flip `Warning` facts
+/// belong to `model_ltm_variables`' returned result and are emitted only by the
+/// non-recursive per-model owner in `db::diagnostic`; a tracked query may be
+/// read by multiple callers without multiplying its warnings.
+/// `model_ltm_variables` sets its returned `mode` from this query, so the two
+/// never drift.
 #[salsa::tracked(returns(clone))]
 pub fn model_ltm_mode(db: &dyn Db, model: SourceModel, project: SourceProject) -> super::LtmMode {
     use super::{LtmMode, causal_graph_from_edges, model_causal_edges, model_loop_circuits_tiered};
@@ -966,8 +967,9 @@ pub fn model_ltm_mode(db: &dyn Db, model: SourceModel, project: SourceProject) -
     // (inside `model_loop_circuits_tiered`) on an SCC this large is exactly the
     // explosion the gate avoids, so it must be checked BEFORE the slow-path
     // tier is ever consulted.
+    let scc_node_budget = crate::ltm::ltm_scc_node_budget();
     let var_scc_size = causal_graph_from_edges(edges_result).largest_scc_size();
-    if var_scc_size > crate::ltm::MAX_LTM_SCC_NODES {
+    if var_scc_size > scc_node_budget {
         return LtmMode::Discovery;
     }
 
@@ -978,7 +980,7 @@ pub fn model_ltm_mode(db: &dyn Db, model: SourceModel, project: SourceProject) -
     // slow-path subgraph blew past the SCC threshold (which the tiered
     // enumerator exposes without having run Johnson on it).
     let tiered = model_loop_circuits_tiered(db, model, project);
-    if tiered.truncated || tiered.slow_path_largest_scc > crate::ltm::MAX_LTM_SCC_NODES {
+    if tiered.truncated || tiered.slow_path_largest_scc > scc_node_budget {
         LtmMode::Discovery
     } else {
         LtmMode::Exhaustive
@@ -1003,18 +1005,18 @@ pub fn model_ltm_variables(
 ) -> super::LtmVariablesResult {
     use crate::common::Ident;
     use crate::ltm::{CyclePartitions, Loop};
-    use salsa::Accumulator;
     use std::collections::HashSet;
 
     use super::{
-        CompilationDiagnostic, Diagnostic, DiagnosticError, DiagnosticSeverity, LtmSyntheticVar,
-        LtmVariablesResult, causal_graph_from_edges, causal_graph_with_modules,
-        generate_max_abs_selection, model_causal_edges, model_element_cycle_partitions,
-        model_loop_circuits_tiered, model_pinned_loops, module_input_pathways_from_edges,
+        Diagnostic, DiagnosticSeverity, LtmSyntheticVar, LtmVariablesResult,
+        causal_graph_from_edges, causal_graph_with_modules, generate_max_abs_selection,
+        model_causal_edges, model_element_cycle_partitions, model_loop_circuits_tiered,
+        model_pinned_loops, module_input_pathways_from_edges,
     };
 
     use super::LtmMode;
 
+    let mut diagnostics = Vec::new();
     let edges_result = model_causal_edges(db, model, project);
 
     // Determine output ports for this model and the internal input->output
@@ -1063,6 +1065,7 @@ pub fn model_ltm_variables(
             agg_recovery_truncated: false,
             pathways_truncated: false,
             mode: model_ltm_mode(db, model, project),
+            diagnostics,
         };
     }
 
@@ -1098,19 +1101,17 @@ pub fn model_ltm_variables(
             rejection.axis.describe(),
             rejection.limit,
         );
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: Some(rejection.variable.clone()),
-            error: DiagnosticError::Assembly(msg),
-            severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
+        diagnostics.push(
+            Diagnostic::assembly(msg, DiagnosticSeverity::Warning)
+                .with_context(model.name(db).clone(), Some(rejection.variable.clone())),
+        );
         return LtmVariablesResult {
             vars: vec![],
             loop_partitions: indexmap::IndexMap::new(),
             agg_recovery_truncated: false,
             pathways_truncated: false,
             mode: model_ltm_mode(db, model, project),
+            diagnostics,
         };
     }
 
@@ -1160,13 +1161,14 @@ pub fn model_ltm_variables(
     // the VM. See `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`
     // and `docs/design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md`.
     let is_discovery_user = project.ltm_discovery_mode(db);
+    let scc_node_budget = crate::ltm::ltm_scc_node_budget();
     let var_scc_size = if is_discovery_user {
         0
     } else {
         let edges = model_causal_edges(db, model, project);
         causal_graph_from_edges(edges).largest_scc_size()
     };
-    let var_auto_flipped = !is_discovery_user && var_scc_size > crate::ltm::MAX_LTM_SCC_NODES;
+    let var_auto_flipped = !is_discovery_user && var_scc_size > scc_node_budget;
 
     if var_auto_flipped {
         let msg = format!(
@@ -1180,16 +1182,12 @@ pub fn model_ltm_variables(
              recorded link scores; see \
              docs/design/ltm--loops-that-matter.md for the two-tier \
              strategy.",
-            var_scc_size,
-            crate::ltm::MAX_LTM_SCC_NODES,
+            var_scc_size, scc_node_budget,
         );
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: None,
-            error: DiagnosticError::Assembly(msg),
-            severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
+        diagnostics.push(
+            Diagnostic::assembly(msg, DiagnosticSeverity::Warning)
+                .with_context(model.name(db).clone(), None),
+        );
     }
     let mut is_discovery = is_discovery_user || var_auto_flipped;
 
@@ -1219,13 +1217,10 @@ pub fn model_ltm_variables(
             model.name(db).as_str(),
             ports,
         );
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: None,
-            error: DiagnosticError::Assembly(msg),
-            severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
+        diagnostics.push(
+            Diagnostic::assembly(msg, DiagnosticSeverity::Warning)
+                .with_context(model.name(db).clone(), None),
+        );
     }
 
     let mut vars = Vec::new();
@@ -1320,13 +1315,10 @@ pub fn model_ltm_variables(
                  strategy.",
                 crate::ltm::ltm_circuit_budget(),
             );
-            CompilationDiagnostic(Diagnostic {
-                model: model.name(db).clone(),
-                variable: None,
-                error: DiagnosticError::Assembly(msg),
-                severity: DiagnosticSeverity::Warning,
-            })
-            .accumulate(db);
+            diagnostics.push(
+                Diagnostic::assembly(msg, DiagnosticSeverity::Warning)
+                    .with_context(model.name(db).clone(), None),
+            );
             is_discovery = true;
             None
         }
@@ -1337,23 +1329,19 @@ pub fn model_ltm_variables(
         // case (`slow_path` is empty); we just need to flip the
         // is_discovery flag so link-score generation, etc. follow the
         // discovery path.
-        else if tiered.slow_path_largest_scc > crate::ltm::MAX_LTM_SCC_NODES {
+        else if tiered.slow_path_largest_scc > scc_node_budget {
             let msg = format!(
                 "LTM analysis auto-switched from exhaustive to discovery mode: \
                  the cross-element / mixed slow-path subgraph's largest SCC has {} nodes, \
                  exceeding MAX_LTM_SCC_NODES = {}.  Per-loop scores are ranked \
                  post-simulation from the recorded link scores; see \
                  docs/design/ltm--loops-that-matter.md for the two-tier strategy.",
-                tiered.slow_path_largest_scc,
-                crate::ltm::MAX_LTM_SCC_NODES,
+                tiered.slow_path_largest_scc, scc_node_budget,
             );
-            CompilationDiagnostic(Diagnostic {
-                model: model.name(db).clone(),
-                variable: None,
-                error: DiagnosticError::Assembly(msg),
-                severity: DiagnosticSeverity::Warning,
-            })
-            .accumulate(db);
+            diagnostics.push(
+                Diagnostic::assembly(msg, DiagnosticSeverity::Warning)
+                    .with_context(model.name(db).clone(), None),
+            );
             is_discovery = true;
             None
         } else if tiered.fast_path.is_empty() && tiered.slow_path.is_empty() {
@@ -1366,6 +1354,7 @@ pub fn model_ltm_variables(
                     agg_recovery_truncated: false,
                     pathways_truncated: false,
                     mode: LtmMode::Exhaustive,
+                    diagnostics,
                 };
             }
             None
@@ -1402,13 +1391,10 @@ pub fn model_ltm_variables(
                     cross_agg_budget,
                     truncated_aggs.join(", "),
                 );
-                CompilationDiagnostic(Diagnostic {
-                    model: model.name(db).clone(),
-                    variable: None,
-                    error: DiagnosticError::Assembly(msg),
-                    severity: DiagnosticSeverity::Warning,
-                })
-                .accumulate(db);
+                diagnostics.push(
+                    Diagnostic::assembly(msg, DiagnosticSeverity::Warning)
+                        .with_context(model.name(db).clone(), None),
+                );
             }
             agg_recovery_truncated = !truncated_aggs.is_empty();
             // GH #516: hops into/out of synthetic `$⁚ltm⁚agg⁚{n}` nodes come
@@ -1433,7 +1419,7 @@ pub fn model_ltm_variables(
 
     // GH #758: the (from, to) edges the conservative per-shape emitter
     // declined to score (arrayed endpoints whose dimensions don't
-    // correspond -- see `emit_unscoreable_conservative_edge_warning`).
+    // correspond -- see `unscoreable_conservative_edge_warning`).
     // Such an edge has no link-score variable, so a loop-score product
     // through it could only be a guaranteed-zero stub (its fragment either
     // fail-warns on the subscripted missing name or silently multiplies a
@@ -1467,6 +1453,7 @@ pub fn model_ltm_variables(
                     /* skip_agg_halves = */ false,
                     &mut vars,
                     &mut unscoreable_edges,
+                    &mut diagnostics,
                 );
             }
         }
@@ -1516,6 +1503,7 @@ pub fn model_ltm_variables(
                         project,
                         &mut vars,
                         &mut unscoreable_edges,
+                        &mut diagnostics,
                     );
                 } else if let Some(agg) = agg_by_name(from_var_level) {
                     emit_agg_to_target_link_scores(
@@ -1528,6 +1516,7 @@ pub fn model_ltm_variables(
                         project,
                         &mut vars,
                         &mut unscoreable_edges,
+                        &mut diagnostics,
                     );
                 } else {
                     emit_link_scores_for_edge(
@@ -1542,6 +1531,7 @@ pub fn model_ltm_variables(
                         /* skip_agg_halves = */ true,
                         &mut vars,
                         &mut unscoreable_edges,
+                        &mut diagnostics,
                     );
                 }
             }
@@ -1580,18 +1570,19 @@ pub fn model_ltm_variables(
         link_hits(&l.links) || l.slot_links.iter().any(|(_, links)| link_hits(links))
     }
 
-    fn emit_unresolved_loop_score_warning(db: &dyn Db, model: SourceModel, loop_id: &str) {
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: Some(format!("$⁚ltm⁚loop_score⁚{loop_id}")),
-            error: DiagnosticError::Assembly(format!(
+    fn unresolved_loop_score_warning(db: &dyn Db, model: SourceModel, loop_id: &str) -> Diagnostic {
+        Diagnostic::assembly(
+            format!(
                 "LTM loop score {loop_id} was not emitted because its link-score product \
                  references a link-score variable that was not emitted; the affected loop is \
                  not scored instead of compiling through a missing-name zero stub"
-            )),
-            severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
+            ),
+            DiagnosticSeverity::Warning,
+        )
+        .with_context(
+            model.name(db).clone(),
+            Some(format!("$⁚ltm⁚loop_score⁚{loop_id}")),
+        )
     }
 
     if let Some(ref detected_loops) = loops {
@@ -1699,7 +1690,7 @@ pub fn model_ltm_variables(
         for l in detected_loops {
             let expected = format!("$⁚ltm⁚loop_score⁚{}", l.id);
             if !emitted_loop_score_names.contains(&expected) {
-                emit_unresolved_loop_score_warning(db, model, l.id.as_str());
+                diagnostics.push(unresolved_loop_score_warning(db, model, l.id.as_str()));
             }
         }
         for (name, equation) in loop_vars {
@@ -1741,13 +1732,10 @@ pub fn model_ltm_variables(
         // mode change: a `Warning`. Without this a typo'd or stale pin would
         // silently score nothing, which is the failure mode #466 warns about.
         let _ = name;
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: None,
-            error: DiagnosticError::Assembly(reason.clone()),
-            severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
+        diagnostics.push(
+            Diagnostic::assembly(reason.clone(), DiagnosticSeverity::Warning)
+                .with_context(model.name(db).clone(), None),
+        );
     }
     if !pinned.loops.is_empty() {
         // The variable-level node set of each already-emitted enumerated loop,
@@ -1837,6 +1825,7 @@ pub fn model_ltm_variables(
                             project,
                             &mut vars,
                             &mut unscoreable_edges,
+                            &mut diagnostics,
                         );
                     } else if let Some(agg) = agg_by_name(from_var_level) {
                         emit_agg_to_target_link_scores(
@@ -1849,6 +1838,7 @@ pub fn model_ltm_variables(
                             project,
                             &mut vars,
                             &mut unscoreable_edges,
+                            &mut diagnostics,
                         );
                     } else {
                         emit_link_scores_for_edge(
@@ -1863,6 +1853,7 @@ pub fn model_ltm_variables(
                             /* skip_agg_halves = */ true,
                             &mut vars,
                             &mut unscoreable_edges,
+                            &mut diagnostics,
                         );
                     }
                 }
@@ -1878,18 +1869,18 @@ pub fn model_ltm_variables(
                 if traverses_unscoreable(pin_loop, &unscoreable_edges) {
                     if !warned_unscoreable_pin {
                         warned_unscoreable_pin = true;
-                        CompilationDiagnostic(Diagnostic {
-                            model: model.name(db).clone(),
-                            variable: None,
-                            error: DiagnosticError::Assembly(format!(
-                                "pinned loop '{}' traverses a causal edge whose link \
-                                 score could not be computed (see the unscoreable-edge \
-                                 warning); its affected instances are not scored",
-                                pin.name
-                            )),
-                            severity: DiagnosticSeverity::Warning,
-                        })
-                        .accumulate(db);
+                        diagnostics.push(
+                            Diagnostic::assembly(
+                                format!(
+                                    "pinned loop '{}' traverses a causal edge whose link \
+                                     score could not be computed (see the unscoreable-edge \
+                                     warning); its affected instances are not scored",
+                                    pin.name
+                                ),
+                                DiagnosticSeverity::Warning,
+                            )
+                            .with_context(model.name(db).clone(), None),
+                        );
                     }
                     continue;
                 }
@@ -1927,7 +1918,11 @@ pub fn model_ltm_variables(
                     &crate::ltm_augment::LoopLinkOverrides::new(),
                 );
                 if pin_loop_vars.is_empty() {
-                    emit_unresolved_loop_score_warning(db, model, pin_loop.id.as_str());
+                    diagnostics.push(unresolved_loop_score_warning(
+                        db,
+                        model,
+                        pin_loop.id.as_str(),
+                    ));
                 }
                 for (lname, equation) in pin_loop_vars {
                     let dimensions = parse::ltm_equation_dimensions(&equation).to_vec();
@@ -1962,7 +1957,7 @@ pub fn model_ltm_variables(
     // `enumerate_pathways_to_outputs` admits up to `MAX_PATHWAYS_PER_PORT`
     // paths per input port and a converging module graph shares edges across
     // most of them, while `collect_model_diagnostics` does not deduplicate
-    // accumulator output -- so an un-gated warning here is thousands of
+    // returned diagnostic facts -- so an un-gated warning here is thousands of
     // identical rows drowning out every other diagnostic. This mirrors the
     // warn-once-per-edge convention `unscoreable_edges` already applies on the
     // link-score side.
@@ -2009,14 +2004,14 @@ pub fn model_ltm_variables(
                             link.to.as_str().to_string(),
                         ))
                     {
-                        emit_unresolved_pathway_link_warning(
+                        diagnostics.push(unresolved_pathway_link_warning(
                             db,
                             model,
                             input_port.as_str(),
                             link.from.as_str(),
                             link.to.as_str(),
                             &resolved,
-                        );
+                        ));
                     }
                     format!("\"{resolved}\"")
                 })
@@ -2138,6 +2133,7 @@ pub fn model_ltm_variables(
         // branching above; `model_ltm_mode` is the single source of truth for
         // the decision itself).
         mode: model_ltm_mode(db, model, project),
+        diagnostics,
     }
 }
 
@@ -2145,7 +2141,7 @@ pub fn model_ltm_variables(
 #[path = "../ltm_tests.rs"]
 mod ltm_tests;
 
-/// Accumulate a `Warning` when a sub-model PATHWAY equation references a
+/// Build a `Warning` when a sub-model PATHWAY equation references a
 /// link-score variable that was never emitted.
 ///
 /// `resolve_link_score_name_for_loop` deliberately falls back to the Bare name
@@ -2164,16 +2160,14 @@ mod ltm_tests;
 /// The honest fix is a per-element pathway resolution -- the analogue of the
 /// `⁚via⁚` aliases `compute_module_link_overrides` mints for module hops -- and
 /// until that exists this warning is what keeps the zero attributable.
-fn emit_unresolved_pathway_link_warning(
+fn unresolved_pathway_link_warning(
     db: &dyn Db,
     model: SourceModel,
     input_port: &str,
     from: &str,
     to: &str,
     attempted: &str,
-) {
-    use crate::db::{CompilationDiagnostic, Diagnostic, DiagnosticError, DiagnosticSeverity};
-    use salsa::Accumulator;
+) -> crate::db::Diagnostic {
     let msg = format!(
         "LTM pathway score for input port {input_port} references link score \
          '{attempted}' for edge {from} -> {to}, which was not emitted (the edge is \
@@ -2181,11 +2175,5 @@ fn emit_unresolved_pathway_link_warning(
          that factor reads a constant 0, so this pathway, the composite built from \
          it, and any loop through this module are degraded"
     );
-    CompilationDiagnostic(Diagnostic {
-        model: model.name(db).clone(),
-        variable: None,
-        error: DiagnosticError::Assembly(msg),
-        severity: DiagnosticSeverity::Warning,
-    })
-    .accumulate(db);
+    link_scores::ltm_edge_warning(db, model, None, from, to, msg)
 }

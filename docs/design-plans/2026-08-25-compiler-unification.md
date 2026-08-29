@@ -14,8 +14,8 @@ because `PREVIOUS`/`INIT`/`SMOOTH` helpers are synthesized as *text* and the
 visitor must know the model's module set to do it (which is why adding one
 module variable re-keys every parse -- GH #372, `engine-performance.md` C6).
 
-This plan removes that incidental complexity in eight phases, each landing as
-reviewed commits on the `compiler-unification` branch. The irreducible parts
+This plan removes that incidental complexity in reviewed phases on the
+`compiler-unification` branch. The irreducible parts
 -- XMILE array semantics, the two-phase dependency relation, symbolic bytecode
 with late resolution, loud-safe refusal -- are kept exactly; every phase must
 leave the genuine-output corpus green and record C-LEARN compile cost in the
@@ -60,7 +60,7 @@ branch).
    splitting on `·` to classify a dependency is gone; `collect_expr_refs`,
    `DepClassification`'s string sets, and `build_var_info`'s `normalize_dep`/
    `keep_dt_dep` are replaced by reading the structured fields.
-6. **One `Variable`.** `Variable { ident, units, eqn, errors, unit_errors, kind }`
+6. **One `Variable`.** `Variable { ident, units, eqn, diagnostics, kind }`
    with a `VarKind` enum. Parsing reads a borrowed `VariableSource<'_>` over
    `SourceVariable` fields; `datamodel_variable_from_source` is gone from every
    parse path, as is the duplicated field extraction in `db/sync.rs`. One
@@ -71,9 +71,14 @@ branch).
    `FragmentMerger` (phase-local literal pool mode), the results-offset map is
    derived from `VariableLayout`, the module-instance input-set extraction has
    one owner, and `assemble_module` collects fragments in one pass.
-8. **Errors carry their message.** `EquationError` has `details`; nothing
-   between parse and `collect_all_diagnostics` drops error text; parse-stage
-   errors are produced as `Diagnostic`s rather than translated three times.
+8. **One diagnostic channel.** `Diagnostic` is the authoritative payload from
+   parse/lower onward and the salsa accumulator itself. It retains raw and
+   display details, severity, code/category, source span, ordered related
+   sources, physical/helper owner identity, module path, and element. Context
+   is attached exactly once at the DB boundary; no wrapper or string-only
+   downgrade sits between a raising site and `collect_all_diagnostics`.
+   Multiple runlist phases reaching one fully attributed fragment failure emit
+   its first occurrence; full payload equality preserves distinct sources.
 9. **A pure parse.** `parse_source_variable(db, var, project)` is keyed only on
    the variable and project-global inputs. `PREVIOUS(expr)`/`INIT(expr)` with
    a non-slot argument produce *captures* (AST-carried, dependency-scheduled
@@ -235,7 +240,7 @@ pub enum DepKind { Var, Module { shape: Arc<ModelShape> } }           // Var: au
 pub struct ModelShape { pub vars: IdentMap<Ident<Canonical>, ShapeEntry>, pub n_slots: usize }
 pub struct ShapeEntry { pub offset: usize, pub shape: DepShape }      // nested module: its own ModelShape
 pub struct FragmentInput<'a> {
-    pub target: Variable,                                  // the variable in its Expr2 form
+    pub target: Cow<'a, Arc<Variable>>,                     // borrowed memo or owned transient Expr2 variable
     pub deps: IdentMap<Ident<Canonical>, DepShape>,        // every referenceable name, the target included
     pub tables: HashMap<Ident<Canonical>, Vec<Table>>,
     pub module_inputs: BTreeSet<Ident<Canonical>>,
@@ -248,10 +253,10 @@ impl FragmentInput<'_> { pub fn new(target, deps, tables, module_inputs, model_n
 pub fn lower_fragment(input: &FragmentInput<'_>, is_initial: bool) -> Result<Var>;
 pub fn reference_extents(deps: &IdentMap<Ident<Canonical>, DepShape>) -> VarSizes;
 // db/: the four constructors
-fn explicit_fragment_input(db, var, model, project, module_input_names) -> ExplicitFragment   // Fatal { unit_diags, fatal_diags } | Ready { unit_diags, input }
+fn explicit_fragment_input(db, var, model, project, module_input_names) -> ExplicitFragment   // { diagnostics, input: Option<Box<FragmentInput>> }
 fn implicit_fragment_input(db, meta, model, project, module_input_names) -> Result<FragmentInput, ImplicitInputError>
-fn ltm_fragment_input(db, var_name, equation, model, project) -> Result<FragmentInput, String>
-fn ltm_implicit_fragment_input(db, meta, model, project, module_input_names) -> Option<FragmentInput>
+fn ltm_fragment_input(db, var_name, equation, model, project) -> Result<LtmFragmentInput, Vec<Diagnostic>>
+fn ltm_implicit_fragment_input(db, meta, model, project, module_input_names) -> Result<LtmFragmentInput, Vec<Diagnostic>>
 #[salsa::tracked(returns(ref))] fn model_shape(db, model, project) -> Arc<ModelShape>
 fn module_input_set(prefix, refs) -> BTreeSet<Ident<Canonical>>   // the one owner of "which ports does this wiring bind"
 ```
@@ -531,7 +536,7 @@ mode; `renumber_initials_phase` deleted), `db/assemble.rs`
 source-parameterized collection; `enumerate_module_instances_inner` uses the
 Phase 3 owner), `common.rs` (`EquationError.details`), `db/fragment_compile.rs`
 (`accumulate_var_compile_error` keeps details), parse-stage error production
-as `Diagnostic` with `Variable.errors`/`ModelStage0.errors` consumers moved.
+as `Diagnostic` with the variable and whole-model consumers moved.
 
 **Dependencies:** Phase 3 (owners exist), Phase 4 (`Variable` shape settled).
 
@@ -742,14 +747,88 @@ graph/result presentation. Test fixtures add no production owner. The only
 broad syntax-name projection used by LTM rewriting is the crate-private
 `expression_transform_names`; narrower subscript walkers operate only inside
 that rewrite and cannot return scheduling facts by type. Parse/lowering and
-unit errors still travel through `Variable.errors`/`unit_errors`, fragment
-diagnostic translation and the units accumulator; diagnostics unification is a
-separate end-to-end boundary and must not recreate a whole-model AST owner.
+unit errors live on the per-variable context-free `Variable::diagnostics`
+channel; the DB boundary attaches source context and emits the same payload
+through salsa. No whole-model AST owner participates.
 
 **Done when:** `rg "BTreeSet<String>" src/simlin-engine/src/db` finds no
 dependency set; `model_stage0`/`model_stage1` do not exist; docs describe the
 pipeline as it is; final ledger row; this document's ledger complete.
 <!-- END_PHASE_8 -->
+
+<!-- START_PHASE_9 -->
+### Phase 9: One diagnostic payload
+
+**Goal:** one lossless diagnostic type from parse/lower through salsa
+collection, deterministic exactly-once emission, and one formatter over that
+payload.
+
+**Components:** `diagnostic.rs` (`Diagnostic` is both the payload and salsa
+accumulator; category/severity enums, source identity and raw/display detail),
+`variable.rs` / `model.rs` / `capture.rs` (context-free per-variable payloads),
+`db/var_fragment.rs` / `db/fragment_compile.rs` (one context-attachment and
+emission boundary), `db/diagnostic.rs` / `db/units.rs` / `db/ltm/` (direct
+producers and deterministic drains), and `errors.rs` / `libsimlin` (one
+presentation adapter).
+
+The physical name of a generated helper and its user-authored owner are
+separate fields: compiler identity and equality use the physical name, while
+source lookup and public presentation use the owner. A missing qualified leaf
+retains its proven module-instance path plus the source span of the complete
+reference; an unknown array entry retains its element; LTM edge diagnostics
+retain ordered `from, to` related sources. These fields participate in
+`Diagnostic` equality and hashing, so equal prose cannot collapse distinct
+element or module instances.
+
+Generated LTM equations retain every parser error in a compact shared slice.
+Their fragment inputs keep structured dependency targets beside the ordinary
+shape map so unresolved module paths and spans remain recoverable. The optional
+reporting path carries `Vec<Diagnostic>` in first-producer order; identical
+required-phase failures deduplicate only after model, physical helper and owner
+context is attached. Degraded-slot explanation is presentation detail, while
+the original parse/lower/codegen reason remains the raw payload.
+
+Project unit-definition and macro-registry failures remain direct rows from
+memoized project facts, and a module-cycle row remains direct per affected
+model. Macro validation retains the exact raising-site `Error` in its memo;
+collection consumes it directly while the hard compile entry deliberately maps
+it to `NotSimulatable`. Transient conveyor-parameter checks retain the original
+`UnitError`, source span and raw detail, with conveyor attribution held only in
+presentation detail. Every other compile producer emits through the per-model
+salsa trigger; sorted model, variable and helper walks define order. `Import`
+and `Variable` remain formatter/adapter categories but are not compile-channel producers;
+`DiagnosticCategory::COMPILE_PIPELINE` enumerates the six accumulated
+categories and a production-derived matrix exercises each plus both severities.
+Queue/conveyor warnings use the same per-model accumulator even though the
+special-stock build path returns a hard `Error`; that hard-error formatter
+retains its complete details.
+
+Recursive LTM derivations are the deliberate exception to direct accumulation:
+`model_ltm_variables` and its fragment-diagnostic query return ordered
+model-local `Vec<Diagnostic>` facts, never accumulator output. A parent may
+query a child while composing module scores but ignores the child's fact
+vector. The non-recursive `model_all_diagnostics` boundary emits the current
+model's facts exactly once. This ownership rule preserves first-producer order
+without global equality deduplication; every edge-warning family goes through
+one constructor that attaches ordered `from, to` related sources.
+
+**Done when:** no `CompilationDiagnostic`, `DiagnosticError`, fatal/unit
+fragment wrapper, formatter twin or `Variable.errors`/`unit_errors` channel
+exists; the producer/category/severity matrix, explicit/implicit/module/LTM,
+element/path/related-source identity, warning-only special-stock results,
+source spans, duplicate prevention, clean controls, repeated-build ordering and
+per-variable invalidation are pinned through production inputs; full corpus,
+determinism, C-LEARN artifact/parity/digest/backend and performance gates are
+green.
+
+**Residual final cleanup:** diagnostics have no second internal channel.
+`Error`, `EquationError`, and `UnitError` remain typed raising-site results;
+`FormattedError` remains the deliberate presentation/FFI adapter; unit
+inference retains its full conflict list independently of the one reported
+umbrella row. The branch-wide final pass owns only zero-searches, evergreen
+documentation and the recorded artifact/performance evidence, not another
+diagnostic representation change.
+<!-- END_PHASE_9 -->
 
 ## Additional Considerations
 
@@ -1624,8 +1703,8 @@ Three of the changes are user-visible enough to name:
 
 1. An equation diagnostic's summary line gains a ` -- {reason}` tail wherever a
    reason exists, matching the shape the unit arms already used
-   (`format_equation_error` and `format_diagnostic` both compose it through the
-   one `errors::code_and_reason`). One test pinned the old text and is
+   (the category arms compose it through the one `errors::code_and_reason`).
+   One test pinned the old text and is
    deliberately re-baselined: `errors::tests::equation_error_formats_snippet`,
    which now reads `unknown_dependency -- 'bogus' is not a variable of model
    'main'` and additionally pins `FormattedError::details`. No other golden or
@@ -2008,6 +2087,7 @@ hash is not available to it.
 
 | phase | commit | cold compile Ir | slots | opcodes (flow / stock / init) | literals / GFs / temps / views | notes |
 |---|---|---:|---:|---|---|---|
+| 9 | `engine: unify compiler diagnostics` | Against exact `aac2cf5c` and final release binaries pinned to performance core 2, five alternating paired rounds each subtract a matching zero-extra-work control and average five extra compiles. Plain compile is 0.94514 G instructions current versus 0.93683 G base (+0.8874% by per-side medians); the median paired delta is +0.8509% (range +0.6772%..+0.9563%). LTM compile is 10.57596 G versus 10.56632 G (+0.0912%); median paired +0.0742% (-0.1077%..+0.2910%). Both are below the one-percent investigation threshold, with no resolved compile-cost regression. | 5189 plain / 28490 LTM | plain 28637 / 1477 / 24711; LTM 830380 / 1477 / 24711 | plain 1358 / 162 / 28 / 725; LTM 13113 / 162 / 28 / 2334 | `Diagnostic` is the authoritative parse/lower, salsa accumulator and collection payload. It retains severity/category/code, raw and display details, source span, physical variable, user-facing owner, element, proven module-instance path and ordered related sources; context is attached exactly once at the DB boundary. Explicit, implicit, module, LTM, unit, queue and conveyor producers create it directly. Explicit and implicit fragment compilers coalesce identical multi-phase failures only after full source attribution and by complete `Diagnostic` equality, preserving first-producer order and distinct phase/source facts. Recursive LTM queries return ordered model-local facts, and one non-recursive per-model owner emits only the current model's facts; parent module queries cannot duplicate child warnings, no global equality dedup is used, and all edge-warning families attach ordered source/target identity through one constructor. Generated LTM equations keep every parser error in a compact shared slice, tag per-element failures before lowering, carry typed failures rather than a string reason slot and deduplicate required phases only after physical/owner context is attached. Macro validation retains its exact typed `Error`; transient conveyor parameter checks retain the original `UnitError`, span and raw detail while putting stock attribution in display detail. `CompilationDiagnostic`, `DiagnosticError`, fatal/unit fragment wrappers, formatter twins and `Variable.errors`/`unit_errors` do not exist; hard queue/conveyor errors preserve their details through formatting. Production-derived tests cover every compile-pipeline category and both severities, every live producer family, nested/source/identity fields, warning-only results, duplicate prevention, stable ordering and one-variable invalidation. Plain and LTM profiles are byte-identical to the base: totals 54825 / 856568, post-fusion flow+stock 17017 / 384463, result offsets 4900 / 13800, and every slot/opcode/histogram/literal/GF/temp/dimension/view/name/module count agrees. Release C-LEARN structural/VDF, plain wasm, LTM user-series, discovery VM/wasm, every generated partial, pinned loop, complete 23-warning surface and all-slot digest `(19264, 0, 3106, 19264, 790401758590, 2212, 7484877280482623718)` are green; its diagnostics also retain exactly five rank-like declines and zero fragment compile failures or unusable cyclic-edge scores. Validation: engine lib 5752 passed / 2 ignored; integration 787 passed / 16 ignored; libsimlin unit/integration 21 / 244 passed; doctests 2 passed / 1 ignored; both determinism modules pass 12 consecutive invocations; all-target/all-feature engine + libsimlin clippy with warnings denied, rustfmt and `git diff --check` are green. `Error`, `EquationError` and `UnitError` remain typed raising-site results, `FormattedError` is the one presentation/FFI adapter, and unit inference retains its ordered conflict list inside the one diagnostic row; these are roles, not residual diagnostic channels. |
 | 8c | `engine: retire whole-model compiler stages` | Against exact `d80b8833` and final release binaries pinned to performance core 2, five alternating paired rounds with a matching zero-extra-work control per binary and round put plain compile at 0.93708 G instructions current versus 0.98425 G base (-4.7926% by per-side medians); the median paired delta is -4.7394% (range -4.8739%..-4.5569%). LTM compile is 10.56555 G versus 10.94546 G (-3.4709%); median paired -3.2972% (-3.8574%..-3.1686%). Runtime is -0.8090% plain by per-side medians / -0.8119% paired (-0.8246%..-0.7967%) and -0.7085% LTM / -0.7147% paired (-0.8702%..-0.6572%), below the one-percent redesign threshold. | 5189 plain / 28490 LTM | plain 28637 / 1477 / 24711; LTM 830380 / 1477 / 24711 | plain 1358 / 162 / 28 / 725; LTM 13113 / 162 / 28 / 2334 | `lowered_source_variable` and `lowered_implicit_variable` own the one memo `Arc<Variable<Expr2>>` payload per explicit or parse-synthesized variable. Explicit and ordinary implicit `FragmentInput`s borrow that exact Arc; generated LTM equations and their transient helpers own theirs. Unit analysis and all causal/polarity/LTM model maps clone only Arc handles, with production pointer-identity tests against both memo classes; per-name LTM consumers query those memos directly. Module lowering parses every kind-independent field and replaces only resolved `VarKind::Module` wiring, with declared-unit and malformed-unit diagnostic rows. Module topology retains only target names and source-model handles, including nested and renamed macro calls, and its iterative closure terminates on cycles. Execution probes show unit analysis and fragments share one payload, a scalar edit relowers only the edited variable, rebuilding a graph map relowers only the changed or newly added payload, unrelated model/topology edits execute only necessary lightweight facts, and a child edit reruns parent inference while relowering only the child. Source audit finds no stage query/type, stage oracle, reconstruction query or whole-model parsed/lowered payload owner. Standard allocation calls/bytes fall from 1,753,314 / 199.5 MiB to 1,538,885 / 178.2 MiB plain and 26,624,414 / 2802.0 MiB to 25,331,791 / 2566.3 MiB LTM; peak live is 32.3 -> 40.5 MiB plain and 260.8 -> 256.8 MiB LTM. A matched lifecycle census with the parsed datamodel alive reports exact base -> current deltas for `db+sync+artifact`, after independently dropping the artifact, after dropping the db, and after dropping sync: plain 25.39 -> 33.59, 25.16 -> 33.36, 0.29 -> 0.29, 0.20 -> 0.20 MiB; LTM 224.83 -> 220.78, 224.05 -> 219.99, 0.75 -> 0.75, 0.66 -> 0.66 MiB. The +8.2 MiB per-variable memo cost exists in both modes; plain never demanded the old reconstruction owner, while deleting that owner saves about 12.3 MiB under LTM, yielding the measured 4.1 MiB net LTM residency reduction. This is an ownership result, not a blanket residency-improvement claim. Plain and LTM profiles are byte-identical to the base: totals 54825 / 856568, post-fusion flow+stock 17017 / 384463, result offsets 4900 / 13800, and every slot/opcode/histogram/literal/GF/temp/dimension/view/name/module count agrees. Release C-LEARN VDF and plain/LTM user-series parity, complete warnings, every generated partial, all-slot digest `(19264, 0, 3106, 19264, 790401758590, 2212, 7484877280482623718)`, plain wasm and discovery VM/wasm parity are green. Validation: engine lib 5733 passed / 2 ignored; integration 787 passed / 16 ignored; VM allocation 4 passed; doctests 2 passed / 1 ignored; both determinism modules pass 12 consecutive invocations; all-target/all-feature clippy with warnings denied, rustfmt and `git diff --check` are green. The residual diagnostic channels are `Variable.errors`/`unit_errors`, fragment translation and the units accumulator; no whole-model owner exists to centralize them. |
 | 8b | `engine: unify dependency consumers` | Against exact `4d5302d6` and final release binaries pinned to one performance core, five alternating paired rounds with a matching zero-extra-work control per binary and round put plain compile at 0.98292 G instructions current versus 0.98821 G base (-0.5359% by per-side medians); the median paired delta is -0.4926% (range -0.6062%..-0.1671%). LTM compile is 10.94342 G versus 10.93254 G (+0.0996%); median paired +0.0366% (-0.0592%..+0.2726%), inside the channel's noise floor. The runtime gate is +0.3833% plain by per-side medians / +0.3784% paired (+0.3748%..+0.4122%) and +0.3194% LTM / +0.3220% paired (+0.2944%..+0.3461%), below the one-percent redesign threshold. | 5189 plain / 28490 LTM | plain 28637 / 1477 / 24711; LTM 830380 / 1477 / 24711 | plain 1358 / 162 / 28 / 725; LTM 13113 / 162 / 28 / 2334 | A fragment carries one compiler-local flow-invariance boolean; `model_flows_invariant` combines it with the authoritative source relation as `local compiler invariant && every local Dt/Current DepRef target invariant`. INIT reads frozen storage and PREVIOUS is compiler-local lagged. The source relation keeps both eager conditional arms for validation, runlists and cycles, so a constant-discarded dynamic arm safely under-hoists; production VM/wasm/reset rows pin exact values. The C-LEARN oracle grows from 868 invariant slots at the base to 883 current, with zero varying slots on both sides; the identity-level accounting above structurally proves all fifteen additions and reports no removals. `collect_expr_refs`, fragment `dep_names`, `identifier_set` and `DepClassification::all_names` do not exist. LTM transforms receive the crate-private `ExpressionTransformNames { value_candidates, table_holders }`, which cannot carry a phase, lag, resolved module path or scheduling target; the one remaining generated-equation `classify_dependencies` call resolves immediately to `DepTarget` and uses local targets plus the lookup layout channel only for shape construction. Exhaustive and discovery module exits share a `CausalGraph` projection of complete dt targets for explicit and parse-synthesized readers; production rows cover nested paths, equal leaves below distinct roots, repeated ports and multi-output ambiguity. Per-name execution probes show an unrelated edit executes only the edited dependency body even when the model invariance or graph projection query updates. Plain and LTM profiles are byte-identical to the base: totals 54825 / 856568, post-fusion flow+stock 17017 / 384463, result offsets 4900 / 13800, and every slot/opcode/histogram/literal/GF/temp/dimension/view/name/module count agrees. Release C-LEARN VDF and plain/LTM user-series parity, complete warnings, every generated partial, all-slot digest `(19264, 0, 3106, 19264, 790401758590, 2212, 7484877280482623718)`, plain wasm and discovery VM/wasm parity are green. Validation: engine lib 5738 passed / 2 ignored; integration 787 passed / 16 ignored; VM allocation 4 passed; doctests 2 passed / 1 ignored; both determinism modules pass 12 consecutive invocations; all-target/all-feature clippy with warnings denied, rustfmt and `git diff --check` are green. Phase 8c owns only per-variable unit checking, deletion of `model_stage0`/`model_stage1`, the final architecture documentation, and classification of remaining `BTreeSet<String>` values as table/layout references, graph/result presentation, dimensions or tests. |
 | 8a | `engine: structure source dependencies` | Against exact `af201c7f` and the final release binary pinned to one performance core, five alternating paired rounds with a matching zero-extra-compile control for each binary and round put the per-side median plain compile at 0.99120 G instructions current versus 1.02325 G base (-3.132%); the median paired delta is -3.177% (range -3.497%..-2.010%). LTM is 10.95372 G current versus 11.14736 G base (-1.737%); median paired delta -1.989% (-2.213%..-0.372%). | 5189 plain / 28490 LTM | plain 28637 / 1477 / 24711; LTM 830380 / 1477 / 24711 | plain 1358 / 162 / 28 / 725; LTM 13113 / 162 / 28 / 2334 | `DepClassification` emits canonical occurrence + lag rows from production Expr2; `VariableDeps` and `ImplicitVarDeps` attach dt/init phase and a metadata-proven `DepTarget { module_path, variable }`. Scheduling, `build_var_info`, nested sparse initials, causal/LTM edges and pins, module-output ports, layout and all fragment constructors read the structured fields. The resolver recognizes explicit and same-parse implicit modules plus source-registered implicit modules read by generated LTM equations, proves every nested hop, and leaves dimension-element qualification local; generated equations come from the post-expansion source AST, so the unreachable LTM-owned module lookup is absent. The adversarial production fixture gives identical `d.e` source spelling a dimension-element meaning with dimension metadata and a module-path meaning without it, while distinct `[left, inner]/out` and `[right, inner]/out` targets remain distinct. The exhaustive classifier matrix covers every lag/context/index arm; the production phase matrix crosses both phases with all three lag variants. Previous-only state is `Previous - Current`, so an Initial fallback or sibling snapshot never cancels the lag. Production resolver rows cover leading-parent wiring, missing target/intermediate/non-module/leaf metadata, depth three, same-parse and source-registered implicit modules, and full missing-leaf diagnostic identity. Per-name model and variable projections prove unrelated owner/intermediate/project structural edits do not execute an unchanged dependency query. Existing production suites cover captures, stdlib/project-macro modules, active initials, mappings/subdimensions, SCCs, LTM synthetic/implicit fragments, diagnostics and both backends. Plain and LTM artifacts are byte-identical to the base profile: totals 54825 / 856568, post-fusion flow+stock 17017 / 384463, result offsets 4900 / 13800, and every slot/opcode/histogram/literal/GF/temp/dimension/view/name/module count agrees. Release C-LEARN user series parity, all generated partials, complete warnings, VM/wasm discovery parity and the all-slot digest `(19264, 0, 3106, 19264, 790401758590, 2212, 7484877280482623718)` are green. Validation: engine lib 5731 passed / 2 ignored; integration 786 passed / 16 ignored; VM allocation 4 passed; doctests 2 passed / 1 ignored; both determinism modules pass 12 consecutive invocations; all-target/all-feature engine clippy with warnings denied, rustfmt and `git diff --check` are green. 8b owns compiler-Expr invariance (`collect_expr_refs` / `dep_names`) and any remaining LTM per-slot identity projection; lookup-table strings are a separate layout channel. Physical offsets cannot replace source scheduling identity because resolution erases nested instance and terminal source names before sparse initialization and diagnostics consume them. |

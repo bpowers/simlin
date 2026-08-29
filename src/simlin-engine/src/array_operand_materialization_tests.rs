@@ -167,14 +167,14 @@ fn assert_fails_attributed(project: TestProject, what: &str) {
 /// diagnostic (the surface a user reads) rather than against the aggregate
 /// assembly error, which names only the variable.
 fn assert_declines_because(project: TestProject, variable: &str, reason: &str) {
-    use crate::db::{DiagnosticError, SimlinDb, collect_all_diagnostics, sync_from_datamodel};
+    use crate::db::{SimlinDb, collect_all_diagnostics, sync_from_datamodel};
     let datamodel = project.build_datamodel();
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &datamodel);
     let diags = collect_all_diagnostics(&db, sync.project);
     let matched = diags.iter().any(|d| {
         d.variable.as_deref() == Some(variable)
-            && matches!(&d.error, DiagnosticError::Assembly(msg) if msg.contains(reason))
+            && d.assembly_reason().is_some_and(|msg| msg.contains(reason))
     });
     assert!(
         matched,

@@ -18,6 +18,7 @@ use crate::common::{
 };
 use crate::datamodel;
 use crate::db::SourceVariableKind;
+use crate::diagnostic::{Diagnostic, DiagnosticCategory, DiagnosticSeverity};
 use crate::dimensions::{Dimension, DimensionsContext};
 use crate::lexer::LexerType;
 #[cfg(test)]
@@ -87,8 +88,8 @@ pub struct ModuleInput {
 
 /// A variable's per-kind payload: exactly the facts whose meaning depends on
 /// what kind of variable this is. Everything a variable has regardless of kind
-/// -- its name, its declared units, its source equation, and the two error
-/// channels -- lives on [`Variable`] itself, so a transformation that only
+/// -- its name, its declared units, its source equation, and its diagnostics
+/// channel -- lives on [`Variable`] itself, so a transformation that only
 /// rewrites equations (`model::lower_variable`) maps over `kind` instead of
 /// re-listing every field of every variant.
 ///
@@ -129,12 +130,9 @@ pub struct Variable<MI = ModuleInput, E = Expr2> {
     /// re-derivation, unit inference's diagnostics). `None` for a module
     /// instance, which has no equation of its own.
     pub eqn: Option<datamodel::Equation>,
-    /// How parsing and lowering report a failure on this variable; see the
-    /// note on [`Variable::equation_errors`].
-    pub errors: Vec<EquationError>,
-    /// How parsing reports a malformed `<units>` string on this variable;
-    /// see the note on [`Variable::unit_errors`].
-    pub unit_errors: Vec<UnitError>,
+    /// Context-free parse and lowering diagnostics. The database attaches the
+    /// source model and variable exactly once when it emits these values.
+    pub diagnostics: Vec<Diagnostic>,
     pub kind: VarKind<MI, E>,
 }
 
@@ -196,48 +194,13 @@ impl<MI, E> Variable<MI, E> {
         matches!(self.kind, VarKind::Module { .. })
     }
 
-    /// The equation errors parsing and lowering recorded on this variable.
-    ///
-    /// **This is a live error channel.** `parse_var` writes an equation's
-    /// parse errors here and
-    /// `model::lower_variable` appends the errors `lower_ast` raises, because
-    /// both produce a `Variable` and have nowhere else to put a failure. The
-    /// salsa path READS it: `db::var_fragment::explicit_fragment_input` turns each
-    /// entry into a `Diagnostic`, at two sites. The read of the LOWERED
-    /// variable is the one nothing else covers -- drop it and every
-    /// `MismatchedDimensions` disappears
-    /// (`db::diagnostic_tests::variable_error_fields_are_the_lowering_channel`
-    /// is the standing gate). The read of the PARSED variable sees a strict
-    /// subset, since `lower_variable` clones the parse errors forward, but it
-    /// is where the conveyor/queue driven-flow `EmptyEquation` suppression
-    /// applies, so dropping it turns a spec-sanctioned empty equation into a
-    /// phantom error (`db::diagnostic_tests`'
-    /// `test_conveyor_driven_flow_empty_equation_suppressed` and its two
-    /// siblings).
-    ///
-    /// So `db::collect_model_diagnostics` is not an ALTERNATIVE source for
-    /// these -- it is the same errors, downstream of this field.
-    pub fn equation_errors(&self) -> Option<Vec<EquationError>> {
-        if self.errors.is_empty() {
-            None
-        } else {
-            Some(self.errors.clone())
-        }
-    }
-
-    /// The malformed-`<units>`-string errors parsing recorded on this variable.
-    ///
-    /// Live for the same reason as [`Variable::equation_errors`]: `parse_var`
-    /// is where a unit string is parsed, and `explicit_fragment_input` reads this
-    /// field to emit the non-fatal `DiagnosticError::Unit` rows. Unit
-    /// *consistency* mismatches are a different pass (`db::units`) and never
-    /// land here -- nothing appends to this field after parsing.
-    pub fn unit_errors(&self) -> Option<Vec<UnitError>> {
-        if self.unit_errors.is_empty() {
-            None
-        } else {
-            Some(self.unit_errors.clone())
-        }
+    /// Whether any parse/lowering diagnostic prevents this variable from
+    /// compiling. Malformed unit declarations are reported but non-fatal.
+    pub fn has_fatal_diagnostics(&self) -> bool {
+        self.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == DiagnosticSeverity::Error
+                && diagnostic.category != DiagnosticCategory::UnitDefinition
+        })
     }
 
     pub fn table(&self) -> Option<&Table> {
@@ -271,8 +234,7 @@ impl Variable {
             ident,
             units: None,
             eqn: None,
-            errors: vec![],
-            unit_errors: vec![],
+            diagnostics: vec![],
             kind: VarKind::Module { model_name, inputs },
         }
     }
@@ -1284,12 +1246,20 @@ where
             )
         }
     };
+    let diagnostics = unit_errors
+        .into_iter()
+        .map(|error| Diagnostic::unit(error, DiagnosticSeverity::Error))
+        .chain(
+            errors
+                .into_iter()
+                .map(|error| Diagnostic::equation(error, DiagnosticSeverity::Error)),
+        )
+        .collect();
     Variable {
         ident,
         units,
         eqn,
-        errors,
-        unit_errors,
+        diagnostics,
         kind,
     }
 }
@@ -2359,8 +2329,7 @@ fn test_tables() {
         ident: Ident::new("lookup_function_table"),
         units: None,
         eqn: Some(datamodel::Equation::Scalar("0".to_string())),
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Aux {
             ast: Some(Ast::Scalar(Expr0::Const(
                 "0".to_string(),

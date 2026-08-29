@@ -19,6 +19,7 @@
 
 use crate::builtins_visitor::{empty_macro_registry, instantiate_implicit_modules};
 use crate::common::{Canonical, Ident};
+use crate::diagnostic::{Diagnostic, DiagnosticSeverity};
 use crate::dimensions::DimensionsContext;
 use std::collections::HashSet;
 
@@ -78,8 +79,10 @@ pub(crate) fn parse_ltm_equation(
         ident: Ident::new(var_name),
         units: None,
         eqn: None,
-        errors,
-        unit_errors: vec![],
+        diagnostics: errors
+            .into_iter()
+            .map(|error| Diagnostic::equation(error, DiagnosticSeverity::Error))
+            .collect(),
         kind: crate::variable::VarKind::Aux {
             ast,
             init_ast: None,

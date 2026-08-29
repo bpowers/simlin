@@ -43,6 +43,7 @@ mod conveyor_tests;
 pub mod data_provider;
 pub mod datamodel;
 pub mod db;
+mod diagnostic;
 pub mod diagram;
 mod dimensions;
 pub mod errors;

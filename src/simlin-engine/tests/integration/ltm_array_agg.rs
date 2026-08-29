@@ -64,8 +64,8 @@
 
 use simlin_engine::datamodel::{self, Dimension};
 use simlin_engine::db::{
-    DetectedLoopPolarity, DiagnosticError, DiagnosticSeverity, LtmEquation, LtmSyntheticVar,
-    SimlinDb, collect_all_diagnostics, compile_project_incremental, model_detected_loops,
+    DetectedLoopPolarity, DiagnosticSeverity, LtmEquation, LtmSyntheticVar, SimlinDb,
+    collect_all_diagnostics, compile_project_incremental, model_detected_loops,
     model_element_causal_edges, model_ltm_variables, reclassify_loops_from_results,
     set_project_ltm_discovery_mode, set_project_ltm_enabled, sync_from_datamodel_incremental,
 };
@@ -579,10 +579,8 @@ fn variable_backed_partial_reduce_loop_scores_finite_and_sustained() {
         .iter()
         .filter(|d| {
             d.severity == DiagnosticSeverity::Warning
-                && matches!(
-                    &d.error,
-                    DiagnosticError::Assembly(msg) if msg.contains("failed to compile")
-                )
+                && d.assembly_reason()
+                    .is_some_and(|msg| msg.contains("failed to compile"))
         })
         .collect();
     assert!(
@@ -2588,8 +2586,8 @@ fn broadcast_agg_loop_scores_are_finite_and_sustained() {
         .into_iter()
         .filter(|d| {
             d.severity == DiagnosticSeverity::Warning
-                && matches!(&d.error,
-                    DiagnosticError::Assembly(msg) if msg.contains("failed to compile"))
+                && d.assembly_reason()
+                    .is_some_and(|msg| msg.contains("failed to compile"))
         })
         .map(|d| d.variable.unwrap_or_default())
         .collect();
@@ -3325,7 +3323,7 @@ fn iterated_dim_feeder_closure_scores_via_hoist() {
     let diags = collect_all_diagnostics(&db, sync.project);
     let assembly: Vec<_> = diags
         .iter()
-        .filter(|d| matches!(d.error, DiagnosticError::Assembly(_)))
+        .filter(|d| d.assembly_reason().is_some())
         .collect();
     assert!(
         assembly.is_empty(),
@@ -3459,7 +3457,7 @@ fn iterated_dim_feeder_co_source_closure_scores_real_values() {
     let diags = collect_all_diagnostics(&db, sync.project);
     let assembly: Vec<_> = diags
         .iter()
-        .filter(|d| matches!(d.error, DiagnosticError::Assembly(_)))
+        .filter(|d| d.assembly_reason().is_some())
         .collect();
     assert!(
         assembly.is_empty(),
@@ -3690,7 +3688,7 @@ fn repeated_dim_co_source_pins_feeder_at_iterated_axis() {
     let diags = collect_all_diagnostics(&db, sync.project);
     let assembly: Vec<_> = diags
         .iter()
-        .filter(|d| matches!(d.error, DiagnosticError::Assembly(_)))
+        .filter(|d| d.assembly_reason().is_some())
         .collect();
     assert!(
         assembly.is_empty(),
@@ -3822,7 +3820,7 @@ fn pinned_canonical_with_feeder_scores_additively() {
     let diags = collect_all_diagnostics(&db, sync.project);
     let assembly: Vec<_> = diags
         .iter()
-        .filter(|d| matches!(d.error, DiagnosticError::Assembly(_)))
+        .filter(|d| d.assembly_reason().is_some())
         .collect();
     assert!(
         assembly.is_empty(),
@@ -3962,7 +3960,7 @@ fn inline_feeder_reducer_synthetic_agg_closure_scores() {
     let diags = collect_all_diagnostics(&db, sync.project);
     let assembly: Vec<_> = diags
         .iter()
-        .filter(|d| matches!(d.error, DiagnosticError::Assembly(_)))
+        .filter(|d| d.assembly_reason().is_some())
         .collect();
     assert!(
         assembly.is_empty(),
@@ -4054,8 +4052,7 @@ fn non_projection_feeder_co_source_closure_stays_loud() {
     let warned_loop_scores: Vec<&str> = diags
         .iter()
         .filter(|d| {
-            matches!(d.severity, DiagnosticSeverity::Warning)
-                && matches!(d.error, DiagnosticError::Assembly(_))
+            matches!(d.severity, DiagnosticSeverity::Warning) && d.assembly_reason().is_some()
         })
         .filter_map(|d| d.variable.as_deref())
         .filter(|v| v.starts_with(LOOP_SCORE_PREFIX))
@@ -4316,14 +4313,13 @@ fn bare_arrayed_reducer_arg_in_a2a_target_declines_loudly() {
     let warnings = assembly_warnings(&db, sync.project);
     for edge in ["other -> growth", "frac -> growth"] {
         assert!(
-            warnings.iter().any(|d| match &d.error {
-                DiagnosticError::Assembly(msg) => {
+            warnings.iter().any(|d| {
+                d.assembly_reason().is_some_and(|msg| {
                     let lower = msg.to_ascii_lowercase();
                     msg.contains(edge)
                         && msg.contains("bare arrayed reducer argument")
                         && lower.contains("sum(other)")
-                }
-                _ => false,
+                })
             }),
             "expected warning for declined {edge}; got: {warnings:?}"
         );
@@ -4388,23 +4384,21 @@ fn bare_arrayed_reducer_decline_keeps_independent_additive_source() {
 
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
-        warnings.iter().any(|d| match &d.error {
-            DiagnosticError::Assembly(msg) => {
+        warnings.iter().any(|d| {
+            d.assembly_reason().is_some_and(|msg| {
                 let lower = msg.to_ascii_lowercase();
                 msg.contains("pop -> growth")
                     && msg.contains("bare arrayed reducer argument")
                     && lower.contains("sum(pop)")
-            }
-            _ => false,
+            })
         }),
         "expected warning for declined pop -> growth; got: {warnings:?}"
     );
     assert!(
-        !warnings.iter().any(|d| match &d.error {
-            DiagnosticError::Assembly(msg) => {
+        !warnings.iter().any(|d| {
+            d.assembly_reason().is_some_and(|msg| {
                 msg.contains("local -> growth") && msg.contains("bare arrayed reducer argument")
-            }
-            _ => false,
+            })
         }),
         "local -> growth is independent of the bare reducer and must not warn; got: {warnings:?}"
     );
@@ -4554,10 +4548,7 @@ fn assembly_warnings(
 ) -> Vec<simlin_engine::db::Diagnostic> {
     collect_all_diagnostics(db, project)
         .into_iter()
-        .filter(|d| {
-            d.severity == DiagnosticSeverity::Warning
-                && matches!(d.error, DiagnosticError::Assembly(_))
-        })
+        .filter(|d| d.severity == DiagnosticSeverity::Warning && d.assembly_reason().is_some())
         .collect()
 }
 
@@ -4613,9 +4604,9 @@ fn declined_sliced_reducer_edge_skips_loudly() {
         1,
         "expected exactly one Assembly warning (the unscoreable edge); got: {warnings:?}"
     );
-    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
-        unreachable!("filtered to Assembly above");
-    };
+    let msg = warnings[0]
+        .assembly_reason()
+        .expect("filtered to Assembly above");
     assert!(
         msg.contains("matrix") && msg.contains("growth"),
         "the warning must name the unscoreable edge's endpoints; got: {msg}"
@@ -4798,10 +4789,10 @@ fn a_disagreeing_mapped_pair_is_denied_the_arrayed_score() {
     // than two substrings a dozen unrelated messages contain.
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
-        warnings.iter().any(|w| match &w.error {
-            DiagnosticError::Assembly(m) =>
-                m.contains("LTM link score for edge x -> target could not be computed"),
-            _ => false,
+        warnings.iter().any(|w| {
+            w.assembly_reason().is_some_and(|m| {
+                m.contains("LTM link score for edge x -> target could not be computed")
+            })
         }),
         "the decline must be LOUD -- one warning naming the edge; got: {warnings:?}"
     );
@@ -6894,9 +6885,9 @@ fn aliased_through_agg_residual_strict_site_declines_edge() {
                 "{mode}: expected one warning for the residual strict pop -> out \
              read; got: {warnings:?}"
             );
-            let DiagnosticError::Assembly(msg) = &warnings[0].error else {
-                unreachable!("filtered to Assembly above");
-            };
+            let msg = warnings[0]
+                .assembly_reason()
+                .expect("filtered to Assembly above");
             assert!(
                 msg.contains("pop -> out") && msg.contains("pop[r,young]"),
                 "{mode}: warning must name the declined edge and strict residual \
@@ -9874,10 +9865,7 @@ fn assert_square_source_loudly_skipped(
     let warnings = assembly_warnings(&db, sync.project);
     let square: Vec<&str> = warnings
         .iter()
-        .filter_map(|w| match &w.error {
-            DiagnosticError::Assembly(m) if m.contains("square-source") => Some(m.as_str()),
-            _ => None,
-        })
+        .filter_map(|w| w.assembly_reason().filter(|m| m.contains("square-source")))
         .collect();
     assert_eq!(
         square.len(),
@@ -9895,11 +9883,9 @@ fn assert_square_source_loudly_skipped(
     }
     let repeated: Vec<&str> = warnings
         .iter()
-        .filter_map(|w| match &w.error {
-            DiagnosticError::Assembly(m) if m.contains("repeats a dimension in its subscripts") => {
-                Some(m.as_str())
-            }
-            _ => None,
+        .filter_map(|w| {
+            w.assembly_reason()
+                .filter(|m| m.contains("repeats a dimension in its subscripts"))
         })
         .collect();
     assert_eq!(
@@ -9922,7 +9908,7 @@ fn assert_square_source_loudly_skipped(
         expected_skipped.len() + repeated_targets.len(),
         "{mode}: the only Assembly warnings are the declared loud shape skips; \
          got: {:?}",
-        warnings.iter().map(|w| &w.error).collect::<Vec<_>>()
+        warnings
     );
 
     // The model simulates and every emitted score series stays finite.
@@ -10121,9 +10107,9 @@ fn gh791_arrayed_owner_mismatched_cosource_strict_slice_skips_loudly() {
         "expected exactly one Assembly warning (the unscoreable pop -> share edge); \
          got: {warnings:?}"
     );
-    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
-        unreachable!("filtered to Assembly above");
-    };
+    let msg = warnings[0]
+        .assembly_reason()
+        .expect("filtered to Assembly above");
     assert!(
         msg.contains("share") && msg.contains("strict slice") && msg.contains("pop[nyc,*]"),
         "the warning must name the unscoreable edge, the strict-slice reason, and the \
@@ -10388,9 +10374,9 @@ fn gh792_per_element_owner_strict_slice_skips_loudly() {
         "expected exactly one Assembly warning (the unscoreable pop -> share edge); \
          got: {warnings:?}"
     );
-    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
-        unreachable!("filtered to Assembly above");
-    };
+    let msg = warnings[0]
+        .assembly_reason()
+        .expect("filtered to Assembly above");
     assert!(
         msg.contains("pop -> share")
             && msg.contains("per-element equations")
@@ -10518,9 +10504,9 @@ fn gh792_mixed_slot_reducer_read_declines_whole_edge() {
         1,
         "expected exactly one Assembly warning for the mixed-slot decline; got: {warnings:?}"
     );
-    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
-        unreachable!("filtered to Assembly above");
-    };
+    let msg = warnings[0]
+        .assembly_reason()
+        .expect("filtered to Assembly above");
     assert!(
         msg.contains("pop -> share")
             && msg.contains("per-element equations")
@@ -10598,9 +10584,9 @@ fn assert_gh792_per_element_decline(slots: Vec<(&str, &str)>, expected_share_nyc
         "expected exactly one Assembly warning (the unscoreable pop -> share edge); \
          got: {warnings:?}"
     );
-    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
-        unreachable!("filtered to Assembly above");
-    };
+    let msg = warnings[0]
+        .assembly_reason()
+        .expect("filtered to Assembly above");
     assert!(
         msg.contains("pop -> share") && msg.contains("per-element equations"),
         "the warning must name the edge and the per-element reducer-read reason; \
@@ -10763,9 +10749,9 @@ fn assert_gh793_strict_sibling_declines(strict_first: bool) {
         "expected exactly one Assembly warning for the unscoreable pop -> share \
          strict-slice sibling; got: {warnings:?}"
     );
-    let DiagnosticError::Assembly(msg) = &warnings[0].error else {
-        unreachable!("filtered to Assembly above");
-    };
+    let msg = warnings[0]
+        .assembly_reason()
+        .expect("filtered to Assembly above");
     assert!(
         msg.contains("pop -> share") && msg.contains("pop[nyc,*]"),
         "the warning must name the edge and the strict sibling slice \

@@ -2263,7 +2263,7 @@ fn result_dims_from_read_slice(
 /// remaining landing (`try_cross_dimensional_link_scores`' cartesian
 /// partial-reduce branch, whose own `from_pos` map has the same first-match
 /// hazard) is closed in lockstep by the loud `#758`/`#780` skip
-/// (`emit_unscoreable_duplicated_dim_source_warning`), so NO surface carries
+/// (the duplicated-dimension-source warning), so NO surface carries
 /// an unwarned wrong number for this shape.
 ///
 /// Keyed on `result_dims` (already the canonical slice's `Iterated` target

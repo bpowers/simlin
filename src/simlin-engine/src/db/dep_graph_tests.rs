@@ -1134,13 +1134,12 @@ fn init_recurrence_behind_stock_model_dep_graph_resolves_no_circular() {
     // The model's reporting trigger must agree with the pure graph verdict.
     let diags = crate::db::collect_model_diagnostics(&db, model, result.project);
     assert!(
-        !diags.iter().any(|d| matches!(
-            d.error,
-            crate::db::DiagnosticError::Model(crate::common::Error {
-                code: crate::common::ErrorCode::CircularDependency,
-                ..
-            })
-        )),
+        !diags.iter().any(|d| {
+            d.is(
+                crate::db::DiagnosticCategory::Model,
+                crate::common::ErrorCode::CircularDependency,
+            )
+        }),
         "no CircularDependency must be raised for the resolved init-only \
          recurrence"
     );
@@ -2145,10 +2144,9 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
     let circular: Vec<_> = diags
         .iter()
         .filter(|d| {
-            matches!(
-                &d.error,
-                crate::db::DiagnosticError::Model(e)
-                    if e.code == crate::common::ErrorCode::CircularDependency
+            d.is(
+                crate::db::DiagnosticCategory::Model,
+                crate::common::ErrorCode::CircularDependency,
             )
         })
         .collect();
@@ -3482,10 +3480,9 @@ fn an_init_view_is_an_init_phase_element_edge() {
     let diags = crate::db::collect_all_diagnostics(&db, result.project);
     let circular = diags.iter().any(|d| {
         d.variable.as_deref() == Some("s")
-            && matches!(
-                &d.error,
-                crate::db::DiagnosticError::Model(e)
-                    if e.code == crate::common::ErrorCode::CircularDependency
+            && d.is(
+                crate::db::DiagnosticCategory::Model,
+                crate::common::ErrorCode::CircularDependency,
             )
     });
     assert!(

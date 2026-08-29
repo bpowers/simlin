@@ -41,8 +41,8 @@
 //!   pinned by the pre-existing `ltm_array_agg` RANK integration tests.
 
 use crate::db::{
-    DiagnosticError, SimlinDb, collect_all_diagnostics, model_ltm_variables,
-    set_project_ltm_enabled, sync_from_datamodel_incremental,
+    SimlinDb, collect_all_diagnostics, model_ltm_variables, set_project_ltm_enabled,
+    sync_from_datamodel_incremental,
 };
 use crate::test_common::TestProject;
 
@@ -65,11 +65,10 @@ fn rank_target_fixture() -> TestProject {
 fn fragment_failures(db: &SimlinDb, project: crate::db::SourceProject) -> Vec<String> {
     collect_all_diagnostics(db, project)
         .iter()
-        .filter_map(|d| match &d.error {
-            DiagnosticError::Assembly(msg) if msg.contains("failed to compile") => {
-                Some(format!("{:?}: {msg}", d.variable))
-            }
-            _ => None,
+        .filter_map(|d| {
+            d.reason()
+                .filter(|msg| msg.contains("failed to compile"))
+                .map(|msg| format!("{:?}: {msg}", d.variable))
         })
         .collect()
 }
@@ -96,24 +95,32 @@ fn per_element_partial_of_rank_like_target_declines_loudly() {
          emitted; got: {emitted:?}"
     );
 
-    let rank_warnings: Vec<String> = collect_all_diagnostics(&db, sync.project)
+    let diagnostics = collect_all_diagnostics(&db, sync.project);
+    let rank_warnings: Vec<_> = diagnostics
         .iter()
-        .filter_map(|d| match &d.error {
-            DiagnosticError::Assembly(msg)
-                if msg.contains("order statistic") || msg.contains("ranks a whole array") =>
-            {
-                Some(msg.clone())
-            }
-            _ => None,
+        .filter(|d| {
+            d.assembly_reason().is_some_and(|msg| {
+                msg.contains("order statistic") || msg.contains("ranks a whole array")
+            })
         })
         .collect();
     assert!(
         !rank_warnings.is_empty(),
         "the decline must be loud, naming the rank-like shape; diagnostics: {:?}",
-        collect_all_diagnostics(&db, sync.project)
+        diagnostics
             .iter()
-            .map(|d| format!("{:?}", d.error))
+            .map(|d| format!("{:?}", d))
             .collect::<Vec<_>>()
+    );
+    assert!(
+        rank_warnings.iter().any(|diagnostic| {
+            diagnostic
+                .related
+                .iter()
+                .map(|source| source.variable.as_str())
+                .eq(["asc", "order"])
+        }),
+        "rank-like partial warning must retain ordered edge sources: {rank_warnings:?}"
     );
 
     // The decline replaces what used to be attributed codegen FAILURES: with

@@ -746,9 +746,9 @@ fn every_invalid_delayn_arity_and_order_refuses_loudly() {
         let out = sync.models["main"].variables["out"].source;
         let parsed = parse_source_variable(&db, out, sync.project);
         assert!(
-            parsed.variable.errors.iter().any(|error| {
-                error.code == row.code
-                    && error
+            parsed.variable.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == row.code
+                    && diagnostic
                         .details
                         .as_deref()
                         .is_some_and(|details| details.contains(row.details))
@@ -757,7 +757,7 @@ fn every_invalid_delayn_arity_and_order_refuses_loudly() {
             row.equation,
             row.code,
             row.details,
-            parsed.variable.errors
+            parsed.variable.diagnostics
         );
     }
 }
@@ -1207,9 +1207,9 @@ fn active_initial_capture_cannot_replace_dt_hoisted_argument() {
         "the retained dt helper must be the computed module argument"
     );
     assert!(
-        parsed.variable.errors.iter().any(|error| {
-            error.code == crate::common::ErrorCode::DuplicateVariable
-                && error
+        parsed.variable.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == crate::common::ErrorCode::DuplicateVariable
+                && diagnostic
                     .details
                     .as_deref()
                     .is_some_and(|details| details.contains(collision_name))
@@ -1222,12 +1222,14 @@ fn active_initial_capture_cannot_replace_dt_hoisted_argument() {
         diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == DiagnosticSeverity::Error
                 && diagnostic.variable.as_deref() == Some("out")
-                && matches!(
-                    &diagnostic.error,
-                    DiagnosticError::Equation(error)
-                        if error.code == crate::common::ErrorCode::DuplicateVariable
-                            && error.details.as_deref().is_some_and(|details| details.contains(collision_name))
+                && diagnostic.is(
+                    DiagnosticCategory::Equation,
+                    crate::common::ErrorCode::DuplicateVariable,
                 )
+                && diagnostic
+                    .details
+                    .as_deref()
+                    .is_some_and(|details| details.contains(collision_name))
         }),
         "the cross-kind collision must surface through collection: {diagnostics:?}"
     );
@@ -1388,10 +1390,9 @@ fn assert_parsed_equivalent(
     assert_eq!(actual.ident, expected.ident, "{what}: ident of {ident}");
     assert_eq!(actual.units, expected.units, "{what}: units of {ident}");
     assert_eq!(actual.eqn, expected.eqn, "{what}: equation of {ident}");
-    assert_eq!(actual.errors, expected.errors, "{what}: errors of {ident}");
-    assert!(
-        actual.unit_errors == expected.unit_errors,
-        "{what}: unit errors of {ident}"
+    assert_eq!(
+        actual.diagnostics, expected.diagnostics,
+        "{what}: diagnostics of {ident}"
     );
 
     match (&actual.kind, &expected.kind) {

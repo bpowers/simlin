@@ -23,8 +23,10 @@ use simlin_engine::db::{
 };
 use simlin_engine::{open_vensim, open_xmile};
 
-/// Which decline this diagnostic reports, keyed off the message's own wording
-/// (the messages are the only channel `collect_all_diagnostics` exposes).
+/// Which decline this diagnostic reports. `PartialEquationErrorKind` belongs
+/// to generation before a diagnostic exists, so the decline subtype is the
+/// one fact intentionally retained in its detailed explanation rather than a
+/// separate compiler error code.
 fn bucket(msg: &str) -> Option<&'static str> {
     if !msg.contains("could not be generated") && !msg.contains("no link score") {
         return None;
@@ -70,15 +72,14 @@ fn main() {
     let diags = collect_all_diagnostics(&db, sync.project);
     let mut by_bucket: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
     for d in &diags {
-        let msg = format!("{:?}", d.error);
-        if let Some(b) = bucket(&msg) {
-            // The link-score variable name is the quoted ident right after
-            // "variable '".
-            let name = msg
-                .split_once("variable '")
-                .and_then(|(_, rest)| rest.split_once('\''))
-                .map(|(n, _)| n.to_string())
-                .unwrap_or_else(|| msg.clone());
+        let Some(msg) = d.reason() else {
+            continue;
+        };
+        if let Some(b) = bucket(msg) {
+            let name = d
+                .variable
+                .clone()
+                .unwrap_or_else(|| "<project>".to_string());
             // The offending dep / equation text, the second quoted run.
             let detail = msg
                 .split_once("dependency '")

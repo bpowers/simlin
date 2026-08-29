@@ -51,6 +51,7 @@ use crate::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, EquationError, Ident,
 };
 use crate::datamodel;
+use crate::diagnostic::{Diagnostic, DiagnosticSeverity};
 use crate::dimensions::{Dimension, DimensionsContext};
 use crate::model::ParsedVariable;
 use crate::variable::{VarKind, Variable, get_dimensions};
@@ -279,17 +280,13 @@ impl Capture {
     /// two cannot drift.
     ///
     /// A dimension name this capture cannot resolve is recorded as an equation
-    /// error and discards the AST, exactly as the parse does: the caller's
-    /// loud-safe `None` then keeps the helper out of the compile rather than
-    /// laying it out at the wrong size.
+    /// diagnostic and discards the AST, exactly as the parse does. Fragment
+    /// preparation then refuses the helper while emitting that typed payload.
     ///
     /// Any span such an error carries indexes the PARENT's equation text, since
-    /// that is where the subtree was written -- where a re-parse of the printed
-    /// helper indexed the printed text. Nothing observes the difference today:
-    /// `db::fragment_compile::lower_implicit_var` returns `None` on any error
-    /// here, and the helper surfaces through `assemble_module`'s batch
-    /// "failed to compile fragments" message, which names the helper rather
-    /// than rendering a snippet.
+    /// that is where the subtree was written. The diagnostic retains the
+    /// helper as its physical variable and the parent as its source owner, so
+    /// formatting resolves this span against the editable parent equation.
     ///
     /// The body goes through `instantiate_implicit_modules` because a parse of
     /// it does. A module call still requires one instance per active element;
@@ -365,8 +362,10 @@ fn subtree_parsed_variable(
         ident,
         units: None,
         eqn: Some(eqn),
-        errors,
-        unit_errors: vec![],
+        diagnostics: errors
+            .into_iter()
+            .map(|error| Diagnostic::equation(error, DiagnosticSeverity::Error))
+            .collect(),
         kind: VarKind::Aux {
             ast,
             init_ast: None,
@@ -625,8 +624,7 @@ impl ImplicitModule {
             ident: Ident::<Canonical>::new(&self.ident),
             units: None,
             eqn: None,
-            errors: vec![],
-            unit_errors: vec![],
+            diagnostics: vec![],
             kind: VarKind::Module {
                 model_name: Ident::new(&self.model_name),
                 inputs: self.references.clone(),

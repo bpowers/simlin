@@ -47,7 +47,7 @@ fn typed_ltm_capture_helpers_emit_exactly_their_required_phase() {
             crate::db::project_dimensions_context(&db, sync.project),
             Some(ltm_model_var_names(&db, model, sync.project)),
         );
-        assert!(parsed.variable.errors.is_empty(), "{kind:?}");
+        assert!(parsed.variable.diagnostics.is_empty(), "{kind:?}");
         let helpers: Vec<&ImplicitVar> = parsed
             .implicit_vars
             .iter()
@@ -56,17 +56,17 @@ fn typed_ltm_capture_helpers_emit_exactly_their_required_phase() {
         assert_eq!(helpers.len(), 1, "{kind:?}: one production parse capture");
         assert_eq!(helpers[0].capture().unwrap().kind(), kind);
         let meta = ltm_implicit_var_meta(&db, sync.project, &parent, helpers[0]);
-        let mut reason = None;
+        let mut diagnostics = Vec::new();
         let fragment = compile_ltm_implicit_var_fragment(
             &db,
             &meta,
             model,
             sync.project,
             &[],
-            Some(&mut reason),
+            Some(&mut diagnostics),
         )
         .unwrap_or_else(|| panic!("{kind:?}: helper fragment"));
-        assert!(reason.is_none(), "{kind:?}: {reason:?}");
+        assert!(diagnostics.is_empty(), "{kind:?}: {diagnostics:?}");
         assert_eq!(
             fragment.fragment.initial_bytecodes.is_some(),
             kind.needs_initials(),
@@ -93,6 +93,78 @@ fn typed_ltm_capture_helpers_emit_exactly_their_required_phase() {
             "{kind:?}: a missing required phase must warn"
         );
     }
+}
+
+/// A capture shared by INIT and PREVIOUS is lowered in both required phases.
+/// The fragment diagnostic boundary must retain one source defect, not emit the
+/// same payload twice merely because two consumers require its storage.
+#[test]
+fn combined_ltm_capture_deduplicates_the_same_required_phase_diagnostic() {
+    use salsa::Setter;
+
+    use super::{
+        LtmEquation, compile_ltm_implicit_var_fragment, ltm_implicit_var_meta, ltm_model_var_names,
+        parse_ltm_equation,
+    };
+    use crate::capture::CaptureKind;
+
+    let project = TestProject::new("ltm_combined_capture_diagnostic")
+        .named_dimension("D", &["a", "b"])
+        .aux("k", "1", None)
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    sync.project.set_ltm_enabled(&mut db).to(true);
+    let model = sync.models["main"].source;
+    let dims = crate::db::project_dimensions_context(&db, sync.project);
+    let names = ltm_model_var_names(&db, model, sync.project);
+    let parent = "$⁚ltm_capture_phase⁚combined";
+
+    let previous = parse_ltm_equation(
+        parent,
+        &LtmEquation::scalar("PREVIOUS(1 + D)".to_string()),
+        dims,
+        Some(names),
+    );
+    let initial = parse_ltm_equation(
+        parent,
+        &LtmEquation::scalar("INIT(1 + D)".to_string()),
+        dims,
+        Some(names),
+    );
+    assert_eq!(previous.implicit_vars.len(), 1);
+    assert_eq!(initial.implicit_vars.len(), 1);
+    let mut helper = previous.implicit_vars[0].clone();
+    assert!(
+        helper.merge_same_definition(&initial.implicit_vars[0]),
+        "the production merge must recognize the shared positional capture"
+    );
+    assert_eq!(
+        helper.capture().map(|capture| capture.kind()),
+        Some(CaptureKind::PreviousAndInit)
+    );
+
+    let meta = ltm_implicit_var_meta(&db, sync.project, parent, &helper);
+    let mut diagnostics = Vec::new();
+    let fragment = compile_ltm_implicit_var_fragment(
+        &db,
+        &meta,
+        model,
+        sync.project,
+        &[],
+        Some(&mut diagnostics),
+    )
+    .expect("the failed phases remain represented in the fragment");
+    assert!(fragment.fragment.initial_bytecodes.is_none());
+    assert!(fragment.fragment.flow_bytecodes.is_none());
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(
+        diagnostics[0].code,
+        crate::common::ErrorCode::DimensionInScalarContext
+    );
+    assert_eq!(diagnostics[0].model, "main");
+    assert_eq!(diagnostics[0].variable.as_deref(), Some(helper.ident()));
+    assert_eq!(diagnostics[0].owner.as_deref(), Some(parent));
 }
 
 /// Generated LTM scores currently synthesize only nested PREVIOUS captures.
@@ -215,14 +287,14 @@ fn test_ltm_bare_module_snapshot_refuses_both_intrinsics_loudly() {
             builtin.name()
         );
 
-        let mut why = None;
+        let mut diagnostics = Vec::new();
         let fragment = compile_ltm_equation_fragment(
             &db,
             &var_name,
             &equation,
             source_model,
             sync.project,
-            Some(&mut why),
+            Some(&mut diagnostics),
         )
         .expect("the LTM compiler retains a failed fragment for diagnostic reporting");
         assert!(
@@ -230,7 +302,23 @@ fn test_ltm_bare_module_snapshot_refuses_both_intrinsics_loudly() {
             "{} of a bare module instance must emit no bytecode rather than read slot zero",
             builtin.name()
         );
-        let err = why.expect("the LTM boundary must preserve the lowering reason");
+        assert_eq!(diagnostics.len(), 1, "{var_name}: {diagnostics:?}");
+        let diagnostic = &diagnostics[0];
+        assert_eq!(
+            diagnostic.category,
+            crate::db::DiagnosticCategory::Equation,
+            "the LTM boundary must preserve the raising category"
+        );
+        assert_eq!(diagnostic.code, crate::common::ErrorCode::NotSimulatable);
+        assert_eq!(diagnostic.severity, crate::db::DiagnosticSeverity::Warning);
+        assert_eq!(diagnostic.model, "main");
+        assert_eq!(diagnostic.variable.as_deref(), Some(var_name.as_str()));
+        assert!(diagnostic.owner.is_none());
+        assert!(diagnostic.location.is_some());
+        let err = diagnostic
+            .details
+            .as_deref()
+            .expect("the LTM boundary must preserve the lowering reason");
         assert!(
             err.contains("cannot read the bare module instance 'producer'"),
             "{} refusal for {var_name} must identify the unsafe module read, got {err}",
@@ -758,13 +846,13 @@ fn unparseable_generated_arm_degrades_loudly_without_panicking() {
     let arm = LtmArm::new(bad.to_string());
     assert!(arm.expr.is_none(), "unparseable text must yield no AST");
     assert!(
-        arm.parse_error.is_some(),
+        !arm.parse_errors.is_empty(),
         "the parse error must be retained -- discarding it is what made the \
          arrayed case silent"
     );
     // An EMPTY arm is the legitimate `expr == None` and must NOT carry errors.
     let empty = LtmArm::new(String::new());
-    assert!(empty.expr.is_none() && empty.parse_error.is_none());
+    assert!(empty.expr.is_none() && empty.parse_errors.is_empty());
 
     let project = TestProject::new("bad_arm_degradation")
         .named_dimension("Region", &["nyc", "boston"])
@@ -783,12 +871,26 @@ fn unparseable_generated_arm_degrades_loudly_without_panicking() {
         ast.is_none() && !errs.is_empty(),
         "scalar must reject loudly"
     );
+    let mut scalar_diagnostics = Vec::new();
     assert!(
-        compile_ltm_equation_fragment(&db, "$⁚ltm⁚bad⁚scalar", &scalar, model, sync.project, None)
-            .is_none(),
+        compile_ltm_equation_fragment(
+            &db,
+            "$⁚ltm⁚bad⁚scalar",
+            &scalar,
+            model,
+            sync.project,
+            Some(&mut scalar_diagnostics),
+        )
+        .is_none(),
         "a rejected equation must not produce a fragment (the diagnostic pass \
          reports the missing bytecode)"
     );
+    assert_eq!(scalar_diagnostics.len(), errs.len());
+    assert!(scalar_diagnostics.iter().all(|diagnostic| {
+        diagnostic.category == crate::db::DiagnosticCategory::Equation
+            && diagnostic.severity == crate::db::DiagnosticSeverity::Warning
+            && diagnostic.location.is_some()
+    }));
 
     // (c) Arrayed with ONE bad arm and one GOOD sibling -- the case that was
     // silent. The whole equation must be rejected, not zero-filled.
@@ -819,6 +921,42 @@ fn unparseable_generated_arm_degrades_loudly_without_panicking() {
         .is_none(),
         "the arrayed fragment must be rejected -- otherwise the missing slot is \
          zero-filled and no diagnostic fires"
+    );
+
+    // Two independently failing slots keep two identities even when their
+    // parser payloads are identical. This is the production input to the LTM
+    // diagnostic deduplication path, not a hand-built diagnostic vector.
+    let two_bad = LtmEquation::arrayed(
+        vec!["Region".to_string()],
+        vec![
+            ("nyc".to_string(), bad.to_string()),
+            ("boston".to_string(), bad.to_string()),
+        ],
+        None,
+        false,
+    );
+    let mut element_diagnostics = Vec::new();
+    assert!(
+        compile_ltm_equation_fragment(
+            &db,
+            "$⁚ltm⁚bad⁚elements",
+            &two_bad,
+            model,
+            sync.project,
+            Some(&mut element_diagnostics),
+        )
+        .is_none()
+    );
+    assert_eq!(element_diagnostics.len(), 2, "{element_diagnostics:?}");
+    assert!(element_diagnostics.iter().all(|diagnostic| {
+        diagnostic.model == "main" && diagnostic.variable.as_deref() == Some("$⁚ltm⁚bad⁚elements")
+    }));
+    assert_eq!(
+        element_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.element.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("nyc"), Some("boston")]
     );
 
     // (d) An arrayed equation whose arms ALL parse is unaffected: an empty
@@ -1782,10 +1920,7 @@ fn a_dimension_name_index_is_not_frozen_when_the_axis_is_known() {
     assert!(
         diags.is_empty(),
         "every LTM fragment and helper must compile; got: {:?}",
-        diags
-            .iter()
-            .map(|d| (&d.variable, &d.error))
-            .collect::<Vec<_>>()
+        diags.iter().map(|d| (&d.variable, d)).collect::<Vec<_>>()
     );
 }
 
@@ -2097,7 +2232,7 @@ fn an_uncoverable_arrayed_dep_declines_the_edge_loudly() {
     let errors: Vec<_> = diags
         .iter()
         .filter(|d| d.severity == crate::db::DiagnosticSeverity::Error)
-        .map(|d| (&d.variable, &d.error))
+        .map(|d| (&d.variable, d))
         .collect();
     assert!(
         errors.is_empty(),
@@ -2126,11 +2261,11 @@ fn an_uncoverable_arrayed_dep_declines_the_edge_loudly() {
     // guard exists to remove.
     let silently_degraded: Vec<&String> = diags
         .iter()
-        .filter_map(|d| match &d.error {
-            crate::db::DiagnosticError::Assembly(m) if m.contains("silently degraded") => {
-                d.variable.as_ref()
-            }
-            _ => None,
+        .filter_map(|d| {
+            d.reason()
+                .is_some_and(|message| message.contains("silently degraded"))
+                .then_some(d.variable.as_ref())
+                .flatten()
         })
         .collect();
     assert!(
@@ -2141,17 +2276,14 @@ fn an_uncoverable_arrayed_dep_declines_the_edge_loudly() {
     // The decline must be LOUD and must be THIS decline: `!diags.is_empty()` is
     // satisfied by any diagnostic at all, including one from an unrelated defect.
     assert!(
-        diags.iter().any(|d| match &d.error {
-            crate::db::DiagnosticError::Assembly(m) =>
-                m.contains("cannot be projected onto that target element")
-                    && m.contains("switch\u{2192}target"),
-            _ => false,
+        diags.iter().any(|d| {
+            d.assembly_reason().is_some_and(|message| {
+                message.contains("cannot be projected onto that target element")
+                    && message.contains("switch\u{2192}target")
+            })
         }),
         "the switch->target decline must carry the unprojectable-dep warning; got: {:?}",
-        diags
-            .iter()
-            .map(|d| (&d.variable, &d.error))
-            .collect::<Vec<_>>()
+        diags.iter().map(|d| (&d.variable, d)).collect::<Vec<_>>()
     );
 }
 
@@ -2231,13 +2363,12 @@ fn an_element_mapped_arrayed_dep_is_scored_through_the_map() {
     let diags = crate::db::collect_all_diagnostics(&db, source_project);
     let declines: Vec<_> = diags
         .iter()
-        .filter(|d| match &d.error {
-            crate::db::DiagnosticError::Assembly(m) => {
-                m.contains("cannot be projected onto that target element")
-            }
-            _ => false,
+        .filter(|d| {
+            d.assembly_reason().is_some_and(|message| {
+                message.contains("cannot be projected onto that target element")
+            })
         })
-        .map(|d| (&d.variable, &d.error))
+        .map(|d| (&d.variable, d))
         .collect();
     assert!(declines.is_empty(), "got: {declines:?}");
 }
@@ -2283,7 +2414,7 @@ fn a_many_to_one_mapped_read_is_scored_per_row_and_element() {
     let errors: Vec<_> = diags
         .iter()
         .filter(|d| d.severity == crate::db::DiagnosticSeverity::Error)
-        .map(|d| (&d.variable, &d.error))
+        .map(|d| (&d.variable, d))
         .collect();
     assert!(
         errors.is_empty(),
@@ -2426,10 +2557,7 @@ fn a_lookup_table_index_is_element_pinned_in_a_per_element_partial() {
     assert!(
         diags.is_empty(),
         "the fixture must compile with no diagnostics; got: {:?}",
-        diags
-            .iter()
-            .map(|d| (&d.variable, &d.error))
-            .collect::<Vec<_>>()
+        diags.iter().map(|d| (&d.variable, d)).collect::<Vec<_>>()
     );
 
     // The per-element score for the `factor -> out[b]` edge. `b`'s table has
@@ -2553,7 +2681,7 @@ fn the_completeness_guard_holds_on_the_per_element_emitter() {
     let errors: Vec<_> = diags
         .iter()
         .filter(|d| d.severity == crate::db::DiagnosticSeverity::Error)
-        .map(|d| (&d.variable, &d.error))
+        .map(|d| (&d.variable, d))
         .collect();
     assert!(
         errors.is_empty(),
@@ -2579,11 +2707,11 @@ fn the_completeness_guard_holds_on_the_per_element_emitter() {
 
     let silently_degraded: Vec<&String> = diags
         .iter()
-        .filter_map(|d| match &d.error {
-            crate::db::DiagnosticError::Assembly(m) if m.contains("silently degraded") => {
-                d.variable.as_ref()
-            }
-            _ => None,
+        .filter_map(|d| {
+            d.reason()
+                .is_some_and(|message| message.contains("silently degraded"))
+                .then_some(d.variable.as_ref())
+                .flatten()
         })
         .collect();
     assert!(
@@ -2592,17 +2720,14 @@ fn the_completeness_guard_holds_on_the_per_element_emitter() {
          got: {silently_degraded:?}"
     );
     assert!(
-        diags.iter().any(|d| match &d.error {
-            crate::db::DiagnosticError::Assembly(m) =>
-                m.contains("cannot be projected onto that target element")
-                    && m.contains("other[region]"),
-            _ => false,
+        diags.iter().any(|d| {
+            d.assembly_reason().is_some_and(|message| {
+                message.contains("cannot be projected onto that target element")
+                    && message.contains("other[region]")
+            })
         }),
         "the decline must carry the unprojectable-dep warning naming the dep; got: {:?}",
-        diags
-            .iter()
-            .map(|d| (&d.variable, &d.error))
-            .collect::<Vec<_>>()
+        diags.iter().map(|d| (&d.variable, d)).collect::<Vec<_>>()
     );
 }
 

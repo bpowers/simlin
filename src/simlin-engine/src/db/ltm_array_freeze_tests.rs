@@ -41,8 +41,8 @@
 use std::collections::HashSet;
 
 use crate::db::{
-    DiagnosticError, SimlinDb, collect_all_diagnostics, model_ltm_variables,
-    set_project_ltm_enabled, sync_from_datamodel_incremental,
+    SimlinDb, collect_all_diagnostics, model_ltm_variables, set_project_ltm_enabled,
+    sync_from_datamodel_incremental,
 };
 use crate::test_common::TestProject;
 
@@ -81,11 +81,10 @@ fn select_slice_fixture() -> TestProject {
 fn fragment_failures(db: &SimlinDb, project: crate::db::SourceProject) -> Vec<String> {
     collect_all_diagnostics(db, project)
         .iter()
-        .filter_map(|d| match &d.error {
-            DiagnosticError::Assembly(msg) if msg.contains("failed to compile") => {
-                Some(format!("{:?}: {msg}", d.variable))
-            }
-            _ => None,
+        .filter_map(|d| {
+            d.reason()
+                .filter(|msg| msg.contains("failed to compile"))
+                .map(|msg| format!("{:?}: {msg}", d.variable))
         })
         .collect()
 }
@@ -95,11 +94,10 @@ fn fragment_failures(db: &SimlinDb, project: crate::db::SourceProject) -> Vec<St
 fn unfreezable_declines(db: &SimlinDb, project: crate::db::SourceProject) -> Vec<String> {
     collect_all_diagnostics(db, project)
         .iter()
-        .filter_map(|d| match &d.error {
-            DiagnosticError::Assembly(msg) if msg.contains("freeze an array slice") => {
-                Some(msg.clone())
-            }
-            _ => None,
+        .filter_map(|d| {
+            d.assembly_reason()
+                .filter(|msg| msg.contains("freeze an array slice"))
+                .map(str::to_owned)
         })
         .collect()
 }

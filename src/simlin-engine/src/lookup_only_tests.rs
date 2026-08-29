@@ -33,7 +33,7 @@
 use crate::common::ErrorCode;
 use crate::datamodel;
 use crate::db::{
-    DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
+    DiagnosticCategory, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
     compile_project_incremental, sync_from_datamodel, sync_from_datamodel_incremental,
 };
 use crate::mdl::LOOKUP_SENTINEL;
@@ -473,12 +473,9 @@ fn bare_reference_to_lookup_only_is_compile_error() {
     let diags = diagnostics_of(&project);
     let has_bare_ref_error = diags.iter().any(|d| {
         d.variable.as_deref() == Some("y")
-            && matches!(
-                &d.error,
-                DiagnosticError::Model(crate::common::Error {
-                    code: ErrorCode::LookupReferencedWithoutArgument,
-                    ..
-                })
+            && d.is(
+                DiagnosticCategory::Model,
+                ErrorCode::LookupReferencedWithoutArgument,
             )
             && d.severity == DiagnosticSeverity::Error
     });

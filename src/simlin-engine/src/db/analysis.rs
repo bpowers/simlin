@@ -245,7 +245,7 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 /// EDGES in all of those (a superset, never fewer); the declined
 /// mapped-reducer cases' link SCORES have no compilable conservative shape,
 /// so the emitter skips them loudly and loop scores through the edge are
-/// dropped (GH #758, `emit_unscoreable_conservative_edge_warning`).
+/// dropped with the GH #758 unscoreable-conservative-edge warning.
 #[allow(clippy::too_many_arguments)]
 fn emit_edges_for_reference(
     from_name: &str,
@@ -2655,7 +2655,7 @@ pub fn model_detected_loops(
     // discovery branch returns rather than consuming an unreliable
     // (truncated) circuit list.
     let tiered = model_loop_circuits_tiered(db, model, project);
-    if tiered.truncated || tiered.slow_path_largest_scc > crate::ltm::MAX_LTM_SCC_NODES {
+    if tiered.truncated || tiered.slow_path_largest_scc > crate::ltm::ltm_scc_node_budget() {
         debug_assert!(
             false,
             "model_detected_loops: tiered enumeration truncated (or slow-path SCC oversized) \
@@ -3381,7 +3381,7 @@ pub fn model_loop_circuits_tiered(
             module_graphs: HashMap::new(),
         };
         let scc = graph.largest_scc_size();
-        if scc > crate::ltm::MAX_LTM_SCC_NODES {
+        if scc > crate::ltm::ltm_scc_node_budget() {
             // Skip Johnson on a huge cross-element subgraph; the
             // caller will auto-flip on the SCC count.
             (

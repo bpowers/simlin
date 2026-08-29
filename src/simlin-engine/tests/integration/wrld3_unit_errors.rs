@@ -20,30 +20,31 @@
 //!   inference and checking paths produce mismatch diagnostics citing both
 //!   `resource_unit` and `resource_units` as distinct units.
 
-use simlin_engine::common::{ErrorCode, UnitError};
 use simlin_engine::db::{
-    Diagnostic, DiagnosticError, SimlinDb, collect_all_diagnostics, sync_from_datamodel_incremental,
+    Diagnostic, DiagnosticCategory, SimlinDb, collect_all_diagnostics,
+    sync_from_datamodel_incremental,
 };
 use simlin_engine::open_vensim;
 
 /// Extract a human-readable detail string from a diagnostic's unit-error payload.
 ///
-/// `DiagnosticError::Unit` is the most common shape for unit errors, but a few
-/// inference-driven mismatches land in `DiagnosticError::Model`.  We collapse
-/// both into a single string so filters can use simple substring checks.
+/// Return the complete producer reason, preferring its deliberately concise
+/// modeler-facing rendering when unit inference supplied one.
 fn diag_details(d: &Diagnostic) -> String {
-    match &d.error {
-        DiagnosticError::Unit(UnitError::ConsistencyError(_, _, Some(s))) => s.clone(),
-        DiagnosticError::Unit(UnitError::InferenceError {
-            details: Some(s), ..
-        }) => s.clone(),
-        DiagnosticError::Unit(UnitError::DefinitionError(e)) => {
-            e.details.clone().unwrap_or_default()
-        }
-        DiagnosticError::Unit(other) => format!("{:?}", other),
-        DiagnosticError::Model(e) => e.details.as_deref().unwrap_or("").to_string(),
-        _ => String::new(),
-    }
+    d.display_details
+        .as_ref()
+        .or(d.details.as_ref())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn is_unit_diag(d: &Diagnostic) -> bool {
+    matches!(
+        d.category,
+        DiagnosticCategory::UnitDefinition
+            | DiagnosticCategory::UnitConsistency
+            | DiagnosticCategory::UnitInference
+    )
 }
 
 /// Test whether `needle` occurs in `haystack` as a distinct identifier token
@@ -93,20 +94,13 @@ fn wrld3_parses_without_hard_errors() {
 
     // Unit errors are non-fatal warnings -- they must NOT prevent the model from
     // having a parseable datamodel.  Check that no *blocking* equation errors exist.
-    let blocking: Vec<_> = diagnostics
-        .iter()
-        .filter(|d| match &d.error {
-            DiagnosticError::Unit(_) => false,
-            DiagnosticError::Model(e) if e.code == ErrorCode::UnitMismatch => false,
-            _ => true,
-        })
-        .collect();
+    let blocking: Vec<_> = diagnostics.iter().filter(|d| !is_unit_diag(d)).collect();
     assert!(
         blocking.is_empty(),
         "World3 should parse cleanly; unexpected blocking diagnostics:\n{}",
         blocking
             .iter()
-            .map(|d| format!("  {}.{:?}: {:?}", d.model, d.variable, d.error))
+            .map(|d| format!("  {}.{:?}: {d:?}", d.model, d.variable))
             .collect::<Vec<_>>()
             .join("\n")
     );
@@ -139,19 +133,12 @@ fn wrld3_resource_unit_alias_should_not_conflict() {
     let conflicts: Vec<_> = diagnostics
         .iter()
         .filter(|d| {
-            // Only consider unit-related diagnostics (either Unit variant or
-            // model-level UnitMismatch).
-            let is_unit_diag = matches!(&d.error, DiagnosticError::Unit(_))
-                || matches!(
-                    &d.error,
-                    DiagnosticError::Model(e) if e.code == ErrorCode::UnitMismatch
-                );
-            if !is_unit_diag {
+            if !is_unit_diag(d) {
                 return false;
             }
             // Combine the Debug representation (catches unit-map keys) with
             // the human-readable details (catches rendered unit strings).
-            let combined = format!("{:?} :: {}", d.error, diag_details(d));
+            let combined = format!("{d:?} :: {}", diag_details(d));
             contains_token(&combined, "resource_unit")
                 && contains_token(&combined, "resource_units")
         })
@@ -165,7 +152,7 @@ fn wrld3_resource_unit_alias_should_not_conflict() {
         conflicts.len(),
         conflicts
             .iter()
-            .map(|d| format!("  {}.{:?}: {:?}", d.model, d.variable, d.error))
+            .map(|d| format!("  {}.{:?}: {d:?}", d.model, d.variable))
             .collect::<Vec<_>>()
             .join("\n")
     );
@@ -179,7 +166,7 @@ fn wrld3_resource_unit_alias_should_not_conflict() {
 /// units; only `input` and `initial_value` must match.
 ///
 /// Strengthened over the previous version: we now collect diagnostics
-/// directly and assert that no `DiagnosticError::Unit` cites BOTH the
+/// directly and assert that no unit diagnostic cites BOTH the
 /// generation-rate and the transmission-delay identifiers as conflicting.
 /// The earlier `assert_compiles_incremental()` check did not examine unit
 /// warnings, so the bug was invisible to it.
@@ -210,7 +197,7 @@ fn delay3_input_and_delay_time_different_units_is_valid() {
     let spurious: Vec<_> = diagnostics
         .iter()
         .filter(|d| {
-            if !matches!(&d.error, DiagnosticError::Unit(_)) {
+            if !is_unit_diag(d) {
                 return false;
             }
             let details = diag_details(d);
@@ -228,7 +215,7 @@ fn delay3_input_and_delay_time_different_units_is_valid() {
         spurious.len(),
         spurious
             .iter()
-            .map(|d| format!("  {}.{:?}: {:?}", d.model, d.variable, d.error))
+            .map(|d| format!("  {}.{:?}: {d:?}", d.model, d.variable))
             .collect::<Vec<_>>()
             .join("\n")
     );
@@ -264,7 +251,7 @@ fn delay3_with_explicit_initial_value_does_not_falsely_flag_delay_time() {
     let spurious: Vec<_> = diagnostics
         .iter()
         .filter(|d| {
-            if !matches!(&d.error, DiagnosticError::Unit(_)) {
+            if !is_unit_diag(d) {
                 return false;
             }
             let details = diag_details(d);
@@ -280,7 +267,7 @@ fn delay3_with_explicit_initial_value_does_not_falsely_flag_delay_time() {
         spurious.len(),
         spurious
             .iter()
-            .map(|d| format!("  {}.{:?}: {:?}", d.model, d.variable, d.error))
+            .map(|d| format!("  {}.{:?}: {d:?}", d.model, d.variable))
             .collect::<Vec<_>>()
             .join("\n")
     );
@@ -319,7 +306,7 @@ fn delay3_initial_value_unit_mismatch_is_caught() {
     let real_mismatch: Vec<_> = diagnostics
         .iter()
         .filter(|d| {
-            if !matches!(&d.error, DiagnosticError::Unit(_)) {
+            if !is_unit_diag(d) {
                 return false;
             }
             let details = diag_details(d);
@@ -336,7 +323,7 @@ fn delay3_initial_value_unit_mismatch_is_caught() {
          conflicting inputs. All diagnostics:\n{}",
         diagnostics
             .iter()
-            .map(|d| format!("  {}.{:?}: {:?}", d.model, d.variable, d.error))
+            .map(|d| format!("  {}.{:?}: {d:?}", d.model, d.variable))
             .collect::<Vec<_>>()
             .join("\n")
     );
@@ -375,7 +362,7 @@ fn smth3_input_and_averaging_time_different_units_is_valid() {
     let spurious: Vec<_> = diagnostics
         .iter()
         .filter(|d| {
-            if !matches!(&d.error, DiagnosticError::Unit(_)) {
+            if !is_unit_diag(d) {
                 return false;
             }
             let details = diag_details(d);
@@ -390,7 +377,7 @@ fn smth3_input_and_averaging_time_different_units_is_valid() {
         spurious.len(),
         spurious
             .iter()
-            .map(|d| format!("  {}.{:?}: {:?}", d.model, d.variable, d.error))
+            .map(|d| format!("  {}.{:?}: {d:?}", d.model, d.variable))
             .collect::<Vec<_>>()
             .join("\n")
     );
@@ -426,7 +413,7 @@ fn smth3_initial_value_unit_mismatch_is_caught() {
     let real_mismatch: Vec<_> = diagnostics
         .iter()
         .filter(|d| {
-            if !matches!(&d.error, DiagnosticError::Unit(_)) {
+            if !is_unit_diag(d) {
                 return false;
             }
             let details = diag_details(d);
@@ -441,7 +428,7 @@ fn smth3_initial_value_unit_mismatch_is_caught() {
          conflicting inputs. All diagnostics:\n{}",
         diagnostics
             .iter()
-            .map(|d| format!("  {}.{:?}: {:?}", d.model, d.variable, d.error))
+            .map(|d| format!("  {}.{:?}: {d:?}", d.model, d.variable))
             .collect::<Vec<_>>()
             .join("\n")
     );
@@ -466,7 +453,7 @@ fn wrld3_delay3_pollution_variable_has_no_spurious_unit_error() {
     let spurious: Vec<_> = diagnostics
         .iter()
         .filter(|d| {
-            if !matches!(&d.error, DiagnosticError::Unit(_)) {
+            if !is_unit_diag(d) {
                 return false;
             }
             let var_matches = d
@@ -495,7 +482,7 @@ fn wrld3_delay3_pollution_variable_has_no_spurious_unit_error() {
         spurious.len(),
         spurious
             .iter()
-            .map(|d| format!("  {}.{:?}: {:?}", d.model, d.variable, d.error))
+            .map(|d| format!("  {}.{:?}: {d:?}", d.model, d.variable))
             .collect::<Vec<_>>()
             .join("\n")
     );
@@ -549,7 +536,7 @@ fn trend_does_not_conflate_value_rate_and_delay_args() {
     let spurious: Vec<_> = diagnostics
         .iter()
         .filter(|d| {
-            if !matches!(&d.error, DiagnosticError::Unit(_)) {
+            if !is_unit_diag(d) {
                 return false;
             }
             let details = diag_details(d);
@@ -567,7 +554,7 @@ fn trend_does_not_conflate_value_rate_and_delay_args() {
         spurious.len(),
         spurious
             .iter()
-            .map(|d| format!("  {}.{:?}: {:?}", d.model, d.variable, d.error))
+            .map(|d| format!("  {}.{:?}: {d:?}", d.model, d.variable))
             .collect::<Vec<_>>()
             .join("\n")
     );

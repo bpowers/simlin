@@ -227,13 +227,13 @@ fn invalid_pin_surfaces_diagnostic_not_silent_zero() {
     let diagnostics = collect_all_diagnostics(&db, sync.project);
 
     let has_pin_warning = diagnostics.iter().any(|d| {
-        let msg = format!("{:?}", d.error);
+        let msg = format!("{:?}", d);
         msg.contains("bogus") && msg.to_lowercase().contains("closed feedback loop")
     });
     assert!(
         has_pin_warning,
         "an invalid pinned cycle must surface a diagnostic; got: {:?}",
-        diagnostics.iter().map(|d| &d.error).collect::<Vec<_>>()
+        diagnostics
     );
 
     // And crucially: no `pin{n}` loop_score var was emitted for the bogus pin.
@@ -739,7 +739,7 @@ fn pinned_mixed_scalar_arrayed_loop_scored_per_instance_in_discovery_mode() {
     // constant 0 backed by a fragment-diagnostics Warning).
     let no_pin_warnings = collect_all_diagnostics(&db, sync.project)
         .iter()
-        .all(|d| !format!("{:?}", d.error).contains("loop_score\u{205A}pin"));
+        .all(|d| !format!("{:?}", d).contains("loop_score\u{205A}pin"));
     assert!(
         no_pin_warnings,
         "no pinned loop-score fragment may fail to compile"
@@ -869,13 +869,13 @@ fn pin_without_element_level_instantiation_is_invalid() {
     let diagnostics = collect_all_diagnostics(&db, sync.project);
 
     let has_warning = diagnostics.iter().any(|d| {
-        let msg = format!("{:?}", d.error);
+        let msg = format!("{:?}", d);
         msg.contains("phantom") && msg.to_lowercase().contains("element-level")
     });
     assert!(
         has_warning,
         "a pin with no element-level instantiation must surface a diagnostic naming it; got: {:?}",
-        diagnostics.iter().map(|d| &d.error).collect::<Vec<_>>()
+        diagnostics
     );
 
     // And no loop_score var was emitted for it.
@@ -914,13 +914,13 @@ fn pin_with_oversized_element_expansion_is_invalid() {
     let diagnostics = collect_all_diagnostics(&db, sync.project);
 
     let has_warning = diagnostics.iter().any(|d| {
-        let msg = format!("{:?}", d.error);
+        let msg = format!("{:?}", d);
         msg.contains("big loop") && msg.contains("strongly-connected")
     });
     assert!(
         has_warning,
         "an oversized pin expansion must surface a diagnostic naming it; got: {:?}",
-        diagnostics.iter().map(|d| &d.error).collect::<Vec<_>>()
+        diagnostics
     );
 }
 
@@ -1668,13 +1668,13 @@ fn pinned_loop_through_stockless_passthrough_rejected() {
     let diagnostics = collect_all_diagnostics(&db, sync.project);
 
     let has_no_stock_warning = diagnostics.iter().any(|d| {
-        let msg = format!("{:?}", d.error);
+        let msg = format!("{:?}", d);
         msg.contains("instantaneous") && msg.contains("contains no stock")
     });
     assert!(
         has_no_stock_warning,
         "a stockless passthrough pin must surface the no-stock diagnostic; got: {:?}",
-        diagnostics.iter().map(|d| &d.error).collect::<Vec<_>>()
+        diagnostics
     );
 
     let source_model = sync.models["main"].source_model;
@@ -1749,9 +1749,9 @@ fn previous_lagged_module_output_pin_scored_in_discovery_mode() {
     assert!(
         !diagnostics
             .iter()
-            .any(|d| format!("{:?}", d.error).contains("contains no stock")),
+            .any(|d| format!("{:?}", d).contains("contains no stock")),
         "an accepted lagged-module-output pin must not warn 'contains no stock'; got: {:?}",
-        diagnostics.iter().map(|d| &d.error).collect::<Vec<_>>()
+        diagnostics
     );
 }
 
@@ -1889,9 +1889,9 @@ fn stockless_previous_lagged_pin_scored_in_discovery_mode() {
     assert!(
         !diagnostics
             .iter()
-            .any(|d| format!("{:?}", d.error).contains("contains no stock")),
+            .any(|d| format!("{:?}", d).contains("contains no stock")),
         "an accepted PREVIOUS-lagged pin must not warn 'contains no stock'; got: {:?}",
-        diagnostics.iter().map(|d| &d.error).collect::<Vec<_>>()
+        diagnostics
     );
 }
 
@@ -2110,10 +2110,7 @@ fn pinned_loop_through_unscoreable_edge_skipped_with_single_warnings() {
     let diagnostics = collect_all_diagnostics(&db, sync.project);
     let assembly_msgs: Vec<&str> = diagnostics
         .iter()
-        .filter_map(|d| match &d.error {
-            simlin_engine::db::DiagnosticError::Assembly(msg) => Some(msg.as_str()),
-            _ => None,
-        })
+        .filter_map(|d| d.assembly_reason())
         .collect();
 
     // Exactly ONE unscoreable-edge warning (Part 1 + the pin's re-visit
@@ -2145,7 +2142,7 @@ fn pinned_loop_through_unscoreable_edge_skipped_with_single_warnings() {
     assert_eq!(
         assembly_msgs.len(),
         2,
-        "only the edge warning and the pin warning may be accumulated; got: {assembly_msgs:?}"
+        "only the edge warning and the pin warning may be emitted; got: {assembly_msgs:?}"
     );
 
     // The model still compiles and simulates.

@@ -12,10 +12,10 @@
 //! mis-wired input now surfaces a Warning while a correct (module-qualified)
 //! wiring and empty placeholder rows stay clean.
 
-use crate::common::{Error, ErrorCode};
+use crate::common::ErrorCode;
 use crate::datamodel::{self, Equation, Variable, Visibility};
 use crate::db::{
-    Diagnostic, DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
+    Diagnostic, DiagnosticCategory, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
     sync_from_datamodel,
 };
 use crate::test_common::TestProject;
@@ -76,10 +76,9 @@ fn diagnostics(project: &datamodel::Project) -> Vec<Diagnostic> {
 }
 
 fn has_warning(diags: &[Diagnostic], code: ErrorCode) -> bool {
-    diags.iter().any(|d| {
-        d.severity == DiagnosticSeverity::Warning
-            && matches!(&d.error, DiagnosticError::Model(Error { code: c, .. }) if *c == code)
-    })
+    diags
+        .iter()
+        .any(|d| d.severity == DiagnosticSeverity::Warning && d.is(DiagnosticCategory::Model, code))
 }
 
 /// A correctly module-qualified `dst` (`m·input_var`) wiring a real input port

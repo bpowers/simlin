@@ -7,12 +7,12 @@
 //! This module provides a builder-based API for creating test projects
 //! that can be used by various test modules.
 
-use crate::common::{Canonical, ErrorCode, Ident, UnitError};
+use crate::common::{Canonical, ErrorCode, Ident};
 use crate::datamodel::{self, Dimension, Equation, Project, SimSpecs, Variable};
 #[cfg(test)]
 use crate::db::sync_from_datamodel;
 use crate::db::{
-    DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
+    DiagnosticCategory, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
     compile_project_incremental, sync_from_datamodel_incremental,
 };
 use crate::vm::{CompiledSimulation, Vm};
@@ -776,19 +776,19 @@ impl TestProject {
         self.diagnostics_incremental()
             .into_iter()
             .filter_map(|d| {
-                let detail = match &d.error {
-                    DiagnosticError::Unit(UnitError::ConsistencyError(_, _, details)) => {
-                        details.clone().unwrap_or_default()
-                    }
-                    DiagnosticError::Unit(UnitError::DefinitionError(err)) => format!("{err}"),
-                    DiagnosticError::Unit(UnitError::InferenceError { details, .. }) => {
-                        details.clone().unwrap_or_default()
-                    }
-                    DiagnosticError::Model(e) if e.code == ErrorCode::UnitMismatch => {
-                        e.details.clone().unwrap_or_default()
-                    }
-                    _ => return None,
-                };
+                if !matches!(
+                    d.category,
+                    DiagnosticCategory::UnitDefinition
+                        | DiagnosticCategory::UnitConsistency
+                        | DiagnosticCategory::UnitInference
+                ) {
+                    return None;
+                }
+                let detail = d
+                    .display_details
+                    .clone()
+                    .or(d.details.clone())
+                    .unwrap_or_else(|| d.code.to_string());
                 Some((d.variable.clone(), detail))
             })
             .collect()
@@ -833,17 +833,7 @@ impl TestProject {
                     (model, Some(var)) => format!("{model}.{var}"),
                     (model, None) => model.to_string(),
                 };
-                let code = match &d.error {
-                    DiagnosticError::Equation(eq_err) => eq_err.code,
-                    DiagnosticError::Model(err) => err.code,
-                    DiagnosticError::Unit(unit_err) => match unit_err {
-                        UnitError::DefinitionError(eq_err) => eq_err.code,
-                        UnitError::ConsistencyError(code, _, _) => *code,
-                        UnitError::InferenceError { code, .. } => *code,
-                    },
-                    DiagnosticError::Assembly(_) => ErrorCode::NotSimulatable,
-                };
-                (location, code)
+                (location, d.code)
             })
             .collect()
     }
@@ -852,14 +842,9 @@ impl TestProject {
     pub fn assert_compile_error_vm(&self, expected_error: ErrorCode) {
         let diagnostics = self.diagnostics_incremental();
 
-        let has_error = diagnostics.iter().any(|d| {
-            d.severity == DiagnosticSeverity::Error
-                && match &d.error {
-                    DiagnosticError::Equation(eq_err) => eq_err.code == expected_error,
-                    DiagnosticError::Model(err) => err.code == expected_error,
-                    _ => false,
-                }
-        });
+        let has_error = diagnostics
+            .iter()
+            .any(|d| d.severity == DiagnosticSeverity::Error && d.code == expected_error);
 
         if !has_error {
             if diagnostics.is_empty() {
@@ -869,7 +854,12 @@ impl TestProject {
             } else {
                 let diag_summary: Vec<_> = diagnostics
                     .iter()
-                    .map(|d| format!("{}: {:?} ({:?})", d.model, d.error, d.severity))
+                    .map(|d| {
+                        format!(
+                            "{}: {:?} {:?} ({:?})",
+                            d.model, d.category, d.code, d.severity
+                        )
+                    })
                     .collect();
                 panic!(
                     "Expected compilation error {expected_error:?}, but got:\n{}",
@@ -884,28 +874,31 @@ impl TestProject {
         let diagnostics = self.diagnostics_incremental();
 
         let has_unit_mismatch = diagnostics.iter().any(|d| {
-            if let DiagnosticError::Unit(unit_err) = &d.error {
-                let code = match unit_err {
-                    UnitError::DefinitionError(eq_err) => eq_err.code,
-                    UnitError::ConsistencyError(code, _, _) => *code,
-                    UnitError::InferenceError { code, .. } => *code,
-                };
-                code == ErrorCode::UnitMismatch
-            } else {
-                false
-            }
+            matches!(
+                d.category,
+                DiagnosticCategory::UnitDefinition
+                    | DiagnosticCategory::UnitConsistency
+                    | DiagnosticCategory::UnitInference
+            ) && d.code == ErrorCode::UnitMismatch
         });
 
         if !has_unit_mismatch {
             let unit_diags: Vec<_> = diagnostics
                 .iter()
-                .filter(|d| matches!(&d.error, DiagnosticError::Unit(_)))
+                .filter(|d| {
+                    matches!(
+                        d.category,
+                        DiagnosticCategory::UnitDefinition
+                            | DiagnosticCategory::UnitConsistency
+                            | DiagnosticCategory::UnitInference
+                    )
+                })
                 .map(|d| {
                     format!(
                         "{}.{}: {:?}",
                         d.model,
                         d.variable.as_deref().unwrap_or("?"),
-                        d.error
+                        d
                     )
                 })
                 .collect();

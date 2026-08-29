@@ -269,10 +269,12 @@ fn main() {
         // which.
         println!("\n=== LTM diagnostics naming {needle:?} ===");
         for d in simlin_engine::db::collect_all_diagnostics(&db, sync.project).iter() {
-            if let simlin_engine::db::DiagnosticError::Assembly(msg) = &d.error
-                && msg.contains(&needle)
+            if d.category == simlin_engine::db::DiagnosticCategory::Assembly
+                && d.details
+                    .as_deref()
+                    .is_some_and(|msg| msg.contains(&needle))
             {
-                println!("  [{:?}] {msg}", d.severity);
+                println!("  [{:?}] {}", d.severity, d.details.as_deref().unwrap());
             }
         }
     }
@@ -324,7 +326,10 @@ fn main() {
     let mut failed: BTreeSet<String> = BTreeSet::new();
     let mut reasons: HashMap<String, String> = HashMap::new();
     for d in &diagnostics {
-        let simlin_engine::db::DiagnosticError::Assembly(msg) = &d.error else {
+        if d.category != simlin_engine::db::DiagnosticCategory::Assembly {
+            continue;
+        }
+        let Some(msg) = d.details.as_deref() else {
             continue;
         };
         if !msg.contains("failed to compile") || d.model != main_name {

@@ -479,8 +479,7 @@ fn var_with_expr(expr: Expr2) -> Variable {
         ident: Ident::new("target"),
         units: None,
         eqn: None,
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Aux {
             ast: Some(Ast::Scalar(expr)),
             init_ast: None,
@@ -707,8 +706,7 @@ fn test_classify_reducer_no_ast() {
         ident: Ident::new("target"),
         units: None,
         eqn: None,
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Aux {
             ast: None,
             init_ast: None,
@@ -3921,8 +3919,7 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
         ident: Ident::new("scalar_target"),
         units: None,
         eqn: Some(Equation::Scalar("driver".to_string())),
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Aux {
             ast: Some(Ast::Scalar(var_ref("driver"))),
             init_ast: None,
@@ -4017,8 +4014,7 @@ fn flow_to_stock_test_stock(
         ident: Ident::new(ident),
         units: None,
         eqn: Some(eqn),
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Stock {
             init_ast: None,
             inflows: inflows.iter().map(|f| Ident::new(f)).collect(),
@@ -4035,8 +4031,7 @@ fn flow_to_stock_test_flow(ident: &str, eqn: Equation) -> Variable {
         ident: Ident::new(ident),
         units: None,
         eqn: Some(eqn),
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Aux {
             ast: None,
             init_ast: None,

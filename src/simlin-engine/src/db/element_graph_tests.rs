@@ -2115,7 +2115,7 @@ fn element_graph_subset_star_range_reads_only_subdimension_rows() {
 /// phantom off-diagonal rows the simulation never reads (#785). Declining the
 /// hoist makes all of that disappear: the element graph keeps the sound
 /// (coarse) cross-product, and the score side loudly skips the edge
-/// (`emit_unscoreable_duplicated_dim_source_warning`) so loops through it drop
+/// (the duplicated-dimension-source warning) so loops through it drop
 /// rather than reference never-emitted names.
 #[test]
 fn element_graph_square_source_duplicated_dim_declines_to_cross_product() {

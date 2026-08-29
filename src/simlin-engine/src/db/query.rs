@@ -351,6 +351,17 @@ impl DepTarget {
         self.module_path.first().unwrap_or(&self.variable)
     }
 
+    /// The canonical source spelling of this target.
+    ///
+    /// This is presentation and exact-error matching only. Dependency
+    /// consumers keep reading `module_path` and `variable` separately so a
+    /// dimension-element spelling can never be mistaken for a module path.
+    pub fn qualified_name(&self) -> String {
+        let mut parts: Vec<&str> = self.module_path.iter().map(Ident::as_str).collect();
+        parts.push(self.variable.as_str());
+        parts.join("\u{00b7}")
+    }
+
     /// The output name relative to the first module instance. For `m·n·x`
     /// this is `n·x`; for `m·x` it is `x`.
     pub fn within_first_module_ident(&self) -> Option<Ident<Canonical>> {
