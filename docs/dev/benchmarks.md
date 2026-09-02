@@ -72,6 +72,24 @@ The Rust counterpart is `src/simlin-engine/examples/backend_bench.rs`, which use
 
 Results are reported in the PR or chat, not committed: the harness is regenerable, but checked-in numbers go stale and mislead. Do not add a results file.
 
+## Node allocator benchmark for the wasm bundle
+
+`src/engine/bench/clearn-alloc.mjs` compares two or more builds of the libsimlin wasm bundle on the full public-API pipeline for C-LEARN v77 -- `Project.openVensim` (parse + salsa sync), `Model.simulate` (the salsa compile plus `Vm::new`), `Sim.runToEnd`, every series, the LTM link scores, and dispose -- and prints median and min per stage plus the peak `memory.size`. It exists to compare **global allocators**: the compile stage makes tens of millions of small, short-lived allocations on this model, so the allocator the bundle links (`src/libsimlin/src/lib.rs`) is a first-order term in its time, and a synthetic allocation loop would not show how that plays out on the real allocation mix.
+
+```bash
+# Build the bundle to compare against on its branch and copy it out of
+# src/engine/core/ first: build.sh overwrites the staged artifacts.
+node --expose-gc src/engine/bench/clearn-alloc.mjs \
+    dlmalloc=/path/to/main/libsimlin-browser.wasm \
+    wasmalloc=src/engine/core/libsimlin-browser.wasm
+
+# LTM off only, 20 iterations, exact memory.grow counts (needs wasm-tools on PATH)
+node --expose-gc src/engine/bench/clearn-alloc.mjs --ltm off --iters 20 --count-grows \
+    a=/path/to/a.wasm b=/path/to/b.wasm
+```
+
+The bundles are interleaved (A, B, A, B, ...) so machine drift is shared rather than attributed to whichever ran last. Each iteration runs on a fresh instance of a module compiled once per bundle: every iteration starts from a cold heap, the state a page load leaves the allocator in, and no iteration inherits fragmentation from the one before, while V8 keeps its optimized code for the shared module, so the warm-up iterations warm the JIT and only the JIT. Instantiation is not timed. Run it under both node 22 and node 24 (V8 12 and 13), with `--expose-gc` so it can collect between iterations and pinned with `taskset` to reduce drift; like the eval benchmark, its results belong in the PR or chat, never in a committed file.
+
 ## Profiling
 
 ### Build a benchmark binary for profiling
