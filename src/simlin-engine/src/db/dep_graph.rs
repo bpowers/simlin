@@ -646,6 +646,64 @@ pub(crate) fn dt_cycle_sccs_engine_consistent(
     sccs
 }
 
+/// Every CURRENT-(phase-)timestep read `op` makes, as `(variable, element)`
+/// pairs, appended to `out`. `false` means the fragment is malformed (a static
+/// view id outside `static_views`) and the caller must decline.
+///
+/// This is the ONE statement of which reads a per-element ordering has to
+/// respect, and it has two readers that must not drift: the element graph in
+/// [`symbolic_phase_element_order`], which ORDERS the segments, and
+/// `db::assemble::combine_scc_fragment`, which checks that the order it was
+/// handed actually satisfies a member prologue's reads. The rule itself, and
+/// the soundness argument for each exclusion, is
+/// [`symbolic_phase_element_order`]'s rustdoc: a `SymLoadPrev` reads a
+/// prior-timestep snapshot and is an ordering edge in neither phase, a
+/// `SymLoadInitial` reads the initial-values snapshot and is one in
+/// `SccPhase::Initial` only, and everything variable-backed and current is
+/// kept. A view carries the same classification through its base.
+pub(crate) fn ordering_reads(
+    op: &crate::compiler::symbolic::SymbolicOpcode,
+    static_views: &[crate::compiler::symbolic::SymbolicStaticView],
+    phase: &crate::db::SccPhase,
+    out: &mut BTreeSet<(Ident<Canonical>, usize)>,
+) -> bool {
+    use crate::compiler::symbolic::{SymStaticViewBase as ViewBase, SymbolicOpcode};
+    match op {
+        SymbolicOpcode::LoadVar { var }
+        | SymbolicOpcode::LoadSubscript { var }
+        | SymbolicOpcode::PushVarViewDirect { var, .. } => {
+            out.insert((var.name.clone(), var.element_offset));
+        }
+        SymbolicOpcode::SymLoadPrev { .. } => {}
+        SymbolicOpcode::SymLoadInitial { var } => {
+            if matches!(phase, crate::db::SccPhase::Initial) {
+                out.insert((var.name.clone(), var.element_offset));
+            }
+        }
+        SymbolicOpcode::PushStaticView { view_id } => {
+            let Some(view) = static_views.get(*view_id as usize) else {
+                return false;
+            };
+            let read_name = match &view.base {
+                ViewBase::Var(v) => Some(&v.name),
+                ViewBase::InitialVar(v) if matches!(phase, crate::db::SccPhase::Initial) => {
+                    Some(&v.name)
+                }
+                ViewBase::InitialVar(_) | ViewBase::PrevVar(_) | ViewBase::Temp(_) => None,
+            };
+            if let Some(name) = read_name {
+                for elem in static_view_element_offsets(view) {
+                    out.insert((name.clone(), elem));
+                }
+            }
+        }
+        // Writes, control flow, constants, temp access: no current-value read
+        // of a model variable.
+        _ => {}
+    }
+    true
+}
+
 /// Enumerate the exact set of *element offsets within `base.name`* that a
 /// symbolic static view addresses.
 ///
@@ -862,19 +920,23 @@ fn symbolic_phase_element_order(
     members: &BTreeSet<Ident<Canonical>>,
     phase: crate::db::SccPhase,
 ) -> Option<Vec<(Ident<Canonical>, usize)>> {
-    use crate::compiler::symbolic::SymbolicOpcode;
-
     // The set of member canonical names, for the "is this read an in-SCC
     // member?" test. `SymVarRef.name` is the canonical variable name
     // (an `Ident<Canonical>`), so a member's `as_str()` compares directly.
     let member_names: BTreeSet<&str> = members.iter().map(|m| m.as_str()).collect();
 
-    // Build the induced element graph by segmenting each member's
-    // symbolic code on its per-element write opcode. For each member
-    // element (M, e), every `SymVarRef` read in its segment whose name is
-    // an in-SCC member (M', e') contributes a data-flow edge
-    // (M', e') -> (M, e). Any member whose symbolic fragment cannot be
-    // sourced => not element-sourceable => unresolved (loud-safe).
+    // Build the induced element graph from the SAME segmentation the combined
+    // fragment is assembled with (`db::assemble::segment_member_by_element`):
+    // a member's PROLOGUE plus one slice per element. For each member element
+    // (M, e), every current-value read in its slice whose name is an in-SCC
+    // member (M', e') contributes a data-flow edge (M', e') -> (M, e). A read
+    // in the PROLOGUE contributes an edge into every element of M that READS
+    // one of the prologue's temps, because the prologue is emitted once,
+    // immediately ahead of the first of those readers, so whatever it reads
+    // has to be evaluated before all of them -- and only them: an element that
+    // reads nothing of the prologue may run first, and must when the prologue
+    // reads it. Any member whose symbolic fragment cannot be sourced or
+    // segmented => not element-sourceable => unresolved (loud-safe).
     let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
     let mut self_loop = false;
     // `members` is a BTreeSet, so this iterates in sorted member order;
@@ -888,141 +950,76 @@ fn symbolic_phase_element_order(
             phase.clone(),
         )?;
         let member_name = member.as_str();
+        let seg = crate::db::assemble::segment_member_by_element(
+            member_name,
+            &frag.symbolic.code,
+            &frag.static_views,
+        )
+        .ok()?;
 
-        // Reads accumulated since the previous per-element write of THIS
-        // member, as (read-name, read-element) pairs. A read is an
-        // in-SCC edge source only if its name is an SCC member.
-        let mut pending_reads: BTreeSet<(Ident<Canonical>, usize)> = BTreeSet::new();
-        // True once at least one per-element write of this member has
-        // been seen: a malformed fragment with no write for the member
-        // means it is not element-sourceable in the simple per-element
-        // shape this refinement assumes (loud-safe: keep
-        // `CircularDependency`).
-        let mut saw_write = false;
-
-        for op in &frag.symbolic.code {
-            match op {
-                // ── Per-element WRITE of this member: terminate the
-                // current element segment, define node (member, elem),
-                // and wire every pending in-SCC read as a predecessor.
-                SymbolicOpcode::AssignCurr { var }
-                | SymbolicOpcode::AssignConstCurr { var, .. }
-                | SymbolicOpcode::BinOpAssignCurr { var, .. }
-                    if var.name.as_str() == member_name =>
-                {
-                    saw_write = true;
-                    let node = element_node_key(member_name, var.element_offset);
-                    edges.entry(node.clone()).or_default();
-                    // Deterministic successor order: BTreeSet pending
-                    // reads -> sorted by the read node's encoded key.
-                    let mut preds: BTreeSet<Ident<Canonical>> = BTreeSet::new();
-                    for (rname, relem) in &pending_reads {
-                        if member_names.contains(rname.as_str()) {
-                            preds.insert(element_node_key(rname.as_str(), *relem));
-                        }
-                    }
-                    for pred in preds {
-                        if pred == node {
-                            // A node reading its own slot is a size-1 SCC
-                            // Tarjan does NOT surface as a >=2 component,
-                            // so detect element self-loops directly from
-                            // adjacency (mirrors `dt_cycle_sccs`).
-                            self_loop = true;
-                        }
-                        edges.entry(pred).or_default().push(node.clone());
-                    }
-                    pending_reads.clear();
-                }
-                // ── Current-value reads consumed by the current element
-                // segment. These are the literal current-(phase-)timestep
-                // data-flow reads a genuine element cycle is made of; they
-                // are exactly the reads the variable-level relation keeps
-                // (`build_var_info` never strips a current-value dep).
-                SymbolicOpcode::LoadVar { var }
-                | SymbolicOpcode::LoadSubscript { var }
-                | SymbolicOpcode::PushVarViewDirect { var, .. } => {
-                    pending_reads.insert((var.name.clone(), var.element_offset));
-                }
-                // ── PREVIOUS (`prev_values` snapshot, prior timestep):
-                // NEVER a current-timestep ordering edge, in EITHER phase.
-                // This is the element-level analogue of `build_var_info`
-                // stripping `lagged_dt_previous`
-                // (`deps.dt_previous_referenced_vars`) from `dt_deps`
-                // (`db/dep_graph.rs:262`) AND `lagged_initial_previous`
-                // (`deps.initial_previous_referenced_vars`) from
-                // `initial_deps` (`:264`) -- both phases. Contributing no
-                // edge makes the element graph MATCH the engine's actual
-                // per-phase relation; it cannot drop a genuine-cycle edge
-                // because a genuine current-timestep element cycle is a
-                // cycle of *current-value* reads and a `SymLoadPrev` reads
-                // a prior-timestep snapshot, never the current timestep's
-                // value (the AC4 soundness argument; see the fn rustdoc).
-                SymbolicOpcode::SymLoadPrev { .. } => {}
-                // ── INIT (`initial_values` snapshot): PHASE-AWARE. In the
-                // dt graph it is NOT a current-dt ordering edge -- the
-                // element-level analogue of `build_var_info` stripping
-                // `init_only_dt` (`deps.dt_init_only_referenced_vars`)
-                // from `dt_deps` (`db/dep_graph.rs:261`). In the init
-                // graph it IS a genuine init-phase dependency: an INIT(x)
-                // read during the initial-value computation orders x's
-                // initial value before this element, and `build_var_info`
-                // strips ONLY `lagged_initial_previous` from `initial_deps`
-                // (`:264`) -- it does NOT strip INIT-refs (those feed
-                // `init_referenced_vars`, the Initials runlist, not a
-                // strip). Excluding it in `Dt` cannot drop a genuine dt
-                // cycle (same AC4 argument: it is an initial-snapshot read,
-                // not a current-dt-timestep value); keeping it in
-                // `Initial` is required so a genuine init element cycle
-                // through INIT() is still detected.
-                SymbolicOpcode::SymLoadInitial { var } => {
-                    if matches!(phase, crate::db::SccPhase::Initial) {
-                        pending_reads.insert((var.name.clone(), var.element_offset));
-                    }
-                }
-                SymbolicOpcode::PushStaticView { view_id } => {
-                    // Resolve the static view's base; if it is a model
-                    // variable, enumerate the EXACT element set it
-                    // addresses (the symbolic-space analogue of the prior
-                    // `collect_read_slots` `StaticSubscript` enumeration,
-                    // so a genuinely element-acyclic model still
-                    // resolves). An out-of-range `view_id` is a malformed
-                    // fragment (loud-safe: unresolved).
-                    let view = frag.static_views.get(*view_id as usize)?;
-                    // A view's base carries the SAME lagged/current
-                    // classification as the scalar read opcodes above, and for
-                    // the same reasons (GH #995 gave `PREVIOUS`/`INIT` array
-                    // forms, which lower to a view over the snapshot region
-                    // instead of to `SymLoadPrev`/`SymLoadInitial`): a `curr`
-                    // view is a current-value read; a PREVIOUS view is a
-                    // prior-timestep snapshot and is an ordering edge in
-                    // NEITHER phase; an INIT view is an initial-snapshot read,
-                    // an edge in `SccPhase::Initial` only.
-                    use crate::compiler::symbolic::SymStaticViewBase as ViewBase;
-                    let read_name = match &view.base {
-                        ViewBase::Var(v) => Some(&v.name),
-                        ViewBase::InitialVar(v)
-                            if matches!(phase, crate::db::SccPhase::Initial) =>
-                        {
-                            Some(&v.name)
-                        }
-                        ViewBase::InitialVar(_) | ViewBase::PrevVar(_) | ViewBase::Temp(_) => None,
-                    };
-                    if let Some(name) = read_name {
-                        for elem in static_view_element_offsets(view) {
-                            pending_reads.insert((name.clone(), elem));
-                        }
-                    }
-                }
-                // Other write targets (a different member, or
-                // `BinOpAssignNext` -- a stock-update, not a per-element
-                // current-value write of THIS member) do not terminate
-                // this member's element segment and carry no read; ignore.
-                _ => {}
-            }
+        // Every element node of this member, in a deterministic order.
+        let mut elements: Vec<usize> = seg.segments.keys().copied().collect();
+        elements.sort_unstable();
+        if elements.is_empty() {
+            // No per-element write: not element-sourceable in the simple
+            // per-element shape this refinement assumes (loud-safe).
+            return None;
+        }
+        for elem in &elements {
+            edges
+                .entry(element_node_key(member_name, *elem))
+                .or_default();
         }
 
-        if !saw_write {
-            return None;
+        let wire = |edges: &mut HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
+                    self_loop: &mut bool,
+                    reads: &BTreeSet<(Ident<Canonical>, usize)>,
+                    targets: &[usize]| {
+            // Deterministic successor order: BTreeSet pending reads -> sorted
+            // by the read node's encoded key.
+            let mut preds: BTreeSet<Ident<Canonical>> = BTreeSet::new();
+            for (rname, relem) in reads {
+                if member_names.contains(rname.as_str()) {
+                    preds.insert(element_node_key(rname.as_str(), *relem));
+                }
+            }
+            for pred in preds {
+                for elem in targets {
+                    let node = element_node_key(member_name, *elem);
+                    if pred == node {
+                        // A node reading its own slot is a size-1 SCC Tarjan
+                        // does NOT surface as a >=2 component, so detect
+                        // element self-loops directly from adjacency (mirrors
+                        // `dt_cycle_sccs`).
+                        *self_loop = true;
+                    }
+                    edges.entry(pred.clone()).or_default().push(node);
+                }
+            }
+        };
+
+        let mut prologue_reads: BTreeSet<(Ident<Canonical>, usize)> = BTreeSet::new();
+        for op in &seg.prologue {
+            if !ordering_reads(op, &frag.static_views, &phase, &mut prologue_reads) {
+                return None;
+            }
+        }
+        let readers: Vec<usize> = seg.prologue_readers.iter().copied().collect();
+        wire(&mut edges, &mut self_loop, &prologue_reads, &readers);
+
+        for elem in &elements {
+            let mut reads: BTreeSet<(Ident<Canonical>, usize)> = BTreeSet::new();
+            for op in &seg.segments[elem] {
+                if !ordering_reads(op, &frag.static_views, &phase, &mut reads) {
+                    return None;
+                }
+            }
+            wire(
+                &mut edges,
+                &mut self_loop,
+                &reads,
+                std::slice::from_ref(elem),
+            );
         }
     }
 
@@ -1415,50 +1412,10 @@ pub(crate) fn resolve_recurrence_sccs(
     }
 }
 
-/// The set of main-model variables whose own production-lowered
-/// per-element `Vec<Expr>` is, or recursively contains, an
-/// array-producing builtin
-/// (VectorElmMap/VectorSortOrder/Rank/AllocateAvailable/AllocateByPriority).
-///
-/// The universe is the identical `build_var_info(.., &[])` keyset
-/// `dt_cycle_sccs` iterates, on the same `(db, model, project)` triple,
-/// so a caller can intersect `{multi ∪ self_loops}` with this set over
-/// one shared universe. Each variable's lowered `Vec<Expr>` is sourced
-/// from the engine's own per-variable production lowering via
-/// `var_noninitial_lowered_exprs` (never a re-derivation), and the
-/// complete list is fed to
-/// `crate::compiler::exprs_contain_array_producing_builtin`. Sourcing the
-/// real lowering output -- not a hoist-set subset -- is what makes the
-/// membership test complete: `var_noninitial_lowered_exprs` aborts (never
-/// silent-skips) on any universe variable whose production lowered exprs
-/// cannot be sourced, because a silent skip would under-count and produce
-/// a false negative. Sorted/byte-stable.
-#[cfg(test)]
-pub(crate) fn array_producing_vars(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-) -> BTreeSet<Ident<Canonical>> {
-    // The identical universe `dt_cycle_sccs` uses -- the same
-    // `build_var_info(.., &[])` keyset on the same `(db, model, project)`
-    // triple -- so a caller intersects `{multi ∪ self_loops}` and this
-    // set over one universe.
-    let (var_info, _all_init_referenced) = build_var_info(db, model, project, &[]);
-
-    let mut out: BTreeSet<Ident<Canonical>> = BTreeSet::new();
-    for name in var_info.keys() {
-        let exprs = var_noninitial_lowered_exprs(db, model, project, name.as_str());
-        if crate::compiler::exprs_contain_array_producing_builtin(&exprs) {
-            out.insert(name.clone());
-        }
-    }
-    out
-}
-
 /// The engine's OWN per-variable production-lowered non-initial (dt/flow)
 /// `Vec<Expr>` for the canonical `var_name`.
 ///
-/// Two test surfaces read it: `array_producing_vars` below, and
+/// Two test surfaces read it: `dep_graph_tests::array_producing_vars`, and
 /// `test_common::TestProject::flow_exprs`, through which every structural
 /// lowering assertion in the crate constrains the production fragment compiler.
 ///

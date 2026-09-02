@@ -809,7 +809,7 @@ fn instantiating_a_stdlib_template_reports_nothing() {
 
 /// A NaN EXCEPT default that NO slot can reach is not an unfilled equation.
 ///
-/// The arms name every element of `D`, so `expand_arrayed_with_hoisting` never
+/// The arms name every element of `D`, so `expand_per_element` never
 /// consults the default; the compiled model holds 1/2/3 and contains no NaN
 /// anywhere. Before the coverage axis this reported "no equation for every
 /// element with no equation of its own" -- a finding about a slot that does not

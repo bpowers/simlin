@@ -232,9 +232,12 @@ fn dep_axis_elements(
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DepSpelling {
     /// A BARE reference (`dep`) in an equation body. `compiler::context`'s
-    /// `lower_pass0` rewrites it into the iterated-dimension spelling, whose
-    /// index `ast::expr3` Pass 1 folds to an ordinal -- so it reads
-    /// POSITIONALLY and never consults a declared element map.
+    /// `lower_pass0` rewrites it into the iterated-dimension spelling, which is
+    /// described by `positional_correspondence` -- the diagonal. Execution
+    /// resolves it the same way as [`Self::OwnDimSubscript`] (name-first, then
+    /// the declared map); the two answers coincide except under a permuting
+    /// element map, the disclosed describer gap stated on
+    /// `DimensionsContext::positional_correspondence`.
     Bare,
     /// An already-subscripted reference whose index names one of the dep's OWN
     /// declared dimensions (`dep[Region]` under a `State`-iterating target).

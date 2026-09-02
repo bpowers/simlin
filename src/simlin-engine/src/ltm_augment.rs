@@ -3632,7 +3632,7 @@ fn build_arrayed_link_score_equation(
 
     // The default arm follows the same policy. When the policy is
     // `OmitStructuralZero` the target's `apply_default_to_missing` is false, so
-    // `expand_arrayed_with_hoisting` never consults a default anyway; when it
+    // `expand_per_element` never consults a default anyway; when it
     // is `Materialize` the arm is always built and the flatten is a no-op.
     let default_gf_table_ref = slot_refs.for_default();
     let default_slot = default_expr

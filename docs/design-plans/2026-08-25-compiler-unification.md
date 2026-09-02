@@ -47,9 +47,14 @@ branch).
 3. **One temp allocator, one materialization pass.** Temp ids are allocated by
    one counter per variable lowering; `remap_temp_ids`, `find_max_temp_id`,
    `next_available_temp_id`, and the pointer-keyed `ast_temp_bases` are
-   deleted. Array-producing builtins and computed array operands are hoisted
-   into temps by one pass after subscript resolution; `Expr3` Pass 1 hoisting
-   and the `compiler/mod.rs` A2A hoisting machinery are gone.
+   deleted. `compiler/array_operand.rs` is the one pass that materializes an
+   array value into a temp -- the array-producing builtins, the per-element
+   arrayed-GF applies, and the computed array operands -- and it is the only
+   caller of `TempAllocator::alloc`. It runs after subscript resolution, reads
+   the positions off `BuiltinFn::signature()`, and decides once-per-equation
+   against once-per-element by structural identity of the lowered body.
+   `Expr3` is a structural rewrite with no temp variant, and the
+   `compiler/mod.rs` A2A hoisting machinery is gone.
 4. **One dimension matcher.** `DimMatcher` owns the axis-matching precedence
    (exact name, declared mapping, subdimension, size) and every former matcher
    is a call into it. `lower_from_expr3`'s Subscript arm is decomposed into
@@ -560,21 +565,59 @@ Phase 3 (one lowering entry). (a) then (b), as two chunks.
 **Done when:** AC2.3; `rg "Pass1Context" src/` empty; corpus, array tests,
 and wasm parity green; ledger row (opcode/temp counts may change; explained).
 
-Part (a) is done: `dimensions::match_axes` is the one precedence, the
-Subscript arm is five named steps, `lower`/`lower_preserving_dimensions` are
-one function under `DimensionRefs`, and GH #1027 is fixed. Part (b) -- the
-single materialization pass and the deletion of Pass 1 hoisting -- is what
-remains, and inherits one lowering entry point with an explicit mode.
+**The materializer (part b), as designed.** Lowering is structural all the
+way down: `Expr2 -> Expr3` resolves wildcards and gives every bare array
+reference its subscripts, `Context::lower` returns one `compiler::Expr` per
+equation body, and `Var::new` expands an apply-to-all or arrayed equation into
+one assignment per element with `expand_per_element`. Nothing before
+`compiler/array_operand.rs` allocates a temp. That pass runs once over the
+whole lowered, constant-folded fragment -- every element's code at once --
+and is the only caller of `TempAllocator::alloc`. It reads the signature
+table for its positions: an `ArgKind::Array` operand that is not already a
+view is moved into a temp, a `ResultKind::Array` call (the five
+array-producing builtins) is moved into a temp wherever it appears, and a
+`LOOKUP` whose table operand is a multi-element array (the per-element
+arrayed-GF apply) is the one non-`ResultKind::Array` call that also writes a
+temp. A materialized value is read back whole where an array is wanted and at
+the assignment's own element where a number is; a scalar equation has no
+element to read, so an array value in its one slot stays the loud codegen
+refusal.
 
-One shape is waiting for it. Resolving a `Dimension(d)` subscript picks the
-first active axis named `d` for EVERY occurrence, so with `square[D,D]` holding
-`10i+j` both `o[D,D] = square` and `o[D,D] = square[D,D]` read the diagonal
-`square[d_i,d_i]` -- measured identical on the pre-change and the post-change
-CLI, so it is pre-existing and outside 6(a), but 6(a)'s corrected
-`square[*,*]` (divergence 7) now disagrees with both. The single
-materialization pass has to resolve each `Dimension(d)` occurrence against its
-own active axis, which is the same positional property `match_axes_partial`
-already states.
+Once per equation against once per element is decided by structural identity
+of the lowered body, source positions included: the elements of an
+apply-to-all body or an EXCEPT default are lowerings of one text under
+different active subscripts, so two elements' bodies are equal exactly when
+nothing in the body resolved through the element, and two explicit arms
+share only when they spell the body identically at the same offset. A body two
+or more elements read is SHARED -- one id, its `AssignTemp` emitted ahead of
+the element code -- and a body one element reads is RECYCLED on an id the
+elements reissue (`TempAllocator::element_scopes`); shared ids are numbered
+below the recycled range so no element can clobber one. Sharing is sound
+because a fragment writes only its own variable's slots and its own temps, so
+nothing evaluated between two elements can change what a shared body read.
+A subscript naming a dimension is an `IndexOp::ActiveDimRef` all the way to
+`compiler::subscript`, which allocates the active positions ONE TO ONE across
+a reference's subscripts and resolves the element through the one mapped read;
+`project_var_index_to_temp` pairs a temp's axes to the variable's by the same
+two rules, which is what makes `o[D,D] = square[D,D]` read the cell rather
+than the diagonal on every spelling.
+
+A resolved recurrence SCC is the one place a shared temp meets reordering.
+`db::assemble::segment_member_by_element` is the single statement of where a
+member's code splits: its PROLOGUE and one segment per element, together
+with the set of elements that READ a prologue temp. The prologue is the
+leading run of whole temp-writing blocks whose temp two or more elements read,
+or a later prologue block reads (a shared body materialized from a shared
+operand) -- decided in reverse, so a once-written temp only the first element
+materializes stays in that element's segment beside the shared ones the
+materializer emits ahead of it. The element graph wires the prologue's
+current-value reads into exactly those readers, and `combine_scc_fragment`
+emits the prologue once, immediately before the first of those readers in
+`element_order`, refusing loud-safe if the order it was handed does not
+evaluate every in-SCC read first. An element the prologue reads but that
+reads nothing of it therefore runs before it, and a body that reads the
+recurrence's own readers is an element self-loop rather than a silently
+misplaced write.
 <!-- END_PHASE_6 -->
 
 <!-- START_PHASE_7 -->
@@ -981,12 +1024,14 @@ corpus (C-LEARN artifacts are identical); each is pinned:
    and the incomparable apply-to-all spelling is refused exactly as the
    `VECTOR SORT ORDER` twin is. Pinned by
    `builtin_signature_tests::rank_accepts_the_cross_dimension_operand_vector_sort_order_accepts`
-   and `rank_and_vector_sort_order_refuse_the_same_incomparable_a2a_operand`.
-   The same fact closes a pre-existing divergence between the LTM pass-1 gate
-   (`db/ltm/compile.rs`) and Pass 1 itself: the gate classified `RANK` as
-   non-decomposing while Pass 1 decomposed its argument (GH #995), so an LTM
-   fragment embedding `RANK(<computed array>, d)` took the unscoped lower.
-   Pinned by `pass1_gate_covers_each_decomposition_builtin`.
+   and `rank_and_vector_sort_order_read_the_same_operand_in_both_spellings`.
+   The same fact closed a divergence between the LTM scoped-relower gate
+   (`db/ltm/compile.rs`) and the materialization set it restated: the gate
+   classified `RANK` as non-decomposing while the argument was decomposed
+   (GH #995), so an LTM fragment embedding `RANK(<computed array>, d)` took
+   the unscoped lower. The gate restates no set (Phase 6b); the LTM side is
+   pinned by
+   `scoped_relower_gate_tests::every_ltm_fragment_compiles_on_both_sides_of_the_scoped_relower_gate`.
 4. `ISMODULEINPUT` spelled with zero or two arguments is `BadBuiltinArgs`
    (was `ExpectedIdent`, and silently accepted with the second argument
    dropped). Pinned by
@@ -1010,10 +1055,10 @@ artifacts are identical); it is pinned:
    the main expression come from one lowering and name one id, so the arm
    reads its own operand: `[6, 126, 126]`. Pinned, with the expected values
    derived from the builtins' rules, by
-   `db::temp_allocation_tests::default_arm_beside_a_hoisting_override_reads_its_own_pass1_temp`,
-   `explicit_arm_beside_a_hoisting_arm_reads_its_own_pass1_temp`,
-   `default_arm_with_two_pass1_temps_reads_both_of_its_own`, and the 2-D
-   `two_d_override_beside_a_hoisting_default_reads_its_own_pass1_temp`.
+   `db::temp_allocation_tests::default_arm_beside_an_override_reads_its_own_operand_temp`,
+   `explicit_arm_beside_another_reads_its_own_operand_temp`,
+   `default_arm_with_two_operand_temps_reads_both_of_its_own`, and the 2-D
+   `two_d_override_beside_a_shared_default_reads_its_own_operand_temp`.
 
 **Phase 5a semantic divergences.** Deriving the results-offset map from the
 layout changed how three shapes are keyed. None occurs in the corpus (C-LEARN's
@@ -1043,6 +1088,244 @@ generator produces them:
    variable; the running-count flatten keyed it through `to_source_repr`,
    which rewrote the period sentinel to `.`, a spelling `Ident::new` reads back
    as the module separator.
+
+**Phase 6b semantic divergences.** Making `compiler/array_operand.rs` the one
+materialization pass, and deleting the `Expr3` decomposition it duplicated,
+changed how nine shapes compile. C-LEARN's artifacts move (ledger row 6b) and
+one corpus model moves; each is pinned:
+
+1. **Once per equation is decided on the lowered body, not on the equation.**
+   An array value two or more elements of an apply-to-all or arrayed equation
+   read is materialized ONCE, hoisted ahead of the element code; one that
+   differs per element is materialized per element on an id the elements
+   REISSUE. The old rule classified the whole equation
+   (`expression_depends_on_active_dimension` lowered every element twice to
+   compare), so an equation with one element-invariant subexpression beside one
+   element-varying one took the per-element regime for both, and a per-element
+   hoist spent one id per ELEMENT. Identity includes source positions, so two
+   explicit arms share a body only when they spell it at the same offset --
+   the shape `a[t1] = SUM(VECTOR SORT ORDER(input[D], 1))` beside
+   `a[t2] = a[t1] + SUM(VECTOR SORT ORDER(input[D], 1) * 1)` evaluates two
+   sorts, as it always did. Values are unchanged -- the five array-producing
+   builtins are pure and the fragment writes nothing they read -- and every
+   temp count falls: C-LEARN's LTM artifact goes from 441 temp slots to 28, and
+   a 300-element per-element hoist over a materialized operand from 600 ids to
+   2, which takes GH #583's `u8` namespace out of reach of any equation shape.
+   The C-LEARN `sorted target` shape -- `VECTOR ELM MAP(Src[COP,t1], Target
+   Order[COP,Target])` over `[COP,Target]` -- stays one map per equation,
+   because a vector builtin's operand is promoted to the whole axis whichever
+   element is active and the fixed-column slice is the same view for every
+   element. Pinned throughout `db::temp_allocation_tests`, whose rows are
+   derived from the pass's two enumerations (where it fires; which regime the id
+   gets), by
+   `array_operand_materialization_tests::a_per_element_hoist_over_a_shared_operand_costs_two_ids_at_any_size`,
+   `an_elm_map_over_a_fixed_column_slice_is_materialized_once_per_equation` and
+   `a_sort_order_over_the_iterated_axis_is_materialized_once_per_equation`;
+   the refusal itself keeps its own pin at
+   `symbolic::tests::test_resolve_static_view_temp_past_the_id_namespace`.
+
+2. **A subscript naming a dimension resolves through one rule, whichever
+   dimension it names.** Pass 1 folded a subscript naming an ACTIVE dimension to
+   that dimension's ordinal and indexed the source's storage raw, while a
+   subscript naming any other dimension went to
+   `DimensionsContext::resolve_mapped_read` (the active element's own name on
+   the source axis, then the declared element map, then a mapped parent). With
+   Pass 1 gone both take the second route, and reading by ORDINAL survives only
+   as its last resort, where the two dimensions declare no correspondence at
+   all. This is the largest behaviour change in the phase and it is a
+   CORRECTION: `test/test-models/tests/subrange_merge/` ships genuine Vensim
+   output beside its `.mdl` and nothing simulated it (the corpus list is built
+   from `.xmile` files and that directory has none), and
+   `lower values[lower] = value per layer[lower]` over `lower: Layer2, Layer3,
+   Layer4` moves from `1, 2, 3` to Vensim's `2, 3, 4`. Pinned by
+   `simulate.rs::a_subrange_subscript_reads_the_element_it_names`, and cell by
+   cell over the (mapping kind x spelling x declaration direction) matrix by
+   `mapped_reference_semantics_tests`, whose expectation table is keyed on the
+   mapping kind alone -- all four spellings agree, and
+   `a_bare_equation_reference_and_a_flow_reference_agree` says so directly where
+   its predecessor pinned the disagreement.
+
+   A second corpus consequence, measured in the sweep:
+   `sdeverywhere/models/arrays_cname` and `arrays_varname` are subject to
+   GH #859, the importer's nondeterministic dimension ordering, and on the base
+   that coin flip reached the VALUES -- canonicalizing each run by sorting its
+   columns leaves TWO distinct forms. On the tree it leaves one. Reading by
+   element name rather than by the active element's ordinal is what makes a
+   permuted declaration order stop changing which element a reference reads.
+
+   One describer did NOT move with execution and the gap is disclosed rather
+   than closed: `DimensionsContext::positional_correspondence`, which the LTM
+   attribution surfaces use for the iterated spelling, still returns the
+   diagonal. It differs from execution only for a declared element map that
+   PERMUTES at equal cardinality (a plain positional `maps_to` gives the same
+   answer either way). Delegating it to `executed_read_correspondence` under the
+   same admission gate is a five-line change that moves ten LTM
+   element-attribution tests, each with its own derivation
+   (`db::analysis::element_graph_tests`, `ltm_agg_tests`,
+   `ltm_augment_pin_tests`, `db::ltm_ir_tests`) -- the LTM attribution layer's
+   change, sequenced separately. The rustdoc on that function states the window
+   and the cost.
+
+3. **Each occurrence of a repeated active dimension reads its own axis.**
+   `o[D,D] = square[D,D]` (and the bare `o[D,D] = square`, which pass 0 rewrites
+   into it) read the DIAGONAL `square[d_i,d_i]`, disagreeing with the wildcard
+   spelling `square[*,*]`. `compiler::subscript::normalize_subscripts3` now
+   allocates the active positions one to one across a reference's subscripts,
+   and `compiler::project_var_index_to_temp` pairs a temp's axes to the
+   variable's the same way, so all three spellings read the cell. Vensim rejects
+   the declaration outright ("DimA appears more than once on LHS", measured in
+   Vensim DSS 2026-08-04 on `vensim-probes/repeated_dimension.mdl`) while XMILE
+   v1.0 exemplifies it and says nothing about the reference, so the reading is
+   Simlin's to define. Not in the corpus; pinned by
+   `simulate.rs::each_occurrence_of_a_repeated_active_dimension_reads_its_own_axis`
+   (VM values plus `ensure_wasm_matches`) and by
+   `array_operand_materialization_tests::a_repeated_dimension_read_directly_reads_each_axis`,
+   which is not a residual on the execution side.
+   `db::analysis::expand_same_element`'s repeated-target residual is the same
+   root cause on the LTM side and is unchanged.
+
+4. **`VECTOR SELECT`'s two array positions are REDUCED, not WHOLE.** The
+   signature table classified them as whole-array operands, which only ever
+   reached lowering when the enclosing equation ALSO held an array-producing
+   builtin (that is what selected the wildcard-preserving mode); every other
+   spelling took the ordinary per-element path. With one mode the classification
+   decides every call, and the corpus says which one is right: genuine Vensim
+   output in `test/sdeverywhere/models/vector/` runs
+   `q[DimB] = VECTOR SELECT(e[DimA!,DimB], c[DimA!], 0, VSSUM, VSERRNONE)` and
+   `r[DimA] = VECTOR SELECT(e[DimA,DimB!], d[DimA,DimB!], :NA:, VSMAX,
+   VSERRNONE)`, where the `!` marks the reduced axis and the LHS's own dimension
+   is an ELEMENT of the operand. `VECTOR SELECT` reduces to a scalar, so
+   `ArgKind::Array { whole: false }` is both the Vensim rule and the reading the
+   corpus already exercised. `VECTOR ELM MAP`, `VECTOR SORT ORDER`, `RANK` and
+   the `ALLOCATE` family stay whole, which is what their own ground truth says
+   (`test/test-models/tests/vector_order/`, `test/sdeverywhere/models/allocate/`,
+   C-LEARN's `Target Order[COP,Target]`). Pinned by the `[*]`-spelled rows of
+   `array_operand_materialization_tests::vector_select_positions` and by
+   `the_gh_1001_user_shape_compiles_and_reads_the_previous_row`, which reads one
+   row of the previous step's matrix per element.
+
+5. **Two operand shapes neither containing the other broadcast into their cross
+   product, in every position.** `SUM(a[*] + h[*])` over disjoint named
+   dimensions has always been the 3 x 3 cross-product sum Vensim's own output
+   gives (`test/sdeverywhere/models/sum/sum.xmile`), because `Expr3`'s
+   decomposition unioned the axes left to right; the post-lowering materializer
+   declined the same shape, so which answer an equation got depended on which
+   pass saw it -- `out[X,Y] = RANK(a[*] + b[*], 1)` compiled and
+   `out[X,Y] = RANK(a[X] + b[Y], 1)` was refused, for one operand. One rule
+   answers both: `compiler::join_array_views` takes the containment join where
+   there is one and the left-to-right union otherwise, which is the same order
+   `ast::Expr2` already assigns to the expression's bounds. What Vensim's own
+   output establishes is the REDUCER case only (`sum.dat`, the 198 above); that
+   `RANK` and `VECTOR SORT ORDER` should read a cross-product operand at all,
+   and in that axis order, is UNVERIFIED -- Vensim has no such example and the
+   spelling that reaches it here is Simlin's `[*]`, not Vensim's `!`. The rows
+   pin what this engine does, in both operand orders, so a future ground truth
+   moves a test rather than a silent number. A view that leaves
+   an axis unnamed or names one TWICE cannot be paired by name and still
+   declines. Pinned by
+   `array_operand_materialization_tests::incomparable_operand_shapes_broadcast_into_their_cross_product`
+   (which rows both operand orders, because the axis order is the axis
+   `VECTOR SORT ORDER` sorts along) and
+   `builtin_signature_tests::rank_and_vector_sort_order_read_the_same_operand_in_both_spellings`.
+
+6. **An array-producing builtin nested inside a computed operand is
+   materialized first.** `VECTOR SORT ORDER(VECTOR ELM MAP(a, b) + c, 1)` was a
+   disclosed residual: the `Op2` became a temp whose `BeginIter` body still held
+   the inner call, which codegen cannot emit. Materializing every array value in
+   its own array-valued position closes it, and the inner temp is written before
+   the body that reads it. Pinned by
+   `array_operand_materialization_tests::a_nested_array_producing_builtin_inside_arithmetic_materializes_first`.
+
+7. **A lookup's TABLE argument lowers like a reducer's operand, and an array
+   value in a one-value position gets one diagnostic.** The table position used
+   to lower in the enclosing context, so inside an apply-to-all body a free axis
+   of the table collapsed and `out[COP] = LOOKUP(g, Time)` over a `g[COP, ROW]`
+   holder compiled to a fabricated positional read; it now keeps the free axis,
+   is materialized as the per-element arrayed-GF apply it is, and -- having no
+   correspondence to project the element through -- is read WHOLE and refused as
+   an array in a one-value position. OBSERVABLE BEHAVIOUR IS UNCHANGED: the base
+   refuses `out[COP] = LOOKUP(g, Time)` over a `g[COP, ROW]` holder with the
+   identical diagnostic, Phase 6a having already unified the two arms onto one
+   message, so this item is a change of ROUTE (the table keeps its free axis and
+   is materialized, rather than collapsing to a fabricated positional read that
+   some other check would have to catch) and not of what a user sees. Pinned by
+   `per_element_gf_tests::array_valued_table_apply_assigned_to_one_slot_is_refused_not_aborted`,
+   whose rows cover both the `StaticSubscript` and the `TempArray` arm.
+
+8. **A shared materialization inside a resolved recurrence SCC is evaluated
+   before every element that reads it.** The combined fragment emits a
+   member's segments in `element_order`, and a temp two or more elements read
+   is emitted ONCE as the member's prologue, immediately before the first of
+   its readers in that order; `symbolic_phase_element_order` wires the
+   prologue's current-value reads into exactly those readers. A hoist that
+   rides on one element's segment is instead written wherever that element
+   lands: an EXCEPT default `SUM(VECTOR SORT ORDER(v[t] * a[t3], 1))` shared by
+   `a[t1]` and `a[t2]` beside the override `a[t3] = 7` puts the hoist in
+   `a[t1]`'s segment with its `a[t3]` read attributed there, leaves `a[t2]`
+   with no ordering edge, and schedules `a[t2]` FIRST -- a well-formed program
+   reading zero-initialised temp storage on step 1 (`a[t2] = 0` at `t = 0`,
+   3 afterwards, because the temp region persists across steps; measured on
+   the pre-change CLI over an XMILE spelling of that model). It is `[3, 3, 7]`
+   on every step now. The same mechanism seen from the override's side is a
+   base FALSE refusal: `a[t1] = 7` beside a default `SUM(VECTOR SORT ORDER(v[t]
+   * a[t1], 1))` for `t2, t3` put the hoist in `t1`'s segment reading `t1`, a
+   self-loop, and was refused as `CircularDependency`; it is `[7, 3, 3]` now.
+   Wiring the reads into the readers only, rather than into every element, and
+   lifting only what two or more elements read, is what keeps every recurrence
+   with an acyclic element graph compiling: a prologue that reads an element
+   which reads nothing of it orders that element first, a prologue that reads
+   one of its own readers is an element self-loop, and a once-written temp
+   only the first element materializes (`a[d1] = SUM(VECTOR SORT ORDER(v[D], 1))
+   + SUM(VECTOR SORT ORDER(w[D] * a[d3], 1))` beside a shared default) stays
+   that element's, so its `a[d3]` read orders `a[d3]` before `a[d1]` alone.
+   Pinned by
+   `dep_graph_tests::a_shared_default_reading_an_override_element_runs_the_override_first`
+   and `a_prologue_read_of_a_non_reader_element_orders_that_element_first`
+   (every step, through the VM), `simulate.rs::a_shared_materialization_inside_a_recurrence_scc_precedes_every_reader`,
+   `two_arms_each_materializing_a_temp_inside_a_recurrence_compile_in_both_orders`
+   (the shape a guard on "a temp touched by two segments" would refuse) and
+   `a_private_materialization_beside_a_shared_one_stays_in_its_element` (the
+   two rows above; all three VM plus `ensure_wasm_matches`), the refusal
+   `dep_graph_tests::a_prologue_reading_an_scc_member_refuses_the_recurrence`,
+   and the combiner's own rows in `db::combined_fragment_tests`, including
+   `a_private_block_beside_a_shared_temp_stays_in_its_element`.
+
+9. **A temp axis the target does not name is read through the declared
+   correspondence, and refused without one.** `out[D] = VECTOR SORT ORDER(w[E],
+   1)` materializes a `[E]`-shaped temp that `out[D]` reads back per element.
+   `compiler::project_var_index_to_temp` pairs the temp's axes to the
+   variable's by name first; an axis the variable does not name is resolved
+   per element through `DimensionsContext::resolve_mapped_read` -- the
+   element's own name on the temp's axis, then the declared map, then a mapped
+   parent -- which is the rule an ordinary reference `x[E]` resolves by (GH
+   #997). With `E -> D` declared, and likewise for two indexed dimensions,
+   `out` is the sort order `[1, 2, 0]` of `w = [3, 1, 2]`; two named
+   dimensions declaring nothing have no correspondence, so the temp is read
+   WHOLE and refused as an array in a one-value position. The old projection
+   read coordinate 0 on every such axis, so all three spellings gave `[1, 1,
+   1]`: a plausible array that answered a question the model did not ask. The
+   refusal is the one new loud refusal of a base-compiling shape in this
+   phase, and it replaces a silent wrong number. Not in the corpus; pinned by
+   `simulate.rs::a_temp_axis_the_target_does_not_name_is_read_through_the_declared_correspondence`
+   (the mapped and indexed rows through the VM plus `ensure_wasm_matches`,
+   and the unrelated pair's `NotSimulatable`).
+
+The LTM lowering scope is EMPTY, and there is no scoped re-lower.
+`lower_ltm_variable` lowers every LTM equation once with no model variables in
+scope; the scope only ever fed `ArrayContext::get_dimensions`, which computes
+`Expr2` `ArrayBounds`, and no bound is load-bearing for the fragment compiler:
+every dependency's shape reaches lowering through `FragmentInput.deps`,
+materialization is decided on the lowered `compiler::Expr`, and the remaining
+bounds consumers are refusals (Phase 8 audit, section 4). The evidence is the
+artifact, not the suite: C-LEARN's `CLEARN_LTM=1` `bytecode_profile` block is
+byte-identical with the populated-scope re-lower and without it, and the LTM
+goldens (`db/ltm_char_golden`, `db/fragment_char_golden/ltm_*`,
+`db/ltm_value_golden`) are unchanged. The re-lower had been gated by a
+signature-table scan for array-position builtins (`BuiltinFn::arg_kinds()`,
+`SIZE` included), which was the right gate for a pass that read the bounds;
+the drift GH #738's second round recorded belonged to the text-scan gate that
+preceded it. With no bounds consumer left, the scan and the re-lower go
+together, and the LTM compile channel falls with them (ledger row 6b).
 
 **Phase 3 semantic divergences.** Feeding every fragment through one
 `FragmentInput` changed how one shape compiles. It does not occur in the
@@ -1415,3 +1698,4 @@ hash is not available to it.
 | 5b | `engine: diagnostics keep their message from parse to collection` | 8.829 G (median of 5; range 8.827-8.841), +0.36% against the Phase 4 tree re-measured in the same session (8.798 G, median of 5, range 8.791-8.802; interleaved pairs +0.44 / +0.32 / +0.28 / +0.49 / +0.38%) | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: both `bytecode_profile` blocks are byte-identical, including the full opcode histogram, the post-fusion stream counts, the 371 names and 7 modules; same channel and flags as the baseline row. This phase changes diagnostics, not codegen, so the delta is cost rather than saving: `EquationError` grew an `Option<String>` from 8 to 32 bytes, and it is the error type of every `EquationResult` in the AST-lowering path and the element type of `Variable::errors`, which is cloned per parse. Under the one-percent bar the plan sets for recording rather than investigating; a perf pass follows this branch. Diagnostics on the `test/` corpus: the same 501 rows with the same per-code distribution, of which 409 now carry a payload where 209 did (`unknown_builtin` 0 -> 96, `unknown_dependency` 0 -> 48, `mismatched_dimensions` 0 -> 14, `generic` 0 -> 10, `bad_builtin_args` 0 -> 6, `array_reference_needs_explicit_subscripts` 0 -> 5, `empty_equation` 0 -> 18 of 58, `bad_binary_op_in_units` 0 -> 3). 372 of the 409 are a SENTENCE; the other 37 are a bare identifier, which is what their raising site had -- `empty_equation` (18), `mismatched_dimensions` (14) and `array_reference_needs_explicit_subscripts` (5), all raised in `compiler/mod.rs` and `compiler/context.rs`, which Phase 6(b) rewrites and which the sentences should follow. The 92 that remain payload-less are the parse stage (45), whose reason is the source snippet every Rust surface now renders from the span, plus three sites in files Phase 6a/6b own (43) and one (`db/dep_graph.rs`'s `cycle_diagnostic`, 4) that has no reason in hand. One deliberately re-baselined pin and three named divergences (Additional Considerations, "Phase 5b semantic divergences"), which also record the two places a reason still stops: the web app's equation arm (GH #1030) and the bare-identifier payloads above. The CLI renders through `collect_formatted_errors`, so the parse row's "the snippet IS the reason" rule now holds on every Rust surface -- libsimlin, both MCP servers and the CLI. The engine suite (lib 5661, integration 767), the CLI suite (9), the 12-repeat determinism suites, every fragment/LTM golden with no regeneration, and one capped `cargo test --workspace` are green; `cbindgen` reproduces `simlin.h` unchanged |
 | 7.1 | `engine: one predicate for a direct PREVIOUS read` | 8.689 G (median of 5; range 8.685-8.698), -0.01% against the seeded tree (`6cf3660b`) re-measured in the same session (8.690 G, median of 5, range 8.679-8.692; interleaved pairs +0.10 / -0.03 / +0.07 / -0.05 / +0.02%), inside the channel's noise floor and not investigated | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: the whole `bytecode_profile` block is byte-identical in both modes -- every count above, the 371 names and 7 modules, the full opcode histogram, the post-fusion stream counts and the fused-binop table; same channel and flags as the baseline row. A refactor plus a probe, so no saving is expected or found. `snapshot_arg::SnapshotArg::access` is now the one statement of what `PREVIOUS`/`INIT` addresses directly, called by `BuiltinVisitor::snapshot_arg` over the source argument (replacing `needs_temp_arg` and `arg_is_array_shaped`) and by `codegen::lowered_snapshot_arg` over the lowered one (feeding `static_slot` and `Compiler::snapshot_static_view`); `db::exec_probe::ProbedDb` counts every tracked query's executions from salsa's own events. Differential sweep of a base-tree and a working-tree CLI over all 509 models under `test/`, each run twice per binary: 396 byte-identical, 110 refused identically, and the only three models whose output is not identical are `subscript_transposition`, `arrays_cname` and `arrays_varname`, each of which flips between exactly the same TWO outputs on BOTH binaries (GH #859, an importer nondeterminism; resampled 12x per binary per model, which is what separates a flip from a move -- two samples per binary does not). No model moved. Four parse-vs-codegen divergences recorded, none of them introduced here and none changing an artifact (Additional Considerations, "Phase 7.1 predicate"); the probe's findings, including that `ModuleIdentContext` is the sole remaining cause of AC3.1's loose case, are under "Phase 7.1 probe" |
 | 7.2 | `engine: captures carry their argument, not its text` | 8.6920 G (median of 5; range 8.6866-8.6976), -0.02% against the base tree (the 7.1 chunk staged on `68774a16`) re-measured in the same session (8.6937 G, median of 5, range 8.6834-8.6979; interleaved pairs -0.017 / +0.163 / -0.047 / -0.038 / -0.017%), inside the channel's noise floor and not investigated | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: the whole `bytecode_profile` block is byte-identical in both modes -- every count above, the 371 names and 7 modules, the full opcode histogram, the post-fusion stream counts and the fused-binop table; same channel and flags as the baseline row. A representation change with the observable result held fixed, so no saving is expected and none is found. The exact per-capture delta at each of the six consumers that build a helper's parse-stage form is: a lex-and-parse of the helper's equation text is deleted, and one `print_eqn` (the `Variable::eqn` field is source text by definition) plus one `Expr0` subtree clone replaces it. The `instantiate_implicit_modules` walk is NOT part of the delta -- `parse_var` ran it on the old path too, and `Capture::variable_stage0` runs it for the same reason. On a model with 233 captures among 5215 slots that trade is a wash. `PREVIOUS`/`INIT` arguments are now `capture::Capture` values -- an `Expr0` subtree with positional identity `(parent, id)` -- carried on the parse result in a `capture::ImplicitVar` list beside the module instances and hoisted call arguments that are still text; `Capture::variable_stage0` is the one constructor of a capture's parse-stage variable, and `capture::synthetic_ident` the one derivation of every synthesized helper's name (`rg "arg0" src/simlin-engine/src` finds one production site). `ImplicitVar::Synthesized` is boxed, which is what keeps the enum the size of a capture rather than of a `datamodel::Variable` in a list salsa retains per variable and, under LTM, per synthetic variable. Differential sweep of the base-tree and working-tree CLIs over all 509 models under `test/`, each run twice per binary: 396 byte-identical, 110 refused identically, and the only three non-identical models are `arrays_cname`, `arrays_varname` and `subscript_transposition`, each resampled 12x per binary and each producing the SAME two-output set on both binaries (GH #859, the importer nondeterminism). No model moved. The engine suite (lib 5677, integration 776, CLI 4, wasm 2), the 12-repeat determinism suites and every fragment/LTM golden are green with no regeneration |
+| 6b | `engine: one materialization pass over the lowered fragment` | 8.710 G (median of 5; range 8.708-8.716), +0.15% against the base `5c406dd5` re-measured in the same session (8.696 G, median of 5, range 8.687-8.709; interleaved pairs +0.14 / +0.28 / +0.01 / +0.08 / +0.24%), inside the channel's floor and not investigated | 5215 | 30682 / 1477 / 24658 | 1732 / 162 / 28 / 641 | The artifact moves, and the direction is smaller. Plain: 12 fewer flow opcodes and 2 fewer static views, all from ONE variable (`rs_ff_co2_ff_aggregated`, an element-invariant per-element arrayed-GF apply evaluated once instead of three times: `LookupArray` 12 -> 10, its `PushStaticView`/`PopView` pairs, and the `LoadVar`/`Op2`/`LoadGlobalVar` of the two dropped applies); `VectorElmMap` 8 -> 8, `VectorSortOrder` 2 -> 2, `BeginIter` 99 -> 99, 28 temp slots either side. Under `CLEARN_LTM=1`: 907851 / 1477 / 28514 opcodes (-526 flow), 16741 literals, 162 GFs, **28 temp slots against 441**, 2682 static views (-184), `VectorElmMap` 92 -> 12, `VectorSortOrder` 23 -> 3, `LookupArray` 29 -> 25, `BeginIter` 415 -> 415 -- a body one element reads is evaluated on an id the elements reissue rather than one id per element, and an element-invariant one is evaluated once per link-score fragment rather than once per element. The LTM lowering scope is empty (no scoped re-lower): that LTM block is byte-identical with the re-lower and without it, every LTM golden is unchanged, and the LTM compile channel (`CLEARN_LTM=1 CLEARN_PROFILE=compile CLEARN_COMPILE_ITERS=2`, three interleaved pairs) is 58.653 G against the base's 61.369 G, **-4.42%** (pairs -4.56 / -4.38 / -4.45%). The plain compile channel's cost is the subscript route (every subscript naming a dimension goes through `normalize_subscripts3` and `resolve_mapped_read` where Pass 1 folded an active one to an ordinal, divergence item 2); an exact-name fast path in `active_dim_ref` keeps it inside the floor. The run channel (`CLEARN_PROFILE=run CLEARN_RUN_ITERS=20`, same binaries) is 30.660 G against 30.776 G, -0.38% (pairs -0.37 / -0.39 / -0.38 / -0.39 / -0.37%). Differential sweep of the base and tree CLIs over all 509 models under `test/`: 396 byte-identical, 110 refused identically, 0 refused on one side only, and three not byte-identical: `subrange_merge` is deterministic on both and moves onto its checked-in Vensim `output.tab` (item 2); `arrays_cname` and `arrays_varname` have two order-free forms on the base and one -- one of the base's two -- on the tree (item 2: a subscript naming a dimension is read by element NAME, so the importer's permuted declaration order stops changing which element is read); `subscript_transposition` keeps the same two order-free forms on both binaries (GH #859, resampled 12x per binary). Nine divergences, pinned (Additional Considerations, "Phase 6b semantic divergences"); the engine suite (lib 5669, integration 782), the wasm parity corpus and the 12-repeat determinism suites are green with no golden regeneration |

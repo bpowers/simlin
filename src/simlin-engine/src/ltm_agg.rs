@@ -457,15 +457,16 @@ pub enum AxisRead {
     /// inside a `COP`-iterating equation, C-LEARN's shape and GH #997's).
     ///
     /// Structurally the same pair as [`AxisRead::Iterated`]; the difference is
-    /// the RESOLUTION RULE, which is why it is a separate variant rather than a
-    /// flag. The iterated spelling folds its index to an ordinal
-    /// (`ast::expr3`'s Pass 1) and never consults the declared element map;
-    /// this one survives to `IndexOp::ActiveDimRef` and
+    /// which DESCRIBER a consumer must use, which is why it is a separate
+    /// variant rather than a flag. EXECUTION resolves both the same way --
+    /// every dimension-named subscript reaches `IndexOp::ActiveDimRef` and
     /// `compiler::subscript::build_view_from_ops` resolves it name-first, then
-    /// through the map -- so the two read DIFFERENT source elements wherever a
-    /// model declares an element map or the two dimensions share element
-    /// names. Every consumer must pick the matching correspondence
-    /// (`executed_read_correspondence` here,
+    /// through the declared map -- but the two describers have not converged:
+    /// `positional_correspondence`, which the `Iterated` consumers read, still
+    /// returns the diagonal, and its own rustdoc states the window where that
+    /// differs from the executed read (a permuting element map at equal
+    /// cardinality) and what closing it costs. Every consumer must pick the
+    /// matching correspondence (`executed_read_correspondence` here,
     /// `positional_correspondence` for `Iterated`), which is what a
     /// separate variant makes a compile error rather than a silent
     /// mis-attribution.
@@ -497,12 +498,13 @@ pub enum AxisRead {
 ///   given source element is the target element whose correspondence entry
 ///   names it.
 ///
-///   The POSITIONAL correspondence is the right one here and not merely the
-///   historical one: this helper serves an [`AxisRead::Iterated`] axis, whose
-///   index spells a dimension the equation ITERATES, and `ast::expr3`'s Pass 1
-///   folds that to an ordinal without consulting any declared element map
-///   (GH #997). Being positional it is also a bijection (index-identity, equal
-///   cardinality), so every source element has exactly one preimage; the
+///   The POSITIONAL correspondence is the one this helper is written
+///   against: it serves an [`AxisRead::Iterated`] axis, whose index spells a
+///   dimension the equation ITERATES, and `positional_correspondence` is the
+///   describer those consumers read (GH #997). That describer differs from
+///   execution for a permuting element map -- the gap is stated on the function
+///   itself -- but it is a bijection (index-identity, equal cardinality), so
+///   every source element has exactly one preimage; the
 ///   inversion is still written generally and declines (returns `None`) if a
 ///   source element has zero or multiple preimages, mirroring
 ///   `expand_same_element`'s general-shape inversion. That generality is what

@@ -370,8 +370,16 @@ fn main() {
     );
     let mut hist: Vec<_> = prof.histogram.iter().collect();
     hist.sort_by(|a, b| b.1.cmp(a.1));
-    println!("  opcode histogram (top 25 of {}):", prof.histogram.len());
-    for (name, count) in hist.iter().take(25) {
+    // `CLEARN_HISTOGRAM=full` prints every opcode rather than the top 25, so a
+    // ledger row can account for a rare opcode's count (the array-producing
+    // builtins are far outside the top 25 on C-LEARN).
+    let shown = if std::env::var("CLEARN_HISTOGRAM").is_ok_and(|v| v == "full") {
+        hist.len()
+    } else {
+        25
+    };
+    println!("  opcode histogram ({shown} of {}):", prof.histogram.len());
+    for (name, count) in hist.iter().take(shown) {
         let pct = **count as f64 / prof.total_opcodes as f64 * 100.0;
         println!("    {name:<22} {count:>9}  {pct:>5.1}%");
     }

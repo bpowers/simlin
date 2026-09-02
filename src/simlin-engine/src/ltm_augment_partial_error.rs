@@ -90,10 +90,10 @@ pub(crate) enum PartialEquationErrorKind {
     /// to a single element, and an order statistic of one element is
     /// meaningless (`vm_vector_sort_order` on a 1-element view is rank 0
     /// always). Today such a fragment also fails codegen loudly
-    /// ("array-producing builtin outside AssignTemp context"); declining at
-    /// generation keeps the drop loud even if a future Pass-1 widening
-    /// (option A) makes the fragment compile -- which would otherwise convert
-    /// it into a silent constant-0 partial. The element pin belongs on the
+    /// (an array in a position that consumes one value); declining at
+    /// generation keeps the drop loud even if a future widening of the
+    /// materializer (option A) makes the fragment compile -- which would
+    /// otherwise convert it into a silent constant-0 partial. The element pin belongs on the
     /// RESULT (the A2A-shaped whole-array score, which stays emitted), never
     /// on a rank-like builtin's argument.
     RankLikePartial,
@@ -157,8 +157,8 @@ impl PartialEquationError {
 /// scalar fragment cannot hold. The order-statistic subset (everything but
 /// ELM MAP) is additionally a semantic trap: pinning its argument to one
 /// element changes the ranking rather than selecting a slot, so those must
-/// stay declined even if a future Pass-1 widening makes the fragment
-/// compile. Deliberately NOT in the set: `VECTOR SELECT`, whose selection
+/// stay declined even if a future widening of the materializer makes the
+/// fragment compile. Deliberately NOT in the set: `VECTOR SELECT`, whose selection
 /// reduces to a scalar (per-element pinning of the non-reduced axes is
 /// exactly right). This is the same result-type distinction
 /// `ltm_agg::reducer_collapses_to_scalar` draws for `RANK` (GH #771/#742),

@@ -1746,10 +1746,11 @@ fn an_unrelated_equation_edit_does_not_regenerate_every_link_score() {
 /// declared over `agg` -- a dimension with DISJOINT element names and NO
 /// mapping to `cop`.
 ///
-/// It COMPILES because `cop` is the dimension the equation ITERATES, so
-/// `ast::expr3`'s Pass 1 folds the index to that dimension's ordinal and it
-/// indexes `agg`'s storage raw: `target[c1]` reads `agg`'s FIRST element, by
-/// POSITION, consulting neither names nor mappings
+/// It COMPILES because `cop` is the dimension the equation ITERATES and the two
+/// dimensions declare no correspondence at all, which is the ORDINAL last
+/// resort of `build_view_from_ops`'s `ActiveDimRef` arm: `target[c1]` reads
+/// `agg`'s FIRST element, by POSITION, neither name nor mapping having
+/// resolved it
 /// (`mapped_reference_semantics_tests`' `no_mapping_equal_cardinality` measures
 /// exactly this -- a cross-dimension read between two dimensions declared to
 /// have nothing to do with each other compiles and produces numbers).
@@ -2232,9 +2233,10 @@ fn a_lookup_table_index_is_element_pinned_in_a_per_element_partial() {
 /// reads `other[region]`, where `other` is declared over `agg` -- a dimension
 /// with DISJOINT element names and no declared mapping -- so that dep has no
 /// projectable element and its dimension-name subscript would survive into the
-/// scalar partial. The read itself is POSITIONAL (`region` is the iterated
-/// dimension, folded to an ordinal by Pass 1), which is what makes an unrelated
-/// pair legal; see `an_uncoverable_arrayed_dep_declines_the_edge_loudly` for
+/// scalar partial. The read itself is POSITIONAL -- `region` and `agg` declare
+/// no correspondence, so it reaches the ordinal last resort -- which is what
+/// makes an unrelated pair legal; see
+/// `an_uncoverable_arrayed_dep_declines_the_edge_loudly` for
 /// the full mechanism and for why this shape rather than an explicit element
 /// map (GH #997 made the latter projectable). Nothing exotic: a 2-D read and an
 /// undeclared-mapping dep.

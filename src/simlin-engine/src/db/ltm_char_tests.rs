@@ -1678,7 +1678,7 @@ fn char_arrayed_target_slot_scores() {
 // `mp[la]` reads no `pop` at all, so for either `pop[e] -> mp` edge every
 // occurrence in the `la` arm is frozen by the ceteris-paribus wrap and the arm
 // is provably `PREVIOUS(mp)`. It is omitted from the element map, which
-// `compiler::expand_arrayed_with_hoisting` lowers to a single constant-zero
+// `compiler::expand_per_element` lowers to a single constant-zero
 // assign. What the golden shows is the slot being ABSENT -- deliberately
 // distinct from an arm that is present holding a `"0"` partial, which is what a
 // generator that gave up would emit.

@@ -7,8 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::ast::{
-    self, ArrayView, BinaryOp, Expr3, Expr3LowerContext, IndexExpr3, Loc, Pass1Context,
-    TempAllocator,
+    self, ArrayView, BinaryOp, Expr3, Expr3LowerContext, IndexExpr3, Loc, TempAllocator,
 };
 use crate::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, ErrorCode, ErrorKind, Ident, IdentMap,
@@ -29,22 +28,6 @@ use super::subscript::{
     normalize_subscripts3,
 };
 use crate::builtins::ArgKind;
-
-/// What Pass 1 does with a subscript that names an active apply-to-all
-/// dimension, the one axis on which [`Context::lower`]'s two callers differ.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum DimensionRefs {
-    /// Fold it to the active element's index, so an expression that would
-    /// otherwise be deferred can be decomposed into temps here.
-    Resolve,
-    /// Leave it as an `IndexExpr3::Dimension`, so
-    /// [`super::subscript::normalize_subscripts3`] turns it into an
-    /// `IndexOp::ActiveDimRef` that an array-producing builtin's
-    /// wildcard-preserving context can promote back to a whole axis. What an
-    /// `Ast::Arrayed` equation containing `VECTOR ELM MAP`,
-    /// `VECTOR SORT ORDER` or a sibling needs.
-    Preserve,
-}
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
@@ -592,14 +575,20 @@ impl Context<'_> {
         }
     }
 
-    /// Lower an `Expr2` to the compiler's `Expr` list: pass 0, then `Expr3`,
-    /// then Pass 1 temp decomposition, then `lower_from_expr3` over the temp
-    /// assignments and the main expression, which is last.
-    pub(super) fn lower(
-        &self,
-        expr: &ast::Expr2,
-        dimension_refs: DimensionRefs,
-    ) -> Result<Vec<Expr>> {
+    /// Lower an `Expr2` to the compiler's `Expr`: pass 0, then `Expr3`, then
+    /// `lower_from_expr3`.
+    ///
+    /// The lowering is structural. It materializes nothing: an expression whose
+    /// value codegen cannot express in place becomes a temp afterwards, in
+    /// [`super::array_operand`], which is the fragment's one materialization
+    /// pass and sees every element's lowered form at once. That is why a
+    /// subscript naming an active apply-to-all dimension stays an
+    /// `IndexExpr3::Dimension` all the way to
+    /// [`super::subscript::normalize_subscripts3`], which allocates one active
+    /// axis per occurrence: an array-producing builtin's wildcard-preserving
+    /// context can then promote it back to a whole axis, and an ordinary
+    /// reference resolves it to the active element.
+    pub(super) fn lower(&self, expr: &ast::Expr2) -> Result<Expr> {
         // Pass 0: normalize bare arrays into explicit subscripts.
         let normalized = self.lower_pass0(expr);
 
@@ -613,29 +602,7 @@ impl Context<'_> {
             details: e.details,
         })?;
 
-        // Pass 1: temp decomposition. The apply-to-all context is exactly what
-        // resolves a dimension reference to a concrete element index, so
-        // withholding it is how `DimensionRefs::Preserve` preserves them.
-        let mut pass1_ctx = match (
-            dimension_refs,
-            &self.active_dimension,
-            &self.active_subscript,
-        ) {
-            (DimensionRefs::Resolve, Some(dims), Some(subs)) => {
-                Pass1Context::with_a2a_context(dims, subs, &self.temps)
-            }
-            _ => Pass1Context::new(&self.temps),
-        };
-        let transformed = pass1_ctx.transform(expr3);
-        let assignments = pass1_ctx.take_assignments();
-
-        let mut result: Vec<Expr> = assignments
-            .iter()
-            .map(|a| self.lower_from_expr3(a))
-            .collect::<Result<Vec<_>>>()?;
-        result.push(self.lower_from_expr3(&transformed)?);
-
-        Ok(result)
+        self.lower_from_expr3(&expr3)
     }
 
     pub(super) fn fold_flows(&self, flows: &[Ident<Canonical>]) -> Result<Option<Expr>> {
@@ -824,17 +791,6 @@ impl Expr3LowerContext for Context<'_> {
     }
 }
 
-/// Result of applying pass 1 to an expression.
-/// Contains the transformed expression and any temp assignments that must be
-/// evaluated before the main expression.
-#[allow(dead_code)]
-pub struct Pass1Result {
-    /// Temp assignments in order of dependency (first should be evaluated first)
-    pub assignments: Vec<Expr>,
-    /// The main expression (references temps via TempArray)
-    pub expr: Expr,
-}
-
 impl Context<'_> {
     /// Create a context with transposed active dimensions for transpose operations.
     /// Used when processing expressions under a Transpose operator in A2A context.
@@ -886,34 +842,12 @@ impl Context<'_> {
         }
     }
 
-    /// Lower an Expr3 to compiler's Expr representation.
-    /// Handles all Expr3 variants directly, including pass-1 specific variants
-    /// (TempArray, AssignTemp, etc.) and common expression types.
+    /// Lower an `Expr3` to the compiler's `Expr`, one arm per variant.
+    ///
+    /// Structural throughout: an expression whose value codegen cannot produce
+    /// in place becomes a temp afterwards, in `super::array_operand`.
     pub(super) fn lower_from_expr3(&self, expr: &Expr3) -> Result<Expr> {
         match expr {
-            // Handle Expr3-specific variants directly
-            Expr3::StaticSubscript(id, view, _, loc) => {
-                let base = self.get_base_ref(id)?;
-                Ok(Expr::StaticSubscript(base, view.clone(), *loc))
-            }
-
-            Expr3::TempArray(id, view, loc) => Ok(Expr::TempArray(*id, view.clone(), *loc)),
-
-            Expr3::TempArrayElement(id, view, idx, loc) => {
-                Ok(Expr::TempArrayElement(*id, view.clone(), *idx, *loc))
-            }
-
-            Expr3::AssignTemp(id, inner, view) => {
-                // AssignTemp content was hoisted out of an array reducer
-                // (SUM, MEAN, etc.) by Pass 1.  It may contain
-                // cross-dimension wildcards (e.g. c[*] with DimA in a
-                // DimB context) that must be preserved, so lower in a
-                // wildcard-preserving context.
-                let lowered_inner = self.with_preserved_wildcards().lower_from_expr3(inner)?;
-                Ok(Expr::AssignTemp(*id, Box::new(lowered_inner), view.clone()))
-            }
-
-            // Handle common variants directly (no longer converting to Expr2)
             Expr3::Const(_, n, loc) => Ok(Expr::Const(n.value(), *loc)),
 
             Expr3::Var(id, _, loc) => {
@@ -1913,7 +1847,23 @@ impl Context<'_> {
             ArgKind::Array { whole: true } => whole_ctx
                 .get_or_insert_with(|| self.with_vector_builtin_wildcards())
                 .lower_from_expr3(arg),
-            ArgKind::Scalar | ArgKind::Table => self.lower_from_expr3(arg),
+            ArgKind::Scalar => self.lower_from_expr3(arg),
+            // Inside an apply-to-all body a lookup's table lowers like a
+            // REDUCER's operand: the element pins the axes it names and every
+            // other axis survives as a view. That is what a per-element
+            // arrayed-GF apply is -- `out[COP] = LOOKUP(g, t)` over `g[COP]`
+            // applies each element's own table, while over `g[COP, ROW]` the
+            // free ROW axis makes the apply array-valued and
+            // `compiler::array_operand` materializes it into the `LookupArray`
+            // temp codegen emits. OUTSIDE one the enclosing context already
+            // keeps the whole view, and switching to the wildcard-preserving
+            // one would additionally stop `normalize_subscript_ops` resolving a
+            // `@N` table index to its element -- there is no iteration for `@N`
+            // to name in a table position, so it must resolve.
+            ArgKind::Table if self.active_dimension.is_some() => {
+                self.with_preserved_wildcards().lower_from_expr3(arg)
+            }
+            ArgKind::Table => self.lower_from_expr3(arg),
             ArgKind::Ident => unreachable!("an identifier payload is not an expression argument"),
         })?;
         // ALLOCATE AVAILABLE reads all four XPriority columns for each
@@ -2262,13 +2212,13 @@ impl Context<'_> {
                 // 4 with none at all (the `no_mapping_*` refusal cells of
                 // `crate::mapped_reference_semantics_tests`). The two-candidate
                 // shape -- a target iterating both a dimension and something
-                // mapped to it -- is nevertheless REACHABLE, and not by the
-                // route one would guess: Pass 1 folds an active dimension's
-                // name to an ordinal only when it runs, and
-                // `DimensionRefs::Preserve` skips it, which is exactly how
-                // all 8 corpus references (`LOOKUP` table arguments with an
-                // `@N` sibling) arrive here naming an ACTIVE dimension. A
-                // fixture of that shape reaches this loop with two candidates.
+                // mapped to it -- is nevertheless REACHABLE: a subscript naming
+                // an active dimension reaches the subscript path as an
+                // `IndexExpr3::Dimension` rather than as a folded ordinal,
+                // which is how all 8 corpus references (`LOOKUP` table
+                // arguments with an `@N` sibling) arrive here naming an ACTIVE
+                // dimension. A fixture of that shape reaches this loop with two
+                // candidates.
                 // What is unmeasured is whether the two ever resolve to
                 // DIFFERENT elements in a model that compiles; the order is
                 // chosen to match the static path either way.
@@ -2388,11 +2338,8 @@ fn test_lower() {
         (ast::BinaryOp::And, BinaryOp::And),
         (ast::BinaryOp::Or, BinaryOp::Or),
     ] {
-        let mut output_exprs = context
-            .lower(&lower_if(op), DimensionRefs::Resolve)
-            .expect("lowers");
-        // The last element is the main expression
-        assert_eq!(expected(lowered_op), output_exprs.pop().unwrap());
+        let output = context.lower(&lower_if(op)).expect("lowers");
+        assert_eq!(expected(lowered_op), output);
     }
 }
 

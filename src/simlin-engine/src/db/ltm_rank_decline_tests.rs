@@ -10,11 +10,11 @@
 //! link-score partial of such a target pins the builtin's argument down to
 //! one element, and an order statistic of a single element is meaningless
 //! (`vm_vector_sort_order` on a 1-element view yields rank 0 always). Today
-//! those fragments fail codegen loudly ("array-producing builtin outside
-//! AssignTemp context" -- 21 VECTOR SORT ORDER fragments on C-LEARN, plus 84
-//! VECTOR ELM MAP ones on the sibling reason below); any change that made
-//! them compile (e.g. widening Pass-1 materialization, GH #995 option A)
-//! would convert the loud drop into a silent constant-0 partial. Option C
+//! those fragments fail codegen loudly (an array in a position that consumes
+//! one value -- 21 VECTOR SORT ORDER fragments on C-LEARN, plus 84 VECTOR ELM
+//! MAP ones on the sibling reason below); any change that made them compile
+//! (e.g. widening the materializer, GH #995 option A) would convert the loud
+//! drop into a silent constant-0 partial. Option C
 //! therefore declines the edge at generation, with a warning naming the
 //! shape, BEFORE any such widening can land.
 //!

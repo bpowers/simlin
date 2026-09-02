@@ -530,7 +530,7 @@ pub(crate) enum UnfilledArms {
 /// dropped, duplicate canonical subscripts collapsed last-wins, dimensions
 /// resolved. The one stage that is not in the `Ast` -- which declared slot takes
 /// which arm -- is the `SubscriptIterator` walk below, and it is the compiler's
-/// own (`compiler::expand_arrayed_with_hoisting` looks each combination's key up
+/// own (`compiler::expand_per_element` looks each combination's key up
 /// in this same map and falls to the EXCEPT default only on a miss). Nothing
 /// here mirrors a stage that exists elsewhere.
 ///

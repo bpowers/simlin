@@ -3462,6 +3462,38 @@ mod tests {
     // renumber_opcode bounds checking (fix #5)
     // ====================================================================
 
+    /// A static view over a temp above 255 is refused at resolution.
+    ///
+    /// A view base is the ONE place a temp id is carried as a `u32`, while
+    /// every writer of a temp narrows it to `u8`, so such a view would read
+    /// storage no opcode ever wrote -- a well-formed program with wrong
+    /// numbers. No lowering reaches it (`compiler::array_operand` reissues a
+    /// per-element temp's id across the elements, so an equation costs one id
+    /// per simultaneously-live temp rather than one per element), which is
+    /// exactly why the refusal is pinned here rather than through a model:
+    /// GH #583 is the id namespace itself, and this is the guard that keeps a
+    /// future widening loud.
+    #[test]
+    fn test_resolve_static_view_temp_past_the_id_namespace() {
+        let layout = VariableLayout::new(HashMap::new(), 0);
+        let view = |id: u32| SymbolicStaticView {
+            base: SymStaticViewBase::Temp(id),
+            dims: smallvec::smallvec![2],
+            strides: smallvec::smallvec![1],
+            offset: 0,
+            sparse: smallvec::SmallVec::new(),
+            dim_ids: smallvec::smallvec![0],
+        };
+        resolve_static_view(&view(TempId::MAX as u32), &layout)
+            .expect("the last id inside the namespace resolves");
+        let err = resolve_static_view(&view(TempId::MAX as u32 + 1), &layout)
+            .expect_err("a view over a temp above the namespace must be refused");
+        assert!(
+            err.contains("TempId capacity"),
+            "expected the TempId namespace refusal, got: {err}"
+        );
+    }
+
     #[test]
     fn test_renumber_opcode_temp_offset_overflow() {
         let op = SymbolicOpcode::LoadTempConst {

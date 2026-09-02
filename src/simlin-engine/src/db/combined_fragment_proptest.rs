@@ -193,8 +193,15 @@ fn build_member(spec: &MemberSpec) -> PerVarBytecodes {
             code.push(SymbolicOpcode::PopView {});
         }
         if e < dim_lists.len() {
+            // A dynamic view over a variable OUTSIDE the SCC. Element 0's
+            // opcodes ahead of its write are a candidate prologue whenever the
+            // element writes a temp, and a prologue that read the element it
+            // feeds would be an element self-loop -- a fragment the element
+            // graph never hands the combiner, and one the combiner refuses.
+            // These members are structural fixtures, not data-flow ones, so
+            // their one variable-backed dynamic view names a foreign variable.
             code.push(SymbolicOpcode::PushVarViewDirect {
-                var: SymVarRef::base(name.clone()),
+                var: SymVarRef::base(Ident::new("outside_the_scc")),
                 dim_list_id: e as u16,
             });
             code.push(SymbolicOpcode::PopView {});

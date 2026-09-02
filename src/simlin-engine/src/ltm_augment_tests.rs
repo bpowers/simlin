@@ -3812,7 +3812,7 @@ fn test_arrayed_link_score_population_to_migration_pressure_fixed_boston() {
 ///
 /// The instrument changed with GH #977 and the guarded property did not. A slot
 /// whose transformed partial is provably `PREVIOUS(target)` is now OMITTED from
-/// the element map (`compiler::expand_arrayed_with_hoisting` lowers an absent
+/// the element map (`compiler::expand_per_element` lowers an absent
 /// slot to one constant-zero assign), so "every slot references the flow's
 /// equation contents" can no longer be asked of `boston` and `la` -- those arms
 /// are gone by design. Asking it anyway would pin materialization, not

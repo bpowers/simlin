@@ -658,7 +658,7 @@ fn emit_conveyor_spec_warnings(db: &dyn Db, model: SourceModel, project: SourceP
 ///
 /// Every consumer of a per-element equation list matches entries against the
 /// declared elements by canonical key and SILENTLY DROPS an unmatched entry:
-/// the compiler's arrayed expansion (`compiler::expand_arrayed_with_hoisting`
+/// the compiler's arrayed expansion (`compiler::expand_per_element`
 /// falls back to the default equation or a constant 0 for a combination with
 /// no entry, and never visits an entry matching no combination), the
 /// per-element graphical-function table layout
@@ -680,7 +680,7 @@ fn emit_conveyor_spec_warnings(db: &dyn Db, model: SourceModel, project: SourceP
 /// 2. **Whole-string** (the plain compiler's rule -- `variable.rs`
 ///    `parse_equation` keys entries by
 ///    `CanonicalElementName::from_raw(subscript)` and
-///    `compiler::expand_arrayed_with_hoisting` looks up
+///    `compiler::expand_per_element` looks up
 ///    `from_raw(combination.join(","))` -- and equally the per-element
 ///    GF-table layout, `variable::build_tables` /
 ///    `reorder_arrayed_element_tables`): the entry's whole canonicalized
@@ -779,7 +779,7 @@ fn emit_unknown_element_subscript_warnings(
             // Rule 2 (whole-string, the compiler/GF matcher): the entry's
             // whole canonicalized subscript equals some declared
             // combination's comma-joined key -- exactly how
-            // `compiler::expand_arrayed_with_hoisting` resolves entries, so
+            // `compiler::expand_per_element` resolves entries, so
             // e.g. a comma-containing element name or a quoted whole
             // subscript that rule 1 mis-splits is recognized as resolved.
             let whole_string_keys = whole_string_keys.get_or_insert_with(|| {

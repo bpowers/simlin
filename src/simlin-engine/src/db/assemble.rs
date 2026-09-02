@@ -651,18 +651,180 @@ fn var_phase_symbolic_fragment_memo(
     compile_phase_to_per_var_bytecodes(&input.emit_ctx(), &var.ast)
 }
 
-/// Segment one member's symbolic opcode stream into per-element slices,
-/// keyed by `element_offset`.
+/// One member's symbolic opcode stream, split into the pieces the combined
+/// fragment relocates independently.
+pub(crate) struct MemberSegments {
+    /// Whole `AssignTemp` blocks at the head of the member's code that write
+    /// temps nothing else in the member writes: the materializations
+    /// `compiler::array_operand` hoists ahead of the element code because two
+    /// or more elements read them. The prologue belongs to no element --
+    /// folding it into the first one and then reordering the segments leaves
+    /// every LATER-ordered element reading a temp nothing has written yet --
+    /// so `combine_scc_fragment` emits it once, immediately before the first
+    /// of its READERS in `element_order`.
+    pub(crate) prologue: Vec<crate::compiler::symbolic::SymbolicOpcode>,
+    /// The elements whose slice reads a temp the prologue writes. These are
+    /// the elements the prologue has to precede, and the ONLY ones: an element
+    /// that reads none of its temps may run before it -- and has to, when the
+    /// prologue reads that element. Non-empty whenever `prologue` is, because
+    /// a candidate block no element reads is not lifted out at all.
+    pub(crate) prologue_readers: BTreeSet<usize>,
+    /// The per-element slices, keyed by `element_offset`.
+    pub(crate) segments: HashMap<usize, Vec<crate::compiler::symbolic::SymbolicOpcode>>,
+}
+
+/// The temp `op` reads, if it reads one: a cell (`LoadTempConst`) or a static
+/// view whose base is a temp (`PushStaticView`, resolved through
+/// `static_views`). `None` for a view id outside the table, which the caller
+/// treats as a malformed fragment.
+fn temp_read_by(
+    op: &crate::compiler::symbolic::SymbolicOpcode,
+    static_views: &[crate::compiler::symbolic::SymbolicStaticView],
+) -> Result<Option<u32>, String> {
+    use crate::compiler::symbolic::{SymStaticViewBase, SymbolicOpcode};
+    Ok(match op {
+        SymbolicOpcode::LoadTempConst { temp_id, .. } => Some(*temp_id as u32),
+        SymbolicOpcode::PushStaticView { view_id } => {
+            let view = static_views
+                .get(*view_id as usize)
+                .ok_or_else(|| format!("static view {view_id} is outside the fragment's table"))?;
+            match view.base {
+                SymStaticViewBase::Temp(id) => Some(id),
+                SymStaticViewBase::Var(_)
+                | SymStaticViewBase::PrevVar(_)
+                | SymStaticViewBase::InitialVar(_) => None,
+            }
+        }
+        _ => None,
+    })
+}
+
+/// The temp `op` writes, if it writes one.
+///
+/// These are the opcodes `compiler::codegen`'s `AssignTemp` arm emits as a
+/// block's result: the `BeginIter` loop form (which fills its temp through
+/// `StoreIterElement`) and the array-producing / `LookupArray` forms, which
+/// write theirs directly. Exhaustive over the variants that carry a temp id;
+/// `LoadTempConst` READS one and is deliberately not here.
+fn temp_written_by(
+    op: &crate::compiler::symbolic::SymbolicOpcode,
+) -> Option<crate::bytecode::TempId> {
+    use crate::compiler::symbolic::SymbolicOpcode;
+    match op {
+        SymbolicOpcode::BeginIter {
+            write_temp_id,
+            has_write_temp,
+        } => has_write_temp.then_some(*write_temp_id),
+        SymbolicOpcode::VectorElmMap { write_temp_id, .. }
+        | SymbolicOpcode::VectorSortOrder { write_temp_id }
+        | SymbolicOpcode::Rank { write_temp_id }
+        | SymbolicOpcode::LookupArray { write_temp_id, .. }
+        | SymbolicOpcode::AllocateAvailable { write_temp_id }
+        | SymbolicOpcode::AllocateByPriority { write_temp_id } => Some(*write_temp_id),
+        _ => None,
+    }
+}
+
+/// One candidate prologue block: a whole `AssignTemp` block at the head of a
+/// member's code, ending at `end` (exclusive), writing `temp` -- a temp the
+/// member writes exactly once -- and reading the temps in `reads`.
+struct LeadingBlock {
+    end: usize,
+    temp: u32,
+    reads: Vec<u32>,
+}
+
+/// The leading temp-writing blocks of `body`: the longest prefix before the
+/// first per-element write that consists of WHOLE blocks each writing a temp
+/// the member writes EXACTLY ONCE, in order.
+///
+/// A block runs from a temp WRITE (`temp_written_by`) to the first point after
+/// it where the view stack and the iteration nesting are both back to zero --
+/// which is how `compiler::codegen`'s `AssignTemp` arm ends one, whichever form
+/// it took: its rustdoc says "AssignTemp doesn't produce a value on the stack",
+/// and it pops every view it pushed. Only such a point ends a block. That is
+/// what stops the candidates at the end of the hoisted blocks rather than
+/// running on into the first element's code, whose own reads balance the view
+/// stack too but write no temp. It is an assumption about a DIFFERENT file's
+/// emission shape, which is why it is computed and checked here rather than
+/// asserted in prose.
+///
+/// Writing once separates a temp several elements share from one the elements
+/// RECYCLE -- `compiler::array_operand` reissues a recycled id per element, so
+/// it is written once per element and must stay inside the element that
+/// writes it. It does NOT separate a shared temp from a PRIVATE one that only
+/// the first element materializes: the materializer emits the shared blocks
+/// first and the first element's own blocks right after them, and a private
+/// temp is written once too. Which candidates are prologue is decided by who
+/// reads them (`segment_member_by_element`).
+fn leading_temp_blocks(
+    body: &[crate::compiler::symbolic::SymbolicOpcode],
+    first_write: usize,
+    static_views: &[crate::compiler::symbolic::SymbolicStaticView],
+) -> Result<Vec<LeadingBlock>, String> {
+    use crate::compiler::symbolic::SymbolicOpcode;
+
+    let mut total_writes: HashMap<crate::bytecode::TempId, usize> = HashMap::new();
+    for op in body {
+        if let Some(id) = temp_written_by(op) {
+            *total_writes.entry(id).or_insert(0) += 1;
+        }
+    }
+
+    let mut blocks: Vec<LeadingBlock> = Vec::new();
+    let mut view_depth: isize = 0;
+    let mut iter_depth: isize = 0;
+    // The temp the block in progress writes, once its write has been seen.
+    let mut writing: Option<crate::bytecode::TempId> = None;
+    let mut reads: Vec<u32> = Vec::new();
+    for (i, op) in body.iter().take(first_write).enumerate() {
+        match op {
+            SymbolicOpcode::PushStaticView { .. } | SymbolicOpcode::PushVarViewDirect { .. } => {
+                view_depth += 1
+            }
+            SymbolicOpcode::PopView {} => view_depth -= 1,
+            SymbolicOpcode::BeginIter { .. } => iter_depth += 1,
+            SymbolicOpcode::EndIter {} => iter_depth -= 1,
+            _ => {}
+        }
+        if let Some(read) = temp_read_by(op, static_views)? {
+            reads.push(read);
+        }
+        if let Some(id) = temp_written_by(op) {
+            writing = Some(id);
+        }
+        if let Some(id) = writing
+            && view_depth == 0
+            && iter_depth == 0
+        {
+            // A recycled id (written again by a later element) ends the
+            // candidates: everything from here on is the first element's own.
+            if total_writes.get(&id).copied().unwrap_or(0) != 1 {
+                break;
+            }
+            blocks.push(LeadingBlock {
+                end: i + 1,
+                temp: id as u32,
+                reads: std::mem::take(&mut reads),
+            });
+            writing = None;
+        }
+    }
+    Ok(blocks)
+}
+
+/// Segment one member's symbolic opcode stream into a prologue and per-element
+/// slices, keyed by `element_offset`.
 ///
 /// A per-element slice for element `e` is the run of opcodes up to and
 /// including the **write** opcode whose `var.name == member` and
 /// `var.element_offset == e` (`AssignCurr | AssignConstCurr |
-/// BinOpAssignCurr`). This is the *exact* segmentation
-/// `crate::db::dep_graph::symbolic_phase_element_order` performs to build
-/// the SCC element graph (GH #575) -- the verdict and the combined
-/// fragment MUST agree on segment boundaries or `element_order` would
-/// reference a slice the combiner cannot reproduce, so the two share this
-/// definition's contract.
+/// BinOpAssignCurr`), starting after the prologue for the first one. This is
+/// the *exact* segmentation `crate::db::dep_graph::symbolic_phase_element_order`
+/// builds the SCC element graph from (GH #575) -- the verdict and the combined
+/// fragment MUST agree on both boundaries or `element_order` would reference a
+/// slice the combiner cannot reproduce, so they share this function rather than
+/// a documented contract.
 ///
 /// A trailing `Ret` is stripped first (the combined fragment carries one
 /// terminal `Ret`). Any opcodes after the member's final per-element write
@@ -676,25 +838,27 @@ fn var_phase_symbolic_fragment_memo(
 /// - opcodes present but no per-element write at all (not element-
 ///   sourceable in the simple per-element shape, mirroring
 ///   `symbolic_phase_element_order`'s `saw_write` guard);
-/// - a backward jump whose target lies in an EARLIER segment. Segments are
-///   emitted in `element_order`, not in their original order, and a jump
-///   offset is relative, so a jump that escaped its own segment would land on
-///   whatever opcode happened to sit that far back after the interleave -- a
-///   silent miscompile with no bad id and no bad reference to notice. Codegen
-///   cannot currently produce one (a `BeginIter` loop writes a TEMP through
-///   `StoreIterElement`, and a member's per-element `AssignCurr` is emitted
-///   after `EndIter`, so a loop is always wholly inside one segment), which is
-///   exactly why it is worth checking rather than asserting in prose: this is
-///   an assumption about a DIFFERENT file's emission shape, and nothing else
-///   would notice it changing.
+/// - a backward jump whose target lies in an EARLIER segment, or in the
+///   prologue. Segments are emitted in `element_order`, not in their original
+///   order, and a jump offset is relative, so a jump that escaped its own
+///   segment would land on whatever opcode happened to sit that far back after
+///   the interleave -- a silent miscompile with no bad id and no bad reference
+///   to notice. Codegen cannot currently produce one (a `BeginIter` loop writes
+///   a TEMP through `StoreIterElement`, and a member's per-element `AssignCurr`
+///   is emitted after `EndIter`, so a loop is always wholly inside one
+///   segment), which is exactly why it is worth checking rather than asserting
+///   in prose: this is an assumption about a DIFFERENT file's emission shape,
+///   and nothing else would notice it changing.
 ///
 /// Consumed by `combine_scc_fragment`, which `assemble_module` invokes
 /// for every resolved recurrence SCC (the dt flows program and the
-/// synthetic-ident init `SymbolicCompiledInitial` path).
-fn segment_member_by_element(
+/// synthetic-ident init `SymbolicCompiledInitial` path), and by the element
+/// graph that orders them.
+pub(crate) fn segment_member_by_element(
     member: &str,
     code: &[crate::compiler::symbolic::SymbolicOpcode],
-) -> Result<HashMap<usize, Vec<crate::compiler::symbolic::SymbolicOpcode>>, String> {
+    static_views: &[crate::compiler::symbolic::SymbolicStaticView],
+) -> Result<MemberSegments, String> {
     use crate::compiler::symbolic::SymbolicOpcode;
 
     // Strip a trailing Ret -- the combined fragment appends a single Ret.
@@ -707,8 +871,7 @@ fn segment_member_by_element(
 
     // The opcode that terminates one of THIS member's per-element segments. A
     // write to a *different* member, or a `BinOpAssignNext` (a stock update,
-    // not a per-element current-value write of this member), does not --
-    // exactly the `symbolic_phase_element_order` rule.
+    // not a per-element current-value write of this member), does not.
     let write_element = |op: &SymbolicOpcode| -> Option<usize> {
         match op {
             SymbolicOpcode::AssignCurr { var }
@@ -722,14 +885,105 @@ fn segment_member_by_element(
         }
     };
 
+    let Some(first_write) = body.iter().position(|op| write_element(op).is_some()) else {
+        return Err(format!(
+            "SCC member `{member}` has no per-element write \
+             opcode; not element-sourceable for the combined \
+             fragment"
+        ));
+    };
+    let first_elem = write_element(&body[first_write])
+        .expect("first_write indexes a per-element write by construction");
+    let blocks = leading_temp_blocks(body, first_write, static_views)?;
+    let prefix_end = blocks.last().map_or(0, |b| b.end);
+
+    // Which elements read each temp, over the code after the candidate
+    // prefix: a segment reading a temp, whether as a cell or as a view, and
+    // the opcodes trailing the final write belonging to the last element.
+    let mut element_readers: HashMap<u32, BTreeSet<usize>> = HashMap::new();
+    let mut segment_reads: BTreeSet<u32> = BTreeSet::new();
+    let mut scanned_elem: Option<usize> = None;
+    for op in &body[prefix_end..] {
+        if let Some(id) = temp_read_by(op, static_views)? {
+            segment_reads.insert(id);
+        }
+        if let Some(elem) = write_element(op) {
+            for id in std::mem::take(&mut segment_reads) {
+                element_readers.entry(id).or_default().insert(elem);
+            }
+            scanned_elem = Some(elem);
+        }
+    }
+    if let Some(elem) = scanned_elem {
+        for id in segment_reads {
+            element_readers.entry(id).or_default().insert(elem);
+        }
+    }
+
+    // A candidate block is prologue when two or more elements read its temp,
+    // or when a later prologue block does (a shared body materialized from a
+    // shared operand: the operand is read by that body alone). Decided in
+    // reverse so the later block's verdict is known, and a block that is NOT
+    // prologue belongs to the first written element, whose own reads of the
+    // shared temps it carries count as that element's. The prologue is the
+    // qualifying PREFIX: the materializer emits every shared block ahead of
+    // the first element's own, so a qualifying block behind a private one is
+    // an emission shape this segmentation does not cover, and it is refused
+    // rather than left inside an element other readers may precede.
+    let mut prologue: Vec<bool> = vec![false; blocks.len()];
+    for i in (0..blocks.len()).rev() {
+        let temp = blocks[i].temp;
+        let mut readers: BTreeSet<usize> = element_readers.get(&temp).cloned().unwrap_or_default();
+        let mut read_by_later_prologue = false;
+        for (later, block) in blocks.iter().enumerate().skip(i + 1) {
+            if block.reads.contains(&temp) {
+                if prologue[later] {
+                    read_by_later_prologue = true;
+                } else {
+                    readers.insert(first_elem);
+                }
+            }
+        }
+        prologue[i] = readers.len() >= 2 || read_by_later_prologue;
+    }
+    let prologue_blocks = prologue.iter().position(|is| !is).unwrap_or(blocks.len());
+    if prologue[prologue_blocks..].iter().any(|is| *is) {
+        return Err(format!(
+            "SCC member `{member}` has a temp several elements read behind one \
+             only its first element reads; not element-sourceable for the \
+             combined fragment"
+        ));
+    }
+    let prologue_len = if prologue_blocks == 0 {
+        0
+    } else {
+        blocks[prologue_blocks - 1].end
+    };
+    let mut prologue_readers: BTreeSet<usize> = BTreeSet::new();
+    for block in &blocks[..prologue_blocks] {
+        if let Some(readers) = element_readers.get(&block.temp) {
+            prologue_readers.extend(readers.iter().copied());
+        }
+        if blocks[prologue_blocks..]
+            .iter()
+            .any(|later| later.reads.contains(&block.temp))
+        {
+            prologue_readers.insert(first_elem);
+        }
+    }
+
     // Jump containment. `lower_bound[pc]` is the first index of the segment
     // `pc` ends up in: segments start just after the previous per-element
-    // write, except that opcodes trailing the FINAL write are appended to the
-    // last segment rather than starting a new one (see below), so their bound
-    // is that segment's start.
+    // write (or after the prologue for the first), except that opcodes
+    // trailing the FINAL write are appended to the last segment rather than
+    // starting a new one (see below), so their bound is that segment's start.
+    // A prologue opcode's bound is 0: the prologue is relocated as a unit.
     let mut lower_bound: Vec<usize> = Vec::with_capacity(body.len());
     let mut start = 0usize;
     for (pc, op) in body.iter().enumerate() {
+        if pc == prologue_len {
+            start = prologue_len;
+        }
         lower_bound.push(start);
         if write_element(op).is_some() {
             start = pc + 1;
@@ -766,11 +1020,12 @@ fn segment_member_by_element(
         }
     }
 
+    let prologue: Vec<SymbolicOpcode> = body[..prologue_len].to_vec();
     let mut segments: HashMap<usize, Vec<SymbolicOpcode>> = HashMap::new();
     let mut current: Vec<SymbolicOpcode> = Vec::new();
     let mut last_written_elem: Option<usize> = None;
 
-    for op in body {
+    for op in &body[prologue_len..] {
         current.push(op.clone());
         if let Some(elem) = write_element(op) {
             if segments.contains_key(&elem) {
@@ -806,7 +1061,11 @@ fn segment_member_by_element(
         }
     }
 
-    Ok(segments)
+    Ok(MemberSegments {
+        prologue,
+        prologue_readers,
+        segments,
+    })
 }
 
 /// Interleave a multi-member recurrence SCC's per-element symbolic
@@ -873,6 +1132,11 @@ pub(crate) fn combine_scc_fragment(
     // `(member, element)` identity `element_order` carries.
     let mut renumbered_segments: HashMap<(Ident<Canonical>, usize), Vec<SymbolicOpcode>> =
         HashMap::new();
+    // Per-member prologues, keyed by the `element_order` index they are emitted
+    // immediately before: the member's first READER of the prologue's temps.
+    // Two members' first readers are two different entries, so the keys never
+    // collide.
+    let mut prologue_before: HashMap<usize, Vec<SymbolicOpcode>> = HashMap::new();
 
     for (member, _elem) in &scc.element_order {
         if absorbed.contains_key(member) {
@@ -892,25 +1156,84 @@ pub(crate) fn combine_scc_fragment(
         let (off, gf_remap) = merger.absorb(frag)?;
         absorbed.insert(member.clone(), off);
 
-        // Segment the member's symbolic code on its per-element write
-        // opcodes (identical contract to the Task 4 verdict builder), then
-        // renumber every opcode of every segment by THIS member's offsets
-        // and GF remap.
-        let segments = segment_member_by_element(member.as_str(), &frag.symbolic.code)?;
-        for (elem, ops) in segments {
-            let mut renumbered = Vec::with_capacity(ops.len());
-            for op in &ops {
-                renumbered.push(renumber_opcode(
+        // Segment the member's symbolic code into its prologue and its
+        // per-element slices (the same function the Task 4 verdict builder
+        // orders them with, so the two cannot disagree about a boundary),
+        // then renumber every opcode by THIS member's offsets and GF remap.
+        let seg =
+            segment_member_by_element(member.as_str(), &frag.symbolic.code, &frag.static_views)?;
+        let renumber_all = |ops: &[SymbolicOpcode]| -> Result<Vec<SymbolicOpcode>, String> {
+            ops.iter()
+                .map(|op| {
+                    renumber_opcode(
+                        op,
+                        off.lit_offset,
+                        &gf_remap,
+                        off.mod_offset,
+                        off.view_offset,
+                        off.temp_offset,
+                        off.dl_offset,
+                    )
+                })
+                .collect()
+        };
+
+        // The prologue is emitted once, immediately before the first of its
+        // readers in `element_order`, so every CURRENT-value read it makes of
+        // an in-SCC element has to be evaluated before that point. The element
+        // graph adds exactly that constraint (`symbolic_phase_element_order`
+        // wires a prologue read into every reader of the prologue), so this
+        // never fires on an order that graph produced -- it is here because
+        // the two live in different files and a disagreement between them is
+        // precisely the class of bug that produces a well-formed program
+        // reading a temp nothing has written.
+        if !seg.prologue.is_empty() {
+            let first_reader = scc
+                .element_order
+                .iter()
+                .position(|(m, e)| m == member && seg.prologue_readers.contains(e))
+                .ok_or_else(|| {
+                    format!(
+                        "SCC member `{}` has a prologue but none of its readers is in element_order; keeping CircularDependency",
+                        member.as_str()
+                    )
+                })?;
+            let mut reads: BTreeSet<(Ident<Canonical>, usize)> = BTreeSet::new();
+            for op in &seg.prologue {
+                if !crate::db::dep_graph::ordering_reads(
                     op,
-                    off.lit_offset,
-                    &gf_remap,
-                    off.mod_offset,
-                    off.view_offset,
-                    off.temp_offset,
-                    off.dl_offset,
-                )?);
+                    &frag.static_views,
+                    &scc.phase,
+                    &mut reads,
+                ) {
+                    return Err(format!(
+                        "SCC member `{}` has a prologue opcode referencing a static view outside its fragment; keeping CircularDependency",
+                        member.as_str()
+                    ));
+                }
             }
-            renumbered_segments.insert((member.clone(), elem), renumbered);
+            for (name, elem) in &reads {
+                if !scc.members.contains(name) {
+                    continue;
+                }
+                let read_at = scc
+                    .element_order
+                    .iter()
+                    .position(|(m, e)| m == name && e == elem);
+                if read_at.is_none_or(|at| at >= first_reader) {
+                    return Err(format!(
+                        "SCC member `{}`'s prologue reads `{}`[{}], which element_order does not evaluate before the prologue's first reader; keeping CircularDependency",
+                        member.as_str(),
+                        name.as_str(),
+                        elem
+                    ));
+                }
+            }
+            prologue_before.insert(first_reader, renumber_all(&seg.prologue)?);
+        }
+
+        for (elem, ops) in seg.segments {
+            renumbered_segments.insert((member.clone(), elem), renumber_all(&ops)?);
         }
     }
 
@@ -920,7 +1243,12 @@ pub(crate) fn combine_scc_fragment(
     // `element_order` (which the Task 4 builder cannot produce -- nodes
     // are unique) would try to reuse a removed segment and fail loud-safe.
     let mut combined_code: Vec<SymbolicOpcode> = Vec::new();
-    for (member, elem) in &scc.element_order {
+    for (index, (member, elem)) in scc.element_order.iter().enumerate() {
+        // A member's prologue precedes the first of its readers, wherever the
+        // order puts that reader.
+        if let Some(prologue) = prologue_before.remove(&index) {
+            combined_code.extend(prologue);
+        }
         let seg = renumbered_segments
             .remove(&(member.clone(), *elem))
             .ok_or_else(|| {

@@ -1549,9 +1549,10 @@ fn per_element_pin_colliding_element_name_verdict_enumeration() {
 /// directions.
 ///
 /// The correspondence is the POSITIONAL one because every index here spells a
-/// dimension the target ITERATES, which `ast::expr3`'s Pass 1 folds to an ordinal
-/// (GH #997). An element-mapped pair therefore pins too -- and pins to the
-/// ORDINAL's element, not the map's.
+/// dimension the target ITERATES (GH #997). An element-mapped pair therefore
+/// pins too -- and pins to the ORDINAL's element, not the map's, which is the
+/// disclosed describer/execution gap on
+/// `DimensionsContext::positional_correspondence`.
 ///
 /// Both columns are the SAME for every row here, and that is the point: these are
 /// `Pinned` and `Unspellable` verdicts, neither of which the freeze context can

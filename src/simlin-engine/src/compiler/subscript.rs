@@ -104,18 +104,46 @@ impl Subscript3Config<'_> {
     /// Only the DIRECT declared mappings are admitted, because the element
     /// this resolves to is `build_view_from_ops`'s `ActiveDimRef` arm reading
     /// the active element off the source axis.
-    fn active_dim_ref(&self, name: &str) -> Option<usize> {
+    ///
+    /// `claimed` holds the active positions the reference's EARLIER subscripts
+    /// already read, and an unclaimed one is preferred: `square[D,D]` in an
+    /// equation over `[D, D]` reads `square[d_i, d_j]`, the cell, not
+    /// `square[d_i, d_i]`, the diagonal. A subscript that names a dimension the
+    /// equation iterates FEWER times than the reference spells it -- `m[D,D]`
+    /// under a `[D]` target -- has no unclaimed position left and falls back to
+    /// the claimed one, which is the only element it can mean.
+    fn active_dim_ref(&self, name: &str, claimed: &[usize]) -> Option<usize> {
         let active_dims = self.active_dimension?;
-        let source = [Axis::named(name, 0)];
-        match_axes_partial(
-            &source,
-            &axes_of(active_dims),
-            &DirectMappingsOnly(self.dimensions_ctx),
-        )
-        .into_iter()
-        .next()
-        .flatten()
-        .map(|(active_idx, _)| active_idx)
+        // The overwhelmingly common subscript names an active dimension by its
+        // exact name, and exact name is the precedence's first rung, so the
+        // first unclaimed active axis of that name is the answer the matcher
+        // would give -- without building its axis lists.
+        if let Some(idx) = active_dims
+            .iter()
+            .enumerate()
+            .position(|(i, dim)| dim.name() == name && !claimed.contains(&i))
+        {
+            return Some(idx);
+        }
+        let pick = |targets: &[Axis<'_>]| -> Option<usize> {
+            match_axes_partial(
+                &[Axis::named(name, 0)],
+                targets,
+                &DirectMappingsOnly(self.dimensions_ctx),
+            )
+            .into_iter()
+            .next()
+            .flatten()
+            .map(|(idx, _)| idx)
+        };
+        let all = axes_of(active_dims);
+        // With nothing claimed the pool is every active axis.
+        if claimed.is_empty() {
+            return pick(&all);
+        }
+        let pool: Vec<usize> = (0..all.len()).filter(|i| !claimed.contains(i)).collect();
+        let unclaimed: Vec<Axis<'_>> = pool.iter().map(|&i| all[i]).collect();
+        pick(&unclaimed).map(|idx| pool[idx]).or_else(|| pick(&all))
     }
 }
 
@@ -133,6 +161,9 @@ pub(crate) fn normalize_subscripts3(
     config: &Subscript3Config,
 ) -> Option<Vec<IndexOp>> {
     let mut operations = Vec::with_capacity(args.len());
+    // The active positions this reference's earlier subscripts already read, so
+    // a repeated dimension name takes its own axis (see `active_dim_ref`).
+    let mut claimed: Vec<usize> = Vec::new();
 
     for (i, arg) in args.iter().enumerate() {
         if i >= config.dims.len() {
@@ -249,7 +280,9 @@ pub(crate) fn normalize_subscripts3(
                         {
                             IndexOp::Single(idx)
                         } else if config.dimension_named(ident.as_str()).is_some() {
-                            IndexOp::ActiveDimRef(config.active_dim_ref(ident.as_str())?)
+                            let active = config.active_dim_ref(ident.as_str(), &claimed)?;
+                            claimed.push(active);
+                            IndexOp::ActiveDimRef(active)
                         } else {
                             // Not a known element or dimension - need dynamic handling
                             return None;
@@ -267,7 +300,9 @@ pub(crate) fn normalize_subscripts3(
                 {
                     IndexOp::Single(idx)
                 } else {
-                    IndexOp::ActiveDimRef(config.active_dim_ref(name.as_str())?)
+                    let active = config.active_dim_ref(name.as_str(), &claimed)?;
+                    claimed.push(active);
+                    IndexOp::ActiveDimRef(active)
                 }
             }
         };
@@ -404,8 +439,33 @@ pub(crate) fn build_view_from_ops(
                     let dims_ctx = config.dimensions_ctx?;
                     let active_dims = config.active_dimension?;
                     let active_dim = &active_dims[*active_idx];
-                    let resolved = dims_ctx.resolve_mapped_read(dim, active_dim, subscript)?;
-                    dim.get_offset(&resolved)
+                    if let Some(resolved) = dims_ctx.resolve_mapped_read(dim, active_dim, subscript)
+                    {
+                        // A declared correspondence is authoritative: an element
+                        // it names that this axis does not declare is an error,
+                        // not a reason to read some other element.
+                        return dim.get_offset(&resolved);
+                    }
+                    // Nothing is declared between the two dimensions, so the
+                    // reference is POSITIONAL: the active element's ordinal
+                    // within its own dimension, indexing this axis. That is
+                    // `Context::resolve_iteration_element`'s last resort for an
+                    // axis it could not pair by name or mapping, and this is the
+                    // same question one axis-collapse earlier; a declared
+                    // correspondence that fails to translate stops short of it
+                    // there too. Out of range is an error, exactly as it is for
+                    // the `IndexOp::Single` an explicit element produces.
+                    let source_name = dim.canonical_name();
+                    let active_name = active_dim.canonical_name();
+                    let declared = dims_ctx.has_mapping_to(source_name, active_name)
+                        || dims_ctx.has_mapping_to(active_name, source_name)
+                        || dims_ctx.has_mapping_to_parent_of(source_name, active_name);
+                    if declared {
+                        return None;
+                    }
+                    active_dim
+                        .get_offset(subscript)
+                        .filter(|offset| *offset < dim.len())
                 });
 
                 if let Some(offset) = offset {

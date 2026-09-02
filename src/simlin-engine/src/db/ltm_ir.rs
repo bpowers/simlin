@@ -320,7 +320,7 @@ fn classify_iterated_dim_shape(
     // name-keyed target positions, and doing it there lets the edges and the
     // scores move together instead of trading one for the other. Pinned, both
     // directions, by
-    // `mapped_reference_semantics_tests::a_repeated_target_dimension_reads_the_first_axis_on_both_sides`.
+    // `mapped_reference_semantics_tests::a_repeated_target_dimension_reads_each_axis_on_the_executed_path`.
     //
     // Blast radius, measured: Vensim rejects a repeated-dimension declaration
     // ("DimA appears more than once on LHS", `vensim-probes/repeated_dimension.mdl`

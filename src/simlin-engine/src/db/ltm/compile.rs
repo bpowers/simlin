@@ -19,7 +19,6 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::canonicalize;
 use crate::common::{Canonical, Ident, IdentMap};
-use crate::datamodel;
 
 use crate::compiler::fragment::{DepShape, FragmentInput, lower_fragment};
 use crate::db::var_fragment::{
@@ -29,8 +28,7 @@ use crate::db::{
     Db, LtmLinkId, LtmSyntheticVar, RefShape, SourceModel, SourceProject, SourceVariableKind,
     VarFragmentResult, build_module_inputs, canonical_module_input_set,
     compile_phase_to_per_var_bytecodes, extract_tables_from_source_var, model_implicit_var_info,
-    model_module_ident_context, module_dep_shape, module_input_prefix,
-    parse_source_variable_with_module_context, project_converted_dimensions,
+    module_dep_shape, module_input_prefix, project_converted_dimensions,
     project_dimensions_context, project_units_context, reconstruct_single_variable,
     variable_dimensions,
 };
@@ -536,9 +534,7 @@ struct LoweredLtmVariable {
     variable: crate::variable::Variable,
     /// `classify_dependencies(..).all` of the lowered AST
     /// (`Variable::ast()`, which for the Aux-parsed Vars LTM produces is
-    /// the dt AST). Identifier sets are lowering-scope-independent, so
-    /// this is valid for the returned `variable` whether or not the
-    /// scoped re-lower ran.
+    /// the dt AST).
     ///
     /// ORDERED, not a `HashSet` -- **deliberately, even though no consumer is
     /// order-sensitive.** Keep it that way; the reasoning is not "something
@@ -567,151 +563,26 @@ struct LoweredLtmVariable {
     referenced_tables: BTreeSet<String>,
 }
 
-/// `true` when the lowered AST contains a construct whose compilation
-/// consumes the Expr2 `ArrayBounds` that only the dependency-aware
-/// lowering scope can recover -- i.e. a Pass-1 temp-decomposition site.
+/// Lower a parsed LTM Stage0 variable with an EMPTY lowering scope, and
+/// classify its dependencies once.
 ///
-/// This is [`lower_ltm_variable`]'s gate for the scoped re-lower, and it
-/// must be sound against `ast::expr3`'s Pass-1 decomposition set -- NOT
-/// the agg-hoistable reducer set (`ltm_agg::reducer_kind_from_name`),
-/// which differs: `SIZE` is never hoisted into an agg (its link score is
-/// constant 0) yet Pass-1 decomposes its argument exactly like `SUM`'s, and
-/// `RANK` -- array-valued, routed through its own LTM agg path (GH #776) --
-/// has a Pass-1-decomposed array argument too (`ArgKind::Array`, GH #995).
-/// Deriving the original (text-scan) gate from
-/// the wrong set silently stubbed any fragment embedding
-/// `SIZE(<array expression>)` -- the demonstrated GH #738 round-2
-/// regression, pinned by
-/// `ltm_array_agg::size_reducer_previous_helper_compiles_and_is_correct`.
-fn ast_contains_pass1_decomposition_site(ast: &crate::ast::Ast<crate::ast::Expr2>) -> bool {
-    use crate::ast::Ast;
-    match ast {
-        Ast::Scalar(e) | Ast::ApplyToAll(_, e) => expr_contains_pass1_decomposition_site(e),
-        Ast::Arrayed(_, elements, default, _) => {
-            elements
-                .values()
-                .any(expr_contains_pass1_decomposition_site)
-                || default
-                    .as_ref()
-                    .is_some_and(expr_contains_pass1_decomposition_site)
-        }
-    }
-}
-
-/// Expression-level walk for [`ast_contains_pass1_decomposition_site`].
-///
-/// Sound BY CONSTRUCTION: a Pass-1 decomposition site is a builtin with a
-/// non-scalar argument position in the signature table
-/// (`BuiltinFn::arg_kinds`) -- an array operand, which
-/// `transform_builtin_inner`'s `maybe_decompose_array_arg_inner` turns into an
-/// `AssignTemp` (`SUM` / 1-arg `MEAN` / `STDDEV` / `SIZE` / 1-arg `MIN` / 1-arg
-/// `MAX` / `RANK` / `VECTOR SELECT` / `VECTOR ELM MAP` / `VECTOR SORT ORDER` /
-/// `ALLOCATE AVAILABLE` / `ALLOCATE BY PRIORITY`), or a lookup's table
-/// position, which `transform_inner`'s arrayed-GF apply decomposition reads (a
-/// LOOKUP-family call whose *table* operand carries multi-element bounds;
-/// flagged for every lookup since the table's arrayedness is exactly what the
-/// recovered bounds determine). Pass 1 reads the same kinds, so the gate
-/// cannot drift from it, and a new `BuiltinFn` variant is classified in the
-/// table or fails to compile there.
-/// `pass1_gate_covers_each_decomposition_builtin` pins the classification.
-///
-/// The one bounds consumer deliberately NOT gated on is the non-A2A Op2
-/// dimension-reordering pass (`compiler::context`'s Op2 lowering): it
-/// requires a whole-array Op2 *result* outside any reducer, which in a
-/// scalar LTM equation is ill-typed under either lowering, and in an
-/// A2A/per-element LTM equation is unreachable (per-element expansion
-/// lowers with `active_dimension` set, which skips the pass). A gated-out
-/// fragment therefore compiles byte-identically to its empty-scope
-/// (pre-GH #738) lowering.
-fn expr_contains_pass1_decomposition_site(expr: &crate::ast::Expr2) -> bool {
-    use crate::ast::{Expr2, IndexExpr2};
-    match expr {
-        Expr2::Const(..) | Expr2::Var(..) => false,
-        Expr2::Subscript(_, indices, _, _) => indices.iter().any(|idx| match idx {
-            IndexExpr2::Expr(e) => expr_contains_pass1_decomposition_site(e),
-            IndexExpr2::Range(l, r, _) => {
-                expr_contains_pass1_decomposition_site(l)
-                    || expr_contains_pass1_decomposition_site(r)
-            }
-            IndexExpr2::Wildcard(_)
-            | IndexExpr2::StarRange(_, _)
-            | IndexExpr2::DimPosition(_, _) => false,
-        }),
-        Expr2::App(builtin, _, _) => {
-            use crate::builtins::ArgKind;
-            if builtin
-                .arg_kinds()
-                .iter()
-                .any(|kind| !matches!(kind, ArgKind::Scalar))
-            {
-                return true;
-            }
-            // A decomposition site can hide anywhere in a non-decomposing
-            // builtin's arguments (`ABS(SUM(a[*] * 2))`).
-            builtin
-                .args()
-                .into_iter()
-                .any(expr_contains_pass1_decomposition_site)
-        }
-        Expr2::Op1(_, e, _, _) => expr_contains_pass1_decomposition_site(e),
-        Expr2::Op2(_, l, r, _, _) => {
-            expr_contains_pass1_decomposition_site(l) || expr_contains_pass1_decomposition_site(r)
-        }
-        Expr2::If(c, t, f, _, _) => {
-            expr_contains_pass1_decomposition_site(c)
-                || expr_contains_pass1_decomposition_site(t)
-                || expr_contains_pass1_decomposition_site(f)
-        }
-    }
-}
-
-/// Lower a parsed LTM Stage0 variable with a lowering scope that can
-/// resolve the dimensions of its model-variable dependencies (GH #738).
-///
-/// Expr1 -> Expr2 lowering computes each subexpression's `ArrayBounds` via
-/// `ArrayContext::get_dimensions`, which reads `ScopeStage0.models`. Pass-1
-/// temp decomposition (`Pass1Context::needs_decomposition`) gates on those
-/// bounds: a reducer over an array *expression* (`SUM(pop[*] * scale)`) is
-/// hoisted into an `AssignTemp` only when the Op2 carries them. With an
-/// empty scope the bounds are never computed, the array expression stays
-/// inline under the reducer, and codegen rejects the fragment ("Cannot push
-/// view for expression type ..."), silently stubbing the LTM variable to a
-/// constant 0. Mirrors `explicit_fragment_input`'s minimal-`ModelStage0`
-/// construction for ordinary per-variable fragments.
-///
-/// Strategy: lower once with an empty scope (cheap, and byte-identical to
-/// the populated-scope lowering when no dependency is arrayed -- the scope
-/// only feeds `get_dimensions`, which returns `None` for scalars either
-/// way); only when the lowered AST contains a Pass-1 temp-decomposition
-/// site ([`ast_contains_pass1_decomposition_site`]) AND an arrayed
-/// dependency is present, re-lower with a scope carrying the parsed Stage0
-/// variables of self plus the deps. The dependency identifier set is
-/// scope-independent (the scope affects only bounds metadata), so the
-/// classification computed on the preliminary lowering is returned
-/// alongside whichever lowering wins.
-///
-/// An arrayed dependency can be a model source variable OR an arrayed
-/// implicit helper aux synthesized while parsing an LTM equation (the GH
-/// #541 `PREVIOUS(<bare arrayed name>)` capture, which a ceteris-paribus
-/// link score references inside its reducer). `equation_implicits` carries
-/// the implicits from the caller's own parse; cross-equation helper refs
-/// resolve through the cached `model_ltm_implicit_var_info` registry.
-///
-/// Boundary: dependencies that are neither model source variables nor LTM
-/// parse-time implicit helpers stay OUTSIDE the lowering scope and lower
-/// with unresolved (scalar) bounds, exactly as before GH #738. That
-/// notably includes other LTM *synthetic* variables -- e.g. an A2A link
-/// score referenced by a loop score -- which is sound because loop and
-/// relative-score equations reference those deps only in plain products,
-/// never inside reducers; their multi-slot layout is handled separately by
-/// the compile stage's dimension-aware dependency shapes (the LTM-var dep
-/// branch in `ltm_fragment_input`, tech-debt #34). `·`-dotted
-/// module-output refs likewise stay outside (they are not flat variables).
+/// The scope feeds only `ArrayContext::get_dimensions`, which the
+/// `Expr1 -> Expr2` lowering reads to compute `ArrayBounds`, and nothing the
+/// fragment compiler needs comes from those bounds: every dependency's shape
+/// reaches lowering through `FragmentInput.deps` (`Context::dims_of`), the
+/// bare-array rewrite and the subscript lowering read that shape first,
+/// materialization is decided on the lowered `compiler::Expr`
+/// (`compiler::array_operand`), and the remaining bounds consumers are
+/// refusals (an array-valued subscript index, `Expr2`'s bounds unification).
+/// An arrayed dependency therefore lowers the same whether the scope knows it
+/// or not -- C-LEARN's LTM artifact is byte-identical with a populated scope
+/// and without one -- so the empty-scope lowering is the only one. The GH #738
+/// shape (`SUM(pop[*] * scale)` under a scalar target) is pinned end to end by
+/// `ltm_unified_tests::scalar_target_agg_over_array_expression_fragments_compile`
+/// and `ltm_array_agg::size_reducer_previous_helper_compiles_and_is_correct`.
 fn lower_ltm_variable(
     db: &dyn Db,
     parsed_variable: &crate::model::VariableStage0,
-    equation_implicits: &[crate::capture::ImplicitVar],
-    model: SourceModel,
     project: SourceProject,
 ) -> LoweredLtmVariable {
     let dim_context = project_dimensions_context(db, project);
@@ -723,9 +594,8 @@ fn lower_ltm_variable(
     };
     let prelim = crate::model::lower_variable(&empty_scope, parsed_variable);
 
-    // Classify dependencies ONCE on the preliminary lowering; the set is
-    // scope-independent, so it serves both the re-lower decision below and
-    // the caller's dependency-shape construction. `Variable::ast()` is the
+    // Classify dependencies ONCE on the lowering, for the caller's
+    // dependency-shape construction. `Variable::ast()` is the
     // right (and only needed) source: every LTM Stage0 input here is an
     // Aux-parsed Var whose dt AST is its sole AST, and even a hypothetical
     // stock-shaped input is covered because `ast()` returns a Stock's init
@@ -738,151 +608,8 @@ fn lower_ltm_variable(
         None => (BTreeSet::new(), BTreeSet::new()),
     };
 
-    // Structural gate: without a Pass-1 temp-decomposition site in the
-    // lowered AST, the Expr2 bounds the scoped re-lower would recover
-    // cannot change the compile outcome -- skip the per-dep arrayedness
-    // lookups and the second lowering entirely (the common case: most
-    // link/loop scores contain no reducer even on heavily arrayed models).
-    if !prelim
-        .ast()
-        .is_some_and(ast_contains_pass1_decomposition_site)
-    {
-        return LoweredLtmVariable {
-            variable: prelim,
-            dep_idents,
-            referenced_tables,
-        };
-    }
-
-    // Dependencies of the LTM equation (data-flow deps plus referenced
-    // lookup tables -- an arrayed graphical function's per-element apply
-    // also needs its dimensions resolved). `·`-dotted module-output refs
-    // are not flat variables and keep resolving to scalar (None) exactly
-    // as before.
-    let mut dep_names: BTreeSet<&str> = BTreeSet::new();
-    for dep in dep_idents
-        .iter()
-        .map(|d| d.as_str())
-        .chain(referenced_tables.iter().map(|s| s.as_str()))
-    {
-        let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
-        if !effective.contains('\u{00B7}') {
-            dep_names.insert(effective);
-        }
-    }
-
-    let source_vars = model.variables(db);
-    let ltm_implicit_info = model_ltm_implicit_var_info(db, model, project);
-    // Resolve a dep that is an LTM-parse-time implicit helper aux to its
-    // datamodel form (modules are scalar nodes in equations; only helper
-    // auxes can be arrayed).
-    let find_implicit_dm = |name: &str| -> Option<&crate::capture::ImplicitVar> {
-        equation_implicits
-            .iter()
-            .find(|v| canonicalize(v.ident()) == name)
-            .or_else(|| {
-                ltm_implicit_info
-                    .get(name)
-                    .filter(|meta| !meta.is_module)
-                    .map(|meta| &meta.variable)
-            })
-    };
-    let dm_var_is_arrayed = |v: &crate::capture::ImplicitVar| !v.equation_dims().is_empty();
-    // An ARRAYED sibling LTM var referenced as a dep -- today that is the
-    // GH #995 freeze helper, a whole-array operand of a vector builtin
-    // (`VECTOR SELECT("$⁚ltm⁚freeze⁚…", …)`). The Pass-1 temp decomposition
-    // below can only materialize a computed array argument (`helper * k`) if
-    // the lowering scope knows the helper's dims; without them the reference
-    // lowers as a scalar and codegen rejects the fragment ("expected array
-    // expression"). Same registry lookup (and the same safety argument) as
-    // the LTM-var dep branch in `ltm_fragment_input`: this runs from
-    // fragment compilation, strictly after `model_ltm_variables` completed.
-    let find_arrayed_ltm_dep = |name: &str| -> Option<Vec<String>> {
-        let idx = *model_ltm_var_name_index(db, model, project).get(name)?;
-        let lsv = &model_ltm_variables(db, model, project).vars[idx];
-        (!lsv.dimensions.is_empty()).then(|| lsv.dimensions.clone())
-    };
-
-    let any_arrayed_dep = dep_names.iter().any(|name| {
-        source_vars
-            .get(*name)
-            .is_some_and(|sv| !variable_dimensions(db, *sv, project).is_empty())
-            || find_implicit_dm(name).is_some_and(dm_var_is_arrayed)
-            || find_arrayed_ltm_dep(name).is_some()
-    });
-    if !any_arrayed_dep {
-        return LoweredLtmVariable {
-            variable: prelim,
-            dep_idents,
-            referenced_tables,
-        };
-    }
-
-    let model_name_str = model.name(db);
-    let module_ctx = model_module_ident_context(db, model, project, vec![]);
-    let dim_ctx = project_dimensions_context(db, project);
-    let units_ctx = project_units_context(db, project);
-    let mut stage0_vars: HashMap<Ident<Canonical>, crate::model::VariableStage0> = HashMap::new();
-    stage0_vars.insert(Ident::new(parsed_variable.ident()), parsed_variable.clone());
-    for dep_name in &dep_names {
-        if let Some(dep_sv) = source_vars.get(*dep_name) {
-            let dep_parsed =
-                parse_source_variable_with_module_context(db, *dep_sv, project, module_ctx);
-            stage0_vars.insert(Ident::new(dep_name), dep_parsed.variable.clone());
-        } else if let Some(implicit_dep) = find_implicit_dm(dep_name) {
-            // Nested implicits of an implicit are registered (and compiled)
-            // in their own right; here only the dep's own dimensions matter.
-            let dep_parsed = match implicit_dep {
-                crate::capture::ImplicitVar::Capture(capture) => capture.variable_stage0(dim_ctx),
-                crate::capture::ImplicitVar::Synthesized(dm_var) => {
-                    let mut nested = Vec::new();
-                    let dep_ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
-                    crate::variable::parse_var(&dep_ctx, dm_var.as_ref(), &mut nested, |mi| {
-                        Ok(Some(mi.clone()))
-                    })
-                }
-            };
-            stage0_vars.insert(Ident::new(dep_name), dep_parsed);
-        } else if let Some(ltm_dims) = find_arrayed_ltm_dep(dep_name) {
-            // An arrayed sibling LTM var (the GH #995 freeze helper): a
-            // zero-bodied dims-only stub -- only the dep's dimensions matter
-            // to the lowering, exactly like the implicit branch above.
-            let stub = datamodel::Variable::Aux(datamodel::Aux {
-                ident: (*dep_name).to_string(),
-                equation: datamodel::Equation::ApplyToAll(ltm_dims, "0".to_string()),
-                documentation: String::new(),
-                units: None,
-                gf: None,
-                ai_state: None,
-                uid: None,
-                compat: datamodel::Compat::default(),
-            });
-            let mut nested = Vec::new();
-            let dep_ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
-            let dep_parsed =
-                crate::variable::parse_var(&dep_ctx, &stub, &mut nested, |mi| Ok(Some(mi.clone())));
-            stage0_vars.insert(Ident::new(dep_name), dep_parsed);
-        }
-    }
-
-    let mini_model = crate::model::ModelStage0 {
-        ident: Ident::new(model_name_str),
-        display_name: model_name_str.to_string(),
-        variables: stage0_vars,
-        implicit: false,
-        // Single-variable fragment lowering only; not a macro template.
-        is_macro: false,
-        macro_params: vec![],
-    };
-    let mut models: HashMap<Ident<Canonical>, &crate::model::ModelStage0> = HashMap::new();
-    models.insert(Ident::new(model_name_str), &mini_model);
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
-        dimensions: dim_context,
-        model_name: model_name_str,
-    };
     LoweredLtmVariable {
-        variable: crate::model::lower_variable(&scope, parsed_variable),
+        variable: prelim,
         dep_idents,
         referenced_tables,
     }
@@ -890,9 +617,8 @@ fn lower_ltm_variable(
 
 /// Build the fragment input of one LTM synthetic variable: parse its typed
 /// equation (running the SAME implicit-module / PREVIOUS-INIT visitor the
-/// ordinary variable parse runs), lower it with a scope that can resolve its
-/// arrayed dependencies' bounds (GH #738), and resolve the shape of every name
-/// it references. `Err` carries the reason the generated equation did not
+/// ordinary variable parse runs), lower it, and resolve the shape of every
+/// name it references. `Err` carries the reason the generated equation did not
 /// parse.
 ///
 /// LTM equations are scalar (or A2A) aux equations that may reference model
@@ -946,15 +672,13 @@ pub(crate) fn ltm_fragment_input<'db>(
         ));
     }
 
-    // `lower_ltm_variable` threads the dependencies (model variables and
-    // arrayed parse-time helpers) into the lowering scope so array bounds
-    // resolve (GH #738), and hands back the dependency classification it
+    // `lower_ltm_variable` hands back the dependency classification it
     // computed so the lowered AST is not walked again here.
     let LoweredLtmVariable {
         variable: lowered,
         dep_idents,
         referenced_tables,
-    } = lower_ltm_variable(db, &parsed.variable, &parsed.implicit_vars, model, project);
+    } = lower_ltm_variable(db, &parsed.variable, project);
 
     let var_name_canonical = canonicalize(var_name).into_owned();
     let var_ident: Ident<Canonical> = Ident::new(&var_name_canonical);
@@ -1697,14 +1421,14 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
     } else {
         // Same dependency-aware lowering scope as `ltm_fragment_input` (GH
         // #738): a synthesized helper aux whose equation embeds a reducer over
-        // an array expression needs its deps' dimensions resolvable for Pass-1
-        // temp decomposition. The classification comes back from the same
-        // lowering, so the lowered AST is not walked again.
+        // an array expression needs its deps' dimensions resolvable, or the
+        // expression lowers as a scalar. The classification comes back from the
+        // same lowering, so the lowered AST is not walked again.
         let LoweredLtmVariable {
             variable: lowered,
             dep_idents,
             referenced_tables,
-        } = lower_ltm_variable(db, &parsed_implicit, &nested_implicits, model, project);
+        } = lower_ltm_variable(db, &parsed_implicit, project);
         // An arrayed capture helper occupies one slot per element.
         deps.insert(
             var_ident,
@@ -1715,8 +1439,8 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
                     .unwrap_or_default(),
             ),
         );
-        // No lowered AST -> no dependency shapes: if the scoped re-lower
-        // surfaced an equation error, `lowered.ast()` is `None` and the
+        // No lowered AST -> no dependency shapes: if lowering surfaced an
+        // equation error, `lowered.ast()` is `None` and the
         // fragment compiles to nothing anyway.
         let (dep_idents, referenced_tables) = if lowered.ast().is_some() {
             (dep_idents, referenced_tables)
@@ -1888,135 +1612,4 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         // run-invariance.
         flow_invariance: None,
     })
-}
-
-#[cfg(test)]
-mod pass1_gate_tests {
-    use super::expr_contains_pass1_decomposition_site;
-    use crate::ast::{Expr2, IndexExpr2, Loc};
-    use crate::builtins::BuiltinFn;
-    use crate::common::{Canonical, Ident};
-
-    fn c() -> Box<Expr2> {
-        Box::new(Expr2::Const(
-            "0".to_string(),
-            crate::ast::Literal::new(0.0),
-            Loc::default(),
-        ))
-    }
-
-    fn app(builtin: BuiltinFn<Expr2>) -> Expr2 {
-        Expr2::App(builtin, None, Loc::default())
-    }
-
-    /// The guard test tying the gate to Pass-1's decomposition set
-    /// (`ast::expr3::Pass1Context::transform_builtin_inner` /
-    /// `transform_inner`'s arrayed-GF apply): every builtin Pass-1
-    /// decomposes must flag the gate, and the non-decomposing near-misses
-    /// (n-ary MEAN, 2-arg MIN/MAX) must not flag it on their own. The
-    /// signature table is the compile-time half of this guard -- a new
-    /// `BuiltinFn` variant fails to build until its argument kinds are
-    /// stated there -- while this test pins the classification of the
-    /// existing variants so a refactor cannot silently flip one (the
-    /// round-2 GH #738 regression was exactly such a divergence: the gate
-    /// was derived from the agg-hoistable reducer set, which omits SIZE).
-    #[test]
-    fn pass1_gate_covers_each_decomposition_builtin() {
-        let decomposing: Vec<(&str, BuiltinFn<Expr2>)> = vec![
-            ("sum", BuiltinFn::Sum(c())),
-            ("mean_1arg", BuiltinFn::Mean(vec![*c()])),
-            ("stddev", BuiltinFn::Stddev(c())),
-            ("size", BuiltinFn::Size(c())),
-            ("min_1arg", BuiltinFn::Min(c(), None)),
-            ("max_1arg", BuiltinFn::Max(c(), None)),
-            (
-                "vector_select",
-                BuiltinFn::VectorSelect(c(), c(), c(), c(), c()),
-            ),
-            ("vector_elm_map", BuiltinFn::VectorElmMap(c(), c())),
-            ("vector_sort_order", BuiltinFn::VectorSortOrder(c(), c())),
-            (
-                "allocate_available",
-                BuiltinFn::AllocateAvailable(c(), c(), c()),
-            ),
-            (
-                "allocate_by_priority",
-                BuiltinFn::AllocateByPriority(c(), c(), c(), c(), c()),
-            ),
-            ("lookup", BuiltinFn::Lookup(c(), c(), Loc::default())),
-            (
-                "lookup_forward",
-                BuiltinFn::LookupForward(c(), c(), Loc::default()),
-            ),
-            (
-                "lookup_backward",
-                BuiltinFn::LookupBackward(c(), c(), Loc::default()),
-            ),
-        ];
-        for (name, builtin) in decomposing {
-            assert!(
-                expr_contains_pass1_decomposition_site(&app(builtin)),
-                "{name} is a Pass-1 decomposition site and must flag the gate"
-            );
-        }
-
-        let decomposing_rank = app(BuiltinFn::Rank(c(), c()));
-        assert!(
-            expr_contains_pass1_decomposition_site(&decomposing_rank),
-            "RANK's array argument decomposes like VECTOR SORT ORDER's"
-        );
-
-        // n-ary MEAN is the scalar mean of its arguments (every position is
-        // `ArgKind::Scalar`), so it is not a decomposition site on its own.
-        let non_decomposing: Vec<(&str, BuiltinFn<Expr2>)> = vec![
-            ("mean_2arg", BuiltinFn::Mean(vec![*c(), *c()])),
-            ("min_2arg", BuiltinFn::Min(c(), Some(c()))),
-            ("max_2arg", BuiltinFn::Max(c(), Some(c()))),
-            ("abs", BuiltinFn::Abs(c())),
-            ("previous", BuiltinFn::Previous(c(), c())),
-            ("init", BuiltinFn::Init(c())),
-        ];
-        for (name, builtin) in non_decomposing {
-            assert!(
-                !expr_contains_pass1_decomposition_site(&app(builtin)),
-                "{name} is not a Pass-1 decomposition site and must not flag the gate alone"
-            );
-        }
-    }
-
-    /// A decomposition site nested inside a non-decomposing construct
-    /// (a builtin argument, an Op2 operand, a subscript index) must still
-    /// flag the gate -- the walk recurses everywhere Pass-1's transform
-    /// recurses.
-    #[test]
-    fn pass1_gate_finds_nested_decomposition_sites() {
-        let nested_in_builtin = app(BuiltinFn::Abs(Box::new(app(BuiltinFn::Sum(c())))));
-        assert!(expr_contains_pass1_decomposition_site(&nested_in_builtin));
-
-        let nested_in_op2 = Expr2::Op2(
-            crate::ast::BinaryOp::Mul,
-            c(),
-            Box::new(app(BuiltinFn::Size(c()))),
-            None,
-            Loc::default(),
-        );
-        assert!(expr_contains_pass1_decomposition_site(&nested_in_op2));
-
-        let nested_in_subscript = Expr2::Subscript(
-            Ident::<Canonical>::new("a"),
-            vec![IndexExpr2::Expr(app(BuiltinFn::Sum(c())))],
-            None,
-            Loc::default(),
-        );
-        assert!(expr_contains_pass1_decomposition_site(&nested_in_subscript));
-
-        let plain = Expr2::Op2(
-            crate::ast::BinaryOp::Add,
-            c(),
-            Box::new(app(BuiltinFn::Previous(c(), c()))),
-            None,
-            Loc::default(),
-        );
-        assert!(!expr_contains_pass1_decomposition_site(&plain));
-    }
 }

@@ -298,6 +298,19 @@ impl Dimension {
         }
     }
 
+    /// The element at 0-based `offset`, the inverse of [`Self::get_offset`].
+    ///
+    /// `None` past the end. An INDEXED dimension's elements are their 1-based
+    /// positions spelled as numerals, which is the spelling `get_offset` reads
+    /// back and the one `canonical_element` normalizes to.
+    pub fn element_name(&self, offset: usize) -> Option<CanonicalElementName> {
+        match self {
+            Dimension::Named(_, named) => named.elements.get(offset).cloned(),
+            Dimension::Indexed(_, size) => (offset < *size as usize)
+                .then(|| CanonicalElementName::from_raw(&(offset + 1).to_string())),
+        }
+    }
+
     /// Get the offset of an element by name (for named dimensions) or by index string (for indexed dimensions).
     /// Returns 0-based offset for use in array indexing.
     pub fn get_offset(&self, subscript: &CanonicalElementName) -> Option<usize> {
@@ -869,47 +882,44 @@ impl DimensionsContext {
     /// element a POSITIONALLY-resolved reference reads (GH #527, re-keyed by
     /// GH #997).
     ///
-    /// This is the describer for the two spellings the executed lowering
-    /// resolves by ORDINAL, measured cell by cell in
-    /// `crate::mapped_reference_semantics_tests`:
+    /// This is the describer the LTM surfaces use for the two spellings written
+    /// with the ITERATED dimension:
     ///
     /// * a subscript naming a dimension the equation ITERATES
-    ///   (`target[State] = x[State]`, `x` over `Region`). `ast::expr3`'s
-    ///   Pass 1 folds the active dimension's name to that dimension's ordinal,
-    ///   which then indexes the source's storage raw.
+    ///   (`target[State] = x[State]`, `x` over `Region`);
     /// * a BARE reference inside an equation body (`target[State] = x`).
     ///   `compiler::context`'s `lower_pass0` rewrites it into the spelling
     ///   above before anything resolves it, so the two are one rule.
     ///
-    /// Neither consults a declared element map, which is why this function
-    /// returns the positional diagonal for an element-mapped pair rather than
-    /// declining it. It declined before GH #997 because ONE function served
-    /// both this rule and [`Self::resolve_mapped_read`]'s, and could not see
-    /// which was being asked; a caller now picks the one its site's spelling
-    /// gets and the conservative decline is no longer needed for either.
+    /// **It differs from execution, and the gap is disclosed rather than
+    /// closed here.** The executed lowering resolves EVERY dimension-named
+    /// subscript through [`Self::resolve_mapped_read`] -- name on the source
+    /// axis, then the declared element map, then a mapped parent -- so for a
+    /// pair whose element map is not the identity the reference reads the
+    /// MAPPED element while this returns the diagonal, and an LTM link score
+    /// built on it names a row the reference does not read. The window is
+    /// exactly: a declared element map that permutes, equal cardinality, both
+    /// dimensions named, and an LTM surface over one of the two spellings above;
+    /// a plain positional `maps_to` (the common declaration) is unaffected
+    /// because the two answers coincide.
+    ///
+    /// Closing it is delegating this to [`Self::executed_read_correspondence`]
+    /// under the same admission gate -- measured, that is a five-line change
+    /// that moves ten LTM element-attribution tests
+    /// (`db::analysis::element_graph_tests`, `ltm_agg_tests`,
+    /// `ltm_augment_pin_tests`, `db::ltm_ir_tests`), each of which pins the
+    /// positional attribution with its own derivation. That is the LTM
+    /// attribution layer's change, not the lowering's, and it is sequenced
+    /// separately rather than folded in.
     ///
     /// A mapping must be DECLARED (in either direction) for the pair to
-    /// correspond at all. That is narrower than execution -- the iterated
-    /// spelling compiles and reads positionally between two dimensions
-    /// declared to have nothing to do with each other, which
-    /// `mapped_reference_semantics_tests::no_mapping_equal_cardinality`
-    /// measures -- and deliberately so: an undeclared pair keeps the
-    /// conservative broadcast, which is a SUPERSET of that read, and GH #527's
-    /// rule is that the diagonal follows a correspondence the model declares.
-    ///
-    /// Equal cardinality is likewise required. A larger source is read only up
-    /// to the target's extent and a smaller one does not compile at all, so
-    /// declining is again a superset rather than a wrong answer.
+    /// correspond at all, and the cardinalities must be equal. Both narrow the
+    /// describer relative to execution, and a declining caller keeps its
+    /// cross-product, which is a SUPERSET of the true reads.
     ///
     /// Returns `None` when no mapping is declared either way, when either
     /// dimension is indexed, or when the cardinalities differ; callers keep
     /// their conservative broadcast.
-    ///
-    /// GH #756 tracks the open question of whether VENSIM resolves the
-    /// iterated spelling positionally at all -- its own Example 3 cannot say,
-    /// because there the three candidate rules coincide. If that is ever
-    /// settled the other way, this function moves with execution; it describes
-    /// what the engine runs today.
     pub fn positional_correspondence(
         &self,
         iterated_dim: &CanonicalDimensionName,
