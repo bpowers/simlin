@@ -17,7 +17,8 @@ set of larger proposals grounded in the measured data.
 - Harness: `src/simlin-engine/examples/clearn_profile.rs` — times each pipeline
   stage (parse → compile-via-salsa → `Vm::new` → `run_to_end`) and, with
   `CLEARN_COUNT_ALLOCS=1`, reports allocation counts / peak live bytes per stage
-  via a gated counting global allocator. With high `CLEARN_COMPILE_ITERS` /
+  via a gated counting global allocator (`CLEARN_ALLOC_HIST=1` adds a size
+  histogram of the allocations and reallocs in each stage). With high `CLEARN_COMPILE_ITERS` /
   `CLEARN_RUN_ITERS` it is a focused `perf record` / `callgrind` target.
 - `CompiledSimulation::bytecode_profile()` — opcode histogram + table sizes.
 - CPU: `perf record -g --call-graph dwarf` and `valgrind --tool=callgrind`

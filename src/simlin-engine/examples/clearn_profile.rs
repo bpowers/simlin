@@ -24,6 +24,9 @@
 //!   CLEARN_RUN_ITERS      extra run-only iterations (default 0)
 //!   CLEARN_PROFILE        "compile" | "run" | "both" (default both) -- which
 //!                         extra-iteration loop(s) to execute
+//!   CLEARN_COUNT_ALLOCS   "1" to count allocations per phase (distorts timing)
+//!   CLEARN_ALLOC_HIST     "1" to also print, per phase, a histogram of
+//!                         allocation and realloc sizes (implies counting)
 
 use std::alloc::{GlobalAlloc, Layout};
 
@@ -48,17 +51,80 @@ use simlin_engine::{CompiledSimulation, Vm, open_vensim};
 // so the counters are atomic and the peak is maintained with a CAS loop. That
 // is a requirement of the allocator position, not of the workload:
 // compile_project_incremental runs on one thread today (measured at 0.9996 CPUs
-// utilized). The default
-// GlobalAlloc::realloc routes through our alloc/dealloc, so realloc is counted
-// without an explicit override.
+// utilized). `realloc` is overridden so reallocs can be histogrammed
+// separately (an allocator serves a grow-in-place very differently from a
+// fresh block), but each one is still counted as one allocation of the new
+// size, exactly as the default `GlobalAlloc::realloc` (alloc + copy + dealloc)
+// would count it, so the `allocs` column does not depend on the override.
 
 struct Counting;
 
 static COUNTING_ON: AtomicBool = AtomicBool::new(false);
+static HIST_ON: AtomicBool = AtomicBool::new(false);
 static ALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
 static ALLOC_BYTES: AtomicUsize = AtomicUsize::new(0);
+static REALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
 static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
 static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+// Size-class histogram (CLEARN_ALLOC_HIST=1). Bins are 8 bytes wide up to
+// 1 KiB, the range a size-class allocator serves from per-class pages, and one
+// bin per power of two above that. Reallocs are binned by their NEW size.
+const HIST_SMALL_BINS: usize = 128;
+const HIST_LARGE_BINS: usize = 22;
+const HIST_BINS: usize = HIST_SMALL_BINS + HIST_LARGE_BINS;
+static HIST_ALLOCS: [AtomicUsize; HIST_BINS] = [const { AtomicUsize::new(0) }; HIST_BINS];
+static HIST_BYTES: [AtomicUsize; HIST_BINS] = [const { AtomicUsize::new(0) }; HIST_BINS];
+static HIST_REALLOCS: [AtomicUsize; HIST_BINS] = [const { AtomicUsize::new(0) }; HIST_BINS];
+
+fn hist_bin(size: usize) -> usize {
+    if size <= 8 * HIST_SMALL_BINS {
+        // 1..=8 -> 0, 9..=16 -> 1, ...; a zero-size request never reaches
+        // GlobalAlloc, but clamp anyway.
+        (size.max(1) - 1) / 8
+    } else {
+        // ceil(log2(size)): 1025..=2048 -> 11, 2049..=4096 -> 12, ...
+        let log2 = (usize::BITS - (size - 1).leading_zeros()) as usize;
+        HIST_SMALL_BINS + (log2 - 11).min(HIST_LARGE_BINS - 1)
+    }
+}
+
+/// The inclusive upper size bound of a histogram bin, for printing.
+fn hist_bin_upper(bin: usize) -> usize {
+    if bin < HIST_SMALL_BINS {
+        8 * (bin + 1)
+    } else {
+        1usize << (11 + bin - HIST_SMALL_BINS)
+    }
+}
+
+fn record_live(delta: isize) {
+    let live = if delta >= 0 {
+        LIVE_BYTES.fetch_add(delta as usize, Ordering::Relaxed) + delta as usize
+    } else {
+        LIVE_BYTES.fetch_sub(delta.unsigned_abs(), Ordering::Relaxed) - delta.unsigned_abs()
+    };
+    let mut peak = PEAK_BYTES.load(Ordering::Relaxed);
+    while live > peak {
+        match PEAK_BYTES.compare_exchange_weak(peak, live, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(observed) => peak = observed,
+        }
+    }
+}
+
+fn record_alloc(size: usize, realloc: bool) {
+    ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+    ALLOC_BYTES.fetch_add(size, Ordering::Relaxed);
+    if HIST_ON.load(Ordering::Relaxed) {
+        let bin = hist_bin(size);
+        HIST_ALLOCS[bin].fetch_add(1, Ordering::Relaxed);
+        HIST_BYTES[bin].fetch_add(size, Ordering::Relaxed);
+        if realloc {
+            HIST_REALLOCS[bin].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -67,21 +133,8 @@ unsafe impl GlobalAlloc for Counting {
         // per-allocation atomic overhead. Enable with CLEARN_COUNT_ALLOCS=1 to
         // get allocation counts (at the cost of distorted timing).
         if !p.is_null() && COUNTING_ON.load(Ordering::Relaxed) {
-            ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
-            ALLOC_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
-            let live = LIVE_BYTES.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
-            let mut peak = PEAK_BYTES.load(Ordering::Relaxed);
-            while live > peak {
-                match PEAK_BYTES.compare_exchange_weak(
-                    peak,
-                    live,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(observed) => peak = observed,
-                }
-            }
+            record_alloc(layout.size(), false);
+            record_live(layout.size() as isize);
         }
         p
     }
@@ -92,6 +145,16 @@ unsafe impl GlobalAlloc for Counting {
             LIVE_BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
         }
     }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let p = unsafe { Backing.realloc(ptr, layout, new_size) };
+        if !p.is_null() && COUNTING_ON.load(Ordering::Relaxed) {
+            REALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+            record_alloc(new_size, true);
+            record_live(new_size as isize - layout.size() as isize);
+        }
+        p
+    }
 }
 
 #[global_allocator]
@@ -101,6 +164,7 @@ static GLOBAL: Counting = Counting;
 struct Snap {
     calls: usize,
     bytes: usize,
+    reallocs: usize,
     live: usize,
 }
 
@@ -108,7 +172,65 @@ fn snap() -> Snap {
     Snap {
         calls: ALLOC_CALLS.load(Ordering::Relaxed),
         bytes: ALLOC_BYTES.load(Ordering::Relaxed),
+        reallocs: REALLOC_CALLS.load(Ordering::Relaxed),
         live: LIVE_BYTES.load(Ordering::Relaxed),
+    }
+}
+
+/// The histogram counters at one instant.
+struct HistSnap {
+    allocs: [usize; HIST_BINS],
+    bytes: [usize; HIST_BINS],
+    reallocs: [usize; HIST_BINS],
+}
+
+fn hist_snap() -> HistSnap {
+    let load = |counters: &[AtomicUsize; HIST_BINS]| {
+        let mut out = [0usize; HIST_BINS];
+        for (slot, counter) in out.iter_mut().zip(counters) {
+            *slot = counter.load(Ordering::Relaxed);
+        }
+        out
+    };
+    HistSnap {
+        allocs: load(&HIST_ALLOCS),
+        bytes: load(&HIST_BYTES),
+        reallocs: load(&HIST_REALLOCS),
+    }
+}
+
+/// Print the non-empty bins of the histogram delta between two snapshots:
+/// allocation count (with its share of the phase's allocations and the running
+/// cumulative share), bytes requested, and how many of the bin's allocations
+/// arrived as reallocs.
+fn print_hist_delta(before: &HistSnap, after: &HistSnap) {
+    let total: usize = (0..HIST_BINS)
+        .map(|bin| after.allocs[bin] - before.allocs[bin])
+        .sum();
+    if total == 0 {
+        return;
+    }
+    println!("  size histogram (bin upper bound, inclusive):");
+    println!(
+        "    {:>12} {:>10} {:>6} {:>6} {:>10} {:>9}",
+        "size <=", "allocs", "%", "cum%", "MiB", "reallocs"
+    );
+    let mut cum = 0usize;
+    for bin in 0..HIST_BINS {
+        let allocs = after.allocs[bin] - before.allocs[bin];
+        if allocs == 0 {
+            continue;
+        }
+        cum += allocs;
+        println!(
+            "    {:>12} {:>10} {:>6.2} {:>6.2} {:>10.2} {:>9}",
+            hist_bin_upper(bin),
+            allocs,
+            100.0 * allocs as f64 / total as f64,
+            100.0 * cum as f64 / total as f64,
+            mib(after.bytes[bin] - before.bytes[bin]),
+            after.reallocs[bin] - before.reallocs[bin],
+        );
     }
 }
 
@@ -126,6 +248,7 @@ fn mib(bytes: usize) -> f64 {
 /// the phase, net retained (live) bytes, and peak live bytes reached.
 fn phase<T>(name: &str, f: impl FnOnce() -> T) -> T {
     reset_peak();
+    let hist_before = HIST_ON.load(Ordering::Relaxed).then(hist_snap);
     let before = snap();
     let t0 = Instant::now();
     let out = f();
@@ -135,16 +258,21 @@ fn phase<T>(name: &str, f: impl FnOnce() -> T) -> T {
 
     let calls = after.calls - before.calls;
     let bytes = after.bytes - before.bytes;
+    let reallocs = after.reallocs - before.reallocs;
     let retained = after.live as i64 - before.live as i64;
 
     println!(
-        "{name:<22} {:>9.2} ms | allocs {:>10} | alloc'd {:>9.1} MiB | retained {:>+8.1} MiB | peak {:>8.1} MiB",
+        "{name:<22} {:>9.2} ms | allocs {:>10} | alloc'd {:>9.1} MiB | retained {:>+8.1} MiB | peak {:>8.1} MiB | reallocs {:>8}",
         elapsed.as_secs_f64() * 1000.0,
         calls,
         mib(bytes),
         retained as f64 / (1024.0 * 1024.0),
         mib(peak),
+        reallocs,
     );
+    if let Some(hist_before) = hist_before {
+        print_hist_delta(&hist_before, &hist_snap());
+    }
     out
 }
 
@@ -182,6 +310,10 @@ fn main() {
     let ltm = std::env::var("CLEARN_LTM").is_ok_and(|v| v != "0");
     if std::env::var("CLEARN_COUNT_ALLOCS").is_ok_and(|v| v != "0") {
         COUNTING_ON.store(true, Ordering::Relaxed);
+    }
+    if std::env::var("CLEARN_ALLOC_HIST").is_ok_and(|v| v != "0") {
+        COUNTING_ON.store(true, Ordering::Relaxed);
+        HIST_ON.store(true, Ordering::Relaxed);
     }
 
     println!("model: {path}");
