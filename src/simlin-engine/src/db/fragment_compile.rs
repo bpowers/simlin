@@ -24,15 +24,15 @@ use crate::ast::LoweringScope;
 use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::fragment::{DepShape, FragmentInput, lower_fragment};
 use crate::db::var_fragment::{
-    ExplicitFragment, dep_head, explicit_fragment_input, is_implicit_global, model_dep_shape,
+    DeclaredName, ExplicitFragment, dep_head, explicit_fragment_input, is_implicit_global,
 };
 
 // Test-only per-thread record of which fragment-compiler bodies ran.
 //
 // Pointer equality of a memo does NOT prove a query body did not run: salsa
 // backdates a re-executed query whose value compares equal and keeps the memo
-// address (the trap `db::stages` documents at length). For the fragment
-// compilers that matters even more than it did there, because a fragment is
+// address. For the fragment compilers that matters especially, because a
+// fragment is
 // *designed* to be layout-independent -- so a layout-only edit produces an
 // EQUAL fragment whether or not the expensive compile re-ran, and every
 // pointer-based test passes either way. Recording each body entry, with the
@@ -43,9 +43,8 @@ use crate::db::var_fragment::{
 // ("an *unchanged* fragment is reused"), so an aggregate count cannot say
 // whether the one re-execution was the edited variable or an unrelated one.
 //
-// Thread-local rather than a global atomic, for the same reasons as
-// `db::stages`: no lock, and a parallel test run cannot charge one test's
-// work to another. The same caveat applies -- the record happens INSIDE the
+// Thread-local rather than a global atomic: no lock, and a parallel test run
+// cannot charge one test's work to another. The record happens INSIDE the
 // body, on whatever thread salsa ran it, so anyone introducing query
 // parallelism here must move this to a shared atomic in the same change.
 // `reset_fragment_executions()` at the start of a measured region is what
@@ -333,36 +332,174 @@ pub(crate) enum ImplicitInputError {
     Lowering(Vec<crate::common::EquationError>),
 }
 
-/// Build the fragment input of one implicit helper (a SMOOTH/DELAY/TREND
-/// instance, a hoisted argument aux, or a PREVIOUS/INIT capture) of `model`:
-/// the helper's lowered form and the shape of every name it references.
+/// Every name a helper's equation can reference: both phases' data-flow
+/// dependencies from the parent's dependency extraction
+/// (`variable_direct_dependencies(parent).implicit_vars`, built input-agnostic
+/// so both branches of an `isModuleInput(...)` conditional stay compilable),
+/// the lookup tables it calls (layout references, not data-flow deps -- issue
+/// #606), and a stock helper's inflows and outflows.
+fn implicit_referenced_names<MI, E>(
+    db: &dyn Db,
+    meta: &ImplicitVarMeta,
+    project: SourceProject,
+    helper: &crate::variable::Variable<MI, E>,
+) -> BTreeSet<String> {
+    let parent_deps = variable_direct_dependencies(
+        db,
+        meta.parent_source_var,
+        project,
+        ModuleInputSet::empty(db),
+    );
+    let mut names: BTreeSet<String> = parent_deps
+        .implicit_vars
+        .iter()
+        .filter(|iv| canonicalize(&iv.name) == meta.name)
+        .flat_map(|iv| {
+            iv.dt_deps
+                .iter()
+                .chain(iv.initial_deps.iter())
+                .chain(iv.referenced_tables.iter())
+        })
+        .cloned()
+        .collect();
+    if let crate::variable::VarKind::Stock {
+        inflows, outflows, ..
+    } = &helper.kind
+    {
+        names.extend(
+            inflows
+                .iter()
+                .chain(outflows.iter())
+                .map(|flow| flow.as_str().to_string()),
+        );
+    }
+    names
+}
+
+/// The head of every name in `names` that `model` declares (the helper
+/// itself, the implicit globals and a repeated head skipped), each resolved
+/// once through `DeclaredName`. A helper's dependencies are explicit variables
+/// of the same model or other helpers; a name that is neither fails to resolve
+/// at lowering.
+fn implicit_referenced_heads(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    self_name: &str,
+    names: &BTreeSet<String>,
+) -> Vec<(Ident<Canonical>, DeclaredName)> {
+    let mut heads: Vec<(Ident<Canonical>, DeclaredName)> = Vec::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for dep_name in names {
+        let (head, _qualified) = dep_head(dep_name);
+        if head == self_name || is_implicit_global(head) || !seen.insert(head) {
+            continue;
+        }
+        if let Some(declared) = DeclaredName::resolve(db, model, project, head) {
+            heads.push((Ident::new(head), declared));
+        }
+    }
+    heads
+}
+
+/// One implicit helper lowered once, with the names it references resolved
+/// once: what [`lowered_implicit_variable`] memoizes.
+#[derive(Clone, PartialEq)]
+pub(crate) struct LoweredImplicit {
+    /// The helper in its `Expr2` form.
+    pub variable: std::sync::Arc<crate::variable::Variable>,
+    /// The head of every name the helper references that the model declares
+    /// ([`implicit_referenced_heads`]); `implicit_fragment_input` projects the
+    /// compiler's shapes and the tables it needs from these.
+    pub heads: Vec<(Ident<Canonical>, DeclaredName)>,
+}
+
+/// One implicit helper (a SMOOTH/DELAY/TREND instance, a hoisted argument
+/// aux, or a PREVIOUS/INIT capture) of `model` in its `Expr2` form, lowered
+/// once under the dimensions of the names it references
+/// ([`implicit_referenced_heads`]); `None` when the parent's parse
+/// synthesized no helper of that name.
 ///
-/// This is the *single relation* from an `ImplicitVarMeta` to the helper's
-/// lowered form -- the parent's parse, the helper NAMED by the metadata, its
-/// parse-stage variable, `lower_variable` under the helper's dependency
-/// shapes -- consumed by `compile_implicit_var_fragment` (the production
+/// The one owner of a helper's lowered form, keyed on the helper's canonical
+/// name -- the only identity a helper has (it exists solely inside its
+/// parent's parse), and the key `model_implicit_var_info` files it under.
+/// `implicit_fragment_input` borrows it and the LTM describers hold its `Arc`
+/// (`db::model_lowered_variables`; an element-scoped helper's map entry is
+/// the memo's element-pinned projection). A helper lowers under the shapes
+/// its parent's equation lowers under, so a hoisted argument is refused
+/// where, and with the code, the plain spelling is
+/// (`db::lowering_scope_tests`). `lower_variable` is total (GH #580): a body
+/// that does not parse or lower keeps its errors and has no AST, and the
+/// fragment constructor reports those errors against the parent.
+#[salsa::tracked(returns(ref))]
+pub(crate) fn lowered_implicit_variable(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    implicit_var_name: String,
+) -> Option<LoweredImplicit> {
+    let meta = model_implicit_var_by_name(db, model, project, implicit_var_name)?;
+    let parsed = parse_source_variable(db, meta.parent_source_var, project);
+    let implicit_var = meta.find_in(parsed)?;
+    let dim_context = project_dimensions_context(db, project);
+    let helper = implicit_var.parsed_variable(dim_context);
+
+    // A module-typed helper is its wiring, resolved by `lower_variable`'s
+    // module arm like an explicit instance's, under the model's canonical
+    // name; nothing is lowered under a shape, though its input sources are
+    // still resolved for the instance's fragment. Any other helper lowers
+    // under the dimensions of the names it references
+    // (`DeclaredName::dimensions_shape`): an arrayed helper (a structural
+    // apply-to-all capture) has its declared dimensions, every other helper
+    // is scalar.
+    let names = implicit_referenced_names(db, &meta, project, &helper);
+    let heads = implicit_referenced_heads(db, model, project, &meta.name, &names);
+    let mut shapes: IdentMap<Ident<Canonical>, DepShape> = Default::default();
+    if !meta.is_module {
+        shapes.insert(
+            Ident::new(&meta.name),
+            DepShape::var(
+                helper
+                    .get_dimensions()
+                    .map(<[crate::dimensions::Dimension]>::to_vec)
+                    .unwrap_or_default(),
+            ),
+        );
+        for (ident, declared) in &heads {
+            if let Some(shape) = declared.dimensions_shape(db, project) {
+                shapes.insert(ident.clone(), shape);
+            }
+        }
+    }
+    let model_ident: Ident<Canonical> = Ident::new(model.name(db));
+    let scope = LoweringScope {
+        dimensions: dim_context,
+        shapes: &shapes,
+        model_name: model_ident.as_str(),
+    };
+    Some(LoweredImplicit {
+        variable: std::sync::Arc::new(crate::model::lower_variable(&scope, &helper)),
+        heads,
+    })
+}
+
+/// Build the fragment input of one implicit helper of `model`: its lowered
+/// form ([`lowered_implicit_variable`], borrowed) plus the shape of every name
+/// it references and the tables it calls.
+///
+/// This is the *single relation* from an `ImplicitVarMeta` to a compilable
+/// helper, consumed by `compile_implicit_var_fragment` (the production
 /// per-variable fragment compiler), by `var_phase_symbolic_fragment_prod`'s
-/// no-`SourceVariable` arm (a helper that lands in a recurrence SCC) and by the
-/// LTM describers' reconstruction of an element-scoped helper, so every reader
-/// sees one lowering. A helper lowers under the shapes its parent's equation
-/// lowers under, so a hoisted argument is refused where, and with the code,
-/// the plain spelling is (`db::lowering_scope_tests`).
-///
-/// The helper's dependencies come from the parent variable's dependency
-/// extraction (`variable_direct_dependencies(parent).implicit_vars`), built
-/// input-agnostic (the empty `ModuleInputSet`) so both branches of an
-/// `isModuleInput(...)` conditional stay compilable. Every referenced name is
-/// resolved through the per-variable firewall queries, so the helper's fragment
-/// depends on exactly the names it looks up.
+/// no-`SourceVariable` arm (a helper that lands in a recurrence SCC) and by
+/// the LTM describers' element-pinned projection of an element-scoped helper,
+/// so every reader sees one lowering.
 ///
 /// Loud-safe (never panics): `Absent` when this parse synthesized no helper of
-/// that name, `Lowering` with the body's equation errors when it does not
-/// parse or lower. `lower_variable` is total (GH #580): a lowering error such
-/// as an un-translatable cross-dimension subscript surviving into a scalar
-/// helper as `DimensionInScalarContext` lands on the variable's error channel
-/// and discards the AST, which `lower_fragment` would otherwise reject as an
-/// `EmptyEquation` -- so the lowered variable is checked as well as the parsed
-/// one, and the caller reports the errors against the parent.
+/// that name, `Lowering` with the body's equation errors when it did not parse
+/// or lower -- an un-translatable cross-dimension subscript surviving into a
+/// scalar helper as `DimensionInScalarContext` lands on the variable's error
+/// channel and discards the AST, which `lower_fragment` would otherwise reject
+/// as an `EmptyEquation`, so the caller reports the errors against the parent.
 pub(crate) fn implicit_fragment_input<'db>(
     db: &'db dyn Db,
     meta: &ImplicitVarMeta,
@@ -370,107 +507,55 @@ pub(crate) fn implicit_fragment_input<'db>(
     project: SourceProject,
     module_input_names: &[String],
 ) -> Result<FragmentInput<'db>, ImplicitInputError> {
-    let parsed = parse_source_variable(db, meta.parent_source_var, project);
-    let implicit_var = meta.find_in(parsed).ok_or(ImplicitInputError::Absent)?;
-    let implicit_name = canonicalize(implicit_var.ident()).into_owned();
-    let var_ident: Ident<Canonical> = Ident::new(&implicit_name);
+    let LoweredImplicit {
+        variable: lowered,
+        heads,
+    } = lowered_implicit_variable(db, model, project, meta.name.clone())
+        .as_ref()
+        .ok_or(ImplicitInputError::Absent)?;
+    if let Some(errors) = lowered.equation_errors().filter(|e| !e.is_empty()) {
+        return Err(ImplicitInputError::Lowering(errors));
+    }
 
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
 
-    let parsed_implicit = implicit_var.parsed_variable(dim_context);
-    if let Some(errors) = parsed_implicit.equation_errors().filter(|e| !e.is_empty()) {
-        return Err(ImplicitInputError::Lowering(errors));
-    }
-
-    let parent_deps = variable_direct_dependencies(
-        db,
-        meta.parent_source_var,
-        project,
-        ModuleInputSet::empty(db),
-    );
-    let helper_deps = parent_deps
-        .implicit_vars
-        .iter()
-        .find(|iv| canonicalize(&iv.name) == implicit_name);
-
-    // Every name the helper references: both phases' data-flow dependencies,
-    // the lookup tables it calls (layout references, not data-flow deps --
-    // issue #606), and a stock helper's inflows and outflows.
-    let mut all_names: BTreeSet<&str> = helper_deps
-        .into_iter()
-        .flat_map(|iv| {
-            iv.dt_deps
-                .iter()
-                .chain(iv.initial_deps.iter())
-                .chain(iv.referenced_tables.iter())
-        })
-        .map(String::as_str)
-        .collect();
-    if let crate::variable::VarKind::Stock {
-        inflows, outflows, ..
-    } = &parsed_implicit.kind
-    {
-        all_names.extend(inflows.iter().chain(outflows.iter()).map(Ident::as_str));
-    }
-
+    // The shape of every name the helper can reference, itself included, as
+    // the compiler resolves them: a module-typed helper is its sub-model's
+    // shape, an arrayed helper (a structural apply-to-all capture) occupies
+    // one slot per element, and every other helper is scalar.
     let self_shape = if meta.is_module {
         module_dep_shape(db, project, meta.model_name.as_deref().unwrap_or(""))
     } else {
-        // An arrayed helper (a structural apply-to-all capture) occupies one
-        // slot per element; its dimensions are the parse's.
         DepShape::var(
-            parsed_implicit
+            lowered
                 .get_dimensions()
                 .map(<[crate::dimensions::Dimension]>::to_vec)
                 .unwrap_or_default(),
         )
     };
     let mut dep_shapes: IdentMap<Ident<Canonical>, DepShape> = Default::default();
-    dep_shapes.insert(var_ident.clone(), self_shape);
-    for dep_name in &all_names {
-        let (head, _qualified) = dep_head(dep_name);
-        if head == implicit_name || is_implicit_global(head) || dep_shapes.contains_key(head) {
-            continue;
-        }
-        // A helper's dependencies are explicit variables of the same model or
-        // other helpers; a name that is neither fails to resolve at lowering.
-        if let Some(shape) = model_dep_shape(db, model, project, head) {
-            dep_shapes.insert(Ident::new(head), shape);
-        }
-    }
-
-    // A module-typed helper is its wiring, resolved by `lower_variable`'s
-    // module arm like an explicit instance's.
-    let scope = LoweringScope {
-        dimensions: dim_context,
-        shapes: &dep_shapes,
-        model_name: model.name(db),
-    };
-    let lowered = crate::model::lower_variable(&scope, &parsed_implicit);
-    if let Some(errors) = lowered.equation_errors() {
-        return Err(ImplicitInputError::Lowering(errors));
+    dep_shapes.insert(Ident::new(&meta.name), self_shape);
+    for (ident, declared) in heads {
+        dep_shapes.insert(ident.clone(), declared.shape(db, project));
     }
 
     // A synthesized helper carries no graphical function of its own
     // (`ImplicitVar::parsed_variable` builds it with no tables); only the
     // tables of the dependencies it reads through `LOOKUP(dep, x)` are needed.
     let mut tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
-    for dep_name in &all_names {
-        let (head, qualified) = dep_head(dep_name);
-        if qualified || tables.contains_key(head) {
+    for (ident, declared) in heads {
+        let DeclaredName::Source(dep_sv) = declared else {
             continue;
-        }
-        if let Some(dep_sv) = model_variable_by_name(db, model, head.to_string()) {
-            let dep_tables = extract_tables_from_source_var(db, &dep_sv, project);
-            if !dep_tables.is_empty() {
-                tables.insert(Ident::new(head), dep_tables);
-            }
+        };
+        let dep_tables = variable_tables(db, *dep_sv, project);
+        if !dep_tables.is_empty() {
+            tables.insert(ident.clone(), dep_tables.clone());
         }
     }
 
     Ok(FragmentInput::new(
-        lowered,
+        std::borrow::Cow::Borrowed(lowered.as_ref()),
         dep_shapes,
         tables,
         canonical_module_input_set(module_input_names),

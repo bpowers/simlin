@@ -390,8 +390,8 @@ impl MacroRegistry {
         //     producers: `stdlib_descriptor` (target `stdlib⁚{name}`) and Pass 1
         //     above (target the macro's own model).
         //   - A stdlib model is a SINK: it holds no module variable, explicit or
-        //     implicit. Asserted over synced Stage0s by
-        //     `db::stages_tests::stdlib_templates_are_scalar_and_instantiate_no_module`.
+        //     implicit. Asserted over the synced parse memos by
+        //     `db::units_tests::stdlib_templates_are_scalar_and_instantiate_no_module`.
         //   - So a macro model's outgoing edges are three, and all three are
         //     handled: an explicit module in its body (this pass), an implicit
         //     macro-to-macro edge (Pass 3 rejects a cycle among them, and on ANY
@@ -410,8 +410,9 @@ impl MacroRegistry {
         // module vars today, all fed by the same `expand_module_function`:
         // `db::query::model_implicit_var_info` and
         // `db::ltm::model_ltm_implicit_var_info` (both carrying `is_module` +
-        // `model_name`), plus `db::stages::model_scope_models`, which walks the
-        // Stage0 `variables`. Only the first opens a cycle path: `compute_layout`
+        // `model_name`), plus `db::model_scope_models`, which reads the explicit
+        // `Module` variables and the first recorder's module entries. Only the
+        // first opens a cycle path: `compute_layout`
         // recurses on `model_implicit_var_info`'s module entries (Section 2) but
         // takes `meta.size` verbatim for the LTM ones (Section 3b), and
         // `model_shape` recurses only through `compute_layout`. So the LTM

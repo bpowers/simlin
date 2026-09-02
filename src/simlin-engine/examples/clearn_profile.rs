@@ -27,6 +27,12 @@
 //!   CLEARN_COUNT_ALLOCS   "1" to count allocations per phase (distorts timing)
 //!   CLEARN_ALLOC_HIST     "1" to also print, per phase, a histogram of
 //!                         allocation and realloc sizes (implies counting)
+//!   CLEARN_DIAGNOSTICS    "1" to run `collect_all_diagnostics` (the fragment
+//!                         and unit passes) inside the compile phase, as every
+//!                         product path that reports errors does
+//!   CLEARN_RESIDENCY      "1" to report the bytes the database retains after
+//!                         a compile, with the artifact, the database and the
+//!                         sync state dropped one at a time
 
 use std::alloc::{GlobalAlloc, Layout};
 
@@ -40,7 +46,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use simlin_engine::db::{
-    SimlinDb, compile_project_incremental, set_project_ltm_enabled, sync_from_datamodel_incremental,
+    PersistentSyncState, SimlinDb, collect_all_diagnostics, compile_project_incremental,
+    set_project_ltm_enabled, sync_from_datamodel_incremental,
 };
 use simlin_engine::{CompiledSimulation, Vm, open_vensim};
 
@@ -286,13 +293,67 @@ fn model_path() -> String {
     )
 }
 
-fn compile_once(datamodel: &simlin_engine::datamodel::Project, ltm: bool) -> CompiledSimulation {
+/// One compile with everything it retains: the database (every salsa memo),
+/// the sync state (the input handles) and the artifact.
+struct RetainedCompile {
+    db: SimlinDb,
+    sync: PersistentSyncState,
+    compiled: CompiledSimulation,
+}
+
+fn compile_retained(
+    datamodel: &simlin_engine::datamodel::Project,
+    ltm: bool,
+    diagnostics: bool,
+) -> RetainedCompile {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
     if ltm {
         set_project_ltm_enabled(&mut db, sync.project, true);
     }
-    compile_project_incremental(&db, sync.project, "main").unwrap()
+    if diagnostics {
+        std::hint::black_box(collect_all_diagnostics(&db, sync.project));
+    }
+    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    RetainedCompile { db, sync, compiled }
+}
+
+fn compile_once(
+    datamodel: &simlin_engine::datamodel::Project,
+    ltm: bool,
+    diagnostics: bool,
+) -> CompiledSimulation {
+    compile_retained(datamodel, ltm, diagnostics).compiled
+}
+
+fn print_residency(label: &str, baseline: usize) {
+    let live = LIVE_BYTES.load(Ordering::Relaxed);
+    let delta = live as i64 - baseline as i64;
+    println!(
+        "residency {label:<18} live {:>12} bytes ({:>8.2} MiB) | above baseline {delta:>+12} bytes ({:>+8.2} MiB)",
+        live,
+        mib(live),
+        delta as f64 / (1024.0 * 1024.0),
+    );
+}
+
+/// What a compile leaves resident, attributed by dropping each owner in turn:
+/// the artifact first (what a caller keeps to simulate), then the database
+/// (every salsa memo -- the parse and lowering memos, fragments, layouts),
+/// then the sync state. The parsed datamodel stays alive throughout, as it
+/// does in every embedding.
+fn residency_census(datamodel: &simlin_engine::datamodel::Project, ltm: bool, diagnostics: bool) {
+    let baseline = LIVE_BYTES.load(Ordering::Relaxed);
+    print_residency("baseline", baseline);
+    let retained = compile_retained(datamodel, ltm, diagnostics);
+    print_residency("db+sync+artifact", baseline);
+    let RetainedCompile { db, sync, compiled } = retained;
+    drop(compiled);
+    print_residency("db+sync", baseline);
+    drop(db);
+    print_residency("sync", baseline);
+    drop(sync);
+    print_residency("after all drops", baseline);
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
@@ -308,7 +369,9 @@ fn main() {
     let run_iters = env_usize("CLEARN_RUN_ITERS", 0);
     let which = std::env::var("CLEARN_PROFILE").unwrap_or_else(|_| "both".to_string());
     let ltm = std::env::var("CLEARN_LTM").is_ok_and(|v| v != "0");
-    if std::env::var("CLEARN_COUNT_ALLOCS").is_ok_and(|v| v != "0") {
+    let diagnostics = std::env::var("CLEARN_DIAGNOSTICS").is_ok_and(|v| v != "0");
+    let residency = std::env::var("CLEARN_RESIDENCY").is_ok_and(|v| v != "0");
+    if residency || std::env::var("CLEARN_COUNT_ALLOCS").is_ok_and(|v| v != "0") {
         COUNTING_ON.store(true, Ordering::Relaxed);
     }
     if std::env::var("CLEARN_ALLOC_HIST").is_ok_and(|v| v != "0") {
@@ -318,6 +381,7 @@ fn main() {
 
     println!("model: {path}");
     println!("ltm:   {ltm}");
+    println!("diagnostics: {diagnostics}");
 
     let contents = phase("read_file", || {
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"))
@@ -336,7 +400,13 @@ fn main() {
         datamodel.dimensions.len()
     );
 
-    let compiled = phase("compile (salsa)", || compile_once(&datamodel, ltm));
+    if residency {
+        residency_census(&datamodel, ltm, diagnostics);
+    }
+
+    let compiled = phase("compile (salsa)", || {
+        compile_once(&datamodel, ltm, diagnostics)
+    });
     println!("  n_slots (root): {}", compiled.n_slots());
 
     let prof = compiled.bytecode_profile();
@@ -413,14 +483,14 @@ fn main() {
     if compile_iters > 0 && do_compile {
         let t0 = Instant::now();
         for _ in 0..compile_iters {
-            std::hint::black_box(compile_once(&datamodel, ltm));
+            std::hint::black_box(compile_once(&datamodel, ltm, diagnostics));
         }
         let per = t0.elapsed().as_secs_f64() * 1000.0 / compile_iters as f64;
         println!("compile x{compile_iters}: {per:.2} ms/iter");
     }
 
     if run_iters > 0 && do_run {
-        let compiled = compile_once(&datamodel, ltm);
+        let compiled = compile_once(&datamodel, ltm, diagnostics);
         let t0 = Instant::now();
         for _ in 0..run_iters {
             let mut vm = Vm::new(compiled.clone()).unwrap();

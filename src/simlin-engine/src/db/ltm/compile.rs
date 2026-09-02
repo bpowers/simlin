@@ -28,9 +28,9 @@ use crate::db::var_fragment::{
 use crate::db::{
     Db, LtmLinkId, LtmSyntheticVar, RefShape, SourceModel, SourceProject, SourceVariableKind,
     VarFragmentResult, build_module_inputs, canonical_module_input_set,
-    compile_phase_to_per_var_bytecodes, extract_tables_from_source_var, model_implicit_var_info,
+    compile_phase_to_per_var_bytecodes, lowered_variable_by_name, model_implicit_var_info,
     module_dep_shape, module_input_prefix, project_converted_dimensions,
-    project_dimensions_context, reconstruct_single_variable,
+    project_dimensions_context, variable_tables,
 };
 
 use super::parse::{parse_ltm_equation, scalarize_ltm_equation};
@@ -112,9 +112,10 @@ pub fn compile_ltm_var_fragment(
 // The query documents a per-involved-variable incrementality claim, and only a
 // body-entry count can check it: salsa BACKDATES a re-executed query whose
 // value compares equal, so the memo neither moves nor changes and pointer
-// equality reads identical whether the body ran or not. Thread-local for the
-// same reasons `db::stages`' counters are -- see the note there, including the
-// warning about what happens if this subtree is ever parallelized.
+// equality reads identical whether the body ran or not. Thread-local so a
+// parallel test run cannot charge one test's queries to another; the bump
+// happens INSIDE the body, on whatever thread salsa ran it, so parallelizing
+// this subtree means moving the counter to a shared atomic in the same change.
 #[cfg(test)]
 thread_local! {
     static SHAPED_LINK_SCORE_EXECUTIONS: std::cell::Cell<usize> = const {
@@ -240,12 +241,12 @@ pub fn link_score_equation_text_shaped<'db>(
     let from_ident = Ident::<Canonical>::new(from_name);
     let to_ident = Ident::<Canonical>::new(to_name);
 
-    let from_var = reconstruct_single_variable(db, model, project, from_name);
+    let from_var = lowered_variable_by_name(db, model, project, from_name);
     // A target that cannot be reconstructed is a benign structural skip
     // (degenerate edge), NOT a partial-equation failure -- no `Warning`, no
     // unscoreable-edge recording. Loop scores through such an edge are
     // unaffected, exactly as the pre-GH #780 `None` behaved.
-    let Some(to_var) = reconstruct_single_variable(db, model, project, to_name) else {
+    let Some(to_var) = lowered_variable_by_name(db, model, project, to_name) else {
         return ShapedLinkScore::NoVariable;
     };
 
@@ -572,7 +573,7 @@ struct LoweredLtmVariable {
 /// and `ltm_array_agg::size_reducer_previous_helper_compiles_and_is_correct`.
 fn lower_ltm_variable(
     db: &dyn Db,
-    parsed_variable: &crate::model::VariableStage0,
+    parsed_variable: &crate::model::ParsedVariable,
     project: SourceProject,
 ) -> LoweredLtmVariable {
     let dim_context = project_dimensions_context(db, project);
@@ -721,7 +722,7 @@ pub(crate) fn ltm_fragment_input<'db>(
         let Some(table_sv) = source_vars.get(head) else {
             continue;
         };
-        let table_data = extract_tables_from_source_var(db, table_sv, project);
+        let table_data = variable_tables(db, *table_sv, project).clone();
         if !table_data.is_empty() {
             tables.insert(Ident::new(head), table_data);
         }
@@ -730,7 +731,7 @@ pub(crate) fn ltm_fragment_input<'db>(
     }
 
     Ok(FragmentInput::new(
-        lowered,
+        std::borrow::Cow::Owned(lowered),
         deps,
         tables,
         BTreeSet::new(),
@@ -946,8 +947,9 @@ pub(crate) fn compile_ltm_synthetic_fragment(
             //     the var to zero).
             // (d) Aggregate-node link score (from = $⁚ltm⁚agg⁚n, or to =
             //     $⁚ltm⁚agg⁚n): compile directly. The (from, to)-keyed salsa
-            //     path would `reconstruct_single_variable` the synthetic agg
-            //     name, get `None`, and emit a degenerate ceteris-paribus
+            //     path would resolve the synthetic agg name through
+            //     `lowered_variable_by_name`, get `None`, and emit a degenerate
+            //     ceteris-paribus
             //     equation against the *target's* original (reducer-bearing)
             //     equation -- which the agg name appears nowhere in -- so the
             //     numerator collapses to zero. `model_ltm_variables` already
@@ -1012,8 +1014,8 @@ pub(crate) fn compile_ltm_synthetic_fragment(
 /// the whole-model `model_ltm_variables`, so it re-executes on any edit, but its
 /// VALUE is one fragment -- so salsa backdates it whenever that variable's
 /// fragment is unchanged and `assemble_module` is not re-run. Same shape, and
-/// the same reason, as `reconstruct_named_variable` over
-/// `reconstruct_model_variables`.
+/// the same reason, as `lowered_variable_by_name` over
+/// `model_lowered_variables`.
 ///
 /// An out-of-range index yields `None`, which is also what a variable whose
 /// fragment failed to compile yields; callers treat both as "no fragment",
@@ -1476,7 +1478,7 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
             let Some(table_sv) = source_vars.get(head) else {
                 continue;
             };
-            let table_data = extract_tables_from_source_var(db, table_sv, project);
+            let table_data = variable_tables(db, *table_sv, project).clone();
             if !table_data.is_empty() {
                 tables.insert(Ident::new(head), table_data);
             }
@@ -1487,7 +1489,7 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
     };
 
     Some(FragmentInput::new(
-        lowered,
+        std::borrow::Cow::Owned(lowered),
         deps,
         tables,
         canonical_module_input_set(module_input_names),

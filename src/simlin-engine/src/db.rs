@@ -33,11 +33,12 @@ use std::collections::BTreeSet;
 //   per-variable compilation.
 // * `assemble`   -- module/simulation assembly + flattened-offset map.
 // * `dep_graph`  -- the dependency-graph cycle gate + its result types.
-// * `analysis`   -- causal-graph analysis tracked functions.
-// * `stages`     -- the two cached model-compilation stages (Stage0/Stage1).
+// * `analysis`   -- causal-graph analysis tracked functions, and the handle
+//   map of a model's lowered variables (`model_lowered_variables`).
 // * `ltm` / `ltm_ir` / `macro_registry` / `units` -- LTM (a `ltm/` directory:
 //   mod/parse/compile/loops/link_scores), the reference-site IR, the macro
-//   registry, and the unit-check pass.
+//   registry, and the unit-check pass with its inference scope
+//   (`model_scope_models`).
 mod dep_graph;
 // The production per-variable lowering as a flow-phase `Vec<Expr>`, which
 // `test_common::TestProject::flow_exprs` reads from outside `db` so structural
@@ -58,16 +59,11 @@ pub(crate) use invariance::model_flows_invariant;
 // (`model_ltm_reference_sites`) it compares the Expr0 partial builder against.
 pub(crate) mod ltm_ir;
 mod macro_registry;
-mod stages;
-pub(crate) use stages::{model_scope_models, model_stage0, model_stage1, source_model_is_stdlib};
-// Test-only: the execution counters for the two stage queries and the unit-check
-// pass, so `stages_tests` can prove each model's stages are BUILT at most once
-// per revision (GH #966), and that an unrelated model's edit re-executes none of
-// the three -- claims pointer equality of a `returns(ref)` memo cannot support.
-#[cfg(test)]
-pub(crate) use stages::{QueryExecutions, query_executions, reset_query_executions};
-mod units;
+// `pub(crate)` so `units_infer`'s tests drive `infer` over the same `UnitModel`
+// views (`units::unit_model`) the salsa pass builds.
+pub(crate) mod units;
 mod var_fragment;
+pub(crate) use var_fragment::lowered_source_variable;
 
 mod diagnostic;
 pub use diagnostic::{
@@ -76,11 +72,11 @@ pub use diagnostic::{
 };
 
 mod input;
-pub(crate) use input::source_var_is_table_only;
 pub use input::{
     LtmLinkId, ModuleInputSet, PinnedLoopSpec, SourceModel, SourceProject, SourceVariable,
     SourceVariableKind, variable_source,
 };
+pub(crate) use input::{source_model_is_stdlib, source_var_is_table_only};
 
 mod query;
 pub use query::{
@@ -107,8 +103,8 @@ pub(crate) use layout::flattened_offsets;
 pub(crate) use layout::module_dep_shape;
 
 mod fragment_compile;
-pub(crate) use fragment_compile::compile_implicit_var_fragment;
 pub use fragment_compile::compile_var_fragment;
+pub(crate) use fragment_compile::{compile_implicit_var_fragment, lowered_implicit_variable};
 // Test-only: the per-thread record of which fragment-compiler bodies ran, so
 // `fragment_char_tests` can prove a layout-only edit did or did not recompile
 // a fragment. Pointer equality of a memo cannot prove that -- salsa backdates
@@ -122,7 +118,7 @@ pub(crate) use fragment_compile::{
 mod assemble;
 pub(crate) use assemble::{
     VarFragmentResult, build_module_inputs, compile_phase_to_per_var_bytecodes,
-    extract_tables_from_source_var, module_input_prefix, var_phase_symbolic_fragment_prod,
+    module_input_prefix, var_phase_symbolic_fragment_prod, variable_tables,
 };
 pub use assemble::{assemble_module, assemble_simulation};
 // `combine_scc_fragment` is consumed at runtime only WITHIN `assemble.rs`; the
@@ -179,7 +175,7 @@ pub use analysis::RefShape;
 pub use analysis::causal_graph_from_edges;
 pub use analysis::causal_graph_from_element_edges;
 pub use analysis::causal_graph_from_element_edges_with_modules;
-pub(crate) use analysis::reconstruct_model_variables;
+pub(crate) use analysis::model_lowered_variables;
 // The variable-level graph with module sub-graphs, for tests outside `db` that
 // pin edge normalization and polarity on the production graph constructor.
 pub(crate) use analysis::causal_graph_with_modules;
@@ -804,8 +800,8 @@ pub(crate) fn module_link_score_equation(
     project: SourceProject,
     from_name: &str,
     to_name: &str,
-    from_var: Option<&crate::variable::Variable>,
-    to_var: &crate::variable::Variable,
+    from_var: Option<&std::sync::Arc<crate::variable::Variable>>,
+    to_var: &std::sync::Arc<crate::variable::Variable>,
 ) -> Option<LtmEquation> {
     use crate::common::{Canonical, Ident};
 
@@ -933,7 +929,7 @@ pub(crate) fn module_link_score_equation(
             Some(output_ref) => {
                 let output_ident = Ident::<Canonical>::new(&output_ref);
                 let mut all_vars = HashMap::new();
-                all_vars.insert(to_ident.clone(), to_var.clone());
+                all_vars.insert(to_ident.clone(), std::sync::Arc::clone(to_var));
                 let dim_ctx = project_dimensions_context(db, project);
                 // The target's per-occurrence access-shape IR. The live source
                 // here is a `module·port` composite (an `OccurrenceRef::ModuleOutput`),
@@ -1445,6 +1441,8 @@ mod implicit_module_tests;
 #[cfg(test)]
 mod incremental_compile_tests;
 #[cfg(test)]
+mod lowered_variable_tests;
+#[cfg(test)]
 mod lowering_scope_tests;
 #[cfg(test)]
 mod ltm_array_freeze_tests;
@@ -1467,11 +1465,11 @@ mod module_wiring_tests;
 #[cfg(test)]
 mod prev_init_tests;
 #[cfg(test)]
-mod stages_tests;
-#[cfg(test)]
 mod temp_allocation_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod units_tests;
 #[cfg(test)]
 mod variable_dimensions_tests;
 #[cfg(test)]

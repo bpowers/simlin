@@ -3306,8 +3306,8 @@ fn generate_link_score_equation_for_link_empty_target_is_err() {
     let from_var = scalar_aux_from_text("source", "1");
 
     let mut all_vars = HashMap::new();
-    all_vars.insert(from.clone(), from_var);
-    all_vars.insert(to.clone(), to_var.clone());
+    all_vars.insert(from.clone(), std::sync::Arc::new(from_var));
+    all_vars.insert(to.clone(), std::sync::Arc::new(to_var.clone()));
 
     let result = generate_link_score_equation_for_link(
         &from,
@@ -3340,9 +3340,12 @@ fn generate_link_score_equation_for_link_normal_target_is_ok() {
     let other_var = scalar_aux_from_text("other", "2");
 
     let mut all_vars = HashMap::new();
-    all_vars.insert(from.clone(), from_var);
-    all_vars.insert(Ident::<Canonical>::new("other"), other_var);
-    all_vars.insert(to.clone(), to_var.clone());
+    all_vars.insert(from.clone(), std::sync::Arc::new(from_var));
+    all_vars.insert(
+        Ident::<Canonical>::new("other"),
+        std::sync::Arc::new(other_var),
+    );
+    all_vars.insert(to.clone(), std::sync::Arc::new(to_var.clone()));
 
     let equation = generate_link_score_equation_for_link(
         &from,
@@ -3463,7 +3466,7 @@ fn arrayed_with_lookup_var(
 
 /// Lower `dm_var` as the LTM describers read a variable: synced into a
 /// one-model project declaring `dims` and read back through
-/// `db::reconstruct_model_variables`, the production lowering every generator
+/// `db::model_lowered_variables`, the production lowering every generator
 /// target comes from. The reconstruction is total, so a name the equation
 /// references but the project does not declare lowers like any other and a
 /// fixture need declare only the variable under test.
@@ -3471,7 +3474,7 @@ fn lower_dm_var(
     dm_var: crate::datamodel::Variable,
     dims: &[crate::datamodel::Dimension],
 ) -> Variable {
-    use crate::db::{SimlinDb, reconstruct_model_variables, sync_from_datamodel};
+    use crate::db::{SimlinDb, model_lowered_variables, sync_from_datamodel};
     use crate::testutils::{sim_specs_with_units, x_model, x_project};
 
     let ident: Ident<Canonical> = Ident::new(dm_var.get_ident());
@@ -3482,7 +3485,9 @@ fn lower_dm_var(
     project.dimensions = dims.to_vec();
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    reconstruct_model_variables(&db, sync.models["test"].source, sync.project)[&ident].clone()
+    model_lowered_variables(&db, sync.models["test"].source, sync.project)[&ident]
+        .as_ref()
+        .clone()
 }
 
 /// GH #910: a scalar WITH-LOOKUP target's link-score partial must be
@@ -3498,9 +3503,12 @@ fn link_score_for_with_lookup_scalar_target_wraps_partial_in_lookup() {
     let other_var = scalar_aux_from_text("other", "2");
 
     let mut all_vars = HashMap::new();
-    all_vars.insert(from.clone(), from_var);
-    all_vars.insert(Ident::<Canonical>::new("other"), other_var);
-    all_vars.insert(to.clone(), to_var.clone());
+    all_vars.insert(from.clone(), std::sync::Arc::new(from_var));
+    all_vars.insert(
+        Ident::<Canonical>::new("other"),
+        std::sync::Arc::new(other_var),
+    );
+    all_vars.insert(to.clone(), std::sync::Arc::new(to_var.clone()));
 
     let equation = generate_link_score_equation_for_link(
         &from,
@@ -3542,8 +3550,8 @@ fn link_score_for_with_lookup_a2a_target_pins_shared_table() {
     let from_var = scalar_aux_from_text("source", "1");
 
     let mut all_vars = HashMap::new();
-    all_vars.insert(from.clone(), from_var);
-    all_vars.insert(to.clone(), to_var.clone());
+    all_vars.insert(from.clone(), std::sync::Arc::new(from_var));
+    all_vars.insert(to.clone(), std::sync::Arc::new(to_var.clone()));
 
     let equation = generate_link_score_equation_for_link(
         &from,
@@ -3591,8 +3599,8 @@ fn link_score_for_with_lookup_arrayed_target_wraps_per_slot() {
     let from_var = scalar_aux_from_text("source", "1");
 
     let mut all_vars = HashMap::new();
-    all_vars.insert(from.clone(), from_var);
-    all_vars.insert(to.clone(), to_var.clone());
+    all_vars.insert(from.clone(), std::sync::Arc::new(from_var));
+    all_vars.insert(to.clone(), std::sync::Arc::new(to_var.clone()));
 
     let equation = generate_link_score_equation_for_link(
         &from,

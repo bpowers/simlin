@@ -8,10 +8,10 @@ use crate::ast::{Ast, BinaryOp, Expr2};
 use crate::builtins::{BuiltinFn, Loc};
 use crate::common::{Canonical, ErrorCode, Ident, UnitError, canonicalize};
 use crate::datamodel::UnitMap;
-use crate::model::ModelStage1;
 #[cfg(test)]
 use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
 use crate::units::{Context, UnitOp, Units, combine};
+use crate::units_check::UnitModel;
 use crate::variable::{VarKind, Variable};
 
 /// Source of a constraint for error reporting.
@@ -106,7 +106,7 @@ pub(crate) struct InferenceResult {
 
 struct UnitInferer<'a> {
     ctx: &'a Context,
-    models: &'a HashMap<Ident<Canonical>, &'a ModelStage1>,
+    models: &'a HashMap<Ident<Canonical>, UnitModel>,
     // units for module inputs
     time: Variable,
 }
@@ -945,7 +945,7 @@ impl UnitInferer<'_> {
     /// [`InstantiationPath`].
     fn gen_all_constraints(
         &self,
-        model: &ModelStage1,
+        model: &UnitModel,
         prefix: &str,
         constraints: &mut Vec<LocatedConstraint>,
         active: &InstantiationPath<'_>,
@@ -970,7 +970,11 @@ impl UnitInferer<'_> {
         // names, and how many pairs a k-way conflict yields), and the
         // solver's binding choices. Sorting is the GH #595/#633 recipe:
         // an unordered collection must not reach an observable (GH #999).
-        let mut sorted_vars: Vec<(&Ident<Canonical>, &Variable)> = model.variables.iter().collect();
+        let mut sorted_vars: Vec<(&Ident<Canonical>, &Variable)> = model
+            .variables
+            .iter()
+            .map(|(id, var)| (id, var.as_ref()))
+            .collect();
         sorted_vars.sort_unstable_by_key(|(id, _)| id.as_str());
         for (id, var) in sorted_vars {
             let current_var = format!("{prefix}{id}");
@@ -1043,7 +1047,7 @@ impl UnitInferer<'_> {
                 // `back_edge_declines_a_real_cross_module_conflict` builds
                 // exactly that shape and pins the silence, so this trade stays
                 // visible instead of looking like an accident.
-                if let Some(&submodel) = self.models.get(model_name)
+                if let Some(submodel) = self.models.get(model_name)
                     && !active.contains(model_name)
                 {
                     let subprefix = format!("{prefix}{}·", var.ident);
@@ -1265,7 +1269,7 @@ impl UnitInferer<'_> {
         (resolved_fvs, finalized.into_vec())
     }
 
-    fn infer(&self, model: &ModelStage1) -> InferenceResult {
+    fn infer(&self, model: &UnitModel) -> InferenceResult {
         let mut constraints = vec![];
         // The root model is seeded onto the path, so a model that instantiates
         // ITSELF is declined at the first edge rather than unrolled once.
@@ -1825,9 +1829,9 @@ fn test_macro_mixed_param_and_base_units_infer_cleanly() {
 }
 
 pub(crate) fn infer(
-    models: &HashMap<Ident<Canonical>, &ModelStage1>,
+    models: &HashMap<Ident<Canonical>, UnitModel>,
     units_ctx: &Context,
-    model: &ModelStage1,
+    model: &UnitModel,
 ) -> InferenceResult {
     let time_units_name =
         canonicalize(units_ctx.sim_specs.time_units.as_deref().unwrap_or("time")).into_owned();
@@ -1866,12 +1870,12 @@ pub(crate) fn infer(
 // shape of the module graph -- not just its contents -- decides whether it
 // terminates and whether it generates the constraints a legal model needs.
 // These tests drive `infer` the way `db::units::check_model_units` does, over
-// each project model's salsa-cached `ModelStage1`.
+// each project model's `UnitModel` view of the per-variable lowering memos.
 
-/// Run inference over `model_name` with every project model's salsa-cached
-/// lowered stage in the map, the way `db::units::check_model_units` drives
-/// `infer` (its map is the model's module-reachable scope, a subset of this
-/// one; inference only ever looks up module targets, so the two agree).
+/// Run inference over `model_name` with every project model's unit view in
+/// the map, the way `db::units::check_model_units` drives `infer` (its map is
+/// the model's module-reachable scope, a subset of this one; inference only
+/// ever looks up module targets, so the two agree).
 #[cfg(test)]
 fn infer_project(
     project_datamodel: &crate::datamodel::Project,
@@ -1879,18 +1883,18 @@ fn infer_project(
 ) -> InferenceResult {
     let db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel(&db, project_datamodel);
-    let models_s1: HashMap<Ident<Canonical>, &ModelStage1> = sync
+    let models: HashMap<Ident<Canonical>, UnitModel> = sync
         .project
         .models(&db)
         .values()
         .map(|src_model| {
-            let s1 = crate::db::model_stage1(&db, *src_model, sync.project);
-            (s1.name.clone(), s1)
+            let view = crate::db::units::unit_model(&db, *src_model, sync.project);
+            (view.name.clone(), view)
         })
         .collect();
-    let target = models_s1[&Ident::<Canonical>::new(model_name)];
+    let target = &models[&Ident::<Canonical>::new(model_name)];
     infer(
-        &models_s1,
+        &models,
         crate::db::project_units_context(&db, sync.project),
         target,
     )

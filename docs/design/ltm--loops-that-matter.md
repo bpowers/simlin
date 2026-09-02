@@ -52,8 +52,10 @@ pub struct CausalGraph {
 }
 ```
 
-The adjacency-list representation of a model's causal structure. Built from a
-`ModelStage1` by `CausalGraph::from_model()`, which:
+The adjacency-list representation of a model's causal structure. Built from
+`model_causal_edges` by `db::analysis::causal_graph_from_edges` and its
+module-enriched twins, with `variables` the shared `db::model_lowered_variables`
+handle map (an `Arc<Variable>` per name); the edges:
 
 - Creates edges from each variable's equation dependencies to the variable itself
 - Handles stocks specially: edges come from inflows and outflows, not from the
@@ -565,12 +567,12 @@ module's sub-graph enumerates no pathways and is harmless. (This is why the
 prior `classify_module_for_ltm` stock gate on sub-graph construction is gone.)
 The element-level module nodes are keyed by the bare module instance name --
 the same key `module_graphs` and the module `Variable` use -- so the recompute's
-lookups resolve. `reconstruct_model_variables` reconstructs a module instance
-through `reconstruct_implicit_variable` (not the generic parse+lower path, which
-resolves inputs against an empty `scope.models` and so drops them), so the
-recompute can read a module's entry/exit ports off its preserved `ModuleInput`s
--- the same fix `reconstruct_single_variable` already applied for the exhaustive
-override.
+lookups resolve. A module instance's lowered form (`db::lowered_source_variable`,
+`db::lowered_implicit_variable`) is its wiring, resolved by
+`model::lower_variable`'s module arm through `db::build_module_inputs`, so the
+recompute reads a module's entry/exit ports off its `ModuleInput`s whether it
+reached the instance through the whole-model map or by name
+(`lowered_variable_by_name`).
 
 Because the discovery graph is element-level, an arrayed loop's non-module
 nodes carry element subscripts (`s[nyc] → m → growth[nyc]`).

@@ -135,10 +135,11 @@ pub struct CausalGraph {
     /// Variables in the model for polarity analysis.
     ///
     /// Shared rather than owned: the map is the salsa-cached
-    /// `db::reconstruct_model_variables`, and a graph is built many times per
-    /// LTM compile (once per query that needs polarity or module structure)
-    /// while the variables in it do not change between those builds.
-    pub(crate) variables: std::sync::Arc<HashMap<Ident<Canonical>, Variable>>,
+    /// `db::model_lowered_variables` -- handles to the per-variable lowering
+    /// memos -- and a graph is built many times per LTM compile (once per
+    /// query that needs polarity or module structure) while the variables in
+    /// it do not change between those builds.
+    pub(crate) variables: std::sync::Arc<crate::variable::LoweredVariableMap>,
     /// Module instances and their internal graphs
     pub(crate) module_graphs: HashMap<Ident<Canonical>, Box<CausalGraph>>,
 }
@@ -157,7 +158,7 @@ impl CausalGraph {
     /// Read-only access to the variable map (name -> `Variable`), used by the
     /// discovery-mode per-exit-port pathway recompute (GH #698) to find a
     /// module instance's input ports and the port a downstream reader reads.
-    pub(crate) fn variables(&self) -> &HashMap<Ident<Canonical>, Variable> {
+    pub(crate) fn variables(&self) -> &crate::variable::LoweredVariableMap {
         &self.variables
     }
 
@@ -446,7 +447,7 @@ impl CausalGraph {
                 Some(g) => g,
                 None => continue,
             };
-            let module_var = match self.variables.get(node) {
+            let module_var = match self.variables.get(node).map(std::sync::Arc::as_ref) {
                 Some(Variable {
                     kind: VarKind::Module { inputs, .. },
                     ..

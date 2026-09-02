@@ -7,7 +7,7 @@
 //! `model_ltm_reference_sites` is the single salsa-tracked place a causal
 //! edge's access shape *and* aggregate-node routing are decided. It consumes
 //! `enumerate_agg_nodes` (which stays the sole "is this subexpression a
-//! hoistable maximal reducer" decider) and `reconstruct_model_variables`,
+//! hoistable maximal reducer" decider) and `model_lowered_variables`,
 //! walks each variable's `Expr2` AST exactly once, and buckets every
 //! `Var` / `Subscript` reference by its `(from, to)` causal edge into a
 //! `Vec<ClassifiedSite>` carrying the per-reference `shape`,
@@ -30,7 +30,7 @@
 use std::collections::HashMap;
 
 use crate::common::{Canonical, Ident};
-use crate::db::{Db, RefShape, SourceModel, SourceProject, reconstruct_model_variables};
+use crate::db::{Db, RefShape, SourceModel, SourceProject, model_lowered_variables};
 
 // ── AST-walker helpers (moved from db/analysis.rs) ─────────────────────────
 
@@ -373,7 +373,7 @@ fn classify_iterated_dim_shape(
 /// `walk_all_in_expr`'s signature short (the only *mutable* state -- the
 /// `lookup_dims` cache and the `sites` accumulator -- stays out of band).
 struct WalkCtx<'a> {
-    variables: &'a HashMap<Ident<Canonical>, crate::variable::Variable>,
+    variables: &'a crate::variable::LoweredVariableMap,
     /// The target equation's iterated dimensions (canonical names, in the
     /// order they appear on `Ast::ApplyToAll` / `Ast::Arrayed`). Empty for
     /// `Ast::Scalar` -- a scalar target has no iterated-dimension subscript.
@@ -407,7 +407,7 @@ struct WalkCtx<'a> {
 #[cfg(test)]
 pub(crate) fn collect_all_reference_sites(
     target_var: &crate::variable::Variable,
-    variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
+    variables: &crate::variable::LoweredVariableMap,
     dim_ctx: &crate::dimensions::DimensionsContext,
     lookup_dims: &mut impl FnMut(&str) -> Vec<crate::dimensions::Dimension>,
 ) -> HashMap<String, Vec<ReferenceSite>> {
@@ -781,7 +781,7 @@ type WalkedTarget = (
 /// the per-edge map is complete as always.
 fn collect_all_reference_sites_and_occurrences(
     target_var: &crate::variable::Variable,
-    variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
+    variables: &crate::variable::LoweredVariableMap,
     dim_ctx: &crate::dimensions::DimensionsContext,
     lookup_dims: &mut impl FnMut(&str) -> Vec<crate::dimensions::Dimension>,
 ) -> WalkedTarget {
@@ -1730,7 +1730,7 @@ pub(crate) fn model_ltm_reference_sites(
     // none -- SIZE, a reducer over only scalar sources, or a not-yet-hoisted
     // sliced reducer).
     let agg_nodes = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
-    let variables = reconstruct_model_variables(db, model, project);
+    let variables = model_lowered_variables(db, model, project);
 
     // Dimension context for the #511 iterated-subscript recognition: the
     // mapped-dimension case (`State[i]` over a source declared with

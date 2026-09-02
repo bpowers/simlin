@@ -28,8 +28,8 @@ use crate::ltm::strip_subscript;
 
 use super::{
     Db, SourceModel, SourceProject, SourceVariable, SourceVariableKind, compute_layout,
-    model_causal_edges, project_datamodel_dims, project_dimensions_context,
-    reconstruct_single_variable,
+    lowered_variable_by_name, model_causal_edges, project_datamodel_dims,
+    project_dimensions_context,
 };
 
 mod compile;
@@ -679,7 +679,7 @@ fn compute_module_link_overrides(
             // `module_exit_port_for_reader`'s multi-match -> None semantics and
             // the discovery-side `recompute_module_input_edge_series` (GH #698 /
             // PR #705 r3353459409).
-            let module_var = reconstruct_single_variable(db, model, project, module_name);
+            let module_var = lowered_variable_by_name(db, model, project, module_name);
             let Some(crate::variable::VarKind::Module { inputs, .. }) =
                 module_var.as_ref().map(|v| &v.kind)
             else {
@@ -716,13 +716,13 @@ fn compute_module_link_overrides(
                     // `recompute_module_input_edge_series` (GH #698 / PR #705
                     // r3353597299). Two inputs naming the SAME `m·port` are NOT
                     // ambiguous: a unique distinct port is fine.
-                    let y_var = reconstruct_single_variable(db, model, project, y);
+                    let y_var = lowered_variable_by_name(db, model, project, y);
                     let module_ident = Ident::<Canonical>::new(module_name);
-                    match y_var.map(|v| v.kind) {
+                    match y_var.as_deref().map(|v| &v.kind) {
                         Some(crate::variable::VarKind::Module { inputs: y_in, .. }) => {
                             let mut exit: Option<String> = None;
                             let mut ambiguous = false;
-                            for inp in &y_in {
+                            for inp in y_in {
                                 if normalize_module_ref(&inp.src) != module_ident {
                                     continue;
                                 }
@@ -744,7 +744,7 @@ fn compute_module_link_overrides(
                         _ => None,
                     }
                 } else {
-                    reconstruct_single_variable(db, model, project, y)
+                    lowered_variable_by_name(db, model, project, y)
                         .and_then(|y_var| module_exit_port_for_reader(module_name, &y_var))
                 }
             };

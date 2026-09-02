@@ -73,8 +73,8 @@ impl BinaryOp {
 /// builtin functions have been checked/resolved.
 ///
 /// The `Eq` derive is load-bearing, not decoration: `Expr0` rides on
-/// salsa-cached values (`db::query::ParsedVariableResult`, `ModelStage0`,
-/// `db::ltm::LtmArm`) whose backdating is decided by comparing an old value
+/// salsa-cached values (`db::query::ParsedVariableResult`, `db::ltm::LtmArm`)
+/// whose backdating is decided by comparing an old value
 /// with a rebuilt one, so a variant that is not equal to ITSELF permanently
 /// defeats that comparison. A bare `f64` is exactly such a field (`NaN !=
 /// NaN`), and `Eq` rejects it at compile time -- which is why the literal is an

@@ -1844,8 +1844,8 @@ fn a_dimension_name_index_is_not_frozen_when_the_axis_is_known() {
 /// in `db::ltm::compile` beside the query.
 ///
 /// The failure this pins is not hypothetical. Routing
-/// `reconstruct_single_variable` straight through the whole-model
-/// `reconstruct_model_variables` map -- which is what a naive "read the cached
+/// `lowered_variable_by_name` straight through the whole-model
+/// `model_lowered_variables` map -- which is what a naive "read the cached
 /// map" refactor does -- makes every link score depend on every variable's
 /// lowered form, so ONE unrelated equation edit regenerates all of them. On a
 /// model with thousands of links that is a full LTM rebuild per keystroke.

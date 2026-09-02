@@ -566,7 +566,7 @@ longer describes the code.
 ### C1. Arena-allocate the transient parse AST
 
 The equation parser builds `Expr0` with `Box` children + `Vec` args — 3.86M+
-transient heap allocations, all lowered to `VariableStage0` and dropped.
+transient heap allocations, all lowered to `ParsedVariable` and dropped.
 Allocating the AST in a per-parse arena (a `bumpalo`-style bump allocator; the
 engine carries no such dependency) would turn these into pointer bumps. The constraint: the salsa-cached result
 (`ParsedVariableResult`) must be owned/`'static`, so the arena can only back the
@@ -579,8 +579,9 @@ only if profiling after B still shows the parser as a hotspot.
 
 ### C2. Halve `reconstruct_variable` — MOOT
 
-`reconstruct_variable` is now the salsa-cached `reconstruct_model_variables`,
-and every caller is on the LTM / analysis / patch path; it does not appear in
+`reconstruct_variable` is now the salsa-cached `model_lowered_variables` (a map
+of handles to the per-variable lowering memos), and every caller is on the LTM
+/ analysis / patch path; it does not appear in
 an ordinary compile profile at all. The 2x duplication that WAS real, and is
 fixed, was a different function: `variable_dimensions` demanded the per-variable
 parse under an empty `ModuleIdentContext`, a cache key nothing else used, so

@@ -3223,7 +3223,7 @@ fn generate_dimensioned_loop_score_equation(
 /// construction). Used to build the GH #511 [`IteratedDimCtx`].
 fn source_dim_names_for(
     from: &Ident<Canonical>,
-    all_vars: &HashMap<Ident<Canonical>, Variable>,
+    all_vars: &crate::variable::LoweredVariableMap,
 ) -> Vec<String> {
     all_vars
         .get(from)
@@ -3282,7 +3282,7 @@ pub(crate) fn generate_link_score_equation_for_link(
     shape: &RefShape,
     source_dim_elements: &[Vec<String>],
     to_var: &Variable,
-    all_vars: &HashMap<Ident<Canonical>, Variable>,
+    all_vars: &crate::variable::LoweredVariableMap,
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,
     dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
     to_occurrences: &[OccurrenceSite],
@@ -3316,14 +3316,14 @@ fn generate_link_score_equation(
     shape: &RefShape,
     source_dim_elements: &[Vec<String>],
     to_var: &Variable,
-    all_vars: &HashMap<Ident<Canonical>, Variable>,
+    all_vars: &crate::variable::LoweredVariableMap,
     dim_ctx: Option<&crate::dimensions::DimensionsContext>,
     dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
     to_occurrences: &[OccurrenceSite],
     freeze_helpers: &mut Vec<ArrayFreezeHelper>,
 ) -> Result<LtmEquation, PartialEquationError> {
     // Check if this is a stock-to-flow link
-    let is_stock_to_flow = all_vars.get(from).is_some_and(Variable::is_stock)
+    let is_stock_to_flow = all_vars.get(from).is_some_and(|v| v.is_stock())
         && matches!(to_var.kind, VarKind::Aux { is_flow: true, .. });
 
     // Flow-to-stock link: `to` is a stock and `from` is one of its flows.

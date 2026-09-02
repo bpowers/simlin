@@ -155,7 +155,8 @@ impl IndexExpr2 {
 /// builtin functions have been checked/resolved.
 ///
 /// `Eq` is derived for the reason spelled out on [`crate::ast::Expr0`]: this is
-/// the layer that rides on `ModelStage1` and `ltm_agg::AggNodesResult`, whose
+/// the layer that rides on the lowered-variable memos and
+/// `ltm_agg::AggNodesResult`, whose
 /// salsa backdating is decided by comparing a memo with its own rebuild, so a
 /// field that is not equal to itself defeats it. `Eq` makes that a compile-time
 /// property rather than a convention.

@@ -2393,17 +2393,11 @@ fn equation_only_edit_recompiles_only_the_edited_fragment() {
          that variable's fragment"
     );
 
-    // ...but the blast radius is one hop wide, not zero: `explicit_fragment_input`
-    // reads each dependency's graphical-function tables straight off its
-    // inputs (`extract_tables_from_source_var` reads the equation the tables
-    // are keyed by), so a consumer's fragment depends on its dependencies'
-    // equation text and not merely on their shape. Editing `k`'s constant
-    // therefore recompiles `probe` as well.
-    //
-    // That one hop is pinned as the CURRENT contract, not flagged as a defect:
-    // a tracked per-variable tables projection would narrow it to zero, and
-    // is a query this crate does not yet have. If a later stage widens it
-    // beyond one hop, this reds.
+    // ...and the blast radius is ZERO hops: a consumer's fragment reads its
+    // dependencies' shapes (`variable_dimensions`) and graphical-function
+    // tables (`variable_tables`) through tracked projections that backdate
+    // when the shape and the tables are unchanged, so an edit to `k`'s
+    // constant recompiles `k` and nothing that reads it.
     let mut k_edited = cache_probe_project(&[("independent", "11")], true);
     assert_eq!(
         k_edited.models[0].variables[0].get_ident(),
@@ -2424,9 +2418,9 @@ fn equation_only_edit_recompiles_only_the_edited_fragment() {
     let (_state4, k_execs) = resync_and_assemble(&mut db, &k_edited, Some(&state3));
     assert_eq!(
         explicit_execs(&k_execs),
-        vec!["k", "probe"],
-        "editing `k` recompiles `k` AND its one consumer `probe`, whose fragment \
-         reads `k`'s tables off its inputs; it must not reach any further"
+        vec!["k"],
+        "editing `k` recompiles `k` alone: its consumer `probe` reads `k`'s shape and \
+         tables through projections that backdate on an equation-only edit"
     );
 }
 
@@ -2455,17 +2449,17 @@ fn equation_only_edit_recompiles_only_the_edited_fragment() {
 fn implicit_and_ltm_fragment_cache_granularity() {
     use salsa::Setter;
 
-    let project_with = |smoothed_input: &str, unrelated: &str| {
+    let project_with = |smoothed_input: &str, unrelated: &str, delay: &str| {
         TestProject::new("frag_cache_implicit")
             .with_sim_time(0.0, 1.0, 1.0)
             .scalar_aux("src", smoothed_input)
-            .scalar_aux("smoothed", "SMTH1(src, 2)")
+            .scalar_aux("smoothed", &format!("SMTH1(src, {delay})"))
             .scalar_aux("unrelated", unrelated)
             .build_datamodel()
     };
 
     let mut db = SimlinDb::default();
-    let base = project_with("3", "1");
+    let base = project_with("3", "1", "2");
     let state1 = sync_from_datamodel_incremental(&mut db, &base, None);
     assemble_simulation(&db, state1.to_sync_result().project, "main".to_string())
         .expect("priming assemble");
@@ -2478,7 +2472,7 @@ fn implicit_and_ltm_fragment_cache_granularity() {
     );
 
     // Edit a variable the SMTH1 helper does not read.
-    let edited = project_with("3", "2");
+    let edited = project_with("3", "2", "2");
     let (state3, execs) = resync_and_assemble(&mut db, &edited, Some(&state2));
     assert_eq!(
         explicit_execs(&execs),
@@ -2498,19 +2492,18 @@ fn implicit_and_ltm_fragment_cache_granularity() {
          helper, so its granularity is the helper's, not `assemble_module`'s"
     );
 
-    // The complement, so the assertion above cannot pass by the query having
-    // become unreachable: editing a variable a helper DOES read must still
-    // recompile it.
-    //
-    // Only ONE of the two helpers reads `src`, and which one is a property of
-    // `builtins_visitor`'s synthesis rather than of this cache: an argument
-    // that is already a bare `Var` is passed through by name and gets no helper
-    // at all, so `SMTH1(src, 2)` synthesizes `⁚arg1` for the literal `2` and
-    // wires `src` straight into the `⁚smth1` module instance. The granularity
-    // is therefore per HELPER, not per parent variable -- editing `src` leaves
-    // the constant-capture helper's fragment cached.
-    let src_edited = project_with("5", "2");
-    let (_state4, src_execs) = resync_and_assemble(&mut db, &src_edited, Some(&state3));
+    // A helper's fragment reads its dependencies' SHAPES and TABLES, both
+    // through projections that backdate on an equation-only edit, so editing
+    // `src`'s constant recompiles `src` alone: the `⁚smth1` instance that
+    // wires `src` into its input port names it by `VarRef` and emits the same
+    // bytecode whatever `src` evaluates to.
+    let src_edited = project_with("5", "2", "2");
+    let (state4, src_execs) = resync_and_assemble(&mut db, &src_edited, Some(&state3));
+    assert_eq!(
+        explicit_execs(&src_execs),
+        vec!["src"],
+        "editing `src`'s constant recompiles `src` alone"
+    );
     let implicit_after_src: Vec<&str> = src_execs
         .iter()
         .filter(|(kind, _)| *kind == FragmentExecKind::Implicit)
@@ -2518,10 +2511,35 @@ fn implicit_and_ltm_fragment_cache_granularity() {
         .collect();
     assert_eq!(
         implicit_after_src,
-        vec!["smoothed#$\u{205A}smoothed\u{205A}0\u{205A}smth1"],
-        "editing `src` must still recompile the helper that reads it (a query \
-         that never re-executed would be a cache bug, not a cache win), and \
-         must NOT recompile `\u{205A}arg1`, which captures the literal `2`"
+        Vec::<&str>::new(),
+        "no helper's fragment reads `src`'s value"
+    );
+
+    // The complement, so the assertions above cannot pass by the query having
+    // become unreachable: an edit that changes a helper's BODY must recompile
+    // that helper, and only that one.
+    //
+    // Which helper is a property of `builtins_visitor`'s synthesis rather than
+    // of this cache: an argument that is already a bare `Var` is passed through
+    // by name and gets no helper at all, so `SMTH1(src, 2)` synthesizes `⁚arg1`
+    // for the literal `2` and wires `src` straight into the `⁚smth1` module
+    // instance. Editing the literal re-parses `smoothed` and changes `⁚arg1`'s
+    // body; the instance's wiring is unchanged, so its lowering backdates and
+    // its fragment stays cached. The granularity is therefore per HELPER, not
+    // per parent variable.
+    let delay_edited = project_with("5", "2", "3");
+    let (_state5, delay_execs) = resync_and_assemble(&mut db, &delay_edited, Some(&state4));
+    let implicit_after_delay: Vec<&str> = delay_execs
+        .iter()
+        .filter(|(kind, _)| *kind == FragmentExecKind::Implicit)
+        .map(|(_, name)| name.as_str())
+        .collect();
+    assert_eq!(
+        implicit_after_delay,
+        vec!["smoothed#$\u{205A}smoothed\u{205A}0\u{205A}arg1"],
+        "editing the literal argument recompiles the helper that captures it (a \
+         query that never re-executed would be a cache bug, not a cache win), and \
+         must NOT recompile the `\u{205A}smth1` instance, whose wiring is unchanged"
     );
 
     // The LTM link fragments, on the same shape of edit.

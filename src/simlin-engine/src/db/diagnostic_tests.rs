@@ -3006,18 +3006,21 @@ fn variable_error_fields_are_the_lowering_channel() {
         .build_datamodel();
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &dm);
-    let stage0 = crate::db::model_stage0(&db, sync.models["main"].source, sync.project);
+    let parsed = |name: &str| {
+        &crate::db::parse_source_variable(
+            &db,
+            sync.models["main"].variables[name].source,
+            sync.project,
+        )
+        .variable
+    };
 
     assert!(
-        stage0.variables[&crate::common::Ident::new("bad_unit_var")]
-            .unit_errors()
-            .is_some(),
+        parsed("bad_unit_var").unit_errors().is_some(),
         "parsing must record the malformed unit string on the variable"
     );
     assert!(
-        stage0.variables[&crate::common::Ident::new("bad_eqn_var")]
-            .equation_errors()
-            .is_some(),
+        parsed("bad_eqn_var").equation_errors().is_some(),
         "parsing must record the equation syntax error on the variable"
     );
 
@@ -3048,18 +3051,20 @@ fn variable_error_fields_are_the_lowering_channel() {
         .build_datamodel();
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &dm);
-    let bad = crate::common::Ident::new("bad");
+    let bad = sync.models["main"].variables["bad"].source;
 
     assert!(
-        crate::db::model_stage0(&db, sync.models["main"].source, sync.project).variables[&bad]
+        crate::db::parse_source_variable(&db, bad, sync.project)
+            .variable
             .equation_errors()
             .is_none(),
         "the fixture must isolate a LOWERING error: parsing sees nothing wrong"
     );
-    let lowered_errors = crate::db::model_stage1(&db, sync.models["main"].source, sync.project)
-        .variables[&bad]
-        .equation_errors()
-        .expect("lowering must record the dimension mismatch on the variable");
+    let lowered_errors =
+        crate::db::lowered_source_variable(&db, bad, sync.models["main"].source, sync.project)
+            .variable
+            .equation_errors()
+            .expect("lowering must record the dimension mismatch on the variable");
     assert!(
         lowered_errors
             .iter()

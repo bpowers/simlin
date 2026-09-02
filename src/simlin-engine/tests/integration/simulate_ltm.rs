@@ -3531,8 +3531,9 @@ fn build_two_reducer_target_model(c: f64) -> simlin_engine::datamodel::Project {
 /// This also exercises the agg-node fragment dispatch in `compile_project_incremental`
 /// Pass 3: an `$⁚ltm⁚agg⁚n → scalar_target` link score has no bracket or shape
 /// suffix in its name, so the legacy `(from, to)`-keyed salsa fragment path used
-/// to claim it -- but that path `reconstruct_single_variable`s the synthetic agg
-/// name, gets `None`, and emits a degenerate equation that the agg name appears
+/// to claim it -- but that path resolves the synthetic agg name through
+/// `lowered_variable_by_name`, gets `None`, and emits a degenerate equation that
+/// the agg name appears
 /// nowhere in, collapsing the link score to zero. The fix routes any agg-node
 /// link score through `ltm_var.equation` directly.
 #[test]

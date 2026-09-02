@@ -2,14 +2,12 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::ast::{Ast, Expr0, Expr2, IndexExpr2};
+use crate::ast::{Expr0, Expr2, IndexExpr0, IndexExpr2, print_eqn};
 use crate::builtins::{BuiltinFn, UntypedBuiltinFn};
 use crate::canonicalize;
-use crate::common::{
-    Canonical, CanonicalElementName, Error, ErrorCode, ErrorKind, Ident, RawIdent, Result,
-};
+use crate::common::{Canonical, Error, ErrorCode, ErrorKind, Ident, RawIdent, Result};
 use crate::datamodel::{self, Variable};
-use std::collections::HashMap;
+use crate::lexer::LexerType;
 
 /// A patch to apply to a project. Contains project-level operations
 /// (like changing sim specs or adding models) and per-model patches
@@ -519,17 +517,6 @@ fn apply_rename_variable(
         return Ok(());
     }
 
-    // Use the salsa incremental path to parse and lower variables,
-    // giving us the ASTs needed for dependency-aware renaming.
-    let db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel(&db, project);
-    let source_model = sync
-        .models
-        .get(&*canonicalize(model_name))
-        .ok_or_else(|| Error::new(ErrorKind::Model, ErrorCode::BadModelName, None))?;
-    let compiled_vars =
-        crate::db::reconstruct_model_variables(&db, source_model.source, sync.project);
-
     let model = get_model_mut(project, model_name)?;
 
     if model.get_variable(new_ident.as_str()).is_some() {
@@ -553,7 +540,7 @@ fn apply_rename_variable(
         })
         .ok_or_else(|| Error::new(ErrorKind::Model, ErrorCode::DoesNotExist, None))?;
 
-    rename_model_equations(model, &compiled_vars, &old_ident, &new_ident);
+    rename_model_equations(model, &old_ident, &new_ident);
 
     if is_flow {
         update_stock_flow_references(model, &old_ident, &new_ident);
@@ -633,247 +620,162 @@ fn retarget_parent_module_dst(
     }
 }
 
+/// Rewrite every equation of `model` that references `old_ident`.
+///
+/// A rename is SYNTACTIC: each equation string is parsed as written
+/// (`Expr0::new`, the parser alone), renamed, and printed back, so what the
+/// user wrote is what comes back with one name changed. Neither compiler tier
+/// can do that: the parse memo's tree is the EXPANDED one -- a `SMTH1(x, 3)`
+/// is already an instance read and a `PREVIOUS(x + 1)` a capture, so printing
+/// it back would replace the call with the helper's name -- and the lowered
+/// tree is absent for an equation the compiler refuses, which would leave the
+/// old name in place and turn the refusal into an unknown dependency. A string
+/// that does not parse, or names nothing renamed, is left exactly as written
+/// (`patch::tests::rename_rewrites_an_equation_the_lowering_refuses`,
+/// `rename_keeps_a_module_function_call_as_written`).
 fn rename_model_equations(
     model: &mut datamodel::Model,
-    compiled_vars: &HashMap<Ident<Canonical>, crate::variable::Variable>,
     old_ident: &Ident<Canonical>,
     new_ident: &Ident<Canonical>,
 ) {
-    for datamodel_var in model.variables.iter_mut() {
-        let Some(compiled_var) = compiled_vars.get(&*canonicalize(datamodel_var.get_ident()))
-        else {
-            continue;
-        };
-
-        match datamodel_var {
-            Variable::Stock(stock) => {
-                rewrite_equation(
-                    &mut stock.equation,
-                    compiled_var.ast(),
-                    compiled_var.init_ast(),
-                    old_ident,
-                    new_ident,
-                );
-            }
+    for var in model.variables.iter_mut() {
+        match var {
+            Variable::Stock(stock) => rename_equation(&mut stock.equation, old_ident, new_ident),
             Variable::Flow(flow) => {
-                rewrite_equation(
-                    &mut flow.equation,
-                    compiled_var.ast(),
-                    compiled_var.init_ast(),
-                    old_ident,
-                    new_ident,
-                );
-                rewrite_compat_active_initial(
-                    &mut flow.compat,
-                    compiled_var.init_ast(),
-                    old_ident,
-                    new_ident,
-                );
+                rename_equation(&mut flow.equation, old_ident, new_ident);
+                rename_active_initial(&mut flow.compat, old_ident, new_ident);
             }
             Variable::Aux(aux) => {
-                rewrite_equation(
-                    &mut aux.equation,
-                    compiled_var.ast(),
-                    compiled_var.init_ast(),
-                    old_ident,
-                    new_ident,
-                );
-                rewrite_compat_active_initial(
-                    &mut aux.compat,
-                    compiled_var.init_ast(),
-                    old_ident,
-                    new_ident,
-                );
+                rename_equation(&mut aux.equation, old_ident, new_ident);
+                rename_active_initial(&mut aux.compat, old_ident, new_ident);
             }
-            Variable::Module(_module) => {}
+            Variable::Module(_) => {}
         }
     }
 }
 
-fn rewrite_equation(
+/// Every equation string a `datamodel::Equation` holds: the scalar or
+/// apply-to-all text, and an arrayed equation's per-element texts, per-element
+/// initial texts and default.
+fn rename_equation(
     equation: &mut datamodel::Equation,
-    ast: Option<&Ast<Expr2>>,
-    init_ast: Option<&Ast<Expr2>>,
     old_ident: &Ident<Canonical>,
     new_ident: &Ident<Canonical>,
 ) {
-    if let Some(ast) = ast {
-        let renamed = rename_ast(ast, old_ident, new_ident);
-        apply_ast_to_equation_main(equation, &renamed);
-    }
-
-    if let Some(init_ast) = init_ast {
-        let renamed = rename_ast(init_ast, old_ident, new_ident);
-        apply_ast_to_equation_initial(equation, &renamed);
-    }
-}
-
-fn apply_ast_to_equation_main(equation: &mut datamodel::Equation, ast: &Ast<Expr2>) {
-    match (equation, ast) {
-        (datamodel::Equation::Scalar(main), Ast::Scalar(expr)) => {
-            *main = expr2_to_string(expr);
+    match equation {
+        datamodel::Equation::Scalar(text) | datamodel::Equation::ApplyToAll(_, text) => {
+            rename_text(text, old_ident, new_ident);
         }
-        (datamodel::Equation::ApplyToAll(_, main), Ast::ApplyToAll(_, expr)) => {
-            *main = expr2_to_string(expr);
-        }
-        (
-            datamodel::Equation::Arrayed(_, elements, default_eq, _),
-            Ast::Arrayed(_, exprs, default_expr, _),
-        ) => {
-            for (element_name, equation, _, _) in elements.iter_mut() {
-                let canonical_element = CanonicalElementName::from_raw(element_name.as_str());
-                if let Some(expr) = exprs.get(&canonical_element) {
-                    *equation = expr2_to_string(expr);
+        datamodel::Equation::Arrayed(_, elements, default_eq, _) => {
+            for (_, text, initial, _) in elements.iter_mut() {
+                rename_text(text, old_ident, new_ident);
+                if let Some(initial) = initial.as_mut() {
+                    rename_text(initial, old_ident, new_ident);
                 }
             }
-            *default_eq = default_expr.as_ref().map(expr2_to_string);
-        }
-        _ => {}
-    }
-}
-
-fn apply_ast_to_equation_initial(equation: &mut datamodel::Equation, ast: &Ast<Expr2>) {
-    match (equation, ast) {
-        (datamodel::Equation::Scalar(_), Ast::Scalar(_)) => {
-            // active_initial now lives in Compat, not in Equation
-        }
-        (datamodel::Equation::ApplyToAll(_, _), Ast::ApplyToAll(_, _)) => {
-            // active_initial now lives in Compat, not in Equation
-        }
-        (datamodel::Equation::Arrayed(_, elements, _, _), Ast::Arrayed(_, exprs, _, _)) => {
-            for (element_name, _, initial, _) in elements.iter_mut() {
-                if let Some(initial_value) = initial.as_mut() {
-                    let canonical_element = CanonicalElementName::from_raw(element_name.as_str());
-                    if let Some(expr) = exprs.get(&canonical_element) {
-                        *initial_value = expr2_to_string(expr);
-                    }
-                }
+            if let Some(default_eq) = default_eq.as_mut() {
+                rename_text(default_eq, old_ident, new_ident);
             }
         }
-        _ => {}
     }
 }
 
-fn rewrite_compat_active_initial(
+fn rename_active_initial(
     compat: &mut datamodel::Compat,
-    init_ast: Option<&Ast<Expr2>>,
     old_ident: &Ident<Canonical>,
     new_ident: &Ident<Canonical>,
 ) {
-    if compat.active_initial.is_some()
-        && let Some(init_ast) = init_ast
-    {
-        let renamed = rename_ast(init_ast, old_ident, new_ident);
-        match &renamed {
-            Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => {
-                compat.active_initial = Some(expr2_to_string(expr));
-            }
-            Ast::Arrayed(_, _, _, _) => {}
-        }
+    if let Some(text) = compat.active_initial.as_mut() {
+        rename_text(text, old_ident, new_ident);
     }
 }
 
-fn rename_ast(
-    ast: &Ast<Expr2>,
-    old_ident: &Ident<Canonical>,
-    new_ident: &Ident<Canonical>,
-) -> Ast<Expr2> {
-    match ast {
-        Ast::Scalar(expr) => Ast::Scalar(rename_expr(expr, old_ident, new_ident)),
-        Ast::ApplyToAll(dims, expr) => {
-            Ast::ApplyToAll(dims.clone(), rename_expr(expr, old_ident, new_ident))
-        }
-        Ast::Arrayed(dims, elements, default_expr, apply_default_to_missing) => {
-            let rewritten = elements
-                .iter()
-                .map(|(name, expr)| (name.clone(), rename_expr(expr, old_ident, new_ident)))
-                .collect();
-            let rewritten_default = default_expr
-                .as_ref()
-                .map(|expr| rename_expr(expr, old_ident, new_ident));
-            Ast::Arrayed(
-                dims.clone(),
-                rewritten,
-                rewritten_default,
-                *apply_default_to_missing,
-            )
-        }
+/// One equation string: parsed as written, renamed, and printed back only if
+/// a reference changed. An empty or unparseable string is left as it is; the
+/// parse errors are the variable's own diagnostics, reported by the compile.
+fn rename_text(text: &mut String, old_ident: &Ident<Canonical>, new_ident: &Ident<Canonical>) {
+    let Ok(Some(expr)) = Expr0::new(text, LexerType::Equation) else {
+        return;
+    };
+    let renamed = rename_expr(&expr, old_ident, new_ident);
+    if renamed != expr {
+        *text = print_eqn(&renamed);
     }
 }
 
-fn rename_expr(expr: &Expr2, old_ident: &Ident<Canonical>, new_ident: &Ident<Canonical>) -> Expr2 {
+fn rename_expr(expr: &Expr0, old_ident: &Ident<Canonical>, new_ident: &Ident<Canonical>) -> Expr0 {
     match expr {
-        Expr2::Const(text, value, loc) => Expr2::Const(text.clone(), *value, *loc),
-        Expr2::Var(ident, bounds, loc) => Expr2::Var(
-            rename_canonical_ident(ident, old_ident, new_ident),
-            bounds.clone(),
+        Expr0::Const(..) => expr.clone(),
+        Expr0::Var(ident, loc) => Expr0::Var(rename_raw_ident(ident, old_ident, new_ident), *loc),
+        // Every argument is an expression, a bare variable reference included
+        // (`isModuleInput(x)`), so one walk covers every builtin.
+        Expr0::App(UntypedBuiltinFn(name, args), loc) => Expr0::App(
+            UntypedBuiltinFn(
+                name.clone(),
+                args.iter()
+                    .map(|arg| rename_expr(arg, old_ident, new_ident))
+                    .collect(),
+            ),
             *loc,
         ),
-        Expr2::App(builtin, bounds, loc) => Expr2::App(
-            rename_builtin(builtin, old_ident, new_ident),
-            bounds.clone(),
-            *loc,
-        ),
-        Expr2::Subscript(ident, indexes, bounds, loc) => Expr2::Subscript(
-            rename_canonical_ident(ident, old_ident, new_ident),
+        Expr0::Subscript(ident, indexes, loc) => Expr0::Subscript(
+            rename_raw_ident(ident, old_ident, new_ident),
             indexes
                 .iter()
                 .map(|idx| rename_index_expr(idx, old_ident, new_ident))
                 .collect(),
-            bounds.clone(),
             *loc,
         ),
-        Expr2::Op1(op, rhs, bounds, loc) => Expr2::Op1(
-            *op,
-            Box::new(rename_expr(rhs, old_ident, new_ident)),
-            bounds.clone(),
-            *loc,
-        ),
-        Expr2::Op2(op, lhs, rhs, bounds, loc) => Expr2::Op2(
+        Expr0::Op1(op, rhs, loc) => {
+            Expr0::Op1(*op, Box::new(rename_expr(rhs, old_ident, new_ident)), *loc)
+        }
+        Expr0::Op2(op, lhs, rhs, loc) => Expr0::Op2(
             *op,
             Box::new(rename_expr(lhs, old_ident, new_ident)),
             Box::new(rename_expr(rhs, old_ident, new_ident)),
-            bounds.clone(),
             *loc,
         ),
-        Expr2::If(cond, then_branch, else_branch, bounds, loc) => Expr2::If(
+        Expr0::If(cond, then_branch, else_branch, loc) => Expr0::If(
             Box::new(rename_expr(cond, old_ident, new_ident)),
             Box::new(rename_expr(then_branch, old_ident, new_ident)),
             Box::new(rename_expr(else_branch, old_ident, new_ident)),
-            bounds.clone(),
             *loc,
         ),
     }
 }
 
-fn rename_builtin(
-    builtin: &BuiltinFn<Expr2>,
-    old_ident: &Ident<Canonical>,
-    new_ident: &Ident<Canonical>,
-) -> BuiltinFn<Expr2> {
-    let mut renamed = builtin.map_ref(|expr| rename_expr(expr, old_ident, new_ident));
-    // The identifier payload is a reference to a variable too.
-    if let BuiltinFn::IsModuleInput(ident, _) = &mut renamed {
-        *ident = rename_identifier_string(ident, old_ident, new_ident);
-    }
-    renamed
-}
-
 fn rename_index_expr(
-    index: &IndexExpr2,
+    index: &IndexExpr0,
     old_ident: &Ident<Canonical>,
     new_ident: &Ident<Canonical>,
-) -> IndexExpr2 {
+) -> IndexExpr0 {
     match index {
-        IndexExpr2::Wildcard(loc) => IndexExpr2::Wildcard(*loc),
-        IndexExpr2::StarRange(dim, loc) => IndexExpr2::StarRange(dim.clone(), *loc),
-        IndexExpr2::Range(lhs, rhs, loc) => IndexExpr2::Range(
+        IndexExpr0::Wildcard(_) | IndexExpr0::StarRange(_, _) | IndexExpr0::DimPosition(_, _) => {
+            index.clone()
+        }
+        IndexExpr0::Range(lhs, rhs, loc) => IndexExpr0::Range(
             rename_expr(lhs, old_ident, new_ident),
             rename_expr(rhs, old_ident, new_ident),
             *loc,
         ),
-        IndexExpr2::DimPosition(pos, loc) => IndexExpr2::DimPosition(*pos, *loc),
-        IndexExpr2::Expr(expr) => IndexExpr2::Expr(rename_expr(expr, old_ident, new_ident)),
+        IndexExpr0::Expr(expr) => IndexExpr0::Expr(rename_expr(expr, old_ident, new_ident)),
+    }
+}
+
+/// A reference as written, renamed through the canonical rule
+/// (`rename_canonical_ident`); a reference the rule leaves alone keeps the
+/// user's spelling.
+fn rename_raw_ident(
+    ident: &RawIdent,
+    old_ident: &Ident<Canonical>,
+    new_ident: &Ident<Canonical>,
+) -> RawIdent {
+    let canonical = ident.canonicalize();
+    let renamed = rename_canonical_ident(&canonical, old_ident, new_ident);
+    if renamed == canonical {
+        ident.clone()
+    } else {
+        RawIdent::new(renamed.to_source_repr())
     }
 }
 
@@ -961,16 +863,6 @@ fn rename_canonical_ident(
     }
 
     ident.clone()
-}
-
-fn rename_identifier_string(
-    ident: &str,
-    old_ident: &Ident<Canonical>,
-    new_ident: &Ident<Canonical>,
-) -> String {
-    let canonical = Ident::new(ident);
-    let renamed = rename_canonical_ident(&canonical, old_ident, new_ident);
-    renamed.as_str().to_string()
 }
 
 fn rename_module_references(
@@ -1527,6 +1419,187 @@ mod tests {
         assert!(model.get_variable("foo").is_none());
     }
 
+    /// A rename is syntactic: every equation that parses is rewritten, whether
+    /// or not it lowers. `bad = a + b` mismatches its axes (`a[d]`, `b[p]`),
+    /// which the compiler refuses; renaming `a` must still rewrite it, or the
+    /// stale name turns the refusal into an `unknown_dependency` on a product
+    /// surface (MCP `edit_model`, libsimlin `apply_patch`). An equation that
+    /// does not parse is left as written.
+    #[test]
+    fn rename_rewrites_an_equation_the_lowering_refuses() {
+        let mut project = TestProject::new("test")
+            .named_dimension("d", &["d1", "d2"])
+            .named_dimension("p", &["p1", "p2"])
+            .array_aux("a[d]", "1")
+            .array_aux("b[p]", "2")
+            .aux("bad", "a + b", None)
+            .aux("good", "SUM(a) * 2", None)
+            .aux("unparsed", "a +", None)
+            .build_datamodel();
+
+        apply_patch(
+            &mut project,
+            ProjectPatch {
+                project_ops: vec![],
+                models: vec![ModelPatch {
+                    name: "main".to_string(),
+                    ops: vec![ModelOperation::RenameVariable {
+                        from: "a".to_string(),
+                        to: "aa".to_string(),
+                    }],
+                }],
+            },
+        )
+        .unwrap();
+        let model = project.get_model("main").unwrap();
+        let scalar = |name: &str| match model.get_variable(name).unwrap() {
+            Variable::Aux(aux) => match &aux.equation {
+                datamodel::Equation::Scalar(eqn) => eqn.clone(),
+                _ => panic!("{name}: expected a scalar equation"),
+            },
+            _ => panic!("{name}: expected an aux"),
+        };
+        assert_eq!(scalar("bad"), "aa + b", "a mismatched equation is renamed");
+        // A builtin's name is lowercased by the parser (`parser/mod.rs`), so the
+        // printer has only that form on either tier.
+        assert_eq!(
+            scalar("good"),
+            "sum(aa) * 2",
+            "a compiling equation is renamed"
+        );
+        assert_eq!(
+            scalar("unparsed"),
+            "a +",
+            "an unparseable equation is left as written"
+        );
+        assert!(model.get_variable("aa").is_some());
+    }
+
+    /// An arrayed equation is renamed string by string: every per-element
+    /// text, every per-element initial and the EXCEPT default, in place, with
+    /// the elements and the `except` flag kept.
+    #[test]
+    fn rename_renames_an_arrayed_equations_elements_initials_and_default() {
+        let mut project = TestProject::new("test")
+            .named_dimension("d", &["d1", "d2", "d3"])
+            .aux("k", "1", None)
+            .build_datamodel();
+        project.models[0]
+            .variables
+            .push(Variable::Aux(datamodel::Aux {
+                ident: "arr".to_string(),
+                equation: datamodel::Equation::Arrayed(
+                    vec!["d".to_string()],
+                    vec![
+                        (
+                            "d1".to_string(),
+                            "k * 2".to_string(),
+                            Some("k + 1".to_string()),
+                            None,
+                        ),
+                        ("d2".to_string(), "5".to_string(), None, None),
+                    ],
+                    Some("k * 3".to_string()),
+                    true,
+                ),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }));
+
+        apply_patch(
+            &mut project,
+            ProjectPatch {
+                project_ops: vec![],
+                models: vec![ModelPatch {
+                    name: "main".to_string(),
+                    ops: vec![ModelOperation::RenameVariable {
+                        from: "k".to_string(),
+                        to: "kk".to_string(),
+                    }],
+                }],
+            },
+        )
+        .unwrap();
+
+        let model = project.get_model("main").unwrap();
+        let Variable::Aux(arr) = model.get_variable("arr").unwrap() else {
+            panic!("expected an aux");
+        };
+        let datamodel::Equation::Arrayed(dims, elements, default, except) = &arr.equation else {
+            panic!("expected an arrayed equation");
+        };
+        assert_eq!(dims, &["d".to_string()]);
+        assert_eq!(elements.len(), 2);
+        assert_eq!(elements[0].0, "d1");
+        assert_eq!(elements[0].1, "kk * 2", "the element's text is renamed");
+        assert_eq!(
+            elements[0].2.as_deref(),
+            Some("kk + 1"),
+            "the element's initial is renamed"
+        );
+        assert!(elements[0].3.is_none());
+        assert_eq!(elements[1].0, "d2");
+        assert_eq!(
+            elements[1].1, "5",
+            "an element naming nothing renamed is as written"
+        );
+        assert_eq!(elements[1].2, None);
+        assert_eq!(
+            default.as_deref(),
+            Some("kk * 3"),
+            "the EXCEPT default is renamed in place"
+        );
+        assert!(*except, "the EXCEPT flag is kept");
+    }
+
+    /// A module-function call and a snapshot argument are the user's text, not
+    /// the instance read and the capture the parse rewrites them into: a
+    /// rename rewrites the argument and keeps the call (in the parser's
+    /// lowercase spelling of the builtin's name).
+    #[test]
+    fn rename_keeps_a_module_function_call_as_written() {
+        let mut project = TestProject::new("test")
+            .aux("x", "1", None)
+            .aux("y", "SMTH1(x, 3)", None)
+            .aux("z", "PREVIOUS(x + 1) + INIT(x * 2)", None)
+            .aux("untouched", "SMTH1(y, 2)", None)
+            .build_datamodel();
+
+        apply_patch(
+            &mut project,
+            ProjectPatch {
+                project_ops: vec![],
+                models: vec![ModelPatch {
+                    name: "main".to_string(),
+                    ops: vec![ModelOperation::RenameVariable {
+                        from: "x".to_string(),
+                        to: "w".to_string(),
+                    }],
+                }],
+            },
+        )
+        .unwrap();
+        let model = project.get_model("main").unwrap();
+        let scalar = |name: &str| match model.get_variable(name).unwrap() {
+            Variable::Aux(aux) => match &aux.equation {
+                datamodel::Equation::Scalar(eqn) => eqn.clone(),
+                _ => panic!("{name}: expected a scalar equation"),
+            },
+            _ => panic!("{name}: expected an aux"),
+        };
+        assert_eq!(scalar("y"), "smth1(w, 3)");
+        assert_eq!(scalar("z"), "previous(w + 1) + init(w * 2)");
+        assert_eq!(
+            scalar("untouched"),
+            "SMTH1(y, 2)",
+            "an equation naming nothing renamed is left exactly as written"
+        );
+    }
+
     #[test]
     fn rename_self_qualified_references() {
         let mut project = TestProject::new("test")
@@ -1647,36 +1720,6 @@ mod tests {
                 _ => panic!("expected arrayed equation"),
             },
             _ => panic!("expected auxiliary variable"),
-        }
-    }
-
-    #[test]
-    fn apply_ast_to_arrayed_equation_clears_default_when_missing() {
-        let mut equation = datamodel::Equation::Arrayed(
-            vec!["region".to_string()],
-            vec![("north".to_string(), "old".to_string(), None, None)],
-            Some("legacy_default".to_string()),
-            true,
-        );
-        let mut exprs = std::collections::HashMap::new();
-        exprs.insert(
-            CanonicalElementName::from_raw("north"),
-            Expr2::Const(
-                "2".to_string(),
-                crate::ast::Literal::new(2.0),
-                crate::ast::Loc::default(),
-            ),
-        );
-        let ast = Ast::Arrayed(vec![], exprs, None, false);
-
-        apply_ast_to_equation_main(&mut equation, &ast);
-
-        match equation {
-            datamodel::Equation::Arrayed(_, elements, default_eq, _) => {
-                assert_eq!(elements[0].1, "2");
-                assert_eq!(default_eq, None);
-            }
-            _ => panic!("expected arrayed equation"),
         }
     }
 

@@ -5307,7 +5307,7 @@ mod cross_module_array_reference_tests {
     /// resolve the wildcard.
     ///
     /// It did not, so `SUM(m.arr[*])` -- the ordinary way to reduce over a
-    /// sub-model's arrayed output, and the shape `db::stages_tests`'
+    /// sub-model's arrayed output, and the shape `db::units_tests`'
     /// `arrayed_module_project` fixture is built from -- was rejected as
     /// `CantSubscriptScalar` and the whole variable failed to compile. That
     /// fixture never noticed because it stops at Stage1 lowering, which uses

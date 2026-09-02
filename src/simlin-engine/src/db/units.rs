@@ -4,28 +4,28 @@
 
 // pattern: Imperative Shell
 //
-// Salsa-tracked unit-checking orchestration: it reads the cached
-// ModelStage0/ModelStage1 representations (`db::stages`), runs the pure unit
+// Salsa-tracked unit-checking orchestration: it assembles each scope model's
+// `UnitModel` view over the per-variable lowering memos, runs the pure unit
 // inference (`units_infer`) and consistency checking (`units_check`) cores,
 // and accumulates the resulting diagnostics. The dimensional-analysis logic
 // itself is the Functional Core in `units.rs`/`units_infer.rs`/`units_check.rs`;
 // this module only wires it into the salsa graph.
 //
-// It constructs no model stage of its own -- `db::stages` owns that. The one
-// lowering it performs is per expression: `check_conveyor_param_units` parses
-// and lowers its synthetic `<len>`/`<capacity>`/`<in_limit>`/leak-fraction
-// auxes one at a time under the model's variable shapes (the scope
-// `db::stages::model_stage1` lowers the model's own variables under) and
-// unit-checks each against the cached lowered stage. Those auxes exist only to
-// be unit-checked, so they never enter a cached stage, where they would feed
-// their constraints into every other reader of that memo -- inference and the
-// ordinary unit check included.
+// The one lowering it performs is per expression: `check_conveyor_param_units`
+// parses and lowers its synthetic `<len>`/`<capacity>`/`<in_limit>`/leak-
+// fraction auxes one at a time under the model's variable shapes and
+// unit-checks each against the model's `UnitModel`. Those auxes exist only to
+// be unit-checked, so they never enter a memo, where they would feed their
+// constraints into every other reader -- inference and the ordinary unit
+// check included.
 
 //! Per-model unit inference and checking as a salsa-tracked query.
 //!
 //! `check_model_units` is the single salsa-tracked entry point that runs unit
 //! inference + consistency checking for one model and accumulates unit
-//! warnings. It is invoked by `db::model_all_diagnostics`.
+//! warnings. It is invoked by `db::model_all_diagnostics`. The pass reads a
+//! SCOPE, not the project: [`model_scope_models`] is the model plus the models
+//! it can reach through module instantiation, the map inference runs over.
 //!
 //! Stdlib and macro-marked models are skipped: both are generic templates
 //! whose formal parameters are unitless, so checking them in isolation only
@@ -37,17 +37,20 @@
 //! per-file line cap (`scripts/lint-project.sh` rule 2);
 //! `db::model_all_diagnostics` reaches it via `crate::db::units::...`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use salsa::Accumulator;
 
 use crate::common::{Canonical, Ident};
 use crate::datamodel;
+use crate::db::var_fragment::{implicit_dep_shape, source_dep_shape};
 use crate::db::{
     CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceModel,
-    SourceProject, SourceVariable, model_scope_models, model_stage0, model_stage1,
-    project_dimensions_context, project_units_context, source_model_is_stdlib,
+    SourceProject, SourceVariable, SourceVariableKind, model_implicit_var_info,
+    model_lowered_variables, project_dimensions_context, project_units_context,
+    source_model_is_stdlib,
 };
+use crate::units_check::UnitModel;
 
 /// Collect the identifiers that must share units because they sit in the
 /// "value branches" of an `if isModuleInput(x) then x else y` conditional.
@@ -159,46 +162,122 @@ fn init_value_equivalence_group(
     out
 }
 
+/// The models `model`'s unit inference can reach: itself, plus the transitive
+/// closure of the models its module variables instantiate. Keyed by canonical
+/// model name, valued by the project's handle for that name.
+///
+/// This is the SCOPE of `check_model_units`' inference map, and it is
+/// narrower than the project on purpose: a unit check that read every model
+/// would depend on every model's lowered variables, so any edit anywhere would
+/// re-run every unit check. The closure is a SUPERSET of what its consumers
+/// can consult: `units_infer::gen_all_constraints` follows `model_name` edges
+/// into module targets (declining a back edge already on its
+/// `InstantiationPath`), and `check_model_units`' stdlib-argument check looks a
+/// module's target up by name. Both follow `model_name` edges and nothing
+/// else, which is what the walk below follows.
+///
+/// Implicit modules are IN, and that is load bearing: the edges come from the
+/// explicit `Module` variables AND from `model_implicit_var_info`'s module
+/// entries -- the SMOOTH/DELAY/TREND and macro-call instances builtin expansion
+/// synthesized. `db::project_module_graph` deliberately omits those (it only
+/// needs the edges that can close a user cycle), so it is the wrong source
+/// here: a macro call expands into a module targeting the macro's own model,
+/// and `units_infer` binds the call's argument units to that model's
+/// parameters by recursing through the edge -- dropping it drops the
+/// constraint and, with it, the diagnostic. Stdlib templates are in the
+/// closure on the same rule: a model that instantiates `smth1` gets exactly
+/// `stdlib⁚smth1`, and one that instantiates none gets no template.
+///
+/// The walk is an iterative worklist over a visited set, NOT a recursive
+/// tracked query: `a` instantiating `b` and `b` instantiating `a` is a project
+/// a user can draw, and a recursive salsa query on that graph is an
+/// unrecoverable dependency-graph panic rather than a diagnostic (GH #806). A
+/// model inside a cycle yields its full REACHABLE set. The walk reads only
+/// names -- variable kinds and target model names -- so an equation edit that
+/// synthesizes no new instance backdates it.
+#[salsa::tracked(returns(ref))]
+pub(crate) fn model_scope_models(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> BTreeMap<Ident<Canonical>, SourceModel> {
+    let project_models = project.models(db);
+    let root_ident: Ident<Canonical> = Ident::new(model.name(db));
+
+    let mut scope: BTreeMap<Ident<Canonical>, SourceModel> = BTreeMap::new();
+    if let Some(src_model) = project_models.get(root_ident.as_str()) {
+        scope.insert(root_ident.clone(), *src_model);
+    }
+
+    // The root is walked through the handle the CALLER passed, not through the
+    // project's entry for its name: a renamed-or-deleted model's handle outlives
+    // its place in that map (`PersistentSyncState` threads handles across syncs),
+    // and its own module targets are still what its unit check consults.
+    let mut visited: BTreeSet<Ident<Canonical>> = [root_ident].into_iter().collect();
+    let mut queue: Vec<SourceModel> = vec![model];
+    while let Some(src_model) = queue.pop() {
+        let mut targets: BTreeSet<Ident<Canonical>> = src_model
+            .variables(db)
+            .values()
+            .filter(|sv| sv.kind(db) == SourceVariableKind::Module)
+            .map(|sv| Ident::new(sv.model_name(db)))
+            .collect();
+        targets.extend(
+            model_implicit_var_info(db, src_model, project)
+                .values()
+                .filter(|meta| meta.is_module)
+                .filter_map(|meta| meta.model_name.as_deref())
+                .map(Ident::new),
+        );
+        for target in targets {
+            if !visited.insert(target.clone()) {
+                continue;
+            }
+            if let Some(next) = project_models.get(target.as_str()) {
+                scope.insert(target.clone(), *next);
+                queue.push(*next);
+            }
+        }
+    }
+
+    scope
+}
+
+/// One model as the unit pass reads it: its lowered variables
+/// (`model_lowered_variables`, the handle map shared with the LTM describers)
+/// plus the model-level facts inference needs. Built on the stack, per unit
+/// check and per scope model; it owns no lowered tree.
+pub(crate) fn unit_model(db: &dyn Db, model: SourceModel, project: SourceProject) -> UnitModel {
+    let macro_spec = model.macro_spec(db);
+    UnitModel {
+        name: Ident::new(model.name(db)),
+        variables: model_lowered_variables(db, model, project),
+        is_macro: macro_spec.is_some(),
+        macro_params: macro_spec
+            .as_ref()
+            .map(|spec| spec.parameters.iter().map(|p| Ident::new(p)).collect())
+            .unwrap_or_default(),
+    }
+}
+
 /// Per-model tracked function that performs unit inference and checking,
 /// accumulating unit warnings/errors through the salsa accumulator.
 ///
-/// Reads the salsa-cached `ModelStage1` (`db::stages`) of every model in this
-/// one's module-reachable scope, then runs the same unit inference and checking
-/// pipeline as the old `run_default_model_checks` callback. Unit mismatches are
-/// accumulated as DiagnosticSeverity::Warning to match the old-path behavior
-/// where unit issues don't block simulation.
-///
-/// This function used to BUILD both stages for every project model on every
-/// call, so collecting a project's diagnostics was quadratic in the model count
-/// (GH #966). It then read the cached queries for every project model, which
-/// fixed the builds but left the reads quadratic and, worse, made this check
-/// depend on every model in the project -- so any edit anywhere re-ran every
-/// model's unit check. It now reads `db::model_scope_models`: this model plus the
-/// models it can reach through module instantiation, which is exactly what
-/// `units_infer` can consult (`self.models.get(model_name)`, for module targets,
-/// recursing along the same edges) plus what the stdlib-argument check below
-/// looks up (this model's own direct module targets).
+/// Reads the `UnitModel` view of every model in this one's module-reachable
+/// scope ([`model_scope_models`]), then runs unit inference and consistency
+/// checking over the target. Unit mismatches are accumulated as
+/// `DiagnosticSeverity::Warning`: unit issues do not block simulation.
 ///
 /// Stdlib (implicit) models are skipped because they are generic
-/// templates that only make sense when instantiated with specific inputs.
+/// templates that only make sense when instantiated with concrete inputs.
 #[salsa::tracked]
 pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject) {
     use crate::common::{ErrorCode, ErrorKind};
-    use crate::model::ModelStage1;
-
-    #[cfg(test)]
-    crate::db::stages::note_unit_check_execution();
 
     // Skip stdlib models -- they are generic and unit checking doesn't
-    // apply until instantiated with concrete inputs.
-    //
-    // The test is `db::stages`', shared rather than re-spelled here (GH #988).
-    // This gate used to accept the bare `stdlib\u{205A}` prefix while the stage
-    // query additionally required the suffix to name a real stdlib model, so
-    // the two disagreed about an imported `stdlib\u{205A}<unknown>` model: it
-    // was skipped here but staged as a user model there. The strict rule is the
-    // right one for both -- such a model is a user model, and this gate exists
-    // to skip generic templates, which it is not -- so it is now unit-checked.
+    // apply until instantiated with concrete inputs. The gate is the crate's
+    // one stdlib predicate (GH #988): a model carrying the prefix but an
+    // unknown suffix is a user model, and IS unit-checked.
     if source_model_is_stdlib(db, model) {
         return;
     }
@@ -215,41 +294,34 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
     let model_name = model.name(db).clone();
     let units_ctx = project_units_context(db, project);
 
-    // Read the lowered stage of every model in this one's module-reachable
-    // scope, so that cross-module unit inference constraints (module
-    // inputs/outputs) can resolve submodel variable types. A stdlib model is in
-    // the map when this model instantiates one, on the same rule as any other
-    // module target.
+    // The view of every model in this one's module-reachable scope, so that
+    // cross-module unit inference constraints (module inputs/outputs) can
+    // resolve submodel variable types. A stdlib model is in the map when this
+    // model instantiates one, on the same rule as any other module target.
     //
-    // The map is built from `model_scope_models`' resolved handles WITHOUT the
-    // self-entry repair `model_scope_stage0` performs, because the lookup below
-    // depends on the difference. Be precise about what that difference is: what
-    // can be missing is the NAME, not this handle. `model_scope_models` seeds the
-    // scope with `project.models(db)`'s entry for the root's canonical name
-    // whenever the project holds that name, so
+    // What can be missing from the map is the NAME, not this handle:
+    // `model_scope_models` seeds the scope with `project.models(db)`'s entry
+    // for the root's canonical name whenever the project holds that name, so
     //
-    //   - the name is absent only when the project holds NO model under it (this
-    //     handle was renamed or deleted while a caller kept it), and the lookup
-    //     below then returns `None` -- the signal that there is nothing to check;
+    //   - the name is absent only when the project holds NO model under it
+    //     (this handle was renamed or deleted while a caller kept it), and the
+    //     lookup below then returns `None` -- the signal that there is nothing
+    //     to check;
     //   - if a DIFFERENT handle occupies the name, the map holds that other
-    //     model's Stage1 and `target_model` is that model, not this one.
-    //
-    // Both behaviours predate the scope narrowing -- the whole-project map was
-    // keyed the same way -- and neither is changed by it.
-    let models_s1: HashMap<Ident<Canonical>, &ModelStage1> = model_scope_models(db, model, project)
+    //     model's view and `target_model` is that model, not this one.
+    let models: HashMap<Ident<Canonical>, UnitModel> = model_scope_models(db, model, project)
         .values()
         .map(|src_model| {
-            let s1 = model_stage1(db, *src_model, project);
-            (s1.name.clone(), s1)
+            let view = unit_model(db, *src_model, project);
+            (view.name.clone(), view)
         })
         .collect();
 
-    // Find the target model in the lowered map. A `SourceModel` whose canonical
-    // name the project no longer holds has nothing to check here.
+    // Find the target model in the map. A `SourceModel` whose canonical name
+    // the project no longer holds has nothing to check here.
     let target_ident = Ident::<Canonical>::new(&model_name);
-    let target_model = match models_s1.get(&target_ident) {
-        Some(m) => *m,
-        None => return,
+    let Some(target_model) = models.get(&target_ident) else {
+        return;
     };
 
     // Check whether the model declares units on any variable. If not,
@@ -271,7 +343,7 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
     // produce hundreds of internal constraint contradictions, and emitting one
     // warning each would flood the report. The full conflict list remains
     // available on the `InferenceResult` for callers that want it.
-    let inference = crate::units_infer::infer(&models_s1, units_ctx, target_model);
+    let inference = crate::units_infer::infer(&models, units_ctx, target_model);
     if has_declared_units && !inference.conflicts.is_empty() {
         // The diagnostic detail is user-facing (it reaches the GUI's error
         // panel): a plain-language sentence naming the involved variables,
@@ -334,9 +406,8 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
                 if !sub_model_name.as_str().starts_with("stdlib\u{205A}") {
                     continue;
                 }
-                let submodel = match models_s1.get(sub_model_name) {
-                    Some(m) => m,
-                    None => continue,
+                let Some(submodel) = models.get(sub_model_name) else {
+                    continue;
                 };
                 // Find groups of inputs that must have compatible units.
                 //
@@ -476,13 +547,13 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
 /// error, so the model still simulates through `queue_compile::build_vm`.
 ///
 /// A conveyor's `<len>`/`<capacity>`/`<in_limit>` and its leak flows' fractions
-/// are expression STRINGS on the stock/flow `datamodel::Compat`, not
-/// `ModelStage1` variables, so they must be parsed and lowered here to be
-/// unit-checked. We synthesize one hidden aux per parameter expression, lower
-/// each under the target model's variable shapes (so their variable references
-/// resolve to real declared-or-inferred units), then compare each computed unit
-/// against the unit the block position requires, with the conveyor stock's
-/// declared units `S` and the model time unit `t`:
+/// are expression STRINGS on the stock/flow `datamodel::Compat`, not variables
+/// of the model, so they must be parsed and lowered here to be unit-checked. We
+/// synthesize one hidden aux per parameter expression, lower each under the
+/// model's variable shapes (so their variable references resolve to real
+/// declared-or-inferred units), then compare each computed unit against the
+/// unit the block position requires, with the conveyor stock's declared units
+/// `S` and the model time unit `t`:
 ///
 ///   - `<len>`      : `t`   (transit time)
 ///   - `<capacity>` : `S`   (max material on the belt)
@@ -501,7 +572,7 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
 /// "unknown units are skipped" rule elsewhere in unit checking. Likewise a
 /// parameter whose expression reads a variable with unknown units is skipped
 /// (a `DoesNotExist` verdict), never reported as a mismatch.
-// The lowered target model, its model name and the inferred-units map are all
+// The target model's view, its model name and the inferred-units map are all
 // already resolved by the single caller (`check_model_units`), so they are
 // passed rather than re-derived. The model's variable shapes and the dimension
 // context are read here instead, ONCE, and only past the early return below: a
@@ -512,7 +583,7 @@ fn check_conveyor_param_units(
     model: SourceModel,
     project: SourceProject,
     model_name: &str,
-    target_model: &crate::model::ModelStage1,
+    target_model: &UnitModel,
     units_ctx: &crate::units::Context,
     inferred_units: &HashMap<Ident<Canonical>, crate::datamodel::UnitMap>,
 ) {
@@ -659,19 +730,37 @@ fn check_conveyor_param_units(
     }
 
     // Parse and lower each synthesized parameter aux on its own, under the
-    // model's variable shapes -- the scope `model_stage1` lowers the model's
-    // own variables under, so a parameter expression resolves a reference
-    // exactly as an ordinary equation does -- and unit-check it against the
-    // real lowered stage, which is what its references resolve their units
-    // through. Nothing synthesized here enters a cached stage: the auxes must
-    // not add constraints to the model under analysis, or reach another reader
-    // of the memo.
+    // shapes of the model's variables -- each explicit variable's and each
+    // helper's, through the same two per-name shape functions the fragment
+    // constructors resolve a dependency with, so a parameter expression
+    // resolves a reference exactly as an ordinary equation does -- and
+    // unit-check it against the model's view, which is what its references
+    // resolve their units through. A module instance is left out: the `Expr2`
+    // tier reads only a shape's dimensions, which an instance has none of.
+    // Nothing synthesized here enters a memo: the auxes must not add
+    // constraints to the model under analysis, or reach another reader.
     let dim_ctx = project_dimensions_context(db, project);
-    let shapes = model_stage0(db, model, project).lowering_shapes();
+    let mut shapes: crate::common::IdentMap<Ident<Canonical>, crate::compiler::fragment::DepShape> =
+        Default::default();
+    for (name, sv) in model.variables(db) {
+        if sv.kind(db) != SourceVariableKind::Module {
+            shapes.insert(Ident::new(name), source_dep_shape(db, *sv, project));
+        }
+    }
+    // An explicit variable wins a name collision with a helper, as
+    // `DeclaredName::resolve` decides it (unreachable today: helper names
+    // carry the reserved `$⁚` prefix).
+    for (name, meta) in model_implicit_var_info(db, model, project) {
+        if !meta.is_module {
+            shapes
+                .entry(Ident::new(name))
+                .or_insert_with(|| implicit_dep_shape(db, project, meta));
+        }
+    }
     let scope = crate::ast::LoweringScope {
         dimensions: dim_ctx,
         shapes: &shapes,
-        model_name,
+        model_name: target_model.name.as_str(),
     };
     let synth_ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
 

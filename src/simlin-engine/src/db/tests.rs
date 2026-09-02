@@ -3134,8 +3134,8 @@ fn variable_source_producers_agree_for_every_source_variable_kind() {
 /// parse error.
 ///
 /// The `datamodel::Variable` producer deliberately does NOT apply it: that path
-/// parses synthesized implicit variables and the `ModelStage0` oracle, neither
-/// of which is ever a conveyor, and the ordinary compile path hard-rejects an
+/// parses synthesized helpers and the unit check's conveyor parameters, neither
+/// of which is ever a conveyor stock, and the ordinary compile path hard-rejects an
 /// un-expanded conveyor marker before reading the equation at all.
 #[test]
 fn variable_source_rewrites_a_conveyor_init_list_only_on_the_salsa_path() {

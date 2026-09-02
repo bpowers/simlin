@@ -126,10 +126,9 @@ impl Ast<Expr2> {
 /// the bounds, so a cross-module read has one resolver.
 ///
 /// An empty `shapes` map is a bounds-free lowering: every reference carries
-/// `None`. The dependency classification (`db::variable_direct_dependencies`),
-/// the LTM lowering (`db::ltm::compile::lower_ltm_variable`) and the LTM
-/// describers' reconstruction (`db::analysis::reconstruct_model_variables`)
-/// lower that way, since none of them reads an `ArrayBounds`.
+/// `None`. The dependency classification (`db::variable_direct_dependencies`)
+/// and the LTM lowering (`db::ltm::compile::lower_ltm_variable`) lower that
+/// way, since neither reads an `ArrayBounds`.
 ///
 /// `model_name` is read by the module arm of `model::lower_variable` alone: a
 /// module's input wiring strips a parent-scope `·` prefix in `main` only

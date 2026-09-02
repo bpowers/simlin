@@ -18,8 +18,8 @@ use crate::common::{Canonical, Ident};
 use crate::db::{
     CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, LtmEquation,
     LtmLinkId, LtmSyntheticVar, RefShape, SourceModel, SourceProject, SourceVariable,
-    SourceVariableKind, model_variable_by_name, project_dimensions_context,
-    reconstruct_single_variable,
+    SourceVariableKind, lowered_variable_by_name, model_variable_by_name,
+    project_dimensions_context,
 };
 
 use crate::ltm_augment::DepElementPin;
@@ -511,12 +511,12 @@ pub(super) fn try_cross_dimensional_link_scores(
     // slice) forces the reconstruct and then falls through -- possibly to the
     // `result_axis_names` early return. Restructuring the `&&` chain to defer it
     // would be more obscure than the one reconstruct it saves on a rare shape.
-    let to_var_cell: std::cell::OnceCell<Option<crate::variable::Variable>> =
+    let to_var_cell: std::cell::OnceCell<Option<std::sync::Arc<crate::variable::Variable>>> =
         std::cell::OnceCell::new();
     let to_var_of = || {
         to_var_cell
-            .get_or_init(|| reconstruct_single_variable(db, model, project, to))
-            .as_ref()
+            .get_or_init(|| lowered_variable_by_name(db, model, project, to))
+            .as_deref()
     };
     let owner_wrap_cell: std::cell::OnceCell<crate::ltm_augment::WithLookupWrap> =
         std::cell::OnceCell::new();
@@ -1116,7 +1116,7 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
         return Some(vec![]);
     }
 
-    let to_var = reconstruct_single_variable(db, model, project, to)?;
+    let to_var = lowered_variable_by_name(db, model, project, to)?;
     let ast = to_var.ast()?;
     use crate::ast::Ast;
     let target_ast_dims: &[crate::dimensions::Dimension] = match ast {
@@ -1337,7 +1337,7 @@ fn emit_broadcast_reduce_link_scores(
     from: &str,
     to: &str,
     // The reducer's owner. Passed in rather than re-derived: only the inner
-    // parse is salsa-memoized, so a second `reconstruct_single_variable` would
+    // parse is salsa-memoized, so a second `lowered_variable_by_name` would
     // re-run `crate::model::lower_variable` for the same edge.
     to_var: &crate::variable::Variable,
     from_dims: &[crate::dimensions::Dimension],
@@ -1539,9 +1539,9 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         // per-element-table decline below has no live input here (the
         // `scalar_feeder_of_variable_backed_agg` gate implies a Scalar/A2A
         // owner, which carries at most one table); see the fn doc.
-        let owner_wrap = reconstruct_single_variable(db, model, project, to)
+        let owner_wrap = lowered_variable_by_name(db, model, project, to)
             .as_ref()
-            .map(crate::ltm_augment::with_lookup_reducer_owner_wrap);
+            .map(|v| crate::ltm_augment::with_lookup_reducer_owner_wrap(v));
         if let Some(crate::ltm_augment::WithLookupWrap::PerElementUndecidable) = owner_wrap {
             decline_with_lookup_reducer_edge(db, model, from, to, unscoreable_edges);
             return Some(vec![]);
@@ -1633,7 +1633,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         return Some(vec![]);
     }
 
-    let to_var = reconstruct_single_variable(db, model, project, to)?;
+    let to_var = lowered_variable_by_name(db, model, project, to)?;
     // Without a lowered AST we can't derive per-element equations.
     // Decline and let the caller's existing path handle the (degenerate)
     // failed-to-lower target.
@@ -2488,7 +2488,7 @@ pub(super) fn try_disjoint_dim_arrayed_link_scores(
     // can't broadcast onto D1xD2), which is why only the literal-index
     // sub-case is recoverable; a scalar source into an arrayed target is
     // `try_scalar_to_arrayed`'s job.
-    let to_var = reconstruct_single_variable(db, model, project, to)?;
+    let to_var = lowered_variable_by_name(db, model, project, to)?;
     let to_ast_is_arrayed = matches!(to_var.ast(), Some(crate::ast::Ast::Arrayed(..)));
     let to_ast_is_a2a = matches!(to_var.ast(), Some(crate::ast::Ast::ApplyToAll(..)));
     if !to_ast_is_arrayed && !to_ast_is_a2a {
@@ -2943,7 +2943,7 @@ fn emit_per_element_link_scores(
         // target equation; scalar endpoints mean a stale classification.
         return false;
     }
-    let Some(to_var) = reconstruct_single_variable(db, model, project, to) else {
+    let Some(to_var) = lowered_variable_by_name(db, model, project, to) else {
         return false;
     };
     let Some(ast) = to_var.ast() else {
@@ -3746,7 +3746,7 @@ pub(super) fn emit_agg_to_target_link_scores(
     // loud warning, no link-score variable for the edge, dependent loops
     // dropped. See `iterated_feeder_row_scores`' doc for why recording is
     // edge-level, not per-element.
-    let Some(to_var) = reconstruct_single_variable(db, model, project, to) else {
+    let Some(to_var) = lowered_variable_by_name(db, model, project, to) else {
         return;
     };
     let Some(ast) = to_var.ast() else { return };

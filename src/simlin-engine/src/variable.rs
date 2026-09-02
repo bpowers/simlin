@@ -31,8 +31,8 @@ use crate::{ErrorCode, eqn_err, units};
 /// A graphical function's points, as the compiler and the VM read them.
 ///
 /// The `f64`s keep the derived (IEEE) `PartialEq`, so a lookup table holding a
-/// NaN y-point makes this -- and every `ModelStage0` / `ModelStage1` /
-/// `db::query::ParsedVariableResult` carrying it -- unequal to a bit-identical
+/// NaN y-point makes this -- and every `db::query::ParsedVariableResult` and
+/// lowered-variable memo carrying it -- unequal to a bit-identical
 /// rebuild, defeating salsa backdating. The XMILE reader admits one, since
 /// `f64::from_str` accepts `"NaN"` in a `<ypts>` list unvalidated. Accepted
 /// knowingly, on the same terms as the bytecode types: see the "Float equality
@@ -166,6 +166,12 @@ pub struct Variable<MI = ModuleInput, E = Expr2> {
     pub unit_errors: Vec<UnitError>,
     pub kind: VarKind<MI, E>,
 }
+
+/// A model's lowered variables by canonical name, as the unit pass and the
+/// LTM describers read them: handles to the per-variable memos
+/// (`db::lowered_source_variable`, `db::lowered_implicit_variable`), never a
+/// second copy of a lowered tree. Built by `db::model_lowered_variables`.
+pub(crate) type LoweredVariableMap = HashMap<Ident<Canonical>, std::sync::Arc<Variable>>;
 
 impl<MI, E> Variable<MI, E> {
     pub fn ident(&self) -> &str {
@@ -983,8 +989,8 @@ fn parse_equation(
 /// `SourceVariable`'s split input fields (`db::input::variable_source`), which
 /// is why nothing between the salsa inputs and the parse has to re-assemble --
 /// and deep-clone -- a kind-tagged `datamodel::Variable` per parse. The
-/// non-salsa paths (the `ModelStage0` oracle, and every path that parses a
-/// synthesized implicit `datamodel::Variable`) come through the
+/// non-salsa paths (the unit check's transient conveyor parameters, and every
+/// path that parses a synthesized `datamodel::Variable`) come through the
 /// `From<&datamodel::Variable>` impl below.
 ///
 /// `equation` is a `Cow` for one producer-specific rewrite: a conveyor stock's
@@ -1148,9 +1154,9 @@ where
     // * only helpers of the SAME parent can collide, since a synthesized name
     //   embeds its parent's ident (`$⁚{parent}⁚{n}⁚…`) and two parents sharing a
     //   canonical name is already a `DuplicateVariable` model error (GH #885);
-    // * `model::ModelStage0` passes ONE vector across every variable of a model,
-    //   so seeding from it would make each variable pay for every helper minted
-    //   before it -- quadratic in the model.
+    // * a caller that parses a whole model through one vector would otherwise
+    //   make each variable pay for every helper minted before it -- quadratic
+    //   in the model.
     let mut helpers: IndexMap<Ident<Canonical>, ImplicitVar> = IndexMap::new();
 
     // Resolve the default at use (an empty `'static` registry) rather than

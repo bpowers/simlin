@@ -38,7 +38,7 @@ mod collect_reference_sites_tests {
         let source_model = sync.models["main"].source;
         let source_project = sync.project;
 
-        let variables = crate::db::reconstruct_model_variables(&db, source_model, source_project);
+        let variables = crate::db::model_lowered_variables(&db, source_model, source_project);
         let target_var = variables
             .get(&Ident::<Canonical>::new(target_name))
             .cloned()
@@ -1297,7 +1297,7 @@ mod occurrence_ir_tests {
     /// `module_output_occurrences_recorded_in_document_order` pins an EXPLICIT
     /// author-written multi-output module, this pins the implicit path -- and it
     /// needs its own pin because it ADDITIONALLY depends on
-    /// `reconstruct_model_variables`' implicit-var loop reconstructing that
+    /// `model_lowered_variables`' helper loop holding that
     /// SMOOTH-expanded `Variable::Module`. `module_output_parts` only enumerates
     /// a `·`-composite whose head resolves to a module-kind variable in the
     /// reconstructed map; if a future change to that loop stopped rebuilding the

@@ -692,8 +692,56 @@ each variable under the model's own variables' shapes
 `model_module_wiring_diagnostics`', read off the salsa inputs -- and the
 unit-inference scope (`model_scope_models`) follows `model_name` edges only.
 An empty shapes map is a bounds-free lowering, which dependency
-classification, the LTM lowering and the LTM describers' reconstruction use
-because none of them reads an `ArrayBounds`.
+classification and the LTM lowering use because neither reads an
+`ArrayBounds`.
+
+**Phase 8.2 and 8.3: one lowered memo per variable.** Every variable is
+lowered to `Expr2` exactly once, by a per-variable salsa memo:
+`db::lowered_source_variable(var, model, project)` for an explicit variable
+and `db::lowered_implicit_variable(model, project, name)` for a
+parse-synthesized helper, each returning an `Arc<Variable>`. The memo lowers
+under the DIMENSIONS of the names the equation references, resolved through
+one name resolver (`db::var_fragment::DeclaredName`, over the per-name
+firewall queries); the fragment constructors resolve the same names to the
+compiler's shapes (a module instance's sub-model layout included) and BORROW
+the memo (`FragmentInput::target` is a `Cow`), so compiling a variable retains
+no second lowered tree, and a dependency's graphical-function tables reach a
+fragment through the tracked `db::variable_tables` projection, so an
+equation-only edit recompiles the edited variable alone. The two whole-model
+consumers read handles: `db::model_lowered_variables(model, project)` is an
+`Arc<HashMap<Ident, Arc<Variable>>>` assembled from the memos -- the one map
+builder, whose entry for an element-scoped helper is the memo's element-pinned
+projection, the read the describers classify -- and both the unit pass
+(`check_model_units`, through a stack-local `units_check::UnitModel` per scope
+model) and the LTM describers and causal graphs read it;
+`db::lowered_variable_by_name` is the salsa firewall over it. The unit
+inference scope, `db::model_scope_models`, is an iterative name-only worklist
+over the explicit `Module` variables and `model_implicit_var_info`'s module
+entries, so a module cycle -- which the unit pass reaches -- terminates; the
+memo never reads a sub-model's layout (a recursive query) for the same reason,
+and the pinned projection, which resolves a helper's heads to the compiler's
+shapes and so reads that layout for a module head (`x[d] = SMTH1(m.out + y[d],
+1)`), is taken only where `project_module_graph(..).cycle_error_from(..)` is
+`None`: under a cycle the map holds the memo's handle, which the unit pass
+reads identically (a subscript index carries no units) while the diagnostics
+gate reports the cycle
+(`units_tests::a_module_cycle_reached_through_a_per_element_helper_still_unit_checks`).
+A rename (`patch.rs`) reads neither tier: it is syntactic, over each equation
+string as written, because the parse memo's tree is the expanded one and the
+lowered tree is absent for an equation the compiler refuses. The wiring of a
+module instance resolves under the model's canonical name, so a root model
+spelled `Main` wires its instances as `main` does. There is no whole-model
+lowered copy and no database-free lowering oracle: what pins unit semantics is
+the unit suites over production diagnostics, and what pins the sharing is
+`Arc::ptr_eq` against the production memos plus `ProbedDb` body counts
+(`db::lowered_variable_tests`, `db::units_tests`). The memos are what a
+compile-only caller retains without a diagnostics pass to amortize them
+(pysimlin's `Model.simulate()` used alone, a C/Go embedder holding a project
+without `get_errors`, serve's transient `simulate_sync` as peak only: +9.2 MiB
+on C-LEARN, ledger row); the standing mitigation is boxing `Expr2`'s inline
+`Option<ArrayBounds>` (72 of a node's 128 bytes, `None` on all but arrayed
+subexpressions), which halves every retained
+tree, the memos and the LTM maps alike, and is its own chunk.
 <!-- END_PHASE_8 -->
 
 ## Additional Considerations
@@ -1564,6 +1612,39 @@ read. That one costs nothing -- the equation is ill-typed with or without the
 loud -- and it closes the same way the other three do, by giving the decision
 the dimensions, which is what moving it to lowering does.
 
+**Phase 8.2 semantic divergences.** Two corrected shapes, neither in the
+corpus. (1) The `main` rule of module wiring -- a parent-scope `·x` source is
+stripped in the root model (`db::build_module_inputs`) -- compares CANONICAL
+model names, so a root model whose display name is spelled `Main` wires an
+instance fed from `.x` exactly as one spelled `main` does. Every lowering
+resolves the wiring under the canonical name (`lowered_source_variable`,
+`lowered_implicit_variable`, the LTM helper constructor); pinned by
+`db::lowered_variable_tests::module_wiring_strips_the_parent_scope_prefix_under_a_display_cased_main`,
+which simulates both spellings. (2) A rename is syntactic (`patch.rs`): an
+equation the compiler refuses (`bad = a + b` over `a[d]`, `b[p]`) is renamed
+rather than left holding the old name, which turned the refusal into an
+unknown dependency on every patch surface, and a module-function call keeps
+its call (`SMTH1(x, 3)` renames to `smth1(w, 3)`, the parser's spelling of the
+builtin's name on either tier) rather than being replaced by the instance's
+output read (`"$⁚y⁚0⁚smth1·output"`); pinned by
+`patch::tests::rename_rewrites_an_equation_the_lowering_refuses` and
+`rename_keeps_a_module_function_call_as_written`, and no pinned rename output
+elsewhere changes spelling. Nothing else moves: the C-LEARN artifacts, the
+sweeps and the `test/` diagnostics corpus are identical (ledger row), and the
+LTM describers read the same `Expr2` the compiler reads -- lowered under
+dependency shapes rather than bounds-free -- which changes no describer
+answer, since none reads an `ArrayBounds`
+(`ltm_agg::AggNode` strips them from its cached key, now load-bearing:
+`ltm_agg_tests::the_carried_reducer_is_normalized_so_offset_only_edits_backdate`).
+Incrementality gained, each pinned by `ProbedDb` body counts: an equation
+edit re-lowers and recompiles the edited variable alone (a dependency's tables
+reach a fragment through the tracked `variable_tables`;
+`fragment_char_tests::equation_only_edit_recompiles_only_the_edited_fragment`,
+`lowered_variable_tests::an_equation_edit_relowers_only_the_edited_variable`),
+and a module target's edit re-executes its instantiators' unit checks and
+re-lowers only the edited variable
+(`units_tests::a_module_targets_edit_invalidates_the_unit_check_and_not_the_instantiators_lowering`).
+
 **Phase 8.1 semantic divergences.** One mechanism, pinned by one
 enumeration: a parse-synthesized helper lowers under its parent's dependency
 shapes (`db::fragment_compile::implicit_fragment_input`), so it reads, and is
@@ -2335,3 +2416,4 @@ hash is not available to it.
 | 7.5ab | `engine: static element snapshots; capture phase demand` | 8.2010 G (median of 5; range 8.1969-8.2084), **-1.55%** against `015c98da` with the results-printing commit applied, re-measured in the same session (8.3302 G, median of 5, range 8.3266-8.3335; interleaved pairs -1.51 / -1.42 / -1.60 / -1.63 / -1.53%) | 5189 | 28505 / 1477 / 24795 | 1533 / 162 / 28 / 627 | Plain: -26 slots (the bare and qualified element captures 7.5a no longer mints, `init_c_in_deep_ocean_per_meter` and `target_year`), -2177 flow opcodes (those captures' fragments plus the flow fragments of the 207 INIT-only captures 7.5b takes out of flows), -78 initial opcodes and 1205 -> 1179 initial programs (one per removed capture), -217 literals, -14 views, 371 names and 7 modules unchanged; 4825 results keys where the base had 5058 (26 gone, 207 hidden, 0 renamed -- a removed capture renumbers the later helpers of the same equation, `$⁚v⁚1⁚..` -> `$⁚v⁚0⁚..`, which renames an exposed key only where a capture precedes another helper of the same equation, and no C-LEARN equation has that shape). Under `CLEARN_LTM=1`: 30123 -> 29398 slots and 7163 -> 6193 LTM variables (`ltm_var_dump`: 987 removed, 17 added -- the 26 element captures' 52 scalar scores become 17 direct scores arrayed over their targets, 330 slots; the 207 INIT-only captures' 921 scalar scores, 207 capture->parent and 714 source->capture, and the 14 two-slot array-freeze helpers of the scores into `$⁚last_set_target_year⁚0⁚arg0` do not exist because the edges do not, and 28 `PREVIOUS` helpers of the removed scores go with them; 36,138 slots free of the ceiling), 855713 / 1477 / 24795 opcodes (-52141 flow, -3938 initial, 1976 -> 1179 initial programs: the LTM PREVIOUS helpers' initial fragments), 14503 literals, 2166 views; the all-slot digest 20892 -> 20221 LTM slots and 3141 -> 3106 ever non-zero (the 21 removed scores the base held at 1 and the 14 freeze slots), `clearn_with_ltm_simulates_model_vars_identically` green. Run channel (`CLEARN_PROFILE=run CLEARN_RUN_ITERS=20`) 29.5656 G against 30.5294 G, -3.16% (pairs -3.17 / -3.15 / -3.16 / -3.18 / -3.14%); the plain artifact is byte-identical to the pre-review candidate's, which measured -1.19% against `c972c9e9`, so about two points of this are build layout. Sweep of 509 models, plain and `--ltm`: 394 / 393 identical, 110 refused identically, 0 one-sided; the movers are the GH #859 importer flippers (`subscript_transposition` on both channels, `arrays_varname` under `--ltm`; resampled 6x per binary, the same two digests on both) and, on both channels, `getdata`, `helper_recurrence`, `macro_init_recurrence` and C-LEARN, whose only difference is the hidden INIT-only capture columns and, under `--ltm`, the removed scores: every common column byte-identical (C-LEARN: 4825 plain, 14825 under `--ltm`; 1248 base-only keys = 26 + 207 + 987 + 28, 17 tree-only). Six divergences pinned ("Phase 7.5 semantic divergences"); three goldens regenerated; engine suite, libsimlin, CLI, clippy and `cargo fmt --all -- --check` green |
 | 7.5cd | `engine: element-scoped helpers; structural captures` | 7.5449 G (median of 3; range 7.5440-7.5478), **-8.05%** against `11de2948` re-measured in the same session (8.2050 G, median of 3, range 8.1978-8.2051; interleaved pairs -7.98 / -8.05 / -8.01%) | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Plain: flow and stock streams byte-identical, -126 initial opcodes and 1179 -> 1053 initial programs, -165 literals, 371 names and 7 modules unchanged, all 4825 results keys and values byte-identical (24 apply-to-all `INIT` parents' 150 per-element captures are 24 structural captures over the same 150 slots); under `CLEARN_LTM=1` 29398 slots, 855713 / 1477 / 24669 opcodes (-126 initial), 14503 -> 14078 literals, 2166 views, 6193 LTM variables, 14842 results keys of which 14212 are byte-identical and 630 per-element helper keys are renamed (`⁚elem` -> `[elem]`); LTM compile channel 50.8174 G against 54.3852 G, **-6.56%** (pairs -6.58 / -6.58 / -6.48%), run channel 29.0291 G against 29.5660 G, -1.82% (pairs -1.82 / -1.81 / -1.82%). The saving is deleted work: one structural walk of a snapshot-only apply-to-all body instead of N per-element walks, parse-stage variables and fragments, no parse-time dimension substitution of hoisted arguments, and no duplicated input hoist for `DELAYN`/`SMTHN`. Sweep of 509 models twice per binary: plain 398 identical, 110 refused identically, 0 moved; `--ltm` 386 identical, 110 refused identically, 10 movers that are all key renames (0 differing common columns each, the same key counts, C-LEARN included), the GH #859 flippers on the same two digests on both binaries in both modes (6x per binary), seven divergences pinned (7-13 under "Phase 7.5 semantic divergences"), one golden regenerated (`ltm_value_golden/value_gate.txt`, two phantom loop slots), engine suite (lib 5714, integration 789 plus the C-LEARN release gates), clippy, `cargo fmt --all -- --check` and the default-feature check green, with `mdl_equivalence::test_mdl_equivalence` and `test_clearn_equivalence` failing identically on the base tree (xmutil view element counts) |
 | 8.1 | `engine: lower Expr2 under the fragment's dependency shapes` | 7.2241 G (median of 3; range 7.2234-7.2271), **-4.32%** against `4f3bf7db` re-measured in the same session (7.5501 G, median of 3, range 7.5461-7.5525; interleaved pairs -4.23 / -4.33 / -4.35%) | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Artifacts byte-identical on C-LEARN, plain (every count, 1053 initial programs, 371 names, 7 modules, the full opcode histogram) and under `CLEARN_LTM=1` (29398 slots, 855713 / 1477 / 24669 opcodes, 14078 literals, 2166 views; LTM compile channel 82.8363 G against 83.3488 G, -0.62%, pairs -0.52 / -0.60 / -0.67%, `CLEARN_COMPILE_ITERS=5`). The saving is the deleted per-variable mini-stage: every fragment cloned its dependencies' parse memos into a `ModelStage0` literal to answer `get_dimensions`, which the shape map it already built answers. Sweep of 509 models plain and `--ltm`: 399 / 398 identical, 110 refused identically, 0 one-sided, the one `--ltm` mover the GH #859 flipper `arrays_cname` (the same two digests on both binaries in both modes, 6x each); the `test/` diagnostics corpus identical before and after (plain 471 rows over 366 `(model, variable, code)` keys, `--ltm` 856 over 391, the same per-code distribution, 0 row differences); one mechanism-level divergence -- a helper lowers under its parent's shapes -- pinned by a 48-row value table (helper kind x reducer x rank) and a 5-row refusal table ("Phase 8.1 semantic divergences"); engine suite (lib 5693, integration 783), libsimlin, CLI, mcp-core, clippy, `cargo fmt --all -- --check` and the default-feature check green, every golden unregenerated |
+| 8.2+8.3 | `engine: one lowered memo per variable` | 7.2435 G (median of 3; range 7.2367-7.2437), +0.23% against `75ee055a` re-measured in the same session (7.2268 G, median of 3, range 7.2260-7.2295; interleaved pairs +0.14 / +0.25 / +0.19%), inside the channel's floor and not investigated | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Artifacts byte-identical on C-LEARN, plain (every count, 1053 initial programs, 371 names, 7 modules, the full opcode histogram) and under `CLEARN_LTM=1` (29398 slots, 855713 / 1477 / 24669 opcodes, 14078 literals, 2166 views); LTM compile channel 80.2377 G against 82.8212 G, **-3.12%** (pairs -3.13 / -3.12 / -3.16%, `CLEARN_COMPILE_ITERS=5`); memory (counting allocator, C-LEARN, bytes the database and sync state retain above the parsed datamodel; peak = compile phase): plain compile-only 22.94 -> 32.16 MiB (peak 30.2 -> 39.3), plain with diagnostics 36.58 -> 33.54 (peak 43.9 -> 40.8), LTM 228.26 -> 225.98 (peak 270.0 -> 267.5), LTM with diagnostics 242.34 -> 227.02 (peak 284.1 -> 268.9); allocations plain 1,562,107 / 199.2 MiB -> 1,541,101 / 193.7 MiB, LTM 26.06 M / 2859.0 MiB -> 24.90 M / 2583.6 MiB; sweep of 509 models plain and `--ltm` 398 / 398 identical, 110 refused identically, 0 one-sided, the movers GH #859 flippers (`arrays_varname`, `arrays_cname`, `test_subscript_transposition`: the same two digests on both binaries in both modes, 6x each), 8 `--ltm` stderr line-order permutations (GH #1036); `test/` diagnostics corpus identical (plain 471 rows over 366 keys, `--ltm` 856 over 391). The +9.2 MiB is the lowered trees a compile-only caller retains for a unit pass or describer it never runs (pysimlin `Model.simulate()` used alone, a C/Go embedder holding a project without `get_errors`, serve's transient `simulate_sync` as peak only), while every path that collects diagnostics, the CLI's `simulate` included, retains less than the base. A per-element helper with a module head is pinned only under the module-cycle gate (`units_tests::a_module_cycle_reached_through_a_per_element_helper_still_unit_checks`: without it the unit pass on a cyclic project is salsa's `compute_layout` cycle panic), and the rename patch is syntactic over the equation text ("Phase 8.2 semantic divergences"). Engine suite (lib 5697, integration 783), libsimlin, CLI, mcp-core, clippy, `cargo fmt --all -- --check` and the default-feature check green, every golden unregenerated |

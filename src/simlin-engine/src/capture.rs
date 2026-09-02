@@ -54,7 +54,7 @@ use crate::ast::{Ast, Expr0, print_eqn};
 use crate::common::{Canonical, EquationError, ErrorCode, Ident};
 use crate::datamodel;
 use crate::dimensions::DimensionsContext;
-use crate::model::VariableStage0;
+use crate::model::ParsedVariable;
 use crate::variable::{ElementScope, VarKind, Variable, get_dimensions};
 
 /// The name a synthesized helper of `parent` is filed under.
@@ -279,7 +279,7 @@ impl Capture {
     /// loud-safe `None` then keeps the helper out of the compile rather than
     /// laying it out at the wrong size. See [`subtree_parsed_variable`] for
     /// what the body is.
-    fn parsed_variable(&self, dimensions: &DimensionsContext) -> VariableStage0 {
+    fn parsed_variable(&self, dimensions: &DimensionsContext) -> ParsedVariable {
         let text = print_eqn(&self.arg);
         let (ast, eqn, scope, errors) = match &self.shape {
             CaptureShape::Scalar => (
@@ -330,8 +330,8 @@ impl Capture {
 /// datamodel-cased dimension names off it (a target reporting no dimensions
 /// gets a scalar link score), and `ltm_augment::scalar_or_a2a_target_expr`
 /// falls back to that text whenever the target has no lowered AST, which
-/// `db::analysis::reconstruct_implicit_variable` produces for any helper whose
-/// lowering fails (`model::lower_variable` is total and discards the AST). That
+/// `db::lowered_implicit_variable` holds for any helper whose lowering fails
+/// (`model::lower_variable` is total and discards the AST). That
 /// fallback is the GH #965 generated-text boundary, which applies to every
 /// variable and is not on the compile path.
 ///
@@ -354,7 +354,7 @@ fn subtree_parsed_variable(
     eqn: datamodel::Equation,
     element_scope: Option<ElementScope>,
     errors: Vec<EquationError>,
-) -> VariableStage0 {
+) -> ParsedVariable {
     Variable {
         ident: Ident::<Canonical>::new(ident),
         units: None,
@@ -440,7 +440,7 @@ impl HoistedArg {
             && self.arg.eq_ignoring_loc(&other.arg)
     }
 
-    fn parsed_variable(&self) -> VariableStage0 {
+    fn parsed_variable(&self) -> ParsedVariable {
         subtree_parsed_variable(
             &self.ident,
             Some(Ast::Scalar(self.arg.clone())),
@@ -512,7 +512,7 @@ impl ImplicitModule {
     /// the kind's `inputs`, no equation, and nothing that can fail -- the
     /// sources are names, and whether they resolve is the dependency graph's
     /// question, not the parse's.
-    fn parsed_variable(&self) -> VariableStage0 {
+    fn parsed_variable(&self) -> ParsedVariable {
         Variable {
             ident: Ident::<Canonical>::new(&self.ident),
             units: None,
@@ -633,7 +633,7 @@ impl ImplicitVar {
     ///
     /// `dimensions` is the project's whole dimension context: a structural
     /// capture's declared axes are resolved against it.
-    pub(crate) fn parsed_variable(&self, dimensions: &DimensionsContext) -> VariableStage0 {
+    pub(crate) fn parsed_variable(&self, dimensions: &DimensionsContext) -> ParsedVariable {
         match self {
             ImplicitVar::Capture(c) => c.parsed_variable(dimensions),
             ImplicitVar::HoistedArg(a) => a.parsed_variable(),

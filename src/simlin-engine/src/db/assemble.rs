@@ -5,7 +5,7 @@
 //! Module/simulation assembly: turning per-variable symbolic fragments into
 //! a concrete `CompiledModule`/`CompiledSimulation`.
 //!
-//! Holds the table extraction helper (`extract_tables_from_source_var`), the
+//! Holds the table extraction helper (`variable_tables`), the
 //! two owners of module input wiring (`build_module_inputs` and
 //! `module_input_set`, the only places a wiring is derived from `(src, dst)`
 //! reference strings), the per-variable emission tail
@@ -25,14 +25,23 @@ use super::*;
 use crate::common::{Canonical, Ident};
 use crate::compiler::symbolic::Phase;
 
-/// Extract compiler::Table data directly from a SourceVariable's graphical
-/// function fields, for a fragment's tables map: the lookup tables the
-/// variable calls.
-pub(crate) fn extract_tables_from_source_var(
+/// The `compiler::Table`s a source variable's graphical function declares,
+/// for the tables map of every fragment that calls it through `LOOKUP`.
+///
+/// Salsa-tracked so a fragment depends on its dependency's TABLES rather than
+/// on the equation those tables are keyed by: the per-element tables of an
+/// `Arrayed` equation are read off the equation's element list, so an
+/// untracked read would make every caller of a variable recompile on an edit
+/// to that variable's equation text. Tracked, the value backdates when the
+/// tables are unchanged and an equation-only edit recompiles the edited
+/// variable alone (`db::lowered_variable_tests`).
+#[salsa::tracked(returns(ref))]
+pub(crate) fn variable_tables(
     db: &dyn Db,
-    source_var: &SourceVariable,
+    var: SourceVariable,
     project: SourceProject,
 ) -> Vec<crate::compiler::Table> {
+    let source_var = &var;
     let ident = source_var.ident(db);
     let eq = source_var.equation(db);
 

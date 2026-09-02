@@ -261,6 +261,35 @@ pub(crate) fn source_var_is_table_only(db: &dyn Db, var: SourceVariable) -> bool
     crate::variable::is_lookup_only(var.equation(db), var.gf(db).as_ref())
 }
 
+/// Is `canonical_model_name` one of the stdlib models `db::sync` splices into
+/// every project?
+///
+/// The `stdlib⁚` prefix alone is NOT sufficient. It uses a punctuation
+/// separator that ordinary model creation never produces, but an import can
+/// still carry a model whose name has the prefix and a suffix naming no stdlib
+/// model; flagging that model as a template would skip a user model's unit
+/// check. Requiring the suffix to be a real stdlib model name keeps the flag
+/// on exactly the models the stdlib splice introduced.
+///
+/// This is the ONE stdlib test in the engine's diagnostic path (GH #988): the
+/// unit-check skip gate (`db::units`), the module-input fallback rule
+/// (`db::diagnostic`) and the sub-model initials rule (`db::dep_graph`) all
+/// call [`source_model_is_stdlib`] rather than carrying a looser spelling.
+pub(crate) fn model_is_stdlib(canonical_model_name: &str) -> bool {
+    canonical_model_name
+        .strip_prefix("stdlib\u{205A}")
+        .is_some_and(|suffix| crate::stdlib::MODEL_NAMES.contains(&suffix))
+}
+
+/// [`model_is_stdlib`] for a salsa model handle.
+///
+/// `SourceModel::name` holds the DISPLAY name, so it is canonicalized first --
+/// the project's model map is canonically keyed, and an imported model spelled
+/// `Stdlib⁚Smth1` is the same model as `stdlib⁚smth1`.
+pub(crate) fn source_model_is_stdlib(db: &dyn Db, model: SourceModel) -> bool {
+    model_is_stdlib(Ident::<Canonical>::new(model.name(db)).as_str())
+}
+
 /// The parser's borrowed view of a variable's salsa input fields.
 ///
 /// Every field is a borrow of the `SourceVariable`'s stored value, so a parse

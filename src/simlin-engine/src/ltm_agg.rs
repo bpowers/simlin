@@ -125,8 +125,8 @@ use crate::ast::{Ast, BinaryOp, Expr2, IndexExpr2};
 use crate::builtins::BuiltinFn;
 use crate::common::{Canonical, Ident, canonicalize};
 use crate::db::{
-    Db, LtmLinkId, SourceModel, SourceProject, project_datamodel_dims, project_dimensions_context,
-    reconstruct_model_variables,
+    Db, LtmLinkId, SourceModel, SourceProject, model_lowered_variables, project_datamodel_dims,
+    project_dimensions_context,
 };
 
 /// Prefix for synthetic aggregate-node names: `$⁚ltm⁚agg⁚{n}`.
@@ -661,15 +661,14 @@ pub struct AggNode {
     ///   ([`crate::patch::expr2_to_expr0`] carries them along unread; the
     ///   polarity analyzer matches on none), so removing them changes no answer.
     ///   Pinned by `the_carried_reducer_is_normalized_so_offset_only_edits_backdate`.
-    /// * `ArrayBounds` -- removed as a GUARD, not a live requirement: the ASTs
-    ///   this enumerator walks come from
-    ///   `db::analysis::reconstruct_model_variables`, which lowers against an
-    ///   EMPTY model scope, so `Expr2Context::get_dimensions` resolves nothing
-    ///   and every bound is already `None`. Were that to change, a bound would
-    ///   carry the temp id the lowering context happened to hand out in
-    ///   equation order, and the cached value would become sensitive to
-    ///   unrelated edits elsewhere in the owning equation. Neither reader looks
-    ///   at one either -- `expr2_to_expr0` drops them outright.
+    /// * `ArrayBounds` -- removed, and load-bearing: the ASTs this enumerator
+    ///   walks are the per-variable lowering memos
+    ///   (`db::model_lowered_variables`), lowered under their dependencies'
+    ///   shapes, so an arrayed subexpression carries a bound holding the temp
+    ///   id the lowering context handed out in equation order. Kept, that id
+    ///   would make the cached value sensitive to unrelated edits elsewhere in
+    ///   the owning equation. Neither reader looks at one --
+    ///   `expr2_to_expr0` drops them outright. Pinned by the same test.
     /// * The float literal on `Expr2::Const` -- **not normalized here, and not
     ///   normalizable here:** dropping a `nan` literal would change what the
     ///   equation means. It is closed at the ROOT instead. The literal is an
@@ -829,7 +828,7 @@ pub fn enumerate_agg_nodes(
     model: SourceModel,
     project: SourceProject,
 ) -> AggNodesResult {
-    let variables = reconstruct_model_variables(db, model, project);
+    let variables = model_lowered_variables(db, model, project);
     let dm_dims = project_datamodel_dims(db, project);
     // Dimension context for the GH #534 mapped-iterated-axis recognition
     // (`compute_read_slice`'s `has_mapping_to` direction gate +
@@ -839,7 +838,7 @@ pub fn enumerate_agg_nodes(
     let dim_ctx = crate::db::project_dimensions_context(db, project);
 
     // Visit variables in canonical-sorted order for deterministic synthetic
-    // naming. `reconstruct_model_variables` returns a HashMap, so the order
+    // naming. `model_lowered_variables` returns a HashMap, so the order
     // is not otherwise stable.
     let mut var_names: Vec<&Ident<Canonical>> = variables.keys().collect();
     var_names.sort();
@@ -949,7 +948,7 @@ pub fn enumerate_agg_nodes(
 /// signatures short; the mutable `result`/`next_synthetic_n` stay out of
 /// band.
 struct AggWalkCtx<'a> {
-    variables: &'a HashMap<Ident<Canonical>, crate::variable::Variable>,
+    variables: &'a crate::variable::LoweredVariableMap,
     target_iterated_dims: &'a [String],
     dm_dims: &'a [crate::datamodel::Dimension],
     dim_ctx: &'a crate::dimensions::DimensionsContext,
@@ -1354,7 +1353,7 @@ fn array_valued_rank_arg<E>(builtin: &BuiltinFn<E>) -> Option<&E> {
 /// half's scoring machinery assumes that relationship.
 fn rank_source_vars(
     rank_arg: &Expr2,
-    variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
+    variables: &crate::variable::LoweredVariableMap,
 ) -> Option<Vec<String>> {
     let mut sources: Vec<String> = Vec::new();
     collect_var_refs(rank_arg, &mut sources);
@@ -1618,7 +1617,7 @@ fn register_agg(
 /// normally reject anyway, and is never hoisted).
 fn reducer_source_vars(
     builtin: &BuiltinFn<Expr2>,
-    variables: &HashMap<Ident<Canonical>, crate::variable::Variable>,
+    variables: &crate::variable::LoweredVariableMap,
 ) -> Option<Vec<String>> {
     if !reducer_is_hoistable(builtin) {
         return None;
@@ -2615,7 +2614,7 @@ pub(crate) fn unhoisted_bare_arrayed_reducer_arg(
     project: SourceProject,
 ) -> Option<String> {
     let from_canon = canonicalize(&from).into_owned();
-    let variables = reconstruct_model_variables(db, model, project);
+    let variables = model_lowered_variables(db, model, project);
     let dm_dims = project_datamodel_dims(db, project);
     let dim_ctx = project_dimensions_context(db, project);
     let to_var = variables.get(&Ident::<Canonical>::new(&to))?;
@@ -2758,7 +2757,7 @@ fn first_active_bare_arrayed_reducer(
 /// [`PerElementReducerRead`]: UnhoistedSourceRead::PerElementReducerRead
 ///
 /// Salsa-tracked, keyed on the interned [`LtmLinkId`] (the
-/// per-link `compile_ltm_var_fragment` idiom): the body's `reconstruct_model_variables`
+/// per-link `compile_ltm_var_fragment` idiom): the body's `model_lowered_variables`
 /// is the codebase's one UN-tracked whole-model reconstruction (O(all model
 /// vars)), and this is its first per-edge caller -- tracking bounds that cost
 /// to once per `(edge, revision)` so the pinned-loop pass's and discovery
@@ -2776,7 +2775,7 @@ pub(crate) fn unhoisted_reducer_source_read<'db>(
 ) -> UnhoistedSourceRead {
     let from = link.link_from(db);
     let to = link.link_to(db);
-    let variables = reconstruct_model_variables(db, model, project);
+    let variables = model_lowered_variables(db, model, project);
     let dm_dims = project_datamodel_dims(db, project);
     let dim_ctx = project_dimensions_context(db, project);
     let agg_nodes = enumerate_agg_nodes(db, model, project);

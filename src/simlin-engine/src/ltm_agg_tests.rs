@@ -2530,7 +2530,7 @@ fn agg_sources_declines_when_arrayed_source_lacks_per_var_slice() {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &datamodel);
     let model = sync.models["main"].source;
-    let variables = crate::db::reconstruct_model_variables(&db, model, sync.project);
+    let variables = crate::db::model_lowered_variables(&db, model, sync.project);
     let dm_dims = crate::db::project_datamodel_dims(&db, sync.project);
     let dim_ctx = crate::db::project_dimensions_context(&db, sync.project);
     let ctx = AggWalkCtx {
@@ -2731,15 +2731,13 @@ fn every_reducer_carries_its_classification_on_the_agg_node() {
 /// this query's consumers, as it did not before the node carried an AST
 /// at all.
 ///
-/// It is the `Loc` half of the normalization that this measures. The
-/// `ArrayBounds` half is inert TODAY and cannot be measured, because
-/// `db::analysis::reconstruct_model_variables` -- the source of the ASTs
-/// this query walks -- lowers against an EMPTY model scope, so
-/// `Expr2Context::get_dimensions` resolves nothing and no bound is ever
-/// allocated. The leading `SIZE(other[*])` is chosen over a bare constant
-/// so that this test starts measuring the bounds half the moment that
-/// stops being true: its arrayed argument would take the first temp id
-/// and push `pop[*]` to the second.
+/// Both halves of the normalization are measured. `db::model_lowered_variables`
+/// -- the source of the ASTs this query walks -- lowers each variable under
+/// its dependencies' shapes, so `pop[*]`'s bound carries a temp id, and the
+/// leading `SIZE(other[*])` is chosen over a bare constant because its arrayed
+/// argument takes the first temp id and pushes `pop[*]` to the second: an
+/// `ArrayBounds` left in the carried reducer would make the two spellings
+/// unequal on the id alone.
 ///
 /// The second assertion is a weaker independent check on the same
 /// property (re-normalizing the stored builtin is a no-op); it catches

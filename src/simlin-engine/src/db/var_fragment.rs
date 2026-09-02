@@ -2,9 +2,10 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! The explicit-variable constructor of `compiler::fragment::FragmentInput`
-//! (`explicit_fragment_input`) and the dependency-shape helpers every
-//! constructor in `db/` composes.
+//! The per-variable lowering memo of an explicit variable
+//! (`lowered_source_variable`), the explicit-variable constructor of
+//! `compiler::fragment::FragmentInput` (`explicit_fragment_input`) and the
+//! dependency-shape helpers every constructor in `db/` composes.
 //!
 //! A fragment's input is the variable in its `Expr2` form plus the SHAPE of
 //! every name it can reference -- dimensions, and whether the name is a plain
@@ -12,7 +13,10 @@
 //! the per-variable firewall queries (`model_variable_by_name`,
 //! `model_implicit_var_by_name`, `variable_dimensions`, `model_shape` for a
 //! module's sub-model), never by reading a whole-model map, so a fragment's
-//! salsa dependencies are exactly the names it looks up.
+//! salsa dependencies are exactly the names it looks up. The memo lowers the
+//! equation under those same shapes and is the one owner of the variable's
+//! `Expr2` form: the fragment borrows it, and unit checking and the LTM
+//! describers hold its `Arc` (`db::model_lowered_variables`).
 //!
 //! Because a plain function cannot accumulate salsa diagnostics, the
 //! diagnostics the constructor would emit are returned **as data**
@@ -30,7 +34,9 @@
 //!   *phase-local* -- only that phase's bytecode is dropped while the other
 //!   phases still compile; the caller reports it per phase.
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use crate::ast::LoweringScope;
 use crate::canonicalize;
@@ -38,12 +44,13 @@ use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::fragment::{DepShape, FragmentInput};
 use crate::db::{
     Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ImplicitVarMeta, ModuleInputSet,
-    SourceModel, SourceProject, SourceVariable, SourceVariableKind, canonical_module_input_set,
-    extract_tables_from_source_var, model_implicit_var_by_name, model_variable_by_name,
+    ParsedVariableResult, SourceModel, SourceProject, SourceVariable, SourceVariableKind,
+    VariableDeps, canonical_module_input_set, model_implicit_var_by_name, model_variable_by_name,
     module_dep_shape, parse_source_variable, project_converted_dimensions,
-    project_dimensions_context, variable_dimensions, variable_direct_dependencies,
+    project_dimensions_context, variable_dimensions, variable_direct_dependencies, variable_tables,
 };
 use crate::dimensions::{Dimension, DimensionsContext};
+use crate::variable::Variable;
 
 /// Outcome of [`explicit_fragment_input`]: the fragment's input, or the
 /// diagnostics that stopped it.
@@ -61,8 +68,7 @@ pub(crate) enum ExplicitFragment<'db> {
     /// The variable lowered to `Expr2` and every dependency resolved to a
     /// shape. `unit_diags` carries any non-fatal malformed-unit diagnostics
     /// (replayed, compilation continues). Boxed so the two variants are
-    /// close in size; a `FragmentInput` holds the lowered variable and its
-    /// maps inline.
+    /// close in size; a `FragmentInput` holds its maps inline.
     Ready {
         unit_diags: Vec<Diagnostic>,
         input: Box<FragmentInput<'db>>,
@@ -138,20 +144,78 @@ pub(crate) fn implicit_dep_shape(
     }
 }
 
-/// The shape of the variable `name` denotes in `model` -- a source variable or
-/// a parse-synthesized helper, each through its firewall query -- or `None`
-/// when the model declares neither.
+/// What `model` declares a name as: one of its source variables, or a helper a
+/// parse of one of them synthesized -- each through its firewall query
+/// (`model_variable_by_name`, `model_implicit_var_by_name`), so a reader
+/// depends on the one name it looked up. The one owner of name resolution for
+/// every fragment constructor and lowering memo; the two shapes a resolved
+/// name has are its methods.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum DeclaredName {
+    Source(SourceVariable),
+    /// Boxed: almost every head a variable references is a source variable
+    /// (an 8-byte id), and the memos retain one head per referenced name.
+    Helper(Box<ImplicitVarMeta>),
+}
+
+impl DeclaredName {
+    pub(crate) fn resolve(
+        db: &dyn Db,
+        model: SourceModel,
+        project: SourceProject,
+        name: &str,
+    ) -> Option<Self> {
+        if let Some(var) = model_variable_by_name(db, model, name.to_string()) {
+            return Some(DeclaredName::Source(var));
+        }
+        model_implicit_var_by_name(db, model, project, name.to_string())
+            .map(|meta| DeclaredName::Helper(Box::new(meta)))
+    }
+
+    fn is_module(&self, db: &dyn Db) -> bool {
+        match self {
+            DeclaredName::Source(var) => var.kind(db) == SourceVariableKind::Module,
+            DeclaredName::Helper(meta) => meta.is_module,
+        }
+    }
+
+    /// The shape the compiler resolves the name through: a module instance's
+    /// sub-model shape, or the declared dimensions.
+    pub(crate) fn shape(&self, db: &dyn Db, project: SourceProject) -> DepShape {
+        match self {
+            DeclaredName::Source(var) => source_dep_shape(db, *var, project),
+            DeclaredName::Helper(meta) => implicit_dep_shape(db, project, meta),
+        }
+    }
+
+    /// The shape the `Expr2` tier lowers under: the declared dimensions of a
+    /// plain variable or helper, and NOTHING for a module instance. `lower_ast`
+    /// reads only a shape's dimensions, of which an instance has none, while
+    /// an instance's compiler shape is its sub-model's LAYOUT (`db::model_shape`,
+    /// a recursive query): reading it from a lowering memo would put every
+    /// sub-model's layout in every cross-module reader's dependency cone, and
+    /// on a module cycle -- which the unit pass reaches, its scope being an
+    /// iterative worklist for exactly that reason -- turn the lowering into
+    /// salsa's dependency-graph panic.
+    pub(crate) fn dimensions_shape(&self, db: &dyn Db, project: SourceProject) -> Option<DepShape> {
+        if self.is_module(db) {
+            None
+        } else {
+            Some(self.shape(db, project))
+        }
+    }
+}
+
+/// The shape of the variable `name` denotes in `model`, as the compiler
+/// resolves it, or `None` when the model declares neither a variable nor a
+/// helper of that name.
 pub(crate) fn model_dep_shape(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
     name: &str,
 ) -> Option<DepShape> {
-    if let Some(var) = model_variable_by_name(db, model, name.to_string()) {
-        return Some(source_dep_shape(db, var, project));
-    }
-    model_implicit_var_by_name(db, model, project, name.to_string())
-        .map(|meta| implicit_dep_shape(db, project, &meta))
+    DeclaredName::resolve(db, model, project, name).map(|declared| declared.shape(db, project))
 }
 
 /// Whether `flow_ident` names a flow that is DRIVEN by a special-stock
@@ -200,8 +264,223 @@ pub(crate) fn flow_is_special_stock_driven(
     })
 }
 
-/// Build the fragment input of one source variable: parse it, lower its
-/// equation to `Expr2`, and resolve the shape of every name it references.
+/// Every name `var`'s equation can reference: the two phases' data-flow
+/// dependencies, the lookup tables it calls (a table reference is a layout
+/// reference -- codegen needs the table's identity -- not a data-flow
+/// dependency, so it lives in `referenced_tables`, issue #606), and a stock's
+/// inflows and outflows (read by its update expression).
+fn referenced_names(db: &dyn Db, var: SourceVariable, deps: &VariableDeps) -> BTreeSet<String> {
+    let mut names: BTreeSet<String> = deps
+        .dt_deps
+        .iter()
+        .chain(deps.initial_deps.iter())
+        .chain(deps.referenced_tables.iter())
+        .cloned()
+        .collect();
+    if var.kind(db) == SourceVariableKind::Stock {
+        names.extend(
+            var.inflows(db)
+                .iter()
+                .chain(var.outflows(db).iter())
+                .map(|flow| canonicalize(flow).into_owned()),
+        );
+    }
+    names
+}
+
+/// The shape of a source variable as its OWN fragment's entry: a module
+/// instance's sub-model shape, or the declared dimensions the parse resolved.
+fn source_self_shape(
+    db: &dyn Db,
+    var: SourceVariable,
+    project: SourceProject,
+    parsed: &ParsedVariableResult,
+) -> DepShape {
+    if var.kind(db) == SourceVariableKind::Module {
+        module_dep_shape(db, project, var.model_name(db))
+    } else {
+        DepShape::var(
+            parsed
+                .variable
+                .get_dimensions()
+                .map(<[Dimension]>::to_vec)
+                .unwrap_or_default(),
+        )
+    }
+}
+
+/// The head of every name in `names` that `model` declares, resolved once
+/// (the variable itself, the implicit globals and a repeated head skipped),
+/// and the first bare head the model declares nowhere -- an unknown
+/// dependency, reported by the fragment constructor. A qualified name whose
+/// instance the model does not declare (`module.output` after the module was
+/// deleted) is left out and refused at lowering, as `DoesNotExist` on the
+/// referencing phase.
+fn resolve_referenced_heads(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    self_ident: &str,
+    names: &BTreeSet<String>,
+) -> (Vec<(Ident<Canonical>, DeclaredName)>, Option<String>) {
+    let mut heads: Vec<(Ident<Canonical>, DeclaredName)> = Vec::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut unknown: Option<String> = None;
+    for dep_name in names {
+        let (head, qualified) = dep_head(dep_name);
+        if head == self_ident || is_implicit_global(head) || !seen.insert(head) {
+            continue;
+        }
+        match DeclaredName::resolve(db, model, project, head) {
+            Some(declared) => heads.push((Ident::new(head), declared)),
+            None if qualified => {}
+            None => {
+                if unknown.is_none() {
+                    unknown = Some(head.to_string());
+                }
+            }
+        }
+    }
+    (heads, unknown)
+}
+
+/// The shape of every name a source variable's equation can reference, itself
+/// included, as the compiler resolves them: the map the compiler resolves
+/// every reference through. Nothing here carries an offset in this model: the
+/// model's layout is assigned at assembly and lowering names its references.
+/// That is what makes a fragment position-independent, and hence what lets
+/// ONE salsa cache entry per variable serve both the diagnostic pass and
+/// assembly and survive unrelated variables coming and going. First-inserted
+/// wins, and the variable's own entry comes first. The implicit module
+/// instances the parse synthesized (`SMTH1(x, 3)` creates `$⁚v⁚0⁚smth1`, whose
+/// output the rewritten equation reads as `$⁚v⁚0⁚smth1·output`) are keys too:
+/// the read relocates through the instance.
+fn compiler_shapes(
+    db: &dyn Db,
+    project: SourceProject,
+    self_ident: &str,
+    self_shape: DepShape,
+    heads: &[(Ident<Canonical>, DeclaredName)],
+    parsed: &ParsedVariableResult,
+) -> IdentMap<Ident<Canonical>, DepShape> {
+    let mut dep_shapes: IdentMap<Ident<Canonical>, DepShape> = Default::default();
+    dep_shapes.insert(Ident::new(self_ident), self_shape);
+    for (ident, declared) in heads {
+        dep_shapes.insert(ident.clone(), declared.shape(db, project));
+    }
+    for implicit_var in &parsed.implicit_vars {
+        if let Some(dm_module) = implicit_var.module() {
+            dep_shapes
+                .entry(Ident::new(&dm_module.ident))
+                .or_insert_with(|| module_dep_shape(db, project, &dm_module.model_name));
+        }
+    }
+    dep_shapes
+}
+
+/// The shape of every name an equation can reference as the `Expr2` tier
+/// lowers under it: the equation's own declared dimensions and each resolved
+/// head's (`DeclaredName::dimensions_shape`), so the tier reads a
+/// dependency's dimensions from the same firewall answer the compiler reads
+/// its shape from.
+fn expr2_shapes(
+    db: &dyn Db,
+    project: SourceProject,
+    self_ident: &str,
+    self_dims: Option<&[Dimension]>,
+    heads: &[(Ident<Canonical>, DeclaredName)],
+) -> IdentMap<Ident<Canonical>, DepShape> {
+    let mut shapes: IdentMap<Ident<Canonical>, DepShape> = Default::default();
+    shapes.insert(
+        Ident::new(self_ident),
+        DepShape::var(self_dims.map(<[Dimension]>::to_vec).unwrap_or_default()),
+    );
+    for (ident, declared) in heads {
+        if let Some(shape) = declared.dimensions_shape(db, project) {
+            shapes.insert(ident.clone(), shape);
+        }
+    }
+    shapes
+}
+
+/// One source variable lowered once, with the names its equation references
+/// resolved once: what [`lowered_source_variable`] memoizes.
+#[derive(Clone, PartialEq)]
+pub(crate) struct LoweredSource {
+    /// The variable in its `Expr2` form, lowered under the dimensions of
+    /// `heads` ([`expr2_shapes`]).
+    pub variable: Arc<Variable>,
+    /// The head of every name the equation references that the model declares
+    /// ([`resolve_referenced_heads`]): `explicit_fragment_input` projects the
+    /// compiler's shapes and the tables it needs from these, so a variable's
+    /// names are resolved once per revision rather than once by the memo and
+    /// again by the fragment.
+    pub heads: Vec<(Ident<Canonical>, DeclaredName)>,
+    /// The first bare head the model declares nowhere -- the unknown
+    /// dependency `explicit_fragment_input` reports.
+    pub unknown: Option<String>,
+}
+
+/// One source variable in its `Expr2` form, lowered once under the
+/// dimensions of the names its equation references ([`expr2_shapes`]).
+///
+/// The one owner of a variable's lowered form. `explicit_fragment_input`
+/// borrows it (`Cow::Borrowed`), and the unit check and the LTM describers hold
+/// its `Arc` through `db::model_lowered_variables`, so the compile, diagnostic
+/// and analysis paths lower each variable exactly once per revision
+/// (`db::lowered_variable_tests`). The memo is keyed on the variable and its
+/// owning model -- the model names the scope a module instance's wiring
+/// resolves under -- and reads its dependencies' dimensions through the
+/// firewall queries, so an equation edit re-lowers the edited variable alone:
+/// a dependent lowers under the edited variable's SHAPE, which the edit leaves
+/// unchanged.
+///
+/// A module instance is its wiring: `lower_variable`'s module arm resolves it
+/// under the model's canonical name (`db::build_module_inputs`' `main` rule
+/// compares canonical names, so a root model spelled `Main` wires as `main`
+/// does); its input sources are still resolved, since the instance's fragment
+/// reads their shapes.
+///
+/// Salsa retains the value for as long as it stays valid, in every mode: the
+/// plain compile path pays that residency for a lowered tree it reads once,
+/// where unit checking and LTM read it many times (the Phase 8.2 ledger row
+/// of `docs/design-plans/2026-08-25-compiler-unification.md` records the
+/// measured cost).
+#[salsa::tracked(returns(ref))]
+pub(crate) fn lowered_source_variable(
+    db: &dyn Db,
+    var: SourceVariable,
+    model: SourceModel,
+    project: SourceProject,
+) -> LoweredSource {
+    let parsed = parse_source_variable(db, var, project);
+    let model_ident: Ident<Canonical> = Ident::new(model.name(db));
+    let deps = variable_direct_dependencies(db, var, project, ModuleInputSet::empty(db));
+    let names = referenced_names(db, var, deps);
+    let (heads, unknown) = resolve_referenced_heads(db, model, project, var.ident(db), &names);
+    let shapes = expr2_shapes(
+        db,
+        project,
+        var.ident(db),
+        parsed.variable.get_dimensions(),
+        &heads,
+    );
+    let scope = LoweringScope {
+        dimensions: project_dimensions_context(db, project),
+        shapes: &shapes,
+        model_name: model_ident.as_str(),
+    };
+    LoweredSource {
+        variable: Arc::new(crate::model::lower_variable(&scope, &parsed.variable)),
+        heads,
+        unknown,
+    }
+}
+
+/// Build the fragment input of one source variable: its lowered form
+/// ([`lowered_source_variable`], borrowed) plus the shape of every name it
+/// references as the compiler resolves it ([`compiler_shapes`]) and the tables
+/// it calls.
 ///
 /// `module_input_names` is the module instance's input wiring, which selects
 /// the live `isModuleInput` branch at lowering; the parse and the dependency
@@ -271,22 +550,11 @@ pub(crate) fn explicit_fragment_input<'db>(
     }
 
     let deps = variable_direct_dependencies(db, var, project, ModuleInputSet::empty(db));
-
-    // Per-call memo over `model_variable_by_name`. The salsa firewall query is
-    // the SOURCE of truth for the lookup (that is what gives the fragment a
-    // dependency on the named variable rather than on the whole variables map);
-    // this only stops the name loops below from asking it the same question
-    // several times, which on a dependency-heavy model was the whole measurable
-    // cost of the narrowing.
-    let mut resolved: HashMap<String, Option<SourceVariable>> = HashMap::new();
-    let mut resolve_var = |name: &str| -> Option<SourceVariable> {
-        if let Some(hit) = resolved.get(name) {
-            return *hit;
-        }
-        let found = model_variable_by_name(db, model, name.to_string());
-        resolved.insert(name.to_string(), found);
-        found
-    };
+    let LoweredSource {
+        variable: lowered,
+        heads,
+        unknown: unknown_head,
+    } = lowered_source_variable(db, var, model, project);
 
     // A bare reference to a standalone lookup-only table -- the table used as a
     // value rather than called via `LOOKUP(table, x)` -- has no scalar value of
@@ -296,16 +564,15 @@ pub(crate) fn explicit_fragment_input<'db>(
     // reference (a real call lands in `referenced_tables`), so its presence in
     // the dependency sets is exactly this error.
     {
-        let referenced: BTreeSet<&String> = deps
-            .dt_deps
+        let bare_table_diags: Vec<Diagnostic> = heads
             .iter()
-            .chain(deps.initial_deps.iter())
-            .collect();
-        let bare_table_diags: Vec<Diagnostic> = referenced
-            .into_iter()
-            .filter_map(|dep| {
-                let dep_sv = resolve_var(dep)?;
-                crate::db::source_var_is_table_only(db, dep_sv).then(|| {
+            .filter_map(|(ident, declared)| {
+                let DeclaredName::Source(dep_sv) = declared else {
+                    return None;
+                };
+                let dep = ident.as_str();
+                let referenced_bare = deps.dt_deps.contains(dep) || deps.initial_deps.contains(dep);
+                (referenced_bare && crate::db::source_var_is_table_only(db, *dep_sv)).then(|| {
                     diagnostic(DiagnosticError::Model(crate::common::Error::new(
                         crate::common::ErrorKind::Model,
                         crate::common::ErrorCode::LookupReferencedWithoutArgument,
@@ -328,121 +595,16 @@ pub(crate) fn explicit_fragment_input<'db>(
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
 
-    // Every name the fragment references: the two phases' data-flow
-    // dependencies, the lookup tables it calls (a table reference is a layout
-    // reference -- codegen needs the table's identity -- not a data-flow
-    // dependency, so it lives in `referenced_tables`, issue #606), and a
-    // stock's inflows and outflows (read by its update expression).
-    let mut all_names: BTreeSet<&str> = deps
-        .dt_deps
-        .iter()
-        .chain(deps.initial_deps.iter())
-        .chain(deps.referenced_tables.iter())
-        .map(String::as_str)
-        .collect();
-    let stock_flows: Vec<String> = if var.kind(db) == SourceVariableKind::Stock {
-        var.inflows(db)
-            .iter()
-            .chain(var.outflows(db).iter())
-            .map(|flow| canonicalize(flow).into_owned())
-            .collect()
-    } else {
-        Vec::new()
-    };
-    all_names.extend(stock_flows.iter().map(String::as_str));
-
-    // The shape of every name the fragment can reference, itself included:
-    // the scope the equation lowers under and the map the compiler resolves
-    // every reference through, so the two tiers read one answer. Nothing here
-    // carries an offset in this model: the model's layout is assigned at
-    // assembly and lowering names its references. That is what makes a
-    // fragment position-independent, and hence what lets ONE salsa cache entry
-    // per variable serve both the diagnostic pass and assembly and survive
-    // unrelated variables coming and going. First-inserted-wins, and the
-    // variable's own entry comes first.
-    let self_ident: Ident<Canonical> = Ident::new(&var_ident);
-    let self_shape = if var.kind(db) == SourceVariableKind::Module {
-        module_dep_shape(db, project, var.model_name(db))
-    } else {
-        DepShape::var(
-            parsed
-                .variable
-                .get_dimensions()
-                .map(<[Dimension]>::to_vec)
-                .unwrap_or_default(),
-        )
-    };
-    let mut dep_shapes: IdentMap<Ident<Canonical>, DepShape> = Default::default();
-    dep_shapes.insert(self_ident.clone(), self_shape);
-    // A name that is neither a source variable nor an implicit helper is an
-    // unknown dependency. It is reported once the equation has lowered: a
-    // lowering refusal is about the equation as written and outranks a name
-    // missing from the model around it. The error points at the reference
-    // site and names the reference: the span alone leaves a reader of a
-    // rename or a deletion guessing which of several names went missing, and
-    // the diagnostic's `variable` is the REFERRING variable, not this one.
-    let mut unknown_dependency: Option<Diagnostic> = None;
-    for dep_name in &all_names {
-        let (head, qualified) = dep_head(dep_name);
-        if head == var_ident.as_str() || is_implicit_global(head) || dep_shapes.contains_key(head) {
-            continue;
-        }
-        let shape = match resolve_var(head) {
-            Some(dep_sv) => Some(source_dep_shape(db, dep_sv, project)),
-            None => model_implicit_var_by_name(db, model, project, head.to_string())
-                .map(|meta| implicit_dep_shape(db, project, &meta)),
-        };
-        match shape {
-            Some(shape) => {
-                dep_shapes.insert(Ident::new(head), shape);
-            }
-            // A qualified name whose instance the model does not declare
-            // (`module.output` after the module was deleted) is refused at
-            // lowering, as `DoesNotExist` on the referencing phase.
-            None if qualified => {}
-            None => {
-                if unknown_dependency.is_none() {
-                    let loc = parsed
-                        .variable
-                        .ast()
-                        .and_then(|ast| ast.get_var_loc(head))
-                        .unwrap_or_default();
-                    unknown_dependency = Some(diagnostic(DiagnosticError::Equation(
-                        crate::common::EquationError::detailed(
-                            crate::common::ErrorCode::UnknownDependency,
-                            loc.start,
-                            loc.end,
-                            format!("'{head}' is not a variable of model '{model_name}'"),
-                        ),
-                    )));
-                }
-            }
-        }
-    }
-    // The implicit module instances this variable's parse synthesized
-    // (`SMTH1(x, 3)` creates `$⁚v⁚0⁚smth1`, whose output the rewritten
-    // equation reads as `$⁚v⁚0⁚smth1·output`): the read relocates through the
-    // instance.
-    for implicit_var in &parsed.implicit_vars {
-        if let Some(dm_module) = implicit_var.module() {
-            dep_shapes
-                .entry(Ident::new(&dm_module.ident))
-                .or_insert_with(|| module_dep_shape(db, project, &dm_module.model_name));
-        }
-    }
-
-    // Lower the variable to `Expr2` under those shapes; a module instance is
-    // its wiring, which `lower_variable`'s module arm resolves.
-    let scope = LoweringScope {
-        dimensions: dim_context,
-        shapes: &dep_shapes,
-        model_name,
-    };
-    let lowered = crate::model::lower_variable(&scope, &parsed.variable);
+    let self_shape = source_self_shape(db, var, project, parsed);
+    let dep_shapes = compiler_shapes(db, project, &var_ident, self_shape, heads, parsed);
 
     // Errors introduced during AST lowering (e.g. `MismatchedDimensions` from
     // the Expr2 lowering) land on the lowered variable, not the parsed one, so
-    // they are checked separately.
+    // they are checked separately. A lowering refusal is about the equation
+    // as written and outranks a name missing from the model around it, which
+    // is reported next: at the reference site, naming the reference, since the
+    // span alone leaves a reader of a rename or a deletion guessing which of
+    // several names went missing.
     if let Some(errors) = lowered.equation_errors()
         && !errors.is_empty()
     {
@@ -454,10 +616,22 @@ pub(crate) fn explicit_fragment_input<'db>(
                 .collect(),
         };
     }
-    if let Some(unknown) = unknown_dependency {
+    if let Some(head) = unknown_head {
+        let loc = parsed
+            .variable
+            .ast()
+            .and_then(|ast| ast.get_var_loc(head))
+            .unwrap_or_default();
         return ExplicitFragment::Fatal {
             unit_diags,
-            fatal_diags: vec![unknown],
+            fatal_diags: vec![diagnostic(DiagnosticError::Equation(
+                crate::common::EquationError::detailed(
+                    crate::common::ErrorCode::UnknownDependency,
+                    loc.start,
+                    loc.end,
+                    format!("'{head}' is not a variable of model '{model_name}'"),
+                ),
+            ))],
         };
     }
 
@@ -465,6 +639,7 @@ pub(crate) fn explicit_fragment_input<'db>(
     // rather than silently dropped, which would shift table indices and make
     // lookups read the wrong table at runtime) and those of the tables it calls
     // through `LOOKUP(dep, x)`, which codegen needs to emit the `Lookup`.
+    let self_ident: Ident<Canonical> = Ident::new(&var_ident);
     let mut tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
     let gf_tables = lowered.tables();
     if !gf_tables.is_empty() {
@@ -485,23 +660,20 @@ pub(crate) fn explicit_fragment_input<'db>(
             _ => {}
         }
     }
-    for dep_name in &all_names {
-        let (head, qualified) = dep_head(dep_name);
-        if qualified || tables.contains_key(head) {
+    for (ident, declared) in heads {
+        let DeclaredName::Source(dep_sv) = declared else {
             continue;
-        }
-        if let Some(dep_sv) = resolve_var(head) {
-            let dep_tables = extract_tables_from_source_var(db, &dep_sv, project);
-            if !dep_tables.is_empty() {
-                tables.insert(Ident::new(head), dep_tables);
-            }
+        };
+        let dep_tables = variable_tables(db, *dep_sv, project);
+        if !dep_tables.is_empty() {
+            tables.insert(ident.clone(), dep_tables.clone());
         }
     }
 
     ExplicitFragment::Ready {
         unit_diags,
         input: Box::new(FragmentInput::new(
-            lowered,
+            Cow::Borrowed(lowered.as_ref()),
             dep_shapes,
             tables,
             canonical_module_input_set(module_input_names),

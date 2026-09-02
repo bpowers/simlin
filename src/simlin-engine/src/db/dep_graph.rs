@@ -2451,7 +2451,7 @@ pub(crate) fn model_dependency_graph_impl(
     // instantiates keeps exactly the seeds above; a root some model does
     // instantiate takes the rule like any target, which costs it initial
     // evaluations and changes no number.
-    let instantiated_as_module = crate::db::stages::source_model_is_stdlib(db, model)
+    let instantiated_as_module = crate::db::source_model_is_stdlib(db, model)
         || model.macro_spec(db).is_some()
         || project_module_graph(db, project).is_target(&canonicalize(model.name(db)));
     let runlist_initials = {
