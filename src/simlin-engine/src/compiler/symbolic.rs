@@ -33,206 +33,444 @@ use smallvec::SmallVec;
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeContext, CompiledInitial, CompiledModule, DimId, DimListId,
     GraphicalFunctionId, LiteralId, LookupMode, ModuleDeclaration, ModuleId, ModuleInputOffset,
-    Op2, Opcode, PcOffset, RuntimeSparseMapping, STACK_CAPACITY, StaticArrayView, TempId,
-    VariableOffset, ViewId, ViewStorage,
+    Op2, Opcode, PcOffset, RuntimeSparseMapping, STACK_CAPACITY, StaticArrayView, TableCount,
+    TempId, VariableOffset, ViewId, ViewStorage, bind_kind, operand_of_kind,
 };
 use crate::common::{Canonical, Ident};
 
 pub(crate) use super::expr::VarRef as SymVarRef;
 
 // ============================================================================
-// Types
+// The symbolic opcode table
 // ============================================================================
 
-/// Symbolic version of `Opcode`. Identical structure except opcodes that
-/// reference model variable offsets use `SymVarRef` instead of `VariableOffset`.
+/// Every symbolic opcode, its operands and its concrete twin, stated once.
 ///
-/// Opcodes that reference global implicit variables (time, dt, etc.) keep their
-/// fixed offsets since those never change.
+/// The table is data: it holds no code of its own and hands its rows to the
+/// macro it is invoked with. [`declare_symbolic_opcodes!`] derives the
+/// production items from it -- [`SymbolicOpcode`] itself, [`resolve_opcode`],
+/// [`renumber_opcode`], [`SymbolicOpcode::gf_run`], [`SymbolicOpcode::var_ref`]
+/// and [`SymbolicOpcode::jump_offset`] -- and the test modules derive their
+/// oracles and their every-variant rows from the same rows, so adding an
+/// opcode is one row here (plus the semantics in `vm.rs` and `wasmgen`, which
+/// stay hand-written).
 ///
-/// The 3-address fused opcodes (`BinVarVar`, `AssignAddVarVarCurr`, ...) have no
-/// counterpart here, and that absence is structural rather than an oversight:
-/// `ByteCode::fuse_three_address` runs at `Vm::new`, on the VM's private copy of
-/// already-resolved bytecode, so a fused opcode can never exist in the symbolic
-/// domain.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum SymbolicOpcode {
-    // === ARITHMETIC & LOGIC (unchanged) ===
-    Op2 {
-        op: Op2,
-    },
-    Not {},
+/// A row is
+///
+/// ```text
+/// /// docs
+/// Name { operand: Type, .. } => Twin { field, field: operand, .. },
+/// ```
+///
+/// The left side is the symbolic variant exactly as it is declared. The right
+/// side is the [`Opcode`] it resolves to: a bare `field` copies the symbolic
+/// operand of the same name, `field: operand` takes another symbolic operand
+/// (the resolved slot of a variable reference, under the concrete field's
+/// name), and a symbolic operand the twin does not list is symbolic-only.
+/// A unit variant (`Ret`) has no braces on either side.
+///
+/// An operand's TYPE is its kind, and the derived functions act on the kind:
+///
+/// - `SymVarRef` -- a variable reference. `resolve_opcode` turns it into the
+///   layout's `VariableOffset`; renumbering leaves it alone (M7);
+///   `var_ref` reports it.
+/// - `LiteralId`, `ModuleId`, `ViewId`, `DimListId` -- flat resource ids,
+///   moved by the fragment's base for that resource with a checked `u16`
+///   add.
+/// - `TempId` -- a temp slot, moved by the fragment's temp base with a
+///   checked `u8` add.
+/// - `GraphicalFunctionId` -- the base of a run of `TableCount` tables,
+///   remapped through the fragment's content-deduplicated `GfRemap` (M4).
+///   `gf_run` reports the pair, and a row carrying the base without the
+///   count does not compile.
+/// - `TableCount` -- the length of that run; plain data to renumbering.
+/// - `PcOffset` -- a backward jump, which `jump_offset` reports so the
+///   peephole optimizer and `db::assemble::segment_member_by_element` (which
+///   REORDERS the segments a jump lives between) relocate it.
+/// - anything else (`Op2`, `BuiltinId`, `LookupMode`, `VariableOffset` for
+///   the fixed implicit-global slots, `ModuleInputOffset`, the integer and
+///   `bool` payloads) -- data, copied through by every derived function.
+///
+/// `Compiler` (through its `SymbolicByteCodeBuilder`, which builds the fused
+/// superinstructions) is the ONLY producer of a `SymbolicOpcode` and
+/// `resolve_opcode` the only producer of an `Opcode`, so a symbolic variant
+/// nothing constructs is a program the compiler cannot express -- and the
+/// dead-code lint, which clippy denies, is what keeps such a row out: never
+/// `allow` it.
+macro_rules! symbolic_opcode_table {
+    ($generate:ident) => {
+        $generate! {
+            // === ARITHMETIC & LOGIC ===
+            Op2 { op: Op2 } => Op2 { op },
+            Not {} => Not {},
 
-    // === CONSTANTS & VARIABLES ===
-    LoadConstant {
-        id: LiteralId,
-    },
-    LoadVar {
-        var: SymVarRef,
-    },
-    /// Symbolic counterpart of `Opcode::LoadPrev`.
-    SymLoadPrev {
-        var: SymVarRef,
-    },
-    /// Symbolic counterpart of `Opcode::LoadInitial`.
-    SymLoadInitial {
-        var: SymVarRef,
-    },
-    LoadGlobalVar {
-        off: VariableOffset,
-    },
+            // === CONSTANTS & VARIABLES ===
+            LoadConstant { id: LiteralId } => LoadConstant { id },
+            LoadVar { var: SymVarRef } => LoadVar { off: var },
+            /// Symbolic counterpart of `Opcode::LoadPrev`.
+            SymLoadPrev { var: SymVarRef } => LoadPrev { off: var },
+            /// Symbolic counterpart of `Opcode::LoadInitial`.
+            SymLoadInitial { var: SymVarRef } => LoadInitial { off: var },
+            /// The implicit globals (time, dt, ...) live at fixed slots, so the
+            /// offset is concrete already.
+            LoadGlobalVar { off: VariableOffset } => LoadGlobalVar { off },
 
-    // === LEGACY SUBSCRIPT ===
-    PushSubscriptIndex {
-        bounds: VariableOffset,
-    },
-    LoadSubscript {
-        var: SymVarRef,
-    },
+            // === LEGACY SUBSCRIPT ===
+            PushSubscriptIndex { bounds: VariableOffset } => PushSubscriptIndex { bounds },
+            LoadSubscript { var: SymVarRef } => LoadSubscript { off: var },
 
-    // === CONTROL FLOW (unchanged) ===
-    SetCond {},
-    If {},
-    Ret,
+            // === CONTROL FLOW ===
+            SetCond {} => SetCond {},
+            If {} => If {},
+            Ret => Ret,
 
-    // === MODULES (unchanged) ===
-    LoadModuleInput {
-        input: ModuleInputOffset,
-    },
-    EvalModule {
-        id: ModuleId,
-        n_inputs: u8,
-    },
+            // === MODULES ===
+            LoadModuleInput { input: ModuleInputOffset } => LoadModuleInput { input },
+            EvalModule { id: ModuleId, n_inputs: u8 } => EvalModule { id, n_inputs },
 
-    // === ASSIGNMENT ===
-    AssignCurr {
-        var: SymVarRef,
-    },
+            // === ASSIGNMENT ===
+            AssignCurr { var: SymVarRef } => AssignCurr { off: var },
 
-    // === BUILTINS & LOOKUPS (unchanged) ===
-    Apply {
-        func: BuiltinId,
-    },
-    Lookup {
-        base_gf: GraphicalFunctionId,
-        table_count: u16,
-        mode: LookupMode,
-    },
-    /// `Lookup` with the element offset resolved at COMPILE time.
-    ///
-    /// `compiler::codegen` pushes a `LoadConstant` for a lookup's element
-    /// offset before the index expression, and for a scalar table that
-    /// constant is always 0 -- 429k dispatches per C-LEARN run and 5.1% of
-    /// WORLD3's, spent pushing a zero the VM immediately pops and range-checks.
-    /// The push is not adjacent to the `Lookup` (the index expression sits
-    /// between), so no peephole can remove it; it has to not be emitted.
-    ///
-    /// `base_gf`/`table_count` still describe the variable's WHOLE table block,
-    /// exactly as on `Lookup`, because `gf_blocks_of_fragment` reads block
-    /// extents off these two fields. `elem` is the resolved offset WITHIN that
-    /// block, bounds-checked at emit time (codegen only emits this form when
-    /// `elem < table_count`), so the VM needs no runtime range check.
-    LookupDirect {
-        base_gf: GraphicalFunctionId,
-        table_count: u16,
-        elem: u8,
-        mode: LookupMode,
-    },
+            // === BUILTINS & LOOKUPS ===
+            Apply { func: BuiltinId } => Apply { func },
+            Lookup { base_gf: GraphicalFunctionId, table_count: TableCount, mode: LookupMode }
+                => Lookup { base_gf, table_count, mode },
+            /// `Lookup` with the element offset resolved at COMPILE time.
+            ///
+            /// `compiler::codegen` pushes a `LoadConstant` for a lookup's element
+            /// offset before the index expression, and for a scalar table that
+            /// constant is always 0 -- 429k dispatches per C-LEARN run and 5.1% of
+            /// WORLD3's, spent pushing a zero the VM immediately pops and range-checks.
+            /// The push is not adjacent to the `Lookup` (the index expression sits
+            /// between), so no peephole can remove it; it has to not be emitted.
+            ///
+            /// `base_gf`/`table_count` still describe the variable's WHOLE table block,
+            /// exactly as on `Lookup`, because `gf_blocks_of_fragment` reads block
+            /// extents off these two fields; the twin drops `table_count`, the one
+            /// symbolic-only operand in the table. `elem` is the resolved offset
+            /// WITHIN that block, bounds-checked at emit time (codegen only emits this
+            /// form when `elem < table_count`), so the VM needs no runtime range check.
+            LookupDirect {
+                base_gf: GraphicalFunctionId, table_count: TableCount, elem: u8, mode: LookupMode
+            } => LookupDirect { base_gf, elem, mode },
 
-    // === SUPERINSTRUCTIONS ===
-    AssignConstCurr {
-        var: SymVarRef,
-        literal_id: LiteralId,
-    },
-    BinOpAssignCurr {
-        op: Op2,
-        var: SymVarRef,
-    },
-    BinOpAssignNext {
-        op: Op2,
-        var: SymVarRef,
-    },
+            // === SUPERINSTRUCTIONS ===
+            AssignConstCurr { var: SymVarRef, literal_id: LiteralId }
+                => AssignConstCurr { off: var, literal_id },
+            BinOpAssignCurr { op: Op2, var: SymVarRef } => BinOpAssignCurr { op, off: var },
+            BinOpAssignNext { op: Op2, var: SymVarRef } => BinOpAssignNext { op, off: var },
 
-    // === ARRAY VIEW STACK ===
-    //
-    // Every variant in this enum is one `Compiler` constructs. `Compiler`
-    // (through its `SymbolicByteCodeBuilder`, which builds the fused
-    // superinstructions) is the ONLY producer of a `SymbolicOpcode` and
-    // `resolve_opcode` the only producer of an `Opcode`, so a symbolic variant
-    // nothing constructs is a program the compiler cannot express -- and the
-    // dead-code lint, which clippy denies, is what keeps such a variant out:
-    // never `allow` it here.
-    PushStaticView {
-        view_id: ViewId,
-    },
-    PushVarViewDirect {
-        var: SymVarRef,
-        dim_list_id: DimListId,
-    },
-    ViewSubscriptDynamic {
-        dim_idx: u8,
-    },
-    ViewRangeDynamic {
-        dim_idx: u8,
-    },
-    PopView {},
+            // === ARRAY VIEW STACK ===
+            PushStaticView { view_id: ViewId } => PushStaticView { view_id },
+            PushVarViewDirect { var: SymVarRef, dim_list_id: DimListId }
+                => PushVarViewDirect { base_off: var, dim_list_id },
+            ViewSubscriptDynamic { dim_idx: u8 } => ViewSubscriptDynamic { dim_idx },
+            ViewRangeDynamic { dim_idx: u8 } => ViewRangeDynamic { dim_idx },
+            PopView {} => PopView {},
 
-    // === TEMP ARRAY ACCESS (unchanged) ===
-    LoadTempConst {
-        temp_id: TempId,
-        index: u16,
-    },
+            // === TEMP ARRAY ACCESS ===
+            LoadTempConst { temp_id: TempId, index: u16 } => LoadTempConst { temp_id, index },
 
-    // === ITERATION (unchanged) ===
-    BeginIter {
-        write_temp_id: TempId,
-        has_write_temp: bool,
-    },
-    LoadIterViewAt {
-        offset: u8,
-    },
-    StoreIterElement {},
-    NextIterOrJump {
-        jump_back: PcOffset,
-    },
-    EndIter {},
+            // === ITERATION ===
+            BeginIter { write_temp_id: TempId, has_write_temp: bool }
+                => BeginIter { write_temp_id, has_write_temp },
+            LoadIterViewAt { offset: u8 } => LoadIterViewAt { offset },
+            StoreIterElement {} => StoreIterElement {},
+            NextIterOrJump { jump_back: PcOffset } => NextIterOrJump { jump_back },
+            EndIter {} => EndIter {},
 
-    // === ARRAY REDUCTIONS (unchanged) ===
-    ArraySum {},
-    ArrayMax {},
-    ArrayMin {},
-    ArrayMean {},
-    ArrayStddev {},
-    ArraySize {},
+            // === ARRAY REDUCTIONS ===
+            ArraySum {} => ArraySum {},
+            ArrayMax {} => ArrayMax {},
+            ArrayMin {} => ArrayMin {},
+            ArrayMean {} => ArrayMean {},
+            ArrayStddev {} => ArrayStddev {},
+            ArraySize {} => ArraySize {},
 
-    // === VECTOR OPERATIONS (unchanged) ===
-    VectorSelect {},
-    VectorElmMap {
-        write_temp_id: TempId,
-        full_source_len: u32,
-    },
-    VectorSortOrder {
-        write_temp_id: TempId,
-    },
-    Rank {
-        write_temp_id: TempId,
-    },
-    // Per-element arrayed-GF lookup -> temp (GH #580 Bug B). All fields are
-    // layout-independent (GF-table indices + temp id), so it round-trips
-    // through symbolization unchanged, exactly like `Lookup`.
-    LookupArray {
-        base_gf: GraphicalFunctionId,
-        table_count: u16,
-        mode: LookupMode,
-        write_temp_id: TempId,
-    },
-    AllocateAvailable {
-        write_temp_id: TempId,
-    },
-    AllocateByPriority {
-        write_temp_id: TempId,
-    },
+            // === VECTOR OPERATIONS ===
+            VectorSelect {} => VectorSelect {},
+            /// `full_source_len` is the source variable's ABSOLUTE element count
+            /// (`vm_vector_elm_map`'s full-array-vs-strict-slice threshold and
+            /// the out-of-range `[0, full_source_len)` -> NaN guard), not a
+            /// resource id: it is invariant under renumbering and copied
+            /// through by resolution. The numeric end-to-end coverage (GH #579)
+            /// is `array_tests::out_of_bounds_element_returns_nan_vm` and
+            /// `strict_slice_source_oob_returns_nan_vm`; the merge-path pin is
+            /// `test_vector_elm_map_full_source_len_survives_fragment_roundtrip`.
+            VectorElmMap { write_temp_id: TempId, full_source_len: u32 }
+                => VectorElmMap { write_temp_id, full_source_len },
+            VectorSortOrder { write_temp_id: TempId } => VectorSortOrder { write_temp_id },
+            Rank { write_temp_id: TempId } => Rank { write_temp_id },
+            /// Per-element arrayed-GF lookup -> temp (GH #580 Bug B): a GF run
+            /// like `Lookup`'s plus a result temp like the other vector ops'.
+            LookupArray {
+                base_gf: GraphicalFunctionId, table_count: TableCount, mode: LookupMode, write_temp_id: TempId
+            } => LookupArray { base_gf, table_count, mode, write_temp_id },
+            AllocateAvailable { write_temp_id: TempId } => AllocateAvailable { write_temp_id },
+            AllocateByPriority { write_temp_id: TempId } => AllocateByPriority { write_temp_id },
+        }
+    };
 }
+
+/// The value a resolved concrete field takes: the local of the same name, or
+/// of the symbolic operand the row names for it.
+macro_rules! concrete_source {
+    ($field:ident) => {
+        $field
+    };
+    ($field:ident, $source:ident) => {
+        $source
+    };
+}
+
+/// What resolution makes of one operand: a variable reference becomes its
+/// layout slot; every other kind is copied.
+macro_rules! resolve_operand {
+    (SymVarRef, $operand:ident, $layout:ident) => {
+        resolve_var_ref($operand, $layout)?
+    };
+    ($ty:ident, $operand:ident, $layout:ident) => {
+        *$operand
+    };
+}
+
+/// What renumbering makes of one operand, by kind: a flat id moves by its
+/// base in `$off` (a `FragmentResourceOffsets`) with a checked add, a temp id
+/// by the base already narrowed to `TempId`, a graphical-function id through
+/// the remap, and everything else -- a variable reference (M7), a table
+/// count, a jump offset, plain data -- is copied.
+macro_rules! renumber_operand {
+    (SymVarRef, $operand:ident, $off:ident, $gf_remap:ident, $temp_off:ident) => {
+        $operand.clone()
+    };
+    (LiteralId, $operand:ident, $off:ident, $gf_remap:ident, $temp_off:ident) => {
+        checked_add_u16(*$operand, $off.lit_offset, "LiteralId")?
+    };
+    (GraphicalFunctionId, $operand:ident, $off:ident, $gf_remap:ident, $temp_off:ident) => {
+        remap_gf(*$operand, $gf_remap)?
+    };
+    (ModuleId, $operand:ident, $off:ident, $gf_remap:ident, $temp_off:ident) => {
+        checked_add_u16(*$operand, $off.mod_offset, "ModuleId")?
+    };
+    (ViewId, $operand:ident, $off:ident, $gf_remap:ident, $temp_off:ident) => {
+        checked_add_u16(*$operand, $off.view_offset, "ViewId")?
+    };
+    (TempId, $operand:ident, $off:ident, $gf_remap:ident, $temp_off:ident) => {
+        checked_add_u8(*$operand, $temp_off, "TempId")?
+    };
+    (DimListId, $operand:ident, $off:ident, $gf_remap:ident, $temp_off:ident) => {
+        checked_add_u16(*$operand, $off.dl_offset, "DimListId")?
+    };
+    ($ty:ident, $operand:ident, $off:ident, $gf_remap:ident, $temp_off:ident) => {
+        *$operand
+    };
+}
+
+/// The graphical-function run a row's operands name: `Some((base, count))`
+/// from its `GraphicalFunctionId` and `TableCount` operands, `None` when it
+/// has no base. A base without a count is refused at compile time, because
+/// `gf_blocks_of_fragment` reconstructs a fragment's table layout from these
+/// runs and a run it cannot see collapses into an un-referenced gap -- wrong
+/// tables with no diagnostic. A row with two bases would report the first;
+/// no such row exists, and the VM has no shape for one.
+macro_rules! gf_run_of {
+    ([GraphicalFunctionId $base:ident $($rest:tt)*] [$($all:tt)*]) => {
+        Some((*$base as usize, *gf_run_of!(@count [$($all)*]) as usize))
+    };
+    ([$ty:ident $operand:ident $($rest:tt)*] [$($all:tt)*]) => {
+        gf_run_of!([$($rest)*] [$($all)*])
+    };
+    ([] [$($all:tt)*]) => {
+        None
+    };
+    (@count [TableCount $count:ident $($rest:tt)*]) => {
+        $count
+    };
+    (@count [$ty:ident $operand:ident $($rest:tt)*]) => {
+        gf_run_of!(@count [$($rest)*])
+    };
+    (@count []) => {
+        compile_error!("a GraphicalFunctionId operand needs a TableCount operand beside it")
+    };
+}
+
+/// Derives the symbolic side of the compiler from [`symbolic_opcode_table!`]:
+/// the enum and the five mechanical functions over its operand kinds.
+/// `resolve_opcode` and `renumber_opcode` bind every operand of a row, since
+/// every operand flows into the value they build; the three accessors bind
+/// only the operands their kind reads (`bind_kind!`).
+macro_rules! declare_symbolic_opcodes {
+    ($(
+        $(#[$meta:meta])*
+        $name:ident $({ $( $(#[$fmeta:meta])* $field:ident : $ty:ident ),* $(,)? })?
+            => $cname:ident $({ $( $cfield:ident $(: $csrc:ident)? ),* $(,)? })? ,
+    )*) => {
+        /// Symbolic version of `Opcode`. Identical structure except opcodes that
+        /// reference model variable offsets use `SymVarRef` instead of `VariableOffset`.
+        ///
+        /// Opcodes that reference global implicit variables (time, dt, etc.) keep their
+        /// fixed offsets since those never change.
+        ///
+        /// The 3-address fused opcodes (`BinVarVar`, `AssignAddVarVarCurr`, ...) have no
+        /// counterpart here, and that absence is structural rather than an oversight:
+        /// `ByteCode::fuse_three_address` runs at `Vm::new`, on the VM's private copy of
+        /// already-resolved bytecode, so a fused opcode can never exist in the symbolic
+        /// domain.
+        ///
+        /// Declared by [`symbolic_opcode_table!`], which also states each variant's
+        /// concrete twin and is where the operand kinds are documented.
+        #[derive(Clone, Debug, PartialEq)]
+        pub(crate) enum SymbolicOpcode {
+            $( $(#[$meta])* $name $({ $( $(#[$fmeta])* $field: $ty ),* })?, )*
+        }
+
+        /// Resolve one symbolic opcode against `layout`: the concrete twin the
+        /// table names, with every variable reference turned into its slot and
+        /// every other operand copied. `Err` when a reference names a variable
+        /// the layout does not place or an element past its extent.
+        ///
+        /// Every symbolic operand is resolved into a local before the twin is
+        /// built, because the twin column names its sources by identifier and
+        /// `macro_rules` cannot tell which symbolic operands those identifiers
+        /// are; the one local no twin reads is `LookupDirect::table_count`, the
+        /// table's symbolic-only operand, hence the allow.
+        #[allow(unused_variables)]
+        pub(crate) fn resolve_opcode(
+            op: &SymbolicOpcode,
+            layout: &VariableLayout,
+        ) -> Result<Opcode, String> {
+            match op {
+                $( SymbolicOpcode::$name $({ $($field),* })? => {
+                    $($( let $field = resolve_operand!($ty, $field, layout); )*)?
+                    Ok(Opcode::$cname $({ $( $cfield: concrete_source!($cfield $(, $csrc)?) ),* })?)
+                } )*
+            }
+        }
+
+        /// Renumber resource ids within a single opcode.
+        ///
+        /// Flat resources (`LiteralId`, `ModuleId`, `ViewId`, `TempId`,
+        /// `DimListId`) are offset by the fragment's flat base; `GraphicalFunctionId`
+        /// is *content-de-duplicated* (#582), so a `Lookup`/`LookupArray` `base_gf`
+        /// is translated through `gf_remap` (the fragment's per-slot local->global
+        /// map from `FragmentMerger::absorb_gf`) rather than a flat add. Which
+        /// operand is which is the table's statement, not this function's.
+        ///
+        /// Every offsetting add is checked (M3): a wrapped id is a well-formed
+        /// program that names a different resource, so the failure mode of getting
+        /// this wrong is wrong numbers with no diagnostic. `Err` on a temp id past
+        /// `TempId` (= `u8`), on any `u16` id past its type, or on a `base_gf` out of
+        /// range for `gf_remap` (a corrupt fragment).
+        ///
+        /// The temp base is narrowed to `u8` up front, before any operand is
+        /// looked at, so a base past `TempId` is reported on the first opcode
+        /// renumbered whether or not it carries a temp. A module's programs
+        /// recycle temps into one identity pool whose base is 0 (#583), and
+        /// `combine_scc_fragment` sums into a per-SCC range bounded by the
+        /// members' small temp counts, so only an SCC summing past 255 reaches
+        /// it; a single variable bearing more than 255 temps is caught by the
+        /// per-operand `checked_add_u8` instead.
+        ///
+        /// The `u16` adds are belt-and-braces alongside `absorb_non_gf`'s capacity
+        /// check: that one bounds the merged TABLE, this one bounds the id an
+        /// individual opcode carries. Every production base comes from the merger; the
+        /// add stays checked so a caller with a hand-computed base could not wrap one.
+        pub(crate) fn renumber_opcode(
+            op: &SymbolicOpcode,
+            lit_off: u16,
+            gf_remap: &[GraphicalFunctionId],
+            mod_off: u16,
+            view_off: u16,
+            temp_off: u32,
+            dl_off: u16,
+        ) -> Result<SymbolicOpcode, String> {
+            let temp_off_u8 = u8::try_from(temp_off).map_err(|_| {
+                format!(
+                    "temp offset {} exceeds TempId capacity (u8::MAX = {})",
+                    temp_off,
+                    u8::MAX
+                )
+            })?;
+            let off = FragmentResourceOffsets {
+                lit_offset: lit_off,
+                mod_offset: mod_off,
+                view_offset: view_off,
+                temp_offset: temp_off,
+                dl_offset: dl_off,
+            };
+            Ok(match op {
+                $( SymbolicOpcode::$name $({ $($field),* })? => SymbolicOpcode::$name $({
+                    $( $field: renumber_operand!($ty, $field, off, gf_remap, temp_off_u8) ),*
+                })?, )*
+            })
+        }
+
+        impl SymbolicOpcode {
+            /// The graphical-function BLOCK this opcode references, as
+            /// `(base_gf, table_count)` -- i.e. the run `[base_gf, base_gf + table_count)`
+            /// in the fragment's own `graphical_functions`.
+            ///
+            /// The consumer, `gf_blocks_of_fragment`, reconstructs a fragment's GF
+            /// block layout by scanning for these runs, and a lookup opcode it did
+            /// not recognise would not be an error -- the block would simply stop
+            /// being seen as referenced, collapse into a maximal un-referenced GAP,
+            /// and the de-duplicated table layout would come out wrong with no
+            /// diagnostic anywhere. Derived from the table's `GraphicalFunctionId`
+            /// operands, so a new lookup opcode reports itself by being declared.
+            pub(crate) fn gf_run(&self) -> Option<(usize, usize)> {
+                match self {
+                    $( SymbolicOpcode::$name $({
+                        $( $field: bind_kind!(GraphicalFunctionId TableCount, $ty, $field) ),*
+                    })? => {
+                        gf_run_of!([$($( $ty $field )*)?] [$($( $ty $field )*)?])
+                    } )*
+                }
+            }
+
+            /// The variable this opcode reads or writes, if it names one.
+            pub(crate) fn var_ref(&self) -> Option<&SymVarRef> {
+                match self {
+                    $( SymbolicOpcode::$name $({ $( $field: bind_kind!(SymVarRef, $ty, $field) ),* })? => {
+                        operand_of_kind!(SymVarRef; [$($( $ty $field )*)?])
+                    } )*
+                }
+            }
+
+            /// The jump offset, if this opcode is a backward jump.
+            ///
+            /// Two passes must agree on which opcodes carry a PC, and a jump opcode
+            /// that failed to report itself would be silently mishandled by both:
+            /// the peephole optimizer would mis-relocate it, and
+            /// `db::assemble::segment_member_by_element` -- which REORDERS the
+            /// segments a jump lives between -- would not notice it escaping its
+            /// segment. Derived from the table's `PcOffset` operands.
+            pub(crate) fn jump_offset(&self) -> Option<PcOffset> {
+                match self {
+                    $( SymbolicOpcode::$name $({ $( $field: bind_kind!(PcOffset, $ty, $field) ),* })? => {
+                        let jump: Option<&PcOffset> =
+                            operand_of_kind!(PcOffset; [$($( $ty $field )*)?]);
+                        jump.copied()
+                    } )*
+                }
+            }
+
+            /// Mutably borrow the jump offset, if this opcode is a backward jump.
+            fn jump_offset_mut(&mut self) -> Option<&mut PcOffset> {
+                match self {
+                    $( SymbolicOpcode::$name $({ $( $field: bind_kind!(PcOffset, $ty, $field) ),* })? => {
+                        operand_of_kind!(PcOffset; [$($( $ty $field )*)?])
+                    } )*
+                }
+            }
+        }
+    };
+}
+
+symbolic_opcode_table!(declare_symbolic_opcodes);
+
+// ============================================================================
+// Types
+// ============================================================================
 
 /// Symbolic version of `ByteCode`. Contains the literal pool (unchanged)
 /// and symbolic opcodes.
@@ -492,31 +730,6 @@ impl VariableLayout {
 // Emission: the symbolic bytecode builder
 // ============================================================================
 
-impl SymbolicOpcode {
-    /// The jump offset, if this opcode is a backward jump.
-    ///
-    /// Centralized here because two passes must agree on which opcodes carry a
-    /// PC, and a new jump opcode that failed to report itself would be
-    /// silently mishandled by both: the peephole optimizer would mis-relocate
-    /// it, and `db::assemble::segment_member_by_element` -- which REORDERS the
-    /// segments a jump lives between -- would not notice it escaping its
-    /// segment.
-    pub(crate) fn jump_offset(&self) -> Option<PcOffset> {
-        match self {
-            SymbolicOpcode::NextIterOrJump { jump_back } => Some(*jump_back),
-            _ => None,
-        }
-    }
-
-    /// Mutably borrow the jump offset, if this opcode is a backward jump.
-    fn jump_offset_mut(&mut self) -> Option<&mut PcOffset> {
-        match self {
-            SymbolicOpcode::NextIterOrJump { jump_back } => Some(jump_back),
-            _ => None,
-        }
-    }
-}
-
 /// Accumulates one emission unit's symbolic opcodes and its literal pool.
 ///
 /// This is the compiler's only bytecode builder. It runs entirely in the
@@ -709,18 +922,9 @@ impl SymbolicByteCode {
 
 /// Collect all SymVarRef names referenced in a SymbolicByteCode.
 fn sym_var_refs_in_bytecode(sbc: &SymbolicByteCode) -> impl Iterator<Item = &str> {
-    sbc.code.iter().filter_map(|op| match op {
-        SymbolicOpcode::LoadVar { var }
-        | SymbolicOpcode::SymLoadPrev { var }
-        | SymbolicOpcode::SymLoadInitial { var }
-        | SymbolicOpcode::LoadSubscript { var }
-        | SymbolicOpcode::AssignCurr { var }
-        | SymbolicOpcode::AssignConstCurr { var, .. }
-        | SymbolicOpcode::BinOpAssignCurr { var, .. }
-        | SymbolicOpcode::BinOpAssignNext { var, .. }
-        | SymbolicOpcode::PushVarViewDirect { var, .. } => Some(var.name.as_str()),
-        _ => None,
-    })
+    sbc.code
+        .iter()
+        .filter_map(|op| op.var_ref().map(|var| var.name.as_str()))
 }
 
 /// Returns true if all SymVarRef names in `fragment` are present in `layout`.
@@ -822,176 +1026,6 @@ pub(crate) fn resolve_var_ref(
             VariableOffset::MAX
         )
     })
-}
-
-pub(crate) fn resolve_opcode(
-    op: &SymbolicOpcode,
-    layout: &VariableLayout,
-) -> Result<Opcode, String> {
-    match op {
-        // Opcodes with symbolic variable references
-        SymbolicOpcode::LoadVar { var } => Ok(Opcode::LoadVar {
-            off: resolve_var_ref(var, layout)?,
-        }),
-        SymbolicOpcode::SymLoadPrev { var } => Ok(Opcode::LoadPrev {
-            off: resolve_var_ref(var, layout)?,
-        }),
-        SymbolicOpcode::SymLoadInitial { var } => Ok(Opcode::LoadInitial {
-            off: resolve_var_ref(var, layout)?,
-        }),
-        SymbolicOpcode::LoadSubscript { var } => Ok(Opcode::LoadSubscript {
-            off: resolve_var_ref(var, layout)?,
-        }),
-        SymbolicOpcode::AssignCurr { var } => Ok(Opcode::AssignCurr {
-            off: resolve_var_ref(var, layout)?,
-        }),
-        SymbolicOpcode::AssignConstCurr { var, literal_id } => Ok(Opcode::AssignConstCurr {
-            off: resolve_var_ref(var, layout)?,
-            literal_id: *literal_id,
-        }),
-        SymbolicOpcode::BinOpAssignCurr { op, var } => Ok(Opcode::BinOpAssignCurr {
-            op: *op,
-            off: resolve_var_ref(var, layout)?,
-        }),
-        SymbolicOpcode::BinOpAssignNext { op, var } => Ok(Opcode::BinOpAssignNext {
-            op: *op,
-            off: resolve_var_ref(var, layout)?,
-        }),
-        SymbolicOpcode::PushVarViewDirect { var, dim_list_id } => Ok(Opcode::PushVarViewDirect {
-            base_off: resolve_var_ref(var, layout)?,
-            dim_list_id: *dim_list_id,
-        }),
-
-        // Opcodes that pass through unchanged
-        SymbolicOpcode::Op2 { op } => Ok(Opcode::Op2 { op: *op }),
-        SymbolicOpcode::Not {} => Ok(Opcode::Not {}),
-        SymbolicOpcode::LoadConstant { id } => Ok(Opcode::LoadConstant { id: *id }),
-        SymbolicOpcode::LoadGlobalVar { off } => Ok(Opcode::LoadGlobalVar { off: *off }),
-        SymbolicOpcode::PushSubscriptIndex { bounds } => {
-            Ok(Opcode::PushSubscriptIndex { bounds: *bounds })
-        }
-        SymbolicOpcode::SetCond {} => Ok(Opcode::SetCond {}),
-        SymbolicOpcode::If {} => Ok(Opcode::If {}),
-        SymbolicOpcode::Ret => Ok(Opcode::Ret),
-        SymbolicOpcode::LoadModuleInput { input } => Ok(Opcode::LoadModuleInput { input: *input }),
-        SymbolicOpcode::EvalModule { id, n_inputs } => Ok(Opcode::EvalModule {
-            id: *id,
-            n_inputs: *n_inputs,
-        }),
-        SymbolicOpcode::Apply { func } => Ok(Opcode::Apply { func: *func }),
-        SymbolicOpcode::Lookup {
-            base_gf,
-            table_count,
-            mode,
-        } => Ok(Opcode::Lookup {
-            base_gf: *base_gf,
-            table_count: *table_count,
-            mode: *mode,
-        }),
-        SymbolicOpcode::LookupDirect {
-            base_gf,
-            elem,
-            mode,
-            ..
-        } => Ok(Opcode::LookupDirect {
-            base_gf: *base_gf,
-            elem: *elem,
-            mode: *mode,
-        }),
-        SymbolicOpcode::PushStaticView { view_id } => {
-            Ok(Opcode::PushStaticView { view_id: *view_id })
-        }
-        SymbolicOpcode::ViewSubscriptDynamic { dim_idx } => {
-            Ok(Opcode::ViewSubscriptDynamic { dim_idx: *dim_idx })
-        }
-        SymbolicOpcode::ViewRangeDynamic { dim_idx } => {
-            Ok(Opcode::ViewRangeDynamic { dim_idx: *dim_idx })
-        }
-        SymbolicOpcode::PopView {} => Ok(Opcode::PopView {}),
-        SymbolicOpcode::LoadTempConst { temp_id, index } => Ok(Opcode::LoadTempConst {
-            temp_id: *temp_id,
-            index: *index,
-        }),
-        SymbolicOpcode::BeginIter {
-            write_temp_id,
-            has_write_temp,
-        } => Ok(Opcode::BeginIter {
-            write_temp_id: *write_temp_id,
-            has_write_temp: *has_write_temp,
-        }),
-        SymbolicOpcode::LoadIterViewAt { offset } => Ok(Opcode::LoadIterViewAt { offset: *offset }),
-        SymbolicOpcode::StoreIterElement {} => Ok(Opcode::StoreIterElement {}),
-        SymbolicOpcode::NextIterOrJump { jump_back } => Ok(Opcode::NextIterOrJump {
-            jump_back: *jump_back,
-        }),
-        SymbolicOpcode::EndIter {} => Ok(Opcode::EndIter {}),
-        SymbolicOpcode::ArraySum {} => Ok(Opcode::ArraySum {}),
-        SymbolicOpcode::ArrayMax {} => Ok(Opcode::ArrayMax {}),
-        SymbolicOpcode::ArrayMin {} => Ok(Opcode::ArrayMin {}),
-        SymbolicOpcode::ArrayMean {} => Ok(Opcode::ArrayMean {}),
-        SymbolicOpcode::ArrayStddev {} => Ok(Opcode::ArrayStddev {}),
-        SymbolicOpcode::ArraySize {} => Ok(Opcode::ArraySize {}),
-        SymbolicOpcode::VectorSelect {} => Ok(Opcode::VectorSelect {}),
-        SymbolicOpcode::VectorElmMap {
-            write_temp_id,
-            full_source_len,
-        } => Ok(Opcode::VectorElmMap {
-            write_temp_id: *write_temp_id,
-            // `full_source_len` is the source variable's ABSOLUTE element
-            // count (`vm_vector_elm_map`'s full-array-vs-strict-slice
-            // threshold and the out-of-range `[0, full_source_len)` -> NaN
-            // guard). It is NOT a renumber-able resource id like
-            // temp/lit/gf/view/dim_list/module: it is invariant under
-            // `renumber_opcode` and copied through unchanged on fragment
-            // concatenation (see the matching arm in `renumber_opcode`).
-            //
-            // The genuine-Vensim `.dat` simulate corpus (`vector_simple.dat` /
-            // `vector.dat`) deliberately has no out-of-range offset and no
-            // shape that flips the full-array branch, so a wrong
-            // `full_source_len` is invisible through `simulates_vector_simple_mdl`
-            // / `simulates_vector_xmile_genuine` alone. The NUMERIC end-to-end
-            // coverage (GH #579) therefore lives in `array_tests`: the
-            // full-array-source `out_of_bounds_element_returns_nan_vm`
-            // (base 0, `source_is_full_array == true`) and the
-            // strict-slice-source `strict_slice_source_oob_returns_nan_vm`
-            // (base != 0, the other branch) both feed an
-            // out-of-range offset, so a `full_source_len` corrupted in EITHER
-            // the codegen computation (`codegen::full_source_len`) OR this
-            // `resolve`/`renumber_opcode` path stops yielding the expected NaN
-            // and the assertions fail loudly (verified by hard-forcing a wrong
-            // constant in both sites). The structural symbolic round-trip --
-            // `test_renumber_vector_builtin_temp_ids` (isolated `renumber_opcode`)
-            // and `test_vector_elm_map_full_source_len_survives_fragment_roundtrip`
-            // (the full `concatenate_fragments` -> `resolve_bytecode`
-            // merge path) -- complements them by pinning that this field is
-            // invariant under renumbering (it is NOT a renumber-able resource id
-            // like temp/lit/gf/view/dim_list/module).
-            full_source_len: *full_source_len,
-        }),
-        SymbolicOpcode::VectorSortOrder { write_temp_id } => Ok(Opcode::VectorSortOrder {
-            write_temp_id: *write_temp_id,
-        }),
-        SymbolicOpcode::Rank { write_temp_id } => Ok(Opcode::Rank {
-            write_temp_id: *write_temp_id,
-        }),
-        SymbolicOpcode::LookupArray {
-            base_gf,
-            table_count,
-            mode,
-            write_temp_id,
-        } => Ok(Opcode::LookupArray {
-            base_gf: *base_gf,
-            table_count: *table_count,
-            mode: *mode,
-            write_temp_id: *write_temp_id,
-        }),
-        SymbolicOpcode::AllocateAvailable { write_temp_id } => Ok(Opcode::AllocateAvailable {
-            write_temp_id: *write_temp_id,
-        }),
-        SymbolicOpcode::AllocateByPriority { write_temp_id } => Ok(Opcode::AllocateByPriority {
-            write_temp_id: *write_temp_id,
-        }),
-    }
 }
 
 /// Resolve a symbolic bytecode stream against `layout`, producing the concrete
@@ -1610,93 +1644,6 @@ fn gf_block_key(tables: &[Vec<(f64, f64)>]) -> GfBlockKey {
     key
 }
 
-impl SymbolicOpcode {
-    /// The graphical-function BLOCK this opcode references, as
-    /// `(base_gf, table_count)` -- i.e. the run `[base_gf, base_gf + table_count)`
-    /// in the fragment's own `graphical_functions`.
-    ///
-    /// This is the SINGLE place that decides whether an opcode carries a
-    /// graphical function, and the match is exhaustive with no `_` arm on
-    /// purpose: a new variant cannot be added without answering the question
-    /// here, which is a compile error rather than a silent omission.
-    ///
-    /// That matters because the consumer, `gf_blocks_of_fragment`, reconstructs
-    /// a fragment's GF block layout by scanning for these runs, and a lookup
-    /// opcode it does not recognise is not an error -- the block simply stops
-    /// being seen as referenced, collapses into a maximal un-referenced GAP,
-    /// and the de-duplicated table layout comes out wrong with no diagnostic
-    /// anywhere. Wrong numbers, not a failure. A test cannot close that hole
-    /// either: a fixture exercising one lookup opcode passes unchanged when a
-    /// second is added and ignored, which is the "a test that pins one arm of
-    /// an N-way decision reads exactly like a test that pins the decision"
-    /// hazard. Only the compiler covers every arm.
-    ///
-    /// The same reasoning, and the same shape, as `BuiltinId::arity`.
-    pub(crate) fn gf_run(&self) -> Option<(usize, usize)> {
-        match self {
-            SymbolicOpcode::Lookup {
-                base_gf,
-                table_count,
-                ..
-            }
-            | SymbolicOpcode::LookupDirect {
-                base_gf,
-                table_count,
-                ..
-            }
-            | SymbolicOpcode::LookupArray {
-                base_gf,
-                table_count,
-                ..
-            } => Some((*base_gf as usize, *table_count as usize)),
-            // Every remaining variant, spelled out rather than wildcarded --
-            // that is what makes a new one a compile error here.
-            SymbolicOpcode::Op2 { .. }
-            | SymbolicOpcode::Not { .. }
-            | SymbolicOpcode::LoadConstant { .. }
-            | SymbolicOpcode::LoadVar { .. }
-            | SymbolicOpcode::SymLoadPrev { .. }
-            | SymbolicOpcode::SymLoadInitial { .. }
-            | SymbolicOpcode::LoadGlobalVar { .. }
-            | SymbolicOpcode::PushSubscriptIndex { .. }
-            | SymbolicOpcode::LoadSubscript { .. }
-            | SymbolicOpcode::SetCond { .. }
-            | SymbolicOpcode::If { .. }
-            | SymbolicOpcode::Ret
-            | SymbolicOpcode::LoadModuleInput { .. }
-            | SymbolicOpcode::EvalModule { .. }
-            | SymbolicOpcode::AssignCurr { .. }
-            | SymbolicOpcode::Apply { .. }
-            | SymbolicOpcode::AssignConstCurr { .. }
-            | SymbolicOpcode::BinOpAssignCurr { .. }
-            | SymbolicOpcode::BinOpAssignNext { .. }
-            | SymbolicOpcode::PushStaticView { .. }
-            | SymbolicOpcode::PushVarViewDirect { .. }
-            | SymbolicOpcode::ViewSubscriptDynamic { .. }
-            | SymbolicOpcode::ViewRangeDynamic { .. }
-            | SymbolicOpcode::PopView { .. }
-            | SymbolicOpcode::LoadTempConst { .. }
-            | SymbolicOpcode::BeginIter { .. }
-            | SymbolicOpcode::LoadIterViewAt { .. }
-            | SymbolicOpcode::StoreIterElement { .. }
-            | SymbolicOpcode::NextIterOrJump { .. }
-            | SymbolicOpcode::EndIter { .. }
-            | SymbolicOpcode::ArraySum { .. }
-            | SymbolicOpcode::ArrayMax { .. }
-            | SymbolicOpcode::ArrayMin { .. }
-            | SymbolicOpcode::ArrayMean { .. }
-            | SymbolicOpcode::ArrayStddev { .. }
-            | SymbolicOpcode::ArraySize { .. }
-            | SymbolicOpcode::VectorSelect { .. }
-            | SymbolicOpcode::VectorElmMap { .. }
-            | SymbolicOpcode::VectorSortOrder { .. }
-            | SymbolicOpcode::Rank { .. }
-            | SymbolicOpcode::AllocateAvailable { .. }
-            | SymbolicOpcode::AllocateByPriority { .. } => None,
-        }
-    }
-}
-
 /// Reconstruct the GF *block* layout of a single fragment as a list of
 /// `(start, len)` blocks covering `[0, gf_len)` exactly, sorted by `start`
 /// (#582).
@@ -2239,148 +2186,6 @@ fn remap_gf(
     })
 }
 
-/// Renumber resource IDs within a single opcode.
-///
-/// Flat resources (`LiteralId`, `ModuleId`, `ViewId`, `TempId`,
-/// `DimListId`) are offset by the fragment's flat base; `GraphicalFunctionId`
-/// is *content-de-duplicated* (#582), so a `Lookup`/`LookupArray` `base_gf`
-/// is translated through `gf_remap` (the fragment's per-slot local->global
-/// map from `FragmentMerger::absorb_gf`) rather than a flat add.
-///
-/// Every offsetting add is checked (M3): a wrapped id is a well-formed
-/// program that names a different resource, so the failure mode of getting
-/// this wrong is wrong numbers with no diagnostic. `Err` on a temp id past
-/// `TempId` (= `u8`), on any `u16` id past its type, or on a `base_gf` out of
-/// range for `gf_remap` (a corrupt fragment).
-///
-/// There is no separate `temp_off > u8::MAX` precheck (#583): a module's
-/// programs recycle temps into one identity pool whose `temp_off` is 0, and
-/// `combine_scc_fragment` sums into a per-SCC range bounded by the members'
-/// (small) temp counts. A genuine
-/// per-opcode overflow -- a single variable bearing more than 255 temps, or
-/// an SCC summing past 255 -- is still caught loud by `checked_add_u8`,
-/// which adds the actual `temp_id` to the offset (the precheck only saw the
-/// offset, so it could not have been the real bound anyway).
-///
-/// The `u16` adds are belt-and-braces alongside `absorb_non_gf`'s capacity
-/// check: that one bounds the merged TABLE, this one bounds the id an
-/// individual opcode carries. Every production base comes from the merger; the
-/// add stays checked so a caller with a hand-computed base could not wrap one.
-pub(crate) fn renumber_opcode(
-    op: &SymbolicOpcode,
-    lit_off: u16,
-    gf_remap: &[GraphicalFunctionId],
-    mod_off: u16,
-    view_off: u16,
-    temp_off: u32,
-    dl_off: u16,
-) -> Result<SymbolicOpcode, String> {
-    // A `temp_off` that itself exceeds u8 can only arise from the `Sum` path
-    // (interleaved SCC) summing past 255 temps; `checked_add_u8` below
-    // surfaces it loud when the first temp opcode is renumbered. The
-    // recycle path's `temp_off` is always 0.
-    let temp_off_u8 = u8::try_from(temp_off).map_err(|_| {
-        format!(
-            "temp offset {} exceeds TempId capacity (u8::MAX = {})",
-            temp_off,
-            u8::MAX
-        )
-    })?;
-    Ok(match op {
-        SymbolicOpcode::LoadConstant { id } => SymbolicOpcode::LoadConstant {
-            id: checked_add_u16(*id, lit_off, "LiteralId")?,
-        },
-        SymbolicOpcode::AssignConstCurr { var, literal_id } => SymbolicOpcode::AssignConstCurr {
-            var: var.clone(),
-            literal_id: checked_add_u16(*literal_id, lit_off, "LiteralId")?,
-        },
-        SymbolicOpcode::Lookup {
-            base_gf,
-            table_count,
-            mode,
-        } => SymbolicOpcode::Lookup {
-            base_gf: remap_gf(*base_gf, gf_remap)?,
-            table_count: *table_count,
-            mode: *mode,
-        },
-        SymbolicOpcode::LookupDirect {
-            base_gf,
-            table_count,
-            elem,
-            mode,
-        } => SymbolicOpcode::LookupDirect {
-            base_gf: remap_gf(*base_gf, gf_remap)?,
-            table_count: *table_count,
-            elem: *elem,
-            mode: *mode,
-        },
-        SymbolicOpcode::EvalModule { id, n_inputs } => SymbolicOpcode::EvalModule {
-            id: checked_add_u16(*id, mod_off, "ModuleId")?,
-            n_inputs: *n_inputs,
-        },
-        SymbolicOpcode::PushStaticView { view_id } => SymbolicOpcode::PushStaticView {
-            view_id: checked_add_u16(*view_id, view_off, "ViewId")?,
-        },
-        SymbolicOpcode::PushVarViewDirect { var, dim_list_id } => {
-            SymbolicOpcode::PushVarViewDirect {
-                var: var.clone(),
-                dim_list_id: checked_add_u16(*dim_list_id, dl_off, "DimListId")?,
-            }
-        }
-        SymbolicOpcode::LoadTempConst { temp_id, index } => SymbolicOpcode::LoadTempConst {
-            temp_id: checked_add_u8(*temp_id, temp_off_u8, "TempId")?,
-            index: *index,
-        },
-        SymbolicOpcode::BeginIter {
-            write_temp_id,
-            has_write_temp,
-        } => SymbolicOpcode::BeginIter {
-            write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
-            has_write_temp: *has_write_temp,
-        },
-        SymbolicOpcode::VectorElmMap {
-            write_temp_id,
-            full_source_len,
-        } => SymbolicOpcode::VectorElmMap {
-            write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
-            // full_source_len is the source variable's absolute element count,
-            // not a temp id -- it is not renumbered on fragment concatenation.
-            full_source_len: *full_source_len,
-        },
-        SymbolicOpcode::VectorSortOrder { write_temp_id } => SymbolicOpcode::VectorSortOrder {
-            write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
-        },
-        SymbolicOpcode::Rank { write_temp_id } => SymbolicOpcode::Rank {
-            write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
-        },
-        // LookupArray carries BOTH a GF-table base (like `Lookup`) and a
-        // result temp id (like the other vector ops). The GF base is
-        // content-remapped (the `[base .. base + table_count]` block stays
-        // contiguous after dedup); the temp id is flat-offset.
-        SymbolicOpcode::LookupArray {
-            base_gf,
-            table_count,
-            mode,
-            write_temp_id,
-        } => SymbolicOpcode::LookupArray {
-            base_gf: remap_gf(*base_gf, gf_remap)?,
-            table_count: *table_count,
-            mode: *mode,
-            write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
-        },
-        SymbolicOpcode::AllocateAvailable { write_temp_id } => SymbolicOpcode::AllocateAvailable {
-            write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
-        },
-        SymbolicOpcode::AllocateByPriority { write_temp_id } => {
-            SymbolicOpcode::AllocateByPriority {
-                write_temp_id: checked_add_u8(*write_temp_id, temp_off_u8, "TempId")?,
-            }
-        }
-        // All other opcodes have no resource IDs to renumber
-        other => other.clone(),
-    })
-}
-
 #[cfg(test)]
 #[path = "symbolic_builder_tests.rs"]
 mod builder_tests;
@@ -2388,6 +2193,10 @@ mod builder_tests;
 #[cfg(test)]
 #[path = "symbolic_merge_proptest.rs"]
 mod merge_proptest;
+
+#[cfg(test)]
+#[path = "symbolic_table_tests.rs"]
+mod table_tests;
 
 // ============================================================================
 // Tests
@@ -2416,38 +2225,6 @@ mod tests {
         entries.insert("births".to_string(), LayoutEntry { offset: 4, size: 1 });
         entries.insert("population".to_string(), LayoutEntry { offset: 5, size: 1 });
         VariableLayout::new(entries, 6)
-    }
-
-    /// The two reference-bearing opcode families every model uses.
-    #[test]
-    fn test_resolve_load_var_and_assign_curr() {
-        assert_resolves(
-            SymbolicOpcode::LoadVar {
-                var: sref("population", 0),
-            },
-            Opcode::LoadVar { off: 5 },
-        );
-        assert_resolves(
-            SymbolicOpcode::AssignCurr {
-                var: sref("births", 0),
-            },
-            Opcode::AssignCurr { off: 4 },
-        );
-    }
-
-    /// Opcodes that carry no variable reference pass through resolution with
-    /// their operands untouched.
-    #[test]
-    fn test_resolve_passthrough_opcodes() {
-        assert_resolves(
-            SymbolicOpcode::LoadGlobalVar { off: 1 },
-            Opcode::LoadGlobalVar { off: 1 },
-        );
-        assert_resolves(
-            SymbolicOpcode::Op2 { op: Op2::Add },
-            Opcode::Op2 { op: Op2::Add },
-        );
-        assert_resolves(SymbolicOpcode::Ret, Opcode::Ret);
     }
 
     #[test]
@@ -2856,22 +2633,6 @@ mod tests {
         assert_eq!(offsets, vec![5, 6, 7]);
     }
 
-    /// Assert that `sym` resolves against `simple_layout()` to `expected`.
-    ///
-    /// This is the shape every opcode-family test takes now that resolution is
-    /// the only direction of travel: build the symbolic opcode the compiler
-    /// emits, resolve it, and pin the concrete opcode the VM will execute.
-    #[track_caller]
-    fn assert_resolves(sym: SymbolicOpcode, expected: Opcode) {
-        let layout = simple_layout();
-        let resolved = resolve_opcode(&sym, &layout)
-            .unwrap_or_else(|e| panic!("resolve failed for {sym:?}: {e}"));
-        assert!(
-            resolved == expected,
-            "resolve produced the wrong opcode for {sym:?}"
-        );
-    }
-
     // ====================================================================
     // Integration tests: compile real models and roundtrip through symbolic
     // ====================================================================
@@ -3151,243 +2912,6 @@ mod tests {
     }
 
     // ====================================================================
-    // Resolution coverage: one case per opcode family
-    // ====================================================================
-    //
-    // `resolve_opcode` is an exhaustive match over `SymbolicOpcode`, so a new
-    // variant is a compile error there; these pin that each existing arm maps
-    // to the right concrete opcode with its operands intact.
-
-    #[test]
-    fn test_resolve_control_flow_and_builtin_opcodes() {
-        for (sym, concrete) in [
-            (SymbolicOpcode::Not {}, Opcode::Not {}),
-            (SymbolicOpcode::SetCond {}, Opcode::SetCond {}),
-            (SymbolicOpcode::If {}, Opcode::If {}),
-            (
-                SymbolicOpcode::LoadModuleInput { input: 3 },
-                Opcode::LoadModuleInput { input: 3 },
-            ),
-            (
-                SymbolicOpcode::EvalModule { id: 0, n_inputs: 2 },
-                Opcode::EvalModule { id: 0, n_inputs: 2 },
-            ),
-            (
-                SymbolicOpcode::Apply {
-                    func: BuiltinId::Abs,
-                },
-                Opcode::Apply {
-                    func: BuiltinId::Abs,
-                },
-            ),
-            (
-                SymbolicOpcode::Lookup {
-                    base_gf: 0,
-                    table_count: 4,
-                    mode: LookupMode::Interpolate,
-                },
-                Opcode::Lookup {
-                    base_gf: 0,
-                    table_count: 4,
-                    mode: LookupMode::Interpolate,
-                },
-            ),
-            (
-                SymbolicOpcode::Lookup {
-                    base_gf: 1,
-                    table_count: 1,
-                    mode: LookupMode::Forward,
-                },
-                Opcode::Lookup {
-                    base_gf: 1,
-                    table_count: 1,
-                    mode: LookupMode::Forward,
-                },
-            ),
-            (SymbolicOpcode::Ret, Opcode::Ret),
-        ] {
-            assert_resolves(sym, concrete);
-        }
-    }
-
-    #[test]
-    fn test_resolve_view_stack_opcodes() {
-        for (sym, concrete) in [
-            (
-                SymbolicOpcode::PushStaticView { view_id: 3 },
-                Opcode::PushStaticView { view_id: 3 },
-            ),
-            (
-                SymbolicOpcode::PushVarViewDirect {
-                    var: sref("population", 0),
-                    dim_list_id: 1,
-                },
-                Opcode::PushVarViewDirect {
-                    base_off: 5,
-                    dim_list_id: 1,
-                },
-            ),
-            (
-                SymbolicOpcode::ViewSubscriptDynamic { dim_idx: 1 },
-                Opcode::ViewSubscriptDynamic { dim_idx: 1 },
-            ),
-            (
-                SymbolicOpcode::ViewRangeDynamic { dim_idx: 2 },
-                Opcode::ViewRangeDynamic { dim_idx: 2 },
-            ),
-            (SymbolicOpcode::PopView {}, Opcode::PopView {}),
-        ] {
-            assert_resolves(sym, concrete);
-        }
-    }
-
-    #[test]
-    fn test_resolve_temp_and_subscript_opcodes() {
-        for (sym, concrete) in [
-            (
-                SymbolicOpcode::LoadTempConst {
-                    temp_id: 0,
-                    index: 3,
-                },
-                Opcode::LoadTempConst {
-                    temp_id: 0,
-                    index: 3,
-                },
-            ),
-            (
-                SymbolicOpcode::PushSubscriptIndex { bounds: 4 },
-                Opcode::PushSubscriptIndex { bounds: 4 },
-            ),
-            (
-                SymbolicOpcode::LoadSubscript {
-                    var: sref("population", 0),
-                },
-                Opcode::LoadSubscript { off: 5 },
-            ),
-            (
-                SymbolicOpcode::BinOpAssignNext {
-                    op: Op2::Add,
-                    var: sref("births", 0),
-                },
-                Opcode::BinOpAssignNext {
-                    op: Op2::Add,
-                    off: 4,
-                },
-            ),
-            (
-                SymbolicOpcode::SymLoadPrev {
-                    var: sref("population", 0),
-                },
-                Opcode::LoadPrev { off: 5 },
-            ),
-            (
-                SymbolicOpcode::SymLoadInitial {
-                    var: sref("births", 0),
-                },
-                Opcode::LoadInitial { off: 4 },
-            ),
-        ] {
-            assert_resolves(sym, concrete);
-        }
-    }
-
-    #[test]
-    fn test_resolve_iteration_opcodes() {
-        for (sym, concrete) in [
-            (
-                SymbolicOpcode::BeginIter {
-                    write_temp_id: 0,
-                    has_write_temp: true,
-                },
-                Opcode::BeginIter {
-                    write_temp_id: 0,
-                    has_write_temp: true,
-                },
-            ),
-            (
-                SymbolicOpcode::BeginIter {
-                    write_temp_id: 0,
-                    has_write_temp: false,
-                },
-                Opcode::BeginIter {
-                    write_temp_id: 0,
-                    has_write_temp: false,
-                },
-            ),
-            (
-                SymbolicOpcode::LoadIterViewAt { offset: 2 },
-                Opcode::LoadIterViewAt { offset: 2 },
-            ),
-            (
-                SymbolicOpcode::StoreIterElement {},
-                Opcode::StoreIterElement {},
-            ),
-            (
-                SymbolicOpcode::NextIterOrJump { jump_back: -5 },
-                Opcode::NextIterOrJump { jump_back: -5 },
-            ),
-            (SymbolicOpcode::EndIter {}, Opcode::EndIter {}),
-        ] {
-            assert_resolves(sym, concrete);
-        }
-    }
-
-    #[test]
-    fn test_resolve_reduction_and_vector_opcodes() {
-        for (sym, concrete) in [
-            (SymbolicOpcode::ArraySum {}, Opcode::ArraySum {}),
-            (SymbolicOpcode::ArrayMax {}, Opcode::ArrayMax {}),
-            (SymbolicOpcode::ArrayMin {}, Opcode::ArrayMin {}),
-            (SymbolicOpcode::ArrayMean {}, Opcode::ArrayMean {}),
-            (SymbolicOpcode::ArrayStddev {}, Opcode::ArrayStddev {}),
-            (SymbolicOpcode::ArraySize {}, Opcode::ArraySize {}),
-            (SymbolicOpcode::VectorSelect {}, Opcode::VectorSelect {}),
-            (
-                SymbolicOpcode::VectorElmMap {
-                    write_temp_id: 1,
-                    full_source_len: 12,
-                },
-                Opcode::VectorElmMap {
-                    write_temp_id: 1,
-                    full_source_len: 12,
-                },
-            ),
-            (
-                SymbolicOpcode::VectorSortOrder { write_temp_id: 2 },
-                Opcode::VectorSortOrder { write_temp_id: 2 },
-            ),
-            (
-                SymbolicOpcode::Rank { write_temp_id: 3 },
-                Opcode::Rank { write_temp_id: 3 },
-            ),
-            (
-                SymbolicOpcode::LookupArray {
-                    base_gf: 2,
-                    table_count: 3,
-                    mode: LookupMode::Backward,
-                    write_temp_id: 4,
-                },
-                Opcode::LookupArray {
-                    base_gf: 2,
-                    table_count: 3,
-                    mode: LookupMode::Backward,
-                    write_temp_id: 4,
-                },
-            ),
-            (
-                SymbolicOpcode::AllocateAvailable { write_temp_id: 5 },
-                Opcode::AllocateAvailable { write_temp_id: 5 },
-            ),
-            (
-                SymbolicOpcode::AllocateByPriority { write_temp_id: 6 },
-                Opcode::AllocateByPriority { write_temp_id: 6 },
-            ),
-        ] {
-            assert_resolves(sym, concrete);
-        }
-    }
-
-    // ====================================================================
     // Error path coverage
     // ====================================================================
 
@@ -3526,28 +3050,6 @@ mod tests {
             "expected out-of-range GF remap error, got: {}",
             err
         );
-    }
-
-    #[test]
-    fn test_renumber_opcode_gf_remap_translates_base() {
-        // The remap relocates `base_gf` to its deduped global slot; the
-        // happy path must apply it (and leave `table_count` intact).
-        let op = SymbolicOpcode::Lookup {
-            base_gf: 1,
-            table_count: 1,
-            mode: LookupMode::Interpolate,
-        };
-        match renumber_opcode(&op, 0, &[5, 9, 13], 0, 0, 0, 0).unwrap() {
-            SymbolicOpcode::Lookup {
-                base_gf,
-                table_count,
-                ..
-            } => {
-                assert_eq!(base_gf, 9, "base_gf must be remapped via gf_remap[1]");
-                assert_eq!(table_count, 1);
-            }
-            other => panic!("expected Lookup, got {:?}", other),
-        }
     }
 
     #[test]
@@ -3745,46 +3247,6 @@ mod tests {
                 "Temp(0) view base follows frag_a's one temp under Sum"
             ),
             other => panic!("expected Temp base, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_renumber_vector_builtin_temp_ids() {
-        // VectorElmMap, VectorSortOrder, and AllocateAvailable each carry
-        // a write_temp_id that must be renumbered during fragment
-        // concatenation, just like LoadTempConst and BeginIter.
-        let temp_off: u32 = 5;
-
-        let elm_map = SymbolicOpcode::VectorElmMap {
-            write_temp_id: 0,
-            full_source_len: 6,
-        };
-        match renumber_opcode(&elm_map, 0, &[], 0, 0, temp_off, 0).unwrap() {
-            SymbolicOpcode::VectorElmMap {
-                write_temp_id,
-                full_source_len,
-            } => {
-                assert_eq!(write_temp_id, 5);
-                // full_source_len passes through unchanged (absolute, not a temp id)
-                assert_eq!(full_source_len, 6);
-            }
-            other => panic!("expected VectorElmMap, got {:?}", other),
-        }
-
-        let sort_order = SymbolicOpcode::VectorSortOrder { write_temp_id: 2 };
-        match renumber_opcode(&sort_order, 0, &[], 0, 0, temp_off, 0).unwrap() {
-            SymbolicOpcode::VectorSortOrder { write_temp_id } => {
-                assert_eq!(write_temp_id, 7);
-            }
-            other => panic!("expected VectorSortOrder, got {:?}", other),
-        }
-
-        let alloc = SymbolicOpcode::AllocateAvailable { write_temp_id: 1 };
-        match renumber_opcode(&alloc, 0, &[], 0, 0, temp_off, 0).unwrap() {
-            SymbolicOpcode::AllocateAvailable { write_temp_id } => {
-                assert_eq!(write_temp_id, 6);
-            }
-            other => panic!("expected AllocateAvailable, got {:?}", other),
         }
     }
 
@@ -4245,50 +3707,6 @@ mod tests {
             static_views: vec![],
             temp_sizes: vec![],
             dim_lists: vec![],
-        }
-    }
-
-    /// Every opcode that carries a `base_gf`, with the run it reports.
-    ///
-    /// Derived from the enum rather than sampled: `gf_run`'s match is
-    /// exhaustive with no `_`, so the compiler is what guarantees a new variant
-    /// answers the question, and this pins the answer for the three that do
-    /// carry one. A representative non-carrier of each shape (unit and struct)
-    /// is included so the `None` side is exercised too.
-    #[test]
-    fn gf_run_reports_every_lookup_family_opcode() {
-        let rows: Vec<(SymbolicOpcode, Option<(usize, usize)>)> = vec![
-            (
-                SymbolicOpcode::Lookup {
-                    base_gf: 3,
-                    table_count: 2,
-                    mode: LookupMode::Interpolate,
-                },
-                Some((3, 2)),
-            ),
-            (
-                SymbolicOpcode::LookupDirect {
-                    base_gf: 5,
-                    table_count: 4,
-                    elem: 1,
-                    mode: LookupMode::Interpolate,
-                },
-                Some((5, 4)),
-            ),
-            (
-                SymbolicOpcode::LookupArray {
-                    base_gf: 7,
-                    table_count: 6,
-                    mode: LookupMode::Interpolate,
-                    write_temp_id: 0,
-                },
-                Some((7, 6)),
-            ),
-            (SymbolicOpcode::Ret, None),
-            (SymbolicOpcode::SetCond {}, None),
-        ];
-        for (op, want) in rows {
-            assert_eq!(op.gf_run(), want, "gf_run of {op:?}");
         }
     }
 

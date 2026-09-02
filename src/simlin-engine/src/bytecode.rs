@@ -27,6 +27,11 @@ pub type ModuleId = u16;
 pub type VariableOffset = u16;
 pub type ModuleInputOffset = u16;
 pub type GraphicalFunctionId = u8;
+/// The number of tables in a graphical-function run: the length that
+/// pairs with a `GraphicalFunctionId` base on every lookup opcode
+/// (`Lookup`, `LookupDirect`, `LookupArray`). A type of its own so the
+/// opcode tables can tell the run's length from an unrelated `u16`.
+pub type TableCount = u16;
 
 // New types for array support
 pub type ViewId = u16; // Index into static_views table
@@ -575,990 +580,703 @@ pub(crate) enum Op2 {
 // Opcodes
 // ============================================================================
 
-/// Bytecode opcodes for the VM.
+/// The operand of a kind among a row's `Type operand` pairs: `Some(binding)`
+/// when the row has one, `None` when it does not. The kinds a caller can ask
+/// for are the ones with a rule below; the types are matched literally, which
+/// is why every operand type in the tables is a single identifier.
 ///
-/// The opcodes are organized into categories:
-/// - Arithmetic and logic (Op2, Not, etc.)
-/// - Variable access (LoadVar, LoadGlobalVar, etc.)
-/// - Control flow (SetCond, If, Ret)
-/// - Module operations (EvalModule, LoadModuleInput)
-/// - Assignment (AssignCurr, and the fused BinOpAssignNext for stock updates)
-/// - Builtins and lookups (Apply, Lookup)
-/// - Array view stack operations (PushStaticView, PushVarViewDirect, ViewSubscriptDynamic, ...)
-/// - Array iteration (BeginIter, LoadIterViewAt, StoreIterElement, ...)
-/// - Array reductions (ArraySum, ArrayMax, etc.)
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) enum Opcode {
-    // === ARITHMETIC & LOGIC ===
-    Op2 {
-        op: Op2,
-    },
-    Not {},
+/// Shared by the concrete and the symbolic opcode tables.
+macro_rules! operand_of_kind {
+    (PcOffset; [PcOffset $operand:ident $($rest:tt)*]) => {
+        Some($operand)
+    };
+    (SymVarRef; [SymVarRef $operand:ident $($rest:tt)*]) => {
+        Some($operand)
+    };
+    ($kind:ident; [$ty:ident $operand:ident $($rest:tt)*]) => {
+        operand_of_kind!($kind; [$($rest)*])
+    };
+    ($kind:ident; []) => {
+        None
+    };
+}
+pub(crate) use operand_of_kind;
 
-    // === CONSTANTS & VARIABLES ===
-    LoadConstant {
-        id: LiteralId,
-    },
-    LoadVar {
-        off: VariableOffset,
-    },
-    LoadGlobalVar {
-        off: VariableOffset,
-    },
+/// The binding a generated accessor's match arm gives one operand: the
+/// operand's own name when its type is one of the wanted kinds, `_`
+/// otherwise. Invoked in pattern position (`Name { $( field:
+/// bind_kind!(..) ),* }`), so an accessor's arm binds exactly the operands
+/// its per-kind rule reads and needs no `unused_variables` allow. The wanted
+/// kinds are the ones with a rule below.
+///
+/// Shared by the concrete and the symbolic opcode tables.
+macro_rules! bind_kind {
+    (PcOffset, PcOffset, $operand:ident) => {
+        $operand
+    };
+    (SymVarRef, SymVarRef, $operand:ident) => {
+        $operand
+    };
+    (GraphicalFunctionId TableCount, GraphicalFunctionId, $operand:ident) => {
+        $operand
+    };
+    (GraphicalFunctionId TableCount, TableCount, $operand:ident) => {
+        $operand
+    };
+    ($($want:ident)+, $ty:ident, $operand:ident) => {
+        _
+    };
+}
+pub(crate) use bind_kind;
 
-    /// Resolve PREVIOUS(var, fallback) for a direct scalar variable.
-    /// Pops the already-evaluated fallback from the stack, then pushes either
-    /// `prev_values[module_off + off]` or that fallback when `TIME ==
-    /// INITIAL_TIME`.
-    LoadPrev {
-        off: VariableOffset,
-    },
-    /// Fused `LoadConstant lit; LoadPrev off`.
-    ///
-    /// `LoadPrev` pops its `PREVIOUS()` fallback off the arithmetic stack, so
-    /// codegen emits a `LoadConstant` immediately before every one. Reading the
-    /// fallback from the literal table instead folds the pair into one dispatch.
-    LoadPrevConst {
-        off: VariableOffset,
-        lit: LiteralId,
-    },
-    /// Fused `LoadVar l; LoadConstant lit; LoadPrev r; Op2 Sub` -- the delta
-    /// `v - PREVIOUS(v)`, four dispatches in one.
-    ///
-    /// The operator lives in the variant tag (only `Sub` occurs) so the payload
-    /// stays 3xu16 = 6 bytes and `size_of::<Opcode>()` stays at 8, the same
-    /// trick the `Assign{Add,Sub,Mul,Div}VarVar*` family uses.
-    SubVarPrev {
-        l: VariableOffset,
-        r: VariableOffset,
-        lit: LiteralId,
-    },
-    /// Fused `LoadConstant lit; LoadPrev r; Op2 op` with the lhs already on the
-    /// arithmetic stack.
-    BinStackPrev {
-        r: VariableOffset,
-        lit: LiteralId,
-        op: Op2,
-    },
-    /// Fused `LoadConstant lit; Apply` for a 3-arity builtin whose trailing
-    /// argument is a literal.
-    ///
-    /// This is NOT the operand padding `Apply` once carried: the arity is a
-    /// property of the builtin and no pads are emitted. A 3-arity builtin's
-    /// third operand is a value it reads -- for `SAFEDIV` it is the
-    /// divide-by-zero result -- so the load survives and is worth folding.
-    ApplyTerConst {
-        func: BuiltinId,
-        lit: LiteralId,
-    },
-    /// Load the initial (t=0) value of a variable from the initial-value buffer.
-    /// Pushes `initial_values[module_off + off]` onto the stack.
-    LoadInitial {
-        off: VariableOffset,
-    },
+/// Every concrete opcode, its operands and its effect on the arithmetic
+/// stack, stated once.
+///
+/// The table is data: it holds no code of its own and hands its rows to the
+/// macro it is invoked with. [`declare_opcodes!`] derives the production items
+/// from it -- [`Opcode`] itself, [`Opcode::stack_effect`], [`Opcode::name`]
+/// and [`Opcode::jump_offset`] -- and the test module derives its every-variant
+/// rows from the same rows. The VM (`vm.rs`) and the wasm backend
+/// (`wasmgen::lower`) are the semantics and match on the variants by hand, so
+/// adding an opcode is one row here plus its two execution arms.
+///
+/// A row is
+///
+/// ```text
+/// /// docs
+/// Name { operand: Type, .. } => (pops, pushes),
+/// ```
+///
+/// with the variant exactly as it is declared (a unit variant, `Ret`, has no
+/// braces) and its effect on the arithmetic stack, which `ByteCode::max_stack_depth`
+/// walks to prove a program fits `STACK_CAPACITY`. An effect may read the
+/// variant's operands (`Apply` pops its builtin's arity, `EvalModule` its
+/// `n_inputs`). A fused opcode's effect is the net of the sequence it
+/// replaces: that is what keeps `resolve_bytecode`'s fixed-stack proof,
+/// computed on the pre-fusion stream, valid for what the VM executes.
+///
+/// An operand of type `PcOffset` is a backward jump, which `jump_offset`
+/// reports so the fusion pass relocates it; the symbolic twin of a row is
+/// stated on `compiler::symbolic::symbolic_opcode_table!`, which is where the
+/// resource-id kinds (`LiteralId`, `TempId`, ...) mean something. Here every
+/// operand is data the VM reads.
+///
+/// Every payload fits in 6 bytes (the widest are the 3 x `u16` three-address
+/// forms; view shapes live in side tables indexed by id), so with the
+/// discriminant an opcode is 8 bytes, the width the VM's dispatch loop counts
+/// on; `test_opcode_size` pins it.
+macro_rules! opcode_table {
+    ($generate:ident) => {
+        $generate! {
+            // === ARITHMETIC & LOGIC ===
+            Op2 { op: Op2 } => (2, 1),
+            Not {} => (1, 1),
 
-    // === LEGACY SUBSCRIPT (dynamic, for backward compatibility) ===
-    PushSubscriptIndex {
-        bounds: VariableOffset,
-    },
-    LoadSubscript {
-        off: VariableOffset,
-    },
+            // === CONSTANTS & VARIABLES ===
+            LoadConstant { id: LiteralId } => (0, 1),
+            LoadVar { off: VariableOffset } => (0, 1),
+            LoadGlobalVar { off: VariableOffset } => (0, 1),
 
-    // === CONTROL FLOW ===
-    SetCond {},
-    If {},
-    Ret,
+            /// Resolve PREVIOUS(var, fallback) for a direct scalar variable.
+            /// Pops the already-evaluated fallback from the stack, then pushes either
+            /// `prev_values[module_off + off]` or that fallback when `TIME ==
+            /// INITIAL_TIME`.
+            LoadPrev { off: VariableOffset } => (1, 1),
+            /// Fused `LoadConstant lit; LoadPrev off`.
+            ///
+            /// `LoadPrev` pops its `PREVIOUS()` fallback off the arithmetic stack, so
+            /// codegen emits a `LoadConstant` immediately before every one. Reading the
+            /// fallback from the literal table instead folds the pair into one dispatch.
+            LoadPrevConst { off: VariableOffset, lit: LiteralId } => (0, 1),
+            /// Fused `LoadVar l; LoadConstant lit; LoadPrev r; Op2 Sub` -- the delta
+            /// `v - PREVIOUS(v)`, four dispatches in one.
+            ///
+            /// The operator lives in the variant tag (only `Sub` occurs) so the payload
+            /// stays 3xu16 = 6 bytes and `size_of::<Opcode>()` stays at 8, the same
+            /// trick the `Assign{Add,Sub,Mul,Div}VarVar*` family uses.
+            SubVarPrev { l: VariableOffset, r: VariableOffset, lit: LiteralId } => (0, 1),
+            /// Fused `LoadConstant lit; LoadPrev r; Op2 op` with the lhs already on the
+            /// arithmetic stack.
+            BinStackPrev { r: VariableOffset, lit: LiteralId, op: Op2 } => (1, 1),
+            /// Fused `LoadConstant lit; Apply` for a 3-arity builtin whose trailing
+            /// argument is a literal.
+            ///
+            /// This is NOT the operand padding `Apply` once carried: the arity is a
+            /// property of the builtin and no pads are emitted. A 3-arity builtin's
+            /// third operand is a value it reads -- for `SAFEDIV` it is the
+            /// divide-by-zero result -- so the load survives and is worth folding.
+            /// Two operands still come off the stack; the third is the literal.
+            ApplyTerConst { func: BuiltinId, lit: LiteralId } => (2, 1),
+            /// Load the initial (t=0) value of a variable from the initial-value buffer.
+            /// Pushes `initial_values[module_off + off]` onto the stack.
+            LoadInitial { off: VariableOffset } => (0, 1),
 
-    // === MODULES ===
-    LoadModuleInput {
-        input: ModuleInputOffset,
-    },
-    EvalModule {
-        id: ModuleId,
-        n_inputs: u8,
-    },
+            // === LEGACY SUBSCRIPT (dynamic, for backward compatibility) ===
+            /// Pops an index off the arithmetic stack and appends it to the VM's
+            /// separate `subscript_index` list. Several may precede one
+            /// `LoadSubscript` for a multi-dimensional access; each pops exactly one.
+            PushSubscriptIndex { bounds: VariableOffset } => (1, 0),
+            /// Consumes the accumulated `subscript_index` entries and pushes the
+            /// looked-up value.
+            LoadSubscript { off: VariableOffset } => (0, 1),
 
-    // === ASSIGNMENT ===
-    AssignCurr {
-        off: VariableOffset,
-    },
+            // === CONTROL FLOW ===
+            /// Pops the condition into the VM's condition register.
+            SetCond {} => (1, 0),
+            /// Pops the false and the true branch, pushes the one the condition
+            /// selects.
+            If {} => (2, 1),
+            Ret => (0, 0),
 
-    // === BUILTINS & LOOKUPS ===
-    Apply {
-        func: BuiltinId,
-    },
-    /// Lookup a value in a graphical function table.
-    /// Stack: [..., element_offset, lookup_index] -> [..., result]
-    /// The actual table used is graphical_functions[base_gf + element_offset].
-    /// For scalar tables, element_offset is always 0.
-    /// If element_offset >= table_count, returns NaN.
-    Lookup {
-        base_gf: GraphicalFunctionId,
-        /// Number of tables for this variable (1 for scalars, n for arrayed).
-        /// Used for bounds checking at runtime.
-        table_count: u16,
-        /// Interpolation mode: Interpolate (linear), Forward (step up), Backward (step down)
-        mode: LookupMode,
-    },
+            // === MODULES ===
+            LoadModuleInput { input: ModuleInputOffset } => (0, 1),
+            /// Pops `n_inputs` from the caller's arithmetic stack. The child module
+            /// executes with its own stack context (`EvalState`) and writes its
+            /// results straight to `curr`/`next`, not back to the caller's stack, so
+            /// from the caller's perspective it pushes nothing.
+            EvalModule { id: ModuleId, n_inputs: u8 } => (n_inputs, 0),
 
-    /// `Lookup` whose element offset was resolved at COMPILE time, so it pops
-    /// only the index. Codegen emits this whenever a lookup's element-offset
-    /// expression is a constant in range -- which is every scalar table, where
-    /// the offset is a literal 0. The bounds check `Lookup` performs at runtime
-    /// is discharged at emit time (`elem < table_count`), so the table index is
-    /// `base_gf + elem` unconditionally.
-    ///
-    /// `table_count` is deliberately absent: it exists on `Lookup` for the
-    /// runtime range check and on the SYMBOLIC twin for GF block extents, and
-    /// neither applies once the element is fixed.
-    LookupDirect {
-        base_gf: GraphicalFunctionId,
-        elem: u8,
-        mode: LookupMode,
-    },
+            // === ASSIGNMENT ===
+            AssignCurr { off: VariableOffset } => (1, 0),
 
-    // === SUPERINSTRUCTIONS (fused opcodes for common patterns) ===
-    /// Fused LoadConstant + AssignCurr.
-    /// curr[module_off + off] = literals[literal_id]; stack unchanged.
-    AssignConstCurr {
-        off: VariableOffset,
-        literal_id: LiteralId,
-    },
+            // === BUILTINS & LOOKUPS ===
+            /// Pops exactly the operands `vm::apply` reads (`BuiltinId::arity`), not
+            /// a fixed 3 with discarded padding, and pushes the result.
+            Apply { func: BuiltinId } => (func.arity(), 1),
+            /// Lookup a value in a graphical function table.
+            /// Stack: [..., element_offset, lookup_index] -> [..., result]
+            /// The actual table used is graphical_functions[base_gf + element_offset].
+            /// For scalar tables, element_offset is always 0.
+            /// If element_offset >= table_count, returns NaN.
+            Lookup {
+                base_gf: GraphicalFunctionId,
+                /// Number of tables for this variable (1 for scalars, n for arrayed).
+                /// Used for bounds checking at runtime.
+                table_count: TableCount,
+                /// Interpolation mode: Interpolate (linear), Forward (step up), Backward (step down)
+                mode: LookupMode,
+            } => (2, 1),
 
-    /// Fused Op2 + AssignCurr.
-    /// Pops two values, applies binary op, assigns result to curr[module_off + off].
-    BinOpAssignCurr {
-        op: Op2,
-        off: VariableOffset,
-    },
+            /// `Lookup` whose element offset was resolved at COMPILE time, so it pops
+            /// only the index. Codegen emits this whenever a lookup's element-offset
+            /// expression is a constant in range -- which is every scalar table, where
+            /// the offset is a literal 0. The bounds check `Lookup` performs at runtime
+            /// is discharged at emit time (`elem < table_count`), so the table index is
+            /// `base_gf + elem` unconditionally.
+            ///
+            /// `table_count` is deliberately absent: it exists on `Lookup` for the
+            /// runtime range check and on the SYMBOLIC twin for GF block extents, and
+            /// neither applies once the element is fixed.
+            LookupDirect { base_gf: GraphicalFunctionId, elem: u8, mode: LookupMode } => (1, 1),
 
-    /// The next-value assignment: pops two values, applies the binary op, and
-    /// assigns the result to `next[module_off + off]`.
-    ///
-    /// There is no un-fused counterpart. Every write to `next[]` is a stock
-    /// update, and a stock update's operand walk always ends in an `Op2`
-    /// (`Context::build_stock_update_expr`), so codegen emits this form
-    /// directly via
-    /// `compiler::symbolic::SymbolicByteCodeBuilder::fuse_trailing_op2_into_assign_next`
-    /// and `resolve_bytecode` carries it through unchanged.
-    BinOpAssignNext {
-        op: Op2,
-        off: VariableOffset,
-    },
+            // === SUPERINSTRUCTIONS (fused opcodes for common patterns) ===
+            /// Fused LoadConstant + AssignCurr.
+            /// curr[module_off + off] = literals[literal_id]; stack unchanged.
+            AssignConstCurr { off: VariableOffset, literal_id: LiteralId } => (0, 0),
 
-    // === CONDITIONAL SELECT (R3) ===
-    // `compiler::codegen`'s `Expr::If` arm emits `SetCond` and `If` in one
-    // breath and is the SOLE producer of either, so the pair is adjacent BY
-    // CONSTRUCTION -- measured on C-LEARN as exactly equal executed counts
-    // (1,874,169 each, 6.38% of dispatches apiece). Neither `peephole_optimize`
-    // nor `fuse_three_address` can separate them: both only ever REPLACE an
-    // adjacent run, and `SetCond` is neither a leaf load nor a combiner, so no
-    // fusion window can absorb it.
-    //
-    // Folding the pair removes a dispatch AND the `condition` round trip; the
-    // trailing `AssignCurr` (which follows ~91% of executed `If`s) folds in too.
-    // Created only by the late `fuse_three_address` pass, like the 3-address
-    // forms below -- they never enter the symbolic/incremental layer.
-    /// Pop `cond`, `f`, `t`; push `t` if `cond` is truthy else `f`.
-    SelectIf {},
-    /// Pop `cond`, `f`, `t`; `curr[module_off + off] = if cond { t } else { f }`.
-    SelectIfAssignCurr {
-        off: VariableOffset,
-    },
+            /// Fused Op2 + AssignCurr.
+            /// Pops two values, applies binary op, assigns result to curr[module_off + off].
+            BinOpAssignCurr { op: Op2, off: VariableOffset } => (2, 0),
 
-    // === LEAF STORES AND MODULE-INPUT OPERANDS (R3) ===
-    // `AssignCurr` is 10.68% of executed dispatches on C-LEARN, and the measured
-    // bigrams account for essentially all of it. The conditional-select forms
-    // above take the `If` share; these take the three leaf loads that feed a
-    // store directly. `Apply; AssignCurr` is deliberately left unfused -- the
-    // `Apply` arm inlines every builtin body, so duplicating it to fold a store
-    // would be the largest code growth in the hot function for the smallest
-    // member of the set.
-    //
-    // `LoadConstant; AssignCurr` is absent because it never reaches this pass:
-    // the symbolic `peephole_optimize` already folds it into `AssignConstCurr`.
-    /// `curr[module_off + dst] = curr[module_off + src]` -- a slot-to-slot copy
-    /// (alias / pass-through variables).
-    AssignVarCurr {
-        src: VariableOffset,
-        dst: VariableOffset,
-    },
-    /// `curr[module_off + dst] = <initial value of src>`. Reads `curr` during
-    /// the initials phase and `initial_values` afterwards, exactly as
-    /// `LoadInitial` does.
-    AssignInitialCurr {
-        src: VariableOffset,
-        dst: VariableOffset,
-    },
-    /// `curr[module_off + dst] = module_inputs[input]`.
-    AssignModInputCurr {
-        input: ModuleInputOffset,
-        dst: VariableOffset,
-    },
-    /// Pop `lhs`; push `lhs op module_inputs[r_input]`. `LoadModuleInput` was
-    /// not a fusible leaf at all before this, despite being 4.68% of C-LEARN
-    /// dispatches and 5.8% of WORLD3's.
-    BinStackModInput {
-        r_input: ModuleInputOffset,
-        op: Op2,
-    },
-    /// Pop `lhs`; `curr[module_off + dst] = lhs op module_inputs[b_input]`.
-    AssignStackModInputCurr {
-        dst: VariableOffset,
-        b_input: ModuleInputOffset,
-        op: Op2,
-    },
+            /// The next-value assignment: pops two values, applies the binary op, and
+            /// assigns the result to `next[module_off + off]`.
+            ///
+            /// There is no un-fused counterpart. Every write to `next[]` is a stock
+            /// update, and a stock update's operand walk always ends in an `Op2`
+            /// (`Context::build_stock_update_expr`), so codegen emits this form
+            /// directly via
+            /// `compiler::symbolic::SymbolicByteCodeBuilder::fuse_trailing_op2_into_assign_next`
+            /// and `resolve_bytecode` carries it through unchanged.
+            BinOpAssignNext { op: Op2, off: VariableOffset } => (2, 0),
 
-    // === 3-ADDRESS BINARY OPS (R2) ===
-    // Fold the leaf operand load(s) of a binary op into the op itself, so a
-    // subexpression `a op b` dispatches once instead of 3 (two loads + Op2) or
-    // twice instead of 2 (one load + Op2). Each pushes its result. `curr[]` is
-    // effectively the register file: these read operands straight from it (or
-    // from `literals`) with no intervening stack push/pop. Created only by the
-    // late `fuse_three_address` pass on final concrete bytecode -- they never
-    // enter the symbolic/incremental layer. A 3-operand `dst = a op b` would
-    // exceed the 8-byte Opcode budget, so the assign stays a separate op.
-    /// Push `curr[module_off + l] op curr[module_off + r]`.
-    BinVarVar {
-        l: VariableOffset,
-        r: VariableOffset,
-        op: Op2,
-    },
-    /// Push `curr[module_off + l] op literals[r]`.
-    BinVarConst {
-        l: VariableOffset,
-        r: LiteralId,
-        op: Op2,
-    },
-    /// Push `literals[l] op curr[module_off + r]`.
-    BinConstVar {
-        l: LiteralId,
-        r: VariableOffset,
-        op: Op2,
-    },
-    /// Pop `lhs`; push `lhs op curr[module_off + r]`.
-    BinStackVar {
-        r: VariableOffset,
-        op: Op2,
-    },
-    /// Pop `lhs`; push `lhs op literals[r]`.
-    BinStackConst {
-        r: LiteralId,
-        op: Op2,
-    },
+            // === CONDITIONAL SELECT (R3) ===
+            // `compiler::codegen`'s `Expr::If` arm emits `SetCond` and `If` in one
+            // breath and is the SOLE producer of either, so the pair is adjacent BY
+            // CONSTRUCTION -- measured on C-LEARN as exactly equal executed counts
+            // (1,874,169 each, 6.38% of dispatches apiece). Neither `peephole_optimize`
+            // nor `fuse_three_address` can separate them: both only ever REPLACE an
+            // adjacent run, and `SetCond` is neither a leaf load nor a combiner, so no
+            // fusion window can absorb it.
+            //
+            // Folding the pair removes a dispatch AND the `condition` round trip; the
+            // trailing `AssignCurr` (which follows ~91% of executed `If`s) folds in too.
+            // Created only by the late `fuse_three_address` pass, like the 3-address
+            // forms below -- they never enter the symbolic/incremental layer.
+            /// Pop `cond`, `f`, `t`; push `t` if `cond` is truthy else `f`.
+            SelectIf {} => (3, 1),
+            /// Pop `cond`, `f`, `t`; `curr[module_off + off] = if cond { t } else { f }`.
+            SelectIfAssignCurr { off: VariableOffset } => (3, 0),
 
-    // === 3-ADDRESS BINARY OPS WITH GLOBAL OPERANDS (R2 extension) ===
-    // Mirror the `Bin*` pushing forms above, but for the leaf operands that are
-    // GLOBALS (TIME / DT / INITIAL_TIME / FINAL_TIME, loaded by `LoadGlobalVar`).
-    // The original `Bin*` forms missed these because no binop fused a global
-    // operand, so a `LoadGlobalVar` operand stayed an unfused load.
-    //
-    // CRITICAL: a `_global` field indexes `curr[g]` directly (an absolute global
-    // slot, NO `module_off` -- exactly like `LoadGlobalVar`), while a plain
-    // var field indexes `curr[module_off + v]` (module-relative, like `LoadVar`).
-    // Inside a submodule (`module_off > 0`) those are different slots; conflating
-    // them is a silent miscompile. The operand order is `l op r` matching the
-    // original load order, load-bearing for the non-commutative Sub/Div.
-    /// Push `curr[l_global] op curr[module_off + r]`.
-    BinGlobalVar {
-        l_global: VariableOffset,
-        r: VariableOffset,
-        op: Op2,
-    },
-    /// Push `curr[module_off + l] op curr[r_global]`.
-    BinVarGlobal {
-        l: VariableOffset,
-        r_global: VariableOffset,
-        op: Op2,
-    },
-    /// Push `curr[l_global] op literals[r]`.
-    BinGlobalConst {
-        l_global: VariableOffset,
-        r: LiteralId,
-        op: Op2,
-    },
-    /// Push `literals[l] op curr[r_global]`.
-    BinConstGlobal {
-        l: LiteralId,
-        r_global: VariableOffset,
-        op: Op2,
-    },
-    /// Push `curr[l_global] op curr[r_global]`.
-    BinGlobalGlobal {
-        l_global: VariableOffset,
-        r_global: VariableOffset,
-        op: Op2,
-    },
-    /// Pop `lhs`; push `lhs op curr[r_global]`.
-    BinStackGlobal {
-        r_global: VariableOffset,
-        op: Op2,
-    },
+            // === LEAF STORES AND MODULE-INPUT OPERANDS (R3) ===
+            // `AssignCurr` is 10.68% of executed dispatches on C-LEARN, and the measured
+            // bigrams account for essentially all of it. The conditional-select forms
+            // above take the `If` share; these take the three leaf loads that feed a
+            // store directly. `Apply; AssignCurr` is deliberately left unfused -- the
+            // `Apply` arm inlines every builtin body, so duplicating it to fold a store
+            // would be the largest code growth in the hot function for the smallest
+            // member of the set.
+            //
+            // `LoadConstant; AssignCurr` is absent because it never reaches this pass:
+            // the symbolic `peephole_optimize` already folds it into `AssignConstCurr`.
+            /// `curr[module_off + dst] = curr[module_off + src]` -- a slot-to-slot copy
+            /// (alias / pass-through variables).
+            AssignVarCurr { src: VariableOffset, dst: VariableOffset } => (0, 0),
+            /// `curr[module_off + dst] = <initial value of src>`. Reads `curr` during
+            /// the initials phase and `initial_values` afterwards, exactly as
+            /// `LoadInitial` does.
+            AssignInitialCurr { src: VariableOffset, dst: VariableOffset } => (0, 0),
+            /// `curr[module_off + dst] = module_inputs[input]`.
+            AssignModInputCurr { input: ModuleInputOffset, dst: VariableOffset } => (0, 0),
+            /// Pop `lhs`; push `lhs op module_inputs[r_input]`. `LoadModuleInput` was
+            /// not a fusible leaf at all before this, despite being 4.68% of C-LEARN
+            /// dispatches and 5.8% of WORLD3's.
+            BinStackModInput { r_input: ModuleInputOffset, op: Op2 } => (1, 1),
+            /// Pop `lhs`; `curr[module_off + dst] = lhs op module_inputs[b_input]`.
+            AssignStackModInputCurr {
+                dst: VariableOffset,
+                b_input: ModuleInputOffset,
+                op: Op2,
+            } => (1, 0),
 
-    // === 3-ADDRESS BINARY OP WITH TWO CONSTANT OPERANDS (R2 extension) ===
-    // The greedy 3-window missed `LoadConstant; LoadConstant; Op2` (both operands
-    // are separate literals) because no `Bin*` form took two constant leaves.
-    // This is NOT compile-time constant folding of the result: the two operands
-    // are distinct interned literals, so we fuse the two loads + the op into one
-    // dispatch that still computes `literals[l] op literals[r]` at run time.
-    /// Push `literals[l] op literals[r]`.
-    BinConstConst {
-        l: LiteralId,
-        r: LiteralId,
-        op: Op2,
-    },
+            // === 3-ADDRESS BINARY OPS (R2) ===
+            // Fold the leaf operand load(s) of a binary op into the op itself, so a
+            // subexpression `a op b` dispatches once instead of 3 (two loads + Op2) or
+            // twice instead of 2 (one load + Op2). Each pushes its result. `curr[]` is
+            // effectively the register file: these read operands straight from it (or
+            // from `literals`) with no intervening stack push/pop. Created only by the
+            // late `fuse_three_address` pass on final concrete bytecode -- they never
+            // enter the symbolic/incremental layer. A 3-operand `dst = a op b` would
+            // exceed the 8-byte Opcode budget, so the assign stays a separate op.
+            /// Push `curr[module_off + l] op curr[module_off + r]`.
+            BinVarVar { l: VariableOffset, r: VariableOffset, op: Op2 } => (0, 1),
+            /// Push `curr[module_off + l] op literals[r]`.
+            BinVarConst { l: VariableOffset, r: LiteralId, op: Op2 } => (0, 1),
+            /// Push `literals[l] op curr[module_off + r]`.
+            BinConstVar { l: LiteralId, r: VariableOffset, op: Op2 } => (0, 1),
+            /// Pop `lhs`; push `lhs op curr[module_off + r]`.
+            BinStackVar { r: VariableOffset, op: Op2 } => (1, 1),
+            /// Pop `lhs`; push `lhs op literals[r]`.
+            BinStackConst { r: LiteralId, op: Op2 } => (1, 1),
 
-    // === 3-ADDRESS FUSED LEAF ASSIGNMENTS (R2 extension) ===
-    // A leaf assignment `dst = a op b` is, post-`peephole_optimize`,
-    // `LoadX a; LoadX b; BinOpAssign{Curr|Next}(op, dst)` (3 dispatches). These
-    // fold all three into one register-style op that reads its operands straight
-    // from `curr[]`/`literals` and writes the result straight to `curr[]`/`next[]`
-    // -- no stack push or pop at all. Like the 2-operand pushing forms above they
-    // are created only by the late `fuse_three_address` pass on final concrete
-    // bytecode and never enter the symbolic/incremental layer.
-    //
-    // The operator is encoded in the variant tag (one variant per {Add,Sub,Mul,
-    // Div}) rather than an `Op2` payload field. That keeps the payload at 3xu16 =
-    // 6 bytes so `size_of::<Opcode>()` stays at 8; a shared `Op2` field would make
-    // the payload 7 bytes and blow the budget. The four operators cover ~100% of
-    // measured leaf-assign candidates; any other operator is left in its existing
-    // `BinOpAssign{Curr|Next}` form. Encoding the operator in the tag also removes
-    // the per-dispatch `eval_op2` operator branch: each arm is straight-line f64
-    // arithmetic. The operand order is `l op r` matching the original load order,
-    // which is load-bearing for the non-commutative Sub and Div.
+            // === 3-ADDRESS BINARY OPS WITH GLOBAL OPERANDS (R2 extension) ===
+            // Mirror the `Bin*` pushing forms above, but for the leaf operands that are
+            // GLOBALS (TIME / DT / INITIAL_TIME / FINAL_TIME, loaded by `LoadGlobalVar`).
+            // The original `Bin*` forms missed these because no binop fused a global
+            // operand, so a `LoadGlobalVar` operand stayed an unfused load.
+            //
+            // CRITICAL: a `_global` field indexes `curr[g]` directly (an absolute global
+            // slot, NO `module_off` -- exactly like `LoadGlobalVar`), while a plain
+            // var field indexes `curr[module_off + v]` (module-relative, like `LoadVar`).
+            // Inside a submodule (`module_off > 0`) those are different slots; conflating
+            // them is a silent miscompile. The operand order is `l op r` matching the
+            // original load order, load-bearing for the non-commutative Sub/Div.
+            /// Push `curr[l_global] op curr[module_off + r]`.
+            BinGlobalVar { l_global: VariableOffset, r: VariableOffset, op: Op2 } => (0, 1),
+            /// Push `curr[module_off + l] op curr[r_global]`.
+            BinVarGlobal { l: VariableOffset, r_global: VariableOffset, op: Op2 } => (0, 1),
+            /// Push `curr[l_global] op literals[r]`.
+            BinGlobalConst { l_global: VariableOffset, r: LiteralId, op: Op2 } => (0, 1),
+            /// Push `literals[l] op curr[r_global]`.
+            BinConstGlobal { l: LiteralId, r_global: VariableOffset, op: Op2 } => (0, 1),
+            /// Push `curr[l_global] op curr[r_global]`.
+            BinGlobalGlobal {
+                l_global: VariableOffset,
+                r_global: VariableOffset,
+                op: Op2,
+            } => (0, 1),
+            /// Pop `lhs`; push `lhs op curr[r_global]`.
+            BinStackGlobal { r_global: VariableOffset, op: Op2 } => (1, 1),
 
-    // -- VarVar: `c[dst] = c[l] OP c[r]` (Curr) / `n[dst] = c[l] OP c[r]` (Next) --
-    AssignAddVarVarCurr {
-        l: VariableOffset,
-        r: VariableOffset,
-        dst: VariableOffset,
-    },
-    AssignSubVarVarCurr {
-        l: VariableOffset,
-        r: VariableOffset,
-        dst: VariableOffset,
-    },
-    AssignMulVarVarCurr {
-        l: VariableOffset,
-        r: VariableOffset,
-        dst: VariableOffset,
-    },
-    AssignDivVarVarCurr {
-        l: VariableOffset,
-        r: VariableOffset,
-        dst: VariableOffset,
-    },
-    AssignAddVarVarNext {
-        l: VariableOffset,
-        r: VariableOffset,
-        dst: VariableOffset,
-    },
-    AssignSubVarVarNext {
-        l: VariableOffset,
-        r: VariableOffset,
-        dst: VariableOffset,
-    },
-    AssignMulVarVarNext {
-        l: VariableOffset,
-        r: VariableOffset,
-        dst: VariableOffset,
-    },
-    AssignDivVarVarNext {
-        l: VariableOffset,
-        r: VariableOffset,
-        dst: VariableOffset,
-    },
+            // === 3-ADDRESS BINARY OP WITH TWO CONSTANT OPERANDS (R2 extension) ===
+            // The greedy 3-window missed `LoadConstant; LoadConstant; Op2` (both operands
+            // are separate literals) because no `Bin*` form took two constant leaves.
+            // This is NOT compile-time constant folding of the result: the two operands
+            // are distinct interned literals, so we fuse the two loads + the op into one
+            // dispatch that still computes `literals[l] op literals[r]` at run time.
+            /// Push `literals[l] op literals[r]`.
+            BinConstConst { l: LiteralId, r: LiteralId, op: Op2 } => (0, 1),
 
-    // -- VarConst: `c[dst] = c[l] OP literals[r]` (l is a var, r is a literal) --
-    AssignAddVarConstCurr {
-        l: VariableOffset,
-        r: LiteralId,
-        dst: VariableOffset,
-    },
-    AssignSubVarConstCurr {
-        l: VariableOffset,
-        r: LiteralId,
-        dst: VariableOffset,
-    },
-    AssignMulVarConstCurr {
-        l: VariableOffset,
-        r: LiteralId,
-        dst: VariableOffset,
-    },
-    AssignDivVarConstCurr {
-        l: VariableOffset,
-        r: LiteralId,
-        dst: VariableOffset,
-    },
-    AssignAddVarConstNext {
-        l: VariableOffset,
-        r: LiteralId,
-        dst: VariableOffset,
-    },
-    AssignSubVarConstNext {
-        l: VariableOffset,
-        r: LiteralId,
-        dst: VariableOffset,
-    },
-    AssignMulVarConstNext {
-        l: VariableOffset,
-        r: LiteralId,
-        dst: VariableOffset,
-    },
-    AssignDivVarConstNext {
-        l: VariableOffset,
-        r: LiteralId,
-        dst: VariableOffset,
-    },
+            // === 3-ADDRESS FUSED LEAF ASSIGNMENTS (R2 extension) ===
+            // A leaf assignment `dst = a op b` is, post-`peephole_optimize`,
+            // `LoadX a; LoadX b; BinOpAssign{Curr|Next}(op, dst)` (3 dispatches). These
+            // fold all three into one register-style op that reads its operands straight
+            // from `curr[]`/`literals` and writes the result straight to `curr[]`/`next[]`
+            // -- no stack push or pop at all. Like the 2-operand pushing forms above they
+            // are created only by the late `fuse_three_address` pass on final concrete
+            // bytecode and never enter the symbolic/incremental layer.
+            //
+            // The operator is encoded in the variant tag (one variant per {Add,Sub,Mul,
+            // Div}) rather than an `Op2` payload field. That keeps the payload at 3xu16 =
+            // 6 bytes so `size_of::<Opcode>()` stays at 8; a shared `Op2` field would make
+            // the payload 7 bytes and blow the budget. The four operators cover ~100% of
+            // measured leaf-assign candidates; any other operator is left in its existing
+            // `BinOpAssign{Curr|Next}` form. Encoding the operator in the tag also removes
+            // the per-dispatch `eval_op2` operator branch: each arm is straight-line f64
+            // arithmetic. The operand order is `l op r` matching the original load order,
+            // which is load-bearing for the non-commutative Sub and Div.
 
-    // -- ConstVar: `c[dst] = literals[l] OP c[r]` (l is a literal, r is a var) --
-    AssignAddConstVarCurr {
-        l: LiteralId,
-        r: VariableOffset,
-        dst: VariableOffset,
-    },
-    AssignSubConstVarCurr {
-        l: LiteralId,
-        r: VariableOffset,
-        dst: VariableOffset,
-    },
-    AssignMulConstVarCurr {
-        l: LiteralId,
-        r: VariableOffset,
-        dst: VariableOffset,
-    },
-    AssignDivConstVarCurr {
-        l: LiteralId,
-        r: VariableOffset,
-        dst: VariableOffset,
-    },
-    AssignAddConstVarNext {
-        l: LiteralId,
-        r: VariableOffset,
-        dst: VariableOffset,
-    },
-    AssignSubConstVarNext {
-        l: LiteralId,
-        r: VariableOffset,
-        dst: VariableOffset,
-    },
-    AssignMulConstVarNext {
-        l: LiteralId,
-        r: VariableOffset,
-        dst: VariableOffset,
-    },
-    AssignDivConstVarNext {
-        l: LiteralId,
-        r: VariableOffset,
-        dst: VariableOffset,
-    },
+            // -- VarVar: `c[dst] = c[l] OP c[r]` (Curr) / `n[dst] = c[l] OP c[r]` (Next) --
+            AssignAddVarVarCurr {
+                l: VariableOffset,
+                r: VariableOffset,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignSubVarVarCurr {
+                l: VariableOffset,
+                r: VariableOffset,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignMulVarVarCurr {
+                l: VariableOffset,
+                r: VariableOffset,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignDivVarVarCurr {
+                l: VariableOffset,
+                r: VariableOffset,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignAddVarVarNext {
+                l: VariableOffset,
+                r: VariableOffset,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignSubVarVarNext {
+                l: VariableOffset,
+                r: VariableOffset,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignMulVarVarNext {
+                l: VariableOffset,
+                r: VariableOffset,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignDivVarVarNext {
+                l: VariableOffset,
+                r: VariableOffset,
+                dst: VariableOffset,
+            } => (0, 0),
 
-    // === 2-ADDRESS STACK-LEAF FUSED ASSIGNMENTS (R2 extension) ===
-    // `lhs` is already on the arithmetic stack (a nested subexpression result);
-    // the rhs is a leaf load. Post-peephole this is `LoadX b; BinOpAssign(op, dst)`
-    // (2 dispatches): pop the lhs, combine with the leaf rhs, store. Folds 2->1.
-    // Here the operator stays in the payload (the `{dst, b}` + `op` form is 5
-    // bytes, still within budget) so all operators -- not just {Add,Sub,Mul,Div}
-    // -- are handled by one variant per (Var/Const, Curr/Next) combo.
-    /// Pop `lhs`; `curr[module_off + dst] = lhs op curr[module_off + b]`.
-    AssignStackVarCurr {
-        dst: VariableOffset,
-        b: VariableOffset,
-        op: Op2,
-    },
-    /// Pop `lhs`; `next[module_off + dst] = lhs op curr[module_off + b]`.
-    AssignStackVarNext {
-        dst: VariableOffset,
-        b: VariableOffset,
-        op: Op2,
-    },
-    /// Pop `lhs`; `curr[module_off + dst] = lhs op literals[b]`.
-    AssignStackConstCurr {
-        dst: VariableOffset,
-        b: LiteralId,
-        op: Op2,
-    },
-    /// Pop `lhs`; `next[module_off + dst] = lhs op literals[b]`.
-    AssignStackConstNext {
-        dst: VariableOffset,
-        b: LiteralId,
-        op: Op2,
-    },
+            // -- VarConst: `c[dst] = c[l] OP literals[r]` (l is a var, r is a literal) --
+            AssignAddVarConstCurr {
+                l: VariableOffset,
+                r: LiteralId,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignSubVarConstCurr {
+                l: VariableOffset,
+                r: LiteralId,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignMulVarConstCurr {
+                l: VariableOffset,
+                r: LiteralId,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignDivVarConstCurr {
+                l: VariableOffset,
+                r: LiteralId,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignAddVarConstNext {
+                l: VariableOffset,
+                r: LiteralId,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignSubVarConstNext {
+                l: VariableOffset,
+                r: LiteralId,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignMulVarConstNext {
+                l: VariableOffset,
+                r: LiteralId,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignDivVarConstNext {
+                l: VariableOffset,
+                r: LiteralId,
+                dst: VariableOffset,
+            } => (0, 0),
 
-    // =========================================================================
-    // ARRAY SUPPORT (new)
-    // =========================================================================
+            // -- ConstVar: `c[dst] = literals[l] OP c[r]` (l is a literal, r is a var) --
+            AssignAddConstVarCurr {
+                l: LiteralId,
+                r: VariableOffset,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignSubConstVarCurr {
+                l: LiteralId,
+                r: VariableOffset,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignMulConstVarCurr {
+                l: LiteralId,
+                r: VariableOffset,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignDivConstVarCurr {
+                l: LiteralId,
+                r: VariableOffset,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignAddConstVarNext {
+                l: LiteralId,
+                r: VariableOffset,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignSubConstVarNext {
+                l: LiteralId,
+                r: VariableOffset,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignMulConstVarNext {
+                l: LiteralId,
+                r: VariableOffset,
+                dst: VariableOffset,
+            } => (0, 0),
+            AssignDivConstVarNext {
+                l: LiteralId,
+                r: VariableOffset,
+                dst: VariableOffset,
+            } => (0, 0),
 
-    // === VIEW STACK: Building views dynamically ===
-    /// Push a pre-computed static view onto the view stack.
-    PushStaticView {
-        view_id: ViewId,
-    },
+            // === 2-ADDRESS STACK-LEAF FUSED ASSIGNMENTS (R2 extension) ===
+            // `lhs` is already on the arithmetic stack (a nested subexpression result);
+            // the rhs is a leaf load. Post-peephole this is `LoadX b; BinOpAssign(op, dst)`
+            // (2 dispatches): pop the lhs, combine with the leaf rhs, store. Folds 2->1.
+            // Here the operator stays in the payload (the `{dst, b}` + `op` form is 5
+            // bytes, still within budget) so all operators -- not just {Add,Sub,Mul,Div}
+            // -- are handled by one variant per (Var/Const, Curr/Next) combo.
+            /// Pop `lhs`; `curr[module_off + dst] = lhs op curr[module_off + b]`.
+            AssignStackVarCurr { dst: VariableOffset, b: VariableOffset, op: Op2 } => (1, 0),
+            /// Pop `lhs`; `next[module_off + dst] = lhs op curr[module_off + b]`.
+            AssignStackVarNext { dst: VariableOffset, b: VariableOffset, op: Op2 } => (1, 0),
+            /// Pop `lhs`; `curr[module_off + dst] = lhs op literals[b]`.
+            AssignStackConstCurr { dst: VariableOffset, b: LiteralId, op: Op2 } => (1, 0),
+            /// Pop `lhs`; `next[module_off + dst] = lhs op literals[b]`.
+            AssignStackConstNext { dst: VariableOffset, b: LiteralId, op: Op2 } => (1, 0),
 
-    /// Push a view for a variable with explicit dimension sizes.
-    /// Used when we have bounds but not dim_ids (e.g., dynamic subscripts).
-    /// The dim_list_id references a (n_dims, [u16; 4]) entry in ByteCodeContext.dim_lists.
-    PushVarViewDirect {
-        base_off: VariableOffset,
-        dim_list_id: DimListId,
-    },
+            // =========================================================================
+            // ARRAY SUPPORT (new)
+            // =========================================================================
 
-    /// Apply single-element subscript with dynamic index (from arithmetic stack).
-    /// Removes one dimension from the view. Every constant subscript is baked
-    /// into the `PushStaticView` geometry at compile time, so this is the one
-    /// subscript transform the view stack performs at run time.
-    ViewSubscriptDynamic {
-        dim_idx: u8,
-    },
+            // === VIEW STACK: Building views dynamically ===
+            /// Push a pre-computed static view onto the view stack.
+            PushStaticView { view_id: ViewId } => (0, 0),
 
-    /// Apply range subscript with dynamic bounds (from stack).
-    /// Pops end then start from arithmetic stack (1-based indices).
-    /// Applies range to the specified dimension of the top view.
-    ViewRangeDynamic {
-        dim_idx: u8,
-    },
+            /// Push a view for a variable with explicit dimension sizes.
+            /// Used when we have bounds but not dim_ids (e.g., dynamic subscripts).
+            /// The dim_list_id references a (n_dims, [u16; 4]) entry in ByteCodeContext.dim_lists.
+            PushVarViewDirect { base_off: VariableOffset, dim_list_id: DimListId } => (0, 0),
 
-    /// Pop and discard the top view from view stack.
-    PopView {},
+            /// Apply single-element subscript with dynamic index (from arithmetic stack).
+            /// Removes one dimension from the view. Every constant subscript is baked
+            /// into the `PushStaticView` geometry at compile time, so this is the one
+            /// subscript transform the view stack performs at run time.
+            ViewSubscriptDynamic { dim_idx: u8 } => (1, 0),
 
-    // === TEMP ARRAY ACCESS ===
-    /// Load single element from temp array with constant index.
-    LoadTempConst {
-        temp_id: TempId,
-        index: u16,
-    },
+            /// Apply range subscript with dynamic bounds (from stack).
+            /// Pops end then start from arithmetic stack (1-based indices).
+            /// Applies range to the specified dimension of the top view.
+            ViewRangeDynamic { dim_idx: u8 } => (2, 0),
 
-    // === ITERATION ===
-    /// Begin iteration over top view, optionally writing results to a temp.
-    /// If write_temp is Some, iteration writes to that temp array.
-    /// View remains on stack during iteration.
-    BeginIter {
-        write_temp_id: TempId,
-        has_write_temp: bool,
-    },
+            /// Pop and discard the top view from view stack.
+            PopView {} => (0, 0),
 
-    /// Load the element at the current iteration position from the view at
-    /// `offset` on the view stack: offset=1 is the top, offset=2 the one
-    /// beneath it, and so on. The source views are pushed once before the loop
-    /// and read inside it without per-iteration push/pop; a source whose
-    /// dimensions differ from the iteration view's is broadcast by dimension
-    /// id (`dimensions::match_dimensions_two_pass`), and an out-of-range or
-    /// unmatched element pushes NaN.
-    LoadIterViewAt {
-        offset: u8,
-    },
+            // === TEMP ARRAY ACCESS ===
+            /// Load single element from temp array with constant index.
+            LoadTempConst { temp_id: TempId, index: u16 } => (0, 1),
 
-    /// Store top of arithmetic stack to current iteration position in dest temp.
-    /// Pops value from arithmetic stack.
-    StoreIterElement {},
+            // === ITERATION ===
+            /// Begin iteration over top view, optionally writing results to a temp.
+            /// If write_temp is Some, iteration writes to that temp array.
+            /// View remains on stack during iteration.
+            BeginIter { write_temp_id: TempId, has_write_temp: bool } => (0, 0),
 
-    /// Advance iterator. If not done, jump backward by offset; else continue.
-    /// jump_back is negative offset from current PC.
-    NextIterOrJump {
-        jump_back: PcOffset,
-    },
+            /// Load the element at the current iteration position from the view at
+            /// `offset` on the view stack: offset=1 is the top, offset=2 the one
+            /// beneath it, and so on. The source views are pushed once before the loop
+            /// and read inside it without per-iteration push/pop; a source whose
+            /// dimensions differ from the iteration view's is broadcast by dimension
+            /// id (`dimensions::match_dimensions_two_pass`), and an out-of-range or
+            /// unmatched element pushes NaN.
+            LoadIterViewAt { offset: u8 } => (0, 1),
 
-    /// End iteration and clean up (pops iteration context, view stays on stack).
-    EndIter {},
+            /// Store top of arithmetic stack to current iteration position in dest temp.
+            /// Pops value from arithmetic stack.
+            StoreIterElement {} => (1, 0),
 
-    // === ARRAY REDUCTIONS ===
-    // These operate on the top view and push result to arithmetic stack.
-    // View is NOT popped (caller should PopView after if needed).
-    /// Sum all elements in top view.
-    ArraySum {},
+            /// Advance iterator. If not done, jump backward by offset; else continue.
+            /// jump_back is negative offset from current PC.
+            NextIterOrJump { jump_back: PcOffset } => (0, 0),
 
-    /// Maximum of all elements in top view.
-    ArrayMax {},
+            /// End iteration and clean up (pops iteration context, view stays on stack).
+            EndIter {} => (0, 0),
 
-    /// Minimum of all elements in top view.
-    ArrayMin {},
+            // === ARRAY REDUCTIONS ===
+            // These operate on the top view and push result to arithmetic stack.
+            // View is NOT popped (caller should PopView after if needed).
+            /// Sum all elements in top view.
+            ArraySum {} => (0, 1),
 
-    /// Mean of all elements in top view.
-    ArrayMean {},
+            /// Maximum of all elements in top view.
+            ArrayMax {} => (0, 1),
 
-    /// Standard deviation of all elements in top view.
-    ArrayStddev {},
+            /// Minimum of all elements in top view.
+            ArrayMin {} => (0, 1),
 
-    /// Size (element count) of top view.
-    ArraySize {},
+            /// Mean of all elements in top view.
+            ArrayMean {} => (0, 1),
 
-    // === VECTOR OPERATIONS ===
-    // These implement Vensim's array-producing builtins that cannot be
-    // expressed as simple element-wise iteration or scalar reduction.
-    /// Reduces selected array elements to one scalar.
-    /// Reads 2 views (selection mask, expression values) from the view stack
-    /// and 2 scalars (max_value, action) from the arithmetic stack.
-    /// The result is a single scalar pushed onto the arithmetic stack.
-    VectorSelect {},
+            /// Standard deviation of all elements in top view.
+            ArrayStddev {} => (0, 1),
 
-    /// Genuine-Vensim VECTOR ELM MAP; writes the full result array to
-    /// temp_storage. `full_source_len` is the source *variable's* total
-    /// element count (product of its full declared dimensions) -- the
-    /// out-of-range bound for the genuine `:NA:` rule. The source variable's
-    /// storage in `curr[]` is contiguous row-major, so the source view's
-    /// `base_off` plus a directly-computed flat index addresses it, and the
-    /// offset steps the innermost (last declared) dimension whose contiguous
-    /// stride is 1.
-    VectorElmMap {
-        write_temp_id: TempId,
-        full_source_len: u32,
-    },
+            /// Size (element count) of top view.
+            ArraySize {} => (0, 1),
 
-    /// Produces an array of sort-order indices; writes to temp_storage.
-    VectorSortOrder {
-        write_temp_id: TempId,
-    },
+            // === VECTOR OPERATIONS ===
+            // These implement Vensim's array-producing builtins that cannot be
+            // expressed as simple element-wise iteration or scalar reduction.
+            /// Reduces selected array elements to one scalar.
+            /// Reads 2 views (selection mask, expression values) from the view stack
+            /// and 2 scalars (max_value, action) from the arithmetic stack.
+            /// The result is a single scalar pushed onto the arithmetic stack.
+            VectorSelect {} => (2, 1),
 
-    /// Produces an array of ranks (ordinal positions in sorted order); writes to temp_storage.
-    /// Pops 1 scalar (direction: 1=ascending, 0=descending) from the arithmetic stack.
-    /// Reads 1 view from the view stack.
-    Rank {
-        write_temp_id: TempId,
-    },
+            /// Genuine-Vensim VECTOR ELM MAP; writes the full result array to
+            /// temp_storage. `full_source_len` is the source *variable's* total
+            /// element count (product of its full declared dimensions) -- the
+            /// out-of-range bound for the genuine `:NA:` rule. The source variable's
+            /// storage in `curr[]` is contiguous row-major, so the source view's
+            /// `base_off` plus a directly-computed flat index addresses it, and the
+            /// offset steps the innermost (last declared) dimension whose contiguous
+            /// stride is 1. Reads its views and writes `temp_storage` without
+            /// touching the arithmetic stack.
+            VectorElmMap { write_temp_id: TempId, full_source_len: u32 } => (0, 0),
 
-    /// Per-element graphical-function lookup over an arrayed GF (GH #580 Bug B):
-    /// `g[D!](index)` where each element of `g` carries its own lookup table.
-    /// Pops 1 scalar (the shared lookup `index`) from the arithmetic stack and
-    /// reads 1 view (the arrayed GF's full storage) from the view stack; for
-    /// each of the view's `size()` elements `i` it evaluates the table
-    /// `graphical_functions[base_gf + i]` at `index` (the per-element-table
-    /// layout `Compiler::table_base_ids` records -- one table per element, in
-    /// declared order) and writes the result to `temp_storage[write_temp + i]`.
-    /// `table_count` bounds `base_gf + i` (an out-of-range element yields NaN,
-    /// matching the scalar `Lookup` opcode). The result temp is then consumed
-    /// as an array view by the reducer / vector op that wrapped the apply.
-    LookupArray {
-        base_gf: GraphicalFunctionId,
-        table_count: u16,
-        mode: LookupMode,
-        write_temp_id: TempId,
-    },
+            /// Produces an array of sort-order indices; writes to temp_storage.
+            /// Pops 1 scalar (direction) from the arithmetic stack and reads 1 view.
+            VectorSortOrder { write_temp_id: TempId } => (1, 0),
 
-    /// Priority-based allocation; writes result array to temp_storage.
-    AllocateAvailable {
-        write_temp_id: TempId,
-    },
+            /// Produces an array of ranks (ordinal positions in sorted order); writes to temp_storage.
+            /// Pops 1 scalar (direction: 1=ascending, 0=descending) from the arithmetic stack.
+            /// Reads 1 view from the view stack.
+            Rank { write_temp_id: TempId } => (1, 0),
 
-    /// ALLOCATE BY PRIORITY desugaring: constructs rectangular priority
-    /// profiles from (request, priority, width, supply) and delegates to
-    /// allocate_available. Pops 2 scalars (width, supply) from the stack,
-    /// reads request and priority from the top two views.
-    AllocateByPriority {
-        write_temp_id: TempId,
-    },
+            /// Per-element graphical-function lookup over an arrayed GF (GH #580 Bug B):
+            /// `g[D!](index)` where each element of `g` carries its own lookup table.
+            /// Pops 1 scalar (the shared lookup `index`) from the arithmetic stack and
+            /// reads 1 view (the arrayed GF's full storage) from the view stack; for
+            /// each of the view's `size()` elements `i` it evaluates the table
+            /// `graphical_functions[base_gf + i]` at `index` (the per-element-table
+            /// layout `Compiler::table_base_ids` records -- one table per element, in
+            /// declared order) and writes the result to `temp_storage[write_temp + i]`.
+            /// `table_count` bounds `base_gf + i` (an out-of-range element yields NaN,
+            /// matching the scalar `Lookup` opcode). The result temp is then consumed
+            /// as an array view by the reducer / vector op that wrapped the apply.
+            LookupArray {
+                base_gf: GraphicalFunctionId,
+                table_count: TableCount,
+                mode: LookupMode,
+                write_temp_id: TempId,
+            } => (1, 0),
+
+            /// Priority-based allocation; writes result array to temp_storage.
+            /// Pops 1 scalar (the available amount) from the arithmetic stack and
+            /// reads the request and priority-profile views.
+            AllocateAvailable { write_temp_id: TempId } => (1, 0),
+
+            /// ALLOCATE BY PRIORITY desugaring: constructs rectangular priority
+            /// profiles from (request, priority, width, supply) and delegates to
+            /// allocate_available. Pops 2 scalars (width, supply) from the stack,
+            /// reads request and priority from the top two views.
+            AllocateByPriority { write_temp_id: TempId } => (2, 0),
+        }
+    };
 }
 
-impl Opcode {
-    /// Returns the jump offset if this opcode is a backward jump instruction.
-    /// Centralizes jump handling so new jump opcodes can't be silently missed
-    /// by the peephole optimizer or other passes.
-    fn jump_offset(&self) -> Option<PcOffset> {
-        match self {
-            Opcode::NextIterOrJump { jump_back } => Some(*jump_back),
-            _ => None,
+/// Derives the concrete side of the bytecode from [`opcode_table!`]: the enum
+/// and the mechanical functions over its rows. `stack_effect` binds every
+/// operand of a row, because its column is an arbitrary expression over
+/// them, and allows `unused_variables` for the ones a column does not read;
+/// the jump accessors bind only the `PcOffset` operand (`bind_kind!`).
+macro_rules! declare_opcodes {
+    ($(
+        $(#[$meta:meta])*
+        $name:ident $({ $( $(#[$fmeta:meta])* $field:ident : $ty:ident ),* $(,)? })?
+            => ($pops:expr, $pushes:expr) ,
+    )*) => {
+        /// Bytecode opcodes for the VM.
+        ///
+        /// The opcodes are organized into categories:
+        /// - Arithmetic and logic (Op2, Not, etc.)
+        /// - Variable access (LoadVar, LoadGlobalVar, etc.)
+        /// - Control flow (SetCond, If, Ret)
+        /// - Module operations (EvalModule, LoadModuleInput)
+        /// - Assignment (AssignCurr, and the fused BinOpAssignNext for stock updates)
+        /// - Builtins and lookups (Apply, Lookup)
+        /// - Array view stack operations (PushStaticView, PushVarViewDirect, ViewSubscriptDynamic, ...)
+        /// - Array iteration (BeginIter, LoadIterViewAt, StoreIterElement, ...)
+        /// - Array reductions (ArraySum, ArrayMax, etc.)
+        ///
+        /// Declared by [`opcode_table!`], which also states each variant's effect
+        /// on the arithmetic stack.
+        #[cfg_attr(feature = "debug-derive", derive(Debug))]
+        #[derive(Clone, Copy, PartialEq)]
+        pub(crate) enum Opcode {
+            $( $(#[$meta])* $name $({ $( $(#[$fmeta])* $field: $ty ),* })?, )*
         }
-    }
 
-    /// Mutably borrow the jump offset, if this opcode is a backward jump.
-    fn jump_offset_mut(&mut self) -> Option<&mut PcOffset> {
-        match self {
-            Opcode::NextIterOrJump { jump_back } => Some(jump_back),
-            _ => None,
-        }
-    }
-
-    /// Returns (pops, pushes) describing this opcode's effect on the arithmetic stack.
-    /// Used by `ByteCode::max_stack_depth` to statically validate that compiled
-    /// bytecode cannot overflow the fixed-size VM stack.
-    ///
-    /// Opcodes that only affect the view stack or the iter stack return
-    /// (0, 0) since they don't touch the arithmetic stack.
-    fn stack_effect(&self) -> (u8, u8) {
-        match self {
-            // Arithmetic: pop 2, push 1
-            Opcode::Op2 { .. } => (2, 1),
-            // Logic: pop 1, push 1
-            Opcode::Not {} => (1, 1),
-
-            // Constants/variables: push 1
-            Opcode::LoadConstant { .. }
-            | Opcode::LoadVar { .. }
-            | Opcode::LoadInitial { .. }
-            | Opcode::LoadGlobalVar { .. }
-            | Opcode::LoadModuleInput { .. } => (0, 1),
-
-            // LoadPrev pops the caller-provided fallback, then pushes
-            // either the fallback (at t=INITIAL_TIME) or prev_values[off].
-            Opcode::LoadPrev { .. } => (1, 1),
-            // The fused `LoadConstant; LoadPrev` pair: the fallback comes from
-            // the literal table, so nothing is popped.
-            Opcode::LoadPrevConst { .. } => (0, 1),
-            Opcode::SubVarPrev { .. } => (0, 1),
-            Opcode::BinStackPrev { .. } => (1, 1),
-            // The fused `LoadConstant; Apply` pair for a 3-arity builtin: two
-            // operands still come off the stack, the third from the literals.
-            Opcode::ApplyTerConst { .. } => (2, 1),
-
-            // Legacy subscript: PushSubscriptIndex pops an index from the
-            // arithmetic stack and appends it to a separate subscript_index
-            // SmallVec (not the arithmetic stack). Multiple PushSubscriptIndex
-            // ops may precede a single LoadSubscript for multi-dimensional
-            // access, but each only pops 1 from the arithmetic stack.
-            Opcode::PushSubscriptIndex { .. } => (1, 0),
-            // LoadSubscript consumes the accumulated subscript_index entries
-            // and pushes the looked-up value onto the arithmetic stack.
-            Opcode::LoadSubscript { .. } => (0, 1),
-
-            // Control flow
-            Opcode::SetCond {} => (1, 0), // pops condition
-            Opcode::If {} => (2, 1),      // pops true+false branches, pushes result
-            Opcode::Ret => (0, 0),
-
-            // Module eval: pops n_inputs from the caller's arithmetic stack.
-            // The child module executes with its own stack context (via EvalState)
-            // and writes results directly to curr/next, not back to the caller's
-            // arithmetic stack, so pushes = 0 from the caller's perspective.
-            Opcode::EvalModule { n_inputs, .. } => (*n_inputs, 0),
-
-            // Assignment: pops 1 (the value to assign)
-            Opcode::AssignCurr { .. } => (1, 0),
-
-            // Builtins pop exactly the operands `vm::apply` reads (see
-            // `BuiltinId::arity`), not a fixed 3 with discarded padding.
-            Opcode::Apply { func } => (func.arity(), 1),
-            // Lookup pops element_offset and lookup_index, pushes result
-            Opcode::Lookup { .. } => (2, 1),
-            // LookupDirect's element offset is baked into the opcode, so only
-            // the index is popped.
-            Opcode::LookupDirect { .. } => (1, 1),
-
-            // Superinstructions
-            Opcode::AssignConstCurr { .. } => (0, 0), // reads literal directly
-            Opcode::BinOpAssignCurr { .. } => (2, 0), // pops 2, assigns directly
-            Opcode::BinOpAssignNext { .. } => (2, 0), // pops 2, assigns directly
-
-            // Conditional select: the fusions of `SetCond`(1,0)+`If`(2,1) and of
-            // that pair plus `AssignCurr`(1,0). Net effect is identical to the
-            // sequence they replace, which is what keeps the fixed-stack safety
-            // proof in `resolve_bytecode` valid across the pass.
-            Opcode::SelectIf {} => (3, 1), // pops cond+false+true, pushes result
-            Opcode::SelectIfAssignCurr { .. } => (3, 0), // same, assigns directly
-
-            // Leaf stores: exactly the net of the `LoadX`(0,1) + `AssignCurr`(1,0)
-            // they replace, so a program's peak depth cannot move.
-            Opcode::AssignVarCurr { .. }
-            | Opcode::AssignInitialCurr { .. }
-            | Opcode::AssignModInputCurr { .. } => (0, 0),
-            // Module-input operand forms mirror their var/const twins.
-            Opcode::BinStackModInput { .. } => (1, 1),
-            Opcode::AssignStackModInputCurr { .. } => (1, 0),
-
-            // 3-address binops: the *Var/*Const forms read both operands from
-            // curr/literals and push (0 pops, 1 push); the Stack* forms pop the
-            // lhs and push the result (1 pop, 1 push).
-            Opcode::BinVarVar { .. } | Opcode::BinVarConst { .. } | Opcode::BinConstVar { .. } => {
-                (0, 1)
+        impl Opcode {
+            /// Returns (pops, pushes) describing this opcode's effect on the arithmetic stack.
+            /// Used by `ByteCode::max_stack_depth` to statically validate that compiled
+            /// bytecode cannot overflow the fixed-size VM stack.
+            ///
+            /// Opcodes that only affect the view stack or the iter stack return
+            /// (0, 0) since they don't touch the arithmetic stack.
+            #[allow(unused_variables)]
+            fn stack_effect(&self) -> (u8, u8) {
+                match *self {
+                    $( Opcode::$name $({ $($field),* })? => ($pops, $pushes), )*
+                }
             }
-            Opcode::BinStackVar { .. } | Opcode::BinStackConst { .. } => (1, 1),
 
-            // Global-operand pushing forms mirror the var/const forms above: the
-            // two-leaf forms read both operands from curr/literals and push
-            // (0 pops, 1 push); BinStackGlobal pops the lhs and pushes (1, 1).
-            // BinConstConst reads both literals and pushes (0, 1).
-            Opcode::BinGlobalVar { .. }
-            | Opcode::BinVarGlobal { .. }
-            | Opcode::BinGlobalConst { .. }
-            | Opcode::BinConstGlobal { .. }
-            | Opcode::BinGlobalGlobal { .. }
-            | Opcode::BinConstConst { .. } => (0, 1),
-            Opcode::BinStackGlobal { .. } => (1, 1),
+            /// Static variant name, independent of payload. Used for bytecode-composition
+            /// profiling (opcode histograms) and human-readable diagnostics without
+            /// depending on the optional `debug-derive` Debug impl.
+            pub(crate) fn name(&self) -> &'static str {
+                match self {
+                    $( Opcode::$name { .. } => stringify!($name), )*
+                }
+            }
 
-            // 3-address fused leaf assignments read operands from curr/literals
-            // and write straight to curr/next: no arithmetic-stack traffic.
-            Opcode::AssignAddVarVarCurr { .. }
-            | Opcode::AssignSubVarVarCurr { .. }
-            | Opcode::AssignMulVarVarCurr { .. }
-            | Opcode::AssignDivVarVarCurr { .. }
-            | Opcode::AssignAddVarVarNext { .. }
-            | Opcode::AssignSubVarVarNext { .. }
-            | Opcode::AssignMulVarVarNext { .. }
-            | Opcode::AssignDivVarVarNext { .. }
-            | Opcode::AssignAddVarConstCurr { .. }
-            | Opcode::AssignSubVarConstCurr { .. }
-            | Opcode::AssignMulVarConstCurr { .. }
-            | Opcode::AssignDivVarConstCurr { .. }
-            | Opcode::AssignAddVarConstNext { .. }
-            | Opcode::AssignSubVarConstNext { .. }
-            | Opcode::AssignMulVarConstNext { .. }
-            | Opcode::AssignDivVarConstNext { .. }
-            | Opcode::AssignAddConstVarCurr { .. }
-            | Opcode::AssignSubConstVarCurr { .. }
-            | Opcode::AssignMulConstVarCurr { .. }
-            | Opcode::AssignDivConstVarCurr { .. }
-            | Opcode::AssignAddConstVarNext { .. }
-            | Opcode::AssignSubConstVarNext { .. }
-            | Opcode::AssignMulConstVarNext { .. }
-            | Opcode::AssignDivConstVarNext { .. } => (0, 0),
+            /// Returns the jump offset if this opcode is a backward jump instruction.
+            /// Derived from the table's `PcOffset` operands, so a new jump opcode
+            /// cannot be silently missed by the fusion pass.
+            fn jump_offset(&self) -> Option<PcOffset> {
+                match self {
+                    $( Opcode::$name $({ $( $field: bind_kind!(PcOffset, $ty, $field) ),* })? => {
+                        let jump: Option<&PcOffset> =
+                            operand_of_kind!(PcOffset; [$($( $ty $field )*)?]);
+                        jump.copied()
+                    } )*
+                }
+            }
 
-            // Stack-leaf fused assignments pop the pre-existing lhs (1 pop) and
-            // write the combined result to curr/next (no push).
-            Opcode::AssignStackVarCurr { .. }
-            | Opcode::AssignStackVarNext { .. }
-            | Opcode::AssignStackConstCurr { .. }
-            | Opcode::AssignStackConstNext { .. } => (1, 0),
-
-            // View stack ops don't touch arithmetic stack
-            Opcode::PushStaticView { .. }
-            | Opcode::PushVarViewDirect { .. }
-            | Opcode::PopView {} => (0, 0),
-
-            // Dynamic subscript/range ops pop from arithmetic stack
-            Opcode::ViewSubscriptDynamic { .. } => (1, 0),
-            Opcode::ViewRangeDynamic { .. } => (2, 0),
-
-            // Temp array access
-            Opcode::LoadTempConst { .. } => (0, 1),
-
-            // Iteration: BeginIter/EndIter don't touch arithmetic stack
-            Opcode::BeginIter { .. } | Opcode::EndIter {} => (0, 0),
-            // The iteration body load pushes 1 element
-            Opcode::LoadIterViewAt { .. } => (0, 1),
-            // StoreIterElement pops 1 value
-            Opcode::StoreIterElement {} => (1, 0),
-            // NextIter doesn't touch arithmetic stack
-            Opcode::NextIterOrJump { .. } => (0, 0),
-
-            // Array reductions push 1 result
-            Opcode::ArraySum {}
-            | Opcode::ArrayMax {}
-            | Opcode::ArrayMin {}
-            | Opcode::ArrayMean {}
-            | Opcode::ArrayStddev {}
-            | Opcode::ArraySize {} => (0, 1),
-
-            // VectorSelect pops 2 scalars (max_value, action), pushes 1 result
-            Opcode::VectorSelect {} => (2, 1),
-            // VectorElmMap writes to temp_storage without touching the arithmetic stack.
-            // VectorSortOrder/Rank/AllocateAvailable pop 1 scalar each (direction/avail)
-            // and write their result arrays to temp_storage.
-            Opcode::VectorElmMap { .. } => (0, 0),
-            Opcode::VectorSortOrder { .. } => (1, 0),
-            Opcode::Rank { .. } => (1, 0),
-            // LookupArray pops the scalar lookup index, reads the GF view, and
-            // writes the per-element-lookup array to temp_storage.
-            Opcode::LookupArray { .. } => (1, 0),
-            Opcode::AllocateAvailable { .. } => (1, 0),
-            // AllocateByPriority pops 2 scalars (width, supply) from the stack
-            Opcode::AllocateByPriority { .. } => (2, 0),
+            /// Mutably borrow the jump offset, if this opcode is a backward jump.
+            fn jump_offset_mut(&mut self) -> Option<&mut PcOffset> {
+                match self {
+                    $( Opcode::$name $({ $( $field: bind_kind!(PcOffset, $ty, $field) ),* })? => {
+                        operand_of_kind!(PcOffset; [$($( $ty $field )*)?])
+                    } )*
+                }
+            }
         }
-    }
-
-    /// Static variant name, independent of payload. Used for bytecode-composition
-    /// profiling (opcode histograms) and human-readable diagnostics without
-    /// depending on the optional `debug-derive` Debug impl.
-    pub(crate) fn name(&self) -> &'static str {
-        match self {
-            Opcode::Op2 { .. } => "Op2",
-            Opcode::Not {} => "Not",
-            Opcode::LoadConstant { .. } => "LoadConstant",
-            Opcode::LoadVar { .. } => "LoadVar",
-            Opcode::LoadGlobalVar { .. } => "LoadGlobalVar",
-            Opcode::LoadPrev { .. } => "LoadPrev",
-            Opcode::LoadPrevConst { .. } => "LoadPrevConst",
-            Opcode::SubVarPrev { .. } => "SubVarPrev",
-            Opcode::BinStackPrev { .. } => "BinStackPrev",
-            Opcode::ApplyTerConst { .. } => "ApplyTerConst",
-            Opcode::LoadInitial { .. } => "LoadInitial",
-            Opcode::PushSubscriptIndex { .. } => "PushSubscriptIndex",
-            Opcode::LoadSubscript { .. } => "LoadSubscript",
-            Opcode::SetCond {} => "SetCond",
-            Opcode::If {} => "If",
-            Opcode::Ret => "Ret",
-            Opcode::LoadModuleInput { .. } => "LoadModuleInput",
-            Opcode::EvalModule { .. } => "EvalModule",
-            Opcode::AssignCurr { .. } => "AssignCurr",
-            Opcode::Apply { .. } => "Apply",
-            Opcode::Lookup { .. } => "Lookup",
-            Opcode::LookupDirect { .. } => "LookupDirect",
-            Opcode::AssignConstCurr { .. } => "AssignConstCurr",
-            Opcode::BinVarVar { .. } => "BinVarVar",
-            Opcode::BinVarConst { .. } => "BinVarConst",
-            Opcode::BinConstVar { .. } => "BinConstVar",
-            Opcode::BinStackVar { .. } => "BinStackVar",
-            Opcode::BinStackConst { .. } => "BinStackConst",
-            Opcode::BinGlobalVar { .. } => "BinGlobalVar",
-            Opcode::BinVarGlobal { .. } => "BinVarGlobal",
-            Opcode::BinGlobalConst { .. } => "BinGlobalConst",
-            Opcode::BinConstGlobal { .. } => "BinConstGlobal",
-            Opcode::BinGlobalGlobal { .. } => "BinGlobalGlobal",
-            Opcode::BinStackGlobal { .. } => "BinStackGlobal",
-            Opcode::BinConstConst { .. } => "BinConstConst",
-            Opcode::BinOpAssignCurr { .. } => "BinOpAssignCurr",
-            Opcode::BinOpAssignNext { .. } => "BinOpAssignNext",
-            Opcode::SelectIf {} => "SelectIf",
-            Opcode::SelectIfAssignCurr { .. } => "SelectIfAssignCurr",
-            Opcode::AssignVarCurr { .. } => "AssignVarCurr",
-            Opcode::AssignInitialCurr { .. } => "AssignInitialCurr",
-            Opcode::AssignModInputCurr { .. } => "AssignModInputCurr",
-            Opcode::BinStackModInput { .. } => "BinStackModInput",
-            Opcode::AssignStackModInputCurr { .. } => "AssignStackModInputCurr",
-            Opcode::AssignAddVarVarCurr { .. } => "AssignAddVarVarCurr",
-            Opcode::AssignSubVarVarCurr { .. } => "AssignSubVarVarCurr",
-            Opcode::AssignMulVarVarCurr { .. } => "AssignMulVarVarCurr",
-            Opcode::AssignDivVarVarCurr { .. } => "AssignDivVarVarCurr",
-            Opcode::AssignAddVarVarNext { .. } => "AssignAddVarVarNext",
-            Opcode::AssignSubVarVarNext { .. } => "AssignSubVarVarNext",
-            Opcode::AssignMulVarVarNext { .. } => "AssignMulVarVarNext",
-            Opcode::AssignDivVarVarNext { .. } => "AssignDivVarVarNext",
-            Opcode::AssignAddVarConstCurr { .. } => "AssignAddVarConstCurr",
-            Opcode::AssignSubVarConstCurr { .. } => "AssignSubVarConstCurr",
-            Opcode::AssignMulVarConstCurr { .. } => "AssignMulVarConstCurr",
-            Opcode::AssignDivVarConstCurr { .. } => "AssignDivVarConstCurr",
-            Opcode::AssignAddVarConstNext { .. } => "AssignAddVarConstNext",
-            Opcode::AssignSubVarConstNext { .. } => "AssignSubVarConstNext",
-            Opcode::AssignMulVarConstNext { .. } => "AssignMulVarConstNext",
-            Opcode::AssignDivVarConstNext { .. } => "AssignDivVarConstNext",
-            Opcode::AssignAddConstVarCurr { .. } => "AssignAddConstVarCurr",
-            Opcode::AssignSubConstVarCurr { .. } => "AssignSubConstVarCurr",
-            Opcode::AssignMulConstVarCurr { .. } => "AssignMulConstVarCurr",
-            Opcode::AssignDivConstVarCurr { .. } => "AssignDivConstVarCurr",
-            Opcode::AssignAddConstVarNext { .. } => "AssignAddConstVarNext",
-            Opcode::AssignSubConstVarNext { .. } => "AssignSubConstVarNext",
-            Opcode::AssignMulConstVarNext { .. } => "AssignMulConstVarNext",
-            Opcode::AssignDivConstVarNext { .. } => "AssignDivConstVarNext",
-            Opcode::AssignStackVarCurr { .. } => "AssignStackVarCurr",
-            Opcode::AssignStackVarNext { .. } => "AssignStackVarNext",
-            Opcode::AssignStackConstCurr { .. } => "AssignStackConstCurr",
-            Opcode::AssignStackConstNext { .. } => "AssignStackConstNext",
-            Opcode::PushStaticView { .. } => "PushStaticView",
-            Opcode::PushVarViewDirect { .. } => "PushVarViewDirect",
-            Opcode::ViewSubscriptDynamic { .. } => "ViewSubscriptDynamic",
-            Opcode::ViewRangeDynamic { .. } => "ViewRangeDynamic",
-            Opcode::PopView {} => "PopView",
-            Opcode::LoadTempConst { .. } => "LoadTempConst",
-            Opcode::BeginIter { .. } => "BeginIter",
-            Opcode::LoadIterViewAt { .. } => "LoadIterViewAt",
-            Opcode::StoreIterElement {} => "StoreIterElement",
-            Opcode::NextIterOrJump { .. } => "NextIterOrJump",
-            Opcode::EndIter {} => "EndIter",
-            Opcode::ArraySum {} => "ArraySum",
-            Opcode::ArrayMax {} => "ArrayMax",
-            Opcode::ArrayMin {} => "ArrayMin",
-            Opcode::ArrayMean {} => "ArrayMean",
-            Opcode::ArrayStddev {} => "ArrayStddev",
-            Opcode::ArraySize {} => "ArraySize",
-            Opcode::VectorSelect {} => "VectorSelect",
-            Opcode::VectorElmMap { .. } => "VectorElmMap",
-            Opcode::VectorSortOrder { .. } => "VectorSortOrder",
-            Opcode::Rank { .. } => "Rank",
-            Opcode::LookupArray { .. } => "LookupArray",
-            Opcode::AllocateAvailable { .. } => "AllocateAvailable",
-            Opcode::AllocateByPriority { .. } => "AllocateByPriority",
-        }
-    }
+    };
 }
+
+opcode_table!(declare_opcodes);
 
 // ============================================================================
 // Module and Array Declarations
@@ -2240,12 +1958,69 @@ impl ByteCode {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
-    // =========================================================================
-    // Stack Effect Tests
-    // =========================================================================
+    /// A distinct sentinel value for an operand of each type the opcode tables
+    /// use, for tests that instantiate every row. Shared with
+    /// `compiler::symbolic`'s table tests; a new operand type in either table
+    /// needs a rule here before those tests compile.
+    macro_rules! sentinel {
+        (VariableOffset) => {
+            44
+        };
+        (LiteralId) => {
+            3
+        };
+        (GraphicalFunctionId) => {
+            2
+        };
+        (TableCount) => {
+            11
+        };
+        (ModuleId) => {
+            4
+        };
+        (ModuleInputOffset) => {
+            13
+        };
+        (ViewId) => {
+            5
+        };
+        (TempId) => {
+            6
+        };
+        (DimListId) => {
+            7
+        };
+        (PcOffset) => {
+            -3
+        };
+        (Op2) => {
+            Op2::Sub
+        };
+        (BuiltinId) => {
+            BuiltinId::Sqrt
+        };
+        (LookupMode) => {
+            LookupMode::Backward
+        };
+        (bool) => {
+            true
+        };
+        (u8) => {
+            17
+        };
+        (u16) => {
+            700
+        };
+        (u32) => {
+            70_000
+        };
+    }
+    pub(crate) use sentinel;
 
     // =========================================================================
     // Max Stack Depth Tests
@@ -2435,26 +2210,89 @@ mod tests {
     }
 
     // =========================================================================
-    // Jump Offset Tests
+    // Every row of the table
     // =========================================================================
 
-    #[test]
-    fn test_jump_offset_returns_offset_for_jump_opcodes() {
-        let iter_jump = Opcode::NextIterOrJump { jump_back: -5 };
-        assert_eq!(iter_jump.jump_offset(), Some(-5));
-
-        assert_eq!(Opcode::Ret.jump_offset(), None);
-        assert_eq!((Opcode::Op2 { op: Op2::Add }).jump_offset(), None);
-        assert_eq!((Opcode::LoadVar { off: 0 }).jump_offset(), None);
+    /// One row of `opcode_table!` with sentinel operands, beside what the
+    /// derived accessors must report for it.
+    struct Row {
+        name: &'static str,
+        input: Opcode,
+        jump: Option<PcOffset>,
     }
 
+    /// `Some(the PcOffset sentinel)` when the operand list holds a jump,
+    /// `None` otherwise: the test's own statement of which rows jump.
+    macro_rules! expect_jump {
+        ([PcOffset $operand:ident $($rest:tt)*]) => {
+            Some(sentinel!(PcOffset))
+        };
+        ([$ty:ident $operand:ident $($rest:tt)*]) => {
+            expect_jump!([$($rest)*])
+        };
+        ([]) => {
+            None
+        };
+    }
+
+    macro_rules! sentinel_rows {
+        ($(
+            $(#[$meta:meta])*
+            $name:ident $({ $( $(#[$fmeta:meta])* $field:ident : $ty:ident ),* $(,)? })?
+                => ($pops:expr, $pushes:expr) ,
+        )*) => {
+            fn rows() -> Vec<Row> {
+                vec![$( Row {
+                    name: stringify!($name),
+                    input: Opcode::$name $({ $( $field: sentinel!($ty) ),* })?,
+                    jump: expect_jump!([$($( $ty $field )*)?]),
+                } ),*]
+            }
+        };
+    }
+    opcode_table!(sentinel_rows);
+
+    /// Every row: `name` is the identifier the derived `Debug` spells for the
+    /// variant (an independent statement of the spelling; `row.name` is the
+    /// same `stringify!` the generator uses and would prove nothing) and no
+    /// two rows share one; the jump accessors report exactly the rows that
+    /// declare a `PcOffset` operand, the mutable one addressing the operand
+    /// the immutable one then reads.
     #[test]
-    fn test_jump_offset_mut_modifies_jump() {
-        let mut op = Opcode::NextIterOrJump { jump_back: -5 };
-        if let Some(offset) = op.jump_offset_mut() {
-            *offset = -2;
+    fn every_row_names_itself_and_reports_its_jump() {
+        let mut names: HashSet<&'static str> = HashSet::new();
+        for row in rows() {
+            #[cfg(feature = "debug-derive")]
+            {
+                let debug = format!("{:?}", row.input);
+                let spelled: String = debug
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .collect();
+                assert_eq!(row.input.name(), spelled, "{}: name", row.name);
+            }
+            assert!(
+                names.insert(row.input.name()),
+                "{}: duplicate variant name",
+                row.name
+            );
+            assert_eq!(
+                row.input.jump_offset(),
+                row.jump,
+                "{}: jump_offset",
+                row.name
+            );
+            let mut relocated = row.input;
+            if let Some(back) = relocated.jump_offset_mut() {
+                *back = -9;
+            }
+            assert_eq!(
+                relocated.jump_offset(),
+                row.jump.map(|_| -9),
+                "{}: jump_offset_mut",
+                row.name
+            );
         }
-        assert_eq!(op.jump_offset(), Some(-2));
     }
 
     #[test]
