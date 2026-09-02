@@ -512,25 +512,40 @@ fn run_datamodel_with_errors(project: &DatamodelProject) -> Results {
     }
 }
 
+/// The `--ltm` loop listing: a header per model that has loops, then one line
+/// per loop. A stdlib template is left out. A model the project's module graph
+/// reaches a cycle from lists nothing, since `model_detected_loops` carries
+/// that gate; the cycle is the model error the diagnostics pass prints.
+fn ltm_loop_report(db: &SimlinDb, source_project: SourceProject) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (model_name, source_model) in source_project.models(db).iter() {
+        if model_name.starts_with("stdlib\u{205A}") {
+            continue;
+        }
+        let detected = model_detected_loops(db, *source_model, source_project);
+        if detected.loops.is_empty() {
+            continue;
+        }
+        lines.push(format!("# Loops in model '{model_name}':"));
+        for loop_item in &detected.loops {
+            lines.push(format!(
+                "{} := {}",
+                loop_item.id,
+                loop_item.variables.join(" -> ")
+            ));
+        }
+    }
+    lines
+}
+
 fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
     if enable_ltm {
         let mut db = SimlinDb::default();
         let sync_state = sync_from_datamodel_incremental(&mut db, project, None);
         let source_project = sync_state.project;
 
-        // Detect and report loops via the salsa path
-        let models = source_project.models(&db);
-        for (model_name, source_model) in models.iter() {
-            if model_name.starts_with("stdlib\u{205A}") {
-                continue;
-            }
-            let detected = model_detected_loops(&db, *source_model, source_project);
-            if !detected.loops.is_empty() {
-                eprintln!("# Loops in model '{}':", model_name);
-                for loop_item in &detected.loops {
-                    eprintln!("{} := {}", loop_item.id, loop_item.variables.join(" -> "));
-                }
-            }
+        for line in ltm_loop_report(&db, source_project) {
+            eprintln!("{line}");
         }
 
         // Enable LTM BEFORE harvesting diagnostics. `model_all_diagnostics` emits
@@ -959,6 +974,70 @@ mod diagnostic_reporting_tests {
             .iter()
             .filter_map(|e| e.message.clone())
             .collect()
+    }
+
+    /// A project whose module graph is a cycle (`a -> b -> a`) that `main`
+    /// reaches through an instance a per-element helper reads
+    /// (`x[d] = SMTH1(m.out + y[d], 1)`): the shape whose loop detection
+    /// recurses into the instance's sub-model layout.
+    fn module_cycle_project() -> DatamodelProject {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>cycle</name><vendor>simlin</vendor><product version="1.0">simlin</product></header>
+  <sim_specs method="Euler" time_units="Month"><start>0</start><stop>1</stop><dt>1</dt></sim_specs>
+  <dimensions><dim name="d"><elem name="north"/><elem name="south"/></dim></dimensions>
+  <model><variables>
+    <aux name="driver"><eqn>2</eqn></aux>
+    <aux name="y"><eqn>1</eqn><dimensions><dim name="d"/></dimensions></aux>
+    <module name="m" simlin:model_name="a" xmlns:simlin="https://simlin.com/XMILE/v1.0">
+      <connect to="m.inp" from=".driver"/>
+    </module>
+    <aux name="x"><eqn>SMTH1(m.out + y[d], 1)</eqn><dimensions><dim name="d"/></dimensions></aux>
+  </variables></model>
+  <model name="a"><variables>
+    <aux name="inp"><eqn>1</eqn></aux>
+    <aux name="out" access="output"><eqn>inp * 2</eqn></aux>
+    <module name="to_b" simlin:model_name="b" xmlns:simlin="https://simlin.com/XMILE/v1.0">
+      <connect to="to_b.binp" from="out"/>
+    </module>
+  </variables></model>
+  <model name="b"><variables>
+    <aux name="binp"><eqn>1</eqn></aux>
+    <module name="to_a" simlin:model_name="a" xmlns:simlin="https://simlin.com/XMILE/v1.0">
+      <connect to="to_a.inp" from="binp"/>
+    </module>
+  </variables></model>
+</xmile>"#;
+        open_xmile(&mut std::io::BufReader::new(xml.as_bytes())).expect("parse the cyclic project")
+    }
+
+    /// `simulate --ltm` on a module cycle, end to end: the loop listing has
+    /// nothing for a model that reaches the cycle (the gate is
+    /// `model_detected_loops`'), and the diagnostics pass reports the cycle as
+    /// the model error that makes the run die after printing it.
+    #[test]
+    fn ltm_loop_report_lists_nothing_for_a_module_cycle_that_the_diagnostics_report() {
+        let project = module_cycle_project();
+        let mut db = SimlinDb::default();
+        let sync_state = sync_from_datamodel_incremental(&mut db, &project, None);
+        assert_eq!(
+            ltm_loop_report(&db, sync_state.project),
+            Vec::<String>::new(),
+            "no model of a cyclic project lists loops"
+        );
+
+        let formatted = cli_diagnostics(&project, true);
+        let messages = messages(&formatted);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("error in model") && m.contains("circular module reference")),
+            "the cycle is reported as a model error: {messages:?}"
+        );
+        assert!(
+            formatted.has_model_errors,
+            "an error-severity diagnostic, so the simulate path dies after printing it"
+        );
     }
 
     /// The issue's reproduce case, at the level the CLI actually decides things:

@@ -473,6 +473,51 @@ fn a_module_cycle_yields_a_finite_scope() {
     }
 }
 
+/// The pe1 shape: `main` reaches a module cycle (`a <-> b`, when `cyclic`)
+/// THROUGH the instance `m` that two per-element helpers read (`x[d] =
+/// SMTH1(m.out + y[d], 1)`, `xs[d] = SMTH1(m.outarr[d] + y[d], 1)`); with
+/// `cyclic` false, the same `main` over an acyclic `a`.
+fn cycle_through_helper_project(cyclic: bool) -> datamodel::Project {
+    use crate::testutils::x_module_named;
+
+    let arrayed = |ident: &str, eqn: &str| x_apply_to_all(ident, "d", eqn);
+    let main = x_model(
+        "main",
+        vec![
+            x_aux("driver", "2", Some("people")),
+            arrayed("y", "1"),
+            x_module_named("m", "a", &[("driver", "m.inp")], None),
+            arrayed("x", "SMTH1(m.out + y[d], 1)"),
+            arrayed("xs", "SMTH1(m.outarr[d] + y[d], 1)"),
+        ],
+    );
+    let mut model_a = vec![
+        x_aux("inp", "1", Some("people")),
+        x_aux("out", "inp * 2", Some("people")),
+        arrayed("outarr", "inp * 3"),
+    ];
+    if cyclic {
+        model_a.push(x_module_named("to_b", "b", &[("out", "to_b.binp")], None));
+    }
+    let mut models = vec![main, x_model("a", model_a)];
+    if cyclic {
+        models.push(x_model(
+            "b",
+            vec![
+                x_aux("binp", "1", Some("people")),
+                x_aux("bout", "binp * 2", Some("people")),
+                x_module_named("to_a", "a", &[("binp", "to_a.inp")], None),
+            ],
+        ));
+    }
+    let mut project = x_project(sim_specs_with_units("month"), &models);
+    project.dimensions.push(datamodel::Dimension::named(
+        "d".to_string(),
+        vec!["north".to_string(), "south".to_string()],
+    ));
+    project
+}
+
 /// The second arm of the cycle gate: the cycle is reached from `main` THROUGH
 /// a module instance that a per-element helper reads (`x[d] = SMTH1(m.out +
 /// y[d], 1)`, `xs[d] = SMTH1(m.outarr[d] + y[d], 1)`, `m` an instance of `a`,
@@ -486,53 +531,9 @@ fn a_module_cycle_yields_a_finite_scope() {
 fn a_module_cycle_reached_through_a_per_element_helper_still_unit_checks() {
     use crate::common::ErrorCode;
     use crate::db::lowered_implicit_variable;
-    use crate::testutils::x_module_named;
     use std::sync::Arc;
 
-    let arrayed = |ident: &str, eqn: &str| x_apply_to_all(ident, "d", eqn);
-    let main = || {
-        x_model(
-            "main",
-            vec![
-                x_aux("driver", "2", Some("people")),
-                arrayed("y", "1"),
-                x_module_named("m", "a", &[("driver", "m.inp")], None),
-                arrayed("x", "SMTH1(m.out + y[d], 1)"),
-                arrayed("xs", "SMTH1(m.outarr[d] + y[d], 1)"),
-            ],
-        )
-    };
-    let model_a = |cyclic: bool| {
-        let mut variables = vec![
-            x_aux("inp", "1", Some("people")),
-            x_aux("out", "inp * 2", Some("people")),
-            arrayed("outarr", "inp * 3"),
-        ];
-        if cyclic {
-            variables.push(x_module_named("to_b", "b", &[("out", "to_b.binp")], None));
-        }
-        x_model("a", variables)
-    };
-    let model_b = x_model(
-        "b",
-        vec![
-            x_aux("binp", "1", Some("people")),
-            x_aux("bout", "binp * 2", Some("people")),
-            x_module_named("to_a", "a", &[("binp", "to_a.inp")], None),
-        ],
-    );
-    let project = |cyclic: bool| {
-        let mut models = vec![main(), model_a(cyclic)];
-        if cyclic {
-            models.push(model_b.clone());
-        }
-        let mut project = x_project(sim_specs_with_units("month"), &models);
-        project.dimensions.push(datamodel::Dimension::named(
-            "d".to_string(),
-            vec!["north".to_string(), "south".to_string()],
-        ));
-        project
-    };
+    let project = cycle_through_helper_project;
 
     // Every element-scoped helper of `main`, with whether its map entry IS the
     // memo's handle (unpinned) rather than a projection of it (pinned).
@@ -604,6 +605,36 @@ fn a_module_cycle_reached_through_a_per_element_helper_still_unit_checks() {
         !collect_all_diagnostics(&db, acyclic.project)
             .iter()
             .any(is_cycle)
+    );
+}
+
+/// Loop detection is an analysis entry point, so it carries the module-cycle
+/// gate itself: a model the project's module graph reaches a cycle from has
+/// no detected loops -- the cycle is the model error the diagnostics pass
+/// reports, and enumerating its loops recurses into the instance's layout,
+/// salsa's dependency-graph panic -- while the acyclic sibling of the same
+/// `main` enumerates as usual.
+#[test]
+fn a_module_cycle_reached_through_a_per_element_helper_has_no_detected_loops() {
+    use crate::db::model_detected_loops;
+
+    let db = SimlinDb::default();
+    let acyclic = sync_from_datamodel(&db, &cycle_through_helper_project(false));
+    let detected = model_detected_loops(&db, acyclic.models["main"].source, acyclic.project);
+    // `main` has no feedback of its own, so both arms yield the empty result;
+    // what the gate decides is that the cyclic arm RETURNS it instead of
+    // panicking in `compute_layout`'s dependency-graph cycle.
+    assert!(
+        detected.loops.is_empty() && detected.partitions.is_empty(),
+        "{detected:?}"
+    );
+
+    let db = SimlinDb::default();
+    let cyclic = sync_from_datamodel(&db, &cycle_through_helper_project(true));
+    let detected = model_detected_loops(&db, cyclic.models["main"].source, cyclic.project);
+    assert!(
+        detected.loops.is_empty() && detected.partitions.is_empty(),
+        "a model reaching a module cycle has no detected loops: {detected:?}"
     );
 }
 

@@ -2531,12 +2531,31 @@ fn resolve_loop_partitions(
     (per_loop, meta)
 }
 
+/// The loops of `model`: the exhaustive enumeration the scored surface shares,
+/// or the pinned loops alone in discovery mode.
+///
+/// An analysis entry point, so it carries the module-cycle gate itself, the
+/// rule `analyze_model` applies: a model the project's module graph reaches a
+/// cycle from has no detected loops -- the empty result -- because the cycle
+/// is the model error the diagnostics pass reports for it, and enumerating its
+/// loops recurses into an instance's sub-model layout, which under a module
+/// cycle is salsa's dependency-graph panic (GH #806).
 pub fn model_detected_loops(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
 ) -> DetectedLoopsResult {
     use crate::common::{Canonical, Ident};
+
+    if crate::db::project_module_graph(db, project)
+        .cycle_error_from(model.name(db))
+        .is_some()
+    {
+        return DetectedLoopsResult {
+            loops: vec![],
+            partitions: vec![],
+        };
+    }
 
     let graph = causal_graph_with_modules(db, model, project);
     // The ELEMENT-level cycle partitions -- the same granularity the scored
