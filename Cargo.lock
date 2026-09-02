@@ -3284,6 +3284,7 @@ dependencies = [
  "serde_json",
  "simlin-engine",
  "wasm-interpreter",
+ "wasmalloc",
 ]
 
 [[package]]
@@ -4200,6 +4201,12 @@ dependencies = [
  "libm",
  "log_wrapper",
 ]
+
+[[package]]
+name = "wasmalloc"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53513986006df76a8e2894c054703b480dcdd174ef09c733eba086af7d5d9d96"
 
 [[package]]
 name = "winapi-util"
