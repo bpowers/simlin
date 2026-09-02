@@ -672,6 +672,28 @@ current state.
 **Done when:** `rg "BTreeSet<String>" src/simlin-engine/src/db` finds no
 dependency set; `model_stage0`/`model_stage1` do not exist; docs describe the
 pipeline as it is; final ledger row; this document's ledger complete.
+
+**Phase 8.1: the `Expr2` lowering scope reads dependency shapes.**
+`ast::LoweringScope { dimensions, shapes, model_name }` is what one equation's
+`Expr0 -> Expr2` lowering knows: the project's dimensions and, for every name
+the equation can reference, the `DepShape` the fragment compiler resolves it
+through -- the same `FragmentInput::deps` map, which each constructor builds
+first and then lowers under, so the `Expr2` tier and the compiler read one
+answer for a dependency's dimensions and a parse-synthesized helper lowers
+under the shapes its parent's equation lowers under. A module output `m·x` is
+never a key and lowers without bounds: `compiler::Context` resolves it through
+the instance's `DepKind::Module` shape, a cross-module read has one resolver,
+and the artifact stays byte-identical. The whole-model `model_stage1` lowers
+each variable under the model's own variables' shapes
+(`ModelStage0::lowering_shapes`), so it reads no other model's stage.
+`model::lower_variable`'s module arm resolves an instance's wiring through
+`db::build_module_inputs`, the one owner of that wiring; a module input's
+`src` is not validated at lowering -- the user-facing `BadModuleInputSrc` is
+`model_module_wiring_diagnostics`', read off the salsa inputs -- and the
+unit-inference scope (`model_scope_models`) follows `model_name` edges only.
+An empty shapes map is a bounds-free lowering, which dependency
+classification, the LTM lowering and the LTM describers' reconstruction use
+because none of them reads an `ArrayBounds`.
 <!-- END_PHASE_8 -->
 
 ## Additional Considerations
@@ -1542,6 +1564,70 @@ read. That one costs nothing -- the equation is ill-typed with or without the
 loud -- and it closes the same way the other three do, by giving the decision
 the dimensions, which is what moving it to lowering does.
 
+**Phase 8.1 semantic divergences.** One mechanism, pinned by one
+enumeration: a parse-synthesized helper lowers under its parent's dependency
+shapes (`db::fragment_compile::implicit_fragment_input`), so it reads, and is
+refused, exactly as the plain spelling of its body is -- the invariant GH
+#1035 established for hoisted arguments, holding at the `Expr2` tier as well.
+The base lowered every helper bounds-free, so the compiler's bare-reference
+rewrite (`lower_pass0`) never ran on a helper's arrayed references, and
+wherever that rewrite decides the answer the helper and the plain spelling
+disagreed. The arms:
+
+1. Values, `db::lowering_scope_tests::a_helper_reads_what_the_plain_spelling_reads`:
+   a reducer over a bare arrayed name in an apply-to-all body reads the
+   element the plain spelling reads, for every reducer in {`SUM`, `MAX`,
+   `MEAN`, `SIZE`} x helper kind {`PREVIOUS` capture, `INIT` capture,
+   per-element hoisted argument, capture inside a module-bearing body} x
+   target rank {1-D over a 1-D source, 2-D over a 2-D source, 1-D over a 2-D
+   source, a row} -- 48 rows, each pinned against its plain twin, the twins
+   pinned apart from the whole-array spelling (`R(x[*])`, `R(x[*, *])`).
+   `agg[region] = PREVIOUS(SUM(pop))` is the lagged `pop[region]`,
+   `SMTH1(SUM(pop2), 1)` under `[region, product]` smooths the cell,
+   `PREVIOUS(SIZE(pop))` is 1; the base's helpers read the whole array
+   (`SUM(pop[*])`, `SIZE` = 2, the 2-D total 1200) where the plain spelling
+   read the element. What the plain spelling reads is the engine's
+   apply-to-all rule, which rests on XMILE 1.0 section 3.7.1 -- "when all
+   indices are dimension names, they can be omitted": `revenue = sales` is
+   identical to `revenue[Location, Product] = sales[Location, Product]`, and
+   each element's equation has the dimension name bound to its index --
+   applied to a bare name in a reducer argument, a position the spec does not
+   address separately; what Stella computes for `SUM(pop)` in an apply-to-all
+   body is unverified. The divergence rests on the helper == plain-spelling
+   invariant, not on the spec.
+2. Refusals, `db::lowering_scope_tests::a_helper_is_refused_where_the_plain_spelling_is`:
+   a helper is refused exactly where the plain spelling is, with the refusal
+   where the Phase 7.5 rule puts it -- an `Expr2` refusal on the parent at
+   the argument's span, a codegen refusal on the helper.
+   `SMTH1(sales[Cities] + prices[Products], 1)` is the plain spelling's
+   `MismatchedDimensions` on the parent for a scalar parent (base: the helper
+   reached codegen and was refused `NotSimulatable` on the helper) and for an
+   apply-to-all parent over either axis, hoisted or captured (base: RAN,
+   pairing the unrelated axis by ordinal, `sm_a2a[Boston] = 11`, `[Seattle] =
+   22`); and `aggx[region] = PREVIOUS(SUM(pop * scale))` is refused by codegen
+   on the helper, as `plainx[region] = SUM(pop * scale)` is on both trees
+   (base: ran, 600, the whole-array sum times the scale).
+
+No corpus model has any of these shapes: the sweeps and the diagnostics corpus
+are identical. Three things did not move, and each is pinned so that stays
+true: helpers with well-formed arrayed operands lower to the same numbers with
+or without bounds (`a_hoisted_argument_pairs_axes_as_the_plain_equation_does`:
+transposed operands pair by axis name either way); a module-output read
+carries no bounds on the compile path and the unit path alike
+(`the_expr2_tier_reads_dependency_shapes`,
+`stages_tests::stage1_lowers_a_module_output_read_without_bounds`); and a
+lowering refusal outranks an unknown name on the same variable
+(`a_lowering_refusal_outranks_an_unknown_dependency`). On the unit path a
+variable whose only `MismatchedDimensions` arrives through a module-output
+read keeps its AST and is unit-checked -- `mism[d] = m.arr + prices` reports
+both the compiler's refusal and the `unit_mismatch` warning
+(`a_module_output_read_the_compiler_refuses_is_still_unit_checked`); the
+`test/` corpus has no such variable and reports the same diagnostic rows with
+the same per-code distribution before and after (ledger row). A module
+target's edit re-executes its instantiators' unit checks and not their
+lowered stages
+(`stages_tests::a_module_targets_edit_invalidates_the_unit_check_and_not_the_instantiators_stage`).
+
 **Phase 1 semantic divergences.** Making the signature table the one statement
 of per-builtin facts changed how four edge shapes compile. None occurs in the
 corpus (C-LEARN artifacts are identical); each is pinned:
@@ -2248,3 +2334,4 @@ hash is not available to it.
 | V-opc | `engine: derive opcode operand handling from one table` | 8.6666 G (median of 5; range 8.6581-8.6701), -0.27% against `c8770abb` re-measured in the same session (8.6902 G, median of 5, range 8.6871-8.6934; interleaved pairs -0.24 / -0.27 / -0.35 / -0.37 / -0.26%), measured on the pre-review candidate (the fix round changed only which operands the accessors bind); recorded, not investigated (under the one-percent bar; nothing output-bearing changed) | 5215 | 30682 / 1477 / 24873 | 1750 / 162 / 28 / 641 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`, against `c972c9e9` (57032 opcodes plain, 938064 under LTM -- Phase 7.4's artifact): both `bytecode_profile` blocks are byte-identical; the run channel is -0.03% (inside the floor) and the sweep over all 509 models under `test/` has no mover (`arrays_varname` flips between the same two outputs on both binaries, GH #859), both measured on the pre-review candidate against `c8770abb`. `SymbolicOpcode` and `Opcode` are each one table (`symbolic_opcode_table!`, `opcode_table!`) from which `resolve_opcode`, `renumber_opcode`, `gf_run`, `var_ref`, `jump_offset`, `stack_effect` and `name` derive by operand kind, the accessors binding only the operand their kind reads (`bind_kind!`), with the every-row tests and the merge proptest's blanking oracle derived from the same rows; production -473 lines by file length (bytecode.rs -282, symbolic.rs -191), two `unused_variables` allows in production, no semantic divergence (Additional Considerations, "Opcode operand tables"). |
 | 7.5ab | `engine: static element snapshots; capture phase demand` | 8.2010 G (median of 5; range 8.1969-8.2084), **-1.55%** against `015c98da` with the results-printing commit applied, re-measured in the same session (8.3302 G, median of 5, range 8.3266-8.3335; interleaved pairs -1.51 / -1.42 / -1.60 / -1.63 / -1.53%) | 5189 | 28505 / 1477 / 24795 | 1533 / 162 / 28 / 627 | Plain: -26 slots (the bare and qualified element captures 7.5a no longer mints, `init_c_in_deep_ocean_per_meter` and `target_year`), -2177 flow opcodes (those captures' fragments plus the flow fragments of the 207 INIT-only captures 7.5b takes out of flows), -78 initial opcodes and 1205 -> 1179 initial programs (one per removed capture), -217 literals, -14 views, 371 names and 7 modules unchanged; 4825 results keys where the base had 5058 (26 gone, 207 hidden, 0 renamed -- a removed capture renumbers the later helpers of the same equation, `$⁚v⁚1⁚..` -> `$⁚v⁚0⁚..`, which renames an exposed key only where a capture precedes another helper of the same equation, and no C-LEARN equation has that shape). Under `CLEARN_LTM=1`: 30123 -> 29398 slots and 7163 -> 6193 LTM variables (`ltm_var_dump`: 987 removed, 17 added -- the 26 element captures' 52 scalar scores become 17 direct scores arrayed over their targets, 330 slots; the 207 INIT-only captures' 921 scalar scores, 207 capture->parent and 714 source->capture, and the 14 two-slot array-freeze helpers of the scores into `$⁚last_set_target_year⁚0⁚arg0` do not exist because the edges do not, and 28 `PREVIOUS` helpers of the removed scores go with them; 36,138 slots free of the ceiling), 855713 / 1477 / 24795 opcodes (-52141 flow, -3938 initial, 1976 -> 1179 initial programs: the LTM PREVIOUS helpers' initial fragments), 14503 literals, 2166 views; the all-slot digest 20892 -> 20221 LTM slots and 3141 -> 3106 ever non-zero (the 21 removed scores the base held at 1 and the 14 freeze slots), `clearn_with_ltm_simulates_model_vars_identically` green. Run channel (`CLEARN_PROFILE=run CLEARN_RUN_ITERS=20`) 29.5656 G against 30.5294 G, -3.16% (pairs -3.17 / -3.15 / -3.16 / -3.18 / -3.14%); the plain artifact is byte-identical to the pre-review candidate's, which measured -1.19% against `c972c9e9`, so about two points of this are build layout. Sweep of 509 models, plain and `--ltm`: 394 / 393 identical, 110 refused identically, 0 one-sided; the movers are the GH #859 importer flippers (`subscript_transposition` on both channels, `arrays_varname` under `--ltm`; resampled 6x per binary, the same two digests on both) and, on both channels, `getdata`, `helper_recurrence`, `macro_init_recurrence` and C-LEARN, whose only difference is the hidden INIT-only capture columns and, under `--ltm`, the removed scores: every common column byte-identical (C-LEARN: 4825 plain, 14825 under `--ltm`; 1248 base-only keys = 26 + 207 + 987 + 28, 17 tree-only). Six divergences pinned ("Phase 7.5 semantic divergences"); three goldens regenerated; engine suite, libsimlin, CLI, clippy and `cargo fmt --all -- --check` green |
 | 7.5cd | `engine: element-scoped helpers; structural captures` | 7.5449 G (median of 3; range 7.5440-7.5478), **-8.05%** against `11de2948` re-measured in the same session (8.2050 G, median of 3, range 8.1978-8.2051; interleaved pairs -7.98 / -8.05 / -8.01%) | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Plain: flow and stock streams byte-identical, -126 initial opcodes and 1179 -> 1053 initial programs, -165 literals, 371 names and 7 modules unchanged, all 4825 results keys and values byte-identical (24 apply-to-all `INIT` parents' 150 per-element captures are 24 structural captures over the same 150 slots); under `CLEARN_LTM=1` 29398 slots, 855713 / 1477 / 24669 opcodes (-126 initial), 14503 -> 14078 literals, 2166 views, 6193 LTM variables, 14842 results keys of which 14212 are byte-identical and 630 per-element helper keys are renamed (`⁚elem` -> `[elem]`); LTM compile channel 50.8174 G against 54.3852 G, **-6.56%** (pairs -6.58 / -6.58 / -6.48%), run channel 29.0291 G against 29.5660 G, -1.82% (pairs -1.82 / -1.81 / -1.82%). The saving is deleted work: one structural walk of a snapshot-only apply-to-all body instead of N per-element walks, parse-stage variables and fragments, no parse-time dimension substitution of hoisted arguments, and no duplicated input hoist for `DELAYN`/`SMTHN`. Sweep of 509 models twice per binary: plain 398 identical, 110 refused identically, 0 moved; `--ltm` 386 identical, 110 refused identically, 10 movers that are all key renames (0 differing common columns each, the same key counts, C-LEARN included), the GH #859 flippers on the same two digests on both binaries in both modes (6x per binary), seven divergences pinned (7-13 under "Phase 7.5 semantic divergences"), one golden regenerated (`ltm_value_golden/value_gate.txt`, two phantom loop slots), engine suite (lib 5714, integration 789 plus the C-LEARN release gates), clippy, `cargo fmt --all -- --check` and the default-feature check green, with `mdl_equivalence::test_mdl_equivalence` and `test_clearn_equivalence` failing identically on the base tree (xmutil view element counts) |
+| 8.1 | `engine: lower Expr2 under the fragment's dependency shapes` | 7.2241 G (median of 3; range 7.2234-7.2271), **-4.32%** against `4f3bf7db` re-measured in the same session (7.5501 G, median of 3, range 7.5461-7.5525; interleaved pairs -4.23 / -4.33 / -4.35%) | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Artifacts byte-identical on C-LEARN, plain (every count, 1053 initial programs, 371 names, 7 modules, the full opcode histogram) and under `CLEARN_LTM=1` (29398 slots, 855713 / 1477 / 24669 opcodes, 14078 literals, 2166 views; LTM compile channel 82.8363 G against 83.3488 G, -0.62%, pairs -0.52 / -0.60 / -0.67%, `CLEARN_COMPILE_ITERS=5`). The saving is the deleted per-variable mini-stage: every fragment cloned its dependencies' parse memos into a `ModelStage0` literal to answer `get_dimensions`, which the shape map it already built answers. Sweep of 509 models plain and `--ltm`: 399 / 398 identical, 110 refused identically, 0 one-sided, the one `--ltm` mover the GH #859 flipper `arrays_cname` (the same two digests on both binaries in both modes, 6x each); the `test/` diagnostics corpus identical before and after (plain 471 rows over 366 `(model, variable, code)` keys, `--ltm` 856 over 391, the same per-code distribution, 0 row differences); one mechanism-level divergence -- a helper lowers under its parent's shapes -- pinned by a 48-row value table (helper kind x reducer x rank) and a 5-row refusal table ("Phase 8.1 semantic divergences"); engine suite (lib 5693, integration 783), libsimlin, CLI, mcp-core, clippy, `cargo fmt --all -- --check` and the default-feature check green, every golden unregenerated |

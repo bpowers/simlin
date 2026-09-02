@@ -4,7 +4,8 @@
 
 use super::*;
 use crate::capture::CaptureKind;
-use std::collections::{BTreeSet, HashMap};
+use crate::common::IdentMap;
+use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImplicitVarDeps {
@@ -79,10 +80,12 @@ pub(super) fn extract_implicit_var_deps(
 
             let parsed_implicit = implicit_var.parsed_variable(dim_context);
 
-            let models = HashMap::new();
-            let scope = crate::model::ScopeStage0 {
-                models: &models,
+            // Lowered bounds-free, as the parent is for its own classification
+            // (`variable_direct_dependencies_impl`).
+            let shapes = IdentMap::default();
+            let scope = crate::ast::LoweringScope {
                 dimensions: dim_context,
+                shapes: &shapes,
                 model_name: "",
             };
             let lowered = crate::model::lower_variable(&scope, &parsed_implicit);

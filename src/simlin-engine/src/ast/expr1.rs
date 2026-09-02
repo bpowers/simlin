@@ -7,8 +7,8 @@ use crate::ast::literal::Literal;
 pub use crate::builtins::Loc;
 use crate::builtins::{BuiltinFn, BuiltinSig, UntypedBuiltinFn};
 use crate::common::{Canonical, EquationResult, Ident};
+use crate::dimensions::DimensionsContext;
 use crate::eqn_err;
-use crate::model::ScopeStage0;
 
 /// IndexExpr1 represents a parsed equation, after calls to
 /// builtin functions have been checked/resolved.
@@ -38,17 +38,17 @@ impl IndexExpr1 {
         Ok(expr)
     }
 
-    pub(crate) fn constify_dimensions(self, scope: &ScopeStage0) -> Self {
+    pub(crate) fn constify_dimensions(self, dimensions: &DimensionsContext) -> Self {
         match self {
             IndexExpr1::Wildcard(loc) => IndexExpr1::Wildcard(loc),
             IndexExpr1::StarRange(id, loc) => IndexExpr1::StarRange(id, loc),
             IndexExpr1::Range(l, r, loc) => IndexExpr1::Range(
-                l.constify_dimensions(scope),
-                r.constify_dimensions(scope),
+                l.constify_dimensions(dimensions),
+                r.constify_dimensions(dimensions),
                 loc,
             ),
             IndexExpr1::DimPosition(n, loc) => IndexExpr1::DimPosition(n, loc),
-            IndexExpr1::Expr(e) => IndexExpr1::Expr(e.constify_dimensions(scope)),
+            IndexExpr1::Expr(e) => IndexExpr1::Expr(e.constify_dimensions(dimensions)),
         }
     }
 }
@@ -281,37 +281,39 @@ impl Expr1 {
     // If you use a dimension name, like the "Boston" element from a "Cities" dimension,
     // we will replace that variable-name-looking string with the constant offset of that
     // dimension element.
-    pub(crate) fn constify_dimensions(self, scope: &ScopeStage0) -> Self {
+    pub(crate) fn constify_dimensions(self, dimensions: &DimensionsContext) -> Self {
         match self {
             Expr1::Const(s, n, loc) => Expr1::Const(s, n, loc),
             Expr1::Var(id, loc) => {
-                if let Some(off) = scope.dimensions.lookup(id.as_str()) {
+                if let Some(off) = dimensions.lookup(id.as_str()) {
                     Expr1::Const(id.to_string(), Literal::new(off as f64), loc)
                 } else {
                     Expr1::Var(id, loc)
                 }
             }
             Expr1::App(func, loc) => {
-                Expr1::App(func.map(|arg| arg.constify_dimensions(scope)), loc)
+                Expr1::App(func.map(|arg| arg.constify_dimensions(dimensions)), loc)
             }
             Expr1::Subscript(id, args, loc) => Expr1::Subscript(
                 id,
                 args.into_iter()
-                    .map(|arg| arg.constify_dimensions(scope))
+                    .map(|arg| arg.constify_dimensions(dimensions))
                     .collect(),
                 loc,
             ),
-            Expr1::Op1(op, l, loc) => Expr1::Op1(op, Box::new(l.constify_dimensions(scope)), loc),
+            Expr1::Op1(op, l, loc) => {
+                Expr1::Op1(op, Box::new(l.constify_dimensions(dimensions)), loc)
+            }
             Expr1::Op2(op, l, r, loc) => Expr1::Op2(
                 op,
-                Box::new(l.constify_dimensions(scope)),
-                Box::new(r.constify_dimensions(scope)),
+                Box::new(l.constify_dimensions(dimensions)),
+                Box::new(r.constify_dimensions(dimensions)),
                 loc,
             ),
             Expr1::If(cond, l, r, loc) => Expr1::If(
-                Box::new(cond.constify_dimensions(scope)),
-                Box::new(l.constify_dimensions(scope)),
-                Box::new(r.constify_dimensions(scope)),
+                Box::new(cond.constify_dimensions(dimensions)),
+                Box::new(l.constify_dimensions(dimensions)),
+                Box::new(r.constify_dimensions(dimensions)),
                 loc,
             ),
         }

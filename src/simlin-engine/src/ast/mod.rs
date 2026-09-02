@@ -6,10 +6,11 @@ pub use crate::builtins::Loc;
 use std::collections::HashMap;
 
 use crate::builtins::{BuiltinContents, UntypedBuiltinFn, walk_builtin_expr};
-use crate::common::{CanonicalElementName, EquationResult, canonicalize};
-use crate::dimensions::Dimension;
-use crate::model::{ModelStage0, ScopeStage0};
-use crate::variable::{VarKind, Variable};
+use crate::common::{
+    Canonical, CanonicalElementName, EquationResult, Ident, IdentMap, canonicalize,
+};
+use crate::compiler::fragment::DepShape;
+use crate::dimensions::{Dimension, DimensionsContext};
 use unicode_xid::UnicodeXID;
 
 mod array_view;
@@ -110,10 +111,40 @@ impl Ast<Expr2> {
     }
 }
 
-/// Context for AST lowering that provides dimension information from ScopeStage0
+/// What one equation's `Expr0 -> Expr2` lowering knows about the world: the
+/// project's dimensions, the shape of every name the equation can reference,
+/// and the model the equation belongs to.
+///
+/// `shapes` is the map the fragment compiler lowers under
+/// (`compiler::fragment::FragmentInput::deps`), keyed by the bare name a
+/// reference resolves through, so the `Expr2` tier and the compiler read one
+/// answer for a dependency's dimensions. A module output (`m·x`) is never a
+/// key: the `Expr2` tier does not resolve module-output dimensions, and
+/// `get_dimensions` answers `None` for one. Those are resolved by
+/// `compiler::Context` through the instance's `DepKind::Module` shape, where
+/// the read is lowered to a slot inside the instance; nothing in between reads
+/// the bounds, so a cross-module read has one resolver.
+///
+/// An empty `shapes` map is a bounds-free lowering: every reference carries
+/// `None`. The dependency classification (`db::variable_direct_dependencies`),
+/// the LTM lowering (`db::ltm::compile::lower_ltm_variable`) and the LTM
+/// describers' reconstruction (`db::analysis::reconstruct_model_variables`)
+/// lower that way, since none of them reads an `ArrayBounds`.
+///
+/// `model_name` is read by the module arm of `model::lower_variable` alone: a
+/// module's input wiring strips a parent-scope `·` prefix in `main` only
+/// (`db::build_module_inputs`).
+pub(crate) struct LoweringScope<'a> {
+    pub dimensions: &'a DimensionsContext,
+    pub shapes: &'a IdentMap<Ident<Canonical>, DepShape>,
+    pub model_name: &'a str,
+}
+
+/// The `Expr2Context` one equation lowers under: its [`LoweringScope`] plus
+/// the per-equation state (temp ids, the array-context and dimension-union
+/// gates).
 struct ArrayContext<'a> {
-    scope: &'a ScopeStage0<'a>,
-    model_name: &'a str,
+    scope: &'a LoweringScope<'a>,
     next_temp_id: u32,
     is_array: bool,
     /// When true, allows union of named dimensions (cross-product).
@@ -122,67 +153,22 @@ struct ArrayContext<'a> {
 }
 
 impl<'a> ArrayContext<'a> {
-    fn new(scope: &'a ScopeStage0<'a>, model_name: &'a str) -> Self {
+    fn new(scope: &'a LoweringScope<'a>, is_array: bool) -> Self {
         Self {
             scope,
-            model_name,
             next_temp_id: 0,
-            is_array: false,
+            is_array,
             allow_dimension_union: false,
-        }
-    }
-
-    fn with_array_context(scope: &'a ScopeStage0<'a>, model_name: &'a str) -> Self {
-        Self {
-            scope,
-            model_name,
-            next_temp_id: 0,
-            is_array: true,
-            allow_dimension_union: false,
-        }
-    }
-
-    fn get_model(&self, model_name: &str) -> Option<&'a ModelStage0> {
-        self.scope.models.get(&*canonicalize(model_name)).copied()
-    }
-
-    fn get_variable(
-        &self,
-        model_name: &str,
-        ident: &str,
-    ) -> Option<&'a Variable<crate::datamodel::ModuleReference, Expr0>> {
-        // Handle dotted notation for submodel variables
-        if let Some(pos) = ident.find('·') {
-            let submodel_module_name = &ident[..pos];
-            let submodel_var = &ident[pos + '·'.len_utf8()..];
-
-            // Get the module variable to find the submodel name
-            let module_var = self
-                .get_model(model_name)?
-                .variables
-                .get(&*canonicalize(submodel_module_name))?;
-            if let VarKind::Module {
-                model_name: submodel_name,
-                ..
-            } = &module_var.kind
-            {
-                return self.get_variable(submodel_name.as_str(), submodel_var);
-            }
-            None
-        } else {
-            self.get_model(model_name)?
-                .variables
-                .get(&*canonicalize(ident))
         }
     }
 }
 
-impl<'a> Expr2Context for ArrayContext<'a> {
+impl Expr2Context for ArrayContext<'_> {
     fn get_dimensions(&self, ident: &str) -> Option<&[crate::dimensions::Dimension]> {
-        // During AST lowering, we may encounter variables that don't exist yet
-        // (e.g., in tests or when processing incomplete models)
-        let var = self.get_variable(self.model_name, ident)?;
-        var.get_dimensions()
+        // A module output is not a key (see `LoweringScope`), and a name the
+        // scope does not hold lowers without bounds: whether it exists is the
+        // dependency gate's question, reported there.
+        self.scope.shapes.get(ident)?.dimensions()
     }
 
     fn allocate_temp_id(&mut self) -> u32 {
@@ -239,36 +225,32 @@ impl<'a> Expr2Context for ArrayContext<'a> {
 /// dimension name is a reference to be resolved rather than a name that
 /// cannot appear in a scalar equation.
 pub(crate) fn lower_ast(
-    scope: &ScopeStage0,
+    scope: &LoweringScope,
     ast: &Ast<Expr0>,
     element_scoped: bool,
 ) -> EquationResult<Ast<Expr2>> {
     match ast {
         Ast::Scalar(expr) => {
-            let mut ctx = if element_scoped {
-                ArrayContext::with_array_context(scope, scope.model_name)
-            } else {
-                ArrayContext::new(scope, scope.model_name)
-            };
+            let mut ctx = ArrayContext::new(scope, element_scoped);
             Expr1::from(expr)
-                .map(|expr| expr.constify_dimensions(scope))
+                .map(|expr| expr.constify_dimensions(scope.dimensions))
                 .and_then(|expr| Expr2::from(expr, &mut ctx))
                 .map(Ast::Scalar)
         }
         Ast::ApplyToAll(dims, expr) => {
-            let mut ctx = ArrayContext::with_array_context(scope, scope.model_name);
+            let mut ctx = ArrayContext::new(scope, true);
             Expr1::from(expr)
-                .map(|expr| expr.constify_dimensions(scope))
+                .map(|expr| expr.constify_dimensions(scope.dimensions))
                 .and_then(|expr| Expr2::from(expr, &mut ctx))
                 .map(|expr| Ast::ApplyToAll(dims.clone(), expr))
         }
         Ast::Arrayed(dims, elements, default_expr, apply_default_to_missing) => {
-            let mut ctx = ArrayContext::with_array_context(scope, scope.model_name);
+            let mut ctx = ArrayContext::new(scope, true);
             let elements: EquationResult<HashMap<CanonicalElementName, Expr2>> = elements
                 .iter()
                 .map(|(id, expr)| {
                     match Expr1::from(expr)
-                        .map(|expr| expr.constify_dimensions(scope))
+                        .map(|expr| expr.constify_dimensions(scope.dimensions))
                         .and_then(|expr| Expr2::from(expr, &mut ctx))
                     {
                         Ok(expr) => Ok((id.clone(), expr)),
@@ -279,7 +261,7 @@ pub(crate) fn lower_ast(
             let default_expr = match default_expr {
                 Some(expr) => Some(
                     Expr1::from(expr)
-                        .map(|expr| expr.constify_dimensions(scope))
+                        .map(|expr| expr.constify_dimensions(scope.dimensions))
                         .and_then(|expr| Expr2::from(expr, &mut ctx))?,
                 ),
                 None => None,
@@ -1861,184 +1843,5 @@ mod print_eqn_proptest {
                 );
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod ast_tests {
-    use super::*;
-    use crate::common::{Ident, canonicalize};
-    use crate::datamodel;
-    use crate::model::ModelStage0;
-    use std::collections::HashMap;
-
-    #[test]
-    fn test_simple_expr2_context() {
-        // Create a simple model with an array variable
-        let dim = datamodel::Dimension::named(
-            "region".to_string(),
-            vec!["north".to_string(), "south".to_string()],
-        );
-        let array_var = datamodel::Variable::Aux(datamodel::Aux {
-            ident: canonicalize("population").into_owned(),
-            equation: datamodel::Equation::ApplyToAll(
-                vec!["region".to_string()],
-                "100".to_string(),
-            ),
-            documentation: "".to_string(),
-            units: None,
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: datamodel::Compat::default(),
-        });
-
-        let model_datamodel = datamodel::Model {
-            name: "test_model".to_string(),
-            sim_specs: None,
-            variables: vec![array_var],
-            views: vec![],
-            loop_metadata: vec![],
-            groups: vec![],
-            macro_spec: None,
-        };
-
-        let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-        let model_s0 = ModelStage0::new(
-            &model_datamodel,
-            std::slice::from_ref(&dim),
-            &units_ctx,
-            false,
-        );
-
-        let mut models = HashMap::new();
-        models.insert(Ident::new("test_model"), &model_s0);
-
-        let dims_ctx = crate::dimensions::DimensionsContext::from(&[dim]);
-        let scope = ScopeStage0 {
-            models: &models,
-            dimensions: &dims_ctx,
-            model_name: "test_model",
-        };
-
-        let mut ctx = ArrayContext::new(&scope, "test_model");
-
-        // Test that we can get dimensions for the array variable
-        let dims = ctx.get_dimensions("population");
-        assert!(dims.is_some());
-        let dims = dims.unwrap();
-        assert_eq!(dims.len(), 1);
-        assert_eq!(dims[0].name(), "region");
-        assert_eq!(dims[0].len(), 2);
-
-        // Test that scalar variables return None
-        assert!(ctx.get_dimensions("nonexistent").is_none());
-
-        // Test temp ID allocation
-        assert_eq!(ctx.allocate_temp_id(), 0);
-        assert_eq!(ctx.allocate_temp_id(), 1);
-        assert_eq!(ctx.allocate_temp_id(), 2);
-    }
-
-    #[test]
-    fn test_expr2_dimension_mismatch_errors() {
-        use crate::ast::BinaryOp;
-        use crate::ast::expr1::Expr1;
-        use crate::common::{ErrorCode, Ident, canonicalize};
-
-        // Create a model with array variables of different dimensions
-        let dim1 = datamodel::Dimension::named(
-            "region".to_string(),
-            vec!["north".to_string(), "south".to_string()],
-        );
-        let dim2 = datamodel::Dimension::named(
-            "product".to_string(),
-            vec!["A".to_string(), "B".to_string(), "C".to_string()],
-        );
-
-        let array_var1 = datamodel::Variable::Aux(datamodel::Aux {
-            ident: canonicalize("regional_data").into_owned(),
-            equation: datamodel::Equation::ApplyToAll(
-                vec!["region".to_string()],
-                "100".to_string(),
-            ),
-            documentation: "".to_string(),
-            units: None,
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: datamodel::Compat::default(),
-        });
-        let array_var2 = datamodel::Variable::Aux(datamodel::Aux {
-            ident: canonicalize("product_data").into_owned(),
-            equation: datamodel::Equation::ApplyToAll(
-                vec!["product".to_string()],
-                "50".to_string(),
-            ),
-            documentation: "".to_string(),
-            units: None,
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: datamodel::Compat::default(),
-        });
-
-        let model_datamodel = datamodel::Model {
-            name: "test_model".to_string(),
-            sim_specs: None,
-            variables: vec![array_var1, array_var2],
-            views: vec![],
-            loop_metadata: vec![],
-            groups: vec![],
-            macro_spec: None,
-        };
-
-        let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-        let model_s0 = ModelStage0::new(
-            &model_datamodel,
-            &[dim1.clone(), dim2.clone()],
-            &units_ctx,
-            false,
-        );
-
-        let mut models = HashMap::new();
-        models.insert(Ident::new("test_model"), &model_s0);
-
-        let dims_ctx = crate::dimensions::DimensionsContext::from(&[dim1, dim2]);
-        let scope = ScopeStage0 {
-            models: &models,
-            dimensions: &dims_ctx,
-            model_name: "test_model",
-        };
-
-        let mut ctx = ArrayContext::new(&scope, "test_model");
-
-        // Test binary op with mismatched dimensions
-        let add_expr = Expr1::Op2(
-            BinaryOp::Add,
-            Box::new(Expr1::Var(Ident::new("regional_data"), Loc::default())),
-            Box::new(Expr1::Var(Ident::new("product_data"), Loc::default())),
-            Loc::new(0, 10),
-        );
-        let result = Expr2::from(add_expr, &mut ctx);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.code, ErrorCode::MismatchedDimensions);
-
-        // Test if expression with mismatched dimensions
-        let if_expr = Expr1::If(
-            Box::new(Expr1::Const(
-                "1".to_string(),
-                Literal::new(1.0),
-                Loc::default(),
-            )),
-            Box::new(Expr1::Var(Ident::new("regional_data"), Loc::default())),
-            Box::new(Expr1::Var(Ident::new("product_data"), Loc::default())),
-            Loc::new(0, 20),
-        );
-        let result = Expr2::from(if_expr, &mut ctx);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.code, ErrorCode::MismatchedDimensions);
     }
 }

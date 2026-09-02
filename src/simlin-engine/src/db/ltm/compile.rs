@@ -553,10 +553,10 @@ struct LoweredLtmVariable {
     referenced_tables: BTreeSet<String>,
 }
 
-/// Lower a parsed LTM Stage0 variable with an EMPTY lowering scope, and
-/// classify its dependencies once.
+/// Lower a parsed LTM Stage0 variable bounds-free (a `LoweringScope` with no
+/// shapes), and classify its dependencies once.
 ///
-/// The scope feeds only `ArrayContext::get_dimensions`, which the
+/// The shapes feed only `ArrayContext::get_dimensions`, which the
 /// `Expr1 -> Expr2` lowering reads to compute `ArrayBounds`, and nothing the
 /// fragment compiler needs comes from those bounds: every dependency's shape
 /// reaches lowering through `FragmentInput.deps` (`Context::dims_of`), the
@@ -566,7 +566,7 @@ struct LoweredLtmVariable {
 /// refusals (an array-valued subscript index, `Expr2`'s bounds unification).
 /// An arrayed dependency therefore lowers the same whether the scope knows it
 /// or not -- C-LEARN's LTM artifact is byte-identical with a populated scope
-/// and without one -- so the empty-scope lowering is the only one. The GH #738
+/// and without one -- so the bounds-free lowering is the only one. The GH #738
 /// shape (`SUM(pop[*] * scale)` under a scalar target) is pinned end to end by
 /// `ltm_unified_tests::scalar_target_agg_over_array_expression_fragments_compile`
 /// and `ltm_array_agg::size_reducer_previous_helper_compiles_and_is_correct`.
@@ -576,13 +576,13 @@ fn lower_ltm_variable(
     project: SourceProject,
 ) -> LoweredLtmVariable {
     let dim_context = project_dimensions_context(db, project);
-    let empty_models = HashMap::new();
-    let empty_scope = crate::model::ScopeStage0 {
-        models: &empty_models,
+    let shapes = IdentMap::default();
+    let scope = crate::ast::LoweringScope {
         dimensions: dim_context,
+        shapes: &shapes,
         model_name: "",
     };
-    let prelim = crate::model::lower_variable(&empty_scope, parsed_variable);
+    let prelim = crate::model::lower_variable(&scope, parsed_variable);
 
     // Classify dependencies ONCE on the lowering, for the caller's
     // dependency-shape construction. `Variable::ast()` is the
@@ -1413,11 +1413,10 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
             ),
         )
     } else {
-        // Same dependency-aware lowering scope as `ltm_fragment_input` (GH
-        // #738): a synthesized helper aux whose equation embeds a reducer over
-        // an array expression needs its deps' dimensions resolvable, or the
-        // expression lowers as a scalar. The classification comes back from the
-        // same lowering, so the lowered AST is not walked again.
+        // Lowered as `ltm_fragment_input` lowers its equation
+        // (`lower_ltm_variable`: bounds-free; the shapes built below carry
+        // every dimension the compiler reads). The classification comes back
+        // from the same lowering, so the lowered AST is not walked again.
         let LoweredLtmVariable {
             variable: lowered,
             dep_idents,

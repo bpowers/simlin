@@ -59,9 +59,7 @@ pub(crate) use invariance::model_flows_invariant;
 pub(crate) mod ltm_ir;
 mod macro_registry;
 mod stages;
-pub(crate) use stages::{
-    model_scope_models, model_scope_stage0, model_stage0, model_stage1, source_model_is_stdlib,
-};
+pub(crate) use stages::{model_scope_models, model_stage0, model_stage1, source_model_is_stdlib};
 // Test-only: the execution counters for the two stage queries and the unit-check
 // pass, so `stages_tests` can prove each model's stages are BUILT at most once
 // per revision (GH #966), and that an unrelated model's edit re-executes none of
@@ -1446,6 +1444,8 @@ mod implicit_diag_tests;
 mod implicit_module_tests;
 #[cfg(test)]
 mod incremental_compile_tests;
+#[cfg(test)]
+mod lowering_scope_tests;
 #[cfg(test)]
 mod ltm_array_freeze_tests;
 #[cfg(test)]

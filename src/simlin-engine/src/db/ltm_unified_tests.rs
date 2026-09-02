@@ -4586,12 +4586,14 @@ fn assert_agg_fragments_compile(eqn: &str, failures: &[String]) {
 }
 
 /// GH #738: the synthetic agg hoisted for `SUM(pop[*] * scale)` with a
-/// *scalar* target must compile. Before the fix,
-/// `compile_ltm_equation_fragment` lowered the agg's equation with an empty
-/// `ScopeStage0.models`, so the `pop[*] * scale` Op2 never got its Expr2
-/// `ArrayBounds`, lowered as a scalar, and was never materialized -- codegen
-/// then rejected the inline Op2 under SUM and the agg was silently stubbed
-/// to a constant 0, corrupting every score routed through it.
+/// *scalar* target must compile. The LTM lowering is bounds-free
+/// (`lower_ltm_variable`), so the `pop[*] * scale` Op2 carries no `Expr2`
+/// `ArrayBounds`; the agg compiles because materialization is decided on the
+/// lowered `compiler::Expr` from the dependency shapes
+/// (`compiler::array_operand`), never from those bounds. A materializer that
+/// needed them left the inline Op2 under SUM in place, codegen rejected it,
+/// and the agg was silently stubbed to a constant 0, corrupting every score
+/// routed through it.
 #[test]
 fn scalar_target_agg_over_array_expression_fragments_compile() {
     let eqn = "1 + SUM(pop[*] * scale)";

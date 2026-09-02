@@ -3234,25 +3234,7 @@ fn arrayed_var_from_text(
         })
     };
 
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let mut implicit_vars = Vec::new();
-    let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
-        &crate::variable::ParseContext::new(
-            &crate::dimensions::DimensionsContext::from(dims),
-            &units_ctx,
-        ),
-        &dm_var,
-        &mut implicit_vars,
-        |mi| Ok(Some(mi.clone())),
-    );
-    let dim_ctx = crate::dimensions::DimensionsContext::from(dims);
-    let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
-        dimensions: &dim_ctx,
-        model_name: "test",
-    };
-    crate::model::lower_variable(&scope, &stage0)
+    lower_dm_var(dm_var, dims)
 }
 
 /// Look up the slot equation for `element` in an `Equation::Arrayed`,
@@ -3306,25 +3288,7 @@ fn scalar_aux_from_text(ident: &str, eqn_text: &str) -> Variable {
         uid: None,
         compat: crate::datamodel::Compat::default(),
     });
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let mut implicit_vars = Vec::new();
-    let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
-        &crate::variable::ParseContext::new(
-            &crate::dimensions::DimensionsContext::default(),
-            &units_ctx,
-        ),
-        &dm_var,
-        &mut implicit_vars,
-        |mi| Ok(Some(mi.clone())),
-    );
-    let dim_ctx = crate::dimensions::DimensionsContext::from(&[][..]);
-    let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
-        dimensions: &dim_ctx,
-        model_name: "test",
-    };
-    crate::model::lower_variable(&scope, &stage0)
+    lower_dm_var(dm_var, &[])
 }
 
 /// GH #311 end-to-end through the generator chain: a target whose
@@ -3497,31 +3461,28 @@ fn arrayed_with_lookup_var(
     lower_dm_var(dm_var, dims)
 }
 
-/// Shared parse+lower tail for the with-lookup fixture builders above,
-/// mirroring `scalar_aux_from_text` / `arrayed_var_from_text`.
+/// Lower `dm_var` as the LTM describers read a variable: synced into a
+/// one-model project declaring `dims` and read back through
+/// `db::reconstruct_model_variables`, the production lowering every generator
+/// target comes from. The reconstruction is total, so a name the equation
+/// references but the project does not declare lowers like any other and a
+/// fixture need declare only the variable under test.
 fn lower_dm_var(
     dm_var: crate::datamodel::Variable,
     dims: &[crate::datamodel::Dimension],
 ) -> Variable {
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let mut implicit_vars = Vec::new();
-    let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
-        &crate::variable::ParseContext::new(
-            &crate::dimensions::DimensionsContext::from(dims),
-            &units_ctx,
-        ),
-        &dm_var,
-        &mut implicit_vars,
-        |mi| Ok(Some(mi.clone())),
+    use crate::db::{SimlinDb, reconstruct_model_variables, sync_from_datamodel};
+    use crate::testutils::{sim_specs_with_units, x_model, x_project};
+
+    let ident: Ident<Canonical> = Ident::new(dm_var.get_ident());
+    let mut project = x_project(
+        sim_specs_with_units("month"),
+        &[x_model("test", vec![dm_var])],
     );
-    let dim_ctx = crate::dimensions::DimensionsContext::from(dims);
-    let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
-        dimensions: &dim_ctx,
-        model_name: "test",
-    };
-    crate::model::lower_variable(&scope, &stage0)
+    project.dimensions = dims.to_vec();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    reconstruct_model_variables(&db, sync.models["test"].source, sync.project)[&ident].clone()
 }
 
 /// GH #910: a scalar WITH-LOOKUP target's link-score partial must be
@@ -3948,8 +3909,6 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
 
     // ApplyToAll target.
     let dims = vec![region_dm_dimension()];
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let mut implicit = Vec::new();
     let a2a_dm = crate::datamodel::Variable::Aux(crate::datamodel::Aux {
         ident: "a2a_target".to_string(),
         equation: Equation::ApplyToAll(vec!["Region".to_string()], "driver * 0.5".to_string()),
@@ -3960,23 +3919,7 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
         uid: None,
         compat: crate::datamodel::Compat::default(),
     });
-    let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
-        &crate::variable::ParseContext::new(
-            &crate::dimensions::DimensionsContext::from(dims.as_slice()),
-            &units_ctx,
-        ),
-        &a2a_dm,
-        &mut implicit,
-        |mi| Ok(Some(mi.clone())),
-    );
-    let dim_ctx = crate::dimensions::DimensionsContext::from(dims.as_slice());
-    let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
-        dimensions: &dim_ctx,
-        model_name: "test",
-    };
-    let a2a_to = crate::model::lower_variable(&scope, &stage0);
+    let a2a_to = lower_dm_var(a2a_dm, &dims);
     let to_a2a = Ident::<Canonical>::new("a2a_target");
     let equation = generate_auxiliary_to_auxiliary_equation(
         &from,

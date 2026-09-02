@@ -391,7 +391,7 @@ impl MacroRegistry {
         //     above (target the macro's own model).
         //   - A stdlib model is a SINK: it holds no module variable, explicit or
         //     implicit. Asserted over synced Stage0s by
-        //     `db::stages_tests::omitting_stdlib_models_from_the_lowering_scope_is_inert_today`.
+        //     `db::stages_tests::stdlib_templates_are_scalar_and_instantiate_no_module`.
         //   - So a macro model's outgoing edges are three, and all three are
         //     handled: an explicit module in its body (this pass), an implicit
         //     macro-to-macro edge (Pass 3 rejects a cycle among them, and on ANY

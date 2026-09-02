@@ -196,12 +196,14 @@ impl Context<'_> {
         match expr {
             Expr2::Var(id, _, loc) if self.dims_of(id).is_some() => {
                 // What `lower_pass0` spells a bare arrayed reference as: the
-                // reference's bounds are the variable's own axes. The axes come
-                // from this fragment's dependency shapes rather than the `Var`'s
-                // own bounds because a helper is lowered to `Expr2` without a
-                // model (`db::analysis::reconstruct_implicit_variable`), so its
-                // bare references carry no bounds; `get_ref` resolves them the
-                // same way when the fragment compiles.
+                // reference's bounds are the variable's own axes. The axes are
+                // read from this fragment's dependency shapes rather than the
+                // `Var`'s own bounds because the shapes are what `lower_pass0`
+                // and `get_ref` resolve the reference through when the fragment
+                // compiles, so the pin spells the read the compiled fragment
+                // makes whether the `Var` carries bounds (a helper lowered
+                // through `implicit_fragment_input`) or none (a bounds-free
+                // lowering, `ast::LoweringScope`).
                 let dims = self.dims_of(id).expect("checked above");
                 let bounds = ast::ArrayBounds::Named {
                     name: id.as_str().to_string(),

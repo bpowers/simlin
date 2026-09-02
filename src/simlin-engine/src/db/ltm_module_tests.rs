@@ -237,7 +237,7 @@ fn custom_output_port_project() -> datamodel::Project {
                     x_flow("adjustment", "gap / 5", None),
                     // dst uses the XMILE `<connect to="module.var">` convention
                     // (prefixed with the module instance name); a bare dst is
-                    // dropped by `build_module_inputs` / `resolve_module_input`.
+                    // dropped by `build_module_inputs`.
                     x_module(
                         "custom_smooth",
                         &[

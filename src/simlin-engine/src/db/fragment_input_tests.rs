@@ -28,7 +28,7 @@ use crate::test_common::TestProject;
 /// output beside a reduction over the arrayed variable -- so its fragment has
 /// an arrayed dependency and a module dependency at once. `producer` exposes
 /// `input`, an arrayed `arr[d] = input * d`, and `output = SUM(arr)`.
-fn module_and_array_project() -> datamodel::Project {
+pub(super) fn module_and_array_project() -> datamodel::Project {
     let mut project = TestProject::new("fragment_input")
         .with_sim_time(0.0, 1.0, 1.0)
         .indexed_dimension("d", 3)

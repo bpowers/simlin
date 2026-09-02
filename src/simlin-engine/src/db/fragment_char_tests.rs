@@ -2394,16 +2394,16 @@ fn equation_only_edit_recompiles_only_the_edited_fragment() {
     );
 
     // ...but the blast radius is one hop wide, not zero: `explicit_fragment_input`
-    // builds its dependency-granular mini `ModelStage0` by PARSING each
-    // dependency, so a consumer's fragment depends on its dependencies'
+    // reads each dependency's graphical-function tables straight off its
+    // inputs (`extract_tables_from_source_var` reads the equation the tables
+    // are keyed by), so a consumer's fragment depends on its dependencies'
     // equation text and not merely on their shape. Editing `k`'s constant
     // therefore recompiles `probe` as well.
     //
-    // That one hop is intrinsic to the mini-stage design (track-C invariant 2:
-    // pointing the mini stage at a whole-project cached stage would make the
-    // radius the whole project instead), so it is pinned as the CURRENT
-    // contract, not flagged as a defect. If a later stage widens it beyond one
-    // hop, this reds.
+    // That one hop is pinned as the CURRENT contract, not flagged as a defect:
+    // a tracked per-variable tables projection would narrow it to zero, and
+    // is a query this crate does not yet have. If a later stage widens it
+    // beyond one hop, this reds.
     let mut k_edited = cache_probe_project(&[("independent", "11")], true);
     assert_eq!(
         k_edited.models[0].variables[0].get_ident(),
@@ -2425,8 +2425,8 @@ fn equation_only_edit_recompiles_only_the_edited_fragment() {
     assert_eq!(
         explicit_execs(&k_execs),
         vec!["k", "probe"],
-        "editing `k` recompiles `k` AND its one consumer `probe`, whose mini \
-         ModelStage0 re-parses `k`; it must not reach any further"
+        "editing `k` recompiles `k` AND its one consumer `probe`, whose fragment \
+         reads `k`'s tables off its inputs; it must not reach any further"
     );
 }
 

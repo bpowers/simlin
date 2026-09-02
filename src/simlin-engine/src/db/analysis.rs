@@ -26,9 +26,9 @@ use crate::capture::{CaptureKind, ImplicitVar};
 use crate::datamodel;
 
 use super::{
-    Db, LtmMode, ModuleInputSet, SourceModel, SourceProject, SourceVariableKind,
-    build_module_inputs, model_ltm_mode, parse_source_variable, project_datamodel_dims,
-    project_dimensions_context, variable_direct_dependencies,
+    Db, LtmMode, ModuleInputSet, SourceModel, SourceProject, SourceVariableKind, model_ltm_mode,
+    parse_source_variable, project_datamodel_dims, project_dimensions_context,
+    variable_direct_dependencies,
 };
 
 /// Causal edge structure for a model, built from variable dependency sets
@@ -3548,38 +3548,25 @@ pub(crate) fn reconstruct_model_variables(
     let source_vars = model.variables(db);
     // The canonicalized dimension context comes from the project-global
     // salsa-cached query; every parse and lowering below reads that one value.
+    // The lowering is bounds-free: no describer reads an `ArrayBounds`
+    // (`ltm_agg` strips them from its cached key), so no shape map is built
+    // for the whole model here. A module instance keeps its wiring: the
+    // discovery-mode per-exit-port pathway recompute (GH #698) matches the
+    // loop edge's source against a module's inputs to find its entry port,
+    // and `lower_variable`'s module arm resolves them under the model's name
+    // (`reconstruct_single_variable` reads this map, so both reconstructions
+    // carry it).
     let dim_context = project_dimensions_context(db, project);
-    let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
+    let shapes = crate::common::IdentMap::default();
+    let scope = crate::ast::LoweringScope {
         dimensions: dim_context,
-        model_name: "",
+        shapes: &shapes,
+        model_name: model.name(db),
     };
 
     let mut variables: HashMap<Ident<Canonical>, crate::variable::Variable> = HashMap::new();
 
     for (name, source_var) in source_vars.iter() {
-        // Explicit module instances take the same direct-construction path as
-        // implicit ones: the generic parse+lower path resolves module inputs
-        // against `scope.models`, which is EMPTY here, so `resolve_module_input`
-        // drops every input and the reconstructed `Variable::Module` carries
-        // `inputs: []`. The discovery-mode per-exit-port pathway recompute (GH
-        // #698) matches the loop edge's source against those inputs to find the
-        // module's entry port; with the inputs lost it bails and falls back to
-        // the wrong-signed composite. (`reconstruct_single_variable` already
-        // takes this branch for the exhaustive override; both reconstructions
-        // must keep module wiring.)
-        if source_var.kind(db) == crate::db::SourceVariableKind::Module {
-            let lowered = module_instance_from_refs(
-                model.name(db),
-                Ident::new(source_var.ident(db)),
-                Ident::new(source_var.model_name(db)),
-                source_var.module_refs(db),
-            );
-            variables.insert(Ident::new(name), lowered);
-            continue;
-        }
-
         let parsed = parse_source_variable(db, *source_var, project);
         let lowered = crate::model::lower_variable(&scope, &parsed.variable);
         variables.insert(Ident::new(name), lowered);
@@ -3662,11 +3649,6 @@ fn reconstruct_named_variable(
 /// Reconstruct an implicit (compiler-generated) variable from its parsed form,
 /// as the LTM describers read it.
 ///
-/// Module instances need special handling: `parse_var` does not preserve the
-/// `references` list from the datamodel, so input wiring (built via
-/// `build_module_inputs`) would be lost.  We short-circuit that case and
-/// construct `Variable::Module` directly from the stored `ModuleReference`s.
-///
 /// A per-element helper's body is one element of its parent's apply-to-all
 /// body (`variable::ElementScope`), and the describers classify a read by its
 /// SPELLING: `x[State]` in a scalar equation would read as a dynamic index and
@@ -3682,20 +3664,9 @@ fn reconstruct_implicit_variable(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
-    scope: &crate::model::ScopeStage0<'_>,
+    scope: &crate::ast::LoweringScope<'_>,
     implicit_var: &ImplicitVar,
 ) -> crate::variable::Variable {
-    use crate::common::{Canonical, Ident};
-
-    if let Some(dm_module) = implicit_var.module() {
-        return module_instance_from_refs(
-            model.name(db),
-            Ident::<Canonical>::new(implicit_var.ident()),
-            Ident::new(&dm_module.model_name),
-            &dm_module.references,
-        );
-    }
-
     if implicit_var.element_scope().is_some()
         && let Some(meta) = crate::db::model_implicit_var_by_name(
             db,
@@ -3710,29 +3681,6 @@ fn reconstruct_implicit_variable(
     }
 
     crate::model::lower_variable(scope, &implicit_var.parsed_variable(scope.dimensions))
-}
-
-/// A module instance's lowered form, built straight from its stored
-/// `ModuleReference`s.
-///
-/// `parse_var` does not preserve the `references` list, so a module that went
-/// through the generic parse+lower path would lose its input wiring; both
-/// reconstructions (explicit and implicit) therefore short-circuit to this.
-fn module_instance_from_refs(
-    parent_model_name: &str,
-    ident: crate::common::Ident<crate::common::Canonical>,
-    model_name: crate::common::Ident<crate::common::Canonical>,
-    references: &[datamodel::ModuleReference],
-) -> crate::variable::Variable {
-    let module_var_prefix = format!("{}·", ident.as_str());
-    let inputs = build_module_inputs(
-        parent_model_name,
-        &module_var_prefix,
-        references
-            .iter()
-            .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
-    );
-    crate::variable::Variable::module_instance(ident, model_name, inputs)
 }
 
 #[cfg(test)]

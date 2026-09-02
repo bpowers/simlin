@@ -6,11 +6,13 @@
 //!
 //! Three claims are pinned here:
 //!
-//!   1. **Value**: the cached `model_stage0` / `model_stage1` equal what the
-//!      independently-written, salsa-free `ModelStage0::new_in_project` (plus
-//!      `ModelStage1::new` over a whole-project scope of those) builds for the
-//!      same models -- across every model shape, up to and including the
-//!      combined [`every_shape_project`].
+//!   1. **Value**: the cached `model_stage0` equals what the independently
+//!      written, salsa-free `ModelStage0::new_in_project` builds for the same
+//!      model, and the cached `model_stage1` equals `ModelStage1::new` over
+//!      that oracle Stage0 -- the Stage1 half is the production lowering
+//!      applied to compared-equal inputs, so only the Stage0 half is an
+//!      independent oracle -- across every model shape, up to and including
+//!      the combined [`every_shape_project`].
 //!   2. **Cost (GH #966)**: whole-project unit diagnostics build each model's
 //!      two stages AT MOST ONCE per revision, not once per (model, model) pair.
 //!   3. **Diagnostics do not move**: every diagnostic that reached a harvest
@@ -89,15 +91,12 @@ fn x_apply_to_all(ident: &str, dim: &str, equation: &str) -> datamodel::Variable
 /// The same shape plus a dimension and apply-to-all variables, so Stage0's
 /// dimension resolution and Stage1's array lowering are exercised.
 ///
-/// `sub_a` gains an ARRAYED output that `main` reduces over, which is the one
-/// construct that makes the whole-project scope map load-bearing:
-/// `ArrayContext::get_variable` resolves `sub_a·out_by_region`'s dimensions by
-/// following the module variable into `sub_a`'s Stage0, so with the other
-/// models missing from the scope `get_dimensions` returns `None` and the
-/// reference lowers as though it were scalar. That silent mis-lowering is
-/// exactly what `model_stage1`'s self-insert comment describes -- and, until
-/// this fixture, nothing in the crate's tests could see it: emptying the scope
-/// map entirely left the whole engine suite green.
+/// `sub_a` gains an ARRAYED output that `main` reduces over
+/// (`SUM(sub_a.out_by_region[*])`): a module-output read, which the `Expr2`
+/// tier lowers WITHOUT bounds (`ast::LoweringScope`), so `main`'s stage reads
+/// nothing of `sub_a`'s variables --
+/// [`stage1_lowers_a_module_output_read_without_bounds`] pins that -- and the
+/// compiler resolves the read through the instance's shape.
 fn arrayed_module_project() -> datamodel::Project {
     let mut project = three_model_project();
     project.dimensions = vec![datamodel::Dimension::named(
@@ -129,20 +128,16 @@ fn arrayed_module_project() -> datamodel::Project {
     project
 }
 
-/// A TWO-LEVEL module chain, `main -> sub_a -> sub_c`, where `main` makes an
-/// arrayed reference that resolves through BOTH hops.
+/// A TWO-LEVEL module chain, `main -> sub_a -> sub_c`, where `main` reads
+/// `sub_a.sub_c.out_by_region` through BOTH hops.
 ///
-/// This separates the two narrowings of `model_stage1`'s scope map that
-/// [`arrayed_module_project`] cannot tell apart. `ArrayContext::get_variable`
-/// resolves `sub_a·sub_c·out_by_region` by recursing once per hop, looking up
-/// each intermediate model in `scope.models`: `main` (self), then `sub_a`
-/// (a DIRECT module target of main), then `sub_c` (reachable only THROUGH
-/// `sub_a`, and not a module target of `main` at all).
-///
-/// So a scope narrowed to "self + direct module targets" drops `sub_c`,
-/// `get_dimensions` returns `None`, and `SUM(...[*])` lowers as though its
-/// argument were scalar -- silently, with no error. Only the TRANSITIVE
-/// module-reachable closure is correct, and this fixture is what says so.
+/// `sub_c` is reachable from `main` only THROUGH `sub_a`, and is not a module
+/// target of `main` at all, so this fixture separates a TRANSITIVE
+/// module-reachable closure from "self + direct module targets"
+/// ([`the_inference_scope_is_the_transitive_module_reachable_closure`],
+/// [`a_two_hop_cross_module_unit_mismatch_is_still_reported`]). The nested
+/// read itself is resolved by the compiler through the instances' shapes, not
+/// at the `Expr2` tier.
 fn chain_project() -> datamodel::Project {
     let sub_c = x_model(
         "sub_c",
@@ -180,10 +175,8 @@ fn chain_project() -> datamodel::Project {
 ///     module and argument variables that have no `SourceVariable` of their own
 ///     and so are parsed inside the stage rather than by the per-variable memo;
 ///   - an EXPLICIT user sub-model instance that `main` READS through
-///     (`SUM(sub.out_by_region[*])`), so Stage1 lowering genuinely follows a
-///     `module·output` reference into another model's Stage0 and depends on
-///     the answer -- instantiating `sub` without reading it would exercise
-///     only `resolve_module_input`'s self-entry path;
+///     (`SUM(sub.out_by_region[*])`), so a module's input wiring AND a
+///     module-output read both reach Stage1 lowering;
 ///   - a MACRO-marked model (`is_macro` / `macro_params` non-default) together
 ///     with a caller of it, which only classifies correctly under the
 ///     PROJECT-wide macro registry;
@@ -339,30 +332,21 @@ fn datamodel_driven_stage0s(
     all
 }
 
-/// Lower [`datamodel_driven_stage0s`] under one whole-project `ScopeStage0` per
-/// model, keyed by canonical model name.
+/// Lower [`datamodel_driven_stage0s`] through `ModelStage1::new`, keyed by
+/// canonical model name.
 fn datamodel_driven_stage1s(
     all_s0: &[ModelStage0],
     dims_ctx: &crate::dimensions::DimensionsContext,
 ) -> HashMap<Ident<Canonical>, ModelStage1> {
-    let models_s0: HashMap<Ident<Canonical>, &ModelStage0> =
-        all_s0.iter().map(|m| (m.ident.clone(), m)).collect();
     all_s0
         .iter()
-        .map(|ms0| {
-            let scope = crate::model::ScopeStage0 {
-                models: &models_s0,
-                dimensions: dims_ctx,
-                model_name: ms0.ident.as_str(),
-            };
-            (ms0.ident.clone(), ModelStage1::new(&scope, ms0))
-        })
+        .map(|ms0| (ms0.ident.clone(), ModelStage1::new(dims_ctx, ms0)))
         .collect()
 }
 
-/// The cached `model_stage1` must equal the datamodel-driven whole-project
-/// lowering of the same models, field by field; `variables` is compared last so
-/// a mismatch names the fixture and model.
+/// The cached `model_stage1` must equal the datamodel-driven lowering of the
+/// same models, field by field; `variables` is compared last so a mismatch
+/// names the fixture and model.
 #[test]
 fn cached_stage1_lowering_equals_datamodel_driven_lowering() {
     for (fixture, project, names) in [
@@ -407,70 +391,31 @@ fn cached_stage1_lowering_equals_datamodel_driven_lowering() {
     }
 }
 
-/// Omitting the stdlib models from `model_stage1`'s LOWERING scope changes no
-/// lowering TODAY -- and this is the property that makes that true, asserted
-/// directly so it becomes a tripwire rather than an assumption.
+/// Every shipped stdlib template is scalar and instantiates no module --
+/// asserted directly, over the SYNCED Stage0s the inference scope holds rather
+/// than over the generated stdlib source, so it is a tripwire rather than an
+/// assumption. Two arguments elsewhere rest on it:
 ///
-/// Written for whoever did the scope narrowing (the follow-on to GH #966). That
-/// narrowing has landed and did NOT take the wholesale route: `model_scope_models`
-/// keeps the stdlib models a lowering can actually reach, exactly as it keeps
-/// any other module target, so this test now guards a road not taken.
-///
-/// The reason "whole project MINUS every `stdlib⁚` model" is inert for LOWERING
-/// is not missing coverage. The lowering scope has exactly two consumers, and
-/// neither can observe a stdlib model:
-///
-///   - `ArrayContext::get_variable` follows a `module·output` reference into the
-///     target model's Stage0 to read its DIMENSIONS. Every shipped stdlib
-///     variable is scalar, so the answer is `None` whether the model is in the
-///     map or not.
-///   - `resolve_relative` recurses through intermediate models named by a
-///     dotted reference. No stdlib model instantiates a module, so none can ever
-///     be an intermediate hop.
-///
-/// Two routes DO reach a stdlib entry, and both are deliberately out of scope
-/// for this assertion:
-///
-///   - `resolve_relative`'s TERMINAL lookup. A module-input `src` spelled
-///     `stdlib⁚<template>·<var>` resolves against the stdlib model itself, so
-///     dropping those entries turns that input into a `BadModuleInputSrc`. That
-///     is a LOUD error rather than a silent mis-lowering -- the opposite of the
-///     failure class this tripwire guards -- and it needs an imported model whose
-///     input `src` literally names a stdlib template (ordinary model creation
-///     never produces the `⁚` separator).
-///   - The INFERENCE map, which is a different consumer of the same scope:
-///     `check_model_units`' stdlib-argument-group check looks a module's target
-///     up by name, and `units_infer` recurses into it. Since B3 gave both halves
-///     one scope, a `stdlib⁚*`-skipping closure is no longer even inert
-///     end-to-end -- it reds `unit_checking_test::test_smth1_unit_mismatch_initial`,
-///     measured. Keeping the closure's stdlib targets avoids both routes.
-///
-/// If a future stdlib template gains an arrayed variable or a module instance,
-/// this test fails -- and at that moment a closure that skips `stdlib⁚*` becomes
-/// a silent mis-lowering, exactly like the one
-/// [`arrayed_module_project`] and [`chain_project`] catch for user models. The
-/// assertion runs over the SYNCED Stage0s, which is what the scope map actually
-/// holds, rather than over the generated stdlib source.
-///
-/// # The module half is ALSO the tripwire for module-graph cycle safety
-///
-/// The `Variable::Module` assertion below now carries a second, unrelated claim.
-/// `MacroRegistry::build`'s Pass 4 (rejecting a module inside a macro,
-/// `ErrorCode::MacroContainsModule`) closes the hole where a cycle ran through an
-/// IMPLICIT module edge that `db::project_module_graph` cannot see. Its closure
-/// argument needs "a stdlib model is a SINK -- it instantiates no module", so that
-/// an implicit stdlib edge cannot be one hop of a longer invisible cycle. That
-/// property is TEST-asserted here, not structural: nothing stops a future
-/// `stdlib/*.stmx` template from instantiating another template.
-///
-/// So if this assertion ever fails, TWO things break at once, and the second is
-/// the abort-class one: the shape a stdlib template just gained is a module edge
-/// invisible to the gate, and `project_module_graph`'s "every remaining cycle is
-/// explicit" invariant no longer holds. Fixing it means teaching the gate about
-/// stdlib edges (they are static and known at build time, so this is cheap --
-/// unlike parse-derived macro edges), not just widening the lowering scope.
+///   - **Module-graph cycle safety**, the abort-class one. `MacroRegistry::build`'s
+///     Pass 4 (rejecting a module inside a macro, `ErrorCode::MacroContainsModule`)
+///     closes the hole where a cycle ran through an IMPLICIT module edge that
+///     `db::project_module_graph` cannot see. Its closure argument needs "a
+///     stdlib model is a SINK -- it instantiates no module", so that an implicit
+///     stdlib edge cannot be one hop of a longer invisible cycle. That property
+///     is TEST-asserted here, not structural: nothing stops a future
+///     `stdlib/*.stmx` template from instantiating another template. If the
+///     module assertion ever fails, the shape a template just gained is a module
+///     edge invisible to the gate, and `project_module_graph`'s "every remaining
+///     cycle is explicit" invariant no longer holds. Fixing it means teaching
+///     the gate about stdlib edges (they are static and known at build time, so
+///     this is cheap -- unlike parse-derived macro edges).
+///   - **The unit-inference scope.** `model_scope_models` keeps the stdlib
+///     templates a model instantiates rather than splicing every template in;
+///     with every template scalar and module-free, a template adds nothing to
+///     a scope beyond its own port constraints, so the closure treats it like
+///     any other target.
 #[test]
-fn omitting_stdlib_models_from_the_lowering_scope_is_inert_today() {
+fn stdlib_templates_are_scalar_and_instantiate_no_module() {
     let db = SimlinDb::default();
     let project = x_project(
         sim_specs_with_units("month"),
@@ -487,18 +432,16 @@ fn omitting_stdlib_models_from_the_lowering_scope_is_inert_today() {
         for (ident, var) in s0.variables.iter() {
             assert!(
                 var.get_dimensions().is_none(),
-                "stdlib variable {}·{ident} is arrayed; a lowering scope that omits stdlib \
-                 models can now silently lower a reference to it as scalar",
+                "stdlib variable {}·{ident} is arrayed: the template is no longer the scalar \
+                 sink the inference scope assumes",
                 s0.ident
             );
             assert!(
                 !var.is_module(),
-                "stdlib model {} instantiates a module ({ident}). Two consequences: it can now \
-                 be an intermediate hop in `resolve_relative`, so a lowering scope that omits \
-                 stdlib models can silently break a chained reference; and -- the abort-class \
-                 one -- `db::project_module_graph` does not record implicit module edges, so \
-                 the stdlib-sink premise of `MacroRegistry::build`'s Pass 4 closure argument \
-                 no longer holds and a cycle through this edge is invisible to the cycle gate",
+                "stdlib model {} instantiates a module ({ident}): `db::project_module_graph` \
+                 does not record implicit module edges, so the stdlib-sink premise of \
+                 `MacroRegistry::build`'s Pass 4 closure argument no longer holds and a cycle \
+                 through this edge is invisible to the cycle gate",
                 s0.ident
             );
         }
@@ -919,7 +862,7 @@ fn a_stdlib_prefixed_model_with_an_unknown_suffix_is_unit_checked() {
 
 // ── 5. the scope narrowing ──────────────────────────────────────────────
 
-/// The canonical model names in `model`'s lowering/inference scope.
+/// The canonical model names in `model`'s unit-inference scope.
 fn scope_names(db: &SimlinDb, sync: &SyncResult, model: &str) -> Vec<String> {
     model_scope_models(db, sync.models[model].source, sync.project)
         .keys()
@@ -936,7 +879,7 @@ fn scope_names(db: &SimlinDb, sync: &SyncResult, model: &str) -> Vec<String> {
 /// them, so their absence is what says the scope is a closure and not a filter
 /// on the project's model list.
 #[test]
-fn the_lowering_scope_is_the_transitive_module_reachable_closure() {
+fn the_inference_scope_is_the_transitive_module_reachable_closure() {
     let db = SimlinDb::default();
     let project = chain_project();
     let sync = sync_from_datamodel(&db, &project);
@@ -973,215 +916,6 @@ fn implicit_and_macro_modules_are_scope_edges() {
     // The macro model itself calls nothing, so its scope is just itself -- the
     // macro-call edge above is real reachability, not a project-wide splice.
     assert_eq!(scope_names(&db, &sync, "scaled"), ["scaled"]);
-}
-
-/// A project whose `main` reduces over the output of a MACRO call, where the
-/// macro's primary output is arrayed (`arrayed`) or scalar (the control).
-///
-/// A macro call expands into a synthetic module targeting the macro's own model
-/// plus a reference to `<synthetic module>·<primary_output>`
-/// (`builtins_visitor::expand_module_function`), so `SUM(scaled(driver))` is the
-/// macro-side twin of [`arrayed_module_project`]'s
-/// `SUM(sub_a.out_by_region[*])`: resolving its dimensions means following an
-/// IMPLICIT module edge into another model's Stage0.
-fn macro_output_project(arrayed: bool) -> datamodel::Project {
-    let out = if arrayed {
-        x_apply_to_all("out", "Region", "p1 * 2")
-    } else {
-        x_aux("out", "p1 * 2", None)
-    };
-    let scaled_macro = datamodel::Model {
-        name: "scaled".to_string(),
-        sim_specs: None,
-        variables: vec![out, x_aux("p1", "0", None)],
-        views: vec![],
-        loop_metadata: vec![],
-        groups: vec![],
-        macro_spec: Some(datamodel::MacroSpec {
-            parameters: vec!["p1".to_string()],
-            primary_output: "out".to_string(),
-            additional_outputs: vec![],
-        }),
-    };
-    let main = x_model(
-        "main",
-        vec![
-            x_aux("driver", "5", None),
-            x_aux("total", "SUM(scaled(driver))", None),
-        ],
-    );
-    let mut project = x_project(sim_specs_with_units("month"), &[main, scaled_macro]);
-    project.dimensions = vec![datamodel::Dimension::named(
-        "Region".to_string(),
-        vec!["north".to_string(), "south".to_string()],
-    )];
-    project
-}
-
-/// Lower `main` against its own scope with the named models REMOVED, as a
-/// closure that dropped those edges would.
-fn lower_main_without(
-    db: &SimlinDb,
-    sync: &SyncResult,
-    omit: &[&str],
-) -> crate::model::ModelStage1 {
-    let source = sync.models["main"].source;
-    let main_s0 = model_stage0(db, source, sync.project);
-    let models: HashMap<Ident<Canonical>, &ModelStage0> =
-        model_scope_models(db, source, sync.project)
-            .values()
-            .map(|m| {
-                let s0 = model_stage0(db, *m, sync.project);
-                (s0.ident.clone(), s0)
-            })
-            .filter(|(ident, _)| !omit.contains(&ident.as_str()))
-            .collect();
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
-        dimensions: project_dimensions_context(db, sync.project),
-        model_name: main_s0.ident.as_str(),
-    };
-    ModelStage1::new(&scope, main_s0)
-}
-
-/// Dropping the macro model's scope edge changes the lowered VALUE, and the
-/// mechanism is dimension resolution.
-///
-/// [`implicit_and_macro_modules_are_scope_edges`] pins the macro edge
-/// STRUCTURALLY -- it asserts a name list -- which cannot show that losing the
-/// edge would mis-lower anything. This is the macro-side equivalent of what
-/// [`arrayed_module_project`] and [`chain_project`] do for user models: it
-/// demonstrates the CONSEQUENCE.
-///
-/// Two halves, and the second is what makes the first mean something:
-///
-///   - ARRAYED macro output: `main`'s `total` lowers differently with and
-///     without `scaled` in scope, and it is the ONLY variable that differs.
-///     Without the macro model, `ArrayContext::get_variable` cannot follow the
-///     synthetic module into `scaled`, `get_dimensions` returns `None`, and
-///     `SUM(...)` reduces over what it now believes is a scalar -- no error, a
-///     plausible wrong answer.
-///   - SCALAR macro output (the control): removing `scaled` changes NOTHING,
-///     because `get_dimensions` answers `None` either way. So the difference
-///     above is dimension resolution through the macro edge specifically, not
-///     some incidental sensitivity to the map's contents.
-///
-/// What a mis-lowering here actually corrupts is worth stating, because it is
-/// narrower than "the model simulates wrong": `model_stage1`'s consumer is
-/// unit checking. Simulation compiles from the per-variable fragment path (its
-/// own mini Stage0s), so it does not read this stage at all.
-#[test]
-fn dropping_a_macro_models_scope_edge_changes_the_lowered_value() {
-    let total: Ident<Canonical> = Ident::new("total");
-
-    let db = SimlinDb::default();
-    let project = macro_output_project(true);
-    let sync = sync_from_datamodel(&db, &project);
-    let cached = model_stage1(&db, sync.models["main"].source, sync.project);
-
-    // The fixture must actually route through a macro-expansion module. This is
-    // read off the model's STAGE0, deliberately, not off its scope: a scope-name
-    // assertion would fire first under a narrowing that drops macro edges, and
-    // then this test would be red for the same structural reason
-    // `implicit_and_macro_modules_are_scope_edges` already covers, instead of on
-    // the lowered value it exists to protect.
-    assert!(
-        model_stage0(&db, sync.models["main"].source, sync.project)
-            .variables
-            .values()
-            .any(
-                |v| matches!(&v.kind, crate::variable::VarKind::Module { model_name, .. }
-                if model_name.as_str() == "scaled")
-            ),
-        "the macro call must have expanded into a synthetic module targeting `scaled`"
-    );
-
-    let without_macro = lower_main_without(&db, &sync, &["scaled"]);
-    assert!(
-        cached.variables[&total] != without_macro.variables[&total],
-        "the arrayed macro output's dimensions must resolve through the macro \
-         scope edge, so dropping it must change how `total` lowers"
-    );
-    let differing: Vec<&str> = cached
-        .variables
-        .iter()
-        .filter(|(ident, var)| without_macro.variables.get(*ident) != Some(*var))
-        .map(|(ident, _)| ident.as_str())
-        .collect();
-    assert_eq!(
-        differing,
-        ["total"],
-        "only the reducing caller should be affected"
-    );
-
-    // Control: with a SCALAR macro output the same removal changes nothing.
-    let db = SimlinDb::default();
-    let scalar_project = macro_output_project(false);
-    let sync = sync_from_datamodel(&db, &scalar_project);
-    let cached = model_stage1(&db, sync.models["main"].source, sync.project);
-    let without_macro = lower_main_without(&db, &sync, &["scaled"]);
-    assert!(
-        cached.variables == without_macro.variables,
-        "a scalar macro output resolves to no dimensions either way, so the \
-         difference above is dimension resolution and not the map's contents"
-    );
-}
-
-/// `resolve_relative` keys a dotted module-input `src` on each component as a
-/// MODEL name, so a module's own IDENT is a scope edge too when it names one.
-///
-/// This is the narrowing's one non-obvious edge, and the fixture is the shape
-/// that needs it: `main` instantiates model `real_target` under the ident
-/// `helper`, while a model named `helper` also exists, and a second module's
-/// input reads `helper·something`. `resolve_relative` predates a module ident
-/// being allowed to differ from its target's name, so it resolves that `src`
-/// against MODEL `helper` -- which is reachable from `main` only through the
-/// ident. Dropping the ident edge turns a project that lowered cleanly into one
-/// reporting `BadModuleInputSrc`.
-///
-/// That resolution is itself questionable (the reference means "the module
-/// `helper`'s output", not "model `helper`'s variable"), and its TODO has been
-/// in `model.rs` for years. This test pins BEHAVIOUR PRESERVATION across the
-/// narrowing, not the rule: whoever fixes the underlying resolution should
-/// delete this along with the ident edge.
-#[test]
-fn a_module_ident_that_names_a_model_is_a_scope_edge() {
-    use crate::testutils::x_module_named;
-
-    let db = SimlinDb::default();
-    let project = x_project(
-        sim_specs_with_units("month"),
-        &[
-            x_model(
-                "main",
-                vec![
-                    x_aux("driver", "5", None),
-                    x_module_named("helper", "real_target", &[("driver", "helper.input")], None),
-                    x_module_named("m2", "consumer", &[("helper.something", "m2.input")], None),
-                ],
-            ),
-            x_model("real_target", vec![x_aux("input", "0", None)]),
-            x_model("helper", vec![x_aux("something", "1", None)]),
-            x_model("consumer", vec![x_aux("input", "0", None)]),
-        ],
-    );
-    let sync = sync_from_datamodel(&db, &project);
-
-    assert!(
-        scope_names(&db, &sync, "main").contains(&"helper".to_string()),
-        "the module ident `helper` names a model that `resolve_relative` reaches: {:?}",
-        scope_names(&db, &sync, "main")
-    );
-
-    let m2 = model_stage1(&db, sync.models["main"].source, sync.project)
-        .variables
-        .get(&Ident::<Canonical>::new("m2"))
-        .expect("the second module must be staged")
-        .equation_errors();
-    assert!(
-        m2.is_none(),
-        "the module input must still resolve, as it does under a whole-project scope: {m2:?}"
-    );
 }
 
 /// A module CYCLE yields a finite scope containing the whole cycle.
@@ -1284,7 +1018,7 @@ fn a_two_hop_cross_module_unit_mismatch_is_still_reported() {
     // that precondition is read off the models' STAGE0s rather than off `main`'s
     // scope. A scope-name assertion here would fire first under the very
     // narrowing this test exists to catch, and the test would then be red for a
-    // structural reason `the_lowering_scope_is_the_transitive_module_reachable_closure`
+    // structural reason `the_inference_scope_is_the_transitive_module_reachable_closure`
     // already covers instead of on the diagnostic it is protecting.
     let targets = |model: &str| -> Vec<String> {
         model_stage0(&db, sync.models[model].source, sync.project)
@@ -1497,21 +1231,22 @@ fn expr0_holds_nan(expr: &crate::ast::Expr0) -> bool {
     }
 }
 
-/// Editing a model that `main` instantiates DOES re-execute `main`'s lowered
-/// stage and unit check.
+/// Editing a model that `main` instantiates re-executes `main`'s UNIT CHECK --
+/// inference reads the target's stage through `model_scope_models` -- and NOT
+/// `main`'s lowered stage, which reads only `main`'s own Stage0 (a module-output
+/// read carries no bounds at the `Expr2` tier, `ast::LoweringScope`).
 ///
-/// This is the direction a too-narrow scope breaks, and it breaks silently: the
-/// stale memo still answers, with the previous revision's lowering. A scope of
-/// "self only" leaves this test red, which is the property that makes the
-/// narrowing testable at all rather than merely plausible.
+/// The unit half is the direction a too-narrow inference scope breaks, and it
+/// breaks silently: the stale memo still answers, with the previous revision's
+/// constraints. An inference scope of "self only" leaves the second half red,
+/// which is what makes the closure testable rather than merely plausible.
 ///
-/// The two queries are demanded SEPARATELY, because a combined count cannot tell
-/// `main`'s stage1 re-executing from `sub`'s: the unit check demands `sub`'s
-/// stage1 itself. Demanding `model_stage1(main)` alone can only re-execute
-/// `main`'s -- that query reads Stage0s, never another model's Stage1 -- so the
-/// first count attributes the invalidation to `main`.
+/// The two queries are demanded SEPARATELY so the counts attribute: demanding
+/// `model_stage1(main)` alone can re-execute nothing but `main`'s own two
+/// stages, so its zero count is `main`'s; the unit check's counts are then the
+/// target's Stage0 and Stage1, which only it demands.
 #[test]
-fn a_module_targets_edit_invalidates_its_instantiators_stage_and_unit_check() {
+fn a_module_targets_edit_invalidates_the_unit_check_and_not_the_instantiators_stage() {
     let parent_child = |child_eqn: &str| {
         x_project(
             sim_specs_with_units("month"),
@@ -1566,15 +1301,9 @@ fn a_module_targets_edit_invalidates_its_instantiators_stage_and_unit_check() {
     let _ = model_stage1(&db, main, sync3.project);
     assert_eq!(
         query_executions(),
-        QueryExecutions {
-            // `sub`'s Stage0 rebuilt because its equation changed; `main`'s did
-            // not (its own variables are untouched), and `main`'s Stage1 rebuilt
-            // because that Stage0 is in its lowering scope.
-            stage0: 1,
-            stage1: 1,
-            unit_check: 0,
-        },
-        "a module target's edit must re-execute the INSTANTIATOR's lowered stage"
+        QueryExecutions::default(),
+        "a module target's edit must leave the INSTANTIATOR's lowered stage alone: \
+         its own variables are untouched and it reads no other model's stage"
     );
 
     reset_query_executions();
@@ -1582,11 +1311,50 @@ fn a_module_targets_edit_invalidates_its_instantiators_stage_and_unit_check() {
     assert_eq!(
         query_executions(),
         QueryExecutions {
-            stage0: 0,
-            // the target's own Stage1, which only the unit check demanded
+            // `sub`'s Stage0 rebuilt because its equation changed, and its
+            // Stage1 with it; both demanded here for the first time since the
+            // edit, through the inference scope.
+            stage0: 1,
             stage1: 1,
             unit_check: 1,
         },
         "a module target's edit must re-execute the instantiator's unit check"
+    );
+}
+
+/// A module-output read lowers WITHOUT bounds at the `Expr2` tier, on the unit
+/// path exactly as on the compile path (`db::lowering_scope_tests`): `main`'s
+/// reduction over `sub_a`'s arrayed output carries `None` where its reduction
+/// over its own arrayed `pop` carries the axis, so `main`'s stage reads nothing
+/// of `sub_a`'s variables.
+#[test]
+fn stage1_lowers_a_module_output_read_without_bounds() {
+    use crate::ast::{Ast, Expr2};
+    use crate::builtins::BuiltinFn;
+
+    let db = SimlinDb::default();
+    let project = arrayed_module_project();
+    let sync = sync_from_datamodel(&db, &project);
+    let main_s1 = model_stage1(&db, sync.models["main"].source, sync.project);
+
+    let reduced_bounds = |var: &str| {
+        let ident: Ident<Canonical> = Ident::new(var);
+        let Some(Ast::Scalar(Expr2::App(BuiltinFn::Sum(arg), _, _))) =
+            main_s1.variables[&ident].ast()
+        else {
+            panic!("{var} is a scalar SUM");
+        };
+        let Expr2::Subscript(_, _, bounds, _) = &**arg else {
+            panic!("{var} reduces over a subscripted reference");
+        };
+        bounds.clone()
+    };
+    assert!(
+        reduced_bounds("total_pop").is_some(),
+        "a wildcard over the model's own arrayed variable carries its axis"
+    );
+    assert!(
+        reduced_bounds("sub_region_total").is_none(),
+        "a wildcard over a module output carries no bounds: the compiler resolves it"
     );
 }

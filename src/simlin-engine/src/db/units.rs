@@ -11,15 +11,15 @@
 // itself is the Functional Core in `units.rs`/`units_infer.rs`/`units_check.rs`;
 // this module only wires it into the salsa graph.
 //
-// It constructs no model stage of its own -- `db::stages` owns that -- with ONE
-// deliberate carve-out: `check_conveyor_param_units` clones the cached Stage0,
-// inserts its synthetic `<len>`/`<capacity>`/`<in_limit>`/leak-fraction auxes
-// into the clone, and calls `ModelStage1::new` on the result. That
-// `ModelStage1::new` call is NOT an unmigrated construction site and must not be
-// replaced with a read of `db::stages::model_stage1`: the whole point is that
-// the augmented stage is a throwaway. Those auxes exist only to be unit-checked,
-// and adding them to a cached stage would feed their constraints into every
-// other reader of that memo -- inference and the ordinary unit check included.
+// It constructs no model stage of its own -- `db::stages` owns that. The one
+// lowering it performs is per expression: `check_conveyor_param_units` parses
+// and lowers its synthetic `<len>`/`<capacity>`/`<in_limit>`/leak-fraction
+// auxes one at a time under the model's variable shapes (the scope
+// `db::stages::model_stage1` lowers the model's own variables under) and
+// unit-checks each against the cached lowered stage. Those auxes exist only to
+// be unit-checked, so they never enter a cached stage, where they would feed
+// their constraints into every other reader of that memo -- inference and the
+// ordinary unit check included.
 
 //! Per-model unit inference and checking as a salsa-tracked query.
 //!
@@ -45,8 +45,8 @@ use crate::common::{Canonical, Ident};
 use crate::datamodel;
 use crate::db::{
     CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceModel,
-    SourceProject, SourceVariable, model_scope_models, model_scope_stage0, model_stage0,
-    model_stage1, project_dimensions_context, project_units_context, source_model_is_stdlib,
+    SourceProject, SourceVariable, model_scope_models, model_stage0, model_stage1,
+    project_dimensions_context, project_units_context, source_model_is_stdlib,
 };
 
 /// Collect the identifiers that must share units because they sit in the
@@ -479,7 +479,7 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
 /// are expression STRINGS on the stock/flow `datamodel::Compat`, not
 /// `ModelStage1` variables, so they must be parsed and lowered here to be
 /// unit-checked. We synthesize one hidden aux per parameter expression, lower
-/// them together in the target model's context (so their variable references
+/// each under the target model's variable shapes (so their variable references
 /// resolve to real declared-or-inferred units), then compare each computed unit
 /// against the unit the block position requires, with the conveyor stock's
 /// declared units `S` and the model time unit `t`:
@@ -503,9 +503,10 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
 /// (a `DoesNotExist` verdict), never reported as a mismatch.
 // The lowered target model, its model name and the inferred-units map are all
 // already resolved by the single caller (`check_model_units`), so they are
-// passed rather than re-derived. The Stage0 scope and the dimension queries are
-// read here instead, ONCE, and only past the early return below: a model with no
-// conveyor -- almost every model -- then pays nothing for them at all.
+// passed rather than re-derived. The model's variable shapes and the dimension
+// context are read here instead, ONCE, and only past the early return below: a
+// model with no conveyor -- almost every model -- then pays nothing for them at
+// all.
 fn check_conveyor_param_units(
     db: &dyn Db,
     model: SourceModel,
@@ -522,7 +523,7 @@ fn check_conveyor_param_units(
 
     // One synthesized parameter-expression aux awaiting unit checking.
     struct SynthParam {
-        ident: Ident<Canonical>,
+        aux: datamodel::Variable,
         expected: UnitMap,
         stock: String,
         label: String,
@@ -540,32 +541,27 @@ fn check_conveyor_param_units(
         .collect();
 
     let mut synth_params: Vec<SynthParam> = Vec::new();
-    let mut synth_dm_vars: Vec<datamodel::Variable> = Vec::new();
 
     // A synthetic parameter aux: scalar, no declared units (we compare its
     // computed units manually), a reserved synthetic name that cannot collide
     // with a user variable.
     let push_param = |synth_params: &mut Vec<SynthParam>,
-                      synth_dm_vars: &mut Vec<datamodel::Variable>,
                       key: &str,
                       expr: &str,
                       expected: UnitMap,
                       stock: &str,
                       label: &str| {
-        let ident_str = format!("$\u{205a}conveyor\u{205a}{key}");
-        let ident = Ident::new(&ident_str);
-        synth_dm_vars.push(datamodel::Variable::Aux(datamodel::Aux {
-            ident: ident_str,
-            equation: datamodel::Equation::Scalar(expr.to_string()),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: datamodel::Compat::default(),
-        }));
         synth_params.push(SynthParam {
-            ident,
+            aux: datamodel::Variable::Aux(datamodel::Aux {
+                ident: format!("$\u{205a}conveyor\u{205a}{key}"),
+                equation: datamodel::Equation::Scalar(expr.to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
             expected,
             stock: stock.to_string(),
             label: label.to_string(),
@@ -597,7 +593,6 @@ fn check_conveyor_param_units(
         // `<len>` (transit time): expected `t`.
         push_param(
             &mut synth_params,
-            &mut synth_dm_vars,
             &format!("{stock_name}\u{205a}len"),
             &conv.transit_time,
             time_units.clone(),
@@ -608,7 +603,6 @@ fn check_conveyor_param_units(
         if let Some(capacity) = &conv.capacity {
             push_param(
                 &mut synth_params,
-                &mut synth_dm_vars,
                 &format!("{stock_name}\u{205a}capacity"),
                 capacity,
                 stock_units.clone(),
@@ -620,7 +614,6 @@ fn check_conveyor_param_units(
         if let Some(in_limit) = &conv.inflow_limit {
             push_param(
                 &mut synth_params,
-                &mut synth_dm_vars,
                 &format!("{stock_name}\u{205a}in_limit"),
                 in_limit,
                 combine(UnitOp::Div, stock_units.clone(), time_units.clone()),
@@ -652,7 +645,6 @@ fn check_conveyor_param_units(
             };
             push_param(
                 &mut synth_params,
-                &mut synth_dm_vars,
                 &format!("{stock_name}\u{205a}leak\u{205a}{}", flow.ident(db)),
                 fraction,
                 expected,
@@ -666,62 +658,58 @@ fn check_conveyor_param_units(
         return;
     }
 
-    // Lower every synthesized parameter aux in the target model's context. We
-    // build a throwaway augmented ModelStage1 from a CLONE of the cached Stage0
-    // rather than perturbing either the real `target_model` (which drives
-    // inference and the ordinary unit check) or the cached stage itself: the
-    // synthetic auxes must not add constraints to the model under analysis, and
-    // must never reach another reader of the memo.
+    // Parse and lower each synthesized parameter aux on its own, under the
+    // model's variable shapes -- the scope `model_stage1` lowers the model's
+    // own variables under, so a parameter expression resolves a reference
+    // exactly as an ordinary equation does -- and unit-check it against the
+    // real lowered stage, which is what its references resolve their units
+    // through. Nothing synthesized here enters a cached stage: the auxes must
+    // not add constraints to the model under analysis, or reach another reader
+    // of the memo.
     let dim_ctx = project_dimensions_context(db, project);
-    let mut aug_ms0 = model_stage0(db, model, project).clone();
-    let synth_ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
-    for dm_var in &synth_dm_vars {
-        let mut dummy: Vec<crate::capture::ImplicitVar> = Vec::new();
-        let vs0 =
-            crate::variable::parse_var(&synth_ctx, dm_var, &mut dummy, |mi| Ok(Some(mi.clone())));
-        aug_ms0.variables.insert(Ident::new(vs0.ident()), vs0);
-    }
-    // The scope holds each reachable model's UNAUGMENTED Stage0 -- including the
-    // target's, so the synthetic auxes stay invisible to dimension resolution
-    // exactly as they were before the stages were cached. It is the same scope
-    // `model_stage1` lowers the real variables in, so a parameter expression
-    // resolves a `module·output` reference exactly as an ordinary equation does.
-    let models_s0 = model_scope_stage0(db, model, project);
-    let scope = crate::model::ScopeStage0 {
-        models: &models_s0,
+    let shapes = model_stage0(db, model, project).lowering_shapes();
+    let scope = crate::ast::LoweringScope {
         dimensions: dim_ctx,
-        model_name: aug_ms0.ident.as_str(),
+        shapes: &shapes,
+        model_name,
     };
-    let aug_s1 = crate::model::ModelStage1::new(&scope, &aug_ms0);
+    let synth_ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
 
     for param in &synth_params {
-        // Extract the lowered parameter expression. A malformed expression has
-        // no AST (it surfaces as a separate compile error), so there is nothing
-        // to unit-check -- skip it.
-        let expr = match aug_s1.variables.get(&param.ident).and_then(|v| v.ast()) {
+        let mut dummy: Vec<crate::capture::ImplicitVar> = Vec::new();
+        let parsed = crate::variable::parse_var(&synth_ctx, &param.aux, &mut dummy, |mi| {
+            Ok(Some(mi.clone()))
+        });
+        let lowered = crate::model::lower_variable(&scope, &parsed);
+        // A malformed expression has no AST (it surfaces as a separate compile
+        // error), so there is nothing to unit-check -- skip it.
+        let expr = match lowered.ast() {
             Some(Ast::Scalar(expr)) | Some(Ast::ApplyToAll(_, expr)) => expr,
             _ => continue,
         };
 
-        let diagnostic_detail =
-            match crate::units_check::evaluate_expr_units(units_ctx, inferred_units, &aug_s1, expr)
-            {
-                // A determinate unit that disagrees with what the block requires.
-                Ok(Units::Explicit(actual)) if actual != param.expected => Some(format!(
-                    "conveyor '{}' {}: computed units '{}' don't match the expected units '{}'",
-                    param.stock, param.label, actual, param.expected
-                )),
-                // Matches, or a pure constant (compatible with any expected unit).
-                Ok(_) => None,
-                // A dependency's units are unknown -- skip, not a dimensional error.
-                Err(UnitError::ConsistencyError(ErrorCode::DoesNotExist, _, _)) => None,
-                // An internal dimensional inconsistency in the expression itself
-                // (e.g. adding incompatible units); surface it against the conveyor.
-                Err(err) => Some(format!(
-                    "conveyor '{}' {}: {}",
-                    param.stock, param.label, err
-                )),
-            };
+        let diagnostic_detail = match crate::units_check::evaluate_expr_units(
+            units_ctx,
+            inferred_units,
+            target_model,
+            expr,
+        ) {
+            // A determinate unit that disagrees with what the block requires.
+            Ok(Units::Explicit(actual)) if actual != param.expected => Some(format!(
+                "conveyor '{}' {}: computed units '{}' don't match the expected units '{}'",
+                param.stock, param.label, actual, param.expected
+            )),
+            // Matches, or a pure constant (compatible with any expected unit).
+            Ok(_) => None,
+            // A dependency's units are unknown -- skip, not a dimensional error.
+            Err(UnitError::ConsistencyError(ErrorCode::DoesNotExist, _, _)) => None,
+            // An internal dimensional inconsistency in the expression itself
+            // (e.g. adding incompatible units); surface it against the conveyor.
+            Err(err) => Some(format!(
+                "conveyor '{}' {}: {}",
+                param.stock, param.label, err
+            )),
+        };
 
         if let Some(detail) = diagnostic_detail {
             CompilationDiagnostic(Diagnostic {

@@ -8,6 +8,8 @@ use indexmap::IndexMap;
 
 #[cfg(test)]
 use crate::ast::Loc;
+#[cfg(test)]
+use crate::ast::LoweringScope;
 use crate::ast::{Ast, Expr0, Expr2, IndexExpr2};
 use crate::builtins::{BuiltinContents, BuiltinFn, walk_builtin_expr};
 use crate::builtins_visitor::{
@@ -22,8 +24,6 @@ use crate::datamodel;
 use crate::db::SourceVariableKind;
 use crate::dimensions::{Dimension, DimensionsContext};
 use crate::lexer::LexerType;
-#[cfg(test)]
-use crate::model::ScopeStage0;
 use crate::module_functions::MacroRegistry;
 use crate::units::parse_units;
 use crate::{ErrorCode, eqn_err, units};
@@ -197,13 +197,6 @@ impl<MI, E> Variable<MI, E> {
             return Some(ast);
         }
         self.ast()
-    }
-
-    pub fn scalar_equation(&self) -> Option<&String> {
-        match &self.eqn {
-            Some(datamodel::Equation::Scalar(s)) => Some(s),
-            _ => None,
-        }
     }
 
     pub fn get_dimensions(&self) -> Option<&[Dimension]> {
@@ -1620,14 +1613,17 @@ pub fn identifier_set(
     classify_dependencies(ast, dimensions, module_inputs).all
 }
 
-/// Collect variable identifiers referenced by `PREVIOUS(x)` calls in an AST.
+/// Build an `Ast<Expr2>` from a scalar equation string via parse + lower, as
+/// the production dependency classification sees it.
 ///
-/// These identifiers are lagged dependencies (t-1), not same-step edges.
-pub fn previous_referenced_idents(ast: &Ast<Expr2>) -> BTreeSet<String> {
-    classify_dependencies(ast, &[], None).previous_referenced
-}
-
-/// Build an `Ast<Expr2>` from a scalar equation string via parse + lower.
+/// The scope carries no shapes, which is what `db::variable_direct_dependencies`
+/// lowers under before it classifies (a bounds-free lowering), so the rows
+/// built here classify the `Expr2` production classifies. Production lowers
+/// under the project's dimension context where this uses an empty one; the
+/// difference is inert for these rows because `DimensionsContext::lookup`
+/// constifies only a qualified `dim·elem` spelling and no row spells one, and
+/// a dimension name inside a `[..]` is filtered by `classify_dependencies` from
+/// the `dimensions` it is handed, never by the lowering.
 ///
 /// Panics on parse or lowering errors -- intended for test use only.
 #[cfg(test)]
@@ -1641,9 +1637,9 @@ pub(crate) fn scalar_ast(eqn: &str) -> Ast<Expr2> {
         None,
     );
     assert!(err.is_empty(), "parse error in test equation: {eqn}");
-    let scope = ScopeStage0 {
-        models: &Default::default(),
+    let scope = LoweringScope {
         dimensions: &Default::default(),
+        shapes: &Default::default(),
         model_name: "test",
     };
     lower_ast(&scope, &ast.unwrap(), false).unwrap()

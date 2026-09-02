@@ -129,15 +129,12 @@ pub mod wasmgen;
 pub mod xmile;
 
 pub use self::common::{Error, ErrorCode, ErrorKind, Result, canonicalize};
-pub use self::model::ModelStage1;
 pub use self::patch::{
     ModelOperation, ModelPatch, ProjectOperation, ProjectPatch, apply_patch, is_view_only_patch,
 };
 pub use self::queue_compile::build_sim;
 pub use self::results::{Method, Results, Specs as SimSpecs};
-pub use self::variable::{
-    DepClassification, Variable, classify_dependencies, identifier_set, previous_referenced_idents,
-};
+pub use self::variable::{DepClassification, Variable, classify_dependencies, identifier_set};
 pub use self::vm::{CompiledSimulation, Vm};
 pub use self::vm_profile::BytecodeProfile;
 

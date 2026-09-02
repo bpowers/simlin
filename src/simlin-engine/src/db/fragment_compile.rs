@@ -20,6 +20,7 @@ use std::collections::{BTreeSet, HashMap};
 use salsa::Accumulator;
 
 use super::*;
+use crate::ast::LoweringScope;
 use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::fragment::{DepShape, FragmentInput, lower_fragment};
 use crate::db::var_fragment::{
@@ -321,89 +322,6 @@ pub fn compile_var_fragment<'db>(
     })
 }
 
-/// The genuinely-shared prefix of synthetic-helper sourcing: resolve a
-/// model's implicit variable from its parent's `implicit_vars`, build its
-/// parse-stage form, and lower it to a `crate::variable::Variable`.
-///
-/// This is the *single shared relation* for "given an `ImplicitVarMeta`,
-/// produce the helper's parsed + lowered form": the chain `parent → the
-/// parse's helper NAMED by the metadata → its parse-stage variable →
-/// lower_variable` (the non-module branch builds via `lower_variable`; the
-/// module branch is the instance's wiring, since a module has no equation).
-/// It is consumed by
-/// [`implicit_fragment_input`], which both `compile_implicit_var_fragment`
-/// (the production per-variable fragment compiler) and
-/// `var_phase_symbolic_fragment_prod`'s no-`SourceVariable` arm (parent-
-/// sourcing a synthetic helper that lands in a recurrence SCC) build their
-/// input through, so the accessor's relation is the engine's relation by
-/// construction.
-///
-/// Returns the helper's canonical name and the lowered variable. Loud-safe
-/// (never panics): `Absent` when this parse synthesized no helper of that name
-/// or the module branch's helper is not a module, `Lowering` with the body's
-/// equation errors when it has any. (`lower_variable` itself is total -- any
-/// lowering error surfaces here, see below.)
-fn lower_implicit_var(
-    db: &dyn Db,
-    meta: &ImplicitVarMeta,
-    model: SourceModel,
-    project: SourceProject,
-) -> Result<(String, crate::variable::Variable), ImplicitInputError> {
-    let parsed = parse_source_variable(db, meta.parent_source_var, project);
-    let implicit_var = meta.find_in(parsed).ok_or(ImplicitInputError::Absent)?;
-    let implicit_name = canonicalize(implicit_var.ident()).into_owned();
-
-    let dim_context = project_dimensions_context(db, project);
-
-    let parsed_implicit = implicit_var.parsed_variable(dim_context);
-
-    if let Some(errors) = parsed_implicit.equation_errors().filter(|e| !e.is_empty()) {
-        return Err(ImplicitInputError::Lowering(errors));
-    }
-
-    // A module-typed helper is its wiring; `lower_variable`'s module arm would
-    // need a populated models map to validate the sources against.
-    let lowered = if meta.is_module {
-        let dm_module = implicit_var.module().ok_or(ImplicitInputError::Absent)?;
-        crate::variable::Variable::module_instance(
-            Ident::new(&implicit_name),
-            Ident::new(&dm_module.model_name),
-            build_module_inputs(
-                model.name(db),
-                &module_input_prefix(&implicit_name),
-                dm_module
-                    .references
-                    .iter()
-                    .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
-            ),
-        )
-    } else {
-        let models = HashMap::new();
-        let scope = crate::model::ScopeStage0 {
-            models: &models,
-            dimensions: dim_context,
-            model_name: "",
-        };
-        let lowered = crate::model::lower_variable(&scope, &parsed_implicit);
-
-        // Loud-safe (GH #580): `lower_variable` is total -- on a lowering error
-        // (e.g. an un-translatable cross-dimension subscript surviving into a
-        // scalar helper as `DimensionInScalarContext`) it records the error and
-        // discards the AST rather than failing. The pre-lowering check above
-        // only inspects the *parsed* implicit; a lowering-stage error would
-        // otherwise leave a helper with `ast == None` that `lower_fragment`
-        // rejects as `EmptyEquation`. Bail out with the errors, which the
-        // caller reports against the parent.
-        if let Some(errors) = lowered.equation_errors() {
-            return Err(ImplicitInputError::Lowering(errors));
-        }
-
-        lowered
-    };
-
-    Ok((implicit_name, lowered))
-}
-
 /// Why [`implicit_fragment_input`] produced no input.
 pub(crate) enum ImplicitInputError {
     /// This parse synthesized no helper of that name: nothing to compile, and
@@ -419,12 +337,32 @@ pub(crate) enum ImplicitInputError {
 /// instance, a hoisted argument aux, or a PREVIOUS/INIT capture) of `model`:
 /// the helper's lowered form and the shape of every name it references.
 ///
+/// This is the *single relation* from an `ImplicitVarMeta` to the helper's
+/// lowered form -- the parent's parse, the helper NAMED by the metadata, its
+/// parse-stage variable, `lower_variable` under the helper's dependency
+/// shapes -- consumed by `compile_implicit_var_fragment` (the production
+/// per-variable fragment compiler), by `var_phase_symbolic_fragment_prod`'s
+/// no-`SourceVariable` arm (a helper that lands in a recurrence SCC) and by the
+/// LTM describers' reconstruction of an element-scoped helper, so every reader
+/// sees one lowering. A helper lowers under the shapes its parent's equation
+/// lowers under, so a hoisted argument is refused where, and with the code,
+/// the plain spelling is (`db::lowering_scope_tests`).
+///
 /// The helper's dependencies come from the parent variable's dependency
 /// extraction (`variable_direct_dependencies(parent).implicit_vars`), built
 /// input-agnostic (the empty `ModuleInputSet`) so both branches of an
 /// `isModuleInput(...)` conditional stay compilable. Every referenced name is
 /// resolved through the per-variable firewall queries, so the helper's fragment
 /// depends on exactly the names it looks up.
+///
+/// Loud-safe (never panics): `Absent` when this parse synthesized no helper of
+/// that name, `Lowering` with the body's equation errors when it does not
+/// parse or lower. `lower_variable` is total (GH #580): a lowering error such
+/// as an un-translatable cross-dimension subscript surviving into a scalar
+/// helper as `DimensionInScalarContext` lands on the variable's error channel
+/// and discards the AST, which `lower_fragment` would otherwise reject as an
+/// `EmptyEquation` -- so the lowered variable is checked as well as the parsed
+/// one, and the caller reports the errors against the parent.
 pub(crate) fn implicit_fragment_input<'db>(
     db: &'db dyn Db,
     meta: &ImplicitVarMeta,
@@ -432,11 +370,18 @@ pub(crate) fn implicit_fragment_input<'db>(
     project: SourceProject,
     module_input_names: &[String],
 ) -> Result<FragmentInput<'db>, ImplicitInputError> {
-    let (implicit_name, lowered) = lower_implicit_var(db, meta, model, project)?;
+    let parsed = parse_source_variable(db, meta.parent_source_var, project);
+    let implicit_var = meta.find_in(parsed).ok_or(ImplicitInputError::Absent)?;
+    let implicit_name = canonicalize(implicit_var.ident()).into_owned();
     let var_ident: Ident<Canonical> = Ident::new(&implicit_name);
 
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
+
+    let parsed_implicit = implicit_var.parsed_variable(dim_context);
+    if let Some(errors) = parsed_implicit.equation_errors().filter(|e| !e.is_empty()) {
+        return Err(ImplicitInputError::Lowering(errors));
+    }
 
     let parent_deps = variable_direct_dependencies(
         db,
@@ -464,7 +409,7 @@ pub(crate) fn implicit_fragment_input<'db>(
         .collect();
     if let crate::variable::VarKind::Stock {
         inflows, outflows, ..
-    } = &lowered.kind
+    } = &parsed_implicit.kind
     {
         all_names.extend(inflows.iter().chain(outflows.iter()).map(Ident::as_str));
     }
@@ -475,7 +420,7 @@ pub(crate) fn implicit_fragment_input<'db>(
         // An arrayed helper (a structural apply-to-all capture) occupies one
         // slot per element; its dimensions are the parse's.
         DepShape::var(
-            lowered
+            parsed_implicit
                 .get_dimensions()
                 .map(<[crate::dimensions::Dimension]>::to_vec)
                 .unwrap_or_default(),
@@ -493,6 +438,18 @@ pub(crate) fn implicit_fragment_input<'db>(
         if let Some(shape) = model_dep_shape(db, model, project, head) {
             dep_shapes.insert(Ident::new(head), shape);
         }
+    }
+
+    // A module-typed helper is its wiring, resolved by `lower_variable`'s
+    // module arm like an explicit instance's.
+    let scope = LoweringScope {
+        dimensions: dim_context,
+        shapes: &dep_shapes,
+        model_name: model.name(db),
+    };
+    let lowered = crate::model::lower_variable(&scope, &parsed_implicit);
+    if let Some(errors) = lowered.equation_errors() {
+        return Err(ImplicitInputError::Lowering(errors));
     }
 
     // A synthesized helper carries no graphical function of its own

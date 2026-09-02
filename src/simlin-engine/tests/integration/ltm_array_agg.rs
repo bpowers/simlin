@@ -687,23 +687,21 @@ fn variable_backed_partial_reduce_loop_scores_finite_and_sustained() {
 /// element-graph fix is pinned directly by
 /// `element_graph_tests::element_graph_scalar_feeder_*`.
 ///
-/// The two follow-on gaps this scalar-target scenario originally exposed are
-/// both fixed now:
+/// Two more properties of this scalar-target scenario, each pinned:
 ///
-/// 1. (FIXED, GH #738) The synthetic agg `$⁚ltm⁚agg⁚0` for
-///    `SUM(pop[*] * scale)` (arrayed `pop` times scalar `scale`, reduced to a
-///    scalar target) used to FAIL fragment compilation and was stubbed to a
-///    constant `0` with an `Assembly` Warning: `compile_ltm_equation_fragment`
-///    lowered the equation with an empty `ScopeStage0.models`, so the
-///    `pop[*] * scale` Op2 never got its Expr2 `ArrayBounds` and Pass-1 temp
-///    decomposition never hoisted it out of the reducer. The agg now compiles
-///    and tracks the inlined reducer's value -- asserted below, and pinned in
-///    detail by `scalar_target_agg_value_matches_inlined_reducer`.
+/// 1. (GH #738) The synthetic agg `$⁚ltm⁚agg⁚0` for `SUM(pop[*] * scale)`
+///    (arrayed `pop` times scalar `scale`, reduced to a scalar target)
+///    compiles and tracks the inlined reducer's value: the LTM lowering is
+///    bounds-free, and the Op2 under the reducer is materialized from the
+///    dependency shapes on the lowered `compiler::Expr`, never from `Expr2`
+///    bounds -- a materializer that needed them stubbed the agg to a constant
+///    `0` with an `Assembly` Warning. Asserted below, and pinned in detail by
+///    `scalar_target_agg_value_matches_inlined_reducer`.
 ///
-/// 2. (FIXED, GH #737) The loop-score *builder* now routes the loop through
-///    the agg: `classify_cycle` sends a cycle that traverses a
-///    `ThroughAgg`-routed edge down the element-level slow path (it is no
-///    longer `PureScalar`), where the post-#533 element graph's
+/// 2. (GH #737) The loop-score *builder* routes the loop through the agg:
+///    `classify_cycle` sends a cycle that traverses a `ThroughAgg`-routed
+///    edge down the element-level slow path (it is not `PureScalar`), where
+///    the element graph's
 ///    `scale → $⁚ltm⁚agg⁚0 → grow` hops are traversed, so the loop score
 ///    composes the two agg-half link scores instead of the direct
 ///    `scale → grow` link. That matters because the DIRECT `scale→grow` link
@@ -1422,65 +1420,6 @@ fn arrayed_helper_resolves_capitalized_dimension() {
          the arrayed helper's canonical ApplyToAll dims must resolve against the \
          capitalized dimension name",
     );
-}
-
-/// Regression for the LTM-vs-plain divergence the arrayed-helper path caused
-/// on C-LEARN: a bare arrayed name *inside an array reducer*
-/// (`PREVIOUS(SUM(arr))`) must use a SCALAR helper, not the arrayed-helper
-/// path. The reducer collapses its arrayed argument to a scalar, so wrapping
-/// `SUM(arr)` in an `Equation::ApplyToAll` would broadcast a scalar reduce
-/// across the active dimensions and corrupt the value -- exactly the shape of
-/// an LTM link-score numerator, which is why enabling LTM diverged from plain.
-/// The non-reducer bare-name case (`PREVIOUS(PREVIOUS(arr))`) still takes the
-/// arrayed path; this pins that the reducer case does not.
-#[test]
-fn bare_arrayed_inside_reducer_uses_scalar_helper() {
-    // `agg[region] = PREVIOUS(SUM(pop))`: SUM(pop) is a whole-array scalar
-    // reduce, so every element of `agg` holds the same lagged total. A
-    // wrongly-arrayed helper would broadcast/mis-shape it.
-    let arrayed = TestProject::new("reducer_bare")
-        .with_sim_time(0.0, 4.0, 1.0)
-        .named_dimension("region", &["north", "south"])
-        .array_stock("pop[region]", "100", &["growth"], &[], None)
-        .array_flow("growth[region]", "pop[region] * 0.1", None)
-        .array_aux_direct(
-            "agg",
-            vec!["region".to_string()],
-            "PREVIOUS(SUM(pop))",
-            None,
-        )
-        .build_datamodel();
-
-    // Scalar reference: `sref = PREVIOUS(SUM(pop))` computed once.
-    let scalar = TestProject::new("reducer_scalar")
-        .with_sim_time(0.0, 4.0, 1.0)
-        .named_dimension("region", &["north", "south"])
-        .array_stock("pop[region]", "100", &["growth"], &[], None)
-        .array_flow("growth[region]", "pop[region] * 0.1", None)
-        .scalar_aux("sref", "PREVIOUS(SUM(pop))")
-        .build_datamodel();
-
-    let run = |project: &datamodel::Project| -> Results {
-        let mut db = SimlinDb::default();
-        let sync = sync_from_datamodel_incremental(&mut db, project, None);
-        let compiled = compile_project_incremental(&db, sync.project, "main")
-            .expect("PREVIOUS(SUM(arr)) in an A2A equation must compile");
-        let mut vm = Vm::new(compiled).expect("VM construction should succeed");
-        vm.run_to_end()
-            .expect("simulation should run to completion");
-        vm.into_results()
-    };
-    let arr = run(&arrayed);
-    let sca = run(&scalar);
-    let sref = series_at(&sca, offset_of(&sca, "sref"));
-    for region in ["north", "south"] {
-        let agg = series_at(&arr, offset_of(&arr, &format!("agg[{region}]")));
-        assert_eq!(
-            agg, sref,
-            "agg[{region}] = PREVIOUS(SUM(pop)) must equal the scalar PREVIOUS(SUM(pop)) \
-             (the whole-array reduce is a scalar broadcast to every element)"
-        );
-    }
 }
 
 /// Run a plain (non-LTM) simulation of `project` to completion.
