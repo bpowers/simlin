@@ -1161,6 +1161,12 @@ is byte-identical on C-LEARN plain and under LTM, the checked adds, the remap
 bound and the `temp_off` narrowing keep their error text, and the dead-code
 lint still denies a row nothing constructs. No semantic divergence.
 
+**Phase 7.5 results printing.** `Results::print_tsv` (the CLI's `simulate`
+output) prints one column per key of the results-offset map, in slot order;
+a slot the map has no key for -- a standalone lookup table, a helper slot the
+map hides -- is not printed, because the map is the contract every reader of
+a series shares and an unnamed slot holds a backend's scratch value.
+
 **Phase 7.1 probe.** The execution-count probe chunk 7.1 owed AC3.1 is
 `db::exec_probe::ProbedDb`: a `SimlinDb` built over salsa storage carrying an
 event callback, which records every `EventKind::WillExecute` database key and
