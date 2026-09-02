@@ -761,16 +761,16 @@ decisions taken on it:
   compiler schedules. They collapse to one memo per variable; the ~20 call
   sites that construct a context are rewritten in chunk 7.4, which is why
   `rg ModuleIdentContext src/` is empty only after that chunk.
-- A `PREVIOUS`/`INIT` capture carries its argument as an AST subtree with
-  positional identity `(parent, id)`: nothing prints one to equation text and
-  parses it back, so the printer and the lexer no longer have to agree on every
-  spelling for a model to compile (GH #913's class). A stdlib or macro module
-  instance and its hoisted call arguments are still text; they are printed at
-  ONE site (`expand_module_function`) and re-parsed at the six production sites
-  that build a helper's parse-stage form, plus the test-only
-  `ModelStage0::new_in_project` oracle. Chunk 7.3 closes those. A helper's name
-  is still its identity at the twenty-one name-keyed sites, and it is derived in
-  ONE place (`capture::synthetic_ident`); see "Phase 7.2 captures" below.
+- Every helper the parse synthesizes carries parsed data, never equation text:
+  a `PREVIOUS`/`INIT` capture and a hoisted module-call argument are `Expr0`
+  subtrees with positional identity `(parent, id)`, and a stdlib or macro module
+  instance is its target model plus its input wiring. The re-parse inventory is
+  therefore EMPTY -- no production site and no test oracle lexes a helper back
+  from text -- so the printer and the lexer do not have to agree on every
+  spelling for a model to compile (GH #913's class). A helper's name is still
+  its identity at the twenty-one name-keyed sites, and it is derived in ONE
+  place (`capture::synthetic_ident`); see "Phase 7.2 captures" and "Phase 7.3a
+  implicit modules" below.
 - AC3.1 needs the parse key and nothing else. The two other causes on the
   record are gone or were never real: the whole-model module map the fragment
   compilers cloned was deleted with Phase 3 (module shapes come from
@@ -795,8 +795,10 @@ D1/D3 predicate (a plain function, not a projection: the parse still decides
 and the dep stage still reads the parsed helper list, so no projection removes
 a whole-model read); 7.2 captures for PREVIOUS/INIT with today's
 capture set, names, and walk order held fixed (the goldens are the defect
-detector); 7.3a stdlib `ImplicitModule` with per-element expansion and shared
-`n`; 7.3b macros, passthrough, and GH #554; 7.4 deletion of `ModuleIdentContext`
+detector); 7.3a `ImplicitModule` with per-element expansion and shared `n`, which
+covers macro CALLS for free because `expand_module_function` is one expansion
+for both; 7.3b macro passthrough and GH #554, the paths that deliberately do
+not reach it; 7.4 deletion of `ModuleIdentContext`
 and the empty-context twin call sites and the AC3.1 flip; 7.5 the shape changes, one commit and ledger row each: dropping
 the captures D1 synthesizes for `PREVIOUS(module-call aux)` and
 `PREVIOUS(m·scalar_port)` (redundant: codegen's `static_slot` already accepts
@@ -818,8 +820,8 @@ hoisted into its own unit of evaluation: `(id, kind, arg, suffix, dims)`, where
 `id` is the walk counter the visitor was at, `suffix` is the active
 apply-to-all element when the parent is expanded per element, and `dims` is
 non-empty only for the GH #541 arrayed capture. `capture::ImplicitVar` is the
-ordered list a parse produces: a `Capture`, or a `Synthesized` module instance
-or hoisted call argument that is still a `datamodel::Variable`.
+ordered list a parse produces: a `Capture`, a `HoistedArg` or an
+`ImplicitModule` ("Phase 7.3a implicit modules" below).
 
 `capture::synthetic_ident(parent, n, part, suffix)` is the single statement of
 how EVERY synthesized helper is named -- captures, module instances, and their
@@ -830,13 +832,13 @@ the results offset map are name-sorted, so a helper filed under a different
 string sorts elsewhere and moves the artifact. Internal code addresses a
 capture by `(parent, id)`.
 
-`Capture::variable_stage0` is the one constructor of a capture's parse-stage
-`Variable`, replacing the `parse_var`-over-printed-text call at every consumer
-(`db::implicit_deps`, `db::fragment_compile::lower_implicit_var`,
-`db::stages::model_stage0`, `db::analysis::reconstruct_implicit_variable`, both
-`db::ltm::compile` sites, and the `ModelStage0::new_in_project` oracle). Two
-things it deliberately keeps rather than simplifies, because dropping either
-would change the compiled artifact rather than the representation. It fills the
+`ImplicitVar::parsed_variable` is the one constructor of a helper's parse-stage
+`Variable` at every consumer (`db::implicit_deps`,
+`db::fragment_compile::lower_implicit_var`, `db::stages::model_stage0`,
+`db::analysis::reconstruct_implicit_variable`, both `db::ltm::compile` sites,
+and the `ModelStage0::new_in_project` oracle). Two things the capture arm
+deliberately keeps rather than simplifies, because dropping either would
+change the compiled artifact rather than the representation. It fills the
 `Variable::eqn` field by printing the subtree, because that field is source
 text by definition and LTM's link-score generator has TWO readers of it:
 `ltm_augment::target_equation_dims`, which takes an arrayed target's
@@ -845,12 +847,12 @@ scalar link score), and `ltm_augment::scalar_or_a2a_target_expr`, which falls
 back to `scalar_eqn_text_or_zero` and RE-PARSES that text whenever the target
 has no lowered AST -- reachable for a capture, because
 `db::analysis::reconstruct_implicit_variable` lowers every capture through the
-total `model::lower_variable`, which discards the AST on a lowering error. So
-what this chunk deletes is the round trip on the COMPILE path, not every round
-trip in the engine: LTM's ordinary link-score generation still prints the
-target's LOWERED body (`patch::expr2_to_expr0` + `print_eqn`) and re-parses it
-in `db::ltm::equation::LtmArm::new`, the GH #965 generated-text boundary, which
-applies to every variable and to captures alike. And it runs the body through
+total `model::lower_variable`, which discards the AST on a lowering error. The
+compile path has no round trip; the engine has one, off it: LTM's link-score
+generation prints the target's LOWERED body (`patch::expr2_to_expr0` +
+`print_eqn`) and re-parses it in `db::ltm::equation::LtmArm::new`, the GH #965
+generated-text boundary, which applies to every variable and to captures
+alike. And it runs the body through
 `instantiate_implicit_modules`, whose per-element gate fires on a bare
 `PREVIOUS`/`INIT` as well as on a module call, so an arrayed capture holding one
 becomes an `Ast::Arrayed` of identical elements rather than staying an
@@ -874,6 +876,126 @@ of one cloned body, and what stops a whitespace-only difference between an
 element's equation and its initial equation from becoming two helpers claiming
 one name. `PartialEq` keeps positions, because salsa uses it to decide whether
 a re-parse changed anything and a moved span changes the diagnostics.
+
+**Phase 7.3a implicit modules.** A stdlib or macro module-function call
+expands into values on the same ordered `ImplicitVar` list a capture rides:
+one `capture::ImplicitModule` -- the instance, its target model plus the
+`references` wiring each input port to the variable feeding it -- and one
+`capture::HoistedArg` per argument that is not a bare identifier, carrying the
+argument's `Expr0` subtree. A bare identifier argument wires straight to its
+port, so the wiring and the hoisted arguments do not correspond one-to-one and
+the `arg{i}` in a name is the argument's position in the CALL. Both
+constructors derive their name from `(parent, id, call name, suffix)` through
+`capture::synthetic_ident`, and an instance shares one walk counter with its
+arguments. `ImplicitVar::parsed_variable(dims)` is the one exhaustive
+conversion to a parse-stage variable, so no consumer (`db::implicit_deps`,
+`db::fragment_compile`, `db::stages`, `db::analysis`, both `db::ltm::compile`
+sites, the `ModelStage0::new_in_project` oracle) lexes a helper back from text.
+
+`capture::insert_implicit_var` is the one rule for two helpers claiming one
+name -- a same-definition repeat is idempotent, a different helper is refused
+as `DuplicateVariable` before it can overwrite the first -- applied inside one
+walk, across the per-element walks of an arrayed parent, and across the dt and
+initial passes of one variable. A macro named `ARG1` invoked as
+`ARG1(k, k * 2)` reaches the refusal from ordinary source: its instance and its
+second argument's helper both derive `$⁚out⁚0⁚arg1`.
+
+A hoisted argument is dimension-substituted BEFORE the hoist
+(`substitute_dimension_refs`), because the helper is a scalar aux with no axis
+of its own for lowering to resolve a name against. The substitution is the
+parse-time stand-in for the compiler's resolution of the same spelling and
+gives the same answer: an active dimension name becomes its element, and a
+foreign dimension name resolves against each active element through
+`DimensionsContext::resolve_mapped_read` -- the element's own name on the
+source axis, then the declared mapping, then a mapped parent -- in the
+parent's NARROWED context, so a dimension with no declared relation to the
+active ones is not found and is left for lowering to refuse. The
+hoisted-argument column of `mapped_reference_semantics_tests` holds every row
+of that module's matrix to the plain equation's reads; the cells that differ
+are refusals at a different stage, named there and under "Phase 7.3 semantic
+divergences". A replay that resolves foreign axes through the whole project's
+`DimensionsContext` is what must not be added: it admits equations the
+compiler refuses when written plainly.
+
+**Phase 7.3b macro fall-throughs.** `MacroRegistry::resolve_call(call,
+enclosing_model)` is the one routing decision for a parsed call --
+`Expand(descriptor)`, `Passthrough(descriptor)`, `RenamedBuiltinSelfCall`,
+`Unresolved` -- read by `BuiltinVisitor::walk` and by the registry's own
+recursion analysis, so the expansion and the macro-call graph cannot disagree
+about which calls expand. The precedence it states -- a project macro shadows
+a like-named builtin -- is the engine's rule: unverified against Vensim's
+macro documentation, which says nothing about a macro named after a builtin,
+and the opposite of XMILE 1.0 3.2.2.5, which reserves builtin names --
+they "cannot be used as vendor- or user-defined namespaces, macros, or
+functions" -- and says a conflict SHOULD be flagged as an error.
+Changing the shadowing semantics is out of this phase's scope; the rule is
+kept and the routing it needs is stated once. A genuine passthrough (`:MACRO: INIT(x) =
+INITIAL(x)`, stored as `init = init(x)` after the importer's rename) lowers as
+the builtin it names at an external call site, under the macro's declared
+arity; inside its own body that same call is the enclosing macro's renamed
+builtin and lowers under the builtin's arity. The false `init -> init`
+recursion edge and the infinite re-resolution of GH #554 are both absent
+because they were one decision. Pinned by
+`macro_expansion_tests::issue_554_model_imports_registers_and_routes_both_init_calls_to_the_builtin`
+(the issue's model through production MDL import) and
+`module_functions::tests::resolve_call_covers_every_arm_and_the_self_call_takes_precedence`.
+
+**Phase 7.3 semantic divergences.** Three refusals are new; the first two are
+of models the base compiled to a value no rule stated, the third of a model
+the base aborted on. All are pinned:
+
+1. Two helpers of one call claiming one name. A macro named `ARG1` invoked as
+   `ARG1(k, k * 2)` mints its instance and its second argument's helper as
+   `$⁚out⁚0⁚arg1`; a last-wins helper map let the instance replace the helper
+   and wired the instance's second port to itself, so `out` simulated to 3
+   where `k + k * 2` is 9. Refused as `DuplicateVariable` naming the helper.
+   Pinned by
+   `macro_expansion_tests::a_macro_named_arg1_cannot_alias_its_own_hoisted_argument`.
+2. A passthrough macro's external call with the builtin's wider arity.
+   `:MACRO: PREVIOUS(x) = PREVIOUS(x)` called as `PREVIOUS(input, 0)` compiled
+   as the two-argument builtin behind a macro that declares one parameter;
+   refused as `BadBuiltinArgs` naming the macro's contract. Pinned by
+   `macro_expansion_tests::a_passthrough_macro_keeps_its_declared_arity_at_an_external_call_site`.
+3. A stdlib call with more arguments than its model has ports (`SMTH1(k, 2,
+   5, 7)`) indexed the port list out of bounds, a process abort; refused as
+   `BadBuiltinArgs` over the call before any argument is hoisted. Pinned by
+   `db::implicit_module_tests::a_call_with_more_arguments_than_ports_is_refused_before_any_hoist`.
+
+Four differences between a hoisted argument and the plain equation predate
+this chunk and are pinned by
+`mapped_reference_semantics_tests::a_hoisted_argument_reads_what_the_plain_equation_reads`
+rather than changed. Two are refusals at a different stage: (a) a bare arrayed
+identifier argument is wired to the scalar input port by name and refused,
+where the plain equation broadcasts it positionally; (b) a helper whose body
+keeps a foreign dimension name is refused in `Expr2` lowering as
+`DimensionInScalarContext` where the plain equation is refused in the compiler
+as `MismatchedDimensions`. Two read a DIFFERENT ELEMENT, and are the ones that
+matter (GH #1035): (c) a subscript naming the ITERATED dimension is substituted
+to the active element's qualified name (`x[State]` -> `x[State·Steel]`), which
+`constify_dimensions` folds to that element's ORDINAL, where Phase 6b's
+compiler resolves the plain `x[State]` through `resolve_mapped_read` -- so
+under a permuted, many-to-one, reverse-cardinality or shared-names map the
+hoisted argument reads the ordinal element (or is refused off the end) and the
+plain equation the mapped one; (d) a target repeating a dimension
+(`target[State,State] = SMTH1(pop[State,State], 1)`) substitutes both indices
+to the first axis's element. The substitution cannot close (c): it does not
+know the source's own axis, and the qualified element is the only spelling a
+scalar helper can carry; the fix is the compiler resolving a qualified element
+of a FOREIGN dimension through the same rule it applies to the dimension name,
+which is a change to plain-equation semantics too (`target[State] =
+x[State·Steel]` would follow the map) and so is a decision, not a chunk.
+
+One diagnostic-only change: a helper whose body fails to LOWER is reported by
+`compile_implicit_var_fragment` as an equation error on the PARENT variable,
+at the span of the argument inside the parent's equation (a helper's subtree
+was written there, so its spans index the parent's text), where before
+nothing reached `collect_all_diagnostics` and the compile result's batch
+message was the only trace. `collect_model_diagnostics` collapses identical
+rows, so one parent's per-element helpers report one row -- and eight corpus
+models that printed one diagnostic several times over (`unrecognized_token`
+ten times on `test_subscript_mixed_assembly`, `empty_equation` twice on the
+`hares_and_lynxes` module port) print it once. Pinned by
+`db::implicit_diag_tests::implicit_helper_lowering_failure_is_an_equation_error_on_the_parent`.
 
 **Phase 7.1 probe.** The execution-count probe chunk 7.1 owed AC3.1 is
 `db::exec_probe::ProbedDb`: a `SimlinDb` built over salsa storage carrying an

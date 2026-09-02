@@ -18,6 +18,27 @@ use crate::db::{
 use crate::vm::{CompiledSimulation, Vm};
 use std::collections::HashMap;
 
+/// The helpers one variable's production parse synthesized, in walk order,
+/// read through `parse_source_variable_with_module_context` under the model's
+/// own module-ident context -- the same call, with the same context, that
+/// `model_implicit_var_info` makes -- so they are the helpers the compile
+/// sees, not a re-derivation.
+#[cfg(test)]
+pub fn implicit_vars_of(
+    db: &SimlinDb,
+    sync: &crate::db::SyncResult,
+    model_name: &str,
+    var: &str,
+) -> Vec<crate::capture::ImplicitVar> {
+    use crate::db::{model_module_ident_context, parse_source_variable_with_module_context};
+    let model = sync.models[model_name].source;
+    let source_var = model.variables(db)[var];
+    let ctx = model_module_ident_context(db, model, sync.project, vec![]);
+    parse_source_variable_with_module_context(db, source_var, sync.project, ctx)
+        .implicit_vars
+        .to_vec()
+}
+
 /// The `(input, expected)` contract table for the ROUND builtin:
 /// round-half-to-even (Python `round()` / IEEE roundTiesToEven).
 ///

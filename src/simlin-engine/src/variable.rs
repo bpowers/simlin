@@ -4,12 +4,14 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use indexmap::IndexMap;
+
 #[cfg(test)]
 use crate::ast::Loc;
 use crate::ast::{Ast, Expr0, Expr2, IndexExpr2};
 use crate::builtins::{BuiltinContents, BuiltinFn, walk_builtin_expr};
 use crate::builtins_visitor::{empty_macro_registry, instantiate_implicit_modules};
-use crate::capture::ImplicitVar;
+use crate::capture::{ImplicitVar, insert_implicit_var};
 use crate::common::{
     Canonical, CanonicalElementName, DimensionName, EquationError, EquationResult, Ident,
     UnitError, canonicalize,
@@ -1112,18 +1114,16 @@ where
     let v: VariableSource<'a> = v.into();
     let dimensions = ctx.dimensions;
 
-    // Canonical name -> its index in `implicit_vars`, for the helpers THIS call
-    // contributes. Seeded empty rather than from the caller's vector, which is
-    // deliberate on both counts:
+    // The helpers THIS call contributes, filed by name. Seeded empty rather
+    // than from the caller's vector, which is deliberate on both counts:
     //
     // * only helpers of the SAME parent can collide, since a synthesized name
     //   embeds its parent's ident (`$⁚{parent}⁚{n}⁚…`) and two parents sharing a
     //   canonical name is already a `DuplicateVariable` model error (GH #885);
     // * `model::ModelStage0` passes ONE vector across every variable of a model,
     //   so seeding from it would make each variable pay for every helper minted
-    //   before it -- quadratic in the model, which is the shape this map exists
-    //   to remove in the first place.
-    let mut implicit_index: HashMap<Ident<Canonical>, usize> = HashMap::new();
+    //   before it -- quadratic in the model.
+    let mut helpers: IndexMap<Ident<Canonical>, ImplicitVar> = IndexMap::new();
 
     // Resolve the default at use (an empty `'static` registry) rather than
     // rebinding here -- unifying a borrowed `Some(&'a _)` with the
@@ -1159,46 +1159,15 @@ where
                         // initial pass reads a different equation (an `Arrayed`
                         // element's own init equation, or `compat.active_initial`).
                         // Downstream, `model_implicit_var_info` is name-keyed and
-                        // `compute_layout` allocates one slot per name, so the
-                        // loser used to be discarded in silence and one phase ran
-                        // the other phase's helper body.
-                        //
-                        // The rule is `dedup_vars_by_ident`'s, applied across the
-                        // phases instead of within one: a same-definition repeat
-                        // collapses (the `Arrayed` arm re-parses every slot on the
-                        // initial pass, so this is the common case and costs
-                        // nothing), and a same-name/different-body pair is a loud
-                        // error rather than a silent pick.
+                        // `compute_layout` allocates one slot per name, so a
+                        // silent last-wins would run one phase's helper body in
+                        // the other. `insert_implicit_var` collapses a
+                        // same-definition repeat (the `Arrayed` arm re-parses
+                        // every slot on the initial pass, so this is the common
+                        // case) and refuses a different body loudly.
                         for new_var in new_vars {
-                            let ident = Ident::<Canonical>::new(new_var.ident());
-                            // Indexed, not scanned: an apply-to-all `SMTH1` over
-                            // an N-element dimension mints ~2N helpers on one
-                            // variable, and a scan here is the same O(k^2) shape
-                            // `ImplicitVarMeta::index_hint` exists to remove --
-                            // measured at +30% on N=800 before this map.
-                            match implicit_index.get(&ident).map(|i| &implicit_vars[*i]) {
-                                Some(existing) if existing.same_definition(&new_var) => {}
-                                Some(_) => {
-                                    // `DuplicateVariable` rather than the
-                                    // `Generic` its within-one-pass twin uses:
-                                    // this one is reachable from a model a user
-                                    // wrote, so the code should say what went
-                                    // wrong. Two helpers really do claim one
-                                    // name here.
-                                    errors.push(EquationError::detailed(
-                                        ErrorCode::DuplicateVariable,
-                                        0,
-                                        0,
-                                        format!(
-                                            "two different synthesized helpers both claim the \
-                                             name '{ident}'"
-                                        ),
-                                    ));
-                                }
-                                None => {
-                                    implicit_index.insert(ident, implicit_vars.len());
-                                    implicit_vars.push(new_var);
-                                }
+                            if let Err(err) = insert_implicit_var(&mut helpers, new_var) {
+                                errors.push(err);
                             }
                         }
                         Some(ast)
@@ -1292,6 +1261,7 @@ where
             )
         }
     };
+    implicit_vars.extend(helpers.into_values());
     Variable {
         ident,
         units,

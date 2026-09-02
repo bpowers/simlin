@@ -435,17 +435,17 @@ fn describe_implicit(v: &crate::capture::ImplicitVar) -> String {
             c.dims().join(","),
             crate::ast::print_eqn(c.arg())
         ),
-        ImplicitVar::Synthesized(other) => match v.module() {
-            Some(m) => {
-                let refs: Vec<String> = m
-                    .references
-                    .iter()
-                    .map(|r| format!("{}->{}", r.src, r.dst))
-                    .collect();
-                format!("{} = module {} {:?}", v.ident(), m.model_name, refs)
-            }
-            None => format!("{} = {:?}", v.ident(), other.get_equation()),
-        },
+        ImplicitVar::HoistedArg(a) => {
+            format!("{} = arg {}", a.ident(), crate::ast::print_eqn(a.arg()))
+        }
+        ImplicitVar::Module(m) => {
+            let refs: Vec<String> = m
+                .references
+                .iter()
+                .map(|r| format!("{}->{}", r.src, r.dst))
+                .collect();
+            format!("{} = module {} {:?}", m.ident, m.model_name, refs)
+        }
     }
 }
 
@@ -638,8 +638,8 @@ fn a_cross_context_helper_name_collision_is_confined_to_a_failing_compile() {
 ///
 /// Refusal, not repair: making this shape WORK needs a phase discriminator in
 /// the synthesized helper name, which changes every implicit helper's identity
-/// and is its own change. A loud error is the same choice `dedup_vars_by_ident`
-/// already makes for the within-one-pass twin of this collision.
+/// and is its own change. A loud error is the same choice `insert_implicit_var`
+/// makes for the within-one-pass twin of this collision.
 /// The rows are derived from `parse_equation`'s enumeration, not sampled.
 /// It has exactly three arms that can make the initial pass read a DIFFERENT
 /// equation than the dt pass, and therefore exactly three routes into this

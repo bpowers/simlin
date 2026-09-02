@@ -80,7 +80,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::common::{Canonical, Ident};
 use crate::db::{
     Db, ModuleIdentContext, SourceModel, SourceProject, model_module_ident_context,
-    parse_source_variable_with_module_context, project_dimensions_context, project_units_context,
+    parse_source_variable_with_module_context, project_dimensions_context,
 };
 use crate::model::{ModelStage0, ModelStage1, ScopeStage0, VariableStage0};
 use crate::variable::VarKind;
@@ -475,7 +475,6 @@ pub(crate) fn model_stage0(db: &dyn Db, model: SourceModel, project: SourceProje
     #[cfg(test)]
     note_execution(&STAGE0_EXECUTIONS);
 
-    let units_ctx = project_units_context(db, project);
     let dim_ctx = project_dimensions_context(db, project);
 
     let display_name = model.name(db);
@@ -494,27 +493,9 @@ pub(crate) fn model_stage0(db: &dyn Db, model: SourceModel, project: SourceProje
         implicit_dm.extend(parsed.implicit_vars.iter().cloned());
     }
 
-    // The implicit variables SMOOTH/DELAY/TREND expansion synthesized have no
-    // `SourceVariable` of their own, so they are built here. A capture already
-    // holds its body as an AST and needs no parse; a module instance and its
-    // hoisted call arguments still carry equation text. Those are plain
-    // stocks/flows/auxes and module instances, never module CALLS, so the
-    // expansion cannot recurse -- assert that rather than silently dropping a
-    // second generation into the `nested` sink.
-    let mut nested_implicit: Vec<crate::capture::ImplicitVar> = Vec::new();
-    let implicit_ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
-    var_list.extend(implicit_dm.into_iter().map(|iv| match iv {
-        crate::capture::ImplicitVar::Capture(capture) => capture.variable_stage0(dim_ctx),
-        crate::capture::ImplicitVar::Synthesized(dm_var) => {
-            crate::variable::parse_var(&implicit_ctx, dm_var.as_ref(), &mut nested_implicit, |mi| {
-                Ok(Some(mi.clone()))
-            })
-        }
-    }));
-    debug_assert!(
-        nested_implicit.is_empty(),
-        "implicit vars should not produce further implicit vars"
-    );
+    // The helpers the parses synthesized have no `SourceVariable` of their
+    // own, so they are built here.
+    var_list.extend(implicit_dm.iter().map(|iv| iv.parsed_variable(dim_ctx)));
 
     let variables: HashMap<Ident<Canonical>, VariableStage0> = var_list
         .into_iter()

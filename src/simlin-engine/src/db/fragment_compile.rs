@@ -20,7 +20,6 @@ use std::collections::{BTreeSet, HashMap};
 use salsa::Accumulator;
 
 use super::*;
-use crate::capture::ImplicitVar;
 use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::fragment::{DepShape, FragmentInput, lower_fragment};
 use crate::db::var_fragment::{
@@ -340,54 +339,38 @@ pub fn compile_var_fragment<'db>(
 /// construction.
 ///
 /// Returns the helper's canonical name and the lowered variable. Loud-safe
-/// `None` (never panics): this parse synthesized no helper of that name, the
-/// module branch's datamodel variable is not actually a `Module`, or the
-/// implicit var has equation errors. (`lower_variable` itself is total -- any
-/// lowering error surfaces as `None` here, see below.)
+/// (never panics): `Absent` when this parse synthesized no helper of that name
+/// or the module branch's helper is not a module, `Lowering` with the body's
+/// equation errors when it has any. (`lower_variable` itself is total -- any
+/// lowering error surfaces here, see below.)
 fn lower_implicit_var<'db>(
     db: &'db dyn Db,
     meta: &ImplicitVarMeta,
     model: SourceModel,
     project: SourceProject,
     module_ident_context: ModuleIdentContext<'db>,
-) -> Option<(String, crate::variable::Variable)> {
+) -> Result<(String, crate::variable::Variable), ImplicitInputError> {
     let parsed = parse_source_variable_with_module_context(
         db,
         meta.parent_source_var,
         project,
         module_ident_context,
     );
-    let implicit_var = meta.find_in(parsed)?;
+    let implicit_var = meta.find_in(parsed).ok_or(ImplicitInputError::Absent)?;
     let implicit_name = canonicalize(implicit_var.ident()).into_owned();
 
     let dim_context = project_dimensions_context(db, project);
 
-    // A capture already holds its body as an AST subtree, so it is built
-    // directly; a module instance and a hoisted module-call argument still
-    // carry equation text and are parsed.
-    let parsed_implicit = match implicit_var {
-        ImplicitVar::Capture(capture) => capture.variable_stage0(dim_context),
-        ImplicitVar::Synthesized(dm_var) => {
-            let units_ctx = project_units_context(db, project);
-            let mut dummy_implicits = Vec::new();
-            let ctx = crate::variable::ParseContext::new(dim_context, units_ctx);
-            crate::variable::parse_var(&ctx, dm_var.as_ref(), &mut dummy_implicits, |mi| {
-                Ok(Some(mi.clone()))
-            })
-        }
-    };
+    let parsed_implicit = implicit_var.parsed_variable(dim_context);
 
-    if parsed_implicit
-        .equation_errors()
-        .is_some_and(|e| !e.is_empty())
-    {
-        return None;
+    if let Some(errors) = parsed_implicit.equation_errors().filter(|e| !e.is_empty()) {
+        return Err(ImplicitInputError::Lowering(errors));
     }
 
     // A module-typed helper is its wiring; `lower_variable`'s module arm would
     // need a populated models map to validate the sources against.
     let lowered = if meta.is_module {
-        let dm_module = implicit_var.module()?;
+        let dm_module = implicit_var.module().ok_or(ImplicitInputError::Absent)?;
         crate::variable::Variable::module_instance(
             Ident::new(&implicit_name),
             Ident::new(&dm_module.model_name),
@@ -415,29 +398,27 @@ fn lower_implicit_var<'db>(
         // discards the AST rather than failing. The pre-lowering check above
         // only inspects the *parsed* implicit; a lowering-stage error would
         // otherwise leave a helper with `ast == None` that `lower_fragment`
-        // rejects as `EmptyEquation`. Bail out with `None` so the error rides
-        // out via the caller's aggregate `missing_vars` string (GH #466 tracks
-        // surfacing assembly-stage errors through the per-variable diagnostic
-        // API).
-        if lowered.equation_errors().is_some() {
-            return None;
+        // rejects as `EmptyEquation`. Bail out with the errors, which the
+        // caller reports against the parent.
+        if let Some(errors) = lowered.equation_errors() {
+            return Err(ImplicitInputError::Lowering(errors));
         }
 
         lowered
     };
 
-    Some((implicit_name, lowered))
+    Ok((implicit_name, lowered))
 }
 
 /// Why [`implicit_fragment_input`] produced no input.
 pub(crate) enum ImplicitInputError {
-    /// This parse synthesized no helper of that name, or the helper did not
-    /// parse or lower: nothing to compile, and nothing to attribute beyond the
-    /// caller's batch message.
+    /// This parse synthesized no helper of that name: nothing to compile, and
+    /// nothing to attribute beyond the caller's batch message.
     Absent,
-    /// The helper's graphical-function table failed to build; the reason names
-    /// the table error.
-    Table(String),
+    /// The helper's body did not parse or lower; these are its errors, whose
+    /// spans index the PARENT's equation text (where the helper's subtree was
+    /// written), so they are reported as equation diagnostics on the parent.
+    Lowering(Vec<crate::common::EquationError>),
 }
 
 /// Build the fragment input of one implicit helper (a SMOOTH/DELAY/TREND
@@ -460,8 +441,7 @@ pub(crate) fn implicit_fragment_input<'db>(
     let module_ident_context =
         model_module_ident_context(db, model, project, module_input_names.to_vec());
     let (implicit_name, lowered) =
-        lower_implicit_var(db, meta, model, project, module_ident_context)
-            .ok_or(ImplicitInputError::Absent)?;
+        lower_implicit_var(db, meta, model, project, module_ident_context)?;
     let var_ident: Ident<Canonical> = Ident::new(&implicit_name);
 
     let dim_context = project_dimensions_context(db, project);
@@ -525,25 +505,10 @@ pub(crate) fn implicit_fragment_input<'db>(
         }
     }
 
+    // A synthesized helper carries no graphical function of its own
+    // (`ImplicitVar::parsed_variable` builds it with no tables); only the
+    // tables of the dependencies it reads through `LOOKUP(dep, x)` are needed.
     let mut tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
-    let gf_tables = lowered.tables();
-    if !gf_tables.is_empty() {
-        match gf_tables
-            .iter()
-            .map(|t| crate::compiler::Table::new(&implicit_name, t))
-            .collect::<crate::Result<Vec<_>>>()
-        {
-            Ok(ts) if !ts.is_empty() => {
-                tables.insert(var_ident, ts);
-            }
-            Err(err) => {
-                return Err(ImplicitInputError::Table(format!(
-                    "its graphical-function table failed to build: {err}"
-                )));
-            }
-            _ => {}
-        }
-    }
     for dep_name in &all_names {
         let (head, qualified) = dep_head(dep_name);
         if qualified || tables.contains_key(head) {
@@ -654,23 +619,40 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
         .accumulate(db);
     };
 
+    // A helper that exists but for which nothing can be emitted keeps its
+    // place in the fragment map (its runlist entries then surface as missing
+    // fragments).
+    let unemitted = || {
+        Some(VarFragmentResult {
+            fragment: CompiledVarFragment {
+                ident: meta.name.clone(),
+                initial_bytecodes: None,
+                flow_bytecodes: None,
+                stock_bytecodes: None,
+            },
+            flow_invariance: None,
+        })
+    };
     let input = match implicit_fragment_input(db, meta, model, project, module_input_names) {
         Ok(input) => input,
         Err(ImplicitInputError::Absent) => return None,
-        // The helper exists but nothing can be emitted for it; report why, and
-        // keep the helper's place in the fragment map (its runlist entries
-        // then surface as missing fragments).
-        Err(ImplicitInputError::Table(reason)) => {
-            report(reason);
-            return Some(VarFragmentResult {
-                fragment: CompiledVarFragment {
-                    ident: meta.name.clone(),
-                    initial_bytecodes: None,
-                    flow_bytecodes: None,
-                    stock_bytecodes: None,
-                },
-                flow_invariance: None,
-            });
+        // A body's equation errors are the PARENT's: their spans index the
+        // parent's equation text, where the argument was written, so they are
+        // reported against the parent and render as a snippet under the
+        // argument, exactly as a plain equation's errors do. Identical errors
+        // from the per-element helpers of one parent collapse to one row.
+        Err(ImplicitInputError::Lowering(errors)) => {
+            let parent = meta.parent_source_var.ident(db).clone();
+            for err in errors {
+                CompilationDiagnostic(Diagnostic {
+                    model: model.name(db).clone(),
+                    variable: Some(parent.clone()),
+                    error: DiagnosticError::Equation(err),
+                    severity: DiagnosticSeverity::Error,
+                })
+                .accumulate(db);
+            }
+            return unemitted();
         }
     };
 

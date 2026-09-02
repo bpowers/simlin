@@ -51,7 +51,7 @@
 //! *bare* (unsubscripted) arrayed name inside a *nested* `PREVIOUS` --
 //! `p2bare[region] = PREVIOUS(PREVIOUS(pop))` -- now compiles and
 //! simulates, producing the same per-element values as the explicitly
-//! subscripted form. `builtins_visitor`'s `make_temp_arg` synthesizes an
+//! subscripted form. `builtins_visitor`'s `hoist_capture` synthesizes an
 //! *arrayed* (`Equation::ApplyToAll`) helper aux over the active A2A
 //! dimensions for the inner `PREVIOUS(pop)` and references it
 //! `helper[<element>]`, so the bare arrayed name keeps its array shape
@@ -977,7 +977,7 @@ fn size_reducer_previous_helper_compiles_and_is_correct() {
 /// stubbed to `0`, collapsing the loop score. Piece 2 worked around it
 /// generator-side; this engine-level fix removes the root cause.
 ///
-/// Fix (GH #541): `make_temp_arg` in `builtins_visitor.rs` now synthesizes
+/// Fix (GH #541): `hoist_capture` in `builtins_visitor.rs` now synthesizes
 /// an *arrayed* (`Equation::ApplyToAll`) helper aux over the active A2A
 /// dimensions when the captured argument carries a bare variable reference,
 /// and references it `helper[<element>]`. The bare arrayed name keeps its
@@ -1151,7 +1151,7 @@ fn subscripted_arrayed_nested_previous_matches_scalar() {
 /// GH #541, multi-dimensional case: a bare arrayed name in a nested
 /// `PREVIOUS` inside an apply-to-all equation over *two* dimensions
 /// compiles and matches the explicitly subscripted form per element.
-/// `make_temp_arg`'s arrayed helper is `ApplyToAll([region, age], ...)`, so
+/// `hoist_capture`'s arrayed helper is `ApplyToAll([region, age], ...)`, so
 /// the bare `pop` reference keeps its full 2-D shape.
 #[test]
 fn bare_arrayed_nested_previous_multidim_matches_subscripted() {
@@ -1665,7 +1665,7 @@ fn arrayed_per_element_same_body_previous_correct() {
 }
 
 /// The `INIT` twin of `arrayed_per_element_previous_keeps_per_slot_identity`:
-/// `INIT` arguments take the same `make_temp_arg` arrayed-helper path, so a
+/// `INIT` arguments take the same `hoist_capture` arrayed-helper path, so a
 /// per-element slot collision would corrupt initial values too. `INIT(z)` is
 /// `z` at the initial step held constant, so each slot must equal its own
 /// scalar's initial value.

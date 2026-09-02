@@ -9,13 +9,13 @@
 //! `db::prev_init_tests::every_prev_init_argument_shape_agrees_between_the_parse_and_codegen`
 //! decides WHICH arguments capture; these tests pin what the capture then IS.
 //! Together they cover the `PREVIOUS`/`INIT` routing arms of
-//! `builtins_visitor::walk` and both branches of its `make_temp_arg`.
+//! `builtins_visitor::walk` and both branches of its `hoist_capture`.
 
 use super::*;
 use crate::ast::{Expr0, print_eqn};
 use crate::capture::{Capture, CaptureKind, ImplicitVar};
 use crate::lexer::LexerType;
-use crate::test_common::TestProject;
+use crate::test_common::{TestProject, implicit_vars_of};
 
 /// How the row's equation is attached to the model, which is what decides
 /// whether the parse walks it once or once per element.
@@ -71,7 +71,7 @@ struct CaptureRow {
 /// because a macro body needs a project a `TestProject` cannot express.
 const ROWS: &[CaptureRow] = &[
     CaptureRow {
-        covers: "make_temp_arg scalar branch: an argument that references no storage at all",
+        covers: "hoist_capture scalar branch: an argument that references no storage at all",
         parent: Parent::Scalar,
         equation: "PREVIOUS(k * 2, 0)",
         captures: &[("$⁚lagged⁚0⁚arg0", CaptureKind::Previous, "k * 2", &[])],
@@ -126,7 +126,7 @@ const ROWS: &[CaptureRow] = &[
         rewritten: None,
     },
     CaptureRow {
-        covers: "make_temp_arg scalar branch inside apply-to-all: one capture per element, \
+        covers: "hoist_capture scalar branch inside apply-to-all: one capture per element, \
                  each carrying its element suffix. Substitution is a no-op on this body -- \
                  the index is a VARIABLE, not a dimension -- so the three bodies are equal \
                  and only the suffixes tell the captures apart",
@@ -142,13 +142,13 @@ const ROWS: &[CaptureRow] = &[
         ),
     },
     CaptureRow {
-        covers: "make_temp_arg scalar branch inside apply-to-all, with the substitution \
+        covers: "hoist_capture scalar branch inside apply-to-all, with the substitution \
                  actually firing: a dimension reference in the body is rewritten to the \
                  active element, so each element's capture holds a DIFFERENT body. This is \
                  the one arm where the capture is deliberately not the source subtree",
         parent: Parent::ApplyToAll,
         // `Op2`, so the routing's pre-substitution (which only fires on a bare
-        // `Subscript` arg0) does not run and `make_temp_arg` owns the whole
+        // `Subscript` arg0) does not run and `hoist_capture` owns the whole
         // substitution; `k` is the bare variable reference and `vals[d]` the
         // subscript, which together select the SCALAR branch over the arrayed
         // one (`arg_has_bare_var_ref && !arg_has_subscript`).
@@ -176,7 +176,7 @@ const ROWS: &[CaptureRow] = &[
         rewritten: Some("substitute_dimension_refs rewrites the body per element"),
     },
     CaptureRow {
-        covers: "make_temp_arg ARRAYED branch (GH #541): a bare arrayed name inside the \
+        covers: "hoist_capture ARRAYED branch (GH #541): a bare arrayed name inside the \
                  argument keeps its array shape, so ONE apply-to-all capture is synthesized \
                  for every element and the suffix is omitted so they dedup to one",
         parent: Parent::ApplyToAll,
@@ -190,7 +190,7 @@ const ROWS: &[CaptureRow] = &[
         rewritten: Some("the walk gives the inner PREVIOUS its default fallback"),
     },
     CaptureRow {
-        covers: "make_temp_arg ARRAYED branch under a PER-ELEMENT parent: each slot gets a \
+        covers: "hoist_capture ARRAYED branch under a PER-ELEMENT parent: each slot gets a \
                  fresh visitor, so the walk counter restarts at 0 for every one of them and \
                  the element suffix is the whole of what keeps their names apart (PR #668)",
         parent: Parent::PerElement,
@@ -247,17 +247,8 @@ fn model_for(row: &CaptureRow) -> (TestProject, &'static str) {
 }
 
 /// The captures one variable's production parse synthesized, in walk order.
-///
-/// Read through `parse_source_variable_with_module_context` under the model's
-/// own module-ident context -- the same call, with the same context, that
-/// `model_implicit_var_info` makes -- so these are the captures the compile
-/// sees, not a re-derivation.
 fn captures_of(db: &SimlinDb, sync: &SyncResult, model_name: &str, var: &str) -> Vec<Capture> {
-    let model = sync.models[model_name].source;
-    let source_var = model.variables(db)[var];
-    let ctx = model_module_ident_context(db, model, sync.project, vec![]);
-    parse_source_variable_with_module_context(db, source_var, sync.project, ctx)
-        .implicit_vars
+    implicit_vars_of(db, sync, model_name, var)
         .iter()
         .filter_map(ImplicitVar::capture)
         .cloned()
@@ -418,246 +409,6 @@ fn a_capture_holds_the_argument_subtree_itself() {
     );
 }
 
-/// A capture builds the same parse-stage variable that parsing its printed
-/// equation built.
-///
-/// This is the equivalence the whole chunk rests on: every consumer that used
-/// to re-parse a helper's equation text now calls `Capture::variable_stage0`,
-/// so if the two disagree the dependency graph, the layout and the bytecode
-/// all move. The `datamodel::Variable` on the right is built by the recipe the
-/// parse used to build it with -- the capture's own ident, its argument
-/// printed, and `Scalar` or `ApplyToAll` over its own declared dimensions --
-/// and every field of it comes off the capture, so nothing about the
-/// comparison is invented.
-///
-/// Both sides are reduced by [`normalize_expr`] first -- spans cleared,
-/// identifiers canonicalized -- and that function states what each reduction
-/// hides and why neither is observable.
-#[test]
-fn a_capture_builds_the_variable_parsing_its_printed_equation_built() {
-    for row in ROWS {
-        let what = row.covers;
-        let eqn = row.equation;
-        let (tp, var) = model_for(row);
-        let dm = tp.build_datamodel();
-        let db = SimlinDb::default();
-        let sync = sync_from_datamodel(&db, &dm);
-        let dim_ctx = project_dimensions_context(&db, sync.project);
-        let units_ctx = project_units_context(&db, sync.project);
-
-        for capture in captures_of(&db, &sync, "main", var) {
-            let equation = if capture.dims().is_empty() {
-                datamodel::Equation::Scalar(print_eqn(capture.arg()))
-            } else {
-                datamodel::Equation::ApplyToAll(capture.dims().to_vec(), print_eqn(capture.arg()))
-            };
-            let dm_var = datamodel::Variable::Aux(datamodel::Aux {
-                ident: capture.ident().to_string(),
-                equation,
-                documentation: String::new(),
-                units: None,
-                gf: None,
-                ai_state: None,
-                uid: None,
-                compat: datamodel::Compat::default(),
-            });
-            let mut nested = Vec::new();
-            let ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
-            let reparsed =
-                crate::variable::parse_var(&ctx, &dm_var, &mut nested, |mi| Ok(Some(mi.clone())));
-            assert!(
-                nested.is_empty(),
-                "{what}: `{eqn}` -- a capture body must synthesize no further helpers"
-            );
-
-            let built = capture.variable_stage0(dim_ctx);
-            let id = capture.ident();
-            assert_eq!(
-                built.ident, reparsed.ident,
-                "{what}: `{eqn}` -- ident of {id}"
-            );
-            assert_eq!(built.eqn, reparsed.eqn, "{what}: `{eqn}` -- eqn of {id}");
-            assert_eq!(
-                built.errors, reparsed.errors,
-                "{what}: `{eqn}` -- equation errors of {id}"
-            );
-            assert_eq!(
-                built.units, reparsed.units,
-                "{what}: `{eqn}` -- units of {id}"
-            );
-            assert!(
-                built.unit_errors == reparsed.unit_errors,
-                "{what}: `{eqn}` -- unit errors of {id} ({} vs {})",
-                built.unit_errors.len(),
-                reparsed.unit_errors.len()
-            );
-            // The bodies first, printed, because that is the readable failure;
-            // then the WHOLE `VarKind`, which additionally covers `tables`,
-            // `non_negative`, `is_flow`, `is_table_only` and any structural
-            // difference the printer would hide -- every field a consumer of
-            // the parse-stage variable can read.
-            assert_eq!(
-                built.ast().map(print_ast),
-                reparsed.ast().map(print_ast),
-                "{what}: `{eqn}` -- body of {id}"
-            );
-            assert_eq!(
-                built.init_ast().map(print_ast),
-                reparsed.init_ast().map(print_ast),
-                "{what}: `{eqn}` -- initial-phase body of {id}"
-            );
-            assert_eq!(
-                normalize_kind(built.kind.clone()),
-                normalize_kind(reparsed.kind.clone()),
-                "{what}: `{eqn}` -- VarKind of {id}"
-            );
-        }
-    }
-}
-
-/// One `Expr0` reduced to what the next stage will see: every span cleared and
-/// every identifier canonicalized.
-///
-/// Both reductions are what makes the comparison in
-/// [`a_capture_builds_the_variable_parsing_its_printed_equation_built`] an
-/// equality rather than a near-equality, and neither hides anything a consumer
-/// can observe.
-///
-/// Spans: the right-hand side made the round trip this change deletes, so its
-/// spans index the printed helper text.
-/// [`a_capture_holds_the_argument_subtree_itself`] is where spans are the
-/// property under test.
-///
-/// Identifiers: a capture keeps the SOURCE spelling of an identifier where a
-/// re-parse kept the lexer's. The live case is a qualified element index --
-/// `PREVIOUS(vals[d.e2], 0)` captures `RawIdent("d.e2")`, where re-parsing
-/// `print_eqn`'s output produced `RawIdent("d·e2")`. `Expr0` -> `Expr1` lowering
-/// canonicalizes every identifier, and `common::canonicalize` maps an unquoted
-/// `.` to `·`, so the two are one identifier from that point on. That is an
-/// argument, not a measurement, and the measurement is
-/// [`a_captures_fragment_is_its_argument_compiled`]: it compiles that row's
-/// capture and an ordinary aux holding the same expression and requires
-/// identical bytecode.
-fn normalize_expr(expr: Expr0) -> Expr0 {
-    use crate::ast::IndexExpr0;
-    use crate::common::{RawIdent, canonicalize};
-    fn ident(id: RawIdent) -> RawIdent {
-        RawIdent::new_from_str(&canonicalize(id.as_str()))
-    }
-    fn index(idx: IndexExpr0) -> IndexExpr0 {
-        match idx {
-            IndexExpr0::Wildcard(l) => IndexExpr0::Wildcard(l),
-            IndexExpr0::StarRange(d, l) => IndexExpr0::StarRange(ident(d), l),
-            IndexExpr0::Range(a, b, l) => {
-                IndexExpr0::Range(normalize_expr(a), normalize_expr(b), l)
-            }
-            IndexExpr0::DimPosition(n, l) => IndexExpr0::DimPosition(n, l),
-            IndexExpr0::Expr(e) => IndexExpr0::Expr(normalize_expr(e)),
-        }
-    }
-    let expr = expr.strip_loc();
-    match expr {
-        Expr0::Const(_, _, _) => expr,
-        Expr0::Var(id, l) => Expr0::Var(ident(id), l),
-        Expr0::App(crate::builtins::UntypedBuiltinFn(f, args), l) => Expr0::App(
-            crate::builtins::UntypedBuiltinFn(f, args.into_iter().map(normalize_expr).collect()),
-            l,
-        ),
-        Expr0::Subscript(id, idx, l) => {
-            Expr0::Subscript(ident(id), idx.into_iter().map(index).collect(), l)
-        }
-        Expr0::Op1(op, r, l) => Expr0::Op1(op, Box::new(normalize_expr(*r)), l),
-        Expr0::Op2(op, a, b, l) => Expr0::Op2(
-            op,
-            Box::new(normalize_expr(*a)),
-            Box::new(normalize_expr(*b)),
-            l,
-        ),
-        Expr0::If(c, t, f, l) => Expr0::If(
-            Box::new(normalize_expr(*c)),
-            Box::new(normalize_expr(*t)),
-            Box::new(normalize_expr(*f)),
-            l,
-        ),
-    }
-}
-
-/// [`normalize_expr`] over one `Ast<Expr0>`.
-fn normalize_ast(ast: crate::ast::Ast<Expr0>) -> crate::ast::Ast<Expr0> {
-    use crate::ast::Ast;
-    match ast {
-        Ast::Scalar(e) => Ast::Scalar(normalize_expr(e)),
-        Ast::ApplyToAll(dims, e) => Ast::ApplyToAll(dims, normalize_expr(e)),
-        Ast::Arrayed(dims, elements, default, apply_default) => Ast::Arrayed(
-            dims,
-            elements
-                .into_iter()
-                .map(|(k, e)| (k, normalize_expr(e)))
-                .collect(),
-            default.map(normalize_expr),
-            apply_default,
-        ),
-    }
-}
-
-/// [`normalize_expr`] over one parse-stage `VarKind`. The non-`Aux` arms carry
-/// no `Expr0` of their own at this stage, so they pass through.
-fn normalize_kind(
-    kind: crate::variable::VarKind<datamodel::ModuleReference, Expr0>,
-) -> crate::variable::VarKind<datamodel::ModuleReference, Expr0> {
-    use crate::variable::VarKind;
-    match kind {
-        VarKind::Aux {
-            ast,
-            init_ast,
-            tables,
-            non_negative,
-            is_flow,
-            is_table_only,
-        } => VarKind::Aux {
-            ast: ast.map(normalize_ast),
-            init_ast: init_ast.map(normalize_ast),
-            tables,
-            non_negative,
-            is_flow,
-            is_table_only,
-        },
-        other => other,
-    }
-}
-
-/// One `Ast<Expr0>` printed back to text, for the readable half of the
-/// comparisons above.
-fn print_ast(ast: &crate::ast::Ast<Expr0>) -> String {
-    use crate::ast::Ast;
-    match ast {
-        Ast::Scalar(e) => print_eqn(e),
-        Ast::ApplyToAll(dims, e) => format!(
-            "[{}] {}",
-            dims.iter()
-                .map(|d| d.name().to_string())
-                .collect::<Vec<_>>()
-                .join(","),
-            print_eqn(e)
-        ),
-        Ast::Arrayed(dims, elements, _, _) => {
-            let mut parts: Vec<String> = elements
-                .iter()
-                .map(|(k, e)| format!("{}={}", k.as_str(), print_eqn(e)))
-                .collect();
-            parts.sort();
-            format!(
-                "[{}] {}",
-                dims.iter()
-                    .map(|d| d.name().to_string())
-                    .collect::<Vec<_>>()
-                    .join(","),
-                parts.join(";")
-            )
-        }
-    }
-}
-
 /// A capture's compiled fragment is its argument, compiled.
 ///
 /// The comparison is against a sibling aux of the same model holding the same
@@ -737,7 +488,7 @@ fn a_captures_fragment_is_its_argument_compiled() {
 /// A capture synthesized inside a macro body is filed under the BODY
 /// variable's name, not the invoking variable's.
 ///
-/// The macro-body arm reaches `make_temp_arg` through the same routing as any
+/// The macro-body arm reaches `hoist_capture` through the same routing as any
 /// other equation -- what a macro body changes is which calls resolve to the
 /// builtin (`enclosing_model`, GH #554), not how a capture is minted -- so
 /// this row exists to say that the parent a capture names is the variable
@@ -815,4 +566,78 @@ SAVEPER  = TIME STEP
         "a capture in a macro body is named for the body variable it was hoisted out of"
     );
     assert_eq!(captures[0].kind().as_str(), "PREVIOUS");
+}
+
+/// Two helpers claiming one name and defining the same value are ONE helper,
+/// wherever they were written: the dt pass parses an arrayed element's
+/// equation and the initial pass its `init_eqn`, both name their helpers from
+/// a counter that restarts at zero, and here the two texts differ only in
+/// spacing (`e1`, `e2`) or in the spelling of one constant (`e3`, `2.0` for
+/// `2`). `capture::insert_implicit_var` collapses each pair by the value it
+/// computes rather than by source position or spelling; comparing either
+/// would make this model refuse to compile with two `$⁚out⁚0⁚arg0⁚e1`
+/// claimants.
+///
+/// The element `init_eqn` is the XMILE `<element><init_eqn>` the reader
+/// produces (`TestProject` has no builder for it, so the datamodel is built
+/// directly). The refusal arm -- two helpers claiming one name with DIFFERENT
+/// bodies -- is pinned from source by
+/// `macro_expansion_tests::a_macro_named_arg1_cannot_alias_its_own_hoisted_argument`.
+#[test]
+fn a_same_body_helper_from_the_initial_pass_collapses_into_the_dt_passes() {
+    let mut tp = TestProject::new("collapse")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("d", &["e1", "e2", "e3"])
+        .scalar_aux("k", "3");
+    tp.variables.push(datamodel::Variable::Aux(datamodel::Aux {
+        ident: "out".to_string(),
+        equation: datamodel::Equation::Arrayed(
+            vec!["d".to_string()],
+            vec![
+                (
+                    "e1".to_string(),
+                    "PREVIOUS(k*2, 0)".to_string(),
+                    Some("PREVIOUS(k * 2, 0)".to_string()),
+                    None,
+                ),
+                (
+                    "e2".to_string(),
+                    "PREVIOUS(k*3, 0)".to_string(),
+                    Some("PREVIOUS( k * 3 , 0 )".to_string()),
+                    None,
+                ),
+                (
+                    "e3".to_string(),
+                    "PREVIOUS(k*2, 0)".to_string(),
+                    Some("PREVIOUS(k*2.0, 0)".to_string()),
+                    None,
+                ),
+            ],
+            None,
+            false,
+        ),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    }));
+    let dm = tp.build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &dm);
+    let captures: Vec<(String, String)> = captures_of(&db, &sync, "main", "out")
+        .iter()
+        .map(|c| (c.ident().to_string(), print_eqn(c.arg())))
+        .collect();
+    assert_eq!(
+        captures,
+        vec![
+            ("$⁚out⁚0⁚arg0⁚e1".to_string(), "k * 2".to_string()),
+            ("$⁚out⁚0⁚arg0⁚e2".to_string(), "k * 3".to_string()),
+            ("$⁚out⁚0⁚arg0⁚e3".to_string(), "k * 2".to_string()),
+        ],
+        "one capture per element, from the two passes' spellings of one body"
+    );
+    tp.assert_compiles_incremental();
 }

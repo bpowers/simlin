@@ -2210,7 +2210,7 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
 //
 // element-cycle-resolution.AC3.1: a well-founded recurrence whose SCC
 // includes a synthetic helper (here an INIT-expr-arg helper synthesized by
-// `make_temp_arg`, `$\u{205A}{parent}\u{205A}{n}\u{205A}arg0\u{205A}{sub}`
+// `hoist_capture`, `$\u{205A}{parent}\u{205A}{n}\u{205A}arg0\u{205A}{sub}`
 // per design deviation 2) is resolvable when the helper's symbolic
 // `PerVarBytecodes` is sourced from its parent variable's `implicit_vars`,
 // mirroring the production `compile_implicit_var_fragment` chain.
@@ -2227,7 +2227,7 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
 // in the element order.
 
 /// `ecc[t]` over `t=[t1,t2,t3]` with `ecc[t1] = INIT(seed * 2)` (an
-/// expression INIT arg -> `make_temp_arg` synthesizes a scalar helper aux,
+/// expression INIT arg -> `hoist_capture` synthesizes a scalar helper aux,
 /// the canonical `$\u{205A}ecc\u{205A}0\u{205A}arg0\u{205A}t1` form) and a
 /// well-founded forward element recurrence `ecc[t2]=ecc[t1]+1`,
 /// `ecc[t3]=ecc[t2]+1`. `seed` is an external constant the helper reads.

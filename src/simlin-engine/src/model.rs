@@ -444,23 +444,11 @@ impl ModelStage0 {
             .map(|v| parse_var(&ctx, v, &mut implicit_vars, |mi| Ok(Some(mi.clone()))))
             .collect();
 
-        {
-            // FIXME: this is an unfortunate API choice
-            let mut dummy_implicit_vars: Vec<crate::capture::ImplicitVar> = Vec::new();
-            let implicit_ctx = ParseContext::new(&dimensions_ctx, units_ctx);
-            variable_list.extend(implicit_vars.into_iter().map(|iv| match iv {
-                crate::capture::ImplicitVar::Capture(capture) => {
-                    capture.variable_stage0(&dimensions_ctx)
-                }
-                crate::capture::ImplicitVar::Synthesized(x_var) => parse_var(
-                    &implicit_ctx,
-                    x_var.as_ref(),
-                    &mut dummy_implicit_vars,
-                    |mi| Ok(Some(mi.clone())),
-                ),
-            }));
-            assert_eq!(0, dummy_implicit_vars.len());
-        }
+        variable_list.extend(
+            implicit_vars
+                .iter()
+                .map(|iv| iv.parsed_variable(&dimensions_ctx)),
+        );
 
         let variables: HashMap<Ident<Canonical>, _> = variable_list
             .into_iter()

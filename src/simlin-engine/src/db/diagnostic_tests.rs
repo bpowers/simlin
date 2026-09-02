@@ -369,6 +369,38 @@ fn test_ac2_3_empty_equation() {
     );
 }
 
+/// Identical diagnostic rows collapse to one. The parse of an arrayed
+/// element's equation runs twice -- once for the dt phase and once for the
+/// initial phase, which re-parses the element's equation when it has no
+/// `init_eqn` of its own -- so an equation that does not parse records the
+/// same error twice on the variable, and each copy reached the accumulator.
+/// `collect_model_diagnostics` reports it once. (The same collapse is what
+/// keeps one apply-to-all parent's per-element helpers at one row in
+/// `db::implicit_diag_tests`.)
+#[test]
+fn identical_diagnostic_rows_collapse_to_one() {
+    let project = crate::test_common::TestProject::new("dup_rows")
+        .named_dimension("d", &["e1"])
+        .array_with_ranges("y[d]", vec![("e1", "1 +")])
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+    let rows: Vec<&Diagnostic> = diags
+        .iter()
+        .filter(|d| d.variable.as_deref() == Some("y"))
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the element's parse error is one row, not one per phase: {rows:#?}"
+    );
+    assert!(
+        matches!(&rows[0].error, DiagnosticError::Equation(_)),
+        "it is the equation's own parse error: {rows:#?}"
+    );
+}
+
 /// AC2.4: MismatchedDimensions error for array variables with
 /// incompatible dimensions surfaces through the accumulator.
 #[test]

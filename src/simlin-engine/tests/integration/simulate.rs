@@ -4407,7 +4407,7 @@ fn init_recurrence_mdl_multi_member_init_scc_simulates() {
 /// `INITIAL(<expr>)` (Vensim's spelling of XMILE `INIT`) over the shifted
 /// subrange expands element-wise to `ecc[t2] = INITIAL(ecc[t1] * 2)` and
 /// `ecc[t3] = INITIAL(ecc[t2] * 2)`. Because the `INITIAL` argument is an
-/// *expression* (not a bare scalar slot), `builtins_visitor::make_temp_arg`
+/// *expression* (not a bare scalar slot), `builtins_visitor::hoist_capture`
 /// synthesizes a scalar helper aux per recurrence element -- the canonical
 /// `$\u{205A}ecc\u{205A}0\u{205A}arg0\u{205A}t2` /
 /// `$\u{205A}ecc\u{205A}0\u{205A}arg0\u{205A}t3` form (design deviation 2):

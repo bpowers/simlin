@@ -325,7 +325,8 @@ fn macro_call_expands_to_synthetic_module_structurally() {
     )
     .expect("a macro call must expand");
 
-    let modules: Vec<&crate::datamodel::Module> = vars.iter().filter_map(|v| v.module()).collect();
+    let modules: Vec<&crate::capture::ImplicitModule> =
+        vars.iter().filter_map(|v| v.module()).collect();
     assert_eq!(
         modules.len(),
         1,
@@ -685,6 +686,218 @@ y=
 // params so the invocation is not rewritten to `LOOKUP` (the unrelated #553
 // 1-arg-call heuristic) -- the `INITIAL(x)`->`INIT(x)` rename inside the body
 // (the #554 trigger) is independent of the invocation's arity.
+
+/// GH #554's model, through the production MDL import: C-LEARN's uninvoked
+/// `:MACRO: INIT(x) ... INIT = INITIAL(x)`, whose body the importer's necessary
+/// `INITIAL -> INIT` rename turns into the self-call `init = init(x)`.
+///
+/// The registry must build with no `init -> init` cycle (the false recursion
+/// that emptied the registry and un-shadowed every other macro), the sibling
+/// macro must still expand, and the two routes a call to `init` can take must
+/// both land on the builtin: the body's own call is the enclosing macro's
+/// renamed builtin (`MacroCallResolution::RenamedBuiltinSelfCall`, a direct
+/// slot read of the port, so no helper at all), and `INITIAL(k * 2)` in `main`
+/// is the passthrough at an external call site
+/// (`MacroCallResolution::Passthrough`), which captures its computed argument
+/// exactly as the bare builtin does.
+#[test]
+fn issue_554_model_imports_registers_and_routes_both_init_calls_to_the_builtin() {
+    use crate::capture::{CaptureKind, ImplicitVar};
+    use crate::db::sync_from_datamodel;
+    use crate::test_common::implicit_vars_of;
+
+    let source = mdl(r#":MACRO: INIT(x)
+INIT = INITIAL(x)
+	~	dmnl
+	~	C-LEARN's uninvoked macro: the body's INITIAL is renamed to INIT
+	|
+
+:END OF MACRO:
+:MACRO: SSHAPE(a, b)
+SSHAPE = a * b
+	~	dmnl
+	~	sibling macro, shadowing the 3-arg SSHAPE builtin
+	|
+
+:END OF MACRO:
+k = 3
+	~	dmnl
+	~	|
+sibling = SSHAPE(4, 5)
+	~	dmnl
+	~	|
+frozen = INITIAL(k * 2)
+	~	dmnl
+	~	|
+"#);
+
+    let diags = diagnostics_for(&source);
+    assert!(
+        !has_model_error(&diags, ErrorCode::CircularDependency),
+        "the body's renamed INITIAL is not a recursive macro call; diagnostics: {diags:?}"
+    );
+    let registry = crate::module_functions::MacroRegistry::build(
+        &open_vensim(&source)
+            .expect("the issue's model imports")
+            .models,
+    )
+    .expect("the registry builds: no false init -> init cycle");
+    assert!(
+        registry
+            .resolve_macro("init")
+            .expect("the uninvoked macro is registered")
+            .passthrough,
+        "the importer's `init = init(x)` body is a genuine passthrough"
+    );
+
+    let sibling = run_mdl_var(&source, "sibling");
+    assert!(
+        sibling.iter().all(|&v| (v - 20.0).abs() < 1e-9),
+        "SSHAPE(4, 5) = 20: the sibling macro still shadows the builtin: {sibling:?}"
+    );
+    let frozen = run_mdl_var(&source, "frozen");
+    assert!(
+        frozen.iter().all(|&v| (v - 6.0).abs() < 1e-9),
+        "INITIAL(k * 2) = 6 at every step: {frozen:?}"
+    );
+
+    let project = open_vensim(&source).expect("the issue's model imports");
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let frozen_helpers = implicit_vars_of(&db, &sync, "main", "frozen");
+    assert!(
+        matches!(
+            frozen_helpers.as_slice(),
+            [ImplicitVar::Capture(c)]
+                if c.ident() == "$⁚frozen⁚0⁚arg0" && c.kind() == CaptureKind::Init
+        ),
+        "the external call lowers as the INIT builtin and captures its computed argument"
+    );
+    let body_helpers = implicit_vars_of(&db, &sync, "init", "init");
+    assert!(
+        matches!(
+            body_helpers.as_slice(),
+            [ImplicitVar::Capture(c)]
+                if c.ident() == "$⁚init⁚0⁚arg0" && c.kind() == CaptureKind::Init
+        ),
+        "the body's INIT(x) lowers as the builtin -- a capture of the port, since a \
+         macro's ports are module-backed -- and never as an instance of itself"
+    );
+}
+
+/// A passthrough macro keeps the arity the model declared, even though a
+/// valid call lowers as the builtin. `PREVIOUS(x)` declares one parameter;
+/// the builtin it lowers to also accepts a fallback, so without the check
+/// `PREVIOUS(input, 0)` would compile as the builtin behind a macro that says
+/// otherwise.
+///
+/// XMILE rather than MDL: unary `PREVIOUS` is engine/XMILE syntax, not a
+/// Vensim builtin, so the MDL converter's one-argument heuristic would import
+/// `PREVIOUS(x)` as `LOOKUP(previous, x)`.
+#[test]
+fn a_passthrough_macro_keeps_its_declared_arity_at_an_external_call_site() {
+    let project_for = |call_args: &str| {
+        let source = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><vendor>Simlin</vendor><product>arity</product><name>main</name></header>
+  <sim_specs><start>0</start><stop>2</stop><dt>1</dt></sim_specs>
+  <model name="main"><variables>
+    <aux name="input"><eqn>10</eqn></aux>
+    <aux name="out"><eqn>PREVIOUS({call_args})</eqn></aux>
+  </variables></model>
+  <macro name="PREVIOUS">
+    <parm>x</parm>
+    <eqn>PREVIOUS(x)</eqn>
+  </macro>
+</xmile>"#
+        );
+        crate::compat::open_xmile(&mut source.as_bytes()).expect("the XMILE imports")
+    };
+    let compile = |project: &crate::datamodel::Project| {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, project, None);
+        (
+            compile_project_incremental(&db, sync.project, "main"),
+            collect_all_diagnostics(&db, sync.project),
+        )
+    };
+
+    let valid = project_for("input");
+    assert!(
+        crate::module_functions::MacroRegistry::build(&valid.models)
+            .expect("the registry builds")
+            .resolve_macro("previous")
+            .expect("the macro is registered")
+            .passthrough,
+        "the fixture must be a genuine passthrough, or the arm under test is not reached"
+    );
+    let (compiled, diags) = compile(&valid);
+    assert!(
+        compiled.is_ok(),
+        "the declared one-argument call lowers as the builtin; diagnostics: {diags:?}"
+    );
+
+    let (compiled, diags) = compile(&project_for("input, 0"));
+    assert_eq!(
+        compiled.map(|_| ()).unwrap_err().code,
+        ErrorCode::NotSimulatable,
+        "a call that violates the macro's declared arity is refused"
+    );
+    let arity = diags.iter().find_map(|d| match &d.error {
+        DiagnosticError::Equation(e)
+            if e.code == ErrorCode::BadBuiltinArgs && d.variable.as_deref() == Some("out") =>
+        {
+            Some(e.details.clone().unwrap_or_default())
+        }
+        _ => None,
+    });
+    assert_eq!(
+        arity.as_deref(),
+        Some("macro previous takes exactly 1 argument(s), but 2 were given"),
+        "the refusal names the macro's contract, not the builtin's; diagnostics: {diags:?}"
+    );
+}
+
+/// Two helpers of one call claiming one name is refused, not silently
+/// overwritten. A macro named `ARG1` invoked as `ARG1(k, k * 2)` mints its
+/// instance as `$⁚out⁚0⁚arg1` -- the call name is the instance's part -- and
+/// its second argument's helper under the same name. With a last-wins map the
+/// instance replaced the helper and wired its second port to itself.
+#[test]
+fn a_macro_named_arg1_cannot_alias_its_own_hoisted_argument() {
+    let source = mdl(r#":MACRO: ARG1(a, b)
+ARG1 = a + b
+	~	dmnl
+	~	named so that its instance and its argument 1 helper derive one name
+	|
+
+:END OF MACRO:
+k = 3
+	~	dmnl
+	~	|
+out = ARG1(k, k * 2)
+	~	dmnl
+	~	|
+"#);
+
+    let err = compile_mdl(&source).expect_err("two helpers claiming one name must refuse");
+    assert_eq!(err.code, ErrorCode::NotSimulatable);
+    let diags = diagnostics_for(&source);
+    let collision = diags.iter().find_map(|d| match &d.error {
+        DiagnosticError::Equation(e)
+            if e.code == ErrorCode::DuplicateVariable && d.variable.as_deref() == Some("out") =>
+        {
+            Some(e.details.clone().unwrap_or_default())
+        }
+        _ => None,
+    });
+    assert_eq!(
+        collision.as_deref(),
+        Some("two different synthesized helpers both claim the name '$⁚out⁚0⁚arg1'"),
+        "diagnostics: {diags:?}"
+    );
+}
 
 /// Part A + B together: a macro whose body wraps its own same-named `INIT`
 /// intrinsic, INVOKED alongside a sibling macro, must (1) build the registry

@@ -1489,91 +1489,79 @@ fn an_unrelated_models_edit_invalidates_neither_stage_nor_unit_check() {
     );
 }
 
-/// A model carrying a USER-AUTHORED NaN literal backdates its stage exactly
-/// like one without: a revision bump that re-executes `model_stage0` and
-/// rebuilds a bit-identical value must NOT re-execute `model_stage1`.
+/// A model carrying a USER-AUTHORED NaN literal compares equal to its own
+/// rebuild exactly like one without, which is what lets salsa backdate its
+/// stage instead of re-running every downstream query in the cone.
 ///
 /// This is the reachable half of GH #987's EQUATION-LITERAL path. `ModelStage0`
 /// derives `PartialEq` and holds parsed float constants; with a bare `f64` a
-/// NaN-bearing stage was never equal to its own rebuild, so salsa could never
-/// backdate it and every downstream query in the cone re-ran on every revision
-/// bump -- on the interactive diagnostics path, per keystroke. The issue's own
+/// NaN-bearing stage is never equal to its own rebuild, so salsa can never
+/// backdate it and every downstream query re-runs on every revision bump -- on
+/// the interactive diagnostics path, per keystroke. The issue's own
 /// reachability argument rests on the stdlib `initial_value = NAN`, but that
 /// half is inert (those inputs never change after sync), so the fixture here is
 /// a user equation, which is the shape that actually pays.
 ///
 /// A NaN reaching the same memo through a GRAPHICAL FUNCTION's points is a
-/// different, still-unfixed field (`variable::Table`'s `Vec<f64>`); this lever
+/// different, still-unfixed field (`variable::Table`'s `Vec<f64>`); this test
 /// measures that one identically, which is how it was confirmed. See
 /// `ast::Literal`'s scope note.
 ///
-/// The lever is the project's UNIT table: `model_stage0` reads
-/// `project_units_context` and `model_stage1` does not, so adding an unrelated
-/// unit re-executes stage0 and leaves stage1's re-execution decided purely by
-/// whether the rebuilt stage compares equal to the old one.
+/// **Equality is measured directly, over two independently built stages, and
+/// that is the whole of the property.** Backdating is salsa's own contract on
+/// top of `PartialEq`: a rebuilt value that compares equal is backdated, so
+/// pinning the equality pins the reuse. Measuring the reuse INSTEAD would need
+/// an input that re-executes `model_stage0` while leaving its value equal, and
+/// no such input exists -- every input stage0 reads either changes its value
+/// (its own variables' parses, its name, its macro spec) or is shared with
+/// `model_stage1` (the dimensions context), and the module-ident context is
+/// interned, so an edit that leaves the ident list alone backdates before it
+/// ever reaches stage0. A test built on one of those would be measuring the
+/// lever, not the equality.
 ///
 /// Two rows, derived from the one axis the change is about -- whether the
-/// model's equations carry a NaN literal -- and they must produce identical
-/// counts. The control row is what makes the NaN row attributable: under the
-/// mutation probe (bare `f64` equality inside `ast::Literal`) the control stays
-/// green and the NaN row reds.
+/// model's equations carry a NaN literal -- and they must agree. The control
+/// row is what makes the NaN row attributable: under the mutation probe (bare
+/// `f64` equality inside `ast::Literal`) the control stays green and the NaN
+/// row reds.
 #[test]
 fn a_nan_bearing_models_stage_backdates_like_any_other() {
     // The control row runs FIRST so that a mutation probe fails on the NaN row
     // with the control already green -- attribution, not just a red test.
     for (label, eqn) in [("control", "1 + 2"), ("nan literal", "1 + nan")] {
-        let build = |extra_unit: bool| {
-            let mut project = x_project(
-                sim_specs_with_units("month"),
-                &[x_model("main", vec![x_aux("x", eqn, Some("widget"))])],
-            );
-            if extra_unit {
-                project.units.push(datamodel::Unit {
-                    name: "gizmo".to_owned(),
-                    equation: None,
-                    disabled: false,
-                    aliases: vec![],
-                });
-            }
-            project
-        };
+        let project = x_project(
+            sim_specs_with_units("month"),
+            &[x_model("main", vec![x_aux("x", eqn, Some("widget"))])],
+        );
 
-        let mut db = SimlinDb::default();
-        let state1 = sync_from_datamodel_incremental(&mut db, &build(false), None);
-        let sync1 = state1.to_sync_result();
-        let main = sync1.models["main"].source;
-        let _ = model_stage1(&db, main, sync1.project);
+        // Two independent builds of the same project: separate databases, so
+        // the second stage is a genuine rebuild rather than a memo read.
+        let build = || {
+            let db = SimlinDb::default();
+            let sync = sync_from_datamodel(&db, &project);
+            model_stage0(&db, sync.models["main"].source, sync.project).clone()
+        };
+        let first = build();
+        let second = build();
 
         // Guard against a vacuous pass: the NaN row's stage really does hold a
         // NaN literal, so the equality being measured is the one at issue.
-        let holds_nan = model_stage0(&db, main, sync1.project)
-            .variables
-            .values()
-            .any(|v| {
-                v.ast().is_some_and(|ast| match ast {
-                    crate::ast::Ast::Scalar(e) => expr0_holds_nan(e),
-                    _ => false,
-                })
-            });
+        let holds_nan = first.variables.values().any(|v| {
+            v.ast().is_some_and(|ast| match ast {
+                crate::ast::Ast::Scalar(e) => expr0_holds_nan(e),
+                _ => false,
+            })
+        });
         assert_eq!(
             holds_nan,
             label == "nan literal",
             "{label}: the fixture must carry a NaN literal iff it is the NaN row"
         );
 
-        reset_query_executions();
-        let state2 = sync_from_datamodel_incremental(&mut db, &build(true), Some(&state1));
-        let sync2 = state2.to_sync_result();
-        let _ = model_stage1(&db, sync2.models["main"].source, sync2.project);
-        assert_eq!(
-            query_executions(),
-            QueryExecutions {
-                stage0: 1,
-                stage1: 0,
-                unit_check: 0,
-            },
-            "{label}: the units edit must re-execute stage0 and, because the rebuilt \
-             stage is bit-identical, backdate it so stage1 is reused"
+        assert!(
+            first == second,
+            "{label}: a rebuilt stage must compare equal to the original, or salsa \
+             can never backdate it and every downstream query re-runs per keystroke"
         );
     }
 }

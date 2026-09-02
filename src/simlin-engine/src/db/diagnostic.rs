@@ -1188,8 +1188,13 @@ pub fn collect_model_diagnostics(
     if let Some(diagnostic) = module_cycle_diagnostic(db, project, model.name(db)) {
         return vec![diagnostic];
     }
+    // Identical rows collapse, first occurrence kept: the per-element helpers
+    // of one apply-to-all parent refuse the same construct at the same span
+    // of the parent's equation, which is one defect, not one per element.
+    let mut seen: std::collections::HashSet<&Diagnostic> = std::collections::HashSet::new();
     model_all_diagnostics::accumulated::<CompilationDiagnostic>(db, model, project)
         .into_iter()
+        .filter(|cd| seen.insert(&cd.0))
         .map(|cd| cd.0.clone())
         .collect()
 }

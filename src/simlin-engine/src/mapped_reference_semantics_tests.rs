@@ -827,6 +827,384 @@ fn assert_no_mapping_cases(
     }
 }
 
+// ===========================================================================
+// The hoisted-argument column
+// ===========================================================================
+//
+// A module-function call inside an apply-to-all body hoists each computed
+// argument out of the body into a scalar helper aux, one per element, and
+// `builtins_visitor::substitute_dimension_refs` rewrites the argument to the
+// active element BEFORE the hoist, because the helper has no active axis of its
+// own for lowering to resolve a dimension name against. That rewrite is a
+// second place a cross-dimension reference is resolved, so the column below
+// asks, for every row above, whether `target[State] = SMTH1(<expr>, 1)` reads
+// what `target[State] = <expr>` reads -- and where it does not, pins the
+// difference as a recorded fact rather than an unknown. (With a constant input
+// a smooth equals its input from the first step, so the reads are comparable.)
+//
+// Every cell whose reference names the source's OWN dimension agrees. The cells
+// that do not fall into four kinds, each named in [`hoisted_divergence`] and
+// each reached by some cell: two are refusals at a different stage, and two
+// read a DIFFERENT ELEMENT -- the substitution's active-dimension arm resolves
+// a subscript naming the ITERATED dimension to that element's ordinal (the
+// qualified `State·Steel` it writes folds to a number in
+// `constify_dimensions`), where the compiler resolves the same subscript in
+// the plain equation through `resolve_mapped_read`. Those two are pinned as
+// what the engine does, not endorsed; the fix is a compiler-side resolution
+// of a qualified element of a foreign dimension through the same rule.
+
+/// What one cell does when run: the target's reads, or the distinct diagnostic
+/// codes it was refused with. The variable a refusal lands on is deliberately
+/// not part of the verdict, since a hoisted argument's refusal lands on the
+/// helper.
+#[derive(Debug, Clone, PartialEq)]
+enum Verdict {
+    Reads(Vec<f64>),
+    Refused(Vec<ErrorCode>),
+}
+
+fn verdict(project: &TestProject, target_elements: &[&str]) -> Verdict {
+    match project.run_vm() {
+        Ok(results) => Verdict::Reads(
+            target_elements
+                .iter()
+                .map(|elem| {
+                    *results[&format!("target[{}]", crate::canonicalize(elem))]
+                        .last()
+                        .expect("empty series")
+                })
+                .collect(),
+        ),
+        Err(_) => {
+            let mut codes: Vec<ErrorCode> = Vec::new();
+            for (_, code) in project.error_diagnostics() {
+                if !codes.contains(&code) {
+                    codes.push(code);
+                }
+            }
+            codes.sort_by_key(|c| format!("{c:?}"));
+            Verdict::Refused(codes)
+        }
+    }
+}
+
+impl Spelling {
+    /// The right-hand side of the target's equation, for the spellings that
+    /// are an equation (a stock's flow reference has no argument to hoist).
+    fn rhs(self) -> Option<&'static str> {
+        match self {
+            Spelling::IteratedDim => Some("x[State]"),
+            Spelling::SourceOwnDim => Some("x[Region]"),
+            Spelling::BareInEquation => Some("x"),
+            Spelling::StockFlow => None,
+        }
+    }
+}
+
+/// One cell of the column: the plain model, its hoisted twin (the target's
+/// right-hand side wrapped in `SMTH1(.., 1)`), and the target's elements.
+struct HoistedCell {
+    label: String,
+    plain: TestProject,
+    hoisted: TestProject,
+    target_elements: Vec<&'static str>,
+    /// The hoisted verdict and the kind, where the cell is expected NOT to
+    /// agree with the plain equation and [`hoisted_divergence`] cannot say so
+    /// from the cell's kind and spelling alone.
+    divergence: Option<(Verdict, &'static str)>,
+}
+
+/// The matrix cell and its hoisted twin.
+fn matrix_cell(kind: MappingKind, direction: Direction, spelling: Spelling) -> Option<HoistedCell> {
+    let rhs = spelling.rhs()?;
+    let mut hoisted = TestProject::new("mapped_reference_hoisted");
+    hoisted.dimensions = dimensions(kind, direction);
+    Some(HoistedCell {
+        label: format!(
+            "{} / {} / declared on {}",
+            kind.label(),
+            spelling.label(),
+            match direction {
+                Direction::OnIteratedDim => "State",
+                Direction::OnSourceDim => "Region",
+            }
+        ),
+        plain: model(kind, direction, spelling),
+        hoisted: hoisted
+            .array_with_ranges("x[Region]", kind.source().to_vec())
+            .array_aux("target[State]", &format!("SMTH1({rhs}, 1)")),
+        target_elements: kind.target_elements().to_vec(),
+        divergence: None,
+    })
+}
+
+/// The no-mapping control cell and its hoisted twin.
+fn no_mapping_cell(
+    state_elements: &'static [&'static str],
+    spelling: Spelling,
+) -> Option<HoistedCell> {
+    let rhs = spelling.rhs()?;
+    let dims = || {
+        vec![
+            datamodel::Dimension::named(
+                "Region".to_string(),
+                vec!["Ruby".to_string(), "Rose".to_string(), "Reed".to_string()],
+            ),
+            datamodel::Dimension::named(
+                "State".to_string(),
+                state_elements.iter().map(|s| s.to_string()).collect(),
+            ),
+        ]
+    };
+    let source = vec![("Ruby", "10"), ("Rose", "20"), ("Reed", "30")];
+    let build = |equation: &str| {
+        let mut project = TestProject::new("no_mapping");
+        project.dimensions = dims();
+        project
+            .array_with_ranges("x[Region]", source.clone())
+            .array_aux("target[State]", equation)
+    };
+    Some(HoistedCell {
+        label: format!(
+            "no mapping, {} State elements / {}",
+            state_elements.len(),
+            spelling.label()
+        ),
+        plain: build(rhs),
+        hoisted: build(&format!("SMTH1({rhs}, 1)")),
+        target_elements: state_elements.to_vec(),
+        divergence: None,
+    })
+}
+
+/// The two-axes shapes of the section below, hoisted.
+fn two_axes_cells() -> Vec<HoistedCell> {
+    let mapped = |equation: &str| {
+        two_mapped_axes_project("two_mapped_hoisted")
+            .array_with_ranges("matrix[Ra,Rb]", diagonal_matrix_cells())
+            .array_aux("target[State]", equation)
+    };
+    let iterated = |equation: &str| {
+        TestProject::new("two_iterated_hoisted")
+            .named_dimension_with_mappings(
+                "State",
+                &["s1", "s2", "s3"],
+                &[("Ra", &[]), ("Rb", &[])],
+            )
+            .named_dimension("Ra", &["ra1", "ra2", "ra3"])
+            .named_dimension("Rb", &["rb1", "rb2", "rb3"])
+            .array_with_ranges("matrix[Ra,Rb]", diagonal_matrix_cells())
+            .array_aux("target[State]", equation)
+    };
+    let same = |equation: &str| {
+        TestProject::new("same_dim_twice_hoisted")
+            .named_dimension("State", &["d1", "d2", "d3"])
+            .array_with_ranges(
+                "matrix[State,State]",
+                vec![
+                    ("d1,d1", "11"),
+                    ("d1,d2", "12"),
+                    ("d1,d3", "13"),
+                    ("d2,d1", "21"),
+                    ("d2,d2", "22"),
+                    ("d2,d3", "23"),
+                    ("d3,d1", "31"),
+                    ("d3,d2", "32"),
+                    ("d3,d3", "33"),
+                ],
+            )
+            .array_aux("target[State]", equation)
+    };
+    let repeated = |equation: &str| {
+        TestProject::new("square_owner_hoisted")
+            .named_dimension("State", &["r1", "r2"])
+            .array_with_ranges(
+                "pop[State,State]",
+                vec![
+                    ("r1,r1", "11"),
+                    ("r1,r2", "12"),
+                    ("r2,r1", "21"),
+                    ("r2,r2", "22"),
+                ],
+            )
+            .array_aux("target[State,State]", equation)
+    };
+    vec![
+        HoistedCell {
+            label: "two axes mapped to one target dimension: target[State] = matrix[Ra,Rb]".into(),
+            plain: mapped("matrix[Ra,Rb]"),
+            hoisted: mapped("SMTH1(matrix[Ra,Rb], 1)"),
+            target_elements: vec!["s1", "s2", "s3"],
+            divergence: None,
+        },
+        HoistedCell {
+            label: "two iterated axes: target[State] = matrix[State,State]".into(),
+            plain: iterated("matrix[State,State]"),
+            hoisted: iterated("SMTH1(matrix[State,State], 1)"),
+            target_elements: vec!["s1", "s2", "s3"],
+            divergence: None,
+        },
+        HoistedCell {
+            label: "one dimension named twice: target[State] = matrix[State,State]".into(),
+            plain: same("matrix[State,State]"),
+            hoisted: same("SMTH1(matrix[State,State], 1)"),
+            target_elements: vec!["d1", "d2", "d3"],
+            divergence: None,
+        },
+        HoistedCell {
+            label: "a repeated target dimension: target[State,State] = pop[State,State]".into(),
+            plain: repeated("pop[State,State]"),
+            hoisted: repeated("SMTH1(pop[State,State], 1)"),
+            target_elements: vec!["r1,r1", "r1,r2", "r2,r1", "r2,r2"],
+            // Both `State` indices substitute to the FIRST active axis's
+            // element: (r1,r2) reads pop[r1,r1].
+            divergence: Some((
+                Verdict::Reads(vec![11.0, 11.0, 22.0, 22.0]),
+                REPEATED_DIMENSION_FIRST_AXIS,
+            )),
+        },
+    ]
+}
+
+/// A bare arrayed identifier is not hoisted at all: it is wired to the
+/// instance's scalar input port by name, which assembly refuses, where the
+/// plain equation broadcasts it positionally.
+const BARE_IDENTIFIER_WIRED: &str =
+    "a bare arrayed identifier argument is wired to the scalar port by name and refused";
+/// With no relation between the two dimensions the foreign name is not in
+/// the parent's context, so the helper keeps `x[region]` and `Expr2` lowering
+/// refuses it on the parent as `DimensionInScalarContext`, where the plain
+/// equation is refused later, in the compiler, as `MismatchedDimensions`.
+/// Same refusal, different stage; making the codes agree needs the helper to
+/// fail where the plain equation fails (a shaped helper), which is 7.5's.
+const HELPER_REFUSED_IN_LOWERING: &str =
+    "the helper's body is refused in lowering where the plain equation is refused in the compiler";
+/// A subscript naming the ITERATED dimension is substituted to the active
+/// element's qualified name (`x[State]` -> `x[State·Steel]`), which the
+/// compiler folds to that element's ORDINAL and indexes the source with; the
+/// plain equation's `x[State]` resolves through `resolve_mapped_read`. Under a
+/// non-positional map the two read different elements, and where the ordinal
+/// runs off the source's end the helper is refused in the compiler
+/// (`NotSimulatable` through the assembly channel). The substitution cannot do
+/// better -- it does not know the source's own axis -- so the fix is the
+/// compiler resolving a qualified element of a FOREIGN dimension through the
+/// same rule (GH #1035).
+const ITERATED_ELEMENT_BY_ORDINAL: &str = "the substituted element of the iterated dimension is read by ordinal where the plain \
+     equation follows the map";
+/// A target that repeats a dimension: the substitution resolves a subscript
+/// naming it to the FIRST active axis's element for both positions, where the
+/// compiler pairs positions one to one (GH #1035).
+const REPEATED_DIMENSION_FIRST_AXIS: &str =
+    "both subscripts naming a repeated target dimension substitute to the first axis's element";
+/// Every kind of divergence the column pins.
+const DIVERGENCE_KINDS: [&str; 4] = [
+    BARE_IDENTIFIER_WIRED,
+    HELPER_REFUSED_IN_LOWERING,
+    ITERATED_ELEMENT_BY_ORDINAL,
+    REPEATED_DIMENSION_FIRST_AXIS,
+];
+
+/// Where the hoisted column is expected NOT to agree with the plain equation:
+/// the hoisted verdict and the kind. `None` means the two must agree.
+fn hoisted_divergence(
+    kind: Option<MappingKind>,
+    spelling: Spelling,
+    plain: &Verdict,
+) -> Option<(Verdict, &'static str)> {
+    match (kind, spelling, plain) {
+        (_, Spelling::BareInEquation, _) => Some((
+            Verdict::Refused(vec![ErrorCode::NotSimulatable]),
+            BARE_IDENTIFIER_WIRED,
+        )),
+        (None, Spelling::SourceOwnDim, Verdict::Refused(_)) => Some((
+            Verdict::Refused(vec![ErrorCode::DimensionInScalarContext]),
+            HELPER_REFUSED_IN_LOWERING,
+        )),
+        // The positional row is where map-following and the ordinal agree.
+        (Some(MappingKind::Positional), Spelling::IteratedDim, _) => None,
+        (Some(kind), Spelling::IteratedDim, _) => Some((
+            kind.positional_reads()
+                .map(Verdict::Reads)
+                .unwrap_or_else(|| Verdict::Refused(vec![ErrorCode::NotSimulatable])),
+            ITERATED_ELEMENT_BY_ORDINAL,
+        )),
+        _ => None,
+    }
+}
+
+/// Every cell of the matrix, of the no-mapping controls and of the two-axes
+/// section, hoisted into a module argument, reads what the plain equation
+/// reads -- or diverges exactly as [`hoisted_divergence`] says.
+#[test]
+fn a_hoisted_argument_reads_what_the_plain_equation_reads() {
+    let mut cells: Vec<(HoistedCell, Option<MappingKind>, Spelling)> = Vec::new();
+    for kind in MappingKind::all() {
+        for direction in Direction::all() {
+            for spelling in Spelling::all() {
+                if let Some(cell) = matrix_cell(kind, direction, spelling) {
+                    cells.push((cell, Some(kind), spelling));
+                }
+            }
+        }
+    }
+    for state_elements in [&["Steel", "Slate", "Stone"][..], &["Steel", "Slate"][..]] {
+        for spelling in Spelling::all() {
+            if let Some(cell) = no_mapping_cell(state_elements, spelling) {
+                cells.push((cell, None, spelling));
+            }
+        }
+    }
+    for cell in two_axes_cells() {
+        cells.push((cell, None, Spelling::SourceOwnDim));
+    }
+
+    let mut disagreements: Vec<String> = Vec::new();
+    let mut kinds_seen: Vec<&'static str> = Vec::new();
+    for (cell, kind, spelling) in &cells {
+        let plain = verdict(&cell.plain, &cell.target_elements);
+        let hoisted = verdict(&cell.hoisted, &cell.target_elements);
+        let divergence = cell
+            .divergence
+            .clone()
+            .or_else(|| hoisted_divergence(*kind, *spelling, &plain));
+        let (want, why) = match divergence {
+            Some((want, why)) => {
+                if !kinds_seen.contains(&why) {
+                    kinds_seen.push(why);
+                }
+                (want, why)
+            }
+            None => (
+                match &plain {
+                    Verdict::Reads(r) => Verdict::Reads(r.clone()),
+                    Verdict::Refused(c) => Verdict::Refused(c.clone()),
+                },
+                "must agree with the plain equation",
+            ),
+        };
+        if hoisted != want {
+            disagreements.push(format!(
+                "{}: plain {plain:?}, hoisted {hoisted:?}, expected {want:?} ({why})",
+                cell.label
+            ));
+        }
+    }
+    assert!(
+        disagreements.is_empty(),
+        "hoisted column:\n{}",
+        disagreements.join("\n")
+    );
+    // Every declared kind of divergence must be reached by some cell, and no
+    // cell may reach a kind that is not declared.
+    kinds_seen.sort_unstable();
+    let mut declared = DIVERGENCE_KINDS.to_vec();
+    declared.sort_unstable();
+    assert_eq!(
+        kinds_seen, declared,
+        "the divergence kinds the cells reached"
+    );
+}
+
 /// The two subscript-less spellings AGREE, and this is the single assertion
 /// that says so out loud.
 ///

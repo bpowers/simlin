@@ -1291,7 +1291,7 @@ fn per_element_dynamic_index_scores_preserve_head_lag() {
     };
 
     // (b) The capture helper: `pop[nyc, PREVIOUS(idx, idx)]`, hoisted out of the
-    // frozen occurrence by `builtins_visitor::make_temp_arg`. It is the slot
+    // frozen occurrence by `builtins_visitor::hoist_capture`. It is the slot
     // GH #975 was about -- the outer `PREVIOUS` serves its t=0 value as the
     // score's first live step -- so it is asserted directly rather than through
     // the score.

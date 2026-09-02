@@ -100,6 +100,98 @@ fn implicit_helper_codegen_failure_is_attributed() {
     );
 }
 
+/// A helper whose BODY fails to lower is reported on the PARENT variable, at
+/// the span of the argument inside the parent's equation, as the equation
+/// error it is -- not as an assembly row naming a helper the user never wrote.
+///
+/// `x` is declared over `Region` and read as `x[Region]` inside an
+/// apply-to-all over `State` with no relation between the two, so the hoisted
+/// per-element helper keeps `x[region]` and `Expr2` lowering refuses it as a
+/// dimension in scalar context. The three per-element helpers refuse the same
+/// construct at the same span, which is one row, and the CLI's rendering
+/// underlines the argument in the parent's equation.
+#[test]
+fn implicit_helper_lowering_failure_is_an_equation_error_on_the_parent() {
+    use crate::common::ErrorCode;
+    use crate::datamodel;
+
+    let mut project = TestProject::new("implicit_lowering");
+    project.dimensions = vec![
+        datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["Ruby".to_string(), "Rose".to_string(), "Reed".to_string()],
+        ),
+        datamodel::Dimension::named(
+            "State".to_string(),
+            vec![
+                "Steel".to_string(),
+                "Slate".to_string(),
+                "Stone".to_string(),
+            ],
+        ),
+    ];
+    let equation = "SMTH1(x[Region], 1)";
+    let project = project
+        .array_with_ranges(
+            "x[Region]",
+            vec![("Ruby", "10"), ("Rose", "20"), ("Reed", "30")],
+        )
+        .array_aux("target[State]", equation);
+    let datamodel = project.build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
+
+    let diags = collect_all_diagnostics(&db, sync.project);
+    let on_parent: Vec<&crate::db::Diagnostic> = diags
+        .iter()
+        .filter(|d| {
+            d.variable.as_deref() == Some("target")
+                && matches!(
+                    &d.error,
+                    DiagnosticError::Equation(e) if e.code == ErrorCode::DimensionInScalarContext
+                )
+        })
+        .collect();
+    assert_eq!(
+        on_parent.len(),
+        1,
+        "one row on the parent for the three per-element helpers: {diags:#?}"
+    );
+    let DiagnosticError::Equation(err) = &on_parent[0].error else {
+        unreachable!()
+    };
+    let argument = equation.find("x[Region]").unwrap();
+    assert!(
+        argument <= err.start as usize
+            && err.end as usize <= argument + "x[Region]".len()
+            && err.start < err.end,
+        "the span indexes the argument inside the PARENT's equation: {err:?}"
+    );
+    assert!(
+        !diags
+            .iter()
+            .any(|d| matches!(&d.error, DiagnosticError::Assembly(m) if m.contains("arg0"))),
+        "no assembly row names the helper: {diags:#?}"
+    );
+
+    // The CLI's rendering of that diagnostic: the parent's equation with the
+    // argument underlined.
+    let rendered = crate::errors::format_diagnostic_with_datamodel(on_parent[0], &datamodel);
+    let message = rendered.message.expect("a rendered message");
+    let mut lines = message.lines();
+    let (snippet, underline) = (lines.next().unwrap(), lines.next().unwrap());
+    assert_eq!(snippet.trim(), equation);
+    let underlined = &snippet[underline.find('~').unwrap()..=underline.rfind('~').unwrap()];
+    assert!(
+        "x[Region]".contains(underlined) && !underlined.is_empty(),
+        "the underline sits inside the argument; rendered:\n{message}"
+    );
+    assert!(
+        message.contains("variable 'target'") && message.contains("dimension_in_scalar_context"),
+        "rendered:\n{message}"
+    );
+}
+
 /// A COMPILING model with the same builtin gains no implicit-helper
 /// diagnostics -- the severity argument rests on added rows landing only on
 /// projects that already fail.

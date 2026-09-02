@@ -214,7 +214,7 @@ fn per_element_module_loops_do_not_cross_elements() {
 /// per-element narrowing must leave it exactly as it is.
 ///
 /// Note the scalar fixture synthesizes NO capture helper: `SMTH1(stock, 1)`
-/// passes a bare `Var`, so `make_temp_arg` is never reached and the stock wires
+/// passes a bare `Var`, so `hoist_capture` is never reached and the stock wires
 /// straight into the instance. (In the arrayed fixture the same call becomes
 /// `SMTH1(stock[region·north], 1)` -- a `Subscript`, which IS hoisted.) This
 /// test passes at HEAD; it is here to fail if the fix over-reaches.

@@ -29,8 +29,7 @@ use crate::db::{
     VarFragmentResult, build_module_inputs, canonical_module_input_set,
     compile_phase_to_per_var_bytecodes, extract_tables_from_source_var, model_implicit_var_info,
     module_dep_shape, module_input_prefix, project_converted_dimensions,
-    project_dimensions_context, project_units_context, reconstruct_single_variable,
-    variable_dimensions,
+    project_dimensions_context, reconstruct_single_variable, variable_dimensions,
 };
 
 use super::parse::{parse_ltm_equation, scalarize_ltm_equation};
@@ -1138,7 +1137,7 @@ impl Drop for LtmFragmentFailureGuard {
 /// plausible-but-wrong loop scores went unnoticed precisely because of
 /// this). Surfacing the failure makes a degraded LTM analysis *visible*
 /// instead of silently wrong. The implicit helpers (the PREVIOUS/INIT
-/// capture auxes `builtins_visitor::make_temp_arg` synthesizes while
+/// capture auxes `builtins_visitor::hoist_capture` synthesizes while
 /// parsing LTM equations, `$⁚$⁚ltm⁚…⁚arg{n}`) ride the exact same
 /// silent-drop assembly path, and a dropped helper corrupts every link
 /// score that reads it -- with, before GH #741, no diagnostic anywhere.
@@ -1343,26 +1342,7 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
 
-    // A capture holds its body as an AST subtree; a hoisted module-call
-    // argument still carries equation text. Neither can synthesize a further
-    // generation of helpers -- both bodies are already walked -- and the sink
-    // is shared across the two arms so that stays asserted rather than assumed,
-    // as it is in `db::stages::model_stage0` and `ModelStage0::new_in_project`.
-    let mut nested_implicits = Vec::new();
-    let parsed_implicit = match implicit_dm_var {
-        crate::capture::ImplicitVar::Capture(capture) => capture.variable_stage0(dim_context),
-        crate::capture::ImplicitVar::Synthesized(dm_var) => {
-            let units_ctx = project_units_context(db, project);
-            let ctx = crate::variable::ParseContext::new(dim_context, units_ctx);
-            crate::variable::parse_var(&ctx, dm_var.as_ref(), &mut nested_implicits, |mi| {
-                Ok(Some(mi.clone()))
-            })
-        }
-    };
-    debug_assert!(
-        nested_implicits.is_empty(),
-        "an implicit helper must not synthesize further implicit helpers"
-    );
+    let parsed_implicit = implicit_dm_var.parsed_variable(dim_context);
     if parsed_implicit
         .equation_errors()
         .is_some_and(|e| !e.is_empty())
