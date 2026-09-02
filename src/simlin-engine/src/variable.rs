@@ -1047,8 +1047,15 @@ impl<'a> From<&'a datamodel::Variable> for VariableSource<'a> {
 }
 
 /// Everything a parse reads BESIDE the variable itself: the project-global
-/// contexts plus the four optional model-level facts that decide how
-/// `PREVIOUS`/`INIT` and module-function calls expand.
+/// contexts (dimensions, units, the macro registry, the enclosing macro body)
+/// plus the one model-level fact only the LTM parse supplies.
+///
+/// Nothing here says which variables of the owning model are module
+/// instances, module-call auxes or bound input ports. Whether a
+/// `PREVIOUS`/`INIT` argument addresses snapshot storage is decided by the
+/// argument's own spelling here and by its dependency shape at lowering
+/// (`compiler::context`), so a parse is a function of `(variable, project)`
+/// and no edit to a sibling variable re-keys it.
 ///
 /// A struct rather than a parameter list because every field is optional
 /// context that most callers do not supply -- [`ParseContext::new`] is the
@@ -1056,10 +1063,6 @@ impl<'a> From<&'a datamodel::Variable> for VariableSource<'a> {
 pub struct ParseContext<'a> {
     pub dimensions: &'a DimensionsContext,
     pub units_ctx: &'a units::Context,
-    /// The parent model's module-backed variable identifiers. When provided,
-    /// `PREVIOUS(module_var)` synthesizes a scalar helper aux instead of
-    /// compiling `LoadPrev` directly against a multi-slot module.
-    pub module_idents: Option<&'a HashSet<Ident<Canonical>>>,
     /// The model's full variable-name set. When provided, `PREVIOUS`/`INIT`
     /// accept a non-shadowed bare element name as a static subscript index
     /// instead of synthesizing a helper aux per call site (see
@@ -1084,13 +1087,12 @@ pub struct ParseContext<'a> {
 }
 
 impl<'a> ParseContext<'a> {
-    /// A parse with no model-level context: no module-ident set, no model
-    /// variable-name set, no project macros, and no enclosing macro body.
+    /// A parse with no model-level context: no model variable-name set, no
+    /// project macros, and no enclosing macro body.
     pub fn new(dimensions: &'a DimensionsContext, units_ctx: &'a units::Context) -> Self {
         ParseContext {
             dimensions,
             units_ctx,
-            module_idents: None,
             model_var_names: None,
             macro_registry: None,
             enclosing_model: None,
@@ -1145,7 +1147,6 @@ where
                     ident,
                     ast,
                     Some(dimensions),
-                    ctx.module_idents,
                     ctx.model_var_names,
                     registry,
                     ctx.enclosing_model,

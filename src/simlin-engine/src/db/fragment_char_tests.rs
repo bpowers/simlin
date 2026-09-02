@@ -50,9 +50,10 @@
 //! The second half of the file measures INCREMENTALITY, which no golden can
 //! see: which fragment-compiler bodies actually re-execute after an edit, using
 //! the `#[cfg(test)]` execution records in `db::fragment_compile` rather than
-//! memo pointer equality. Read `layout_only_edits_and_fragment_cache_reuse`'s
-//! header comment for what that measurement found and for the two documented
-//! reasons a module-instantiating add is still saturated.
+//! memo pointer equality, and -- for the AC3.1 pins -- every tracked query's
+//! body entries through `db::exec_probe::ProbedDb`. Read
+//! `layout_only_edits_and_fragment_cache_reuse`'s header comment for what that
+//! measurement found.
 //!
 //! **That half is now the load-bearing one.** The value-equality assertions were
 //! written when a fragment COULD have absorbed a layout dependency and still
@@ -1453,10 +1454,10 @@ fn char_modules_and_stdlib_call() {
                 ("main::src", "initial+flow"),
                 ("main::sub", "initial+flow+stock"),
                 ("main::usesub", "flow"),
-                ("producer::input", "flow"),
-                ("producer::output", "flow"),
-                ("producer::input", "flow"),
-                ("producer::output", "flow"),
+                ("producer::input", "initial+flow"),
+                ("producer::output", "initial+flow"),
+                ("producer::input", "initial+flow"),
+                ("producer::output", "initial+flow"),
             ],
             why: "A module variable is the ONLY shape that compiles all three \
                   phases: it is not a stock, so the `!is_stock` arm of the \
@@ -1467,7 +1468,12 @@ fn char_modules_and_stdlib_call() {
                   initial equation into the initials runlist as well: `src`, \
                   the synthesized `arg1` delay-time helper, `smoothed` (which \
                   reads the instance's output), and `sub`. `usesub` is not \
-                  among them because `producer` holds no stock. \
+                  among them because `producer` holds no stock and `main` is \
+                  not a module target. `producer::input` and `producer::output` \
+                  carry an initial fragment at BOTH input sets because \
+                  `producer` IS one: every value-bearing variable of an \
+                  instantiated model is an initials member, which is what lets \
+                  a parent's initials read its ports (GH #1028). \
                   `producer::input` carries a flow fragment at BOTH input sets, \
                   and for the ordinary reason: it is an Aux, so `!is_stock` \
                   already satisfies the flows gate. The `is_module_input` arm \
@@ -1778,15 +1784,12 @@ fn char_ltm_fragments_discovery() {
 // synthesizes an implicit helper, so it has its own test below rather than a
 // row here.
 //
-// **These counts are the gate C1c is measured against, and they are TIGHT
-// WITHIN A BOUND that `implicit_helper_add_is_tight_but_module_helper_add_is_not`
-// states exactly.** Tight for a plain aux (this test) and for a
-// PREVIOUS/INIT-helper-bearing variable; still saturated for a variable that
-// instantiates a MODULE, for two reasons neither edge narrowing reaches. Read
-// that test before relying on "the counts are tight" as a blanket claim: a
-// stage-3 rewrite that reintroduces a model-wide dependency reds here on the
-// count, not merely on the value assertions below, but only for the shapes
-// these fixtures actually cover.
+// **These counts are the gate C1c is measured against.** Tight for a plain
+// aux (this test), for a PREVIOUS/INIT-helper-bearing variable and for a
+// module-instantiating one (`implicit_helper_add_is_tight_for_plain_and_module_helpers`,
+// `module_helper_add_reparses_only_the_added_variable`). A rewrite that
+// reintroduces a model-wide dependency reds on the count, not merely on the
+// value assertions below, but only for the shapes these fixtures cover.
 // ---------------------------------------------------------------------------
 
 /// A flat model: `probe` (the fragment under test) reads `k`; every other
@@ -2343,13 +2346,12 @@ fn parent_fragment_tracks_the_sub_models_layout_and_nothing_else() {
     // not recompile.
     //
     // The execution set is measured, not assumed: exactly `["sub"]`, stable
-    // across repeated runs. `sub` re-executes because growing the project's
-    // model set re-keys the interned module-ident context, which is the
-    // saturation `implicit_helper_add_is_tight_but_module_helper_add_is_not`
-    // pins with both causes named -- so this test does not re-litigate it. What
-    // it does pin is that `usesub`, the cross-module READER this test is about,
-    // is not in the set: its fragment is a function of `producer`'s layout, and
-    // `producer` did not move.
+    // across repeated runs. `sub` re-executes because a module variable's
+    // fragment resolves its target model through the project's model map
+    // (`db::layout::module_dep_shape` reads `project.models`), and growing
+    // the project changes that map. What this test pins is that `usesub`, the
+    // cross-module READER it is about, is not in the set: its fragment is a
+    // function of `producer`'s layout, and `producer` did not move.
     //
     // Value equality alone could not make that claim. It cannot distinguish
     // "correctly cached" from "recompiled and happened to agree", which is
@@ -2620,9 +2622,8 @@ fn implicit_and_ltm_fragment_cache_granularity() {
     );
 }
 
-/// The THIRD coarse edge (`model_implicit_var_info`), pinned in BOTH
-/// directions: narrowed for a plain implicit helper, still saturated for one
-/// that instantiates a module.
+/// The THIRD coarse edge (`model_implicit_var_info`), pinned for both kinds of
+/// helper: a plain `PREVIOUS`/`INIT` capture and a module-instantiating call.
 ///
 /// `layout_only_edits_and_fragment_cache_reuse` above adds a plain aux, which
 /// synthesizes no implicit variable at all and so never touches this edge. A
@@ -2631,31 +2632,18 @@ fn implicit_and_ltm_fragment_cache_granularity() {
 /// model re-executed for it -- `explicit_fragment_input` read the whole
 /// implicit-var map to answer a per-name question.
 ///
-/// The `SMTH1` half is the honest limit, asserted as the CURRENT CONTRACT so
-/// it cannot be quietly over-claimed. Narrowing this edge does not make a
-/// module-instantiating helper tight, because one whole-model dependency
-/// survives on that path and it is not a projection away:
-/// `model_module_ident_context` is an INTERNED handle keyed on the model's
-/// module-ident set. Adding a module instance grows that set, which mints a NEW
-/// interned id, which becomes a new cache key for every variable's
-/// `parse_source_variable_with_module_context`. A changed key cannot backdate
-/// -- there is no prior memo to compare against -- so this is a cache-key
-/// problem, not a value-equality problem, and no projection over the existing
-/// query can fix it.
-///
-/// The `SMTH1` expectation below also lists the five `stdlib⁚smth1` template
-/// variables, and those are NOT saturation: they are a sub-model compiling for
-/// the first time. `module_helper_add_saturates_only_through_the_module_ident_context`
-/// separates the two by measuring every tracked query, and rules out the
-/// splice of the stdlib template as a cause at all -- `db::sync` splices every
-/// stdlib model on every sync, so the template is in `project.models` from the
-/// first sync of a project that never mentions it.
-///
-/// If someone deletes the module-ident context, this test reds on the `SMTH1`
-/// assertion rather than leaving a stale sentence in a doc comment. That is the
-/// point of pinning a limitation instead of describing it.
+/// The `SMTH1` half is what AC3.1 asks for. The five `stdlib⁚smth1` template
+/// variables in its expectation are a sub-model compiling for the first time,
+/// and `k` legitimately recompiles: the new instance is an initials member
+/// whose input source is `k`, so `k` gains initials membership and an initial
+/// fragment. `probe` -- which reads `k` and nothing the edit touched -- must
+/// not: every parse is keyed on the variable and the project, so nothing the
+/// edit did re-keys it. `module_helper_add_reparses_only_the_added_variable`
+/// measures the same boundary over every tracked query.
 #[test]
-fn implicit_helper_add_is_tight_but_module_helper_add_is_not() {
+fn implicit_helper_add_is_tight_for_plain_and_module_helpers() {
+    use crate::db::exec_probe::ProbedDb;
+
     // `probe` reads `k`; the added variable is independent of both, so this is
     // a layout-only edit from `probe`'s point of view in every case.
     let project_with = |extra: Option<(&str, &str)>| {
@@ -2702,26 +2690,35 @@ fn implicit_helper_add_is_tight_but_module_helper_add_is_not() {
          it about a name whose answer moved"
     );
 
-    // ── An SMTH1 helper: still saturated, for the two reasons above.
-    let mut db2 = SimlinDb::default();
+    // ── An SMTH1 helper: the template and the instance's input source are
+    // new work; `probe` is not.
+    let mut probed = ProbedDb::new();
     let base2 = project_with(None);
-    let s1 = sync_from_datamodel_incremental(&mut db2, &base2, None);
-    assemble_simulation(&db2, s1.to_sync_result().project, "main".to_string())
+    let s1 = sync_from_datamodel_incremental(probed.db_mut(), &base2, None);
+    assemble_simulation(probed.db(), s1.to_sync_result().project, "main".to_string())
         .expect("priming assemble");
 
-    let (s2, control2) = resync_and_assemble(&mut db2, &base2, Some(&s1));
+    probed.reset();
+    let (s2, control2) = resync_and_assemble(probed.db_mut(), &base2, Some(&s1));
     assert_eq!(
         control2,
         Vec::new(),
         "control: re-syncing the identical project must re-execute nothing"
     );
+    assert!(
+        probed.counts().is_empty(),
+        "control: re-syncing the identical project must re-execute no tracked \
+         query at all; got {:?}",
+        probed.counts()
+    );
 
     let with_smth = project_with(Some(("smoothed", "SMTH1(k, 2)")));
-    let (_s3, smth_execs) = resync_and_assemble(&mut db2, &with_smth, Some(&s2));
+    probed.reset();
+    let (_s3, smth_execs) = resync_and_assemble(probed.db_mut(), &with_smth, Some(&s2));
     // `delay_time`/`flow`/`initial_value`/`input`/`output` are the spliced
-    // `stdlib⁚smth1` template's own variables, compiling for the first time --
-    // those are legitimately new work. `k` and `probe` are not: they are the
-    // saturation this test pins.
+    // `stdlib⁚smth1` template's own variables, compiling for the first time.
+    // `k` is the new instance's input source: the instance is an initials
+    // member and pulls `k` in after it, so `k` gains an initial fragment.
     assert_eq!(
         explicit_execs(&smth_execs),
         vec![
@@ -2731,18 +2728,42 @@ fn implicit_helper_add_is_tight_but_module_helper_add_is_not() {
             "input",
             "k",
             "output",
-            "probe",
             "smoothed"
         ],
-        "CURRENT CONTRACT, not an aspiration: adding a MODULE-instantiating \
-         helper still re-executes every PRE-EXISTING fragment (`k`, `probe`), \
-         because the interned `ModuleIdentContext` key every parse is \
-         memoized under changes. The five `stdlib\u{205A}smth1` names beside \
-         them are that sub-model compiling for the first time, not \
-         saturation. If this assertion reds because `k` and `probe` dropped \
-         out, someone deleted the module-ident context and this pin should be \
-         tightened to match"
+        "adding a module-instantiating helper must compile the new variable, \
+         the template's first instance and the input source whose initials \
+         membership changed -- and reuse `probe`, which none of that touches"
     );
+    assert_eq!(
+        implicit_execs(&smth_execs),
+        vec![
+            "smoothed#$\u{205A}smoothed\u{205A}0\u{205A}arg1",
+            "smoothed#$\u{205A}smoothed\u{205A}0\u{205A}smth1"
+        ],
+        "the instance and its hoisted delay time are the edit's only helpers"
+    );
+    let template_variables =
+        _s3.to_sync_result().project.models(probed.db())["stdlib\u{205A}smth1"]
+            .variables(probed.db())
+            .len();
+    assert_eq!(
+        probed
+            .counts()
+            .get("parse_source_variable")
+            .map(|(runs, _)| *runs),
+        Some(1 + template_variables),
+        "one parse for `smoothed` and one per `stdlib\u{205A}smth1` template \
+         variable; `k`'s recompile reuses its parse and `probe` is not touched \
+         at all"
+    );
+}
+
+fn implicit_execs(execs: &[(FragmentExecKind, String)]) -> Vec<&str> {
+    execs
+        .iter()
+        .filter(|(kind, _)| *kind == FragmentExecKind::Implicit)
+        .map(|(_, name)| name.as_str())
+        .collect()
 }
 
 fn ltm_execs_of(execs: &[(FragmentExecKind, String)]) -> Vec<&str> {
@@ -2810,12 +2831,9 @@ fn multi_temp_fragment_is_byte_identical_across_fresh_databases() {
     }
 }
 
-/// The saturation `implicit_helper_add_is_tight_but_module_helper_add_is_not`
-/// pins, isolated to its ONE cause by salsa execution counts over every
-/// tracked query (`db::exec_probe`), not just the fragment compilers.
-///
-/// That test pins the saturation; this one isolates its cause, and the
-/// difference decides what has to change for AC3.1 to flip:
+/// AC3.1 over every tracked query: adding a module instance re-executes the
+/// parse of the added variable and nothing else, measured by salsa execution
+/// counts (`db::exec_probe`) rather than the fragment compilers alone.
 ///
 /// * **`project.models` changing is not a cause.** Both scenarios below assert
 ///   the map is IDENTICAL across the edit, and that `stdlib⁚smth1` is already
@@ -2823,23 +2841,14 @@ fn multi_temp_fragment_is_byte_identical_across_fresh_databases() {
 ///   every sync (`sync_from_datamodel_incremental`) and calls `set_models` only
 ///   on a changed map, so instantiating a SMOOTH adds no model: the template
 ///   was there from the first sync of a project that never mentions it.
-/// * **The interned `ModuleIdentContext` is the cause, on its own.** Scenario A
-///   adds a plain aux to a model that ALREADY holds a module instance -- the
-///   stdlib template compiled, the instance wired -- and is completely tight.
-///   Scenario B adds a SECOND module instance to that same model, changing
-///   nothing but the model's module-ident set, and every pre-existing variable
-///   re-parses and recompiles.
-///
-/// So the remedy is the parse-key rule (`parse_source_variable(var, project)`,
-/// D1/D3 decided at lowering, `ModuleIdentContext` deleted), and no projection
-/// substitutes for it: `model_module_ident_context`'s value is a genuinely
-/// whole-model set that every variable's parse consults, and it is a salsa KEY
-/// as well as a read, so a re-key cannot backdate at all. The third cause the
-/// Phase 7 investigation named -- a whole-`model_module_map` clone inside
-/// `compile_var_fragment` -- no longer exists: Phase 3 deleted that query, and
-/// it appears in neither scenario's execution table.
+/// * **Nothing model-wide keys a parse.** Scenario A adds a plain aux to a
+///   model that ALREADY holds a module instance -- the stdlib template
+///   compiled, the instance wired. Scenario B adds a SECOND module instance to
+///   that same model. Both parse and compile exactly the added variable: the
+///   parse key is the variable and the project, and which of the model's names
+///   are module instances is not a fact the parse reads.
 #[test]
-fn module_helper_add_saturates_only_through_the_module_ident_context() {
+fn module_helper_add_reparses_only_the_added_variable() {
     use crate::db::exec_probe::ProbedDb;
 
     // `probe` reads `k`; `smoothed` reads `k` through a SMTH1 instance. The
@@ -2856,8 +2865,9 @@ fn module_helper_add_saturates_only_through_the_module_ident_context() {
         tp.build_datamodel()
     };
 
-    // Returns (fragment bodies that ran, whole-query execution table, whether
-    // the project's model map moved) for one edit off the primed base.
+    // Returns (explicit fragment bodies that ran, implicit ones, whole-query
+    // execution table, whether the project's model map moved) for one edit
+    // off the primed base.
     let measure = |extra: Option<(&str, &str)>| {
         let mut probed = ProbedDb::new();
         let base = project_with(None);
@@ -2891,7 +2901,7 @@ fn module_helper_add_saturates_only_through_the_module_ident_context() {
         assert!(
             models_before.contains_key("stdlib\u{205A}smth1"),
             "the stdlib template must already be spliced BEFORE the edit, or \
-             this fixture cannot tell a splice apart from an ident-set change"
+             this fixture cannot tell a splice apart from an instance add"
         );
 
         probed.reset();
@@ -2903,15 +2913,18 @@ fn module_helper_add_saturates_only_through_the_module_ident_context() {
                 .into_iter()
                 .map(str::to_string)
                 .collect::<Vec<_>>(),
+            implicit_execs(&execs)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
             probed.counts(),
             models_before == models_after,
         )
     };
 
     // ── Scenario A: a plain aux, added to a model that already instantiates a
-    // module. Tight. The spliced stdlib template and the existing instance do
-    // not, by themselves, saturate anything.
-    let (a_fragments, a_counts, a_models_unchanged) = measure(Some(("other", "1")));
+    // module.
+    let (a_fragments, a_helpers, a_counts, a_models_unchanged) = measure(Some(("other", "1")));
     assert!(
         a_models_unchanged,
         "adding a plain aux must not move `project.models`"
@@ -2923,19 +2936,22 @@ fn module_helper_add_saturates_only_through_the_module_ident_context() {
          adding an unrelated aux must compile only that aux"
     );
     assert_eq!(
-        a_counts
-            .get("parse_source_variable_with_module_context")
-            .map(|(runs, _)| *runs),
+        a_helpers,
+        Vec::<String>::new(),
+        "a plain aux synthesizes no helper"
+    );
+    assert_eq!(
+        a_counts.get("parse_source_variable").map(|(runs, _)| *runs),
         Some(1),
-        "...and must parse only that aux: the model's module-ident set is \
-         unchanged, so every other variable's parse keeps its cache key"
+        "...and must parse only that aux"
     );
 
     // ── Scenario B: a SECOND module instance in the same model. The module
-    // map does not move and the stdlib template does not recompile -- only the
-    // model's module-ident set grows -- and that alone re-parses and
-    // recompiles every pre-existing variable.
-    let (b_fragments, b_counts, b_models_unchanged) = measure(Some(("smoothed2", "SMTH1(k, 3)")));
+    // map does not move and the stdlib template does not recompile (the
+    // instance's input set is the first one's), so the added variable is the
+    // whole of the work.
+    let (b_fragments, b_helpers, b_counts, b_models_unchanged) =
+        measure(Some(("smoothed2", "SMTH1(k, 3)")));
     assert!(
         b_models_unchanged,
         "adding a second module instance must not move `project.models` \
@@ -2944,29 +2960,21 @@ fn module_helper_add_saturates_only_through_the_module_ident_context() {
     );
     assert_eq!(
         b_fragments,
-        vec!["k", "probe", "smoothed", "smoothed2"],
-        "CURRENT CONTRACT, not an aspiration: a second module instance \
-         recompiles every PRE-EXISTING variable of the model (`k`, `probe`, \
-         `smoothed`) because the interned `ModuleIdentContext` their parses \
-         are memoized under is a new value, and a changed key cannot \
-         backdate. The `stdlib\u{205A}smth1` template's own variables are \
-         absent because THEIR model's ident set did not change -- which is \
-         the evidence that the model map is not what saturates this. If this \
-         assertion reds because `k` and `probe` dropped out, chunk 7.4 landed \
-         and this pin should be tightened to match"
+        vec!["smoothed2"],
+        "a second module instance must compile only its own parent variable: \
+         `k`, `probe` and the first `smoothed` keep their parses and fragments"
     );
     assert_eq!(
-        b_counts
-            .get("parse_source_variable_with_module_context")
-            .map(|(runs, _)| *runs),
-        Some(4),
-        "one re-parse per variable of the edited model, under the model's new \
-         interned module-ident context"
+        b_helpers,
+        vec![
+            "smoothed2#$\u{205A}smoothed2\u{205A}0\u{205A}arg1",
+            "smoothed2#$\u{205A}smoothed2\u{205A}0\u{205A}smth1"
+        ],
+        "a second module instance must compile only its own two helpers"
     );
     assert_eq!(
-        b_counts.get("model_module_map"),
-        None,
-        "the whole-model module map the Phase 7 investigation named as a third \
-         cause no longer exists (Phase 3), so it cannot be one"
+        b_counts.get("parse_source_variable").map(|(runs, _)| *runs),
+        Some(1),
+        "only the added variable may parse"
     );
 }

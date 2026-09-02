@@ -565,7 +565,7 @@ impl MacroRegistry {
         {
             return MacroCallResolution::RenamedBuiltinSelfCall;
         }
-        match self.macros.get(call.as_ref()) {
+        match self.resolve_macro(call_name) {
             Some(descriptor) if descriptor.passthrough => {
                 MacroCallResolution::Passthrough(descriptor)
             }

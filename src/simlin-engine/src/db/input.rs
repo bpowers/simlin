@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 //! The salsa INPUT layer: the interned key types
-//! (`LtmLinkId`/`ModuleIdentContext`/`ModuleInputSet`), the variable-kind
+//! (`LtmLinkId`/`ModuleInputSet`), the variable-kind
 //! tag (`SourceVariableKind`), the three `#[salsa::input]` structs
 //! (`SourceProject`/`SourceModel`/`SourceVariable`) that hold the synced
 //! datamodel field-by-field for fine-grained invalidation, the
@@ -25,12 +25,6 @@ pub struct LtmLinkId<'db> {
     pub link_from: String,
     #[returns(ref)]
     pub link_to: String,
-}
-
-#[salsa::interned(debug)]
-pub struct ModuleIdentContext<'db> {
-    #[returns(ref)]
-    pub idents: Vec<String>,
 }
 
 /// Interned identity for a module instance's input-variable wiring: the

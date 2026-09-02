@@ -45,7 +45,7 @@ use crate::common::{Canonical, Ident};
 use crate::db::{
     CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ModuleInputSet,
     SourceModel, SourceProject, SourceVariable, SourceVariableKind, VariableDeps,
-    model_module_ident_context, variable_direct_dependencies,
+    project_module_graph, variable_direct_dependencies,
 };
 
 /// Per-variable dependency facts used to build the model dependency
@@ -191,14 +191,10 @@ pub(crate) fn build_var_info(
     FxHashSet<Ident<Canonical>>,
 ) {
     let source_vars = model.variables(db);
-    let module_input_names = module_input_names.to_vec();
-    let module_ident_context =
-        model_module_ident_context(db, model, project, module_input_names.clone());
-    // Intern the module-input wiring once. An empty set is the no-inputs case
-    // (the old `None`-inputs path); `variable_direct_dependencies` maps it back
-    // to `None` internally, so the classification is byte-identical to the old
-    // empty-vs-nonempty dispatch.
-    let module_inputs = ModuleInputSet::from_names(db, &module_input_names);
+    // Intern the module-input wiring once. An empty set is the no-inputs case;
+    // `variable_direct_dependencies` maps it to `None` internally, so no
+    // `isModuleInput` branch is selected for an uninstantiated model.
+    let module_inputs = ModuleInputSet::from_names(db, module_input_names);
 
     let mut var_info: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
     let mut all_init_referenced: FxHashSet<Ident<Canonical>> = FxHashSet::default();
@@ -229,13 +225,7 @@ pub(crate) fn build_var_info(
     let var_deps: Vec<(&String, &VariableDeps)> = source_vars
         .iter()
         .map(|(name, source_var)| {
-            let deps = variable_direct_dependencies(
-                db,
-                *source_var,
-                project,
-                module_ident_context,
-                module_inputs,
-            );
+            let deps = variable_direct_dependencies(db, *source_var, project, module_inputs);
             (name, deps)
         })
         .collect();
@@ -344,9 +334,8 @@ pub(crate) fn build_var_info(
 
         // Include implicit variables from this variable's deps result.
         // Since we read this from variable_direct_dependencies (not
-        // parse_source_variable_with_module_context), salsa's backdating
-        // ensures that if the deps + implicit vars haven't changed, this
-        // function is cached.
+        // parse_source_variable), salsa's backdating ensures that if the
+        // deps + implicit vars haven't changed, this function is cached.
         for implicit in &deps.implicit_vars {
             // Same stock-submodel-output dt chain-break as above (an implicit
             // var can also read a stock submodel output).
@@ -2418,21 +2407,29 @@ pub(crate) fn model_dependency_graph_impl(
     // dependencies -- must ALSO be seeded. This is the structural signature
     // of an `INITIAL(...)`-backed variable (`v = INITIAL(x)` compiles to a
     // bare `LoadInitial`; `x` is an init-time dep but not a current-value
-    // one). Such a variable can be a module/macro *primary output* that a
-    // parent reads during the parent's OWN initials phase (e.g. C-LEARN's
-    // `:MACRO: INIT(x) INIT = INITIAL(x)`, invoked as
-    // `volumetric_heat_capacity = INITIAL(...)`); the sub-model's dep graph
-    // is computed in isolation and cannot see that cross-model read. Without
-    // this clause the output is compiled only into the flows phase, its
-    // initials slot is never written, and the parent snapshots the
-    // uninitialized slot (0 in a clean buffer, `inf`/NaN in a reused one) into
-    // `initial_values`, served forever by `LoadInitial` (GH #584). General
-    // principle: any variable whose value comes from `INITIAL()` and is read
-    // during initials must be evaluated in the initials phase; the bounded,
-    // structurally-keyed realization here is the empty-`dt_deps` /
-    // non-empty-`initial_deps` set, whose initials value is provably its true
-    // t=0 value (its init-time deps are themselves pulled into the runlist by
-    // the transitive closure below).
+    // one), whose initials value is provably its true t=0 value (its
+    // init-time deps are themselves pulled into the runlist by the transitive
+    // closure below); without the seed its initials slot is never written and
+    // a `LoadInitial` of it reads an uninitialized slot forever (GH #584).
+    //
+    // Every value-bearing variable of a model that is INSTANTIATED AS A
+    // MODULE is seeded too. XMILE's model is one flat graph in which a module
+    // is a namespace, so a parent's initials phase may read any port of an
+    // instance -- `level = INTEG(.., sub·output)` over a stockless sub-model,
+    // a stdlib instance fed from one, `INIT(sub·output)` -- and the value has
+    // to exist when the read happens. The sub-model's own graph cannot see
+    // which ports a parent reads, so the rule is one flat bit per model (is
+    // it a module target?) rather than a per-instance propagation of the
+    // ports each parent reads: it costs one initial evaluation per sub-model
+    // aux, and the ordering the closure below already provides (a stock does
+    // not break an init chain; a module pulls in its input sources) is what
+    // makes those evaluations correct (GH #1028). A root that no other model
+    // instantiates keeps exactly the seeds above; a root some model does
+    // instantiate takes the rule like any target, which costs it initial
+    // evaluations and changes no number.
+    let instantiated_as_module = crate::db::stages::source_model_is_stdlib(db, model)
+        || model.macro_spec(db).is_some()
+        || project_module_graph(db, project).is_target(&canonicalize(model.name(db)));
     let runlist_initials = {
         use std::collections::HashSet;
         // `needed` borrows `var_names` (owned `String`s). `init_set` works in
@@ -2452,6 +2449,7 @@ pub(crate) fn model_dependency_graph_impl(
                         !i.is_table_only
                             && (i.is_stock
                                 || i.is_module
+                                || instantiated_as_module
                                 || (i.dt_deps.is_empty() && !i.initial_deps.is_empty()))
                     })
                     .unwrap_or(false)

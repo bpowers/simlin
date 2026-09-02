@@ -1825,6 +1825,45 @@ impl Context<'_> {
         }
     }
 
+    /// The snapshot storage a bare `PREVIOUS`/`INIT` argument `ident` reads
+    /// when its dependency shape decides the answer differently from an
+    /// ordinary read of the same name -- or a refusal, when the name has no
+    /// snapshot storage at all -- and `Ok(None)` when the ordinary read is
+    /// the right one.
+    ///
+    /// The parse leaves every bare reference in place -- it reads nothing of
+    /// the owning model -- so this is where a name's KIND settles what a
+    /// snapshot of it addresses:
+    ///
+    /// * a bare module instance (`PREVIOUS(sub)`) has no storage of its own:
+    ///   the instance's block starts with whichever sub-model variable the
+    ///   layout put first, and reading it would be a plausible wrong number,
+    ///   so it is refused;
+    /// * a bound module input port reads its OWN slot. An ordinary read of the
+    ///   port lowers to `Expr::ModuleInput` (the value the parent pushed), but
+    ///   the port's fragment assigns that value to the port's slot every phase
+    ///   (`Var::new`), so its `prev_values`/`initial_values` entry is exactly
+    ///   the lagged or frozen port value -- the direct read is what a capture
+    ///   of the port would have computed, without the capture;
+    /// * anything else -- a plain variable, a module-call aux, a qualified
+    ///   `m·port` -- lowers as an ordinary reference to a fixed slot.
+    fn snapshot_storage(&self, ident: &Ident<Canonical>) -> Result<Option<VarRef>> {
+        if let DepKind::Module { .. } = self.shape_of(ident)?.kind {
+            return Err(Error::new(
+                ErrorKind::Simulation,
+                ErrorCode::NotSimulatable,
+                Some(format!(
+                    "PREVIOUS/INIT cannot read the bare module instance '{ident}': \
+                     name one of its output ports"
+                )),
+            ));
+        }
+        if self.inputs.contains(ident) {
+            return Ok(Some(self.get_ref(ident)?));
+        }
+        Ok(None)
+    }
+
     /// Lower a BuiltinFn<Expr3> to BuiltinFn (i.e., BuiltinFn<Expr>).
     ///
     /// Which context lowers each argument is the table's `ArgKind`. A
@@ -1834,11 +1873,24 @@ impl Context<'_> {
     /// array operand (`Array { whole: true }`) also promotes active-dimension
     /// references back to wildcards, so `vals[DimA]` inside
     /// `VECTOR SORT ORDER` keeps its full array view. A scalar, and a lookup's
-    /// table reference, lower in the enclosing context.
+    /// table reference, lower in the enclosing context. A `PREVIOUS`/`INIT`
+    /// argument that is a bare name additionally goes through
+    /// [`Self::snapshot_storage`], which is where the name's kind decides what
+    /// the snapshot addresses.
     fn lower_builtin_expr3(
         &self,
         builtin: &crate::builtins::BuiltinFn<Expr3>,
     ) -> Result<BuiltinFn> {
+        use crate::builtins::BuiltinFn as B;
+
+        let snapshot_slot = match builtin {
+            B::Previous(arg, _) | B::Init(arg) => match arg.as_ref() {
+                Expr3::Var(ident, _, loc) => self.snapshot_storage(ident)?.map(|r| (r, *loc)),
+                _ => None,
+            },
+            _ => None,
+        };
+
         let mut whole_ctx: Option<Context<'_>> = None;
         let mut lowered = builtin.try_map_ref_with_kinds(|arg, kind| match kind {
             ArgKind::Array { whole: false } => {
@@ -1866,6 +1918,11 @@ impl Context<'_> {
             ArgKind::Table => self.lower_from_expr3(arg),
             ArgKind::Ident => unreachable!("an identifier payload is not an expression argument"),
         })?;
+        if let Some((var, loc)) = snapshot_slot
+            && let BuiltinFn::Previous(arg, _) | BuiltinFn::Init(arg) = &mut lowered
+        {
+            **arg = Expr::Var(var, loc);
+        }
         // ALLOCATE AVAILABLE reads all four XPriority columns for each
         // requester, while the Vensim convention spells the argument collapsed
         // (`pp[region, ptype]` means "the priority vector starting from

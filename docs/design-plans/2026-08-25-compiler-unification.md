@@ -300,8 +300,7 @@ pub struct VariableSource<'a> {                    // borrowed; two producers
 }
 pub struct ParseContext<'a> {                      // was nine parameters
     pub dimensions: &'a DimensionsContext, pub units_ctx: &'a units::Context,
-    pub module_idents: Option<&'a HashSet<Ident<Canonical>>>,
-    pub model_var_names: Option<&'a HashSet<Ident<Canonical>>>,
+    pub model_var_names: Option<&'a HashSet<Ident<Canonical>>>,   // LTM parse only
     pub macro_registry: Option<&'a MacroRegistry>,
     pub enclosing_model: Option<&'a str>,
 }
@@ -749,18 +748,20 @@ decisions taken on it:
   macro registry, `macro_body_owner`) or nothing, so a parse keyed on
   `(variable, project)` needs no model key; D8 (is this call inside the macro
   that owns it) is answered by the project-keyed `macro_body_owner`.
-- D1 and D3 move to lowering, decided by ONE predicate -- "does the argument
-  lower to a `static_slot`/`snapshot_static_view`" -- computed once from the
-  capture's lowered form and exposed as a per-variable projection that BOTH
-  the dependency stage and `lower_fragment` consume, so the graph and the
-  bytecode cannot drift (the GH #568 class).
-- Four module-ident contexts are live today (empty, the model's own, the
-  per-instance widened one, the stdlib-extended one) plus LTM's own sets; the
-  analysis, LTM, layout, libsimlin and CLI paths parse every variable a second
-  time under the empty context and can see different dependency sets than the
-  compiler schedules. They collapse to one memo per variable; the ~20 call
-  sites that construct a context are rewritten in chunk 7.4, which is why
-  `rg ModuleIdentContext src/` is empty only after that chunk.
+- D1 moves to lowering: a `PREVIOUS`/`INIT` argument that is a bare name is
+  resolved by `compiler::context::Context::snapshot_storage` from the
+  dependency's shape ("Phase 7.4 context-free parse"), and `SnapshotArg::access`
+  is the one statement of which SPELLINGS address storage, read by the parse
+  over the source argument and by codegen over the lowered one so the graph
+  and the bytecode cannot drift (the GH #568 class). D3 stays in the parse,
+  decided by the LTM parse's variable-name set alone (chunk 7.5a generalizes
+  it).
+- The parse reads no module-ident set: it is one memo per `(variable,
+  project)`, and every consumer -- compile, diagnostics, analysis, LTM,
+  layout, libsimlin, the CLI -- reads that memo. The causal graph reads the
+  input-agnostic dependency set (every `isModuleInput` branch) where an
+  instantiated sub-model's compile graph reads the branch-selected one; the
+  parse they share has no input-set key.
 - Every helper the parse synthesizes carries parsed data, never equation text:
   a `PREVIOUS`/`INIT` capture and a hoisted module-call argument are `Expr0`
   subtrees with positional identity `(parent, id)`, and a stdlib or macro module
@@ -798,21 +799,20 @@ capture set, names, and walk order held fixed (the goldens are the defect
 detector); 7.3a `ImplicitModule` with per-element expansion and shared `n`, which
 covers macro CALLS for free because `expand_module_function` is one expansion
 for both; 7.3b macro passthrough and GH #554, the paths that deliberately do
-not reach it; 7.4 deletion of `ModuleIdentContext`
-and the empty-context twin call sites and the AC3.1 flip; 7.5 the shape changes, one commit and ledger row each: dropping
-the captures D1 synthesizes for `PREVIOUS(module-call aux)` and
-`PREVIOUS(m·scalar_port)` (redundant: codegen's `static_slot` already accepts
-`m·port`, and a stdlib-call aux is a one-slot scalar) and refusing a bare
-`PREVIOUS(sub)` of an explicit module loudly; generalising the D3 bare-element
-rule from the LTM path to user equations, together with the QUALIFIED-element
-form `PREVIOUS(vals[Dim.elem])`, which captures unless the qualified dimension
-is among the variable's own declared dimensions or their map chains, because
-the parse narrows its dimensions context to those (measured in chunk 7.1,
-"Phase 7.1 predicate");
-taking INIT captures out of the flows
-runlist; keeping `ApplyToAll` instead of rewriting to `Arrayed` for an
-apply-to-all body that merely contains `PREVIOUS`/`INIT` (D14); and hoisting
-`DELAYN`'s duplicated input argument once.
+not reach it; 7.4 the context-free parse -- `ModuleIdentContext` and every
+empty-context twin call site deleted, D1 resolved at lowering (the captures
+it synthesized for `PREVIOUS(module-call aux)` and `PREVIOUS(m·scalar_port)`
+gone, a bare `PREVIOUS(sub)` refused loudly, a bound port's snapshot read
+from its own slot), the AC3.1 flip, and the sub-model initials rule that
+closes GH #1028; 7.5 the shape changes, one commit and ledger row each:
+generalising the D3 bare-element rule from the LTM path to user equations,
+together with the QUALIFIED-element form `PREVIOUS(vals[Dim.elem])`, which
+captures unless the qualified dimension is among the variable's own declared
+dimensions or their map chains, because the parse narrows its dimensions
+context to those (measured in chunk 7.1, "Phase 7.1 predicate"); taking INIT
+captures out of the flows runlist; keeping `ApplyToAll` instead of rewriting
+to `Arrayed` for an apply-to-all body that merely contains `PREVIOUS`/`INIT`
+(D14); and hoisting `DELAYN`'s duplicated input argument once.
 
 **Phase 7.2 captures.** A `capture::Capture` is a `PREVIOUS`/`INIT` argument
 hoisted into its own unit of evaluation: `(id, kind, arg, suffix, dims)`, where
@@ -997,6 +997,118 @@ ten times on `test_subscript_mixed_assembly`, `empty_equation` twice on the
 `hares_and_lynxes` module port) print it once. Pinned by
 `db::implicit_diag_tests::implicit_helper_lowering_failure_is_an_equation_error_on_the_parent`.
 
+**Phase 7.4 context-free parse.** `db::parse_source_variable(db, var,
+project)` is the one source parse query. It reads the variable's own fields,
+the dimensions its equation names (narrowed, so a dimension edit re-parses
+only the variables that read it), and the project-global contexts: the units
+context, the macro registry, and `macro_body_owner` for which macro, if any,
+the variable is the body of. It reads nothing of the owning model -- not its
+variable set, not which of its names are module instances, module-call auxes
+or bound input ports -- so no edit to a sibling variable re-keys or
+re-executes it, and one memo per variable serves compilation, diagnostics,
+analysis, LTM, layout, libsimlin and the CLI alike. `ParseContext` carries
+those project-global contexts plus the one model-level fact only the LTM
+parse supplies (the model's variable-name set, the D3 bare-element rule).
+
+What a `PREVIOUS`/`INIT` argument's NAME denotes is therefore lowering's
+question, answered by `compiler::context::Context::snapshot_storage` from the
+dependency's shape: a bare module instance has no storage of its own and is
+refused (`NotSimulatable`, naming the instance), a bound input port reads its
+OWN slot -- the port's fragment assigns the parent's value to it every phase,
+so the slot's `prev_values`/`initial_values` entry is exactly what a capture
+of the port held -- and every other name (a plain variable, a scalar
+module-call aux, a qualified `m·port`) is a fixed slot, which
+`codegen::static_slot` already addressed. The parse keeps exactly one
+module-backed decision of its own, the one it can make without reading the
+model: a module instance synthesized EARLIER IN THE SAME WALK
+(`PREVIOUS(SMTH1(x, 3))`) is captured. `SnapshotArg::access` remains the one
+statement of which spellings address storage, read by the parse over the
+source argument and by codegen over the lowered one.
+
+A model that is INSTANTIATED AS A MODULE -- an explicit `Variable::Module`'s
+target anywhere in the project (`project_module_graph`), a stdlib template, or
+a macro -- evaluates every value-bearing variable in its initials runlist
+(`model_dependency_graph_impl`'s `needed` predicate). XMILE's model is one
+flat graph in which a module is a namespace, so a parent's initials phase may
+read any port of an instance -- `level = INTEG(.., sub·output)` over a
+stockless sub-model, a stdlib instance fed from one, `INIT(sub·output)` --
+and the value has to exist when the read happens. The rule is one flat bit
+per model rather than a per-instance propagation of the ports each parent
+reads: the sub-model's own graph cannot see those reads, the initials closure
+already orders the members (a stock does not break an init chain; a module
+pulls in its input sources), and the cost is one initial evaluation per
+sub-model aux. A root that no other model instantiates keeps exactly the
+seeds it always had; a root some model does instantiate takes the rule like
+any target -- initial evaluations, never a different number (pinned by
+`db::fragment_input_tests::a_root_that_another_model_instantiates_simulates_as_it_does_alone`).
+This closes GH #1028.
+
+**Phase 7.4 semantic divergences.** Four shapes changed, all pinned: the D1
+slice the phase set out to drop, a refusal of a silently wrong number, a
+correction of another, and the helper renaming the first implies.
+
+1. `PREVIOUS`/`INIT` of a scalar module-call aux (`PREVIOUS(smoothed, 0)`
+   over `smoothed = SMTH1(k, 2)`), of a qualified scalar or array-element
+   module output port (`PREVIOUS(sub·output, 0)`, `INIT(sub·arr[2])`), and of
+   a bound input port read from inside its sub-model (`PREVIOUS(input, 0)`,
+   `INIT(input)`) synthesize no capture and read the slot directly; the values
+   are identical to the capture's. A macro formal parameter is the last of
+   those, so a macro body's `INIT(x)` captures nothing either. Pinned by
+   `db::prev_init_tests::module_snapshot_arguments_are_resolved_at_lowering`,
+   the `PREVIOUS(smoothed, 0)` row of
+   `every_prev_init_argument_shape_agrees_between_the_parse_and_codegen`,
+   `db::fragment_determinism_tests::a_submodel_reading_a_bound_port_through_previous_parses_once_and_compiles`
+   (a wired port WITHOUT `access="input"`, which the base refused: its layout
+   came from one parse and its runlists from another) and
+   `macro_expansion_tests::issue_554_model_imports_registers_and_routes_both_init_calls_to_the_builtin`.
+2. `PREVIOUS(sub)`/`INIT(sub)` of a bare module instance is refused as
+   `NotSimulatable` on the referencing variable, in direct and LTM lowering
+   alike. The base captured the instance into a scalar helper whose fragment
+   read flattened slot zero of the instance -- whichever sub-model variable
+   the layout put first -- and simulated that. Pinned by the refusal rows of
+   `module_snapshot_arguments_are_resolved_at_lowering` and
+   `db::ltm_tests::test_ltm_bare_module_snapshot_is_refused_at_lowering`.
+3. The `input -> stock` link score of a `DELAY3` instance whose input varies.
+   The score's numerator holds the flow's two-step lag,
+   `PREVIOUS(PREVIOUS(input))`, whose inner lag is a capture helper inside
+   the instance with the bound port `input` as its body. The base lowered
+   that port to `Expr::ModuleInput`, `static_slot` refused it, and the LTM
+   tail -- which appends helpers by bytecode presence -- dropped the helper
+   with no diagnostic, so the score read an unwritten 0 for the lag: `4, 10,
+   24` for a unit ramp with delay 2 at dt 1, where the formula gives `1, 2,
+   4`. Lowering reads the port's own slot, the helper is `0, 3, 4, 5, 6`, and
+   the score is right at the main level and inside a sub-model alike. A
+   silently wrong number at the base, corrected; on C-LEARN the one such
+   helper (`stdlib⁚delay3` under `{delay_time, input}`) fed a score that is
+   byte-identical either way, which is why the artifact-only reading was
+   tempting and wrong. Pinned by
+   `db::ltm_tests::delay3_input_to_stock_link_score_uses_the_two_step_lag_of_the_bound_port`.
+4. Helper names shift when a capture drops out of a walk. The walk counter is
+   shared by every helper of one equation, so `INITIAL(input) * parameter +
+   SMOOTH(input, 2)` in a macro body files the `SMOOTH` instance as
+   `$⁚expression_macro⁚0⁚smth1`, where the capture of the port took `⁚0⁚` and
+   pushed it to `⁚1⁚`. A helper's name is an external key (the `Results`
+   offset map, the LTM causal graph libsimlin surfaces), so this is an
+   artifact-naming change; the values are unchanged. Pinned by
+   `macro_expansion_tests::a_macro_body_snapshot_of_its_formal_parameter_reads_the_bound_port`.
+
+One value change that is a fix, not a divergence: a parent reading a
+stockless sub-model's port during its initials gets the port's t=0 value
+(GH #1028). Pinned by
+`db::fragment_input_tests::stock_initialized_from_a_stockless_modules_output_reads_its_t0_value`
+(the issue's repro: `level = 30`, `sm = 60`),
+`stock_initialized_through_a_nested_stockless_module_reads_its_t0_value`,
+`stock_initialized_from_an_active_initial_module_output_reads_the_initial_equation`
+(the sub-model's initials evaluate its `ACTIVE INITIAL` equations, so the
+parent reads 300 where the port's own series is 30) and
+`stocks_initialized_from_module_ports_read_the_flat_model_values` (a sub-model
+aux over a sub-model stock, one model instantiated twice with different input
+sets, and stdlib instances inside a sub-model -- the shapes a per-instance
+propagation would get wrong). The artifact grows by
+those initial fragments: every sub-model aux gains one, which is the
+`producer::input`/`producer::output` change in
+`db/fragment_char_golden/modules.txt`.
+
 **Phase 7.1 probe.** The execution-count probe chunk 7.1 owed AC3.1 is
 `db::exec_probe::ProbedDb`: a `SimlinDb` built over salsa storage carrying an
 event callback, which records every `EventKind::WillExecute` database key and
@@ -1100,9 +1212,10 @@ derives its rows from both replaced rule sets and reads every verdict through
 production. It records four shapes where the two sides classify the same
 argument differently. Three are the parse being STRICTER -- a capture where
 codegen would have read the slot directly, so wasted slots and fragments rather
-than wrong numbers -- and each is a 7.5 item: `PREVIOUS(module-call aux)` (D1);
-a bare element index, `PREVIOUS(vals[e1])` (D3); and a QUALIFIED element index
-`PREVIOUS(vals[Dim.elem])` in a **scalar** user equation. The last is worth its own line: the qualified form is documented as
+than wrong numbers: `PREVIOUS(module-call aux)` (D1, whose capture the
+context-free parse does not synthesize -- "Phase 7.4 context-free parse");
+a bare element index, `PREVIOUS(vals[e1])` (D3, a 7.5 item); and a QUALIFIED element index
+`PREVIOUS(vals[Dim.elem])` in a **scalar** user equation (7.5 too). The last is worth its own line: the qualified form is documented as
 folding to a constant regardless of context, but the branch of `index_is_static`
 that recognizes it needs the qualified dimension in `dimensions_ctx`, and the
 parse narrows that context to the variable's own relevant dimensions and their
@@ -1462,13 +1575,11 @@ corpus (C-LEARN artifacts are identical, plain and LTM); it is pinned:
    SimulationError{does_not_exist}`); the helper now resolves `sub` through
    its own dependency shapes like every other fragment. Pinned by
    `db::fragment_input_tests::smooth_argument_reading_a_module_output_compiles`
-   with the values derived from the rules (the helper and the instance's input
-   are 60 on every step; the smooth rises 0, 30, 45). The 0 start is the
-   pre-existing cross-model initials boundary -- a stockless sub-model
-   evaluates nothing in the initials phase, so a parent stock (an explicit one
-   too) initialized from its output reads 0 -- pinned as a disclosed residual
-   by `stock_initialized_from_a_stockless_modules_output_is_a_pre_existing_residual`,
-   tracked as GH #1028, and independent of this phase.
+   with the values derived from the rules (the helper, the instance's input
+   and the smooth are 60 on every step: `producer` evaluates `output` in its
+   initials because every value-bearing variable of an instantiated model is
+   an initials member -- "Phase 7.4 context-free parse", GH #1028 -- so the
+   instance's stock starts at 60).
 
 Every other path is byte-identical by construction and by measurement: each
 emitter is its constructor's `FragmentInput`, lowered and emitted
@@ -1821,3 +1932,4 @@ hash is not available to it.
 | 7.1 | `engine: one predicate for a direct PREVIOUS read` | 8.689 G (median of 5; range 8.685-8.698), -0.01% against the seeded tree (`6cf3660b`) re-measured in the same session (8.690 G, median of 5, range 8.679-8.692; interleaved pairs +0.10 / -0.03 / +0.07 / -0.05 / +0.02%), inside the channel's noise floor and not investigated | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: the whole `bytecode_profile` block is byte-identical in both modes -- every count above, the 371 names and 7 modules, the full opcode histogram, the post-fusion stream counts and the fused-binop table; same channel and flags as the baseline row. A refactor plus a probe, so no saving is expected or found. `snapshot_arg::SnapshotArg::access` is now the one statement of what `PREVIOUS`/`INIT` addresses directly, called by `BuiltinVisitor::snapshot_arg` over the source argument (replacing `needs_temp_arg` and `arg_is_array_shaped`) and by `codegen::lowered_snapshot_arg` over the lowered one (feeding `static_slot` and `Compiler::snapshot_static_view`); `db::exec_probe::ProbedDb` counts every tracked query's executions from salsa's own events. Differential sweep of a base-tree and a working-tree CLI over all 509 models under `test/`, each run twice per binary: 396 byte-identical, 110 refused identically, and the only three models whose output is not identical are `subscript_transposition`, `arrays_cname` and `arrays_varname`, each of which flips between exactly the same TWO outputs on BOTH binaries (GH #859, an importer nondeterminism; resampled 12x per binary per model, which is what separates a flip from a move -- two samples per binary does not). No model moved. Four parse-vs-codegen divergences recorded, none of them introduced here and none changing an artifact (Additional Considerations, "Phase 7.1 predicate"); the probe's findings, including that `ModuleIdentContext` is the sole remaining cause of AC3.1's loose case, are under "Phase 7.1 probe" |
 | 7.2 | `engine: captures carry their argument, not its text` | 8.6920 G (median of 5; range 8.6866-8.6976), -0.02% against the base tree (the 7.1 chunk staged on `68774a16`) re-measured in the same session (8.6937 G, median of 5, range 8.6834-8.6979; interleaved pairs -0.017 / +0.163 / -0.047 / -0.038 / -0.017%), inside the channel's noise floor and not investigated | 5215 | 30694 / 1477 / 24658 | 1732 / 162 / 28 / 643 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`: the whole `bytecode_profile` block is byte-identical in both modes -- every count above, the 371 names and 7 modules, the full opcode histogram, the post-fusion stream counts and the fused-binop table; same channel and flags as the baseline row. A representation change with the observable result held fixed, so no saving is expected and none is found. The exact per-capture delta at each of the six consumers that build a helper's parse-stage form is: a lex-and-parse of the helper's equation text is deleted, and one `print_eqn` (the `Variable::eqn` field is source text by definition) plus one `Expr0` subtree clone replaces it. The `instantiate_implicit_modules` walk is NOT part of the delta -- `parse_var` ran it on the old path too, and `Capture::variable_stage0` runs it for the same reason. On a model with 233 captures among 5215 slots that trade is a wash. `PREVIOUS`/`INIT` arguments are now `capture::Capture` values -- an `Expr0` subtree with positional identity `(parent, id)` -- carried on the parse result in a `capture::ImplicitVar` list beside the module instances and hoisted call arguments that are still text; `Capture::variable_stage0` is the one constructor of a capture's parse-stage variable, and `capture::synthetic_ident` the one derivation of every synthesized helper's name (`rg "arg0" src/simlin-engine/src` finds one production site). `ImplicitVar::Synthesized` is boxed, which is what keeps the enum the size of a capture rather than of a `datamodel::Variable` in a list salsa retains per variable and, under LTM, per synthetic variable. Differential sweep of the base-tree and working-tree CLIs over all 509 models under `test/`, each run twice per binary: 396 byte-identical, 110 refused identically, and the only three non-identical models are `arrays_cname`, `arrays_varname` and `subscript_transposition`, each resampled 12x per binary and each producing the SAME two-output set on both binaries (GH #859, the importer nondeterminism). No model moved. The engine suite (lib 5677, integration 776, CLI 4, wasm 2), the 12-repeat determinism suites and every fragment/LTM golden are green with no regeneration |
 | 6b | `engine: one materialization pass over the lowered fragment` | 8.710 G (median of 5; range 8.708-8.716), +0.15% against the base `5c406dd5` re-measured in the same session (8.696 G, median of 5, range 8.687-8.709; interleaved pairs +0.14 / +0.28 / +0.01 / +0.08 / +0.24%), inside the channel's floor and not investigated | 5215 | 30682 / 1477 / 24658 | 1732 / 162 / 28 / 641 | The artifact moves, and the direction is smaller. Plain: 12 fewer flow opcodes and 2 fewer static views, all from ONE variable (`rs_ff_co2_ff_aggregated`, an element-invariant per-element arrayed-GF apply evaluated once instead of three times: `LookupArray` 12 -> 10, its `PushStaticView`/`PopView` pairs, and the `LoadVar`/`Op2`/`LoadGlobalVar` of the two dropped applies); `VectorElmMap` 8 -> 8, `VectorSortOrder` 2 -> 2, `BeginIter` 99 -> 99, 28 temp slots either side. Under `CLEARN_LTM=1`: 907851 / 1477 / 28514 opcodes (-526 flow), 16741 literals, 162 GFs, **28 temp slots against 441**, 2682 static views (-184), `VectorElmMap` 92 -> 12, `VectorSortOrder` 23 -> 3, `LookupArray` 29 -> 25, `BeginIter` 415 -> 415 -- a body one element reads is evaluated on an id the elements reissue rather than one id per element, and an element-invariant one is evaluated once per link-score fragment rather than once per element. The LTM lowering scope is empty (no scoped re-lower): that LTM block is byte-identical with the re-lower and without it, every LTM golden is unchanged, and the LTM compile channel (`CLEARN_LTM=1 CLEARN_PROFILE=compile CLEARN_COMPILE_ITERS=2`, three interleaved pairs) is 58.653 G against the base's 61.369 G, **-4.42%** (pairs -4.56 / -4.38 / -4.45%). The plain compile channel's cost is the subscript route (every subscript naming a dimension goes through `normalize_subscripts3` and `resolve_mapped_read` where Pass 1 folded an active one to an ordinal, divergence item 2); an exact-name fast path in `active_dim_ref` keeps it inside the floor. The run channel (`CLEARN_PROFILE=run CLEARN_RUN_ITERS=20`, same binaries) is 30.660 G against 30.776 G, -0.38% (pairs -0.37 / -0.39 / -0.38 / -0.39 / -0.37%). Differential sweep of the base and tree CLIs over all 509 models under `test/`: 396 byte-identical, 110 refused identically, 0 refused on one side only, and three not byte-identical: `subrange_merge` is deterministic on both and moves onto its checked-in Vensim `output.tab` (item 2); `arrays_cname` and `arrays_varname` have two order-free forms on the base and one -- one of the base's two -- on the tree (item 2: a subscript naming a dimension is read by element NAME, so the importer's permuted declaration order stops changing which element is read); `subscript_transposition` keeps the same two order-free forms on both binaries (GH #859, resampled 12x per binary). Nine divergences, pinned (Additional Considerations, "Phase 6b semantic divergences"); the engine suite (lib 5669, integration 782), the wasm parity corpus and the 12-repeat determinism suites are green with no golden regeneration |
+| 7.4 | `engine: parse without model context; sub-model initials` | 8.3650 G (median of 5; range 8.3621-8.3749), **-3.72%** against the base `c8770abb` re-measured in the same session (8.6879 G, median of 5, range 8.6855-8.6943; interleaved pairs -3.72 / -3.63 / -3.73 / -3.79 / -3.64%) | 5215 | 30682 / 1477 / 24873 | 1750 / 162 / 28 / 641 | Plain: flow and stock streams byte-identical, initials +215 opcodes and +31 programs (1174 -> 1205), +18 literals, 371 names and 7 modules unchanged: every value-bearing variable of an instantiated model is now an initials member (GH #1028). Under `CLEARN_LTM=1`: 30123 slots and 2682 views unchanged, 907854 / 1477 / 28733 opcodes (+3 flow, +219 initial, 1976 initials), 16761 literals; the one delta beyond the #1028 members is `stdlib⁚delay3`'s LTM helper `$⁚$⁚ltm⁚link_score⁚input→stock⁚1⁚arg0` under the instance wiring `{delay_time, input}` (4 initial opcodes with its `Ret`, 3 flow), whose body snapshots the bound port `input`: the base could not lower the port (`Expr::ModuleInput` has no slot) and the by-presence LTM tail dropped the helper with no diagnostic, so every DELAY3 `input -> stock` link score read an unwritten 0 for its two-step lag -- a silent wrong number (`4, 10, 24` for a unit ramp where the formula gives `1, 2, 4`), corrected by lowering the port to its own slot and pinned under "Phase 7.4 semantic divergences" item 3; on C-LEARN that instance's score happens to be byte-identical, so all 30123 LTM series are identical between the two binaries. The run channel (`CLEARN_PROFILE=run CLEARN_RUN_ITERS=20`) is 30.5414 G against 30.6572 G, -0.38% (pairs -0.36 / -0.41 / -0.37 / -0.38 / -0.38%). The compile saving is deleted work: the per-model module-ident pre-scan that re-parsed every Aux/Flow equation once per context, and the second and third parses of every variable under the empty, per-instance-widened and stdlib-extended contexts. Differential sweep of the base and tree CLIs over all 509 models under `test/`: 396 byte-identical, 110 refused identically, 0 refused on one side only, 3 not identical: one GH #859 importer flipper (`subscript_transposition` or `arrays_varname`, whichever the sample lands on; each flips between the same two outputs on both binaries, resampled 6x per binary), and two GH #1028 movers -- `land_model.stmx`'s `real_gdp_growth_rate = TREND(..)` (TREND's `output` is an aux) now matches the checked-in Stella `output.tab` exactly (0.04, 0.0292888201074, 0.0200569598033 where the base printed 0, 6.957, 3.233), and `bobby/vdf/econ/mark2.mdl`'s `perceived mortgage balance = SMOOTH(interest earned - investments lost)` reads `defaults = DELAY1(..)` (DELAY1's `output` is a flow) during the parent's initials, so the smooth starts at its t0 input as Vensim's SMOOTH does (the base started 150,000,000 above it, with a nonzero t0 flow). Four divergences and one fix pinned (Additional Considerations, "Phase 7.4 semantic divergences"); the engine suite, libsimlin, the CLI, clippy and `cargo fmt --all -- --check` are green, with one golden regenerated (`modules.txt`, the two `producer` initial fragments) |

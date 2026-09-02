@@ -28,8 +28,8 @@ use crate::ltm::strip_subscript;
 
 use super::{
     Db, SourceModel, SourceProject, SourceVariable, SourceVariableKind, compute_layout,
-    model_causal_edges, model_implicit_var_info, project_datamodel_dims,
-    project_dimensions_context, reconstruct_single_variable,
+    model_causal_edges, project_datamodel_dims, project_dimensions_context,
+    reconstruct_single_variable,
 };
 
 mod compile;
@@ -290,17 +290,15 @@ fn model_is_stateless(
 /// (GH #773). A parent-level lag OF a module output (`PREVIOUS(m.out)`)
 /// IS counted: the previous_only entry is the parent variable's own.
 ///
-/// Uses the same empty module-ident context / empty input set as
-/// `model_causal_edges`, so the per-variable dependency queries are shared
-/// salsa cache hits.
+/// Uses the same empty input set as `model_causal_edges`, so the per-variable
+/// dependency queries are shared salsa cache hits.
 fn model_has_lagged_dt_deps(db: &dyn Db, model: SourceModel, project: SourceProject) -> bool {
-    let empty_ctx = super::ModuleIdentContext::new(db, vec![]);
     let empty_inputs = super::ModuleInputSet::empty(db);
     model.variables(db).values().any(|sv| {
         !matches!(
             sv.kind(db),
             SourceVariableKind::Stock | SourceVariableKind::Module
-        ) && !super::variable_direct_dependencies(db, *sv, project, empty_ctx, empty_inputs)
+        ) && !super::variable_direct_dependencies(db, *sv, project, empty_inputs)
             .dt_previous_referenced_vars
             .is_empty()
     })
@@ -360,7 +358,12 @@ fn modules_carry_state(
 /// Every LTM parse site MUST pass the same set: `model_ltm_implicit_var_info`
 /// (which decides which helpers exist and get layout slots) and the fragment
 /// compilers / `assemble_module` (which compile them) have to agree on
-/// whether a given PREVIOUS argument synthesizes a helper.
+/// whether a given PREVIOUS argument synthesizes a helper. It is the ONE
+/// model-level fact an LTM parse reads; which names are module instances is
+/// not one: a generated equation spells a module output as the quoted
+/// composite `"m·port"` that lowering resolves to the port's slot, and a bare
+/// `PREVIOUS(m)` of an instance is refused at lowering rather than captured
+/// (`db::ltm_tests::test_ltm_bare_module_snapshot_is_refused_at_lowering`).
 #[salsa::tracked(returns(ref))]
 pub(super) fn ltm_model_var_names(
     db: &dyn Db,
@@ -372,37 +375,6 @@ pub(super) fn ltm_model_var_names(
         .keys()
         .map(|name| Ident::new(name))
         .collect()
-}
-
-/// Salsa-tracked: the LTM fragment compilers consult this once per synthetic
-/// variable (tens of thousands of times on large models), and rebuilding the
-/// set from every source variable per call was a measurable fraction of LTM
-/// compile time (GH #655).
-#[salsa::tracked(returns(ref))]
-pub(super) fn ltm_module_idents(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-) -> HashSet<Ident<Canonical>> {
-    let source_vars = model.variables(db);
-    let mut module_idents: HashSet<Ident<Canonical>> = source_vars
-        .iter()
-        .filter_map(|(name, source_var)| {
-            if source_var.kind(db) == SourceVariableKind::Module {
-                Some(Ident::new(name))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    for (name, meta) in model_implicit_var_info(db, model, project).iter() {
-        if meta.is_module {
-            module_idents.insert(Ident::new(name));
-        }
-    }
-
-    module_idents
 }
 
 /// The canonical cyclic rotation of a loop's **variable-level** node
@@ -890,7 +862,6 @@ pub fn model_ltm_implicit_var_info(
     let ltm_vars = model_ltm_variables(db, model, project);
 
     let dim_ctx = project_dimensions_context(db, project);
-    let module_idents = ltm_module_idents(db, model, project);
     let model_var_names = ltm_model_var_names(db, model, project);
 
     let mut result = HashMap::new();
@@ -900,7 +871,6 @@ pub fn model_ltm_implicit_var_info(
             &ltm_var.name,
             &ltm_var.equation,
             dim_ctx,
-            Some(module_idents),
             Some(model_var_names),
         );
 

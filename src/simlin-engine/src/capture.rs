@@ -297,11 +297,9 @@ fn subtree_parsed_variable(
             ident.as_str(),
             ast,
             Some(dimensions),
-            // The same four model-level facts a parse of a synthesized helper
-            // has always been given: none of them. A helper body names no
-            // module the parent's walk did not already resolve, and it is not
-            // a macro body.
-            None,
+            // A helper body is given none of the model-level facts a parse
+            // can carry: it names no module the parent's walk did not already
+            // resolve, and it is not a macro body.
             None,
             empty_macro_registry(),
             None,

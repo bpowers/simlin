@@ -39,9 +39,9 @@ use crate::db::{
     Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ImplicitVarMeta, ModuleInputSet,
     SourceModel, SourceProject, SourceVariable, SourceVariableKind, build_module_inputs,
     canonical_module_input_set, extract_tables_from_source_var, model_implicit_var_by_name,
-    model_module_ident_context, model_variable_by_name, module_dep_shape, module_input_prefix,
-    parse_source_variable_with_module_context, project_converted_dimensions,
-    project_dimensions_context, variable_dimensions, variable_direct_dependencies,
+    model_variable_by_name, module_dep_shape, module_input_prefix, parse_source_variable,
+    project_converted_dimensions, project_dimensions_context, variable_dimensions,
+    variable_direct_dependencies,
 };
 use crate::dimensions::{Dimension, DimensionsContext};
 
@@ -203,11 +203,11 @@ pub(crate) fn flow_is_special_stock_driven(
 /// Build the fragment input of one source variable: parse it, lower its
 /// equation to `Expr2`, and resolve the shape of every name it references.
 ///
-/// `module_input_names` is the module instance's input wiring, which widens
-/// the parse's module-ident context and selects the live `isModuleInput`
-/// branch at lowering; the dependency set itself is built input-agnostic
-/// (the empty `ModuleInputSet`) so both branches of such a conditional stay
-/// compilable.
+/// `module_input_names` is the module instance's input wiring, which selects
+/// the live `isModuleInput` branch at lowering; the parse and the dependency
+/// set are instance-agnostic (the parse by construction, the dependency set
+/// through the empty `ModuleInputSet`) so both branches of such a conditional
+/// stay compilable and one memo of each serves every instance.
 pub(crate) fn explicit_fragment_input<'db>(
     db: &'db dyn Db,
     var: SourceVariable,
@@ -217,9 +217,7 @@ pub(crate) fn explicit_fragment_input<'db>(
 ) -> ExplicitFragment<'db> {
     let var_ident = var.ident(db).clone();
     let model_name = model.name(db);
-    let module_ident_context =
-        model_module_ident_context(db, model, project, module_input_names.to_vec());
-    let parsed = parse_source_variable_with_module_context(db, var, project, module_ident_context);
+    let parsed = parse_source_variable(db, var, project);
 
     let diagnostic = |error: DiagnosticError| Diagnostic {
         model: model_name.clone(),
@@ -272,13 +270,7 @@ pub(crate) fn explicit_fragment_input<'db>(
         };
     }
 
-    let deps = variable_direct_dependencies(
-        db,
-        var,
-        project,
-        module_ident_context,
-        ModuleInputSet::empty(db),
-    );
+    let deps = variable_direct_dependencies(db, var, project, ModuleInputSet::empty(db));
 
     // Per-call memo over `model_variable_by_name`. The salsa firewall query is
     // the SOURCE of truth for the lookup (that is what gives the fragment a
@@ -388,12 +380,7 @@ pub(crate) fn explicit_fragment_input<'db>(
                 continue;
             }
             if let Some(dep_sv) = resolve_var(head) {
-                let dep_parsed = parse_source_variable_with_module_context(
-                    db,
-                    dep_sv,
-                    project,
-                    module_ident_context,
-                );
+                let dep_parsed = parse_source_variable(db, dep_sv, project);
                 stage0_vars.insert(Ident::new(head), dep_parsed.variable.clone());
             }
         }

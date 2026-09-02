@@ -20,9 +20,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::common::{Canonical, Ident};
 use crate::db::{
-    CycleClass, Db, LoopCircuitsResult, ModuleIdentContext, ModuleInputSet, SourceModel,
-    SourceProject, SourceVariable, SourceVariableKind, causal_graph_with_modules, classify_cycle,
-    model_edge_shapes, model_element_causal_edges, project_datamodel_dims, variable_dimensions,
+    CycleClass, Db, LoopCircuitsResult, ModuleInputSet, SourceModel, SourceProject, SourceVariable,
+    SourceVariableKind, causal_graph_with_modules, classify_cycle, model_edge_shapes,
+    model_element_causal_edges, project_datamodel_dims, variable_dimensions,
     variable_direct_dependencies,
 };
 use crate::ltm::{Loop, strip_subscript};
@@ -286,15 +286,14 @@ pub(crate) fn model_pinned_loops(
 /// `sub·output` -- while the cycle node is the module-normalized `sub` --
 /// so each entry is collapsed through the same `normalize_module_ref_str`
 /// the causal-edge builder applies before comparing. Uses the same empty
-/// module-ident context / empty input set as `model_causal_edges`, so the
-/// per-variable dependency queries are shared salsa cache hits.
+/// input set as `model_causal_edges`, so the per-variable dependency queries
+/// are shared salsa cache hits.
 fn cycle_has_lagged_edge(
     db: &dyn Db,
     project: SourceProject,
     source_vars: &HashMap<String, SourceVariable>,
     cycle: &[Ident<Canonical>],
 ) -> bool {
-    let empty_ctx = ModuleIdentContext::new(db, vec![]);
     let empty_inputs = ModuleInputSet::empty(db);
     cycle.iter().enumerate().any(|(i, from)| {
         let to = &cycle[(i + 1) % cycle.len()];
@@ -307,7 +306,7 @@ fn cycle_has_lagged_edge(
         ) {
             return false;
         }
-        variable_direct_dependencies(db, *sv, project, empty_ctx, empty_inputs)
+        variable_direct_dependencies(db, *sv, project, empty_inputs)
             .dt_previous_referenced_vars
             .iter()
             .any(|dep| crate::db::analysis::normalize_module_ref_str(dep) == from.as_str())

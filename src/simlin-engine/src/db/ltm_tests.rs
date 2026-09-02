@@ -10,28 +10,15 @@ use crate::db::{
 };
 use crate::test_common::TestProject;
 
-fn phase_sym_load_prev_names(
-    phase: &Option<crate::compiler::symbolic::PerVarBytecodes>,
-) -> Vec<&str> {
-    phase
-        .as_ref()
-        .map(|bc| {
-            bc.symbolic
-                .code
-                .iter()
-                .filter_map(|op| match op {
-                    crate::compiler::symbolic::SymbolicOpcode::SymLoadPrev { var } => {
-                        Some(var.name.as_str())
-                    }
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
+/// `PREVIOUS(producer)` of a bare module instance in a generated LTM equation
+/// is refused at lowering exactly as it is in a user equation
+/// (`db::prev_init_tests::module_snapshot_arguments_are_resolved_at_lowering`):
+/// an instance has no storage of its own, so a direct read would be slot zero
+/// of whichever sub-model variable the layout put first, and the LTM parse --
+/// which reads no module-ident set -- leaves the reference for lowering to
+/// refuse rather than capturing it.
 #[test]
-fn test_ltm_previous_module_var_uses_helper_rewrite() {
+fn test_ltm_bare_module_snapshot_is_refused_at_lowering() {
     let project = datamodel::Project {
         name: "ltm_prev_module_regression".to_string(),
         sim_specs: datamodel::SimSpecs::default(),
@@ -83,33 +70,26 @@ fn test_ltm_previous_module_var_uses_helper_rewrite() {
     let sync = sync_from_datamodel(&db, &project);
     let source_model = sync.models["main"].source;
 
+    let mut why = None;
     let fragment = compile_ltm_equation_fragment(
         &db,
         "$⁚ltm⁚test_prev_module",
         &crate::db::LtmEquation::scalar("PREVIOUS(producer)".to_string()),
         source_model,
         sync.project,
-        None,
+        Some(&mut why),
     )
-    .expect("LTM equation should compile");
-
-    let initial_prev_names = phase_sym_load_prev_names(&fragment.fragment.initial_bytecodes);
-    let flow_prev_names = phase_sym_load_prev_names(&fragment.fragment.flow_bytecodes);
-    let stock_prev_names = phase_sym_load_prev_names(&fragment.fragment.stock_bytecodes);
+    .expect("the LTM compiler keeps a fragment whose lowering failed, for reporting");
 
     assert!(
-        initial_prev_names.is_empty(),
-        "initial phase should not use SymLoadPrev for PREVIOUS(module_var)",
+        fragment.fragment.flow_bytecodes.is_none(),
+        "PREVIOUS of a bare module instance must emit no bytecode rather than read \
+         slot zero of the instance"
     );
+    let why = why.expect("the lowering refusal must reach the LTM diagnostic channel");
     assert!(
-        flow_prev_names
-            .iter()
-            .all(|name| name.starts_with("$⁚$⁚ltm⁚test_prev_module⁚0⁚arg0")),
-        "flow phase should use SymLoadPrev only for the synthesized helper arg, got {flow_prev_names:?}",
-    );
-    assert!(
-        stock_prev_names.is_empty(),
-        "stock phase should not use SymLoadPrev for PREVIOUS(module_var)",
+        why.contains("bare module instance 'producer'"),
+        "the refusal must name the module read, got {why}"
     );
 }
 
@@ -2498,4 +2478,109 @@ fn an_emitted_link_score_shares_its_ast_with_the_shaped_memo() {
         std::sync::Arc::ptr_eq(memo_expr, emitted_expr),
         "the emitted score must SHARE the memo's AST, not hold a deep copy"
     );
+}
+
+/// An XMILE project with a stdlib `DELAY3` whose input ramps, at the main
+/// level (`delayed = DELAY3(src, 2)`) or inside a sub-model whose `input`
+/// port is wired from the parent's `src`.
+fn delay3_ramp_project(in_submodel: bool) -> datamodel::Project {
+    let main_body = if in_submodel {
+        r#"<module name="sub"><connect to="sub.input" from="src"/></module>
+           <stock name="acc"><eqn>0</eqn><inflow>inflow</inflow></stock>
+           <flow name="inflow"><eqn>sub.delayed</eqn></flow>"#
+    } else {
+        r#"<aux name="delayed"><eqn>DELAY3(src, 2)</eqn></aux>
+           <stock name="acc"><eqn>0</eqn><inflow>inflow</inflow></stock>
+           <flow name="inflow"><eqn>delayed</eqn></flow>"#
+    };
+    let sub_model = if in_submodel {
+        r#"<model name="sub"><variables>
+             <aux name="input" access="input"><eqn>0</eqn></aux>
+             <aux name="delayed" access="output"><eqn>DELAY3(input, 2)</eqn></aux>
+           </variables></model>"#
+    } else {
+        ""
+    };
+    let source = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+  <header><vendor>test</vendor><product lang="en">test</product></header>
+  <sim_specs method="Euler" time_units="Month"><start>0</start><stop>4</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <aux name="src"><eqn>TIME + 3</eqn></aux>
+    {main_body}
+  </variables></model>
+  {sub_model}
+</xmile>"#
+    );
+    crate::compat::open_xmile(&mut source.as_bytes()).expect("the XMILE fixture imports")
+}
+
+/// The `input -> stock` link score of a `DELAY3` instance reads the bound
+/// port's two-step lag through a capture helper, at the main level and inside
+/// a sub-model alike.
+///
+/// The flow-to-stock score (`ltm_augment::generate_flow_to_stock_equation`,
+/// Schoenberg et al. 2023 Eq. 3) is
+/// `|dt * (PREVIOUS(input) - PREVIOUS(PREVIOUS(input)))| / |second difference
+/// of stock|`, zero for the first two steps. The nested lag is a capture
+/// helper (`..⁚1⁚arg0 = PREVIOUS(input, 0)`) inside the `stdlib⁚delay3`
+/// instance, whose body snapshots the instance's BOUND port `input`; lowering
+/// resolves that port to its own slot (`Context::snapshot_storage`), so the
+/// helper is `0, 3, 4, 5, 6` (the fallback, then the lagged ramp).
+///
+/// Derived from the template (`stdlib/delay3.stmx`: `stock` inflow `input`,
+/// outflow `flow_1 = stock / (delay_time / 3)`, `delay_time = 2`, so
+/// `stock(0) = 3 * 2/3 = 2`): `stock = 2, 2, 3, 3.5, 4.25`, the numerator is
+/// `1` from t=2 on (the ramp rises by 1 per step), and the second differences
+/// are `1, -0.5, 0.25`, so the score is `1, 2, 4` at t=2..4.
+///
+/// A parse that captured the port, or a lowering that could not address it,
+/// gave the helper no fragment at all -- the LTM tail appends helpers by
+/// bytecode presence, so the score silently read an unwritten 0 for the
+/// two-step lag and printed `4, 10, 24` (the numerator degenerated to the
+/// one-step-lagged ramp `4, 5, 6`) with no diagnostic. That is the
+/// silent-wrong-number class the invariant forbids, which is why the values
+/// are pinned here rather than only the helper's presence.
+#[test]
+fn delay3_input_to_stock_link_score_uses_the_two_step_lag_of_the_bound_port() {
+    for (in_submodel, prefix) in [(false, ""), (true, "sub\u{00B7}")] {
+        let project = delay3_ramp_project(in_submodel);
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        crate::db::set_project_ltm_enabled(&mut db, sync.project, true);
+        let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
+            .expect("the DELAY3 fixture compiles under LTM");
+        let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+        vm.run_to_end().expect("runs");
+        let results = crate::test_common::collect_results(&vm.into_results());
+        let series = |name: String| -> Vec<f64> {
+            results.get(&name).cloned().unwrap_or_else(|| {
+                let candidates: Vec<&String> = results
+                    .keys()
+                    .filter(|k| k.contains("input\u{2192}stock"))
+                    .collect();
+                panic!("{name} not in results; input->stock names: {candidates:?}")
+            })
+        };
+        let score = series(format!(
+            "{prefix}$⁚delayed⁚0⁚delay3\u{00B7}$⁚ltm⁚link_score⁚input\u{2192}stock"
+        ));
+        assert_eq!(
+            score,
+            vec![0.0, 0.0, 1.0, 2.0, 4.0],
+            "in_submodel={in_submodel}: the input -> stock link score must use the \
+             two-step lag of the bound port (it was 0, 0, 4, 10, 24 when the nested \
+             lag's helper silently failed to compile)"
+        );
+        let helper = series(format!(
+            "{prefix}$⁚delayed⁚0⁚delay3\u{00B7}$⁚$⁚ltm⁚link_score⁚input\u{2192}stock⁚1⁚arg0"
+        ));
+        assert_eq!(
+            helper,
+            vec![0.0, 3.0, 4.0, 5.0, 6.0],
+            "in_submodel={in_submodel}: the nested-lag helper holds PREVIOUS(input, 0) \
+             of the bound port"
+        );
+    }
 }

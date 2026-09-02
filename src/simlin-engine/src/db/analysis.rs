@@ -26,10 +26,9 @@ use crate::capture::ImplicitVar;
 use crate::datamodel;
 
 use super::{
-    Db, LtmMode, ModuleIdentContext, ModuleInputSet, SourceModel, SourceProject,
-    SourceVariableKind, build_module_inputs, model_ltm_mode, model_module_ident_context,
-    parse_source_variable_with_module_context, project_datamodel_dims, project_dimensions_context,
-    variable_direct_dependencies,
+    Db, LtmMode, ModuleInputSet, SourceModel, SourceProject, SourceVariableKind,
+    build_module_inputs, model_ltm_mode, parse_source_variable, project_datamodel_dims,
+    project_dimensions_context, variable_direct_dependencies,
 };
 
 /// Causal edge structure for a model, built from variable dependency sets
@@ -1597,11 +1596,16 @@ pub fn causal_graph_from_element_edges_with_modules(
 /// Build the causal edge structure for a model from salsa-tracked
 /// dependency sets and structural variable info.
 ///
-/// Reads `variable_direct_dependencies` (establishing salsa dep on dep
-/// sets) and `parse_source_variable_with_module_context` (for implicit variable details like
-/// module input refs). Salsa backdating ensures that when equation text
-/// changes without changing the resulting edge structure, the cached
-/// result is reused and downstream graph algorithms are skipped.
+/// Reads `variable_direct_dependencies` under the input-agnostic empty
+/// `ModuleInputSet` (establishing salsa dep on dep sets) and
+/// `parse_source_variable` (for implicit variable details like module input
+/// refs) -- the one parse memo every consumer shares. The dependency sets are
+/// the input-agnostic ones on purpose: an instantiated sub-model's compile
+/// graph selects the live `isModuleInput` branch per input set, while the
+/// causal graph has no instance in hand and sees every branch. Salsa
+/// backdating ensures that when equation text changes without changing the
+/// resulting edge structure, the cached result is reused and downstream graph
+/// algorithms are skipped.
 #[salsa::tracked(returns(ref))]
 pub fn model_causal_edges(
     db: &dyn Db,
@@ -1609,11 +1613,6 @@ pub fn model_causal_edges(
     project: SourceProject,
 ) -> CausalEdgesResult {
     let source_vars = model.variables(db);
-    let module_ctx = model_module_ident_context(db, model, project, vec![]);
-    // The old no-arg `variable_direct_dependencies` used a literally-empty
-    // module-ident context (NOT `module_ctx`) and the `None`-inputs path;
-    // reproduce that exactly with the empty context and empty input set.
-    let empty_ctx = ModuleIdentContext::new(db, vec![]);
     let empty_inputs = ModuleInputSet::empty(db);
     let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut stocks = BTreeSet::new();
@@ -1656,8 +1655,7 @@ pub fn model_causal_edges(
                 }
             }
             _ => {
-                let deps =
-                    variable_direct_dependencies(db, *source_var, project, empty_ctx, empty_inputs);
+                let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
                 for dep in &deps.dt_deps {
                     let normalized = normalize_module_ref_str(dep);
                     edges.entry(normalized).or_default().insert(name.clone());
@@ -1666,8 +1664,7 @@ pub fn model_causal_edges(
         }
 
         // Include implicit variables (module instances from SMOOTH/DELAY expansion)
-        let parsed =
-            parse_source_variable_with_module_context(db, *source_var, project, module_ctx);
+        let parsed = parse_source_variable(db, *source_var, project);
         for implicit_var in &parsed.implicit_vars {
             let imp_name = canonicalize(implicit_var.ident()).into_owned();
 
@@ -1696,13 +1693,7 @@ pub fn model_causal_edges(
                 None => {
                     // For implicit flows/auxes, get deps from the parent's
                     // variable_direct_dependencies result.
-                    let deps = variable_direct_dependencies(
-                        db,
-                        *source_var,
-                        project,
-                        empty_ctx,
-                        empty_inputs,
-                    );
+                    let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
                     if let Some(implicit_dep) =
                         deps.implicit_vars.iter().find(|iv| iv.name == imp_name)
                     {
@@ -3499,7 +3490,6 @@ pub(crate) fn reconstruct_model_variables(
     use crate::common::{Canonical, Ident};
 
     let source_vars = model.variables(db);
-    let module_ctx = model_module_ident_context(db, model, project, vec![]);
     // The canonicalized dimension context comes from the project-global
     // salsa-cached query; every parse and lowering below reads that one value.
     let dim_context = project_dimensions_context(db, project);
@@ -3534,8 +3524,7 @@ pub(crate) fn reconstruct_model_variables(
             continue;
         }
 
-        let parsed =
-            parse_source_variable_with_module_context(db, *source_var, project, module_ctx);
+        let parsed = parse_source_variable(db, *source_var, project);
         let lowered = crate::model::lower_variable(&scope, &parsed.variable);
         variables.insert(Ident::new(name), lowered);
 

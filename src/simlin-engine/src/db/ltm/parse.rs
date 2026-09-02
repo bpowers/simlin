@@ -46,7 +46,6 @@ pub(super) fn parse_ltm_equation(
     var_name: &str,
     equation: &LtmEquation,
     dims: &DimensionsContext,
-    module_idents: Option<&HashSet<Ident<Canonical>>>,
     model_var_names: Option<&HashSet<Ident<Canonical>>>,
 ) -> ParsedVariableResult {
     let (flow_ast, mut errors) = equation.to_flow_ast(dims);
@@ -57,7 +56,6 @@ pub(super) fn parse_ltm_equation(
             var_name,
             ast,
             Some(dims),
-            module_idents,
             model_var_names,
             // LTM synthetic equations are engine-generated and never contain
             // user macro invocations -> no registry needed; and are never a

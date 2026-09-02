@@ -775,19 +775,17 @@ decomposes as:
 | ...of which `resolve_recurrence_sccs` | 2 | 245M | 14% |
 | `compile_implicit_var_fragment` | **651** (all) | 233M | 13% |
 
-Nearly every fragment in the model recompiles, which the per-variable keys
-should have prevented. The reason is already written down one level away, on
-`model_implicit_var_by_name`: a structural edit can change the model's implicit
-helper set, `model_module_ident_context` is an INTERNED handle whose id changes
-when that set grows, and a new key cannot backdate at all -- so every variable's
-parse is re-keyed and every fragment behind it recompiles. The bound is pinned
-by `implicit_helper_add_is_tight_but_module_helper_add_is_not`, which asserts
-exactly this asymmetry.
-
-So the next lever for interactive latency is **not** the dependency graph and
-not the fragment compilers: it is the granularity of the module-ident context's
-interning, which is GH #372's context-stable naming. Anything else attacks the
-22% and 13% rows while leaving the mechanism that produced them in place.
+The table above was measured under a parse keyed on an interned module-ident
+set of the owning model: a structural edit that grew the set minted a new key,
+and a new key cannot backdate, so every variable's parse and every fragment
+behind it re-ran. Under the current `(variable, project)` key
+(`parse_source_variable` reads nothing of the owning model) a
+module-instantiating add recompiles the added variable, the template's first
+instance and the input source whose initials membership changed, and nothing
+else (`db::fragment_char_tests::implicit_helper_add_is_tight_for_plain_and_module_helpers`,
+`module_helper_add_reparses_only_the_added_variable`, both measured over every
+tracked query with `db::exec_probe`); the structural edit's instruction cost
+under that key is not yet profiled.
 
 ### C5. `Compiler::intern_name` — the top allocation site, blocked on artifact identity
 
@@ -839,10 +837,10 @@ short of it rather than taking a ~2-3%.
    starting; both are silent, and one is a process abort.
 8. **C5 (`Compiler::intern_name`)** — the top allocation site, blocked on
    `NameId` assignment order being part of the compiled artifact.
-9. **C6's residual** — the remaining interactive lever, and it is GH #372's
-   context-stable helper naming rather than anything in the compile path: a
-   structural edit re-keys `model_module_ident_context`, and a new interned key
-   cannot backdate, so every fragment behind it recompiles.
+9. **C6's residual** — a profile of the structural edit under the
+   `(variable, project)` parse key. The table in C6 is the profile under the
+   older model-keyed parse; the execution-count tests say what recompiles
+   now, and no instruction count does.
 10. **LTM link-score arms** — the dominant cost of an LTM-enabled run on an
     arrayed model, and mostly a generation question rather than a VM one. An
     arm whose ceteris-paribus partial is *provably* `PREVIOUS(target)` is

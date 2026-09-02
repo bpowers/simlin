@@ -321,7 +321,7 @@ fn macro_call_expands_to_synthetic_module_structurally() {
     );
 
     let (transformed, vars) = crate::builtins_visitor::instantiate_implicit_modules(
-        "y", ast, None, None, None, &registry, None,
+        "y", ast, None, None, &registry, None,
     )
     .expect("a macro call must expand");
 
@@ -775,13 +775,13 @@ frozen = INITIAL(k * 2)
     );
     let body_helpers = implicit_vars_of(&db, &sync, "init", "init");
     assert!(
-        matches!(
-            body_helpers.as_slice(),
-            [ImplicitVar::Capture(c)]
-                if c.ident() == "$⁚init⁚0⁚arg0" && c.kind() == CaptureKind::Init
-        ),
-        "the body's INIT(x) lowers as the builtin -- a capture of the port, since a \
-         macro's ports are module-backed -- and never as an instance of itself"
+        body_helpers.is_empty(),
+        "the body's INIT(x) lowers as the builtin reading the port `x`'s own slot -- \
+         never as an instance of itself, and with no capture of the port; got {:?}",
+        body_helpers
+            .iter()
+            .map(|v| v.ident().to_string())
+            .collect::<Vec<_>>()
     );
 }
 
@@ -1503,5 +1503,65 @@ y =
         macro_diags.is_empty(),
         "unit checking must skip macro-marked models; diagnostics attributed \
          to the `badunits` macro model:\n{macro_diags:#?}",
+    );
+}
+
+/// A macro body's `INITIAL(input)` of its formal parameter reads the bound
+/// port's own slot: the invoked value is the parameter's t=0 value, and no
+/// capture is synthesized for it.
+///
+/// `EXPRESSION MACRO(input, parameter) = INITIAL(input) * parameter +
+/// SMOOTH(input, 2)` over `macro input = Time + 5` and `macro parameter =
+/// 1.1` over the control tail's `TIME = 0..2` at dt 1: `INITIAL(input) *
+/// parameter = 5 * 1.1 = 5.5`, and the `SMOOTH` starts at its input and
+/// follows it with delay 2 (`5, 5, 5.5`), so the output is `10.5, 10.5, 11`.
+///
+/// The body's helpers are the `SMOOTH` call's alone, numbered from 0: a
+/// capture of the port would have taken `⁚0⁚` and pushed the instance to
+/// `⁚1⁚smth1`. Helper names are external keys (the results offset map, the
+/// LTM causal graph libsimlin surfaces), so which name the instance carries
+/// is pinned rather than left to drift.
+#[test]
+fn a_macro_body_snapshot_of_its_formal_parameter_reads_the_bound_port() {
+    use crate::db::sync_from_datamodel;
+    use crate::test_common::implicit_vars_of;
+
+    let source = mdl(r#":MACRO: EXPRESSION MACRO(input, parameter)
+EXPRESSION MACRO = INITIAL(input) * parameter + SMOOTH(input, 2)
+	~	input
+	~	a macro whose body snapshots its formal parameter through INITIAL
+	|
+
+:END OF MACRO:
+macro input=
+	Time + 5
+	~
+	~		|
+
+macro output=
+	EXPRESSION MACRO(macro input,macro parameter)
+	~
+	~		|
+
+macro parameter=
+	1.1
+	~
+	~		|
+"#);
+    let output = run_mdl_var(&source, "macro_output");
+    assert_eq!(output, vec![10.5, 10.5, 11.0]);
+
+    let project = open_vensim(&source).expect("the macro source imports");
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let names: Vec<String> = implicit_vars_of(&db, &sync, "expression_macro", "expression_macro")
+        .iter()
+        .map(|v| v.ident().to_string())
+        .collect();
+    assert_eq!(
+        names,
+        ["$⁚expression_macro⁚0⁚arg1", "$⁚expression_macro⁚0⁚smth1"],
+        "INITIAL of the bound port captures nothing, so the SMOOTH call's helpers \
+         are the body's only ones and take walk index 0"
     );
 }

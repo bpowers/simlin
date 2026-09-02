@@ -34,8 +34,8 @@ use crate::db::{
 
 use super::parse::{parse_ltm_equation, scalarize_ltm_equation};
 use super::{
-    LtmEquation, LtmImplicitVarMeta, ltm_module_idents, model_ltm_implicit_var_info,
-    model_ltm_var_name_index, model_ltm_variables,
+    LtmEquation, LtmImplicitVarMeta, model_ltm_implicit_var_info, model_ltm_var_name_index,
+    model_ltm_variables,
 };
 
 /// Compile a single LTM synthetic variable's equation to symbolic
@@ -649,16 +649,9 @@ pub(crate) fn ltm_fragment_input<'db>(
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
 
-    let module_idents = ltm_module_idents(db, model, project);
     let model_var_names = super::ltm_model_var_names(db, model, project);
 
-    let parsed = parse_ltm_equation(
-        var_name,
-        equation,
-        dim_context,
-        Some(module_idents),
-        Some(model_var_names),
-    );
+    let parsed = parse_ltm_equation(var_name, equation, dim_context, Some(model_var_names));
     if let Some(errs) = parsed.variable.equation_errors()
         && !errs.is_empty()
     {

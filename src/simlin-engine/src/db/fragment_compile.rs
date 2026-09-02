@@ -343,19 +343,13 @@ pub fn compile_var_fragment<'db>(
 /// or the module branch's helper is not a module, `Lowering` with the body's
 /// equation errors when it has any. (`lower_variable` itself is total -- any
 /// lowering error surfaces here, see below.)
-fn lower_implicit_var<'db>(
-    db: &'db dyn Db,
+fn lower_implicit_var(
+    db: &dyn Db,
     meta: &ImplicitVarMeta,
     model: SourceModel,
     project: SourceProject,
-    module_ident_context: ModuleIdentContext<'db>,
 ) -> Result<(String, crate::variable::Variable), ImplicitInputError> {
-    let parsed = parse_source_variable_with_module_context(
-        db,
-        meta.parent_source_var,
-        project,
-        module_ident_context,
-    );
+    let parsed = parse_source_variable(db, meta.parent_source_var, project);
     let implicit_var = meta.find_in(parsed).ok_or(ImplicitInputError::Absent)?;
     let implicit_name = canonicalize(implicit_var.ident()).into_owned();
 
@@ -438,10 +432,7 @@ pub(crate) fn implicit_fragment_input<'db>(
     project: SourceProject,
     module_input_names: &[String],
 ) -> Result<FragmentInput<'db>, ImplicitInputError> {
-    let module_ident_context =
-        model_module_ident_context(db, model, project, module_input_names.to_vec());
-    let (implicit_name, lowered) =
-        lower_implicit_var(db, meta, model, project, module_ident_context)?;
+    let (implicit_name, lowered) = lower_implicit_var(db, meta, model, project)?;
     let var_ident: Ident<Canonical> = Ident::new(&implicit_name);
 
     let dim_context = project_dimensions_context(db, project);
@@ -451,7 +442,6 @@ pub(crate) fn implicit_fragment_input<'db>(
         db,
         meta.parent_source_var,
         project,
-        module_ident_context,
         ModuleInputSet::empty(db),
     );
     let helper_deps = parent_deps

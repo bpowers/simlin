@@ -6,26 +6,19 @@ use super::*;
 use crate::datamodel;
 use salsa::plumbing::AsId;
 
-/// Parse with an empty module-ident context (test convenience).
+/// The variable's parse (test convenience).
 fn parse_var_no_module_ctx(
     db: &dyn Db,
     var: SourceVariable,
     project: SourceProject,
 ) -> &ParsedVariableResult {
-    parse_source_variable_with_module_context(db, var, project, ModuleIdentContext::new(db, vec![]))
+    parse_source_variable(db, var, project)
 }
 
-/// Direct dependencies with an empty module-ident context and no module
-/// inputs -- the default (input-agnostic) path the old no-arg
-/// `variable_direct_dependencies` took. A test convenience.
+/// Direct dependencies with no module inputs -- the input-agnostic path. A
+/// test convenience.
 fn deps_no_inputs(db: &dyn Db, var: SourceVariable, project: SourceProject) -> &VariableDeps {
-    variable_direct_dependencies(
-        db,
-        var,
-        project,
-        ModuleIdentContext::new(db, vec![]),
-        ModuleInputSet::empty(db),
-    )
+    variable_direct_dependencies(db, var, project, ModuleInputSet::empty(db))
 }
 
 pub(crate) fn simple_project() -> datamodel::Project {

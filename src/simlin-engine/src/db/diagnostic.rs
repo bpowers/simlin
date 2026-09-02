@@ -167,7 +167,7 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     let source_vars = model.variables(db);
 
     // Trigger compile_var_fragment for each variable. This is a superset
-    // of parse_source_variable_with_module_context: it first accumulates
+    // of parse_source_variable: it first accumulates
     // unit definition syntax errors from the parsed variable, then checks
     // for equation parse errors, then proceeds with compilation which can
     // surface additional errors like BadTable, MismatchedDimensions, etc.
@@ -845,21 +845,17 @@ fn resolve_equation_dimensions(
 ///
 /// This is a memo READ, not a parse. `model_all_diagnostics` triggers
 /// `compile_var_fragment` for every variable before this pass runs, and that
-/// path parses through `parse_source_variable_with_module_context` under
-/// `model_module_ident_context(db, model, project, vec![])` -- the same key used
-/// here, so the memo is already populated and shared rather than a second parse
-/// under a second key.
+/// path parses through `parse_source_variable` -- the one parse memo a
+/// variable has, so it is already populated and shared.
 ///
 /// Callers must still gate on `variable::may_have_unfilled_arms` first: this is
 /// cheap, but the classification it feeds walks the equation's declared slots.
 fn parsed_equation_ast(
     db: &dyn Db,
-    model: SourceModel,
     project: SourceProject,
     var: SourceVariable,
 ) -> Option<crate::ast::Ast<crate::ast::Expr0>> {
-    let module_ident_context = model_module_ident_context(db, model, project, vec![]);
-    let parsed = parse_source_variable_with_module_context(db, var, project, module_ident_context);
+    let parsed = parse_source_variable(db, var, project);
     parsed.variable.ast().cloned()
 }
 
@@ -957,7 +953,7 @@ fn emit_unfilled_equation_warnings(db: &dyn Db, model: SourceModel, project: Sou
         if !may_have_unfilled_arms(svar.equation(db), nan_names_a_variable) {
             continue;
         }
-        let Some(ast) = parsed_equation_ast(db, model, project, svar) else {
+        let Some(ast) = parsed_equation_ast(db, project, svar) else {
             continue;
         };
         let Some(unfilled) = unfilled_arms(&ast) else {

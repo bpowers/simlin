@@ -1156,10 +1156,10 @@ pub fn is_0_arity_builtin_fn_ci(name: &str) -> bool {
 /// expands to a stdlib module: the canonical names in `MODEL_NAMES` plus
 /// the alias forms `delay`, `delayn`, and `smthn`.
 ///
-/// This is the authoritative check shared by `equation_is_module_call()`
-/// (pre-scan name classification) and `contains_module_call()` (walk-time
-/// A2A expansion decision). Each caller adds its own structural logic on
-/// top (e.g., PREVIOUS arg-count check, INIT inclusion for A2A).
+/// This is the authoritative name check, shared by `contains_module_call()`
+/// (the walk-time A2A expansion decision) and the visitor's stdlib routing;
+/// each caller adds its own structural logic on top (e.g. INIT inclusion for
+/// A2A).
 pub(crate) fn is_stdlib_module_function(func_name: &str) -> bool {
     matches!(func_name, "delay" | "delayn" | "smthn")
         || crate::stdlib::MODEL_NAMES.contains(&func_name)

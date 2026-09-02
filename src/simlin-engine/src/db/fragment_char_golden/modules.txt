@@ -172,8 +172,17 @@
   n_slots: 2
   input: [0, 1)
   output: [1, 2)
-== producer::input [explicit] : flow ==
-  initial: <no fragment>
+== producer::input [explicit] : initial+flow ==
+  initial:
+    literals: [0.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  AssignConstCurr input@0 #0 (=0.0)
+      0001  Ret
   flow:
     literals: [0.0]
     temp_sizes: []
@@ -185,8 +194,19 @@
       0000  AssignConstCurr input@0 #0 (=0.0)
       0001  Ret
   stock: <no fragment>
-== producer::output [explicit] : flow ==
-  initial: <no fragment>
+== producer::output [explicit] : initial+flow ==
+  initial:
+    literals: [10.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadVar input@0
+      0001  LoadConstant #0 (=10.0)
+      0002  BinOpAssignCurr Mul output@0
+      0003  Ret
   flow:
     literals: [10.0]
     temp_sizes: []
@@ -205,8 +225,18 @@
   n_slots: 2
   input: [0, 1)
   output: [1, 2)
-== producer::input [explicit] : flow ==
-  initial: <no fragment>
+== producer::input [explicit] : initial+flow ==
+  initial:
+    literals: []
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadModuleInput input=0
+      0001  AssignCurr input@0
+      0002  Ret
   flow:
     literals: []
     temp_sizes: []
@@ -219,8 +249,19 @@
       0001  AssignCurr input@0
       0002  Ret
   stock: <no fragment>
-== producer::output [explicit] : flow ==
-  initial: <no fragment>
+== producer::output [explicit] : initial+flow ==
+  initial:
+    literals: [10.0]
+    temp_sizes: []
+    dim_lists: []
+    graphical_functions: []
+    module_decls: []
+    static_views: []
+    code:
+      0000  LoadModuleInput input=0
+      0001  LoadConstant #0 (=10.0)
+      0002  BinOpAssignCurr Mul output@0
+      0003  Ret
   flow:
     literals: [10.0]
     temp_sizes: []

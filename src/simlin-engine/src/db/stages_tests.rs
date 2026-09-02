@@ -260,12 +260,11 @@ fn unit_pass_diagnostics(
 /// The cached `model_stage0` must equal what the datamodel-driven
 /// `ModelStage0::new_in_project` builds for the same model.
 ///
-/// That constructor is the independently written twin: it derives the
-/// module-ident set (`collect_module_idents` over the `datamodel::Model`), the
-/// macro registry and the duplicate-ident errors (the raw declared-ident list)
-/// along completely different routes than the query, which reads interned salsa
-/// contexts and memoized groups. So this is a real cross-check, not a
-/// restatement of the query body.
+/// That constructor is the independently written twin: it derives the macro
+/// registry, the enclosing-macro fact and the duplicate-ident errors (the raw
+/// declared-ident list) along completely different routes than the query,
+/// which reads memoized project-keyed maps. So this is a real cross-check, not
+/// a restatement of the query body.
 ///
 /// It replaced `ModelStage0::new_cached` as this oracle when that test-only
 /// third copy of the salsa-cached construction was deleted.
@@ -681,89 +680,6 @@ fn source_model_is_stdlib_canonicalizes_the_display_name() {
     assert!(
         crate::db::source_model_is_stdlib(&db, shadow),
         "the predicate must canonicalize before testing the prefix and suffix"
-    );
-}
-
-/// A stdlib model's variable parses treat EVERY variable name as
-/// module-backed; a user model's extra set is empty.
-///
-/// Inert today (no stdlib body calls `PREVIOUS`/`INIT`, the only consumer of
-/// the module-ident set), but load-bearing for cache sharing: one rule means
-/// one `ModuleIdentContext` and one set of per-variable parse memos.
-#[test]
-fn stdlib_models_add_every_variable_name_to_the_module_ident_set() {
-    let db = SimlinDb::default();
-    let project = three_model_project();
-    let sync = sync_from_datamodel(&db, &project);
-
-    let smth1 = sync.models["stdlib\u{205A}smth1"].source;
-    let mut stdlib_extra = crate::db::stages::extra_module_idents(&db, smth1, true);
-    stdlib_extra.sort();
-    let mut expected: Vec<String> = smth1.variables(&db).keys().cloned().collect();
-    expected.sort();
-    assert_eq!(
-        stdlib_extra, expected,
-        "a stdlib model contributes all of its variable names"
-    );
-    assert!(
-        !expected.is_empty(),
-        "the fixture stdlib model has variables"
-    );
-
-    let main = sync.models["main"].source;
-    assert!(
-        crate::db::stages::extra_module_idents(&db, main, false).is_empty(),
-        "a user model contributes no extra module idents"
-    );
-}
-
-/// `model_stage0` actually PASSES the stdlib extra idents on -- pinned on the
-/// interned `ModuleIdentContext` identity, not on a parse result.
-///
-/// This is the wiring the previous version of these tests could not see. The
-/// rule is inert in every stage VALUE (no stdlib body calls `PREVIOUS`/`INIT`),
-/// so reverting the query's call site to `vec![]` left the whole engine suite
-/// green while quietly minting a SECOND set of per-variable parse memos under a
-/// different key -- losing the cache sharing that is the entire stated reason
-/// for the rule. `Stage0Context` is the one place that
-/// wiring can now go wrong, and interned contexts compare by identity, so the
-/// difference is directly observable even though the parse is not.
-#[test]
-fn model_stage0_parses_a_stdlib_model_under_the_extended_module_context() {
-    let db = SimlinDb::default();
-    let project = three_model_project();
-    let sync = sync_from_datamodel(&db, &project);
-
-    let smth1 = sync.models["stdlib\u{205A}smth1"].source;
-    let stdlib_ctx = crate::db::stages::model_stage0_context(&db, smth1, sync.project);
-    assert!(stdlib_ctx.is_stdlib);
-    assert_ne!(
-        stdlib_ctx.module_idents,
-        model_module_ident_context(&db, smth1, sync.project, vec![]),
-        "a stdlib model must be parsed under an EXTENDED module-ident context, \
-         not the bare one a user model gets"
-    );
-
-    // A user model adds nothing, so it must land on exactly the bare context --
-    // that shared identity is what keeps one set of parse memos.
-    let main = sync.models["main"].source;
-    let main_ctx = crate::db::stages::model_stage0_context(&db, main, sync.project);
-    assert!(!main_ctx.is_stdlib);
-    assert_eq!(
-        main_ctx.module_idents,
-        model_module_ident_context(&db, main, sync.project, vec![]),
-        "a user model's stage context must be the bare module-ident context"
-    );
-
-    // And the query reads its `implicit` flag from that same derivation, so the
-    // context cannot be derived correctly while the query uses another one.
-    assert_eq!(
-        model_stage0(&db, smth1, sync.project).implicit,
-        stdlib_ctx.is_stdlib
-    );
-    assert_eq!(
-        model_stage0(&db, main, sync.project).implicit,
-        main_ctx.is_stdlib
     );
 }
 
@@ -1514,10 +1430,8 @@ fn an_unrelated_models_edit_invalidates_neither_stage_nor_unit_check() {
 /// an input that re-executes `model_stage0` while leaving its value equal, and
 /// no such input exists -- every input stage0 reads either changes its value
 /// (its own variables' parses, its name, its macro spec) or is shared with
-/// `model_stage1` (the dimensions context), and the module-ident context is
-/// interned, so an edit that leaves the ident list alone backdates before it
-/// ever reaches stage0. A test built on one of those would be measuring the
-/// lever, not the equality.
+/// `model_stage1` (the dimensions context). A test built on one of those would
+/// be measuring the lever, not the equality.
 ///
 /// Two rows, derived from the one axis the change is about -- whether the
 /// model's equations carry a NaN literal -- and they must agree. The control

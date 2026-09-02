@@ -616,12 +616,15 @@ struct AgreementRow {
 ///
 /// **Arms this table does not cover, and where they are covered instead.**
 ///
-/// * A `Subscript` whose BASE is module-backed. It shares the identical
-///   `is_module_backed_ident` test with the `Var` row below, and a module
-///   output port that can be subscripted needs an explicit sub-model, which
-///   `TestProject` does not build. The module-backed base is pinned by
-///   `model::test_previous_module_input_var_uses_helper_rewrite` and
-///   `db::ltm_tests::test_ltm_previous_module_var_uses_helper_rewrite`.
+/// * A base that is a module instance, a module output port or a bound
+///   input port. The parse leaves every such reference in place (it reads
+///   nothing of the owning model) and lowering decides what the snapshot
+///   addresses from the dependency's shape; those arms need an explicit
+///   sub-model, which `TestProject` does not build, and are the rows of
+///   `module_snapshot_arguments_are_resolved_at_lowering` below.
+/// * A module instance synthesized in the SAME walk (`PREVIOUS(SMTH1(k, 2))`),
+///   the one module-backed base the parse does know: captured, and pinned by
+///   `db::capture_tests`.
 /// * An index that is BOTH `SpansDimension` and `Static` -- a name that is an
 ///   active apply-to-all dimension and also an element of some other
 ///   dimension. No corpus model reaches it: the branch of `index_is_static`
@@ -654,18 +657,12 @@ fn every_prev_init_argument_shape_agrees_between_the_parse_and_codegen() {
             divergence: None,
         },
         AgreementRow {
-            covers: "visitor: Var, base module-backed. codegen: Expr::Var",
+            covers: "visitor: Var naming a stdlib-call aux. codegen: Expr::Var",
             a2a: false,
             equation: "PREVIOUS(smoothed, 0)",
-            captures: true,
+            captures: false,
             codegen: Some(SnapshotAccess::Slot),
-            divergence: Some(
-                "the parse treats a stdlib-call aux as module-backed, but the call is \
-                 rewritten to a reference to a separate module instance and the aux \
-                 keeps one slot, so codegen addresses it like any other variable. The \
-                 capture is redundant; dropping it removes a slot and a fragment, which \
-                 is an artifact change with its own ledger row",
-            ),
+            divergence: None,
         },
         AgreementRow {
             covers: "visitor: Subscript, numeric index. codegen: collapsed StaticSubscript",
@@ -947,6 +944,181 @@ fn every_prev_init_argument_shape_agrees_between_the_parse_and_codegen() {
             tp.compile_incremental().is_ok(),
             row.codegen.is_some(),
             "{what}: `{eqn}` -- compilability"
+        );
+    }
+}
+
+/// One parent and one sub-model, for the snapshot arguments only a project
+/// with a module can spell.
+///
+/// `main`: `src = TIME + 3`, `sub` instantiating `producer` with `src ->
+/// sub.input`, and `probe` holding the equation under test. `producer`:
+/// `input` (an `access="input"` port), `arr[d] = input * d` over `d = {1, 2,
+/// 3}`, `output = input * 10`, and the two snapshot reads of the bound port,
+/// `lagged_input = PREVIOUS(input, 0)` and `frozen_input = INIT(input)`.
+fn module_snapshot_project(probe_equation: &str) -> datamodel::Project {
+    use crate::test_common::TestProject;
+
+    let aux = |ident: &str, equation: datamodel::Equation, can_be_module_input: bool| {
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation,
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat {
+                can_be_module_input,
+                ..datamodel::Compat::default()
+            },
+        })
+    };
+    let scalar = |ident: &str, eqn: &str, port: bool| {
+        aux(ident, datamodel::Equation::Scalar(eqn.to_string()), port)
+    };
+    let mut project = TestProject::new("module_snapshots")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .indexed_dimension("d", 3)
+        .aux("src", "TIME + 3", None)
+        .aux("probe", probe_equation, None)
+        .build_datamodel();
+    project.models.push(datamodel::Model {
+        name: "producer".to_string(),
+        sim_specs: None,
+        variables: vec![
+            scalar("input", "0", true),
+            aux(
+                "arr",
+                datamodel::Equation::ApplyToAll(vec!["d".to_string()], "input * d".to_string()),
+                false,
+            ),
+            scalar("output", "input * 10", false),
+            scalar("lagged_input", "PREVIOUS(input, 0)", false),
+            scalar("frozen_input", "INIT(input)", false),
+        ],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    });
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Module(datamodel::Module {
+            ident: "sub".to_string(),
+            model_name: "producer".to_string(),
+            documentation: String::new(),
+            units: None,
+            references: vec![datamodel::ModuleReference {
+                src: "src".to_string(),
+                dst: "sub.input".to_string(),
+            }],
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+    project
+}
+
+/// Every variable's series, step-major, keyed by canonical name (`module·var`
+/// for a sub-model's).
+fn module_snapshot_series(
+    db: &SimlinDb,
+    project: SourceProject,
+) -> std::collections::HashMap<String, Vec<f64>> {
+    let compiled = compile_project_incremental(db, project, "main").expect("compiles");
+    let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+    vm.run_to_end().expect("runs");
+    let results = vm.into_results();
+    results
+        .offsets
+        .iter()
+        .map(|(name, off)| {
+            let series = (0..results.step_count)
+                .map(|step| results.data[step * results.step_size + off])
+                .collect();
+            (name.as_str().to_string(), series)
+        })
+        .collect()
+}
+
+/// The snapshot arguments whose meaning depends on what the NAME denotes in
+/// the owning model -- a module instance, one of its output ports, a bound
+/// input port -- are resolved at lowering (`Context::snapshot_storage`), not
+/// captured by the parse, which reads nothing of the owning model.
+///
+/// The rows are the enumeration of what a bare name can denote there,
+/// crossed with the two intrinsics:
+///
+/// * a scalar output port and an element of an arrayed one: a fixed slot
+///   inside the instance, read directly;
+/// * a bound input port, read from inside the sub-model: its own slot, which
+///   its fragment assigns the parent's value every phase, so the lag and the
+///   freeze are exactly what a capture of the port would have held (the same
+///   port wired WITHOUT `access="input"`, and the helper list, are
+///   `fragment_determinism_tests::a_submodel_reading_a_bound_port_through_previous_parses_once_and_compiles`);
+/// * the bare instance: no storage of its own, refused loudly rather than
+///   read at whichever sub-model variable the layout put first.
+///
+/// Values, from the rules: `src` is `3, 4, 5, 6`, so `sub·output` is `30, 40,
+/// 50, 60` and `sub·arr[2]` is `6, 8, 10, 12`; a `PREVIOUS` is its fallback at
+/// t=0 and the prior step's value after, an `INIT` the t=0 value throughout.
+/// The `INIT` rows read the sub-model's t=0 value because every value-bearing
+/// variable of an instantiated model is an initials member (GH #1028).
+#[test]
+fn module_snapshot_arguments_are_resolved_at_lowering() {
+    let rows: &[(&str, Vec<f64>)] = &[
+        ("PREVIOUS(sub.output, 0)", vec![0.0, 30.0, 40.0, 50.0]),
+        ("INIT(sub.output)", vec![30.0, 30.0, 30.0, 30.0]),
+        ("PREVIOUS(sub.arr[2], 0)", vec![0.0, 6.0, 8.0, 10.0]),
+        ("INIT(sub.arr[2])", vec![6.0, 6.0, 6.0, 6.0]),
+    ];
+    for (equation, expected) in rows {
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &module_snapshot_project(equation));
+        let main = sync.models["main"].source;
+        let producer = sync.models["producer"].source;
+        assert!(
+            model_implicit_var_info(&db, main, sync.project).is_empty()
+                && model_implicit_var_info(&db, producer, sync.project).is_empty(),
+            "`{equation}`: neither the parent's read of a port nor the sub-model's \
+             reads of its bound input synthesize a capture"
+        );
+        let series = module_snapshot_series(&db, sync.project);
+        assert_eq!(&series["probe"], expected, "`{equation}`");
+        assert_eq!(
+            series["sub\u{00B7}lagged_input"],
+            vec![0.0, 3.0, 4.0, 5.0],
+            "`PREVIOUS(input, 0)` of the bound port lags the parent's value"
+        );
+        assert_eq!(
+            series["sub\u{00B7}frozen_input"],
+            vec![3.0, 3.0, 3.0, 3.0],
+            "`INIT(input)` of the bound port freezes the parent's t=0 value"
+        );
+    }
+
+    for equation in ["PREVIOUS(sub, 0)", "INIT(sub)"] {
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &module_snapshot_project(equation));
+        let refusals: Vec<String> = collect_all_diagnostics(&db, sync.project)
+            .into_iter()
+            .filter(|d| d.model == "main" && d.variable.as_deref() == Some("probe"))
+            .filter_map(|d| match d.error {
+                DiagnosticError::Equation(err)
+                    if err.code == crate::common::ErrorCode::NotSimulatable =>
+                {
+                    err.details
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            refusals
+                .iter()
+                .any(|why| why.contains("bare module instance 'sub'")),
+            "`{equation}`: a bare module instance has no snapshot storage and must be \
+             refused on `probe`; got {refusals:?}"
         );
     }
 }

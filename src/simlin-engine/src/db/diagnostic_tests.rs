@@ -2722,7 +2722,7 @@ fn test_unknown_element_subscript_warns_on_conveyor_init_list() {
 // accumulated from inside `project_macro_registry`'s body and discovered only by
 // whatever accumulator DFS happened to reach that memo, which made it both
 // over-reported (once per model, since every model's `model_all_diagnostics`
-// subtree reaches the registry through `model_module_ident_context`) and
+// subtree reaches the registry through `parse_source_variable`) and
 // FRAGILE (see the pruning hazard documented above `unit_warning_fixture`: after
 // an unrelated revision bump the whole subtree is pruned and the diagnostic
 // silently vanishes). It is now emitted once, directly, by

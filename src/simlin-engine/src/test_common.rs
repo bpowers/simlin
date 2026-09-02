@@ -19,10 +19,9 @@ use crate::vm::{CompiledSimulation, Vm};
 use std::collections::HashMap;
 
 /// The helpers one variable's production parse synthesized, in walk order,
-/// read through `parse_source_variable_with_module_context` under the model's
-/// own module-ident context -- the same call, with the same context, that
-/// `model_implicit_var_info` makes -- so they are the helpers the compile
-/// sees, not a re-derivation.
+/// read through `parse_source_variable` -- the one parse memo a variable has,
+/// the same one `model_implicit_var_info` reads -- so they are the helpers the
+/// compile sees, not a re-derivation.
 #[cfg(test)]
 pub fn implicit_vars_of(
     db: &SimlinDb,
@@ -30,11 +29,9 @@ pub fn implicit_vars_of(
     model_name: &str,
     var: &str,
 ) -> Vec<crate::capture::ImplicitVar> {
-    use crate::db::{model_module_ident_context, parse_source_variable_with_module_context};
     let model = sync.models[model_name].source;
     let source_var = model.variables(db)[var];
-    let ctx = model_module_ident_context(db, model, sync.project, vec![]);
-    parse_source_variable_with_module_context(db, source_var, sync.project, ctx)
+    crate::db::parse_source_variable(db, source_var, sync.project)
         .implicit_vars
         .to_vec()
 }

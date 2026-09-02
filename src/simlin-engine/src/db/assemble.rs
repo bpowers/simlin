@@ -2059,13 +2059,7 @@ fn enumerate_module_instances_inner(
                 name, sub_model_name,
             ));
         }
-        let module_ident_context = model_module_ident_context(db, *source_model, project, vec![]);
-        let parsed = parse_source_variable_with_module_context(
-            db,
-            meta.parent_source_var,
-            project,
-            module_ident_context,
-        );
+        let parsed = parse_source_variable(db, meta.parent_source_var, project);
         let inputs: BTreeSet<Ident<Canonical>> =
             if let Some(dm_module) = meta.find_in(parsed).and_then(|iv| iv.module()) {
                 module_input_set(

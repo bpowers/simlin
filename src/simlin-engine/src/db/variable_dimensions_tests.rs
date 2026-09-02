@@ -64,8 +64,7 @@ fn a2a(dim_names: &[&str], eqn: &str) -> datamodel::Equation {
 }
 
 /// The implementation `variable_dimensions` replaced, kept verbatim as the
-/// ORACLE: parse the variable under the empty module-ident context and read
-/// the shape off the resulting `Ast`.
+/// ORACLE: parse the variable and read the shape off the resulting `Ast`.
 ///
 /// Asserting against this rather than against hand-written expectations is
 /// what makes the agreement claim mean anything. Writing the rows out by hand
@@ -77,8 +76,7 @@ fn a2a(dim_names: &[&str], eqn: &str) -> datamodel::Equation {
 /// BOTH paths. That is a property of the shared narrowing, not of either
 /// implementation, and only an oracle catches it.
 fn oracle_dimension_names(db: &dyn Db, var: SourceVariable, project: SourceProject) -> Vec<String> {
-    let empty_context = ModuleIdentContext::new(db, vec![]);
-    let parsed = parse_source_variable_with_module_context(db, var, project, empty_context);
+    let parsed = parse_source_variable(db, var, project);
     match parsed.variable.get_dimensions() {
         Some(dims) => dims.iter().map(|d| d.name().to_string()).collect(),
         None => Vec::new(),

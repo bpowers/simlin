@@ -107,12 +107,23 @@ const ROWS: &[CaptureRow] = &[
         rewritten: None,
     },
     CaptureRow {
-        covers: "a module-backed base: a stdlib-call aux is captured by NAME, because the \
-                 call is rewritten inside that aux's own parse, not inside this one",
+        covers: "the one module-backed base the parse knows: a module instance synthesized \
+                 EARLIER IN THIS WALK, whose output the argument reads. Every other \
+                 module-backed name -- an explicit instance, a module-call aux such as \
+                 `smoothed`, a bound port -- passes through uncaptured and is resolved at \
+                 lowering (`prev_init_tests::module_snapshot_arguments_are_resolved_at_lowering`)",
         parent: Parent::Scalar,
-        equation: "PREVIOUS(smoothed, 0)",
-        captures: &[("$⁚lagged⁚0⁚arg0", CaptureKind::Previous, "smoothed", &[])],
-        rewritten: None,
+        equation: "PREVIOUS(SMTH1(k, 2), 0)",
+        captures: &[(
+            "$⁚lagged⁚1⁚arg0",
+            CaptureKind::Previous,
+            "\"$⁚lagged⁚0⁚smth1·output\"",
+            &[],
+        )],
+        rewritten: Some(
+            "the call expands to its instance before the capture, so the capture holds \
+             the instance's output reference rather than the call",
+        ),
     },
     CaptureRow {
         covers: "two captures in one equation: the walk counter is shared and increments once \
@@ -547,15 +558,13 @@ SAVEPER  = TIME STEP
         .map(|(_, m)| m.source)
         .expect("the macro model must sync");
 
-    let ctx = model_module_ident_context(&db, macro_model, sync.project, vec![]);
     let body_var = macro_model.variables(&db)["lagsum"];
-    let captures: Vec<Capture> =
-        parse_source_variable_with_module_context(&db, body_var, sync.project, ctx)
-            .implicit_vars
-            .iter()
-            .filter_map(ImplicitVar::capture)
-            .cloned()
-            .collect();
+    let captures: Vec<Capture> = parse_source_variable(&db, body_var, sync.project)
+        .implicit_vars
+        .iter()
+        .filter_map(ImplicitVar::capture)
+        .cloned()
+        .collect();
 
     assert_eq!(
         captures

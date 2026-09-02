@@ -2,19 +2,17 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::ast::{Ast, Expr0, Expr2, lower_ast};
-use crate::common::{Canonical, EquationError, EquationResult, Ident, canonicalize};
-use crate::db::SourceVariableKind;
+use crate::common::{Canonical, EquationError, EquationResult, Ident};
 use crate::dimensions::DimensionsContext;
-use crate::variable::{ModuleInput, VarKind, Variable, VariableSource};
+use crate::variable::{ModuleInput, VarKind, Variable};
 use crate::{datamodel, eqn_err};
 
 #[cfg(test)]
 use {
     crate::datamodel::Dimension,
-    crate::db,
     crate::units::Context,
     crate::variable::{ParseContext, parse_var},
 };
@@ -253,96 +251,6 @@ pub(crate) fn resolve_module_input<'a>(
     }
 }
 
-/// Scan a model's variables and return the set of identifiers that will become
-/// module variables during compilation.
-///
-/// This includes:
-/// - explicit module instances (`SourceVariableKind::Module`)
-/// - aux and flow variables whose equations parse to a top-level
-///   **module-function** call: a stdlib function (`SMTH1`, `DELAY`, ...) or a
-///   project macro (consulted via the passed `MacroRegistry`).
-///
-/// This set is needed so that `PREVIOUS(module_var)` rewrites through a
-/// synthesized scalar helper aux instead of compiling `LoadPrev` directly
-/// against a multi-slot module. A `y = MYMACRO(...)` caller must be
-/// pre-classified here exactly as a `y = SMTH1(...)` caller is, so the
-/// PREVIOUS/INIT rewrite sees it as module-backed.
-pub(crate) fn collect_module_idents<'a>(
-    variables: impl IntoIterator<Item = VariableSource<'a>>,
-    macro_registry: &crate::module_functions::MacroRegistry,
-) -> HashSet<Ident<Canonical>> {
-    let mut module_idents = HashSet::new();
-    for v in variables {
-        if v.can_be_module_input {
-            module_idents.insert(Ident::new(&canonicalize(v.ident)));
-        }
-        match v.kind {
-            SourceVariableKind::Module => {
-                module_idents.insert(Ident::new(&canonicalize(v.ident)));
-            }
-            SourceVariableKind::Aux | SourceVariableKind::Flow => {
-                if equation_is_module_call(&v.equation, macro_registry) {
-                    module_idents.insert(Ident::new(&canonicalize(v.ident)));
-                }
-            }
-            SourceVariableKind::Stock => {}
-        }
-    }
-    module_idents
-}
-
-/// Check if a scalar equation's top-level expression is a **module-function**
-/// call: a stdlib function (`is_stdlib_module_function`) or a project macro
-/// (resolved via `macro_registry`). A project macro is recognized even when
-/// its name shadows a builtin, since the macro registry is consulted
-/// directly (the actual macro-shadows-builtin precedence is enforced later
-/// in `BuiltinVisitor::walk`).
-///
-/// This intentionally re-parses the equation text rather than reusing the
-/// already-parsed AST. It runs during `collect_module_idents` (called from
-/// `ModelStage0::new_in_project` and the salsa `module_ident_context`
-/// query), before the full per-variable parse in `parse_var`. The re-parse
-/// is cheap (single equation, top-level only) and avoids threading the
-/// parsed AST through an intermediate data structure just for this early
-/// classification step.
-///
-/// Scope note: this inspects only `Equation::Scalar` and
-/// `Equation::ApplyToAll`; it returns `false` for `Equation::Arrayed` (the
-/// per-element-equation form). A per-element-equation macro call would not be
-/// pre-classified here -- but that exactly matches the pre-existing behavior
-/// for arrayed stdlib calls, so it is not a macro-specific regression.
-pub(crate) fn equation_is_module_call(
-    eqn: &datamodel::Equation,
-    macro_registry: &crate::module_functions::MacroRegistry,
-) -> bool {
-    let text = match eqn {
-        datamodel::Equation::Scalar(s) | datamodel::Equation::ApplyToAll(_, s) => s.as_str(),
-        _ => return false,
-    };
-    let Ok(Some(ast)) = Expr0::new(text, crate::lexer::LexerType::Equation) else {
-        return false;
-    };
-    match &ast {
-        Expr0::App(crate::builtins::UntypedBuiltinFn(func, _args), _) => {
-            let func_lower = func.to_lowercase();
-            // Any resolvable project macro counts as a module call here,
-            // including a genuine passthrough macro (`:MACRO: INIT(x) =
-            // INITIAL(x)`) that `builtins_visitor::walk` later collapses to a
-            // scalar opcode (#591-c1). Pre-classifying the passthrough caller
-            // as module-backed is benign: the only downstream consumer of this
-            // result is `is_module_backed_ident`, which gates whether a
-            // *referencing* `PREVIOUS`/`INIT` synthesizes a scalar temp arg
-            // (`builtins_visitor.rs`). Since a passthrough caller collapses to
-            // a plain flat-slot variable, that temp-arg copy is value-identical
-            // to reading the slot directly -- so the classification does not
-            // change any observable result either way.
-            let is_module_macro = macro_registry.resolve_macro(func).is_some();
-            crate::builtins::is_stdlib_module_function(&func_lower) || is_module_macro
-        }
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 impl ModelStage0 {
     /// Stage a model that stands alone, resolving module-function calls against
@@ -371,10 +279,10 @@ impl ModelStage0 {
     /// derived from `x_model` plus the project's macro definitions.
     ///
     /// This is the independent twin of the salsa-native
-    /// `db::stages::model_stage0` -- the two share `parse_var`
-    /// but derive the module-ident set, the macro registry and the
-    /// duplicate-ident errors along completely different routes -- which is what
-    /// makes it a real oracle for that query rather than a restatement of it.
+    /// `db::stages::model_stage0` -- the two share `parse_var` but derive the
+    /// macro registry, the enclosing-macro fact and the duplicate-ident errors
+    /// along completely different routes -- which is what makes it a real
+    /// oracle for that query rather than a restatement of it.
     ///
     /// `project_models` is the whole project's model list, only so that the
     /// `MacroRegistry` matches the project-wide one `db::macro_registry`'s query
@@ -391,35 +299,9 @@ impl ModelStage0 {
     ) -> Self {
         let mut implicit_vars: Vec<crate::capture::ImplicitVar> = Vec::new();
 
-        // Determine which variable names should force PREVIOUS to synthesize
-        // a scalar temp arg rather than reading a flat slot directly.
-        //
-        // For user models, only explicit Module variables and stdlib-call
-        // Aux/Flow variables need temp-arg rewriting because they occupy
-        // multiple slots and LoadPrev at the base offset reads the wrong
-        // sub-variable.
-        //
-        // For implicit (stdlib) models, ALL variable names are included.
-        // Inside a submodule, some variables are module inputs whose values
-        // are passed from the parent via a transient array -- they have no
-        // persistent slot in prev_values. PREVIOUS(module_input) must first
-        // capture the current scalar into a temp helper so LoadPrev reads
-        // that helper's slot on the next step.
         // A build error here is a test-fixture bug -- surface it loudly.
         let macro_registry = crate::module_functions::MacroRegistry::build(project_models)
             .expect("test fixture macro set must be valid");
-        let module_idents: HashSet<Ident<Canonical>> = if implicit {
-            x_model
-                .variables
-                .iter()
-                .map(|v| Ident::new(&canonicalize(v.get_ident())))
-                .collect()
-        } else {
-            collect_module_idents(
-                x_model.variables.iter().map(VariableSource::from),
-                &macro_registry,
-            )
-        };
 
         // #554: a macro-marked model's body variables get the model name as
         // `enclosing_model` so a renamed `init`/`previous` builtin inside the
@@ -433,7 +315,6 @@ impl ModelStage0 {
         let ctx = ParseContext {
             dimensions: &dimensions_ctx,
             units_ctx,
-            module_idents: Some(&module_idents),
             model_var_names: None,
             macro_registry: Some(&macro_registry),
             enclosing_model,
@@ -779,69 +660,6 @@ fn unknown_dependency_is_attributed_to_the_referencing_variable() {
     );
 }
 
-/// `PREVIOUS(module_var)` must rewrite through a synthesized scalar helper aux
-/// on the salsa-cached parse path exactly as it does on the direct one.
-///
-/// A module occupies several flattened slots, so a `LoadPrev` at its base
-/// offset would read the wrong sub-variable; the parser therefore captures the
-/// current value into a helper first. That rewrite is driven by the
-/// module-ident set, which the two paths derive along different routes
-/// (`collect_module_idents` over the `datamodel::Model` here, an interned
-/// `ModuleIdentContext` off the salsa inputs there) -- so the agreement is a
-/// real cross-check.
-///
-/// Previously written against the test-only `ModelStage0::new_cached` twin;
-/// now against `db::stages::model_stage0`, which IS the crate's salsa-cached
-/// Stage0 constructor.
-#[test]
-fn test_cached_stage0_preserves_previous_helper_rewrite() {
-    let units_ctx = Context::new(&[], &Default::default()).0;
-    let main_model = x_model(
-        "main",
-        vec![
-            x_module("sub", &[], None),
-            x_aux("prev_sub", "PREVIOUS(sub)", None),
-        ],
-    );
-    // Multiple vars so `sub` is clearly multi-slot when flattened.
-    let sub_model = x_model(
-        "sub",
-        vec![x_aux("internal", "42", None), x_aux("output", "TIME", None)],
-    );
-    let project_datamodel = datamodel::Project {
-        name: "cached_prev_module".to_string(),
-        sim_specs: datamodel::SimSpecs::default(),
-        dimensions: vec![],
-        units: vec![],
-        models: vec![main_model.clone(), sub_model],
-        source: None,
-        ai_information: None,
-    };
-
-    let direct = ModelStage0::new(&main_model, &[], &units_ctx, false);
-
-    let db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel(&db, &project_datamodel);
-    let cached = db::model_stage0(&db, sync.models["main"].source, sync.project);
-
-    let has_previous_helper = |model: &ModelStage0| {
-        model
-            .variables
-            .keys()
-            .any(|ident| ident.as_str().starts_with("$⁚prev_sub⁚0⁚arg0"))
-    };
-
-    assert!(
-        has_previous_helper(&direct),
-        "direct parse should synthesize a scalar helper for PREVIOUS(sub)"
-    );
-    assert_eq!(
-        has_previous_helper(&direct),
-        has_previous_helper(cached),
-        "cached parse should preserve PREVIOUS(module_var) helper rewriting"
-    );
-}
-
 #[test]
 fn test_init_aux_only_array_subscript() {
     use crate::test_common::TestProject;
@@ -896,187 +714,6 @@ fn test_init_expression_vm() {
             "frozen_expr should be 3.0 at every step, got {val} at step {step}"
         );
     }
-}
-
-#[test]
-fn test_previous_module_input_var_uses_helper_rewrite() {
-    let units_ctx = Context::new(&[], &Default::default()).0;
-    let module_input = datamodel::Variable::Aux(datamodel::Aux {
-        ident: "input".to_string(),
-        equation: datamodel::Equation::Scalar("0".to_string()),
-        documentation: String::new(),
-        units: None,
-        gf: None,
-        ai_state: None,
-        uid: None,
-        compat: datamodel::Compat {
-            can_be_module_input: true,
-            ..datamodel::Compat::default()
-        },
-    });
-    let model = x_model(
-        "main",
-        vec![module_input, x_aux("lagged", "PREVIOUS(input)", None)],
-    );
-    let parsed = ModelStage0::new(&model, &[], &units_ctx, false);
-    assert!(
-        parsed
-            .variables
-            .keys()
-            .any(|ident| ident.as_str().starts_with("$⁚lagged⁚0⁚arg0")),
-        "PREVIOUS(module_input) should synthesize a scalar helper aux"
-    );
-}
-
-#[test]
-fn test_model_implicit_var_info_uses_module_context() {
-    let project = datamodel::Project {
-        name: "implicit_info_module_context".to_string(),
-        sim_specs: datamodel::SimSpecs::default(),
-        dimensions: vec![],
-        units: vec![],
-        models: vec![x_model(
-            "main",
-            vec![
-                x_aux("x", "TIME", None),
-                x_aux("delayed", "SMTH1(x, 99)", None),
-                x_aux("prev_delayed", "PREVIOUS(delayed, 123)", None),
-            ],
-        )],
-        source: None,
-        ai_information: None,
-    };
-    let db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel(&db, &project);
-    let source_model = sync.models["main"].source;
-    let implicit_info = crate::db::model_implicit_var_info(&db, source_model, sync.project);
-    assert!(
-        implicit_info
-            .keys()
-            .any(|name| name.starts_with("$⁚prev_delayed⁚0⁚arg0")),
-        "model_implicit_var_info should include helper auxes for PREVIOUS(module-backed var)"
-    );
-}
-
-#[test]
-fn test_incremental_compile_previous_of_module_backed_var() {
-    let project = datamodel::Project {
-        name: "incremental_prev_module_backed".to_string(),
-        sim_specs: datamodel::SimSpecs::default(),
-        dimensions: vec![],
-        units: vec![],
-        models: vec![x_model(
-            "main",
-            vec![
-                x_aux("x", "TIME", None),
-                x_aux("delayed", "SMTH1(x, 99)", None),
-                x_aux("prev_delayed", "PREVIOUS(delayed, 123)", None),
-            ],
-        )],
-        source: None,
-        ai_information: None,
-    };
-    let db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel(&db, &project);
-    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main");
-    assert!(
-        compiled.is_ok(),
-        "incremental compile should support PREVIOUS(module-backed var): {:?}",
-        compiled.err()
-    );
-}
-
-#[test]
-fn test_collect_module_idents_skips_intrinsic_previous() {
-    let vars = [
-        x_aux("x", "TIME", None),
-        x_aux("prev_x", "PREVIOUS(x)", None),
-        x_aux("prev_x_init", "PREVIOUS(x, 42)", None),
-    ];
-    let registry = crate::module_functions::MacroRegistry::default();
-    let ids = collect_module_idents(vars.iter().map(VariableSource::from), &registry);
-    assert!(
-        !ids.contains(&Ident::new("prev_x")),
-        "1-arg PREVIOUS should stay on the intrinsic opcode path",
-    );
-    assert!(
-        !ids.contains(&Ident::new("prev_x_init")),
-        "2-arg PREVIOUS should also stay intrinsic",
-    );
-}
-
-/// `equation_is_module_call` (Phase 3 Task 2 signature) returns `true` for
-/// both a macro call and a stdlib call, and `false` for a plain arithmetic
-/// expression. This is the pre-classification predicate that decides whether
-/// a caller variable's ident lands in `module_idents` (so `PREVIOUS(y)`
-/// rewrites correctly when `y = MYMACRO(...)`).
-#[test]
-fn test_equation_is_module_call_recognizes_macros_and_stdlib() {
-    use crate::module_functions::MacroRegistry;
-
-    // A registry containing a single macro `MYMACRO(a, b)`.
-    let macro_model = datamodel::Model {
-        name: "mymacro".to_string(),
-        sim_specs: None,
-        variables: vec![
-            x_aux("mymacro", "a * b", None),
-            x_aux("a", "0", None),
-            x_aux("b", "0", None),
-        ],
-        views: vec![],
-        loop_metadata: vec![],
-        groups: vec![],
-        macro_spec: Some(datamodel::MacroSpec {
-            parameters: vec!["a".to_string(), "b".to_string()],
-            primary_output: "mymacro".to_string(),
-            additional_outputs: vec![],
-        }),
-    };
-    let registry = MacroRegistry::build(&[macro_model]).expect("valid macro project builds");
-
-    let macro_call = datamodel::Equation::Scalar("MYMACRO(a, b)".to_string());
-    assert!(
-        equation_is_module_call(&macro_call, &registry),
-        "a top-level macro call must be recognized as a module call",
-    );
-
-    let stdlib_call = datamodel::Equation::Scalar("SMTH1(x, 5)".to_string());
-    assert!(
-        equation_is_module_call(&stdlib_call, &registry),
-        "a top-level stdlib call must still be recognized as a module call",
-    );
-
-    let arithmetic = datamodel::Equation::Scalar("a + b".to_string());
-    assert!(
-        !equation_is_module_call(&arithmetic, &registry),
-        "a plain arithmetic expression is not a module call",
-    );
-}
-
-#[test]
-fn test_collect_module_idents_skips_apply_to_all_previous() {
-    let vars = [
-        x_aux("x", "TIME", None),
-        datamodel::Variable::Aux(datamodel::Aux {
-            ident: "prev_x_init".to_string(),
-            equation: datamodel::Equation::ApplyToAll(
-                vec!["DimA".to_string()],
-                "PREVIOUS(x, 42)".to_string(),
-            ),
-            documentation: "".to_string(),
-            units: None,
-            gf: None,
-            ai_state: None,
-            uid: None,
-            compat: datamodel::Compat::default(),
-        }),
-    ];
-    let registry = crate::module_functions::MacroRegistry::default();
-    let ids = collect_module_idents(vars.iter().map(VariableSource::from), &registry);
-    assert!(
-        !ids.contains(&Ident::new("prev_x_init")),
-        "ApplyToAll equations that invoke PREVIOUS should stay intrinsic",
-    );
 }
 
 // Salsa stores any `'static` value as a tracked-fn `returns(ref)` result and

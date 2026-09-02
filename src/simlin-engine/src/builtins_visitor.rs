@@ -227,8 +227,9 @@ pub struct BuiltinVisitor<'a> {
     /// captures, the module instances a stdlib or macro call expands into and
     /// the auxes their non-identifier arguments are hoisted into -- filed by
     /// name through [`Self::insert_implicit_var`], the only writer. A module
-    /// minted here extends the module-ident set for the rest of the walk, so a
-    /// nested reference (`PREVIOUS(SMOOTH(...))`) captures.
+    /// minted here is the one name this walk knows to be module-backed for
+    /// the rest of the walk, so a nested reference (`PREVIOUS(SMOOTH(...))`)
+    /// captures; every other name's kind is lowering's to decide.
     ///
     /// Insertion-ordered, and that is load-bearing: every producer of
     /// `ParsedVariableResult::implicit_vars` emits this map with `.values()`,
@@ -252,10 +253,6 @@ pub struct BuiltinVisitor<'a> {
     active_subscript: Option<Vec<String>>,
     /// Reference to DimensionsContext for dimension mapping lookups
     dimensions_ctx: Option<&'a DimensionsContext>,
-    /// Identifiers of Module variables in the parent model.
-    /// PREVIOUS(module_var) must synthesize a scalar temp arg rather than
-    /// reading a flat slot directly, because modules occupy multiple slots.
-    module_idents: Option<&'a HashSet<Ident<Canonical>>>,
     /// Identifiers of *all* variables in the parent model, when known.
     ///
     /// Used by `index_is_static` to accept a *bare* element name as a static
@@ -313,7 +310,6 @@ impl<'a> BuiltinVisitor<'a> {
             dimension_names: Vec::new(),
             active_subscript: None,
             dimensions_ctx: None,
-            module_idents: None,
             model_var_names: None,
             macro_registry: &EMPTY_MACRO_REGISTRY,
             enclosing_model: None,
@@ -357,14 +353,9 @@ impl<'a> BuiltinVisitor<'a> {
         self
     }
 
-    /// Set the module identifiers for PREVIOUS routing.
-    fn with_module_idents(mut self, module_idents: Option<&'a HashSet<Ident<Canonical>>>) -> Self {
-        self.module_idents = module_idents;
-        self
-    }
-
     /// Set the model's full variable-name set so `index_is_static` can accept
     /// non-shadowed bare element names (see the `model_var_names` field doc).
+    /// Only the LTM parse supplies one.
     fn with_model_var_names(
         mut self,
         model_var_names: Option<&'a HashSet<Ident<Canonical>>>,
@@ -381,33 +372,28 @@ impl<'a> BuiltinVisitor<'a> {
         self
     }
 
-    /// Returns true when the identifier names a module variable in either
-    /// the parent model (`module_idents`) or modules synthesized in this pass.
+    /// Returns true when the identifier names a module instance synthesized
+    /// earlier in this walk -- the one kind of module-backed name the parse
+    /// knows without reading the owning model.
     fn is_known_module_ident(&self, ident: &Ident<Canonical>) -> bool {
-        self.module_idents.is_some_and(|ids| ids.contains(ident))
-            || self.vars.get(ident).is_some_and(ImplicitVar::is_module)
+        self.vars.get(ident).is_some_and(ImplicitVar::is_module)
     }
 
-    /// PREVIOUS/INIT opcode routing only applies to direct scalar variables.
-    /// Module variables and qualified module outputs (`module·output`) must
-    /// be treated as module-backed so PREVIOUS/INIT can synthesize scalar
-    /// helper args before compiling to intrinsic opcodes.
+    /// Is `ident`, or the base of a `module·output` reference, a module
+    /// instance this walk synthesized (`PREVIOUS(SMTH1(x, 3))`)? Such a call is
+    /// captured: the instance's output is a value the parent's own equation
+    /// only reads through the instance.
     ///
-    /// The `·` split runs on the RAW ident, so a fully-quoted composite --
-    /// `"module·port"`, which is what `ltm_augment::quote_ident` emits for every
-    /// module-output reference in a generated LTM equation -- misses: the raw text
-    /// keeps its quotes, the base is `"module` (an unclosed quote that
-    /// `canonicalize` passes through verbatim), and the module lookup fails. That
-    /// miss is INERT, not a latent bug: `canonicalize` strips a balanced quoted
-    /// part, so the whole ident still resolves through `Context::var_ref` to the
-    /// module instance's slot, codegen's `static_slot` accepts the resulting
-    /// `Expr::Var`, and the emitted `LoadPrev` reads exactly the slot a capture
-    /// helper would have. The helper path is needed only for a reference codegen
-    /// cannot take a fixed slot for -- an ARRAYED module output port, which no
-    /// model in the corpus produces. Splitting the canonical form instead would be
-    /// a one-token change; it is not made because it buys no observable behavior
-    /// and the quoted spelling is itself pinned by
-    /// `ltm_augment_tests::quote_ident_needs_both_of_its_conjuncts`.
+    /// Every other module-backed name -- an explicit module instance, a
+    /// module-call aux, a bound input port -- is an ordinary reference here;
+    /// lowering resolves it against the dependency's shape
+    /// (`compiler::context::Context::snapshot_storage`): a scalar module-call
+    /// aux and a qualified output port are fixed slots, a bound input port
+    /// reads its own slot, and a bare module instance is refused. The `·`
+    /// split runs on the RAW ident, so a fully-quoted composite such as the
+    /// `"module·port"` `ltm_augment::quote_ident` emits keeps its quotes and
+    /// misses -- correctly, since only a synthesized instance's OWN output
+    /// reference is spelled unquoted.
     fn is_module_backed_ident(&self, ident: &RawIdent) -> bool {
         let canonical = Ident::new(&canonicalize(ident.as_str()));
         if self.is_known_module_ident(&canonical) {
@@ -539,11 +525,11 @@ impl<'a> BuiltinVisitor<'a> {
     /// GH #568 failure class, where the dependency graph and the bytecode
     /// disagree about what a variable reads.
     ///
-    /// A module-backed base classifies as `not_storage`, which is stricter than
-    /// codegen: codegen's `static_slot` accepts an `m·port` reference like any
-    /// other variable, so the capture this synthesizes for one is redundant.
-    /// The redundancy is preserved deliberately -- dropping it removes slots and
-    /// fragments, which is an artifact-shape change with its own ledger row.
+    /// The only base this classifies as `not_storage` on its own account is a
+    /// module instance synthesized in this walk. What every other name denotes
+    /// is a fact about the owning model, which the parse does not read; the
+    /// reference passes through and lowering resolves it against the
+    /// dependency's shape.
     fn snapshot_arg(&self, arg: &Expr0) -> SnapshotArg {
         match arg {
             Expr0::Var(ident, _) if !self.is_module_backed_ident(ident) => SnapshotArg::whole(),
@@ -682,8 +668,9 @@ impl<'a> BuiltinVisitor<'a> {
 
     /// Does `arg` contain a *bare* (unsubscripted) variable reference that is
     /// neither a dimension name (those get rewritten to qualified elements by
-    /// `substitute_dimension_refs`) nor module-backed (those get their own
-    /// per-element helper)? Such a bare reference is the one that breaks the
+    /// `substitute_dimension_refs`) nor the output of a module instance
+    /// synthesized in this walk (the one module-backed name the parse knows)?
+    /// Such a bare reference is the one that breaks the
     /// scalar-helper path: if it names an *arrayed* variable, a bare arrayed
     /// name has no meaning inside a scalar `Equation::Scalar` helper, so the
     /// helper fragment fails to compile (GH #541 -- the canonical trigger is a
@@ -1059,18 +1046,21 @@ impl<'a> BuiltinVisitor<'a> {
                 // Both compile to intrinsic opcodes (LoadPrev / LoadInitial)
                 // that read a fixed slot, so arg0 must resolve to a static
                 // location:
-                //   * a direct (non-module-backed) scalar variable reference, or
-                //   * a subscripted reference whose base is not module-backed
-                //     and whose every index is statically resolvable -- a
-                //     numeric constant or a qualified `dimension·element`
-                //     reference (see `index_is_static`).
+                //   * a direct variable reference, or
+                //   * a subscripted reference whose every index is statically
+                //     resolvable -- a numeric constant or a qualified
+                //     `dimension·element` reference (see `index_is_static`).
                 //
-                // Anything else (nested PREVIOUS, PREVIOUS(expr),
-                // PREVIOUS(module_var), dynamic subscript indices) is rewritten
-                // through a synthesized scalar temp variable that captures the
-                // value each timestep -- which also gives dynamic indices the
-                // correct lagged semantics (the index itself is read at the
-                // *previous* step).
+                // Anything else (nested PREVIOUS, PREVIOUS(expr), the output
+                // of a module instance synthesized in this walk, dynamic
+                // subscript indices) is rewritten through a synthesized scalar
+                // temp variable that captures the value each timestep -- which
+                // also gives dynamic indices the correct lagged semantics (the
+                // index itself is read at the *previous* step). Which STORAGE
+                // a direct reference addresses -- a plain slot, a module output
+                // port, a bound input port's own slot, or a bare module
+                // instance that has none -- is resolved at lowering from the
+                // dependency's shape.
                 //
                 // In A2A per-element context, dimension references inside a
                 // subscripted arg0 are substituted to qualified element
@@ -1216,9 +1206,7 @@ fn macro_arity(
 /// `macro_registry` carries the per-project macros: a call name resolving
 /// there expands as a macro (shadowing an identically named builtin/stdlib
 /// func) and an *arrayed* macro invocation rides the per-element path via
-/// `contains_module_call`. When `module_idents` is provided,
-/// `PREVIOUS(module_var)` synthesizes a scalar temp arg instead of reading a
-/// flat slot directly.
+/// `contains_module_call`.
 ///
 /// `enclosing_model` is the owning model's name when `variable_name` is a
 /// macro-marked model's body variable (`None` otherwise): the registry needs
@@ -1228,12 +1216,13 @@ fn macro_arity(
 /// `model_var_names`, when provided, is the model's full variable-name set;
 /// it lets `PREVIOUS`/`INIT` accept a non-shadowed bare element name as a
 /// static subscript index instead of synthesizing a helper aux (see
-/// `BuiltinVisitor::index_is_static`).
+/// `BuiltinVisitor::index_is_static`). Only the LTM parse supplies it; the
+/// source parse reads nothing of the owning model, so its memo is keyed on
+/// the variable and the project alone.
 pub fn instantiate_implicit_modules(
     variable_name: &str,
     ast: Ast<Expr0>,
     dimensions_ctx: Option<&DimensionsContext>,
-    module_idents: Option<&HashSet<Ident<Canonical>>>,
     model_var_names: Option<&HashSet<Ident<Canonical>>>,
     macro_registry: &MacroRegistry,
     enclosing_model: Option<&str>,
@@ -1241,7 +1230,6 @@ pub fn instantiate_implicit_modules(
     let visitor = || {
         BuiltinVisitor::new(variable_name)
             .with_dimensions_ctx(dimensions_ctx)
-            .with_module_idents(module_idents)
             .with_model_var_names(model_var_names)
             .with_macro_registry(macro_registry)
             .with_enclosing_model(enclosing_model)
