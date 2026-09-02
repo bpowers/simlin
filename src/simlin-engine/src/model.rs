@@ -315,7 +315,11 @@ impl ModelStage0 {
         let ctx = ParseContext {
             dimensions: &dimensions_ctx,
             units_ctx,
-            model_var_names: None,
+            // No owning model to ask: a `PREVIOUS`/`INIT` element index
+            // captures here where the salsa parse reads the referenced axis,
+            // so a fixture holding one is compared against production
+            // values, never against this oracle.
+            snapshot_index: crate::builtins_visitor::SnapshotIndexFacts::NoModel,
             macro_registry: Some(&macro_registry),
             enclosing_model,
         };

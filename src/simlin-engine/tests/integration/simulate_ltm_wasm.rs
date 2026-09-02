@@ -141,6 +141,100 @@ fn assert_ltm_series_match(model_rel_path: &str) {
     assert_ltm_slabs_match(&vm, &wasm);
 }
 
+/// An INIT-only capture is no causal node, and the two backends agree on
+/// every key of the results map with LTM on.
+///
+/// `frozen = INIT(k * 2 + 1)` captures `k * 2 + 1` into a helper that
+/// initials populate and nothing refreshes; `f` reads `frozen`, `k` reads the
+/// stock `a` that `g` integrates from `s`, so the model has one candidate
+/// loop through the capture (`s -> g -> a -> k -> capture -> frozen -> f ->
+/// s`) besides its two real ones. The capture's slot is written once and
+/// hidden from the map, and the VM's later step chunks leave it at zero where
+/// wasm's memory keeps the initial value, so an edge INTO it would score a
+/// slot the backends disagree on and an edge OUT of it a frozen snapshot.
+/// Neither exists: `model_causal_edges` links nothing to the capture, no
+/// score names it, and every key the map exposes -- the two loops' scores
+/// included -- is the same series on both backends.
+#[test]
+fn an_init_only_capture_is_no_ltm_node_and_every_key_matches_wasm() {
+    use simlin_engine::common::{Canonical, Ident};
+    use simlin_engine::db::{model_causal_edges, sync_from_datamodel_incremental};
+    use simlin_engine::test_common::TestProject;
+
+    let project = TestProject::new("ltm_init_capture")
+        .with_sim_time(0.0, 4.0, 1.0)
+        .stock("a", "100", &["g"], &[], None)
+        .flow("g", "s * 0.05 - a * 0.01", None)
+        .stock("s", "10", &["f"], &[], None)
+        .flow("f", "s * 0.1 * frozen / 100", None)
+        .aux("k", "a * 0.5 + TIME", None)
+        .aux("frozen", "INIT(k * 2 + 1)", None)
+        .build_datamodel();
+    let capture = "$\u{205A}frozen\u{205A}0\u{205A}arg0";
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let edges = model_causal_edges(&db, sync.models["main"].source_model, sync.project);
+    assert!(
+        !edges.edges.contains_key(capture)
+            && edges
+                .edges
+                .values()
+                .all(|targets| !targets.contains(capture)),
+        "no causal edge into or out of the INIT-only capture; got {:?}",
+        edges.edges
+    );
+    assert!(
+        edges
+            .edges
+            .get("k")
+            .is_none_or(|targets| targets.is_empty()),
+        "`k` feeds only the capture, so it feeds nothing per step; got {:?}",
+        edges.edges.get("k")
+    );
+
+    let vm = vm_results_for_ltm(&project, "main");
+    let wasm = wasm_results_for_ltm(&project, "main").expect("lowers to wasm");
+    assert!(
+        vm.offsets.keys().all(|key| !key.as_str().contains(capture)),
+        "neither the capture nor a score naming it is a results key"
+    );
+    let series = |results: &simlin_engine::Results, key: &Ident<Canonical>| -> Vec<f64> {
+        let off = results.offsets[key];
+        (0..results.step_count)
+            .map(|step| results.data[step * results.step_size + off])
+            .collect()
+    };
+    let mut keys: Vec<&Ident<Canonical>> = vm.offsets.keys().collect();
+    keys.sort();
+    assert!(
+        keys.iter()
+            .any(|key| key.as_str().starts_with(LTM_LOOP_SCORE_PREFIX)),
+        "the two real loops are scored"
+    );
+    for key in keys {
+        let v = series(&vm, key);
+        let w = series(
+            &wasm,
+            wasm.offsets
+                .get_key_value(key)
+                .map(|(k, _)| k)
+                .unwrap_or_else(|| panic!("{key} is a wasm key too")),
+        );
+        for (step, (a, b)) in v.iter().zip(&w).enumerate() {
+            assert!(
+                (a - b).abs() <= LTM_SERIES_TOLERANCE * a.abs().max(b.abs()).max(1.0),
+                "{key} at step {step}: vm {a} wasm {b}"
+            );
+        }
+    }
+    assert_eq!(
+        series(&vm, &Ident::<Canonical>::from_str_unchecked("frozen")),
+        vec![101.0; 5],
+        "the frozen snapshot of k * 2 + 1 at t0"
+    );
+}
+
 // The scalar LTM corpus: the three `.stmx` models that lower cleanly today
 // and whose `$⁚ltm⁚*` columns are expected to match the VM bit-for-bit.
 // `hero_culture_ltm/hero_culture.sd.json` is deliberately excluded -- its

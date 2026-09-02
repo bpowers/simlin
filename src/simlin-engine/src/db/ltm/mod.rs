@@ -364,6 +364,13 @@ fn modules_carry_state(
 /// composite `"m·port"` that lowering resolves to the port's slot, and a bare
 /// `PREVIOUS(m)` of an instance is refused at lowering rather than captured
 /// (`db::ltm_tests::test_ltm_bare_module_snapshot_is_refused_at_lowering`).
+///
+/// The source parse decides the same index against the referenced variable's
+/// declared axis instead (`builtins_visitor::SnapshotIndexFacts::Axes`). The
+/// generated path cannot: a generated equation may subscript an LTM synthetic
+/// variable or a helper, neither of which is a `SourceVariable` with declared
+/// axes to ask, so it resolves a bare element against every dimension and
+/// this whole name set.
 #[salsa::tracked(returns(ref))]
 pub(super) fn ltm_model_var_names(
     db: &dyn Db,
@@ -799,8 +806,6 @@ fn compute_module_link_overrides(
 pub struct LtmImplicitVarMeta {
     /// Canonical name of the LTM variable that created this implicit var
     pub ltm_parent_name: String,
-    /// Whether this implicit var is a stock
-    pub is_stock: bool,
     /// Whether this implicit var is a module
     pub is_module: bool,
     /// Sub-model name if is_module is true
@@ -867,19 +872,13 @@ pub fn model_ltm_implicit_var_info(
     let mut result = HashMap::new();
 
     for ltm_var in &ltm_vars.vars {
-        let parsed = parse_ltm_equation(
-            &ltm_var.name,
-            &ltm_var.equation,
-            dim_ctx,
-            Some(model_var_names),
-        );
+        let parsed = parse_ltm_equation(&ltm_var.name, &ltm_var.equation, dim_ctx, model_var_names);
 
         let project_models = project.models(db);
 
         for implicit_var in parsed.implicit_vars.iter() {
             let im_name = canonicalize(implicit_var.ident()).into_owned();
             let is_module = implicit_var.is_module();
-            let is_stock = implicit_var.is_stock();
             let model_name = implicit_var.module().map(|m| m.model_name.clone());
             let size = if is_module {
                 model_name
@@ -909,7 +908,6 @@ pub fn model_ltm_implicit_var_info(
                 im_name,
                 LtmImplicitVarMeta {
                     ltm_parent_name: ltm_var.name.clone(),
-                    is_stock,
                     is_module,
                     model_name,
                     size,

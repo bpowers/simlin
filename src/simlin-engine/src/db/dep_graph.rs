@@ -38,6 +38,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use salsa::Accumulator;
 
 use crate::canonicalize;
+use crate::capture::CaptureKind;
 // `Canonical`/`Ident` are used in production by the element-cycle
 // refinement (`resolve_recurrence_sccs` and friends), not only by the
 // `#[cfg(test)]` SCC accessors.
@@ -63,6 +64,12 @@ pub(crate) struct VarInfo {
     /// saved output, because it is a static table indexed by callers, not a
     /// value-bearing variable (issue #606).
     pub(crate) is_table_only: bool,
+    /// A `PREVIOUS`/`INIT` capture's phase demand, which is its runlist
+    /// membership: `Previous` storage is refreshed in flows and never seeded
+    /// into initials, `Init` storage is populated in initials and enters flows
+    /// only when a per-step definition reads its current value. `None` for
+    /// every other variable.
+    pub(crate) capture_kind: Option<CaptureKind>,
     /// Interned canonical dt-phase deps. `Ident<Canonical>` `Ord` is
     /// lexicographic, so this `BTreeSet` iterates in the SAME order as the
     /// former `BTreeSet<String>` (byte-stability preserved), while `Clone`
@@ -322,13 +329,23 @@ pub(crate) fn build_var_info(
                 is_stock: kind == SourceVariableKind::Stock,
                 is_module: kind == SourceVariableKind::Module,
                 is_table_only: crate::db::source_var_is_table_only(db, source_vars[name.as_str()]),
+                capture_kind: None,
                 dt_deps: normalize_deps(&dt_deps),
                 initial_deps: normalize_deps(&initial_deps),
             },
         );
+        // Every `INIT` referent of a live definition, explicit or synthesized,
+        // seeds the initials runlist: the frozen snapshot has to hold it
+        // whether or not the reader itself runs in initials (a `PREVIOUS`
+        // capture over `INIT(x) + 1` is flow-only and still needs `x` frozen).
         all_init_referenced.extend(
             deps.init_referenced_vars
                 .iter()
+                .chain(
+                    deps.implicit_vars
+                        .iter()
+                        .flat_map(|implicit| implicit.init_referenced_vars.iter()),
+                )
                 .map(|d| Ident::from_str_unchecked(d)),
         );
 
@@ -353,10 +370,13 @@ pub(crate) fn build_var_info(
                 // `implicit.name` is canonicalized in `extract_implicit_var_deps`.
                 Ident::from_str_unchecked(&implicit.name),
                 VarInfo {
-                    is_stock: implicit.is_stock,
+                    // A helper is a capture, a hoisted argument or a module
+                    // instance; the parse synthesizes no stock.
+                    is_stock: false,
                     is_module: implicit.is_module,
                     // Implicit SMOOTH/DELAY/TREND internals are never lookup tables.
                     is_table_only: false,
+                    capture_kind: implicit.capture_kind,
                     dt_deps: normalize_deps(&dt_deps),
                     initial_deps: normalize_deps(&initial_deps),
                 },
@@ -2411,6 +2431,10 @@ pub(crate) fn model_dependency_graph_impl(
     // init-time deps are themselves pulled into the runlist by the transitive
     // closure below); without the seed its initials slot is never written and
     // a `LoadInitial` of it reads an uninitialized slot forever (GH #584).
+    // A `PREVIOUS` capture with that signature (`PREVIOUS(INIT(x) + 1)`) is
+    // NOT seeded: nothing reads its initials value -- `LoadPrev` takes the
+    // fallback until the first step commits -- and its `INIT` referents are
+    // roots of their own through `all_init_referenced`.
     //
     // Every value-bearing variable of a model that is INSTANTIATED AS A
     // MODULE is seeded too. XMILE's model is one flat graph in which a module
@@ -2450,7 +2474,9 @@ pub(crate) fn model_dependency_graph_impl(
                             && (i.is_stock
                                 || i.is_module
                                 || instantiated_as_module
-                                || (i.dt_deps.is_empty() && !i.initial_deps.is_empty()))
+                                || (i.capture_kind.is_none_or(CaptureKind::needs_initials)
+                                    && i.dt_deps.is_empty()
+                                    && !i.initial_deps.is_empty()))
                     })
                     .unwrap_or(false)
                     || all_init_referenced.contains(n.as_str())
@@ -2522,17 +2548,44 @@ pub(crate) fn model_dependency_graph_impl(
         .map(|s| canonicalize(s).into_owned())
         .collect();
     let runlist_flows = {
+        let flow_by_kind = |n: &str| {
+            let is_input = module_input_set.contains(canonicalize(n).as_ref());
+            var_info
+                .get(n)
+                // A lookup-only table is a static table, not a flow: it is
+                // never lowered and emits no bytecode (issue #606).
+                .map(|i| (is_input || !i.is_stock) && !i.is_table_only)
+                .unwrap_or(false)
+        };
+        let per_step = |n: &str| {
+            flow_by_kind(n)
+                && var_info[n]
+                    .capture_kind
+                    .is_none_or(CaptureKind::needs_flows)
+        };
+        // An INIT-only capture is populated once, in initials, and `INIT`
+        // reads the frozen snapshot, so its per-step evaluation is dead unless
+        // some per-step definition reads its CURRENT value. `dt_dependencies`
+        // is the transitive current-value relation with every `INIT`- and
+        // `PREVIOUS`-only edge already stripped (`build_var_info`), so a
+        // capture is promoted into flows exactly when it is in the closure of
+        // a definition that runs there by kind -- and a read from another
+        // INIT-only capture promotes nothing, since that reader is not one.
+        // Only such captures can be promoted, so only they are collected.
+        let current_reads: FxHashSet<&str> = var_names
+            .iter()
+            .filter(|n| per_step(n))
+            .flat_map(|n| dt_dependencies.get(n.as_str()))
+            .flat_map(|deps| deps.iter().map(|d| d.as_str()))
+            .filter(|d| {
+                var_info
+                    .get(*d)
+                    .is_some_and(|i| i.capture_kind == Some(CaptureKind::Init))
+            })
+            .collect();
         let flow_names: Vec<&String> = var_names
             .iter()
-            .filter(|n| {
-                let is_input = module_input_set.contains(canonicalize(n).as_ref());
-                var_info
-                    .get(n.as_str())
-                    // A lookup-only table is a static table, not a flow: it is
-                    // never lowered and emits no bytecode (issue #606).
-                    .map(|i| (is_input || !i.is_stock) && !i.is_table_only)
-                    .unwrap_or(false)
-            })
+            .filter(|n| per_step(n) || (flow_by_kind(n) && current_reads.contains(n.as_str())))
             .collect();
         topo_sort_str(
             flow_names,

@@ -321,7 +321,12 @@ fn macro_call_expands_to_synthetic_module_structurally() {
     );
 
     let (transformed, vars) = crate::builtins_visitor::instantiate_implicit_modules(
-        "y", ast, None, None, &registry, None,
+        "y",
+        ast,
+        None,
+        crate::builtins_visitor::SnapshotIndexFacts::NoModel,
+        &registry,
+        None,
     )
     .expect("a macro call must expand");
 

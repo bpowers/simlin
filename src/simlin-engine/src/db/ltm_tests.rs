@@ -10,6 +10,197 @@ use crate::db::{
 };
 use crate::test_common::TestProject;
 
+/// The bare-element rule at each of the two parse boundaries, for both
+/// intrinsics. The source parse resolves `base_val[b2]` against `base_val`'s
+/// own declared axis -- XMILE 1.0 footnote 9, the element wins over a
+/// same-named variable -- so it never captures. The generated LTM parse has
+/// no declared axis to ask (its target may be a synthetic variable) and
+/// captures once a variable shadows the name
+/// (`builtins_visitor::SnapshotIndexFacts`). `b2` is declared by two
+/// dimensions at different positions, so nothing project-wide could have
+/// decided either row.
+///
+/// Both parses are the production ones: the source row is
+/// `parse_source_variable` over the synced variable, the LTM row is
+/// `parse_ltm_equation` under `ltm_model_var_names`, exactly as
+/// `model_ltm_implicit_var_info` calls it.
+#[test]
+fn a_bare_element_snapshot_captures_on_the_generated_path_only_when_shadowed() {
+    use super::{LtmEquation, ltm_model_var_names, parse_ltm_equation};
+    use crate::db::{parse_source_variable, project_dimensions_context};
+
+    let classify = |call: &str, shadowed: bool| -> (usize, usize) {
+        let mut tp = TestProject::new("bare_element_shadowing")
+            .named_dimension("DimA", &["a1", "b2"])
+            .named_dimension("DimB", &["b2", "x1"])
+            .array_aux("base_val[DimA]", "1")
+            .aux("lagged", call, None);
+        if shadowed {
+            tp = tp.aux("b2", "1", None);
+        }
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &tp.build_datamodel());
+        let model = sync.models["main"].source;
+        let source = parse_source_variable(
+            &db,
+            sync.models["main"].variables["lagged"].source,
+            sync.project,
+        );
+        let ltm = parse_ltm_equation(
+            "$\u{205A}ltm\u{205A}probe",
+            &LtmEquation::scalar(call.to_string()),
+            project_dimensions_context(&db, sync.project),
+            ltm_model_var_names(&db, model, sync.project),
+        );
+        (ltm.implicit_vars.len(), source.implicit_vars.len())
+    };
+
+    for call in ["PREVIOUS(base_val[b2], -7)", "INIT(base_val[b2])"] {
+        assert_eq!(
+            classify(call, false),
+            (0, 0),
+            "{call}: an unshadowed element is direct on both paths"
+        );
+        assert_eq!(
+            classify(call, true),
+            (1, 0),
+            "{call}: a shadowed element captures on the generated path and is direct \
+             on the source path"
+        );
+    }
+}
+
+/// An LTM helper's compiled phases are its capture kind, for both kinds, and
+/// the diagnostic predicate demands exactly those phases.
+///
+/// Today's score generator emits `PREVIOUS` captures only, so the `INIT` row
+/// is driven through `parse_ltm_equation` over a scalar `LtmEquation` built
+/// as the generator builds one; its `LtmImplicitVarMeta` carries the fields
+/// `model_ltm_implicit_var_info` computes for every scalar capture (not a
+/// module, one slot), stated here because that query cannot be handed an
+/// equation the generator does not produce.
+#[test]
+fn ltm_capture_helpers_compile_exactly_the_phases_their_kind_demands() {
+    use salsa::Setter;
+
+    use super::compile::{compile_ltm_implicit_var_fragment, ltm_helper_phases_present};
+    use super::{LtmEquation, LtmImplicitVarMeta, ltm_model_var_names, parse_ltm_equation};
+    use crate::capture::CaptureKind;
+    use crate::db::project_dimensions_context;
+
+    let project = TestProject::new("ltm_capture_phases")
+        .aux("k", "1 + TIME", None)
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    sync.project.set_ltm_enabled(&mut db).to(true);
+    let model = sync.models["main"].source;
+
+    for (text, kind) in [
+        ("PREVIOUS(k * 2, -7)", CaptureKind::Previous),
+        ("INIT(k * 2)", CaptureKind::Init),
+    ] {
+        let parent = format!("$\u{205A}ltm\u{205A}probe\u{205A}{}", kind.as_str());
+        let parsed = parse_ltm_equation(
+            &parent,
+            &LtmEquation::scalar(text.to_string()),
+            project_dimensions_context(&db, sync.project),
+            ltm_model_var_names(&db, model, sync.project),
+        );
+        assert!(parsed.variable.errors.is_empty(), "{text}");
+        let helpers: Vec<_> = parsed
+            .implicit_vars
+            .iter()
+            .filter(|helper| helper.capture().is_some())
+            .collect();
+        assert_eq!(helpers.len(), 1, "{text}: one capture");
+        assert_eq!(helpers[0].capture().unwrap().kind(), kind, "{text}");
+        let meta = LtmImplicitVarMeta {
+            ltm_parent_name: parent.clone(),
+            is_module: false,
+            model_name: None,
+            size: 1,
+            variable: helpers[0].clone(),
+        };
+        let mut reason = None;
+        let fragment = compile_ltm_implicit_var_fragment(
+            &db,
+            &meta,
+            model,
+            sync.project,
+            &[],
+            Some(&mut reason),
+        )
+        .unwrap_or_else(|| panic!("{text}: the helper compiles"));
+        assert!(reason.is_none(), "{text}: {reason:?}");
+        assert_eq!(
+            (
+                fragment.fragment.initial_bytecodes.is_some(),
+                fragment.fragment.flow_bytecodes.is_some(),
+                fragment.fragment.stock_bytecodes.is_some(),
+            ),
+            (kind.needs_initials(), kind.needs_flows(), false),
+            "{text}: the phases are the kind's demand"
+        );
+        assert!(ltm_helper_phases_present(&meta, Some(&fragment)));
+
+        let mut missing = fragment.clone();
+        if kind.needs_initials() {
+            missing.fragment.initial_bytecodes = None;
+        } else {
+            missing.fragment.flow_bytecodes = None;
+        }
+        assert!(
+            !ltm_helper_phases_present(&meta, Some(&missing)),
+            "{text}: a demanded phase without bytecode is a dropped helper"
+        );
+    }
+}
+
+/// The helpers the score generator actually mints -- the flow-to-stock
+/// score's nested `PREVIOUS` captures -- are flow-only: no initial fragment,
+/// since `PREVIOUS`'s fallback covers every read before the first step
+/// commits.
+#[test]
+fn generated_ltm_capture_helpers_are_flow_only() {
+    use salsa::Setter;
+
+    use super::compile::{compile_ltm_implicit_var_fragment, ltm_helper_phases_present};
+    use super::model_ltm_implicit_var_info;
+    use crate::capture::CaptureKind;
+
+    let project = TestProject::new("generated_ltm_capture_phases")
+        .stock("level", "100", &["growth"], &[], None)
+        .flow("growth", "level * rate", None)
+        .aux("rate", "0.1", None)
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    sync.project.set_ltm_enabled(&mut db).to(true);
+    let model = sync.models["main"].source;
+    let info = model_ltm_implicit_var_info(&db, model, sync.project);
+    let captures: Vec<_> = info
+        .values()
+        .filter(|meta| meta.variable.capture().is_some())
+        .collect();
+    assert!(
+        !captures.is_empty(),
+        "the flow-to-stock score mints nested PREVIOUS captures"
+    );
+    for meta in captures {
+        assert_eq!(
+            meta.variable.capture().unwrap().kind(),
+            CaptureKind::Previous,
+            "the generator emits no INIT"
+        );
+        let fragment = compile_ltm_implicit_var_fragment(&db, meta, model, sync.project, &[], None)
+            .expect("the generated helper compiles");
+        assert!(fragment.fragment.initial_bytecodes.is_none());
+        assert!(fragment.fragment.flow_bytecodes.is_some());
+        assert!(ltm_helper_phases_present(meta, Some(&fragment)));
+    }
+}
+
 /// `PREVIOUS(producer)` of a bare module instance in a generated LTM equation
 /// is refused at lowering exactly as it is in a user equation
 /// (`db::prev_init_tests::module_snapshot_arguments_are_resolved_at_lowering`):

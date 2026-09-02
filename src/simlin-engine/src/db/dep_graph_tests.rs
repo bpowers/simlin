@@ -40,6 +40,7 @@ fn vi_for_test(is_stock: bool, is_module: bool, dt_deps: &[&str]) -> VarInfo {
         is_stock,
         is_module,
         is_table_only: false,
+        capture_kind: None,
         dt_deps: dt_deps
             .iter()
             .map(|s| Ident::from_str_unchecked(s))
@@ -157,6 +158,7 @@ fn vi_init_for_test(is_stock: bool, is_module: bool, initial_deps: &[&str]) -> V
         is_stock,
         is_module,
         is_table_only: false,
+        capture_kind: None,
         dt_deps: BTreeSet::new(),
         initial_deps: initial_deps
             .iter()

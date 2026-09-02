@@ -656,8 +656,11 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
 
     // Runlist-gated phase selection: the Initial phase is compiled only for
     // helpers in `runlist_initials`; the non-initial phase feeds
-    // `flow_bytecodes` (non-stock) or `stock_bytecodes` (stock/module), each
-    // gated by the corresponding runlist.
+    // `flow_bytecodes` (a capture or hoisted argument) or `stock_bytecodes`
+    // (a module instance), each gated by the corresponding runlist. A
+    // capture's runlists are its phase demand (`CaptureKind`), decided by
+    // the dependency graph, so an INIT-only capture arrives here with no
+    // flows membership and gets no flow fragment.
     let emit_ctx = input.emit_ctx();
     let mut phase = |is_initial: bool| -> Option<PerVarBytecodes> {
         match lower_fragment(&input, is_initial) {
@@ -684,12 +687,8 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
     } else {
         None
     };
-    let flow_bytecodes = if !meta.is_stock && membership.flows {
-        phase(false)
-    } else {
-        None
-    };
-    let stock_bytecodes = if (meta.is_stock || meta.is_module) && membership.stocks {
+    let flow_bytecodes = if membership.flows { phase(false) } else { None };
+    let stock_bytecodes = if meta.is_module && membership.stocks {
         phase(false)
     } else {
         None

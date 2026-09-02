@@ -324,7 +324,9 @@ fn ltm_constructor_is_compile_ltm_equation_fragments_input() {
     }
 }
 
-/// Row 4 of 4: the LTM implicit-helper constructor.
+/// Row 4 of 4: the LTM implicit-helper constructor. The phases compared are
+/// the ones the helper's capture kind demands -- the generator's helpers are
+/// `PREVIOUS` captures, so flow only.
 #[test]
 fn ltm_implicit_constructor_is_compile_ltm_implicit_var_fragments_input() {
     let mut db = SimlinDb::default();
@@ -350,13 +352,23 @@ fn ltm_implicit_constructor_is_compile_ltm_implicit_var_fragments_input() {
         let input =
             crate::db::ltm::ltm_implicit_fragment_input(&db, meta, model, sync.project, &[])
                 .unwrap_or_else(|| panic!("{name} has a fragment input"));
+        let kind = meta
+            .variable
+            .capture()
+            .unwrap_or_else(|| panic!("{name} is a capture"))
+            .kind();
         assert_eq!(
-            lower_and_emit(&input, false),
+            kind.needs_flows()
+                .then(|| lower_and_emit(&input, false))
+                .flatten(),
             production.fragment.flow_bytecodes,
-            "{name}: the flow fragment is the constructor's input lowered and emitted"
+            "{name}: the flow fragment is the constructor's input lowered and emitted, \
+             when the kind demands it"
         );
         assert_eq!(
-            lower_and_emit(&input, true),
+            kind.needs_initials()
+                .then(|| lower_and_emit(&input, true))
+                .flatten(),
             production.fragment.initial_bytecodes,
             "{name}: the initial fragment likewise"
         );

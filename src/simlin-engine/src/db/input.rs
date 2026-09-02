@@ -225,8 +225,18 @@ pub struct SourceVariable {
     pub outflows: Vec<String>,
     #[returns(ref)]
     pub module_refs: Vec<datamodel::ModuleReference>,
+    /// A `Module` variable's referenced target model; empty for every other
+    /// kind. NOT the owning model, which is `owner_model`.
     #[returns(ref)]
     pub model_name: String,
+    /// The canonical name of the model this variable belongs to, set at
+    /// sync. Carried by name rather than as a `SourceModel` handle because a
+    /// model's `variables` map is a constructor argument of the model, so the
+    /// variables exist before their model does, and a salsa input field can
+    /// only be set afterwards through `&mut`, which the fresh sync path does
+    /// not hold. `db::variable_owner_model` resolves it to the handle.
+    #[returns(ref)]
+    pub owner_model: String,
     #[returns(clone)]
     pub non_negative: bool,
     #[returns(clone)]

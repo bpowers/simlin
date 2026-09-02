@@ -1007,8 +1007,9 @@ variable set, not which of its names are module instances, module-call auxes
 or bound input ports -- so no edit to a sibling variable re-keys or
 re-executes it, and one memo per variable serves compilation, diagnostics,
 analysis, LTM, layout, libsimlin and the CLI alike. `ParseContext` carries
-those project-global contexts plus the one model-level fact only the LTM
-parse supplies (the model's variable-name set, the D3 bare-element rule).
+those project-global contexts plus the `SnapshotIndexFacts` a
+`PREVIOUS`/`INIT` subscript index is decided with ("Phase 7.5a static
+element snapshots").
 
 What a `PREVIOUS`/`INIT` argument's NAME denotes is therefore lowering's
 question, answered by `compiler::context::Context::snapshot_storage` from the
@@ -1166,6 +1167,136 @@ output) prints one column per key of the results-offset map, in slot order;
 a slot the map has no key for -- a standalone lookup table, a helper slot the
 map hides -- is not printed, because the map is the contract every reader of
 a series shares and an unnamed slot holds a backend's scratch value.
+
+**Phase 7.5a static element snapshots.** A `PREVIOUS`/`INIT` argument whose
+subscripts pin one declared element -- bare `vals[e1]` or qualified
+`vals[Dim.e1]` -- reads that slot directly in a user equation, as it does in a
+generated LTM equation. The decision stays in the parse: a capture cannot be
+un-minted at lowering, and always capturing costs a hidden slot and a flow
+evaluation per read. The parse asks the owning model exactly two per-name
+facts through `builtins_visitor::SnapshotIndexFacts::Axes`: the referenced
+variable's declared axis at that position (`model_variable_by_name` and
+`variable_dimensions`, reached through the variable's owning model) and, for
+a qualified name, whether the project declares that element
+(`project_has_qualified_element`, a per-name projection of
+`project_dimensions_context`, so a dimension edit re-parses only the
+variables whose spelled element appears or disappears). The owning model is
+the `owner_model` name the sync sets on every `SourceVariable`, resolved by
+the `variable_owner_model` projection -- a name rather than a `SourceModel`
+handle because a model's variable map is a constructor argument of the model,
+so the variables exist before it does and a salsa input field can only be set
+afterwards through `&mut`, which the fresh sync path does not hold; the same
+projection says which macro a body variable belongs to, so no project-wide
+map of macro bodies exists. Precedence follows XMILE 1.0 section 3.7.1 and
+footnote 9: an element of the referenced axis wins over a same-named
+variable (`dimensions::resolve_axis_index_name`, the compiler's own rule for
+the same index), and a qualified position may come from an unrelated
+dimension and is applied positionally to the referenced axis
+(`resolve_axis_index_position`). The generated LTM parse keeps its
+whole-surface rule (`SnapshotIndexFacts::ModelNames`: an element of any
+dimension that no variable of the model shadows) because a generated equation
+may subscript an LTM synthetic variable or a helper, neither of which is a
+`SourceVariable` with a declared axis to ask; where the two rules disagree one
+mints a capture the other does not, and the difference is observable only
+through a consumer that reads the base's extent (divergence 5 below). A
+helper's scalar body is not re-walked when its
+parse-stage variable is built: every decision of the parent's walk is final,
+and a second walk without the model's facts could only re-decide a direct
+read into a nested helper.
+
+**Phase 7.5b capture phase demand.** A capture's kind is its phase demand
+(`CaptureKind::{Previous, Init, PreviousAndInit}`). `PREVIOUS` storage is
+refreshed in flows and never seeded into initials -- nothing reads its
+initials value, since `LoadPrev` takes the fallback until the first step
+commits. `INIT` storage is populated in initials and enters flows only when a
+per-step definition's transitive current-value closure reads it
+(`model_dependency_graph`, over `dt_dependencies` with every `INIT`- and
+`PREVIOUS`-only edge already stripped, so a read from another INIT-only
+capture promotes nothing). Identical positional storage the dt and
+active-initial parses mint for different consumers is one capture whose
+demand is the union (`Capture::merge_same_definition`). A helper's raw `INIT`
+referents are initialization roots of their own
+(`ImplicitVarDeps::init_referenced_vars` into `all_init_referenced`), so a
+flow-only `PREVIOUS` capture over `INIT(x) + 1` still finds `x` frozen. An LTM
+helper's compiled phases are its kind too (`compile_ltm_implicit_var_fragment`,
+`ltm_helper_phases_present`), which is its runlist membership since assembly
+appends LTM helpers by presence. An INIT-only capture keeps its layout slot --
+initials write it and `LoadInitial` reads the frozen copy -- but has no key in
+the results-offset map (`flattened_offsets`, the static-table precedent):
+nothing writes the slot per step, so the VM's zeroed step chunks and wasm's
+retained linear memory would put different scratch values under one exposed
+name while every value a model reads agrees. It is hidden by kind, whether
+or not a current read promotes it into flows, because promotion is decided per
+module instance and the map is per model. For the same reason it is no
+causal node: an `INIT` read is a snapshot, not a per-step link, so
+`model_causal_edges` takes no edge into or out of an INIT-only capture, and
+no link score reads the hidden slot (a score into one read the VM's zeroed
+chunk against the initial value, `2 dk / (0 - v0)` where wasm computed 0).
+LTM does not promote the capture into flows to keep such an edge: the loop
+it would close runs through a frozen value and is no feedback.
+
+**Phase 7.5 semantic divergences.** Six changes, each pinned: four to the
+artifact and the results map, one to a value, one to the LTM causal graph.
+
+1. A user equation's bare or qualified element snapshot reads the slot
+   directly, and the capture the base minted for it is gone (26 on C-LEARN).
+   Pinned by `db::prev_init_tests::user_element_snapshots_are_direct_for_both_intrinsics`,
+   `snapshot_element_name_matrix_covers_both_intrinsics`,
+   `an_active_dimension_that_is_also_an_axis_element_spans_first_for_both_intrinsics`
+   and the bare and qualified rows of
+   `every_prev_init_argument_shape_agrees_between_the_parse_and_codegen`; the
+   generated-LTM boundary by
+   `db::ltm_tests::a_bare_element_snapshot_captures_on_the_generated_path_only_when_shadowed`,
+   the per-name incrementality by
+   `db::fragment_char_tests::module_helper_add_reparses_only_the_added_variable`
+   and `db::dimension_invalidation_tests::a_qualified_snapshot_index_depends_on_its_own_element_only`.
+2. A capture is a causal node, so removing one changes the LTM score
+   topology: a source element's edge into an arrayed target is one score
+   arrayed over the target's declared dimensions instead of a scalar
+   source->capture and capture->target pair per target element, with equal
+   values where the reads are the same value. Pinned by
+   `db::prev_init_tests::ltm_snapshot_element_reads_preserve_score_topology_and_values`;
+   on C-LEARN 52 scalar scores become 17 arrayed ones (330 slots), pinned
+   together with divergence 6's counts by `clearn_ltm_var_count_guardrail`.
+3. An INIT-only capture has no flow fragment and no results key, and a
+   PREVIOUS capture no initial fragment, LTM helpers included. Pinned by
+   `db::prev_init_tests::every_capture_kind_has_the_right_phases_for_every_storage_shape`,
+   `an_init_only_capture_dependency_does_not_promote_its_input`,
+   `a_current_value_consumer_promotes_an_init_capture_into_flows`,
+   `a_previous_capture_flow_seeds_its_local_init_referent`,
+   `a_bound_module_init_capture_is_initials_only`,
+   `wasmgen::module_tests::compile_simulation_init_capture_without_flow_refresh_matches_vm_and_reruns`,
+   `db::ltm_tests::generated_ltm_capture_helpers_are_flow_only` and
+   `ltm_capture_helpers_compile_exactly_the_phases_their_kind_demands`, and
+   the `prev_init`, `ltm_loop_exhaustive` and `ltm_loop_discovery` goldens.
+4. A dt equation and an active-initial equation that mint the same capture
+   for different consumers compile as one shared capture; the base refused
+   the pair as two helpers claiming one name. Pinned by
+   `db::prev_init_tests::a_positional_capture_shared_by_init_and_previous_unions_its_phases`.
+5. A consumer that reads its operand's EXTENT sees the referenced variable
+   where it saw a one-slot capture: `VECTOR ELM MAP(PREVIOUS(vals[e1], 0),
+   offs[d])` with `offs = 1` reaches the prior step's `vals[e2]` (`0, 20, 21,
+   22`) where the base's mapping ran off the end of the capture (`:NA:`, a
+   NaN) -- exactly what the numeric spelling `vals[1]` already computed.
+   Pinned by
+   `db::prev_init_tests::an_elm_map_over_a_bare_element_snapshot_ranges_over_the_variable`
+   and, relative to the numeric spelling,
+   `array_operand_materialization_tests::every_row_of_the_issue_995_table_compiles`.
+6. An INIT-only capture is no LTM causal node: `model_causal_edges` takes no
+   edge into or out of one, so no link score reads the hidden slot and no
+   loop closes through a frozen snapshot. On C-LEARN 921 scalar scores do not
+   exist -- one capture->parent score per INIT-only capture (207, identically
+   0 since the parent reads the frozen value) and 714 source->capture scores
+   from 104 sources, 21 of which the base scored `1` on every step because it
+   re-evaluated the capture per step -- nor do the 14 array-freeze helpers of
+   the scores into `$⁚last_set_target_year⁚0⁚arg0`; the 10 loop scores are
+   unchanged. 7,163 -> 6,193 LTM variables, 30,123 -> 29,398 slots, and the
+   all-slot digest 20,892 -> 20,221 LTM slots with 3,141 -> 3,106 ever
+   non-zero (the 21 scores and the 14 freeze slots). Pinned by
+   `simulate_ltm_wasm::an_init_only_capture_is_no_ltm_node_and_every_key_matches_wasm`
+   (no edge through the capture, VM == wasm on every results key under LTM),
+   `clearn_ltm_var_count_guardrail`, `clearn_ltm_slot_maxima_digest` and
+   `clearn_with_ltm_simulates_model_vars_identically`.
 
 **Phase 7.1 probe.** The execution-count probe chunk 7.1 owed AC3.1 is
 `db::exec_probe::ProbedDb`: a `SimlinDb` built over salsa storage carrying an
@@ -1992,3 +2123,4 @@ hash is not available to it.
 | 6b | `engine: one materialization pass over the lowered fragment` | 8.710 G (median of 5; range 8.708-8.716), +0.15% against the base `5c406dd5` re-measured in the same session (8.696 G, median of 5, range 8.687-8.709; interleaved pairs +0.14 / +0.28 / +0.01 / +0.08 / +0.24%), inside the channel's floor and not investigated | 5215 | 30682 / 1477 / 24658 | 1732 / 162 / 28 / 641 | The artifact moves, and the direction is smaller. Plain: 12 fewer flow opcodes and 2 fewer static views, all from ONE variable (`rs_ff_co2_ff_aggregated`, an element-invariant per-element arrayed-GF apply evaluated once instead of three times: `LookupArray` 12 -> 10, its `PushStaticView`/`PopView` pairs, and the `LoadVar`/`Op2`/`LoadGlobalVar` of the two dropped applies); `VectorElmMap` 8 -> 8, `VectorSortOrder` 2 -> 2, `BeginIter` 99 -> 99, 28 temp slots either side. Under `CLEARN_LTM=1`: 907851 / 1477 / 28514 opcodes (-526 flow), 16741 literals, 162 GFs, **28 temp slots against 441**, 2682 static views (-184), `VectorElmMap` 92 -> 12, `VectorSortOrder` 23 -> 3, `LookupArray` 29 -> 25, `BeginIter` 415 -> 415 -- a body one element reads is evaluated on an id the elements reissue rather than one id per element, and an element-invariant one is evaluated once per link-score fragment rather than once per element. The LTM lowering scope is empty (no scoped re-lower): that LTM block is byte-identical with the re-lower and without it, every LTM golden is unchanged, and the LTM compile channel (`CLEARN_LTM=1 CLEARN_PROFILE=compile CLEARN_COMPILE_ITERS=2`, three interleaved pairs) is 58.653 G against the base's 61.369 G, **-4.42%** (pairs -4.56 / -4.38 / -4.45%). The plain compile channel's cost is the subscript route (every subscript naming a dimension goes through `normalize_subscripts3` and `resolve_mapped_read` where Pass 1 folded an active one to an ordinal, divergence item 2); an exact-name fast path in `active_dim_ref` keeps it inside the floor. The run channel (`CLEARN_PROFILE=run CLEARN_RUN_ITERS=20`, same binaries) is 30.660 G against 30.776 G, -0.38% (pairs -0.37 / -0.39 / -0.38 / -0.39 / -0.37%). Differential sweep of the base and tree CLIs over all 509 models under `test/`: 396 byte-identical, 110 refused identically, 0 refused on one side only, and three not byte-identical: `subrange_merge` is deterministic on both and moves onto its checked-in Vensim `output.tab` (item 2); `arrays_cname` and `arrays_varname` have two order-free forms on the base and one -- one of the base's two -- on the tree (item 2: a subscript naming a dimension is read by element NAME, so the importer's permuted declaration order stops changing which element is read); `subscript_transposition` keeps the same two order-free forms on both binaries (GH #859, resampled 12x per binary). Nine divergences, pinned (Additional Considerations, "Phase 6b semantic divergences"); the engine suite (lib 5669, integration 782), the wasm parity corpus and the 12-repeat determinism suites are green with no golden regeneration |
 | 7.4 | `engine: parse without model context; sub-model initials` | 8.3650 G (median of 5; range 8.3621-8.3749), **-3.72%** against the base `c8770abb` re-measured in the same session (8.6879 G, median of 5, range 8.6855-8.6943; interleaved pairs -3.72 / -3.63 / -3.73 / -3.79 / -3.64%) | 5215 | 30682 / 1477 / 24873 | 1750 / 162 / 28 / 641 | Plain: flow and stock streams byte-identical, initials +215 opcodes and +31 programs (1174 -> 1205), +18 literals, 371 names and 7 modules unchanged: every value-bearing variable of an instantiated model is now an initials member (GH #1028). Under `CLEARN_LTM=1`: 30123 slots and 2682 views unchanged, 907854 / 1477 / 28733 opcodes (+3 flow, +219 initial, 1976 initials), 16761 literals; the one delta beyond the #1028 members is `stdlib⁚delay3`'s LTM helper `$⁚$⁚ltm⁚link_score⁚input→stock⁚1⁚arg0` under the instance wiring `{delay_time, input}` (4 initial opcodes with its `Ret`, 3 flow), whose body snapshots the bound port `input`: the base could not lower the port (`Expr::ModuleInput` has no slot) and the by-presence LTM tail dropped the helper with no diagnostic, so every DELAY3 `input -> stock` link score read an unwritten 0 for its two-step lag -- a silent wrong number (`4, 10, 24` for a unit ramp where the formula gives `1, 2, 4`), corrected by lowering the port to its own slot and pinned under "Phase 7.4 semantic divergences" item 3; on C-LEARN that instance's score happens to be byte-identical, so all 30123 LTM series are identical between the two binaries. The run channel (`CLEARN_PROFILE=run CLEARN_RUN_ITERS=20`) is 30.5414 G against 30.6572 G, -0.38% (pairs -0.36 / -0.41 / -0.37 / -0.38 / -0.38%). The compile saving is deleted work: the per-model module-ident pre-scan that re-parsed every Aux/Flow equation once per context, and the second and third parses of every variable under the empty, per-instance-widened and stdlib-extended contexts. Differential sweep of the base and tree CLIs over all 509 models under `test/`: 396 byte-identical, 110 refused identically, 0 refused on one side only, 3 not identical: one GH #859 importer flipper (`subscript_transposition` or `arrays_varname`, whichever the sample lands on; each flips between the same two outputs on both binaries, resampled 6x per binary), and two GH #1028 movers -- `land_model.stmx`'s `real_gdp_growth_rate = TREND(..)` (TREND's `output` is an aux) now matches the checked-in Stella `output.tab` exactly (0.04, 0.0292888201074, 0.0200569598033 where the base printed 0, 6.957, 3.233), and `bobby/vdf/econ/mark2.mdl`'s `perceived mortgage balance = SMOOTH(interest earned - investments lost)` reads `defaults = DELAY1(..)` (DELAY1's `output` is a flow) during the parent's initials, so the smooth starts at its t0 input as Vensim's SMOOTH does (the base started 150,000,000 above it, with a nonzero t0 flow). Four divergences and one fix pinned (Additional Considerations, "Phase 7.4 semantic divergences"); the engine suite, libsimlin, the CLI, clippy and `cargo fmt --all -- --check` are green, with one golden regenerated (`modules.txt`, the two `producer` initial fragments) |
 | V-opc | `engine: derive opcode operand handling from one table` | 8.6666 G (median of 5; range 8.6581-8.6701), -0.27% against `c8770abb` re-measured in the same session (8.6902 G, median of 5, range 8.6871-8.6934; interleaved pairs -0.24 / -0.27 / -0.35 / -0.37 / -0.26%), measured on the pre-review candidate (the fix round changed only which operands the accessors bind); recorded, not investigated (under the one-percent bar; nothing output-bearing changed) | 5215 | 30682 / 1477 / 24873 | 1750 / 162 / 28 / 641 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`, against `c972c9e9` (57032 opcodes plain, 938064 under LTM -- Phase 7.4's artifact): both `bytecode_profile` blocks are byte-identical; the run channel is -0.03% (inside the floor) and the sweep over all 509 models under `test/` has no mover (`arrays_varname` flips between the same two outputs on both binaries, GH #859), both measured on the pre-review candidate against `c8770abb`. `SymbolicOpcode` and `Opcode` are each one table (`symbolic_opcode_table!`, `opcode_table!`) from which `resolve_opcode`, `renumber_opcode`, `gf_run`, `var_ref`, `jump_offset`, `stack_effect` and `name` derive by operand kind, the accessors binding only the operand their kind reads (`bind_kind!`), with the every-row tests and the merge proptest's blanking oracle derived from the same rows; production -473 lines by file length (bytecode.rs -282, symbolic.rs -191), two `unused_variables` allows in production, no semantic divergence (Additional Considerations, "Opcode operand tables"). |
+| 7.5ab | `engine: static element snapshots; capture phase demand` | 8.2010 G (median of 5; range 8.1969-8.2084), **-1.55%** against `015c98da` with the results-printing commit applied, re-measured in the same session (8.3302 G, median of 5, range 8.3266-8.3335; interleaved pairs -1.51 / -1.42 / -1.60 / -1.63 / -1.53%) | 5189 | 28505 / 1477 / 24795 | 1533 / 162 / 28 / 627 | Plain: -26 slots (the bare and qualified element captures 7.5a no longer mints, `init_c_in_deep_ocean_per_meter` and `target_year`), -2177 flow opcodes (those captures' fragments plus the flow fragments of the 207 INIT-only captures 7.5b takes out of flows), -78 initial opcodes and 1205 -> 1179 initial programs (one per removed capture), -217 literals, -14 views, 371 names and 7 modules unchanged; 4825 results keys where the base had 5058 (26 gone, 207 hidden, 0 renamed -- a removed capture renumbers the later helpers of the same equation, `$⁚v⁚1⁚..` -> `$⁚v⁚0⁚..`, which renames an exposed key only where a capture precedes another helper of the same equation, and no C-LEARN equation has that shape). Under `CLEARN_LTM=1`: 30123 -> 29398 slots and 7163 -> 6193 LTM variables (`ltm_var_dump`: 987 removed, 17 added -- the 26 element captures' 52 scalar scores become 17 direct scores arrayed over their targets, 330 slots; the 207 INIT-only captures' 921 scalar scores, 207 capture->parent and 714 source->capture, and the 14 two-slot array-freeze helpers of the scores into `$⁚last_set_target_year⁚0⁚arg0` do not exist because the edges do not, and 28 `PREVIOUS` helpers of the removed scores go with them; 36,138 slots free of the ceiling), 855713 / 1477 / 24795 opcodes (-52141 flow, -3938 initial, 1976 -> 1179 initial programs: the LTM PREVIOUS helpers' initial fragments), 14503 literals, 2166 views; the all-slot digest 20892 -> 20221 LTM slots and 3141 -> 3106 ever non-zero (the 21 removed scores the base held at 1 and the 14 freeze slots), `clearn_with_ltm_simulates_model_vars_identically` green. Run channel (`CLEARN_PROFILE=run CLEARN_RUN_ITERS=20`) 29.5656 G against 30.5294 G, -3.16% (pairs -3.17 / -3.15 / -3.16 / -3.18 / -3.14%); the plain artifact is byte-identical to the pre-review candidate's, which measured -1.19% against `c972c9e9`, so about two points of this are build layout. Sweep of 509 models, plain and `--ltm`: 394 / 393 identical, 110 refused identically, 0 one-sided; the movers are the GH #859 importer flippers (`subscript_transposition` on both channels, `arrays_varname` under `--ltm`; resampled 6x per binary, the same two digests on both) and, on both channels, `getdata`, `helper_recurrence`, `macro_init_recurrence` and C-LEARN, whose only difference is the hidden INIT-only capture columns and, under `--ltm`, the removed scores: every common column byte-identical (C-LEARN: 4825 plain, 14825 under `--ltm`; 1248 base-only keys = 26 + 207 + 987 + 28, 17 tree-only). Six divergences pinned ("Phase 7.5 semantic divergences"); three goldens regenerated; engine suite, libsimlin, CLI, clippy and `cargo fmt --all -- --check` green |

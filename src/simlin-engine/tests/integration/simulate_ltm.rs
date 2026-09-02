@@ -11160,12 +11160,12 @@ fn test_whole_rhs_mapped_reducer_routes_through_synthetic_agg() {
 ///
 /// It covers **every element of every LTM variable**, not one per variable.
 /// `Results::offsets` is keyed by variable and carries no extent, so the obvious
-/// walk samples only each arrayed score's FIRST element -- 7,000 of 20,892 LTM
-/// slots here, blind to 1,772 slots that carry non-zero scores and to the other
+/// walk samples only each arrayed score's FIRST element -- 6,030 of 20,221 LTM
+/// slots here, blind to 1,765 slots that carry non-zero scores and to the other
 /// 87% of the damage the positive control below inflicts. Extents come from each
 /// variable's declared dimensions instead.
 ///
-/// The digest is deliberately NOT a checked-in series slab -- 20,892 slots x 251
+/// The digest is deliberately NOT a checked-in series slab -- 20,221 slots x 251
 /// steps is tens of MB of golden nobody would read. It is a small set of numbers
 /// that move under exactly the failures this gate exists for:
 ///
@@ -11204,7 +11204,8 @@ fn test_whole_rhs_mapped_reducer_routes_through_synthetic_agg() {
 ///
 /// **"It passes" and "it constrains the code" are different claims, so both
 /// were measured.** Three runs of this digest, same binary, differing only in
-/// `ltm_augment_zero_slot`:
+/// `ltm_augment_zero_slot` (measured on a 20,892-slot slab: the width follows
+/// the LTM causal graph, the argument does not):
 ///
 /// * predicate as shipped -- `nonzero_slots` 3,141 of 20,892.
 /// * `ZeroSlotPolicy::Materialize` forced everywhere, i.e. GH #977's omission
@@ -11539,10 +11540,10 @@ fn the_digest_sees_both_a_value_swap_and_a_rebinding() {
 }
 
 /// Pinned by `clearn_ltm_slot_maxima_digest`; see its rustdoc before changing.
-const CLEARN_LTM_SLOTS: usize = 20_892;
+const CLEARN_LTM_SLOTS: usize = 20_221;
 const CLEARN_LTM_UNKNOWN_EXTENT: usize = 0;
-const CLEARN_LTM_NONZERO_SLOTS: usize = 3_141;
-const CLEARN_LTM_FINITE_SLOTS: usize = 20_892;
-const CLEARN_LTM_MANTISSA_DIGEST: i64 = 798_101_758_590;
-const CLEARN_LTM_EXPONENT_DIGEST: i64 = 2_254;
-const CLEARN_LTM_IDENTITY_DIGEST: u64 = 11_438_420_344_658_315_382;
+const CLEARN_LTM_NONZERO_SLOTS: usize = 3_106;
+const CLEARN_LTM_FINITE_SLOTS: usize = 20_221;
+const CLEARN_LTM_MANTISSA_DIGEST: i64 = 790_401_758_590;
+const CLEARN_LTM_EXPONENT_DIGEST: i64 = 2_212;
+const CLEARN_LTM_IDENTITY_DIGEST: u64 = 16_953_901_100_024_641_861;

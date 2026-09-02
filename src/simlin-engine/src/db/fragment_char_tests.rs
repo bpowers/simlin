@@ -1528,7 +1528,7 @@ fn char_prev_and_init() {
         prev_init_model(),
         FixtureExpect::plain(
             &[
-                ("main::$⁚init_expr⁚0⁚arg0", "initial+flow"),
+                ("main::$⁚init_expr⁚0⁚arg0", "initial"),
                 ("main::$⁚prev_expr⁚0⁚arg0", "flow"),
                 ("main::init_direct", "initial+flow"),
                 ("main::init_expr", "initial+flow"),
@@ -1537,13 +1537,15 @@ fn char_prev_and_init() {
                 ("main::x", "initial+flow"),
             ],
             "`INIT(...)` reads the frozen initial-values buffer, so everything \
-             an INIT argument reaches must also be evaluated in the initials \
-             phase: `x`, the `INIT(x + 1)` capture helper, and the two INIT \
-             consumers. `PREVIOUS` reads the PRIOR step's committed values, \
-             which the initials phase has not produced, so both PREVIOUS \
-             consumers and the `PREVIOUS(x + 1)` capture helper are flow-only \
-             -- the asymmetry between the two synthesized `arg0` helpers is \
-             the load-bearing detail here.",
+             an INIT argument reaches must be evaluated in the initials phase: \
+             `x`, the `INIT(x + 1)` capture helper, and the two INIT consumers. \
+             The capture is evaluated ONLY there -- nothing reads its per-step \
+             value, so it has no flow fragment and no results series. \
+             `PREVIOUS` reads the PRIOR step's committed values, which the \
+             initials phase has not produced, so both PREVIOUS consumers and \
+             the `PREVIOUS(x + 1)` capture helper are flow-only. The two \
+             synthesized `arg0` helpers occupy disjoint phases: a capture's \
+             kind is its phase demand.",
             &[
                 // x = 2 * time -> 0, 2, 4.
                 (0, "x", 0.0),
@@ -1667,18 +1669,9 @@ fn char_ltm_fragments_exhaustive() {
         FixtureExpect {
             models: &[("main", &[])],
             phases: &[
-                (
-                    "main::$⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0",
-                    "initial+flow",
-                ),
-                (
-                    "main::$⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0",
-                    "initial+flow",
-                ),
-                (
-                    "main::$⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0",
-                    "initial+flow",
-                ),
+                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0", "flow"),
+                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0", "flow"),
+                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0", "flow"),
                 ("main::$⁚ltm⁚link_score⁚growth→level", "flow"),
                 ("main::$⁚ltm⁚link_score⁚level→growth", "flow"),
                 ("main::$⁚ltm⁚loop_score⁚r1", "flow"),
@@ -1692,9 +1685,10 @@ fn char_ltm_fragments_exhaustive() {
                   `rate→growth`, a causal edge no circuit traverses, gets no \
                   score here (contrast the discovery fixture). Every synthetic \
                   is a scalar aux, hence flow-only. Only the `growth→level` \
-                  score synthesizes PREVIOUS capture helpers, and those land in \
-                  the initials runlist because a stock's initial equation \
-                  reaches them.",
+                  score synthesizes PREVIOUS capture helpers, and a PREVIOUS \
+                  capture is flow-only too: its kind is its phase demand, and \
+                  the intrinsic's fallback covers every read before the first \
+                  step commits.",
             spot_checks: LTM_LOOP_SPOT_CHECKS,
             ltm: FixtureLtm::Exhaustive,
             expect_one_resolved_scc: false,
@@ -1710,18 +1704,9 @@ fn char_ltm_fragments_discovery() {
         FixtureExpect {
             models: &[("main", &[])],
             phases: &[
-                (
-                    "main::$⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0",
-                    "initial+flow",
-                ),
-                (
-                    "main::$⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0",
-                    "initial+flow",
-                ),
-                (
-                    "main::$⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0",
-                    "initial+flow",
-                ),
+                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0", "flow"),
+                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0", "flow"),
+                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0", "flow"),
                 ("main::$⁚ltm⁚link_score⁚growth→level", "flow"),
                 ("main::$⁚ltm⁚link_score⁚level→growth", "flow"),
                 ("main::$⁚ltm⁚link_score⁚rate→growth", "flow"),
@@ -1737,9 +1722,8 @@ fn char_ltm_fragments_discovery() {
                   Every score is a scalar aux, hence flow-only. Only the \
                   `growth→level` score -- the stock-update edge, whose \
                   ceteris-paribus numerator re-integrates the stock -- \
-                  synthesizes PREVIOUS capture helpers, and those land in the \
-                  initials runlist because a stock's initial equation reaches \
-                  them.",
+                  synthesizes PREVIOUS capture helpers, and a PREVIOUS capture \
+                  is flow-only too: its kind is its phase demand.",
             spot_checks: LTM_LOOP_SPOT_CHECKS,
             ltm: FixtureLtm::Discovery,
             expect_one_resolved_scc: false,
@@ -2847,23 +2831,42 @@ fn multi_temp_fragment_is_byte_identical_across_fresh_databases() {
 ///   that same model. Both parse and compile exactly the added variable: the
 ///   parse key is the variable and the project, and which of the model's names
 ///   are module instances is not a fact the parse reads.
+/// * **The one model fact a parse does read is per name.** `probe` snapshots
+///   a bare element of `vals`, which the source parse resolves against
+///   `vals`' declared axis through `model_variable_by_name` and
+///   `variable_dimensions` (`builtins_visitor::SnapshotIndexFacts::Axes`).
+///   Adding a variable moves the model's variable map, so that projection
+///   re-runs -- and backdates, so `probe`'s parse does not.
 #[test]
 fn module_helper_add_reparses_only_the_added_variable() {
     use crate::db::exec_probe::ProbedDb;
 
-    // `probe` reads `k`; `smoothed` reads `k` through a SMTH1 instance. The
-    // variable each scenario adds is independent of all three.
+    // `probe` reads an element of `vals`; `smoothed` reads `k` through a
+    // SMTH1 instance. The variable each scenario adds is independent of all
+    // of them.
     let project_with = |extra: Option<(&str, &str)>| {
         let mut tp = TestProject::new("frag_cache_module_ident_edge")
             .with_sim_time(0.0, 2.0, 1.0)
+            .named_dimension("d", &["e1", "e2"])
+            .array_with_ranges("vals[d]", vec![("e1", "10"), ("e2", "20")])
             .scalar_aux("k", "3")
-            .scalar_aux("probe", "k * 2")
+            .scalar_aux("probe", "PREVIOUS(vals[e2], 0)")
             .scalar_aux("smoothed", "SMTH1(k, 2)");
         if let Some((name, eqn)) = extra {
             tp = tp.scalar_aux(name, eqn);
         }
         tp.build_datamodel()
     };
+    // The probe must actually take the axis projection: a capture would make
+    // it an ordinary dependency edge and the assertion below vacuous.
+    {
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project_with(None));
+        assert!(
+            crate::test_common::implicit_vars_of(&db, &sync, "main", "probe").is_empty(),
+            "`PREVIOUS(vals[e2], 0)` must read the element's slot directly"
+        );
+    }
 
     // Returns (explicit fragment bodies that ran, implicit ones, whole-query
     // execution table, whether the project's model map moved) for one edit

@@ -6728,6 +6728,25 @@ fn corpus_clearn_macros_import() {
 /// same names, all rank-like-partial) and the margin is still wide: 35,413 free
 /// against the 65,536-slot ceiling.
 ///
+/// A user equation's `PREVIOUS`/`INIT` of one declared element (`vals[e1]`,
+/// `vals[Dim.e1]`) reads the slot directly instead of through a capture
+/// helper, and an INIT-only capture is no causal node (an `INIT` read is a
+/// snapshot, not a per-step link; `db::analysis::model_causal_edges`). Both
+/// move the count DOWN, 7,163 -> 6,193, measured with `ltm_var_dump`. The 26
+/// element captures C-LEARN no longer mints (`init_c_in_deep_ocean_per_meter`
+/// and `target_year`) each carried a scalar source->capture and
+/// capture->target score, 52 variables that become 17 direct source->target
+/// scores arrayed over their targets' declared dimensions (330 slots). The
+/// 207 INIT-only captures each carried one capture->parent score (identically
+/// 0: the parent reads the frozen value) and between them 714 source->capture
+/// scores from 104 sources -- 921 scalar scores that do not exist because the
+/// edges do not -- plus the 14 array-freeze helpers (two slots each) of the
+/// scores into `$⁚last_set_target_year⁚0⁚arg0`. Width 30,123 -> 29,398 slots
+/// (-26 capture slots, -973 scalar scores, -28 freeze slots, -28 `PREVIOUS`
+/// helpers of the removed scores, +330), from the release LTM
+/// `bytecode_profile`; the margin is 36,138 free against the 65,536-slot
+/// ceiling.
+///
 /// The pin below catches emission changes in EITHER direction, and re-deriving
 /// it means re-measuring BOTH numbers, not just the count.
 #[test]
@@ -6753,7 +6772,7 @@ fn clearn_ltm_var_count_guardrail() {
         })
         .sum();
     assert_eq!(
-        total, 7163,
+        total, 6193,
         "C-LEARN's emitted LTM var count moved; if this is an intentional \
          emission change, re-derive the layout-slot impact (the #654 \
          ceiling) and update this pin with the new numbers"

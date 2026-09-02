@@ -47,7 +47,9 @@
 use indexmap::IndexMap;
 
 use crate::ast::{Ast, Expr0, print_eqn};
-use crate::builtins_visitor::{empty_macro_registry, instantiate_implicit_modules};
+use crate::builtins_visitor::{
+    SnapshotIndexFacts, empty_macro_registry, instantiate_implicit_modules,
+};
 use crate::common::{Canonical, EquationError, ErrorCode, Ident};
 use crate::datamodel;
 use crate::dimensions::DimensionsContext;
@@ -83,31 +85,57 @@ pub(crate) fn synthetic_ident(parent: &str, n: usize, part: &str, suffix: Option
     }
 }
 
-/// Which builtin's argument a capture holds.
+/// Which snapshot builtins read a capture's storage, and therefore which
+/// phases have to evaluate it: a capture's kind is its phase demand.
 ///
-/// The two differ in how the dependency graph schedules them -- a `Previous`
-/// capture carries no edge from its parent in either phase, an `Init` capture
-/// keeps the parent's initial edge and is seeded into the initials runlist --
-/// but that difference is derived from the parent's own classification rather
-/// than read from here. This field records what the call was, so a later
-/// change that wants to treat the two differently (taking `Init` captures out
-/// of the flows runlist, which is a shape change with its own ledger row) has
-/// the fact in hand rather than having to re-derive it from the parent's AST.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// `PREVIOUS` reads the prior step's committed value, so its capture is
+/// refreshed in flows and needs no initial evaluation -- every read before the
+/// first snapshot exists takes the intrinsic's fallback. `INIT` reads the
+/// frozen initial-values snapshot, so its capture is populated once, in
+/// initials, and has no flow fragment unless a per-step definition reads its
+/// current value (`db::dep_graph::model_dependency_graph` decides both). The
+/// dt and active-initial passes of one variable restart the walk counter, so
+/// they can mint the same positional storage for different consumers; one
+/// capture then serves both and its demand is the union
+/// ([`Capture::merge_same_definition`]).
+// `Debug` is unconditional: `db::ImplicitVarDeps` derives it in every build
+// and carries a `CaptureKind`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaptureKind {
     Previous,
     Init,
+    PreviousAndInit,
 }
 
 impl CaptureKind {
-    /// The builtin this capture was hoisted out of, spelled as a model writes
-    /// it. No production caller: `Debug` is feature-gated crate-wide, so the
-    /// tests that pin each capture shape's kind need a printable spelling.
+    /// The consumer, spelled as a model writes it; a shared capture names
+    /// both. No production caller: `Debug` is feature-gated crate-wide, so
+    /// the tests that pin each capture shape's kind need a printable spelling.
     pub fn as_str(self) -> &'static str {
         match self {
             CaptureKind::Previous => "PREVIOUS",
             CaptureKind::Init => "INIT",
+            CaptureKind::PreviousAndInit => "PREVIOUS+INIT",
+        }
+    }
+
+    /// The storage is refreshed every step, ahead of the snapshot a
+    /// `PREVIOUS` reads.
+    pub const fn needs_flows(self) -> bool {
+        matches!(self, CaptureKind::Previous | CaptureKind::PreviousAndInit)
+    }
+
+    /// The storage is populated in initials, ahead of the snapshot an `INIT`
+    /// reads.
+    pub const fn needs_initials(self) -> bool {
+        matches!(self, CaptureKind::Init | CaptureKind::PreviousAndInit)
+    }
+
+    const fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (CaptureKind::Previous, CaptureKind::Previous) => CaptureKind::Previous,
+            (CaptureKind::Init, CaptureKind::Init) => CaptureKind::Init,
+            _ => CaptureKind::PreviousAndInit,
         }
     }
 }
@@ -188,7 +216,8 @@ impl Capture {
         &self.dims
     }
 
-    /// Do these two captures define the same value?
+    /// Absorb another capture that defines the same value: `true` when it
+    /// does, after which this capture's phase demand covers both consumers.
     ///
     /// Source position is deliberately excluded. A helper's identity has always
     /// been its BODY, not where the body was written: the apply-to-all
@@ -199,12 +228,20 @@ impl Capture {
     /// on a model that compiles today. `PartialEq` keeps positions, because
     /// salsa uses it to decide whether a re-parse changed anything and a moved
     /// span does change the diagnostics.
-    pub(crate) fn same_definition(&self, other: &Self) -> bool {
-        self.ident == other.ident
-            && self.kind == other.kind
+    ///
+    /// The kind is excluded too, and unioned instead: the same storage read by
+    /// a `PREVIOUS` in the dt equation and by an `INIT` in the active-initial
+    /// equation is one value evaluated in both phases, not two helpers
+    /// claiming one name.
+    pub(crate) fn merge_same_definition(&mut self, other: &Self) -> bool {
+        let same = self.ident == other.ident
             && self.suffix == other.suffix
             && self.dims == other.dims
-            && self.arg.eq_ignoring_loc(&other.arg)
+            && self.arg.eq_ignoring_loc(&other.arg);
+        if same {
+            self.kind = self.kind.union(other.kind);
+        }
+        same
     }
 
     /// This capture as the parse-stage variable it stands for.
@@ -267,17 +304,20 @@ impl Capture {
 /// against the parent, so the snippet underlines the argument inside the
 /// parent's equation.
 ///
-/// The body goes through `instantiate_implicit_modules` because a parse of it
-/// does, and the visitor is not a no-op on it: its per-element gate fires on a
-/// bare `PREVIOUS`/`INIT` as well as on a module call, so an ARRAYED capture
-/// whose body holds one becomes an `Ast::Arrayed` of identical elements rather
-/// than staying an `Ast::ApplyToAll`. That expansion decides the fragment's
-/// shape, so skipping it here would change the compiled artifact. (Keeping the
-/// `ApplyToAll` is a deliberate shape change with its own ledger row, not a
-/// side effect of moving the body off text.) A second generation of helpers is
-/// impossible -- a helper body was already walked, and a call's arguments are
-/// walked before the call itself expands -- and is refused loudly rather than
-/// assumed.
+/// A scalar body is not walked again. The parent's walk visited every node of
+/// it and every decision that walk makes is final: a call's arguments are
+/// walked before the call itself, so each `PREVIOUS`/`INIT` left in the body
+/// was routed to a direct read under the parent's snapshot-index facts, and a
+/// second walk here -- which has no owning model to ask -- could only
+/// re-decide such a read against a different rule and mint a helper the parent
+/// never filed. An ARRAYED capture's body is walked, because the visitor is
+/// not a no-op on an apply-to-all: its per-element gate fires on a bare
+/// `PREVIOUS`/`INIT` as well as on a module call, so the body becomes an
+/// `Ast::Arrayed` of identical elements rather than staying an
+/// `Ast::ApplyToAll`, and that expansion decides the fragment's shape. Such a
+/// body holds no subscript at all (`BuiltinVisitor::hoist_capture`), so that
+/// walk classifies no index; a helper it nonetheless minted is refused loudly
+/// rather than dropped.
 fn subtree_parsed_variable(
     ident: &str,
     ast: Option<Ast<Expr0>>,
@@ -293,14 +333,18 @@ fn subtree_parsed_variable(
         Some(Ast::Arrayed(..)) | None => crate::ast::Loc::default(),
     };
     let ast = ast.and_then(|ast| {
+        if let Ast::Scalar(_) = ast {
+            return Some(ast);
+        }
         match instantiate_implicit_modules(
             ident.as_str(),
             ast,
             Some(dimensions),
             // A helper body is given none of the model-level facts a parse
             // can carry: it names no module the parent's walk did not already
-            // resolve, and it is not a macro body.
-            None,
+            // resolve, its indices were classified by that walk, and it is not
+            // a macro body.
+            SnapshotIndexFacts::NoModel,
             empty_macro_registry(),
             None,
         ) {
@@ -528,15 +572,6 @@ impl ImplicitVar {
         self.module().is_some()
     }
 
-    /// Never: the parse synthesizes captures, hoisted arguments and module
-    /// instances, and nothing else. The predicate exists because the
-    /// per-variable metadata (`db::query::ImplicitVarMeta`,
-    /// `db::ltm::LtmImplicitVarMeta`) carries an `is_stock` field for every
-    /// variable, explicit or not.
-    pub fn is_stock(&self) -> bool {
-        false
-    }
-
     /// The dimension names this helper applies over, or `&[]` when it is
     /// scalar. An arrayed helper occupies one slot per element, so a consumer
     /// that lays it out or subscripts it reads this rather than assuming 1.
@@ -549,14 +584,15 @@ impl ImplicitVar {
         }
     }
 
-    /// Do these two helpers define the same thing? The question
-    /// [`insert_implicit_var`] asks when two of them claim one name; see
-    /// [`Capture::same_definition`] for why the subtree-bodied arms answer it
-    /// without consulting source positions. A module instance has no positions
-    /// to ignore.
-    pub(crate) fn same_definition(&self, other: &Self) -> bool {
+    /// Absorb another helper that defines the same thing: the question
+    /// [`insert_implicit_var`] asks when two of them claim one name. See
+    /// [`Capture::merge_same_definition`] for why the subtree-bodied arms
+    /// answer it without consulting source positions, and why a capture also
+    /// unions the other's phase demand; a module instance has neither
+    /// positions to ignore nor a demand to merge.
+    pub(crate) fn merge_same_definition(&mut self, other: &Self) -> bool {
         match (self, other) {
-            (ImplicitVar::Capture(a), ImplicitVar::Capture(b)) => a.same_definition(b),
+            (ImplicitVar::Capture(a), ImplicitVar::Capture(b)) => a.merge_same_definition(b),
             (ImplicitVar::HoistedArg(a), ImplicitVar::HoistedArg(b)) => a.same_definition(b),
             (ImplicitVar::Module(a), ImplicitVar::Module(b)) => a == b,
             _ => false,
@@ -585,30 +621,32 @@ impl ImplicitVar {
 /// accumulate: inside one walk (`BuiltinVisitor`), across the per-element walks
 /// of an apply-to-all or arrayed parent, and across the dt and initial passes
 /// of one variable (`variable::parse_var`). A same-definition repeat is
-/// idempotent -- the apply-to-all expansion walks one cloned body per element
-/// and the GH #541 arrayed capture it mints is deliberately suffix-less, so
-/// every element's copy is the same helper. A different helper claiming the
-/// name is refused before it can overwrite the first: the silent last-wins
-/// alternative made a later `Ast::Arrayed` slot read an earlier slot's capture
-/// (PR #668), and a macro named `ARG1` invoked as `ARG1(k, k * 2)` mints its
-/// instance and its second argument's helper under one name from ordinary
-/// source. `DuplicateVariable` because two helpers really do claim one name.
+/// absorbed into the first -- the apply-to-all expansion walks one cloned body
+/// per element and the GH #541 arrayed capture it mints is deliberately
+/// suffix-less, so every element's copy is the same helper, and a capture the
+/// two passes mint for different snapshot consumers is one helper serving
+/// both. A different helper claiming the name is refused before it can
+/// overwrite the first: the silent last-wins alternative made a later
+/// `Ast::Arrayed` slot read an earlier slot's capture (PR #668), and a macro
+/// named `ARG1` invoked as `ARG1(k, k * 2)` mints its instance and its second
+/// argument's helper under one name from ordinary source. `DuplicateVariable`
+/// because two helpers really do claim one name.
 pub(crate) fn insert_implicit_var(
     vars: &mut IndexMap<Ident<Canonical>, ImplicitVar>,
     var: ImplicitVar,
 ) -> Result<(), EquationError> {
     let ident = Ident::<Canonical>::new(var.ident());
-    match vars.get(&ident) {
-        Some(existing) if existing.same_definition(&var) => Ok(()),
-        Some(_) => Err(EquationError::detailed(
-            ErrorCode::DuplicateVariable,
-            0,
-            0,
-            format!("two different synthesized helpers both claim the name '{ident}'"),
-        )),
-        None => {
-            vars.insert(ident, var);
-            Ok(())
-        }
+    let Some(existing) = vars.get_mut(&ident) else {
+        vars.insert(ident, var);
+        return Ok(());
+    };
+    if existing.merge_same_definition(&var) {
+        return Ok(());
     }
+    Err(EquationError::detailed(
+        ErrorCode::DuplicateVariable,
+        0,
+        0,
+        format!("two different synthesized helpers both claim the name '{ident}'"),
+    ))
 }

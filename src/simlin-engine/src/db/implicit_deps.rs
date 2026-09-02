@@ -3,16 +3,26 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use super::*;
+use crate::capture::CaptureKind;
 use std::collections::{BTreeSet, HashMap};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImplicitVarDeps {
     pub name: String,
-    pub is_stock: bool,
     pub is_module: bool,
     pub model_name: Option<String>,
+    /// The phase demand of a `PREVIOUS`/`INIT` capture, which decides its
+    /// runlists (`db::dep_graph::model_dependency_graph`); `None` for a
+    /// hoisted argument or a module instance, which are per-step definitions
+    /// like any explicit aux.
+    pub capture_kind: Option<CaptureKind>,
     pub dt_deps: BTreeSet<String>,
     pub initial_deps: BTreeSet<String>,
+    /// Names read through `INIT` in the helper's own equation. Mirrors
+    /// `VariableDeps::init_referenced_vars`: they seed the initials runlist,
+    /// so the frozen snapshot holds them whether or not the helper itself
+    /// runs in initials (a `PREVIOUS` capture whose body reads `INIT(x)`).
+    pub init_referenced_vars: BTreeSet<String>,
     pub dt_init_only_referenced_vars: BTreeSet<String>,
     pub dt_previous_referenced_vars: BTreeSet<String>,
     pub initial_previous_referenced_vars: BTreeSet<String>,
@@ -53,11 +63,12 @@ pub(super) fn extract_implicit_var_deps(
                     .collect();
                 return ImplicitVarDeps {
                     name: implicit_name,
-                    is_stock: false,
                     is_module: true,
                     model_name: Some(m.model_name.clone()),
+                    capture_kind: None,
                     dt_deps: refs.clone(),
                     initial_deps: refs,
+                    init_referenced_vars: BTreeSet::new(),
                     dt_init_only_referenced_vars: BTreeSet::new(),
                     dt_previous_referenced_vars: BTreeSet::new(),
                     initial_previous_referenced_vars: BTreeSet::new(),
@@ -92,10 +103,10 @@ pub(super) fn extract_implicit_var_deps(
 
             ImplicitVarDeps {
                 name: implicit_name,
-                is_stock: parsed_implicit.is_stock(),
                 // The module arm returned above, so nothing here is one.
                 is_module: false,
                 model_name: None,
+                capture_kind: implicit_var.capture().map(|c| c.kind()),
                 dt_deps: dt_classification
                     .all
                     .into_iter()
@@ -106,6 +117,7 @@ pub(super) fn extract_implicit_var_deps(
                     .into_iter()
                     .map(|id| id.to_string())
                     .collect(),
+                init_referenced_vars: dt_classification.init_referenced,
                 dt_init_only_referenced_vars: dt_classification.init_only,
                 dt_previous_referenced_vars: dt_classification.previous_only,
                 initial_previous_referenced_vars: init_classification.previous_only,

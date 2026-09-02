@@ -18,6 +18,112 @@
 use super::*;
 use crate::datamodel;
 
+/// A qualified `PREVIOUS`/`INIT` index depends on the one element it spells,
+/// through `project_has_qualified_element`, not on the project's dimension
+/// list: an unrelated dimension edit re-checks the projection and backdates
+/// it, so the scalar variable's parse stays cached, while removing the
+/// selected element re-parses it (and the argument then captures). Reordering
+/// the selector's elements changes the POSITION the index selects without
+/// changing whether it exists, so the parse stays cached and the new position
+/// still reaches the value: the position is lowering's fact, not the parse's.
+/// The selector dimension is unrelated to `vals`' axis on purpose, since a
+/// qualified position is applied to whatever axis is referenced.
+#[test]
+fn a_qualified_snapshot_index_depends_on_its_own_element_only() {
+    use crate::db::exec_probe::ProbedDb;
+    use crate::test_common::TestProject;
+
+    let build = |selector: &[&str], unrelated: &[&str]| {
+        TestProject::new("qualified_snapshot_invalidation")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .named_dimension("Data", &["d1", "d2", "d3"])
+            .named_dimension("Selector", selector)
+            .named_dimension("Unrelated", unrelated)
+            .array_with_ranges("vals[Data]", vec![("d1", "10"), ("d2", "20"), ("d3", "30")])
+            .scalar_aux("probe", "PREVIOUS(vals[Selector.s2], 0)")
+            .build_datamodel()
+    };
+    let parse_probe = |db: &ProbedDb, state: &PersistentSyncState| {
+        parse_source_variable(
+            db.db(),
+            state.models["main"].variables["probe"].source_var,
+            state.project,
+        )
+        .implicit_vars
+        .len()
+    };
+    let probe_value = |db: &ProbedDb, state: &PersistentSyncState| -> f64 {
+        let compiled =
+            compile_project_incremental(db.db(), state.project, "main").expect("compiles");
+        let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+        vm.run_to_end().expect("runs");
+        crate::test_common::collect_results(&vm.into_results())["probe"][1]
+    };
+    let runs = |db: &ProbedDb, query: &str| db.counts().get(query).map(|(runs, _)| *runs);
+
+    let mut db = ProbedDb::new();
+    let state1 = sync_from_datamodel_incremental(
+        db.db_mut(),
+        &build(&["s1", "s2", "s3"], &["u1", "u2"]),
+        None,
+    );
+    assert_eq!(
+        parse_probe(&db, &state1),
+        0,
+        "the qualified element is direct"
+    );
+    assert_eq!(probe_value(&db, &state1), 20.0);
+
+    db.reset();
+    let state2 = sync_from_datamodel_incremental(
+        db.db_mut(),
+        &build(&["s1", "s2", "s3"], &["u1", "u3"]),
+        Some(&state1),
+    );
+    parse_probe(&db, &state2);
+    assert_eq!(
+        runs(&db, "parse_source_variable"),
+        None,
+        "an unrelated dimension edit must not re-parse the probe"
+    );
+    assert_eq!(
+        runs(&db, "project_has_qualified_element"),
+        Some(1),
+        "the projection re-checks the dimension list and backdates"
+    );
+
+    db.reset();
+    let state3 = sync_from_datamodel_incremental(
+        db.db_mut(),
+        &build(&["s2", "s1", "s3"], &["u1", "u3"]),
+        Some(&state2),
+    );
+    parse_probe(&db, &state3);
+    assert_eq!(
+        runs(&db, "parse_source_variable"),
+        None,
+        "moving the selected element changes no fact the parse reads"
+    );
+    assert_eq!(
+        probe_value(&db, &state3),
+        10.0,
+        "the moved position reaches the value through lowering"
+    );
+
+    db.reset();
+    let state4 = sync_from_datamodel_incremental(
+        db.db_mut(),
+        &build(&["renamed", "s1", "s3"], &["u1", "u3"]),
+        Some(&state3),
+    );
+    assert_eq!(
+        parse_probe(&db, &state4),
+        1,
+        "an index naming no element captures, so the parse re-runs"
+    );
+    assert_eq!(runs(&db, "parse_source_variable"), Some(1));
+}
+
 /// The variable's parse (test convenience).
 fn parse_var_no_module_ctx(
     db: &dyn Db,

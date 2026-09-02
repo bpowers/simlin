@@ -19,7 +19,9 @@
 
 use std::collections::HashSet;
 
-use crate::builtins_visitor::{empty_macro_registry, instantiate_implicit_modules};
+use crate::builtins_visitor::{
+    SnapshotIndexFacts, empty_macro_registry, instantiate_implicit_modules,
+};
 use crate::common::{Canonical, Ident};
 use crate::dimensions::DimensionsContext;
 
@@ -42,11 +44,16 @@ use super::LtmEquation;
 /// visitor over the same arm bodies, synthesizing the *same-named* helpers that
 /// dedup away (`model_ltm_implicit_var_info` keys implicit vars by canonical
 /// name), so it is skipped.
+///
+/// `model_var_names` is the model's whole variable-name set, the generated
+/// path's rule for a bare element subscript of a `PREVIOUS`/`INIT` argument
+/// (`SnapshotIndexFacts::ModelNames`); every LTM parse site passes
+/// `ltm_model_var_names` so the helper set and the compiled helpers agree.
 pub(super) fn parse_ltm_equation(
     var_name: &str,
     equation: &LtmEquation,
     dims: &DimensionsContext,
-    model_var_names: Option<&HashSet<Ident<Canonical>>>,
+    model_var_names: &HashSet<Ident<Canonical>>,
 ) -> ParsedVariableResult {
     let (flow_ast, mut errors) = equation.to_flow_ast(dims);
 
@@ -56,7 +63,7 @@ pub(super) fn parse_ltm_equation(
             var_name,
             ast,
             Some(dims),
-            model_var_names,
+            SnapshotIndexFacts::ModelNames(model_var_names),
             // LTM synthetic equations are engine-generated and never contain
             // user macro invocations -> no registry needed; and are never a
             // macro body, so no enclosing-macro context (#554).

@@ -99,14 +99,6 @@ const ROWS: &[CaptureRow] = &[
         rewritten: None,
     },
     CaptureRow {
-        covers: "a qualified dimension.element index in a SCALAR parse, which passes no \
-                 dimensions context (the 7.1 divergence)",
-        parent: Parent::Scalar,
-        equation: "PREVIOUS(vals[d.e2], 0)",
-        captures: &[("$⁚lagged⁚0⁚arg0", CaptureKind::Previous, "vals[d·e2]", &[])],
-        rewritten: None,
-    },
-    CaptureRow {
         covers: "the one module-backed base the parse knows: a module instance synthesized \
                  EARLIER IN THIS WALK, whose output the argument reads. Every other \
                  module-backed name -- an explicit instance, a module-call aux such as \
@@ -433,6 +425,10 @@ fn a_capture_holds_the_argument_subtree_itself() {
 /// Those shapes are pinned instead by the checked-in fragment goldens
 /// (`db/fragment_char_golden/prev_init.txt` and its neighbours), which render
 /// every capture's whole bytecode.
+///
+/// The phase compared is the one the capture's kind demands: an `INIT`
+/// capture has only an initial fragment, so its sibling is given an `INIT`
+/// consumer, which puts the sibling in initials too.
 #[test]
 fn a_captures_fragment_is_its_argument_compiled() {
     use crate::db::fragment_compile::compile_implicit_var_fragment;
@@ -446,12 +442,22 @@ fn a_captures_fragment_is_its_argument_compiled() {
         let eqn = row.equation;
         let (tp, _) = model_for(row);
         // The sibling holds the captured argument as an ordinary equation.
-        let arg_text = row.captures[0].2;
-        let tp = tp.aux("sibling", arg_text, None);
+        let (_, kind, arg_text, _) = row.captures[0];
+        let mut tp = tp.aux("sibling", arg_text, None);
+        if kind.needs_initials() {
+            tp = tp.aux("initial_consumer", "INIT(sibling)", None);
+        }
         let dm = tp.build_datamodel();
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &dm);
         let model = sync.models["main"].source;
+        let demanded = |fragment: &crate::compiler::symbolic::CompiledVarFragment| {
+            if kind.needs_initials() {
+                fragment.initial_bytecodes.clone()
+            } else {
+                fragment.flow_bytecodes.clone()
+            }
+        };
 
         let capture_ident = row.captures[0].0;
         let capture_bc = compile_implicit_var_fragment(
@@ -462,11 +468,9 @@ fn a_captures_fragment_is_its_argument_compiled() {
             ModuleInputSet::empty(&db),
         )
         .as_ref()
+        .map(|result| demanded(&result.fragment))
         .unwrap_or_else(|| panic!("{what}: `{eqn}` -- the capture must compile"))
-        .fragment
-        .flow_bytecodes
-        .as_ref()
-        .unwrap_or_else(|| panic!("{what}: `{eqn}` -- the capture must have a flow fragment"));
+        .unwrap_or_else(|| panic!("{what}: `{eqn}` -- the capture must have its demanded phase"));
 
         let sibling_sv = model.variables(&db)["sibling"];
         let sibling_bc = compile_var_fragment(
@@ -477,11 +481,9 @@ fn a_captures_fragment_is_its_argument_compiled() {
             ModuleInputSet::empty(&db),
         )
         .as_ref()
+        .map(|result| demanded(&result.fragment))
         .unwrap_or_else(|| panic!("{what}: `{eqn}` -- the sibling must compile"))
-        .fragment
-        .flow_bytecodes
-        .as_ref()
-        .unwrap_or_else(|| panic!("{what}: `{eqn}` -- the sibling must have a flow fragment"));
+        .unwrap_or_else(|| panic!("{what}: `{eqn}` -- the sibling must have the same phase"));
 
         assert_eq!(
             format!("{capture_bc:?}").replace(capture_ident, "SELF"),

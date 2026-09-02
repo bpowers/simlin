@@ -17,7 +17,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::*;
-use crate::capture::ImplicitVar;
+use crate::builtins_visitor::SnapshotIndexFacts;
+use crate::capture::{CaptureKind, ImplicitVar};
 use crate::common::{Canonical, Ident};
 
 /// Result of parsing a single variable, including any implicit variables
@@ -148,6 +149,28 @@ pub fn project_dimensions_context(
     crate::dimensions::DimensionsContext::from(project_datamodel_dims(db, project).as_slice())
 }
 
+/// Whether the project declares the element a qualified `dimension·element`
+/// spelling names -- the one fact a parse needs about a qualified
+/// `PREVIOUS`/`INIT` subscript index (`builtins_visitor::SnapshotIndexFacts`).
+///
+/// A per-name projection of [`project_dimensions_context`]: the parse narrows
+/// its own dimension context to the dimensions the variable declares, and a
+/// qualified index may name any dimension in the project. Reading the whole
+/// context would put every dimension edit on every such parse's dependency
+/// list; this query re-executes on those edits but backdates on an unchanged
+/// answer, so the parse re-runs only when the element it spells appears or
+/// disappears (`db::dimension_invalidation_tests`).
+#[salsa::tracked(returns(clone))]
+pub(crate) fn project_has_qualified_element(
+    db: &dyn Db,
+    project: SourceProject,
+    qualified: String,
+) -> bool {
+    project_dimensions_context(db, project)
+        .lookup(&qualified)
+        .is_some()
+}
+
 /// Cached project-global converted dimensions -- computed once per project.
 ///
 /// The `Vec<crate::dimensions::Dimension>` form of `project_datamodel_dims`,
@@ -173,17 +196,19 @@ pub fn project_converted_dimensions(
 ///
 /// Keyed on the variable and the project alone: the parse reads the
 /// variable's own fields, the dimensions it names, the project's units context
-/// and macro registry, and the project-keyed `macro_body_owner` map (which
-/// macro, if any, this variable is the body of -- a map over every
-/// macro-marked model's variables, so a variable added to a MACRO model does
-/// re-execute every parse in the project; the value backdates). It reads
-/// nothing of the owning model -- not its variable set, not which of its names
-/// are module instances or bound input ports -- so no edit to a sibling
-/// variable re-keys or re-executes it; what a `PREVIOUS`/`INIT` argument's
-/// name denotes is
-/// resolved at lowering from the dependency's shape
-/// (`compiler::context::Context::snapshot_storage`). One memo per variable
-/// serves the compile, diagnostic, analysis, LTM and layout paths alike.
+/// and macro registry, and its owning model through [`variable_owner_model`]
+/// -- for which macro, if any, it is the body of, and for the one question a
+/// `PREVIOUS`/`INIT` subscript asks of the model, whether an identifier index
+/// pins a declared element of the variable it subscripts
+/// (`builtins_visitor::SnapshotIndexFacts::Axes`). That question goes through
+/// the per-name projections `model_variable_by_name` and
+/// [`variable_dimensions`], never the model's variable set, so no edit to a
+/// sibling variable re-keys or re-executes it
+/// (`db::fragment_char_tests::module_helper_add_reparses_only_the_added_variable`);
+/// what the argument's NAME denotes is resolved at lowering from the
+/// dependency's shape (`compiler::context::Context::snapshot_storage`). One
+/// memo per variable serves the compile, diagnostic, analysis, LTM and layout
+/// paths alike.
 #[salsa::tracked(returns(ref))]
 pub fn parse_source_variable(
     db: &dyn Db,
@@ -213,16 +238,21 @@ pub fn parse_source_variable(
     let units_ctx = project_units_context(db, project);
     // Reaches the BuiltinVisitor so a macro call expands (salsa-cached).
     let macro_registry = &crate::db::macro_registry::project_macro_registry(db, project).registry;
+    let owner = variable_owner_model(db, project, var);
+    let axis_of = |base: &str, axis: usize| -> Option<crate::dimensions::Dimension> {
+        let base = model_variable_by_name(db, owner?, canonicalize(base).into_owned())?;
+        variable_dimensions(db, base, project).get(axis).cloned()
+    };
+    let is_qualified_element = |qualified: &str| -> bool {
+        project_has_qualified_element(db, project, canonicalize(qualified).into_owned())
+    };
     let ctx = crate::variable::ParseContext {
         dimensions: &dim_ctx,
         units_ctx,
-        // No model-var-names set: the per-variable parse must not depend on
-        // the model's full name set, or any variable add/remove/rename would
-        // invalidate every cached parse (dimension-granularity incrementality).
-        // Bare element subscripts in user equations therefore keep the
-        // conservative helper-aux path; the LTM parse path (whose equations
-        // are regenerated wholesale anyway) passes the set instead.
-        model_var_names: None,
+        snapshot_index: SnapshotIndexFacts::Axes {
+            axis_of: &axis_of,
+            is_qualified_element: &is_qualified_element,
+        },
         macro_registry: Some(macro_registry),
         enclosing_model: crate::db::macro_registry::enclosing_macro_for_var(db, project, var), // #554
     };
@@ -427,7 +457,10 @@ pub struct ImplicitVarMeta {
     /// rate on every model tried (C-LEARN, WRLD3, scirev7, and the synthetic at
     /// both 200 and 800).
     pub index_hint: usize,
-    pub is_stock: bool,
+    /// The phase demand of a `PREVIOUS`/`INIT` capture; `None` for a hoisted
+    /// argument or a module instance. An INIT-only capture keeps its layout
+    /// slot but no results key (`db::layout::flattened_offsets`).
+    pub capture_kind: Option<CaptureKind>,
     pub is_module: bool,
     pub model_name: Option<String>,
     pub size: usize,
@@ -476,7 +509,7 @@ impl std::fmt::Debug for ImplicitVarMeta {
             // The hint is not identity, but a WRONG one is exactly what you are
             // looking at this for, so it is rendered rather than hidden.
             .field("index_hint", &self.index_hint)
-            .field("is_stock", &self.is_stock)
+            .field("capture_kind", &self.capture_kind.map(CaptureKind::as_str))
             .field("size", &self.size)
             .field("dimensions", &self.dimensions)
             .finish()
@@ -498,7 +531,7 @@ pub fn model_implicit_var_info(
         let parsed = parse_source_variable(db, *source_var, project);
         for (index, implicit_var) in parsed.implicit_vars.iter().enumerate() {
             let name = canonicalize(implicit_var.ident()).into_owned();
-            let is_stock = implicit_var.is_stock();
+            let capture_kind = implicit_var.capture().map(|c| c.kind());
             let is_module = implicit_var.is_module();
             let model_name = implicit_var.module().map(|m| m.model_name.clone());
             // An arrayed implicit helper (the GH #541 bare-arrayed-PREVIOUS
@@ -533,7 +566,7 @@ pub fn model_implicit_var_info(
                     parent_source_var: *source_var,
                     name,
                     index_hint: index,
-                    is_stock,
+                    capture_kind,
                     is_module,
                     model_name,
                     size,
@@ -600,6 +633,24 @@ pub(crate) fn model_variable_by_name(
     name: String,
 ) -> Option<SourceVariable> {
     model.variables(db).get(&name).copied()
+}
+
+/// The model `var` belongs to -- its `owner_model` name resolved in the
+/// project's model map.
+///
+/// A projection for the same reason `model_variable_by_name` is one: the map
+/// is one input field, so a reader of it depends on every model in the
+/// project, while this query re-executes when a model is added or removed
+/// and backdates on the unchanged handle. `None` only when the name resolves
+/// to no model, which a synced project never produces: the stdlib models are
+/// spliced into `project.models` on every sync too.
+#[salsa::tracked(returns(clone))]
+pub(crate) fn variable_owner_model(
+    db: &dyn Db,
+    project: SourceProject,
+    var: SourceVariable,
+) -> Option<SourceModel> {
+    project.models(db).get(var.owner_model(db)).copied()
 }
 
 /// Extracts the set of dimension names referenced in a variable's equation.

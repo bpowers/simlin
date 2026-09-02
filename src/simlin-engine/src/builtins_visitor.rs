@@ -16,7 +16,9 @@ use crate::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, EquationError, Ident, RawIdent,
     canonicalize,
 };
-use crate::dimensions::{Dimension, DimensionsContext, SubscriptIterator};
+use crate::dimensions::{
+    AxisIndexName, Dimension, DimensionsContext, SubscriptIterator, resolve_axis_index_name,
+};
 use crate::eqn_err;
 use crate::module_functions::{
     MacroCallResolution, MacroRegistry, ModuleFunctionDescriptor, stdlib_descriptor,
@@ -35,6 +37,61 @@ static EMPTY_MACRO_REGISTRY: LazyLock<MacroRegistry> = LazyLock::new(MacroRegist
 /// sites). Avoids allocating a fresh `MacroRegistry` per parse call.
 pub(crate) fn empty_macro_registry() -> &'static MacroRegistry {
     &EMPTY_MACRO_REGISTRY
+}
+
+/// The model-local facts behind the one question a `PREVIOUS`/`INIT`
+/// subscript asks of the owning model: does this identifier index pin ONE
+/// declared element of the referenced variable's axis, so the call reads that
+/// slot directly, or must the argument be captured? The decision has to be
+/// made here, in the parse: a capture cannot be un-minted at lowering, and
+/// capturing every identifier index costs a hidden slot and a flow evaluation
+/// per read.
+///
+/// Which facts are in scope depends on who is parsing, and each arm is a
+/// different rule because it has different facts:
+///
+/// * [`Self::Axes`] is the source parse (`db::parse_source_variable`). A bare
+///   identifier is static when it is an element of the referenced variable's
+///   declared axis at that position -- XMILE 1.0 section 3.7.1, "subscript
+///   index names MAY be used unambiguously as part of a subscript ... once the
+///   dimensions assigned to the variable have been specified", with footnote
+///   9's precedence, "if a variable name is the same as an element name, the
+///   element name prevails" (`docs/reference/xmile-v1.0.html`), which is the
+///   compiler's own resolution of the same index
+///   (`dimensions::resolve_axis_index_name`). A qualified `dimension·element`
+///   is static when the project declares that element: the qualifying
+///   dimension need not be the referenced axis, since its 1-based position is
+///   what the compiler applies, positionally, to whatever axis is referenced
+///   (`dimensions::resolve_axis_index_position`). Both facts are closures
+///   because this layer has no database; the query supplies them through
+///   per-name projections, so a parse depends on exactly the variable it
+///   subscripts and the qualified names it spells, never on the model's
+///   variable set.
+/// * [`Self::ModelNames`] is the generated LTM parse. A generated equation may
+///   subscript an LTM synthetic variable or a helper, neither of which is a
+///   `SourceVariable` with declared axes to ask, so a bare identifier is
+///   static when it is an element of ANY dimension and no variable of the
+///   model shadows it. Where the two rules disagree, one mints a capture the
+///   other does not; a model that compiles under either computes the same
+///   value, because a capture's body resolves the index exactly as the direct
+///   read would.
+/// * [`Self::NoModel`] has no model in scope: a bare identifier is never
+///   static, and a qualified name is static when the dimension context the
+///   parse was given declares it.
+#[derive(Clone, Copy)]
+pub enum SnapshotIndexFacts<'a> {
+    Axes {
+        /// The declared dimension at position `axis` of the variable `base`
+        /// names -- `base` as written in the subscript, not canonicalized --
+        /// or `None` when the owning model declares no such variable or the
+        /// variable has no such axis.
+        axis_of: &'a dyn Fn(&str, usize) -> Option<Dimension>,
+        /// Whether the project declares the element a qualified
+        /// `dimension·element` spelling names.
+        is_qualified_element: &'a dyn Fn(&str) -> bool,
+    },
+    ModelNames(&'a HashSet<Ident<Canonical>>),
+    NoModel,
 }
 
 /// Check if the expression contains any **module-function** call that needs
@@ -253,18 +310,9 @@ pub struct BuiltinVisitor<'a> {
     active_subscript: Option<Vec<String>>,
     /// Reference to DimensionsContext for dimension mapping lookups
     dimensions_ctx: Option<&'a DimensionsContext>,
-    /// Identifiers of *all* variables in the parent model, when known.
-    ///
-    /// Used by `index_is_static` to accept a *bare* element name as a static
-    /// subscript index: a name that is a dimension element AND not any
-    /// variable's name cannot be a dynamic-index reference, so the compiler
-    /// is guaranteed to resolve it against the subscripted variable's
-    /// declared dimensions (the element interpretation always wins -- see
-    /// `compiler::context`'s subscript lowering). `None` (the user-equation
-    /// parse path, which must stay incremental under variable renames)
-    /// disables the check, keeping bare element indices on the conservative
-    /// helper path.
-    model_var_names: Option<&'a HashSet<Ident<Canonical>>>,
+    /// What `index_is_static` may ask the owning model about an identifier
+    /// index of a `PREVIOUS`/`INIT` subscript.
+    snapshot_index: SnapshotIndexFacts<'a>,
     /// The per-project macro registry, consulted through
     /// `MacroRegistry::resolve_call` for every call before any builtin
     /// routing, so a project macro shadows an identically named builtin or
@@ -310,7 +358,7 @@ impl<'a> BuiltinVisitor<'a> {
             dimension_names: Vec::new(),
             active_subscript: None,
             dimensions_ctx: None,
-            model_var_names: None,
+            snapshot_index: SnapshotIndexFacts::NoModel,
             macro_registry: &EMPTY_MACRO_REGISTRY,
             enclosing_model: None,
             per_element_equation: false,
@@ -353,14 +401,10 @@ impl<'a> BuiltinVisitor<'a> {
         self
     }
 
-    /// Set the model's full variable-name set so `index_is_static` can accept
-    /// non-shadowed bare element names (see the `model_var_names` field doc).
-    /// Only the LTM parse supplies one.
-    fn with_model_var_names(
-        mut self,
-        model_var_names: Option<&'a HashSet<Ident<Canonical>>>,
-    ) -> Self {
-        self.model_var_names = model_var_names;
+    /// Set the model-local facts `index_is_static` decides an identifier
+    /// index with (see [`SnapshotIndexFacts`]).
+    fn with_snapshot_index(mut self, snapshot_index: SnapshotIndexFacts<'a>) -> Self {
+        self.snapshot_index = snapshot_index;
         self
     }
 
@@ -406,50 +450,56 @@ impl<'a> BuiltinVisitor<'a> {
             .is_some_and(|(base, _)| self.is_known_module_ident(&Ident::new(&canonicalize(base))))
     }
 
-    /// Is this subscript index expression *certainly* statically resolvable
-    /// at compile time?
+    /// Is this index of `base`'s axis `axis` *certainly* statically resolvable
+    /// at compile time -- a numeric constant, or an identifier the walk's
+    /// [`SnapshotIndexFacts`] resolve to one declared element (each arm's rule
+    /// is stated there)?
     ///
-    /// Returns true for:
-    ///   * a numeric constant;
-    ///   * a qualified `dimension·element` reference (which
-    ///     `constify_dimensions` folds to a constant during Expr1 lowering,
-    ///     regardless of context);
-    ///   * when the model's variable-name set is known (`model_var_names`),
-    ///     a bare identifier that is a dimension element and is NOT shadowed
-    ///     by any variable (model variable, module, or implicit var
-    ///     synthesized during this walk). Such a name cannot be a
-    ///     dynamic-index reference, so the compiler is guaranteed to resolve
-    ///     it against the subscripted variable's declared dimensions -- the
-    ///     element interpretation always wins in subscript lowering.
-    ///
-    /// Without `model_var_names`, bare identifiers are NOT considered static
-    /// even when they name a dimension element: XMILE explicitly allows
-    /// element names to shadow variable names ("the Element names can be the
-    /// same as Variable names"), and only the compiler -- which knows the
-    /// subscripted variable's declared dimensions -- can disambiguate
-    /// element-vs-variable for them. A bare identifier index therefore stays
-    /// on the conservative helper-aux path for PREVIOUS/INIT.
-    fn index_is_static(&self, idx: &IndexExpr0) -> bool {
-        match idx {
-            IndexExpr0::Expr(Expr0::Const(_, _, _)) => true,
-            IndexExpr0::Expr(Expr0::Var(ident, _)) => {
-                let canonical = canonicalize(ident.as_str());
+    /// A helper minted by this walk is never an element name, so `vars` is
+    /// consulted only by the generated-LTM rule, whose name set holds the
+    /// model's explicit variables and cannot see them.
+    fn index_is_static(&self, base: &str, axis: usize, idx: &IndexExpr0) -> bool {
+        let IndexExpr0::Expr(expr) = idx else {
+            return false;
+        };
+        let ident = match expr {
+            Expr0::Const(_, _, _) => return true,
+            Expr0::Var(ident, _) => ident,
+            _ => return false,
+        };
+        let canonical = canonicalize(ident.as_str());
+        match self.snapshot_index {
+            SnapshotIndexFacts::Axes {
+                axis_of,
+                is_qualified_element,
+            } => {
+                if canonical.contains('·') {
+                    is_qualified_element(&canonical)
+                } else {
+                    axis_of(base, axis).is_some_and(|axis_dim| {
+                        matches!(
+                            resolve_axis_index_name(&canonical, &axis_dim, |_| false),
+                            AxisIndexName::Element(_)
+                        )
+                    })
+                }
+            }
+            SnapshotIndexFacts::ModelNames(var_names) => {
                 let Some(ctx) = self.dimensions_ctx else {
                     return false;
                 };
                 if ctx.lookup(&canonical).is_some() {
                     return true;
                 }
-                let Some(var_names) = self.model_var_names else {
-                    return false;
-                };
-                let elem = crate::common::CanonicalElementName::from_raw(&canonical);
+                let elem = CanonicalElementName::from_raw(&canonical);
                 let canonical_ident = Ident::new(&canonical);
                 ctx.is_element_of_any_dimension(&elem)
                     && !var_names.contains(&canonical_ident)
                     && !self.vars.contains_key(&canonical_ident)
             }
-            _ => false,
+            SnapshotIndexFacts::NoModel => self
+                .dimensions_ctx
+                .is_some_and(|ctx| ctx.lookup(&canonical).is_some()),
         }
     }
 
@@ -502,17 +552,18 @@ impl<'a> BuiltinVisitor<'a> {
         self.snapshot_arg(arg).access() == SnapshotAccess::View
     }
 
-    /// Classify one subscript index for the shared `PREVIOUS`/`INIT` predicate.
+    /// Classify index `axis` of a subscript on `base` for the shared
+    /// `PREVIOUS`/`INIT` predicate.
     ///
     /// Spanning is asked BEFORE staticness because a name can satisfy both --
     /// an active apply-to-all dimension that some *other* dimension also
     /// declares as an element -- and what such an index leaves standing is what
     /// the reference means. [`SnapshotArg::subscripted`] carries the same
     /// precedence for the fold; the two must agree.
-    fn classify_snapshot_index(&self, idx: &IndexExpr0) -> SnapshotIndex {
+    fn classify_snapshot_index(&self, base: &str, axis: usize, idx: &IndexExpr0) -> SnapshotIndex {
         if self.index_spans_a_dimension(idx) {
             SnapshotIndex::SpansDimension
-        } else if self.index_is_static(idx) {
+        } else if self.index_is_static(base, axis, idx) {
             SnapshotIndex::Static
         } else {
             SnapshotIndex::Dynamic
@@ -535,7 +586,10 @@ impl<'a> BuiltinVisitor<'a> {
             Expr0::Var(ident, _) if !self.is_module_backed_ident(ident) => SnapshotArg::whole(),
             Expr0::Subscript(id, indices, _) if !self.is_module_backed_ident(id) => {
                 SnapshotArg::subscripted(
-                    indices.iter().map(|idx| self.classify_snapshot_index(idx)),
+                    indices
+                        .iter()
+                        .enumerate()
+                        .map(|(axis, idx)| self.classify_snapshot_index(id.as_str(), axis, idx)),
                 )
             }
             _ => SnapshotArg::not_storage(),
@@ -1048,8 +1102,9 @@ impl<'a> BuiltinVisitor<'a> {
                 // location:
                 //   * a direct variable reference, or
                 //   * a subscripted reference whose every index is statically
-                //     resolvable -- a numeric constant or a qualified
-                //     `dimension·element` reference (see `index_is_static`).
+                //     resolvable -- a numeric constant, a qualified
+                //     `dimension·element` reference, or a bare element of the
+                //     referenced axis (see `index_is_static`).
                 //
                 // Anything else (nested PREVIOUS, PREVIOUS(expr), the output
                 // of a module instance synthesized in this walk, dynamic
@@ -1213,24 +1268,22 @@ fn macro_arity(
 /// it to tell a macro body's renamed-builtin self-call (GH #554) from
 /// recursion.
 ///
-/// `model_var_names`, when provided, is the model's full variable-name set;
-/// it lets `PREVIOUS`/`INIT` accept a non-shadowed bare element name as a
-/// static subscript index instead of synthesizing a helper aux (see
-/// `BuiltinVisitor::index_is_static`). Only the LTM parse supplies it; the
-/// source parse reads nothing of the owning model, so its memo is keyed on
-/// the variable and the project alone.
+/// `snapshot_index` is what the walk may ask the owning model about an
+/// identifier index of a `PREVIOUS`/`INIT` subscript -- the one model-level
+/// question the parse answers itself, because a capture cannot be un-minted at
+/// lowering (see [`SnapshotIndexFacts`] for the three rules).
 pub fn instantiate_implicit_modules(
     variable_name: &str,
     ast: Ast<Expr0>,
     dimensions_ctx: Option<&DimensionsContext>,
-    model_var_names: Option<&HashSet<Ident<Canonical>>>,
+    snapshot_index: SnapshotIndexFacts<'_>,
     macro_registry: &MacroRegistry,
     enclosing_model: Option<&str>,
 ) -> std::result::Result<(Ast<Expr0>, Vec<ImplicitVar>), EquationError> {
     let visitor = || {
         BuiltinVisitor::new(variable_name)
             .with_dimensions_ctx(dimensions_ctx)
-            .with_model_var_names(model_var_names)
+            .with_snapshot_index(snapshot_index)
             .with_macro_registry(macro_registry)
             .with_enclosing_model(enclosing_model)
     };

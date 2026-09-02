@@ -10,7 +10,9 @@ use indexmap::IndexMap;
 use crate::ast::Loc;
 use crate::ast::{Ast, Expr0, Expr2, IndexExpr2};
 use crate::builtins::{BuiltinContents, BuiltinFn, walk_builtin_expr};
-use crate::builtins_visitor::{empty_macro_registry, instantiate_implicit_modules};
+use crate::builtins_visitor::{
+    SnapshotIndexFacts, empty_macro_registry, instantiate_implicit_modules,
+};
 use crate::capture::{ImplicitVar, insert_implicit_var};
 use crate::common::{
     Canonical, CanonicalElementName, DimensionName, EquationError, EquationResult, Ident,
@@ -1048,14 +1050,16 @@ impl<'a> From<&'a datamodel::Variable> for VariableSource<'a> {
 
 /// Everything a parse reads BESIDE the variable itself: the project-global
 /// contexts (dimensions, units, the macro registry, the enclosing macro body)
-/// plus the one model-level fact only the LTM parse supplies.
+/// plus the one model-level question the parse answers itself.
 ///
 /// Nothing here says which variables of the owning model are module
 /// instances, module-call auxes or bound input ports. Whether a
 /// `PREVIOUS`/`INIT` argument addresses snapshot storage is decided by the
 /// argument's own spelling here and by its dependency shape at lowering
-/// (`compiler::context`), so a parse is a function of `(variable, project)`
-/// and no edit to a sibling variable re-keys it.
+/// (`compiler::context`); the one fact the parse asks of the model is whether
+/// an identifier subscript of such an argument pins a declared element
+/// ([`SnapshotIndexFacts`]), asked per name, so a parse is a function of
+/// `(variable, project)` and no edit to a sibling variable re-keys it.
 ///
 /// A struct rather than a parameter list because every field is optional
 /// context that most callers do not supply -- [`ParseContext::new`] is the
@@ -1063,16 +1067,9 @@ impl<'a> From<&'a datamodel::Variable> for VariableSource<'a> {
 pub struct ParseContext<'a> {
     pub dimensions: &'a DimensionsContext,
     pub units_ctx: &'a units::Context,
-    /// The model's full variable-name set. When provided, `PREVIOUS`/`INIT`
-    /// accept a non-shadowed bare element name as a static subscript index
-    /// instead of synthesizing a helper aux per call site (see
-    /// `BuiltinVisitor::index_is_static`). The salsa per-variable parse path
-    /// passes `None` to preserve incremental invalidation granularity (the
-    /// parse must not depend on the model's full name set); the LTM equation
-    /// parse path -- whose equations are regenerated wholesale on model
-    /// changes anyway -- passes the set, which is what keeps large arrayed
-    /// models' LTM helper volume bounded (GH #654).
-    pub model_var_names: Option<&'a HashSet<Ident<Canonical>>>,
+    /// What a `PREVIOUS`/`INIT` subscript may ask the owning model about an
+    /// identifier index (see `BuiltinVisitor::index_is_static`).
+    pub snapshot_index: SnapshotIndexFacts<'a>,
     /// The per-project macro registry. When provided, a call resolving to a
     /// project macro expands into a synthetic module variable (and shadows an
     /// identically named builtin/stdlib func). `None` means "no project
@@ -1087,13 +1084,13 @@ pub struct ParseContext<'a> {
 }
 
 impl<'a> ParseContext<'a> {
-    /// A parse with no model-level context: no model variable-name set, no
-    /// project macros, and no enclosing macro body.
+    /// A parse with no model-level context: no owning model to ask about a
+    /// subscript index, no project macros, and no enclosing macro body.
     pub fn new(dimensions: &'a DimensionsContext, units_ctx: &'a units::Context) -> Self {
         ParseContext {
             dimensions,
             units_ctx,
-            model_var_names: None,
+            snapshot_index: SnapshotIndexFacts::NoModel,
             macro_registry: None,
             enclosing_model: None,
         }
@@ -1147,7 +1144,7 @@ where
                     ident,
                     ast,
                     Some(dimensions),
-                    ctx.model_var_names,
+                    ctx.snapshot_index,
                     registry,
                     ctx.enclosing_model,
                 ) {

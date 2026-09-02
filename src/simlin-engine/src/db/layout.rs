@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 
 use super::*;
+use crate::capture::CaptureKind;
 use crate::common::{Canonical, Ident};
 
 #[salsa::tracked(returns(ref))]
@@ -161,8 +162,18 @@ pub fn compute_layout(
 /// `name[e1,e2]` in the VM's row-major storage order (the conveyor and queue
 /// plans index belts by these keys); an arrayed implicit or LTM variable is
 /// keyed once, by its bare name, at its base slot (readers widen it by the
-/// variable's own dimensions); and a standalone lookup-only table keeps its
-/// layout slot but has no key, because it produces no series (GH #606).
+/// variable's own dimensions); and a slot nothing writes per step keeps its
+/// layout slot but has no key, because it produces no series -- a standalone
+/// lookup-only table (GH #606) or an INIT-only capture, which is populated
+/// in initials and read from the frozen snapshot. Exposing such a slot would
+/// put the two backends' scratch values side by side: the VM's step chunks
+/// start zeroed where wasm's linear memory keeps the last value, so the
+/// series would disagree while every value a model reads agrees -- and LTM
+/// takes no edge through such a capture (`db::analysis::model_causal_edges`),
+/// so no score reads the slot either. The capture is hidden whether or not a
+/// current read promotes it into flows (`db::dep_graph`): promotion is
+/// decided per module instance and this map is per model, and hiding a
+/// written slot costs nothing.
 pub(crate) fn flattened_offsets(
     db: &dyn Db,
     project: SourceProject,
@@ -179,8 +190,9 @@ enum Flatten<'a> {
     /// A module instance: its sub-model's map, based at this slot. `None`
     /// when the project holds no such model -- there is nothing to flatten.
     Module(Option<SourceModel>),
-    /// A static table (GH #606): the slot is reserved, there is no series.
-    Table,
+    /// A static table (GH #606) or an INIT-only capture: the slot is
+    /// reserved, there is no series.
+    Hidden,
     /// An arrayed explicit variable: one key per element, row-major.
     Elements(&'a [crate::dimensions::Dimension]),
     /// One key at the entry's base slot.
@@ -215,24 +227,33 @@ fn flatten_model(
             if svar.kind(db) == SourceVariableKind::Module {
                 Flatten::Module(sub_model(svar.model_name(db)))
             } else if source_var_is_table_only(db, *svar) {
-                Flatten::Table
+                Flatten::Hidden
             } else if entry.size > 1 {
                 // The entry's size is the product of these dimensions.
                 Flatten::Elements(variable_dimensions(db, *svar, project))
             } else {
                 Flatten::Series
             }
-        } else if let Some(info) = implicit_info.get(name)
-            && info.is_module
-        {
-            Flatten::Module(info.model_name.as_deref().and_then(sub_model))
-        } else if let Some(meta) = ltm_implicit.get(name)
-            && meta.is_module
-        {
-            Flatten::Module(meta.model_name.as_deref().and_then(sub_model))
+        } else if let Some(info) = implicit_info.get(name) {
+            if info.is_module {
+                Flatten::Module(info.model_name.as_deref().and_then(sub_model))
+            } else if info.capture_kind == Some(CaptureKind::Init) {
+                Flatten::Hidden
+            } else {
+                Flatten::Series
+            }
+        } else if let Some(meta) = ltm_implicit.get(name) {
+            if meta.is_module {
+                Flatten::Module(meta.model_name.as_deref().and_then(sub_model))
+            } else if meta.variable.capture().map(|c| c.kind()) == Some(CaptureKind::Init) {
+                // The same rule for a generated helper; the generator emits
+                // `PREVIOUS` captures only, so nothing reaches this arm today.
+                Flatten::Hidden
+            } else {
+                Flatten::Series
+            }
         } else {
-            // A scalar or arrayed implicit helper, an LTM synthetic variable,
-            // or one of the root's implicit globals.
+            // An LTM synthetic variable, or one of the root's implicit globals.
             Flatten::Series
         };
         match kind {
@@ -249,7 +270,7 @@ fn flatten_model(
                     offsets,
                 );
             }
-            Flatten::Module(None) | Flatten::Table => {}
+            Flatten::Module(None) | Flatten::Hidden => {}
             Flatten::Elements(dims) => {
                 for (j, subscripts) in crate::dimensions::SubscriptIterator::new(dims).enumerate() {
                     let element = format!("{name}[{}]", subscripts.join(","));

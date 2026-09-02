@@ -19,10 +19,10 @@
 //! - model_detected_loops (matches LTM augmentation loop IDs)
 //! - reconstruct_model_variables, reconstruct_single_variable
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::canonicalize;
-use crate::capture::ImplicitVar;
+use crate::capture::{CaptureKind, ImplicitVar};
 use crate::datamodel;
 
 use super::{
@@ -1606,6 +1606,14 @@ pub fn causal_graph_from_element_edges_with_modules(
 /// backdating ensures that when equation text changes without changing the
 /// resulting edge structure, the cached result is reused and downstream graph
 /// algorithms are skipped.
+///
+/// An INIT-only capture is no causal node. It is populated once, in initials,
+/// and the `INIT` that reads it takes the frozen snapshot, so neither the
+/// names its body reads nor the variable that snapshots it are linked to it
+/// per step: an edge through it would score a slot nothing writes after
+/// initials -- the slot the results map hides for that reason
+/// (`db::layout::flattened_offsets`). A `PREVIOUS` capture, or one shared by
+/// both consumers, is refreshed every step and stays a node.
 #[salsa::tracked(returns(ref))]
 pub fn model_causal_edges(
     db: &dyn Db,
@@ -1614,6 +1622,16 @@ pub fn model_causal_edges(
 ) -> CausalEdgesResult {
     let source_vars = model.variables(db);
     let empty_inputs = ModuleInputSet::empty(db);
+    let init_captures: HashSet<String> = source_vars
+        .values()
+        .flat_map(|source_var| {
+            variable_direct_dependencies(db, *source_var, project, empty_inputs)
+                .implicit_vars
+                .iter()
+                .filter(|iv| iv.capture_kind == Some(CaptureKind::Init))
+                .map(|iv| iv.name.clone())
+        })
+        .collect();
     let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut stocks = BTreeSet::new();
     let mut dynamic_modules = HashMap::new();
@@ -1656,7 +1674,11 @@ pub fn model_causal_edges(
             }
             _ => {
                 let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
-                for dep in &deps.dt_deps {
+                for dep in deps
+                    .dt_deps
+                    .iter()
+                    .filter(|dep| !init_captures.contains(*dep))
+                {
                     let normalized = normalize_module_ref_str(dep);
                     edges.entry(normalized).or_default().insert(name.clone());
                 }
@@ -1691,13 +1713,20 @@ pub fn model_causal_edges(
                 // A capture or a hoisted call argument: an aux, whose deps the
                 // parent's own dependency classification already carries.
                 None => {
+                    if init_captures.contains(&imp_name) {
+                        continue;
+                    }
                     // For implicit flows/auxes, get deps from the parent's
                     // variable_direct_dependencies result.
                     let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
                     if let Some(implicit_dep) =
                         deps.implicit_vars.iter().find(|iv| iv.name == imp_name)
                     {
-                        for dep in &implicit_dep.dt_deps {
+                        for dep in implicit_dep
+                            .dt_deps
+                            .iter()
+                            .filter(|dep| !init_captures.contains(*dep))
+                        {
                             let normalized = normalize_module_ref_str(dep);
                             edges
                                 .entry(normalized)
