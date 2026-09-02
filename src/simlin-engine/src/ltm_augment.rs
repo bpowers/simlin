@@ -1255,10 +1255,10 @@ fn expr_is_array_slice_valued(expr: &Expr0) -> bool {
             // its argument stays uncollapsed (`PREVIOUS(rank(matrix[d1,*],1))`
             // is unfreezable -- the slice-bearing capture lands in a scalar
             // helper, where `rank(...)` is ill-typed), while a bare-name
-            // argument (`PREVIOUS(rank(pop, 1))`) stays freezable because
-            // `hoist_capture` mints an ARRAYED capture for it (the GH #541
-            // path, extended to array-valued builtins by the same GH #742
-            // predicate in `arg_has_bare_var_ref`).
+            // argument (`PREVIOUS(rank(pop, 1))`) stays freezable because a
+            // snapshot-only apply-to-all body is captured structurally, as an
+            // apply-to-all capture the compiler lowers per element
+            // (`builtins_visitor::per_element_requirements`).
             if crate::ltm_agg::reducer_collapses_to_scalar(&name.to_ascii_lowercase(), args.len()) {
                 false
             } else {
@@ -3999,9 +3999,9 @@ fn dimension_subscript_suffix(var: &Variable) -> String {
 /// are all bound by the `ApplyToAll` iteration. A scalar stock/flow has
 /// no dimensions, so its references stay bare -- the pre-fix behavior.
 ///
-/// NOTE: the engine's GH #541 arm (`hoist_capture` mints an arrayed capture
-/// for a bare arrayed reference) makes the bare form compile too, so this
-/// generator-side subscripting is not load-bearing.
+/// NOTE: the engine captures a snapshot-only apply-to-all body structurally
+/// (an apply-to-all capture over the target's dimensions), so the bare form
+/// compiles too and this generator-side subscripting is not load-bearing.
 /// It is intentionally retained: the engine fix is a strict superset
 /// (an already-subscripted reference stays on the unchanged scalar-helper
 /// path), this output is pinned by dedicated tests, and re-baselining the

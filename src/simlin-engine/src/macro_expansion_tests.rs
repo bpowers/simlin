@@ -370,34 +370,137 @@ fn macro_call_expands_to_synthetic_module_structurally() {
     );
 }
 
-/// `contains_module_call` macro-awareness (item 4 of Task 3): with a
-/// registry containing macro `MYMACRO`, it returns `true` for an *arrayed*
-/// macro `App` (`MYMACRO(x[Dim], k)`), `true` for a stdlib call
-/// (`SMTH1(x, 5)`), and `false` for a plain arithmetic expression
-/// (`a + b`).
+/// What an apply-to-all body asks of the expansion
+/// (`builtins_visitor::per_element_requirements`), one row per arm of
+/// `MacroRegistry::resolve_call` crossed with what the call lowers as, plus
+/// the positions a call can sit in.
+///
+/// The rows ARE the routing enumeration: `Expand` (a macro instance),
+/// `Passthrough` (a macro that lowers as the builtin it names, here the
+/// snapshot intrinsic `INIT`), `RenamedBuiltinSelfCall` (the enclosing
+/// macro's own renamed builtin, here the stdlib alias `DELAYN`) and
+/// `Unresolved` (a stdlib call, a snapshot intrinsic, an ordinary builtin, no
+/// call). A body's requirement is the maximum over its calls wherever they
+/// sit -- an argument, a subscript index, a range bound -- so the last rows
+/// nest one inside another.
 #[test]
-fn contains_module_call_is_macro_aware() {
+fn apply_to_all_requirements_follow_every_macro_call_resolution_arm() {
     use crate::ast::Expr0;
+    use crate::builtins_visitor::{PerElement, per_element_requirements};
 
-    let registry = mymacro_registry();
+    // `mymacro` expands; `init` is a genuine passthrough of the renamed
+    // builtin; `delayn` is a macro whose body calls the like-named stdlib
+    // alias, which inside its own body is the builtin (GH #554).
+    let macro_model = |name: &str, params: &[&str], body: &str| crate::datamodel::Model {
+        name: name.to_string(),
+        sim_specs: None,
+        variables: std::iter::once(mk_aux(name, body))
+            .chain(params.iter().map(|p| mk_aux(p, "0")))
+            .collect(),
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: Some(crate::datamodel::MacroSpec {
+            parameters: params.iter().map(|p| p.to_string()).collect(),
+            primary_output: name.to_string(),
+            additional_outputs: vec![],
+        }),
+    };
+    let registry = crate::module_functions::MacroRegistry::build(&[
+        macro_model("mymacro", &["p1", "p2"], "p1 + p2"),
+        macro_model("init", &["x"], "init(x)"),
+        macro_model("delayn", &["x", "t", "n"], "delayn(x, t, n)"),
+    ])
+    .expect("valid registry");
     let parse = |s: &str| {
         Expr0::new(s, crate::lexer::LexerType::Equation)
             .expect("parse")
             .expect("non-empty")
     };
 
-    assert!(
-        crate::builtins_visitor::contains_module_call(&parse("MYMACRO(x[Dim], k)"), &registry),
-        "an arrayed macro App must be recognized by the apply-to-all gate",
-    );
-    assert!(
-        crate::builtins_visitor::contains_module_call(&parse("SMTH1(x, 5)"), &registry),
-        "a stdlib call must still be recognized by the apply-to-all gate",
-    );
-    assert!(
-        !crate::builtins_visitor::contains_module_call(&parse("a + b"), &registry),
-        "a plain arithmetic expression is not a module call",
-    );
+    // `(body, enclosing macro model, routing arm, requirement)`.
+    let rows: &[(&str, Option<&str>, &str, PerElement)] = &[
+        (
+            "MYMACRO(x[Dim], k)",
+            None,
+            "Expand",
+            PerElement::ModuleInstance,
+        ),
+        (
+            "INIT(x)",
+            None,
+            "Passthrough: lowers as the snapshot intrinsic",
+            PerElement::SnapshotOnly,
+        ),
+        (
+            "DELAYN(x, 2, 3)",
+            Some("delayn"),
+            "RenamedBuiltinSelfCall: lowers as the stdlib alias",
+            PerElement::ModuleInstance,
+        ),
+        (
+            "SMTH1(x, 5)",
+            None,
+            "Unresolved: a stdlib call",
+            PerElement::ModuleInstance,
+        ),
+        (
+            "DELAY(x, 5)",
+            None,
+            "Unresolved: the DELAY alias",
+            PerElement::ModuleInstance,
+        ),
+        (
+            "PREVIOUS(x, 0)",
+            None,
+            "Unresolved: PREVIOUS",
+            PerElement::SnapshotOnly,
+        ),
+        (
+            "ABS(x) + MAX(a, b)",
+            None,
+            "Unresolved: ordinary builtins",
+            PerElement::None,
+        ),
+        ("a + b", None, "no call", PerElement::None),
+        (
+            "ABS(PREVIOUS(x, 0)) + 1",
+            None,
+            "a snapshot nested in a builtin argument",
+            PerElement::SnapshotOnly,
+        ),
+        (
+            "PREVIOUS(SMTH1(x, 1), 0)",
+            None,
+            "the maximum: a module call nested in a snapshot argument",
+            PerElement::ModuleInstance,
+        ),
+        (
+            "vals[PREVIOUS(i, 1)]",
+            None,
+            "a snapshot in a subscript index",
+            PerElement::SnapshotOnly,
+        ),
+        (
+            "vals[1:SMTH1(n, 1)]",
+            None,
+            "a module call in a range bound",
+            PerElement::ModuleInstance,
+        ),
+        (
+            "IF a > 0 THEN INIT(x) ELSE SMTH1(x, 1)",
+            None,
+            "the maximum over the branches of an IF",
+            PerElement::ModuleInstance,
+        ),
+    ];
+    for (body, enclosing, arm, expected) in rows {
+        assert_eq!(
+            per_element_requirements(&parse(body), &registry, *enclosing),
+            *expected,
+            "{arm}: `{body}`"
+        );
+    }
 }
 
 /// macros.AC2.1 smoke: a trivial single-output macro `M(a, b) = a * b`

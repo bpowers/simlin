@@ -490,6 +490,7 @@ fn test_polarity_div_denominator_value_sign_guards_numerator_polarity() {
             non_negative: false,
             is_flow: false,
             is_table_only: false,
+            element_scope: None,
         },
     };
     let mut vars = HashMap::new();
@@ -938,6 +939,7 @@ fn gf_var_for_test(
             non_negative: false,
             is_flow: false,
             is_table_only: false,
+            element_scope: None,
         },
     }
 }

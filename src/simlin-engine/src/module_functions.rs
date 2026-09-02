@@ -72,7 +72,7 @@ pub(crate) struct ModuleFunctionDescriptor {
 /// `rewrite_alias_module_call` *before* consulting this).
 pub(crate) fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
     let args: &'static [&'static str] = match name {
-        "smth1" | "smth3" | "delay" | "delay1" | "delay3" | "trend" => {
+        "smth1" | "smth3" | "delay1" | "delay3" | "trend" => {
             &["input", "delay_time", "initial_value"]
         }
         "npv" => &["stream", "discount_rate", "initial_value", "factor"],

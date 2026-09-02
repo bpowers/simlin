@@ -17,7 +17,7 @@ use crate::dimensions::{
     Axis, AxisMatch, Dimension, DimensionsContext, DirectMappingsOnly, SubdimensionRelations,
     axes_of, match_axes_partial,
 };
-use crate::variable::{VarKind, Variable};
+use crate::variable::{ElementScope, VarKind, Variable};
 use crate::{Error, sim_err};
 
 use super::dimensions::{UnaryOp, allocate_implicit_axes, axis_reordering};
@@ -132,6 +132,196 @@ impl Context<'_> {
                     .map(|s| CanonicalElementName::from_raw(s.as_ref()))
                     .collect(),
             ),
+        )
+    }
+
+    /// The context a per-element helper's scalar body is lowered under
+    /// (`variable::ElementScope`): the scope's axes resolved against the
+    /// project's dimensions, this context with that element active -- the
+    /// same context `compiler::expand_per_element` gives the element's own
+    /// slot of an apply-to-all equation -- and the element's row-major
+    /// position among those axes.
+    pub(crate) fn element_scope_context(
+        &self,
+        scope: &ElementScope,
+    ) -> Result<(Vec<Dimension>, Self, usize)> {
+        // Both refusals are defensive: the scope's names are the parent's
+        // declared dimensions and one of their elements, which the parse has
+        // already resolved.
+        let dims: Vec<Dimension> = scope
+            .dims
+            .iter()
+            .map(|name| match self.dimensions_ctx.get(name) {
+                Some(dim) => Ok(dim.clone()),
+                None => sim_err!(BadDimensionName, name.as_str().to_string()),
+            })
+            .collect::<Result<_>>()?;
+        let elements: Vec<&str> = scope.element.iter().map(|e| e.as_str()).collect();
+        let Some(index) = dims
+            .iter()
+            .zip(&scope.element)
+            .try_fold(0usize, |acc, (dim, element)| {
+                dim.get_offset(element).map(|off| acc * dim.len() + off)
+            })
+        else {
+            return sim_err!(MismatchedDimensions, elements.join(","));
+        };
+        let elem_ctx =
+            self.with_active_subscripts(Arc::<[Dimension]>::from(dims.clone()), &elements);
+        Ok((dims, elem_ctx, index))
+    }
+
+    /// `expr` with every read the active element resolves to ONE element
+    /// rewritten to that element's static index, for a describer that
+    /// classifies reads by their spelling rather than lowering them (LTM's
+    /// reference-site IR over a per-element helper's body).
+    ///
+    /// The resolution is this context's own, not a restatement of it: a bare
+    /// arrayed name gets the subscripts [`Self::lower_pass0`] gives it, and
+    /// each subscript then goes through [`Self::normalize_subscript_ops`] and
+    /// [`build_view_from_ops`] exactly as [`Self::lower_subscript`] runs them,
+    /// so the index written back is the element the compiled read addresses.
+    /// Only an index the ACTIVE ELEMENT resolved (an `IndexOp::ActiveDimRef`)
+    /// is rewritten: a literal is already static as written, and a wildcard,
+    /// a range or a dimension position stays the axis it spells. Inside an
+    /// array-producing builtin's whole-array operand (`ArgKind::Array { whole:
+    /// true }`) an active-dimension subscript keeps its axis, so nothing there
+    /// is touched. A subscript the compiler cannot resolve statically -- a
+    /// dynamic index, an unknown name, a mismatched arity -- is left as
+    /// written; the compile of the same body refuses it or lowers it
+    /// dynamically, and the describer's conservative reading of the spelling
+    /// is the right one for it.
+    pub(crate) fn pin_element_reads(&self, expr: &ast::Expr2) -> ast::Expr2 {
+        use ast::Expr2;
+        match expr {
+            Expr2::Var(id, _, loc) if self.dims_of(id).is_some() => {
+                // What `lower_pass0` spells a bare arrayed reference as: the
+                // reference's bounds are the variable's own axes. The axes come
+                // from this fragment's dependency shapes rather than the `Var`'s
+                // own bounds because a helper is lowered to `Expr2` without a
+                // model (`db::analysis::reconstruct_implicit_variable`), so its
+                // bare references carry no bounds; `get_ref` resolves them the
+                // same way when the fragment compiles.
+                let dims = self.dims_of(id).expect("checked above");
+                let bounds = ast::ArrayBounds::Named {
+                    name: id.as_str().to_string(),
+                    dims: dims.iter().map(|d| d.len()).collect(),
+                    dim_names: Some(dims.iter().map(|d| d.name().to_string()).collect()),
+                };
+                let subscripts = self.make_dimension_subscripts(id, &bounds, *loc);
+                let sub_bounds = self.make_subscript_bounds(id, &bounds, &subscripts);
+                self.pin_subscript(id, subscripts, sub_bounds, *loc)
+            }
+            Expr2::Var(..) | Expr2::Const(..) => expr.clone(),
+            Expr2::Subscript(id, indices, bounds, loc) => {
+                self.pin_subscript(id, indices.clone(), bounds.clone(), *loc)
+            }
+            Expr2::App(builtin, bounds, loc) => Expr2::App(
+                builtin
+                    .try_map_ref_with_kinds(|arg, kind| {
+                        Ok::<_, std::convert::Infallible>(match kind {
+                            ArgKind::Array { whole: true } => arg.clone(),
+                            ArgKind::Array { whole: false }
+                            | ArgKind::Scalar
+                            | ArgKind::Table
+                            | ArgKind::Ident => self.pin_element_reads(arg),
+                        })
+                    })
+                    .unwrap(),
+                bounds.clone(),
+                *loc,
+            ),
+            Expr2::Op1(op, inner, bounds, loc) => Expr2::Op1(
+                *op,
+                Box::new(self.pin_element_reads(inner)),
+                bounds.clone(),
+                *loc,
+            ),
+            Expr2::Op2(op, l, r, bounds, loc) => Expr2::Op2(
+                *op,
+                Box::new(self.pin_element_reads(l)),
+                Box::new(self.pin_element_reads(r)),
+                bounds.clone(),
+                *loc,
+            ),
+            Expr2::If(c, t, f, bounds, loc) => Expr2::If(
+                Box::new(self.pin_element_reads(c)),
+                Box::new(self.pin_element_reads(t)),
+                Box::new(self.pin_element_reads(f)),
+                bounds.clone(),
+                *loc,
+            ),
+        }
+    }
+
+    /// [`Self::pin_element_reads`] for one subscript: the nested index
+    /// expressions pinned first, then every index the active element resolves
+    /// replaced by the 1-based position it resolved to.
+    fn pin_subscript(
+        &self,
+        id: &Ident<Canonical>,
+        indices: Vec<ast::IndexExpr2>,
+        bounds: Option<ast::ArrayBounds>,
+        loc: Loc,
+    ) -> ast::Expr2 {
+        use ast::{Expr2, IndexExpr2};
+        let indices: Vec<IndexExpr2> = indices
+            .into_iter()
+            .map(|idx| match idx {
+                IndexExpr2::Expr(e) => IndexExpr2::Expr(self.pin_element_reads(&e)),
+                IndexExpr2::Range(l, r, range_loc) => IndexExpr2::Range(
+                    self.pin_element_reads(&l),
+                    self.pin_element_reads(&r),
+                    range_loc,
+                ),
+                other => other,
+            })
+            .collect();
+        let indices = match self.static_element_indices(id, &indices) {
+            Some(resolved) => indices
+                .into_iter()
+                .zip(resolved)
+                .map(|(idx, element)| match element {
+                    Some(element) => IndexExpr2::Expr(Expr2::Const(
+                        (element + 1).to_string(),
+                        ast::Literal::new((element + 1) as f64),
+                        loc,
+                    )),
+                    None => idx,
+                })
+                .collect(),
+            None => indices,
+        };
+        Expr2::Subscript(id.clone(), indices, bounds, loc)
+    }
+
+    /// Per index of `id[indices]`, the 0-based element the active element
+    /// resolves it to, or `None` for an index left as written; `None` overall
+    /// when the subscript is not one the compiler resolves statically.
+    fn static_element_indices(
+        &self,
+        id: &Ident<Canonical>,
+        indices: &[ast::IndexExpr2],
+    ) -> Option<Vec<Option<usize>>> {
+        let dims = self.subscript_dims(id).ok()?;
+        if indices.len() != dims.len() {
+            return None;
+        }
+        let indices3: Vec<IndexExpr3> = indices
+            .iter()
+            .enumerate()
+            .map(|(i, idx)| IndexExpr3::from_index_expr2(idx, dims.get(i), self).ok())
+            .collect::<Option<_>>()?;
+        let ops = self.normalize_subscript_ops(id, &indices3, dims).ok()??;
+        let orig_dims: Vec<usize> = dims.iter().map(|d| d.len()).collect();
+        let strides = Self::row_major_strides(&orig_dims);
+        let built =
+            build_view_from_ops(&ops, &orig_dims, &strides, &self.view_config(dims)).ok()?;
+        Some(
+            ops.iter()
+                .zip(&built.single_indices)
+                .map(|(op, single)| matches!(op, IndexOp::ActiveDimRef(_)).then_some(*single))
+                .collect(),
         )
     }
 

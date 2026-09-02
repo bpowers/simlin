@@ -1431,6 +1431,8 @@ mod dimension_context_cache_tests;
 #[cfg(test)]
 mod dimension_invalidation_tests;
 #[cfg(test)]
+mod element_scope_tests;
+#[cfg(test)]
 mod fragment_cache_tests;
 #[cfg(test)]
 mod fragment_char_tests;

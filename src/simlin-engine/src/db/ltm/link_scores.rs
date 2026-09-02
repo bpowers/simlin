@@ -18,13 +18,14 @@ use crate::common::{Canonical, Ident};
 use crate::db::{
     CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, LtmEquation,
     LtmLinkId, LtmSyntheticVar, RefShape, SourceModel, SourceProject, SourceVariable,
-    SourceVariableKind, project_dimensions_context, reconstruct_single_variable,
-    variable_dimensions,
+    SourceVariableKind, model_variable_by_name, project_dimensions_context,
+    reconstruct_single_variable,
 };
 
 use crate::ltm_augment::DepElementPin;
 
 use super::compile::{ShapedLinkScore, link_score_equation_text_shaped};
+use super::endpoint_dimensions;
 use super::loops::{
     ReadSliceRow, ReadSliceRowParts, cartesian_subscripts, read_slice_row_parts, read_slice_rows,
 };
@@ -78,7 +79,7 @@ use super::parse::{ltm_equation_dimensions, retarget_ltm_equation_dims};
 /// `dep_element_pins`' incomplete arm and keeps today's loud drop.
 fn pinnable_arrayed_deps(
     db: &dyn Db,
-    source_vars: &HashMap<String, SourceVariable>,
+    model: SourceModel,
     project: SourceProject,
     deps: &HashSet<Ident<Canonical>>,
     tables: &std::collections::BTreeSet<String>,
@@ -92,12 +93,8 @@ fn pinnable_arrayed_deps(
         .iter()
         .filter(|d| keep(d))
         .filter_map(|d| {
-            let sv = source_vars.get(d.as_str())?;
-            if sv.kind(db) == SourceVariableKind::Module {
-                return None;
-            }
-            let dims = variable_dimensions(db, *sv, project);
-            (!dims.is_empty()).then(|| (d.clone(), dims.clone()))
+            let dims = endpoint_dimensions(db, model, project, d.as_str())?;
+            (!dims.is_empty()).then(|| (d.clone(), dims))
         })
         .collect();
     // `deps` is a `HashSet`, and the pin table it feeds is consumed as a map,
@@ -243,33 +240,23 @@ impl ArrayedSlotMap {
 /// exact string match against the project's datamodel dimensions.
 pub(super) fn link_score_dimensions(
     db: &dyn Db,
-    source_vars: &HashMap<String, SourceVariable>,
     from: &str,
     to: &str,
     model: SourceModel,
     project: SourceProject,
     dm_dims: &[crate::datamodel::Dimension],
 ) -> Vec<String> {
-    let to_sv = match source_vars.get(to) {
-        Some(sv) => sv,
-        // Implicit variables (SMOOTH/DELAY expansions) may not be
-        // in source_vars; treat as scalar.
-        None => return vec![],
-    };
-    // Module variables are scalar nodes in the causal graph.
-    if to_sv.kind(db) == SourceVariableKind::Module {
+    // A module is a scalar node in the causal graph; a helper has the shape
+    // its storage has.
+    let Some(to_dims) = endpoint_dimensions(db, model, project, to) else {
         return vec![];
-    }
-    let to_dims = variable_dimensions(db, *to_sv, project);
+    };
     if to_dims.is_empty() {
         return vec![];
     }
+    let to_dims = &to_dims;
 
-    let from_dims = source_vars
-        .get(from)
-        .filter(|sv| sv.kind(db) != SourceVariableKind::Module)
-        .map(|sv| variable_dimensions(db, *sv, project).clone())
-        .unwrap_or_default();
+    let from_dims = endpoint_dimensions(db, model, project, from).unwrap_or_default();
 
     // Scalar source -> arrayed target: NOT handled here. The main
     // link-score loop routes these to `try_scalar_to_arrayed_link_scores`
@@ -499,20 +486,13 @@ pub(super) fn try_cross_dimensional_link_scores(
     unscoreable_edges: &mut HashSet<(String, String)>,
 ) -> Option<Vec<LtmSyntheticVar>> {
     // Only applies when the source is arrayed.
-    let from_sv = source_vars.get(from)?;
-    if from_sv.kind(db) == SourceVariableKind::Module {
-        return None;
-    }
-    let from_dims = variable_dimensions(db, *from_sv, project);
+    let from_dims = endpoint_dimensions(db, model, project, from)?;
     if from_dims.is_empty() {
         return None;
     }
+    let from_dims = &from_dims;
 
-    let to_sv = source_vars.get(to)?;
-    if to_sv.kind(db) == SourceVariableKind::Module {
-        return None;
-    }
-    let to_dims = variable_dimensions(db, *to_sv, project);
+    let to_dims = &endpoint_dimensions(db, model, project, to)?;
 
     // GH #910: every reducer branch below builds its partial in the reducer's
     // own (pre-graphical-function) units. When the reducer's owner is an
@@ -624,6 +604,7 @@ pub(super) fn try_cross_dimensional_link_scores(
             from_dims,
             to_dims,
             vb_agg,
+            model,
             project,
             owner_gf_ref(),
         );
@@ -668,7 +649,7 @@ pub(super) fn try_cross_dimensional_link_scores(
     // (`SUM(pop[*] * (1 - weight[*]))` w.r.t. `weight` has the
     // sign-flipping coefficient `-pop[e]`).
     let (arrayed_dep_dims, model_deps) =
-        reducer_body_ctx_parts(db, source_vars, project, &classified.body);
+        reducer_body_ctx_parts(db, source_vars, model, project, &classified.body);
     let row_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
     // The live source's accepted slice, when `to` IS a variable-backed agg
     // reading `from`: lets the body partial resolve a mismatched-arity
@@ -1058,18 +1039,14 @@ pub(super) fn try_cross_dimensional_link_scores(
 /// simply cannot materialize and keeps its loud decline.
 fn freeze_dep_dims(
     db: &dyn Db,
-    source_vars: &HashMap<String, SourceVariable>,
+    model: SourceModel,
     project: SourceProject,
     deps: &HashSet<Ident<Canonical>>,
 ) -> HashMap<String, Vec<crate::dimensions::Dimension>> {
     deps.iter()
         .filter_map(|dep| {
-            let sv = source_vars.get(dep.as_str())?;
-            if sv.kind(db) == SourceVariableKind::Module {
-                return None;
-            }
-            let dims = variable_dimensions(db, *sv, project);
-            (!dims.is_empty()).then(|| (dep.as_str().to_string(), dims.clone()))
+            let dims = endpoint_dimensions(db, model, project, dep.as_str())?;
+            (!dims.is_empty()).then(|| (dep.as_str().to_string(), dims))
         })
         .collect()
 }
@@ -1084,11 +1061,7 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
     unscoreable_edges: &mut HashSet<(String, String)>,
 ) -> Option<Vec<LtmSyntheticVar>> {
     // Target must be an arrayed, non-module variable.
-    let to_sv = source_vars.get(to)?;
-    if to_sv.kind(db) == SourceVariableKind::Module {
-        return None;
-    }
-    let to_dims = variable_dimensions(db, *to_sv, project).clone();
+    let to_dims = endpoint_dimensions(db, model, project, to)?;
     if to_dims.is_empty() {
         return None;
     }
@@ -1124,8 +1097,8 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
                 module_output()?
             } else {
                 let meta = crate::db::model_implicit_var_info(db, model, project).get(from)?;
-                // The GH #541 arrayed capture helper is a genuine array, not an
-                // element-bound scalar: it is referenced as `helper[<elem>]` and
+                // A structural (apply-to-all) capture helper is a genuine array,
+                // not an element-bound scalar: it is read per element and
                 // the per-element pin belongs on the reference, not here. Pinned
                 // by `an_arrayed_capture_helper_is_not_treated_as_element_bound`.
                 if !meta.dimensions.is_empty() {
@@ -1228,7 +1201,7 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
             Ast::Scalar(_) => unreachable!("target is arrayed"),
         };
         let pinnable =
-            pinnable_arrayed_deps(db, source_vars, project, &elem_deps, &elem_tables, |_| true);
+            pinnable_arrayed_deps(db, model, project, &elem_deps, &elem_tables, |_| true);
 
         let equation = if let Some(elem_eqn) = elem_eqn.as_ref() {
             let slot = slot_map.slot_for(element);
@@ -1267,7 +1240,7 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
             } else {
                 output_ref.as_str()
             };
-            let dep_dims = freeze_dep_dims(db, source_vars, project, &elem_deps);
+            let dep_dims = freeze_dep_dims(db, model, project, &elem_deps);
             let mut raw_freeze_helpers = Vec::new();
             let eqn_result = crate::ltm_augment::generate_scalar_to_element_equation(
                 // The LIVE source is the readable `module·port` scalar, not the
@@ -1370,6 +1343,7 @@ fn emit_broadcast_reduce_link_scores(
     from_dims: &[crate::dimensions::Dimension],
     to_dims: &[crate::dimensions::Dimension],
     vb_agg: &crate::ltm_agg::AggNode,
+    model: SourceModel,
     project: SourceProject,
     // The implicit WITH-LOOKUP wrap for the reducer's owner (GH #910),
     // resolved by the caller.
@@ -1386,7 +1360,7 @@ fn emit_broadcast_reduce_link_scores(
     // changed-first partial must account for. Mirrors
     // `try_cross_dimensional_link_scores`' setup.
     let (arrayed_dep_dims, model_deps) =
-        reducer_body_ctx_parts(db, source_vars, project, &classified.body);
+        reducer_body_ctx_parts(db, source_vars, model, project, &classified.body);
     let row_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
     let body_ctx = crate::ltm_augment::ReducerBodyCtx {
         body: &classified.body,
@@ -1519,7 +1493,6 @@ fn emit_broadcast_reduce_link_scores(
 #[allow(clippy::too_many_arguments)] // threads salsa keys + agg nodes + emission context
 pub(super) fn try_scalar_to_arrayed_link_scores(
     db: &dyn Db,
-    source_vars: &HashMap<String, SourceVariable>,
     agg_nodes: &crate::ltm_agg::AggNodesResult,
     from: &str,
     to: &str,
@@ -1528,21 +1501,20 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     dm_dims: &[crate::datamodel::Dimension],
     unscoreable_edges: &mut HashSet<(String, String)>,
 ) -> Option<Vec<LtmSyntheticVar>> {
-    // Source must be a scalar, non-module variable.
-    let from_sv = source_vars.get(from)?;
-    if from_sv.kind(db) == SourceVariableKind::Module {
-        return None;
-    }
-    if !variable_dimensions(db, *from_sv, project).is_empty() {
+    // Source must be an EXPLICIT scalar variable. A synthesized helper can be
+    // scalar storage too, but an element-bound one (a per-element capture or
+    // hoisted argument of an apply-to-all body) has an edge into ONE target
+    // element, where a genuine scalar source feeds every element -- which is
+    // what this emitter scores. `try_implicit_scalar_to_arrayed_link_scores`
+    // owns the helper edge: one shape answer is not one emitter.
+    if model_variable_by_name(db, model, from.to_string()).is_none()
+        || !endpoint_dimensions(db, model, project, from)?.is_empty()
+    {
         return None;
     }
 
     // Target must be an arrayed, non-module variable.
-    let to_sv = source_vars.get(to)?;
-    if to_sv.kind(db) == SourceVariableKind::Module {
-        return None;
-    }
-    let to_dims = variable_dimensions(db, *to_sv, project).clone();
+    let to_dims = endpoint_dimensions(db, model, project, to)?;
     if to_dims.is_empty() {
         return None;
     }
@@ -1691,7 +1663,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     // -- see `pinnable_arrayed_deps`.
     let pinnable_deps = |deps: &HashSet<Ident<Canonical>>,
                          tables: &std::collections::BTreeSet<String>| {
-        pinnable_arrayed_deps(db, source_vars, project, deps, tables, |_| true)
+        pinnable_arrayed_deps(db, model, project, deps, tables, |_| true)
     };
 
     let dim_element_lists: Vec<Vec<String>> = to_dims
@@ -1769,7 +1741,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                 &target_element_parts(&to_dims, element),
                 dim_ctx,
             );
-            let dep_dims = freeze_dep_dims(db, source_vars, project, elem_deps);
+            let dep_dims = freeze_dep_dims(db, model, project, elem_deps);
             let mut raw_freeze_helpers = Vec::new();
             let eqn_result = crate::ltm_augment::generate_scalar_to_element_equation(
                 from,
@@ -2482,7 +2454,6 @@ pub(crate) fn ltm_partial_equation_warning_message(
 /// re-derives that from the slot equation).
 pub(super) fn try_disjoint_dim_arrayed_link_scores(
     db: &dyn Db,
-    source_vars: &HashMap<String, SourceVariable>,
     from: &str,
     to: &str,
     model: SourceModel,
@@ -2490,19 +2461,11 @@ pub(super) fn try_disjoint_dim_arrayed_link_scores(
     unscoreable_edges: &mut HashSet<(String, String)>,
 ) -> Option<Vec<LtmSyntheticVar>> {
     // Both ends must be arrayed, non-module variables.
-    let from_sv = source_vars.get(from)?;
-    if from_sv.kind(db) == SourceVariableKind::Module {
-        return None;
-    }
-    let from_dims = variable_dimensions(db, *from_sv, project);
+    let from_dims = endpoint_dimensions(db, model, project, from)?;
     if from_dims.is_empty() {
         return None;
     }
-    let to_sv = source_vars.get(to)?;
-    if to_sv.kind(db) == SourceVariableKind::Module {
-        return None;
-    }
-    let to_dims = variable_dimensions(db, *to_sv, project);
+    let to_dims = endpoint_dimensions(db, model, project, to)?;
     if to_dims.is_empty() {
         return None;
     }
@@ -2678,7 +2641,6 @@ pub(super) fn try_disjoint_dim_arrayed_link_scores(
 #[allow(clippy::too_many_arguments)] // helper threads through emission context
 pub(super) fn emit_per_shape_link_scores(
     db: &dyn Db,
-    source_vars: &HashMap<String, SourceVariable>,
     from: &str,
     to: &str,
     fallback_shape: RefShape,
@@ -2733,7 +2695,6 @@ pub(super) fn emit_per_shape_link_scores(
     if !per_element_sites.is_empty()
         && emit_per_element_link_scores(
             db,
-            source_vars,
             from,
             to,
             &per_element_sites,
@@ -2787,7 +2748,7 @@ pub(super) fn emit_per_shape_link_scores(
         return;
     }
 
-    let target_dims = link_score_dimensions(db, source_vars, from, to, model, project, dm_dims);
+    let target_dims = link_score_dimensions(db, from, to, model, project, dm_dims);
 
     // GH #758: when BOTH endpoints are arrayed non-module variables but
     // `link_score_dimensions` found no correspondence (`target_dims`
@@ -2814,11 +2775,7 @@ pub(super) fn emit_per_shape_link_scores(
     // FixedIndex-only ones) and incompatible-dim dynamic-index reducers --
     // all previously warned zero-stubs.
     let arrayed_non_module = |name: &str| -> bool {
-        source_vars
-            .get(name)
-            .filter(|sv| sv.kind(db) != SourceVariableKind::Module)
-            .map(|sv| !variable_dimensions(db, *sv, project).is_empty())
-            .unwrap_or(false)
+        endpoint_dimensions(db, model, project, name).is_some_and(|dims| !dims.is_empty())
     };
     if target_dims.is_empty() && arrayed_non_module(from) && arrayed_non_module(to) {
         if unscoreable_edges.insert((from.to_string(), to.to_string())) {
@@ -2955,7 +2912,6 @@ pub(super) fn emit_per_shape_link_scores(
 #[allow(clippy::too_many_arguments)] // threads salsa keys + emission context
 fn emit_per_element_link_scores(
     db: &dyn Db,
-    source_vars: &HashMap<String, SourceVariable>,
     from: &str,
     to: &str,
     sites: &[(Vec<crate::ltm_agg::AxisRead>, Option<String>)],
@@ -2975,20 +2931,13 @@ fn emit_per_element_link_scores(
         Vec<(Ident<Canonical>, Vec<crate::dimensions::Dimension>)>,
     );
 
-    let Some(from_sv) = source_vars.get(from) else {
+    let Some(from_dims) = endpoint_dimensions(db, model, project, from) else {
         return false;
     };
-    if from_sv.kind(db) == SourceVariableKind::Module {
-        return false;
-    }
-    let from_dims = variable_dimensions(db, *from_sv, project);
-    let Some(to_sv) = source_vars.get(to) else {
+    let from_dims = &from_dims;
+    let Some(to_dims) = endpoint_dimensions(db, model, project, to) else {
         return false;
     };
-    if to_sv.kind(db) == SourceVariableKind::Module {
-        return false;
-    }
-    let to_dims = variable_dimensions(db, *to_sv, project).clone();
     if from_dims.is_empty() || to_dims.is_empty() {
         // A `PerElement` site requires an arrayed source and an iterated
         // target equation; scalar endpoints mean a stale classification.
@@ -3032,9 +2981,7 @@ fn emit_per_element_link_scores(
     // its occurrences are pinned per-row by the wrap's own row lowering.
     let pinnable_deps = |deps: &HashSet<Ident<Canonical>>,
                          tables: &std::collections::BTreeSet<String>| {
-        pinnable_arrayed_deps(db, source_vars, project, deps, tables, |d| {
-            d.as_str() != from
-        })
+        pinnable_arrayed_deps(db, model, project, deps, tables, |d| d.as_str() != from)
     };
 
     let to_dim_element_lists: Vec<Vec<String>> = to_dims
@@ -3245,16 +3192,18 @@ fn emit_per_element_link_scores(
 fn reducer_body_ctx_parts(
     db: &dyn Db,
     source_vars: &HashMap<String, SourceVariable>,
+    model: SourceModel,
     project: SourceProject,
     body: &crate::ast::Expr0,
 ) -> (HashMap<String, usize>, HashSet<String>) {
     let mut arrayed_dep_dims: HashMap<String, usize> = HashMap::new();
     let mut model_deps: HashSet<String> = HashSet::new();
     for ident in crate::ltm_augment::expr_reference_idents(body) {
-        if let Some(sv) = source_vars.get(&ident) {
+        if source_vars.contains_key(&ident) {
             model_deps.insert(ident.clone());
-            let dims = variable_dimensions(db, *sv, project);
-            if !dims.is_empty() {
+            if let Some(dims) = endpoint_dimensions(db, model, project, &ident)
+                && !dims.is_empty()
+            {
                 arrayed_dep_dims.insert(ident, dims.len());
             }
         }
@@ -3412,14 +3361,18 @@ pub(super) fn emit_source_to_agg_link_scores(
     vars: &mut Vec<LtmSyntheticVar>,
     unscoreable_edges: &mut HashSet<(String, String)>,
 ) {
-    let Some(from_sv) = source_vars.get(from) else {
+    let Some(from_dims) = endpoint_dimensions(db, model, project, from) else {
         return;
     };
-    if from_sv.kind(db) == SourceVariableKind::Module {
-        return;
-    }
-    let from_dims = variable_dimensions(db, *from_sv, project);
+    let from_dims = &from_dims;
     if from_dims.is_empty() {
+        // An element-bound helper is scalar storage with an edge at ONE
+        // element of its parent; the feeder score below is dimensioned over
+        // the agg's result slots and would score every one of them. No
+        // emitter scores a helper feeder (the same as every other arm).
+        if model_variable_by_name(db, model, from.to_string()).is_none() {
+            return;
+        }
         // GH #737: a scalar feeder of the hoisted reducer. The per-read-row
         // machinery below is meaningless for a scalar source; emit the single
         // Bare-named score (dimensioned over `result_dims` when the agg is
@@ -3528,7 +3481,7 @@ pub(super) fn emit_source_to_agg_link_scores(
     // Linear arm build the true changed-first row partial instead of
     // asserting ∂agg/∂from[e] = 1.
     let (arrayed_dep_dims, model_deps) =
-        reducer_body_ctx_parts(db, source_vars, project, &classified.body);
+        reducer_body_ctx_parts(db, source_vars, model, project, &classified.body);
     let row_dim_names: Vec<String> = from_dims.iter().map(|d| d.name().to_string()).collect();
     let body_ctx = crate::ltm_augment::ReducerBodyCtx {
         body: &classified.body,
@@ -3775,7 +3728,6 @@ pub(super) fn emit_source_to_agg_link_scores(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_agg_to_target_link_scores(
     db: &dyn Db,
-    source_vars: &HashMap<String, SourceVariable>,
     agg_nodes: &crate::ltm_agg::AggNodesResult,
     agg: &crate::ltm_agg::AggNode,
     to: &str,
@@ -3815,10 +3767,7 @@ pub(super) fn emit_agg_to_target_link_scores(
     // deps and the agg names are not. Computed over the original target's
     // dims and dep set, extended with the agg name (harmless if it never
     // appears).
-    let to_dims = source_vars
-        .get(to)
-        .map(|sv| variable_dimensions(db, *sv, project).clone())
-        .unwrap_or_default();
+    let to_dims = endpoint_dimensions(db, model, project, to).unwrap_or_default();
     use crate::ast::Ast;
     let target_ast_dims: &[crate::dimensions::Dimension] = match ast {
         Ast::Scalar(_) => &[],
@@ -3875,9 +3824,7 @@ pub(super) fn emit_agg_to_target_link_scores(
     let table_holders =
         crate::variable::classify_dependencies(ast, target_ast_dims, None).referenced_tables;
     let pinnable_deps =
-        pinnable_arrayed_deps(db, source_vars, project, &all_deps, &table_holders, |_| {
-            true
-        });
+        pinnable_arrayed_deps(db, model, project, &all_deps, &table_holders, |_| true);
     // An arrayed agg (`result_dims` non-empty) is element-pinned in the
     // per-target-element equation too: `$⁚ltm⁚agg⁚0` → `$⁚ltm⁚agg⁚0[<slot>]`.
     // But NOT via `pinnable_deps`: that projection needs a variable's DECLARED
@@ -4444,7 +4391,6 @@ pub(super) fn emit_link_scores_for_edge(
                 );
                 emit_agg_to_target_link_scores(
                     db,
-                    source_vars,
                     agg_nodes,
                     agg,
                     to,
@@ -4462,7 +4408,6 @@ pub(super) fn emit_link_scores_for_edge(
         // `Wildcard` reducer-arg shape; see its doc.)
         emit_per_shape_link_scores(
             db,
-            source_vars,
             from,
             to,
             RefShape::Bare,
@@ -4504,7 +4449,6 @@ pub(super) fn emit_link_scores_for_edge(
     // drop). We must NOT fall through to `emit_per_shape_link_scores`.
     if let Some(cross_vars) = try_scalar_to_arrayed_link_scores(
         db,
-        source_vars,
         agg_nodes,
         from,
         to,
@@ -4542,15 +4486,9 @@ pub(super) fn emit_link_scores_for_edge(
     // dropped -- the GH #758 treatment), and no link score is emitted --
     // crucially, we *don't* fall through to `emit_per_shape_link_scores`,
     // which would build a scalarized stand-in.
-    if let Some(disjoint_vars) = try_disjoint_dim_arrayed_link_scores(
-        db,
-        source_vars,
-        from,
-        to,
-        model,
-        project,
-        unscoreable_edges,
-    ) {
+    if let Some(disjoint_vars) =
+        try_disjoint_dim_arrayed_link_scores(db, from, to, model, project, unscoreable_edges)
+    {
         vars.extend(disjoint_vars);
         return;
     }
@@ -4587,7 +4525,6 @@ pub(super) fn emit_link_scores_for_edge(
     }
     emit_per_shape_link_scores(
         db,
-        source_vars,
         from,
         to,
         RefShape::Bare,

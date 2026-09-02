@@ -465,14 +465,12 @@ pub struct ImplicitVarMeta {
     pub model_name: Option<String>,
     pub size: usize,
     /// Datamodel dimension names for an *arrayed* implicit helper (empty when
-    /// scalar). Almost every implicit helper (SMOOTH/DELAY/TREND inputs,
-    /// scalar PREVIOUS/INIT args) is scalar, but the arrayed `PREVIOUS`/`INIT`
-    /// helper synthesized for a bare arrayed reference (GH #541) is an
-    /// `Equation::ApplyToAll`, so a consumer that subscripts it
-    /// (`helper[<elem>]`) needs the helper's declared dimensions to resolve
-    /// the subscript -- a scalar stub would reject it as a subscript on a
-    /// scalar. Carried here so the dep-stub builder can give the helper its
-    /// real array shape.
+    /// scalar). Almost every implicit helper (module-call arguments, scalar
+    /// `PREVIOUS`/`INIT` arguments) is scalar; a STRUCTURAL capture -- a
+    /// snapshot-only apply-to-all body, captured once over its parent's
+    /// dimensions -- is an `Equation::ApplyToAll`, so a consumer that
+    /// subscripts it (`helper[<elem>]`), shapes it as a dependency or lays it
+    /// out needs its declared dimensions rather than a scalar stub.
     pub dimensions: Vec<String>,
 }
 
@@ -534,8 +532,8 @@ pub fn model_implicit_var_info(
             let capture_kind = implicit_var.capture().map(|c| c.kind());
             let is_module = implicit_var.is_module();
             let model_name = implicit_var.module().map(|m| m.model_name.clone());
-            // An arrayed implicit helper (the GH #541 bare-arrayed-PREVIOUS
-            // capture) applies over dimensions; every other helper is scalar
+            // A structural capture applies over its parent's dimensions;
+            // every other helper is scalar
             // (empty dims, size 1). Resolve the dimension sizes from the
             // project's dimension definitions so a consumer that subscripts the
             // helper sees its real array shape.

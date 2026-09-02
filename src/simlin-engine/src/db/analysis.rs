@@ -1795,6 +1795,21 @@ pub struct EdgeShapesResult {
     /// feeder); an arrayed reducer argument is `Wildcard` and already
     /// classifies as cross-element on shape alone.
     pub agg_routed_edges: BTreeSet<(String, String)>,
+    /// The variable-level edges every one of whose reference sites sits in
+    /// an `Ast::Arrayed` slot of the target, and whose slots together cover
+    /// a STRICT subset of the target's storage (`births[NYC] = population *
+    /// 0.1` with `births[Boston] = 0`): the edge exists at those elements
+    /// and at no other. Its shape set is `{Bare}` and its endpoints may
+    /// share one dimension list, which on shape and dimensions alone would
+    /// classify a cycle through it as one A2A loop over the WHOLE
+    /// dimension -- a loop claimed at slots where no circuit exists.
+    /// `classify_cycle` sends such a cycle down the element-level slow
+    /// path, and `build_element_level_loops` keeps its circuits per element
+    /// rather than collapsing them into a dimensioned loop. A site with no
+    /// slot (`Ast::Scalar`, `ApplyToAll`, or an `Arrayed` DEFAULT
+    /// expression, which walks with `target_element: None` and stands for
+    /// every element no explicit slot claimed) makes the edge unrestricted.
+    pub target_restricted_edges: BTreeSet<(String, String)>,
 }
 
 /// Tag every variable-level edge with the set of `RefShape`s observed
@@ -1842,6 +1857,7 @@ pub fn model_edge_shapes(
 
     let mut edge_shapes: HashMap<(String, String), BTreeSet<RefShape>> = HashMap::new();
     let mut agg_routed_edges: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut target_restricted_edges: BTreeSet<(String, String)> = BTreeSet::new();
     let agg_nodes = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
     for (from_name, to_set) in &variable_edges.edges {
         for to_name in to_set {
@@ -1900,15 +1916,27 @@ pub fn model_edge_shapes(
             // score derivation, and the slow-path loop routing consult.
             // Inert pre-T5: the identical-slices acceptance could never
             // produce a projection-feeder source.
-            let to_dims = source_vars
-                .get(to_name)
-                .filter(|sv| sv.kind(db) != super::SourceVariableKind::Module)
-                .map(|sv| super::variable_dimensions(db, *sv, project).as_slice())
-                .unwrap_or(&[]);
-            if crate::ltm_agg::variable_backed_reduce_agg(agg_nodes, from_name, to_name, to_dims)
+            let to_dims =
+                super::ltm::endpoint_dimensions(db, model, project, to_name).unwrap_or_default();
+            if crate::ltm_agg::variable_backed_reduce_agg(agg_nodes, from_name, to_name, &to_dims)
                 .is_some_and(|a| a.source_is_projection_feeder(from_name))
             {
                 agg_routed_edges.insert((from_name.clone(), to_name.clone()));
+            }
+            // An edge read only from explicit `Ast::Arrayed` slots exists at
+            // exactly those slots. Fewer distinct slots than the target has
+            // elements makes it target-restricted; one site with no slot (a
+            // default expression, which stands for every unclaimed element)
+            // makes it unrestricted, which is conservative: a default read
+            // over-broadcasts to overridden elements the same way it does in
+            // the element graph.
+            if let Some(sites) = sites.filter(|sites| !sites.is_empty()) {
+                let slots: Option<BTreeSet<&str>> =
+                    sites.iter().map(|s| s.target_element.as_deref()).collect();
+                let storage: usize = to_dims.iter().map(|d| d.len()).product();
+                if slots.is_some_and(|slots| slots.len() < storage) {
+                    target_restricted_edges.insert((from_name.clone(), to_name.clone()));
+                }
             }
         }
     }
@@ -1916,6 +1944,7 @@ pub fn model_edge_shapes(
     EdgeShapesResult {
         edge_shapes,
         agg_routed_edges,
+        target_restricted_edges,
     }
 }
 
@@ -1991,6 +2020,11 @@ pub enum CycleClass {
 ///    (`scale` in `SUM(pop[*] * scale)`) and the same-dims projection
 ///    feeder (`frac[D1]` in `SUM(matrix[D1,*] * frac[D1])`); arrayed
 ///    reducer arguments are `Wildcard` and already caught by rule 1.
+///    An edge in `EdgeShapesResult::target_restricted_edges` (read from a
+///    strict subset of the target's `Ast::Arrayed` slots) is sent the same
+///    way for the opposite reason: its shape is Bare and its endpoints may
+///    share one dimension list, but the loop exists only at the slots that
+///    read the source, and only the element-level circuit says which.
 /// 3. If every variable has an empty dimension list (all scalar),
 ///    `PureScalar`.
 /// 4. If every variable has the *same* non-empty dimension list,
@@ -2021,7 +2055,9 @@ pub(crate) fn classify_cycle(
         // its shapes are all Bare (a scalar feeder of a hoisted reducer) --
         // the loop must traverse the `from → $⁚ltm⁚agg⁚{n} → to` element
         // hops so its score composes the agg-half link scores (GH #737).
-        if edge_shapes.agg_routed_edges.contains(&key) {
+        if edge_shapes.agg_routed_edges.contains(&key)
+            || edge_shapes.target_restricted_edges.contains(&key)
+        {
             return CycleClass::CrossElementOrMixed;
         }
         let shapes = match edge_shapes.edge_shapes.get(&key) {
@@ -2131,10 +2167,7 @@ pub fn model_element_causal_edges(
         if let Some(dims) = cache.get(name) {
             return dims.clone();
         }
-        let dims = source_vars
-            .get(name)
-            .map(|sv| super::variable_dimensions(db, *sv, project).to_vec())
-            .unwrap_or_default();
+        let dims = super::ltm::endpoint_dimensions(db, model, project, name).unwrap_or_default();
         cache.insert(name.to_string(), dims.clone());
         dims
     };
@@ -2630,11 +2663,9 @@ pub fn model_detected_loops(
             partitions: parts,
         };
     }
-    let source_vars = model.variables(db);
     let (mut loops, _truncated_aggs) = crate::db::ltm::build_loops_from_tiered(
         tiered,
         &graph,
-        source_vars,
         db,
         model,
         project,
@@ -3188,7 +3219,6 @@ pub fn model_loop_circuits_tiered(
     }
 
     let edge_shapes = model_edge_shapes(db, model, project);
-    let source_vars = model.variables(db);
 
     // Per-variable dimension lookup. Cached locally because a variable
     // can appear in many cycles; the salsa-tracked `variable_dimensions`
@@ -3199,10 +3229,7 @@ pub fn model_loop_circuits_tiered(
         if let Some(dims) = dim_cache.get(name) {
             return dims.clone();
         }
-        let dims = source_vars
-            .get(name)
-            .map(|sv| super::variable_dimensions(db, *sv, project).to_vec())
-            .unwrap_or_default();
+        let dims = super::ltm::endpoint_dimensions(db, model, project, name).unwrap_or_default();
         dim_cache.insert(name.to_string(), dims.clone());
         dims
     };
@@ -3567,9 +3594,9 @@ pub(crate) fn reconstruct_model_variables(
             // Unreachable today -- implicit names carry the reserved `$⁚`
             // prefix -- so this fixes no bug; it keeps the two from being
             // able to differ.
-            variables
-                .entry(Ident::new(&imp_name))
-                .or_insert_with(|| reconstruct_implicit_variable(db, model, &scope, implicit_var));
+            variables.entry(Ident::new(&imp_name)).or_insert_with(|| {
+                reconstruct_implicit_variable(db, model, project, &scope, implicit_var)
+            });
         }
     }
 
@@ -3632,15 +3659,29 @@ fn reconstruct_named_variable(
         .cloned()
 }
 
-/// Reconstruct an implicit (compiler-generated) variable from its datamodel form.
+/// Reconstruct an implicit (compiler-generated) variable from its parsed form,
+/// as the LTM describers read it.
 ///
 /// Module instances need special handling: `parse_var` does not preserve the
 /// `references` list from the datamodel, so input wiring (built via
 /// `build_module_inputs`) would be lost.  We short-circuit that case and
 /// construct `Variable::Module` directly from the stored `ModuleReference`s.
+///
+/// A per-element helper's body is one element of its parent's apply-to-all
+/// body (`variable::ElementScope`), and the describers classify a read by its
+/// SPELLING: `x[State]` in a scalar equation would read as a dynamic index and
+/// cost the edge its precision. So the helper is reconstructed through its own
+/// fragment input, with every read the element pins spelled as the static
+/// index the compiler resolves it to
+/// (`compiler::fragment::FragmentInput::element_pinned_target`): the compiler
+/// is the one resolver, and the LTM edge into the helper names the element the
+/// helper's fragment reads. A helper whose fragment input cannot be built (its
+/// body does not lower) keeps its unpinned lowering and the errors it carries,
+/// as any variable that fails to lower does.
 fn reconstruct_implicit_variable(
     db: &dyn Db,
     model: SourceModel,
+    project: SourceProject,
     scope: &crate::model::ScopeStage0<'_>,
     implicit_var: &ImplicitVar,
 ) -> crate::variable::Variable {
@@ -3653,6 +3694,19 @@ fn reconstruct_implicit_variable(
             Ident::new(&dm_module.model_name),
             &dm_module.references,
         );
+    }
+
+    if implicit_var.element_scope().is_some()
+        && let Some(meta) = crate::db::model_implicit_var_by_name(
+            db,
+            model,
+            project,
+            canonicalize(implicit_var.ident()).into_owned(),
+        )
+        && let Ok(input) =
+            crate::db::fragment_compile::implicit_fragment_input(db, &meta, model, project, &[])
+    {
+        return input.element_pinned_target();
     }
 
     crate::model::lower_variable(scope, &implicit_var.parsed_variable(scope.dimensions))
@@ -5058,6 +5112,7 @@ mod classify_cycle_tests {
         EdgeShapesResult {
             edge_shapes,
             agg_routed_edges: BTreeSet::new(),
+            target_restricted_edges: BTreeSet::new(),
         }
     }
 
@@ -5097,6 +5152,148 @@ mod classify_cycle_tests {
         assert_eq!(
             classify_cycle(&cycle, &edges, &lookup),
             CycleClass::CrossElementOrMixed
+        );
+    }
+
+    /// Rule 2's other marker: an all-Bare cycle over one shared dimension
+    /// whose edge is target-restricted (the target reads the source in a
+    /// strict subset of its `Ast::Arrayed` slots) must NOT classify
+    /// PureSameElementA2A -- a fast-path loop over the whole dimension would
+    /// claim slots no circuit exists at.
+    #[test]
+    fn target_restricted_bare_edge_forces_slow_path() {
+        let dim = make_dim("region");
+        let cycle = vec!["population".to_string(), "births".to_string()];
+        let mut edges = shapes_with(&[
+            ("population", "births", &[RefShape::Bare]),
+            ("births", "population", &[RefShape::Bare]),
+        ]);
+        let dims = vec![dim];
+        let lookup = dim_lookup(&["population", "births"], &dims);
+        // Without the marker the cycle is the A2A fast path (sanity check
+        // that the marker, not the shapes or dimensions, reclassifies it).
+        assert_eq!(
+            classify_cycle(&cycle, &edges, &lookup),
+            CycleClass::PureSameElementA2A {
+                dimensions: vec!["region".to_string()],
+            }
+        );
+        edges
+            .target_restricted_edges
+            .insert(("population".to_string(), "births".to_string()));
+        assert_eq!(
+            classify_cycle(&cycle, &edges, &lookup),
+            CycleClass::CrossElementOrMixed
+        );
+    }
+
+    /// The plain-`Ast::Arrayed` form of a target-restricted edge, end to
+    /// end: `births` reads `population` in its NYC slot only, so the loop
+    /// exists at NYC and nowhere else. On shapes and dimensions alone
+    /// (`{Bare}`, both variables over `[Region]`) the cycle would take the
+    /// fast path as one A2A loop over every element, scoring two loops that
+    /// do not exist; `model_edge_shapes` records the restriction, the tiered
+    /// enumerator takes the element-level slow path, which finds the NYC
+    /// circuit alone, and the loop builder emits it as ONE scalar loop whose
+    /// score is live in the simulation.
+    #[test]
+    fn partial_slot_arrayed_reference_takes_the_slow_path() {
+        use crate::db::{
+            DiagnosticError, SimlinDb, collect_all_diagnostics, model_ltm_variables,
+            set_project_ltm_enabled, sync_from_datamodel,
+        };
+        use crate::test_common::TestProject;
+
+        let project = TestProject::new("partial_slot")
+            .with_sim_time(0.0, 4.0, 1.0)
+            .named_dimension("Region", &["NYC", "Boston", "LA"])
+            .array_stock("population[Region]", "100", &["births"], &[], None)
+            .array_flow_with_ranges(
+                "births[Region]",
+                vec![("NYC", "population * 0.1"), ("Boston", "0"), ("LA", "0")],
+            );
+        let datamodel = project.build_datamodel();
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let (model, source_project) = (sync.models["main"].source, sync.project);
+
+        let shapes = model_edge_shapes(&db, model, source_project);
+        assert_eq!(
+            shapes.target_restricted_edges,
+            [("population".to_string(), "births".to_string())]
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            "the NYC-only read is the one restricted edge; got {shapes:?}"
+        );
+
+        let result = model_loop_circuits_tiered(&db, model, source_project);
+        assert!(
+            result.fast_path.is_empty(),
+            "a restricted edge must keep the cycle off the A2A fast path, got {result:?}"
+        );
+        let circuits: Vec<BTreeSet<&str>> = (0..result.slow_path.circuits.len())
+            .map(|i| result.slow_path.circuit_names(i).collect())
+            .collect();
+        assert_eq!(
+            circuits,
+            vec![
+                ["births[nyc]", "population[nyc]"]
+                    .into_iter()
+                    .collect::<BTreeSet<_>>()
+            ],
+            "the element graph holds the NYC circuit and no other"
+        );
+
+        set_project_ltm_enabled(&mut db, source_project, true);
+        let ltm = model_ltm_variables(&db, model, source_project);
+        let loop_scores: Vec<&crate::db::LtmSyntheticVar> = ltm
+            .vars
+            .iter()
+            .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+            .collect();
+        assert_eq!(
+            loop_scores.len(),
+            1,
+            "one loop, at NYC; got {:?}",
+            loop_scores.iter().map(|v| &v.name).collect::<Vec<_>>()
+        );
+        assert!(
+            loop_scores[0].dimensions.is_empty(),
+            "the NYC loop is one scalar loop, not an A2A loop over Region: {:?}",
+            loop_scores[0]
+        );
+
+        let failures: Vec<String> = collect_all_diagnostics(&db, source_project)
+            .iter()
+            .filter_map(|d| match &d.error {
+                DiagnosticError::Assembly(msg) if msg.contains("failed to compile") => {
+                    Some(format!("{:?}: {msg}", d.variable))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "LTM fragments failed to compile:\n{failures:?}"
+        );
+
+        let compiled = crate::db::compile_project_incremental(&db, source_project, "main")
+            .expect("the LTM-enabled fixture compiles");
+        let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation succeeds");
+        vm.run_to_end().expect("the simulation runs to completion");
+        let results = vm.into_results();
+        let name = &loop_scores[0].name;
+        let offset = *compiled
+            .offsets
+            .get(name.as_str())
+            .unwrap_or_else(|| panic!("{name} has no results offset"));
+        let series: Vec<f64> = (0..results.step_count)
+            .map(|step| results.data[step * results.step_size + offset])
+            .collect();
+        assert!(
+            series.iter().any(|v| v.is_finite() && *v != 0.0),
+            "{name} is identically zero across the run, which is what a dropped \
+             fragment looks like: {series:?}"
         );
     }
 

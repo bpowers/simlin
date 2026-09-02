@@ -900,22 +900,19 @@ initial passes of one variable. A macro named `ARG1` invoked as
 `ARG1(k, k * 2)` reaches the refusal from ordinary source: its instance and its
 second argument's helper both derive `$⁚out⁚0⁚arg1`.
 
-A hoisted argument is dimension-substituted BEFORE the hoist
-(`substitute_dimension_refs`), because the helper is a scalar aux with no axis
-of its own for lowering to resolve a name against. The substitution is the
-parse-time stand-in for the compiler's resolution of the same spelling and
-gives the same answer: an active dimension name becomes its element, and a
-foreign dimension name resolves against each active element through
-`DimensionsContext::resolve_mapped_read` -- the element's own name on the
-source axis, then the declared mapping, then a mapped parent -- in the
-parent's NARROWED context, so a dimension with no declared relation to the
-active ones is not found and is left for lowering to refuse. The
+A hoisted argument is not rewritten before the hoist: the helper carries the
+element of the apply-to-all body it is one element of (`variable::ElementScope`
+on `VarKind::Aux`, `capture::HoistedArg::scope`), and the compiler lowers it
+under that element (`Context::element_scope_context`), the same `Context` the
+parent's own element is lowered under, so there is ONE resolution of a
+cross-dimension spelling and the helper reads what the plain equation reads
+(GH #1035; "Phase 7.5c structural captures and element-scoped helpers"). The
 hoisted-argument column of `mapped_reference_semantics_tests` holds every row
-of that module's matrix to the plain equation's reads; the cells that differ
-are refusals at a different stage, named there and under "Phase 7.3 semantic
-divergences". A replay that resolves foreign axes through the whole project's
-`DimensionsContext` is what must not be added: it admits equations the
-compiler refuses when written plainly.
+of that module's matrix, its no-mapping controls and its two-axes section to
+the plain equation's verdict, values and refusal codes alike, for the hoisted
+twin and for the snapshot-captured twin. A parse-time replay of the compiler's
+rule is what must not be added: two resolvers of one spelling drift exactly
+where the rule is non-trivial.
 
 **Phase 7.3b macro fall-throughs.** `MacroRegistry::resolve_call(call,
 enclosing_model)` is the one routing decision for a parsed call --
@@ -961,29 +958,8 @@ the base aborted on. All are pinned:
    `BadBuiltinArgs` over the call before any argument is hoisted. Pinned by
    `db::implicit_module_tests::a_call_with_more_arguments_than_ports_is_refused_before_any_hoist`.
 
-Four differences between a hoisted argument and the plain equation predate
-this chunk and are pinned by
-`mapped_reference_semantics_tests::a_hoisted_argument_reads_what_the_plain_equation_reads`
-rather than changed. Two are refusals at a different stage: (a) a bare arrayed
-identifier argument is wired to the scalar input port by name and refused,
-where the plain equation broadcasts it positionally; (b) a helper whose body
-keeps a foreign dimension name is refused in `Expr2` lowering as
-`DimensionInScalarContext` where the plain equation is refused in the compiler
-as `MismatchedDimensions`. Two read a DIFFERENT ELEMENT, and are the ones that
-matter (GH #1035): (c) a subscript naming the ITERATED dimension is substituted
-to the active element's qualified name (`x[State]` -> `x[State·Steel]`), which
-`constify_dimensions` folds to that element's ORDINAL, where Phase 6b's
-compiler resolves the plain `x[State]` through `resolve_mapped_read` -- so
-under a permuted, many-to-one, reverse-cardinality or shared-names map the
-hoisted argument reads the ordinal element (or is refused off the end) and the
-plain equation the mapped one; (d) a target repeating a dimension
-(`target[State,State] = SMTH1(pop[State,State], 1)`) substitutes both indices
-to the first axis's element. The substitution cannot close (c): it does not
-know the source's own axis, and the qualified element is the only spelling a
-scalar helper can carry; the fix is the compiler resolving a qualified element
-of a FOREIGN dimension through the same rule it applies to the dimension name,
-which is a change to plain-equation semantics too (`target[State] =
-x[State·Steel]` would follow the map) and so is a decision, not a chunk.
+A hoisted argument reads what the plain equation reads and is refused with
+its code ("Phase 7.5 semantic divergences", items 7-9).
 
 One diagnostic-only change: a helper whose body fails to LOWER is reported by
 `compile_implicit_var_fragment` as an equation error on the PARENT variable,
@@ -1235,8 +1211,76 @@ chunk against the initial value, `2 dk / (0 - v0)` where wasm computed 0).
 LTM does not promote the capture into flows to keep such an edge: the loop
 it would close runs through a frozen value and is no feedback.
 
-**Phase 7.5 semantic divergences.** Six changes, each pinned: four to the
-artifact and the results map, one to a value, one to the LTM causal graph.
+**Phase 7.5c structural captures and element-scoped helpers.** An apply-to-all
+body is walked once for what it needs (`builtins_visitor::per_element_requirements`,
+the maximum over its calls of `None`, `SnapshotOnly`, `ModuleInstance`, routed
+through `MacroRegistry::resolve_call` and `module_functions::stdlib_descriptor`
+so it cannot disagree with expansion). A snapshot-only body is captured
+structurally: ONE `CaptureShape::ApplyToAll` capture over the parent's
+dimensions whose body is the source subtree (`$⁚p⁚n⁚arg0`, one slot per
+element, keyed per element in the results map like any arrayed variable,
+GH #1033), lowered by the compiler per element exactly as the parent's body
+is. A module-bearing body is expanded per element, and every helper it hoists
+-- a computed argument, a bare arrayed identifier, a bare dimension name, a
+snapshot argument (`CaptureShape::Element`) -- is a scalar whose body is one
+element of the parent's: `ElementScope` names the element, and
+`Context::element_scope_context` lowers the body under it, so a subscript
+naming the iterated dimension, a mapped foreign dimension or a repeated target
+dimension resolves through the compiler's one rule. An explicit `Ast::Arrayed`
+slot keeps its own element context; a snapshot-only default expression is
+captured once and its capture read inserted into every missing slot, and a
+module-bearing default is materialized per missing slot. A snapshot argument
+subscripted by a dimension the parent's axes answer for -- one of them by
+name, or one they relate to through a declared mapping or subdimension --
+reads its slot directly; `index_spans_a_dimension` puts that question to the
+compiler's own matcher under the projection `active_dim_ref` uses
+(`match_axes_partial` under `DirectMappingsOnly`), so the parse captures
+exactly where lowering cannot resolve a slot. A helper body the compiler
+refuses is the parent's equation error, with the compiler's code and the
+argument's span (`compile_implicit_var_fragment`), so the hoisted spelling and
+the plain spelling refuse identically; a codegen refusal stays an assembly row
+on the helper. The LTM describers see a scoped helper with every read its
+element pins spelled as the static index the compiler resolves it to
+(`FragmentInput::element_pinned_target`, `Context::pin_element_reads`: the
+helper's own fragment context running `normalize_subscript_ops` and
+`build_view_from_ops`, the steps `lower_subscript` runs), so the element graph
+and the scores name the slot the helper's fragment reads for a proper
+subdimension, a shared-name axis and an element map alike; a substituted
+spelling is what must not stand in for that index, since a qualified
+`dimension·element` of a foreign axis folds to an ordinal the compiler does
+not read. Separately, the IR's description of a PLAIN read under an explicit
+element map is positional where execution is name-first
+(`ltm_agg::AxisRead::MappedRead`), a pre-existing imprecision of the
+describers that this chunk neither introduces nor closes.
+`db::ltm::endpoint_dimensions` is the
+projection of `model_dep_shape` onto plain variables, read by the causal
+edges, the element graph, every score emitter, the loop builders and the pins;
+one shape answer is not one emitter -- an element-bound helper is scalar
+storage with an edge at one element of its parent, so the scalar-source
+emitters admit only explicit scalar sources and
+`try_implicit_scalar_to_arrayed_link_scores` scores that edge -- and
+`ltm_dep_shape` is `model_dep_shape` plus the two kinds only a generated
+equation references. An edge whose every reference site sits in an
+`Ast::Arrayed` slot of the target, over a strict subset of the target's
+elements, is target-restricted (`EdgeShapesResult::target_restricted_edges`):
+`classify_cycle` keeps its cycles on the element-level path and
+`build_element_level_loops` emits one loop per circuit, so a loop that exists
+at one slot is not reported over the whole dimension.
+
+**Phase 7.5d sparse delay initial ports.** `DELAYN`/`SMTHN` rewrite to the
+canonical order-1 and order-3 stdlib models and wire only the ports the call
+names: `[input, delay_time]` when no initial value is given, the stdlib
+model's `isModuleInput(initial_value)` guard then falling back to the input as
+XMILE 1.0 section 3.5.3 states ("If initial value is not provided, the initial
+value of input will be used", `docs/reference/xmile-v1.0.html#_Toc439926074`);
+an explicit fourth argument is an independent `initial_value` port. `DELAY`
+renames to `DELAY1` and nothing else. Two or five arguments, an order other
+than the literal 1 or 3, and a non-literal order refuse before any argument is
+hoisted.
+
+**Phase 7.5 semantic divergences.** Thirteen changes, each pinned: 7.5a and
+7.5b's six (four to the artifact and the results map, one to a value, one to
+the LTM causal graph), then 7.5c and 7.5d's seven.
 
 1. A user equation's bare or qualified element snapshot reads the slot
    directly, and the capture the base minted for it is gone (26 on C-LEARN).
@@ -1297,6 +1341,85 @@ artifact and the results map, one to a value, one to the LTM causal graph.
    (no edge through the capture, VM == wasm on every results key under LTM),
    `clearn_ltm_var_count_guardrail`, `clearn_ltm_slot_maxima_digest` and
    `clearn_with_ltm_simulates_model_vars_identically`.
+7. A hoisted module-call argument under an apply-to-all body reads what the
+   plain equation reads: the eight cells the base read by ORDINAL (a subscript
+   naming the iterated dimension under a permuted, many-to-one,
+   reverse-cardinality or shared-element-name map, and a repeated target
+   dimension) follow `resolve_mapped_read` name-first, as the plain equation
+   does, and a stock's smoothed flow under a copied dimension reads the
+   element NAMED like the active one (`stock[Region]` over `Other` declaring
+   the same names reversed reads 20, not the positional 10). Pinned by
+   `mapped_reference_semantics_tests::a_hoisted_argument_reads_what_the_plain_equation_reads`
+   (equality in every cell, hoisted and captured twins) and
+   `db::ltm_element_instance_tests::qualified_index_edge_follows_the_plain_equations_name_first_read`
+   (the VM, and the element graph naming the element the helper reads) and
+   `db::element_scope_tests::a_hoisted_read_of_a_proper_subdimension_is_scored_at_its_own_element`
+   (a subdimension read inside a loop: the edge, the score and the loop all
+   at the helper's element).
+8. A bare arrayed identifier or a bare dimension name as a module-call
+   argument under an apply-to-all body compiles as an element-scoped helper
+   (`$⁚out⁚0⁚arg0⁚e1 = aux vals in d=e1`) where the base wired the name to the
+   scalar port and refused (`NotSimulatable`) or wired the qualified element.
+   Pinned by `db::implicit_module_tests` (the bare-arrayed, bare-dimension and
+   bare-scalar rows) and the hoisted column's `target[State] = x` cells.
+9. A helper the compiler refuses is reported on the PARENT as the plain
+   equation's error -- `MismatchedDimensions` with the argument underlined --
+   where the base reported `DimensionInScalarContext` on the parent or an
+   assembly row on the helper. Pinned by
+   `db::implicit_diag_tests::implicit_helper_lowering_failure_is_an_equation_error_on_the_parent`,
+   `array_tests::unresolvable_helper_fails_loudly_not_silently` and the
+   no-mapping refusal cells of the hoisted column.
+10. A snapshot-only apply-to-all body is ONE structural capture, keyed per
+    element in the results map, where the base minted one scalar capture per
+    element with an element suffix: on C-LEARN 24 `INIT` parents' 150
+    per-element captures are 24 arrayed ones over the same 150 slots (-126
+    initial programs, -165 literals, every plain results key and value
+    identical), and under `CLEARN_LTM=1` the 630 per-element helper keys are
+    630 per-element keys of structural captures, every other count and every
+    value identical. A snapshot argument subscripted by a dimension the
+    parent's axes relate to through a declared mapping (`PREVIOUS(x[Other],
+    0)` under `Region`, `Other maps_to Region`) reads its slot directly, as
+    the base's per-element substitution did. Pinned by `db::capture_tests`
+    (the apply-to-all rows), `an_apply_to_all_captures_slots_are_keyed_per_element`,
+    `db::prev_init_tests::ltm_snapshot_element_reads_preserve_score_topology_and_values`,
+    the mapped-foreign-dimension row of
+    `every_prev_init_argument_shape_agrees_between_the_parse_and_codegen`,
+    `db::element_scope_tests::a_per_element_capture_scores_its_own_element_only`
+    (an element-bound helper scores its own element and no other, values
+    pinned on an asymmetric fixture), and
+    `db::ltm_element_instance_tests::an_arrayed_capture_helper_is_not_treated_as_element_bound`
+    and `an_arrayed_capture_helpers_scores_compile`.
+11. A loop through an `Ast::Arrayed` target that reads its source in a strict
+    subset of its slots is reported at those slots only: the value-gate
+    golden's `r2[1]` and `r2[2]` rows (identically zero, a loop claimed at
+    Boston and LA that exists at NYC alone) are gone and `r2` is one scalar
+    loop. Pinned by `db::analysis::classify_cycle_tests::target_restricted_bare_edge_forces_slow_path`,
+    `partial_slot_arrayed_reference_takes_the_slow_path` and the regenerated
+    `ltm_value_golden/value_gate.txt`.
+12. `DELAYN`/`SMTHN` without an initial value wire `[input, delay_time]`; the
+    base hoisted the input a second time into `initial_value`. `DELAY` is
+    `DELAY1`. Arities 2 and 5 refuse with `BadBuiltinArgs`, and an order other
+    than the literal 1 or 3 with `UnknownBuiltin`, before any hoist. Pinned by
+    `db::implicit_module_tests` (the `SMTHN`, `DELAYN`, explicit-initial and
+    `DELAY` rows, `delayn_and_smthn_refuse_bad_arities_and_unsupported_orders`,
+    `mdl_delay_n_and_smooth_n_import_their_initial_value_as_the_fourth_port`)
+    and `simulate::delayn_and_smthn_omitted_initial_values_are_the_input_on_both_backends`
+    (equal to the explicit-initial twins on the VM and on wasm, and across a
+    reset). C-LEARN's `DELAY N`/`SMOOTH N` calls all carry an initial value,
+    so its artifact does not move.
+13. Four shapes compile that the base refused: an explicit `Ast::Arrayed`
+    slot beside a module-bearing EXCEPT default keeps its own element context,
+    a snapshot-only default is captured once and read in the missing slots, a
+    module-bearing default is materialized per missing slot (the base refused
+    all three as `dimension_in_scalar_context`), and a snapshot nested in a
+    snapshot under an apply-to-all body (`PREVIOUS(INIT(vals[d] * 2) + 1,
+    0)`) captures structurally twice (the base refused it as
+    `duplicate_variable`, two per-element walks claiming one capture) -- each
+    equal to its plain twin on the VM. The wildcard spelling `SMTH1(vals[*],
+    3)` under an apply-to-all body compiles too, reading the active element
+    as the plain `vals[*]` does. Pinned by `db::element_scope_tests` (the four
+    rules) and
+    `mapped_reference_semantics_tests::a_wildcard_argument_under_an_apply_to_all_body_reads_the_active_element`.
 
 **Phase 7.1 probe.** The execution-count probe chunk 7.1 owed AC3.1 is
 `db::exec_probe::ProbedDb`: a `SimlinDb` built over salsa storage carrying an
@@ -2124,3 +2247,4 @@ hash is not available to it.
 | 7.4 | `engine: parse without model context; sub-model initials` | 8.3650 G (median of 5; range 8.3621-8.3749), **-3.72%** against the base `c8770abb` re-measured in the same session (8.6879 G, median of 5, range 8.6855-8.6943; interleaved pairs -3.72 / -3.63 / -3.73 / -3.79 / -3.64%) | 5215 | 30682 / 1477 / 24873 | 1750 / 162 / 28 / 641 | Plain: flow and stock streams byte-identical, initials +215 opcodes and +31 programs (1174 -> 1205), +18 literals, 371 names and 7 modules unchanged: every value-bearing variable of an instantiated model is now an initials member (GH #1028). Under `CLEARN_LTM=1`: 30123 slots and 2682 views unchanged, 907854 / 1477 / 28733 opcodes (+3 flow, +219 initial, 1976 initials), 16761 literals; the one delta beyond the #1028 members is `stdlib⁚delay3`'s LTM helper `$⁚$⁚ltm⁚link_score⁚input→stock⁚1⁚arg0` under the instance wiring `{delay_time, input}` (4 initial opcodes with its `Ret`, 3 flow), whose body snapshots the bound port `input`: the base could not lower the port (`Expr::ModuleInput` has no slot) and the by-presence LTM tail dropped the helper with no diagnostic, so every DELAY3 `input -> stock` link score read an unwritten 0 for its two-step lag -- a silent wrong number (`4, 10, 24` for a unit ramp where the formula gives `1, 2, 4`), corrected by lowering the port to its own slot and pinned under "Phase 7.4 semantic divergences" item 3; on C-LEARN that instance's score happens to be byte-identical, so all 30123 LTM series are identical between the two binaries. The run channel (`CLEARN_PROFILE=run CLEARN_RUN_ITERS=20`) is 30.5414 G against 30.6572 G, -0.38% (pairs -0.36 / -0.41 / -0.37 / -0.38 / -0.38%). The compile saving is deleted work: the per-model module-ident pre-scan that re-parsed every Aux/Flow equation once per context, and the second and third parses of every variable under the empty, per-instance-widened and stdlib-extended contexts. Differential sweep of the base and tree CLIs over all 509 models under `test/`: 396 byte-identical, 110 refused identically, 0 refused on one side only, 3 not identical: one GH #859 importer flipper (`subscript_transposition` or `arrays_varname`, whichever the sample lands on; each flips between the same two outputs on both binaries, resampled 6x per binary), and two GH #1028 movers -- `land_model.stmx`'s `real_gdp_growth_rate = TREND(..)` (TREND's `output` is an aux) now matches the checked-in Stella `output.tab` exactly (0.04, 0.0292888201074, 0.0200569598033 where the base printed 0, 6.957, 3.233), and `bobby/vdf/econ/mark2.mdl`'s `perceived mortgage balance = SMOOTH(interest earned - investments lost)` reads `defaults = DELAY1(..)` (DELAY1's `output` is a flow) during the parent's initials, so the smooth starts at its t0 input as Vensim's SMOOTH does (the base started 150,000,000 above it, with a nonzero t0 flow). Four divergences and one fix pinned (Additional Considerations, "Phase 7.4 semantic divergences"); the engine suite, libsimlin, the CLI, clippy and `cargo fmt --all -- --check` are green, with one golden regenerated (`modules.txt`, the two `producer` initial fragments) |
 | V-opc | `engine: derive opcode operand handling from one table` | 8.6666 G (median of 5; range 8.6581-8.6701), -0.27% against `c8770abb` re-measured in the same session (8.6902 G, median of 5, range 8.6871-8.6934; interleaved pairs -0.24 / -0.27 / -0.35 / -0.37 / -0.26%), measured on the pre-review candidate (the fix round changed only which operands the accessors bind); recorded, not investigated (under the one-percent bar; nothing output-bearing changed) | 5215 | 30682 / 1477 / 24873 | 1750 / 162 / 28 / 641 | artifacts identical on C-LEARN, plain and under `CLEARN_LTM=1`, against `c972c9e9` (57032 opcodes plain, 938064 under LTM -- Phase 7.4's artifact): both `bytecode_profile` blocks are byte-identical; the run channel is -0.03% (inside the floor) and the sweep over all 509 models under `test/` has no mover (`arrays_varname` flips between the same two outputs on both binaries, GH #859), both measured on the pre-review candidate against `c8770abb`. `SymbolicOpcode` and `Opcode` are each one table (`symbolic_opcode_table!`, `opcode_table!`) from which `resolve_opcode`, `renumber_opcode`, `gf_run`, `var_ref`, `jump_offset`, `stack_effect` and `name` derive by operand kind, the accessors binding only the operand their kind reads (`bind_kind!`), with the every-row tests and the merge proptest's blanking oracle derived from the same rows; production -473 lines by file length (bytecode.rs -282, symbolic.rs -191), two `unused_variables` allows in production, no semantic divergence (Additional Considerations, "Opcode operand tables"). |
 | 7.5ab | `engine: static element snapshots; capture phase demand` | 8.2010 G (median of 5; range 8.1969-8.2084), **-1.55%** against `015c98da` with the results-printing commit applied, re-measured in the same session (8.3302 G, median of 5, range 8.3266-8.3335; interleaved pairs -1.51 / -1.42 / -1.60 / -1.63 / -1.53%) | 5189 | 28505 / 1477 / 24795 | 1533 / 162 / 28 / 627 | Plain: -26 slots (the bare and qualified element captures 7.5a no longer mints, `init_c_in_deep_ocean_per_meter` and `target_year`), -2177 flow opcodes (those captures' fragments plus the flow fragments of the 207 INIT-only captures 7.5b takes out of flows), -78 initial opcodes and 1205 -> 1179 initial programs (one per removed capture), -217 literals, -14 views, 371 names and 7 modules unchanged; 4825 results keys where the base had 5058 (26 gone, 207 hidden, 0 renamed -- a removed capture renumbers the later helpers of the same equation, `$⁚v⁚1⁚..` -> `$⁚v⁚0⁚..`, which renames an exposed key only where a capture precedes another helper of the same equation, and no C-LEARN equation has that shape). Under `CLEARN_LTM=1`: 30123 -> 29398 slots and 7163 -> 6193 LTM variables (`ltm_var_dump`: 987 removed, 17 added -- the 26 element captures' 52 scalar scores become 17 direct scores arrayed over their targets, 330 slots; the 207 INIT-only captures' 921 scalar scores, 207 capture->parent and 714 source->capture, and the 14 two-slot array-freeze helpers of the scores into `$⁚last_set_target_year⁚0⁚arg0` do not exist because the edges do not, and 28 `PREVIOUS` helpers of the removed scores go with them; 36,138 slots free of the ceiling), 855713 / 1477 / 24795 opcodes (-52141 flow, -3938 initial, 1976 -> 1179 initial programs: the LTM PREVIOUS helpers' initial fragments), 14503 literals, 2166 views; the all-slot digest 20892 -> 20221 LTM slots and 3141 -> 3106 ever non-zero (the 21 removed scores the base held at 1 and the 14 freeze slots), `clearn_with_ltm_simulates_model_vars_identically` green. Run channel (`CLEARN_PROFILE=run CLEARN_RUN_ITERS=20`) 29.5656 G against 30.5294 G, -3.16% (pairs -3.17 / -3.15 / -3.16 / -3.18 / -3.14%); the plain artifact is byte-identical to the pre-review candidate's, which measured -1.19% against `c972c9e9`, so about two points of this are build layout. Sweep of 509 models, plain and `--ltm`: 394 / 393 identical, 110 refused identically, 0 one-sided; the movers are the GH #859 importer flippers (`subscript_transposition` on both channels, `arrays_varname` under `--ltm`; resampled 6x per binary, the same two digests on both) and, on both channels, `getdata`, `helper_recurrence`, `macro_init_recurrence` and C-LEARN, whose only difference is the hidden INIT-only capture columns and, under `--ltm`, the removed scores: every common column byte-identical (C-LEARN: 4825 plain, 14825 under `--ltm`; 1248 base-only keys = 26 + 207 + 987 + 28, 17 tree-only). Six divergences pinned ("Phase 7.5 semantic divergences"); three goldens regenerated; engine suite, libsimlin, CLI, clippy and `cargo fmt --all -- --check` green |
+| 7.5cd | `engine: element-scoped helpers; structural captures` | 7.5449 G (median of 3; range 7.5440-7.5478), **-8.05%** against `11de2948` re-measured in the same session (8.2050 G, median of 3, range 8.1978-8.2051; interleaved pairs -7.98 / -8.05 / -8.01%) | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Plain: flow and stock streams byte-identical, -126 initial opcodes and 1179 -> 1053 initial programs, -165 literals, 371 names and 7 modules unchanged, all 4825 results keys and values byte-identical (24 apply-to-all `INIT` parents' 150 per-element captures are 24 structural captures over the same 150 slots); under `CLEARN_LTM=1` 29398 slots, 855713 / 1477 / 24669 opcodes (-126 initial), 14503 -> 14078 literals, 2166 views, 6193 LTM variables, 14842 results keys of which 14212 are byte-identical and 630 per-element helper keys are renamed (`⁚elem` -> `[elem]`); LTM compile channel 50.8174 G against 54.3852 G, **-6.56%** (pairs -6.58 / -6.58 / -6.48%), run channel 29.0291 G against 29.5660 G, -1.82% (pairs -1.82 / -1.81 / -1.82%). The saving is deleted work: one structural walk of a snapshot-only apply-to-all body instead of N per-element walks, parse-stage variables and fragments, no parse-time dimension substitution of hoisted arguments, and no duplicated input hoist for `DELAYN`/`SMTHN`. Sweep of 509 models twice per binary: plain 398 identical, 110 refused identically, 0 moved; `--ltm` 386 identical, 110 refused identically, 10 movers that are all key renames (0 differing common columns each, the same key counts, C-LEARN included), the GH #859 flippers on the same two digests on both binaries in both modes (6x per binary), seven divergences pinned (7-13 under "Phase 7.5 semantic divergences"), one golden regenerated (`ltm_value_golden/value_gate.txt`, two phantom loop slots), engine suite (lib 5714, integration 789 plus the C-LEARN release gates), clippy, `cargo fmt --all -- --check` and the default-feature check green, with `mdl_equivalence::test_mdl_equivalence` and `test_clearn_equivalence` failing identically on the base tree (xmutil view element counts) |

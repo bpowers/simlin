@@ -35,7 +35,8 @@ enum Parent {
     /// A scalar aux named `out`.
     Scalar,
     /// An apply-to-all aux `out[d]`: one equation, walked once per element
-    /// because the body contains a module call (`contains_module_call`).
+    /// because the body contains a module call
+    /// (`builtins_visitor::per_element_requirements`).
     ApplyToAll,
     /// A per-element arrayed aux `out[d]` whose slots carry the SAME text but
     /// are distinct equations.
@@ -130,28 +131,64 @@ const ROWS: &[ModuleRow] = &[
     },
     ModuleRow {
         covers: "SMTHN's order argument is consumed by `rewrite_alias_module_call`, which \
-                 rewrites the call to SMTH3 and DEFAULTS the initial value to the input -- so \
-                 the input expression is hoisted TWICE, under two names",
+                 rewrites the call to SMTH3 and wires the two ports the call names; the \
+                 initial-value port stays unwired, and the stdlib model's \
+                 `isModuleInput(initial_value)` guard falls back to the input, as XMILE 1.0 \
+                 section 3.5.3 says it must",
         parent: Parent::Scalar,
         equation: "SMTHN(k * 2, 4, 3)",
         helpers: &[
             "$⁚out⁚0⁚arg0 = aux k * 2",
             "$⁚out⁚0⁚arg1 = aux 4",
-            "$⁚out⁚0⁚arg2 = aux k * 2",
             "$⁚out⁚0⁚smth3 = module stdlib⁚smth3 [$⁚out⁚0⁚arg0->$⁚out⁚0⁚smth3.input, \
-             $⁚out⁚0⁚arg1->$⁚out⁚0⁚smth3.delay_time, \
-             $⁚out⁚0⁚arg2->$⁚out⁚0⁚smth3.initial_value]",
+             $⁚out⁚0⁚arg1->$⁚out⁚0⁚smth3.delay_time]",
         ],
     },
     ModuleRow {
-        covers: "DELAYN order 1 rewrites to DELAY1, and its defaulted initial value is the \
-                 duplicated input hoist the 7.5 shape list owns",
+        covers: "DELAYN order 1 rewrites to DELAY1 with the same two ports",
         parent: Parent::Scalar,
         equation: "DELAYN(k, 2, 1)",
         helpers: &[
             "$⁚out⁚0⁚arg1 = aux 2",
             "$⁚out⁚0⁚delay1 = module stdlib⁚delay1 [k->$⁚out⁚0⁚delay1.input, \
-             $⁚out⁚0⁚arg1->$⁚out⁚0⁚delay1.delay_time, k->$⁚out⁚0⁚delay1.initial_value]",
+             $⁚out⁚0⁚arg1->$⁚out⁚0⁚delay1.delay_time]",
+        ],
+    },
+    ModuleRow {
+        covers: "DELAYN's explicit fourth argument is an independent port: it is hoisted \
+                 under the position it takes after the order is consumed and wired to \
+                 `initial_value`",
+        parent: Parent::Scalar,
+        equation: "DELAYN(k, 2, 3, 7)",
+        helpers: &[
+            "$⁚out⁚0⁚arg1 = aux 2",
+            "$⁚out⁚0⁚arg2 = aux 7",
+            "$⁚out⁚0⁚delay3 = module stdlib⁚delay3 [k->$⁚out⁚0⁚delay3.input, \
+             $⁚out⁚0⁚arg1->$⁚out⁚0⁚delay3.delay_time, \
+             $⁚out⁚0⁚arg2->$⁚out⁚0⁚delay3.initial_value]",
+        ],
+    },
+    ModuleRow {
+        covers: "SMTHN order 1 with an explicit initial value: the SMTH1 twin of the row above",
+        parent: Parent::Scalar,
+        equation: "SMTHN(k, 2, 1, k * 3)",
+        helpers: &[
+            "$⁚out⁚0⁚arg1 = aux 2",
+            "$⁚out⁚0⁚arg2 = aux k * 3",
+            "$⁚out⁚0⁚smth1 = module stdlib⁚smth1 [k->$⁚out⁚0⁚smth1.input, \
+             $⁚out⁚0⁚arg1->$⁚out⁚0⁚smth1.delay_time, \
+             $⁚out⁚0⁚arg2->$⁚out⁚0⁚smth1.initial_value]",
+        ],
+    },
+    ModuleRow {
+        covers: "DELAY is a rename to DELAY1 and nothing else: its arguments pass through \
+                 untouched",
+        parent: Parent::Scalar,
+        equation: "DELAY(k, 2)",
+        helpers: &[
+            "$⁚out⁚0⁚arg1 = aux 2",
+            "$⁚out⁚0⁚delay1 = module stdlib⁚delay1 [k->$⁚out⁚0⁚delay1.input, \
+             $⁚out⁚0⁚arg1->$⁚out⁚0⁚delay1.delay_time]",
         ],
     },
     ModuleRow {
@@ -198,64 +235,114 @@ const ROWS: &[ModuleRow] = &[
     ModuleRow {
         covers: "an apply-to-all body: the parse expands one instance per element, every \
                  synthesized name carries the element suffix, and a subscripted argument is \
-                 substituted to that element",
+                 hoisted UNREWRITTEN into a helper scoped to that element -- the compiler \
+                 lowers it as element `e` of the body, so it reads what the plain equation \
+                 reads (GH #1035)",
         parent: Parent::ApplyToAll,
         equation: "SMTH1(vals[d], 2)",
         helpers: &[
-            "$⁚out⁚0⁚arg0⁚e1 = aux vals[d·e1]",
-            "$⁚out⁚0⁚arg1⁚e1 = aux 2",
+            "$⁚out⁚0⁚arg0⁚e1 = aux vals[d] in d=e1",
+            "$⁚out⁚0⁚arg1⁚e1 = aux 2 in d=e1",
             "$⁚out⁚0⁚smth1⁚e1 = module stdlib⁚smth1 \
              [$⁚out⁚0⁚arg0⁚e1->$⁚out⁚0⁚smth1⁚e1.input, \
              $⁚out⁚0⁚arg1⁚e1->$⁚out⁚0⁚smth1⁚e1.delay_time]",
-            "$⁚out⁚0⁚arg0⁚e2 = aux vals[d·e2]",
-            "$⁚out⁚0⁚arg1⁚e2 = aux 2",
+            "$⁚out⁚0⁚arg0⁚e2 = aux vals[d] in d=e2",
+            "$⁚out⁚0⁚arg1⁚e2 = aux 2 in d=e2",
             "$⁚out⁚0⁚smth1⁚e2 = module stdlib⁚smth1 \
              [$⁚out⁚0⁚arg0⁚e2->$⁚out⁚0⁚smth1⁚e2.input, \
              $⁚out⁚0⁚arg1⁚e2->$⁚out⁚0⁚smth1⁚e2.delay_time]",
-            "$⁚out⁚0⁚arg0⁚e3 = aux vals[d·e3]",
-            "$⁚out⁚0⁚arg1⁚e3 = aux 2",
+            "$⁚out⁚0⁚arg0⁚e3 = aux vals[d] in d=e3",
+            "$⁚out⁚0⁚arg1⁚e3 = aux 2 in d=e3",
             "$⁚out⁚0⁚smth1⁚e3 = module stdlib⁚smth1 \
              [$⁚out⁚0⁚arg0⁚e3->$⁚out⁚0⁚smth1⁚e3.input, \
              $⁚out⁚0⁚arg1⁚e3->$⁚out⁚0⁚smth1⁚e3.delay_time]",
         ],
     },
     ModuleRow {
-        covers: "an apply-to-all body whose argument is the bare DIMENSION name: the \
-                 identifier arm substitutes it to the qualified element and wires that name \
-                 directly, hoisting nothing",
+        covers: "an apply-to-all body whose argument is the bare DIMENSION name: it means \
+                 nothing without the element, so the identifier arm hoists it into an \
+                 element-scoped helper rather than wiring the name",
         parent: Parent::ApplyToAll,
         equation: "SMTH1(d, 2)",
         helpers: &[
-            "$⁚out⁚0⁚arg1⁚e1 = aux 2",
-            "$⁚out⁚0⁚smth1⁚e1 = module stdlib⁚smth1 [d·e1->$⁚out⁚0⁚smth1⁚e1.input, \
+            "$⁚out⁚0⁚arg0⁚e1 = aux d in d=e1",
+            "$⁚out⁚0⁚arg1⁚e1 = aux 2 in d=e1",
+            "$⁚out⁚0⁚smth1⁚e1 = module stdlib⁚smth1 \
+             [$⁚out⁚0⁚arg0⁚e1->$⁚out⁚0⁚smth1⁚e1.input, \
              $⁚out⁚0⁚arg1⁚e1->$⁚out⁚0⁚smth1⁚e1.delay_time]",
-            "$⁚out⁚0⁚arg1⁚e2 = aux 2",
-            "$⁚out⁚0⁚smth1⁚e2 = module stdlib⁚smth1 [d·e2->$⁚out⁚0⁚smth1⁚e2.input, \
+            "$⁚out⁚0⁚arg0⁚e2 = aux d in d=e2",
+            "$⁚out⁚0⁚arg1⁚e2 = aux 2 in d=e2",
+            "$⁚out⁚0⁚smth1⁚e2 = module stdlib⁚smth1 \
+             [$⁚out⁚0⁚arg0⁚e2->$⁚out⁚0⁚smth1⁚e2.input, \
              $⁚out⁚0⁚arg1⁚e2->$⁚out⁚0⁚smth1⁚e2.delay_time]",
-            "$⁚out⁚0⁚arg1⁚e3 = aux 2",
-            "$⁚out⁚0⁚smth1⁚e3 = module stdlib⁚smth1 [d·e3->$⁚out⁚0⁚smth1⁚e3.input, \
+            "$⁚out⁚0⁚arg0⁚e3 = aux d in d=e3",
+            "$⁚out⁚0⁚arg1⁚e3 = aux 2 in d=e3",
+            "$⁚out⁚0⁚smth1⁚e3 = module stdlib⁚smth1 \
+             [$⁚out⁚0⁚arg0⁚e3->$⁚out⁚0⁚smth1⁚e3.input, \
+             $⁚out⁚0⁚arg1⁚e3->$⁚out⁚0⁚smth1⁚e3.delay_time]",
+        ],
+    },
+    ModuleRow {
+        covers: "an apply-to-all body whose argument is a bare ARRAYED identifier: the \
+                 plain equation reads its active element, so the identifier arm hoists it \
+                 into an element-scoped helper for the scalar port",
+        parent: Parent::ApplyToAll,
+        equation: "SMTH1(vals, 2)",
+        helpers: &[
+            "$⁚out⁚0⁚arg0⁚e1 = aux vals in d=e1",
+            "$⁚out⁚0⁚arg1⁚e1 = aux 2 in d=e1",
+            "$⁚out⁚0⁚smth1⁚e1 = module stdlib⁚smth1 \
+             [$⁚out⁚0⁚arg0⁚e1->$⁚out⁚0⁚smth1⁚e1.input, \
+             $⁚out⁚0⁚arg1⁚e1->$⁚out⁚0⁚smth1⁚e1.delay_time]",
+            "$⁚out⁚0⁚arg0⁚e2 = aux vals in d=e2",
+            "$⁚out⁚0⁚arg1⁚e2 = aux 2 in d=e2",
+            "$⁚out⁚0⁚smth1⁚e2 = module stdlib⁚smth1 \
+             [$⁚out⁚0⁚arg0⁚e2->$⁚out⁚0⁚smth1⁚e2.input, \
+             $⁚out⁚0⁚arg1⁚e2->$⁚out⁚0⁚smth1⁚e2.delay_time]",
+            "$⁚out⁚0⁚arg0⁚e3 = aux vals in d=e3",
+            "$⁚out⁚0⁚arg1⁚e3 = aux 2 in d=e3",
+            "$⁚out⁚0⁚smth1⁚e3 = module stdlib⁚smth1 \
+             [$⁚out⁚0⁚arg0⁚e3->$⁚out⁚0⁚smth1⁚e3.input, \
+             $⁚out⁚0⁚arg1⁚e3->$⁚out⁚0⁚smth1⁚e3.delay_time]",
+        ],
+    },
+    ModuleRow {
+        covers: "an apply-to-all body whose argument is a bare SCALAR identifier: no element \
+                 changes what it means, so it is wired to the port by name as in the scalar \
+                 base shape",
+        parent: Parent::ApplyToAll,
+        equation: "SMTH1(k, 2)",
+        helpers: &[
+            "$⁚out⁚0⁚arg1⁚e1 = aux 2 in d=e1",
+            "$⁚out⁚0⁚smth1⁚e1 = module stdlib⁚smth1 [k->$⁚out⁚0⁚smth1⁚e1.input, \
+             $⁚out⁚0⁚arg1⁚e1->$⁚out⁚0⁚smth1⁚e1.delay_time]",
+            "$⁚out⁚0⁚arg1⁚e2 = aux 2 in d=e2",
+            "$⁚out⁚0⁚smth1⁚e2 = module stdlib⁚smth1 [k->$⁚out⁚0⁚smth1⁚e2.input, \
+             $⁚out⁚0⁚arg1⁚e2->$⁚out⁚0⁚smth1⁚e2.delay_time]",
+            "$⁚out⁚0⁚arg1⁚e3 = aux 2 in d=e3",
+            "$⁚out⁚0⁚smth1⁚e3 = module stdlib⁚smth1 [k->$⁚out⁚0⁚smth1⁚e3.input, \
              $⁚out⁚0⁚arg1⁚e3->$⁚out⁚0⁚smth1⁚e3.delay_time]",
         ],
     },
     ModuleRow {
         covers: "a per-element arrayed equation: each slot is its own equation walked by its \
-                 own visitor, so every slot restarts the counter at 0 and is kept apart by \
-                 the element suffix alone",
+                 own visitor under its own element, so every slot restarts the counter at 0 \
+                 and is kept apart by the element suffix alone",
         parent: Parent::PerElement,
         equation: "SMTH1(vals[d], 2)",
         helpers: &[
-            "$⁚out⁚0⁚arg0⁚e1 = aux vals[d·e1]",
-            "$⁚out⁚0⁚arg1⁚e1 = aux 2",
+            "$⁚out⁚0⁚arg0⁚e1 = aux vals[d] in d=e1",
+            "$⁚out⁚0⁚arg1⁚e1 = aux 2 in d=e1",
             "$⁚out⁚0⁚smth1⁚e1 = module stdlib⁚smth1 \
              [$⁚out⁚0⁚arg0⁚e1->$⁚out⁚0⁚smth1⁚e1.input, \
              $⁚out⁚0⁚arg1⁚e1->$⁚out⁚0⁚smth1⁚e1.delay_time]",
-            "$⁚out⁚0⁚arg0⁚e2 = aux vals[d·e2]",
-            "$⁚out⁚0⁚arg1⁚e2 = aux 2",
+            "$⁚out⁚0⁚arg0⁚e2 = aux vals[d] in d=e2",
+            "$⁚out⁚0⁚arg1⁚e2 = aux 2 in d=e2",
             "$⁚out⁚0⁚smth1⁚e2 = module stdlib⁚smth1 \
              [$⁚out⁚0⁚arg0⁚e2->$⁚out⁚0⁚smth1⁚e2.input, \
              $⁚out⁚0⁚arg1⁚e2->$⁚out⁚0⁚smth1⁚e2.delay_time]",
-            "$⁚out⁚0⁚arg0⁚e3 = aux vals[d·e3]",
-            "$⁚out⁚0⁚arg1⁚e3 = aux 2",
+            "$⁚out⁚0⁚arg0⁚e3 = aux vals[d] in d=e3",
+            "$⁚out⁚0⁚arg1⁚e3 = aux 2 in d=e3",
             "$⁚out⁚0⁚smth1⁚e3 = module stdlib⁚smth1 \
              [$⁚out⁚0⁚arg0⁚e3->$⁚out⁚0⁚smth1⁚e3.input, \
              $⁚out⁚0⁚arg1⁚e3->$⁚out⁚0⁚smth1⁚e3.delay_time]",
@@ -266,16 +353,31 @@ const ROWS: &[ModuleRow] = &[
 /// One synthesized helper, rendered as what a consumer is entitled to read off
 /// it: its runlist ident, which kind of helper it is, and its whole definition
 /// -- a module's target model and input wiring, or an aux's body printed back
-/// to equation text.
+/// to equation text followed by the element the body is scoped to (`in
+/// d=e1`), when it is one element of an apply-to-all body.
 fn describe(v: &ImplicitVar) -> String {
+    let scope = v
+        .element_scope()
+        .map(|s| {
+            let pairs: Vec<String> = s
+                .dims
+                .iter()
+                .zip(&s.element)
+                .map(|(d, e)| format!("{}={}", d.as_str(), e.as_str()))
+                .collect();
+            format!(" in {}", pairs.join(","))
+        })
+        .unwrap_or_default();
     match v {
         ImplicitVar::Capture(c) => format!(
-            "{} = capture[{}] {}",
+            "{} = capture[{}] {}{scope}",
             c.ident(),
             c.dims().join(","),
             print_eqn(c.arg())
         ),
-        ImplicitVar::HoistedArg(a) => format!("{} = aux {}", a.ident(), print_eqn(a.arg())),
+        ImplicitVar::HoistedArg(a) => {
+            format!("{} = aux {}{scope}", a.ident(), print_eqn(a.arg()))
+        }
         ImplicitVar::Module(m) => {
             let refs: Vec<String> = m
                 .references
@@ -325,6 +427,115 @@ fn helpers_for(row: &ModuleRow) -> Vec<ImplicitVar> {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &dm);
     implicit_vars_of(&db, &sync, "main", var)
+}
+
+/// `DELAYN`/`SMTHN` refuse every arity and order the canonical stdlib models
+/// cannot express, before any argument is hoisted: two or five arguments, an
+/// order other than the literal 1 or 3, and a non-literal order. Each refusal
+/// spans the whole call and names the reason, and files no helper.
+#[test]
+fn delayn_and_smthn_refuse_bad_arities_and_unsupported_orders() {
+    // `(equation, code, details)`. The orders the canonical models express
+    // are 1 and 3, so 2 is the smallest refused one.
+    let rows: &[(&str, ErrorCode, &str)] = &[
+        (
+            "SMTHN(k, 2)",
+            ErrorCode::BadBuiltinArgs,
+            "smthn takes 3 or 4 arguments, but 2 were given",
+        ),
+        (
+            "DELAYN(k, 2, 3, 7, 9)",
+            ErrorCode::BadBuiltinArgs,
+            "delayn takes 3 or 4 arguments, but 5 were given",
+        ),
+        (
+            "DELAYN(k, 2, 2)",
+            ErrorCode::UnknownBuiltin,
+            "delayn of order 2 is not supported; use order 1 or 3",
+        ),
+        (
+            "SMTHN(k, 2, n)",
+            ErrorCode::UnknownBuiltin,
+            "smthn's order argument must be the literal 1 or 3",
+        ),
+    ];
+    for (equation, code, details) in rows {
+        let project = TestProject::new("alias_refusals")
+            .scalar_aux("k", "3")
+            .scalar_aux("n", "3")
+            .aux("out", equation, None);
+        let refusal = project
+            .diagnostics_incremental()
+            .into_iter()
+            .find_map(|d| match d.error {
+                DiagnosticError::Equation(e)
+                    if e.code == *code && d.variable.as_deref() == Some("out") =>
+                {
+                    Some(e)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("`{equation}` is refused on `out` with {code:?}"));
+        assert_eq!(refusal.details.as_deref(), Some(*details), "`{equation}`");
+        assert_eq!(
+            (refusal.start, refusal.end),
+            (0, equation.len() as u16),
+            "`{equation}`: the span covers the whole call"
+        );
+
+        let dm = project.build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &dm);
+        assert!(
+            implicit_vars_of(&db, &sync, "main", "out").is_empty(),
+            "`{equation}`: a refused call files no helper at all"
+        );
+    }
+}
+
+/// Vensim's `DELAY N`/`SMOOTH N` carry their initial value THIRD and their
+/// order FOURTH; the MDL reader restructures them to the `DELAYN`/`SMTHN`
+/// argument order (`mdl/xmile_compat.rs`), so an imported call wires its
+/// initial value as the independent fourth port.
+#[test]
+fn mdl_delay_n_and_smooth_n_import_their_initial_value_as_the_fourth_port() {
+    let mdl = "\
+{UTF-8}
+inp = 10 + Time ~~|
+d = DELAY N(inp, 2, 7, 3) ~~|
+s = SMOOTH N(inp, 2, 7, 1) ~~|
+INITIAL TIME = 0 ~~|
+FINAL TIME = 4 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|
+";
+    let dm = crate::open_vensim(mdl).expect("the MDL parses");
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &dm);
+    let helpers = |var: &str| -> Vec<String> {
+        implicit_vars_of(&db, &sync, "main", var)
+            .iter()
+            .map(describe)
+            .collect()
+    };
+    assert_eq!(
+        helpers("d"),
+        [
+            "$⁚d⁚0⁚arg1 = aux 2",
+            "$⁚d⁚0⁚arg2 = aux 7",
+            "$⁚d⁚0⁚delay3 = module stdlib⁚delay3 [inp->$⁚d⁚0⁚delay3.input, \
+             $⁚d⁚0⁚arg1->$⁚d⁚0⁚delay3.delay_time, $⁚d⁚0⁚arg2->$⁚d⁚0⁚delay3.initial_value]",
+        ]
+    );
+    assert_eq!(
+        helpers("s"),
+        [
+            "$⁚s⁚0⁚arg1 = aux 2",
+            "$⁚s⁚0⁚arg2 = aux 7",
+            "$⁚s⁚0⁚smth1 = module stdlib⁚smth1 [inp->$⁚s⁚0⁚smth1.input, \
+             $⁚s⁚0⁚arg1->$⁚s⁚0⁚smth1.delay_time, $⁚s⁚0⁚arg2->$⁚s⁚0⁚smth1.initial_value]",
+        ]
+    );
 }
 
 /// A call with more arguments than its target model has ports is refused

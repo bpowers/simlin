@@ -471,6 +471,7 @@ fn time_variable(ctx: &Context) -> Variable {
             non_negative: false,
             is_flow: false,
             is_table_only: false,
+            element_scope: None,
         },
     }
 }

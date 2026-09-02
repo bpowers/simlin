@@ -16,10 +16,11 @@ use std::collections::{HashMap, HashSet};
 use crate::common::{Canonical, Ident};
 use crate::ltm::strip_subscript;
 
+use super::endpoint_dimensions;
+
 use crate::db::{
-    Db, LoopCircuitsResult, ModuleInputSet, SourceModel, SourceProject, SourceVariable,
-    SourceVariableKind, TieredCircuitsResult, model_causal_edges, parse_source_variable,
-    variable_dimensions, variable_direct_dependencies,
+    Db, LoopCircuitsResult, ModuleInputSet, SourceModel, SourceProject, TieredCircuitsResult,
+    model_causal_edges, model_edge_shapes, parse_source_variable, variable_direct_dependencies,
 };
 
 /// Find the output ports for a model by scanning other models' variable
@@ -158,21 +159,16 @@ pub(crate) fn sub_model_output_ports(
 /// produce.
 fn is_projection_feeder_edge(
     db: &dyn Db,
-    source_vars: &HashMap<String, SourceVariable>,
     from: &str,
     to: &str,
     model: SourceModel,
     project: SourceProject,
 ) -> bool {
-    let Some(to_sv) = source_vars.get(to) else {
+    let Some(to_dims) = endpoint_dimensions(db, model, project, to) else {
         return false;
     };
-    if to_sv.kind(db) == SourceVariableKind::Module {
-        return false;
-    }
-    let to_dims = variable_dimensions(db, *to_sv, project);
     let aggs = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
-    crate::ltm_agg::variable_backed_reduce_agg(aggs, from, to, to_dims)
+    crate::ltm_agg::variable_backed_reduce_agg(aggs, from, to, &to_dims)
         .is_some_and(|a| a.source_is_projection_feeder(from))
 }
 
@@ -198,21 +194,17 @@ fn is_projection_feeder_edge(
 /// element subscripts on the `matrix[d1,d2] -> agg[d1]` link.
 fn is_partial_reduce_edge(
     db: &dyn Db,
-    source_vars: &HashMap<String, SourceVariable>,
     from: &str,
     to: &str,
+    model: SourceModel,
     project: SourceProject,
 ) -> bool {
-    let from_sv = match source_vars.get(from) {
-        Some(sv) if sv.kind(db) != SourceVariableKind::Module => sv,
-        _ => return false,
+    let Some(from_dims) = endpoint_dimensions(db, model, project, from) else {
+        return false;
     };
-    let to_sv = match source_vars.get(to) {
-        Some(sv) if sv.kind(db) != SourceVariableKind::Module => sv,
-        _ => return false,
+    let Some(to_dims) = endpoint_dimensions(db, model, project, to) else {
+        return false;
     };
-    let from_dims = variable_dimensions(db, *from_sv, project);
-    let to_dims = variable_dimensions(db, *to_sv, project);
     if from_dims.is_empty() || to_dims.is_empty() || to_dims.len() >= from_dims.len() {
         return false;
     }
@@ -281,24 +273,19 @@ fn is_per_element_edge(
 /// subscripted.
 fn is_broadcast_reduce_edge(
     db: &dyn Db,
-    source_vars: &HashMap<String, SourceVariable>,
     from: &str,
     to: &str,
     model: SourceModel,
     project: SourceProject,
 ) -> bool {
-    let Some(to_sv) = source_vars.get(to) else {
+    let Some(to_dims) = endpoint_dimensions(db, model, project, to) else {
         return false;
     };
-    if to_sv.kind(db) == SourceVariableKind::Module {
-        return false;
-    }
-    let to_dims = variable_dimensions(db, *to_sv, project);
     if to_dims.is_empty() {
         return false;
     }
     let aggs = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
-    crate::ltm_agg::variable_backed_reduce_agg(aggs, from, to, to_dims)
+    crate::ltm_agg::variable_backed_reduce_agg(aggs, from, to, &to_dims)
         .is_some_and(|a| a.result_dims.is_empty())
 }
 
@@ -672,7 +659,6 @@ pub(super) fn build_a2a_loop_stocks(
 pub(crate) fn build_loops_from_tiered(
     tiered: &TieredCircuitsResult,
     var_graph: &crate::ltm::CausalGraph,
-    source_vars: &HashMap<String, SourceVariable>,
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
@@ -770,7 +756,6 @@ pub(crate) fn build_loops_from_tiered(
         let (mut slow_path_loops, t) = build_element_level_loops(
             &tiered.slow_path,
             var_graph,
-            source_vars,
             db,
             model,
             project,
@@ -824,8 +809,8 @@ pub(crate) fn build_loops_from_tiered(
 fn build_element_subscripted_links(
     circuit: &[&str],
     var_links: &[crate::ltm::Link],
-    source_vars: &HashMap<String, SourceVariable>,
     db: &dyn Db,
+    model: SourceModel,
     project: SourceProject,
 ) -> Vec<crate::ltm::Link> {
     let mut links = Vec::with_capacity(circuit.len());
@@ -844,13 +829,8 @@ fn build_element_subscripted_links(
         };
         let to_var_level = strip_subscript(to_raw);
         let to_is_arrayed = crate::ltm_agg::is_synthetic_agg_name(to_var_level)
-            || source_vars
-                .get(to_var_level)
-                .map(|sv| {
-                    sv.kind(db) != SourceVariableKind::Module
-                        && !variable_dimensions(db, *sv, project).is_empty()
-                })
-                .unwrap_or(false);
+            || endpoint_dimensions(db, model, project, to_var_level)
+                .is_some_and(|dims| !dims.is_empty());
         let link_to = if to_raw.contains('[') && to_is_arrayed {
             to_raw
         } else {
@@ -905,7 +885,6 @@ fn build_element_subscripted_links(
 pub(crate) fn build_element_level_loops(
     element_circuits: &LoopCircuitsResult,
     var_graph: &crate::ltm::CausalGraph,
-    source_vars: &HashMap<String, SourceVariable>,
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
@@ -1022,14 +1001,10 @@ pub(crate) fn build_element_level_loops(
             (0..representative.len()).any(|i| {
                 let from_var = strip_subscript(representative[i]);
                 let to_var = strip_subscript(representative[(i + 1) % representative.len()]);
-                let Some(to_sv) = source_vars.get(to_var) else {
+                let Some(to_dims) = endpoint_dimensions(db, model, project, to_var) else {
                     return false;
                 };
-                if to_sv.kind(db) == SourceVariableKind::Module {
-                    return false;
-                }
-                let to_dims = variable_dimensions(db, *to_sv, project);
-                crate::ltm_agg::variable_backed_reduce_agg(aggs, from_var, to_var, to_dims)
+                crate::ltm_agg::variable_backed_reduce_agg(aggs, from_var, to_var, &to_dims)
                     .is_some()
             })
         };
@@ -1045,6 +1020,19 @@ pub(crate) fn build_element_level_loops(
                 let to_var = strip_subscript(representative[(i + 1) % representative.len()]);
                 is_per_element_edge(db, model, project, from_var, to_var)
             });
+
+        // An edge read from a strict subset of its target's `Ast::Arrayed`
+        // slots (`EdgeShapesResult::target_restricted_edges`) exists only at
+        // those slots, so a group traversing it keeps one scalar loop per
+        // circuit: the dimensioned form would claim every element.
+        let representative_has_target_restricted_hop = all_subscripted && {
+            let restricted = &model_edge_shapes(db, model, project).target_restricted_edges;
+            (0..representative.len()).any(|i| {
+                let from_var = strip_subscript(representative[i]);
+                let to_var = strip_subscript(representative[(i + 1) % representative.len()]);
+                restricted.contains(&(from_var.to_string(), to_var.to_string()))
+            })
+        };
 
         // Detect cross-element circuits that should NOT be collapsed
         // into A2A loops. Two patterns indicate cross-element:
@@ -1100,6 +1088,7 @@ pub(crate) fn build_element_level_loops(
             && !representative_has_synthetic_agg
             && !representative_has_partial_reduce_hop
             && !representative_has_per_element_hop
+            && !representative_has_target_restricted_hop
             && !representative.is_empty()
         {
             // Pure-dimension group: produce a single A2A loop.
@@ -1123,10 +1112,9 @@ pub(crate) fn build_element_level_loops(
             // it carries, then map canonical dim names to original
             // datamodel names for equation parsing.
             let first_var_name = strip_subscript(representative[0]);
-            let dimensions = source_vars
-                .get(first_var_name)
-                .map(|sv| {
-                    variable_dimensions(db, *sv, project)
+            let dimensions = endpoint_dimensions(db, model, project, first_var_name)
+                .map(|endpoint_dims| {
+                    endpoint_dims
                         .iter()
                         .map(|d| {
                             let canonical = d.name();
@@ -1187,8 +1175,8 @@ pub(crate) fn build_element_level_loops(
                 let links = build_element_subscripted_links(
                     circuit,
                     &circuit_var_links,
-                    source_vars,
                     db,
+                    model,
                     project,
                 );
                 slot_links.push((slot_tuple, links));
@@ -1209,6 +1197,7 @@ pub(crate) fn build_element_level_loops(
             || representative_has_synthetic_agg
             || representative_has_partial_reduce_hop
             || representative_has_per_element_hop
+            || representative_has_target_restricted_hop
         {
             // Cross-element circuits: a circuit that genuinely visits
             // different elements at different points -- e.g.
@@ -1259,13 +1248,8 @@ pub(crate) fn build_element_level_loops(
                     .collect();
                 let var_links = var_graph.circuit_to_links(&var_level_nodes);
 
-                let links = build_element_subscripted_links(
-                    element_nodes,
-                    &var_links,
-                    source_vars,
-                    db,
-                    project,
-                );
+                let links =
+                    build_element_subscripted_links(element_nodes, &var_links, db, model, project);
 
                 // Stocks must be element-level so `partition_for_loop`
                 // can resolve them in `model_element_cycle_partitions::
@@ -1354,13 +1338,8 @@ pub(crate) fn build_element_level_loops(
                     let to_subscripted = to_raw.contains('[');
                     let from_var_level = strip_subscript(from_raw);
                     let to_var_level = strip_subscript(to_raw);
-                    let to_is_arrayed = source_vars
-                        .get(to_var_level)
-                        .map(|sv| {
-                            sv.kind(db) != SourceVariableKind::Module
-                                && !variable_dimensions(db, *sv, project).is_empty()
-                        })
-                        .unwrap_or(false);
+                    let to_is_arrayed = endpoint_dimensions(db, model, project, to_var_level)
+                        .is_some_and(|dims| !dims.is_empty());
                     let (link_from, link_to) = if from_subscripted && !to_subscripted {
                         // Cross-dimensional (full reduce, arrayed-from /
                         // scalar-to): keep element-level from, bare to.
@@ -1369,13 +1348,12 @@ pub(crate) fn build_element_level_loops(
                         && to_subscripted
                         && (is_partial_reduce_edge(
                             db,
-                            source_vars,
                             from_var_level,
                             to_var_level,
+                            model,
                             project,
                         ) || is_projection_feeder_edge(
                             db,
-                            source_vars,
                             from_var_level,
                             to_var_level,
                             model,
@@ -1388,7 +1366,6 @@ pub(crate) fn build_element_level_loops(
                             to_var_level,
                         ) || is_broadcast_reduce_edge(
                             db,
-                            source_vars,
                             from_var_level,
                             to_var_level,
                             model,
@@ -1482,8 +1459,8 @@ pub(crate) fn build_element_level_loops(
     let (recovered, truncated_aggs) = recover_cross_agg_loops(
         &circuit_strs,
         var_graph,
-        source_vars,
         db,
+        model,
         project,
         agg_loop_budget,
     );
@@ -1782,8 +1759,8 @@ where
 fn recover_cross_agg_loops(
     circuit_strs: &[Vec<&str>],
     var_graph: &crate::ltm::CausalGraph,
-    source_vars: &HashMap<String, SourceVariable>,
     db: &dyn Db,
+    model: SourceModel,
     project: SourceProject,
     agg_loop_budget: usize,
 ) -> (Vec<crate::ltm::Loop>, Vec<String>) {
@@ -1813,7 +1790,7 @@ fn recover_cross_agg_loops(
         let var_level_nodes: Vec<Ident<Canonical>> =
             seq.iter().map(|n| Ident::new(strip_subscript(n))).collect();
         let var_links = var_graph.circuit_to_links(&var_level_nodes);
-        let links = build_element_subscripted_links(&seq, &var_links, source_vars, db, project);
+        let links = build_element_subscripted_links(&seq, &var_links, db, model, project);
         let stocks: Vec<Ident<Canonical>> = seq
             .iter()
             .filter(|n| var_graph.stocks.contains(&Ident::new(strip_subscript(n))))

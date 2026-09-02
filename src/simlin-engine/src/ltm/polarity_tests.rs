@@ -94,6 +94,7 @@ fn test_provable_value_sign() {
             non_negative: false,
             is_flow: false,
             is_table_only: false,
+            element_scope: None,
         },
     };
 

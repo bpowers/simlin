@@ -472,8 +472,8 @@ pub(crate) fn implicit_fragment_input<'db>(
     let self_shape = if meta.is_module {
         module_dep_shape(db, project, meta.model_name.as_deref().unwrap_or(""))
     } else {
-        // An arrayed helper (the GH #541 bare-arrayed-PREVIOUS capture)
-        // occupies one slot per element; its dimensions are the parse's.
+        // An arrayed helper (a structural apply-to-all capture) occupies one
+        // slot per element; its dimensions are the parse's.
         DepShape::var(
             lowered
                 .get_dimensions()
@@ -576,15 +576,16 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
     // Each runlist-gated phase threads the GH #1000 `why` channel: a member
     // phase that fails to compile lands in `assemble_module`'s batch
     // "failed to compile fragments" message, so the reason is accumulated
-    // HERE as a diagnostic naming the helper (interpolated into the message
-    // -- `errors.rs`'s `Assembly` arm never renders the `variable` field)
-    // and the parent it was synthesized for. Accumulation attaches to the
-    // enclosing query: `model_all_diagnostics`' implicit probe (drained by
-    // `collect_all_diagnostics`) or `assemble_module` (dormant until
-    // GH #581). Severity is `Error` for the same measured reason as the
-    // explicit path's (see `compile_var_fragment`): the fragment's absence
-    // fails the build, and the corpus sweep shape holds -- added rows land
-    // only on projects that already fail to compile.
+    // HERE. A CODEGEN refusal is a diagnostic naming the helper
+    // (interpolated into the message -- `errors.rs`'s `Assembly` arm never
+    // renders the `variable` field) and the parent it was synthesized for.
+    // Accumulation attaches to the enclosing query: `model_all_diagnostics`'
+    // implicit probe (drained by `collect_all_diagnostics`) or
+    // `assemble_module` (dormant until GH #581). Severity is `Error` for the
+    // same measured reason as the explicit path's (see
+    // `compile_var_fragment`): the fragment's absence fails the build, and
+    // the corpus sweep shape holds -- added rows land only on projects that
+    // already fail to compile.
     // Identical reasons across phases collapse to ONE row (a helper whose
     // initial and flow phases refuse the same construct is one defect, and
     // duplicate rows are user-visible noise); distinct per-phase reasons
@@ -661,6 +662,21 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
     // capture's runlists are its phase demand (`CaptureKind`), decided by
     // the dependency graph, so an INIT-only capture arrives here with no
     // flows membership and gets no flow fragment.
+    // A body the COMPILER refuses is refused where the parent's plain
+    // equation would be, as the parent's equation error: a subtree-bodied
+    // helper is the whole or one element of the parent's body, so the
+    // compiler's verdict on it is the verdict on the plain spelling, its code
+    // is that spelling's code, and the argument's span in the parent's
+    // equation text is where the rendering underlines it. The drain collapses
+    // the per-element and per-phase repeats of one `(code, span)` into one
+    // row. A module instance has no argument of its own, so its lowering
+    // failure keeps the assembly row.
+    let parent_argument_span = || {
+        let parsed = parse_source_variable(db, meta.parent_source_var, project);
+        meta.find_in(parsed)
+            .and_then(crate::capture::ImplicitVar::arg)
+            .map(|arg| arg.get_loc())
+    };
     let emit_ctx = input.emit_ctx();
     let mut phase = |is_initial: bool| -> Option<PerVarBytecodes> {
         match lower_fragment(&input, is_initial) {
@@ -676,7 +692,21 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
                 }
             }
             Err(err) => {
-                report(format!("could not be lowered: {err}"));
+                match parent_argument_span() {
+                    Some(loc) => CompilationDiagnostic(Diagnostic {
+                        model: model.name(db).clone(),
+                        variable: Some(meta.parent_source_var.ident(db).clone()),
+                        error: DiagnosticError::Equation(crate::common::EquationError {
+                            start: loc.start,
+                            end: loc.end,
+                            code: err.code,
+                            details: err.details,
+                        }),
+                        severity: DiagnosticSeverity::Error,
+                    })
+                    .accumulate(db),
+                    None => report(format!("could not be lowered: {err}")),
+                }
                 None
             }
         }

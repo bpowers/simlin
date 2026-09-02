@@ -1991,12 +1991,10 @@ fn build_loops_for_test(project: &TestProject) -> Vec<crate::ltm::Loop> {
         return vec![];
     }
     let var_graph = causal_graph_with_modules(&db, model, sync.project);
-    let source_vars = model.variables(&db);
     let dm_dims = project_datamodel_dims(&db, sync.project);
     build_element_level_loops(
         circuits,
         &var_graph,
-        source_vars,
         &db,
         model,
         sync.project,
@@ -2274,12 +2272,10 @@ fn edge_aliasing_bare_and_fixed_index_to_same_source_element() {
         vec![]
     } else {
         let var_graph = causal_graph_with_modules(&db, model, source_project);
-        let source_vars = model.variables(&db);
         let dm_dims = project_datamodel_dims(&db, source_project);
         build_element_level_loops(
             circuits,
             &var_graph,
-            source_vars,
             &db,
             model,
             source_project,
@@ -3057,12 +3053,10 @@ fn scalar_feeder_cycle_routes_through_agg_node() {
 
     let tiered = model_loop_circuits_tiered(&db, model, sync.project);
     let var_graph = causal_graph_with_modules(&db, model, sync.project);
-    let source_vars = model.variables(&db);
     let dm_dims = project_datamodel_dims(&db, sync.project);
     let (loops, _truncated) = build_loops_from_tiered(
         tiered,
         &var_graph,
-        source_vars,
         &db,
         model,
         sync.project,
@@ -3623,12 +3617,10 @@ fn cross_agg_two_petal_loops_match_pre_fix_content() {
 
     let tiered = crate::db::model_loop_circuits_tiered(&db, model, sync.project);
     let var_graph = causal_graph_with_modules(&db, model, sync.project);
-    let source_vars = model.variables(&db);
     let dm_dims = project_datamodel_dims(&db, sync.project);
     let (loops, truncated_aggs) = build_loops_from_tiered(
         tiered,
         &var_graph,
-        source_vars,
         &db,
         model,
         sync.project,
@@ -3851,12 +3843,10 @@ fn cross_agg_loop_recovery_handles_subscripted_agg_node() {
 
     let tiered = crate::db::model_loop_circuits_tiered(&db, model, sync.project);
     let var_graph = causal_graph_with_modules(&db, model, sync.project);
-    let source_vars = model.variables(&db);
     let dm_dims = project_datamodel_dims(&db, sync.project);
     let (loops, truncated_aggs) = build_loops_from_tiered(
         tiered,
         &var_graph,
-        source_vars,
         &db,
         model,
         sync.project,
@@ -4573,10 +4563,9 @@ fn ltm_fragment_failures_with_agg_present(project: &datamodel::Project) -> Vec<S
 /// synthetic `$⁚ltm⁚agg⁚{n}` fragment compiles (no fragment-failure
 /// Warning names an agg variable), and the only failures still present --
 /// if any -- are the known residual: the *direct* `scale→grow` link score,
-/// whose ceteris-paribus partial contains `PREVIOUS(pop[*])` and trips the
-/// documented GH #541 scalar-helper limitation (`hoist_capture` outside A2A
-/// context captures a wildcard-subscripted arrayed arg into an ill-typed
-/// *scalar* helper). That residual is a separate defect from #738 -- the
+/// whose ceteris-paribus partial contains `PREVIOUS(pop[*])`, an array-valued
+/// snapshot in a SCALAR equation, which codegen refuses. That residual is a
+/// separate defect from #738 -- the
 /// loop score consuming that direct link stays 0 pending GH #737's
 /// routing fix anyway. The second assertion TOLERATES the residual rather
 /// than REQUIRING it: any unexpected failure still trips it, but fixing

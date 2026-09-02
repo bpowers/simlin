@@ -231,10 +231,25 @@ impl<'a> Expr2Context for ArrayContext<'a> {
     }
 }
 
-pub(crate) fn lower_ast(scope: &ScopeStage0, ast: &Ast<Expr0>) -> EquationResult<Ast<Expr2>> {
+/// Lower one equation's parsed AST to `Expr2`.
+///
+/// `element_scoped` is true for a per-element helper's scalar equation
+/// (`variable::ElementScope`): its body was written inside an apply-to-all
+/// body, so it is lowered in the array context that body has, where a
+/// dimension name is a reference to be resolved rather than a name that
+/// cannot appear in a scalar equation.
+pub(crate) fn lower_ast(
+    scope: &ScopeStage0,
+    ast: &Ast<Expr0>,
+    element_scoped: bool,
+) -> EquationResult<Ast<Expr2>> {
     match ast {
         Ast::Scalar(expr) => {
-            let mut ctx = ArrayContext::new(scope, scope.model_name);
+            let mut ctx = if element_scoped {
+                ArrayContext::with_array_context(scope, scope.model_name)
+            } else {
+                ArrayContext::new(scope, scope.model_name)
+            };
             Expr1::from(expr)
                 .map(|expr| expr.constify_dimensions(scope))
                 .and_then(|expr| Expr2::from(expr, &mut ctx))

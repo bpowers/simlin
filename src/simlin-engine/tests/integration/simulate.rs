@@ -967,6 +967,94 @@ fn ensure_wasm_matches_runs_supported_scalar_model() {
     );
 }
 
+/// `DELAYN`/`SMTHN` with no initial value are the canonical
+/// `DELAY1`/`DELAY3`/`SMTH1`/`SMTH3` with the INPUT as the initial value (the
+/// stdlib model's `isModuleInput(initial_value)` guard, XMILE 1.0 section
+/// 3.5.3), an explicit fourth argument is that twin with the argument as the
+/// initial value, and `DELAY` is `DELAY1` -- on the VM, on wasm
+/// (`ensure_wasm_matches` panics on any divergence), and across a reset and
+/// rerun. The input varies in time so the initial value is observable: the
+/// default twins start at the input's `t0` value, the explicit ones at 7.
+#[test]
+fn delayn_and_smthn_omitted_initial_values_are_the_input_on_both_backends() {
+    use simlin_engine::common::Ident;
+
+    let datamodel = simlin_engine::test_common::TestProject::new("alias_init")
+        .with_sim_time(0.0, 10.0, 0.5)
+        .aux("inp", "10 + TIME", None)
+        .aux("d1_default", "DELAYN(inp, 2, 1)", None)
+        .aux("d1_twin", "DELAY1(inp, 2, inp)", None)
+        .aux("d3_default", "DELAYN(inp, 2, 3)", None)
+        .aux("d3_twin", "DELAY3(inp, 2, inp)", None)
+        .aux("s1_default", "SMTHN(inp, 2, 1)", None)
+        .aux("s1_twin", "SMTH1(inp, 2, inp)", None)
+        .aux("s3_default", "SMTHN(inp, 2, 3)", None)
+        .aux("s3_twin", "SMTH3(inp, 2, inp)", None)
+        .aux("d3_explicit", "DELAYN(inp, 2, 3, 7)", None)
+        .aux("d3_explicit_twin", "DELAY3(inp, 2, 7)", None)
+        .aux("s1_explicit", "SMTHN(inp, 2, 1, 7)", None)
+        .aux("s1_explicit_twin", "SMTH1(inp, 2, 7)", None)
+        .aux("alias", "DELAY(inp, 2)", None)
+        .aux("alias_twin", "DELAY1(inp, 2)", None)
+        .build_datamodel();
+
+    let expected = vm_results(&datamodel);
+    let series = |results: &Results, name: &str| -> Vec<f64> {
+        let off = results.offsets[&Ident::new(name)];
+        (0..results.step_count)
+            .map(|step| results.data[step * results.step_size + off])
+            .collect()
+    };
+    for (spelling, twin) in [
+        ("d1_default", "d1_twin"),
+        ("d3_default", "d3_twin"),
+        ("s1_default", "s1_twin"),
+        ("s3_default", "s3_twin"),
+        ("d3_explicit", "d3_explicit_twin"),
+        ("s1_explicit", "s1_explicit_twin"),
+        ("alias", "alias_twin"),
+    ] {
+        assert_eq!(
+            series(&expected, spelling),
+            series(&expected, twin),
+            "{spelling} is {twin}"
+        );
+    }
+    // The initial value is observable, so the equalities above are not
+    // trivially true: the default and explicit spellings differ at t0.
+    for (default, explicit) in [("d3_default", "d3_explicit"), ("s1_default", "s1_explicit")] {
+        assert_ne!(
+            series(&expected, default)[0],
+            series(&expected, explicit)[0],
+            "{default} starts at the input, {explicit} at 7"
+        );
+    }
+
+    // A reset and rerun reproduces every series bit for bit.
+    let mut vm = Vm::new(compile_vm(&datamodel)).unwrap();
+    vm.run_to(4.0).unwrap();
+    vm.reset();
+    vm.run_to_end().unwrap();
+    let rerun = vm.into_results();
+    // Bit for bit: an unwired `initial_value` port's slot holds NaN, which
+    // `==` never equates.
+    assert!(
+        rerun.data.len() == expected.data.len()
+            && rerun
+                .data
+                .iter()
+                .zip(expected.data.iter())
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+        "a reset VM reruns to the same series"
+    );
+
+    let outcome = ensure_wasm_matches(&datamodel, "main", &expected, &[]);
+    assert!(
+        matches!(outcome, WasmRunOutcome::Ran),
+        "the alias spellings must run through the wasm backend, got {outcome:?}"
+    );
+}
+
 /// GH #1027: a star range over a NON-CONTIGUOUS subdimension survives a
 /// transpose, both as the operand of a reducer and read per element.
 ///
@@ -5817,10 +5905,11 @@ fn simulates_macro_multi_output_mdl() {
 // ===========================================================================
 // Phase 4 / Task 2: arrayed (apply-to-all) macro invocation
 //
-// Phase 3 made `instantiate_implicit_modules`'s apply-to-all path
-// macro-aware (`contains_module_call`), so an arrayed macro invocation
-// `out[Region] = SCALE(inp[Region], factor)` rides the EXISTING per-element
-// module-expansion machinery -- one independent synthetic Variable::Module
+// `instantiate_implicit_modules`'s apply-to-all path is macro-aware
+// (`per_element_requirements` follows `MacroRegistry::resolve_call`), so an
+// arrayed macro invocation `out[Region] = SCALE(inp[Region], factor)` rides
+// the per-element module-expansion machinery -- one independent synthetic
+// Variable::Module
 // per dimension element -- with no new mechanism. These tests verify that
 // (macros.AC3.4) and the per-element-independent-stock edge (macros.AC3.5).
 //
@@ -6746,6 +6835,13 @@ fn corpus_clearn_macros_import() {
 /// helpers of the removed scores, +330), from the release LTM
 /// `bytecode_profile`; the margin is 36,138 free against the 65,536-slot
 /// ceiling.
+///
+/// The count is unchanged by structural captures, which change the HELPERS of
+/// the generated equations, not the equations: a generated snapshot argument
+/// subscripted by a mapped foreign dimension (`PREVIOUS(x[aggregated_regions])`)
+/// captures where the per-element substitution read the slot directly, seven
+/// arrayed helpers of three scores, so the width is 29,398 -> 29,447 slots
+/// and the margin 36,089 free against the 65,536-slot ceiling.
 ///
 /// The pin below catches emission changes in EITHER direction, and re-deriving
 /// it means re-measuring BOTH numbers, not just the count.

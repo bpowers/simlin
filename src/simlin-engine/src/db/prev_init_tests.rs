@@ -740,12 +740,13 @@ fn test_ltm_bare_element_subscripts_no_helpers() {
 /// share ONE arrayed `rate[a1] -> grow` score over `DimA`; `rate[b2]` -- the
 /// element winning over the same-named variable `b2`, XMILE footnote 9 --
 /// gets its own arrayed score; and only the dynamic `rate[idx]` keeps a
-/// capture per target element with a scalar score node each.
+/// capture: ONE structural capture over `DimA` (the body is snapshot-only, so
+/// it is captured once, not per element), scored as the arrayed source it is.
 ///
 /// The values say the topology change is representation only: `idx` is `2`,
 /// so the dynamic read and `rate[b2]` are the same value with the same
-/// per-step change, and the capture score for each target element equals
-/// that element of the direct `rate[b2] -> grow` score.
+/// per-step change, and each element of the capture's score equals that
+/// element of the direct `rate[b2] -> grow` score.
 #[test]
 fn ltm_snapshot_element_reads_preserve_score_topology_and_values() {
     use salsa::Setter;
@@ -784,11 +785,8 @@ fn ltm_snapshot_element_reads_preserve_score_topology_and_values() {
     helper_names.sort();
     assert_eq!(
         helper_names,
-        [
-            "$\u{205A}grow\u{205A}0\u{205A}arg0\u{205A}a1",
-            "$\u{205A}grow\u{205A}0\u{205A}arg0\u{205A}b2",
-        ],
-        "only the dynamic read captures, once per target element"
+        ["$\u{205A}grow\u{205A}0\u{205A}arg0"],
+        "only the dynamic read captures, once, structurally over DimA"
     );
 
     let ltm = model_ltm_variables(&db, model, sync.project);
@@ -815,16 +813,14 @@ fn ltm_snapshot_element_reads_preserve_score_topology_and_values() {
         .collect();
     assert_eq!(
         capture_scores.len(),
-        2,
-        "one dynamic call site times two target elements is two scalar scores; \
-         got {:?}",
+        1,
+        "one dynamic call site is one arrayed capture with one arrayed score; got {:?}",
         capture_scores.iter().map(|v| &v.name).collect::<Vec<_>>()
     );
-    assert!(
-        capture_scores
-            .iter()
-            .all(|score| score.dimensions.is_empty()),
-        "a capture's score is scalar"
+    assert_eq!(
+        capture_scores[0].dimensions,
+        ["DimA"],
+        "the capture's score has the capture's shape"
     );
 
     let compiled = compile_project_incremental(&db, sync.project, "main").expect("compiles");
@@ -850,12 +846,9 @@ fn ltm_snapshot_element_reads_preserve_score_topology_and_values() {
     }
     for (slot, element) in ["a1", "b2"].into_iter().enumerate() {
         let direct = element_series(direct_names[1], slot);
-        let capture = capture_scores
-            .iter()
-            .find(|score| score.name.ends_with(&format!("\u{2192}grow[{element}]")))
-            .unwrap_or_else(|| panic!("a capture score for grow[{element}]"));
+        let capture = element_series(&capture_scores[0].name, slot);
         assert_eq!(
-            results[&capture.name], direct,
+            capture, direct,
             "grow[{element}]: the capture's score is the direct read's score"
         );
     }
@@ -909,7 +902,7 @@ fn an_elm_map_over_a_bare_element_snapshot_ranges_over_the_variable() {
 /// compiler: the runlists a capture is in, and the fragments it has, are its
 /// kind. The shapes are the enumeration of `hoist_capture`'s arms and of
 /// what a body can hold -- a computed scalar, a runtime-selected element, an
-/// array-valued nested snapshot (the GH #541 arrayed capture), and a body
+/// array-valued nested snapshot (a structural apply-to-all capture), and a body
 /// whose only dependency is an `INIT` read (the "fully determined at
 /// initialization" seed signature, which must not seed a `PREVIOUS` capture).
 #[test]
@@ -1309,10 +1302,11 @@ struct AgreementRow {
 ///
 /// Rows are derived from BOTH of the rule sets that statement replaced:
 ///
-/// * the parse's, `BuiltinVisitor`'s `needs_temp_arg`/`arg_is_array_shaped` --
+/// * the parse's (`BuiltinVisitor::snapshot_arg` over the source argument) --
 ///   a `Var` whose base is or is not module-backed, a `Subscript` whose every
-///   index is static / leaves a dimension standing / is dynamic, and the
-///   catch-all for anything that is not a reference;
+///   index is static / leaves a dimension standing (one of the parent's axes,
+///   or a dimension one of them relates to) / is dynamic, and the catch-all
+///   for anything that is not a reference;
 /// * codegen's, `static_slot` plus `Compiler::snapshot_static_view` -- an
 ///   `Expr::Var`, a `StaticSubscript` that collapsed to one element, a
 ///   `StaticSubscript` with dimensions standing, and the refusals.
@@ -1430,6 +1424,17 @@ fn every_prev_init_argument_shape_agrees_between_the_parse_and_codegen() {
             divergence: None,
         },
         AgreementRow {
+            covers: "visitor: Subscript naming a FOREIGN dimension the parent's axis relates \
+                     to through a declared mapping (`other` maps to `d`), the compiler's \
+                     `active_dim_ref` matcher under `DirectMappingsOnly`. codegen: collapsed \
+                     StaticSubscript",
+            a2a: true,
+            equation: "PREVIOUS(vals_o[other], 0)",
+            captures: false,
+            codegen: Some(SnapshotAccess::Slot),
+            divergence: None,
+        },
+        AgreementRow {
             covers: "visitor: the catch-all, an argument that is no reference at all. \
                      codegen: Expr::Op2",
             a2a: false,
@@ -1541,7 +1546,9 @@ fn every_prev_init_argument_shape_agrees_between_the_parse_and_codegen() {
             let base = TestProject::new("prev_init_agreement")
                 .with_sim_time(0.0, 2.0, 1.0)
                 .named_dimension("d", &["e1", "e2", "e3"])
+                .named_dimension_with_mapping("other", &["o1", "o2", "o3"], "d")
                 .array_with_ranges("vals[d]", vec![("e1", "30"), ("e2", "10"), ("e3", "20")])
+                .array_with_ranges("vals_o[other]", vec![("o1", "3"), ("o2", "1"), ("o3", "2")])
                 .scalar_aux("k", "3")
                 .aux("idx", "1 + MIN(TIME, 1)", None)
                 .aux("smoothed", "SMTH1(k, 2)", None);

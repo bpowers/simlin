@@ -117,14 +117,16 @@ fn resolve_relative<'a>(
 /// channel.
 pub(crate) fn lower_variable(scope: &ScopeStage0, var_s0: &VariableStage0) -> Variable {
     let mut errors = var_s0.errors.clone();
+    let element_scoped = var_s0.element_scope().is_some();
     let mut lower = |ast: &Option<Ast<Expr0>>| -> Option<Ast<Expr2>> {
-        ast.as_ref().and_then(|ast| match lower_ast(scope, ast) {
-            Ok(ast) => Some(ast),
-            Err(err) => {
-                errors.push(err);
-                None
-            }
-        })
+        ast.as_ref()
+            .and_then(|ast| match lower_ast(scope, ast, element_scoped) {
+                Ok(ast) => Some(ast),
+                Err(err) => {
+                    errors.push(err);
+                    None
+                }
+            })
     };
 
     let kind = match &var_s0.kind {
@@ -146,6 +148,7 @@ pub(crate) fn lower_variable(scope: &ScopeStage0, var_s0: &VariableStage0) -> Va
             non_negative,
             is_flow,
             is_table_only,
+            element_scope,
         } => VarKind::Aux {
             ast: lower(ast),
             init_ast: lower(init_ast),
@@ -153,6 +156,7 @@ pub(crate) fn lower_variable(scope: &ScopeStage0, var_s0: &VariableStage0) -> Va
             non_negative: *non_negative,
             is_flow: *is_flow,
             is_table_only: *is_table_only,
+            element_scope: element_scope.clone(),
         },
         VarKind::Module { model_name, inputs } => {
             let resolved = inputs.iter().map(|mi| {
@@ -584,6 +588,7 @@ fn lower_variable_preserves_every_field_of_every_kind() {
                     non_negative: p_nn,
                     is_flow: p_flow,
                     is_table_only: p_table_only,
+                    element_scope: p_scope,
                 },
                 VarKind::Aux {
                     ast: l_ast,
@@ -592,6 +597,7 @@ fn lower_variable_preserves_every_field_of_every_kind() {
                     non_negative: l_nn,
                     is_flow: l_flow,
                     is_table_only: l_table_only,
+                    element_scope: l_scope,
                 },
             ) => {
                 if *l_flow {
@@ -603,6 +609,7 @@ fn lower_variable_preserves_every_field_of_every_kind() {
                 assert_eq!(p_nn, l_nn, "{ident}: non_negative");
                 assert_eq!(p_flow, l_flow, "{ident}: is_flow");
                 assert_eq!(p_table_only, l_table_only, "{ident}: is_table_only");
+                assert_eq!(p_scope, l_scope, "{ident}: element_scope");
                 assert_eq!(p_ast.is_some(), l_ast.is_some(), "{ident}: ast");
                 assert_eq!(p_init.is_some(), l_init.is_some(), "{ident}: init_ast");
                 assert!(l_ast.is_some(), "{ident}: the aux/flow has an equation");

@@ -488,6 +488,7 @@ fn var_with_expr(expr: Expr2) -> Variable {
             non_negative: false,
             is_flow: false,
             is_table_only: false,
+            element_scope: None,
         },
     }
 }
@@ -716,6 +717,7 @@ fn test_classify_reducer_no_ast() {
             non_negative: false,
             is_flow: false,
             is_table_only: false,
+            element_scope: None,
         },
     };
     let result = classify_reducer(&var, "population");
@@ -3921,6 +3923,7 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
             non_negative: false,
             is_flow: false,
             is_table_only: false,
+            element_scope: None,
         },
     };
     let from = Ident::<Canonical>::new("driver");
@@ -4035,6 +4038,7 @@ fn flow_to_stock_test_flow(ident: &str, eqn: Equation) -> Variable {
             non_negative: false,
             is_flow: true,
             is_table_only: false,
+            element_scope: None,
         },
     }
 }

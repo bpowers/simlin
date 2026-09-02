@@ -30,10 +30,12 @@ use crate::db::{
 };
 use crate::test_common::TestProject;
 
-/// An A2A SMTH1 whose argument is an array slice: the per-element capture
-/// helper `$⁚out⁚0⁚arg0⁚{elem}` holds `vals[*]` in a SCALAR equation, which
-/// codegen rejects ("an array of shape [2] is used where a single value is
-/// required").
+/// A scalar SMTH1 whose argument is an array slice: the hoisted helper
+/// `$⁚out⁚0⁚arg0` holds `vals[*]` in a SCALAR equation, which codegen rejects
+/// ("an array of shape [2] is used where a single value is required"). Two
+/// such calls, so the attribution is once per helper. (Under an apply-to-all
+/// parent the same argument is one element of the body and reads the active
+/// element, as the plain equation does, so it compiles.)
 /// The model does not compile -- the point of the fixture is what the
 /// diagnostics SAY about that.
 fn failing_implicit_fixture() -> TestProject {
@@ -41,8 +43,8 @@ fn failing_implicit_fixture() -> TestProject {
         .with_sim_time(0.0, 4.0, 1.0)
         .named_dimension("C", &["c1", "c2"])
         .array_with_ranges("vals[C]", vec![("c1", "s"), ("c2", "s * 2")])
-        .array_aux("out[C]", "SMTH1(vals[*], 3)")
-        .flow("g", "(out[c1] + 1) * 0.01", None)
+        .aux("out", "SMTH1(vals[*], 3) + SMTH1(vals[*], 5)", None)
+        .flow("g", "(out + 1) * 0.01", None)
         .stock("s", "10", &["g"], &[], None)
 }
 
@@ -59,7 +61,8 @@ fn implicit_helper_codegen_failure_is_attributed() {
         .iter()
         .filter(|d| match &d.error {
             DiagnosticError::Assembly(msg) => {
-                msg.contains("$\u{205A}out\u{205A}0\u{205A}arg0")
+                msg.contains("$\u{205A}out\u{205A}")
+                    && msg.contains("\u{205A}arg0")
                     && msg.contains("failed to compile")
             }
             _ => false,
@@ -96,20 +99,22 @@ fn implicit_helper_codegen_failure_is_attributed() {
     assert_eq!(
         attributed.len(),
         2,
-        "exactly one row per failing helper (c1, c2): {attributed:#?}"
+        "exactly one row per failing helper (the two calls' arg0): {attributed:#?}"
     );
 }
 
-/// A helper whose BODY fails to lower is reported on the PARENT variable, at
-/// the span of the argument inside the parent's equation, as the equation
-/// error it is -- not as an assembly row naming a helper the user never wrote.
+/// A helper whose BODY the compiler refuses is reported on the PARENT
+/// variable, at the span of the argument inside the parent's equation, with
+/// the code the plain equation is refused with -- not as an assembly row
+/// naming a helper the user never wrote.
 ///
 /// `x` is declared over `Region` and read as `x[Region]` inside an
-/// apply-to-all over `State` with no relation between the two, so the hoisted
-/// per-element helper keeps `x[region]` and `Expr2` lowering refuses it as a
-/// dimension in scalar context. The three per-element helpers refuse the same
-/// construct at the same span, which is one row, and the CLI's rendering
-/// underlines the argument in the parent's equation.
+/// apply-to-all over `State` with no relation between the two. The hoisted
+/// helper is one element of that body, so the compiler refuses it exactly as
+/// it refuses `target[State] = x[Region]`: `MismatchedDimensions`. The three
+/// per-element helpers refuse the same construct at the same span, which is
+/// one row, and the CLI's rendering underlines the argument in the parent's
+/// equation.
 #[test]
 fn implicit_helper_lowering_failure_is_an_equation_error_on_the_parent() {
     use crate::common::ErrorCode;
@@ -148,7 +153,7 @@ fn implicit_helper_lowering_failure_is_an_equation_error_on_the_parent() {
             d.variable.as_deref() == Some("target")
                 && matches!(
                     &d.error,
-                    DiagnosticError::Equation(e) if e.code == ErrorCode::DimensionInScalarContext
+                    DiagnosticError::Equation(e) if e.code == ErrorCode::MismatchedDimensions
                 )
         })
         .collect();
@@ -187,7 +192,7 @@ fn implicit_helper_lowering_failure_is_an_equation_error_on_the_parent() {
         "the underline sits inside the argument; rendered:\n{message}"
     );
     assert!(
-        message.contains("variable 'target'") && message.contains("dimension_in_scalar_context"),
+        message.contains("variable 'target'") && message.contains("mismatched_dimensions"),
         "rendered:\n{message}"
     );
 }

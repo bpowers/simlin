@@ -462,6 +462,7 @@ fn test_arrayed_default_equation_applies_to_missing_elements() {
             non_negative: false,
             is_flow: false,
             is_table_only: false,
+            element_scope: None,
         },
     };
 
@@ -673,6 +674,7 @@ impl Var {
                     VarKind::Aux {
                         tables,
                         is_table_only,
+                        element_scope,
                         ..
                     } => {
                         // A standalone lookup-only table is a static table consulted
@@ -698,10 +700,31 @@ impl Var {
                             return sim_err!(EmptyEquation, var.ident().to_string());
                         };
                         let (exprs, target) = match ast {
-                            Ast::Scalar(ast) => (
-                                vec![Expr::AssignCurr(base.clone(), Box::new(ctx.lower(ast)?))],
-                                None,
-                            ),
+                            // A per-element helper's scalar body is one
+                            // element of its parent's apply-to-all body: it is
+                            // lowered under that element, exactly as
+                            // `expand_per_element` lowers the element's own
+                            // slot, and its one assignment names the element
+                            // for the materializer.
+                            Ast::Scalar(ast) => match element_scope {
+                                Some(scope) => {
+                                    let (dims, elem_ctx, element) =
+                                        ctx.element_scope_context(scope)?;
+                                    let expr = lower_element(ctx, &elem_ctx, ast)?;
+                                    (
+                                        vec![Expr::AssignCurr(base.clone(), Box::new(expr))],
+                                        Some(array_operand::ElementTarget {
+                                            base: base.clone(),
+                                            view: array_view_from_dims(&dims),
+                                            element: Some(element),
+                                        }),
+                                    )
+                                }
+                                None => (
+                                    vec![Expr::AssignCurr(base.clone(), Box::new(ctx.lower(ast)?))],
+                                    None,
+                                ),
+                            },
                             Ast::ApplyToAll(dims, ast) => (
                                 expand_per_element(
                                     ctx,
@@ -1383,7 +1406,22 @@ fn element_target(base: &VarRef, dims: &[Dimension]) -> array_operand::ElementTa
     array_operand::ElementTarget {
         base: base.clone(),
         view: array_view_from_dims(dims),
+        element: None,
     }
+}
+
+/// Lower `ast` as the element `elem_ctx` is active for: the one lowering an
+/// apply-to-all element gets, whether the element is one slot of an arrayed
+/// variable or the whole body of a per-element helper
+/// (`variable::ElementScope`).
+fn lower_element(ctx: &Context, elem_ctx: &Context, ast: &crate::ast::Expr2) -> Result<Expr> {
+    // GH #578: fold a scalar-source / constant-offset ELM MAP to a direct
+    // slot read before the materializer sees it. The array-producing opcode
+    // needs a *view* offset, which a per-element constant cannot supply, so
+    // this fold is what lets the shape compile at all.
+    let mut expr = elem_ctx.lower(ast)?;
+    fold_scalar_source_elm_maps(ctx, &mut expr);
+    Ok(expr)
 }
 
 /// Lower an apply-to-all or arrayed equation into one assignment per element.
@@ -1421,12 +1459,7 @@ fn expand_per_element(
             continue;
         };
         let elem_ctx = ctx.with_active_subscripts(active_dims.clone(), &subscripts);
-        // GH #578: fold a scalar-source / constant-offset ELM MAP to a direct
-        // slot read before the materializer sees it. The array-producing opcode
-        // needs a *view* offset, which a per-element constant cannot supply, so
-        // this fold is what lets the shape compile at all.
-        let mut main_expr = elem_ctx.lower(ast)?;
-        fold_scalar_source_elm_maps(ctx, &mut main_expr);
+        let main_expr = lower_element(ctx, &elem_ctx, ast)?;
         exprs.push(Expr::AssignCurr(base.offset_by(i), Box::new(main_expr)));
     }
     Ok(exprs)

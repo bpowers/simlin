@@ -136,6 +136,12 @@ pub(super) struct ElementTarget {
     /// The variable's own dimensions, contiguous -- the space
     /// [`super::project_var_index_to_temp`] projects an element index FROM.
     pub(super) view: ArrayView,
+    /// The one element every assignment writes, when the fragment is a
+    /// per-element helper's: its scalar slot is element `element` of `view`
+    /// (`variable::ElementScope`), which the assignment's own offset -- the
+    /// helper's slot 0 -- cannot say. `None` for an arrayed variable, whose
+    /// assignments name their element by offset.
+    pub(super) element: Option<usize>,
 }
 
 /// How the expression under rewrite is consumed.
@@ -369,6 +375,9 @@ impl Materializer<'_> {
             Expr::AssignCurr(dst, _) | Expr::AssignNext(dst, _) => dst,
             _ => return None,
         };
+        if let Some(element) = target.element {
+            return Some(element);
+        }
         (dst.name == target.base.name && dst.element_offset >= target.base.element_offset)
             .then(|| dst.element_offset - target.base.element_offset)
     }

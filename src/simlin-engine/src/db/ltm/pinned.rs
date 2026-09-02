@@ -22,10 +22,11 @@ use crate::common::{Canonical, Ident};
 use crate::db::{
     CycleClass, Db, LoopCircuitsResult, ModuleInputSet, SourceModel, SourceProject, SourceVariable,
     SourceVariableKind, causal_graph_with_modules, classify_cycle, model_edge_shapes,
-    model_element_causal_edges, project_datamodel_dims, variable_dimensions,
-    variable_direct_dependencies,
+    model_element_causal_edges, project_datamodel_dims, variable_direct_dependencies,
 };
 use crate::ltm::{Loop, strip_subscript};
+
+use super::endpoint_dimensions;
 
 use super::loops::{
     build_a2a_loop_stocks, build_element_level_loops, cross_agg_loop_budget,
@@ -210,10 +211,7 @@ pub(crate) fn model_pinned_loops(
         // as scalar graph nodes.
         let cycle_strs: Vec<String> = cycle.iter().map(|c| c.as_str().to_string()).collect();
         let dim_lookup = |name: &str| -> Vec<crate::dimensions::Dimension> {
-            source_vars
-                .get(name)
-                .map(|sv| variable_dimensions(db, *sv, project).to_vec())
-                .unwrap_or_default()
+            endpoint_dimensions(db, model, project, name).unwrap_or_default()
         };
         let loops = match classify_cycle(&cycle_strs, edge_shapes, &dim_lookup) {
             // PureScalar: the pre-#653 scalar construction is correct.
@@ -222,15 +220,7 @@ pub(crate) fn model_pinned_loops(
                 vec![build_a2a_pin_loop(&graph, &cycle, id, &dimensions, dm_dims)]
             }
             CycleClass::CrossElementOrMixed => {
-                match expand_pin_on_element_graph(
-                    db,
-                    model,
-                    project,
-                    &graph,
-                    &cycle,
-                    source_vars,
-                    dm_dims,
-                ) {
+                match expand_pin_on_element_graph(db, model, project, &graph, &cycle, dm_dims) {
                     Ok(mut loops) => {
                         // A pin expanded through a hoisted reducer carries
                         // synthetic-agg hops, which come back Unknown-polarity
@@ -364,7 +354,6 @@ fn expand_pin_on_element_graph(
     project: SourceProject,
     var_graph: &crate::ltm::CausalGraph,
     cycle: &[Ident<Canonical>],
-    source_vars: &HashMap<String, SourceVariable>,
     dm_dims: &[crate::datamodel::Dimension],
 ) -> Result<Vec<Loop>, String> {
     let pin_var_set: HashSet<&str> = cycle.iter().map(|c| c.as_str()).collect();
@@ -455,7 +444,6 @@ fn expand_pin_on_element_graph(
     let (loops, _truncated_aggs) = build_element_level_loops(
         &filtered,
         var_graph,
-        source_vars,
         db,
         model,
         project,

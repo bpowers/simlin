@@ -213,9 +213,8 @@ pub fn resolve_axis_index_name(
 /// * a QUALIFIED `dimension·element` reference, which
 ///   [`DimensionsContext::lookup`] turns into that element's 1-based index
 ///   *within the dimension it names* and `Expr1::constify_dimensions` rewrites
-///   into an `Expr1::Const`. This is the form
-///   `builtins_visitor::substitute_dimension_refs` synthesizes for every
-///   per-element expansion.
+///   into an `Expr1::Const`. This is the form the LTM equation generator
+///   writes for an element it pins (`ltm_augment`).
 ///
 /// In both cases `compiler::subscript::normalize_subscripts3` lowers the
 /// constant to `IndexOp::Single(value - 1)` -- a raw offset into the

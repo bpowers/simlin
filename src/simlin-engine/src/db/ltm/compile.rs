@@ -22,20 +22,21 @@ use crate::common::{Canonical, Ident, IdentMap};
 
 use crate::compiler::fragment::{DepShape, FragmentInput, lower_fragment};
 use crate::db::var_fragment::{
-    dep_head, dimensions_named, implicit_dep_shape, is_implicit_global, source_dep_shape,
+    dep_head, dimensions_named, implicit_dep_shape, is_implicit_global, model_dep_shape,
+    source_dep_shape,
 };
 use crate::db::{
     Db, LtmLinkId, LtmSyntheticVar, RefShape, SourceModel, SourceProject, SourceVariableKind,
     VarFragmentResult, build_module_inputs, canonical_module_input_set,
     compile_phase_to_per_var_bytecodes, extract_tables_from_source_var, model_implicit_var_info,
     module_dep_shape, module_input_prefix, project_converted_dimensions,
-    project_dimensions_context, reconstruct_single_variable, variable_dimensions,
+    project_dimensions_context, reconstruct_single_variable,
 };
 
 use super::parse::{parse_ltm_equation, scalarize_ltm_equation};
 use super::{
-    LtmEquation, LtmImplicitVarMeta, model_ltm_implicit_var_info, model_ltm_var_name_index,
-    model_ltm_variables,
+    LtmEquation, LtmImplicitVarMeta, endpoint_dimensions, model_ltm_implicit_var_info,
+    model_ltm_var_name_index, model_ltm_variables,
 };
 
 /// Compile a single LTM synthetic variable's equation to symbolic
@@ -296,17 +297,11 @@ pub fn link_score_equation_text_shaped<'db>(
     // `[NYC]` against the source's actual dimensions. For scalar sources
     // this is empty, which is the right input for Bare-shape calls (no
     // subscripts to classify).
-    let source_dim_elements: Vec<Vec<String>> =
-        if let Some(from_sv) = model.variables(db).get(from_name) {
-            variable_dimensions(db, *from_sv, project)
-                .iter()
-                .map(crate::ltm_augment::dimension_element_names)
-                .collect()
-        } else {
-            // Implicit variables (SMOOTH/DELAY expansions) aren't in
-            // source_vars and are scalar by construction.
-            Vec::new()
-        };
+    let source_dim_elements: Vec<Vec<String>> = endpoint_dimensions(db, model, project, from_name)
+        .unwrap_or_default()
+        .iter()
+        .map(crate::ltm_augment::dimension_element_names)
+        .collect();
 
     let mut all_vars = HashMap::new();
     if let Some(ref fv) = from_var {
@@ -338,12 +333,8 @@ pub fn link_score_equation_text_shaped<'db>(
             crate::variable::identifier_set(ast, target_ast_dims, None)
                 .into_iter()
                 .filter_map(|dep| {
-                    let sv = model.variables(db).get(dep.as_str())?;
-                    if sv.kind(db) == SourceVariableKind::Module {
-                        return None;
-                    }
-                    let dims = variable_dimensions(db, *sv, project);
-                    (!dims.is_empty()).then(|| (dep.as_str().to_string(), dims.clone()))
+                    let dims = endpoint_dimensions(db, model, project, dep.as_str())?;
+                    (!dims.is_empty()).then(|| (dep.as_str().to_string(), dims))
                 })
                 .collect()
         })
@@ -675,18 +666,15 @@ pub(crate) fn ltm_fragment_input<'db>(
     let var_name_canonical = canonicalize(var_name).into_owned();
     let var_ident: Ident<Canonical> = Ident::new(&var_name_canonical);
     let source_vars = model.variables(db);
-    let implicit_info = model_implicit_var_info(db, model, project);
-    let ltm_implicit_info = model_ltm_implicit_var_info(db, model, project);
 
-    // A helper this equation's own parse synthesized, by canonical name.
+    // A helper this equation's own parse synthesized, by canonical name: an
+    // arbitrary equation's helpers (a loop score compiled outside
+    // `model_ltm_variables`) are in no model-wide map.
     let parsed_implicit = |name: &str| {
         parsed
             .implicit_vars
             .iter()
             .find(|v| canonicalize(v.ident()) == name)
-    };
-    let helper_dims = |helper: &crate::capture::ImplicitVar| {
-        dimensions_named(helper.equation_dims(), dim_context)
     };
 
     let mut deps: IdentMap<Ident<Canonical>, DepShape> = Default::default();
@@ -704,31 +692,13 @@ pub(crate) fn ltm_fragment_input<'db>(
         if head == var_name_canonical || is_implicit_global(head) || deps.contains_key(head) {
             continue;
         }
-        let shape = if let Some(sv) = source_vars.get(head) {
-            source_dep_shape(db, *sv, project)
-        } else if let Some(helper) = parsed_implicit(head) {
+        let shape = if let Some(helper) = parsed_implicit(head) {
             match helper.module() {
                 Some(dm_module) => module_dep_shape(db, project, &dm_module.model_name),
-                None => DepShape::var(helper_dims(helper)),
+                None => DepShape::var(dimensions_named(helper.equation_dims(), dim_context)),
             }
-        } else if let Some(meta) = implicit_info.get(head) {
-            implicit_dep_shape(db, project, meta)
-        } else if let Some(meta) = ltm_implicit_info.get(head) {
-            if meta.is_module {
-                module_dep_shape(db, project, meta.model_name.as_deref().unwrap_or(""))
-            } else {
-                DepShape::var(helper_dims(&meta.variable))
-            }
-        } else if let Some(&idx) = model_ltm_var_name_index(db, model, project).get(head) {
-            // Another LTM synthetic variable. The indexed lookup matters: most
-            // unresolved deps here are PREVIOUS-helper names that are NOT LTM
-            // vars, and a linear scan over all LTM vars per dep was O(N^2)
-            // across a model's compile (~145k lookups over 6.7k vars on
-            // C-LEARN).
-            let lsv = &model_ltm_variables(db, model, project).vars[idx];
-            DepShape::var(dimensions_named(&lsv.dimensions, dim_context))
         } else {
-            DepShape::var(Vec::new())
+            ltm_dep_shape(db, model, project, head).unwrap_or_else(|| DepShape::var(Vec::new()))
         };
         deps.insert(Ident::new(head), shape);
     }
@@ -768,6 +738,43 @@ pub(crate) fn ltm_fragment_input<'db>(
         converted_dims,
         dim_context,
     ))
+}
+
+/// The shape of a name an LTM equation or an LTM helper references:
+/// [`model_dep_shape`]'s answer for an explicit variable or one of the model's
+/// own helpers, plus the two kinds only a generated equation can reference --
+/// an LTM helper (a structural capture is arrayed) and an LTM synthetic
+/// variable. `None` for a name nothing declares. One statement, so a helper's
+/// fragment and its parent's shape a shared dependency identically: a
+/// generated capture that reads a sibling capture arrayed over the parent's
+/// dimensions lowers `sibling[Dim]` against those dimensions.
+fn ltm_dep_shape(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    head: &str,
+) -> Option<DepShape> {
+    if let Some(shape) = model_dep_shape(db, model, project, head) {
+        return Some(shape);
+    }
+    let dim_context = project_dimensions_context(db, project);
+    if let Some(meta) = model_ltm_implicit_var_info(db, model, project).get(head) {
+        return Some(if meta.is_module {
+            module_dep_shape(db, project, meta.model_name.as_deref().unwrap_or(""))
+        } else {
+            DepShape::var(dimensions_named(meta.variable.equation_dims(), dim_context))
+        });
+    }
+    // Another LTM synthetic variable. The indexed lookup matters: most
+    // unresolved deps here are PREVIOUS-helper names that are NOT LTM vars,
+    // and a linear scan over all LTM vars per dep was O(N^2) across a
+    // model's compile (~145k lookups over 6.7k vars on C-LEARN).
+    let idx = *model_ltm_var_name_index(db, model, project).get(head)?;
+    let lsv = &model_ltm_variables(db, model, project).vars[idx];
+    Some(DepShape::var(dimensions_named(
+        &lsv.dimensions,
+        dim_context,
+    )))
 }
 
 /// Compile an arbitrary LTM `Equation` to symbolic bytecodes: its
@@ -1454,10 +1461,8 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
                 } else {
                     continue;
                 }
-            } else if let Some(dep_sv) = source_vars.get(head) {
-                source_dep_shape(db, *dep_sv, project)
             } else {
-                DepShape::var(Vec::new())
+                ltm_dep_shape(db, model, project, head).unwrap_or_else(|| DepShape::var(Vec::new()))
             };
             deps.insert(Ident::new(head), shape);
         }

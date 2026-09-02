@@ -10,20 +10,23 @@ use indexmap::IndexMap;
 use crate::ast::{Ast, BinaryOp, Expr0, IndexExpr0, Literal};
 use crate::builtins::{UntypedBuiltinFn, is_builtin_fn};
 use crate::capture::{
-    Capture, CaptureKind, HoistedArg, ImplicitModule, ImplicitVar, insert_implicit_var,
+    Capture, CaptureKind, CaptureShape, HoistedArg, ImplicitModule, ImplicitVar, element_suffix,
+    insert_implicit_var,
 };
 use crate::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, EquationError, Ident, RawIdent,
     canonicalize,
 };
 use crate::dimensions::{
-    AxisIndexName, Dimension, DimensionsContext, SubscriptIterator, resolve_axis_index_name,
+    Axis, AxisIndexName, Dimension, DimensionsContext, DirectMappingsOnly, SubscriptIterator,
+    axes_of, match_axes_partial, resolve_axis_index_name,
 };
 use crate::eqn_err;
 use crate::module_functions::{
     MacroCallResolution, MacroRegistry, ModuleFunctionDescriptor, stdlib_descriptor,
 };
 use crate::snapshot_arg::{SnapshotAccess, SnapshotArg, SnapshotIndex};
+use crate::variable::ElementScope;
 
 /// An empty registry used when no project macros are in scope (the
 /// `BuiltinVisitor::new` constructor before `with_macro_registry` runs). Lets
@@ -94,49 +97,76 @@ pub enum SnapshotIndexFacts<'a> {
     NoModel,
 }
 
-/// Check if the expression contains any **module-function** call that needs
-/// per-element expansion in A2A context: a stdlib function, a project macro
-/// (consulted via `macro_registry`), or `init`/`previous` (which may need
-/// per-element temp vars though they create no standalone module).
+/// What an apply-to-all body asks of the expansion, from the calls it
+/// contains. Ordered, so a body's requirement is the maximum over its calls.
+// `Debug` is unconditional, as the crate keeps it for every type an
+// `assert_eq!` compares (the routing-arm table in `macro_expansion_tests`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PerElement {
+    /// Nothing that synthesizes a helper.
+    None,
+    /// Only `PREVIOUS`/`INIT`: the body stays one structural apply-to-all
+    /// equation, and a capture it needs is one structural helper over the
+    /// declared axes ([`crate::capture::CaptureShape::ApplyToAll`]), resolved
+    /// per element by ordinary lowering.
+    SnapshotOnly,
+    /// A stdlib or macro module call: an instance carries state and wiring of
+    /// its own, so the body is expanded into one equation per element, each
+    /// with its own instance, and every helper minted along the way is one
+    /// element's own ([`crate::variable::ElementScope`]).
+    ModuleInstance,
+}
+
+/// Classify every call in `expr` once, before any visitor is chosen: the
+/// expansion's shape is decided per body, and a walk cannot change shape
+/// halfway through.
 ///
-/// This is the recognition predicate that gates the `Ast::ApplyToAll` /
-/// `Ast::Arrayed` per-element expansion paths in `instantiate_implicit_modules`.
-/// Macro-awareness is what lets an *arrayed* macro invocation enter the
-/// per-element path (a scalar macro call expands via `walk()`'s `App`-arm
-/// change regardless); Phase 4's arrayed fixtures exercise this end-to-end.
-pub(crate) fn contains_module_call(expr: &Expr0, macro_registry: &MacroRegistry) -> bool {
+/// The stdlib predicate is [`crate::builtins::is_stdlib_module_function`],
+/// which is defined over the same descriptor table the expansion reads
+/// (`stdlib_descriptor`), so the two cannot drift. A macro call that the
+/// registry routes to the builtin rather than expanding -- a passthrough at an
+/// external call site, the enclosing macro's own renamed builtin (GH #554) --
+/// is classified as that builtin.
+pub(crate) fn per_element_requirements(
+    expr: &Expr0,
+    macro_registry: &MacroRegistry,
+    enclosing_model: Option<&str>,
+) -> PerElement {
     use Expr0::*;
+    let of = |e: &Expr0| per_element_requirements(e, macro_registry, enclosing_model);
     match expr {
-        Const(_, _, _) => false,
-        Var(_, _) => false,
+        Const(_, _, _) | Var(_, _) => PerElement::None,
         App(UntypedBuiltinFn(func, args), _) => {
-            // The gate over-approximates: a passthrough or a renamed self-call
-            // that lowers as a builtin still enters the per-element path, which
-            // only costs an `Ast::Arrayed` of identical slots.
-            if crate::builtins::is_stdlib_module_function(func.as_str())
-                || !matches!(
-                    macro_registry.resolve_call(func, None),
-                    MacroCallResolution::Unresolved
-                )
-                || matches!(func.as_str(), "init" | "previous")
-            {
-                return true;
-            }
-            args.iter().any(|a| contains_module_call(a, macro_registry))
+            let own = match macro_registry.resolve_call(func, enclosing_model) {
+                MacroCallResolution::Expand(_) => PerElement::ModuleInstance,
+                MacroCallResolution::Passthrough(_)
+                | MacroCallResolution::RenamedBuiltinSelfCall
+                | MacroCallResolution::Unresolved => {
+                    if crate::builtins::is_stdlib_module_function(func.as_str()) {
+                        PerElement::ModuleInstance
+                    } else if matches!(func.as_str(), "init" | "previous") {
+                        PerElement::SnapshotOnly
+                    } else {
+                        PerElement::None
+                    }
+                }
+            };
+            args.iter().map(of).fold(own, PerElement::max)
         }
-        Subscript(_, args, _) => args.iter().any(|idx| match idx {
-            IndexExpr0::Expr(e) => contains_module_call(e, macro_registry),
-            _ => false,
-        }),
-        Op1(_, r, _) => contains_module_call(r, macro_registry),
-        Op2(_, l, r, _) => {
-            contains_module_call(l, macro_registry) || contains_module_call(r, macro_registry)
-        }
-        If(cond, t, f, _) => {
-            contains_module_call(cond, macro_registry)
-                || contains_module_call(t, macro_registry)
-                || contains_module_call(f, macro_registry)
-        }
+        Subscript(_, args, _) => args
+            .iter()
+            .map(|idx| match idx {
+                IndexExpr0::Expr(e) => of(e),
+                IndexExpr0::Range(start, end, _) => of(start).max(of(end)),
+                IndexExpr0::Wildcard(_)
+                | IndexExpr0::StarRange(_, _)
+                | IndexExpr0::DimPosition(_, _) => PerElement::None,
+            })
+            .max()
+            .unwrap_or(PerElement::None),
+        Op1(_, r, _) => of(r),
+        Op2(_, l, r, _) => of(l).max(of(r)),
+        If(cond, t, f, _) => of(cond).max(of(t)).max(of(f)),
     }
 }
 
@@ -151,17 +181,31 @@ fn parse_module_order_arg(expr: &Expr0) -> Option<u32> {
     None
 }
 
+/// Normalize the stdlib aliases to the model each call instantiates:
+/// `DELAY` to `DELAY1`, and `DELAYN`/`SMTHN` with a literal order 1 or 3 to
+/// `DELAY1`/`DELAY3`/`SMTH1`/`SMTH3` with the order argument consumed.
+///
+/// An omitted initial value stays omitted: the call wires only `[input,
+/// delay_time]`, and the canonical model's `isModuleInput(initial_value)`
+/// guard falls back to the input, which is what XMILE 1.0 section 3.5.3
+/// (Delay Functions, `docs/reference/xmile-v1.0.html#_Toc439926074`)
+/// specifies for `DELAYN` and `SMTHN`: "If initial value is not provided, the
+/// initial value of input will be used". An explicit fourth argument is an
+/// independent port, as for every other stdlib call.
+///
+/// `DELAY(x, t)` is XMILE 1.0 section 3.5.3's infinite-order material delay
+/// -- a pipeline delay, Vensim's `DELAY FIXED` as xmutil maps it -- which the
+/// stdlib framework cannot represent (it has no ring-buffer state), so it is
+/// a first-order delay here: known-incorrect where the exact delay matters
+/// (`delay_time >> DT`).
+///
+/// Only the first- and third-order forms have a stdlib model; every other
+/// literal order is refused loudly.
 fn rewrite_alias_module_call(
     func: String,
     args: Vec<Expr0>,
     loc: crate::builtins::Loc,
 ) -> Result<(String, Vec<Expr0>), EquationError> {
-    // xmutil maps DELAY FIXED to DELAY(...); semantically this is a
-    // pipeline delay, not an exponential smooth like delay1.  The stdlib
-    // framework cannot represent the ring-buffer state needed for a true
-    // pipeline delay, so for now we map it to delay1 as a rough
-    // approximation.  This is known-incorrect for models where the exact
-    // delay matters (e.g. delay_time >> DT).
     if func == "delay" {
         return Ok(("delay1".to_string(), args));
     }
@@ -209,11 +253,9 @@ fn rewrite_alias_module_call(
         }
     };
 
-    let init_expr = init.unwrap_or_else(|| input.clone());
-    Ok((
-        rewritten_name.to_string(),
-        vec![input, delay_time, init_expr],
-    ))
+    let mut args = vec![input, delay_time];
+    args.extend(init);
+    Ok((rewritten_name.to_string(), args))
 }
 
 /// Get dimension names from a slice of Dimensions
@@ -232,7 +274,7 @@ fn get_dimension_names(dimensions: &[Dimension]) -> Vec<CanonicalDimensionName> 
 ///
 /// `Ast::Arrayed` stores its slots in a `HashMap`, and both expansion paths in
 /// `instantiate_implicit_modules` read that order into something observable.
-/// The module-call path unions each slot's synthesized helpers into one vector,
+/// The per-element path unions each slot's synthesized helpers into one vector,
 /// whose ORDER rides two salsa-cached values with derived `PartialEq`
 /// (`ParsedVariableResult::implicit_vars` and `VariableDeps::implicit_vars`),
 /// so an unstable order defeats backdating and makes the compiled artifact
@@ -242,28 +284,18 @@ fn get_dimension_names(dimensions: &[Dimension]) -> Vec<CanonicalDimensionName> 
 ///
 /// The other path walks every slot with ONE visitor, so the `n` counter that
 /// names each synthesized helper (`$⁚v⁚{n}⁚arg0`) is handed out in iteration
-/// order. It is taken when `!any_module_call || dimensions.is_empty()`, and the
-/// two disjuncts are NOT alike:
-///
-/// * `!any_module_call` is inert. `contains_module_call` is true for every
-///   construct that can synthesize a helper at all -- a stdlib call, a macro,
-///   `init`, `previous` -- since the sole `hoist_capture` call site sits inside
-///   the PREVIOUS/INIT routing branch, and the only other producer is
-///   `expand_module_function`, whose macro and stdlib call sites are gated by
-///   the same predicates `contains_module_call` consults. With no module call
-///   there is nothing to name.
-/// * `dimensions.is_empty()` is LIVE, and not a degenerate path: an `<aux>`
-///   carrying `<element subscript=…>` children with no `<dimensions>` sibling
-///   is an ordinary XMILE document, `xmile::variables`' `convert_equation!`
-///   maps the missing element to an empty dimension list, and the model
-///   compiles. Reverting the ordering here leaves the helper NAMES identical --
-///   the counter is monotonic, so it emits `⁚0⁚`, `⁚1⁚`, `⁚2⁚` however the
-///   slots are walked -- and re-binds which SLOT'S EQUATION each name carries,
-///   which then moves the compiled artifact. Gated by
-///   `db::fragment_determinism_tests::undimensioned_arrayed_helper_bindings_are_stable_across_fresh_databases`,
-///   whose fixture is read through the real XMILE reader rather than
-///   hand-built. (A failed dimension LOOKUP is not this case: it returns
-///   `Err(BadDimensionName)` and yields no AST at all.)
+/// order. It is taken when `dimensions.is_empty()`, which is LIVE and not a
+/// degenerate path: an `<aux>` carrying `<element subscript=…>` children with
+/// no `<dimensions>` sibling is an ordinary XMILE document, `xmile::variables`'
+/// `convert_equation!` maps the missing element to an empty dimension list,
+/// and the model compiles. Reverting the ordering here leaves the helper NAMES
+/// identical -- the counter is monotonic, so it emits `⁚0⁚`, `⁚1⁚`, `⁚2⁚`
+/// however the slots are walked -- and re-binds which SLOT'S EQUATION each name
+/// carries, which then moves the compiled artifact. Gated by
+/// `db::fragment_determinism_tests::undimensioned_arrayed_helper_bindings_are_stable_across_fresh_databases`,
+/// whose fixture is read through the real XMILE reader rather than
+/// hand-built. (A failed dimension LOOKUP is not this case: it returns
+/// `Err(BadDimensionName)` and yields no AST at all.)
 ///
 /// Sorted by canonical element name rather than walked in declared row-major
 /// order: the map is allowed to be sparse (an `EXCEPT` default covers the
@@ -302,11 +334,17 @@ pub struct BuiltinVisitor<'a> {
     vars: IndexMap<Ident<Canonical>, ImplicitVar>,
     n: usize,
     self_allowed: bool,
-    /// Full dimension info for A2A context (used to identify indexed vs named dimensions)
+    /// The parent's declared axes, when the body being walked is an
+    /// apply-to-all body or one slot of one: what a subscript naming one of
+    /// them spans, what a structural capture applies over, and the axes a
+    /// per-element helper's scope names. Empty for a scalar equation.
     dimensions: Vec<Dimension>,
-    /// Dimension names for A2A context (derived from dimensions)
+    /// `dimensions` by canonical name.
     dimension_names: Vec<CanonicalDimensionName>,
-    /// Current subscript element names being processed in A2A context
+    /// The active element on each of `dimensions` when the body is walked for
+    /// ONE element -- a per-element expansion, or an explicit `Ast::Arrayed`
+    /// slot -- and every helper minted is that element's own. `None` for a
+    /// scalar equation and for a structural apply-to-all walk.
     active_subscript: Option<Vec<String>>,
     /// Reference to DimensionsContext for dimension mapping lookups
     dimensions_ctx: Option<&'a DimensionsContext>,
@@ -325,26 +363,6 @@ pub struct BuiltinVisitor<'a> {
     /// builtin a macro body calls under its own name (GH #554) from a
     /// recursive call.
     enclosing_model: Option<&'a str>,
-    /// `true` only when this visitor is walking ONE slot's equation of a
-    /// per-element (`Ast::Arrayed`) variable -- distinct slots have DISTINCT
-    /// equations, even though they share `variable_name` and each fresh visitor
-    /// restarts `n` at 0.
-    ///
-    /// This selects whether the GH #541 arrayed `PREVIOUS`/`INIT` capture
-    /// (`hoist_capture`'s arrayed branch) carries the active element in its
-    /// name. In the `Ast::ApplyToAll` per-element expansion every slot walks the
-    /// SAME cloned body, so the suffix-less capture `$⁚{var}⁚{n}⁚arg0` defines
-    /// the same value in every slot and the union of the slots' helpers
-    /// collapses them to one. In the `Ast::Arrayed` per-element expansion the
-    /// bodies differ per slot, so a suffix-less capture would mint the SAME id
-    /// for DIFFERENT bodies -- a silent collision that made a later slot read an
-    /// earlier slot's capture (PR #668). When this flag is set, the arrayed
-    /// capture appends the slot's element suffix (like the scalar captures
-    /// always have), so distinct slots never collide. Set ONLY by
-    /// the `Ast::Arrayed` branch of `instantiate_implicit_modules`; NOT by its
-    /// `default_expr` visitor (which has no `active_subscript`, and so never
-    /// reaches the arrayed-helper branch).
-    per_element_equation: bool,
 }
 
 impl<'a> BuiltinVisitor<'a> {
@@ -361,19 +379,23 @@ impl<'a> BuiltinVisitor<'a> {
             snapshot_index: SnapshotIndexFacts::NoModel,
             macro_registry: &EMPTY_MACRO_REGISTRY,
             enclosing_model: None,
-            per_element_equation: false,
         }
     }
 
-    /// Walk one element of an apply-to-all or arrayed parent: `dimensions` are
-    /// the parent's declared dimensions and `element` the active element on
-    /// each of them, which is what per-element substitution and helper suffixes
-    /// are derived from.
-    fn with_active_element(mut self, dimensions: &[Dimension], element: &[String]) -> Self {
+    /// Walk an apply-to-all body structurally: `dimensions` are the parent's
+    /// declared axes, and no element is active.
+    fn with_declared_dimensions(mut self, dimensions: &[Dimension]) -> Self {
         self.dimension_names = get_dimension_names(dimensions);
         self.dimensions = dimensions.to_vec();
-        self.active_subscript = Some(element.to_vec());
         self
+    }
+
+    /// Walk one element of an apply-to-all or arrayed parent: `dimensions` are
+    /// the parent's declared axes and `element` the active element on each,
+    /// which every helper minted is scoped to and named for.
+    fn with_active_element(mut self, dimensions: &[Dimension], element: &[String]) -> Self {
+        self.active_subscript = Some(element.to_vec());
+        self.with_declared_dimensions(dimensions)
     }
 
     /// Set the per-project macro registry so macro calls expand (and a
@@ -392,15 +414,6 @@ impl<'a> BuiltinVisitor<'a> {
         self
     }
 
-    /// Mark this visitor as walking a per-element (`Ast::Arrayed`) slot
-    /// equation, so the GH #541 arrayed `PREVIOUS`/`INIT` helper carries the
-    /// element suffix and distinct slots never collide on a suffix-less id
-    /// (PR #668). Set only by the `Ast::Arrayed` per-element expansion.
-    fn with_per_element_equation(mut self, per_element_equation: bool) -> Self {
-        self.per_element_equation = per_element_equation;
-        self
-    }
-
     /// Set the model-local facts `index_is_static` decides an identifier
     /// index with (see [`SnapshotIndexFacts`]).
     fn with_snapshot_index(mut self, snapshot_index: SnapshotIndexFacts<'a>) -> Self {
@@ -410,7 +423,7 @@ impl<'a> BuiltinVisitor<'a> {
 
     /// Set the dimensions context so PREVIOUS/INIT can recognize statically
     /// resolvable subscript indices (qualified `dimension·element` references)
-    /// and per-element substitution can follow declared mappings.
+    /// and a bare dimension-name argument is known to be one.
     fn with_dimensions_ctx(mut self, dimensions_ctx: Option<&'a DimensionsContext>) -> Self {
         self.dimensions_ctx = dimensions_ctx;
         self
@@ -506,50 +519,41 @@ impl<'a> BuiltinVisitor<'a> {
     /// Does this subscript index leave a whole dimension standing, rather than
     /// selecting one element of it?
     ///
-    /// True for a wildcard or star-range, and for a bare reference to one of the
-    /// ACTIVE apply-to-all dimensions -- the spelling `context.rs` resolves per
-    /// element in scalar position and promotes to the whole array inside a
-    /// vector builtin's array-operand position
-    /// (`with_vector_builtin_wildcards`). A mapped or otherwise foreign
-    /// dimension name is deliberately NOT included: those need
-    /// `substitute_dimension_refs`' positional translation, which is only
-    /// available here.
+    /// True for a wildcard or star-range, and for a dimension name the parent's
+    /// declared axes answer for -- one of them by name, or a dimension one of
+    /// them relates to through a declared mapping or subdimension. That is the
+    /// spelling `context.rs` resolves per element in scalar position and
+    /// promotes to the whole array inside a vector builtin's array-operand
+    /// position (`with_vector_builtin_wildcards`), and the question is put to
+    /// the same matcher under the same projection the compiler's
+    /// `Subscript3Config::active_dim_ref` uses to resolve it
+    /// (`match_axes_partial` under `DirectMappingsOnly`), so a snapshot reads
+    /// its slot directly exactly where lowering resolves one. A name no
+    /// declared axis answers for is a runtime index: a variable, or a
+    /// dimension the element cannot resolve.
     fn index_spans_a_dimension(&self, idx: &IndexExpr0) -> bool {
         match idx {
             IndexExpr0::Wildcard(_) | IndexExpr0::StarRange(_, _) => true,
             IndexExpr0::Expr(Expr0::Var(ident, _)) => {
                 let canonical = CanonicalDimensionName::from_raw(ident.as_str());
-                self.dimension_names.iter().any(|d| d == &canonical)
+                if self.dimension_names.iter().any(|d| d == &canonical) {
+                    return true;
+                }
+                self.dimensions_ctx.is_some_and(|ctx| {
+                    ctx.get(&canonical).is_some()
+                        && match_axes_partial(
+                            &[Axis::named(canonical.as_str(), 0)],
+                            &axes_of(&self.dimensions),
+                            &DirectMappingsOnly(ctx),
+                        )
+                        .into_iter()
+                        .next()
+                        .flatten()
+                        .is_some()
+                })
             }
             _ => false,
         }
-    }
-
-    /// Is `arg` a subscripted reference that is ARRAY-shaped -- one whose
-    /// indices leave at least one dimension standing, and where every index is
-    /// either that or statically resolvable (GH #995)?
-    ///
-    /// This is the `View` arm of [`BuiltinVisitor::snapshot_arg`], named
-    /// separately because the substitution site reads it as a question about
-    /// the argument's shape rather than about the capture decision.
-    ///
-    /// Such an argument is passed through to lowering untouched: no per-element
-    /// substitution, and no synthesized capture helper. That is what lets an
-    /// array-valued `PREVIOUS`/`INIT` exist at all, and it puts the decision in
-    /// the one place that can make it. `PREVIOUS(vals[d])` means the element in
-    /// `y[d] = PREVIOUS(vals[d])` and the whole array in
-    /// `y[d] = VECTOR SORT ORDER(PREVIOUS(vals[d]), 1)`, exactly as bare
-    /// `vals[d]` does -- and only `compiler::context` knows which position it
-    /// is in. Substituting here would pin it to one element before that context
-    /// exists; the helper path cannot hold it either, since a scalar
-    /// `Equation::Scalar` helper holding `vals[*]` does not compile.
-    ///
-    /// Every other shape takes the scalar routing: an all-static subscript
-    /// substitutes and compiles to `LoadPrev`/`LoadInitial` against a fixed
-    /// slot, and anything with a dynamic index gets a capture helper (which is
-    /// also what gives a dynamic index the correct lagged semantics).
-    fn arg_is_array_shaped(&self, arg: &Expr0) -> bool {
-        self.snapshot_arg(arg).access() == SnapshotAccess::View
     }
 
     /// Classify index `axis` of a subscript on `base` for the shared
@@ -596,325 +600,89 @@ impl<'a> BuiltinVisitor<'a> {
         }
     }
 
-    /// Rewrite dimension references in `expr` to the active element: processing
-    /// element `A2` of dimension `SubA`, `input[SubA]` becomes `input[A2]`, and
-    /// a foreign dimension name resolves through `resolve_mapped_read`.
-    ///
-    /// An `Expr0` -> `Expr0` rewrite, and it is where the per-element decision
-    /// has to be made: everything it rewrites is about to be hoisted OUT of the
-    /// apply-to-all body into a helper of its own -- a [`Capture`], a
-    /// [`HoistedArg`], or a module-input `src` name -- and a helper is a SCALAR
-    /// variable with no dimensions of its own. Lowering cannot make the decision
-    /// later, because by then the helper's fragment is an `Ast::Scalar` with no
-    /// active element for a bare `SubA` to resolve against; it would lower as a
-    /// dimension in scalar context and the fragment would be refused. So the
-    /// rewrite is the parse-time stand-in for the compiler's resolution of the
-    /// same spelling and must give the same answer, which
-    /// `mapped_reference_semantics_tests`' hoisted-argument column measures.
-    ///
-    /// The one shape deliberately NOT rewritten is the GH #541 arrayed capture,
-    /// which keeps its body unsubstituted precisely because it is arrayed and
-    /// therefore does have dimensions to resolve against ([`Self::hoist_capture`]).
-    fn substitute_dimension_refs(&self, expr: Expr0) -> Expr0 {
-        use Expr0::*;
-        use std::mem;
-
-        let subscript = match &self.active_subscript {
-            Some(s) => s,
-            None => return expr,
-        };
-
-        match expr {
-            Const(_, _, _) => expr,
-            Var(ref ident, loc) => {
-                // Check if this var is a dimension name that should be substituted
-                let canonical_name = CanonicalDimensionName::from_raw(ident.as_str());
-                for (i, dim_name) in self.dimension_names.iter().enumerate() {
-                    if &canonical_name == dim_name {
-                        // Check if this is an indexed or named dimension
-                        match &self.dimensions[i] {
-                            Dimension::Indexed(_, _) => {
-                                // For indexed dimensions, the subscript element is a number
-                                // Use it directly as a Const
-                                let val: f64 = subscript[i].parse().unwrap_or(0.0);
-                                return Const(subscript[i].clone(), Literal::new(val), loc);
-                            }
-                            Dimension::Named(_, _) => {
-                                // For named dimensions, use qualified element (dimension·element).
-                                // During constify_dimensions, this gets looked up via
-                                // DimensionsContext::lookup which returns a 1-based index
-                                // (from indexed_elements). The compiler then converts this
-                                // 1-based value to 0-based when processing subscript indices.
-                                let qualified_name =
-                                    format!("{}·{}", dim_name.as_str(), subscript[i]);
-                                return Var(RawIdent::new_from_str(&qualified_name), loc);
-                            }
-                        }
-                    }
-                }
-                // A FOREIGN dimension name -- one the parent does not iterate --
-                // resolves against each active element through
-                // `resolve_mapped_read`, the same rule the compiler applies to
-                // this spelling (`compiler::subscript::build_view_from_ops`):
-                // the element's own name on the source axis first, then the
-                // declared mapping, then a mapped parent. The context is the
-                // parent's NARROWED one, so a dimension with no declared
-                // relation to the active ones is not found and the name is
-                // left for lowering to refuse.
-                if let Some(ctx) = self.dimensions_ctx
-                    && let Some(source_axis) = ctx.get(&canonical_name)
-                {
-                    for (i, active) in self.dimensions.iter().enumerate() {
-                        let target_element = CanonicalElementName::from_raw(&subscript[i]);
-                        if let Some(source_element) =
-                            ctx.resolve_mapped_read(source_axis, active, &target_element)
-                        {
-                            let qualified_name =
-                                format!("{}·{}", canonical_name.as_str(), source_element.as_str());
-                            return Var(RawIdent::new_from_str(&qualified_name), loc);
-                        }
-                    }
-                }
-                expr
-            }
-            App(UntypedBuiltinFn(func, args), loc) => {
-                let args = args
-                    .into_iter()
-                    .map(|a| self.substitute_dimension_refs(a))
-                    .collect();
-                App(UntypedBuiltinFn(func, args), loc)
-            }
-            Subscript(id, args, loc) => {
-                let args = args
-                    .into_iter()
-                    .map(|idx| match idx {
-                        IndexExpr0::Expr(e) => IndexExpr0::Expr(self.substitute_dimension_refs(e)),
-                        other => other,
-                    })
-                    .collect();
-                Subscript(id, args, loc)
-            }
-            Op1(op, mut r, loc) => {
-                *r = self.substitute_dimension_refs(mem::take(&mut *r));
-                Op1(op, r, loc)
-            }
-            Op2(op, mut l, mut r, loc) => {
-                *l = self.substitute_dimension_refs(mem::take(&mut *l));
-                *r = self.substitute_dimension_refs(mem::take(&mut *r));
-                Op2(op, l, r, loc)
-            }
-            If(mut cond, mut t, mut f, loc) => {
-                *cond = self.substitute_dimension_refs(mem::take(&mut *cond));
-                *t = self.substitute_dimension_refs(mem::take(&mut *t));
-                *f = self.substitute_dimension_refs(mem::take(&mut *f));
-                If(cond, t, f, loc)
-            }
-        }
-    }
-
-    /// Get the subscript suffix for module/helper names (e.g., "a2" or "a1,b2")
+    /// Get the subscript suffix for module names (e.g., "a2" or "a1,b2")
     fn subscript_suffix(&self) -> String {
-        match &self.active_subscript {
-            Some(s) => s.join(",").to_lowercase(),
-            None => String::new(),
-        }
+        self.element_scope()
+            .map(|scope| element_suffix(&scope))
+            .unwrap_or_default()
     }
 
-    /// Does `arg` contain a *bare* (unsubscripted) variable reference that is
-    /// neither a dimension name (those get rewritten to qualified elements by
-    /// `substitute_dimension_refs`) nor the output of a module instance
-    /// synthesized in this walk (the one module-backed name the parse knows)?
-    /// Such a bare reference is the one that breaks the
-    /// scalar-helper path: if it names an *arrayed* variable, a bare arrayed
-    /// name has no meaning inside a scalar `Equation::Scalar` helper, so the
-    /// helper fragment fails to compile (GH #541 -- the canonical trigger is a
-    /// nested `PREVIOUS(PREVIOUS(arr))`, whose inner `PREVIOUS(arr)` is an
-    /// expression arg routed through `hoist_capture`).
-    ///
-    /// We cannot tell here whether the bare name is arrayed or scalar (the
-    /// visitor has no variable->dimensions map -- the per-variable parse path
-    /// deliberately withholds the model's name set for salsa incrementality),
-    /// so the conservative answer is "treat any surviving bare reference as
-    /// possibly-arrayed and route it through an arrayed helper". An arrayed
-    /// (`Equation::ApplyToAll`) helper broadcasts a *scalar* reference cleanly
-    /// too, so a false positive (a bare scalar reference) stays correct -- it
-    /// is merely held in a broadcast array rather than a scalar slot. A
-    /// `Subscript` base (`arr[Dim]`) is NOT a bare reference: after
-    /// substitution it is a per-element scalar access the scalar helper holds
-    /// fine, which is why the explicitly-subscripted form already compiles.
-    fn arg_has_bare_var_ref(&self, arg: &Expr0) -> bool {
-        use Expr0::*;
-        match arg {
-            Const(_, _, _) => false,
-            Var(ident, _) => {
-                let canonical = CanonicalDimensionName::from_raw(ident.as_str());
-                let is_active_dim = self.dimension_names.iter().any(|d| d == &canonical);
-                !is_active_dim && !self.is_module_backed_ident(ident)
-            }
-            // A subscripted reference is already a per-element scalar access; a
-            // wildcard/range index lives inside an array-reducer (handled by
-            // its own array-view path), so we do not descend into indices here.
-            Subscript(_, _, _) => false,
-            // A scalar-collapsing array reducer (`SUM`/`MEAN`/`MIN`/`MAX`/
-            // `STDDEV`/`SIZE`) collapses its arrayed argument to a SCALAR, so
-            // a bare arrayed name inside it (`SUM(hfc_emissions)`) is
-            // well-typed in a *scalar* helper -- it does NOT need the
-            // arrayed-helper path, and wrapping `SUM(arr)` in an `ApplyToAll`
-            // would broadcast a scalar reduce across the active dims and
-            // corrupt the result (LTM link-score numerators are exactly this
-            // shape). Do not descend into such a reducer. `RANK` is in the
-            // reducer table but is ARRAY-valued (Vensim's VECTOR RANK), so a
-            // bare arrayed name inside it MUST take the arrayed-helper path:
-            // captured into a scalar helper, `rank(pop, 1)` is ill-typed and
-            // the helper fragment fails (GH #742). The lowercasing is
-            // defensive belt-and-suspenders: parsed `Expr0` function names
-            // are already lowercase by construction (the parser lowercases
-            // function-call identifiers).
-            App(UntypedBuiltinFn(func, args), _) => {
-                !crate::ltm_agg::reducer_collapses_to_scalar(&func.to_ascii_lowercase(), args.len())
-                    && args.iter().any(|a| self.arg_has_bare_var_ref(a))
-            }
-            Op1(_, r, _) => self.arg_has_bare_var_ref(r),
-            Op2(_, l, r, _) => self.arg_has_bare_var_ref(l) || self.arg_has_bare_var_ref(r),
-            If(cond, t, f, _) => {
-                self.arg_has_bare_var_ref(cond)
-                    || self.arg_has_bare_var_ref(t)
-                    || self.arg_has_bare_var_ref(f)
-            }
-        }
+    /// The element this walk is scoped to, when it walks one element of an
+    /// apply-to-all body.
+    fn element_scope(&self) -> Option<ElementScope> {
+        self.active_subscript.as_ref().map(|element| ElementScope {
+            dims: self.dimension_names.clone(),
+            element: element
+                .iter()
+                .map(|e| CanonicalElementName::from_raw(e))
+                .collect(),
+        })
     }
 
-    /// Does `arg` contain ANY `Subscript` expression?
+    /// Can a bare identifier argument of a module call be wired to the scalar
+    /// input port by name, or does it mean one element's value under this
+    /// walk's active element -- an arrayed variable, whose port wiring would
+    /// hand a whole array to a scalar port, or a dimension name, whose value
+    /// is the active element's position?
     ///
-    /// The GH #541 arrayed-helper path is restricted to args with NO subscript:
-    /// the ONLY shape that genuinely needs it is a *bare* arrayed name
-    /// (`PREVIOUS(PREVIOUS(pop))`), which carries no subscript. The moment a
-    /// subscript is present -- whether by an active dimension (`reg[region]`),
-    /// a mapped/foreign dimension (`agg[Aggregated Regions]` inside A2A-over-COP,
-    /// the C-LEARN idiom), or a literal element -- the OLD per-element scalar
-    /// helper path handles it correctly: `substitute_dimension_refs` translates
-    /// each subscript to a concrete per-element reference (active dims to
-    /// `dim·elem`, mapped dims through `translate_via_mapping`), which compiles
-    /// in the scalar helper exactly as it did pre-#541. Wrapping a subscripted
-    /// body in an `Equation::ApplyToAll` helper instead is both unnecessary and
-    /// the source of subtle bugs (mapped-subscript ill-typing, per-element
-    /// layout/value divergence under LTM), so we keep the proven scalar path for
-    /// every subscripted arg. A bare arrayed name *alongside* a subscript in the
-    /// same arg therefore also takes the scalar path; if that bare name is
-    /// genuinely arrayed it fails cleanly there, as it did pre-#541 -- a known
-    /// limitation no corpus model hits.
-    fn arg_has_subscript(&self, arg: &Expr0) -> bool {
-        use Expr0::*;
-        match arg {
-            Const(_, _, _) | Var(_, _) => false,
-            Subscript(_, _, _) => true,
-            App(UntypedBuiltinFn(_, args), _) => args.iter().any(|a| self.arg_has_subscript(a)),
-            Op1(_, r, _) => self.arg_has_subscript(r),
-            Op2(_, l, r, _) => self.arg_has_subscript(l) || self.arg_has_subscript(r),
-            If(cond, t, f, _) => {
-                self.arg_has_subscript(cond)
-                    || self.arg_has_subscript(t)
-                    || self.arg_has_subscript(f)
-            }
+    /// Only the source parse can tell an arrayed name from a scalar one
+    /// ([`SnapshotIndexFacts::Axes`], the same per-name projection the
+    /// snapshot-index question uses); the other two rules wire every bare
+    /// name, as a scalar equation always does.
+    fn arg_needs_element_scope(&self, name: &RawIdent) -> bool {
+        if self.active_subscript.is_none() {
+            return false;
         }
+        let canonical = canonicalize(name.as_str());
+        let is_dimension = self.dimensions_ctx.is_some_and(|ctx| {
+            ctx.get(&CanonicalDimensionName::from_raw(&canonical))
+                .is_some()
+        });
+        let is_arrayed = match self.snapshot_index {
+            SnapshotIndexFacts::Axes { axis_of, .. } => axis_of(name.as_str(), 0).is_some(),
+            SnapshotIndexFacts::ModelNames(_) | SnapshotIndexFacts::NoModel => false,
+        };
+        is_dimension || is_arrayed
     }
 
     /// Hoist a `PREVIOUS`/`INIT` argument into a [`Capture`] and return the
     /// reference expression the caller substitutes for the argument.
     ///
-    /// Outside A2A context (`active_subscript == None`), or when the captured
-    /// argument carries no bare variable reference, the capture is scalar: it
-    /// holds the (dimension-substituted) argument and the reference is a bare
-    /// `Var`.
-    ///
-    /// In A2A context, when the argument contains a bare variable reference
-    /// (`arg_has_bare_var_ref`) AND no subscript at all (`arg_has_subscript`),
-    /// the capture is instead *arrayed* -- it applies over the active
-    /// dimensions and holds the argument *without* per-element substitution, so
-    /// a bare arrayed name keeps its array shape (GH #541). The returned
-    /// reference subscripts it by the active element (`capture[<element>]`), a
-    /// static per-element access the caller's outer `PREVIOUS`/`INIT` then
-    /// compiles to a fixed slot. Its name carries NO element suffix, so every
-    /// element of the enclosing apply-to-all produces the same capture, which
-    /// `instantiate_implicit_modules` deduplicates into one.
-    ///
-    /// Any subscripted arg takes the scalar path instead (see
-    /// `arg_has_subscript`): `substitute_dimension_refs` translates each
-    /// subscript per element, which avoids the arrayed capture's
-    /// subscript-interaction bugs (the C-LEARN regression).
+    /// The capture's shape is where the call was written. In a scalar
+    /// equation it is a scalar. In an apply-to-all body walked structurally it
+    /// is one helper over the parent's declared axes, holding the argument
+    /// untouched, and the reference is `capture[Dim, ..]` -- one index per
+    /// axis naming that axis, which leaves every axis standing for lowering to
+    /// pin to the active element, exactly as the parent's own `x[Dim]` reads
+    /// resolve. In a body walked for one element it is that element's own,
+    /// scalar, scoped to the element so lowering resolves its body there.
     fn hoist_capture(&mut self, kind: CaptureKind, arg: Expr0) -> Result<Expr0, EquationError> {
         let loc = crate::builtins::Loc::default();
-
-        // The active per-element subscript, cloned up front so the helper-
-        // insertion (`&mut self.vars`) below does not conflict with borrowing
-        // it. `Some` exactly in A2A context; cheap (a few element-name Strings).
-        let active_subscript = self.active_subscript.clone();
-        if let Some(subscript) = active_subscript.as_ref()
-            && self.arg_has_bare_var_ref(&arg)
-            && !self.arg_has_subscript(&arg)
-        {
-            // Arrayed capture holding the *un-substituted* argument so bare
-            // arrayed names stay arrayed and a subscripted reference (`arr[Dim]`)
-            // broadcasts over the capture's own dimensions instead of being
-            // frozen to one element.
-            //
-            // The name omits the element suffix in the `Ast::ApplyToAll`
-            // per-element expansion (every slot walks the same cloned body, so
-            // every slot's capture defines the same value and the union of the
-            // slots' helpers collapses the N copies into one). But in the
-            // `Ast::Arrayed` per-element expansion (`per_element_equation`) each
-            // slot has its OWN body, so a suffix-less id would mint the same
-            // name for different bodies -- a silent collision (PR #668). There
-            // the name carries the slot's element suffix, exactly like the
-            // scalar captures, so distinct slots get distinct captures.
-            let subscript_suffix = self.subscript_suffix();
-            let suffix = (self.per_element_equation && !subscript_suffix.is_empty())
-                .then_some(subscript_suffix);
-            // The capture's dims carry the active (canonical) dimension names;
-            // `variable::get_dimensions` resolves them canonically against the
-            // project dimensions, so they match a dimension declared with
-            // original casing/spacing.
-            let dims: Vec<String> = self
-                .dimension_names
-                .iter()
-                .map(|d| d.as_str().to_string())
-                .collect();
-            let capture = Capture::new(self.variable_name, self.n, kind, arg, suffix, dims);
-            let id = capture.ident().to_string();
-            self.insert_implicit_var(ImplicitVar::Capture(capture))?;
-            self.n += 1;
-
-            // Reference the helper at the active element: one qualified
-            // `dimension·element` index per active dimension. These are
-            // statically resolvable, so the outer PREVIOUS/INIT compiles to a
-            // fixed slot rather than synthesizing yet another helper.
-            let indices: Vec<IndexExpr0> = self
-                .dimension_names
-                .iter()
-                .zip(subscript.iter())
-                .map(|(dim_name, elem)| {
-                    let qualified = format!("{}·{}", dim_name.as_str(), elem);
-                    IndexExpr0::Expr(Expr0::Var(RawIdent::new_from_str(&qualified), loc))
-                })
-                .collect();
-            return Ok(Expr0::Subscript(RawIdent::new_from_str(&id), indices, loc));
-        }
-
-        let transformed_arg = self.substitute_dimension_refs(arg);
-        let subscript_suffix = self.subscript_suffix();
-        let suffix = (!subscript_suffix.is_empty()).then_some(subscript_suffix);
-        let capture = Capture::new(
-            self.variable_name,
-            self.n,
-            kind,
-            transformed_arg,
-            suffix,
-            Vec::new(),
-        );
-        let id = capture.ident().to_string();
+        let shape = match self.element_scope() {
+            Some(scope) => CaptureShape::Element(scope),
+            None if self.dimension_names.is_empty() => CaptureShape::Scalar,
+            None => CaptureShape::ApplyToAll(
+                self.dimension_names
+                    .iter()
+                    .map(|d| d.as_str().to_string())
+                    .collect(),
+            ),
+        };
+        let capture = Capture::new(self.variable_name, self.n, kind, arg, shape);
+        let ident = RawIdent::new_from_str(capture.ident());
+        let reference = match capture.shape() {
+            CaptureShape::ApplyToAll(dims) => Expr0::Subscript(
+                ident,
+                dims.iter()
+                    .map(|dim| IndexExpr0::Expr(Expr0::Var(RawIdent::new_from_str(dim), loc)))
+                    .collect(),
+                loc,
+            ),
+            CaptureShape::Scalar | CaptureShape::Element(_) => Expr0::Var(ident, loc),
+        };
         self.insert_implicit_var(ImplicitVar::Capture(capture))?;
         self.n += 1;
-        Ok(Expr0::Var(RawIdent::new_from_str(&id), loc))
+        Ok(reference)
     }
 
     /// File one helper this walk synthesized -- the only writer of `vars`.
@@ -986,27 +754,13 @@ impl<'a> BuiltinVisitor<'a> {
         // order the salsa-cached vectors compare in.
         let mut sources: Vec<String> = Vec::with_capacity(args.len());
         for (i, arg) in args.into_iter().enumerate() {
-            // Per element, a bare active dimension name becomes the qualified
-            // element it stands for, and a subscript naming one is resolved to
-            // that element BEFORE the hoist: the helper is a scalar aux with no
-            // dimension context of its own to resolve it against later.
             let src = match arg {
-                Var(name, var_loc) => {
-                    match self.substitute_dimension_refs(Var(name.clone(), var_loc)) {
-                        // A bare identifier wires straight to the port.
-                        Var(substituted, _) => substituted.as_str().to_string(),
-                        // An INDEXED active dimension name substitutes to a number,
-                        // which has no name to wire; the port reads the dimension
-                        // name as a variable, which the dependency stage refuses as
-                        // unknown. Hoisting the number instead would make
-                        // `SMTH1(Idx, t)` compile, a shape change with its own
-                        // ledger row.
-                        _ => name.as_str().to_string(),
-                    }
-                }
+                // A bare identifier wires straight to the port, unless it
+                // means one element's value under the active element.
+                Var(name, _) if !self.arg_needs_element_scope(&name) => name.as_str().to_string(),
                 arg => {
-                    let arg = self.substitute_dimension_refs(arg);
-                    let hoisted = HoistedArg::new(self.variable_name, self.n, i, arg, suffix);
+                    let hoisted =
+                        HoistedArg::new(self.variable_name, self.n, i, arg, self.element_scope());
                     let src = hoisted.ident().to_string();
                     self.insert_implicit_var(ImplicitVar::HoistedArg(hoisted))?;
                     src
@@ -1098,57 +852,32 @@ impl<'a> BuiltinVisitor<'a> {
                 // PREVIOUS and INIT opcode routing:
                 //
                 // Both compile to intrinsic opcodes (LoadPrev / LoadInitial)
-                // that read a fixed slot, so arg0 must resolve to a static
-                // location:
+                // that read a fixed slot or a static view, so arg0 must
+                // address storage:
                 //   * a direct variable reference, or
                 //   * a subscripted reference whose every index is statically
                 //     resolvable -- a numeric constant, a qualified
                 //     `dimension·element` reference, or a bare element of the
-                //     referenced axis (see `index_is_static`).
+                //     referenced axis (see `index_is_static`) -- or leaves a
+                //     declared axis of the parent standing (`x[Dim]` in an
+                //     apply-to-all body), which lowering pins to the active
+                //     element or keeps as a view, whichever the position wants.
                 //
                 // Anything else (nested PREVIOUS, PREVIOUS(expr), the output
                 // of a module instance synthesized in this walk, dynamic
-                // subscript indices) is rewritten through a synthesized scalar
-                // temp variable that captures the value each timestep -- which
-                // also gives dynamic indices the correct lagged semantics (the
+                // subscript indices) is rewritten through a synthesized
+                // capture that holds the value each timestep -- which also
+                // gives dynamic indices the correct lagged semantics (the
                 // index itself is read at the *previous* step). Which STORAGE
                 // a direct reference addresses -- a plain slot, a module output
                 // port, a bound input port's own slot, or a bare module
                 // instance that has none -- is resolved at lowering from the
                 // dependency's shape.
-                //
-                // In A2A per-element context, dimension references inside a
-                // subscripted arg0 are substituted to qualified element
-                // references FIRST, so `PREVIOUS(x[Dim], ...)` in an
-                // apply-to-all equation resolves to a per-element static slot
-                // instead of synthesizing one helper aux per element.
                 let is_prev_routing = func == "previous" && args.len() == 2;
                 let is_init_routing = func == "init" && args.len() == 1;
                 if is_prev_routing || is_init_routing {
                     let mut args = args.into_iter();
                     let arg0 = args.next().expect("previous/init arity checked");
-                    // Only subscripted args benefit from the substitution (it
-                    // makes their indices statically resolvable); other shapes
-                    // keep their original form so behavior is unchanged for
-                    // them (`hoist_capture` substitutes internally, and the
-                    // substitution is idempotent). An ARRAY-shaped subscript is
-                    // the exception: substituting would pin it to one element
-                    // before lowering can tell whether the position wants the
-                    // element or the whole array (`arg_is_array_shaped`).
-                    let arg0 = match arg0 {
-                        Subscript(_, _, _)
-                            if self.active_subscript.is_some()
-                                && !self.arg_is_array_shaped(&arg0) =>
-                        {
-                            self.substitute_dimension_refs(arg0)
-                        }
-                        other => other,
-                    };
-                    // An index that leaves a dimension standing needs no
-                    // helper either: it resolves statically too, just to a VIEW
-                    // over the argument's storage rather than to a single slot
-                    // (codegen's `snapshot_static_view`).
-                    //
                     // `snapshot_arg` reduces the argument to the form
                     // `SnapshotArg::access` decides over -- the same rule
                     // codegen's `static_slot`/`snapshot_static_view` apply to
@@ -1157,11 +886,6 @@ impl<'a> BuiltinVisitor<'a> {
                     let needs_temp_arg =
                         self.snapshot_arg(&arg0).access() == SnapshotAccess::Capture;
                     let arg0 = if needs_temp_arg {
-                        // `hoist_capture` returns the reference expression for
-                        // the synthesized capture: a bare `Var` for a scalar
-                        // capture, or a subscripted `capture[<element>]` access
-                        // for the arrayed capture it synthesizes when the arg
-                        // carries a bare arrayed reference (GH #541).
                         let kind = if is_prev_routing {
                             CaptureKind::Previous
                         } else {
@@ -1190,10 +914,7 @@ impl<'a> BuiltinVisitor<'a> {
                 // for a name that is neither a macro -- handled above -- nor
                 // an `is_builtin_fn` builtin, nor a stdlib module, satisfying
                 // macros.AC5.6) and supplies the descriptor that drives the
-                // shared module rewrite. Folding the two into one lookup also
-                // avoids a panic path for MODEL_NAMES entries without a
-                // stdlib spec (e.g. `systems_*`) if a user equation ever
-                // references them.
+                // shared module rewrite.
                 let Some(descriptor) = stdlib_descriptor(&func) else {
                     return eqn_err!(
                         UnknownBuiltin,
@@ -1258,10 +979,20 @@ fn macro_arity(
 /// macros -- plus PREVIOUS/INIT builtins into implicit module instances and
 /// opcode-backed builtins.
 ///
+/// The shape of the expansion is decided per body by
+/// [`per_element_requirements`]: a scalar equation is walked once; an
+/// apply-to-all body containing a module call is expanded into an
+/// `Ast::Arrayed` of per-element equations, each with its own instance and
+/// its own element-scoped helpers; an apply-to-all body containing at most
+/// `PREVIOUS`/`INIT` keeps its structural shape and mints structural captures
+/// over its axes. An explicit `Ast::Arrayed` walks each slot for its own
+/// element; its EXCEPT default is materialized into the missing slots when it
+/// needs an instance per element, and otherwise transformed once, structurally,
+/// and kept as the default.
+///
 /// `macro_registry` carries the per-project macros: a call name resolving
 /// there expands as a macro (shadowing an identically named builtin/stdlib
-/// func) and an *arrayed* macro invocation rides the per-element path via
-/// `contains_module_call`.
+/// func) and an *arrayed* macro invocation rides the per-element path.
 ///
 /// `enclosing_model` is the owning model's name when `variable_name` is a
 /// macro-marked model's body variable (`None` otherwise): the registry needs
@@ -1269,9 +1000,10 @@ fn macro_arity(
 /// recursion.
 ///
 /// `snapshot_index` is what the walk may ask the owning model about an
-/// identifier index of a `PREVIOUS`/`INIT` subscript -- the one model-level
-/// question the parse answers itself, because a capture cannot be un-minted at
-/// lowering (see [`SnapshotIndexFacts`] for the three rules).
+/// identifier index of a `PREVIOUS`/`INIT` subscript, and about a bare
+/// module-call argument -- the model-level questions the parse answers itself,
+/// because a capture cannot be un-minted at lowering (see
+/// [`SnapshotIndexFacts`] for the three rules).
 pub fn instantiate_implicit_modules(
     variable_name: &str,
     ast: Ast<Expr0>,
@@ -1287,10 +1019,11 @@ pub fn instantiate_implicit_modules(
             .with_macro_registry(macro_registry)
             .with_enclosing_model(enclosing_model)
     };
+    let requirements =
+        |expr: &Expr0| per_element_requirements(expr, macro_registry, enclosing_model);
     // The helpers of one variable, across every walk this expansion runs:
-    // `insert_implicit_var` is what lets the per-element walks of one cloned
-    // body collapse their identical GH #541 captures into one, and what refuses
-    // two walks minting different helpers under one name.
+    // `insert_implicit_var` is what lets two walks minting one helper collapse
+    // it, and what refuses two walks minting different helpers under one name.
     let mut all_vars: IndexMap<Ident<Canonical>, ImplicitVar> = IndexMap::new();
     let mut collect = |visitor: BuiltinVisitor| -> Result<(), EquationError> {
         for var in visitor.vars.into_values() {
@@ -1307,10 +1040,7 @@ pub fn instantiate_implicit_modules(
             Ast::Scalar(transformed)
         }
         Ast::ApplyToAll(dimensions, ast) => {
-            // A body with a module-function call (stdlib or macro) or a
-            // PREVIOUS/INIT is expanded once per element, into an arrayed
-            // equation of per-element instances.
-            if contains_module_call(&ast, macro_registry) && !dimensions.is_empty() {
+            if requirements(&ast) == PerElement::ModuleInstance && !dimensions.is_empty() {
                 let mut elements = HashMap::new();
                 for subscript in SubscriptIterator::new(&dimensions) {
                     let subscript_key = CanonicalElementName::from_raw(&subscript.join(","));
@@ -1321,67 +1051,89 @@ pub fn instantiate_implicit_modules(
                 }
                 Ast::Arrayed(dimensions, elements, None, false)
             } else {
-                let mut walker = visitor();
+                let mut walker = visitor().with_declared_dimensions(&dimensions);
                 let transformed = walker.walk(ast)?;
                 collect(walker)?;
                 Ast::ApplyToAll(dimensions, transformed)
             }
         }
         Ast::Arrayed(dimensions, elements, default_expr, apply_default_to_missing) => {
-            let any_module_call = elements
-                .values()
-                .any(|e| contains_module_call(e, macro_registry))
-                || default_expr
-                    .as_ref()
-                    .is_some_and(|e| contains_module_call(e, macro_registry));
-            let mut new_elements = HashMap::new();
-            let transformed_default;
-            if any_module_call && !dimensions.is_empty() {
-                for (subscript_key, equation) in elements_in_stable_order(elements) {
-                    let subscript_parts: Vec<String> = subscript_key
-                        .as_str()
-                        .split(',')
-                        .map(|s| s.to_string())
-                        .collect();
-                    let mut walker = visitor()
-                        .with_active_element(&dimensions, &subscript_parts)
-                        // Per-element slots have distinct equations, so any
-                        // arrayed PREVIOUS/INIT helper must carry the element
-                        // suffix to avoid colliding across slots (PR #668).
-                        .with_per_element_equation(true);
-                    let transformed = walker.walk(equation)?;
-                    collect(walker)?;
-                    new_elements.insert(subscript_key, transformed);
-                }
-                transformed_default = match default_expr {
-                    Some(default_expr) => {
-                        let mut walker = visitor();
-                        let transformed = walker.walk(default_expr)?;
-                        collect(walker)?;
-                        Some(transformed)
-                    }
-                    None => None,
-                };
-            } else {
+            if dimensions.is_empty() {
                 // One visitor across every slot, so the `n` counter that names
                 // each synthesized helper is handed out in this iteration
                 // order -- see `elements_in_stable_order`.
                 let mut walker = visitor();
+                let mut new_elements = HashMap::new();
                 for (subscript_key, equation) in elements_in_stable_order(elements) {
                     new_elements.insert(subscript_key, walker.walk(equation)?);
                 }
-                transformed_default = match default_expr {
+                let transformed_default = match default_expr {
                     Some(default_expr) => Some(walker.walk(default_expr)?),
                     None => None,
                 };
                 collect(walker)?;
+                return Ok((
+                    Ast::Arrayed(
+                        dimensions,
+                        new_elements,
+                        transformed_default,
+                        apply_default_to_missing,
+                    ),
+                    all_vars.into_values().collect(),
+                ));
             }
-            Ast::Arrayed(
-                dimensions,
-                new_elements,
-                transformed_default,
-                apply_default_to_missing,
-            )
+            // An explicit slot is one element's own equation, walked for that
+            // element: every helper it mints carries the slot's element, so
+            // distinct slots never claim one name (PR #668).
+            let mut new_elements = HashMap::new();
+            for (subscript_key, equation) in elements_in_stable_order(elements) {
+                let subscript_parts: Vec<String> = subscript_key
+                    .as_str()
+                    .split(',')
+                    .map(|s| s.to_string())
+                    .collect();
+                let mut walker = visitor().with_active_element(&dimensions, &subscript_parts);
+                let transformed = walker.walk(equation)?;
+                collect(walker)?;
+                new_elements.insert(subscript_key, transformed);
+            }
+            let mut transformed_default = None;
+            let mut apply_default = apply_default_to_missing;
+            if let Some(default_expr) = default_expr {
+                let missing: Vec<Vec<String>> = SubscriptIterator::new(&dimensions)
+                    .filter(|subscript| {
+                        !new_elements
+                            .contains_key(&CanonicalElementName::from_raw(&subscript.join(",")))
+                    })
+                    .collect();
+                if apply_default_to_missing
+                    && requirements(&default_expr) == PerElement::ModuleInstance
+                {
+                    // An instance carries state and wiring of its own, so one
+                    // default equation cannot serve several elements: the
+                    // default is materialized into exactly the slots it
+                    // applies to, each with its own instance.
+                    for subscript in missing {
+                        let mut walker = visitor().with_active_element(&dimensions, &subscript);
+                        let transformed = walker.walk(default_expr.clone())?;
+                        collect(walker)?;
+                        new_elements.insert(
+                            CanonicalElementName::from_raw(&subscript.join(",")),
+                            transformed,
+                        );
+                    }
+                    apply_default = false;
+                } else {
+                    // A snapshot-only default stays one structural equation
+                    // over the declared axes, exactly as an apply-to-all body
+                    // does, and the compiler selects it for the missing slots.
+                    let mut walker = visitor().with_declared_dimensions(&dimensions);
+                    let transformed = walker.walk(default_expr)?;
+                    collect(walker)?;
+                    transformed_default = Some(transformed);
+                }
+            }
+            Ast::Arrayed(dimensions, new_elements, transformed_default, apply_default)
         }
     };
     Ok((ast, all_vars.into_values().collect()))
@@ -1389,52 +1141,7 @@ pub fn instantiate_implicit_modules(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::builtins::Loc;
-    use crate::datamodel;
     use crate::test_common::TestProject;
-
-    #[test]
-    fn test_substitute_dimension_refs_uses_secondary_mapping_target() {
-        let dim_a = datamodel::Dimension::named(
-            "dima".to_string(),
-            vec!["a1".to_string(), "a2".to_string()],
-        );
-        let dim_x = datamodel::Dimension::named(
-            "dimx".to_string(),
-            vec!["x1".to_string(), "x2".to_string()],
-        );
-        let mut dim_b = datamodel::Dimension::named(
-            "dimb".to_string(),
-            vec!["b1".to_string(), "b2".to_string()],
-        );
-        dim_b.mappings = vec![
-            datamodel::DimensionMapping {
-                target: "dimx".to_string(),
-                element_map: vec![],
-            },
-            datamodel::DimensionMapping {
-                target: "dima".to_string(),
-                element_map: vec![],
-            },
-        ];
-
-        let dims_ctx = DimensionsContext::from(&[dim_a.clone(), dim_x, dim_b.clone()]);
-        let active_dims = vec![Dimension::from(&dim_a)];
-        let active_subscript = vec!["a1".to_string()];
-        let visitor = BuiltinVisitor::new("test_var")
-            .with_dimensions_ctx(Some(&dims_ctx))
-            .with_active_element(&active_dims, &active_subscript);
-
-        let expr = Expr0::Var(RawIdent::new_from_str("dimb"), Loc::default());
-        let rewritten = visitor.substitute_dimension_refs(expr);
-        match rewritten {
-            Expr0::Var(id, _) => {
-                assert_eq!(id.as_str(), "dimb·b1");
-            }
-            other => panic!("expected Var, got {other:?}"),
-        }
-    }
 
     /// Every operator is usable inside a module-function argument (GH #913).
     ///

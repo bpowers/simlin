@@ -11,7 +11,11 @@
 //! `Expr0` subtree, an [`ImplicitModule`] carries its target model and its
 //! input wiring, and [`ImplicitVar::parsed_variable`] is the one way a
 //! consumer turns any of them back into the parse-stage variable it stands
-//! for. Nothing prints a helper to equation text and parses it back.
+//! for. Nothing prints a helper to equation text and parses it back, and
+//! nothing rewrites a helper's body: a body written inside an apply-to-all
+//! keeps the axes it was written for ([`CaptureShape::ApplyToAll`]) or the
+//! element it was expanded for ([`crate::variable::ElementScope`]), and
+//! lowering resolves it there.
 //!
 //! `PREVIOUS`/`INIT` compile to opcodes that read a fixed slot or a static
 //! view of the snapshot regions. An argument that addresses neither
@@ -47,14 +51,11 @@
 use indexmap::IndexMap;
 
 use crate::ast::{Ast, Expr0, print_eqn};
-use crate::builtins_visitor::{
-    SnapshotIndexFacts, empty_macro_registry, instantiate_implicit_modules,
-};
 use crate::common::{Canonical, EquationError, ErrorCode, Ident};
 use crate::datamodel;
 use crate::dimensions::DimensionsContext;
 use crate::model::VariableStage0;
-use crate::variable::{VarKind, Variable, get_dimensions};
+use crate::variable::{ElementScope, VarKind, Variable, get_dimensions};
 
 /// The name a synthesized helper of `parent` is filed under.
 ///
@@ -83,6 +84,18 @@ pub(crate) fn synthetic_ident(parent: &str, n: usize, part: &str, suffix: Option
         Some(suffix) if !suffix.is_empty() => format!("$⁚{parent}⁚{n}⁚{part}⁚{suffix}"),
         _ => format!("$⁚{parent}⁚{n}⁚{part}"),
     }
+}
+
+/// The element suffix of a per-element helper's name: the active element's
+/// coordinates joined by `,`, lowercased -- the one spelling of an element
+/// tuple the helper names carry.
+pub(crate) fn element_suffix(scope: &ElementScope) -> String {
+    scope
+        .element
+        .iter()
+        .map(|e| e.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Which snapshot builtins read a capture's storage, and therefore which
@@ -140,6 +153,27 @@ impl CaptureKind {
     }
 }
 
+/// The storage a capture occupies and the context its body is resolved in --
+/// decided by where the `PREVIOUS`/`INIT` call was written.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
+pub enum CaptureShape {
+    /// A scalar equation's argument: one slot, a scalar body.
+    Scalar,
+    /// An apply-to-all body's argument, kept structural: one slot per element
+    /// of the parent's declared axes (canonical dimension names), the body
+    /// resolved per element by the same apply-to-all lowering the parent gets,
+    /// and read back by the parent as `capture[Dim..]` -- the reference that
+    /// leaves each axis standing for lowering to pin to the active element.
+    ApplyToAll(Vec<String>),
+    /// One element's argument, minted while the parent's body was walked for
+    /// that element -- a module-bearing apply-to-all body, an explicit
+    /// `Ast::Arrayed` slot, or a module-bearing EXCEPT default materialized
+    /// for a slot no explicit element claims: one slot, a scalar body
+    /// resolved as that element (`ElementScope`).
+    Element(ElementScope),
+}
+
 /// One `PREVIOUS`/`INIT` argument, hoisted into its own unit of evaluation.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
@@ -153,40 +187,32 @@ pub struct Capture {
     /// identity; the name is derived from it.
     id: usize,
     kind: CaptureKind,
-    /// The argument, exactly as the walk left it -- already dimension-
-    /// substituted for a scalar capture in an apply-to-all body, and
-    /// deliberately NOT substituted for an arrayed one, so a bare arrayed name
-    /// inside it keeps its array shape (GH #541).
+    /// The argument, exactly as the walk left it: a subscript naming an axis
+    /// of the parent stays that subscript, and lowering resolves it under the
+    /// shape's axes or element.
     arg: Expr0,
-    /// The active apply-to-all element, when this capture is one element's own.
-    suffix: Option<String>,
-    /// The canonical dimension names an arrayed capture applies over; empty for
-    /// a scalar one. An arrayed capture occupies one slot per element and is
-    /// read back per element by the rewritten call, so every consumer that
-    /// lays it out or subscripts it needs its declared shape.
-    dims: Vec<String>,
+    shape: CaptureShape,
 }
 
 impl Capture {
     /// Mint the capture for one `PREVIOUS`/`INIT` call of `parent`.
-    ///
-    /// `dims` empty makes a scalar capture; non-empty makes the arrayed one
-    /// (GH #541), whose body is held unsubstituted over those dimensions.
     pub(crate) fn new(
         parent: &str,
         id: usize,
         kind: CaptureKind,
         arg: Expr0,
-        suffix: Option<String>,
-        dims: Vec<String>,
+        shape: CaptureShape,
     ) -> Self {
+        let suffix = match &shape {
+            CaptureShape::Element(scope) => Some(element_suffix(scope)),
+            CaptureShape::Scalar | CaptureShape::ApplyToAll(_) => None,
+        };
         Capture {
             ident: synthetic_ident(parent, id, "arg0", suffix.as_deref()),
             id,
             kind,
             arg,
-            suffix,
-            dims,
+            shape,
         }
     }
 
@@ -206,14 +232,17 @@ impl Capture {
         &self.arg
     }
 
-    pub fn suffix(&self) -> Option<&str> {
-        self.suffix.as_deref()
+    pub fn shape(&self) -> &CaptureShape {
+        &self.shape
     }
 
-    /// The canonical dimension names this capture applies over; empty when it
-    /// is scalar.
+    /// The canonical dimension names this capture's STORAGE applies over;
+    /// empty when it is one slot.
     pub fn dims(&self) -> &[String] {
-        &self.dims
+        match &self.shape {
+            CaptureShape::ApplyToAll(dims) => dims,
+            CaptureShape::Scalar | CaptureShape::Element(_) => &[],
+        }
     }
 
     /// Absorb another capture that defines the same value: `true` when it
@@ -235,8 +264,7 @@ impl Capture {
     /// claiming one name.
     pub(crate) fn merge_same_definition(&mut self, other: &Self) -> bool {
         let same = self.ident == other.ident
-            && self.suffix == other.suffix
-            && self.dims == other.dims
+            && self.shape == other.shape
             && self.arg.eq_ignoring_loc(&other.arg);
         if same {
             self.kind = self.kind.union(other.kind);
@@ -250,27 +278,36 @@ impl Capture {
     /// error and discards the AST, exactly as the parse does: the caller's
     /// loud-safe `None` then keeps the helper out of the compile rather than
     /// laying it out at the wrong size. See [`subtree_parsed_variable`] for
-    /// what the body goes through and why.
+    /// what the body is.
     fn parsed_variable(&self, dimensions: &DimensionsContext) -> VariableStage0 {
-        let mut errors: Vec<EquationError> = Vec::new();
-        let ast = if self.dims.is_empty() {
-            Some(Ast::Scalar(self.arg.clone()))
-        } else {
-            match get_dimensions(dimensions, &self.dims) {
-                Ok(dims) => Some(Ast::ApplyToAll(dims, self.arg.clone())),
-                Err(err) => {
-                    errors.push(err);
-                    None
-                }
+        let text = print_eqn(&self.arg);
+        let (ast, eqn, scope, errors) = match &self.shape {
+            CaptureShape::Scalar => (
+                Some(Ast::Scalar(self.arg.clone())),
+                datamodel::Equation::Scalar(text),
+                None,
+                Vec::new(),
+            ),
+            CaptureShape::Element(scope) => (
+                Some(Ast::Scalar(self.arg.clone())),
+                datamodel::Equation::Scalar(text),
+                Some(scope.clone()),
+                Vec::new(),
+            ),
+            CaptureShape::ApplyToAll(dims) => {
+                let (ast, errors) = match get_dimensions(dimensions, dims) {
+                    Ok(resolved) => (Some(Ast::ApplyToAll(resolved, self.arg.clone())), vec![]),
+                    Err(err) => (None, vec![err]),
+                };
+                (
+                    ast,
+                    datamodel::Equation::ApplyToAll(dims.clone(), text),
+                    None,
+                    errors,
+                )
             }
         };
-        let text = print_eqn(&self.arg);
-        let eqn = if self.dims.is_empty() {
-            datamodel::Equation::Scalar(text)
-        } else {
-            datamodel::Equation::ApplyToAll(self.dims.clone(), text)
-        };
-        subtree_parsed_variable(&self.ident, ast, eqn, errors, dimensions)
+        subtree_parsed_variable(&self.ident, ast, eqn, scope, errors)
     }
 }
 
@@ -304,69 +341,22 @@ impl Capture {
 /// against the parent, so the snippet underlines the argument inside the
 /// parent's equation.
 ///
-/// A scalar body is not walked again. The parent's walk visited every node of
-/// it and every decision that walk makes is final: a call's arguments are
-/// walked before the call itself, so each `PREVIOUS`/`INIT` left in the body
-/// was routed to a direct read under the parent's snapshot-index facts, and a
-/// second walk here -- which has no owning model to ask -- could only
-/// re-decide such a read against a different rule and mint a helper the parent
-/// never filed. An ARRAYED capture's body is walked, because the visitor is
-/// not a no-op on an apply-to-all: its per-element gate fires on a bare
-/// `PREVIOUS`/`INIT` as well as on a module call, so the body becomes an
-/// `Ast::Arrayed` of identical elements rather than staying an
-/// `Ast::ApplyToAll`, and that expansion decides the fragment's shape. Such a
-/// body holds no subscript at all (`BuiltinVisitor::hoist_capture`), so that
-/// walk classifies no index; a helper it nonetheless minted is refused loudly
-/// rather than dropped.
+/// The body is not walked again. The parent's walk visited every node of it
+/// and every decision that walk makes is final: a call's arguments are walked
+/// before the call itself, so each `PREVIOUS`/`INIT` left in the body was
+/// routed to a direct read under the parent's snapshot-index facts and its
+/// declared axes, and a second walk here -- which has no owning model to ask
+/// -- could only re-decide such a read against a different rule and mint a
+/// helper the parent never filed.
 fn subtree_parsed_variable(
     ident: &str,
     ast: Option<Ast<Expr0>>,
     eqn: datamodel::Equation,
-    mut errors: Vec<EquationError>,
-    dimensions: &DimensionsContext,
+    element_scope: Option<ElementScope>,
+    errors: Vec<EquationError>,
 ) -> VariableStage0 {
-    let ident = Ident::<Canonical>::new(ident);
-    // Where the body was written in the parent's equation, for the one error
-    // this function raises itself.
-    let loc = match &ast {
-        Some(Ast::Scalar(body) | Ast::ApplyToAll(_, body)) => body.get_loc(),
-        Some(Ast::Arrayed(..)) | None => crate::ast::Loc::default(),
-    };
-    let ast = ast.and_then(|ast| {
-        if let Ast::Scalar(_) = ast {
-            return Some(ast);
-        }
-        match instantiate_implicit_modules(
-            ident.as_str(),
-            ast,
-            Some(dimensions),
-            // A helper body is given none of the model-level facts a parse
-            // can carry: it names no module the parent's walk did not already
-            // resolve, its indices were classified by that walk, and it is not
-            // a macro body.
-            SnapshotIndexFacts::NoModel,
-            empty_macro_registry(),
-            None,
-        ) {
-            Ok((ast, nested)) if nested.is_empty() => Some(ast),
-            Ok(_) => {
-                errors.push(EquationError::detailed(
-                    ErrorCode::Generic,
-                    loc.start,
-                    loc.end,
-                    format!("the body of synthesized helper '{ident}' synthesized further helpers"),
-                ));
-                None
-            }
-            Err(err) => {
-                errors.push(err);
-                None
-            }
-        }
-    });
-
     Variable {
-        ident,
+        ident: Ident::<Canonical>::new(ident),
         units: None,
         eqn: Some(eqn),
         errors,
@@ -380,6 +370,7 @@ fn subtree_parsed_variable(
             non_negative: false,
             is_flow: false,
             is_table_only: false,
+            element_scope,
         },
     }
 }
@@ -391,7 +382,10 @@ fn subtree_parsed_variable(
 /// straight to its port -- so the `arg{i}` in the name is the argument's
 /// position in the CALL, not in any list of hoisted arguments, and
 /// [`ImplicitModule::references`] does not correspond one-to-one with the
-/// hoisted arguments of its call.
+/// hoisted arguments of its call. The exceptions are the two bare names a
+/// scalar port cannot read directly: an arrayed variable and a dimension name,
+/// which under a per-element expansion mean one element's value, and are
+/// hoisted into a helper scoped to that element so lowering reads it.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
 pub struct HoistedArg {
@@ -400,27 +394,29 @@ pub struct HoistedArg {
     /// position and the active element; see [`Capture::ident`] for why one
     /// exists.
     ident: String,
-    /// The argument, exactly as the walk left it -- already dimension-
-    /// substituted when the parent is expanded per element, because the helper
-    /// is a scalar aux with no dimension context of its own to resolve a bare
-    /// dimension name against.
+    /// The argument, exactly as the walk left it.
     arg: Expr0,
+    /// The element this argument is one element of, when the parent is
+    /// expanded per element; `None` for a scalar parent's argument.
+    scope: Option<ElementScope>,
 }
 
 impl HoistedArg {
     /// Mint the helper for argument `index` of the call `parent`'s walk is at
-    /// counter `id`, expanding element `suffix` when the parent is walked per
+    /// counter `id`, for element `scope` when the parent is walked per
     /// element.
     pub(crate) fn new(
         parent: &str,
         id: usize,
         index: usize,
         arg: Expr0,
-        suffix: Option<&str>,
+        scope: Option<ElementScope>,
     ) -> Self {
+        let suffix = scope.as_ref().map(element_suffix);
         HoistedArg {
-            ident: synthetic_ident(parent, id, &format!("arg{index}"), suffix),
+            ident: synthetic_ident(parent, id, &format!("arg{index}"), suffix.as_deref()),
             arg,
+            scope,
         }
     }
 
@@ -432,19 +428,25 @@ impl HoistedArg {
         &self.arg
     }
 
-    /// Do these two hoisted arguments define the same value? Source position
-    /// is excluded for the reason [`Capture::same_definition`] gives.
-    pub(crate) fn same_definition(&self, other: &Self) -> bool {
-        self.ident == other.ident && self.arg.eq_ignoring_loc(&other.arg)
+    pub fn scope(&self) -> Option<&ElementScope> {
+        self.scope.as_ref()
     }
 
-    fn parsed_variable(&self, dimensions: &DimensionsContext) -> VariableStage0 {
+    /// Do these two hoisted arguments define the same value? Source position
+    /// is excluded for the reason [`Capture::merge_same_definition`] gives.
+    pub(crate) fn same_definition(&self, other: &Self) -> bool {
+        self.ident == other.ident
+            && self.scope == other.scope
+            && self.arg.eq_ignoring_loc(&other.arg)
+    }
+
+    fn parsed_variable(&self) -> VariableStage0 {
         subtree_parsed_variable(
             &self.ident,
             Some(Ast::Scalar(self.arg.clone())),
             datamodel::Equation::Scalar(print_eqn(&self.arg)),
+            self.scope.clone(),
             Vec::new(),
-            dimensions,
         )
     }
 }
@@ -572,15 +574,41 @@ impl ImplicitVar {
         self.module().is_some()
     }
 
-    /// The dimension names this helper applies over, or `&[]` when it is
-    /// scalar. An arrayed helper occupies one slot per element, so a consumer
-    /// that lays it out or subscripts it reads this rather than assuming 1.
-    /// Only a capture is ever arrayed (GH #541): a hoisted argument is a scalar
-    /// aux, and a module instance is sized by its target model.
+    /// The argument subtree a subtree-bodied helper holds, whose spans index
+    /// the PARENT's equation text. `None` for a module instance: it is its
+    /// target model plus its port wiring, with no argument of its own, so a
+    /// failure to lower it has no span in the parent's equation to point at.
+    pub fn arg(&self) -> Option<&Expr0> {
+        match self {
+            ImplicitVar::Capture(c) => Some(c.arg()),
+            ImplicitVar::HoistedArg(a) => Some(a.arg()),
+            ImplicitVar::Module(_) => None,
+        }
+    }
+
+    /// The dimension names this helper's STORAGE applies over, or `&[]` when
+    /// it is one slot. An arrayed helper occupies one slot per element, so a
+    /// consumer that lays it out or subscripts it reads this rather than
+    /// assuming 1. Only a structural capture is ever arrayed: a per-element
+    /// helper is one element's slot, and a module instance is sized by its
+    /// target model.
     pub fn equation_dims(&self) -> &[String] {
         match self {
             ImplicitVar::Capture(c) => c.dims(),
             ImplicitVar::HoistedArg(_) | ImplicitVar::Module(_) => &[],
+        }
+    }
+
+    /// The element this helper's scalar body is one element of, when it was
+    /// minted for one element of its parent's apply-to-all body.
+    pub fn element_scope(&self) -> Option<&ElementScope> {
+        match self {
+            ImplicitVar::Capture(c) => match c.shape() {
+                CaptureShape::Element(scope) => Some(scope),
+                CaptureShape::Scalar | CaptureShape::ApplyToAll(_) => None,
+            },
+            ImplicitVar::HoistedArg(a) => a.scope(),
+            ImplicitVar::Module(_) => None,
         }
     }
 
@@ -603,13 +631,12 @@ impl ImplicitVar {
     /// conversion every consumer of a helper uses, so no consumer can build a
     /// helper's variable through a different representation than another.
     ///
-    /// `dimensions` is the project's whole dimension context: a helper body was
-    /// written inside its parent's equation, and the parent's parse resolved
-    /// every dimension name in it against the dimensions that parent reads.
+    /// `dimensions` is the project's whole dimension context: a structural
+    /// capture's declared axes are resolved against it.
     pub(crate) fn parsed_variable(&self, dimensions: &DimensionsContext) -> VariableStage0 {
         match self {
             ImplicitVar::Capture(c) => c.parsed_variable(dimensions),
-            ImplicitVar::HoistedArg(a) => a.parsed_variable(dimensions),
+            ImplicitVar::HoistedArg(a) => a.parsed_variable(),
             ImplicitVar::Module(m) => m.parsed_variable(),
         }
     }
@@ -621,16 +648,14 @@ impl ImplicitVar {
 /// accumulate: inside one walk (`BuiltinVisitor`), across the per-element walks
 /// of an apply-to-all or arrayed parent, and across the dt and initial passes
 /// of one variable (`variable::parse_var`). A same-definition repeat is
-/// absorbed into the first -- the apply-to-all expansion walks one cloned body
-/// per element and the GH #541 arrayed capture it mints is deliberately
-/// suffix-less, so every element's copy is the same helper, and a capture the
-/// two passes mint for different snapshot consumers is one helper serving
-/// both. A different helper claiming the name is refused before it can
-/// overwrite the first: the silent last-wins alternative made a later
-/// `Ast::Arrayed` slot read an earlier slot's capture (PR #668), and a macro
-/// named `ARG1` invoked as `ARG1(k, k * 2)` mints its instance and its second
-/// argument's helper under one name from ordinary source. `DuplicateVariable`
-/// because two helpers really do claim one name.
+/// absorbed into the first -- the dt and initial passes walk one equation
+/// twice, and a capture the two passes mint for different snapshot consumers
+/// is one helper serving both. A different helper claiming the name is refused
+/// before it can overwrite the first: the silent last-wins alternative made a
+/// later `Ast::Arrayed` slot read an earlier slot's capture (PR #668), and a
+/// macro named `ARG1` invoked as `ARG1(k, k * 2)` mints its instance and its
+/// second argument's helper under one name from ordinary source.
+/// `DuplicateVariable` because two helpers really do claim one name.
 pub(crate) fn insert_implicit_var(
     vars: &mut IndexMap<Ident<Canonical>, ImplicitVar>,
     var: ImplicitVar,

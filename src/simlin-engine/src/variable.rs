@@ -15,8 +15,8 @@ use crate::builtins_visitor::{
 };
 use crate::capture::{ImplicitVar, insert_implicit_var};
 use crate::common::{
-    Canonical, CanonicalElementName, DimensionName, EquationError, EquationResult, Ident,
-    UnitError, canonicalize,
+    Canonical, CanonicalDimensionName, CanonicalElementName, DimensionName, EquationError,
+    EquationResult, Ident, UnitError, canonicalize,
 };
 use crate::datamodel;
 use crate::db::SourceVariableKind;
@@ -87,6 +87,29 @@ pub struct ModuleInput {
     pub dst: Ident<Canonical>,
 }
 
+/// One element of an apply-to-all body, as the context a SCALAR equation is
+/// resolved in.
+///
+/// A per-element helper -- a `PREVIOUS`/`INIT` capture or a hoisted
+/// module-call argument minted while its parent's apply-to-all body was
+/// expanded for one element -- holds its argument exactly as it was written
+/// inside that body. Its storage is one slot, but its body is one element of
+/// the parent's equation: `dims` are the parent's declared axes in order and
+/// `element` the active element on each. Lowering seeds the same
+/// active-element context the parent's own slot is lowered under
+/// (`compiler::Var::new`), so `x[State]`, a bare arrayed name, a mapped or
+/// subdimension read and a repeated axis resolve through the compiler's rules
+/// (`match_axes`, `resolve_mapped_read`) and read what the parent's element
+/// reads. Nothing rewrites the body to get there: a rewrite is a second
+/// resolution rule, and the two drift exactly where the rules are non-trivial
+/// (GH #1035).
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
+pub struct ElementScope {
+    pub dims: Vec<CanonicalDimensionName>,
+    pub element: Vec<CanonicalElementName>,
+}
+
 /// A variable's per-kind payload: exactly the facts whose meaning depends on
 /// what kind of variable this is. Everything a variable has regardless of kind
 /// -- its name, its declared units, its source equation, and the two error
@@ -113,6 +136,10 @@ pub enum VarKind<MI = ModuleInput, E = Expr2> {
         non_negative: bool,
         is_flow: bool,
         is_table_only: bool,
+        /// `Some` for a per-element helper, whose scalar `ast` is one element
+        /// of its parent's apply-to-all body ([`ElementScope`]); `None` for
+        /// every variable a model declares.
+        element_scope: Option<ElementScope>,
     },
     Module {
         // the current spec has ident == model name
@@ -183,6 +210,15 @@ impl<MI, E> Variable<MI, E> {
         match self.ast()? {
             Ast::Arrayed(dims, _, _, _) | Ast::ApplyToAll(dims, _) => Some(dims),
             Ast::Scalar(_) => None,
+        }
+    }
+
+    /// The element this scalar's body is one element of, when it is a
+    /// per-element helper's.
+    pub fn element_scope(&self) -> Option<&ElementScope> {
+        match &self.kind {
+            VarKind::Aux { element_scope, .. } => element_scope.as_ref(),
+            VarKind::Stock { .. } | VarKind::Module { .. } => None,
         }
     }
 
@@ -840,9 +876,9 @@ pub(crate) fn get_dimensions(
             // names came from `print_eqn` carries CANONICAL names (`hfc_type`),
             // which must still resolve against a dimension declared with
             // original casing/spacing (`HFC type` -> `HFC_type`); a raw `==`
-            // check rejected it as `BadDimensionName` (the GH #541 arrayed
-            // PREVIOUS/INIT helper regression on C-LEARN's capitalized
-            // dimensions). Importer-produced equations already match exactly,
+            // check rejected it as `BadDimensionName` (a synthesized apply-to-all
+            // capture over C-LEARN's capitalized dimensions, GH #541).
+            // Importer-produced equations already match exactly,
             // so canonical matching is a strict superset.
             //
             // Taking the already-built `DimensionsContext` rather than the raw
@@ -1241,6 +1277,7 @@ where
                     non_negative: v.non_negative,
                     is_flow: matches!(v.kind, SourceVariableKind::Flow),
                     is_table_only,
+                    element_scope: None,
                 },
             )
         }
@@ -1609,7 +1646,7 @@ pub(crate) fn scalar_ast(eqn: &str) -> Ast<Expr2> {
         dimensions: &Default::default(),
         model_name: "test",
     };
-    lower_ast(&scope, &ast.unwrap()).unwrap()
+    lower_ast(&scope, &ast.unwrap(), false).unwrap()
 }
 
 /// Table-driven matrix test for `classify_dependencies`.
@@ -2301,6 +2338,7 @@ fn test_tables() {
             non_negative: false,
             is_flow: false,
             is_table_only: false,
+            element_scope: None,
         },
     };
 

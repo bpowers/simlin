@@ -1153,16 +1153,18 @@ pub fn is_0_arity_builtin_fn_ci(name: &str) -> bool {
 }
 
 /// Returns true if `func_name` (already lowercased) names a function that
-/// expands to a stdlib module: the canonical names in `MODEL_NAMES` plus
-/// the alias forms `delay`, `delayn`, and `smthn`.
+/// expands to a stdlib module: a name with a
+/// [`crate::module_functions::stdlib_descriptor`] plus the alias forms
+/// `delay`, `delayn`, and `smthn`, which `builtins_visitor` normalizes to one
+/// of those before the descriptor is looked up.
 ///
-/// This is the authoritative name check, shared by `contains_module_call()`
-/// (the walk-time A2A expansion decision) and the visitor's stdlib routing;
-/// each caller adds its own structural logic on top (e.g. INIT inclusion for
-/// A2A).
+/// Defined over the descriptor table rather than `stdlib::MODEL_NAMES` so the
+/// per-element expansion decision (`builtins_visitor::per_element_requirements`)
+/// and the expansion itself cannot disagree: a `stdlib⁚systems_*` model has no
+/// descriptor and is not a callable function.
 pub(crate) fn is_stdlib_module_function(func_name: &str) -> bool {
     matches!(func_name, "delay" | "delayn" | "smthn")
-        || crate::stdlib::MODEL_NAMES.contains(&func_name)
+        || crate::module_functions::stdlib_descriptor(func_name).is_some()
 }
 
 /// Whether a (lowercased) name or alias denotes a builtin function.

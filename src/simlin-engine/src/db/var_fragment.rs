@@ -121,8 +121,8 @@ pub(crate) fn source_dep_shape(
 }
 
 /// The shape of a parse-synthesized implicit helper: a module instance's
-/// sub-model shape, or the helper's declared dimensions (an arrayed
-/// `PREVIOUS`/`INIT` capture, GH #541; every other helper is scalar).
+/// sub-model shape, or the helper's declared dimensions (a structural
+/// apply-to-all capture; every other helper is scalar).
 pub(crate) fn implicit_dep_shape(
     db: &dyn Db,
     project: SourceProject,

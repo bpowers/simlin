@@ -51,11 +51,11 @@
 //! *bare* (unsubscripted) arrayed name inside a *nested* `PREVIOUS` --
 //! `p2bare[region] = PREVIOUS(PREVIOUS(pop))` -- now compiles and
 //! simulates, producing the same per-element values as the explicitly
-//! subscripted form. `builtins_visitor`'s `hoist_capture` synthesizes an
-//! *arrayed* (`Equation::ApplyToAll`) helper aux over the active A2A
-//! dimensions for the inner `PREVIOUS(pop)` and references it
-//! `helper[<element>]`, so the bare arrayed name keeps its array shape
-//! instead of landing ill-typed in a scalar helper. This was exactly the
+//! subscripted form. A snapshot-only apply-to-all body is captured
+//! structurally: `hoist_capture` synthesizes ONE apply-to-all
+//! (`Equation::ApplyToAll`) helper over the parent's dimensions whose body
+//! the compiler lowers per element, so the bare arrayed name keeps its
+//! array shape instead of landing ill-typed in a scalar helper. This was exactly the
 //! shape the LTM flow-to-stock link-score generator emits; "Finding 2" of
 //! the review was this bug surfacing *through* the generator, and Piece 2
 //! worked around it generator-side, but the underlying engine limitation
@@ -977,12 +977,12 @@ fn size_reducer_previous_helper_compiles_and_is_correct() {
 /// stubbed to `0`, collapsing the loop score. Piece 2 worked around it
 /// generator-side; this engine-level fix removes the root cause.
 ///
-/// Fix (GH #541): `hoist_capture` in `builtins_visitor.rs` now synthesizes
-/// an *arrayed* (`Equation::ApplyToAll`) helper aux over the active A2A
-/// dimensions when the captured argument carries a bare variable reference,
-/// and references it `helper[<element>]`. The bare arrayed name keeps its
-/// array shape, and dimension matching (including transposed contexts) is
-/// delegated to the existing apply-to-all lowering.
+/// The rule (GH #541): a snapshot-only apply-to-all body is captured
+/// structurally -- `hoist_capture` synthesizes one apply-to-all
+/// (`Equation::ApplyToAll`) helper over the parent's dimensions, read under
+/// the active element. The bare arrayed name keeps its array shape, and
+/// dimension matching (including transposed contexts) is the apply-to-all
+/// lowering's.
 ///
 /// `pop[region]` and `scalar_pop` share identical dynamics, so each arrayed
 /// slot must track `PREVIOUS(PREVIOUS(pop[region]))` -- which
@@ -1322,14 +1322,12 @@ fn bare_arrayed_nested_previous_transposed_matches_subscripted() {
 /// `DimensionMapping` does not reproduce the same `find_mapping_parent_of` /
 /// `translate_via_mapping` resolution).
 ///
-/// The original #541 path wrapped the whole `INITIAL` body in an
-/// `Equation::ApplyToAll(["cop"], ...)` helper and SKIPPED
-/// `substitute_dimension_refs`, so the foreign `[Aggregated Regions]` subscript
-/// stayed un-translated and the helper fragment failed (`BadDimensionName` ->
-/// silently dropped -> `NotSimulatable`). The fix keeps a subscripted argument
-/// on the per-element scalar-helper path, which translates each mapped
-/// subscript to a concrete element. The per-element values must be exactly the
-/// mapped source values (`Agg` element `Ai` -> `COP` element `Ci`).
+/// The `INITIAL` body is captured structurally, as an
+/// `Equation::ApplyToAll(["cop"], ...)` helper, and the compiler resolves the
+/// foreign `[Aggregated Regions]` subscript per element through the declared
+/// mapping (`DimensionsContext::resolve_mapped_read`) exactly as it resolves
+/// the parent's own body. The per-element values must be exactly the mapped
+/// source values (`Agg` element `Ai` -> `COP` element `Ci`).
 #[test]
 fn a2a_init_mapped_dim_subscript_matches_mapped_source() {
     const MDL: &str = r#"{UTF-8}
@@ -5247,14 +5245,11 @@ fn module_only_root_with_pinned_index_sub_scores_cleanly() {
 /// must compile and read the per-element rank of the *lagged* array.
 ///
 /// `RANK(arr, dir)` is array-valued (the rank of each element -- Vensim's
-/// VECTOR RANK), but `builtins_visitor::arg_has_bare_var_ref` treated every
-/// `reducer_kind_from_name` builtin as scalar-collapsing and refused to
-/// descend, so the PREVIOUS capture landed in a per-element SCALAR helper
-/// whose equation `rank(pop, 1)` is ill-typed (array-valued in scalar
-/// context) and the model failed to compile. Treating RANK as
-/// array-valued routes the capture through the GH #541 ARRAYED helper
-/// (`Equation::ApplyToAll` over the active dims, referenced at the active
-/// element), which compiles exactly like the model's own A2A equation.
+/// VECTOR RANK). A snapshot-only apply-to-all body is captured structurally,
+/// as an `Equation::ApplyToAll` helper over the active dims whose body the
+/// compiler lowers per element, so `rank(pop, 1)` is lowered under the
+/// capture's own dimensions -- exactly like the model's own A2A equation --
+/// rather than in a scalar helper where it is ill-typed.
 #[test]
 fn previous_of_rank_compiles_per_element() {
     let project = TestProject::new("prev_rank")
@@ -5507,13 +5502,13 @@ fn rank_frozen_subtree_link_score_scores_correctly() {
         .expect("VM simulation should run to completion");
     let results = vm.into_results();
 
-    // The frozen-RANK capture helper is ONE arrayed (deduped) helper whose
-    // slots read the current-step per-element ranks -- constant [1, 2].
+    // The frozen-RANK capture helper is ONE arrayed (structural) helper,
+    // keyed per element like any arrayed variable, whose slots read the
+    // current-step per-element ranks -- constant [1, 2].
     let helper =
         "$\u{205A}$\u{205A}ltm\u{205A}link_score\u{205A}scale\u{2192}grow\u{205A}0\u{205A}arg0";
-    let helper_base = offset_of(&results, helper);
-    let helper_north = series_at(&results, helper_base);
-    let helper_south = series_at(&results, helper_base + 1);
+    let helper_north = series_at(&results, offset_of(&results, &format!("{helper}[north]")));
+    let helper_south = series_at(&results, offset_of(&results, &format!("{helper}[south]")));
     assert!(
         helper_north.iter().all(|&v| v == 1.0),
         "the arrayed capture helper's north slot must hold rank 1; got {helper_north:?}"

@@ -95,6 +95,7 @@ pub(super) fn parse_ltm_equation(
             non_negative: false,
             is_flow: false,
             is_table_only: false,
+            element_scope: None,
         },
     };
 

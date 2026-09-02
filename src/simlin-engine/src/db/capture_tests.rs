@@ -23,12 +23,15 @@ use crate::test_common::{TestProject, implicit_vars_of};
 enum Parent {
     /// A scalar aux named `lagged`.
     Scalar,
-    /// An apply-to-all aux `out[d]`: one equation, walked once per element
-    /// because the body contains `PREVIOUS`/`INIT` (`contains_module_call`).
+    /// An apply-to-all aux `out[d]`: one equation. A snapshot-only body is
+    /// walked once and its capture is STRUCTURAL, an apply-to-all capture
+    /// over `d` (`builtins_visitor::per_element_requirements`); only a body
+    /// with a module call is walked once per element.
     ApplyToAll,
     /// A per-element arrayed aux `out[d]` whose slots carry the SAME text but
-    /// are distinct equations, so a capture of one slot must not be able to
-    /// claim another slot's name (PR #668).
+    /// are distinct equations, each walked under its own element, so a
+    /// capture of one slot must not be able to claim another slot's name
+    /// (PR #668).
     PerElement,
 }
 
@@ -129,59 +132,32 @@ const ROWS: &[CaptureRow] = &[
         rewritten: None,
     },
     CaptureRow {
-        covers: "hoist_capture scalar branch inside apply-to-all: one capture per element, \
-                 each carrying its element suffix. Substitution is a no-op on this body -- \
-                 the index is a VARIABLE, not a dimension -- so the three bodies are equal \
-                 and only the suffixes tell the captures apart",
+        covers: "hoist_capture under an apply-to-all parent whose body is snapshot-only: ONE \
+                 structural capture over the parent's dimensions, no element suffix, its \
+                 body the source subtree. The compiler resolves that body per element \
+                 exactly as it resolves the parent's own (GH #1035); here the index is a \
+                 VARIABLE, so every element reads the same dynamic slot",
         parent: Parent::ApplyToAll,
         equation: "PREVIOUS(vals[idx], 0)",
-        captures: &[
-            ("$⁚out⁚0⁚arg0⁚e1", CaptureKind::Previous, "vals[idx]", &[]),
-            ("$⁚out⁚0⁚arg0⁚e2", CaptureKind::Previous, "vals[idx]", &[]),
-            ("$⁚out⁚0⁚arg0⁚e3", CaptureKind::Previous, "vals[idx]", &[]),
-        ],
-        rewritten: Some(
-            "the scalar branch substitutes, even where the substitution changes nothing",
-        ),
+        captures: &[("$⁚out⁚0⁚arg0", CaptureKind::Previous, "vals[idx]", &["d"])],
+        rewritten: None,
     },
     CaptureRow {
-        covers: "hoist_capture scalar branch inside apply-to-all, with the substitution \
-                 actually firing: a dimension reference in the body is rewritten to the \
-                 active element, so each element's capture holds a DIFFERENT body. This is \
-                 the one arm where the capture is deliberately not the source subtree",
+        covers: "the structural capture with a DIMENSION reference in the body: nothing \
+                 rewrites it, because the capture is itself apply-to-all over `d` and \
+                 `vals[d]` under it is the active element, as in any apply-to-all body",
         parent: Parent::ApplyToAll,
-        // `Op2`, so the routing's pre-substitution (which only fires on a bare
-        // `Subscript` arg0) does not run and `hoist_capture` owns the whole
-        // substitution; `k` is the bare variable reference and `vals[d]` the
-        // subscript, which together select the SCALAR branch over the arrayed
-        // one (`arg_has_bare_var_ref && !arg_has_subscript`).
+        // `Op2`, so the routing's static-slot classification (which only
+        // fires on a bare `Subscript` arg0) does not run and `hoist_capture`
+        // captures the whole body.
         equation: "PREVIOUS(vals[d] * k, 0)",
-        captures: &[
-            (
-                "$⁚out⁚0⁚arg0⁚e1",
-                CaptureKind::Previous,
-                "vals[d·e1] * k",
-                &[],
-            ),
-            (
-                "$⁚out⁚0⁚arg0⁚e2",
-                CaptureKind::Previous,
-                "vals[d·e2] * k",
-                &[],
-            ),
-            (
-                "$⁚out⁚0⁚arg0⁚e3",
-                CaptureKind::Previous,
-                "vals[d·e3] * k",
-                &[],
-            ),
-        ],
-        rewritten: Some("substitute_dimension_refs rewrites the body per element"),
+        captures: &[("$⁚out⁚0⁚arg0", CaptureKind::Previous, "vals[d] * k", &["d"])],
+        rewritten: None,
     },
     CaptureRow {
-        covers: "hoist_capture ARRAYED branch (GH #541): a bare arrayed name inside the \
-                 argument keeps its array shape, so ONE apply-to-all capture is synthesized \
-                 for every element and the suffix is omitted so they dedup to one",
+        covers: "a bare arrayed name inside the body (GH #541's shape) takes the same \
+                 structural arm as every other snapshot-only body: the capture is \
+                 apply-to-all over `d`, under which the bare name is the active element",
         parent: Parent::ApplyToAll,
         equation: "PREVIOUS(PREVIOUS(vals), 0)",
         captures: &[(
@@ -193,9 +169,11 @@ const ROWS: &[CaptureRow] = &[
         rewritten: Some("the walk gives the inner PREVIOUS its default fallback"),
     },
     CaptureRow {
-        covers: "hoist_capture ARRAYED branch under a PER-ELEMENT parent: each slot gets a \
-                 fresh visitor, so the walk counter restarts at 0 for every one of them and \
-                 the element suffix is the whole of what keeps their names apart (PR #668)",
+        covers: "hoist_capture under a PER-ELEMENT parent: each slot is its own equation \
+                 walked under its own element, so the capture is that element's SCALAR \
+                 (`CaptureShape::Element`, no declared dimensions of its own), the walk \
+                 counter restarts at 0 for every slot and the element suffix is the whole \
+                 of what keeps their names apart (PR #668)",
         parent: Parent::PerElement,
         equation: "PREVIOUS(PREVIOUS(vals), 0)",
         captures: &[
@@ -203,19 +181,19 @@ const ROWS: &[CaptureRow] = &[
                 "$⁚out⁚0⁚arg0⁚e1",
                 CaptureKind::Previous,
                 "previous(vals, 0)",
-                &["d"],
+                &[],
             ),
             (
                 "$⁚out⁚0⁚arg0⁚e2",
                 CaptureKind::Previous,
                 "previous(vals, 0)",
-                &["d"],
+                &[],
             ),
             (
                 "$⁚out⁚0⁚arg0⁚e3",
                 CaptureKind::Previous,
                 "previous(vals, 0)",
-                &["d"],
+                &[],
             ),
         ],
         rewritten: Some("the walk gives the inner PREVIOUS its default fallback"),
@@ -328,6 +306,56 @@ fn every_capture_shape_carries_its_ident_kind_and_argument() {
             );
         }
     }
+}
+
+/// An apply-to-all capture occupies one slot per element, and the results
+/// map keys every one of them (`$⁚out⁚0⁚arg0[e1]`, ...) exactly as it keys
+/// an explicit arrayed variable's, so a name-keyed reader -- the CLI's TSV,
+/// `get_series`, libsimlin's variable list -- addresses each element and no
+/// slot is left unnamed (GH #1033).
+#[test]
+fn an_apply_to_all_captures_slots_are_keyed_per_element() {
+    let tp = TestProject::new("capture_offsets")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("d", &["e1", "e2", "e3"])
+        .array_with_ranges("vals[d]", vec![("e1", "30"), ("e2", "10"), ("e3", "20")])
+        .array_aux("out[d]", "PREVIOUS(vals[d] * 2, 0)");
+    let compiled = tp.compile_incremental().expect("compiles");
+    let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+    vm.run_to_end().expect("runs");
+    let results = vm.into_results();
+
+    let base = results.offsets[&crate::common::Ident::new("$⁚out⁚0⁚arg0[e1]")];
+    for (i, element) in ["e1", "e2", "e3"].into_iter().enumerate() {
+        assert_eq!(
+            results
+                .offsets
+                .get(&crate::common::Ident::new(&format!(
+                    "$⁚out⁚0⁚arg0[{element}]"
+                )))
+                .copied(),
+            Some(base + i),
+            "the capture's {element} slot is keyed in row-major order"
+        );
+    }
+    assert!(
+        !results
+            .offsets
+            .contains_key(&crate::common::Ident::new("$⁚out⁚0⁚arg0")),
+        "an arrayed helper has no bare key: {:?}",
+        results.offsets.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        results.offsets.len(),
+        results.step_size,
+        "every slot of the run is keyed: {:?}",
+        results.offsets.keys().collect::<Vec<_>>()
+    );
+    // And the keys address the right data: the capture holds `vals * 2` at
+    // every step, per element.
+    let series = crate::test_common::collect_results(&results);
+    assert_eq!(series["$⁚out⁚0⁚arg0[e2]"], [20.0, 20.0, 20.0]);
+    assert_eq!(series["$⁚out⁚0⁚arg0[e3]"], [40.0, 40.0, 40.0]);
 }
 
 /// A capture holds the argument SUBTREE the parent's parse produced -- source

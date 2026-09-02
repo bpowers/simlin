@@ -205,11 +205,12 @@ pub(crate) fn reducer_kind_from_name(name: &str, arity: usize) -> Option<Reducer
 /// `PREVIOUS(RANK(arr, dir))` subtree as scalar routes the capture into a
 /// per-element *scalar* helper whose equation is ill-typed (array-valued in
 /// scalar context), the helper fragment fails, and the consuming score
-/// silently corrupts. The three consumers are
-/// `builtins_visitor::arg_has_bare_var_ref` (the GH #541 arrayed-capture
-/// gate), `ltm_augment::expr_is_array_slice_valued` (the GH #743
-/// unfreezable-`PREVIOUS` detector), and scalar-reducer agg minting
-/// ([`reducer_is_hoistable`], GH #771). LTM still routes RANK references
+/// silently corrupts. The two consumers are
+/// `ltm_augment::expr_is_array_slice_valued` (the GH #743
+/// unfreezable-`PREVIOUS` detector) and scalar-reducer agg minting
+/// ([`reducer_is_hoistable`], GH #771); the engine's own capture needs no
+/// such gate, because a snapshot-only apply-to-all body is captured
+/// structurally and its `RANK` lowers under the capture's own dimensions. LTM still routes RANK references
 /// through synthetic aggs, but those aggs are marked array-valued and their
 /// source→agg half uses the RANK-specific all-read-rows-to-all-output-slots
 /// treatment rather than the scalar reducer row→slot treatment (GH #776).

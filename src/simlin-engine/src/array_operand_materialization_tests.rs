@@ -1226,13 +1226,12 @@ fn previous_reducer_operands_read_the_previous_row() {
 /// QUALIFIED spelling the LTM wrap generates --
 /// `PREVIOUS(matrix[region·nyc,*])` -- pins the row by NAME instead, and it
 /// reaches this SAME view route from an ordinary APPLY-TO-ALL user equation:
-/// `arg_is_array_shaped` accepts it (the qualified index is static, the `*`
-/// spans), so no capture helper is synthesized and the argument passes through
-/// to lowering. Measured: `out[row] = SUM(PREVIOUS(wide[row·r1,*]))` compiles
-/// with ZERO synthesized helpers and reads r1's previous row at every step,
-/// while with `arg_is_array_shaped` reverted (HEAD's visitor) the same equation
-/// declines through a capture helper. So the qualified spelling is neither
-/// LTM-only nor pre-existing -- C3 is what routes it here.
+/// `SnapshotArg::access` classifies it as a view (the qualified index is
+/// static, the `*` spans), so no capture helper is synthesized and the
+/// argument passes through to lowering. Measured: `out[row] =
+/// SUM(PREVIOUS(wide[row·r1,*]))` compiles with ZERO synthesized helpers and
+/// reads r1's previous row at every step. So the qualified spelling is
+/// neither LTM-only nor pre-existing -- C3 is what routes it here.
 ///
 /// What IS split is `Ast::Scalar` vs `Ast::ApplyToAll` inside
 /// `builtins_visitor::instantiate_implicit_modules`, not user-vs-LTM: both
@@ -1820,13 +1819,10 @@ fn a_non_default_array_previous_fallback_declines_loudly() {
 
 /// The three spellings of an arrayed reference, at `VECTOR SORT ORDER` arg0.
 ///
-/// They arrive from three different directions and only one of them ever
-/// reached lowering intact before: `vals` (a bare name) already lowered to a
-/// whole-array view; `vals[*]` and `vals[d]` were claimed by
-/// `builtins_visitor`'s capture-helper synthesis, which cannot hold an array
-/// (`vals[*]` in a scalar `Equation::Scalar` helper does not compile) or pinned
-/// them to one element (`substitute_dimension_refs` rewriting `d` to `d·elem`).
-/// All three must now mean the same array.
+/// They arrive from three different directions: `vals` (a bare name) lowers
+/// to a whole-array view, and `vals[*]` and `vals[d]` are static views the
+/// parse reads directly (`SnapshotArg::access`), never captured. All three
+/// mean the same array.
 #[test]
 fn all_three_arrayed_previous_spellings_agree() {
     let expected = [[0.0, 1.0, 0.0], [1.0, 2.0, 1.0], [2.0, 0.0, 2.0]];

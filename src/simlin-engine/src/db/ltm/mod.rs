@@ -112,6 +112,38 @@ use link_scores::{
 pub(crate) use loops::recover_agg_hop_polarities;
 use parse::parse_ltm_equation;
 
+/// The declared dimensions of a causal-graph endpoint of `model` -- the one
+/// answer to "what shape does the name `name` have" that every LTM surface
+/// reads: causal edges, the element graph, scores, loops and pins.
+///
+/// The projection of [`crate::db::var_fragment::model_dep_shape`] -- the
+/// fragment compiler's own dependency shape, through the per-name firewall
+/// queries -- onto plain variables: an explicit variable's declared axes, a
+/// parse-synthesized helper's storage (a structural `PREVIOUS`/`INIT` capture
+/// is arrayed over its parent's declared axes, every other helper is one
+/// slot), `None` for a module instance, explicit or implicit (a scalar node
+/// in the graph whatever its ports' shapes), and for a name the model does
+/// not declare.
+///
+/// One shape answer is not one emitter. An element-bound helper (a
+/// per-element capture or hoisted argument of an apply-to-all body) is scalar
+/// storage whose edge into its arrayed parent exists at ONE element, so the
+/// scalar-source emitters (`try_scalar_to_arrayed_link_scores`, the
+/// scalar-feeder arm of `emit_source_to_agg_link_scores`) admit only explicit
+/// scalar sources and leave that edge to
+/// `try_implicit_scalar_to_arrayed_link_scores`, which scores it into the one
+/// element that reads it.
+pub(crate) fn endpoint_dimensions(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    name: &str,
+) -> Option<Vec<crate::dimensions::Dimension>> {
+    use crate::compiler::fragment::DepKind;
+    let shape = crate::db::var_fragment::model_dep_shape(db, model, project, name)?;
+    matches!(shape.kind, DepKind::Var).then_some(shape.dims)
+}
+
 /// The single integration method the assembled simulation actually runs, when
 /// it is NOT Euler.
 ///
@@ -892,9 +924,8 @@ pub fn model_ltm_implicit_var_info(
                     .unwrap_or(1)
             } else {
                 // A non-module helper is usually a scalar aux (1 slot), but
-                // an ARRAYED capture helper -- the GH #541 arrayed
-                // `PREVIOUS`/`INIT` capture, extended to array-valued builtin
-                // subtrees like `rank(pop, 1)` by GH #742 -- occupies
+                // a structural capture -- a snapshot-only apply-to-all body,
+                // captured once over the parent's dimensions -- occupies
                 // product(dim lengths) slots. Laid out at size 1 it would
                 // overlap its successors' slots and consumers would read it
                 // as scalar.
@@ -1435,7 +1466,6 @@ pub fn model_ltm_variables(
             let (mut detected, truncated_aggs) = build_loops_from_tiered(
                 tiered,
                 &var_graph,
-                source_vars,
                 db,
                 model,
                 project,
@@ -1578,7 +1608,6 @@ pub fn model_ltm_variables(
                 } else if let Some(agg) = agg_by_name(from_var_level) {
                     emit_agg_to_target_link_scores(
                         db,
-                        source_vars,
                         agg_nodes,
                         agg,
                         to_var_level,
@@ -1899,7 +1928,6 @@ pub fn model_ltm_variables(
                     } else if let Some(agg) = agg_by_name(from_var_level) {
                         emit_agg_to_target_link_scores(
                             db,
-                            source_vars,
                             agg_nodes,
                             agg,
                             to_var_level,

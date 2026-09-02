@@ -158,11 +158,14 @@ pub fn compute_layout(
 /// module instance: a top-level variable is keyed by its canonical name at its
 /// layout slot; a module variable contributes no key of its own but its
 /// sub-model's map, each name prefixed `module·` and each slot based at the
-/// module's; an arrayed explicit variable is keyed per element as
-/// `name[e1,e2]` in the VM's row-major storage order (the conveyor and queue
-/// plans index belts by these keys); an arrayed implicit or LTM variable is
-/// keyed once, by its bare name, at its base slot (readers widen it by the
-/// variable's own dimensions); and a slot nothing writes per step keeps its
+/// module's; an arrayed variable -- explicit, or a structural capture helper
+/// -- is keyed per element as `name[e1,e2]` in the VM's row-major storage
+/// order (the conveyor and queue plans index belts by these keys); an arrayed
+/// LTM synthetic variable is keyed once, by its bare name, at its base slot,
+/// because its only readers (the LTM result readers) look a score up by that
+/// bare name and widen it by the variable's own dimensions, so a per-element
+/// key would be a second spelling of a slot nothing looks up; and a slot
+/// nothing writes per step keeps its
 /// layout slot but has no key, because it produces no series -- a standalone
 /// lookup-only table (GH #606) or an INIT-only capture, which is populated
 /// in initials and read from the frozen snapshot. Exposing such a slot would
@@ -186,15 +189,17 @@ pub(crate) fn flattened_offsets(
 }
 
 /// How one layout entry reaches the results map.
-enum Flatten<'a> {
+enum Flatten {
     /// A module instance: its sub-model's map, based at this slot. `None`
     /// when the project holds no such model -- there is nothing to flatten.
     Module(Option<SourceModel>),
     /// A static table (GH #606) or an INIT-only capture: the slot is
     /// reserved, there is no series.
     Hidden,
-    /// An arrayed explicit variable: one key per element, row-major.
-    Elements(&'a [crate::dimensions::Dimension]),
+    /// An arrayed variable -- explicit, or a structural capture helper (GH
+    /// #1033) -- whose storage these dimensions describe: one key per
+    /// element, row-major.
+    Elements(Vec<crate::dimensions::Dimension>),
     /// One key at the entry's base slot.
     Series,
 }
@@ -215,7 +220,11 @@ fn flatten_model(
     let source_vars = model.variables(db);
     let implicit_info = model_implicit_var_info(db, model, project);
     let ltm_implicit = model_ltm_implicit_var_info(db, model, project);
+    let dim_context = project_dimensions_context(db, project);
     let sub_model = |name: &str| project_models.get(canonicalize(name).as_ref()).copied();
+    let helper_elements = |dims: &[String]| {
+        Flatten::Elements(super::var_fragment::dimensions_named(dims, dim_context))
+    };
     let qualified = |local: Ident<Canonical>| match prefix {
         Some(prefix) => Ident::join(&prefix.as_canonical_str(), &local.as_canonical_str()),
         None => local,
@@ -230,7 +239,7 @@ fn flatten_model(
                 Flatten::Hidden
             } else if entry.size > 1 {
                 // The entry's size is the product of these dimensions.
-                Flatten::Elements(variable_dimensions(db, *svar, project))
+                Flatten::Elements(variable_dimensions(db, *svar, project).clone())
             } else {
                 Flatten::Series
             }
@@ -239,6 +248,8 @@ fn flatten_model(
                 Flatten::Module(info.model_name.as_deref().and_then(sub_model))
             } else if info.capture_kind == Some(CaptureKind::Init) {
                 Flatten::Hidden
+            } else if entry.size > 1 {
+                helper_elements(&info.dimensions)
             } else {
                 Flatten::Series
             }
@@ -249,6 +260,8 @@ fn flatten_model(
                 // The same rule for a generated helper; the generator emits
                 // `PREVIOUS` captures only, so nothing reaches this arm today.
                 Flatten::Hidden
+            } else if entry.size > 1 {
+                helper_elements(meta.variable.equation_dims())
             } else {
                 Flatten::Series
             }
@@ -272,7 +285,8 @@ fn flatten_model(
             }
             Flatten::Module(None) | Flatten::Hidden => {}
             Flatten::Elements(dims) => {
-                for (j, subscripts) in crate::dimensions::SubscriptIterator::new(dims).enumerate() {
+                for (j, subscripts) in crate::dimensions::SubscriptIterator::new(&dims).enumerate()
+                {
                     let element = format!("{name}[{}]", subscripts.join(","));
                     offsets.insert(
                         qualified(Ident::<Canonical>::from_unchecked(element)),
