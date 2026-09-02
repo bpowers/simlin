@@ -185,6 +185,17 @@ fn resolve_input_format(input: &InputArgs) -> InputFormat {
 /// pairs in declaration order.
 type VisibleStocks = Vec<(String, String)>;
 
+/// The model file's bytes, or the refusal `open_model` dies with: the path
+/// and the OS's reason. Stdin is read as `/dev/stdin`.
+fn read_model_file(file_path: &str) -> StdResult<Vec<u8>, String> {
+    std::fs::read(file_path).map_err(|err| format!("model '{file_path}': {err}"))
+}
+
+/// A text format's file as UTF-8, refused with the path when it is not.
+fn model_text(file_path: &str, bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|err| die!("model '{}': {}", file_path, err))
+}
+
 /// Load a model file, dispatching on format. Exits on error.
 /// For systems format, also returns the visible stocks list (declaration
 /// order, original names) for filtered output.
@@ -195,27 +206,20 @@ fn open_model(input: &InputArgs) -> (DatamodelProject, Option<VisibleStocks>) {
         .as_ref()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "/dev/stdin".to_string());
+    let bytes = read_model_file(&file_path).unwrap_or_else(|reason| die!("{}", reason));
 
     let (result, visible) = match format {
         InputFormat::Vensim => {
-            let contents = std::fs::read_to_string(&file_path).unwrap();
+            let contents = model_text(&file_path, bytes);
             // `input.path` is the user's intent: `Some` for a named model file
             // (anchors the external-data root), `None` for stdin (pipe or
             // `< file`) where no data root can be inferred.
             (open_vensim_model(input.path.as_deref(), &contents), None)
         }
-        InputFormat::Protobuf => {
-            let file = File::open(&file_path).unwrap();
-            let mut reader = BufReader::new(file);
-            (open_binary(&mut reader), None)
-        }
-        InputFormat::Xmile => {
-            let file = File::open(&file_path).unwrap();
-            let mut reader = BufReader::new(file);
-            (open_xmile(&mut reader), None)
-        }
+        InputFormat::Protobuf => (open_binary(&mut BufReader::new(bytes.as_slice())), None),
+        InputFormat::Xmile => (open_xmile(&mut BufReader::new(bytes.as_slice())), None),
         InputFormat::Systems => {
-            let contents = std::fs::read_to_string(&file_path).unwrap();
+            let contents = model_text(&file_path, bytes);
             let systems_model = simlin_engine::systems::parse(&contents)
                 .unwrap_or_else(|e| die!("model '{}' parse error: {}", &file_path, e));
             let visible = simlin_engine::systems::translate::visible_stocks(&systems_model);
@@ -795,6 +799,32 @@ fn main() {
                 results.print_tsv_comparison(Some(&reference_data));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod open_model_tests {
+    use super::*;
+
+    /// A model file the CLI cannot read is refused with the path and the
+    /// OS's reason -- the message `open_model` dies with -- never a panic.
+    #[test]
+    fn an_unreadable_model_file_is_refused_with_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent.mdl");
+        let missing = missing.to_string_lossy().into_owned();
+        let reason = read_model_file(&missing).expect_err("a missing file is refused");
+        assert!(
+            reason.contains(&missing),
+            "the refusal names the path: {reason}"
+        );
+
+        let present = dir.path().join("present.xmile");
+        std::fs::write(&present, b"<xmile/>").unwrap();
+        assert_eq!(
+            read_model_file(&present.to_string_lossy()).unwrap(),
+            b"<xmile/>"
+        );
     }
 }
 
