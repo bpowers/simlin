@@ -200,7 +200,7 @@ export function simlin_project_render_png(
       ) => void)
     | undefined;
   // The browser wasm artifact is built without png_render (the rasterization
-  // stack is ~28% of the binary); only the full artifact Node loads has it.
+  // stack is ~17% of the binary); only the full artifact Node loads has it.
   if (typeof renderFn !== 'function') {
     throw new Error('PNG rendering is not available in this build of libsimlin (browser builds omit png_render)');
   }

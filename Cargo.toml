@@ -12,12 +12,18 @@ members = [
 ]
 
 # Release builds optimize for speed (opt-level = 3) on every target, the wasm32
-# bundle included: size-optimized codegen there costs a 1.6x slower
-# open-compile-run pipeline for a 0.5 MB smaller compressed download (numbers
+# bundle included: size-optimized codegen there costs a 1.6x to 1.7x slower
+# open-compile-run pipeline for a 0.6 MB smaller compressed download (numbers
 # in .cargo/config.toml, which also carries the wasm-only codegen-units
 # setting, keyed on the target so every wasm build path gets it). Measured on
 # C-LEARN: opt-level 3 vs "z" is ~-30% compile and ~-41% simulate on native
 # (see docs/design/engine-performance.md).
+#
+# `lto = true` applies to the binaries and to the wasm bundle, but only because
+# src/engine/build.sh builds the latter with `cargo rustc --crate-type cdylib`:
+# cargo passes `-C lto` only when every crate type of the target allows it, and
+# libsimlin's rlib does not, so a plain `cargo build -p simlin` on any target
+# is a non-LTO build whatever this line says.
 [profile.release]
 opt-level = 3
 lto = true

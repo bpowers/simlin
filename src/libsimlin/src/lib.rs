@@ -43,16 +43,20 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 // rather than a feature because both artifacts src/engine/build.sh produces
 // (the full Node bundle and the --no-default-features browser bundle) are the
 // same single-threaded target, which is the one thing wasmalloc requires (it
-// refuses to build with the `atomics` target feature). The release profile's
-// `lto = true` matters here: wasmalloc's fast paths are `#[inline]` and only
-// specialise per call site when they can be inlined across the crate boundary.
+// refuses to build with the `atomics` target feature). Link-time optimization
+// matters here: wasmalloc's fast paths are `#[inline]` and only specialise per
+// call site when LLVM can see them across the crate boundary, which is why
+// src/engine/build.sh builds the bundle as a cdylib alone (cargo passes
+// `-C lto` only for a target whose every crate type allows it, and this
+// crate's rlib does not).
 //
 // Measured with src/engine/bench/clearn-alloc.mjs on C-LEARN v77 with LTM
-// (node 22 and 24): the salsa compile, ~34M mostly sub-128-byte allocations,
-// takes 0.72-0.75x the time it takes on dlmalloc, dispose 0.52x, the
-// allocation-free run is unchanged, and the whole open-compile-run pipeline
-// 0.83-0.85x. The costs are +5% peak `memory.size` (wasmalloc keeps at least
-// one 64 KiB page per size class in use) and about 9 KiB of optimized bundle.
+// (node 22 and 24, at `opt-level = "z"` without LTO): the salsa compile, ~34M
+// mostly sub-128-byte allocations, takes 0.72-0.75x the time it takes on
+// dlmalloc, dispose 0.52x, the allocation-free run is unchanged, and the whole
+// open-compile-run pipeline 0.83-0.85x. The costs are +5% peak `memory.size`
+// (wasmalloc keeps at least one 64 KiB page per size class in use) and about
+// 9 KiB of optimized bundle.
 #[cfg(target_arch = "wasm32")]
 #[global_allocator]
 static GLOBAL: wasmalloc::WasmAlloc = wasmalloc::WasmAlloc::new();

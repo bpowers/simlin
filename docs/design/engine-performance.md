@@ -208,18 +208,20 @@ redundant per-variable rebuild.
 ## Build-level levers (measured, near-free, the biggest wins) — IMPLEMENTED
 
 These need no engine-code changes and dwarf the code-level compile work. Lever A
-applies to every target; the WASM bundle additionally builds with
-`codegen-units=1` (`.cargo/config.toml`, which carries the measured trade-off).
-Lever B is **native-only**: the WASM bundle never links mimalloc.
+applies to every target; the WASM bundle additionally builds with fat LTO
+(`src/engine/build.sh` builds it as a cdylib alone, which is what makes cargo
+pass `-C lto`) and `codegen-units=1` (`.cargo/config.toml`, which carries the
+measured trade-offs). Lever B is **native-only**: the WASM bundle never links
+mimalloc.
 
 ### A. `opt-level = 3` for native (compile −30%, run −41%)
 
 `[profile.release]` is `opt-level = 3`, and the WASM bundle takes it too: on
 C-LEARN v77 through `src/engine/bench/clearn-alloc.mjs` the browser bundle's
-open-compile-run pipeline is 0.64x the `opt-level="z"` time (compile 0.55x to
-0.61x, run 0.64x to 0.75x on V8 12.4 and 13.6) for a bundle 1.5x larger raw
-(5.38 MB to 8.03 MB after wasm-opt) and 1.4x larger compressed (brotli 1.27 MB to
-1.76 MB). Native, measured on C-LEARN (with the code wins in):
+open-compile-run pipeline is 0.59x to 0.62x the `opt-level="z"` time (compile
+0.50x to 0.57x, run 0.60x to 0.76x on V8 12.4 and 13.6) for a bundle 1.8x
+larger raw (5.38 MB to 9.52 MB after wasm-opt) and 1.5x larger compressed
+(brotli 1.27 MB to 1.87 MB). Native, measured on C-LEARN (with the code wins in):
 
 | | opt="z" | opt=3 | delta |
 |---|---|---|---|
@@ -807,9 +809,10 @@ short of it rather than taking a ~2-3%.
 
 1. ~~**Build levers A (opt=3 native) + B (mimalloc native)**~~ — DONE. Measured
    −59% compile / −41% run for ~no engine code and near-zero risk
-   (`[profile.release] opt-level=3` on every target, plus `codegen-units=1`
-   for wasm via `.cargo/config.toml`; `mimalloc` global allocator on the native
-   binaries + libsimlin's opt-in feature). WASM links no mimalloc.
+   (`[profile.release] opt-level=3` on every target, plus LTO and
+   `codegen-units=1` for wasm via `src/engine/build.sh` and
+   `.cargo/config.toml`; `mimalloc` global allocator on the native binaries +
+   libsimlin's opt-in feature). WASM links no mimalloc.
 2. ~~**R1 (bounds-check elimination)**~~ — INVESTIGATED, dropped: measured
    sub-noise (~0) ceiling; bounds checks are effectively free at opt-level=3.
 3. ~~**R2 (3-address binop fusion)**~~ — DONE. Flow opcodes −23.5%, run −6.8% on

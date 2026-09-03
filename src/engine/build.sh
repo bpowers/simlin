@@ -14,28 +14,50 @@ mkdir -p core
 #   - libsimlin-browser.wasm  --no-default-features build; imported by
 #                             wasm.browser.ts and bundled into the SPA. The
 #                             png_render stack (resvg + text shaping + an
-#                             embedded font) is ~28% of the optimized binary
+#                             embedded font) is ~17% of the optimized binary
 #                             and nothing in the browser calls it.
 #
-# Both feature sets share the cargo target dir (artifacts coexist keyed by
-# feature hash), but cargo uplifts each build to the same simlin.wasm path,
-# so we stage into core/ immediately after each build.
+# Each artifact builds in its own target directory, named after it and nested
+# under the workspace's. The two are the same crate with different feature
+# sets, and cargo gives a cdylib target no per-feature-set hash in its output
+# name or its fingerprint (dynamic libraries keep stable file names), so in a
+# shared directory each build evicts the other's and cargo relinks simlin on
+# every run of this script, changed tree or not. Under LTO that relink is the
+# whole-program optimization, ~50 s per artifact on a 16-core desktop; the
+# separate directories make an unchanged tree a no-op and cost one extra copy
+# of the browser build's dependency closure (bitcode only, under LTO) on a
+# clean build. Nesting them keeps both inside whatever `cargo clean` and the
+# CI caches cover.
 #
 # The xmutil feature is always off here (C++ dependency, not wasm-buildable).
 #
-# The target directory is RESOLVED, not assumed: `CARGO_TARGET_DIR` and a cargo
-# config's `build.target-dir` both move it, and a hardcoded `../../target` turns
-# that into a `cp: cannot stat` below -- which reads as a broken wasm build
-# rather than as a path mismatch.
+# The workspace target directory is RESOLVED, not assumed: `CARGO_TARGET_DIR`
+# and a cargo config's `build.target-dir` both move it, and a hardcoded
+# `../../target` turns that into a `cp: cannot stat` below -- which reads as a
+# broken wasm build rather than as a path mismatch.
 TARGET_DIR="$("$DIR/../../scripts/cargo-target-dir.sh")"
-WASM_SRC="$TARGET_DIR/wasm32-unknown-unknown/release/simlin.wasm"
 
 build_wasm() {
   local out_name="$1"
   shift
+  local target_dir="$TARGET_DIR/${out_name%.wasm}"
+  local wasm_src="$target_dir/wasm32-unknown-unknown/release/simlin.wasm"
   echo "Building $out_name for wasm32-unknown-unknown..."
-  # cargo build is idempotent and no-ops when nothing has changed.
-  cargo build -p simlin --lib --release --target wasm32-unknown-unknown "$@"
+  # `cargo rustc --crate-type cdylib`, deliberately not `cargo build`. The
+  # simlin crate lists three crate types (staticlib, rlib, cdylib) for its
+  # native consumers, and cargo passes `-C lto` to rustc only when every crate
+  # type it is producing can be link-time optimized -- an rlib cannot -- so a
+  # plain `cargo build` silently drops the release profile's `lto = true` for
+  # this target: rustc then sees each crate on its own, and the
+  # `#[global_allocator]` shims stay out of line at every allocation site
+  # instead of being inlined and specialized per call site. Restricting the
+  # build to the one crate type the bundle needs is what makes cargo pass
+  # `-C lto` (`cargo rustc ... -v` shows it; .cargo/config.toml carries the
+  # measured effect). Cargo still uplifts the output to $wasm_src, so the
+  # staging and cache logic below is unaffected, and the invocation is
+  # idempotent: it no-ops when nothing has changed.
+  cargo rustc -p simlin --lib --release --target wasm32-unknown-unknown --crate-type cdylib \
+    --target-dir "$target_dir" "$@"
 
   # Whether this invocation will optimize. Decided BEFORE the cache check
   # because it is part of the cache key -- see below.
@@ -64,7 +86,7 @@ build_wasm() {
   # which deletes core/ and hid this; nothing about the cache made it safe.
   if [ ! -f "core/$out_name" ] \
       || [ "$have_mode" != "$want_mode" ] \
-      || ! cmp -s "$WASM_SRC" "core/$out_name.raw"; then
+      || ! cmp -s "$wasm_src" "core/$out_name.raw"; then
     # Invalidate the stamp BEFORE restaging, not merely write it after.
     #
     # Writing it last protects a FIRST build: an abort leaves no stamp, so the
@@ -86,8 +108,8 @@ build_wasm() {
     # is redone. Reversed, a failure between the two would leave a `.raw`
     # describing the new source beside a blob built from the old one -- which
     # `cmp` cannot detect, since it only ever compares `.raw` to cargo.
-    cp "$WASM_SRC" "core/$out_name"
-    cp "$WASM_SRC" "core/$out_name.raw"
+    cp "$wasm_src" "core/$out_name"
+    cp "$wasm_src" "core/$out_name.raw"
 
     if [ "$want_mode" = "opt" ]; then
       echo "Running wasm-opt on $out_name..."

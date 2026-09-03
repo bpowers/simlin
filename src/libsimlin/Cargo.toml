@@ -8,6 +8,10 @@ license = "Apache-2.0"
 edition = "2021"
 
 [lib]
+# The rlib in this list means `cargo build` never passes `-C lto` for this
+# crate: cargo only requests LTO when every crate type it is producing can be
+# link-time optimized. src/engine/build.sh builds the wasm bundle with `cargo
+# rustc --crate-type cdylib` for that reason.
 crate-type = ["staticlib", "rlib", "cdylib"]
 
 [features]
@@ -15,7 +19,7 @@ crate-type = ["staticlib", "rlib", "cdylib"]
 # C/C++) -- the server's model-preview pipeline rasterizes diagrams to PNG.
 # The browser wasm bundle disables it (src/engine/build.sh passes
 # --no-default-features for the browser artifact): the resvg + text-shaping
-# stack plus an embedded font is ~28% of the optimized wasm binary, and no
+# stack plus an embedded font is ~17% of the optimized wasm binary, and no
 # browser code calls simlin_project_render_png.
 default = ["png_render"]
 debug-derive = ["simlin-engine/debug-derive"]
