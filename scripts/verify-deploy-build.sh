@@ -159,7 +159,7 @@ fi
 #    slim WASM here would 500 every preview render. A missing or empty
 #    WASM means the Rust+WASM step was skipped or failed silently.
 #    ~1MB minimum is well under any real build (wasm-opt'd release WASM is
-#    ~6.5MB; DISABLE_WASM_OPT leaves the raw opt-level=z output at ~7.9MB).
+#    ~10.0MB; DISABLE_WASM_OPT leaves the raw cargo output at ~11.1MB).
 #    This check deliberately passes either way -- it gates "the WASM step
 #    ran and produced the full artifact", not "wasm-opt ran"; that is
 #    .github/workflows/wasm-opt.yml's job.
@@ -195,7 +195,7 @@ fi
 #     happening to clean first for unrelated reasons.
 #
 #     This exists because the failure it catches is silent and user-facing: an
-#     unoptimized browser bundle is ~24% larger (5.0MB -> 6.2MB) and nothing
+#     unoptimized browser bundle is ~12% larger (8.0MB -> 9.0MB) and nothing
 #     else on the deploy path would notice. It is the backstop for the
 #     src/engine/build.sh cache-key bug -- a pre-commit build staging an
 #     unoptimized blob that then satisfied the next optimizing build's cache
@@ -208,7 +208,7 @@ if [ "1" = "${REQUIRE_WASM_OPT-0}" ]; then
         elif [ ! -f "$wasm.mode" ]; then
             fail "$wasm.mode missing -- src/engine/build.sh did not stage $wasm, or predates the mode stamp"
         elif [ "opt" != "$(cat "$wasm.mode")" ]; then
-            fail "$wasm was built WITHOUT wasm-opt (mode: $(cat "$wasm.mode")). Deploying it would ship a ~24% larger bundle. Is wasm-opt installed, and is DISABLE_WASM_OPT unset?"
+            fail "$wasm was built WITHOUT wasm-opt (mode: $(cat "$wasm.mode")). Deploying it would ship a ~12% larger bundle. Is wasm-opt installed, and is DISABLE_WASM_OPT unset?"
         elif [ ! -f "$wasm.raw" ]; then
             fail "$wasm.raw missing -- cannot corroborate the mode stamp, so $wasm may not actually be optimized"
         elif cmp -s "$wasm" "$wasm.raw"; then

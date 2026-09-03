@@ -11,12 +11,13 @@ members = [
     "src/xmutil",
 ]
 
-# Native release builds optimize for speed (opt-level = 3). The WASM bundle,
-# where download size dominates, is forced back to opt-level = "z" via
-# `.cargo/config.toml` ([target.wasm32-unknown-unknown] rustflags), which is
-# keyed on the target rather than the build invocation so every wasm build path
-# stays size-optimized. Measured on C-LEARN: opt-level 3 vs "z" is ~-30% compile
-# and ~-41% simulate on native (see docs/design/engine-performance.md).
+# Release builds optimize for speed (opt-level = 3) on every target, the wasm32
+# bundle included: size-optimized codegen there costs a 1.6x slower
+# open-compile-run pipeline for a 0.5 MB smaller compressed download (numbers
+# in .cargo/config.toml, which also carries the wasm-only codegen-units
+# setting, keyed on the target so every wasm build path gets it). Measured on
+# C-LEARN: opt-level 3 vs "z" is ~-30% compile and ~-41% simulate on native
+# (see docs/design/engine-performance.md).
 [profile.release]
 opt-level = 3
 lto = true

@@ -23,8 +23,9 @@ set of larger proposals grounded in the measured data.
 - `CompiledSimulation::bytecode_profile()` — opcode histogram + table sizes.
 - CPU: `perf record -g --call-graph dwarf` and `valgrind --tool=callgrind`
   (exact call counts). Memory: the counting allocator. Machine: Ryzen 9950X.
-- Numbers below are the shipped `[profile.release]` (`opt-level="z"`, LTO)
-  unless noted. Profile builds add `CARGO_PROFILE_RELEASE_DEBUG=1
+- Numbers below are `opt-level="z"` + LTO builds unless noted; the release
+  profile is `opt-level=3` on every target (see the build levers below).
+  Profile builds add `CARGO_PROFILE_RELEASE_DEBUG=1
   CARGO_PROFILE_RELEASE_STRIP=false`.
 
 ### Measuring a change
@@ -206,18 +207,19 @@ redundant per-variable rebuild.
 
 ## Build-level levers (measured, near-free, the biggest wins) — IMPLEMENTED
 
-These need no engine-code changes and dwarf the code-level compile work. Both are
-**native-only**: the WASM bundle (built via `cargo build --target
-wasm32-unknown-unknown --release`) keeps `opt-level="z"` for download size and
-never links mimalloc.
+These need no engine-code changes and dwarf the code-level compile work. Lever A
+applies to every target; the WASM bundle additionally builds with
+`codegen-units=1` (`.cargo/config.toml`, which carries the measured trade-off).
+Lever B is **native-only**: the WASM bundle never links mimalloc.
 
 ### A. `opt-level = 3` for native (compile −30%, run −41%)
 
-`[profile.release]` is now `opt-level = 3`. The WASM bundle is forced back to
-`opt-level=z` by `.cargo/config.toml` (`[target.wasm32-unknown-unknown] rustflags
-= ["-C", "opt-level=z"]`) — keyed on the target, so every wasm build path stays
-size-optimized regardless of invocation (verified: wasm bundle 7.19 MB at z vs
-9.75 MB at 3). Measured on C-LEARN (with the code wins in):
+`[profile.release]` is `opt-level = 3`, and the WASM bundle takes it too: on
+C-LEARN v77 through `src/engine/bench/clearn-alloc.mjs` the browser bundle's
+open-compile-run pipeline is 0.64x the `opt-level="z"` time (compile 0.55x to
+0.61x, run 0.64x to 0.75x on V8 12.4 and 13.6) for a bundle 1.5x larger raw
+(5.38 MB to 8.03 MB after wasm-opt) and 1.4x larger compressed (brotli 1.27 MB to
+1.76 MB). Native, measured on C-LEARN (with the code wins in):
 
 | | opt="z" | opt=3 | delta |
 |---|---|---|---|
@@ -805,9 +807,9 @@ short of it rather than taking a ~2-3%.
 
 1. ~~**Build levers A (opt=3 native) + B (mimalloc native)**~~ — DONE. Measured
    −59% compile / −41% run for ~no engine code and near-zero risk
-   (`[profile.release] opt-level=3` + `.cargo/config.toml` wasm override;
-   `mimalloc` global allocator on the native binaries + libsimlin's opt-in
-   feature). WASM stays on `z` and links no mimalloc.
+   (`[profile.release] opt-level=3` on every target, plus `codegen-units=1`
+   for wasm via `.cargo/config.toml`; `mimalloc` global allocator on the native
+   binaries + libsimlin's opt-in feature). WASM links no mimalloc.
 2. ~~**R1 (bounds-check elimination)**~~ — INVESTIGATED, dropped: measured
    sub-noise (~0) ceiling; bounds checks are effectively free at opt-level=3.
 3. ~~**R2 (3-address binop fusion)**~~ — DONE. Flow opcodes −23.5%, run −6.8% on

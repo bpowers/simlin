@@ -9,7 +9,7 @@ Read this before your first deploy after a long gap: the deploy is one local com
 ## Prerequisites
 
 - `gcloud` authenticated against the production project (`gcloud auth login`, `gcloud config set project ...`).
-- A Rust toolchain with the `wasm32-unknown-unknown` target (the toolchain file pins it; `rustup show` to check) and `wasm-opt` on `PATH`. Without `wasm-opt` the deploy still works but ships an unoptimized ~5.6 MB WASM blob. `./scripts/dev-init.sh` sets most of this up.
+- A Rust toolchain with the `wasm32-unknown-unknown` target (the toolchain file pins it; `rustup show` to check) and `wasm-opt` on `PATH`. Without `wasm-opt` the deploy still works but ships an unoptimized ~9 MB WASM blob. `./scripts/dev-init.sh` sets most of this up.
 - Node 24 locally, matching the GAE runtime.
 - A clean working tree. The deploy scripts copy build output into the tracked `public/` directory and `git checkout` it back afterward; starting dirty makes that unreliable.
 - `.app.prod.yaml` in the repo root. It's gitignored -- you keep it locally. See [The two app.yaml files](#the-two-appyaml-files) below.

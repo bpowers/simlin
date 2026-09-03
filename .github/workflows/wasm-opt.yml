@@ -86,8 +86,9 @@ jobs:
   wasm-opt:
     name: Build with wasm-opt and run the engine tests against it
     runs-on: ubuntu-latest
-    # wasm-opt -O3 is ~170s on our two blobs (90s + 76s), on top of the wasm
-    # cargo build. Generous cap so a cold cargo cache does not trip it.
+    # wasm-opt -O3 is ~190s on our two blobs (100s + 90s on a fast desktop), on
+    # top of the ~200s the two codegen-units=1 wasm cargo builds take. Generous
+    # cap so a cold cargo cache does not trip it.
     timeout-minutes: 30
     steps:
       - name: Checkout
