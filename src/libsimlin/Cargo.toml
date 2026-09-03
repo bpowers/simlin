@@ -42,7 +42,7 @@ mimalloc = { version = "0.1", optional = true }
 # lib.rs). Pure Rust and no_std, so it adds no build tooling; single-threaded,
 # which every artifact src/engine/build.sh produces is.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasmalloc = "0.1"
+wasmalloc = "0.1.1"
 
 [dev-dependencies]
 # Second edge onto the engine, adding EXACTLY `test-support` (the `TestProject`
