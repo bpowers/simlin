@@ -24,7 +24,7 @@ pub use array_view::{ArrayView, SparseInfo};
 pub use expr0::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
 pub use expr1::Expr1;
 #[allow(unused_imports)]
-pub use expr2::{ArrayBounds, Expr2, Expr2Context, IndexExpr2};
+pub use expr2::{ArrayBounds, Expr2, Expr2Context, IndexExpr2, NodeBounds};
 #[allow(unused_imports)]
 pub use expr3::{Expr3, Expr3LowerContext, IndexExpr3, TempAllocator};
 pub use literal::Literal;

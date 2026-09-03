@@ -73,6 +73,19 @@ impl ArrayBounds {
     }
 }
 
+/// The bounds slot of a lowered node: `None` on a scalar node, boxed on an
+/// arrayed one.
+///
+/// Boxed, not inline, because the trees carrying it are RETAINED (the
+/// per-variable lowering memos, the LTM handle maps) and a bound is `None` on
+/// every scalar subexpression: an inline [`ArrayBounds`] -- a name and two
+/// `Vec`s -- would be paid by every node for the few that carry one, where a
+/// `None` box costs one pointer. Readers go through `get_array_bounds`, a copy
+/// of a node clones the slot as it stands, and the box is spelled only where a
+/// bound is produced ([`Expr2::from`] and the compiler's bare-reference
+/// rewrite).
+pub type NodeBounds = Option<Box<ArrayBounds>>;
+
 /// IndexExpr represents a parsed equation, after calls to
 /// builtin functions have been checked/resolved.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -165,12 +178,12 @@ impl IndexExpr2 {
 #[derive(PartialEq, Eq, Clone)]
 pub enum Expr2 {
     Const(String, Literal, Loc),
-    Var(Ident<Canonical>, Option<ArrayBounds>, Loc),
-    App(BuiltinFn<Expr2>, Option<ArrayBounds>, Loc),
-    Subscript(Ident<Canonical>, Vec<IndexExpr2>, Option<ArrayBounds>, Loc),
-    Op1(UnaryOp, Box<Expr2>, Option<ArrayBounds>, Loc),
-    Op2(BinaryOp, Box<Expr2>, Box<Expr2>, Option<ArrayBounds>, Loc),
-    If(Box<Expr2>, Box<Expr2>, Box<Expr2>, Option<ArrayBounds>, Loc),
+    Var(Ident<Canonical>, NodeBounds, Loc),
+    App(BuiltinFn<Expr2>, NodeBounds, Loc),
+    Subscript(Ident<Canonical>, Vec<IndexExpr2>, NodeBounds, Loc),
+    Op1(UnaryOp, Box<Expr2>, NodeBounds, Loc),
+    Op2(BinaryOp, Box<Expr2>, Box<Expr2>, NodeBounds, Loc),
+    If(Box<Expr2>, Box<Expr2>, Box<Expr2>, NodeBounds, Loc),
 }
 
 /// Context trait for converting Expr1 to Expr2
@@ -294,26 +307,27 @@ impl Expr2 {
         }
     }
 
-    /// Extract the array bounds from an expression, if it has one
+    /// The array bounds of this node: `None` on a scalar node, always on a
+    /// `Const`.
     pub(crate) fn get_array_bounds(&self) -> Option<&ArrayBounds> {
         match self {
             Expr2::Const(_, _, _) => None,
-            Expr2::Var(_, array_bounds, _) => array_bounds.as_ref(),
-            Expr2::App(_, array_bounds, _) => array_bounds.as_ref(),
-            Expr2::Subscript(_, _, array_bounds, _) => array_bounds.as_ref(),
-            Expr2::Op1(_, _, array_bounds, _) => array_bounds.as_ref(),
-            Expr2::Op2(_, _, _, array_bounds, _) => array_bounds.as_ref(),
-            Expr2::If(_, _, _, array_bounds, _) => array_bounds.as_ref(),
+            Expr2::Var(_, array_bounds, _) => array_bounds.as_deref(),
+            Expr2::App(_, array_bounds, _) => array_bounds.as_deref(),
+            Expr2::Subscript(_, _, array_bounds, _) => array_bounds.as_deref(),
+            Expr2::Op1(_, _, array_bounds, _) => array_bounds.as_deref(),
+            Expr2::Op2(_, _, _, array_bounds, _) => array_bounds.as_deref(),
+            Expr2::If(_, _, _, array_bounds, _) => array_bounds.as_deref(),
         }
     }
 
     /// Allocates a new temp ID for an array with given dimensions
-    fn allocate_temp_array<C: Expr2Context>(ctx: &mut C, dims: Vec<usize>) -> ArrayBounds {
-        ArrayBounds::Temp {
+    fn allocate_temp_array<C: Expr2Context>(ctx: &mut C, dims: Vec<usize>) -> Box<ArrayBounds> {
+        Box::new(ArrayBounds::Temp {
             id: ctx.allocate_temp_id(),
             dims,
             dim_names: None, // Temp arrays don't have dimension names initially
-        }
+        })
     }
 
     /// Allocates a new temp ID for an array with given dimensions and names
@@ -321,12 +335,12 @@ impl Expr2 {
         ctx: &mut C,
         dims: Vec<usize>,
         names: Vec<String>,
-    ) -> ArrayBounds {
-        ArrayBounds::Temp {
+    ) -> Box<ArrayBounds> {
+        Box::new(ArrayBounds::Temp {
             id: ctx.allocate_temp_id(),
             dims,
             dim_names: Some(names),
-        }
+        })
     }
 
     fn unify_array_bounds<C: Expr2Context>(
@@ -334,7 +348,7 @@ impl Expr2 {
         l: Option<&ArrayBounds>,
         r: Option<&ArrayBounds>,
         loc: Loc,
-    ) -> EquationResult<Option<ArrayBounds>> {
+    ) -> EquationResult<NodeBounds> {
         match (l, r) {
             // Both sides are arrays - check dimensions match
             (Some(left), Some(right)) => {
@@ -585,11 +599,11 @@ impl Expr2 {
                     let dim_sizes: Vec<usize> = dims.iter().map(|d| d.len()).collect();
                     let dim_names: Vec<String> =
                         dims.iter().map(|d| d.name().to_string()).collect();
-                    Some(ArrayBounds::Named {
+                    Some(Box::new(ArrayBounds::Named {
                         name: id.as_str().to_string(),
                         dims: dim_sizes,
                         dim_names: Some(dim_names),
-                    })
+                    }))
                 } else {
                     None
                 };
@@ -762,7 +776,8 @@ impl Expr2 {
                 // If the branches are both scalar but the condition is
                 // array-valued, the IF expression should inherit the
                 // condition's dimensions (broadcasting scalar branches).
-                let array_bounds = branch_bounds.or_else(|| cond_expr.get_array_bounds().cloned());
+                let array_bounds = branch_bounds
+                    .or_else(|| cond_expr.get_array_bounds().map(|b| Box::new(b.clone())));
 
                 Expr2::If(
                     Box::new(cond_expr),
@@ -993,7 +1008,7 @@ mod tests {
                 assert_eq!(id.as_str(), "array_var");
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
-                match bounds {
+                match *bounds {
                     ArrayBounds::Named { name, dims, .. } => {
                         assert_eq!(name, "array_var");
                         assert_eq!(dims, vec![3, 4]);
@@ -1037,7 +1052,7 @@ mod tests {
                 assert_eq!(args.len(), 2);
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
-                match bounds {
+                match *bounds {
                     ArrayBounds::Temp { id, dims, .. } => {
                         assert_eq!(id, 0); // First temp allocation
                         assert_eq!(dims, vec![4]); // Only second dimension remains
@@ -1106,7 +1121,7 @@ mod tests {
             Expr2::Op1(UnaryOp::Negative, _, array_bounds, _) => {
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
-                match bounds {
+                match *bounds {
                     ArrayBounds::Temp { id, dims, .. } => {
                         assert_eq!(id, 0); // First temp allocation
                         assert_eq!(dims, vec![2, 3]); // Dimensions preserved
@@ -1142,7 +1157,7 @@ mod tests {
             Expr2::Op1(UnaryOp::Transpose, _, array_bounds, _) => {
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
-                match bounds {
+                match *bounds {
                     ArrayBounds::Temp { id, dims, .. } => {
                         assert_eq!(id, 0); // First temp allocation
                         assert_eq!(dims, vec![4, 3]); // Dimensions reversed
@@ -1183,7 +1198,7 @@ mod tests {
             Expr2::Op2(BinaryOp::Add, _, _, array_bounds, _) => {
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
-                match bounds {
+                match *bounds {
                     ArrayBounds::Temp { id, dims, .. } => {
                         assert_eq!(id, 0); // First temp allocation
                         assert_eq!(dims, vec![2, 3]); // Array dimensions preserved
@@ -1222,7 +1237,7 @@ mod tests {
             Expr2::Op2(BinaryOp::Add, _, _, array_bounds, _) => {
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
-                match bounds {
+                match *bounds {
                     ArrayBounds::Temp { id, dims, .. } => {
                         assert_eq!(id, 0); // First temp allocation
                         assert_eq!(dims, vec![3, 4]); // Dimensions preserved
@@ -1262,7 +1277,7 @@ mod tests {
             Expr2::If(_, _, _, array_bounds, _) => {
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
-                match bounds {
+                match *bounds {
                     ArrayBounds::Temp { id, dims, .. } => {
                         assert_eq!(id, 0); // First temp allocation
                         assert_eq!(dims, vec![2, 2]); // Dimensions preserved
@@ -1310,7 +1325,7 @@ mod tests {
         match expr2_1 {
             Expr2::Op1(_, _, array_bounds, _) => {
                 assert!(array_bounds.is_some());
-                match array_bounds.unwrap() {
+                match *array_bounds.unwrap() {
                     ArrayBounds::Temp { id, .. } => assert_eq!(id, 0),
                     _ => panic!("Expected Temp array bounds"),
                 }
@@ -1322,7 +1337,7 @@ mod tests {
         match expr2_2 {
             Expr2::Op2(_, _, _, array_bounds, _) => {
                 assert!(array_bounds.is_some());
-                match array_bounds.unwrap() {
+                match *array_bounds.unwrap() {
                     ArrayBounds::Temp { id, .. } => assert_eq!(id, 1),
                     _ => panic!("Expected Temp array bounds"),
                 }

@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use crate::ast::expr0::{BinaryOp, UnaryOp};
-use crate::ast::expr2::{ArrayBounds, Expr2, IndexExpr2};
+use crate::ast::expr2::{ArrayBounds, Expr2, IndexExpr2, NodeBounds};
 use crate::ast::literal::Literal;
 use crate::builtins::{ArgKind, BuiltinFn, Loc};
 use crate::common::{
@@ -96,19 +96,20 @@ impl IndexExpr3 {
 /// `Eq` is derived for the reason spelled out on [`crate::ast::Expr0`], even
 /// though this layer is not itself salsa-cached: it keeps all four layers under
 /// one rule, so a float-bearing variant added here cannot be a bare `f64` and
-/// then be copied down to a layer where it would matter.
+/// then be copied down to a layer where it would matter. The bounds slot is
+/// `Expr2`'s [`NodeBounds`], which [`Self::from_expr2`] copies as it stands.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(PartialEq, Eq, Clone)]
 pub enum Expr3 {
     // Core variants (similar to Expr2)
     Const(String, Literal, Loc),
-    Var(Ident<Canonical>, Option<ArrayBounds>, Loc),
-    App(BuiltinFn<Expr3>, Option<ArrayBounds>, Loc),
+    Var(Ident<Canonical>, NodeBounds, Loc),
+    App(BuiltinFn<Expr3>, NodeBounds, Loc),
     /// Dynamic subscript - indices computed at runtime
-    Subscript(Ident<Canonical>, Vec<IndexExpr3>, Option<ArrayBounds>, Loc),
-    Op1(UnaryOp, Box<Expr3>, Option<ArrayBounds>, Loc),
-    Op2(BinaryOp, Box<Expr3>, Box<Expr3>, Option<ArrayBounds>, Loc),
-    If(Box<Expr3>, Box<Expr3>, Box<Expr3>, Option<ArrayBounds>, Loc),
+    Subscript(Ident<Canonical>, Vec<IndexExpr3>, NodeBounds, Loc),
+    Op1(UnaryOp, Box<Expr3>, NodeBounds, Loc),
+    Op2(BinaryOp, Box<Expr3>, Box<Expr3>, NodeBounds, Loc),
+    If(Box<Expr3>, Box<Expr3>, Box<Expr3>, NodeBounds, Loc),
 }
 
 impl Expr3 {
@@ -127,12 +128,12 @@ impl Expr3 {
     pub fn get_array_bounds(&self) -> Option<&ArrayBounds> {
         match self {
             Expr3::Const(_, _, _) => None,
-            Expr3::Var(_, bounds, _) => bounds.as_ref(),
-            Expr3::App(_, bounds, _) => bounds.as_ref(),
-            Expr3::Subscript(_, _, bounds, _) => bounds.as_ref(),
-            Expr3::Op1(_, _, bounds, _) => bounds.as_ref(),
-            Expr3::Op2(_, _, _, bounds, _) => bounds.as_ref(),
-            Expr3::If(_, _, _, bounds, _) => bounds.as_ref(),
+            Expr3::Var(_, bounds, _) => bounds.as_deref(),
+            Expr3::App(_, bounds, _) => bounds.as_deref(),
+            Expr3::Subscript(_, _, bounds, _) => bounds.as_deref(),
+            Expr3::Op1(_, _, bounds, _) => bounds.as_deref(),
+            Expr3::Op2(_, _, _, bounds, _) => bounds.as_deref(),
+            Expr3::If(_, _, _, bounds, _) => bounds.as_deref(),
         }
     }
 
@@ -511,7 +512,7 @@ mod tests {
             dims: vec![3, 4],
             dim_names: None,
         };
-        let expr = Expr3::Var(Ident::new("arr"), Some(bounds), Loc::new(0, 3));
+        let expr = Expr3::Var(Ident::new("arr"), Some(Box::new(bounds)), Loc::new(0, 3));
         assert!(expr.get_array_bounds().is_some());
         assert_eq!(expr.get_array_bounds().unwrap().dims(), &[3, 4]);
     }
@@ -640,7 +641,7 @@ mod tests {
             dims: vec![3, 4],
             dim_names: Some(vec!["dim0".to_string(), "dim1".to_string()]),
         };
-        let expr2 = Expr2::Var(Ident::new("arr"), Some(bounds), Loc::new(0, 3));
+        let expr2 = Expr2::Var(Ident::new("arr"), Some(Box::new(bounds)), Loc::new(0, 3));
 
         let expr3 = Expr3::from_expr2(&expr2, &ctx).unwrap();
 
@@ -816,12 +817,12 @@ mod tests {
             BinaryOp::Add,
             Box::new(Expr2::Var(
                 Ident::new("arr1"),
-                Some(bounds1),
+                Some(Box::new(bounds1)),
                 Loc::new(0, 4),
             )),
             Box::new(Expr2::Var(
                 Ident::new("arr2"),
-                Some(bounds2),
+                Some(Box::new(bounds2)),
                 Loc::new(7, 11),
             )),
             None,

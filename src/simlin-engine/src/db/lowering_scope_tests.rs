@@ -67,8 +67,8 @@ fn the_expr2_tier_reads_dependency_shapes() {
     );
     assert_eq!(s.get_array_bounds(), None);
     assert_eq!(
-        product,
-        Some(ArrayBounds::Temp {
+        product.as_deref(),
+        Some(&ArrayBounds::Temp {
             id: 0,
             dims: vec![3],
             dim_names: Some(vec!["d".to_string()]),
@@ -83,8 +83,8 @@ fn the_expr2_tier_reads_dependency_shapes() {
         panic!("total reduces over a subscript");
     };
     assert_eq!(
-        *bounds,
-        Some(ArrayBounds::Temp {
+        bounds.as_deref(),
+        Some(&ArrayBounds::Temp {
             id: 0,
             dims: vec![3],
             dim_names: Some(vec!["d".to_string()]),
@@ -112,7 +112,7 @@ fn the_expr2_tier_reads_dependency_shapes() {
         panic!("the second term reduces over arr");
     };
     assert!(
-        matches!(*arr, Expr2::Var(_, Some(ArrayBounds::Named { .. }), _)),
+        matches!(&*arr, Expr2::Var(_, Some(bounds), _) if matches!(**bounds, ArrayBounds::Named { .. })),
         "the arrayed dependency beside it carries its axis"
     );
     assert!(

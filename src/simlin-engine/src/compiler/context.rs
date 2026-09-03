@@ -263,7 +263,7 @@ impl Context<'_> {
         &self,
         id: &Ident<Canonical>,
         indices: Vec<ast::IndexExpr2>,
-        bounds: Option<ast::ArrayBounds>,
+        bounds: ast::NodeBounds,
         loc: Loc,
     ) -> ast::Expr2 {
         use ast::{Expr2, IndexExpr2};
@@ -709,7 +709,7 @@ impl Context<'_> {
         ident: &Ident<Canonical>,
         bounds: &ast::ArrayBounds,
         subscripts: &[ast::IndexExpr2],
-    ) -> Option<ast::ArrayBounds> {
+    ) -> ast::NodeBounds {
         let dims = self.dims_of(ident)?;
 
         let mut result_dims = Vec::new();
@@ -739,18 +739,19 @@ impl Context<'_> {
         }
 
         let dim_names = Some(result_dim_names);
-        match bounds {
-            ast::ArrayBounds::Named { name, .. } => Some(ast::ArrayBounds::Named {
+        let bounds = match bounds {
+            ast::ArrayBounds::Named { name, .. } => ast::ArrayBounds::Named {
                 name: name.clone(),
                 dims: result_dims,
                 dim_names,
-            }),
-            ast::ArrayBounds::Temp { id, .. } => Some(ast::ArrayBounds::Temp {
+            },
+            ast::ArrayBounds::Temp { id, .. } => ast::ArrayBounds::Temp {
                 id: *id,
                 dims: result_dims,
                 dim_names,
-            }),
-        }
+            },
+        };
+        Some(Box::new(bounds))
     }
 
     /// Recursively process index expressions
