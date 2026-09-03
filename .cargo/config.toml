@@ -1,17 +1,35 @@
-# Force the WASM bundle back to size-optimized codegen.
+# Codegen settings for the WASM bundle, keyed on the target rather than passed
+# by each build script so that every wasm build path -- the `cargo build
+# --target wasm32-unknown-unknown` in src/engine/build.sh, any future wasm-pack
+# invocation, etc. -- gets them automatically.
 #
-# `[profile.release]` (in the workspace Cargo.toml) is `opt-level = 3` so native
-# binaries (CLI, server, MCP, pysimlin's libsimlin, C FFI) optimize for speed.
-# The browser WASM bundle is dominated by download size, not CPU, so we override
-# the opt-level for the wasm32 target here. Keying this on the *target* (rather
-# than passing a flag in each build script) means every wasm build path -- the
-# `cargo build --target wasm32-unknown-unknown` in src/engine/build.sh, any
-# future wasm-pack invocation, etc. -- stays size-optimized automatically.
+# The bundle takes `[profile.release]`'s `opt-level = 3` (workspace Cargo.toml)
+# rather than a size-optimized override. The trade-off was measured on C-LEARN
+# v77 through src/engine/bench/clearn-alloc.mjs (browser bundle after
+# `wasm-opt -O3`, node 22 and 24, LTM on): against `opt-level = "z"` the whole
+# open-compile-run pipeline takes 0.64x the time (compile 0.55x to 0.61x, run
+# 0.64x to 0.75x) for a bundle 1.5x larger raw (5.38 MB to 8.03 MB) and 1.4x
+# larger compressed (brotli 1.27 MB to 1.76 MB, gzip 1.81 MB to 2.58 MB).
+# `opt-level = "s"` sits between (0.72x to 0.77x the time, 6.56 MB raw, 1.47 MB
+# brotli). Half a megabyte more of compressed download is inside the variance
+# of a page load; 1.4 seconds off a large model's open-compile-run is not.
 #
-# Caveat: a `RUSTFLAGS` *environment variable* takes precedence over and replaces
-# these target rustflags (Cargo does not merge the two). Today only the asan test
-# scripts set RUSTFLAGS, and they build for the host, so the wasm bundle is
-# unaffected. Do not set RUSTFLAGS during a wasm release build or it will pick up
-# opt-level 3.
+# `codegen-units=1` lives here and not in `[profile.release]` so that native
+# release builds (CLI, server, MCP, pysimlin's libsimlin) keep their parallel
+# codegen. On the wasm bundle LLVM then sees each crate whole: the shipped
+# browser bundle is 6% smaller (8.53 MB to 8.03 MB raw, 1.83 MB to 1.76 MB
+# brotli), the compile stage 2% to 3% faster, and the LTM run stage 12% to 16%
+# faster on V8 13.6 (node 24) but 2% to 4% slower on V8 12.4 (node 22), for
+# whole-pipeline totals within 1% on node 22 and 7% to 9% better on node 24.
+# Its price is build time: each of the two `cargo build`s in build.sh goes from
+# ~25 s to ~100 s on a 16-core desktop (an engine-only rebuild from ~20 s to
+# ~100 s), and every wasm build pays it, the pre-commit hook and CI included.
+# Deleting the flag buys that time back at the cost above.
+#
+# Caveat: a `RUSTFLAGS` *environment variable* takes precedence over and
+# replaces these target rustflags (Cargo does not merge the two). Today only the
+# asan test scripts set RUSTFLAGS, and they build for the host, so the wasm
+# bundle is unaffected. Do not set RUSTFLAGS during a wasm release build or the
+# bundle silently loses codegen-units=1.
 [target.wasm32-unknown-unknown]
-rustflags = ["-C", "opt-level=z"]
+rustflags = ["-C", "codegen-units=1"]
