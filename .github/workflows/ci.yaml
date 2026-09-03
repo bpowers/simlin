@@ -11,6 +11,9 @@ name: CI
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # Hosted runners occasionally lose DNS for crates.io mid-build; cargo's default of three
+  # retries with short backoff has not been enough on the Windows smoke job.
+  CARGO_NET_RETRY: 8
 
 jobs:
   build:
