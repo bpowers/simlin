@@ -42,15 +42,14 @@ pub(super) fn analyze_link_polarity(
 /// non-monotone reducer like STDDEV) stays Unknown -- never a confident
 /// wrong label.
 ///
-/// This used to be `analyze_link_polarity` with a feeder-hop-only
-/// `mul_convention` flag enabling the positive-by-convention Mul one-side
-/// rule; that rule is now part of the general analyzer (see the Mul arm of
-/// [`analyze_expr_polarity_with_context`]), so the only thing this entry
-/// point adds is accepting a bare `BuiltinFn` instead of a whole equation.
+/// The positive-by-convention Mul one-side rule is part of the general
+/// analyzer (see the Mul arm of [`analyze_expr_polarity_with_context`]), not a
+/// flag of this entry point; the only thing this entry point adds is accepting
+/// a bare `BuiltinFn` instead of a whole equation.
 ///
 /// `reducer` is the reducer call itself (`ltm_agg::AggNode::reducer`), not a
 /// whole equation: an aggregate node's equation IS one reducer application,
-/// so the `Ast` wrapper the caller used to reconstruct carried no
+/// so an `Ast` wrapper around it would carry no
 /// information -- [`analyze_ast_polarity`] treats `Ast::Scalar` and
 /// `Ast::ApplyToAll` through the same arm, and an agg is never
 /// `Ast::Arrayed`.

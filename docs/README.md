@@ -3,9 +3,9 @@
 ## Architecture and Design
 
 - [architecture.md](architecture.md) -- Component descriptions, dependency graph, project structure
-- [design/2026-02-21-incremental-compilation.md](design/2026-02-21-incremental-compilation.md) -- Incremental compilation via salsa: symbolic bytecode, per-variable tracking, LTM integration
+- [design/2026-02-21-incremental-compilation.md](design/2026-02-21-incremental-compilation.md) -- Historical design record of the salsa pipeline: symbolic bytecode, per-variable tracking, LTM integration (the pipeline as it stands is in `src/simlin-engine/CLAUDE.md` and the compiler-unification plan)
 - [design/conveyors.md](design/conveyors.md) -- XMILE conveyor support: complete specification of syntax, per-DT simulation semantics, leakage/initialization formulas, spread inputs, arrays, and engine integration
-- [design/engine-performance.md](design/engine-performance.md) -- Engine compile/simulate profile (C-LEARN), implemented optimizations, and remaining proposals
+- [design/engine-performance.md](design/engine-performance.md) -- Engine compile/simulate profile (C-LEARN), how to measure a change (the instruction, LTM, artifact, sweep and dump channels), implemented optimizations, and remaining proposals
 - [design/ltm--loops-that-matter.md](design/ltm--loops-that-matter.md) -- LTM implementation design: data structures, synthetic variables, module handling, array/element-level support, and post-simulation loop discovery (candidate generation, retention against the loop universe, ranking and the coverage-aware cap)
 - [design/mdl-parser.md](design/mdl-parser.md) -- Vensim MDL parser design history and implementation notes
 - [design/queues.md](design/queues.md) -- XMILE queue support: complete specification of queue stocks, FIFO discipline, conveyor/queue coupling, overflow flows, and engine integration
@@ -29,7 +29,7 @@
 
 - [tech-debt.md](tech-debt.md) -- Known technical debt items with measurement commands
 - [design-plans/](design-plans/) -- Design plans (architecture and phasing for major efforts)
-  - [design-plans/2026-08-25-compiler-unification.md](design-plans/2026-08-25-compiler-unification.md) -- Engine compiler de-duplication: one fragment compiler (`lower_fragment`/`DepShape`), one `BuiltinFn::signature` table, one temp allocator and materialization pass, one `DimMatcher`, structured `DepRef`s, one `Variable`, assembly single-ownership, a pure parse with AST-carried captures replacing text-synthesized helpers, Stage0/Stage1 memo removal; 8 phases with a measured ledger
+  - [design-plans/2026-08-25-compiler-unification.md](design-plans/2026-08-25-compiler-unification.md) -- Engine compiler de-duplication, landed: one fragment compiler (`lower_fragment`/`DepShape`), one `BuiltinFn::signature` table, one temp allocator and materialization pass, one axis matcher (`match_axes`), structured `DepRef`s, one `Variable`, one `Diagnostic`, a `(variable, project)`-keyed parse with AST-carried captures and implicit modules, per-variable lowered memos, Loops That Matter as a consumer of each; every pinned semantic divergence and a per-commit measured ledger
   - [design-plans/2026-08-26-compiler-unification-phase7-investigation.md](design-plans/2026-08-26-compiler-unification-phase7-investigation.md) -- Companion to the compiler unification plan: every parse-time decision that reads model state, where each moves under a `(variable, project)` parse key, every text/name identity site of synthesized helpers, the salsa keys, the capture runlist contract
   - [design-plans/2026-08-17-pysimlin-widget.md](design-plans/2026-08-17-pysimlin-widget.md) -- pysimlin file-backed models + anywidget in-notebook editor (file on disk as sync authority)
   - [design-plans/2026-04-05-server-rewrite.md](design-plans/2026-04-05-server-rewrite.md) -- Local-first `simlin-serve` binary: filesystem-backed editor + in-process MCP

@@ -127,15 +127,13 @@ pub fn project_datamodel_dims(db: &dyn Db, project: SourceProject) -> Vec<datamo
 
 /// Cached project-global dimension context -- computed once per project.
 ///
-/// This is the project's immutable `DimensionsContext`, the same value the
-/// per-variable compile sites used to rebuild on every variable via
-/// `DimensionsContext::from(project_datamodel_dims(..))`. Building it
-/// canonicalizes every dimension element name, so doing it once per project
-/// (instead of once per explicit-and-implicit variable compilation) removes a
-/// dominant allocation cost on large models. Keyed only on `project` -- and
-/// reading `project_datamodel_dims`, which depends solely on the project's
-/// dimensions input -- so it recomputes exactly when the dimensions change, the
-/// SAME dependency granularity the inline rebuild took. The shared context's
+/// This is the project's immutable `DimensionsContext`. Building one
+/// (`DimensionsContext::from(project_datamodel_dims(..))`) canonicalizes every
+/// dimension element name, so it is built once per project rather than once
+/// per explicit-and-implicit variable compilation, which would be a dominant
+/// allocation cost on large models. Keyed only on `project` -- and reading
+/// `project_datamodel_dims`, which depends solely on the project's dimensions
+/// input -- so it recomputes exactly when the dimensions change. The shared context's
 /// only interior mutability is its `relationship_cache` `Mutex`, which is what
 /// makes the memo `Sync` and therefore shareable at all: one context serves
 /// every variable's compilation instead of one being rebuilt per variable, and
@@ -1153,19 +1151,16 @@ impl ModuleReferenceGraph {
 ///
 /// # Why omitting implicit edges is nonetheless SOUND
 ///
-/// This doc once claimed the omission was free because implicit modules "can only
-/// reference leaf stdlib models, so they can never close a user cycle". That was
-/// false for a MACRO call, which expands into an implicit module targeting the
-/// macro's own model -- an ordinary user model. A macro whose body instantiated a
-/// module targeting a model that CALLED that macro closed a cycle this graph did
-/// not see, and `compute_layout` (which does follow implicit edges) then hit
-/// salsa's unrecoverable dependency-graph cycle panic with this gate reporting no
-/// cycle at all.
-///
-/// That shape no longer exists: `MacroRegistry::build`'s Pass 4 rejects a
-/// `Variable::Module` inside a macro-marked model (`MacroContainsModule`). With
-/// it gone, every implicit module edge terminates somewhere that cannot continue
-/// an invisible cycle:
+/// The omission is sound only because `MacroRegistry::build`'s Pass 4 rejects a
+/// `Variable::Module` inside a macro-marked model (`MacroContainsModule`).
+/// Without that rejection it would not be: a MACRO call expands into an
+/// implicit module targeting the macro's own model -- an ordinary user model --
+/// and a macro whose body instantiated a module targeting a model that CALLED
+/// that macro would close a cycle this graph does not see, so `compute_layout`
+/// (which does follow implicit edges) would hit salsa's unrecoverable
+/// dependency-graph cycle panic with this gate reporting no cycle at all. With
+/// the rejection, every implicit module edge terminates somewhere that cannot
+/// continue an invisible cycle:
 ///
 ///   - The edges are synthesized at ONE site,
 ///     `builtins_visitor::expand_module_function`, from a

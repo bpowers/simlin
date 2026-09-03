@@ -9,10 +9,9 @@ use crate::canonicalize;
 use crate::common::{Canonical, Ident};
 use crate::datamodel;
 
-// `BTreeSet` is no longer used by the root module's own code after the
-// `db/` split, but the root-mounted `#[cfg(test)]` test modules pull it in
-// through their `use super::*` glob (preserving the pre-split import
-// surface), so keep it in scope for the test build only.
+// `BTreeSet` is imported for the root-mounted `#[cfg(test)]` test modules,
+// which reach it through their `use super::*` glob; the root module's own code
+// does not use it, so the import is test-only.
 #[cfg(test)]
 use std::collections::BTreeSet;
 
@@ -714,27 +713,25 @@ fn module_composite_ports(
 /// DOCUMENT order (left-to-right over `to`'s reconstructed AST), or `None`
 /// when `to` reads no output of `module`.
 ///
-/// This is the deterministic replacement (GH #971) for
-/// [`module_link_score_equation`]'s former pick -- an arbitrary
-/// `{module}·`-prefixed dependency out of `identifier_set`'s `HashSet`, whose
-/// iteration order is per-process random. When `to` reads MORE THAN ONE
-/// output of one module instance the choice decides which output's change the
-/// link score attributes (the others are frozen), so the random pick made the
-/// emitted score -- and every loop score through it -- flap between processes.
-/// The reference-site IR already enumerates the module-output composites as
-/// `OccurrenceRef::ModuleOutput` occurrences in the walk's stable
-/// left-to-right order, so taking the first that names `module` is a
-/// reproducible choice over the SAME set the old scan considered.
+/// The choice is deterministic by construction (GH #971): the reference-site
+/// IR enumerates the module-output composites as `OccurrenceRef::ModuleOutput`
+/// occurrences in the walk's stable left-to-right order, so the first that
+/// names `module` is reproducible. It must never be drawn from a `HashSet` of
+/// `{module}·`-prefixed dependencies, whose iteration order is per-process
+/// random: when `to` reads MORE THAN ONE output of one module instance the
+/// choice decides which output's change the link score attributes (the others
+/// are frozen), so a random pick makes the emitted score -- and every loop
+/// score through it -- flap between processes.
 ///
-/// `None` no longer conflates a WIDTH-suppressed reference with a genuine
-/// absence. The occurrence stream is complete in that respect for every model
-/// that reaches here, because the LTM front door
+/// `None` is a genuine absence, never a WIDTH-suppressed reference. The
+/// occurrence stream is complete in that respect for every model that reaches
+/// here, because the LTM front door
 /// (`db::ltm_ir::model_ltm_reference_sites`' `site_width_rejection`, GH
 /// #978/#979) refuses a model holding an equation whose `SiteId` paths could not
 /// name every child, and `model_ltm_variables` then emits no link score for it
-/// at all. Until that check existed, an over-arity builtin child had its
-/// occurrence suppressed and looked identical here to "reads no output", so the
-/// caller silently approximated the first with the signed magnitude-1
+/// at all. Without that front door an over-arity builtin child's suppressed
+/// occurrence would look identical here to "reads no output", and the caller
+/// would silently approximate it with the signed magnitude-1
 /// `black_box_unit_transfer_equation`.
 ///
 /// One PRE-EXISTING source of `None` survives, deliberately and unrelated to

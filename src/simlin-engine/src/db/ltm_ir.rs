@@ -1274,14 +1274,13 @@ fn walk_all_in_expr(
 
 // ── The classified-site IR ─────────────────────────────────────────────────
 
-/// One classified reference site for a `(from, to)` causal edge.
-///
-/// Successor of `analysis::ReferenceSite`, generalized to fold the
-/// `in_reducer` flag plus the hoisting decision into [`SiteRouting`].
+/// One classified reference site for a `(from, to)` causal edge: a
+/// [`ReferenceSite`] with its `in_reducer` flag and the hoisting decision
+/// folded into [`SiteRouting`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ClassifiedSite {
     /// The per-reference access shape: `Bare`, `FixedIndex(elems)`,
-    /// `Wildcard`, or `DynamicIndex`.
+    /// `PerElement(axes)`, `Wildcard`, or `DynamicIndex`.
     pub shape: RefShape,
     /// `Some(elem)` when the reference sits in an `Ast::Arrayed` per-element
     /// slot (the canonical element name / comma-separated tuple of the
@@ -1506,12 +1505,12 @@ pub(crate) enum OtherDepVerdict {
 ///
 /// The ceteris-paribus wrap (`ltm_augment::other_dep_verdict`) reads a
 /// non-live-dep subscript occurrence's `axes` straight off the occurrence IR
-/// (via `OccurrenceLookup`) and calls this -- there is no longer an Expr0-side
+/// (via `OccurrenceLookup`) and calls this -- there is no Expr0-side
 /// re-derivation of the verdict on the live path, so the wrap and the edge
-/// emitter cannot drift: they consume the SAME classification. (The Expr0
-/// `axes` builder survives only `#[cfg(test)]`, to reconstruct occurrences for
-/// the text-level wrap unit tests, and is proven in step with `classify_occurrence_axes`
-/// by the alignment gate.)
+/// emitter cannot drift: they consume the SAME classification. (An Expr0
+/// `axes` builder exists only under `#[cfg(test)]`, to reconstruct occurrences
+/// for the text-level wrap unit tests, and is proven in step with
+/// `classify_occurrence_axes` by the alignment gate.)
 ///
 /// See [`OccurrenceAxis`]'s rustdoc for the full rule; the two load-bearing
 /// arity corners (under-arity all-`Iterated` => `Mismatch`; over-target-arity =>
@@ -1692,10 +1691,9 @@ struct RawOccurrence {
 /// `occurrences` is the finer, per-reference-occurrence enumeration over the
 /// whole target equation (Track A2a), keyed by TARGET canonical name; each
 /// value `Vec<OccurrenceSite>` is in stable left-to-right DFS order (slots in
-/// sorted key order). It is still a *superset* of `sites`' causal references,
-/// though no longer because of module outputs: an occurrence carries the
-/// `composite` spelling and the per-axis reads, which the edge view has no place
-/// for. Like `sites`, the HashMap *key* order is irrelevant (consumers sort keys
+/// sorted key order). It is a *superset* of `sites`' causal references: an
+/// occurrence carries the `composite` spelling and the per-axis reads, which
+/// the edge view has no place for. Like `sites`, the HashMap *key* order is irrelevant (consumers sort keys
 /// themselves); only each value `Vec`'s order is load-bearing for salsa
 /// determinism.
 ///

@@ -1,5 +1,16 @@
 # Incremental Compilation Design
 
+This is the historical design record of the salsa pipeline: the plan the
+incremental compiler was built from, kept for the reasoning behind symbolic
+bytecode, per-variable tracked queries and the LTM integration. The pipeline
+as it stands -- one fragment compiler over dependency shapes, per-variable
+lowered memos, a `(variable, project)`-keyed parse whose helpers are parsed
+data, structured `DepRef`s and one `Diagnostic` payload -- is described in
+`src/simlin-engine/CLAUDE.md` and in
+`docs/design-plans/2026-08-25-compiler-unification.md`; where this document
+names a stage, a query or a type that neither of those does, theirs is the
+current statement.
+
 ## Summary
 
 Simlin's simulation engine currently recompiles the entire model from scratch on

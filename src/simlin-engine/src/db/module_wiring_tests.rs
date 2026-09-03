@@ -5,12 +5,16 @@
 //! Regression tests for the module input-wiring diagnostic
 //! (`model_module_wiring_diagnostics`).
 //!
-//! `build_module_inputs` silently drops a module reference whose `dst` does not
-//! name an input of the target model, so the port reads its default and the
-//! simulation is quietly wrong. The salsa compile path had lost the legacy
-//! `BadModuleInputDst`/`BadModuleInputSrc` check; these tests pin that a
-//! mis-wired input now surfaces a Warning while a correct (module-qualified)
-//! wiring and empty placeholder rows stay clean.
+//! `build_module_inputs` runs at lowering and binds only what `bound_port`
+//! returns, raising no error for what it does not: a module reference whose
+//! `dst` is not this instance's `{module}·{port}`, or whose `src` is inside the
+//! instance's namespace, is dropped there silently, and a `dst` naming a port
+//! the target model does not declare binds a slot nothing reads. Either way the
+//! port reads its default and the simulation is quietly wrong. The diagnostic
+//! pass is the one place that wiring is validated
+//! (`BadModuleInputDst`/`BadModuleInputSrc`); these tests pin that a mis-wired
+//! input surfaces a Warning while a correct (module-qualified) wiring and empty
+//! placeholder rows stay clean.
 
 use crate::common::{Error, ErrorCode};
 use crate::datamodel::{self, Equation, Variable, Visibility};

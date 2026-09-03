@@ -278,17 +278,19 @@ fn reconstruct_project_models(db: &dyn Db, project: SourceProject) -> Vec<datamo
 /// memoized VALUE that its two consumers read directly:
 /// `compile_project_incremental` (to fail with a clear message) and
 /// `collect_all_diagnostics` (to emit the project-level `Diagnostic`, once).
-/// It used to accumulate here, which was wrong twice over. A registry failure
-/// is a PROJECT-level fact, but every model's `model_all_diagnostics` subtree
-/// reaches this query through `parse_source_variable`, so the accumulator
-/// DFS found the one accumulated value once per model and `collect_all_diagnostics`
-/// reported N identical copies. Worse, a value accumulated inside a memo body is
-/// only discoverable while the `accumulated_inputs` flags along the whole path
-/// stay `Any`: after an unrelated salsa revision bump the deep-verify path
-/// recomputed them as `Empty`, the DFS pruned the subtree, and the diagnostic
-/// silently vanished from the next collection entirely (pinned by
+/// Accumulating here would be wrong twice over. A registry failure is a
+/// PROJECT-level fact, but every model's `model_all_diagnostics` subtree
+/// reaches this query through `parse_source_variable`, so the accumulator DFS
+/// would find the one accumulated value once per model and
+/// `collect_all_diagnostics` would report N identical copies. Worse, a value
+/// accumulated inside a memo body is only discoverable while the
+/// `accumulated_inputs` flags along the whole path stay `Any`: after an
+/// unrelated salsa revision bump the deep-verify path recomputes them as
+/// `Empty`, the DFS prunes the subtree, and the diagnostic silently vanishes
+/// from the next collection entirely (pinned by
 /// `db::diagnostic_tests::macro_registry_build_error_survives_an_unrelated_input_change`).
-/// Reading the memoized value sidesteps the accumulator, and with it both bugs.
+/// Reading the memoized value sidesteps the accumulator, and with it both
+/// failures.
 ///
 /// For a *valid* project every model name is unique, so rebuilding the
 /// resolution map from the (deduplicated) `SourceModel`s here is exact.

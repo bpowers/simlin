@@ -207,9 +207,9 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // dimensions, or the input set it is instantiated at -- so an edit to an
     // unrelated variable leaves every other helper's memo intact.
     //
-    // This is the reason the per-edit paths that call `collect_all_diagnostics`
-    // (libsimlin `get_errors`, MCP `edit_model`) no longer pay a whole-model
-    // helper recompile per revision. Do not "optimize" the walk away on the
+    // This is why the per-edit paths that call `collect_all_diagnostics`
+    // (libsimlin `get_errors`, MCP `edit_model`) pay no whole-model helper
+    // recompile per revision. Do not "optimize" the walk away on the
     // assumption it is doing the compiling; it is the accumulator replay that
     // needs it, and the compiles are already shared with assembly.
     {
@@ -234,11 +234,15 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // cap).
     crate::db::units::check_model_units(db, model, project);
 
-    // Validate each explicit module variable's input wiring (GH #806 sibling):
-    // a reference whose `dst` names no input of the target model, or whose bare
-    // `src` names no variable in this model, is silently dropped at assembly and
-    // the port reads its default -- a quietly-wrong simulation. The salsa path
-    // had lost the legacy `BadModuleInputDst`/`BadModuleInputSrc` check.
+    // Validate each explicit module variable's input wiring (GH #806 sibling).
+    // `build_module_inputs` runs at lowering and binds only what `bound_port`
+    // returns, raising no error for what it does not: a reference whose `dst`
+    // is not this instance's `{module}·{port}`, or whose `src` is inside the
+    // instance's namespace, is dropped there silently, and a `dst` naming a
+    // port the target model does not declare binds a slot nothing reads.
+    // Either way the port reads its default -- a quietly-wrong simulation --
+    // so this pass is the one place the wiring is validated
+    // (`BadModuleInputDst`/`BadModuleInputSrc`) and the drop explained.
     model_module_wiring_diagnostics(db, model, project);
 
     // Conveyor compile-time spec advisories (docs/design/conveyors.md §4.1 /
@@ -1287,9 +1291,9 @@ pub fn collect_all_diagnostics(db: &SimlinDb, project: SourceProject) -> Vec<Dia
         });
     }
 
-    // Sorted (GH #999): `models` is a HashMap, and its per-instance order
-    // used to reorder the per-model diagnostic BLOCKS run to run on any
-    // multi-model project.
+    // Sorted (GH #999): `models` is a HashMap, whose per-instance order would
+    // reorder the per-model diagnostic BLOCKS run to run on any multi-model
+    // project.
     let mut sorted_models: Vec<_> = project.models(db).iter().collect();
     sorted_models.sort_unstable_by_key(|(name, _)| name.as_str());
     for (_name, source_model) in sorted_models {

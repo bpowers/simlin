@@ -1036,13 +1036,12 @@ pub(crate) fn resolve_var_ref(
 /// able to overflow the VM's fixed-size arithmetic stack, which is what makes
 /// `vm::Stack`'s unchecked accesses sound.
 ///
-/// The check used to live in the per-fragment `ByteCodeBuilder::finish()`. Moving
-/// it here made it strictly STRONGER, not merely equivalent: a fragment starts
-/// and ends at depth 0 today, so per-fragment maxima and the concatenation's
-/// maximum agree -- but `concatenate_fragments` strips each fragment's trailing
-/// `Ret` and appends, so a fragment that did NOT balance would accumulate depth
-/// across fragment boundaries in a way the per-fragment check could not see.
-/// It also runs once per assembled phase instead of once per fragment.
+/// The check belongs here and not in a per-fragment builder, where it would be
+/// strictly WEAKER: a fragment starts and ends at depth 0, so per-fragment
+/// maxima and the concatenation's maximum agree -- but `concatenate_fragments`
+/// strips each fragment's trailing `Ret` and appends, so a fragment that did
+/// NOT balance would accumulate depth across fragment boundaries in a way a
+/// per-fragment check could not see. It runs once per assembled phase.
 ///
 /// Both failure modes are reported, not asserted: an over-deep program and an
 /// `Opcode::stack_effect` underflow (a compiler-metadata bug) both come back as

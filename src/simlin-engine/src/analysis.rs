@@ -389,13 +389,13 @@ fn run_ltm_pipeline(
 
     // `build_sim` routes a conveyor/queue model through its special expansion
     // build path -- so the model compiles and runs correctly rather than tripping
-    // the ordinary path's NotExpanded guard (which previously surfaced here as a
-    // spurious `analysis_error`) -- while an ordinary model still compiles through
+    // the ordinary path's NotExpanded guard (which would otherwise surface here
+    // as a spurious `analysis_error`) -- while an ordinary model still compiles through
     // the incremental path with the caller's `ltm_enabled` intact. The special
     // path compiles the db's EXPANDED `SourceProject`, whose `ltm_enabled` is
     // always false, so it synthesizes no LTM variables: a conveyor/queue model's
     // loop analysis degrades to empty loops (conveyor/queue + LTM is a documented
-    // degradation) but no longer reports a false error.
+    // degradation) and reports no false error.
     //
     // A compile failure here is still the actionable GH #660 case: the GH #486
     // non-Euler hard-fail (and any other compile/`Vm::new`/`run_to_end` error)
@@ -548,7 +548,7 @@ fn to_feedback_loop(fl: &crate::ltm_finding::FoundLoop) -> FeedbackLoop {
 
     // Feed the SIGNED partition-relative loop score into dominant-period
     // selection so periods are share-based, not raw-magnitude-based: a loop in
-    // a high-raw-magnitude partition no longer dominates the period labels just
+    // a high-raw-magnitude partition does not dominate the period labels just
     // because its absolute score is large.  `rel_scores` is already normalized
     // per partition into [-1, 1] (see `to_loop_summary`); NaN coerces to 0 so
     // `calculate_dominant_periods` sees a finite series.
@@ -1030,7 +1030,7 @@ mod tests {
         assert_ne!(lone.partition, competitive.partition);
 
         // Periods exist for the competitive partition -- the lone loop's
-        // constant share no longer smothers it.
+        // constant share does not smother it.
         assert!(
             analysis
                 .dominant_loops_by_period
@@ -2029,13 +2029,11 @@ mod tests {
     /// TWO loops, not one, and not four: `m` is scalar, so every element of
     /// `growth` genuinely reads it, but each `growth[e]` feeds only `s[e]`, so
     /// the cycles are `s[e] → total → m → growth[e] → s[e]` per element with no
-    /// cross-element pair among them. The old comment's "a reinforcing module
-    /// loop" (singular) anticipated this shape imprecisely.
+    /// cross-element pair among them.
     ///
-    /// It also un-blocks what it used to describe as unreachable: the
-    /// per-exit-port recompute's element-subscript handling (PR #705
-    /// r3353758167) is no longer latent, since an arrayed module loop now
-    /// reaches it end to end. The unit-level guard for that path remains
+    /// This is also the end-to-end reach of the per-exit-port recompute's
+    /// element-subscript handling (PR #705 r3353758167): an arrayed module loop
+    /// exercises it live. The unit-level guard for that path is
     /// `recompute_strips_element_subscripts_before_port_match` in
     /// `ltm_finding.rs`.
     #[test]

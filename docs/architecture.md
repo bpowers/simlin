@@ -9,13 +9,13 @@ This is a monorepo without external users -- breaking changes are OK as long as 
 ## Component Descriptions
 
 ### `src/simlin-engine` (Rust)
-Core simulation engine. Compiles, type-checks, unit-checks, and simulates SD models.
-- Projects consist of 1 or more models, compiled to bytecode (`compiler/`)
-- Primary compilation path is `db::compile_project_incremental()` using salsa tracked functions for fine-grained incrementality (`db.rs`, `db/analysis.rs`, `db/ltm.rs`, `db/ltm_ir.rs`)
-- Equation text is parsed via recursive descent parser (`parser/mod.rs`)
-- Simulations run on a stack-based bytecode VM (`vm.rs`) with `PREVIOUS`/`INIT` intrinsic opcodes
+Core simulation engine. Compiles, type-checks, unit-checks, and simulates SD models; [src/simlin-engine/CLAUDE.md](/src/simlin-engine/CLAUDE.md) is the map of the crate and its standing invariants.
+- Equation text becomes a simulation in six stages: parse (`parser/`, `variable.rs`), module-function expansion (`builtins_visitor.rs`, `capture.rs`), AST lowering (`ast/`, `model.rs`), per-variable fragment compilation (`compiler/fragment.rs`, `compiler/`), assembly (`db/layout.rs`, `db/assemble.rs`, `compiler/symbolic.rs`) and execution (`vm.rs`, `wasmgen/`). `db::compile_project_incremental()` is the one production entry, over salsa tracked queries (`db.rs`, `db/`) keyed per variable so an edit recompiles the variables it touches
+- Every compiler decision has one owner, and a second implementation of any of them is a defect: `parse_var` (the parse), `MacroRegistry::resolve_call` (routing a stdlib or macro call), `SnapshotArg::access` (what `PREVIOUS`/`INIT` addresses), `capture::synthetic_ident` (helper names), `classify_dependencies` and `DepRef` (dependencies), `ast::LoweringScope` (what the `Expr2` lowering knows), `BuiltinFn::signature()` (per-builtin facts), `dimensions::match_axes` (axis pairing), `lower_fragment` (per-variable lowering), `compiler/array_operand.rs` with `TempAllocator` (array temps), `FragmentMerger` and `segment_member_by_element` (assembly)
+- Simulations run on a stack-based bytecode VM (`vm.rs`) with `PREVIOUS`/`INIT` intrinsic opcodes; both opcode enums are declared by tables (`symbolic_opcode_table!`, `opcode_table!`) from which the operand accessors derive
 - An alternative WebAssembly code-generation backend (`wasmgen/`) lowers a compiled model to one self-contained wasm module (no host imports) for fast repeated re-simulation; the VM stays the correctness oracle (every emitted module is checked against it). Surfaced through libsimlin `simlin_model_compile_to_wasm`
 - `builtins.rs` defines builtin functions (including `PREVIOUS`, `INIT`); stateful module functions (TREND, SMOOTH3) are model definitions in `stdlib/*.stmx`, generated into `stdlib.gen.rs`
+- Loops That Matter (`db/ltm/`, `db/ltm_ir.rs`, `db/analysis.rs`, `ltm_agg.rs`, `ltm_augment.rs`, `ltm_finding.rs`) compiles its synthetic variables through the same fragment pipeline as user variables; see [docs/design/ltm--loops-that-matter.md](/docs/design/ltm--loops-that-matter.md)
 - Native Vensim MDL parser in `mdl/` (replaces C++ xmutil); see [docs/design/mdl-parser.md](/docs/design/mdl-parser.md)
 
 ### `src/libsimlin` (Rust)

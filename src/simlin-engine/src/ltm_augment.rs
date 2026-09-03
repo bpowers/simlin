@@ -70,11 +70,10 @@ pub(crate) use post_transform::{dep_element_pins, per_element_row_for_target};
 /// node) -- those have no source subscripts, so iterated-dim recognition
 /// never applies.
 ///
-/// It used to carry a `DimensionsContext` too, for the AC3.5 mapped-dimension
-/// case. That was a duplicate of [`WrapCtx::dims_ctx`] -- production threaded the
-/// same context into both -- kept alive solely by the Expr0 per-axis classifiers.
-/// With those gone from production the field went with them; the remaining
-/// `#[cfg(test)]` classifiers take the one `dims_ctx` explicitly.
+/// It carries no `DimensionsContext`: the one context is [`WrapCtx::dims_ctx`],
+/// which production threads to every reader, and a second copy here would be a
+/// duplicate that only the `#[cfg(test)]` Expr0 per-axis classifiers could want
+/// -- they take the one `dims_ctx` explicitly.
 pub(crate) struct IteratedDimCtx<'a> {
     pub source_dim_names: &'a [String],
     pub target_iterated_dims: &'a [String],
@@ -240,13 +239,13 @@ struct WrapCtx<'a> {
     /// [`generate_per_element_link_equation`].
     ///
     /// When set, the wrap ALSO lowers each live-source reference to its concrete
-    /// per-element subscript as it goes. That used to be a separate pass over
-    /// the WRAPPED tree, which had to re-derive each occurrence's per-axis
-    /// access with an Expr0 classifier because a `SiteId` computed on the
-    /// original AST cannot address a tree the wrap has inserted `PREVIOUS` nodes
-    /// into. Folding it into the wrap deletes that classifier: here the
-    /// occurrence is still reachable by path, and -- decisively -- the wrap is
-    /// the only place that knows whether it is about to FREEZE the reference,
+    /// per-element subscript as it goes. It cannot be a separate pass over the
+    /// WRAPPED tree: a `SiteId` computed on the original AST cannot address a
+    /// tree the wrap has inserted `PREVIOUS` nodes into, so such a pass would
+    /// have to re-derive each occurrence's per-axis access with a second
+    /// classifier. Inside the wrap the occurrence is still reachable by path,
+    /// and -- decisively -- the wrap is the only place that knows whether it is
+    /// about to FREEZE the reference,
     /// which is what selects the bare-row spelling for the live occurrence and
     /// the qualified-row spelling for every other one. See
     /// [`post_transform::pin_source_subscript_indices`].
@@ -295,12 +294,12 @@ use zero_slot::partial_is_provably_previous_target;
 ///
 /// The conversion saturates rather than wrapping, which is strictly better --
 /// wrapping maps child 65,536 onto child 0, so it can alias an ARBITRARY earlier
-/// sibling. But saturating is not a safety net: this change deleted the reserved
-/// unaddressable-child sentinel that used to hold `u16::MAX` back, so `u16::MAX`
-/// is now an ordinary, addressable child index (pinned by `db::ltm_ir::ltm_ir_tests`'
-/// `the_production_limit_is_the_whole_u16_range`). A violated precondition would
+/// sibling. But saturating is not a safety net: there is no reserved
+/// unaddressable-child sentinel, so `u16::MAX` is an ordinary, addressable child
+/// index (the production limit `db::ltm_ir::MAX_SITE_CHILDREN` is
+/// `u16::MAX + 1` children, the whole `u16` range). A violated precondition would
 /// therefore land on sibling 65,535's real recorded `SiteId` -- exactly the alias
-/// the sentinel used to make impossible. Do not read the saturation as
+/// a sentinel would make impossible. Do not read the saturation as
 /// protection; read it as "the failure mode is one specific collision instead of
 /// an arbitrary one, and the front door is what keeps it unreachable".
 ///
@@ -404,7 +403,7 @@ fn wrap_non_matching_in_previous(
     frozen: bool,
 ) -> Expr0 {
     // `dims_ctx` is consumed only by `wrap_index_non_matching_in_previous` (via
-    // `ctx`); `source_dim_elements` / `iter_ctx` are no longer read here (the
+    // `ctx`); `source_dim_elements` / `iter_ctx` are not read here (the
     // occurrence IR carries the shape) so they are not bound.
     let &WrapCtx {
         live_source,
@@ -575,7 +574,7 @@ fn wrap_non_matching_in_previous(
                 //     PREVIOUS for ceteris-paribus.
                 //
                 // Without the per-index split, DynamicIndex live refs would skip
-                // wrapping inner deps and the partial would no longer be
+                // wrapping inner deps and the partial would not be
                 // ceteris-paribus.
                 //
                 // `PerElement` row pinning takes over entirely: the occurrence's
@@ -791,12 +790,10 @@ fn wrap_non_matching_in_previous(
             // enclosing apply-to-all context) and evaluates fine -- rather
             // than recursing into it and emitting `SUM(PREVIOUS(pop[*]))`.
             // The wrap is the GH #517 semantics -- freeze the reducer's
-            // RESULT -- and is kept for that reason. Its original
-            // justification is stale: the inner form used to be a stubbed
-            // `0.0` at every step because codegen had no array-`PREVIOUS`
-            // path, and GH #995 phase C3 gave it one (a view over
-            // `prev_values`), so both forms compile now.
-            // If the live reference *is* inside this reducer (the now
+            // RESULT. Both forms compile (codegen has an array-`PREVIOUS`
+            // path, a view over `prev_values`, GH #995), so the semantics
+            // alone decide the choice.
+            // If the live reference *is* inside this reducer (the
             // test-only `RefShape::Wildcard` path where `SUM(pop[*])` is the
             // live thing), recurse normally so the live `pop[*]` stays
             // unwrapped. Likewise (Track A stage 1, finding 2) if the reducer
@@ -949,9 +946,9 @@ fn wrap_non_matching_in_previous(
 /// Because this discharges the index everywhere the arm runs -- for ANY index
 /// ident, not only one that happens to be a dependency elsewhere -- and the
 /// enclosing freeze discharges it everywhere the arm does not,
-/// `post_transform::pin_dimension_name_indices` no longer has to REFUSE a table
-/// argument carrying a runtime index -- it keeps it and says nothing. That
-/// refusal, its `frozen` plumbing, and the warned skip it produced are deleted.
+/// `post_transform::pin_dimension_name_indices` keeps a table argument carrying
+/// a runtime index and says nothing; a refusal there would be a second, weaker
+/// discharge of the same obligation.
 fn freeze_lookup_table_indices(
     arg: Expr0,
     ctx: &WrapCtx<'_>,
@@ -1629,7 +1626,7 @@ fn shaped_guard_form_text(
         return Err(PartialEquationError::unfreezable(&err_text()));
     }
     // Materialize BEFORE the doom check: a `PREVIOUS(<slice>)` the helper can
-    // express is no longer a doom. What the materializer declines stays in
+    // express is not a doom. What the materializer declines stays in
     // the tree verbatim, so `contains_unfreezable_previous` still catches it.
     let mut first_leg_helpers = Vec::new();
     let changed_first = materialize(changed_first, &mut first_leg_helpers);
@@ -1675,13 +1672,11 @@ fn shaped_guard_form_text(
     }
 
     // Changed-last fallback: freeze only the live source, starting from the
-    // SAME pristine target AST the changed-first leg wrapped. This used to
-    // re-parse the equation text here -- justified at the time as a cheap second
-    // parse on a rare doomed path, which was true of the cost but not of the
-    // structure: the "cheap re-parse" was reconstructing a tree the caller
-    // already owned, and it was the only reason this function needed the text at
-    // all. Taking the AST as the parameter removes both the parse and the
-    // possibility that the two conventions ever walk different trees.
+    // SAME pristine target AST the changed-first leg wrapped. Taking the AST as
+    // the parameter, not the equation text, is what guarantees the two
+    // conventions walk one tree: a re-parse here would reconstruct a tree the
+    // caller already owns, and would be the only reason this function needed
+    // the text at all.
     let ast = target_expr.clone();
 
     let mut frozen_ref: Option<Expr0> = None;
@@ -2366,8 +2361,8 @@ pub(crate) fn generate_scalar_to_element_equation(
     }
     // GH #995: materialize any array-slice freeze the wrap produced (a frozen
     // `def[*, r1]` other-dep, say) into its helper reference BEFORE printing;
-    // this path never doom-checked, so an inline `PREVIOUS(<slice>)` used to
-    // reach codegen and fail there. What the materializer declines is left
+    // this path has no doom check, so an inline `PREVIOUS(<slice>)` would
+    // otherwise reach codegen and fail there. What the materializer declines is left
     // verbatim and keeps that (loud, `model_ltm_fragment_diagnostics`-surfaced)
     // failure. The later text passes pin only bare dep idents, so the quoted
     // helper reference is inert to them.
@@ -2684,11 +2679,11 @@ fn live_reducer_text_for_agg<'a>(
 /// The leading-character and keyword rules are [`crate::ast::needs_quoting`],
 /// the same predicate the `print_eqn` path's `print_ident` uses -- so the two
 /// spellings of one name inside a single generated equation cannot disagree.
-/// They did: this used to test only "every char is alphanumeric or `_`", which a
-/// leading digit satisfies, so a guard form emitted `print_eqn`'s quoted
+/// A test of "every char is alphanumeric or `_`" is not that predicate: a
+/// leading digit satisfies it, so a guard form would emit `print_eqn`'s quoted
 /// `"1stock"` in the partial beside a bare `1stock` in the `SIGN(...)` factor --
-/// an unparseable equation, hence a silently-zeroed link score on a valid model.
-/// A keyword satisfied that test too, and is now covered by the same delegation
+/// an unparseable equation, hence a silently-zeroed link score on a valid model
+/// -- and a keyword satisfies it too; both are covered by the same delegation
 /// (GH #976).
 ///
 /// This deliberately stays MORE conservative than `print_ident` rather than
@@ -3837,7 +3832,7 @@ fn generate_flow_to_stock_equation(
     // `suba` inside `dima`) is spelled bare too: under the score's
     // iteration over the stock's dimensions the compiler resolves a bare
     // arrayed name through its implicit subscripts (`get_implicit_subscripts`,
-    // the pairing the wiring itself used to fold the flow into the stock),
+    // the pairing the wiring itself uses to fold the flow into the stock),
     // where `inflow[dimb]` names an axis that iteration does not carry and
     // does not lower.
     let stock_ref = format!("{stock}{}", dimension_subscript_suffix(stock_var));
@@ -3993,8 +3988,8 @@ fn generate_stock_to_flow_equation(
 /// via element-level `from` prefix), and so on. The downstream consumer
 /// doesn't carry the access shape, so we resolve at equation-generation
 /// time by trying candidate names in priority order against the set of
-/// names actually emitted. (Reducer references no longer produce a
-/// per-shape link score here -- a maximal inlined reducer is hoisted into
+/// names actually emitted. (Reducer references produce no per-shape link
+/// score here -- a maximal inlined reducer is hoisted into
 /// a `$⁚ltm⁚agg⁚{n}` node whose two halves carry their own canonical
 /// names, and the conservative-slice case collapses onto the Bare name.)
 ///
@@ -4353,8 +4348,9 @@ pub(crate) struct ClassifiedReducer {
     /// The reducer's array argument (its "body") -- e.g. the AST of
     /// `pop[*] * (1 - weight[*])` for `SUM(pop[*] * (1 - weight[*]))`, lowered
     /// straight from the target's `Expr2` by [`crate::patch::expr2_to_expr0`].
-    /// It used to be that AST's printed TEXT, which every consumer immediately
-    /// parsed back -- a parse of our own print of a tree we already held.
+    /// A tree, never its printed text: a consumer that needs the body reads it
+    /// directly rather than parsing a print of a tree the generator already
+    /// holds.
     pub body: Expr0,
 }
 
@@ -4432,7 +4428,7 @@ fn classify_reducer_in_expr(
 /// This is how the link-score emitters read the reducer kind, name and body
 /// off [`crate::ltm_agg::AggNode::reducer`] (GH #983): an aggregate node's
 /// equation IS one reducer call, so `is_top_level = true` reproduces exactly
-/// what walking a reconstructed `Ast::Scalar(App(..))` used to produce --
+/// what walking an `Ast::Scalar(App(..))` wrapper around it would produce --
 /// including the nested-reducer fallback below, which fires when the outer
 /// reducer's array argument does not itself reference `source_ident`.
 pub(crate) fn classify_reducer_in_builtin(

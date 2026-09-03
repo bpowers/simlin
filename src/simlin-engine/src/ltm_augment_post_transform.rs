@@ -60,11 +60,10 @@ use crate::lexer::LexerType;
 /// `(site, target element)` instantiation of a `PerElement` link score
 /// (GH #525, T6 of the shape-expressiveness design).
 ///
-/// Notably absent since the lowering became IR-driven: the source's per-axis
-/// element-name lists and the iterated-dim recognition context. Those were the
-/// inputs to the Expr0 per-axis CLASSIFIER this lowering used to run; the
-/// per-axis truth now comes off the occurrence IR (`OccurrenceSite::axes`), so
-/// only the projection data survives.
+/// It carries no per-axis element-name lists and no iterated-dim recognition
+/// context: the per-axis truth comes off the occurrence IR
+/// (`OccurrenceSite::axes`), so this lowering holds projection data only and
+/// never classifies an axis itself.
 pub(super) struct PerElementRefCtx<'a> {
     /// The live source variable (canonical).
     pub(super) from: &'a Ident<Canonical>,
@@ -168,17 +167,17 @@ pub(crate) fn per_element_row_for_target(
 /// [`crate::db::bare_axis_pairing`] -- the one pairing of two declared
 /// dimension lists, the same answer behind the element graph's
 /// `expand_same_element` and the arrayed score's admission -- so a pin cannot
-/// spell a row the simulation does not read. This used to be a per-axis `.find`
-/// over the target's dimension NAMES, and it got two shapes wrong for the one
-/// reason: a name is not an axis identity. A target repeating a dimension
-/// (`target[D,D]`) has two axes with one name, and a name-keyed map keeps only
-/// the last (the simulation reads the FIRST, measured by
-/// `repeated_target_dimension_reads_the_first_axis`); and two dep axes that can
-/// each map to the same target axis both claimed it, because an independent
-/// search tracks no `used` set (the simulation allocates one-to-one, measured by
-/// `doubly_mapped_dep_axes_are_allocated_one_to_one`). That is the SECOND time in
-/// this area a table keyed by dimension name produced a wrong row -- GH #986 was
-/// the first -- so the rule is now asked for rather than restated.
+/// spell a row the simulation does not read. A per-axis `.find` over the
+/// target's dimension NAMES must not stand in for it, because a name is not an
+/// axis identity: a target repeating a dimension (`target[D,D]`) has two axes
+/// with one name, and a name-keyed map keeps only the last (the simulation
+/// reads the FIRST, measured by `repeated_target_dimension_reads_the_first_axis`);
+/// and two dep axes that can each map to the same target axis would both claim
+/// it, because an independent search tracks no `used` set (the simulation
+/// allocates one-to-one, measured by
+/// `doubly_mapped_dep_axes_are_allocated_one_to_one`). A table keyed by
+/// dimension name is what produced GH #986's wrong row, so the rule is asked
+/// for rather than restated.
 fn dep_axis_elements(
     dep_dims: &[crate::dimensions::Dimension],
     target_dims: &[crate::dimensions::Dimension],
@@ -640,20 +639,20 @@ fn mapped_read_axis(
 /// verdict: a dimension-name subscript that survives into a scalar fragment does
 /// not resolve, so the partial is abandoned rather than emitted.
 ///
-/// This rule used to be loud about a RUNTIME index too, conditionally on an
-/// enclosing freeze, because a bare `LOOKUP` table argument is the one place the
-/// wrap wrapped nothing -- so the index stayed live, `codegen::extract_table_info`
-/// evaluated it at the current step, and the partial isolating one source varied
-/// with another's movement. That is GH #984, and it is now fixed at the source
-/// rather than refused here: [`crate::ltm_augment::freeze_lookup_table_indices`]
-/// puts the table argument's indices through the wrap's own index pass, having
-/// first WIDENED that descent's dep set with the indices' own idents -- without
-/// which the freeze would not fire at all, since `classify_dependencies` does not
-/// walk a table expression and so reports no dependency for an index variable
+/// A RUNTIME index is not a loud verdict here, and the reason is upstream: a
+/// bare `LOOKUP` table argument is the one place the wrap would otherwise wrap
+/// nothing, leaving the index live so that `codegen::extract_table_info`
+/// evaluated it at the current step and the partial isolating one source
+/// varied with another's movement (GH #984). That is discharged at the source:
+/// [`crate::ltm_augment::freeze_lookup_table_indices`] puts the table
+/// argument's indices through the wrap's own index pass, having first WIDENED
+/// that descent's dep set with the indices' own idents -- without which the
+/// freeze would not fire at all, since `classify_dependencies` does not walk a
+/// table expression and so reports no dependency for an index variable
 /// referenced only there. A runtime index therefore arrives here already frozen
 /// (or, inside an enclosing freeze, already lagged) for ANY ident, not just one
 /// that happens to be a dependency elsewhere. One rule discharges it on every
-/// path, this rule keeps it, and the refusal plus its `frozen` plumbing are gone.
+/// path, and this rule keeps it.
 ///
 /// There is no `RefShape` here, no live-vs-frozen decision, and this can never
 /// make the reference live-selectable (the pin-only descent records no

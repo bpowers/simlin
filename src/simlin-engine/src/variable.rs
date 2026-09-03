@@ -519,19 +519,15 @@ pub(crate) enum UnfilledArms {
 ///
 /// # Why this takes the parsed `Ast`, not the `datamodel::Equation`
 ///
-/// Four review findings on this diagnostic were the same mistake, each caught
-/// one at a time: an arm shadowed because the others cover the dimension, an arm
-/// whose subscript names nothing, an arm a later duplicate overrides, and an arm
-/// whose equation is EMPTY. Every one is a gap between the arms AS WRITTEN and
-/// the arms the compiler EVALUATES, and the first three were each fixed by
-/// re-deriving one more stage of that pipeline by hand. The fourth proved the
-/// approach wrong: the hand-derived selection was missing a stage, and missing
-/// one silently -- it reported nothing where a slot really was NaN.
-///
-/// So this no longer re-derives anything. [`parse_equation`] already performs
-/// the pipeline, and its `Ast` IS the result: empty and unparseable arms
-/// dropped, duplicate canonical subscripts collapsed last-wins, dimensions
-/// resolved. The one stage that is not in the `Ast` -- which declared slot takes
+/// This re-derives nothing. Every gap between the arms AS WRITTEN and the arms
+/// the compiler EVALUATES -- an arm shadowed because the others cover the
+/// dimension, an arm whose subscript names nothing, an arm a later duplicate
+/// overrides, an arm whose equation is EMPTY -- is a stage of the parse
+/// pipeline, and a hand-derived selection that reproduces those stages one at
+/// a time misses the next one silently: it reports nothing where a slot really
+/// is NaN. [`parse_equation`] already performs the pipeline, and its `Ast` IS
+/// the result: empty and unparseable arms dropped, duplicate canonical
+/// subscripts collapsed last-wins, dimensions resolved. The one stage that is not in the `Ast` -- which declared slot takes
 /// which arm -- is the `SubscriptIterator` walk below, and it is the compiler's
 /// own (`compiler::expand_per_element` looks each combination's key up
 /// in this same map and falls to the EXCEPT default only on a miss). Nothing

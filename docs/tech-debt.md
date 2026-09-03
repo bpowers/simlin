@@ -97,11 +97,11 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 
 - **Component**: simlin-engine
 - **Severity**: low
-- **Description**: `#[allow(dead_code)]` attributes scattered through simlin-engine: expr3 variants and methods reserved for pass 2, retained-for-discoverability registry fields in `wasmgen`, and assorted test-only constructors. `SymbolicOpcode` carries none: every variant is one `Compiler` constructs, and the dead-code lint (denied under clippy) is what keeps it that way.
+- **Description**: `#[allow(dead_code)]` attributes scattered through simlin-engine: retained-for-discoverability registry fields in `wasmgen/lower.rs` (7), VDF record decoders (`vdf/record_results.rs`), test-only constructors (`test_common.rs`), and assorted AST, bytecode and importer helpers. `SymbolicOpcode` and `Opcode` carry none: every variant is one `Compiler` constructs, and the dead-code lint (denied under clippy) is what keeps it that way.
 - **Measure**: `rg '#\[allow\(dead_code\)\]' --type rust src/simlin-engine/src/ -c`
-- **Count**: 48 occurrences across 26 files (as of 2026-08-25)
+- **Count**: 40 occurrences across 22 files (as of 2026-09-03)
 - **Owner**: unassigned
-- **Last reviewed**: 2026-08-25
+- **Last reviewed**: 2026-09-03
 
 ### 13. Ignored Rust Tests
 
@@ -159,11 +159,12 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 
 ### 18. Dimension-Granularity Incremental Invalidation
 
-- **Component**: simlin-engine (src/simlin-engine/src/db.rs)
+- **Component**: simlin-engine (src/simlin-engine/src/db/fragment_compile.rs, src/simlin-engine/src/db/var_fragment.rs)
 - **Severity**: low
-- **Description**: When project dimensions change, all variables are currently re-parsed because `parse_source_variable` depends on the full dimension list via `SourceProject::dimensions`. A `variable_relevant_dimensions` tracked function could narrow invalidation to only variables whose equations reference changed dimensions, avoiding unnecessary re-parsing for unaffected variables. AC1.5 (dimension changes propagate correctly) is already satisfied by salsa's backdating -- this is a pure performance optimization. For current model sizes the overhead is negligible; this would matter for projects with many dimensions and thousands of variables.
+- **Description**: The parse side is dimension-granular: `parse_source_variable` reads only the dimensions its equation names (`db::query::variable_relevant_dimensions`) and, for a qualified snapshot index, one element (`project_has_qualified_element`), so a dimension edit re-parses only the variables that read it (`db::dimension_invalidation_tests`). The fragment side is not: `lowered_source_variable`, `compile_var_fragment` and `explicit_fragment_input` read `project_dimensions_context` whole, so a dimension edit re-lowers and recompiles every fragment of the project. AC1.5 (dimension changes propagate correctly) holds through salsa's backdating -- this is a pure performance item, and it matters for projects with many dimensions and thousands of variables.
+- **Measure**: `rg -n 'project_dimensions_context\(db, project\)' src/simlin-engine/src/db/fragment_compile.rs src/simlin-engine/src/db/var_fragment.rs` (the whole-context reads a per-variable dimension projection would replace); `db::exec_probe::ProbedDb` over a dimension edit counts the fragments that recompile.
 - **Owner**: unassigned
-- **Last reviewed**: 2026-02-22
+- **Last reviewed**: 2026-09-03
 
 ### 19. Rust VDF Parser Boundary Parity
 
@@ -563,11 +564,10 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 ### 61. CLAUDE.md files decaying from orientation docs into append-only changelogs
 
 - **Component**: docs / process (`src/simlin-engine/CLAUDE.md`; the `project-claude-librarian` / `maintaining-project-context` skill)
-- **Severity**: low
-- **Description**: `src/simlin-engine/CLAUDE.md`'s "Last updated" header has degraded into a single ~2,500-word run-on paragraph spanning two unrelated epics (LTM arrays Phases 1-8 *and* macro Phases 1-7); the `db/ltm.rs` and `ltm_agg.rs` module bullets are multi-hundred-word single paragraphs that read like changelog archaeology rather than orientation. The file's stated purpose is current-state orientation ("maps where functionality lives"; "Keep this file up to date when adding, removing, or reorganizing modules"). Root cause: the `maintaining-project-context` / `project-claude-librarian` skill optimizes *per-delta* accuracy, not whole-file readability, so the aggregate readability degrades a little every epic and nothing ever compacts it. Related but distinct from #407 (which is about pruning verbatim code snippets from `docs/design-plans/`, not CLAUDE.md orientation decay).
-- **Suspected fix**: Introduce an **epic-boundary CLAUDE.md compaction pass** (a distinct step from the librarian's per-delta updates) that relocates historical/changelog narrative into the now-committed design/implementation-plan docs (`docs/design-plans/`, `docs/implementation-plans/`) and trims each CLAUDE.md back to current-state orientation. Could be wired into `finishing-a-development-branch` or a dedicated skill.
+- **Severity**: RESOLVED (the documentation commit that closes the `compiler-unification-v2` branch, `doc: engine map, ledger and evergreen design docs`)
+- **Description**: `src/simlin-engine/CLAUDE.md` is a scannable map -- one bullet per pipeline stage and per `db/` file, each under about 120 words, with the standing invariants and the test that pins each -- and carries no "Last updated" stamp (`scripts/check-docs.py` refuses one) and no history (the root `CLAUDE.md`'s comment standards: documentation is evergreen, never a changelog). The standing rule that keeps it so: a per-delta update to a CLAUDE.md rewrites the surrounding bullet as if the code had always been this way; it never appends a paragraph narrating the change, and a bullet that grows past a screen is split, not extended. An epic's history lives in its design plan (`docs/design-plans/`), which is where the compiler-unification plan's ledger and divergence lists are.
 - **Owner**: unassigned
-- **Last reviewed**: 2026-05-15
+- **Last reviewed**: 2026-09-03
 
 ### 62. Implementation plans back-load all real-corpus validation into the final phase
 

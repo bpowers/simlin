@@ -435,15 +435,13 @@ impl Context<'_> {
             // one active dimension always passes it -- `get_implicit_subscripts`
             // returns active SUBSCRIPTS, each an element of its own active
             // dimension -- so the shared rule's name-first arm is reached for
-            // every element, exactly as the un-guarded `dim.get_offset` that
-            // used to precede this loop was.
+            // every element.
             //
-            // One behaviour widened when the loop became a `find_map`: a
-            // translation that resolves to an element this axis does not
-            // declare (a malformed element map) used to abort the whole
-            // resolution, and now falls through to the remaining active
-            // dimensions. That can only resolve a reference that previously
-            // failed to compile.
+            // A translation that resolves to an element this axis does not
+            // declare (a malformed element map) falls through to the remaining
+            // active dimensions rather than aborting the whole resolution;
+            // that can only resolve a reference that would otherwise fail to
+            // compile.
             let element_off = active_dims.iter().find_map(|active_dim| {
                 active_dim.get_offset(&element)?;
                 let resolved = self
@@ -2412,51 +2410,37 @@ impl Context<'_> {
                 // static path. Which element: the shared executed rule
                 // (`DimensionsContext::resolve_mapped_read`, GH #997).
                 //
-                // Both halves used to be spelled out here as two separate
-                // loops, and the second one consulted the mapping WITHOUT
-                // trying the active element's own name against this axis
-                // first -- a divergence from the two static sites that would
-                // have read a different element for a mapped pair whose two
-                // dimensions share element names. Instrumenting all three
-                // arms found this one resolving nothing across the lib suite,
-                // but it is reachable -- measured at 8 references in the
-                // integration corpus -- so the divergence was latent rather
-                // than absent. Routing it through the shared rule removes it.
+                // Both halves go through the shared rule, and the element is
+                // tried by the active element's own name on this axis BEFORE
+                // the mapping: a resolver that consulted the mapping first
+                // would read a different element than the two static sites
+                // for a mapped pair whose two dimensions share element names
+                // (reachable: 8 references in the integration corpus). Where a
+                // source axis's dimension maps to two active dimensions and
+                // the index names one of them, the candidate order below pairs
+                // it with the one the index spells, matching what
+                // `normalize_subscripts3` picks on the static path for the
+                // same reference: every active dimension the index NAMES, then
+                // every one it reaches through a declared mapping, and the
+                // first that resolves wins.
                 //
-                // One behaviour changed for a reference that ALREADY compiled,
-                // and it is a fix rather than a wash: where a source axis's
-                // dimension maps to two active dimensions and the index names
-                // one of them, the old second loop could pair it with the OTHER
-                // (it tested only that a mapping existed, in either direction,
-                // and took the first active dimension that had one). The
-                // candidate order below names the one the index spells first,
-                // matching what `normalize_subscripts3` picks on the static
-                // path for the same reference.
-                // Candidates in `normalize_subscripts3`'s order -- every active
-                // dimension the index NAMES, then every one it reaches through
-                // a declared mapping -- and the first that resolves wins.
+                // Neither candidate may fall back to inventing an index. For an
+                // INDEXED active dimension whose numeral the source axis does
+                // not declare, emitting the raw 1-based index would diverge
+                // from the static twin `build_view_from_ops`, which has no such
+                // fallback -- GH #997's class of latent divergence. Both paths
+                // REFUSE an unresolvable subscript rather than one of them
+                // inventing an index; the codes differ (`MismatchedDimensions`
+                // here, `Generic` there), which is worth tidying but is not
+                // what the refusal is about. (The case is reachable in
+                // principle -- a NAMED dimension may declare a mapping toward
+                // an indexed one, which puts an indexed active dimension in
+                // the mapping candidates -- and measured dead across the lib
+                // and integration corpora, where the by-name candidate is
+                // reached 8 times and every one resolves by name identity.)
                 //
-                // The two used to be separate passes distinguished by a
-                // `Pairing` enum whose only reader was a numeric fallback: for
-                // an INDEXED active dimension whose numeral the source axis did
-                // not declare, the by-name pass emitted the raw 1-based index.
-                // Both are gone. The fallback is measured DEAD -- zero
-                // executions across the lib and integration corpora, where the
-                // by-name candidate is reached 8 times and every one resolves
-                // by name identity -- and its static twin `build_view_from_ops`
-                // has no such fallback at all, so keeping it was the same class
-                // of latent divergence GH #997 removed from the rest of this
-                // arm. Both paths now REFUSE an unresolvable subscript rather
-                // than one of them inventing an index -- the codes still
-                // differ (`MismatchedDimensions` here, `Generic` there), which
-                // is worth tidying but is not what the fallback was about.
-                // (The gate was not structurally vacuous: a NAMED dimension may
-                // declare a mapping toward an indexed one, which puts an
-                // indexed active dimension in the mapping candidates. It is
-                // empirically dead, which is the stronger reason to drop it.)
-                //
-                // The ORDER survives as a chained iterator rather than as a
-                // documented property, because it costs nothing and mirrors
+                // The ORDER is a chained iterator rather than a documented
+                // property, because it costs nothing and mirrors
                 // `normalize_subscripts3`. No reference in either corpus has
                 // two candidates: this arm is entered 12 times, 8 with a single
                 // by-name candidate (every one resolving by name identity) and

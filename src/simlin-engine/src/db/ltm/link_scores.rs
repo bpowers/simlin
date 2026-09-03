@@ -445,11 +445,10 @@ pub(super) fn link_score_dimensions(
 /// with NO variable-backed agg at all: the not-hoisted conservative family
 /// (dynamic-index reducers, declined mappings, and the slice combinations
 /// the I1 acceptance declines -- differing co-sources, non-projection
-/// feeders like the GH #743 family's Pinned-axis residue), byte-identical
-/// to pre-T3. (The GH #764 broadcast/permuted result shapes
-/// used to ride it too; since T4 they mint SYNTHETIC aggs at enumeration,
-/// so their edges route through the two-half agg emitters and never reach
-/// this function.)
+/// feeders like the GH #743 family's Pinned-axis residue). (The GH #764
+/// broadcast/permuted result shapes mint SYNTHETIC aggs at enumeration, so
+/// their edges route through the two-half agg emitters and never reach this
+/// function.)
 ///
 /// The BROADCAST-REDUCE shape (GH #777): an ARRAYED-owner scalar-result
 /// Pinned/subset slice (`share[Region] = SUM(pop[nyc,*])` -- a
@@ -695,10 +694,9 @@ pub(super) fn try_cross_dimensional_link_scores(
     // function, so the agg reaching here is either an aligned partial reduce
     // (Iterated-armed `read_slice_rows` path) or, on a SCALAR owner, the
     // scalar-result slice admission. A `vb_agg` whose gate decision declines
-    // (the trivial full-extent slice) falls through to the pre-T3 cartesian
-    // derivation byte-identically. (The GH #764 non-aligned shapes no longer
-    // appear here: since T4 they mint synthetic aggs, so no variable-backed
-    // agg exists for them.)
+    // (the trivial full-extent slice) falls through to the cartesian
+    // derivation. (The GH #764 non-aligned shapes do not appear here: they
+    // mint synthetic aggs, so no variable-backed agg exists for them.)
     // The ARRAYED-owner scalar-result Pinned/subset broadcast slice
     // (`share[Region] = SUM(pop[nyc,*])`) does NOT reach here: it is handled
     // by the broadcast-reduce branch near the top of this function (which
@@ -793,7 +791,7 @@ pub(super) fn try_cross_dimensional_link_scores(
 
     // GH #778/#785: a DEGENERATE SQUARE-SOURCE reducer (`from`'s dims repeat a
     // dimension that survives as a result axis -- `cube[D1,D1,*] -> x[D1]`)
-    // reaches HERE post-decline: its agg is no longer minted
+    // reaches HERE post-decline: no agg is minted for it
     // (`result_dims_has_repeated_dim`), so the agg branch above did not handle
     // it, and it falls into the conservative cartesian partial-reduce branch
     // below. That branch projects each source tuple onto the result axes
@@ -4025,14 +4023,14 @@ pub(super) fn emit_agg_to_target_link_scores(
             }
         }
         Ast::ApplyToAll(_, expr) => {
-            // One shared body; emit one per-target-element scalar var. Track A
-            // stage 1: the generator runs the wrap on this OWN A2A body and
-            // substitutes reducers -> agg names AFTER the wrap, so we thread the
-            // un-substituted AST + `reducer_subst`. The own-equation parse that
-            // used to be able to fail here is gone (the generation half lowers
-            // the `Expr2` straight to `Expr0`); a doomed wrap still surfaces on
-            // the first element's generator `Err` and dooms the edge once, via
-            // the same GH #661 warning path the per-element loop uses.
+            // One shared body; emit one per-target-element scalar var. The
+            // generator runs the wrap on this OWN A2A body and substitutes
+            // reducers -> agg names AFTER the wrap, so we thread the
+            // un-substituted AST + `reducer_subst`. Nothing here can fail to
+            // parse (the generation half lowers the `Expr2` straight to
+            // `Expr0`); a doomed wrap surfaces on the first element's generator
+            // `Err` and dooms the edge once, via the same GH #661 warning path
+            // the per-element loop uses.
             let to_own_eqn = crate::patch::expr2_to_expr0(expr);
             if to_dims.is_empty() {
                 return;
@@ -4288,12 +4286,11 @@ pub(super) fn emit_link_scores_for_edge(
 ) {
     // The set of synthetic aggs `(from, to)` routes through, read off
     // the reference-site IR (the unique `ThroughAgg` `AggRef`s of this
-    // edge's classified sites, in first-occurrence order). This is the
-    // single place the old per-edge `routed_aggs` filter
-    // (`aggs_in_var(to).filter(is_synthetic && reads from)`) used to be
-    // restated -- it now lives only in the IR builder; here we just
-    // project the result, resolving each `AggRef` to its `AggNode` for
-    // the half-emitters.
+    // edge's classified sites, in first-occurrence order). The routing
+    // decision (`aggs_in_var(to).filter(is_synthetic && reads from)`)
+    // lives only in the IR builder and is not restated here: this is a
+    // projection of its result, resolving each `AggRef` to its `AggNode`
+    // for the half-emitters.
     let ir = crate::db::ltm_ir::model_ltm_reference_sites(db, model, project);
     let routed_aggs: Vec<&crate::ltm_agg::AggNode> = {
         let mut idxs: Vec<usize> = Vec::new();
