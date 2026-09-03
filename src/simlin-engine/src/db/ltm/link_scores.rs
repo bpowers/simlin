@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use crate::common::{Canonical, Ident};
 
 use crate::db::{
-    Db, LtmEquation, LtmLinkId, LtmSyntheticVar, RefShape, SourceModel, SourceProject,
+    Db, LtmArm, LtmEquation, LtmLinkId, LtmSyntheticVar, RefShape, SourceModel, SourceProject,
     SourceVariable, SourceVariableKind, lowered_variable_by_name, model_variable_by_name,
     project_dimensions_context,
 };
@@ -24,7 +24,7 @@ use crate::db::{
 use crate::ltm_augment::DepElementPin;
 
 use super::LtmWarnings;
-use super::compile::{ShapedLinkScore, link_score_equation_text_shaped};
+use super::compile::{ShapedLinkScore, shaped_link_score};
 use super::endpoint_dimensions;
 use super::loops::{
     ReadSliceRow, ReadSliceRowParts, cartesian_subscripts, read_slice_row_parts, read_slice_rows,
@@ -1287,8 +1287,13 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
         // Same completeness guard the sibling emitter applies: a surviving
         // dimension-name index cannot lower in a scalar fragment, and would
         // otherwise produce a score that compiles while a capture helper
-        // beneath it reads constant 0.
-        if let Some(offender) = crate::ltm_augment::unresolvable_dimension_index(&equation, dim_ctx)
+        // beneath it reads constant 0. The arm is parsed once; the guard reads
+        // the tree the fragment compiles.
+        let arm = LtmArm::new(equation);
+        if let Some(offender) = arm
+            .expr
+            .as_deref()
+            .and_then(|expr| crate::ltm_augment::unresolvable_dimension_index(expr, dim_ctx))
         {
             let err =
                 crate::ltm_augment::PartialEquationError::unprojectable_dep(&offender, element);
@@ -1301,7 +1306,7 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
 
         vars.push(LtmSyntheticVar {
             name,
-            equation: LtmEquation::scalar(equation),
+            equation: LtmEquation::Scalar(arm),
             dimensions: vec![],
             compile_directly: false,
         });
@@ -1559,80 +1564,60 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
             Some(crate::ltm_augment::WithLookupWrap::Wrap(r)) => Some(r.as_str()),
             _ => None,
         };
-        match crate::ltm_augment::generate_scalar_feeder_to_agg_equation(
+        let text = crate::ltm_augment::generate_scalar_feeder_to_agg_equation(
             from,
             &agg.name,
-            &agg.equation_text,
+            &agg.reducer_expr0(),
             owner_gf_ref,
-        ) {
-            Ok(text) => {
-                // The score is ALWAYS arrayed here (`to_dims` is non-empty in
-                // this function). Two sub-shapes:
-                //  - ALIGNED reduce (`result_dims` == the owner's dims): the
-                //    score is A2A over `result_dims`.
-                //  - BROADCAST reduce (GH #777: `result_dims` empty, owner
-                //    arrayed -- `share[D9] = SUM(matrix[a,*] * scale)`): the
-                //    single scalar reducer value feeds every `to[e]`
-                //    identically, so the score is A2A over the OWNER's dims.
-                //    Emitting `Equation::Scalar` here would reference the
-                //    bare multi-slot owner in a scalar fragment -- an
-                //    assembly failure whose loops stub to warned constant 0
-                //    (the exact GH #790 defect, one shape over).
-                // The changed-last text is ApplyToAll-compatible in both:
-                // the bare owner reference element-resolves inside its own
-                // A2A context, and the frozen reducer body is either
-                // iterated over `result_dims` (aligned) or scalar-valued
-                // (broadcast -- a Pinned/subset slice broadcasts cleanly).
-                let equation_dims: Vec<String> = if agg.result_dims.is_empty() {
-                    // Map the owner's canonical dim names back to their
-                    // datamodel casing for correct equation parsing (the
-                    // same mapping `link_score_dimensions` applies).
-                    to_dims
+        );
+        // The score is ALWAYS arrayed here (`to_dims` is non-empty in
+        // this function). Two sub-shapes:
+        //  - ALIGNED reduce (`result_dims` == the owner's dims): the
+        //    score is A2A over `result_dims`.
+        //  - BROADCAST reduce (GH #777: `result_dims` empty, owner
+        //    arrayed -- `share[D9] = SUM(matrix[a,*] * scale)`): the
+        //    single scalar reducer value feeds every `to[e]`
+        //    identically, so the score is A2A over the OWNER's dims.
+        //    Emitting `Equation::Scalar` here would reference the
+        //    bare multi-slot owner in a scalar fragment -- an
+        //    assembly failure whose loops stub to warned constant 0
+        //    (the exact GH #790 defect, one shape over).
+        // The changed-last text is ApplyToAll-compatible in both:
+        // the bare owner reference element-resolves inside its own
+        // A2A context, and the frozen reducer body is either
+        // iterated over `result_dims` (aligned) or scalar-valued
+        // (broadcast -- a Pinned/subset slice broadcasts cleanly).
+        let equation_dims: Vec<String> = if agg.result_dims.is_empty() {
+            // Map the owner's canonical dim names back to their
+            // datamodel casing for correct equation parsing (the
+            // same mapping `link_score_dimensions` applies).
+            to_dims
+                .iter()
+                .map(|d| {
+                    let canonical = d.name();
+                    dm_dims
                         .iter()
-                        .map(|d| {
-                            let canonical = d.name();
-                            dm_dims
-                                .iter()
-                                .find(|dm| {
-                                    crate::common::canonicalize(dm.name()).as_ref() == canonical
-                                })
-                                .map(|dm| dm.name().to_string())
-                                .unwrap_or_else(|| canonical.to_string())
-                        })
-                        .collect()
-                } else {
-                    agg.result_dims.clone()
-                };
-                return Some(vec![LtmSyntheticVar {
-                    name,
-                    equation: LtmEquation::apply_to_all(equation_dims.clone(), text),
-                    dimensions: equation_dims,
-                    // The non-empty `dimensions` route this through the A2A
-                    // arm of `compile_ltm_synthetic_fragment`, which compiles
-                    // `equation` verbatim -- but set the direct flag anyway:
-                    // the (from, to)-keyed salsa path would re-derive a
-                    // DIFFERENT (changed-first, Bare-shaped) equation than
-                    // this var carries, so falling into it under any future
-                    // dims-handling change would be a silent divergence.
-                    compile_directly: true,
-                }]);
-            }
-            Err(err) => {
-                // GH #780 contract: the scalar feeder's single score IS this
-                // edge's entire emission; a doom leaves every loop hop through
-                // `(from, to)` referencing a missing name. Record + warn on
-                // first insert only so dependent loop scores drop instead of
-                // stubbing, and a pinned-pass re-visit does not duplicate the
-                // warning.
-                if warnings
-                    .unscoreable_edges
-                    .insert((from.to_string(), to.to_string()))
-                {
-                    emit_ltm_partial_equation_warning(warnings, &name, &err);
-                }
-                return Some(vec![]);
-            }
-        }
+                        .find(|dm| crate::common::canonicalize(dm.name()).as_ref() == canonical)
+                        .map(|dm| dm.name().to_string())
+                        .unwrap_or_else(|| canonical.to_string())
+                })
+                .collect()
+        } else {
+            agg.result_dims.clone()
+        };
+        return Some(vec![LtmSyntheticVar {
+            name,
+            equation: LtmEquation::apply_to_all(equation_dims.clone(), text),
+            dimensions: equation_dims,
+            // The non-empty `dimensions` route this through the A2A
+            // arm of `compile_ltm_synthetic_fragment`, which compiles
+            // `equation` verbatim -- but set the direct flag anyway:
+            // the (from, to)-keyed salsa path would re-derive a
+            // DIFFERENT (changed-first, Bare-shaped) equation than
+            // this var carries, so falling into it under any future
+            // dims-handling change would be a silent divergence.
+            compile_directly: true,
+        }]);
     }
 
     // A re-visit of an already-recorded doomed edge (the pinned pass dedups
@@ -1813,12 +1798,17 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         // `PartialEquationError` contract the GH #311 parse failure and the
         // GH #743 unfreezable partial use: loops through it drop with a warning.
         //
-        // Checked on the FINISHED text, not predicted from the pin table. A dep
-        // the table cannot cover may still need no pin -- `source[idx]` resolves
-        // through its own runtime index -- so declining whenever a dep is
-        // unpinnable rejects edges that score correctly. Only a surviving
-        // dimension-name index actually breaks.
-        if let Some(offender) = crate::ltm_augment::unresolvable_dimension_index(&equation, dim_ctx)
+        // Checked on the FINISHED arm -- parsed once, the tree the fragment
+        // compiles -- not predicted from the pin table. A dep the table cannot
+        // cover may still need no pin -- `source[idx]` resolves through its
+        // own runtime index -- so declining whenever a dep is unpinnable
+        // rejects edges that score correctly. Only a surviving dimension-name
+        // index actually breaks.
+        let arm = LtmArm::new(equation);
+        if let Some(offender) = arm
+            .expr
+            .as_deref()
+            .and_then(|expr| crate::ltm_augment::unresolvable_dimension_index(expr, dim_ctx))
         {
             let err =
                 crate::ltm_augment::PartialEquationError::unprojectable_dep(&offender, element);
@@ -1827,7 +1817,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         }
         Some(LtmSyntheticVar {
             name,
-            equation: LtmEquation::scalar(equation),
+            equation: LtmEquation::Scalar(arm),
             dimensions: vec![], // scalar -- one variable per target element
             // bracketed name -> routed direct by `assemble_module`.
             compile_directly: false,
@@ -2317,6 +2307,14 @@ pub(crate) fn ltm_partial_equation_warning_message(
              emitted with a non-ceteris-paribus equation (which would silently \
              score a constant magnitude of 1)."
         ),
+        PartialEquationErrorKind::MissingTypedTarget => format!(
+            "LTM link-score variable '{variable_name}' could not be generated: the \
+             target '{equation_text}' has no lowered equation to differentiate -- \
+             the compiler refused its equation (which is reported as that \
+             variable's own error), so the project does not simulate. The \
+             variable is skipped, and dependent loop scores dropped, rather than \
+             emitted around a body the compiler rejected."
+        ),
         PartialEquationErrorKind::UnfreezablePartial => format!(
             "LTM link-score variable '{variable_name}' could not be generated: the \
              ceteris-paribus partial of '{equation_text}' would freeze an array \
@@ -2389,7 +2387,7 @@ pub(crate) fn ltm_partial_equation_warning_message(
 /// guard form (`from[m]` frozen at `PREVIOUS`) elsewhere -- exactly what
 /// `build_arrayed_link_score_equation` produces for a `FixedIndex` source
 /// into an `Ast::Arrayed` target (reached here via the salsa-cached
-/// `link_score_equation_text_shaped`).
+/// `shaped_link_score`).
 ///
 /// Returns:
 ///  - `Some(vec)` with one var per distinct referenced source element when
@@ -2519,7 +2517,7 @@ pub(super) fn try_disjoint_dim_arrayed_link_scores(
     for key in &elem_keys {
         let shape = RefShape::FixedIndex(key.split(',').map(|s| s.to_string()).collect());
         let link_id = LtmLinkId::new(db, from.to_string(), to.to_string());
-        match link_score_equation_text_shaped(db, link_id, shape.clone(), model, project).clone() {
+        match shaped_link_score(db, link_id, shape.clone(), model, project).clone() {
             ShapedLinkScore::Unscoreable(warning) => {
                 // GH #780: a `PartialEquationError` for one element of this
                 // disjoint-dim edge dooms the whole edge -- the partial that
@@ -2763,7 +2761,7 @@ pub(super) fn emit_per_shape_link_scores(
 
     for shape in shapes {
         let link_id = LtmLinkId::new(db, from.to_string(), to.to_string());
-        match link_score_equation_text_shaped(db, link_id, shape.clone(), model, project).clone() {
+        match shaped_link_score(db, link_id, shape.clone(), model, project).clone() {
             ShapedLinkScore::Unscoreable(warning) => {
                 // GH #780: a `PartialEquationError` for this shape makes the
                 // whole `(from, to)` edge unscoreable. The query returned
@@ -2828,7 +2826,7 @@ pub(super) fn emit_per_shape_link_scores(
                 lsv.equation = retarget_ltm_equation_dims(lsv.equation, &target_dims);
                 // A non-`Bare` shape carries a partial that the (from, to)-
                 // keyed salsa compilation path (`compile_ltm_var_fragment` ->
-                // `link_score_equation_text_shaped(.., Bare)`) cannot
+                // `shaped_link_score(.., Bare)`) cannot
                 // reproduce: a
                 // `Wildcard`/`DynamicIndex` reference into a scalar target
                 // would have its whole subscript wrapped in `PREVIOUS()` and
@@ -3129,9 +3127,10 @@ fn emit_per_element_link_scores(
                     // (see its COMPLETENESS comment): a surviving dimension-name
                     // index cannot lower, and it becomes a `PREVIOUS`-capture
                     // helper that dies while THIS score still compiles.
-                    if let Some(offender) =
-                        crate::ltm_augment::unresolvable_dimension_index(&equation, dim_ctx)
-                    {
+                    let arm = LtmArm::new(equation);
+                    if let Some(offender) = arm.expr.as_deref().and_then(|expr| {
+                        crate::ltm_augment::unresolvable_dimension_index(expr, dim_ctx)
+                    }) {
                         let err = crate::ltm_augment::PartialEquationError::unprojectable_dep(
                             &offender, element,
                         );
@@ -3145,7 +3144,7 @@ fn emit_per_element_link_scores(
                     }
                     edge_vars.push(LtmSyntheticVar {
                         name,
-                        equation: LtmEquation::scalar(equation),
+                        equation: LtmEquation::Scalar(arm),
                         dimensions: vec![], // scalar -- one variable per (row, element)
                         // bracketed name -> routed direct by `assemble_module`.
                         compile_directly: false,
@@ -3265,6 +3264,7 @@ fn iterated_feeder_row_scores(
             _ => None,
         })
         .collect();
+    let reducer_expr = agg.reducer_expr0();
     let mut vars = Vec::with_capacity(rows.len());
     for ReadSliceRow { row, slot, .. } in &rows {
         // Names keep the bare element form (the user-facing / discovery-
@@ -3282,7 +3282,7 @@ fn iterated_feeder_row_scores(
         match crate::ltm_augment::generate_iterated_feeder_to_agg_equation(
             from,
             &agg.name,
-            &agg.equation_text,
+            &reducer_expr,
             &iterated_dims,
             &slot_parts,
             owner_gf_ref,
@@ -3370,10 +3370,10 @@ pub(super) fn emit_source_to_agg_link_scores(
             "$\u{205A}ltm\u{205A}link_score\u{205A}{}\u{2192}{}",
             from, agg.name
         );
-        match crate::ltm_augment::generate_scalar_feeder_to_agg_equation(
+        let text = crate::ltm_augment::generate_scalar_feeder_to_agg_equation(
             from,
             &agg.name,
-            &agg.equation_text,
+            &agg.reducer_expr0(),
             // A synthetic `$⁚ltm⁚agg⁚{n}` aux carries no graphical function,
             // so there is no implicit WITH-LOOKUP application to compose
             // (GH #910). Every caller of this emitter filters to synthetic
@@ -3381,42 +3381,25 @@ pub(super) fn emit_source_to_agg_link_scores(
             // `try_cross_dimensional_link_scores` / `try_scalar_to_arrayed_link_scores`,
             // which resolve the owner's wrap.
             None,
-        ) {
-            Ok(text) => {
-                let equation = if agg.result_dims.is_empty() {
-                    LtmEquation::scalar(text)
-                } else {
-                    // An arrayed agg's feeder score is per-slot: the agg's own
-                    // equation text is already ApplyToAll-compatible over
-                    // `result_dims` (it is the agg aux's own equation shape),
-                    // and the bare agg/feeder references resolve same-element
-                    // / broadcast respectively in A2A context.
-                    LtmEquation::apply_to_all(agg.result_dims.clone(), text)
-                };
-                vars.push(LtmSyntheticVar {
-                    name,
-                    equation,
-                    dimensions: agg.result_dims.clone(),
-                    // agg-named target -> routed direct by the synthetic-agg
-                    // check in compile_ltm_synthetic_fragment.
-                    compile_directly: false,
-                });
-            }
-            Err(err) => {
-                // GH #780: the scalar feeder's single score IS this edge's
-                // entire emission; a doom leaves every loop hop through
-                // `(from, agg)` referencing a missing name. Record + warn on
-                // first insert only (#758 convention) so dependent loop
-                // scores drop instead of stubbing and a pinned-pass re-visit
-                // does not duplicate the warning.
-                if warnings
-                    .unscoreable_edges
-                    .insert((from.to_string(), agg.name.clone()))
-                {
-                    emit_ltm_partial_equation_warning(warnings, &name, &err);
-                }
-            }
-        }
+        );
+        let equation = if agg.result_dims.is_empty() {
+            LtmEquation::scalar(text)
+        } else {
+            // An arrayed agg's feeder score is per-slot: the agg's own
+            // reducer is already ApplyToAll-compatible over `result_dims`
+            // (it is the agg aux's own equation shape), and the bare
+            // agg/feeder references resolve same-element / broadcast
+            // respectively in A2A context.
+            LtmEquation::apply_to_all(agg.result_dims.clone(), text)
+        };
+        vars.push(LtmSyntheticVar {
+            name,
+            equation,
+            dimensions: agg.result_dims.clone(),
+            // agg-named target -> routed direct by the synthetic-agg
+            // check in compile_ltm_synthetic_fragment.
+            compile_directly: false,
+        });
         return;
     }
     // GH #767 (T5): an arrayed ITERATED-DIM projection feeder of the
@@ -3439,16 +3422,13 @@ pub(super) fn emit_source_to_agg_link_scores(
         return;
     }
     // The reducer kind / name / body come straight off the aggregate node
-    // (GH #983). This used to print `agg.equation_text`, re-parse it, re-lower
-    // it against a freshly built scope and re-classify the result -- a closed
-    // round trip through our own printer and parser, run once per
-    // (agg, source) pair, whose two fallible steps both returned early and
-    // silently zeroed the agg's loop score. It also forced the emitter to
-    // rebuild the equation SHAPE by hand: an arrayed agg had to be
-    // reconstructed as an `ApplyToAll` over `result_dims`, because treating
-    // `matrix[d1,*]` as a scalar equation is a type error whose lowering
-    // failure emitted no scores at all. Reading the classified builtin
-    // removes both hazards -- there is no shape to rebuild.
+    // (GH #983): the classified builtin, never a print of `reducer_key`
+    // re-parsed and re-lowered against a fresh scope. That round trip had two
+    // fallible steps that returned early and silently zeroed the agg's loop
+    // score, and it forced the emitter to rebuild the equation SHAPE by hand
+    // (an arrayed agg reconstructed as an `ApplyToAll` over `result_dims`,
+    // since `matrix[d1,*]` as a scalar equation is a type error). Reading the
+    // classified builtin removes both hazards -- there is no shape to rebuild.
     let Some(classified) = crate::ltm_augment::classify_reducer_in_builtin(
         &agg.reducer,
         from,
@@ -3737,12 +3717,12 @@ pub(super) fn emit_agg_to_target_link_scores(
     };
     let Some(ast) = to_var.ast() else { return };
 
-    // Map of canonical reducer text -> agg name for every synthetic agg
-    // occurring in `to`'s equation.
+    // Map of reducer key (the canonical printed reducer) -> agg name for
+    // every synthetic agg occurring in `to`'s equation.
     let reducer_subst: HashMap<String, String> = agg_nodes
         .aggs_in_var(to)
         .filter(|a| a.is_synthetic)
-        .map(|a| (a.equation_text.clone(), a.name.clone()))
+        .map(|a| (a.reducer_key.clone(), a.name.clone()))
         .collect();
 
     let agg_canonical = Ident::<Canonical>::new(&agg.name);
@@ -4143,10 +4123,13 @@ pub(super) fn emit_agg_to_target_link_scores(
                         // dimension-name index cannot lower, and it becomes a
                         // `PREVIOUS`-capture helper that dies while THIS score
                         // still compiles.
-                        if let Some(offender) = crate::ltm_augment::unresolvable_dimension_index(
-                            &equation,
-                            project_dimensions_context(db, project),
-                        ) {
+                        let arm = LtmArm::new(equation);
+                        if let Some(offender) = arm.expr.as_deref().and_then(|expr| {
+                            crate::ltm_augment::unresolvable_dimension_index(
+                                expr,
+                                project_dimensions_context(db, project),
+                            )
+                        }) {
                             let err = crate::ltm_augment::PartialEquationError::unprojectable_dep(
                                 &offender, element,
                             );
@@ -4160,7 +4143,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                         }
                         edge_vars.push(LtmSyntheticVar {
                             name,
-                            equation: LtmEquation::scalar(equation),
+                            equation: LtmEquation::Scalar(arm),
                             dimensions: vec![],
                             // synthetic agg on `from` + bracketed `to` -> routed direct.
                             compile_directly: false,
@@ -4260,10 +4243,13 @@ pub(super) fn emit_agg_to_target_link_scores(
                         // dimension-name index cannot lower, and it becomes a
                         // `PREVIOUS`-capture helper that dies while THIS score
                         // still compiles.
-                        if let Some(offender) = crate::ltm_augment::unresolvable_dimension_index(
-                            &equation,
-                            project_dimensions_context(db, project),
-                        ) {
+                        let arm = LtmArm::new(equation);
+                        if let Some(offender) = arm.expr.as_deref().and_then(|expr| {
+                            crate::ltm_augment::unresolvable_dimension_index(
+                                expr,
+                                project_dimensions_context(db, project),
+                            )
+                        }) {
                             let err = crate::ltm_augment::PartialEquationError::unprojectable_dep(
                                 &offender, element,
                             );
@@ -4277,7 +4263,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                         }
                         edge_vars.push(LtmSyntheticVar {
                             name,
-                            equation: LtmEquation::scalar(equation),
+                            equation: LtmEquation::Scalar(arm),
                             dimensions: vec![],
                             // synthetic agg on `from` + bracketed `to` -> routed direct.
                             compile_directly: false,

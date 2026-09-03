@@ -90,6 +90,24 @@ fn pin_table_with_completeness(
         .collect()
 }
 
+/// Parse a test equation into the typed tree the generators consume. For the
+/// feeder generators, whose production input is `AggNode::reducer_expr0()`,
+/// a parse of the reducer's key is that value up to `Loc`
+/// (`ltm_agg_tests::the_typed_reducer_is_the_parse_of_its_key`).
+fn expr(text: &str) -> Expr0 {
+    Expr0::new(text, crate::lexer::LexerType::Equation)
+        .expect("test equation must lex")
+        .expect("test equation must be non-empty")
+}
+
+/// Pin `text`'s references through [`subscript_idents_in_expr0`] and print
+/// the result -- the test-side spelling of the typed pin the per-element
+/// generators apply. The parse lowercases call names, so a `PREVIOUS(..)`
+/// in `text` prints back as `previous(..)`.
+fn pin_text(text: &str, pins: &HashMap<Ident<Canonical>, DepElementPin>) -> String {
+    print_eqn(&subscript_idents_in_expr0(expr(text), pins))
+}
+
 /// Source-dimension element names for the per-shape partial-equation
 /// tests using a single `Region` dimension with elements `nyc` and
 /// `boston` (canonical lowercase form, in source-declared order).
@@ -332,7 +350,7 @@ fn substitute_reducers_empty_reducers_passes_through_unparseable() {
     assert_eq!(out, bad);
 }
 
-// -- subscript_idents_at_element tests --
+// -- subscript_idents_in_expr0 tests --
 
 /// A dep referenced through the *dimension-name* subscript form
 /// (`reference_emissions[cop]`, the A2A iterated reference) must be
@@ -342,18 +360,15 @@ fn substitute_reducers_empty_reducers_passes_through_unparseable() {
 /// occurrence -- the dominant residual helper source on C-LEARN
 /// (~27k call sites, GH #654).
 #[test]
-fn test_subscript_idents_at_element_pins_dimension_name_indices() {
+fn test_subscript_idents_in_expr0_pins_dimension_name_indices() {
     let pins = pin_table(&[
         ("reference_emissions", &[("cop", "cop·oecd_us")]),
         ("pct_change", &[("cop", "cop·oecd_us")]),
     ]);
-    // Parsed function names round-trip lowercased through print_eqn, so
-    // the expected text spells `previous(...)`.
-    let result = subscript_idents_at_element(
+    let result = pin_text(
         "PREVIOUS(reference_emissions[cop]) * (PREVIOUS(pct_change[cop]) / c + 1)",
         &pins,
-    )
-    .unwrap();
+    );
     assert_eq!(
         result,
         "previous(reference_emissions[cop·oecd_us]) * (previous(pct_change[cop·oecd_us]) / c + 1)"
@@ -364,12 +379,12 @@ fn test_subscript_idents_at_element_pins_dimension_name_indices() {
 /// dep declared over a subset of the target's dimensions (or with them in
 /// a different order) pins each index to the right element.
 #[test]
-fn test_subscript_idents_at_element_pins_by_dimension_name() {
+fn test_subscript_idents_in_expr0_pins_by_dimension_name() {
     let pins = pin_table(&[
         ("row_input", &[("age", "age·adult")]),
         ("matrix", &[("age", "age·adult"), ("region", "region·nyc")]),
     ]);
-    let result = subscript_idents_at_element("row_input[age] + matrix[age,region]", &pins).unwrap();
+    let result = pin_text("row_input[age] + matrix[age,region]", &pins);
     assert_eq!(
         result,
         "row_input[age·adult] + matrix[age·adult, region·nyc]"
@@ -380,10 +395,10 @@ fn test_subscript_idents_at_element_pins_by_dimension_name() {
 /// left untouched: only an index naming one of the DEP's own dimensions is
 /// the "current element" form the pin substitutes.
 #[test]
-fn test_subscript_idents_at_element_leaves_literal_indices() {
+fn test_subscript_idents_in_expr0_leaves_literal_indices() {
     let pins = pin_table(&[("dep", &[("region", "region·la")])]);
     // `nyc` is an element literal, not the dimension name `region`.
-    let result = subscript_idents_at_element("dep[nyc] + dep[region]", &pins).unwrap();
+    let result = pin_text("dep[nyc] + dep[region]", &pins);
     assert_eq!(result, "dep[nyc] + dep[region·la]");
 }
 
@@ -404,13 +419,13 @@ fn test_subscript_idents_at_element_leaves_literal_indices() {
 /// resolve numerically, so the partial compiled and silently read
 /// `flip[young, boston]`.
 #[test]
-fn test_subscript_idents_at_element_pins_bare_refs_over_the_deps_own_dims() {
+fn test_subscript_idents_in_expr0_pins_bare_refs_over_the_deps_own_dims() {
     let pins = pin_table(&[
         ("same", &[("region", "region·nyc"), ("age", "age·old")]),
         ("flip", &[("age", "age·old"), ("region", "region·nyc")]),
         ("w", &[("age", "age·old")]),
     ]);
-    let result = subscript_idents_at_element("same * flip * w", &pins).unwrap();
+    let result = pin_text("same * flip * w", &pins);
     assert_eq!(
         result,
         "same[region·nyc, age·old] * flip[age·old, region·nyc] * w[age·old]"
@@ -430,9 +445,9 @@ fn test_subscript_idents_at_element_pins_bare_refs_over_the_deps_own_dims() {
 /// arity-1 `pop[region·nyc]` over a 2-D variable. Bare stays bare, which fails
 /// to compile LOUDLY rather than reading a wrong element.
 #[test]
-fn test_subscript_idents_at_element_incomplete_pin_leaves_bare_refs_alone() {
+fn test_subscript_idents_in_expr0_incomplete_pin_leaves_bare_refs_alone() {
     let pins = pin_table_with_completeness(&[("pop", &[("region", "region·nyc")])], false);
-    let result = subscript_idents_at_element("pop[Region, idx] + pop", &pins).unwrap();
+    let result = pin_text("pop[Region, idx] + pop", &pins);
     assert_eq!(result, "pop[region·nyc, idx] + pop");
 }
 
@@ -2338,26 +2353,6 @@ fn build_partial_equation_shaped_no_deps_to_wrap_is_ok() {
         !live_only.contains("PREVIOUS"),
         "the live source must not be PREVIOUS-wrapped; got {live_only}"
     );
-}
-
-/// `subscript_idents_at_element` shares the same loud-failure contract:
-/// an unparseable (already-partial) equation returns `Err`, while an
-/// empty pin table is a legitimate no-op that returns the text unchanged.
-#[test]
-fn subscript_idents_at_element_parse_error_is_err() {
-    let pins = pin_table(&[("dep", &[("region", "region·nyc")])]);
-    let bad = "dep * * other";
-    let result = subscript_idents_at_element(bad, &pins);
-    match result {
-        Err(err) => assert_eq!(err.equation_text, bad),
-        Ok(out) => panic!("a parse failure must be a loud Err; got Ok({out:?})"),
-    }
-
-    // Empty pin table: nothing to pin, returns the text verbatim (even text
-    // that would not parse is irrelevant -- the function short-circuits).
-    let noop = subscript_idents_at_element(bad, &pin_table(&[]))
-        .expect("an empty pin table is a no-op, not a parse attempt");
-    assert_eq!(noop, bad);
 }
 
 // -- link_score_var_name: per-shape naming convention --
@@ -4550,10 +4545,9 @@ fn test_generate_scalar_feeder_to_agg_equation_freezes_only_feeder() {
     let eq = generate_scalar_feeder_to_agg_equation(
         "scale",
         "$\u{205A}ltm\u{205A}agg\u{205A}0",
-        "sum(pop[*] * scale)",
+        &expr("sum(pop[*] * scale)"),
         None,
-    )
-    .expect("the agg equation text must parse");
+    );
     // The frozen evaluation wraps the feeder, not the array reference.
     assert!(
         eq.contains("sum(pop[*] * PREVIOUS(scale))"),
@@ -4590,12 +4584,12 @@ fn test_generate_iterated_feeder_to_agg_equation_pins_slot_and_freezes_feeder() 
     let eq = generate_iterated_feeder_to_agg_equation(
         "frac",
         "growth",
-        "sum(matrix[d1, *] * frac[d1])",
+        &expr("sum(matrix[d1, *] * frac[d1])"),
         &["d1".to_string()],
         &["d1\u{B7}r1".to_string()],
         None,
     )
-    .expect("the agg equation text must parse");
+    .expect("the feeder occurrence freezes");
     assert_eq!(
         eq,
         "if (TIME = INITIAL_TIME) then 0 else if ((growth[d1\u{B7}r1] - \
@@ -4616,7 +4610,7 @@ fn test_generate_iterated_feeder_to_agg_equation_unfreezable_without_occurrence(
     let err = generate_iterated_feeder_to_agg_equation(
         "absent",
         "growth",
-        "sum(matrix[d1, *] * frac[d1])",
+        &expr("sum(matrix[d1, *] * frac[d1])"),
         &["d1".to_string()],
         &["d1\u{B7}r1".to_string()],
         None,
@@ -4638,7 +4632,7 @@ fn test_generate_iterated_feeder_to_agg_equation_bails_on_duplicate_dims() {
     let err = generate_iterated_feeder_to_agg_equation(
         "frac",
         "growth",
-        "sum(cube[d1, d1, *] * frac[d1, d1])",
+        &expr("sum(cube[d1, d1, *] * frac[d1, d1])"),
         &["d1".to_string(), "d1".to_string()],
         &["d1\u{B7}r1".to_string(), "d1\u{B7}r2".to_string()],
         None,

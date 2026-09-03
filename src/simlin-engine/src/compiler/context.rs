@@ -202,8 +202,8 @@ impl Context<'_> {
                 // and `get_ref` resolve the reference through when the fragment
                 // compiles, so the pin spells the read the compiled fragment
                 // makes whether the `Var` carries bounds (a helper lowered
-                // through `implicit_fragment_input`) or none (a bounds-free
-                // lowering, `ast::LoweringScope`).
+                // through `implicit_fragment_input`) or none (a reference the
+                // `Expr2` tier had no shape for).
                 let dims = self.dims_of(id).expect("checked above");
                 let bounds = ast::ArrayBounds::Named {
                     name: id.as_str().to_string(),

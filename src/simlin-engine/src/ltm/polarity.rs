@@ -122,7 +122,7 @@ fn analyze_ast_polarity(
 /// `analyze_link_polarity` (which matches `Var(agg)` occurrences) returns
 /// `Unknown`. This substitutes the subexpression -- matched by its
 /// canonical printed form `reducer_subexpr_text` (exactly the
-/// `AggNode::equation_text` key `enumerate_agg_nodes` stores) -- with a
+/// `AggNode::reducer_key` `enumerate_agg_nodes` stores) -- with a
 /// bare `Var(agg_name)` and runs the ordinary analysis on the result.
 ///
 /// Returns `Unknown` if the subexpression isn't found (graceful: the hop

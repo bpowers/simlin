@@ -412,7 +412,7 @@ fn per_element_subset_dep_scores_are_live_not_silent_zero() {
 // projection (`post_transform::dep_element_pins`, enumerated by
 // `dep_element_pins_projection_enumeration`) but reach it through different
 // call paths: an other-dep's bare reference goes through
-// `subscript_idents_at_element`, and a bare reference to the LIVE SOURCE goes
+// `subscript_idents_in_expr0`, and a bare reference to the LIVE SOURCE goes
 // through the wrap's own `pin_bare_source_ref`.
 //
 // Both models below compile with ZERO diagnostics before the fix -- the defects
@@ -559,9 +559,9 @@ fn bare_arrayed_dep_is_pinned_over_its_own_declared_dims() {
         ],
     );
     for expected in [
-        "previous(same[region\u{B7}nyc, age\u{B7}old])",
-        "previous(flip[age\u{B7}old, region\u{B7}nyc])",
-        "previous(w[age\u{B7}old])",
+        "PREVIOUS(same[region\u{B7}nyc, age\u{B7}old])",
+        "PREVIOUS(flip[age\u{B7}old, region\u{B7}nyc])",
+        "PREVIOUS(w[age\u{B7}old])",
     ] {
         assert!(
             text.contains(expected),
@@ -1905,7 +1905,7 @@ fn char_already_lagged_other_dep() {
 // recursed into it -- changed-LAST. Stage 2b re-aligned the legacy query onto
 // the shaped derivation; Track A3 stage 3a then DELETED the legacy query
 // outright: assembly's sub-case (a) now sources from
-// `link_score_equation_text_shaped(.., Bare)` directly, so the compiled and
+// `shaped_link_score(.., Bare)` directly, so the compiled and
 // reported equations are one value and cannot drift. This golden pins the
 // emitted (changed-LAST) text -- the numerator subtracts
 // `PREVIOUS(scale) + sum(arr[*] * PREVIOUS(scale))` from the live `total`, i.e.

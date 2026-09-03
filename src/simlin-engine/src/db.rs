@@ -117,7 +117,7 @@ pub(crate) use fragment_compile::{
 mod assemble;
 pub(crate) use assemble::{
     VarFragmentResult, build_module_inputs, compile_phase_to_per_var_bytecodes,
-    module_input_prefix, var_phase_symbolic_fragment_prod, variable_tables,
+    module_input_prefix, port_of, var_phase_symbolic_fragment_prod, variable_tables,
 };
 pub use assemble::{assemble_module, assemble_simulation};
 // `combine_scc_fragment` is consumed at runtime only WITHIN `assemble.rs`; the
@@ -136,8 +136,8 @@ mod ltm;
 use ltm::*;
 pub use ltm::{
     LtmArm, LtmEquation, LtmImplicitVarMeta, ShapedLinkScore, compile_ltm_var_fragment,
-    link_score_equation_text_shaped, model_ltm_implicit_var_info, model_ltm_mode,
-    model_ltm_var_name_index, model_ltm_variables,
+    model_ltm_implicit_var_info, model_ltm_mode, model_ltm_var_name_index, model_ltm_variables,
+    shaped_link_score,
 };
 // The cross-agg petal-stitching core, shared with `crate::ltm_finding`'s
 // discovery-mode recovery (GH #696).
@@ -441,7 +441,7 @@ impl Db for SimlinDb {}
 /// `compile_directly` forces `assemble_module`'s LTM pass to compile this
 /// var's `equation` verbatim instead of re-deriving it from the
 /// `(from, to)`-keyed salsa cache (`compile_ltm_var_fragment` ->
-/// `link_score_equation_text_shaped(.., Bare)`). It is
+/// `shaped_link_score(.., Bare)`). It is
 /// set by `emit_per_shape_link_scores` for a scalar link score whose
 /// underlying reference shape is *not* `Bare` -- a `Wildcard`/`DynamicIndex`
 /// reference into a scalar target (e.g. `total = arr[idx]`), where the salsa
@@ -770,7 +770,7 @@ pub(crate) fn module_output_ref_in_document_order(
 
 /// Equation for a module-involved link score (`from` and/or `to` is a
 /// module node in the parent causal graph). Called by the per-shape
-/// [`crate::db::link_score_equation_text_shaped`]; a module link's equation
+/// [`crate::db::shaped_link_score`]; a module link's equation
 /// is independent of `RefShape` (modules are scalar nodes whose
 /// composite-reference / ceteris-paribus / unit-transfer formulas don't
 /// reach into the target's AST shape), so the scalar Bare score the compile
@@ -988,9 +988,9 @@ pub(crate) fn module_link_score_equation(
     Some(LtmEquation::scalar(equation))
 }
 
-// `link_score_equation_text_shaped` lives in `db/ltm/compile.rs` (where
+// `shaped_link_score` lives in `db/ltm/compile.rs` (where
 // the emission loop calls it) so this file stays under the project's
-// per-file line cap; see `ltm::link_score_equation_text_shaped`.
+// per-file line cap; see `ltm::shaped_link_score`.
 
 /// Build a causal graph from pre-computed edges and enumerate all pathways
 /// from each input port to the specified output ports (or auto-detect them).

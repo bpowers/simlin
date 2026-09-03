@@ -125,10 +125,12 @@ impl Ast<Expr2> {
 /// the read is lowered to a slot inside the instance; nothing in between reads
 /// the bounds, so a cross-module read has one resolver.
 ///
-/// An empty `shapes` map is a bounds-free lowering: every reference carries
-/// `None`. The dependency classification (`db::variable_direct_dependencies`)
-/// and the LTM lowering (`db::ltm::compile::lower_ltm_variable`) lower that
-/// way, since neither reads an `ArrayBounds`.
+/// Every lowering runs under the shapes of the names its equation references,
+/// resolved before it runs: `db::lowered_source_variable` and
+/// `db::lowered_implicit_variable` for a model's variables and helpers,
+/// `db::ltm::compile::lower_ltm_variable` for a generated LTM equation and its
+/// helpers. The dependency classification (`db::variable_direct_dependencies`)
+/// runs on the typed `Expr1` and needs no scope at all.
 ///
 /// `model_name` is read by the module arm of `model::lower_variable` alone: a
 /// module's input wiring strips a parent-scope `·` prefix in `main` only
@@ -277,7 +279,7 @@ pub(crate) fn typed_ast(
 }
 
 /// Lower one equation's parsed AST to `Expr2`: [`typed_ast`], then the array
-/// bounds under `scope`.
+/// bounds under `scope` ([`lower_typed_ast`]).
 ///
 /// `element_scoped` is true for a per-element helper's scalar equation
 /// (`variable::ElementScope`): its body was written inside an apply-to-all
@@ -289,7 +291,19 @@ pub(crate) fn lower_ast(
     ast: &Ast<Expr0>,
     element_scoped: bool,
 ) -> EquationResult<Ast<Expr2>> {
-    match typed_ast(ast, scope.dimensions)? {
+    lower_typed_ast(scope, typed_ast(ast, scope.dimensions)?, element_scoped)
+}
+
+/// The array-bounds half of [`lower_ast`]: one equation at the typed tier
+/// lowered to `Expr2` under `scope`. A caller that typed the equation itself
+/// -- to classify its reads before the shapes it lowers under exist -- lowers
+/// that tree here rather than typing it again.
+pub(crate) fn lower_typed_ast(
+    scope: &LoweringScope,
+    typed: Ast<Expr1>,
+    element_scoped: bool,
+) -> EquationResult<Ast<Expr2>> {
+    match typed {
         Ast::Scalar(expr) => {
             let mut ctx = ArrayContext::new(scope, element_scoped);
             Expr2::from(expr, &mut ctx).map(Ast::Scalar)

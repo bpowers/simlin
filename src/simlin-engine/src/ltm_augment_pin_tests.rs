@@ -134,7 +134,7 @@ fn per_element_pin_descends_into_range_endpoints() {
 /// relation yields (GH #974).
 ///
 /// This is the projection behind every bare-reference pin -- the rule
-/// `subscript_idents_at_element` consumes and the rule `pin_bare_source_ref`
+/// `subscript_idents_in_expr0` consumes and the rule `pin_bare_source_ref`
 /// reuses for the live source -- so the rows are derived from the two
 /// enumerations it composes, not from examples:
 ///

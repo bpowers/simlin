@@ -26,11 +26,12 @@ use crate::common::{Canonical, Ident, canonicalize};
 use crate::compiler::symbolic::VariableLayout;
 use crate::datamodel;
 use crate::db::{
-    ModuleInputSet, SccPhase, SimlinDb, SyncResult, assemble_module, assemble_simulation,
-    compute_layout, model_dependency_graph, model_flows_invariant, model_implicit_var_info,
-    model_ltm_implicit_var_info, model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel,
+    ModuleInputSet, SccPhase, SimlinDb, SourceProject, SyncResult, assemble_module,
+    assemble_simulation, compute_layout, model_dependency_graph, model_flows_invariant,
+    model_implicit_var_info, model_ltm_implicit_var_info, model_ltm_variables,
+    set_project_ltm_enabled, sync_from_datamodel,
 };
-use crate::testutils::{x_aux, x_flow, x_model, x_module, x_project, x_stock};
+use crate::testutils::{x_aux, x_flow, x_model, x_module, x_module_named, x_project, x_stock};
 use crate::vm::Vm;
 
 fn sim_specs() -> datamodel::SimSpecs {
@@ -90,6 +91,308 @@ fn x_arrayed(ident: &str, dim: &str, elements: &[(&str, &str)]) -> datamodel::Va
 
 fn key(s: &str) -> Ident<Canonical> {
     Ident::<Canonical>::from_unchecked(s.to_string())
+}
+
+/// `main` instantiates `leaf` through three explicit instances -- the first
+/// and third bind the same port set, the second a different one, and the
+/// first also names a port of ANOTHER instance's namespace -- and a stdlib
+/// model through a `SMTH1` call; `leaf` instantiates `nested`. Every
+/// candidate namespace and every identity rule of module-instance
+/// enumeration is reached, from source variables and source parses alone.
+fn enumeration_fixture() -> datamodel::Project {
+    x_project(
+        sim_specs(),
+        &[
+            x_model(
+                "main",
+                vec![
+                    x_aux("source", "3", None),
+                    x_stock("level", "1", &["adjustment"], &[], None),
+                    x_module_named(
+                        "leaf_p",
+                        "leaf",
+                        &[("source", "leaf_p.p"), ("source", "other.q")],
+                        None,
+                    ),
+                    x_module_named("leaf_q", "leaf", &[("source", "leaf_q.q")], None),
+                    x_module_named(
+                        "leaf_p_again",
+                        "leaf",
+                        &[("source", "leaf_p_again.p")],
+                        None,
+                    ),
+                    x_aux("smoothed", "SMTH1(level, 2)", None),
+                    x_flow("adjustment", "(source - smoothed) / 2", None),
+                ],
+            ),
+            x_model(
+                "leaf",
+                vec![
+                    x_aux("p", "0", None),
+                    x_aux("q", "0", None),
+                    x_aux("out", "p + q", None),
+                    x_module_named("nested", "nested", &[], None),
+                ],
+            ),
+            x_model("nested", vec![x_aux("value", "1", None)]),
+        ],
+    )
+}
+
+/// The input sets `model` is instantiated with, as strings, sorted.
+fn input_sets(db: &SimlinDb, project: SourceProject, model: &str) -> Vec<Vec<String>> {
+    let mut sets: Vec<Vec<String>> =
+        crate::db::assemble::module_input_sets_for(db, project, "main", model)
+            .into_iter()
+            .map(|set| set.iter().map(|i| i.as_str().to_string()).collect())
+            .collect();
+    sets.sort();
+    sets
+}
+
+/// Both candidate namespaces -- explicit `Module` variables and the instances
+/// a parse synthesizes -- feed one `(model, bound-port set)` identity: a
+/// repeated port set is one instance, a distinct set another, a `dst` in a
+/// foreign namespace binds nothing, and a target model is descended into
+/// exactly far enough to find its own instances.
+#[test]
+fn module_instance_enumeration_covers_both_namespaces_with_one_identity() {
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &enumeration_fixture());
+    let project = sync.project;
+
+    assert_eq!(
+        input_sets(&db, project, "leaf"),
+        vec![vec!["p".to_string()], vec!["q".to_string()]],
+        "the repeated {{p}} set is one instance, {{q}} another, and `other.q` binds nothing"
+    );
+    assert_eq!(
+        input_sets(&db, project, "nested"),
+        vec![Vec::<String>::new()],
+        "the nested model is reached through `leaf`"
+    );
+    assert_eq!(
+        input_sets(&db, project, "stdlib\u{205A}smth1"),
+        vec![vec!["delay_time".to_string(), "input".to_string()]],
+        "the SMTH1 instance's ports are the ones its call wires"
+    );
+}
+
+/// A reference whose source and destination are both inside one instance
+/// binds no port: the instance's compilation identity, its lowered wiring and
+/// the module the VM evaluates all agree on the target model's empty port
+/// set, so the sub-model's own `input` is read and `output` is `input + 1`.
+///
+/// A divergence pin: with two owners of the bound-port rule the identity
+/// counted the port (`{input}`) while the wiring wrote nothing, and `Vm::new`
+/// panicked looking up the compiled child under the identity it was never
+/// compiled for (`vm.rs` `key_to_idx`, "no entry found for key"). One rule
+/// makes the shape compile; `model_module_wiring_diagnostics` warns that the
+/// reference binds nothing (`module_wiring_tests`). XMILE 1.0 section 4.7.1
+/// places connections at the lowest common ancestor of the submodel
+/// hierarchy, which is where an instance-qualified `from` arises; whether a
+/// connect from an instance to that same instance has a defined meaning is
+/// unverified.
+#[test]
+fn internal_module_reference_is_not_a_bound_input() {
+    let project = x_project(
+        sim_specs(),
+        &[
+            x_model(
+                "main",
+                vec![x_module_named(
+                    "bridge",
+                    "leaf",
+                    &[("bridge.output", "bridge.input")],
+                    None,
+                )],
+            ),
+            x_model(
+                "leaf",
+                vec![
+                    x_aux("input", "2", None),
+                    x_aux("output", "input + 1", None),
+                ],
+            ),
+        ],
+    );
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+
+    assert_eq!(
+        input_sets(&db, sync.project, "leaf"),
+        vec![Vec::<String>::new()],
+        "an own-namespace source is internal and binds no port"
+    );
+
+    let sim = assemble_simulation(&db, sync.project, "main".to_string())
+        .expect("the internal reference compiles");
+    let root = sim.modules.get(&sim.root).expect("root compiled module");
+    let declarations: Vec<&ModuleDeclaration> = root
+        .compiled_flows
+        .code
+        .iter()
+        .filter_map(|opcode| match opcode {
+            Opcode::EvalModule { id, .. } => Some(&root.context.modules[*id as usize]),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(declarations.len(), 1, "one instance is evaluated");
+    assert_eq!(declarations[0].model_name, key("leaf"));
+    assert!(
+        declarations[0].input_set.is_empty(),
+        "the evaluated module's identity is the enumerated one"
+    );
+
+    let mut vm = Vm::new((*sim).clone()).expect("the declaration resolves its compiled child");
+    vm.run_to_end().expect("the internal-reference model runs");
+    assert_constant_series(&vm, "bridge\u{00B7}output", 3.0);
+}
+
+/// The same shape as an XMILE file reads it (`<connect to="bridge.input"
+/// from="bridge.output"/>`, the spelling a writer emits), through
+/// `open_xmile`: the instance binds no port, the project compiles, and a
+/// reader of the instance's output sees the sub-model's own value.
+#[test]
+fn an_xmile_internal_module_reference_compiles_and_binds_nothing() {
+    let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+<header><name>r3</name><vendor>simlin</vendor><product version="1.0">simlin</product></header>
+<sim_specs method="Euler"><start>0</start><stop>4</stop><dt>1</dt></sim_specs>
+<model name="main"><variables>
+<module name="bridge" model_name="leaf"><connect to="bridge.input" from="bridge.output"/></module>
+<aux name="reader"><eqn>bridge.output</eqn></aux>
+</variables></model>
+<model name="leaf"><variables>
+<aux name="input"><eqn>2</eqn></aux>
+<aux name="output"><eqn>input + 1</eqn></aux>
+</variables></model>
+</xmile>"#;
+    let project = crate::compat::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("the fixture is well-formed XMILE");
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    assert_eq!(
+        input_sets(&db, sync.project, "leaf"),
+        vec![Vec::<String>::new()],
+        "the instance-qualified source binds no port"
+    );
+    let sim = assemble_simulation(&db, sync.project, "main".to_string())
+        .expect("the internal reference compiles");
+    let mut vm = Vm::new((*sim).clone()).expect("the child is compiled under the same identity");
+    vm.run_to_end().expect("runs");
+    assert_constant_series(&vm, "bridge\u{00B7}output", 3.0);
+    assert_constant_series(&vm, "reader", 3.0);
+}
+
+/// A missing target model is refused with the namespace's own wording, and
+/// with several missing the refusal names the first in name order whatever
+/// the declaration order -- explicit candidates before implicit ones.
+///
+/// The implicit rows edit the synced `models` input to drop the stdlib
+/// templates: a missing IMPLICIT target has no natural fixture, since every
+/// project syncs with the whole stdlib present, so the only way to reach the
+/// refusal is to remove the template after the sync.
+#[test]
+fn a_missing_module_target_is_refused_in_name_order_per_namespace() {
+    use salsa::Setter;
+
+    // Explicit namespace: two missing targets, declared in both orders.
+    let explicit = [
+        x_module_named("alpha_instance", "missing_alpha", &[], None),
+        x_module_named("zeta_instance", "missing_zeta", &[], None),
+    ];
+    for reverse in [false, true] {
+        let mut vars = vec![
+            x_aux("source", "1", None),
+            x_aux("ordinary_missing", "SMTH1(source, 2)", None),
+        ];
+        let mut modules = explicit.to_vec();
+        if reverse {
+            modules.reverse();
+        }
+        vars.extend(modules);
+        let project = x_project(sim_specs(), &[x_model("main", vars)]);
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        let mut models = sync.project.models(&db).clone();
+        models.remove("stdlib\u{205A}smth1");
+        sync.project.set_models(&mut db).to(models);
+
+        let error = assemble_simulation(&db, sync.project, "main".to_string())
+            .expect_err("a missing explicit target is refused");
+        assert_eq!(
+            error, "model 'missing_alpha' referenced as module but not found",
+            "reverse={reverse}: explicit candidates first, in name order"
+        );
+    }
+
+    // Implicit namespace: two stdlib calls whose models are gone.
+    let calls = [
+        x_aux("alpha_delayed", "DELAY1(source, 2)", None),
+        x_aux("zeta_smoothed", "SMTH1(source, 2)", None),
+    ];
+    for reverse in [false, true] {
+        let mut vars = vec![x_aux("source", "1", None)];
+        let mut helpers = calls.to_vec();
+        if reverse {
+            helpers.reverse();
+        }
+        vars.extend(helpers);
+        let project = x_project(sim_specs(), &[x_model("main", vars)]);
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        let mut models = sync.project.models(&db).clone();
+        models.remove("stdlib\u{205A}delay1");
+        models.remove("stdlib\u{205A}smth1");
+        sync.project.set_models(&mut db).to(models);
+
+        let error = assemble_simulation(&db, sync.project, "main".to_string())
+            .expect_err("a missing implicit target is refused");
+        assert_eq!(
+            error,
+            "implicit module '$\u{205A}alpha_delayed\u{205A}0\u{205A}delay1' references model \
+             'stdlib\u{205A}delay1' which was not found",
+            "reverse={reverse}: implicit candidates in name order"
+        );
+    }
+}
+
+/// Generated LTM equations are built from a target's expanded tree, so their
+/// parses synthesize captures and never a module instance: the source
+/// `SMTH1` stays the ordinary implicit instance, every LTM helper is a
+/// capture, and the module universe under LTM is the source models' own.
+#[test]
+fn generated_ltm_helpers_are_captures_only() {
+    let project = ltm_project();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let model = sync.models["main"].source;
+
+    assert!(
+        model_implicit_var_info(&db, model, sync.project)
+            .values()
+            .any(|meta| meta.is_module),
+        "the source SMTH1 call is an ordinary implicit instance"
+    );
+    let ltm_implicit = model_ltm_implicit_var_info(&db, model, sync.project);
+    assert!(
+        !ltm_implicit.is_empty(),
+        "the flow-to-stock score synthesizes PREVIOUS capture helpers"
+    );
+    assert!(
+        ltm_implicit
+            .values()
+            .all(|meta| meta.variable.capture().is_some()),
+        "every generated helper is a capture: {:?}",
+        ltm_implicit.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        input_sets(&db, sync.project, "stdlib\u{205A}smth1"),
+        vec![vec!["delay_time".to_string(), "input".to_string()]],
+        "the LTM reads of the SMTH1 output resolve through the ordinary instance"
+    );
 }
 
 /// The model a module variable instantiates: an explicit `Module` variable's

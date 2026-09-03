@@ -2587,7 +2587,7 @@ fn implicit_and_ltm_fragment_cache_granularity() {
     //
     // What that nondeterminism is, established by measurement rather than
     // inferred: `compile_ltm_var_fragment`'s returned VALUE is equal before and
-    // after the edit in every repetition, and `link_score_equation_text_shaped`
+    // after the edit in every repetition, and `shaped_link_score`
     // backdates correctly in every repetition -- only whether the body re-runs
     // varies. Salsa backdates the equal value, so no consumer observes a
     // difference and no artifact changes (both `ltm_loop_*` goldens hold across

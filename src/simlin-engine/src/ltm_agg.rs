@@ -121,7 +121,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{Ast, BinaryOp, Expr2, IndexExpr2};
+use crate::ast::{Ast, BinaryOp, Expr0, Expr2, IndexExpr2};
 use crate::builtins::BuiltinFn;
 use crate::common::{Canonical, Ident, canonicalize};
 use crate::db::{
@@ -591,12 +591,21 @@ pub struct AggNode {
     /// `$⁚ltm⁚agg⁚{n}`; for a variable-backed agg this is the owning
     /// variable's canonical name (`total_population`, `row_sum`, ...).
     pub name: String,
-    /// The reducer subexpression rendered as equation text, e.g.
-    /// `"sum(pop[*])"`. This is the canonical (`Loc`-insensitive) key the
-    /// node was deduped on; `expr2_to_string` lowercases idents and
+    /// The reducer's identity: its canonical printed form, e.g.
+    /// `"sum(pop[*])"` (`expr2_to_string`, which lowercases idents and
     /// normalizes whitespace, so textually-distinct-but-AST-identical
-    /// subexpressions collapse to one node.
-    pub equation_text: String,
+    /// subexpressions collapse to one node). It is the `Loc`-insensitive key
+    /// the node was deduped on and the key every consumer that has to find
+    /// this reducer INSIDE another tree compares against -- the reference-site
+    /// IR's routing (`ReferenceSite::reducer_keys`), the ceteris-paribus
+    /// wrap's live-reducer match and its agg-name substitution, and the
+    /// agg-to-consumer polarity substitution -- because `Expr2` is `Eq` but
+    /// not `Hash`, and a tree holds the same reducer at other `Loc`s.
+    ///
+    /// A key, never an equation: nothing parses it. The reducer's body is
+    /// [`AggNode::reducer`], and [`AggNode::reducer_expr0`] is its typed
+    /// projection for the equation generators.
+    pub reducer_key: String,
     /// The aggregate's result-axis dimension names, in datamodel casing
     /// (e.g. `["D1"]` for `row_sum[D1] = SUM(matrix[D1,*])` or for a
     /// synthetic agg minted from `x[D1] = ... + SUM(matrix[D1,*])`). Empty
@@ -625,26 +634,24 @@ pub struct AggNode {
     /// fans each read row out across all non-pinned result-axis slots.
     pub array_valued_rank: bool,
     /// The reducer call itself: the very `BuiltinFn<Expr2>` this enumerator
-    /// classified when it decided the hoist, of which `equation_text` is the
+    /// classified when it decided the hoist, of which `reducer_key` is the
     /// printed rendering.
     ///
     /// It is here so that no downstream consumer has to recover the reducer's
-    /// kind, name, or body by parsing and re-lowering `equation_text` (GH
-    /// #983): [`crate::ltm_augment::classify_reducer_in_builtin`] reads the
-    /// first two and hands back the third, and
-    /// `db::ltm::loops::source_to_agg_hop_polarity` analyses it directly.
+    /// kind, name, or body by parsing `reducer_key` (GH #983):
+    /// [`crate::ltm_augment::classify_reducer_in_builtin`] reads the first two
+    /// and hands back the third, `db::ltm::loops::source_to_agg_hop_polarity`
+    /// analyses it directly, and the agg's own equation and the feeder link
+    /// scores are generated from its [`AggNode::reducer_expr0`] projection.
     ///
-    /// **Read only for SYNTHETIC aggs.** Both readers filter to those
+    /// The polarity and classification readers filter to SYNTHETIC aggs
     /// (`recover_agg_hop_polarities` on `is_synthetic`; every
     /// `emit_source_to_agg_link_scores` call site on `is_synthetic_agg_name` or
-    /// the IR's synthetic-only `routed_aggs`), so the copy `register_agg`
-    /// stores on the variable-backed arm is unread today. It is stored anyway
-    /// so `AggNode` has ONE shape -- an `Option` here would add a branch to
-    /// every reader to encode a fact about who happens to call them -- but
-    /// nothing pins it: corrupting it to a wrong kind, name and body leaves the
-    /// whole suite green, while the same corruption on the synthetic arm reds a
-    /// dozen-plus tests across the char goldens and the cross-agg recovery
-    /// suite.
+    /// the IR's synthetic-only `routed_aggs`); the feeder generators reach the
+    /// variable-backed arm's copy through `scalar_feeder_of_variable_backed_agg`
+    /// and `try_cross_dimensional_link_scores`. One shape for both arms -- an
+    /// `Option` here would add a branch to every reader to encode a fact about
+    /// who happens to call them.
     ///
     /// # What the stored form does and does not normalize
     ///
@@ -684,6 +691,19 @@ pub struct AggNode {
 }
 
 impl AggNode {
+    /// The reducer as the typed `Expr0` the equation generators consume -- the
+    /// agg's own equation and the frozen re-evaluation of the feeder link
+    /// scores. A projection of [`AggNode::reducer`] (`patch::builtin_to_untyped`,
+    /// the same map `expr2_to_expr0` applies to every lowered subtree the
+    /// generators wrap), so it prints as `reducer_key` and never goes through
+    /// the lexer.
+    pub(crate) fn reducer_expr0(&self) -> Expr0 {
+        Expr0::App(
+            crate::patch::builtin_to_untyped(&self.reducer),
+            crate::ast::Loc::default(),
+        )
+    }
+
     /// `true` when `var` (canonical) is one of this agg's source variables
     /// (arrayed co-source or scalar feeder alike) -- the name-keyed
     /// membership test the reference-site IR's routing filter and the
@@ -1565,7 +1585,7 @@ fn register_agg(
                 *next_synthetic_n += 1;
                 result.aggs.push(AggNode {
                     name,
-                    equation_text: key.to_string(),
+                    reducer_key: key.to_string(),
                     result_dims,
                     sources,
                     is_synthetic: true,
@@ -1587,7 +1607,7 @@ fn register_agg(
             // never deduped, and not entered in `synthetic_by_key`.
             result.aggs.push(AggNode {
                 name: var_name,
-                equation_text: key.to_string(),
+                reducer_key: key.to_string(),
                 result_dims,
                 sources,
                 is_synthetic: false,
@@ -2801,7 +2821,7 @@ pub(crate) fn unhoisted_reducer_source_read<'db>(
         .into_iter()
         .flat_map(|idxs| idxs.iter().map(|&i| &agg_nodes.aggs[i]))
         .filter(|agg| agg.is_synthetic && agg.reads_var(&from_canon))
-        .map(|agg| agg.equation_text.clone())
+        .map(|agg| agg.reducer_key.clone())
         .collect();
 
     match ast {

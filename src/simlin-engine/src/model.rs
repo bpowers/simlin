@@ -6,14 +6,16 @@
 //!
 //! Its callers are the per-variable memos `db::lowered_source_variable` and
 //! `db::lowered_implicit_variable` (each variable lowered once, under the
-//! shapes its equation references), the bounds-free lowerings the dependency
-//! classification and the LTM equations run, and the unit check's transient
-//! conveyor parameters. No whole-model lowered copy exists: a consumer that
-//! needs several variables assembles handles to the memos
+//! shapes its equation references), the LTM lowering of a generated equation
+//! or capture (`db::ltm::compile::lower_ltm_variable`, through
+//! [`lower_variable_from_typed`] with the tree it classified), and the unit
+//! check's transient conveyor parameters. No whole-model lowered copy exists:
+//! a consumer that needs several variables assembles handles to the memos
 //! (`db::model_lowered_variables`).
 
-use crate::ast::{Ast, Expr0, Expr2, LoweringScope, lower_ast};
+use crate::ast::{Ast, Expr0, Expr1, Expr2, LoweringScope, lower_ast, lower_typed_ast, typed_ast};
 use crate::canonicalize;
+use crate::common::EquationResult;
 use crate::datamodel;
 use crate::db::{build_module_inputs, module_input_prefix};
 use crate::diagnostic::DiagnosticError;
@@ -33,33 +35,59 @@ pub type ParsedVariable = Variable<datamodel::ModuleReference, Expr0>;
 /// variable whose equation does not lower keeps its diagnostics and loses its
 /// AST, and the caller decides what that means.
 pub(crate) fn lower_variable(scope: &LoweringScope, parsed: &ParsedVariable) -> Variable {
+    let primary = parsed.ast().map(|ast| typed_ast(ast, scope.dimensions));
+    lower_variable_from_typed(scope, parsed, primary)
+}
+
+/// [`lower_variable`] with the variable's primary equation (`parsed.ast()`: a
+/// stock's initial equation, an aux's dt equation) already at the typed tier.
+///
+/// The one map over a variable's kind, for both entry points. A caller that
+/// typed the primary equation to classify its reads before the shapes it
+/// lowers under existed (`db::ltm::compile::lower_ltm_variable`) hands that
+/// tree in rather than typing the equation again; `primary` is that
+/// equation's `typed_ast` result, or `None` for a variable without one. An
+/// aux's initial equation is typed here.
+pub(crate) fn lower_variable_from_typed(
+    scope: &LoweringScope,
+    parsed: &ParsedVariable,
+    primary: Option<EquationResult<Ast<Expr1>>>,
+) -> Variable {
     let mut diagnostics = parsed.diagnostics.clone();
     let element_scoped = parsed.element_scope().is_some();
-    let mut lower = |ast: &Option<Ast<Expr0>>| -> Option<Ast<Expr2>> {
+    let mut record = |lowered: EquationResult<Ast<Expr2>>| -> Option<Ast<Expr2>> {
+        match lowered {
+            Ok(ast) => Some(ast),
+            Err(err) => {
+                diagnostics.push(DiagnosticError::Equation(err));
+                None
+            }
+        }
+    };
+    // The primary equation first, then an aux's initial equation, so the
+    // diagnostics keep equation order.
+    let primary = primary.and_then(|typed| {
+        record(typed.and_then(|typed| lower_typed_ast(scope, typed, element_scoped)))
+    });
+    let mut lower_initial = |ast: &Option<Ast<Expr0>>| -> Option<Ast<Expr2>> {
         ast.as_ref()
-            .and_then(|ast| match lower_ast(scope, ast, element_scoped) {
-                Ok(ast) => Some(ast),
-                Err(err) => {
-                    diagnostics.push(DiagnosticError::Equation(err));
-                    None
-                }
-            })
+            .and_then(|ast| record(lower_ast(scope, ast, element_scoped)))
     };
 
     let kind = match &parsed.kind {
         VarKind::Stock {
-            init_ast,
+            init_ast: _,
             inflows,
             outflows,
             non_negative,
         } => VarKind::Stock {
-            init_ast: lower(init_ast),
+            init_ast: primary,
             inflows: inflows.clone(),
             outflows: outflows.clone(),
             non_negative: *non_negative,
         },
         VarKind::Aux {
-            ast,
+            ast: _,
             init_ast,
             tables,
             non_negative,
@@ -67,8 +95,8 @@ pub(crate) fn lower_variable(scope: &LoweringScope, parsed: &ParsedVariable) -> 
             is_table_only,
             element_scope,
         } => VarKind::Aux {
-            ast: lower(ast),
-            init_ast: lower(init_ast),
+            ast: primary,
+            init_ast: lower_initial(init_ast),
             tables: tables.clone(),
             non_negative: *non_negative,
             is_flow: *is_flow,

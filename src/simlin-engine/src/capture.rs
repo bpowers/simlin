@@ -50,7 +50,7 @@
 
 use indexmap::IndexMap;
 
-use crate::ast::{Ast, Expr0, print_eqn};
+use crate::ast::{Ast, Expr0};
 use crate::common::{Canonical, EquationError, ErrorCode, Ident};
 use crate::datamodel;
 use crate::dimensions::DimensionsContext;
@@ -280,34 +280,23 @@ impl Capture {
     /// laying it out at the wrong size. See [`subtree_parsed_variable`] for
     /// what the body is.
     fn parsed_variable(&self, dimensions: &DimensionsContext) -> ParsedVariable {
-        let text = print_eqn(&self.arg);
-        let (ast, eqn, scope, errors) = match &self.shape {
-            CaptureShape::Scalar => (
-                Some(Ast::Scalar(self.arg.clone())),
-                datamodel::Equation::Scalar(text),
-                None,
-                Vec::new(),
-            ),
+        let (ast, scope, errors) = match &self.shape {
+            CaptureShape::Scalar => (Some(Ast::Scalar(self.arg.clone())), None, Vec::new()),
             CaptureShape::Element(scope) => (
                 Some(Ast::Scalar(self.arg.clone())),
-                datamodel::Equation::Scalar(text),
                 Some(scope.clone()),
                 Vec::new(),
             ),
-            CaptureShape::ApplyToAll(dims) => {
-                let (ast, errors) = match get_dimensions(dimensions, dims) {
-                    Ok(resolved) => (Some(Ast::ApplyToAll(resolved, self.arg.clone())), vec![]),
-                    Err(err) => (None, vec![err]),
-                };
-                (
-                    ast,
-                    datamodel::Equation::ApplyToAll(dims.clone(), text),
+            CaptureShape::ApplyToAll(dims) => match get_dimensions(dimensions, dims) {
+                Ok(resolved) => (
+                    Some(Ast::ApplyToAll(resolved, self.arg.clone())),
                     None,
-                    errors,
-                )
-            }
+                    vec![],
+                ),
+                Err(err) => (None, None, vec![err]),
+            },
         };
-        subtree_parsed_variable(&self.ident, ast, eqn, scope, errors)
+        subtree_parsed_variable(&self.ident, ast, scope, errors)
     }
 }
 
@@ -324,16 +313,11 @@ impl Capture {
 /// compile to identical bytecode.
 ///
 /// `Variable::eqn` is the one field of a parsed variable that is source text
-/// rather than an AST, and a helper has no source text of its own, so it prints
-/// its subtree there. Two readers need it, both in LTM's link-score generator:
-/// `ltm_augment::target_equation_dims` takes an ARRAYED target's
-/// datamodel-cased dimension names off it (a target reporting no dimensions
-/// gets a scalar link score), and `ltm_augment::scalar_or_a2a_target_expr`
-/// falls back to that text whenever the target has no lowered AST, which
-/// `db::lowered_implicit_variable` holds for any helper whose lowering fails
-/// (`model::lower_variable` is total and discards the AST). That
-/// fallback is the GH #965 generated-text boundary, which applies to every
-/// variable and is not on the compile path.
+/// rather than an AST, and a helper has none: its body is the subtree, and a
+/// printed projection of it would be engine-generated text that some reader
+/// would eventually parse again (the GH #965 boundary). The LTM generators
+/// read a target's dimensions and body off `ast()` and keep an `eqn` arm for
+/// SOURCE variables only, whose text is user-authored.
 ///
 /// Any span an error here carries indexes the PARENT's equation text, since
 /// that is where the subtree was written, and that is how it is rendered:
@@ -351,14 +335,13 @@ impl Capture {
 fn subtree_parsed_variable(
     ident: &str,
     ast: Option<Ast<Expr0>>,
-    eqn: datamodel::Equation,
     element_scope: Option<ElementScope>,
     errors: Vec<EquationError>,
 ) -> ParsedVariable {
     Variable {
         ident: Ident::<Canonical>::new(ident),
         units: None,
-        eqn: Some(eqn),
+        eqn: None,
         diagnostics: errors
             .into_iter()
             .map(crate::diagnostic::DiagnosticError::Equation)
@@ -446,7 +429,6 @@ impl HoistedArg {
         subtree_parsed_variable(
             &self.ident,
             Some(Ast::Scalar(self.arg.clone())),
-            datamodel::Equation::Scalar(print_eqn(&self.arg)),
             self.scope.clone(),
             Vec::new(),
         )

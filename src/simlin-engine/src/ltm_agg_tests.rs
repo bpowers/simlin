@@ -421,7 +421,7 @@ fn subexpression_reducer_mints_one_synthetic_agg() {
         result.aggs
     );
     assert_eq!(synthetic[0].name, "$\u{205A}ltm\u{205A}agg\u{205A}0");
-    assert_eq!(synthetic[0].equation_text, "sum(pop[*])");
+    assert_eq!(synthetic[0].reducer_key, "sum(pop[*])");
     assert_eq!(source_names(synthetic[0]), vec!["pop"]);
     assert!(synthetic[0].result_dims.is_empty());
     assert!(
@@ -467,7 +467,7 @@ fn inline_reducer_does_not_reuse_variable_backed_agg() {
         !denom_agg.is_synthetic,
         "`denom`'s agg must be variable-backed"
     );
-    assert_eq!(denom_agg.equation_text, "sum(pop[*])");
+    assert_eq!(denom_agg.reducer_key, "sum(pop[*])");
 
     // `share` must own a *synthetic* agg with the same reducer text.
     let share_agg = result
@@ -475,7 +475,7 @@ fn inline_reducer_does_not_reuse_variable_backed_agg() {
         .find(|a| a.is_synthetic)
         .expect("expected a synthetic agg owned by `share`");
     assert_eq!(share_agg.name, "$\u{205A}ltm\u{205A}agg\u{205A}0");
-    assert_eq!(share_agg.equation_text, "sum(pop[*])");
+    assert_eq!(share_agg.reducer_key, "sum(pop[*])");
     assert_eq!(source_names(share_agg), vec!["pop"]);
     // `agg_for_key` resolves the reducer text to the *synthetic* agg.
     assert_eq!(
@@ -525,7 +525,7 @@ fn inline_reducer_mints_synthetic_when_visited_before_variable_backed() {
         .find(|a| a.is_synthetic)
         .expect("expected a synthetic agg owned by `a_share`");
     assert_eq!(share_agg.name, "$\u{205A}ltm\u{205A}agg\u{205A}0");
-    assert_eq!(share_agg.equation_text, "sum(pop[*])");
+    assert_eq!(share_agg.reducer_key, "sum(pop[*])");
 
     let denom_agg = result
         .aggs_in_var("z_denom")
@@ -588,10 +588,10 @@ fn nested_reducers_mint_two_aggs() {
     );
     // First-encounter (left-to-right DFS) order: SUM(a[*]) then SUM(b[*]).
     assert_eq!(synthetic[0].name, "$\u{205A}ltm\u{205A}agg\u{205A}0");
-    assert_eq!(synthetic[0].equation_text, "sum(a[*])");
+    assert_eq!(synthetic[0].reducer_key, "sum(a[*])");
     assert_eq!(source_names(synthetic[0]), vec!["a"]);
     assert_eq!(synthetic[1].name, "$\u{205A}ltm\u{205A}agg\u{205A}1");
-    assert_eq!(synthetic[1].equation_text, "sum(b[*])");
+    assert_eq!(synthetic[1].reducer_key, "sum(b[*])");
     assert_eq!(source_names(synthetic[1]), vec!["b"]);
 }
 
@@ -617,7 +617,7 @@ fn ast_identical_reducers_dedupe() {
         "AST-identical reducers must dedupe to one agg; got: {:?}",
         result.aggs
     );
-    assert_eq!(synthetic[0].equation_text, "sum(pop[*])");
+    assert_eq!(synthetic[0].reducer_key, "sum(pop[*])");
     // Both variables reference the same agg index.
     let a_idx: Vec<usize> = result.by_var.get("share_a").cloned().unwrap_or_default();
     let b_idx: Vec<usize> = result.by_var.get("share_b").cloned().unwrap_or_default();
@@ -654,7 +654,7 @@ fn per_element_arrayed_target_mints_one_agg_per_element_reducer() {
         result.aggs
     );
     let texts: std::collections::HashSet<&str> =
-        synthetic.iter().map(|a| a.equation_text.as_str()).collect();
+        synthetic.iter().map(|a| a.reducer_key.as_str()).collect();
     assert!(texts.contains("sum(p[*])"), "missing sum(p[*]): {texts:?}");
     assert!(
         texts.contains("mean(p[*])"),
@@ -808,7 +808,7 @@ fn slice_reducer_subexpression_is_hoisted() {
     assert_eq!(synthetic[0].name, "$\u{205A}ltm\u{205A}agg\u{205A}0");
     // `expr2_to_string` puts a space after the comma in a multi-index
     // subscript -- assert the canonical text it actually produces.
-    assert_eq!(synthetic[0].equation_text, "sum(pop[nyc, *])");
+    assert_eq!(synthetic[0].reducer_key, "sum(pop[nyc, *])");
     assert_eq!(source_names(synthetic[0]), vec!["pop"]);
     assert_eq!(
         synthetic[0].canonical_read_slice(),
@@ -868,7 +868,7 @@ fn sliced_reducer_over_iterated_dim_mints_arrayed_agg() {
     assert_eq!(synthetic[0].result_dims, vec!["D1".to_string()]);
     assert_eq!(source_names(synthetic[0]), vec!["matrix"]);
     // `expr2_to_string` canonicalizes the iterated dim name lowercase.
-    assert_eq!(synthetic[0].equation_text, "sum(matrix[d1, *])");
+    assert_eq!(synthetic[0].reducer_key, "sum(matrix[d1, *])");
 }
 
 /// #514: a *mixed* read slice -- `Iterated` + `Pinned` + `Reduced` axes
@@ -918,7 +918,7 @@ fn mixed_pinned_iterated_reduced_slice_mints_arrayed_agg() {
     );
     assert_eq!(synthetic[0].result_dims, vec!["D1".to_string()]);
     assert_eq!(source_names(synthetic[0]), vec!["matrix3d"]);
-    assert_eq!(synthetic[0].equation_text, "sum(matrix3d[d1, nyc, *])");
+    assert_eq!(synthetic[0].reducer_key, "sum(matrix3d[d1, nyc, *])");
 }
 
 /// #514: a multi-source reducer whose arrayed args agree on their read
@@ -1046,7 +1046,7 @@ fn mapped_iterated_dim_sliced_reducer_is_hoisted_with_pair() {
         "the agg's result axis is the TARGET equation's iterated dim"
     );
     assert_eq!(source_names(synthetic[0]), vec!["matrix"]);
-    assert_eq!(synthetic[0].equation_text, "sum(matrix[state, *])");
+    assert_eq!(synthetic[0].reducer_key, "sum(matrix[state, *])");
 }
 
 /// GH #997 (flipped from the GH #534-era conservative pin): a sliced reducer
@@ -2578,7 +2578,7 @@ fn agg_sources_declines_when_arrayed_source_lacks_per_var_slice() {
 
 /// GH #983: every recognized reducer's classification is CARRIED on the
 /// SYNTHETIC node it decided, so no emitter has to recover it by
-/// re-parsing [`AggNode::equation_text`].
+/// parsing [`AggNode::reducer_key`].
 ///
 /// Scope, stated because "every recognized reducer" is only one of the two
 /// axes here: this covers all seven reducers on the SYNTHETIC producer arm,
@@ -2701,7 +2701,7 @@ fn every_reducer_carries_its_classification_on_the_agg_node() {
             "{equation}: an aggregate node's equation IS the reducer call"
         );
         // The body is the reducer's array argument, taken from the AST the
-        // enumerator walked rather than re-parsed from `equation_text`.
+        // enumerator walked rather than parsed from `reducer_key`.
         assert_eq!(
             crate::ast::print_eqn(&classified.body),
             "pop[*]",
@@ -2744,6 +2744,57 @@ fn every_reducer_carries_its_classification_on_the_agg_node() {
 /// normalization being dropped entirely but, being idempotence, cannot
 /// by itself catch the normalization being made too weak. That is what
 /// the equality assertion above is for.
+/// `AggNode::reducer_expr0` -- the typed reducer the agg's own equation and
+/// the feeder link scores are generated from -- is the tree a parse of
+/// `reducer_key` produces, up to `Loc`, and prints as that key. This is what
+/// lets `ltm_augment_tests`' feeder-generator rows hand the generators a
+/// parsed reducer: the parse IS the value production supplies. The rows are
+/// the reducer shapes those generators see -- a scalar feeder beside a
+/// wildcard slice, and an iterated-dim projection feeder beside a partial
+/// slice -- plus a nested reducer, which `reducer_expr0` projects recursively.
+#[test]
+fn the_typed_reducer_is_the_parse_of_its_key() {
+    use crate::ast::{Expr0, print_eqn};
+    use crate::lexer::LexerType;
+
+    let nodes = agg_nodes(
+        &TestProject::new("typed_reducer")
+            .named_dimension("d1", &["r1", "r2"])
+            .named_dimension("d2", &["c1", "c2"])
+            .array_aux("pop[d1]", "1")
+            .array_aux("matrix[d1, d2]", "2")
+            .array_aux("frac[d1]", "3")
+            .scalar_aux("scale", "2")
+            .scalar_aux("total", "1 + SUM(pop[*] * scale)")
+            .array_aux("growth[d1]", "1 + SUM(matrix[d1, *] * frac[d1])")
+            .scalar_aux("nested", "1 + SUM(pop[*] * SUM(matrix[*, *]))"),
+    );
+    let synthetic: Vec<&AggNode> = nodes.aggs.iter().filter(|a| a.is_synthetic).collect();
+    assert_eq!(
+        synthetic.len(),
+        3,
+        "three hoisted reducers: {:?}",
+        synthetic.iter().map(|a| &a.reducer_key).collect::<Vec<_>>()
+    );
+    for agg in synthetic {
+        let typed = agg.reducer_expr0();
+        assert_eq!(
+            print_eqn(&typed),
+            agg.reducer_key,
+            "the key is the typed reducer's print"
+        );
+        let parsed = Expr0::new(&agg.reducer_key, LexerType::Equation)
+            .expect("a reducer key lexes")
+            .expect("a reducer key is an expression");
+        assert!(
+            typed.eq_ignoring_loc(&parsed),
+            "a parse of the key is the typed reducer: {} vs {}",
+            print_eqn(&typed),
+            print_eqn(&parsed)
+        );
+    }
+}
+
 #[test]
 fn the_carried_reducer_is_normalized_so_offset_only_edits_backdate() {
     let build = |leading: &str| {
@@ -2759,7 +2810,7 @@ fn the_carried_reducer_is_normalized_so_offset_only_edits_backdate() {
     let sum_agg = |r: &AggNodesResult| {
         r.aggs
             .iter()
-            .find(|a| a.equation_text == "sum(pop[*])")
+            .find(|a| a.reducer_key == "sum(pop[*])")
             .cloned()
             .expect("the SUM subexpression must be hoisted")
     };

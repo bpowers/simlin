@@ -2009,7 +2009,7 @@ fn two_loop_project() -> datamodel::Project {
 ///
 /// The meaningful cache is the compiled fragment (`compile_ltm_var_fragment`),
 /// not the equation-text query. The per-shape equation-text query
-/// `link_score_equation_text_shaped(.., Bare)` (which `compile_ltm_var_fragment`
+/// `shaped_link_score(.., Bare)` (which `compile_ltm_var_fragment`
 /// now sources from) reads the whole-model occurrence IR
 /// (`model_ltm_reference_sites`) so the compiled fragment matches the emitted
 /// one -- so editing ANY variable re-runs it. But it produces an UNCHANGED value

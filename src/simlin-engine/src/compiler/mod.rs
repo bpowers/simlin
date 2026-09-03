@@ -153,14 +153,19 @@ fn test_module_var_new_missing_input_source_returns_error() {
 
     // The module variable itself (an empty sub-model shape: the source is
     // what is missing, not the sub-model)
-    let module_var = Variable::module_instance(
-        module_ident.clone(),
-        model_name_ident,
-        vec![ModuleInput {
-            src: Ident::new("missing_source"),
-            dst: Ident::new("available"),
-        }],
-    );
+    let module_var = Variable {
+        ident: module_ident.clone(),
+        units: None,
+        eqn: None,
+        diagnostics: vec![],
+        kind: crate::variable::VarKind::Module {
+            model_name: model_name_ident,
+            inputs: vec![ModuleInput {
+                src: Ident::new("missing_source"),
+                dst: Ident::new("available"),
+            }],
+        },
+    };
 
     // deps only contain "my_module" -- NOT "missing_source"
     let mut deps: crate::common::IdentMap<Ident<Canonical>, fragment::DepShape> =

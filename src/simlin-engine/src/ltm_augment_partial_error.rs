@@ -32,11 +32,13 @@ use crate::builtins::UntypedBuiltinFn;
 /// established "loud failure" pattern in this codebase
 /// (cf. `emit_unscoreable_disjoint_edge_warning`).
 ///
-/// The text being parsed is itself produced by the engine (`print_eqn` /
-/// `expr2_to_string` over a compiled AST), so `Err` is effectively
+/// The text being parsed is itself produced by the engine (the guard form a
+/// generator prints around a wrapped `Expr0`), so `Err` is effectively
 /// unreachable in production; `Ok(None)` is reachable for a target with an
 /// empty equation. Either way the failure is rare and unexpected -- exactly
 /// the case where a silent semantics-changing fallback is most dangerous.
+/// A target that has no lowered body at all is the separate
+/// `MissingTypedTarget` class: nothing is parsed for it, the edge is declined.
 ///
 /// `UnfreezablePartial` (GH #743) is the second loud-failure class: the
 /// equation parsed fine, but neither ceteris-paribus convention can be
@@ -62,6 +64,14 @@ pub(crate) enum PartialEquationErrorKind {
     /// The equation text failed to parse (or was empty); there is no AST
     /// to transform.
     Parse,
+    /// The target has no lowered body to differentiate: its `Expr0 -> Expr2`
+    /// lowering failed (a scope-dependent refusal such as
+    /// `MismatchedDimensions`, which leaves the causal edge into it standing
+    /// because dependencies are classified on the typed tier), or its body is
+    /// a per-element `Ast::Arrayed` that the arrayed generator did not route.
+    /// A project with such a target does not compile; the edge is declined
+    /// rather than scored around a body the compiler refused.
+    MissingTypedTarget,
     /// Neither the changed-first nor the changed-last ceteris-paribus
     /// convention can be rendered as a compilable equation (GH #743).
     UnfreezablePartial,
@@ -121,6 +131,15 @@ impl PartialEquationError {
         PartialEquationError {
             equation_text: equation_text.to_string(),
             kind: PartialEquationErrorKind::UnfreezablePartial,
+        }
+    }
+
+    /// `target` (the variable's name) has no lowered scalar or apply-to-all
+    /// body; `equation_text` names the target, since there is no equation.
+    pub(super) fn missing_typed_target(target: &str) -> Self {
+        PartialEquationError {
+            equation_text: target.to_string(),
+            kind: PartialEquationErrorKind::MissingTypedTarget,
         }
     }
 

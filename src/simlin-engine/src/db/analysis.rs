@@ -3635,7 +3635,7 @@ pub(super) fn lowered_variable_by_name(
 ///
 /// The map is whole-model: any variable's equation edit changes it. A caller
 /// that read it directly would depend on every variable in the model -- which
-/// for `link_score_equation_text_shaped` (tracked per `(from, to, shape)`, and
+/// for `shaped_link_score` (tracked per `(from, to, shape)`, and
 /// documented as "recomputed only when the involved variables change") means
 /// one unrelated edit regenerating EVERY link score, on C-LEARN 6,721 of them
 /// per keystroke. This query still reads the whole map and so re-executes on

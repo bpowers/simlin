@@ -1198,7 +1198,7 @@ impl CausalGraph {
     /// The aggregate node stands in for an inlined reducer that this
     /// variable-level graph has no node for, so `get_link_polarity` returns
     /// `Unknown` for it. This substitutes the reducer subexpression (matched
-    /// by its canonical printed form, exactly the `AggNode::equation_text`
+    /// by its canonical printed form, exactly the `AggNode::reducer_key`
     /// key `enumerate_agg_nodes` records) with a bare `Var(agg_name)` in
     /// `consumer`'s equation and runs the ordinary static polarity analysis.
     /// Returns `Unknown` if `consumer` has no AST or the subexpression isn't

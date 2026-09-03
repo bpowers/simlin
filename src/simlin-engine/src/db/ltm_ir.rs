@@ -1879,7 +1879,7 @@ pub(crate) fn model_ltm_reference_sites(
                         .filter(|&agg_idx| {
                             raw.reducer_keys
                                 .iter()
-                                .any(|key| key == &agg_nodes.aggs[agg_idx].equation_text)
+                                .any(|key| key == &agg_nodes.aggs[agg_idx].reducer_key)
                         })
                         .collect()
                 } else {

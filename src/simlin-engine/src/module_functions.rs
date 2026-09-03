@@ -406,19 +406,16 @@ impl MacroRegistry {
         // from the code paths above, not proved exhaustively. Nothing
         // structurally prevents a future implicit-var synthesizer from minting a
         // `Variable::Module` with a different target, and such a target would be
-        // invisible to the gate again. There are THREE recorders of implicit
-        // module vars today, all fed by the same `expand_module_function`:
-        // `db::query::model_implicit_var_info` and
-        // `db::ltm::model_ltm_implicit_var_info` (both carrying `is_module` +
-        // `model_name`), plus `db::model_scope_models`, which reads the explicit
-        // `Module` variables and the first recorder's module entries. Only the
-        // first opens a cycle path: `compute_layout`
-        // recurses on `model_implicit_var_info`'s module entries (Section 2) but
-        // takes `meta.size` verbatim for the LTM ones (Section 3b), and
-        // `model_shape` recurses only through `compute_layout`. So the LTM
-        // recorder is inert for cycle safety -- but it is a place a future edit
-        // could make recursive, which is why it is named here rather than left
-        // out of the enumeration.
+        // invisible to the gate again. There are TWO recorders of implicit
+        // module vars today, both fed by the same `expand_module_function`:
+        // `db::query::model_implicit_var_info` (`is_module` + `model_name`),
+        // whose module entries `compute_layout` recurses on (Section 2) and
+        // `model_shape` through it, and `db::model_scope_models`, which reads
+        // the explicit `Module` variables and the first recorder's module
+        // entries. The LTM recorder, `db::ltm::model_ltm_implicit_var_info`,
+        // holds captures only -- a generated equation is built from an
+        // already-expanded tree and contains no module-function call -- so it
+        // records no module and opens no cycle path.
         //
         // The rejection is deliberately BROADER than the cycle, and the cost is
         // REAL, not zero. Measured against the pre-pass code, an explicit module

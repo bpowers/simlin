@@ -1976,10 +1976,10 @@ fn source_to_agg_hop_polarity(
     agg: &crate::ltm_agg::AggNode,
 ) -> crate::ltm::LinkPolarity {
     // The agg's body is the reducer call the enumerator classified, carried
-    // on the node (GH #983). It used to be recovered by printing
-    // `equation_text`, re-parsing it and re-lowering it against a freshly
-    // built scope -- and an agg whose reconstruction failed came back
-    // `Unknown`, degrading every loop through it to `Undetermined`.
+    // on the node (GH #983). Never recover it from `reducer_key`: a print,
+    // re-parse and re-lower against a fresh scope has two fallible steps, and
+    // a reconstruction that fails comes back `Unknown` and degrades every
+    // loop through the agg to `Undetermined`.
     let source = Ident::<Canonical>::new(from_var_level);
     var_graph.source_to_agg_polarity(&source, &agg.reducer)
 }
@@ -2062,7 +2062,7 @@ pub(crate) fn recover_agg_hop_polarities(
                 .find(|(name, _)| name.as_str() == from_var_level)
             {
                 let consumer = Ident::new(to_var_level);
-                let p = var_graph.agg_consumer_polarity(&consumer, &agg.equation_text, agg_ident);
+                let p = var_graph.agg_consumer_polarity(&consumer, &agg.reducer_key, agg_ident);
                 if p != LinkPolarity::Unknown {
                     link.polarity = p;
                     patched = true;

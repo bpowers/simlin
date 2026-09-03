@@ -1115,26 +1115,49 @@ pub fn model_module_wiring_diagnostics(db: &dyn Db, model: SourceModel, project:
             continue;
         };
         let child_vars = child_model.variables(db);
-        let prefix = format!("{module_name}\u{00B7}");
+        let prefix = crate::db::module_input_prefix(module_name);
 
         for reference in svar.module_refs(db).iter() {
             let dst = crate::canonicalize(&reference.dst);
-            if !dst.is_empty() {
-                let resolves = dst
-                    .strip_prefix(prefix.as_str())
-                    .is_some_and(|port| child_vars.contains_key(port));
-                if !resolves {
-                    emit(
-                        crate::common::ErrorCode::BadModuleInputDst,
-                        format!(
-                            "module '{module_name}' input wiring target '{}' does not name an input of model '{}'",
-                            reference.dst, child_canonical
-                        ),
-                    );
-                }
+            let port = if dst.is_empty() {
+                None
+            } else {
+                crate::db::port_of(&prefix, &dst)
+            };
+            if !dst.is_empty() && !port.is_some_and(|port| child_vars.contains_key(port)) {
+                emit(
+                    crate::common::ErrorCode::BadModuleInputDst,
+                    format!(
+                        "module '{module_name}' input wiring target '{}' does not name an input of model '{}'",
+                        reference.dst, child_canonical
+                    ),
+                );
             }
 
             let src = crate::canonicalize(&reference.src);
+            // A reference to one of this instance's own ports whose `src` is
+            // inside the instance's namespace binds no port
+            // (`db::assemble::bound_port`): the port keeps its default and
+            // the reference is dead. XMILE 1.0 section 4.7.1 places every
+            // connection at the lowest common ancestor of the submodel
+            // hierarchy, which is where a `src` spelled through an instance
+            // arises (`from="Sub.y"`); whether a connect from an instance to
+            // that same instance has a defined meaning is unverified (the
+            // section does not say), so it is reported, never silently
+            // dropped. A `src` inside the namespace with a `dst` outside it
+            // is a connection between two instances recorded on the source
+            // instance, and the `dst` arm above is its report.
+            if port.is_some() && src.starts_with(prefix.as_str()) {
+                emit(
+                    crate::common::ErrorCode::BadModuleInputSrc,
+                    format!(
+                        "module '{module_name}' input source '{}' is inside the module's own \
+                         namespace, so the wiring binds no input of model '{}': an input's \
+                         source must be a variable of model '{model_name}'",
+                        reference.src, child_canonical
+                    ),
+                );
+            }
             if !src.is_empty()
                 && !src.contains('\u{00B7}')
                 && !src.starts_with("$\u{205A}")

@@ -52,7 +52,7 @@
 //!   in the target equation *printed with the production print path
 //!   (`crate::patch::expr2_to_string`) and reparsed to `Expr0`* via
 //!   `classify_expr0_subscript_shape`, with the SAME `IteratedDimCtx` /
-//!   `source_dim_elements` the production caller (`link_score_equation_text_shaped`
+//!   `source_dim_elements` the production caller (`shaped_link_score`
 //!   -> `generate_link_score_equation_for_link`) builds.
 //!
 //! Printing and reparsing before the Expr0 classification puts printer/parser
@@ -425,7 +425,7 @@ fn classify_expr0_occurrence(
 /// The reparsed `Expr0` occurrences of every model variable in one target
 /// equation, built from the target's Expr2 AST printed with the PRODUCTION
 /// print path (`crate::patch::expr2_to_string`) and reparsed -- the same text
-/// `link_score_equation_text_shaped` feeds the Expr0 partial builder. An
+/// `shaped_link_score` feeds the Expr0 partial builder. An
 /// `Ast::Arrayed` target is printed and walked per element slot (plus the
 /// default), mirroring `build_arrayed_link_score_equation`'s per-slot
 /// `expr2_to_string`; `collect_all_reference_sites` walks the same slots on

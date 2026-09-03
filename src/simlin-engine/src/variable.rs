@@ -275,27 +275,6 @@ impl<MI, E> Variable<MI, E> {
     }
 }
 
-impl Variable {
-    /// A module instance in its lowered form: the instance `ident`, the model
-    /// it instantiates, and its resolved input wiring. A module has no
-    /// equation of its own, so its lowered form is exactly these three facts;
-    /// the fragment constructors build it from the instance's `(src, dst)`
-    /// references (`db::build_module_inputs`) without a parse.
-    pub(crate) fn module_instance(
-        ident: Ident<Canonical>,
-        model_name: Ident<Canonical>,
-        inputs: Vec<ModuleInput>,
-    ) -> Self {
-        Variable {
-            ident,
-            units: None,
-            eqn: None,
-            diagnostics: vec![],
-            kind: VarKind::Module { model_name, inputs },
-        }
-    }
-}
-
 #[allow(clippy::unnecessary_wraps)]
 pub(crate) fn parse_table(
     gf: Option<&datamodel::GraphicalFunction>,

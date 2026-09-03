@@ -691,9 +691,8 @@ each variable under the model's own variables' shapes
 `src` is not validated at lowering -- the user-facing `BadModuleInputSrc` is
 `model_module_wiring_diagnostics`', read off the salsa inputs -- and the
 unit-inference scope (`model_scope_models`) follows `model_name` edges only.
-An empty shapes map is a bounds-free lowering, which dependency
-classification and the LTM lowering use because neither reads an
-`ArrayBounds`.
+Every lowering runs under the shapes of the names its equation references;
+the dependency classification runs on the typed `Expr1` and needs no scope.
 
 **Phase 8.2 and 8.3: one lowered memo per variable.** Every variable is
 lowered to `Expr2` exactly once, by a per-variable salsa memo:
@@ -873,6 +872,127 @@ module instance lists its input sources under the parent-scope spelling
 un-stripped `·driver` against the model's variables and dropped a real
 dependency by spelling. Pinned by the module row of
 `test_get_incoming_links_lists_variables_of_the_model_not_module_reads`.
+
+**Loops That Matter: the generated-text boundary and one module-instance
+owner.** LTM is a consumer of every unification above, and its compile path
+has exactly one place where engine-generated text is parsed: a generator
+prints the ceteris-paribus guard form around a wrapped `Expr0` and
+`db::ltm::equation::LtmArm::new` parses that text once, at the emitter, into
+the arm the fragment compiles (the GH #965 boundary). Everything before that
+point is typed. A helper carries no `Variable::eqn` (`capture.rs`: its body is
+the subtree, and the generators read a target's axes and body off its lowered
+`ast()`, keeping the `eqn` arm for source variables, whose text is
+user-authored); a target whose `Expr0 -> Expr2` lowering failed has no body to
+differentiate and is declined loudly (`PartialEquationErrorKind::MissingTypedTarget`,
+one warning, no score, dependent loops dropped -- the edge into it stands
+because dependencies are classified on the typed tier, and the project does
+not compile); an aggregate node carries its reducer as the classified
+`BuiltinFn<Expr2>` and projects it to `Expr0` (`AggNode::reducer_expr0`) for
+its own equation (`LtmArm::from_typed`) and for the feeder link scores, so the
+feeder generators are infallible on the text they used to parse; the
+per-element emitters pin element subscripts on the wrapped tree
+(`subscript_idents_in_expr0`) and read their completeness guard
+(`unresolvable_dimension_index`) off the one arm they emit, so every arm is
+parsed once. `AggNode::reducer_key`, the canonical printed reducer, survives
+as an identity (the dedup key, the reference-site IR's routing key, the
+wrap's live-reducer match, the polarity substitution) because `Expr2` is `Eq`
+but not `Hash`; nothing parses it. One spelling of a generated equation's
+builtins (`PREVIOUS(..)` as the wrap inserts it) reaches the characterization
+goldens, so a pinned arm and an unpinned one read alike.
+
+The LTM constructors lower under shapes like every other constructor:
+`lower_ltm_variable` classifies a generated equation's reads on its typed
+`Expr1`, resolves them through `DepScope::resolve` to the same `DepShape` map
+the fragment compiler reads (`ltm_dep_shape`: a model variable's, an LTM
+helper's, an LTM synthetic variable's), and lowers under that map; a helper an
+LTM equation's parse synthesized is always a capture (the equation is generated
+from an already-expanded tree and contains no module-function call), so
+`db::ltm::LtmImplicitVarMeta` says captures only and the module universe under
+LTM is the source models' own. That universe has one owner:
+`db::assemble::enumerate_module_instances` walks a model's explicit `Module`
+variables and the instances its parses synthesized as one candidate shape
+(`ModuleInstanceCandidate`), records each under `(target model, bound-port
+set)` with `module_input_set`, and descends into a target once. A reference's
+port is one reading, `port_of(dst)` (the `dst` with the instance's prefix
+stripped); the bound-port set and the lowered wiring (`build_module_inputs`)
+are projections of one rule over it (`bound_port`: `port_of(dst)` when the
+`src` is outside the instance's namespace), so an instance is compiled under
+exactly the ports its inputs write, and `model_module_wiring_diagnostics`
+validates `port_of(dst)` for every reference -- internal ones included -- and
+warns (`BadModuleInputSrc`) about a reference to one of the instance's own
+ports whose `src` is inside the instance's namespace, which binds nothing. A
+`src` inside the namespace with a `dst` in ANOTHER instance is the connect a
+writer records on the source instance (Stella's `<connect
+to="lynxes.hare_density" from="hares.hare_density"/>` on `hares`, five corpus
+models), which the `dst` check reports; it is not an internal reference. XMILE
+1.0 section 4.7.1 places every connection at the lowest common ancestor of the
+submodel hierarchy, which is where an instance-qualified `from` arises;
+whether a connect from an instance to that same instance has a defined meaning
+is unverified. The other derivations of a
+target model are different facts and stay separate: `project_module_graph`
+(explicit `Module` kinds and target names, parse-free, the cycle gate every
+recursive query consults), `module_functions`' macro-registry cycle gate
+(macro-to-macro edges), `DepScope::instance_target_model` (which model a
+READ's head instantiates), `model_scope_models` (the unit pass's target
+closure, no ports), `compute_layout`/`flattened_offsets` (an instance's slot
+count and key prefix), and `model_causal_edges`' `dynamic_modules` (an
+implicit instance's target for the causal graph); none derives a bound-port
+set. C-LEARN's plain and LTM artifacts, the corpus sweeps in both modes, the
+corpus-wide LTM variable sets and detected loops, and the LTM value goldens
+are identical against the base; the natural shapes that move are the
+divergences below.
+
+**Phase LTM semantic divergences.** Four, each pinned. (V9a-1) A generated
+equation lowers under the shapes of its reads, so a frozen-whole reducer
+over a BARE arrayed argument in an apply-to-all body lowers as execution
+lowers the target: per element. `x[region] = other + SUM(pop) / 1000` reads
+`pop[region]` under `SUM` (the plain spelling's rule; the additive `other`
+term keeps `other -> x` clear of the GH #788 decline, which only sees the
+term that references the source), and the ceteris-paribus partial for
+`other -> x` freezes the reducer whole into a structural capture over
+`[region]` with body `sum(pop)`; lowered under shapes that capture is
+`pop[e]` per element, as the executed `x[e]` reads it, where the bounds-free
+lowering summed the whole array (300 against a read of 100) and scored a link
+that moves `x` by one part in a hundred at 16. Direction: the base's number
+was wrong. Pinned by
+`ltm_unified_tests::a_frozen_whole_reducer_over_a_bare_arrayed_argument_lowers_per_element`
+(the capture's series equals `pop[e]`, `x[e]` equals `other[e] + pop[e]/1000`,
+the score is bounded by 1); no corpus model has the shape (C-LEARN's LTM
+artifact is identical). The same mechanism has a loud face on a project that
+does not compile: an LTM score's copy of a target body that the compiler
+refuses under shapes now fails the way the target fails, where the
+bounds-free copy compiled and read a whole-array value into a score for a
+project that never simulates (one or two more `failed to compile; constant 0`
+discovery-mode warnings on such a project; no compiling model affected).
+(V9a-2) A model with a reference internal to a module instance
+(`<connect to="bridge.input" from="bridge.output"/>`) compiles, the reference
+binding nothing and warned as `BadModuleInputSrc`; with two owners of the
+bound-port rule the instance's compilation identity counted the port while
+its wiring wrote nothing, and `Vm::new` panicked looking up the compiled
+child (`vm.rs` `key_to_idx`, "no entry found for key") -- a model the base
+refused with an abort now compiles. Pinned by
+`assemble_tests::internal_module_reference_is_not_a_bound_input`,
+`assemble_tests::an_xmile_internal_module_reference_compiles_and_binds_nothing`
+and `module_wiring_tests::internal_src_warns_that_it_binds_nothing` (through
+`open_xmile`, alone and beside a bound port), with
+`module_wiring_tests::a_cross_instance_reference_on_the_source_instance_is_a_dst_report_only`
+pinning that the warning is not raised for a cross-instance connect recorded
+on the source instance (the corpus's only instance-qualified sources; no
+corpus model carries an internal reference, and every corpus model's
+diagnostics are unchanged). (V9a-3) The assembly refusal of a project with several missing
+module targets names the first in name order (`alpha_missing` before
+`zeta_missing`, whatever the declaration order) rather than the first in
+`HashMap` order; pinned by
+`assemble_tests::a_missing_module_target_is_refused_in_name_order_per_namespace`
+for both namespaces. (V9a-4) A target whose `Expr2` lowering failed is
+declined with a `Warning` (`MissingTypedTarget`) beside the target's own
+`MismatchedDimensions` error, which `simlin simulate --ltm` prints on a
+stateful model where the base printed the error alone and silently emitted a
+`0`-bodied score; `first_error_code` is unchanged everywhere (a stateless
+model takes `model_ltm_variables`' early return and reaches neither). Pinned
+by `ltm_unified_tests::a_target_whose_lowering_failed_is_declined_not_scored`
+(an aux target, a flow target and an element-scoped helper target, with an
+unaffected edge's score still emitted).
 <!-- END_PHASE_8 -->
 
 <!-- START_PHASE_9 -->
@@ -919,7 +1039,7 @@ per-element helpers -- and any row differing in a field survives.
 never accumulates: `model_ltm_variables` records its warnings and its
 declined edges in one `LtmWarnings` sink and returns them as
 `LtmVariablesResult::diagnostics`, `model_ltm_fragment_diagnostics` returns
-its `Vec<Diagnostic>`, `link_score_equation_text_shaped` carries a declined
+its `Vec<Diagnostic>`, `shaped_link_score` carries a declined
 edge's warning as `ShapedLinkScore::Unscoreable`'s payload, and the
 dependency graph records its cycle as `ModelDepGraphResult::cycle_variables`.
 The non-recursive `model_all_diagnostics` emits each model's facts once, in
@@ -1159,30 +1279,27 @@ capture by `(parent, id)`.
 
 `ImplicitVar::parsed_variable` is the one constructor of a helper's parse-stage
 `Variable` at every consumer (`db::implicit_deps`,
-`db::fragment_compile::lower_implicit_var`, `db::stages::model_stage0`,
-`db::analysis::reconstruct_implicit_variable`, both `db::ltm::compile` sites,
-and the `ModelStage0::new_in_project` oracle). Two things the capture arm
-deliberately keeps rather than simplifies, because dropping either would
-change the compiled artifact rather than the representation. It fills the
-`Variable::eqn` field by printing the subtree, because that field is source
-text by definition and LTM's link-score generator has TWO readers of it:
-`ltm_augment::target_equation_dims`, which takes an arrayed target's
-datamodel-cased dimension names off it (a target reporting no dimensions gets a
-scalar link score), and `ltm_augment::scalar_or_a2a_target_expr`, which falls
-back to `scalar_eqn_text_or_zero` and RE-PARSES that text whenever the target
-has no lowered AST -- reachable for a capture, because
-`db::analysis::reconstruct_implicit_variable` lowers every capture through the
-total `model::lower_variable`, which discards the AST on a lowering error. The
-compile path has no round trip; the engine has one, off it: LTM's link-score
-generation prints the target's LOWERED body (`patch::expr2_to_expr0` +
-`print_eqn`) and re-parses it in `db::ltm::equation::LtmArm::new`, the GH #965
-generated-text boundary, which applies to every variable and to captures
-alike. And it runs the body through
-`instantiate_implicit_modules`, whose per-element gate fires on a bare
-`PREVIOUS`/`INIT` as well as on a module call, so an arrayed capture holding one
-becomes an `Ast::Arrayed` of identical elements rather than staying an
-`Ast::ApplyToAll` (D14 -- keeping the `ApplyToAll` is a shape change with its
-own ledger row).
+`db::fragment_compile::lower_implicit_var`, the lowering memos and both
+`db::ltm::compile` sites). A helper carries no `Variable::eqn`: that field is
+user-authored source text by definition, and a helper has none -- its body is
+the subtree. The one reader that needs a target's axes as names,
+`ltm_augment::target_equation_dims`, takes them off a source variable's `eqn`
+(datamodel casing) and off a helper's lowered `ast()` (canonical), and the
+generator reads a target's body from its lowered `ast()` only: a target with
+none -- a scope-dependent lowering refusal such as `MismatchedDimensions`,
+which leaves the causal edge into it standing because dependencies are
+classified on the typed tier -- is declined loudly
+(`PartialEquationErrorKind::MissingTypedTarget`) rather than scored around a
+body the compiler refused. The compile path has no round trip; the engine has
+one, off it: LTM's link-score generation prints the target's LOWERED body
+(`patch::expr2_to_expr0` + `print_eqn`) around the guard form and parses that
+text once in `db::ltm::equation::LtmArm::new`, the GH #965 generated-text
+boundary, which applies to every variable and to captures alike. The capture
+arm runs the body through `instantiate_implicit_modules`, whose per-element
+gate fires on a bare `PREVIOUS`/`INIT` as well as on a module call, so an
+arrayed capture holding one becomes an `Ast::Arrayed` of identical elements
+rather than staying an `Ast::ApplyToAll` (D14 -- keeping the `ApplyToAll` is a
+shape change with its own ledger row).
 
 One representation difference survives, and it is not observable. A capture
 keeps the SOURCE spelling of an identifier where a re-parse kept the lexer's:
@@ -2674,4 +2791,5 @@ hash is not available to it.
 | 8.2+8.3 | `engine: one lowered memo per variable` | 7.2435 G (median of 3; range 7.2367-7.2437), +0.23% against `75ee055a` re-measured in the same session (7.2268 G, median of 3, range 7.2260-7.2295; interleaved pairs +0.14 / +0.25 / +0.19%), inside the channel's floor and not investigated | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Artifacts byte-identical on C-LEARN, plain (every count, 1053 initial programs, 371 names, 7 modules, the full opcode histogram) and under `CLEARN_LTM=1` (29398 slots, 855713 / 1477 / 24669 opcodes, 14078 literals, 2166 views); LTM compile channel 80.2377 G against 82.8212 G, **-3.12%** (pairs -3.13 / -3.12 / -3.16%, `CLEARN_COMPILE_ITERS=5`); memory (counting allocator, C-LEARN, bytes the database and sync state retain above the parsed datamodel; peak = compile phase): plain compile-only 22.94 -> 32.16 MiB (peak 30.2 -> 39.3), plain with diagnostics 36.58 -> 33.54 (peak 43.9 -> 40.8), LTM 228.26 -> 225.98 (peak 270.0 -> 267.5), LTM with diagnostics 242.34 -> 227.02 (peak 284.1 -> 268.9); allocations plain 1,562,107 / 199.2 MiB -> 1,541,101 / 193.7 MiB, LTM 26.06 M / 2859.0 MiB -> 24.90 M / 2583.6 MiB; sweep of 509 models plain and `--ltm` 398 / 398 identical, 110 refused identically, 0 one-sided, the movers GH #859 flippers (`arrays_varname`, `arrays_cname`, `test_subscript_transposition`: the same two digests on both binaries in both modes, 6x each), 8 `--ltm` stderr line-order permutations (GH #1036); `test/` diagnostics corpus identical (plain 471 rows over 366 keys, `--ltm` 856 over 391). The +9.2 MiB is the lowered trees a compile-only caller retains for a unit pass or describer it never runs (pysimlin `Model.simulate()` used alone, a C/Go embedder holding a project without `get_errors`, serve's transient `simulate_sync` as peak only), while every path that collects diagnostics, the CLI's `simulate` included, retains less than the base. A per-element helper with a module head is pinned only under the module-cycle gate (`units_tests::a_module_cycle_reached_through_a_per_element_helper_still_unit_checks`: without it the unit pass on a cyclic project is salsa's `compute_layout` cycle panic), and the rename patch is syntactic over the equation text ("Phase 8.2 semantic divergences"). Engine suite (lib 5697, integration 783), libsimlin, CLI, mcp-core, clippy, `cargo fmt --all -- --check` and the default-feature check green, every golden unregenerated |
 | 8.3b | `engine: box the Expr2 node's array bounds` | 7.1283 G (median of 3; range 7.1281-7.1303), **-1.01%** against `a17e8027` re-measured in the same session (7.2008 G, median of 3, range 7.2004-7.2008; interleaved pairs -0.98 / -1.01 / -1.01%) | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Artifacts byte-identical on C-LEARN, plain (every count, 1053 initial programs, 371 names, 7 modules, the full opcode histogram) and under `CLEARN_LTM=1` (29398 slots, 855713 / 1477 / 24669 opcodes, 14078 literals, 2166 views; LTM compile channel 78.9676 G against 79.8251 G, **-1.07%**, pairs -1.10 / -1.07 / -1.12%, `CLEARN_COMPILE_ITERS=5`); `size_of::<Expr2>()` 128 -> 64 (the bounds slot 72 -> 8; `Expr3` 128 -> 64, `IndexExpr2` 264 -> 136, `variable::Variable` 680 -> 552); memory (counting allocator, C-LEARN, bytes the database and sync state retain above the parsed datamodel; peak = compile phase): plain compile-only 32.16 -> 29.49 MiB (peak 39.3 -> 36.7), plain with diagnostics 33.54 -> 30.73 (peak 40.8 -> 38.0), LTM 225.97 -> 223.12 (peak 267.4 -> 264.7), LTM with diagnostics 227.02 -> 224.20 (peak 268.9 -> 266.3); allocations plain 1,540,711 / 193.7 MiB -> 1,542,030 / 171.3 MiB, LTM 24,898,752 / 2583.6 MiB -> 24,905,400 / 2277.1 MiB; sweep of 509 models plain and `--ltm` 399 / 397 identical, 110 refused identically, 0 one-sided, the two `--ltm` movers GH #859 flippers (`arrays_varname`, `test_subscript_transposition`: the same two digests on both binaries in both modes, 6x each), 7 `--ltm` stderr line-order permutations (GH #1036); `test/` diagnostics corpus identical (plain 471 rows over 366 keys, `--ltm` 856 over 391). A representation change with the observable held fixed: the -2.7 MiB on every row is the retained `Expr2` trees at half a node, under a third of the +9.2 MiB the memos cost a compile-only caller (the `Variable` beside each tree, the heads and the handle map are the rest), so that row stays above the pre-memo base (22.94 MiB). The instruction saving is the node copies (every construction, clone and move of a node moves half the bytes), and the +0.1% / +0.03% allocations are one box per bound produced. Engine suite (lib 5699, integration 783), libsimlin, CLI, mcp-core, clippy, `cargo fmt --all -- --check` and the default-feature check green, every golden unregenerated |
 | 8.5 | `engine: one dependency representation, classified once` | 6.9918 G (median of 3; range 6.9895-6.9932), **-1.84%** against `9e6253cd` re-measured in the same session (7.1229 G, median of 3, range 7.1224-7.1313; interleaved pairs -1.96 / -1.87 / -1.81%) | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Artifacts byte-identical on C-LEARN, plain (every count, 1053 initial programs, 371 names, 7 modules, the full opcode histogram) and under `CLEARN_LTM=1` (29398 slots, 855713 / 1477 / 24669 opcodes, 14078 literals, 2166 views; LTM compile channel 77.7223 G against 79.0077 G, **-1.63%**, pairs -1.59 / -1.69 / -1.63%, `CLEARN_COMPILE_ITERS=5`); memory (counting allocator, C-LEARN, bytes the database and sync state retain above the parsed datamodel; peak = compile phase): plain compile-only 29.49 -> 28.97 MiB (peak 36.7 -> 36.2), plain with diagnostics 30.73 -> 30.18 (peak 38.0 -> 37.5), LTM 223.17 -> 222.52 (peak 264.9 -> 264.0), LTM with diagnostics 224.28 -> 223.55 (peak 266.1 -> 265.8); allocations plain 1,542,125 / 171.3 MiB -> 1,466,767 / 163.5 MiB, LTM 24,905,822 / 2277.5 MiB -> 24,226,276 / 2241.2 MiB; sweep of 509 models plain and `--ltm` 397 / 398 identical, 110 refused identically, 0 one-sided, the movers GH #859 flippers (the same two digests on both binaries in both modes, 6x each), 8 `--ltm` stderr line-order permutations (GH #1036); `test/` diagnostics corpus plain 471 -> 472 rows over 366 -> 367 keys, `--ltm` 856 -> 857 over 391 -> 392, the one added row divergence 4. The saving is deleted work: one classification per variable and helper over its `Expr1`, where the base lowered every one to `Expr2` a second time under an empty scope for its dependencies, and no `·` re-splitting at the consumers. Seven divergences pinned under "Phase 8.5 semantic divergences", none with a corpus model of its shape but divergence 4 (`sir_social_distancing_mixnot.stmx`, refused on both binaries): the nested-stock ordering (5) moves numbers on a model the base ran, from the #591-c1 stale-input class to the one-hop rule's, and the output-port scan (6) adds LTM series. Engine suite (lib 5686, integration 783), libsimlin (244), CLI, mcp-core, clippy, `cargo fmt --all -- --check` and the default-feature check green, every golden unregenerated |
+| V9a | `engine: LTM reads typed values; one module-instance owner` | 6.9798 G (median of 3; range 6.9797-6.9883), -0.44% against `bee455c4` re-measured in the same session (7.0107 G, median of 3, range 7.0061-7.0132; interleaved pairs -0.44 / -0.25 / -0.48%); LTM compile channel (`CLEARN_LTM=1 CLEARN_COMPILE_ITERS=2`) 49.1146 G against 48.6483 G, +0.96% (pairs +0.84 / +0.76 / +0.99%), recorded | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | C-LEARN artifacts identical plain and under `CLEARN_LTM=1` (29398 slots, 855713 / 1477 / 24669 opcodes, 14078 literals, 2166 views); one natural LTM shape moves, pinned (V9a-1, the frozen-whole reducer over a bare arrayed argument), and a base VM abort compiles (V9a-2). Sweeps plain 398 identical / 110 refused / 0 one-sided / 1 mover and `--ltm` 397 / 110 / 0 / 2, every mover a GH #859 flipper, every stderr difference a GH #1036 order-only permutation; corpus-wide LTM variable sets and detected loops identical. The LTM channel's +1% is the `Expr2` tier's array bounds on ~7k generated equations (+2.9 points, measured with a bounds-free control) against the parses the text boundary no longer pays (-2.1 points); typing each generated equation once (`lower_variable_from_typed`) is what keeps it there rather than at +4.6%. Rust non-test -175 lines. |
 | 9 | `engine: one diagnostic payload from site to collection` | 7.0152 G (median of 3; range 7.0119-7.0152), +0.38% against `baeac250` re-measured in the same session (6.9890 G, median of 3, range 6.9825-6.9902; interleaved pairs +0.33 / +0.47 / +0.36%), inside the channel's floor and not investigated | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Artifacts byte-identical on C-LEARN, plain (every count, 1053 initial programs, 371 names, 7 modules, the full opcode histogram) and under `CLEARN_LTM=1` (29398 slots, 855713 / 1477 / 24669 opcodes, 14078 literals, 2166 views); LTM compile channel 78.6850 G against 77.7404 G, +1.22% (pairs +1.18 / +1.32 / +1.13%, `CLEARN_COMPILE_ITERS=5`), with compile-phase allocations plain 1,466,823 / 163.9 MiB -> 1,466,145 / 163.5 MiB and LTM 24,226,667 / 2242.7 MiB -> 24,224,380 / 2241.5 MiB and a symbol-level profile whose whole delta sits in untouched lowering and lexing functions (the code this phase touches is under 0.01% of samples), so it is recorded as build-layout perturbation; sweep of 509 models plain and `--ltm` 396 / 398 identical, 110 refused identically, 0 one-sided, the movers the GH #859 flippers `arrays_cname`, `arrays_varname` and `subscript_transposition` (each the same two digests on both binaries in both modes, 6x each), one plain stderr line-order permutation (`RealBeer4-Sterman13.mdl`, its cycle row after the variable rows, divergence 6) and 8 `--ltm` (GH #1036, divergence 7); `test/` diagnostics corpus plain 472 rows over 367 keys and `--ltm` 857 over 392 on both binaries, the same per-code distribution but the 33 umbrella rows (divergence 1), which move from the `Model` arm's rendering to the inference arm's. A diagnostic is one typed payload from its raising site to `collect_all_diagnostics`, context attached once by type, recursive queries returning facts and the per-model owner emitting them exactly once (`db::diagnostic_payload_tests`: the producer x category x severity matrix, the once-across-revisions matrix over every warning family, one-variable invalidation under `ProbedDb`). Engine suite (lib 5693, integration 783), libsimlin (245), CLI, mcp-core, clippy, `cargo fmt --all -- --check` and the default-feature check green, every golden unregenerated, `simlin.h` byte-identical under cbindgen |

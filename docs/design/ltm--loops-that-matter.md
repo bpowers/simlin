@@ -341,10 +341,10 @@ stock's contribution.
 ### Module Links
 
 `module_link_score_equation` in `db.rs` is the single source of truth for a
-module-involved link's equation, shared verbatim by the `(from, to)`-keyed
-`link_score_equation_text` and the per-shape `link_score_equation_text_shaped`
-(a module link's equation does not depend on the reference `RefShape`, so the
-two twins delegate to the same helper and can never drift). It handles three
+module-involved link's equation, read by the per-shape `shaped_link_score`
+for every `RefShape`
+(a module link's equation does not depend on the reference shape, so every
+shape delegates to the same helper and cannot drift). It handles three
 cases, each preferring a faithful link score and only falling back to the
 signed unit transfer when nothing better exists:
 

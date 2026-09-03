@@ -254,9 +254,8 @@ fn flatten_model(
                 Flatten::Series
             }
         } else if let Some(meta) = ltm_implicit.get(name) {
-            if meta.is_module {
-                Flatten::Module(meta.model_name.as_deref().and_then(sub_model))
-            } else if meta.variable.capture().map(|c| c.kind()) == Some(CaptureKind::Init) {
+            // A generated helper is a capture (never a module instance).
+            if meta.variable.capture().map(|c| c.kind()) == Some(CaptureKind::Init) {
                 // The same rule for a generated helper; the generator emits
                 // `PREVIOUS` captures only, so nothing reaches this arm today.
                 Flatten::Hidden
@@ -383,28 +382,16 @@ pub(crate) fn model_shape(
             let Some(entry) = layout.get(im_name) else {
                 continue;
             };
-            let shape = if meta.is_module {
-                module_dep_shape(db, project, meta.model_name.as_deref().unwrap_or(""))
-            } else {
-                // An `LtmImplicitVarMeta` carries no `dimensions` field (its
-                // `ImplicitVarMeta` sibling does), so the helper's axes come
-                // from its synthesized equation's declared dimension names --
-                // the same read `ltm_fragment_input`'s `helper_dims` and
-                // `ltm_implicit_fragment_input` make, so a parent resolving
-                // this helper through the model's shape sizes it exactly as
-                // this model's own fragments do.
-                DepShape::var(
-                    meta.variable
-                        .equation_dims()
-                        .iter()
-                        .filter_map(|name| {
-                            dim_context
-                                .get(&crate::common::CanonicalDimensionName::from_raw(name))
-                                .cloned()
-                        })
-                        .collect(),
-                )
-            };
+            // An `LtmImplicitVarMeta` carries no `dimensions` field (its
+            // `ImplicitVarMeta` sibling does), so the helper's axes come from
+            // its synthesized equation's declared dimension names -- the same
+            // read the LTM fragment constructors make (`ltm_dep_shape`), so a
+            // parent resolving this helper through the model's shape sizes it
+            // exactly as this model's own fragments do.
+            let shape = DepShape::var(super::var_fragment::dimensions_named(
+                meta.variable.equation_dims(),
+                dim_context,
+            ));
             vars.entry(Ident::new(im_name)).or_insert(ShapeEntry {
                 offset: entry.offset,
                 shape,

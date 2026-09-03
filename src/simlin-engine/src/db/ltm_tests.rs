@@ -5,8 +5,8 @@
 use super::{compile_ltm_equation_fragment, scalarize_ltm_equation};
 use crate::datamodel;
 use crate::db::{
-    LtmLinkId, RefShape, ShapedLinkScore, SimlinDb, compute_layout,
-    link_score_equation_text_shaped, sync_from_datamodel,
+    LtmLinkId, RefShape, ShapedLinkScore, SimlinDb, compute_layout, shaped_link_score,
+    sync_from_datamodel,
 };
 use crate::test_common::TestProject;
 
@@ -117,8 +117,6 @@ fn ltm_capture_helpers_compile_exactly_the_phases_their_kind_demands() {
         assert_eq!(helpers[0].capture().unwrap().kind(), kind, "{text}");
         let meta = LtmImplicitVarMeta {
             ltm_parent_name: parent.clone(),
-            is_module: false,
-            model_name: None,
             size: 1,
             variable: helpers[0].clone(),
         };
@@ -449,7 +447,7 @@ fn test_stock_to_flow_link_score_handles_apply_to_all() {
     // output as the (deleted) legacy `(from, to)`-keyed query did.
     let link_id = LtmLinkId::new(&db, "population".to_string(), "births".to_string());
     let ShapedLinkScore::Scored { var: lsv, .. } =
-        link_score_equation_text_shaped(&db, link_id, RefShape::Bare, source_model, sync.project)
+        shaped_link_score(&db, link_id, RefShape::Bare, source_model, sync.project)
     else {
         panic!("stock-to-flow link score should be generated for arrayed model");
     };
@@ -571,7 +569,7 @@ fn test_stock_to_flow_link_score_handles_arrayed() {
     // shaped entry point with the FixedIndex shape so the arrayed equation
     // survives intact.
     let link_id = LtmLinkId::new(&db, "population".to_string(), "births".to_string());
-    let result = link_score_equation_text_shaped(
+    let result = shaped_link_score(
         &db,
         link_id,
         RefShape::FixedIndex(vec!["nyc".to_string()]),
@@ -689,7 +687,7 @@ fn link_score_quotes_a_canonical_name_that_cannot_be_bare() {
 
     // The `1stock -> inflow` edge: the guard form spells both endpoints.
     let link_id = LtmLinkId::new(&db, "1stock".to_string(), "inflow".to_string());
-    let scored = link_score_equation_text_shaped(&db, link_id, RefShape::Bare, model, sync.project);
+    let scored = shaped_link_score(&db, link_id, RefShape::Bare, model, sync.project);
     let ShapedLinkScore::Scored { var: lsv, .. } = scored else {
         panic!("the 1stock -> inflow link score should be scored, got: {scored:?}");
     };
@@ -740,8 +738,7 @@ fn link_score_quotes_every_keyword_named_source() {
         let model = sync.models["main"].source;
 
         let link_id = LtmLinkId::new(&db, keyword.to_string(), "inflow".to_string());
-        let scored =
-            link_score_equation_text_shaped(&db, link_id, RefShape::Bare, model, sync.project);
+        let scored = shaped_link_score(&db, link_id, RefShape::Bare, model, sync.project);
         let ShapedLinkScore::Scored { var: lsv, .. } = scored else {
             panic!("the {keyword} -> inflow link score should be scored, got: {scored:?}");
         };
@@ -1834,7 +1831,7 @@ fn a_dimension_name_index_is_not_frozen_when_the_axis_is_known() {
     );
 }
 
-/// `link_score_equation_text_shaped` documents that "a per-shape link score is
+/// `shaped_link_score` documents that "a per-shape link score is
 /// recomputed only when the involved variables (and their shape-classifying
 /// dimensions) change". This is that claim, measured.
 ///
@@ -2616,7 +2613,7 @@ fn first_arm_expr(eq: &crate::db::LtmEquation) -> &std::sync::Arc<crate::ast::Ex
 }
 
 /// `model_ltm_variables` must SHARE each emitted score's parsed AST with the
-/// `link_score_equation_text_shaped` memo it came from, not deep-copy it.
+/// `shaped_link_score` memo it came from, not deep-copy it.
 ///
 /// The emission loop clones the shaped result out of the memo for every score,
 /// so before the ASTs were shared each equation was retained twice for the life
@@ -2651,8 +2648,7 @@ fn an_emitted_link_score_shares_its_ast_with_the_shaped_memo() {
         });
 
     let link_id = LtmLinkId::new(&db, "growth".to_string(), "pop".to_string());
-    let shaped =
-        link_score_equation_text_shaped(&db, link_id, RefShape::Bare, model, source_project);
+    let shaped = shaped_link_score(&db, link_id, RefShape::Bare, model, source_project);
     let ShapedLinkScore::Scored { var: memo_var, .. } = shaped else {
         panic!("the growth->pop edge must be scored; got: {shaped:?}");
     };

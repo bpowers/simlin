@@ -5444,3 +5444,225 @@ fn test_queue_ltm_degraded_warning_absent_without_ltm() {
         "LTM-disabled project must not emit the queue degradation warning; got: {diags:?}"
     );
 }
+
+/// A target with no lowered body is declined loudly, never scored, and every
+/// other edge of the model is scored as before. The two generators that read
+/// a Scalar/A2A target's body (`generate_auxiliary_to_auxiliary_equation`,
+/// `generate_stock_to_flow_equation`) each get a row, and so does a HELPER
+/// target (an element-scoped hoisted argument whose body fails, reachable
+/// only in discovery mode); the third arm of `scalar_or_a2a_target_expr` --
+/// an `Ast::Arrayed` target -- is unreachable through either generator (the
+/// arrayed generator takes that shape first) and is not rowed.
+///
+/// The shape is a scope-dependent lowering refusal: `sales[Cities] + prices[Products]`
+/// is `MismatchedDimensions` at the `Expr2` tier, which leaves the target's
+/// memo with no AST while its causal edges stand (dependencies are classified
+/// on the typed tier), so the failed target is reached with edges into it.
+/// Discovery mode scores every edge, so no loop is needed to reach them.
+#[test]
+fn a_target_whose_lowering_failed_is_declined_not_scored() {
+    use crate::common::ErrorCode;
+    use crate::db::{
+        DiagnosticError, DiagnosticSeverity, compile_project_incremental,
+        set_project_ltm_discovery_mode,
+    };
+
+    let tp = TestProject::new("ltm_failed_target")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("Cities", &["boston", "seattle"])
+        .named_dimension("Products", &["a", "b"])
+        .aux("level", "TIME + 1", None)
+        .array_aux("sales[Cities]", "level + 1")
+        .array_aux("prices[Products]", "1")
+        // Row 1: an aux target that reads an aux.
+        .array_aux("bad[Cities]", "sales + prices")
+        // Row 2: a flow target that reads its stock.
+        .array_stock("stk[Cities]", "10", &["badflow"], &[], None)
+        .array_flow("badflow[Cities]", "stk * 0.1 + prices", None)
+        // Row 3: a helper target -- the per-element hoisted argument of a
+        // module-bearing apply-to-all body, whose body is the same refusal.
+        .array_aux("hx[Cities]", "SMTH1(sales + prices, 1)");
+    let errs = tp.error_diagnostics();
+    for target in ["bad", "badflow", "hx"] {
+        assert!(
+            errs.contains(&(format!("main.{target}"), ErrorCode::MismatchedDimensions)),
+            "{target} is the compiler's MismatchedDimensions refusal: {errs:?}"
+        );
+    }
+
+    let project = tp.build_datamodel();
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    set_project_ltm_enabled(&mut db, source_project, true);
+    set_project_ltm_discovery_mode(&mut db, source_project, true);
+
+    let ltm = model_ltm_variables(&db, model, source_project);
+    let names: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
+    let helper = "$\u{205A}hx\u{205A}0\u{205A}arg0\u{205A}boston";
+    for (from, to) in [("sales", "bad"), ("stk", "badflow"), ("sales", helper)] {
+        let link = format!("{from}\u{2192}{to}");
+        assert!(
+            names.iter().all(|n| !n.contains(&link)),
+            "no score may be built around the refused body of {to}: {names:?}"
+        );
+        let declined: Vec<&str> = ltm
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == DiagnosticSeverity::Warning)
+            .filter_map(|d| match &d.error {
+                DiagnosticError::Assembly(msg) if msg.contains(&link) => Some(msg.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            declined.len(),
+            1,
+            "exactly one warning declines the {from} -> {to} edge: {declined:?}"
+        );
+        assert!(
+            declined[0].contains("no lowered equation") && declined[0].contains(to),
+            "the warning names the target and the missing body: {}",
+            declined[0]
+        );
+    }
+    // An edge whose target lowered is scored as before.
+    assert!(
+        names
+            .iter()
+            .any(|n| n.starts_with("$\u{205A}ltm\u{205A}link_score\u{205A}level\u{2192}sales")),
+        "the level -> sales edge keeps its score: {names:?}"
+    );
+    assert!(
+        compile_project_incremental(&db, source_project, "main").is_err(),
+        "a project with a refused target does not compile"
+    );
+}
+
+/// A frozen-whole reducer over a BARE arrayed argument inside an apply-to-all
+/// body lowers as execution lowers the target: per element. `x[region] =
+/// other + SUM(pop) / 1000` reads `pop[region]` under `SUM` (the plain
+/// spelling's rule), the additive `other` term keeps the `other -> x` edge
+/// clear of the GH #788 decline, and the ceteris-paribus partial for that edge
+/// freezes the reducer whole into a structural capture over `[region]` whose
+/// body is `sum(pop)`. Lowered under the shapes of its reads, that capture is
+/// `pop[e]` per element -- the value the executed `x[e]` reads -- so the score
+/// is the ratio of two per-element deltas and stays bounded by 1. (A
+/// bounds-free lowering of the same capture summed the whole array: 300 where
+/// `x[north]` read 100, and a score of 16 for a link that changes `x` by one
+/// part in a hundred.)
+#[test]
+fn a_frozen_whole_reducer_over_a_bare_arrayed_argument_lowers_per_element() {
+    let datamodel = TestProject::new("ltm_frozen_reducer_per_element")
+        .with_sim_time(0.0, 4.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_with_ranges("init[region]", vec![("north", "100"), ("south", "200")])
+        .array_stock("pop[region]", "init[region]", &["growth"], &[], None)
+        .array_flow("growth[region]", "pop[region] * 0.1 * x[region]", None)
+        .array_aux("x[region]", "other + SUM(pop) / 1000")
+        .array_aux("other[region]", "1 + pop[region] / 10000")
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &datamodel);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+
+    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
+        .expect("the LTM-enabled fixture compiles");
+    let mut vm = crate::vm::Vm::new(compiled.clone()).expect("vm");
+    vm.run_to_end().expect("runs");
+    let results = vm.into_results();
+    let steps = results.data.len() / results.step_size;
+    let series = |name: &str| -> Vec<f64> {
+        let off = compiled.offsets[&crate::common::Ident::new(name)];
+        (0..steps)
+            .map(|step| results.data[step * results.step_size + off])
+            .collect()
+    };
+
+    let score_prefix = "$\u{205A}ltm\u{205A}link_score\u{205A}other\u{2192}x";
+    let capture = format!("$\u{205A}{score_prefix}\u{205A}0\u{205A}arg0");
+    for element in ["north", "south"] {
+        let pop = series(&format!("pop[{element}]"));
+        // The executed read of `x` is per element: the oracle.
+        let x = series(&format!("x[{element}]"));
+        let other = series(&format!("other[{element}]"));
+        for step in 0..steps {
+            assert!(
+                (x[step] - (other[step] + pop[step] / 1000.0)).abs() < 1e-9,
+                "x[{element}] step {step}: {} reads pop[{element}] = {} under SUM",
+                x[step],
+                pop[step]
+            );
+        }
+        // The frozen reducer's capture reads the same element.
+        assert_eq!(
+            series(&format!("{capture}[{element}]")),
+            pop,
+            "the capture over [region] holds sum(pop) evaluated at {element}"
+        );
+    }
+    let scores: Vec<&crate::common::Ident<crate::common::Canonical>> = compiled
+        .offsets
+        .keys()
+        .filter(|k| k.as_str().starts_with(score_prefix))
+        .collect();
+    assert!(!scores.is_empty(), "the other -> x edge is scored");
+    for name in scores {
+        let got = series(name.as_str());
+        assert!(
+            got[1..].iter().any(|v| *v != 0.0),
+            "{name}: the score is live after the first step: {got:?}"
+        );
+        assert!(
+            got.iter().all(|v| v.abs() <= 1.0),
+            "{name}: a per-element partial of a link that moves x by one part in a hundred is \
+             bounded by 1: {got:?}"
+        );
+    }
+}
+
+/// A structural capture is a link-score target like any arrayed variable:
+/// its axes come off its lowered `ast()` (a helper carries no equation text,
+/// `Variable::eqn` is `None`), so the score into it is apply-to-all over the
+/// capture's declared axis exactly as a source variable's would be.
+#[test]
+fn a_structural_capture_target_scores_over_its_declared_axis() {
+    use crate::db::lowered_variable_by_name;
+
+    let project = TestProject::new("ltm_capture_target")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .named_dimension("Region", &["north", "south"])
+        .array_stock("pop[Region]", "10", &["growth"], &[], None)
+        .array_flow("growth[Region]", "PREVIOUS(pop[Region] * 0.1, 1)", None)
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let (source_project, model) = {
+        let sync = sync_from_datamodel(&db, &project);
+        (sync.project, sync.models["main"].source)
+    };
+    set_project_ltm_enabled(&mut db, source_project, true);
+
+    let capture = "$\u{205A}growth\u{205A}0\u{205A}arg0";
+    let lowered = lowered_variable_by_name(&db, model, source_project, capture)
+        .expect("the apply-to-all PREVIOUS argument is a structural capture");
+    assert!(lowered.eqn.is_none(), "a helper carries no equation text");
+    assert_eq!(
+        lowered.get_dimensions().map(|d| d.len()),
+        Some(1),
+        "the capture applies over the parent's one axis"
+    );
+
+    let ltm = model_ltm_variables(&db, model, source_project);
+    let score = ltm
+        .vars
+        .iter()
+        .find(|v| v.name == format!("$\u{205A}ltm\u{205A}link_score\u{205A}pop\u{2192}{capture}"))
+        .expect("the pop -> capture edge is on the loop and scored");
+    assert!(
+        matches!(&score.equation, LtmEquation::ApplyToAll(dims, _) if dims == &["Region".to_string()]),
+        "the score is apply-to-all over the capture's axis: {}",
+        score.equation.source_text()
+    );
+}
