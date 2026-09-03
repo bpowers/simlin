@@ -285,7 +285,8 @@ pub fn build_sub_model_output_ports(
 /// declared dimensions via the salsa-cached `variable_dimensions` -- the SAME
 /// query `model_element_causal_edges` reads, so the from-side projection and
 /// the element graph derive dims identically. `dim_ctx` is the project's
-/// dimension-mapping correspondence (the GH #527 positional-mapping diagonal).
+/// dimension context (the executed correspondence of a mapped pair), and
+/// `flow_to_stock` the structural edges the wiring's pairing applies to.
 ///
 /// Public so the engine's LTM discovery tests can drive
 /// `discover_loops_with_graph` through the exact production decision rather
@@ -306,9 +307,23 @@ pub fn build_link_expansion_context(
         })
         .collect();
     let dim_ctx = crate::db::project_dimensions_context(db, source_project).clone();
+    let flow_to_stock = source_model
+        .variables(db)
+        .iter()
+        .filter(|(_, var)| var.kind(db) == crate::db::SourceVariableKind::Stock)
+        .flat_map(|(stock, var)| {
+            let stock = crate::common::Ident::<crate::common::Canonical>::new(stock.as_str());
+            var.inflows(db)
+                .iter()
+                .chain(var.outflows(db).iter())
+                .map(move |flow| (crate::common::Ident::new(flow.as_str()), stock.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
     crate::ltm_finding::LinkExpansionContext {
         declared_dims,
         dim_ctx,
+        flow_to_stock,
     }
 }
 

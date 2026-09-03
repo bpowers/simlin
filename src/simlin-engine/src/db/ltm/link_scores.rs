@@ -72,11 +72,11 @@ use super::parse::{ltm_equation_dimensions, retarget_ltm_equation_dims};
 /// iterates it -- so the projection is the identity and no dimension mapping is
 /// consulted. That is a measured property of one corpus, not of the language: a
 /// model reading a table declared over a DIFFERENT axis than the target iterates
-/// needs a mapped element correspondence, and it gets the one its SPELLING earns
-/// (GH #997) -- `positional_correspondence` for an index naming an iterated
-/// dimension, `executed_read_correspondence` for one naming the holder's own.
-/// A pair with no DECLARED correspondence either way still lands in
-/// `dep_element_pins`' incomplete arm and keeps today's loud drop.
+/// needs a mapped element correspondence, and it gets the executed one
+/// (`DimensionsContext::executed_read_correspondence`, GH #997) whichever
+/// dimension the index names. A pair with no declared correspondence and no
+/// shared element name lands in `dep_element_pins`' incomplete arm and keeps
+/// the loud drop.
 fn pinnable_arrayed_deps(
     db: &dyn Db,
     model: SourceModel,
@@ -219,6 +219,19 @@ impl ArrayedSlotMap {
     }
 }
 
+/// Whether `(from, to)` is a stock's structural inflow/outflow edge -- the one
+/// Bare edge the wiring's pairing (`db::BareSpelling::StockFlow`) applies to.
+fn is_structural_flow_to_stock(db: &dyn Db, model: SourceModel, from: &str, to: &str) -> bool {
+    model.variables(db).get(to).is_some_and(|var| {
+        var.kind(db) == crate::db::SourceVariableKind::Stock
+            && var
+                .inflows(db)
+                .iter()
+                .chain(var.outflows(db).iter())
+                .any(|flow| crate::common::canonicalize(flow).as_ref() == from)
+    })
+}
+
 /// Determine the dimensions a link score should carry.
 ///
 /// Returns the target's dimension names when the edge is
@@ -305,76 +318,62 @@ pub(super) fn link_score_dimensions(
     // In all these cases, the link score inherits the target's
     // dimensions so per-element values are computed via A2A expansion.
     let dim_ctx = project_dimensions_context(db, project);
-    // PR #761 review (r3389029131): the mapped arm is additionally gated on
-    // the edge having a `Bare`-classified reference site -- the exact
-    // condition under which `expand_same_element` emits the mapped DIAGONAL
-    // element edges, so "score arrayed over the target's dims" ⟺ "element
-    // edges are the diagonal". The gate therefore consults
-    // `db::analysis::bare_reference_correspondence`, the same helper
-    // `expand_same_element` does, so the two cannot disagree about which
-    // pairs project; since GH #757 the classifier
-    // (`classify_iterated_dim_shape` via `classify_axis_access`) accepts
-    // BOTH declaration directions, so a positionally-mapped subscripted
-    // reference (forward- or reverse-declared) classifies `Bare` and passes
-    // this gate with the diagonal it deserves.
-    //
-    // Since GH #997 an ELEMENT-mapped pair can project too, but on a STRICTER
-    // condition than the element graph's: `mapped_pair_projects_uniquely`, not
-    // `bare_reference_correspondence(..).is_some()`. The element graph emits
-    // the UNION of the two spellings' diagonals, which is sound there because
-    // an extra edge is the safe direction. A SCORE is one arrayed variable with
-    // one slot per target element, and `ltm_finding::expand_a2a_link_offsets`
-    // maps every union edge for a target element onto that one slot -- so where
-    // the two rules DISAGREE, the phantom from-node reads the real edge's
-    // non-zero score out of the shared slot. A compilable, confidently wrong
-    // number is the outcome this repo treats as worse than none (GH #758), so
-    // the retarget is denied unless every target element's correspondence is a
-    // SINGLETON.
-    //
-    // What that admits: every mapping that projected before GH #997 (the two
-    // rules coincide on a positional mapping between disjointly-named
-    // dimensions) plus C-LEARN's many-to-one element map, where the positional
-    // rule declines outright and leaves the executed rule alone in the union.
-    // What it refuses: an equal-cardinality PERMUTED element map, and a pair
-    // sharing element names in a different order.
-    //
-    // What still does NOT reach here at all is a reference the classifier gave
-    // a non-`Bare` shape -- a genuinely dynamic index, a transposition --
-    // whose element edges stay the conservative cross-product; retargeting one
-    // of those to the target's dims would shape per-slot DIAGONAL partials
-    // that the off-diagonal loop links then read by target-element subscript,
-    // i.e. silent wrong-slot values.
-    // Denied the retarget, such an edge instead takes the GH #758 loud skip
-    // in `emit_per_shape_link_scores` (no link-score variable, loop scores
-    // through the edge dropped, one Warning). A mixed edge (a Bare site AND
-    // a DynamicIndex site on the same `(from, to)`) keeps the arrayed score
+    // The pairing is `db::analysis::bare_axis_pairing` -- the same one
+    // `expand_same_element` emits the element edges from -- so "score arrayed
+    // over the target's dims" holds exactly where the element edges are the
+    // pairing's rows: a positionally paired axis (a shared name, or two indexed
+    // axes of one size) always, a MAPPED pair only when the edge has a
+    // `Bare`-classified site (PR #761 review, r3389029131). A `Bare` A2A score
+    // is one arrayed variable with one slot per target element, and
+    // `ltm_finding::expand_a2a_link_offsets` attaches each element edge of the
+    // pairing to that slot; a `DynamicIndex` or `Wildcard` site's edges are the
+    // conservative cross-product instead, and retargeting one of those to the
+    // target's dims would shape per-slot DIAGONAL partials that the
+    // off-diagonal loop links then read by target-element subscript -- silent
+    // wrong-slot values. Denied the retarget, such an edge takes the GH #758
+    // loud skip in `emit_per_shape_link_scores` (no link-score variable, loop
+    // scores through the edge dropped, one Warning). A mixed edge (a Bare site
+    // AND a DynamicIndex site on the same `(from, to)`) keeps the arrayed score
     // -- the Bare site needs it -- while its cross-product links still read
-    // diagonal slots; that is the pre-existing mixed-shape conservatism
-    // family, not changed here. The same-NAME arms below stay
-    // shape-independent. Absent-edge lookups (a `(from, to)` not in the
-    // causal graph, which the emitters never produce) fail the gate, which
-    // errs toward the conservative scalar.
+    // diagonal slots; that is the pre-existing mixed-shape conservatism family.
+    // Absent-edge lookups (a `(from, to)` not in the causal graph, which the
+    // emitters never produce) fail the gate, which errs toward the
+    // conservative scalar.
+    //
+    // The pairing is positional and one-to-one (`match_axes_partial`), so a
+    // target that repeats a dimension is covered axis by axis rather than by
+    // name -- `cube[D1,D1] = pop[D1,D1]` pairs both occurrences and keeps its
+    // arrayed score over `[D1,D1]`, the shape the compiler reads cell by cell.
     let edge_has_bare_site = crate::db::model_edge_shapes(db, model, project)
         .edge_shapes
         .get(&(from.to_string(), to.to_string()))
         .is_some_and(|shapes| shapes.contains(&RefShape::Bare));
-    let dims_correspond =
-        |td: &crate::dimensions::Dimension, fd: &crate::dimensions::Dimension| -> bool {
-            td.name() == fd.name()
-                || (edge_has_bare_site
-                    && crate::db::analysis::mapped_pair_projects_uniquely(
-                        dim_ctx,
-                        td.canonical_name(),
-                        fd.canonical_name(),
-                    ))
-        };
-    let dims_compatible = from_dims == *to_dims
-        || to_dims
-            .iter()
-            .all(|td| from_dims.iter().any(|fd| dims_correspond(td, fd)))
-        || from_dims
-            .iter()
-            .all(|fd| to_dims.iter().any(|td| dims_correspond(td, fd)));
+    // A flow feeds its stock through the wiring's pairing (the full context,
+    // a mapping onto a parent dimension included -- the element edges and
+    // discovery's from-node projection pair it the same way); every other
+    // edge is an equation read under pass 0's relations.
+    let spelling = if is_structural_flow_to_stock(db, model, from, to) {
+        crate::db::analysis::BareSpelling::StockFlow
+    } else {
+        crate::db::analysis::BareSpelling::Equation
+    };
+    let pairing = crate::db::analysis::bare_axis_pairing(&from_dims, to_dims, dim_ctx, spelling);
+    let paired_pos = |axis: &crate::db::analysis::BareAxis| match axis {
+        crate::db::analysis::BareAxis::Positional(pos) => Some(*pos),
+        crate::db::analysis::BareAxis::Mapped { pos, .. } if edge_has_bare_site => Some(*pos),
+        crate::db::analysis::BareAxis::Mapped { .. } | crate::db::analysis::BareAxis::Collapsed => {
+            None
+        }
+    };
+    // Same dims, a partial collapse (every target axis supplied) or a
+    // broadcast (every source axis placed): in all three the link score
+    // inherits the target's dimensions so per-element values are computed
+    // via A2A expansion.
+    let every_target_axis_supplied =
+        (0..to_dims.len()).all(|pos| pairing.iter().any(|axis| paired_pos(axis) == Some(pos)));
+    let every_source_axis_placed = pairing.iter().all(|axis| paired_pos(axis).is_some());
+    let dims_compatible =
+        from_dims == *to_dims || every_target_axis_supplied || every_source_axis_placed;
 
     if dims_compatible {
         // Map canonical dimension names back to their original
@@ -599,7 +598,6 @@ pub(super) fn try_cross_dimensional_link_scores(
             source_vars,
             from,
             to,
-            to_var_of()?,
             from_dims,
             to_dims,
             vb_agg,
@@ -632,10 +630,19 @@ pub(super) fn try_cross_dimensional_link_scores(
         to_names.iter().map(|s| s.to_string()).collect()
     };
 
-    // The source is a reducer argument. Classify the reducing function
-    // in the target's equation.
-    let to_var = to_var_of()?;
-    let classified = crate::ltm_augment::classify_reducer(to_var, from)?;
+    // The source is a reducer argument. When `to` IS a variable-backed
+    // aggregate reading `from`, classify the node's stored reducer, which
+    // spells every bare arrayed source per the enclosing iteration
+    // (`AggNode::reducer`), so the body partial below pins a bare feeder per
+    // row exactly as it does the iterated spelling; an un-hoisted target has
+    // no node and is classified off its own equation.
+    let vb_agg = agg_nodes
+        .aggs_in_var(to)
+        .find(|a| !a.is_synthetic && a.name == to && a.reads_var(from));
+    let classified = match vb_agg {
+        Some(agg) => crate::ltm_augment::classify_reducer_in_builtin(&agg.reducer, from, true)?,
+        None => crate::ltm_augment::classify_reducer(to_var_of()?, from)?,
+    };
 
     if classified.kind == crate::ltm_augment::ReducerKind::Constant {
         // SIZE is constant; link score is always 0. Skip entirely.
@@ -662,10 +669,7 @@ pub(super) fn try_cross_dimensional_link_scores(
     // `result_dims_has_repeated_dim`) and so never reaches here. The
     // un-hoisted cartesian family has no agg and keeps `None` (unique
     // by-name resolution with the ambiguity bail).
-    let live_read_slice = agg_nodes
-        .aggs_in_var(to)
-        .find(|a| !a.is_synthetic && a.name == to && a.reads_var(from))
-        .map(|a| a.source_read_slice(from));
+    let live_read_slice = vb_agg.map(|a| a.source_read_slice(from));
     let body_ctx = crate::ltm_augment::ReducerBodyCtx {
         body: &classified.body,
         live_source: from,
@@ -1350,10 +1354,6 @@ fn emit_broadcast_reduce_link_scores(
     source_vars: &HashMap<String, SourceVariable>,
     from: &str,
     to: &str,
-    // The reducer's owner. Passed in rather than re-derived: only the inner
-    // parse is salsa-memoized, so a second `lowered_variable_by_name` would
-    // re-run `crate::model::lower_variable` for the same edge.
-    to_var: &crate::variable::Variable,
     from_dims: &[crate::dimensions::Dimension],
     to_dims: &[crate::dimensions::Dimension],
     vb_agg: &crate::ltm_agg::AggNode,
@@ -1363,7 +1363,9 @@ fn emit_broadcast_reduce_link_scores(
     // resolved by the caller.
     owner_gf_ref: Option<&str>,
 ) -> Option<Vec<LtmSyntheticVar>> {
-    let classified = crate::ltm_augment::classify_reducer(to_var, from)?;
+    // The node's stored reducer, every bare arrayed source spelled
+    // (`AggNode::reducer`), is the reducer the owner's equation IS.
+    let classified = crate::ltm_augment::classify_reducer_in_builtin(&vb_agg.reducer, from, true)?;
     if classified.kind == crate::ltm_augment::ReducerKind::Constant {
         // SIZE is constant; link score is always 0. Skip entirely.
         return Some(vec![]);
@@ -2153,32 +2155,12 @@ pub(super) fn emit_unscoreable_per_element_reducer_warning(
     let msg = format!(
         "LTM link score for edge {from} -> {to} could not be computed: {to} is defined \
          with per-element equations whose bodies read {from} inside a reducer{example} \
-         that could not be hoisted into an aggregate, and no remaining derivation can \
-         represent the per-slot reads (a single whole-edge stand-in score would \
-         misattribute them) -- so the edge is declined instead: it will have no \
-         link-score variable and feedback loops through it will not be scored"
-    );
-    warnings.warn(None, msg);
-}
-
-/// Accumulate the GH #788 `Warning` for an Apply-To-All target whose equation
-/// contains a maximal reducer with a bare arrayed argument that overlaps the
-/// target's active dimensions. LTM cannot yet represent that bare spelling:
-/// a synthetic aggregate would evaluate the reducer as a whole-array scalar,
-/// while ordinary feeder partials would freeze that wrong reducer value.
-pub(super) fn emit_unscoreable_bare_arrayed_reducer_warning(
-    warnings: &mut LtmWarnings,
-    from: &str,
-    to: &str,
-    reducer_text: &str,
-) {
-    let msg = format!(
-        "LTM link score for edge {from} -> {to} could not be computed: {to}'s \
-         equation contains the bare arrayed reducer argument {reducer_text}, and \
-         LTM cannot yet score that spelling in an Apply-To-All target without \
-         treating the reducer as a whole-array aggregate value -- so the edge is \
-         declined instead: it will have no link-score variable and feedback loops \
-         through it will not be scored"
+         that could not be hoisted into an aggregate (or as a bare argument, which a \
+         hoisted aggregate describes as the whole array where the slot reads the row \
+         its element pins), and no remaining derivation can represent the per-slot \
+         reads (a single whole-edge stand-in score would misattribute them) -- so the \
+         edge is declined instead: it will have no link-score variable and feedback \
+         loops through it will not be scored"
     );
     warnings.warn(None, msg);
 }
@@ -2232,33 +2214,6 @@ fn decline_unhoisted_reducer_edge(
     }
 }
 
-fn decline_bare_arrayed_reducer_target(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-    from: &str,
-    to: &str,
-    warnings: &mut LtmWarnings,
-) -> bool {
-    let reducer = crate::ltm_agg::unhoisted_bare_arrayed_reducer_arg(
-        db,
-        from.to_string(),
-        to.to_string(),
-        model,
-        project,
-    );
-    let Some(reducer) = reducer.as_ref() else {
-        return false;
-    };
-    if warnings
-        .unscoreable_edges
-        .insert((from.to_string(), to.to_string()))
-    {
-        emit_unscoreable_bare_arrayed_reducer_warning(warnings, from, to, reducer);
-    }
-    true
-}
-
 /// Record a `Warning` for a ceteris-paribus partial-equation parse failure
 /// (GH #311), naming the synthetic link-score variable and the original
 /// (untransformed) equation text that could not be parsed.
@@ -2286,9 +2241,8 @@ fn emit_ltm_partial_equation_warning(
 
 /// The human-readable message body for a partial-equation failure -- a
 /// GH #311 parse failure, a GH #743 unfreezable partial (neither
-/// ceteris-paribus convention can be rendered as a compilable equation), or
-/// a GH #779 bare reducer feeder (a bare arrayed reference inside a reducer
-/// argument, whose message names the subscripted-spelling workaround).
+/// ceteris-paribus convention can be rendered as a compilable equation), and
+/// the other `PartialEquationErrorKind`s.
 /// Pure (functional core) so the diagnostic's wording -- which names the
 /// offending variable and equation text and explains the silent-garbage
 /// hazard the loud skip prevents -- is testable without driving a salsa
@@ -2351,16 +2305,6 @@ pub(crate) fn ltm_partial_equation_warning_message(
              plausible-looking constant; where the same target has a compiling \
              whole-array (A2A-shaped) score, that score carries the edge's \
              attribution instead (GH #995)."
-        ),
-        PartialEquationErrorKind::BareReducerFeeder => format!(
-            "LTM link-score variable '{variable_name}' could not be generated: \
-             '{equation_text}' references the arrayed source variable BARE \
-             (without a subscript) inside an array-reducer argument, which cannot \
-             be scored -- the per-element ceteris-paribus partial disagrees with \
-             how the simulation evaluates the bare reference (GH #779/#789). The \
-             variable is skipped (and dependent loop scores dropped) rather than \
-             emitted with a silently wrong value; subscripting the reference \
-             (e.g. 'frac[D1]') restores scoring."
         ),
     }
 }
@@ -2730,13 +2674,12 @@ pub(super) fn emit_per_shape_link_scores(
     // cross-product, so per-slot diagonal partials would be read at wrong
     // slots). Degrade loudly instead: one Warning naming the edge, no
     // link-score variable, and (via `unscoreable_edges`) no loop scores
-    // through it. Two families land here: the sliced reducers the
-    // correspondence declines (an UNDECLARED pair, a cardinality mismatch, or
-    // a `MappedRead` axis -- GH #997; a DECLARED mapping is hoisted in either
-    // direction since GH #757, an explicit element map included since #997),
-    // and -- also since GH #997 -- a mapped pair whose two spellings DISAGREE,
-    // which `mapped_pair_projects_uniquely` denies the arrayed retarget
-    // because the two would share one score slot. So do disjoint-dim
+    // through it. The families that land here: the sliced reducers the
+    // correspondence declines (an UNDECLARED pair with disjoint element
+    // names, a cardinality mismatch, a many-to-one map, or a `MappedRead`
+    // axis -- GH #997; a DECLARED mapping is hoisted in either direction
+    // since GH #757, an explicit element map included since #997), and an
+    // arrayed pair `bare_axis_pairing` cannot relate at all. So do disjoint-dim
     // ApplyToAll-target references whose sites
     // are not all FixedIndex (the GH #769 widening recovers the
     // FixedIndex-only ones) and incompatible-dim dynamic-index reducers --
@@ -3712,6 +3655,22 @@ pub(super) fn emit_agg_to_target_link_scores(
     // loud warning, no link-score variable for the edge, dependent loops
     // dropped. See `iterated_feeder_row_scores`' doc for why recording is
     // edge-level, not per-element.
+    //
+    // The per-element-owner decline (GH #792) is consulted for every source
+    // the node reads: a slot of `to` reading one of them inside this reducer
+    // as a BARE argument reads the row its element pins, which this node --
+    // the whole array -- does not describe, so the `(agg, to)` half is
+    // declined together with the `(from, to)` edge. Consulted here as well as
+    // in `emit_link_scores_for_edge`, because a loop link `agg -> to` reaches
+    // this emitter directly.
+    for source in &agg.sources {
+        if decline_unhoisted_reducer_edge(db, model, project, &source.var, to, warnings) {
+            warnings
+                .unscoreable_edges
+                .insert((agg.name.clone(), to.to_string()));
+            return;
+        }
+    }
     let Some(to_var) = lowered_variable_by_name(db, model, project, to) else {
         return;
     };
@@ -3821,9 +3780,9 @@ pub(super) fn emit_agg_to_target_link_scores(
     // Projection of a target element tuple onto an agg's `result_dims`, so the
     // link-score name, denominator, and per-ident body pin all address the same
     // helper slot. Exact dimension names use the target element directly
-    // (GH #528). Positionally mapped dims use the same correspondence as A2A
-    // execution: a `Region` target can pin a `State`-dimensioned RANK helper to
-    // the State element read for that Region slot.
+    // (GH #528). Mapped dims use the same correspondence as A2A execution: a
+    // `Region` target can pin a `State`-dimensioned RANK helper to the State
+    // element read for that Region slot.
     let target_projection_for_result_dims = |result_dims: &[String]| -> AggTargetProjection {
         let mut axes = Vec::with_capacity(result_dims.len());
         for rd in result_dims {
@@ -3849,7 +3808,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                 .enumerate()
                 .find_map(|(target_pos, target_dim)| {
                     dim_ctx
-                        .positional_correspondence(target_dim.canonical_name(), &result_canon)
+                        .executed_read_correspondence(target_dim.canonical_name(), &result_canon)
                         .map(|mapped_elements| (target_pos, target_dim, mapped_elements))
                 })
             {
@@ -3947,10 +3906,10 @@ pub(super) fn emit_agg_to_target_link_scores(
                 .map(|axis| axis.result_dim.clone())
                 .collect();
             let qualified = crate::ltm_augment::qualify_element_csv(&slot, &result_dims);
-            let axes: Vec<(String, String)> = result_dims
+            let axes: Vec<Vec<(String, String)>> = result_dims
                 .iter()
                 .zip(qualified.split(','))
-                .map(|(dim, elem)| (dim.name().to_string(), elem.to_string()))
+                .map(|(dim, elem)| vec![(dim.name().to_string(), elem.to_string())])
                 .collect();
             Some(DepElementPin {
                 // An agg's slot space IS its `result_dims`, and the projection
@@ -3959,7 +3918,11 @@ pub(super) fn emit_agg_to_target_link_scores(
                 // spelling to answer for -- an agg ident carries no declared
                 // dimension a subscript could name -- so the two rows are the
                 // same row.
-                bare_row: Some(axes.iter().map(|(_, elem)| elem.clone()).collect()),
+                bare_row: Some(
+                    axes.iter()
+                        .map(|spellings| spellings[0].1.clone())
+                        .collect(),
+                ),
                 axes,
             })
         };
@@ -4323,10 +4286,6 @@ pub(super) fn emit_link_scores_for_edge(
     vars: &mut Vec<LtmSyntheticVar>,
     warnings: &mut LtmWarnings,
 ) {
-    if decline_bare_arrayed_reducer_target(db, model, project, from, to, warnings) {
-        return;
-    }
-
     // The set of synthetic aggs `(from, to)` routes through, read off
     // the reference-site IR (the unique `ThroughAgg` `AggRef`s of this
     // edge's classified sites, in first-occurrence order). This is the

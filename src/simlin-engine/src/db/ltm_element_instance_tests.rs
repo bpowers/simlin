@@ -145,11 +145,17 @@ fn arrayed_source_feeds_only_the_helper_that_captured_it() {
 /// `plain[Region] = stock[Region]` reads the element NAMED north, 20, and so
 /// does the north helper of `out[Region] = SMTH1(stock[Region], 1)`. The VM
 /// assertions are the oracle for both spellings, and the element graph must
-/// name the element the helper's fragment reads: `stock[north]` feeds the
-/// north helper and nothing else does. A describer that folded the read to
-/// `north`'s ORDINAL in `Region` (the qualified `region·north` spelling on
-/// `stock`'s own axis) would name `stock[south]` here, which is what the
-/// negative assertions refuse.
+/// name the element each fragment reads: `stock[north]` feeds the north
+/// helper and the north slot of `plain`, and nothing else does. The two
+/// spellings are described by one rule -- the helper through its
+/// element-pinned fragment (`FragmentInput::element_pinned_target`), the
+/// plain read through the IR's `PerElement` site resolving the same
+/// `executed_read_correspondence` -- so they cannot disagree. A describer
+/// that folded the read to `north`'s ORDINAL in `Region` (the qualified
+/// `region·north` spelling on `stock`'s own axis) would name `stock[south]`
+/// here, and one that paired the two declared lists by nothing would
+/// broadcast every `stock` element into every `plain` slot; the negative
+/// assertions refuse both.
 #[test]
 fn qualified_index_edge_follows_the_plain_equations_name_first_read() {
     let project = TestProject::new("qualified_name_first")
@@ -190,6 +196,11 @@ fn qualified_index_edge_follows_the_plain_equations_name_first_read() {
     assert_no_edge(&edges, "stock[south]", "$⁚out⁚0⁚arg0⁚north");
     assert_edge(&edges, "stock[south]", "$⁚out⁚0⁚arg0⁚south");
     assert_no_edge(&edges, "stock[north]", "$⁚out⁚0⁚arg0⁚south");
+    // The plain spelling: the same read, the same edges.
+    assert_edge(&edges, "stock[north]", "plain[north]");
+    assert_no_edge(&edges, "stock[south]", "plain[north]");
+    assert_edge(&edges, "stock[south]", "plain[south]");
+    assert_no_edge(&edges, "stock[north]", "plain[south]");
 }
 
 /// The phantom circuits are gone: two independent per-element loops, not the

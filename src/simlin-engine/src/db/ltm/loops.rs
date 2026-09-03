@@ -333,15 +333,16 @@ pub(crate) struct ReadSliceRowParts {
 /// (`AggNode::source_read_slice(from)` -- one [`crate::ltm_agg::AxisRead`] per
 /// `from`'s axis, which holds because `from` is one of the agg's `sources`)
 /// and `from`'s dimension element lists. A `Pinned` axis is fixed to its
-/// single element; an `Iterated` axis ranges over every element of that axis;
+/// single element; an `Iterated` axis ranges over the elements of that axis
+/// some target element reads (every one for the axis's own dimension);
 /// a `Reduced` axis ranges over every element, or -- for a subset-bearing
 /// `Reduced` (a proper-subdimension StarRange, GH #766) -- over only the
 /// subset's elements, so unread rows get no per-row score and divisor-bearing
 /// reducers (MEAN, STDDEV) divide by the subset size. The agg result slot for
 /// a row is its `Iterated` coordinates in order -- remapped to the
 /// corresponding TARGET-dim element via
-/// [`crate::ltm_agg::iterated_axis_slot_elements`] when the axis is a
-/// positionally-mapped pair (GH #534; identity in the literal case), so the
+/// [`crate::ltm_agg::iterated_axis_slot_elements`] when the axis reads a
+/// foreign source dimension (GH #534; identity in the literal case), so the
 /// `{from}[<row>]→{agg}[<slot>]` names the element graph and the link scores
 /// emit agree by construction.
 ///
@@ -374,7 +375,15 @@ pub(crate) fn read_slice_row_parts(
             AxisRead::Iterated { dim, source_dim } => {
                 let slots =
                     crate::ltm_agg::iterated_axis_slot_elements(dim, source_dim, elems, dim_ctx)?;
-                Some((elems.clone(), Some(slots)))
+                // A source element no target element reads is not a row
+                // (`energy[nonrenewable]` over `energy[source]` reads the
+                // subrange's elements and no other).
+                let (read_elems, read_slots): (Vec<String>, Vec<String>) = elems
+                    .iter()
+                    .zip(slots)
+                    .filter_map(|(e, slot)| slot.map(|slot| (e.clone(), slot)))
+                    .unzip();
+                Some((read_elems, Some(read_slots)))
             }
             AxisRead::Reduced { subset } => {
                 Some((subset.clone().unwrap_or_else(|| elems.clone()), None))

@@ -208,11 +208,13 @@ fn classify_subscript_shape(
 /// source's axis at that position or a literal element of that axis -- and
 /// classify it:
 ///
-/// - **all axes `Iterated`** ⇒ [`RefShape::Bare`] (the
-///   same-element-on-shared-dims reference, GH #511: `row_sum[Region]`
-///   inside `growth[Region,Age]` reads the same `Region` element, which
-///   `emit_edges_for_reference`'s `Bare` arm projects via
-///   `expand_same_element`);
+/// - **all axes `Iterated`, paired as the declared dimension lists pair**
+///   ⇒ [`RefShape::Bare`] (the same-element-on-shared-dims reference,
+///   GH #511: `row_sum[Region]` inside `growth[Region,Age]` reads the same
+///   `Region` element, which `emit_edges_for_reference`'s `Bare` arm projects
+///   via `expand_same_element` -- whose pairing, `bare_axis_pairing`, must
+///   therefore reproduce the subscript's; where it cannot, the reference is
+///   `PerElement` below);
 /// - **mixed `Iterated` + `Pinned`** ⇒ [`RefShape::PerElement`] (GH #525,
 ///   T6 of the shape-expressiveness design: `pop[Region, young]` inside an
 ///   A2A-over-`Region` equation reads the same `Region` element pinned at
@@ -232,22 +234,22 @@ fn classify_subscript_shape(
 /// here -- a non-reducer reference never collapses an axis -- so wildcard
 /// shapes keep their `classify_subscript_shape` classification.
 ///
-/// A mapped iterated index (`State[i]` over a source declared with
-/// `Region[i]`) is accepted when `classify_axis_access`'s
-/// `iterated_axis_slot_elements` / `positional_correspondence` gate
-/// yields a usable positional remap -- in EITHER declaration direction
-/// (GH #757), an explicit element map included since GH #997 (this spelling
-/// is folded to an ordinal and never reads the map). A position-mismatched
-/// subscript
-/// like `row_sum[D2]` inside `growth[D1,D2]` where `row_sum` is over `D1`
-/// is a *genuine* cross-element reference -- no axis classifies -- so it
-/// returns `None` and keeps its `DynamicIndex` classification.
+/// A foreign-axis iterated index (`State[i]` over a source declared with
+/// `Region[i]`) is accepted when `classify_axis_access` finds the executed
+/// correspondence (`DimensionsContext::executed_read_correspondence`: shared
+/// element names, or a mapping declared in EITHER declaration direction, an
+/// explicit element map included and followed -- GH #757, GH #997). A
+/// position-mismatched subscript like `row_sum[D2]` inside `growth[D1,D2]`
+/// where `row_sum` is over `D1` is a *genuine* cross-element reference -- no
+/// axis classifies -- so it returns `None` and keeps its `DynamicIndex`
+/// classification.
 ///
 /// Returns `None` when the subscript is not statically describable per
 /// axis; the caller then falls back to [`classify_subscript_shape`].
 fn classify_iterated_dim_shape(
     indices: &[crate::ast::IndexExpr2],
     source_dims: &[crate::dimensions::Dimension],
+    target_dims: &[crate::dimensions::Dimension],
     target_iterated_dims: &[String],
     dim_ctx: &crate::dimensions::DimensionsContext,
 ) -> Option<RefShape> {
@@ -281,84 +283,58 @@ fn classify_iterated_dim_shape(
         // `classify_subscript_shape` fallback (identical resolution rules).
         return None;
     }
-    // Two projected axes naming the SAME target dimension are resolved from the
-    // one active element of it, so the reference reads that dimension's DIAGONAL
-    // (`target[D] = matrix[D,D]` reads `matrix[d,d]`, and
-    // `target[State] = matrix[State,State]` over a `matrix[Region1,Region2]`
-    // source reads `matrix[map1(s), map2(s)]` -- both measured in
-    // `mapped_reference_semantics_tests`). `Bare` cannot express that, for the
-    // same reason as the `MappedRead` note below: `expand_same_element` sees only
-    // the two variables' dimension lists, so a repeated target dimension either
-    // unions the two axes' candidates (`matrix[D,D]`, 15 edges over a 3x3 source
-    // where 3 are read) or claims the position for the first axis and leaves the
-    // second broadcasting (`matrix[State,State]`, 9 edges). `PerElement`'s
-    // `read_slice_rows` derivation drives axes sharing a target dimension from
-    // one coordinate and lands exactly the executed rows.
+    // All-`Iterated` canonicalizes to `Bare` exactly when the two declared
+    // dimension LISTS reproduce the pairing the subscript spells. `Bare`
+    // carries no axes: `expand_same_element` (the element graph and
+    // discovery's from-node projection) and `link_score_dimensions` (the
+    // arrayed score's admission) re-derive the pairing from the lists through
+    // `bare_axis_pairing`, so a `Bare` verdict is a promise that the lists say
+    // what the subscript said. Where they cannot -- `stock[Region]` over an
+    // `Other`-declared source that shares element names with `Region` under
+    // no declared mapping, or a transposition the matcher would allocate the
+    // other way round -- the reference keeps its axes as `PerElement`, whose
+    // `read_slice_rows` derivation drives each axis by the target dimension
+    // the index names and resolves the element through the one executed
+    // correspondence: exactly the read `build_view_from_ops` performs (a
+    // dimension-name index pairs with the ACTIVE dimension it names, then
+    // resolves name-first), and never a cross-product.
     //
-    // The retarget is narrowed to a dimension the TARGET names ONCE, and the
-    // reason is the SCORE surface, not the edges.
-    //
-    // `RefShape` decides both. A target that repeats the dimension
-    // (`cube[D1,D1] = ... pop[D1,D1] ...`) is one `emit_per_element_link_scores`
-    // refuses outright -- every per-element derivation addresses a target axis by
-    // NAME and there are two coordinates for one name -- so retargeting such a
-    // reference would silently convert an EMITTED `Bare` link score into the loud
-    // per-element skip, on every edge into or out of a repeated-dimension
-    // variable (measured on a three-variable fixture: `pop -> cube` AND
-    // `cube -> grow` both flip, and loops through them stop being scored). That
-    // is a real product decision about a shape this change is not about, and it
-    // is not one to make as a side effect of an edge fix.
-    //
-    // What the narrowing COSTS is stated plainly because it is not zero: on
-    // EDGES the retarget would be better. Over `cube[D1,D1] = pop[D1,D1]` the
-    // simulation makes four reads (both indices resolve to the target's FIRST
-    // `D1` axis, so `cube[r1,r2]` reads `pop[r1,r1]`); `Bare` emits 12 edges
-    // covering 2 of them, and `PerElement` would emit 2 edges covering the SAME
-    // 2 with no phantoms. Both miss the same two real edges, so the retarget
-    // removes phantoms without fixing the missing half -- which is the half that
-    // breaks loop discovery. Fixing that half is `expand_same_element`'s
-    // name-keyed target positions, and doing it there lets the edges and the
-    // scores move together instead of trading one for the other. Pinned, both
-    // directions, by
-    // `mapped_reference_semantics_tests::a_repeated_target_dimension_reads_each_axis_on_the_executed_path`.
-    //
-    // Blast radius, measured: Vensim rejects a repeated-dimension declaration
-    // ("DimA appears more than once on LHS", `vensim-probes/repeated_dimension.mdl`
-    // in Vensim DSS 2026-08-04), so no MDL-imported model reaches this shape --
-    // it is confined to hand-authored XMILE/JSON/protobuf, which the XMILE v1.0
-    // spec does sanction by example. Bounded, not closed.
+    // A target that REPEATS a dimension pairs each occurrence with its own
+    // axis on both sides (the matcher is positional and one-to-one, as
+    // `normalize_subscripts3` is), so `cube[D1,D1] = pop[D1,D1]` is `Bare` and
+    // reads the cell, while `target[D1] = m[D1,D1]` leaves the second axis
+    // unpaired and is `PerElement`. The per-element emitter declines a
+    // repeated-dimension TARGET outright (`emit_repeated_target_dimension_warning`:
+    // its row derivations address a target axis by name), which is why the
+    // `Bare` arm, not a retarget, is what keeps `pop -> cube` scoreable.
     let all_iterated = axes.iter().all(|a| matches!(a, AxisRead::Iterated { .. }));
     if all_iterated {
-        let mut seen = std::collections::HashSet::new();
-        let repeats_a_singly_named_target_dim = axes
-            .iter()
-            .filter_map(|a| match a {
-                AxisRead::Iterated { dim, .. } => Some(dim.as_str()),
-                // Unreachable: `all_iterated` has just excluded all three.
-                AxisRead::Pinned(_) | AxisRead::Reduced { .. } | AxisRead::MappedRead { .. } => {
-                    None
-                }
-            })
-            .any(|dim| {
-                !seen.insert(dim) && target_iterated_dims.iter().filter(|t| *t == dim).count() == 1
-            });
-        if !repeats_a_singly_named_target_dim {
+        let pairing = crate::db::analysis::bare_axis_pairing(
+            source_dims,
+            target_dims,
+            dim_ctx,
+            crate::db::analysis::BareSpelling::Equation,
+        );
+        let lists_reproduce_the_subscript = axes.iter().zip(&pairing).all(|(axis, paired)| {
+            let AxisRead::Iterated { dim, .. } = axis else {
+                return false;
+            };
+            paired
+                .target_pos()
+                .is_some_and(|pos| target_dims.get(pos).is_some_and(|t| t.name() == dim))
+        });
+        if lists_reproduce_the_subscript {
             return Some(RefShape::Bare);
         }
     }
-    // Everything else -- a mixed `Iterated`+`Pinned` subscript, and since
-    // GH #997 any subscript carrying a `MappedRead` axis -- is `PerElement`.
-    //
-    // A `MappedRead` axis deliberately does NOT collapse to `Bare` even when
-    // every axis is one. `Bare`'s element edges go through
-    // `db::analysis::expand_same_element`, which cannot see the reference site
-    // and so emits the union of both spellings' diagonals; `PerElement`'s go
-    // through the per-axis `read_slice_rows` derivation, which resolves each
-    // axis by ITS OWN rule and lands the exact rows execution reads. The
-    // per-(row, target-element) link scores follow the same derivation, so the
-    // names and the edges agree by construction -- which is the property a
-    // many-to-one element map needs, since several target elements then share
-    // one source row.
+    // Everything else -- a mixed `Iterated`+`Pinned` subscript, an
+    // all-`Iterated` one the lists cannot pair, and since GH #997 any
+    // subscript carrying a `MappedRead` axis -- is `PerElement`: its
+    // `read_slice_rows` derivation resolves each axis by ITS OWN pairing and
+    // lands exactly the rows execution reads, and the per-(row, target-element)
+    // link scores follow the same derivation, so the names and the edges agree
+    // by construction -- which is the property a many-to-one element map
+    // needs, since several target elements then share one source row.
     Some(RefShape::PerElement { axes })
 }
 
@@ -378,6 +354,9 @@ struct WalkCtx<'a> {
     /// order they appear on `Ast::ApplyToAll` / `Ast::Arrayed`). Empty for
     /// `Ast::Scalar` -- a scalar target has no iterated-dimension subscript.
     target_iterated_dims: Vec<String>,
+    /// The same dimensions as declared, for `bare_axis_pairing` (the
+    /// `Bare`-vs-`PerElement` decision of `classify_iterated_dim_shape`).
+    target_dims: &'a [crate::dimensions::Dimension],
     dim_ctx: &'a crate::dimensions::DimensionsContext,
 }
 
@@ -794,15 +773,16 @@ fn collect_all_reference_sites_and_occurrences(
     let width_rejection = ast_site_width_rejection(ast, site_children_limit());
     // The target equation's iterated dimensions drive the #511 iterated-
     // subscript recognition; `Ast::Scalar` has none.
-    let target_iterated_dims: Vec<String> = match ast {
-        crate::ast::Ast::Scalar(_) => Vec::new(),
-        crate::ast::Ast::ApplyToAll(dims, _) | crate::ast::Ast::Arrayed(dims, _, _, _) => {
-            dims.iter().map(|d| d.name().to_string()).collect()
-        }
+    let target_dims: &[crate::dimensions::Dimension] = match ast {
+        crate::ast::Ast::Scalar(_) => &[],
+        crate::ast::Ast::ApplyToAll(dims, _) | crate::ast::Ast::Arrayed(dims, _, _, _) => dims,
     };
+    let target_iterated_dims: Vec<String> =
+        target_dims.iter().map(|d| d.name().to_string()).collect();
     let ctx = WalkCtx {
         variables,
         target_iterated_dims,
+        target_dims,
         dim_ctx,
     };
     // The `WalkAccum` borrows `sites`/`occurrences`; scope it so those borrows
@@ -974,10 +954,38 @@ fn walk_all_in_expr(
         Expr2::Const(..) => {}
         Expr2::Var(ident, _, _) => {
             if ctx.variables.contains_key(ident) {
-                acc.push_ref_site(ident.as_str(), RefShape::Bare, target_element, reducer_keys);
+                // A reducer's bare arrayed argument reads what pass 0 spells
+                // for it: the axes the equation's pairing relates to the
+                // enclosing iteration read the active element, the rest the
+                // whole axis (`ltm_agg::compute_read_slice`). When NO axis
+                // pairs -- `SUM(src)` over `src[dimb]` under a `suba`
+                // iteration related to `dimb` only through a parent mapping
+                // pass 0 withholds, or in a scalar owner -- the read is the
+                // whole array: `Wildcard`, exactly as `SUM(src[*])` is, never
+                // `Bare`, whose consumers would project an empty pairing as a
+                // broadcast and retarget the score onto it.
+                let shape = if reducer_keys.is_empty() {
+                    RefShape::Bare
+                } else {
+                    let from_dims = lookup_dims(ident.as_str());
+                    let pairs_some_axis = crate::db::analysis::bare_axis_pairing(
+                        &from_dims,
+                        ctx.target_dims,
+                        ctx.dim_ctx,
+                        crate::db::analysis::BareSpelling::Equation,
+                    )
+                    .iter()
+                    .any(|axis| axis.target_pos().is_some());
+                    if from_dims.is_empty() || pairs_some_axis {
+                        RefShape::Bare
+                    } else {
+                        RefShape::Wildcard
+                    }
+                };
+                acc.push_ref_site(ident.as_str(), shape.clone(), target_element, reducer_keys);
                 acc.push_occurrence(
                     OccurrenceRef::Variable(ident.as_str().to_string()),
-                    RefShape::Bare,
+                    shape,
                     Vec::new(),
                     reducer_keys,
                     index_nested,
@@ -1013,6 +1021,7 @@ fn walk_all_in_expr(
                 let shape = classify_iterated_dim_shape(
                     indices,
                     &from_dims,
+                    ctx.target_dims,
                     &ctx.target_iterated_dims,
                     ctx.dim_ctx,
                 )
@@ -1472,10 +1481,10 @@ impl OccurrenceAxis {
 /// `(row_sum, growth)`). See [`derive_other_dep_verdict`] and [`OccurrenceAxis`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OtherDepVerdict {
-    /// Collapse the subscript to a bare `Var(dep)` before the `PREVIOUS()` wrap
-    /// (the indices correspond position-for-position to the dep's declared axes,
-    /// or the dep's dims are un-threadable and the historical permissive
-    /// collapse applies).
+    /// Collapse the subscript to a bare `Var(dep)` before the `PREVIOUS()` wrap:
+    /// the occurrence is `Bare` -- the dep's declared axes reproduce the pairing
+    /// its indices spell, so the bare spelling is the same read -- or the dep's
+    /// dims are un-threadable and the historical permissive collapse applies.
     Collapse,
     /// Not an iterated-dim subscript at all (a literal, wildcard, dynamic index,
     /// a name outside the target's iterated dims, or more indices than the
@@ -1509,6 +1518,7 @@ pub(crate) enum OtherDepVerdict {
 /// `NotIterated`) are pinned by `under_arity_iterated_subscript_is_mismatch_not_collapse`
 /// / `over_target_arity_iterated_subscript_is_not_iterated` in `db::ltm_ir_tests`.
 pub(crate) fn derive_other_dep_verdict(
+    shape: &RefShape,
     axes: &[OccurrenceAxis],
     dep_arity: Option<usize>,
     target_iterated_count: usize,
@@ -1531,6 +1541,16 @@ pub(crate) fn derive_other_dep_verdict(
         )
     });
     if !all_iterated_or_mismatched {
+        return OtherDepVerdict::NotIterated;
+    }
+    // A `PerElement` occurrence reads through a pairing the two declared
+    // dimension lists do not reproduce -- that is the shape's definition
+    // (`classify_iterated_dim_shape`) -- so the bare spelling is a different
+    // read: `energy[nonrenewable]` over an `energy[source]` names each element
+    // of the subrange, while a bare `energy` does not even lower under a
+    // `nonrenewable` iteration. The subscript is kept; frozen as written it is
+    // the equation's own read one step back.
+    if matches!(shape, RefShape::PerElement { .. }) {
         return OtherDepVerdict::NotIterated;
     }
     // The dep's declared arity gates the collapse: un-threadable keeps the
@@ -1593,18 +1613,16 @@ pub(crate) struct OccurrenceSite {
     /// gate, which scopes its per-occurrence shape comparison to non-reducer
     /// references and asserts both streams agree on reducer context.
     ///
-    /// Deliberately NOT consumed by the transform's GH #779
-    /// bare-reducer-feeder decline, which asks a DIFFERENT question with its
-    /// own walk: "does this subtree collapse to a scalar?"
-    /// (`ltm_agg::reducer_collapses_to_scalar`) rather than "did an aggregate
-    /// node get minted for it?" (`builtin_routes_through_agg`, which sets this
-    /// bit). The two answers are inverted on exactly `SIZE` and `RANK`, and
-    /// that inversion IS the difference between the questions -- `SIZE` is a
-    /// scalar count that is never hoisted, `RANK` is array-valued but gets an
-    /// array-valued agg. Consuming this bit there would flip a bare source
-    /// inside `RANK(...)` from scored to loudly declined, a user-visible score
-    /// change with no argument behind it. Assessed and resolved that way in
-    /// GH #982; `ltm_agg::reducer_collapses_to_scalar`'s doc carries the full
+    /// A different question from "does this subtree collapse to a scalar?"
+    /// (`ltm_agg::reducer_collapses_to_scalar`, the transform's own walk):
+    /// this bit answers "can an aggregate node be minted for it?"
+    /// (`builtin_routes_through_agg`). The two answers are inverted on
+    /// exactly `SIZE` and `RANK`, and that inversion IS the difference
+    /// between the questions -- `SIZE` is a scalar count that is never
+    /// hoisted, `RANK` is array-valued but gets an array-valued agg. It is
+    /// also what `occurrence_realizes_shape` reads to hold a reducer's
+    /// wildcard argument live under its edge's `DynamicIndex` site.
+    /// `ltm_agg::reducer_collapses_to_scalar`'s doc carries the full
     /// comparison and `ltm_agg::REDUCER_DECISION_TABLE` pins both predicates,
     /// row by row, so neither can move silently.
     pub in_reducer: bool,

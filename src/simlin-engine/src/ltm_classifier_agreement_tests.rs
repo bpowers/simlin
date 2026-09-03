@@ -1302,8 +1302,8 @@ fn agree_mapped_dim_forward_declaration_is_bare() {
 fn agree_mapped_dim_reverse_declaration_is_bare() {
     // GH #757 reverse direction: the mapping is declared `State -> Region`,
     // but the target iterates `Region` and reads a `State`-dimensioned source.
-    // `positional_correspondence` accepts both declaration directions, so both
-    // families classify `speed[Region]` as Bare.
+    // `executed_read_correspondence` accepts both declaration directions, so
+    // both families classify `speed[Region]` as Bare.
     let tp = TestProject::new("main")
         .with_sim_time(0.0, 3.0, 1.0)
         .named_dimension("Region", &["r1", "r2"])
@@ -1316,10 +1316,9 @@ fn agree_mapped_dim_reverse_declaration_is_bare() {
 #[test]
 fn agree_element_mapped_iterated_dim_is_bare() {
     // An EXPLICIT element map on the ITERATED spelling: `pop[State]` names the
-    // dimension the equation iterates, which execution folds to an ordinal
-    // (GH #997), so `positional_correspondence` answers and both families
-    // classify Bare. This asserted DynamicIndex until GH #997, when one
-    // correspondence served both spellings and answered neither.
+    // dimension the equation iterates and is resolved name-first, then through
+    // the map (GH #997); the declared lists reproduce that pairing (a mapped
+    // pair), so both families classify Bare.
     let tp = TestProject::new("main")
         .with_sim_time(0.0, 3.0, 1.0)
         .named_dimension("Region", &["r1", "r2"])
@@ -1372,9 +1371,9 @@ fn agree_element_mapped_source_own_dim_is_per_element() {
 
 #[test]
 fn agree_many_to_one_mapped_source_own_dim_is_per_element() {
-    // The cardinality `positional_correspondence` cannot describe at all
-    // (three target elements, two source ones), so this row is reachable only
-    // through the executed rule -- C-LEARN's shape.
+    // The cardinality no positional derivation could describe (three target
+    // elements, two source ones), reachable only through the executed rule --
+    // C-LEARN's shape.
     let tp = TestProject::new("main")
         .with_sim_time(0.0, 3.0, 1.0)
         .named_dimension("Region", &["r1", "r2"])

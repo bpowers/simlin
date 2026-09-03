@@ -1923,9 +1923,11 @@ fn an_unrelated_equation_edit_does_not_regenerate_every_link_score() {
 /// exactly this -- a cross-dimension read between two dimensions declared to
 /// have nothing to do with each other compiles and produces numbers).
 /// `build_view_from_ops` is never reached. The DESCRIBER declines because
-/// `allocate_implicit_axes_partial` pairs axes by name or by a DECLARED
-/// mapping and this pair has neither, so `dep_element_pins` can project no axis
-/// of `aggregated` and the dep is absent from the pin table entirely.
+/// `db::bare_axis_pairing` relates axes by name, by a DECLARED mapping, or by
+/// equal indexed size, and `DimensionsContext::executed_read_correspondence`
+/// resolves an element by name or through a map -- this pair has none of
+/// those, so `dep_element_pins` can project no axis of `aggregated` and the
+/// dep is absent from the pin table entirely.
 ///
 /// The element names are deliberately disjoint. An earlier revision used `cop`'s
 /// own names on `agg`, which made the values look name-matched when the read is

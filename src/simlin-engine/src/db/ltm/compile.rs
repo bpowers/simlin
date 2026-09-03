@@ -144,9 +144,9 @@ pub(crate) fn shaped_link_score_executions() -> usize {
 ///   built; emit it.
 /// - [`Unscoreable`](ShapedLinkScore::Unscoreable) -- a
 ///   [`PartialEquationError`](crate::ltm_augment::PartialEquationError)
-///   (the GH #311 parse class, the GH #526/T7 both-legs-doomed
-///   mismatched-dep class, or the GH #779 bare-reducer-feeder decline)
-///   made this `(from, to)` edge unscoreable. The loud `Warning` is the
+///   (the GH #311 parse class, or the GH #526/T7 both-legs-doomed
+///   mismatched-dep class) made this `(from, to)` edge unscoreable. The
+///   loud `Warning` is the
 ///   variant's payload -- a fact on the memoized value, never accumulated by
 ///   the query -- and the caller MUST record the edge in its
 ///   `LtmWarnings` so loop scores traversing it are DROPPED (the #758
@@ -341,12 +341,10 @@ pub fn shaped_link_score<'db>(
     // [`force_partial_equation_error`] override was added to exercise the
     // unscoreable-edge contract end-to-end (per
     // docs/dev/rust.md#test-time-budgets -- a test-only override and a tiny
-    // fixture, not a contrived production input). The GH #779
-    // bare-reducer-feeder decline has since made the terminal LIVE-reachable
-    // (`bare_feeder_of_unhoisted_reducer_declines_loudly`); the seam is
-    // retained because it can doom ONE arbitrary edge of a multi-edge model
+    // fixture, not a contrived production input). The seam is retained
+    // because it can doom ONE arbitrary edge of a multi-edge model
     // independent of any equation shape, which the surgical-degradation
-    // tests still need. (The AGG-HALF feeder emitter's DUPLICATE-DIM
+    // tests need. (The AGG-HALF feeder emitter's DUPLICATE-DIM
     // `UnfreezablePartial` bail -- `pin_iterated_dim_indices`, PR #787 --
     // was its only live square-source caller, but the GH #778/#785 decline
     // now skips that whole shape at agg minting, so that specific terminal
@@ -372,8 +370,7 @@ pub fn shaped_link_score<'db>(
     // (set when `shape` is not `Bare`) with the per-shape policy result.
     // A `PartialEquationError` means the target's equation text could not
     // be rendered as a compilable ceteris-paribus partial -- the GH #311
-    // parse class, the GH #526/T7 both-legs-doomed mismatched-dep class, or
-    // the GH #779 bare-reducer-feeder decline.
+    // parse class, or the GH #526/T7 both-legs-doomed mismatched-dep class.
     // Report the edge as `Unscoreable`, carrying the warning, so the emission
     // loop records both and DROPS dependent loop scores
     // (GH #758/#780); emitting a silently non-ceteris-paribus link score

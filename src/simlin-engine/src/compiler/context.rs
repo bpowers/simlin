@@ -387,12 +387,14 @@ impl Context<'_> {
     /// `test_get_implicit_subscript_off_translates_through_mapping_parent`,
     /// which invokes [`Self::get_implicit_subscript_off`] directly.
     ///
-    /// That split is why the flow reference is the one subscript-less spelling
-    /// that can follow an explicit element map (through the
-    /// `translate_via_mapping` fallback in
-    /// [`Self::get_implicit_subscript_off`], though only when the source
-    /// dimension does not already contain an element of the same NAME) while
-    /// the bare in-equation one is positional; both halves are pinned in
+    /// That split is why the flow reference and the bare in-equation one are
+    /// two rules: the flow pairs axes under the full context (a mapping onto a
+    /// parent dimension included) and resolves the paired element through
+    /// `translate_via_mapping`, though only when the source dimension does not
+    /// already contain an element of the same NAME; the in-equation one is
+    /// rewritten by pass 0 under `DirectMappingsOnly` and resolves its
+    /// dimension-named subscript name-first, then through the map
+    /// (`build_view_from_ops`). Both halves are pinned in
     /// `crate::mapped_reference_semantics_tests`. It is also why the GH #996
     /// hazard fixture there is built from a two-axis FLOW under a stock: no
     /// ordinary expression can reach this allocation at all.

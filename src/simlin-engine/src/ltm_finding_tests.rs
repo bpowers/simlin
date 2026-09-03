@@ -271,6 +271,7 @@ fn test_parse_link_offsets_a2a_expansion() {
         .into_iter()
         .collect(),
         dim_ctx: crate::dimensions::DimensionsContext::default(),
+        flow_to_stock: Default::default(),
     };
 
     let parsed = parse_link_offsets(&results, &ltm_vars, &dims, &expansion);
@@ -406,6 +407,7 @@ fn test_parse_link_offsets_scalar_source_projects_to_bare() {
         .into_iter()
         .collect(),
         dim_ctx: crate::dimensions::DimensionsContext::default(),
+        flow_to_stock: Default::default(),
     };
 
     let parsed = parse_link_offsets(&results, &ltm_vars, &dims, &expansion);
@@ -476,6 +478,7 @@ fn test_parse_link_offsets_lower_dim_source_projects_and_broadcasts() {
         .into_iter()
         .collect(),
         dim_ctx: crate::dimensions::DimensionsContext::default(),
+        flow_to_stock: Default::default(),
     };
 
     let parsed = parse_link_offsets(&results, &ltm_vars, &dims, &expansion);
@@ -756,6 +759,7 @@ fn test_parse_link_offsets_dedupes_a2a_bare_over_fixed_index() {
         .into_iter()
         .collect(),
         dim_ctx: crate::dimensions::DimensionsContext::default(),
+        flow_to_stock: Default::default(),
     };
 
     let parsed = parse_link_offsets(&results, &ltm_vars, &dims, &expansion);

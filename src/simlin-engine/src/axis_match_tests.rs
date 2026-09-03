@@ -14,7 +14,7 @@
 //!
 //! | # | replaced matcher | arms it had, in its own order |
 //! |---|---|---|
-//! | A | `compiler::dimensions::allocate_implicit_axes_partial` | name, mapping (forward, forward-to-a-parent, reverse), size |
+//! | A | the LTM dependency pins' own partial allocation (today `db::bare_axis_pairing`, a projection of the one matcher) | name, mapping (forward, forward-to-a-parent, reverse), size |
 //! | B | `compiler::dimensions::allocate_implicit_axes` | A, requiring every axis |
 //! | C | `compiler::dimensions::match_dimensions_with_mapping` | name, mapping (forward, reverse, common target), size |
 //! | D | `compiler::dimensions::find_dimension_reordering` | name only, equal arity, bijection |

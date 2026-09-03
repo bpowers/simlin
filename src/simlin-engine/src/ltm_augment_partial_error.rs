@@ -75,23 +75,19 @@ pub(crate) enum PartialEquationErrorKind {
     /// Neither the changed-first nor the changed-last ceteris-paribus
     /// convention can be rendered as a compilable equation (GH #743).
     UnfreezablePartial,
-    /// The live source is a BARE reference to an arrayed variable inside an
-    /// array-reducer argument (GH #779): the changed-last partial cannot be
-    /// rendered faithfully for it, and the spelling's own execution
-    /// semantics carry a spurious factor (GH #789). Selects a diagnostic
-    /// that names the shape and the subscripted-spelling workaround.
-    BareReducerFeeder,
     /// An arrayed dep of the target's equation cannot be projected onto the
     /// target element this partial is for, so no correct element subscript
     /// exists for it. `equation_text` carries `dep@element`. Emitting anyway
     /// leaves the dep's dimension-name subscript in a scalar fragment, which
     /// becomes a `PREVIOUS`-capture helper that cannot lower WHILE THE PARENT
     /// STILL COMPILES -- a score that silently reads part of its own equation
-    /// as 0. The reachable cause is a pair with no DECLARED correspondence at
-    /// all -- two dimensions sharing element names, which the simulation
-    /// resolves by name while `allocate_implicit_axes_partial` pairs axes only
-    /// by name or by a declared mapping. (An explicit element map was the
-    /// reachable cause until GH #997 made that spelling projectable.)
+    /// as 0. The reachable cause is a pair with NO correspondence the
+    /// describers admit: two dimensions with disjoint element names under no
+    /// declared mapping (the ordinal read the simulation performs there at
+    /// equal cardinality is deliberately left undescribed, GH #527), or a
+    /// many-to-one or transposed shape the row derivation declines. A pair
+    /// sharing element names, and an explicit element map, both project
+    /// (`DimensionsContext::executed_read_correspondence`, GH #997).
     UnprojectableDep,
     /// The target's equation applies an ORDER-STATISTIC, array-producing
     /// builtin (`VECTOR SORT ORDER`, `RANK`, `ALLOCATE AVAILABLE`,
@@ -140,13 +136,6 @@ impl PartialEquationError {
         PartialEquationError {
             equation_text: target.to_string(),
             kind: PartialEquationErrorKind::MissingTypedTarget,
-        }
-    }
-
-    pub(super) fn bare_reducer_feeder(equation_text: &str) -> Self {
-        PartialEquationError {
-            equation_text: equation_text.to_string(),
-            kind: PartialEquationErrorKind::BareReducerFeeder,
         }
     }
 

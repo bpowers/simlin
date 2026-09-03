@@ -1431,32 +1431,6 @@ fn test_ltm_partial_equation_warning_message_contract() {
         msg.contains("array slice"),
         "the unfreezable warning must explain the unfreezable-slice cause; got: {msg}"
     );
-
-    // GH #779: the bare-reducer-feeder kind names the actual shape (a bare
-    // arrayed reference inside a reducer argument) and the
-    // subscripted-spelling workaround, instead of the generic unfreezable
-    // text.
-    let bare_feeder_err = crate::ltm_augment::PartialEquationError {
-        equation_text: eqn_text.to_string(),
-        kind: crate::ltm_augment::PartialEquationErrorKind::BareReducerFeeder,
-    };
-    let msg = super::ltm::ltm_partial_equation_warning_message(var_name, &bare_feeder_err);
-    assert!(
-        msg.contains(var_name),
-        "the bare-feeder warning must name the skipped variable; got: {msg}"
-    );
-    assert!(
-        msg.contains(eqn_text),
-        "the bare-feeder warning must include the equation text; got: {msg}"
-    );
-    assert!(
-        msg.contains("BARE") && msg.contains("reducer"),
-        "the bare-feeder warning must name the bare-reference-inside-reducer shape; got: {msg}"
-    );
-    assert!(
-        msg.contains("subscripting the reference"),
-        "the bare-feeder warning must name the subscripted-spelling workaround; got: {msg}"
-    );
 }
 
 /// Adversarial corner case for Option A: the auto-flip gate must key on
@@ -5543,16 +5517,20 @@ fn a_target_whose_lowering_failed_is_declined_not_scored() {
 
 /// A frozen-whole reducer over a BARE arrayed argument inside an apply-to-all
 /// body lowers as execution lowers the target: per element. `x[region] =
-/// other + SUM(pop) / 1000` reads `pop[region]` under `SUM` (the plain
-/// spelling's rule), the additive `other` term keeps the `other -> x` edge
-/// clear of the GH #788 decline, and the ceteris-paribus partial for that edge
-/// freezes the reducer whole into a structural capture over `[region]` whose
-/// body is `sum(pop)`. Lowered under the shapes of its reads, that capture is
-/// `pop[e]` per element -- the value the executed `x[e]` reads -- so the score
-/// is the ratio of two per-element deltas and stays bounded by 1. (A
-/// bounds-free lowering of the same capture summed the whole array: 300 where
-/// `x[north]` read 100, and a score of 16 for a link that changes `x` by one
-/// part in a hundred.)
+/// other + SUM(pop * w[*]) / 1000` reads `pop[region]` under `SUM` (the plain
+/// spelling's rule; `w` is 1 everywhere, so the sum is `2 * pop[e]`). The
+/// wildcard co-source `w[*]` keeps the reducer out of the aggregate hoist --
+/// its slice disagrees with the iterated `pop`'s, the I1 acceptance -- where a
+/// plain `SUM(pop)` is hoisted like its iterated twin
+/// (`ltm_array_agg::an_additive_bare_reducer_argument_scores_its_own_element`).
+/// So the ceteris-paribus partial for `other -> x` freezes the reducer whole
+/// into a structural capture over `[region]` whose body is `sum(pop * w[*])`.
+/// Lowered under the shapes of its reads, that capture is `2 * pop[e]` per
+/// element -- the value the executed `x[e]` reads -- so the score is the ratio
+/// of two per-element deltas and stays bounded by 1. (A bounds-free lowering
+/// of the same capture summed the whole array: 600 where `x[north]` read 200,
+/// and a score far past 1 for a link that changes `x` by one part in a
+/// hundred.)
 #[test]
 fn a_frozen_whole_reducer_over_a_bare_arrayed_argument_lowers_per_element() {
     let datamodel = TestProject::new("ltm_frozen_reducer_per_element")
@@ -5561,8 +5539,9 @@ fn a_frozen_whole_reducer_over_a_bare_arrayed_argument_lowers_per_element() {
         .array_with_ranges("init[region]", vec![("north", "100"), ("south", "200")])
         .array_stock("pop[region]", "init[region]", &["growth"], &[], None)
         .array_flow("growth[region]", "pop[region] * 0.1 * x[region]", None)
-        .array_aux("x[region]", "other + SUM(pop) / 1000")
+        .array_aux("x[region]", "other + SUM(pop * w[*]) / 1000")
         .array_aux("other[region]", "1 + pop[region] / 10000")
+        .array_with_ranges("w[region]", vec![("north", "1"), ("south", "1")])
         .build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &datamodel);
@@ -5583,6 +5562,13 @@ fn a_frozen_whole_reducer_over_a_bare_arrayed_argument_lowers_per_element() {
 
     let score_prefix = "$\u{205A}ltm\u{205A}link_score\u{205A}other\u{2192}x";
     let capture = format!("$\u{205A}{score_prefix}\u{205A}0\u{205A}arg0");
+    assert!(
+        !compiled
+            .offsets
+            .keys()
+            .any(|k| k.as_str().contains("\u{205A}agg\u{205A}")),
+        "the wildcard co-source keeps the reducer out of the aggregate hoist"
+    );
     for element in ["north", "south"] {
         let pop = series(&format!("pop[{element}]"));
         // The executed read of `x` is per element: the oracle.
@@ -5590,7 +5576,7 @@ fn a_frozen_whole_reducer_over_a_bare_arrayed_argument_lowers_per_element() {
         let other = series(&format!("other[{element}]"));
         for step in 0..steps {
             assert!(
-                (x[step] - (other[step] + pop[step] / 1000.0)).abs() < 1e-9,
+                (x[step] - (other[step] + 2.0 * pop[step] / 1000.0)).abs() < 1e-9,
                 "x[{element}] step {step}: {} reads pop[{element}] = {} under SUM",
                 x[step],
                 pop[step]
@@ -5599,8 +5585,8 @@ fn a_frozen_whole_reducer_over_a_bare_arrayed_argument_lowers_per_element() {
         // The frozen reducer's capture reads the same element.
         assert_eq!(
             series(&format!("{capture}[{element}]")),
-            pop,
-            "the capture over [region] holds sum(pop) evaluated at {element}"
+            pop.iter().map(|p| 2.0 * p).collect::<Vec<f64>>(),
+            "the capture over [region] holds sum(pop * w[*]) evaluated at {element}"
         );
     }
     let scores: Vec<&crate::common::Ident<crate::common::Canonical>> = compiled

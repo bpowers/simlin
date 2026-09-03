@@ -1338,11 +1338,18 @@ indices are *exactly* the target equation's iterated (apply-to-all)
 dimensions, in the position matching the source's declared dimension order --
 `row_sum[Region]` inside `growth[Region, Age] = ... + row_sum[Region] * c`,
 where each index `d_i` either names the source's `i`-th dim or a dimension
-that *maps* to it (the AC3.5 mapped case) -- classifies as `Bare`, not
-`DynamicIndex`. Such a reference reads the *same* `Region` element of
-`row_sum` per iterated tuple, so `emit_edges_for_reference` projects it via
-`expand_same_element` (`row_sum[d1] -> growth[d1, d2]` for each `d2`), not
-the N×M cross-product. (A *sliced reducer argument* with the same shape --
+that *maps* to it (the AC3.5 mapped case) -- classifies as `Bare` when the
+two declared dimension lists reproduce that pairing (`db::bare_axis_pairing`:
+by name, by a declared mapping, by equal indexed size), and as `PerElement`
+carrying the per-axis reads otherwise (shared element names under no mapping,
+a subrange over a superset, a transposition) -- never `DynamicIndex`. Each
+axis is resolved as the compiler resolves it
+(`DimensionsContext::executed_read_correspondence`: the element's name first,
+then the declared element map, in either declaration direction). A `Bare`
+reference reads the *same* `Region` element of `row_sum` per iterated tuple,
+so `emit_edges_for_reference` projects it via `expand_same_element`
+(`row_sum[d1] -> growth[d1, d2]` for each `d2`), not the N×M cross-product;
+a `PerElement` one is projected per target element through its axes. (A *sliced reducer argument* with the same shape --
 `SUM(matrix[D1, *])` inside an A2A body over `D1` -- is a different path: it
 is hoisted into an arrayed agg by `enumerate_agg_nodes`, so its reference is
 `ThroughAgg` and its `Wildcard` shape is ignored. The iterated-dim `Bare`
@@ -1360,15 +1367,20 @@ positionally-MAPPED sliced reducer (`SUM(matrix[State, *])` over
 `matrix[Region, D2]` with a positional `State→Region` mapping, GH #534) is
 hoisted too: the `Iterated` axis carries the (target, source) dimension
 pair, the agg is arrayed over the TARGET dim (`State`), and each source row
-is remapped to the slot of its positionally-corresponding target element
+is remapped to the slot of the target element that reads it
 (`iterated_axis_slot_elements` -- the preimage of
-`positional_correspondence`, which is the right rule here because
-`matrix[State, *]` names the dimension the equation ITERATES and execution
-folds that to an ordinal; an explicit element map is therefore honoured as a
-DECLARED correspondence but not READ, GH #997). The only reducers *not*
-hoisted are the dynamic-index carve-out (`SUM(pop[idx, *])`, `idx`
-non-literal -- not statically describable, reclassified `DynamicIndex`), a
-pair with no declared correspondence at all, and a `MappedRead` axis
+`DimensionsContext::executed_read_correspondence`: `matrix[State, *]` names
+the dimension the equation ITERATES, the index survives to
+`IndexOp::ActiveDimRef`, and `build_view_from_ops` resolves it name-first,
+then through the declared element map, GH #997; a source element no target
+element reads -- a superset source read through a subrange -- is no row).
+A BARE arrayed argument reads what pass 0 spells for it (its axes paired with
+the enclosing iteration by `match_axes_partial` under `DirectMappingsOnly`,
+the rest reduced), so `SUM(matrix[D1, *] * frac)` and `SUM(other)` inside an
+A2A body hoist exactly as `frac[D1]` and `SUM(other[D1])` do. The only
+reducers *not* hoisted are the dynamic-index carve-out (`SUM(pop[idx, *])`,
+`idx` non-literal -- not statically describable, reclassified
+`DynamicIndex`), a pair with no correspondence at all, and a `MappedRead` axis
 (`SUM(matrix[Region, *])` naming a NON-iterated dimension, GH #997: its
 executed rule admits a many-to-one correspondence that the one-slot-per-row
 remap cannot express, so `compute_read_slice` declines it) -- all of which
@@ -1470,10 +1482,10 @@ slot per `D1` element); `SUM(matrix3d[D1, NYC, *])` over an A2A-`D1` body ⇒
 `matrix[Region, D2]` inside an A2A body over `State` (positional
 `State→Region` mapping) ⇒ `[Iterated{state, region}, Reduced]`,
 `result_dims = [State]` -- the agg is arrayed over the TARGET's iterated
-dim, and the emitters remap each source row to the slot of its
-positionally-corresponding target element (`iterated_axis_slot_elements`,
-the preimage inversion of `positional_correspondence`, the rule the ITERATED
-spelling gets). The carve-outs (tracked tech debt;
+dim, and the emitters remap each source row to the slot of the target
+element that reads it (`iterated_axis_slot_elements`, the preimage
+inversion of `executed_read_correspondence`, the one rule every
+dimension-named spelling gets). The carve-outs (tracked tech debt;
 the conservative cross-product / coarse link score stays in place) are: a
 reducer over a *dynamic index* (`SUM(pop[idx, *])`, `idx` non-literal -- the
 IR reclassifies its reference to `DynamicIndex`); a mapped sliced reducer
@@ -1936,9 +1948,8 @@ cases remain deliberate carve-outs:
   so a non-uniform x-spacing can still misclassify (GH #536).
 - **Smaller magnitude/over-conservatism nits.** A transposed non-live array
   dependency's magnitude estimate in an A2A link-score partial can be
-  imprecise (GH #526); `expand_same_element` takes the full cross-product
-  instead of the positional-mapping diagonal for mapped dimensions (GH #527);
-  and the partial-iterated arrayed subscript in an A2A link-score partial
+  imprecise (GH #526); and the partial-iterated arrayed subscript in an A2A
+  link-score partial
   fails to compile because the `PREVIOUS` argument must be a `Var` (GH #525).
 
 ## Divergences from the Papers

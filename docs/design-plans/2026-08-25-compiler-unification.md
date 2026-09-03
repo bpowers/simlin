@@ -942,23 +942,24 @@ corpus-wide LTM variable sets and detected loops, and the LTM value goldens
 are identical against the base; the natural shapes that move are the
 divergences below.
 
-**Phase LTM semantic divergences.** Four, each pinned. (V9a-1) A generated
+**Phase LTM semantic divergences (V9a).** Four, each pinned. (V9a-1) A generated
 equation lowers under the shapes of its reads, so a frozen-whole reducer
 over a BARE arrayed argument in an apply-to-all body lowers as execution
-lowers the target: per element. `x[region] = other + SUM(pop) / 1000` reads
-`pop[region]` under `SUM` (the plain spelling's rule; the additive `other`
-term keeps `other -> x` clear of the GH #788 decline, which only sees the
-term that references the source), and the ceteris-paribus partial for
-`other -> x` freezes the reducer whole into a structural capture over
-`[region]` with body `sum(pop)`; lowered under shapes that capture is
-`pop[e]` per element, as the executed `x[e]` reads it, where the bounds-free
-lowering summed the whole array (300 against a read of 100) and scored a link
-that moves `x` by one part in a hundred at 16. Direction: the base's number
-was wrong. Pinned by
+lowers the target: per element. `x[region] = other + SUM(pop * w[*]) / 1000`
+reads `pop[region]` under `SUM` (the plain spelling's rule; the wildcard
+co-source `w[*]` keeps the reducer out of the aggregate hoist, where a plain
+`SUM(pop)` is hoisted like its iterated twin), and the
+ceteris-paribus partial for `other -> x` freezes the reducer whole into a
+structural capture over `[region]` with body `sum(pop * w[*])`; lowered under
+shapes that capture is `2 * pop[e]` per element, as the executed `x[e]` reads
+it, where the bounds-free lowering summed the whole array (600 against a
+read of 200) and scored a link that moves `x` by one part in a hundred far
+past 1. Direction: the base's number was wrong. Pinned by
 `ltm_unified_tests::a_frozen_whole_reducer_over_a_bare_arrayed_argument_lowers_per_element`
-(the capture's series equals `pop[e]`, `x[e]` equals `other[e] + pop[e]/1000`,
-the score is bounded by 1); no corpus model has the shape (C-LEARN's LTM
-artifact is identical). The same mechanism has a loud face on a project that
+(the capture's series equals `2 * pop[e]`, `x[e]` equals
+`other[e] + 2 * pop[e]/1000`, the score is bounded by 1); no corpus model has
+the shape (C-LEARN's LTM artifact is identical). The same fixture's `w -> x`
+edge, with `w` varying, is V9b-5. The same mechanism has a loud face on a project that
 does not compile: an LTM score's copy of a target body that the compiler
 refuses under shapes now fails the way the target fails, where the
 bounds-free copy compiled and read a whole-array value into a score for a
@@ -993,6 +994,187 @@ model takes `model_ltm_variables`' early return and reaches neither). Pinned
 by `ltm_unified_tests::a_target_whose_lowering_failed_is_declined_not_scored`
 (an aux target, a flow target and an element-scoped helper target, with an
 unaffected edge's score still emitted).
+
+**Loops That Matter: the IR describes the read execution performs.** Every
+dimension-named subscript the compiler resolves through
+`build_view_from_ops` -- the element's name on the source axis first, then
+the declared element map in either declaration direction -- is described by
+one correspondence, `DimensionsContext::executed_read_correspondence`
+(`resolve_mapped_read` per element, no admission gate of its own), read by
+the axis classifier (`ltm_agg::classify_axis_access`), the aggregate slot
+remap (`iterated_axis_slot_elements`), the per-element row derivation
+(`per_element_row_for_target`) and the dependency pins
+(`dep_element_pins`, per axis and per spelling). Every bare arrayed read is
+described by one pairing of the two declared dimension lists,
+`db::bare_axis_pairing` (`match_axes_partial`, the compiler's own matcher,
+with each mapped pair carrying its executed correspondence), under the
+relations the spelling's own lowering consults (`db::BareSpelling`): pass
+0's `DirectMappingsOnly` for a read in an equation body, which withholds a
+mapping declared on a parent dimension, and the full context for a stock's
+flows (`get_implicit_subscript_off`). It is read by the element graph's
+`expand_same_element`, discovery's from-node projection, the arrayed
+score's admission (`link_score_dimensions`, which pairs a stock's
+structural inflow/outflow edge under the wiring's relations and every
+other edge under the equation's) and the dep pins' bare row; the
+flow-to-stock score spells a flow declared over other dimensions than its
+stock's bare, the reference the compiler resolves through the wiring's
+pairing (a flow the compiler refuses to integrate -- an arrayed flow of a
+scalar stock, `array_reference_needs_explicit_subscripts` -- has no
+executed read, and its fragment is refused with the stock's own update).
+The two meet in `db::ltm_ir`: an all-iterated subscript is `Bare` exactly when
+the lists reproduce the pairing it spells, and `PerElement` carrying its
+axes otherwise; a reducer's bare argument that pairs with no axis of the
+iteration is `Wildcard`, the whole array, as `SUM(src[*])` is. A `Bare`
+verdict is therefore a promise the lists keep, and the element edges of a
+`Bare` or `PerElement` site are exactly the executed reads. Two shapes
+keep a superset, each with a loud decline of its score: a plain bare read
+of a shared-name pair under no mapping (`bare[region] = s` over
+`s[other]`: the compiler resolves it by name through its implicit
+subscripts, the lists pair nothing, the graph broadcasts), and a plain
+bare read related to its iteration only through a parent mapping
+(`z[suba] = src` over `src[dimb]`, `dimb -> dima`: pass 0 pairs nothing and
+the implicit subscripts then read through the parent). The consumers
+follow the site: a frozen `PerElement` occurrence keeps its subscript
+(`OtherDepVerdict`: the bare spelling is a different read, one that need
+not lower), a superset source read through a subrange has rows for the
+subrange's elements and no other, a reducer's bare arrayed argument reads
+what pass 0 spells for it (`compute_read_slice`: `match_axes_partial`
+under `DirectMappingsOnly` against the enclosing iteration; whole-array
+with none in scope or inside an array-producing builtin), stored spelled
+on the node (`AggNode::reducer`) so the agg's equation, the classified body
+and the feeder freezes pin it per slot, and that spelled reducer is the
+synthetic node's identity (`AggNodesResult::synthetic_by_key`): two owners
+whose spelled reducers print alike read the same slices and share a node,
+and `SUM(pop)` in a scalar owner (`sum(pop)`, the whole array) beside
+`b[region] = SUM(pop) * k` (`sum(pop[region])`) are two -- the target's own
+text is not an identity, and a reducer's text is resolved to a node only
+among its owner's own nodes (`by_var`). The wildcard argument of a reducer
+the hoist declines is held live in its own edge's partial
+(`occurrence_realizes_shape`: the edge's `DynamicIndex` site is realized by
+the walker's `Wildcard` occurrence inside the reducer), the co-sources
+frozen around it. The GH #779/#788/#789 declines rest on a premise the VM
+refutes (`growth[r] = SUM(matrix[r,*] * frac[r])`, no `|D1|` factor) and are
+gone, with a bare spelling emitting its iterated twin's variables and series
+bit for bit. The one executed read the describers leave undescribed is the
+ordinal fallback of an undeclared pair with disjoint element names at equal
+cardinality (GH #527, a read Vensim rejects): it is declined loudly, never
+described positionally, and the attribution surfaces hold no positional
+derivation of their own. A bare argument in a per-element (`Ast::Arrayed`)
+slot reads the row the slot's element pins (`slot[a] = SUM(matrix) * 0.001`
+is `matrix[a, *]`'s sum, measured); the only node its identity mints is the
+whole array, so the per-element-owner rule (GH #792,
+`unhoisted_reducer_source_read`'s `Ast::Arrayed` arm) sees the bare
+argument whether or not a node was hoisted for it and the slot's edge is
+declined loudly, never scored against that node -- the exact per-slot
+description (a node per slot with the element pinned) is a tracked
+follow-up. C-LEARN's plain and LTM artifacts (the
+`bytecode_profile` blocks, the 6193-variable LTM set) and the plain corpus
+sweep are identical against the base; the corpus `--ltm` sweep moves one
+natural model's diagnostics (FREE6, V9b-3) and no values.
+
+**Phase LTM semantic divergences (V9b).** Seven, each pinned against the
+compiler's executed read. (V9b-1) The iterated spelling under a declared
+element map that PERMUTES the ordinal diagonal is described as the map's
+diagonal: `target[State] = x[State] * w` with `s1 -> b, s2 -> a` reads
+`x[b]` in slot `s1` (measured), so the element edges are the map's alone,
+the arrayed `x -> target` score reads `x[b]` there (its recorded series
+equals the ratio the recorded series give, and differs from the ordinal
+alternative), and the loops through it score, where the base withheld the
+score and dropped the loops as a "disagreeing" pair. A sliced reducer
+over the same map hoists with the map's slots (`matrix[east,*]` feeds
+`agg[ca]` under `CA -> east`). Pinned by
+`ltm_array_agg::a_permuted_mapped_pair_scores_the_maps_diagonal` and
+`element_mapped_sliced_reducer_hoists_and_scores_its_loops`;
+`element_graph_tests::bare_mapped_dims_project_the_executed_correspondence`
+and `ltm_augment_pin_tests::dep_element_pins_projection_enumeration` pin the
+element graph's and the pins' halves. (V9b-2) An undeclared pair sharing
+element names is read by NAME in every spelling, and described so:
+`plain[Region] = stock[Region]` over `stock[Other]` (`Other` the same names
+in the opposite order) is `PerElement` with `stock[north] -> plain[north]`
+and no other edge, scored per element, where the base classified the site
+`DynamicIndex`, declined `stock -> plain` loudly, and let the ceteris-paribus
+partial of a sibling edge read a wrong element (`stock -> grow` under
+`grow[Other] = stock[Other] * 0.1 * plain[Other]`: the base's 0.667 is
+neither the by-name ratio 0.333 the series give nor the ordinal one; the
+tree's is the by-name ratio). Pinned by
+`ltm_element_instance_tests::qualified_index_edge_follows_the_plain_equations_name_first_read`
+(the plain and the helper spelling, against the VM) and
+`ltm_ir_tests::ir_undeclared_shared_names_iterated_subscript_is_per_element`.
+(V9b-3) A subrange-named read of a superset-dimensioned variable inside an
+apply-to-all over the subrange -- FREE6's `Energy Carbon
+Emissions[nonrenewable] = Energy Production[nonrenewable] * Carbon
+Content[nonrenewable]` over `Energy Production[source]` -- is `PerElement`
+by name: the edges are `energy[coal] -> prod[coal]` and
+`energy[oilgas] -> prod[oilgas]` (the base's cross-product minted
+`energy[hn] -> prod[coal]` and phantom loops through it), the per-element
+scores exist, a frozen `energy[nonrenewable]` keeps its subscript in the
+sibling partials (a bare `energy` does not lower under a `nonrenewable`
+iteration; collapsing it turned `carbon_content -> energy_carbon_emissions`
+into a `failed to compile; constant 0` score), and the other dependency
+`ref[nonrenewable]` over `ref[source]` is pinned by name. The natural
+mover: FREE6's `--ltm` diagnostics (five pair-level declines gone, the
+per-element scores emitted; the model's LTM run falls back on the base and
+the tree alike for unrelated fragments). Pinned by
+`ltm_array_agg::a_subrange_named_read_of_a_superset_variable_is_read_by_element_name`,
+`ltm_ir_tests::other_dep_verdict_rule_covers_every_branch` (the `PerElement`
+row) and the subrange row of `dep_element_pins_projection_enumeration`.
+(V9b-4) A bare arrayed reducer argument in an apply-to-all body is hoisted
+and scored exactly as its iterated spelling: `growth[D1] = SUM(matrix[D1,*]
+* frac)` emits `frac[D1]`'s variables and series bit for bit (the feeder's
+changed-last share and the rows' changed-first shares of one slot sum to
+one), for `SUM`, `MEAN`, `MIN`, `MAX` and `STDDEV`; `growth[D1] = SUM(other)
+* frac` hoists an aggregate over `D1` whose slot `e` is `other[e]`, with the
+`frac -> growth` and `agg[e] -> growth[e]` partials equal to the ratios the
+recorded series give; `growth[D1] = local + SUM(pop)` scores both terms with
+shares summing to one. The base declined every one of these edges loudly
+(GH #779/#788) on the `|D1|`-factor premise of GH #789, which the VM
+refutes (`growth[r] = Σ_d2 matrix[r,d2] * frac[r]`). Pinned by
+`ltm_array_agg::a_bare_reducer_feeder_is_hoisted_like_its_iterated_spelling`,
+`bare_reducer_feeders_hoist_across_the_reducer_class`,
+`a_bare_reducer_argument_in_a_product_scores_per_element` and
+`an_additive_bare_reducer_argument_scores_its_own_element`; no corpus model
+has the shape. Two owners of one text under different iterations are two
+nodes (`two_owners_of_one_reducer_text_under_different_iterations_get_their_own_nodes`,
+both declaration orders, under debug assertions;
+`a_row_sum_and_a_column_sum_of_one_text_get_their_own_nodes`,
+`a_per_element_owner_beside_an_a2a_owner_of_one_text_keeps_the_a2a_node`,
+`a_row_reducer_owner_and_a_whole_reducer_owner_of_one_text_get_their_own_nodes`),
+and a bare argument related to its iteration only through a parent mapping
+reads the whole array (`a_parent_mapped_bare_argument_reads_the_whole_array`:
+the six element edges, the loud decline; `a_directly_mapped_bare_argument_reads_its_slot`
+the control). (V9b-5) A live reducer argument beside a wildcard co-source,
+the reducer un-hoisted -- `x[region] = other + SUM(pop * w[*]) / 1000` with
+`w` varying -- scores `w -> x` as the partial with `w[*]` live and `pop`
+frozen (`sum(PREVIOUS(pop) * w[*])`), 0.0155 at the first step against the
+recorded series, where the base hoisted the reducer whole-array (305 against
+a read of 203, `agg -> x[north]` 5.48, V9a-1's wrong number) and a partial
+that froze the reducer whole with its live source inside scored 0 at every
+step with no diagnostic. Pinned by
+`ltm_array_agg::a_live_wildcard_argument_of_an_unhoisted_reducer_stays_live`
+(`w -> x` and `pop -> x` against the series ratios); no corpus model has the
+shape. (V9b-6) A bare reducer argument in a per-element (`Ast::Arrayed`)
+slot -- `slot[a] = SUM(m) * 0.001` beside `z = SUM(m) * 0.0001` -- reads the
+row its element pins (`m[a,*]`'s sum, measured) while the node its identity
+mints is the whole array `z` reads; the slot's edge `m -> slot` is declined
+loudly (one warning, no `agg -> slot[e]` score, the loops through `slot`
+dropped), where the base scored `agg -> slot[a]` at 2050.5 against the
+whole array with no diagnostic. `z`'s `agg -> z` and the A2A `row`'s own row
+node are untouched. Pinned by
+`ltm_array_agg::a_per_element_slots_bare_reducer_argument_is_declined_not_scored`
+and the per-element arm of
+`a_per_element_owner_beside_an_a2a_owner_of_one_text_keeps_the_a2a_node`;
+no corpus model has the shape. (V9b-7) A flow feeding its stock through a
+PARENT mapping -- `inflow[dimb]` into `level[suba]`, `dimb -> dima`, `suba`
+inside `dima` -- is integrated element by element through the parent
+(`level[a1]` from `inflow[b1]`, `level[a3]` from `inflow[b3]`, measured);
+the score admission pairs the structural edge under the wiring's relations,
+so `inflow -> level` is one arrayed score over `suba` whose slot equals the
+flow-to-stock ratio the recorded series give, the element edges being the
+two the wiring makes; the base declined the score loudly ("dimensions do
+not correspond"). Pinned by
+`ltm_array_agg::a_flow_feeding_its_stock_through_a_parent_mapping_scores_per_slot`
+(the parent-mapped stock and the directly-mapped control); no corpus model
+has the shape.
 <!-- END_PHASE_8 -->
 
 <!-- START_PHASE_9 -->
@@ -1690,10 +1872,9 @@ and the scores name the slot the helper's fragment reads for a proper
 subdimension, a shared-name axis and an element map alike; a substituted
 spelling is what must not stand in for that index, since a qualified
 `dimension·element` of a foreign axis folds to an ordinal the compiler does
-not read. Separately, the IR's description of a PLAIN read under an explicit
-element map is positional where execution is name-first
-(`ltm_agg::AxisRead::MappedRead`), a pre-existing imprecision of the
-describers that this chunk neither introduces nor closes.
+not read. The IR's description of a PLAIN read is the same resolution
+(V9b below: `DimensionsContext::executed_read_correspondence` is the one
+correspondence every dimension-named subscript is described by).
 `db::ltm::endpoint_dimensions` is the
 projection of `model_dep_shape` onto plain variables, read by the causal
 edges, the element graph, every score emitter, the loop builders and the pins;
@@ -2239,18 +2420,12 @@ one corpus model moves; each is pinned:
    element name rather than by the active element's ordinal is what makes a
    permuted declaration order stop changing which element a reference reads.
 
-   One describer did NOT move with execution and the gap is disclosed rather
-   than closed: `DimensionsContext::positional_correspondence`, which the LTM
-   attribution surfaces use for the iterated spelling, still returns the
-   diagonal. It differs from execution only for a declared element map that
-   PERMUTES at equal cardinality (a plain positional `maps_to` gives the same
-   answer either way). Delegating it to `executed_read_correspondence` under the
-   same admission gate is a five-line change that moves ten LTM
-   element-attribution tests, each with its own derivation
-   (`db::analysis::element_graph_tests`, `ltm_agg_tests`,
-   `ltm_augment_pin_tests`, `db::ltm_ir_tests`) -- the LTM attribution layer's
-   change, sequenced separately. The rustdoc on that function states the window
-   and the cost.
+   The LTM attribution surfaces describe the iterated spelling by the same
+   rule (V9b: `DimensionsContext::executed_read_correspondence` is the one
+   correspondence; it differs from the ordinal diagonal only for a declared
+   element map that permutes at equal cardinality, and the element-attribution
+   tests in `db::analysis::element_graph_tests`, `ltm_agg_tests`,
+   `ltm_augment_pin_tests` and `db::ltm_ir_tests` pin the map's answer).
 
 3. **Each occurrence of a repeated active dimension reads its own axis.**
    `o[D,D] = square[D,D]` (and the bare `o[D,D] = square`, which pass 0 rewrites
@@ -2628,7 +2803,7 @@ over the same model.
    dimension-name subscript and so resolves the paired element by ordinal. A
    direct mapping is safe there -- the ordinal read is the documented
    bare-reference rule (GH #527 / #997,
-   `DimensionsContext::positional_correspondence`) -- while the parent one runs
+   `DimensionsContext::executed_read_correspondence`'s rustdoc) -- while the parent one runs
    target -> parent -> source and is not the ordinal. Admitting it made
    `dst[SubA] = src` over `src[DimB]` with `DimB -> DimA` and `SubA` a
    subdimension of `DimA` read `DimB`'s first element instead of the mapped
@@ -2793,3 +2968,4 @@ hash is not available to it.
 | 8.5 | `engine: one dependency representation, classified once` | 6.9918 G (median of 3; range 6.9895-6.9932), **-1.84%** against `9e6253cd` re-measured in the same session (7.1229 G, median of 3, range 7.1224-7.1313; interleaved pairs -1.96 / -1.87 / -1.81%) | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Artifacts byte-identical on C-LEARN, plain (every count, 1053 initial programs, 371 names, 7 modules, the full opcode histogram) and under `CLEARN_LTM=1` (29398 slots, 855713 / 1477 / 24669 opcodes, 14078 literals, 2166 views; LTM compile channel 77.7223 G against 79.0077 G, **-1.63%**, pairs -1.59 / -1.69 / -1.63%, `CLEARN_COMPILE_ITERS=5`); memory (counting allocator, C-LEARN, bytes the database and sync state retain above the parsed datamodel; peak = compile phase): plain compile-only 29.49 -> 28.97 MiB (peak 36.7 -> 36.2), plain with diagnostics 30.73 -> 30.18 (peak 38.0 -> 37.5), LTM 223.17 -> 222.52 (peak 264.9 -> 264.0), LTM with diagnostics 224.28 -> 223.55 (peak 266.1 -> 265.8); allocations plain 1,542,125 / 171.3 MiB -> 1,466,767 / 163.5 MiB, LTM 24,905,822 / 2277.5 MiB -> 24,226,276 / 2241.2 MiB; sweep of 509 models plain and `--ltm` 397 / 398 identical, 110 refused identically, 0 one-sided, the movers GH #859 flippers (the same two digests on both binaries in both modes, 6x each), 8 `--ltm` stderr line-order permutations (GH #1036); `test/` diagnostics corpus plain 471 -> 472 rows over 366 -> 367 keys, `--ltm` 856 -> 857 over 391 -> 392, the one added row divergence 4. The saving is deleted work: one classification per variable and helper over its `Expr1`, where the base lowered every one to `Expr2` a second time under an empty scope for its dependencies, and no `·` re-splitting at the consumers. Seven divergences pinned under "Phase 8.5 semantic divergences", none with a corpus model of its shape but divergence 4 (`sir_social_distancing_mixnot.stmx`, refused on both binaries): the nested-stock ordering (5) moves numbers on a model the base ran, from the #591-c1 stale-input class to the one-hop rule's, and the output-port scan (6) adds LTM series. Engine suite (lib 5686, integration 783), libsimlin (244), CLI, mcp-core, clippy, `cargo fmt --all -- --check` and the default-feature check green, every golden unregenerated |
 | V9a | `engine: LTM reads typed values; one module-instance owner` | 6.9798 G (median of 3; range 6.9797-6.9883), -0.44% against `bee455c4` re-measured in the same session (7.0107 G, median of 3, range 7.0061-7.0132; interleaved pairs -0.44 / -0.25 / -0.48%); LTM compile channel (`CLEARN_LTM=1 CLEARN_COMPILE_ITERS=2`) 49.1146 G against 48.6483 G, +0.96% (pairs +0.84 / +0.76 / +0.99%), recorded | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | C-LEARN artifacts identical plain and under `CLEARN_LTM=1` (29398 slots, 855713 / 1477 / 24669 opcodes, 14078 literals, 2166 views); one natural LTM shape moves, pinned (V9a-1, the frozen-whole reducer over a bare arrayed argument), and a base VM abort compiles (V9a-2). Sweeps plain 398 identical / 110 refused / 0 one-sided / 1 mover and `--ltm` 397 / 110 / 0 / 2, every mover a GH #859 flipper, every stderr difference a GH #1036 order-only permutation; corpus-wide LTM variable sets and detected loops identical. The LTM channel's +1% is the `Expr2` tier's array bounds on ~7k generated equations (+2.9 points, measured with a bounds-free control) against the parses the text boundary no longer pays (-2.1 points); typing each generated equation once (`lower_variable_from_typed`) is what keeps it there rather than at +4.6%. Rust non-test -175 lines. |
 | 9 | `engine: one diagnostic payload from site to collection` | 7.0152 G (median of 3; range 7.0119-7.0152), +0.38% against `baeac250` re-measured in the same session (6.9890 G, median of 3, range 6.9825-6.9902; interleaved pairs +0.33 / +0.47 / +0.36%), inside the channel's floor and not investigated | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Artifacts byte-identical on C-LEARN, plain (every count, 1053 initial programs, 371 names, 7 modules, the full opcode histogram) and under `CLEARN_LTM=1` (29398 slots, 855713 / 1477 / 24669 opcodes, 14078 literals, 2166 views); LTM compile channel 78.6850 G against 77.7404 G, +1.22% (pairs +1.18 / +1.32 / +1.13%, `CLEARN_COMPILE_ITERS=5`), with compile-phase allocations plain 1,466,823 / 163.9 MiB -> 1,466,145 / 163.5 MiB and LTM 24,226,667 / 2242.7 MiB -> 24,224,380 / 2241.5 MiB and a symbol-level profile whose whole delta sits in untouched lowering and lexing functions (the code this phase touches is under 0.01% of samples), so it is recorded as build-layout perturbation; sweep of 509 models plain and `--ltm` 396 / 398 identical, 110 refused identically, 0 one-sided, the movers the GH #859 flippers `arrays_cname`, `arrays_varname` and `subscript_transposition` (each the same two digests on both binaries in both modes, 6x each), one plain stderr line-order permutation (`RealBeer4-Sterman13.mdl`, its cycle row after the variable rows, divergence 6) and 8 `--ltm` (GH #1036, divergence 7); `test/` diagnostics corpus plain 472 rows over 367 keys and `--ltm` 857 over 392 on both binaries, the same per-code distribution but the 33 umbrella rows (divergence 1), which move from the `Model` arm's rendering to the inference arm's. A diagnostic is one typed payload from its raising site to `collect_all_diagnostics`, context attached once by type, recursive queries returning facts and the per-model owner emitting them exactly once (`db::diagnostic_payload_tests`: the producer x category x severity matrix, the once-across-revisions matrix over every warning family, one-variable invalidation under `ProbedDb`). Engine suite (lib 5693, integration 783), libsimlin (245), CLI, mcp-core, clippy, `cargo fmt --all -- --check` and the default-feature check green, every golden unregenerated, `simlin.h` byte-identical under cbindgen |
+| V9b | `engine: ltm describes the executed read` | 6.9521 G (median of 3; range 6.9501-6.9593), -0.41% against `615526fe` re-measured in the same session (6.9808 G, median of 3, range 6.9805-6.9854; interleaved pairs -0.44 / -0.48 / -0.30%), on a channel this chunk does not touch (no plain-compile code changes; recorded as build-layout perturbation) | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Artifacts byte-identical on C-LEARN, plain (every count, the full opcode histogram) and under `CLEARN_LTM=1` (29398 slots, 855713 / 1477 / 24669 opcodes, 14078 literals, 2166 views, the 6193-variable LTM set); LTM compile channel 78.5986 G against 79.5227 G, -1.16% (pairs -1.18 / -1.17 / -1.16%, `CLEARN_COMPILE_ITERS=5`); sweep of 509 models plain 397 identical / 110 refused identically / 0 one-sided, the movers GH #859 flippers (`arrays_cname` and `arrays_varname` `.mdl` this run, `subscript_transposition` in the previous; base-vs-base differs run to run), no stderr change; `--ltm` 396 identical / 110 refused / 3 moved (the same three flippers), nine stderr differences of which seven are line-order permutations (sorted-identical: `sir_social_distancing_mixnot`, `critical-slowing`, `PinkNoise2010`, `modules_hares_and_foxes`, `hares_and_lynxes_modules` .stmx/.xmile, C-LEARN; the warning order is not deterministic run to run on either binary), one FREE6 (V9b-3: six pair-level and per-element declines gone, nothing added) and one `covid19_severity.stmx` (refused on both binaries, `conveyor_driven_flow_read`; the arrayed outflow of its scalar stock is a shape the compiler refuses to integrate, and the flow-to-stock fragment for it fails to compile on both -- its two helpers on the base, the fragment as a whole on the tree -- each warned); corpus-wide LTM dump in both modes 501 of 509 identical this run (499 in the previous; the difference is the two flippers `arrays_varname.mdl` and `subscript_switching.mdl`), the movers named in the V9b report (FREE6 +12, the subrange fixtures +2/+3 -- V9b-3 shapes -- `subscript_switching.xmile` +5, `arrays_cname.mdl`, on which the importer assigns `inputAB` to `DimA` or to the same-named `DimX` run to run, and `covid19_severity.stmx` -1, whose base discovery-mode direct score beside a hoisted `SUM(total_infected)` was a fragment that failed to compile). Engine suite (lib 5702, integration 793), libsimlin (245), CLI, mcp-core, clippy, `cargo fmt --check`, the default-feature check and the debug-build IR dump over 97 probe models green; every golden unregenerated |

@@ -630,8 +630,8 @@ fn test_ltm_mapped_dimension_loop_scores_diagonal_and_nonzero() {
 
     // The mapped Bare edges' link scores carry the TARGET's dimensions
     // (the mapped pair counts as corresponding -- `link_score_dimensions`
-    // consults `db::analysis::bare_reference_correspondence`), so the per-slot
-    // references in the loop-score equations resolve.
+    // consults `db::bare_axis_pairing`), so the per-slot references in the
+    // loop-score equations resolve.
     let ltm_vars = crate::db::model_ltm_variables(&db, source_model, source_project);
     let dims_of = |name: &str| -> &[String] {
         &ltm_vars

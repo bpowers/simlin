@@ -186,6 +186,7 @@ pub(crate) use analysis::causal_graph_with_modules;
 // rather than re-deriving it with a subtly different rule (GH #754).
 pub(crate) use analysis::expand_same_element;
 use analysis::*;
+pub(crate) use analysis::{BareAxis, BareSpelling, bare_axis_pairing};
 // `model_element_loop_circuits` is `#[deprecated]` for LTM consumers (the
 // LTM pipeline uses `model_loop_circuits_tiered` instead). The re-export
 // itself triggers the deprecation lint, but we need to keep it visible

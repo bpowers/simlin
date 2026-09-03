@@ -153,8 +153,9 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
 /// A site that is *not* a hoisted reducer's argument -- a bare dynamic index
 /// (`arr[i+1]`, a range), the dynamic-index reducer carve-out
 /// (`SUM(pop[idx, *])`, `idx` non-literal, reclassified to `DynamicIndex`),
-/// a sliced reducer the correspondence declines -- an UNDECLARED pair, a
-/// cardinality mismatch, or a `MappedRead` axis (GH #997), all of which
+/// a sliced reducer the correspondence declines -- an UNDECLARED pair with
+/// disjoint element names, a cardinality mismatch, a many-to-one map (no
+/// one-slot-per-row remap), or a `MappedRead` axis (GH #997), all of which
 /// `enumerate_agg_nodes` refuses, so the reference stays `Direct` and is
 /// reclassified `DynamicIndex` (a DECLARED mapping is accepted in either
 /// direction since GH #757, an explicit element map included since GH #997)
@@ -189,10 +190,14 @@ pub enum RefShape {
     /// Invariants (enforced by `classify_iterated_dim_shape`): no
     /// `Reduced` entries (a non-reducer reference never collapses an
     /// axis); not all-`Pinned` (that canonicalizes to `FixedIndex`) and
-    /// not all-`Iterated` (that canonicalizes to `Bare`) -- so every
-    /// existing `Bare`/`FixedIndex` link-score NAME is untouched and
-    /// `PerElement` is minted only where the pre-T6 classifier said
-    /// `DynamicIndex` and was wrong.
+    /// not all-`Iterated` paired as the two declared dimension lists pair
+    /// (that canonicalizes to `Bare`, whose projection re-derives the pairing
+    /// from the lists through `bare_axis_pairing`). An all-`Iterated`
+    /// subscript whose pairing only the SUBSCRIPT knows -- a foreign axis
+    /// sharing element names with the iterated dimension under no declared
+    /// mapping, a transposition the lists would pair the other way -- keeps
+    /// its axes here, so the edges and scores land the rows the compiler
+    /// resolves rather than a cross-product.
     ///
     /// The element graph emits the diagonal-with-pinned-axes edges
     /// (`pop[r,young] -> row_sum[r]`, never the cross-product); emission
@@ -265,7 +270,7 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 /// | non-empty   | []         | Bare                          | `from[d] -> to` for each cartesian d          |
 /// | non-empty   | non-empty (same dims)  | Bare              | `from[d] -> to[d]` per shared element         |
 /// | non-empty   | non-empty (partial collapse) | Bare        | `from[d1,d2] -> to[d1]` (delegates to `expand_same_element`)|
-/// | non-empty   | non-empty (mapped dims, GH #527) | Bare    | the mapping's diagonal `from[mapped(d)] -> to[d]` per target element when a usable (positional) correspondence exists, else broadcast (via `expand_same_element` + `dim_ctx`) |
+/// | non-empty   | non-empty (mapped dims, GH #527) | Bare    | the executed correspondence's rows `from[read(d)] -> to[d]` per target element (`bare_axis_pairing`), else broadcast |
 /// | non-empty   | any        | Wildcard / DynamicIndex       | full cross product (NxM)                      |
 /// | non-empty   | []         | FixedIndex(elems)             | `from[elems] -> to` (one edge)                |
 /// | non-empty   | non-empty  | FixedIndex(elems)             | `from[elems] -> to[d]` for each cartesian d   |
@@ -306,6 +311,7 @@ fn emit_edges_for_reference(
     shape: &RefShape,
     target_element: Option<&str>,
     dim_ctx: &crate::dimensions::DimensionsContext,
+    spelling: BareSpelling,
     element_edges: &mut HashMap<String, BTreeSet<String>>,
 ) {
     let from_is_scalar = from_dims.is_empty();
@@ -375,6 +381,7 @@ fn emit_edges_for_reference(
                     from_dims,
                     to_dims,
                     dim_ctx,
+                    spelling,
                     &mut scratch,
                 );
                 let target_set: BTreeSet<String> = target_nodes.iter().cloned().collect();
@@ -395,6 +402,7 @@ fn emit_edges_for_reference(
                     from_dims,
                     to_dims,
                     dim_ctx,
+                    spelling,
                     element_edges,
                 );
             }
@@ -607,144 +615,143 @@ fn cartesian_element_names(var_name: &str, dims: &[crate::dimensions::Dimension]
         .collect()
 }
 
-/// Per element of `to_dim` in declared order, the `from_dim` elements a
-/// same-element (`RefShape::Bare`) reference may read -- the UNION of the two
-/// spellings' correspondences (GH #527, re-keyed by GH #997).
-///
-/// `RefShape::Bare` is the one shape covering references that resolve by two
-/// different rules, and nothing downstream of the classification tells them
-/// apart:
-///
-/// * a bare or iterated-dimension reference in an equation body
-///   (`target[State] = x` / `= x[State]`) resolves POSITIONALLY;
-/// * a structural flow-to-stock edge (`level[State] = INTEG(x, 0)` with `x`
-///   over `Region`) is labelled `Bare` by `model_edge_shapes` with no AST
-///   reference behind it at all, and resolves name-first then through the
-///   declared element map.
-///
-/// Both are legal, both ship, and the element graph must not emit FEWER edges
-/// than either reads. So this returns both answers and the expansion emits
-/// their union: exact wherever the two rules agree -- which is every
-/// positional mapping between dimensions with disjoint element names, i.e.
-/// everything that resolved before GH #997 -- and a two-edge superset per
-/// target element where they genuinely differ (an explicit element map, or a
-/// pair sharing element names).
-///
-/// Keeping the union in ONE function is also what keeps the element graph and
-/// discovery's from-node projection in lockstep. `expand_same_element` has two
-/// consumers, and only one of them can see the reference site: the element
-/// graph does, `ltm_finding::expand_a2a_link_offsets` re-derives the from-node
-/// from a link score's dimensions alone. A rule chosen per site would have put
-/// them back out of step, which is the GH #754 failure -- a from-node naming
-/// no real element node, so every loop through it dangles.
-///
-/// # EDGES may be a union; SCORES may not
-///
-/// The union is sound for edges precisely because an extra edge is the safe
-/// direction. It is NOT sound for a link SCORE, and the two must be gated
-/// separately -- [`mapped_pair_projects_uniquely`] is that gate.
-///
-/// A Bare A2A link score is one arrayed variable with one slot per TARGET
-/// element, and `ltm_finding::expand_a2a_link_offsets` maps every edge this
-/// function emits for a target element onto that element's single slot. Where
-/// the two rules DISAGREE, one of the two source elements is a phantom for the
-/// site that actually exists -- and it would read the real edge's non-zero
-/// score out of the shared slot. That is a compilable, confidently wrong
-/// number, which this repo treats as worse than no score at all (GH #758): the
-/// edge is denied the arrayed retarget and takes the loud skip instead.
-///
-/// So the two questions are deliberately different:
-/// * "which element edges exist?" -> every element in this function's answer;
-/// * "may this edge carry an arrayed score?" -> only when every target
-///   element's answer is a SINGLETON, i.e. the two rules agree everywhere and
-///   no slot is shared by a phantom.
-///
-/// Every mapping that resolved before GH #997 is a singleton (the two rules
-/// coincide on a positional mapping between disjointly-named dimensions), and
-/// so is C-LEARN's many-to-one element map -- there the positional rule
-/// declines outright, leaving the executed rule alone in the union. What is
-/// NOT a singleton is an equal-cardinality PERMUTED element map, or a pair
-/// sharing element names in a different order.
-///
-/// `None` when the two dimensions are not related by a declared mapping at
-/// all; the caller then broadcasts.
-pub(crate) fn bare_reference_correspondence(
-    dim_ctx: &crate::dimensions::DimensionsContext,
-    to_dim: &crate::common::CanonicalDimensionName,
-    from_dim: &crate::common::CanonicalDimensionName,
-) -> Option<Vec<Vec<crate::common::CanonicalElementName>>> {
-    let positional = dim_ctx.positional_correspondence(to_dim, from_dim);
-    let executed = dim_ctx.executed_read_correspondence(to_dim, from_dim);
-    let len = positional
-        .as_ref()
-        .or(executed.as_ref())
-        .map(Vec::len)
-        .filter(|n| *n > 0)?;
-    Some(
-        (0..len)
-            .map(|i| {
-                let mut elems: Vec<crate::common::CanonicalElementName> = Vec::with_capacity(2);
-                for corr in [positional.as_ref(), executed.as_ref()]
-                    .into_iter()
-                    .flatten()
-                {
-                    if let Some(e) = corr.get(i)
-                        && !elems.contains(e)
-                    {
-                        elems.push(e.clone());
-                    }
-                }
-                elems
-            })
-            .collect(),
-    )
+/// How one source axis of a `Bare` read pairs with the target's axes, and
+/// which source element each target element reads through the pair -- one
+/// entry per source axis, from [`bare_axis_pairing`].
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum BareAxis {
+    /// Paired with target axis `pos` by name, or as two indexed axes of one
+    /// size: the target's i-th element reads the source's i-th.
+    Positional(usize),
+    /// Paired with target axis `pos` through a declared correspondence:
+    /// `reads[i]` is the source element the target's i-th element reads.
+    Mapped {
+        pos: usize,
+        reads: Vec<crate::common::CanonicalElementName>,
+    },
+    /// No target axis supplies it: the axis is collapsed (iterated but not
+    /// projected).
+    Collapsed,
 }
 
-/// May a `Bare` edge across this dimension pair carry an ARRAYED (per-target-
-/// element) link score? True only when every target element's
-/// [`bare_reference_correspondence`] entry is a SINGLETON -- the two spellings
-/// agree, so no target slot is shared by a source element that only one of them
-/// reads.
-///
-/// See [`bare_reference_correspondence`]'s "EDGES may be a union; SCORES may
-/// not" section for why this is a separate, stricter question than which edges
-/// exist. A pair this declines keeps its element-edge union (the never-fewer
-/// direction is untouched) and loses only the retarget, which sends the edge to
-/// the GH #758 loud skip: one Warning naming it, no link-score variable, and
-/// loop scores through it dropped.
-pub(crate) fn mapped_pair_projects_uniquely(
-    dim_ctx: &crate::dimensions::DimensionsContext,
-    to_dim: &crate::common::CanonicalDimensionName,
-    from_dim: &crate::common::CanonicalDimensionName,
-) -> bool {
-    bare_reference_correspondence(dim_ctx, to_dim, from_dim)
-        .is_some_and(|corr| corr.iter().all(|elems| elems.len() == 1))
+impl BareAxis {
+    /// The target axis this source axis is paired with, if any.
+    pub(crate) fn target_pos(&self) -> Option<usize> {
+        match self {
+            BareAxis::Positional(pos) | BareAxis::Mapped { pos, .. } => Some(*pos),
+            BareAxis::Collapsed => None,
+        }
+    }
 }
 
-/// Expand same-element edges with possible partial dimension collapse.
+/// Which of the compiler's two executed rules a `Bare` read follows: the
+/// relations its axis pairing consults.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BareSpelling {
+    /// A read in an equation body -- a bare arrayed name, or an
+    /// iterated-dimension subscript. Pass 0 (`compiler::context::lower_pass0`)
+    /// and `normalize_subscripts3` pair its axes under
+    /// [`crate::dimensions::DirectMappingsOnly`]: a mapping declared on a
+    /// PARENT dimension is withheld, so `y[suba] = SUM(src)` over `src[dimb]`
+    /// with `dimb -> dima` and `suba` inside `dima` reads all of `src`.
+    Equation,
+    /// A stock's inflow/outflow reference and its own initial
+    /// (`Context::fold_flows`, `compiler::Var::new`), paired by
+    /// `get_implicit_subscript_off` under the full `DimensionsContext`,
+    /// parent mappings included.
+    StockFlow,
+}
+
+/// The ONE pairing of a `Bare` read's source axes with its target's axes,
+/// read by the element graph ([`expand_same_element`]), by discovery's
+/// from-node projection (`ltm_finding::expand_a2a_link_offsets`, through it),
+/// by the score admission (`link_scores::link_score_dimensions`), by the
+/// dependency pins' bare row (`ltm_augment_post_transform::dep_axis_elements`)
+/// and by the classifications that decide a reference is `Bare` at all
+/// (`db::ltm_ir`: an iterated-dimension subscript whose lists reproduce its
+/// pairing, a reducer's bare argument that pairs with some axis).
 ///
-/// For each source element tuple, constructs the target element tuple(s) by
-/// matching shared dimension names -- or, when names differ, a declared
-/// dimension MAPPING between a target dimension and a source dimension
-/// (GH #527; the correspondence comes from
-/// [`bare_reference_correspondence`], which is the union of the two
-/// spellings' diagonals -- see there for why a `Bare` site cannot pick one).
-/// Dimensions in the source that correspond to
-/// no target dimension are collapsed (their elements are iterated but do
-/// not appear in the target subscript); target dimensions that correspond
-/// to no source dimension broadcast over all their elements.
+/// `RefShape::Bare` covers three spellings -- a bare reference in an equation
+/// body, an iterated-dimension subscript, and a structural flow-to-stock edge
+/// -- and the pairing is what the compiler's own axis matcher gives each of
+/// them: [`crate::dimensions::match_axes_partial`] over the two declared
+/// dimension lists (exact name, then a declared mapping, then two indexed
+/// axes of one size; positional and one-to-one, so a repeated dimension pairs
+/// each occurrence with its own axis, as
+/// `compiler::subscript::normalize_subscripts3` allocates the active
+/// positions), under the relations the spelling's own lowering consults
+/// ([`BareSpelling`]). A pair the matcher relates through a declared mapping
+/// reads through [`crate::dimensions::DimensionsContext::executed_read_correspondence`];
+/// a declared relation the executed rule cannot translate (a positional
+/// mapping between different sizes, a common mapping target -- which the
+/// compiler reads by ordinal at equal size, the GH #527 class) leaves the
+/// axis `Collapsed`, which broadcasts, and the score admission declines it
+/// loudly; a superset of edges is harmless where a subset would hide a loop.
+///
+/// An iterated-dimension subscript can pair axes the dimension lists alone
+/// cannot -- `stock[Region]` over an `Other`-declared `stock` that shares
+/// element names with `Region` under no mapping -- and
+/// `classify_iterated_dim_shape` keeps such a reference `PerElement`, carrying
+/// its axes, rather than `Bare`; so a `Bare` site's pairing IS this one, by
+/// construction, and the edges, the discovery from-nodes and the score's
+/// per-slot reads all name the same rows.
+pub(crate) fn bare_axis_pairing(
+    from_dims: &[crate::dimensions::Dimension],
+    to_dims: &[crate::dimensions::Dimension],
+    dim_ctx: &crate::dimensions::DimensionsContext,
+    spelling: BareSpelling,
+) -> Vec<BareAxis> {
+    use crate::dimensions::{
+        AxisMatch, AxisRelations, DirectMappingsOnly, axes_of, match_axes_partial,
+    };
+    let direct = DirectMappingsOnly(dim_ctx);
+    let relations: &dyn AxisRelations = match spelling {
+        BareSpelling::Equation => &direct,
+        BareSpelling::StockFlow => dim_ctx,
+    };
+    match_axes_partial(&axes_of(from_dims), &axes_of(to_dims), relations)
+        .into_iter()
+        .enumerate()
+        .map(|(i, paired)| match paired {
+            Some((pos, AxisMatch::Exact | AxisMatch::BySize)) => BareAxis::Positional(pos),
+            Some((pos, AxisMatch::Mapped { .. })) => dim_ctx
+                .executed_read_correspondence(
+                    to_dims[pos].canonical_name(),
+                    from_dims[i].canonical_name(),
+                )
+                .map_or(BareAxis::Collapsed, |reads| BareAxis::Mapped { pos, reads }),
+            // `DimensionsContext` admits no subdimension pairing (see
+            // `AxisRelations::is_subdimension`).
+            Some((_, AxisMatch::Subdimension)) => {
+                unreachable!("DimensionsContext pairs no axes as subdimensions")
+            }
+            None => BareAxis::Collapsed,
+        })
+        .collect()
+}
+
+/// Expand same-element edges for a `Bare` read: for each source element tuple,
+/// the target element tuple(s) that read it under [`bare_axis_pairing`]. A
+/// positionally paired axis reads the same index; a mapped axis reads the
+/// preimage of the executed correspondence (several target elements under a
+/// many-to-one map, none for a source element nothing maps to); a target axis
+/// no source axis supplies broadcasts over every element; a collapsed source
+/// axis is iterated but not projected.
 ///
 /// Examples:
 /// - `from[D1,D2] -> to[D1]`: `from[d1,d2] -> to[d1]` for all `(d1,d2)`
 ///   (partial collapse).
 /// - `from[Region] -> to[State]` with a positional `State→Region` mapping:
-///   the mapping's diagonal -- `from[mapped(s)] -> to[s]` for each State
-///   element `s`.
-/// - `from[Region] -> to[State]` with an explicit element map: the union of
-///   the map's diagonal and the positional one -- at most two source elements
-///   per target element, and one where the two agree.
-/// - `from[Region] -> to[State]` with NO mapping: the conservative broadcast
-///   (every source element feeds every target element).
+///   the diagonal `from[i] -> to[i]`.
+/// - `from[Region] -> to[State]` with an explicit element map: the map's
+///   rows, `from[map(s)] -> to[s]`.
+/// - `from[Region] -> to[State]` with NO mapping and disjoint element names:
+///   the conservative broadcast (every source element feeds every target
+///   element).
+/// - `from[D,D] -> to[D,D]`: each occurrence paired with its own axis, so
+///   `from[i,j] -> to[i,j]` -- the cell the compiler reads.
 ///
 /// Besides the element graph (`emit_edges_for_reference`'s `Bare` arm), this
 /// is also consumed by discovery's `ltm_finding::expand_a2a_link_offsets`
@@ -757,86 +764,14 @@ pub(crate) fn expand_same_element(
     from_dims: &[crate::dimensions::Dimension],
     to_dims: &[crate::dimensions::Dimension],
     dim_ctx: &crate::dimensions::DimensionsContext,
+    spelling: BareSpelling,
     element_edges: &mut HashMap<String, BTreeSet<String>>,
 ) {
-    // Build a map of target dimension name -> position for matching
-    let to_dim_positions: HashMap<&str, usize> = to_dims
-        .iter()
-        .enumerate()
-        .map(|(i, d)| (d.name(), i))
-        .collect();
-
-    // For each source dimension, record which target dimension position
-    // it corresponds to (if any) -- by name first, then by a declared
-    // dimension mapping. Source dimensions with no correspondence are
-    // "collapsed" (iterated but not projected).
-    #[derive(Clone)]
-    enum Correspondence {
-        /// Same-named target dimension at this position: target element =
-        /// same index as the source element.
-        SameName(usize),
-        /// Mapped target dimension at this position. The outer Vec is
-        /// indexed by TARGET element index and holds the SOURCE element
-        /// indices that target element may read -- the diagonal direction
-        /// [`bare_reference_correspondence`] defines, with one entry per
-        /// spelling whose answers differ. The expansion below inverts it per
-        /// source element, and is written for the general shape: a source
-        /// element may have no preimage (nothing maps to it) or several (a
-        /// many-to-one element map).
-        Mapped(usize, Vec<Vec<usize>>),
-        /// No corresponding target dimension: collapse.
-        Collapsed,
-    }
-
-    // Name matches first (every source dim gets a chance before mapped
-    // matching claims a position), so adding a mapping to a model can
-    // never change which dimensions pair up by name.
-    let mut correspondence: Vec<Correspondence> = from_dims
-        .iter()
-        .map(|d| match to_dim_positions.get(d.name()) {
-            Some(&pos) => Correspondence::SameName(pos),
-            None => Correspondence::Collapsed,
-        })
-        .collect();
+    let pairing = bare_axis_pairing(from_dims, to_dims, dim_ctx, spelling);
     let mut claimed: Vec<bool> = vec![false; to_dims.len()];
-    for c in &correspondence {
-        if let Correspondence::SameName(pos) = c {
-            claimed[*pos] = true;
-        }
-    }
-    for (i, c) in correspondence.iter_mut().enumerate() {
-        if !matches!(c, Correspondence::Collapsed) {
-            continue;
-        }
-        let from_canon = from_dims[i].canonical_name();
-        for (pos, to_dim) in to_dims.iter().enumerate() {
-            if claimed[pos] {
-                continue;
-            }
-            let Some(elems) =
-                bare_reference_correspondence(dim_ctx, to_dim.canonical_name(), from_canon)
-            else {
-                continue;
-            };
-            // Resolve the per-target-element source names to source element
-            // indices. The correspondence only returns elements of the source
-            // dimension, so the lookup can't fail for a well-formed context;
-            // bail to Collapsed (broadcast) if it does.
-            let Some(idxs) = elems
-                .iter()
-                .map(|per_target| {
-                    per_target
-                        .iter()
-                        .map(|e| from_dims[i].get_offset(e))
-                        .collect::<Option<Vec<usize>>>()
-                })
-                .collect::<Option<Vec<Vec<usize>>>>()
-            else {
-                continue;
-            };
-            *c = Correspondence::Mapped(pos, idxs);
+    for axis in &pairing {
+        if let Some(pos) = axis.target_pos() {
             claimed[pos] = true;
-            break;
         }
     }
 
@@ -874,50 +809,38 @@ pub(crate) fn expand_same_element(
         };
 
         // Per target position, the candidate element names this source
-        // tuple connects to: a singleton for a SameName position, the
-        // (possibly empty) preimage of the source element for a Mapped
-        // position, and every element for an unclaimed (broadcast)
-        // position. The target node set is the cartesian product.
+        // tuple connects to: the same index for a positional pair, the
+        // (possibly empty, possibly several-element) preimage of the source
+        // element for a mapped one, and every element for an unclaimed
+        // (broadcast) position. The target node set is the cartesian product.
         let mut to_elem_options: Vec<Vec<&str>> = to_dim_elements
             .iter()
             .enumerate()
             .map(|(pos, elems)| {
                 if claimed[pos] {
-                    Vec::new() // filled from the correspondence below
+                    Vec::new() // filled from the pairing below
                 } else {
                     elems.iter().map(String::as_str).collect()
                 }
             })
             .collect();
-        for (src_dim_idx, c) in correspondence.iter().enumerate() {
+        for (src_dim_idx, axis) in pairing.iter().enumerate() {
             let src_elem_idx = from_indices[src_dim_idx];
-            match c {
-                Correspondence::SameName(pos) => {
-                    // Use the element name from the target dimension at the
-                    // corresponding position. If the source element index is
-                    // out of range for the target dimension (dimension size
-                    // mismatch), fall back to the source element name.
-                    let name = if src_elem_idx < to_dim_elements[*pos].len() {
-                        to_dim_elements[*pos][src_elem_idx].as_str()
-                    } else {
-                        from_dim_elements[src_dim_idx][src_elem_idx].as_str()
-                    };
-                    to_elem_options[*pos].push(name);
+            match axis {
+                // Two axes of one name (or two indexed axes of one size) list
+                // the same elements, so the index carries across.
+                BareAxis::Positional(pos) => {
+                    to_elem_options[*pos].push(to_dim_elements[*pos][src_elem_idx].as_str());
                 }
-                Correspondence::Mapped(pos, target_to_source) => {
-                    // Preimage: every target element that reads this source
-                    // element under either spelling. A singleton for a
-                    // positional mapping between disjointly-named dimensions;
-                    // empty for a source element nothing maps to; several for
-                    // a many-to-one element map, or where the two spellings
-                    // disagree.
-                    for (target_idx, src_idxs) in target_to_source.iter().enumerate() {
-                        if src_idxs.contains(&src_elem_idx) {
+                BareAxis::Mapped { pos, reads } => {
+                    let src_elem = from_dim_elements[src_dim_idx][src_elem_idx].as_str();
+                    for (target_idx, read) in reads.iter().enumerate() {
+                        if read.as_str() == src_elem {
                             to_elem_options[*pos].push(to_dim_elements[*pos][target_idx].as_str());
                         }
                     }
                 }
-                Correspondence::Collapsed => {}
+                BareAxis::Collapsed => {}
             }
         }
 
@@ -1307,6 +1230,7 @@ fn emit_agg_routed_edges(
             &iterated_dims,
             to_dims,
             dim_ctx,
+            BareSpelling::Equation,
             element_edges,
         );
     }
@@ -2242,6 +2166,14 @@ pub fn model_element_causal_edges(
                 && !from_dims.is_empty()
                 && !to_dims.is_empty();
             if is_structural_flow_to_stock || classified.map(Vec::is_empty).unwrap_or(true) {
+                // A flow feeds its stock through the wiring's pairing (the
+                // full context); every other reference here is an equation
+                // read.
+                let spelling = if is_structural_flow_to_stock {
+                    BareSpelling::StockFlow
+                } else {
+                    BareSpelling::Equation
+                };
                 emit_edges_for_reference(
                     from_name,
                     to_name,
@@ -2250,6 +2182,7 @@ pub fn model_element_causal_edges(
                     &RefShape::Bare,
                     None,
                     dim_ctx,
+                    spelling,
                     &mut element_edges,
                 );
                 continue;
@@ -2340,6 +2273,7 @@ pub fn model_element_causal_edges(
                             &site.shape,
                             site.target_element.as_deref(),
                             dim_ctx,
+                            BareSpelling::Equation,
                             &mut element_edges,
                         );
                     }
@@ -3710,6 +3644,7 @@ mod emit_edges_for_reference_tests {
             &RefShape::Bare,
             None,
             &empty_dim_ctx(),
+            BareSpelling::Equation,
             &mut edges,
         );
 
@@ -3735,6 +3670,7 @@ mod emit_edges_for_reference_tests {
             &RefShape::FixedIndex(vec!["nyc".to_string()]),
             None,
             &empty_dim_ctx(),
+            BareSpelling::Equation,
             &mut edges,
         );
 
@@ -3768,6 +3704,7 @@ mod emit_edges_for_reference_tests {
             &RefShape::Bare,
             None,
             &empty_dim_ctx(),
+            BareSpelling::Equation,
             &mut edges,
         );
 
@@ -3798,6 +3735,7 @@ mod emit_edges_for_reference_tests {
             &RefShape::FixedIndex(vec!["nyc".to_string()]),
             Some("boston"),
             &empty_dim_ctx(),
+            BareSpelling::Equation,
             &mut edges,
         );
 
@@ -3826,6 +3764,7 @@ mod emit_edges_for_reference_tests {
             &RefShape::Bare,
             Some("boston"),
             &empty_dim_ctx(),
+            BareSpelling::Equation,
             &mut edges,
         );
 
@@ -3858,21 +3797,18 @@ mod emit_edges_for_reference_tests {
     }
 
     /// GH #527 / GH #997: a `Bare` edge between dimensions related by a
-    /// POSITIONAL mapping projects the single diagonal both spellings agree on;
-    /// a pair related by an EXPLICIT element map projects the UNION of the two
-    /// spellings' diagonals, because a `Bare` site can be an in-equation
-    /// reference (positional) or a structural flow-to-stock edge (map-following)
-    /// and nothing downstream of the shape tells them apart -- see
-    /// [`bare_reference_correspondence`].
+    /// declared mapping projects the executed correspondence's rows -- the
+    /// diagonal under a positional `maps_to`, the map's rows under an explicit
+    /// element map -- through [`bare_axis_pairing`].
     ///
-    /// Exercised directly (no salsa pipeline) so both arms of the
-    /// correspondence decision are pinned at the emitter level. The 2-element
-    /// permuted case below produces the FULL broadcast, which is what this test
-    /// asserted before GH #997 and would still pass for the old reason; the
-    /// 3-element case after it is the one that distinguishes a union from a
-    /// broadcast.
+    /// Exercised directly (no salsa pipeline) so the emitter-level projection
+    /// is pinned on its own. The 2-element permuted map is the row where the
+    /// map's answer and the ordinal's differ on every element; the 3-element
+    /// 3-cycle after it separates "the map's row" from every other pairing, so
+    /// a describer emitting the ordinal's row, a union of both, or a broadcast
+    /// fails a different assertion each.
     #[test]
-    fn bare_mapped_dims_positional_diagonal_element_map_broadcast() {
+    fn bare_mapped_dims_project_the_executed_correspondence() {
         // Positional mapping: diagonal.
         let mut state = crate::datamodel::Dimension::named(
             "State".to_string(),
@@ -3896,6 +3832,7 @@ mod emit_edges_for_reference_tests {
             &RefShape::Bare,
             None,
             &dim_ctx,
+            BareSpelling::Equation,
             &mut edges,
         );
         assert_eq!(
@@ -3909,7 +3846,7 @@ mod emit_edges_for_reference_tests {
             "positional mapping: x[b] feeds only its positional twin"
         );
 
-        // Explicit element map (permuted s1↦b, s2↦a): broadcast.
+        // Explicit element map (permuted s1↦b, s2↦a): the map's rows.
         let mut state_em = crate::datamodel::Dimension::named(
             "State".to_string(),
             vec!["s1".to_string(), "s2".to_string()],
@@ -3934,27 +3871,24 @@ mod emit_edges_for_reference_tests {
             &RefShape::Bare,
             None,
             &dim_ctx_em,
+            BareSpelling::Equation,
             &mut edges_em,
         );
-        let broadcast = BTreeSet::from(["target[s1]".to_string(), "target[s2]".to_string()]);
         assert_eq!(
             edges_em.get("x[a]"),
-            Some(&broadcast),
-            "element map: x[a] keeps the conservative broadcast"
+            Some(&BTreeSet::from(["target[s2]".to_string()])),
+            "element map: x[a] feeds the target the map sends to it"
         );
         assert_eq!(
             edges_em.get("x[b]"),
-            Some(&broadcast),
-            "element map: x[b] keeps the conservative broadcast"
+            Some(&BTreeSet::from(["target[s1]".to_string()])),
+            "element map: x[b] feeds the target the map sends to it"
         );
 
-        // Three elements, so the two rules' answers are a strict SUBSET of the
-        // broadcast and the union is observable. The map is the 3-cycle
-        // s1->b, s2->c, s3->a; the positional diagonal is s1->a, s2->b, s3->c.
-        // Each source element therefore feeds exactly TWO targets, never all
-        // three -- which is the property the flow-to-stock spelling needs (its
-        // map-following read must have an edge) without giving up the tightening
-        // (the third pair is a phantom either way).
+        // Three elements under the 3-cycle s1->b, s2->c, s3->a (the positional
+        // diagonal would be s1->a, s2->b, s3->c): each source element feeds
+        // exactly the ONE target the map names, never its ordinal twin and
+        // never the third.
         let mut state3 = crate::datamodel::Dimension::named(
             "State".to_string(),
             vec!["s1".to_string(), "s2".to_string(), "s3".to_string()],
@@ -3982,16 +3916,14 @@ mod emit_edges_for_reference_tests {
             &RefShape::Bare,
             None,
             &dim_ctx3,
+            BareSpelling::Equation,
             &mut edges3,
         );
-        for (src, positional, mapped) in [("a", "s1", "s3"), ("b", "s2", "s1"), ("c", "s3", "s2")] {
+        for (src, mapped) in [("a", "s3"), ("b", "s1"), ("c", "s2")] {
             assert_eq!(
                 edges3.get(&format!("x[{src}]")),
-                Some(&BTreeSet::from([
-                    format!("target[{positional}]"),
-                    format!("target[{mapped}]")
-                ])),
-                "x[{src}] must feed exactly its positional and its mapped target"
+                Some(&BTreeSet::from([format!("target[{mapped}]")])),
+                "x[{src}] must feed exactly the target the map names"
             );
         }
     }

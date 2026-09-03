@@ -1713,21 +1713,20 @@ fn element_graph_per_element_broadcast_is_pinned_diagonal() {
     assert_no_edge(&result, "pop[b,old]", "mid[b,x]");
 }
 
-/// GH #527: a many-to-one `State{s1,s2,s3}→Region{a,b}` element map read on
-/// the ITERATED spelling (`x[State]`) keeps the conservative BROADCAST.
+/// A many-to-one `State{s1,s2,s3}→Region{a,b}` element map read on the
+/// ITERATED spelling (`x[State]`) gets the map's rows: `x[a]` feeds `s1` and
+/// `s2`, `x[b]` feeds `s3`, and nothing else.
 ///
-/// The reason is CARDINALITY, not the map. This spelling folds its index to an
-/// ordinal (GH #997), and `positional_correspondence` needs equal extents --
-/// there is no third `Region` element for `s3`'s ordinal to read. The model
-/// does not compile either (`mapped_reference_semantics_tests`'
-/// `(ManyToOne, IteratedDim)` cell is a refusal, GH #753), so a graph-level pin
-/// is all this shape can have; the broadcast is a superset of whatever the
-/// engine would read, so no true edge can be missing. The map-following
-/// spelling of the SAME cardinality is
-/// `element_graph_many_to_one_mapped_read_emits_the_map_rows`, which compiles
-/// and gets the map's rows.
+/// Execution follows the map on this spelling at this cardinality
+/// (`mapped_reference_semantics_tests`' `ManyToOne` row measures every
+/// spelling reading `[10, 20, 10]`), and the reference classifies `Bare`:
+/// `classify_axis_access` accepts the pair through the executed
+/// correspondence, and `expand_same_element` inverts it per target element,
+/// so a source element read by several target elements feeds each of them.
+/// The source-own-dim spelling of the same map is
+/// `element_graph_many_to_one_mapped_read_emits_the_map_rows`.
 #[test]
-fn element_graph_mapped_element_map_stays_broadcast() {
+fn element_graph_many_to_one_iterated_read_emits_the_map_rows() {
     let project = TestProject::new("mapped_element_map_3_to_2")
         .named_dimension("Region", &["a", "b"])
         .named_dimension_with_element_mapping(
@@ -1741,15 +1740,12 @@ fn element_graph_mapped_element_map_stays_broadcast() {
 
     let result = element_edges(&project);
 
-    for region in ["a", "b"] {
-        for state in ["s1", "s2", "s3"] {
-            assert_edge(
-                &result,
-                &format!("x[{region}]"),
-                &format!("target[{state}]"),
-            );
-        }
-    }
+    assert_edge(&result, "x[a]", "target[s1]");
+    assert_edge(&result, "x[a]", "target[s2]");
+    assert_edge(&result, "x[b]", "target[s3]");
+    assert_no_edge(&result, "x[a]", "target[s3]");
+    assert_no_edge(&result, "x[b]", "target[s1]");
+    assert_no_edge(&result, "x[b]", "target[s2]");
 }
 
 /// GH #527: the mapped diagonal composes with the target-only-dimension
@@ -1787,33 +1783,18 @@ fn element_graph_mapped_diagonal_with_broadcast_dim() {
 ///
 /// `Region{a,b}`, `State{s1,s2}` with the PERMUTED element map s1↦b, s2↦a,
 /// distinct per-element source values (`x[a]=10`, `x[b]=20`), and
-/// `target[State] = x[State] * 1`. The element graph's edges must be a
-/// SUPERSET of the edges the simulation's actual reads imply (derived here
-/// from which `x` element's value each `target` element equals) -- the LTM
-/// contract is "more edges than necessary, never fewer".
-///
-/// On THIS fixture's spelling the executed A2A lowering resolves the
-/// reference POSITIONALLY, ignoring the explicit element map (target[s1] =
-/// x[a], the map notwithstanding), so a map-following diagonal would DROP
-/// the true positionally-read edges -- which is why `expand_same_element`
-/// projects the UNION of the two spellings' diagonals rather than picking one
-/// (GH #997). Emitting only the map's diagonal reds this test by dropping the
-/// `x[a] -> target[s1]` edge, the direction the LTM contract forbids.
-///
-/// The qualifier is load-bearing and was missing: this claim is NOT
-/// universal. `x[State]` spells the dimension the equation ITERATES, which
-/// `ast::expr3` folds to an ordinal that indexes `x`'s storage raw; a
-/// subscript naming a NON-active dimension instead reaches
-/// `translate_via_mapping` and DOES follow the element map. Both spellings
-/// are real and both ship -- see `db::analysis::bare_reference_correspondence`
-/// for the fork and the Vensim `Ref.vdf` evidence that map-following is correct
-/// where it happens. This fixture builds only the positional spelling, so it
-/// constrains only that half.
+/// `target[State] = x[State] * 1`. The element graph's edges must be EXACTLY
+/// the edges the simulation's actual reads imply (derived here from which
+/// `x` element's value each `target` element equals): the read edge present,
+/// the other absent. The executed A2A lowering follows the element map on
+/// this spelling (`mapped_reference_semantics_tests`' `Permuted` row), and
+/// `expand_same_element` projects that one correspondence.
 ///
 /// The test derives the implied edges from the run itself, so it keeps
-/// passing if execution on this spelling later changes.
+/// checking the graph against execution if execution on this spelling later
+/// changes.
 #[test]
-fn element_graph_mapped_element_map_edges_superset_of_simulation_reads() {
+fn element_graph_mapped_element_map_edges_are_the_simulation_reads() {
     let project = TestProject::new("mapped_element_map_parity")
         .named_dimension("Region", &["a", "b"])
         .named_dimension_with_element_mapping(
@@ -1852,6 +1833,9 @@ fn element_graph_mapped_element_map_edges_superset_of_simulation_reads() {
             "exactly one x element should match {target_key}={target_val}"
         );
         assert_edge(&graph, &format!("x[{}]", read_from[0]), &target_key);
+        for other in region_elems.iter().filter(|r| **r != read_from[0]) {
+            assert_no_edge(&graph, &format!("x[{other}]"), &target_key);
+        }
     }
 }
 
@@ -1927,25 +1911,18 @@ fn element_graph_mapped_sliced_reducer_routes_through_remapped_agg() {
     }
 }
 
-/// GH #997 (flipped from the GH #534-era conservative pin): a sliced reducer
-/// over an EXPLICIT element-mapped pair is hoisted, and its slots are remapped
-/// POSITIONALLY -- ignoring the declared element map.
+/// A sliced reducer over an EXPLICIT element-mapped pair is hoisted, and its
+/// slots follow the map: `matrix[State, *]` inside a `State`-iterating body
+/// reads, at `s1`, the `Region` row the map sends `s1` to
+/// (`mapped_reference_semantics_tests`' `Permuted` row measures the iterated
+/// spelling following the map against the VM), and
+/// `iterated_axis_slot_elements` inverts that same correspondence.
 ///
-/// This test asserted the conservative cross-product until GH #997, on the
-/// reasoning that the single correspondence declined the pair. The
-/// decline was never a claim about this spelling: `matrix[State, *]` names the
-/// dimension the equation ITERATES, and `mapped_reference_semantics_tests`'
-/// `(Permuted, IteratedDim)` cell measures such a reference reading by ordinal
-/// against the VM -- the map is not consulted. One function served both
-/// spellings and could not answer either, so it answered neither; now
-/// `positional_correspondence` answers this one and the reducer hoists with the
-/// slots execution actually reads.
-///
-/// The element map here (s1↦r2, s2↦r1) is the REVERSE of the positional
-/// diagonal, so the two rules disagree on every slot and the assertions below
-/// distinguish them.
+/// The element map here (s1↦r2, s2↦r1) is the REVERSE of the ordinal
+/// diagonal, so the map's slots and the ordinal's disagree on every row and the
+/// assertions below distinguish them.
 #[test]
-fn element_graph_element_mapped_sliced_reducer_remaps_positionally() {
+fn element_graph_element_mapped_sliced_reducer_remaps_along_the_map() {
     let project = TestProject::new("element_mapped_sliced")
         .named_dimension("Region", &["r1", "r2"])
         .named_dimension("D2", &["x", "y"])
@@ -1966,15 +1943,15 @@ fn element_graph_element_mapped_sliced_reducer_remaps_positionally() {
     let result = element_edges(&project);
     let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
 
-    // POSITIONAL slots: `Region`'s first element feeds `State`'s first slot,
-    // which is what the ordinal fold reads. The declared map says the opposite
-    // (s1↦r2), so a map-following remap would land every row on the other slot.
-    assert_edge(&result, "matrix[r1,x]", &format!("{agg}[s1]"));
-    assert_edge(&result, "matrix[r1,y]", &format!("{agg}[s1]"));
-    assert_edge(&result, "matrix[r2,x]", &format!("{agg}[s2]"));
-    assert_edge(&result, "matrix[r2,y]", &format!("{agg}[s2]"));
-    assert_no_edge(&result, "matrix[r1,x]", &format!("{agg}[s2]"));
-    assert_no_edge(&result, "matrix[r2,x]", &format!("{agg}[s1]"));
+    // The MAP's slots: `s1` reads `r2`, so `Region`'s second row feeds
+    // `State`'s first slot; an ordinal remap would land every row on the other
+    // slot.
+    assert_edge(&result, "matrix[r2,x]", &format!("{agg}[s1]"));
+    assert_edge(&result, "matrix[r2,y]", &format!("{agg}[s1]"));
+    assert_edge(&result, "matrix[r1,x]", &format!("{agg}[s2]"));
+    assert_edge(&result, "matrix[r1,y]", &format!("{agg}[s2]"));
+    assert_no_edge(&result, "matrix[r2,x]", &format!("{agg}[s2]"));
+    assert_no_edge(&result, "matrix[r1,x]", &format!("{agg}[s1]"));
     // The agg fans into the target diagonally on the shared State axis.
     assert_edge(&result, &format!("{agg}[s1]"), "growth[s1]");
     assert_edge(&result, &format!("{agg}[s2]"), "growth[s2]");
@@ -1994,12 +1971,11 @@ fn element_graph_element_mapped_sliced_reducer_remaps_positionally() {
     }
 }
 
-/// GH #757 (flipped from the GH #534-era conservative pin): a sliced
-/// reducer whose POSITIONAL mapping is declared only in the REVERSE
-/// direction (on the source's `Region` toward `State`) is now hoisted --
-/// `classify_axis_access` gates on `positional_correspondence`, which
-/// accepts both declaration directions -- so the element graph routes it
-/// through the remapped agg slots exactly like the forward-declared twin.
+/// GH #757: a sliced reducer whose POSITIONAL mapping is declared only in
+/// the REVERSE direction (on the source's `Region` toward `State`) is hoisted
+/// -- the executed correspondence accepts both declaration directions -- so
+/// the element graph routes it through the remapped agg slots exactly like
+/// the forward-declared twin.
 #[test]
 fn element_graph_reverse_declared_mapped_sliced_reducer_routes_remapped_agg() {
     let project = TestProject::new("reverse_mapped_sliced")
@@ -2392,37 +2368,33 @@ fn element_graph_ambiguous_mapped_read_declines_to_the_cross_product() {
     }
 }
 
-/// The premise that forced `expand_same_element` to emit a UNION rather than
-/// pick a rule, reached through the production pipeline.
+/// The two subscript-less `Bare` spellings on one element-mapped pair read the
+/// map, and the element graph names exactly the map's row for each.
 ///
 /// A structural flow-to-stock edge is labelled `RefShape::Bare` by
 /// `model_edge_shapes` with no AST reference behind it -- a stock's equation
 /// holds only its initial value, so the flow's name never appears in it. The
 /// flow reference is resolved by `Context::fold_flows` through
-/// `get_implicit_subscript_off`, i.e. name-first then through the declared
-/// element map (`mapped_reference_semantics_tests`' `StockFlow` row measures it
-/// against the VM). An in-equation `Bare` reference on the same pair resolves
-/// POSITIONALLY. Both wear one shape, so the element graph must cover both.
+/// `get_implicit_subscript_off`, and an in-equation bare reference on the
+/// same pair by `lower_pass0`'s rewrite into the iterated spelling; both reach
+/// `DimensionsContext::resolve_mapped_read` and follow the declared element
+/// map (`mapped_reference_semantics_tests`' `StockFlow` and `BareInEquation`
+/// cells of the `Permuted` row, and
+/// `a_bare_equation_reference_and_a_flow_reference_agree`).
 ///
 /// This fixture builds BOTH on one element-mapped pair -- `level[State]`
 /// integrating a `Region`-declared flow, and `readout[State]` reading the same
-/// flow in an equation -- and asserts the union appears on each.
+/// flow in an equation -- with a 3-CYCLE map (s1↦b, s2↦c, s3↦a) so that the
+/// map's row, the ordinal's row and the third element are three different
+/// answers per target: the map's is asserted present and the other two absent.
 ///
-/// THREE elements, with a 3-CYCLE map (s1↦b, s2↦c, s3↦a) against the positional
-/// diagonal (s1↦a, s2↦b, s3↦c). Two is not enough: at two elements the union of
-/// two disjoint permutations IS the full broadcast, so the test could not tell a
-/// union from a decline -- deleting `bare_reference_correspondence` reds ten
-/// other tests and would leave a 2-element version of this one green. At three
-/// it is a strict subset: each source element feeds exactly TWO of the three
-/// targets, and the third is asserted ABSENT.
-///
-/// The hand-built `bare_mapped_dims_positional_diagonal_element_map_broadcast`
+/// The hand-built `bare_mapped_dims_project_the_executed_correspondence`
 /// exercises `emit_edges_for_reference` directly with a `RefShape::Bare` it
 /// supplies itself; this one derives the shape through `model_edge_shapes` and
 /// the real `model_element_causal_edges` query, so it pins that production
 /// actually classifies a structural stock edge that way.
 #[test]
-fn element_graph_flow_to_stock_across_an_element_map_gets_the_union() {
+fn element_graph_flow_to_stock_across_an_element_map_reads_the_map() {
     let project = TestProject::new("mapped_flow_to_stock")
         .named_dimension("Region", &["a", "b", "c"])
         .named_dimension_with_element_mapping(
@@ -2445,19 +2417,14 @@ fn element_graph_flow_to_stock_across_an_element_map_gets_the_union() {
         result.edges.keys().collect::<Vec<_>>()
     );
 
-    // Per target element: the POSITIONAL source, the MAPPED source, and the
-    // third element that neither spelling reads.
+    // Per target element: the MAPPED source present, the ordinal's and the
+    // third absent.
     for target in ["level", "readout"] {
-        for (elem, positional, mapped, absent) in [
-            ("s1", "a", "b", "c"),
-            ("s2", "b", "c", "a"),
-            ("s3", "c", "a", "b"),
+        for (elem, mapped, ordinal, third) in [
+            ("s1", "b", "a", "c"),
+            ("s2", "c", "b", "a"),
+            ("s3", "a", "c", "b"),
         ] {
-            assert_edge(
-                &result,
-                &format!("feed[{positional}]"),
-                &format!("{target}[{elem}]"),
-            );
             assert_edge(
                 &result,
                 &format!("feed[{mapped}]"),
@@ -2465,45 +2432,44 @@ fn element_graph_flow_to_stock_across_an_element_map_gets_the_union() {
             );
             assert_no_edge(
                 &result,
-                &format!("feed[{absent}]"),
+                &format!("feed[{ordinal}]"),
+                &format!("{target}[{elem}]"),
+            );
+            assert_no_edge(
+                &result,
+                &format!("feed[{third}]"),
                 &format!("{target}[{elem}]"),
             );
         }
     }
 }
 
-/// [`super::mapped_pair_projects_uniquely`], row by row, derived from the four
-/// cases its own rustdoc enumerates rather than sampled.
+/// [`super::bare_axis_pairing`], row by row, derived from the rungs of the
+/// matcher it wraps (`dimensions::match_axes_partial`: exact name, declared
+/// mapping, indexed size) and the answers the executed correspondence gives a
+/// mapped pair, rather than sampled.
 ///
-/// The function decides whether a `Bare` edge across a mapped pair may carry an
-/// ARRAYED link score, and it is a STRICTER question than which element edges
-/// exist -- a distinction no other test isolates. Two of the four rows also have
-/// end-to-end pins (`a_disagreeing_mapped_pair_is_denied_the_arrayed_score` and
-/// its agreeing companion in `tests/integration/ltm_array_agg.rs`), but the
-/// MANY-TO-ONE admit row -- the one the rustdoc credits with keeping C-LEARN's
-/// class-D edges working -- has none: C-LEARN's class-D references classify
-/// `PerElement`, so they never consult this gate at all. Without this test that
-/// row is an unexercised claim.
+/// The pairing decides three things at once -- which element edges a `Bare`
+/// read gets, which from-nodes discovery attaches to a score's slots, and
+/// whether an edge may carry an arrayed score at all -- so a row here pins all
+/// three. The end-to-end pins are `a_permuted_mapped_pair_scores_the_maps_diagonal`
+/// and `an_agreeing_mapped_pair_keeps_the_arrayed_score` in
+/// `tests/integration/ltm_array_agg.rs`.
 #[test]
-fn mapped_pair_projects_uniquely_enumeration() {
-    use crate::common::CanonicalDimensionName;
+fn bare_axis_pairing_enumeration() {
+    use super::BareAxis;
+    use crate::common::{CanonicalDimensionName, CanonicalElementName};
     use crate::dimensions::DimensionsContext;
 
-    let region = |elems: &[&str]| {
+    let named = |name: &str, elems: &[&str]| {
         crate::datamodel::Dimension::named(
-            "Region".to_string(),
+            name.to_string(),
             elems.iter().map(|e| e.to_string()).collect(),
         )
     };
-    let state = |elems: &[&str]| {
-        crate::datamodel::Dimension::named(
-            "State".to_string(),
-            elems.iter().map(|e| e.to_string()).collect(),
-        )
-    };
-    let with_map = |mut d: crate::datamodel::Dimension, pairs: &[(&str, &str)]| {
+    let with_map = |mut d: crate::datamodel::Dimension, target: &str, pairs: &[(&str, &str)]| {
         d.mappings = vec![crate::datamodel::DimensionMapping {
-            target: "Region".to_string(),
+            target: target.to_string(),
             element_map: pairs
                 .iter()
                 .map(|(a, b)| (a.to_string(), b.to_string()))
@@ -2511,68 +2477,210 @@ fn mapped_pair_projects_uniquely_enumeration() {
         }];
         d
     };
-    let projects = |dims: &[crate::datamodel::Dimension]| -> bool {
+    let elems = |names: &[&str]| -> Vec<CanonicalElementName> {
+        names
+            .iter()
+            .map(|n| CanonicalElementName::from_raw(n))
+            .collect()
+    };
+    use super::BareSpelling;
+    // The pairing of `from` (declared over `from_names`) read into `to`
+    // (declared over `to_names`) under `dims`, for one spelling.
+    let pairing_for = |dims: &[crate::datamodel::Dimension],
+                       from_names: &[&str],
+                       to_names: &[&str],
+                       spelling: BareSpelling| {
         let ctx = DimensionsContext::from(dims);
-        super::mapped_pair_projects_uniquely(
-            &ctx,
-            &CanonicalDimensionName::from_raw("State"),
-            &CanonicalDimensionName::from_raw("Region"),
-        )
+        let dim = |n: &str| {
+            ctx.get(&CanonicalDimensionName::from_raw(n))
+                .unwrap_or_else(|| panic!("the fixture declares {n}"))
+                .clone()
+        };
+        let from: Vec<_> = from_names.iter().map(|n| dim(n)).collect();
+        let to: Vec<_> = to_names.iter().map(|n| dim(n)).collect();
+        super::bare_axis_pairing(&from, &to, &ctx, spelling)
+    };
+    // The rows below hold for BOTH spellings unless they say otherwise; the
+    // equation's and the wiring's relations differ only on the parent-mapping
+    // row at the end.
+    let pairing = |dims: &[crate::datamodel::Dimension], from_names: &[&str], to_names: &[&str]| {
+        let equation = pairing_for(dims, from_names, to_names, BareSpelling::Equation);
+        assert_eq!(
+            equation,
+            pairing_for(dims, from_names, to_names, BareSpelling::StockFlow),
+            "{from_names:?} -> {to_names:?}: the two spellings agree on this row"
+        );
+        equation
     };
 
-    // ADMIT 1 -- a plain positional mapping. The two spellings coincide, which
-    // is why every pre-GH #997 mapped edge kept its score.
-    let mut positional = state(&["s1", "s2"]);
+    // EXACT: two axes of one name pair positionally.
+    assert_eq!(
+        pairing(&[named("Region", &["a", "b"])], &["Region"], &["Region"]),
+        vec![BareAxis::Positional(0)]
+    );
+    // EXACT, repeated on both sides: each occurrence pairs with its own axis
+    // (positional and one-to-one), so `cube[D,D] = pop[D,D]` reads the cell.
+    assert_eq!(
+        pairing(&[named("D", &["r1", "r2"])], &["D", "D"], &["D", "D"]),
+        vec![BareAxis::Positional(0), BareAxis::Positional(1)]
+    );
+    // EXACT, repeated on the source only: the second occurrence is collapsed.
+    assert_eq!(
+        pairing(&[named("D", &["r1", "r2"])], &["D", "D"], &["D"]),
+        vec![BareAxis::Positional(0), BareAxis::Collapsed]
+    );
+    // MAPPED, positional `maps_to`: the diagonal.
+    let mut positional = named("State", &["s1", "s2"]);
     positional.set_maps_to("Region".to_string());
-    assert!(
-        projects(&[positional, region(&["a", "b"])]),
-        "a positional mapping must admit"
+    assert_eq!(
+        pairing(
+            &[positional, named("Region", &["a", "b"])],
+            &["Region"],
+            &["State"]
+        ),
+        vec![BareAxis::Mapped {
+            pos: 0,
+            reads: elems(&["a", "b"])
+        }]
     );
-
-    // ADMIT 2 -- a MANY-TO-ONE element map (C-LEARN's shape). The positional
-    // rule declines outright at unequal cardinality, leaving the executed rule
-    // alone in the union, so every entry is still a singleton.
-    assert!(
-        projects(&[
-            with_map(
-                state(&["s1", "s2", "s3"]),
-                &[("s1", "a"), ("s2", "a"), ("s3", "b")],
-            ),
-            region(&["a", "b"]),
-        ]),
-        "a many-to-one element map must admit -- the positional rule contributes \
-         nothing to the union at unequal cardinality"
+    // MAPPED, a PERMUTED element map: the map's rows, not the ordinal's.
+    assert_eq!(
+        pairing(
+            &[
+                with_map(
+                    named("State", &["s1", "s2"]),
+                    "Region",
+                    &[("s1", "b"), ("s2", "a")]
+                ),
+                named("Region", &["a", "b"]),
+            ],
+            &["Region"],
+            &["State"]
+        ),
+        vec![BareAxis::Mapped {
+            pos: 0,
+            reads: elems(&["b", "a"])
+        }]
     );
-
-    // REFUSE 1 -- an equal-cardinality PERMUTED element map. Both rules answer,
-    // and they disagree, so a target slot would be shared by two source
-    // elements.
-    assert!(
-        !projects(&[
-            with_map(state(&["s1", "s2"]), &[("s1", "b"), ("s2", "a")]),
-            region(&["a", "b"]),
-        ]),
-        "an equal-cardinality permuted element map must refuse"
+    // MAPPED, MANY-TO-ONE (C-LEARN's shape): one source element under several
+    // target elements.
+    assert_eq!(
+        pairing(
+            &[
+                with_map(
+                    named("State", &["s1", "s2", "s3"]),
+                    "Region",
+                    &[("s1", "a"), ("s2", "a"), ("s3", "b")],
+                ),
+                named("Region", &["a", "b"]),
+            ],
+            &["Region"],
+            &["State"]
+        ),
+        vec![BareAxis::Mapped {
+            pos: 0,
+            reads: elems(&["a", "a", "b"])
+        }]
     );
-
-    // REFUSE 2 -- a pair SHARING element names in a different order. Here the
-    // executed rule stops at name identity while the positional one reads by
-    // ordinal; no element map is involved at all, which is what makes this a
-    // separate row rather than a restatement of the one above.
-    let mut shared = state(&["b", "a"]);
+    // MAPPED, shared element names in a different order: NAME identity beats
+    // the ordinal the positional mapping would suggest.
+    let mut shared = named("State", &["b", "a"]);
     shared.set_maps_to("Region".to_string());
-    assert!(
-        !projects(&[shared, region(&["a", "b"])]),
-        "a mapped pair sharing element names in a different order must refuse"
+    assert_eq!(
+        pairing(
+            &[shared, named("Region", &["a", "b"])],
+            &["Region"],
+            &["State"]
+        ),
+        vec![BareAxis::Mapped {
+            pos: 0,
+            reads: elems(&["b", "a"])
+        }]
+    );
+    // MAPPED but untranslatable (a positional mapping between different
+    // sizes): collapsed, so the read broadcasts -- the compiler refuses it.
+    let mut mismatched = named("State", &["s1", "s2", "s3"]);
+    mismatched.set_maps_to("Region".to_string());
+    assert_eq!(
+        pairing(
+            &[mismatched, named("Region", &["a", "b"])],
+            &["Region"],
+            &["State"]
+        ),
+        vec![BareAxis::Collapsed]
+    );
+    // BY SIZE: two INDEXED axes of one size pair positionally, as
+    // `lower_pass0` pairs them for a bare reference.
+    assert_eq!(
+        pairing(
+            &[
+                crate::datamodel::Dimension::indexed("I".to_string(), 3),
+                crate::datamodel::Dimension::indexed("J".to_string(), 3),
+            ],
+            &["J"],
+            &["I"]
+        ),
+        vec![BareAxis::Positional(0)]
+    );
+    // UNDECLARED, disjoint names: nothing pairs, the read broadcasts (GH #527).
+    assert_eq!(
+        pairing(
+            &[named("State", &["s1", "s2"]), named("Region", &["a", "b"])],
+            &["Region"],
+            &["State"]
+        ),
+        vec![BareAxis::Collapsed]
+    );
+    // MAPPED ONTO A PARENT: `dimb -> dima` declared, `suba` inside `dima`. Pass
+    // 0 withholds the parent rung (`DirectMappingsOnly`), so an in-equation
+    // bare `src[dimb]` under a `suba` iteration is unpaired -- `y[suba] =
+    // SUM(src)` reads all three elements (measured) -- while the stock/flow
+    // wiring pairs through the parent (`get_implicit_subscript_off`) and reads
+    // `b1` for `a1`, `b3` for `a3`.
+    let parent_dims = [
+        named("dima", &["a1", "a2", "a3"]),
+        named("suba", &["a1", "a3"]),
+        with_map(named("dimb", &["b1", "b2", "b3"]), "dima", &[]),
+    ];
+    assert_eq!(
+        pairing_for(&parent_dims, &["dimb"], &["suba"], BareSpelling::Equation),
+        vec![BareAxis::Collapsed]
+    );
+    assert_eq!(
+        pairing_for(&parent_dims, &["dimb"], &["suba"], BareSpelling::StockFlow),
+        vec![BareAxis::Mapped {
+            pos: 0,
+            reads: elems(&["b1", "b3"])
+        }]
+    );
+    // A COMMON MAPPING TARGET: `x -> dima` and `y -> dima` relate `x` to `y`
+    // in both rule sets, but the executed correspondence translates no element
+    // of the pair (no shared name, no map between them; the compiler reads it
+    // by ordinal at equal size, the GH #527 class), so the axis is collapsed
+    // and the score admission declines it.
+    let common_dims = [
+        named("dima", &["a1", "a2"]),
+        with_map(named("x", &["x1", "x2"]), "dima", &[]),
+        with_map(named("y", &["y1", "y2"]), "dima", &[]),
+    ];
+    assert_eq!(
+        pairing(&common_dims, &["x"], &["y"]),
+        vec![BareAxis::Collapsed]
     );
 
-    // And the boundary the two REFUSE rows sit against: shared names in the
-    // SAME order agree, so they admit. Without this the refusals could be read
-    // as "shared names always refuse".
-    let mut agreeing = state(&["a", "b"]);
-    agreeing.set_maps_to("Region".to_string());
-    assert!(
-        projects(&[agreeing, region(&["a", "b"])]),
-        "shared element names in the SAME order agree on both rules and admit"
+    // UNDECLARED, shared names: the LISTS alone do not pair either -- a
+    // dimension-name subscript pairs such axes by the name it spells, which is
+    // why `classify_iterated_dim_shape` keeps that reference `PerElement`
+    // rather than `Bare` (pinned by `ir_undeclared_shared_names_iterated_subscript_is_per_element`).
+    assert_eq!(
+        pairing(
+            &[
+                named("Region", &["north", "south"]),
+                named("Other", &["south", "north"])
+            ],
+            &["Other"],
+            &["Region"]
+        ),
+        vec![BareAxis::Collapsed]
     );
 }

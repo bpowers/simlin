@@ -14,6 +14,16 @@ use super::*;
 use crate::db::{SimlinDb, sync_from_datamodel};
 use crate::test_common::TestProject;
 
+/// The synthetic node whose identity -- its spelled reducer, printed -- is
+/// `identity`; `None` for a reducer that only ever appears as a variable's
+/// whole dt-equation (a variable-backed agg is found through `aggs_in_var`).
+fn agg_for_key<'a>(result: &'a AggNodesResult, identity: &str) -> Option<&'a AggNode> {
+    result
+        .synthetic_by_key
+        .get(identity)
+        .map(|&i| &result.aggs[i])
+}
+
 /// Test helper: the source-variable names of an agg (sorted + deduped
 /// by the [`AggNode::sources`] construction invariant).
 fn source_names(a: &AggNode) -> Vec<&str> {
@@ -326,7 +336,7 @@ fn whole_rhs_scalar_reducer_is_its_own_agg() {
     assert_eq!(source_names(agg), vec!["population"]);
     assert!(agg.result_dims.is_empty());
     // `agg_for_key` resolves only synthetic aggs, so it must not find this one.
-    assert!(result.agg_for_key("sum(population[*])").is_none());
+    assert!(agg_for_key(&result, "sum(population[*])").is_none());
 }
 
 /// AC4.3 (arrayed variant): `agg[D1] = SUM(matrix[D1,*])` is whole-RHS, so
@@ -479,7 +489,7 @@ fn inline_reducer_does_not_reuse_variable_backed_agg() {
     assert_eq!(source_names(share_agg), vec!["pop"]);
     // `agg_for_key` resolves the reducer text to the *synthetic* agg.
     assert_eq!(
-        result.agg_for_key("sum(pop[*])").map(|a| a.name.as_str()),
+        agg_for_key(&result, "sum(pop[*])").map(|a| a.name.as_str()),
         Some("$\u{205A}ltm\u{205A}agg\u{205A}0")
     );
 
@@ -703,11 +713,11 @@ fn enumeration_is_deterministic_under_variable_reordering() {
     // Specifically: SUM(a[*]) -> agg 0, SUM(b[*]) -> agg 1 (a < b, and
     // within q's equation SUM(a[*]) precedes SUM(b[*])).
     assert_eq!(
-        r1.agg_for_key("sum(a[*])").map(|a| a.name.clone()),
+        agg_for_key(&r1, "sum(a[*])").map(|a| a.name.clone()),
         Some("$\u{205A}ltm\u{205A}agg\u{205A}0".to_string())
     );
     assert_eq!(
-        r1.agg_for_key("sum(b[*])").map(|a| a.name.clone()),
+        agg_for_key(&r1, "sum(b[*])").map(|a| a.name.clone()),
         Some("$\u{205A}ltm\u{205A}agg\u{205A}1".to_string())
     );
 }
@@ -747,12 +757,12 @@ fn reducer_over_scalar_source_is_not_hoisted() {
     let result = agg_nodes(&project);
     // Only the arrayed reducer is recognized.
     assert!(
-        result.agg_for_key("sum(pop[*])").is_some(),
+        agg_for_key(&result, "sum(pop[*])").is_some(),
         "the arrayed reducer must be recognized; got: {:?}",
         result.aggs
     );
     assert!(
-        result.agg_for_key("sum(s)").is_none(),
+        agg_for_key(&result, "sum(s)").is_none(),
         "a reducer over a scalar source must not be hoisted; got: {:?}",
         result.aggs
     );
@@ -1049,18 +1059,14 @@ fn mapped_iterated_dim_sliced_reducer_is_hoisted_with_pair() {
     assert_eq!(synthetic[0].reducer_key, "sum(matrix[state, *])");
 }
 
-/// GH #997 (flipped from the GH #534-era conservative pin): a sliced reducer
-/// over an EXPLICIT element-mapped pair IS hoisted, with a POSITIONAL slot
-/// remap.
-///
-/// `matrix[State, *]` spells the dimension the equation ITERATES, and
-/// `mapped_reference_semantics_tests`' `(Permuted, IteratedDim)` cell measures
-/// that spelling reading by ordinal against the VM -- the declared element map
-/// is not consulted. The old decline came from one correspondence serving both
-/// spellings and answering neither; `classify_axis_access` now asks
-/// `positional_correspondence`, which describes this one exactly.
+/// A sliced reducer over an EXPLICIT element-mapped pair IS hoisted; the
+/// slice carries the `(State, Region)` pair and the slot remap follows the
+/// map (`mapped_reference_semantics_tests`' `(Permuted, IteratedDim)` cell
+/// measures that spelling following the map against the VM;
+/// `element_graph_element_mapped_sliced_reducer_remaps_along_the_map` pins the
+/// slots).
 #[test]
-fn element_mapped_sliced_reducer_is_hoisted_with_positional_slots() {
+fn element_mapped_sliced_reducer_is_hoisted() {
     let project = TestProject::new("element_mapped_slice")
         .named_dimension("Region", &["r1", "r2"])
         .named_dimension("D2", &["x", "y"])
@@ -1094,15 +1100,11 @@ fn element_mapped_sliced_reducer_is_hoisted_with_positional_slots() {
     assert_eq!(synthetic[0].result_dims, vec!["State".to_string()]);
 }
 
-/// GH #757 (flipped from the GH #534-era conservative pin): a sliced
-/// reducer whose POSITIONAL mapping is declared only in the REVERSE
-/// direction (on the source's `Region` toward `State`) is now hoisted --
-/// `classify_axis_access`'s mapped arm gates on
-/// `iterated_axis_slot_elements` / `positional_correspondence`,
-/// which accepts both declaration directions (the compiler's
-/// `translate_via_mapping` resolves both, so declining one direction
-/// was pure over-conservatism). The slice and `result_dims` are
-/// identical to the forward-declared twin.
+/// GH #757: a sliced reducer whose POSITIONAL mapping is declared only in
+/// the REVERSE direction (on the source's `Region` toward `State`) is hoisted
+/// -- the executed correspondence accepts both declaration directions (the
+/// compiler's `translate_via_mapping` resolves both). The slice and
+/// `result_dims` are identical to the forward-declared twin.
 #[test]
 fn reverse_declared_mapped_sliced_reducer_is_hoisted() {
     let project = TestProject::new("reverse_mapped_slice")
@@ -1337,10 +1339,12 @@ fn whole_rhs_broadcast_pinned_mix_mints_synthetic_agg() {
     );
 }
 
-/// GH #534: `iterated_axis_slot_elements` -- identity for the literal
-/// case, and the positional preimage for any mapped pair -- element map
-/// included, since this helper serves the ITERATED spelling and execution
-/// resolves that by ordinal (GH #997). `None` for an unmapped pair.
+/// GH #534: `iterated_axis_slot_elements` -- identity for the literal case,
+/// and the preimage of the executed correspondence for a foreign axis: the
+/// diagonal under a positional mapping, the map's slots under an element
+/// map, name identity where the two dimensions share element names, and
+/// `None` for an undeclared pair with disjoint names or a many-to-one map (a
+/// source element with several preimages has no single agg slot).
 #[test]
 fn iterated_axis_slot_elements_cases() {
     use crate::datamodel::{Dimension as DmDimension, DimensionMapping};
@@ -1368,6 +1372,10 @@ fn iterated_axis_slot_elements_cases() {
 
     let region_elems = vec!["r1".to_string(), "r2".to_string()];
 
+    let slots = |names: &[&str]| -> Option<Vec<Option<String>>> {
+        Some(names.iter().map(|n| Some(n.to_string())).collect())
+    };
+
     // Literal: identity (no dim_ctx lookups consulted).
     let ctx = DimensionsContext::from(&[
         named("Region", &["r1", "r2"], vec![]),
@@ -1375,39 +1383,90 @@ fn iterated_axis_slot_elements_cases() {
     ]);
     assert_eq!(
         iterated_axis_slot_elements("region", "region", &region_elems, &ctx),
-        Some(region_elems.clone())
+        slots(&["r1", "r2"])
     );
 
     // Positional mapping: source row r1 feeds slot s1, r2 feeds s2
     // (index-identity under the positional correspondence).
     assert_eq!(
         iterated_axis_slot_elements("state", "region", &region_elems, &ctx),
-        Some(vec!["s1".to_string(), "s2".to_string()])
+        slots(&["s1", "s2"])
     );
 
-    // Explicit element map: the POSITIONAL slots, not the map's. This asserted
-    // `None` until GH #997. `iterated_axis_slot_elements` serves the ITERATED
-    // spelling only (an `AxisRead::Iterated` axis, whose index names a
-    // dimension the equation iterates), which execution folds to an ordinal --
-    // so the map is not consulted and the slots are the positional diagonal.
-    // The map here is the reverse permutation (s1↦r2), so an accidental
-    // map-following remap would give ["s2", "s1"] and fail this row.
+    // Explicit element map: the MAP's slots. The map here is the reverse
+    // permutation (s1↦r2), so source row r1 feeds slot s2; an ordinal remap
+    // would give ["s1", "s2"] and fail this row.
     let ctx_elem = DimensionsContext::from(&[
         named("Region", &["r1", "r2"], vec![]),
         named("State", &["s1", "s2"], vec![element_mapped]),
     ]);
     assert_eq!(
         iterated_axis_slot_elements("state", "region", &region_elems, &ctx_elem),
-        Some(vec!["s1".to_string(), "s2".to_string()])
+        slots(&["s2", "s1"])
     );
 
-    // Unmapped pair: declined.
+    // Shared element names under no mapping: name identity, whatever the
+    // declared order.
+    let ctx_shared = DimensionsContext::from(&[
+        named("Region", &["r1", "r2"], vec![]),
+        named("State", &["r2", "r1"], vec![]),
+    ]);
+    assert_eq!(
+        iterated_axis_slot_elements("state", "region", &region_elems, &ctx_shared),
+        slots(&["r1", "r2"])
+    );
+
+    // A superset source read through a subrange: the subrange's elements have
+    // their slots (by name) and the others are not read -- `None` in their
+    // position, not a decline.
+    let ctx_subrange = DimensionsContext::from(&[
+        named("Source", &["coal", "oilgas", "hn", "new"], vec![]),
+        named("Nonrenewable", &["coal", "oilgas"], vec![]),
+    ]);
+    let source_elems: Vec<String> = ["coal", "oilgas", "hn", "new"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        iterated_axis_slot_elements("nonrenewable", "source", &source_elems, &ctx_subrange),
+        Some(vec![
+            Some("coal".to_string()),
+            Some("oilgas".to_string()),
+            None,
+            None
+        ])
+    );
+
+    // Unmapped pair with disjoint names: declined.
     let ctx_unmapped = DimensionsContext::from(&[
         named("Region", &["r1", "r2"], vec![]),
         named("State", &["s1", "s2"], vec![]),
     ]);
     assert_eq!(
         iterated_axis_slot_elements("state", "region", &region_elems, &ctx_unmapped),
+        None
+    );
+
+    // A many-to-one map: `r1` is read by two target elements, so it has no
+    // single slot; the direct-reference path describes the read, the
+    // aggregate path declines the hoist.
+    let ctx_many = DimensionsContext::from(&[
+        named("Region", &["r1", "r2"], vec![]),
+        named(
+            "State",
+            &["s1", "s2", "s3"],
+            vec![DimensionMapping {
+                target: "Region".to_string(),
+                element_map: vec![
+                    ("s1".to_string(), "r1".to_string()),
+                    ("s2".to_string(), "r1".to_string()),
+                    ("s3".to_string(), "r2".to_string()),
+                ],
+            }],
+        ),
+    ]);
+    assert_eq!(
+        iterated_axis_slot_elements("state", "region", &region_elems, &ctx_many),
         None
     );
 }
@@ -2536,6 +2595,7 @@ fn agg_sources_declines_when_arrayed_source_lacks_per_var_slice() {
     let ctx = AggWalkCtx {
         variables: &variables,
         target_iterated_dims: &[],
+        target_dims: &[],
         dm_dims: dm_dims.as_slice(),
         dim_ctx,
     };
@@ -3022,7 +3082,7 @@ fn classify_axis_access_resolves_a_colliding_name_element_first() {
     assert!(mapped_ctx.is_dimension_name("region"));
     assert!(
         mapped_ctx
-            .positional_correspondence(
+            .executed_read_correspondence(
                 &CanonicalDimensionName::from_raw("region"),
                 &CanonicalDimensionName::from_raw("bucket"),
             )

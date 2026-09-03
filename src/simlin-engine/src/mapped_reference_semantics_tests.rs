@@ -1197,8 +1197,8 @@ fn a_bare_equation_reference_and_a_flow_reference_agree() {
 /// BY MAPPING the active slot a later axis matches BY NAME.
 ///
 /// This is the hazard shape as a whole model rather than a hand-built call
-/// to `allocate_implicit_axes_partial`, the implicit-axis projection of
-/// `dimensions::match_axes_partial`. Reaching the allocator from a real
+/// to `dimensions::match_axes_partial`. Reaching the allocator
+/// (`compiler::dimensions::allocate_implicit_axes`) from a real
 /// model constrains the fixture: ordinary expression references never get
 /// there, because `Context::lower_pass0` rewrites a bare arrayed reference
 /// into an explicit subscript first (module docs). Tagging each call with its
@@ -1485,45 +1485,33 @@ fn two_iterated_axes_on_one_target_dimension_read_the_diagonal() {
     );
 }
 
-/// The boundary of the rule above: a TARGET that repeats the dimension.
+/// A TARGET that repeats the dimension: `cube[D1,D1] = pop[D1,D1]` resolves
+/// each of the reference's indices to its OWN active axis, so `cube[r1,r2]`
+/// reads `pop[r1,r2]` -- the whole matrix, four reads -- and the element graph
+/// names exactly those four.
 ///
-/// `cube[D1,D1] = pop[D1,D1]` resolves BOTH of the reference's indices to the
-/// target's FIRST `D1` axis, so `cube[r1,r2]` reads `pop[r1,r1]` -- four reads,
-/// which are NOT a diagonal in the target's own element tuple. Every
-/// per-element derivation addresses a target axis by dimension NAME, and this
-/// target has two coordinates for one name.
+/// Both sides pair axes positionally and one to one:
+/// `compiler::subscript::normalize_subscripts3` allocates the active positions
+/// across a reference's subscripts in order, and
+/// `db::analysis::bare_axis_pairing` -- the matcher behind `expand_same_element`
+/// -- pairs the two declared dimension lists the same way, so a repeated name is
+/// two axes on both sides rather than one map key. A name-keyed pairing kept
+/// only the LAST `D1` axis of the target and let both source axes claim it,
+/// which minted the phantom `pop[r1,r1] -> cube[r2,r1]` while dropping the real
+/// `pop[r1,r1] -> cube[r1,r2]`; the third instance of "a dimension name is not
+/// an axis identity" here after GH #974 and GH #986.
 ///
-/// **Why the retarget is narrowed to a singly-named target dimension, and what
-/// that costs.** The reason is the SCORE surface, not the edges. `RefShape`
-/// decides both, and `emit_per_element_link_scores` refuses a repeated-dimension
-/// target outright, so retargeting this shape would convert an emitted `Bare`
-/// link score into the loud per-element skip -- on every edge into or out of a
-/// repeated-dimension variable, with the loops through them dropped. That is a
-/// product decision about a shape this change is not about. On EDGES the
-/// retarget would be better, and the assertions below say so rather than hiding
-/// it: `Bare` emits 12 edges covering 2 of the 4 real reads, `PerElement` would
-/// emit exactly those same 2 and no phantoms. Both miss the same two real reads,
-/// so the retarget removes phantoms without fixing the missing half -- the half
-/// that breaks loop discovery.
-///
-/// **Pre-existing residual, pinned rather than fixed.** The missing half is
-/// `db::analysis::expand_same_element` keying target positions by dimension NAME
-/// (`HashMap<&str, usize>`), so a target repeating `D1` records only its LAST
-/// axis and both source axes claim it. The EXECUTED read does not have that
-/// defect -- the lowering allocates active positions one to one -- so the LTM
-/// half is what remains. Fixing it means
-/// teaching that function about repeated dimensions on either side -- the third
-/// instance of "a dimension name is not an axis identity" here after GH #974 and
-/// GH #986 -- which changes the arm every ordinary bare arrayed reference uses
-/// plus `ltm_finding::expand_a2a_link_offsets`. Doing it there lets the edges and
-/// the scores move together instead of trading one for the other.
+/// The shape stays `Bare` (the lists reproduce the subscript's pairing), which
+/// is what keeps `pop -> cube` on the arrayed A2A score -- asserted below
+/// through the loop-carrying twin, since the per-element emitter declines a
+/// repeated-dimension target outright and a `PerElement` retarget would trade
+/// the score for a loud skip.
 ///
 /// **Blast radius, measured.** Vensim REJECTS a repeated-dimension declaration
 /// ("DimA appears more than once on LHS", `vensim-probes/repeated_dimension.mdl`
-/// in Vensim DSS 2026-08-04), so no MDL-imported model reaches this residual and
+/// in Vensim DSS 2026-08-04), so no MDL-imported model reaches this shape and
 /// it is confined to hand-authored XMILE/JSON/protobuf. The XMILE v1.0 spec does
-/// exemplify the declaration, so the shape stays legitimate and the residual
-/// stays worth fixing -- just not urgent, and not from an importer.
+/// exemplify the declaration, so the shape stays legitimate.
 #[test]
 fn a_repeated_target_dimension_reads_each_axis_on_the_executed_path() {
     let project = TestProject::new("square_owner_reads")
@@ -1540,12 +1528,7 @@ fn a_repeated_target_dimension_reads_each_axis_on_the_executed_path() {
         .array_aux("cube[D1,D1]", "pop[D1,D1]");
     let results = project.run_vm().expect("must compile and run");
     // Each `D1` subscript reads its OWN active axis, so the copy is the whole
-    // matrix. `compiler::subscript::normalize_subscripts3` allocates the active
-    // positions one to one across a reference's subscripts, and
-    // `compiler::project_var_index_to_temp` pairs a temp's axes to the
-    // variable's the same way -- the read side of "a dimension name is not an
-    // axis identity". The LTM side below is not fixed, which is why the two
-    // halves are asserted separately.
+    // matrix -- the executed read, and the oracle for the edges below.
     for (cell, want) in [
         ("cube[r1,r1]", 11.0),
         ("cube[r1,r2]", 12.0),
@@ -1559,34 +1542,27 @@ fn a_repeated_target_dimension_reads_each_axis_on_the_executed_path() {
         );
     }
 
-    // The DISCRIMINATOR for the narrowing. Both of the above hold under the
-    // retarget too -- `PerElement` drops the same real edge and, being phantom-
-    // free, would satisfy the first line and fail the second only incidentally.
-    // What actually separates the two is that `Bare` keeps this edge SCOREABLE.
-    // Under the retarget `pop -> cube` gets no link-score variable and a loud
-    // per-element skip instead, so this assertion is what the narrowing is for.
+    // The element graph names exactly the four executed reads: no phantom
+    // and nothing missing.
+    assert_eq!(
+        edges_from(&project, "pop["),
+        vec![
+            "pop[r1,r1] -> cube[r1,r1]".to_string(),
+            "pop[r1,r2] -> cube[r1,r2]".to_string(),
+            "pop[r2,r1] -> cube[r2,r1]".to_string(),
+            "pop[r2,r2] -> cube[r2,r2]".to_string(),
+        ],
+        "each source cell feeds the target cell that reads it"
+    );
+
+    // And the edge stays on the arrayed `Bare` score (the per-element emitter
+    // would decline a repeated-dimension target with a loud skip instead).
     let scored = square_owner_link_score_names();
     assert!(
         scored
             .iter()
             .any(|n| n.ends_with("link_score\u{205A}pop\u{2192}cube")),
-        "the narrowing keeps this edge on the Bare emitter, which scores it; \
-         retargeting it to PerElement replaces the score with a loud skip. \
-         got: {scored:?}"
-    );
-
-    // The RESIDUAL's current behaviour, in both its directions. Neither line is
-    // a statement of what should be true: a fix to `expand_same_element` reds
-    // this test and has to restate what became true, which is the point of
-    // pinning a defect rather than leaving it silent.
-    let edges = edges_from(&project, "pop[");
-    assert!(
-        !edges.contains(&"pop[r1,r1] -> cube[r1,r2]".to_string()),
-        "residual (missing): a real read still has no edge; got {edges:?}"
-    );
-    assert!(
-        edges.contains(&"pop[r1,r1] -> cube[r2,r1]".to_string()),
-        "residual (phantom): a read that never happens still has one; got {edges:?}"
+        "the repeated-dimension read keeps its arrayed Bare score; got: {scored:?}"
     );
 }
 

@@ -149,6 +149,10 @@ pub struct LinkExpansionContext {
     pub declared_dims: HashMap<Ident<Canonical>, Vec<crate::dimensions::Dimension>>,
     /// Dimension-mapping element correspondence for the mapped (#527) leg.
     pub dim_ctx: crate::dimensions::DimensionsContext,
+    /// The structural `(flow, stock)` edges: a flow feeds its stock through
+    /// the wiring's axis pairing (`db::BareSpelling::StockFlow`), every other
+    /// Bare link through the equation's.
+    pub flow_to_stock: HashSet<(Ident<Canonical>, Ident<Canonical>)>,
 }
 
 // --- Constants (from the paper) ---
@@ -804,17 +808,12 @@ fn parse_link_offsets(
 /// (`scale[a]`, `boost[r,a]`, `x[s]`) that named no real element node, so
 /// every loop through such a feeder dangled and was silently undiscoverable.
 ///
-/// The MAPPED leg covers every pair whose two reference spellings AGREE, which
-/// since GH #997 includes an explicit element map at unequal cardinality
-/// (C-LEARN's many-to-one). It cannot cover a pair whose spellings DISAGREE,
-/// and does not have to: `expand_same_element` emits the UNION of both
-/// diagonals there, which would put two from-nodes on the one slot this
-/// function assigns per target element -- so `link_score_dimensions` denies
-/// such a pair the arrayed retarget (`db::analysis::mapped_pair_projects_uniquely`)
-/// and it takes the GH #758 loud skip instead, leaving no dimensioned score for
-/// `parse_link_offsets` to expand. That is the whole reason the gate is
-/// STRICTER than the element graph's rule; the lockstep with
-/// `expand_same_element` is what makes the from-node names match either way.
+/// The MAPPED leg covers every pair `db::analysis::bare_axis_pairing` relates
+/// through a declared correspondence, an explicit element map at unequal
+/// cardinality (C-LEARN's many-to-one) included: each target element reads ONE
+/// source element under the executed correspondence, so each slot gets exactly
+/// the from-nodes the element graph emits for it, and the lockstep with
+/// `expand_same_element` is what makes the from-node names match.
 fn expand_a2a_link_offsets(
     from_var: &str,
     to_var: &str,
@@ -864,12 +863,21 @@ fn expand_a2a_link_offsets(
         (Some(fd), Some(td)) => {
             let mut element_edges: HashMap<String, std::collections::BTreeSet<String>> =
                 HashMap::new();
+            let spelling = if expansion
+                .flow_to_stock
+                .contains(&(from_ident.clone(), to_ident.clone()))
+            {
+                crate::db::BareSpelling::StockFlow
+            } else {
+                crate::db::BareSpelling::Equation
+            };
             crate::db::expand_same_element(
                 from_var,
                 to_var,
                 fd,
                 td,
                 &expansion.dim_ctx,
+                spelling,
                 &mut element_edges,
             );
             for (from_node, to_nodes) in element_edges {

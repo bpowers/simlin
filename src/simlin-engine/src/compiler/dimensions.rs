@@ -3,25 +3,19 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use crate::dimensions::{
-    Axis, Dimension, DimensionsContext, NoAxisRelations, axes_of, match_axes, match_axes_partial,
+    Axis, Dimension, DimensionsContext, NoAxisRelations, match_axes, match_axes_partial,
 };
 
 /// For each dimension of `dims`, the POSITION in `active_dims` whose subscript
-/// supplies it, or `None` for a dimension no active axis supplies -- the
-/// implicit-subscript axis allocation behind a BARE arrayed reference inside an
-/// apply-to-all body.
+/// supplies it -- the implicit-subscript axis allocation behind a BARE arrayed
+/// reference -- or `None` when some dimension no active axis supplies, which is
+/// the compiler's `MismatchedDimensions`.
 ///
-/// The allocation itself is [`crate::dimensions::match_axes_partial`], the
-/// engine's one axis-matching precedence; this is the projection that drops
-/// HOW each axis matched and keeps only WHICH active axis supplies it. Read
-/// that function for the precedence and for the two properties every caller
-/// depends on (positional, one-to-one).
-///
-/// Both properties were live silent-wrong-row defects in the LTM per-element
-/// projection (P2-1 / P2-2 of the whole-branch review) precisely because that
-/// projection re-derived the rule instead of asking for it.
-/// [`crate::ltm_augment`] now calls this, so its pins and the executed reads
-/// agree by construction rather than by parallel implementation.
+/// The allocation itself is [`crate::dimensions::match_axes`], the engine's one
+/// axis-matching precedence; this is the projection that drops HOW each axis
+/// matched and keeps only WHICH active axis supplies it. Read that function for
+/// the precedence and for the two properties every caller depends on
+/// (positional, one-to-one).
 ///
 /// **Which references arrive here.** An ordinary expression cannot reach this
 /// allocation: `compiler::context`'s `lower_pass0` rewrites a bare arrayed
@@ -35,25 +29,9 @@ use crate::dimensions::{
 /// nothing. See `compiler::context`'s `get_implicit_subscripts` for the rest
 /// of that measurement.
 ///
-/// The compiler wants the TOTAL answer and errors without it, so it calls
-/// [`allocate_implicit_axes`]; the LTM projection wants the partial one,
-/// because a SUBSCRIPTED reference spells some of its own axes and only needs
-/// the rest resolved.
-pub(crate) fn allocate_implicit_axes_partial(
-    dims: &[Dimension],
-    active_dims: &[Dimension],
-    dimensions_ctx: &DimensionsContext,
-) -> Vec<Option<usize>> {
-    match_axes_partial(&axes_of(dims), &axes_of(active_dims), dimensions_ctx)
-        .into_iter()
-        .map(|m| m.map(|(active_idx, _)| active_idx))
-        .collect()
-}
-
-/// [`allocate_implicit_axes_partial`] with every dimension resolved, or `None`.
-///
-/// `None` is the compiler's `MismatchedDimensions`: no complete allocation
-/// exists.
+/// The LTM describers ask the same matcher through `db::bare_axis_pairing`,
+/// which keeps the match kind (a mapped pair carries its executed
+/// correspondence), so a pin cannot spell a row the simulation does not read.
 pub(crate) fn allocate_implicit_axes(
     dims: &[Dimension],
     active_dims: &[Dimension],
@@ -107,6 +85,21 @@ mod tests {
     use super::*;
     use crate::ast::ArrayView;
     use crate::common::CanonicalDimensionName;
+    use crate::dimensions::axes_of;
+
+    /// The partial allocation -- [`crate::dimensions::match_axes_partial`]
+    /// with the match kind dropped -- so the precedence pins below read as
+    /// position lists.
+    fn allocate_partial(
+        dims: &[Dimension],
+        active_dims: &[Dimension],
+        ctx: &DimensionsContext,
+    ) -> Vec<Option<usize>> {
+        crate::dimensions::match_axes_partial(&axes_of(dims), &axes_of(active_dims), ctx)
+            .into_iter()
+            .map(|m| m.map(|(active_idx, _)| active_idx))
+            .collect()
+    }
 
     /// GH #996: a NAME match must win globally, not lose to an earlier
     /// dimension's MAPPING match just because that dimension is processed first.
@@ -170,7 +163,7 @@ mod tests {
         // Aggregated Regions alone. Only axis 1 corresponds, and it does so BY
         // NAME -- axis 0 must not consume the slot through its mapping.
         assert_eq!(
-            allocate_implicit_axes_partial(
+            allocate_partial(
                 &[cop_d.clone(), agg_d.clone()],
                 std::slice::from_ref(&agg_d),
                 &ctx
@@ -183,11 +176,7 @@ mod tests {
         // Control: with the name-matching axis FIRST the old order already
         // worked, so this pins that the fix did not simply invert a preference.
         assert_eq!(
-            allocate_implicit_axes_partial(
-                &[agg_d.clone(), cop_d],
-                std::slice::from_ref(&agg_d),
-                &ctx
-            ),
+            allocate_partial(&[agg_d.clone(), cop_d], std::slice::from_ref(&agg_d), &ctx),
             vec![Some(0), None],
             "declaration order must not change which axis wins"
         );
@@ -222,7 +211,7 @@ mod tests {
         let (ia_d, ib_d, y_d) = (get("IA"), get("IB"), get("Y"));
 
         assert_eq!(
-            allocate_implicit_axes_partial(&[ib_d, y_d], std::slice::from_ref(&ia_d), &ctx),
+            allocate_partial(&[ib_d, y_d], std::slice::from_ref(&ia_d), &ctx),
             vec![None, Some(0)],
             "the mapping-matching axis must get the slot; a size match on an \
              earlier axis must not consume it first"

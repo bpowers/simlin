@@ -2226,9 +2226,9 @@ fn lookup_table_head_and_static_index_survive_the_wrap() {
 // one, and each is measured against the VM before its pin is asserted.
 //
 // This is the second time in this area a name-keyed table produced a wrong row
-// (GH #986 was the first), which is why the projection now asks
-// `compiler::dimensions::allocate_implicit_axes_partial` instead of restating
-// the rule.
+// (GH #986 was the first), which is why the projection asks
+// `db::bare_axis_pairing` -- the one pairing of two declared dimension lists
+// -- instead of restating the rule.
 // ---------------------------------------------------------------------------
 
 /// Read one variable's final-step value out of a compiled+run model.

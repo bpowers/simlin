@@ -33,6 +33,7 @@ use crate::db::ltm_ir::{
 #[path = "ltm_augment_occurrence.rs"]
 mod occurrence;
 
+use occurrence::occurrence_realizes_shape;
 pub(crate) use occurrence::{OccurrenceLookup, SlotOccurrences};
 
 /// The implicit WITH-LOOKUP rules (GH #910), in their own file only to keep this
@@ -333,7 +334,12 @@ fn other_dep_verdict(
         return OtherDepVerdict::NotIterated;
     };
     let dep_arity = ic.dep_dims.and_then(|m| m.get(dep)).map(|d| d.len());
-    derive_other_dep_verdict(&occ.axes, dep_arity, ic.target_iterated_dims.len())
+    derive_other_dep_verdict(
+        &occ.shape,
+        &occ.axes,
+        dep_arity,
+        ic.target_iterated_dims.len(),
+    )
 }
 
 /// Walk an `Expr0` tree and wrap variable references in `PREVIOUS()` except
@@ -548,7 +554,9 @@ fn wrap_non_matching_in_previous(
                     OtherDepVerdict::NotIterated => {}
                 }
             }
-            if &canonical == live_source && node_shape == Some(live_shape) {
+            if &canonical == live_source
+                && node_occ.is_some_and(|o| occurrence_realizes_shape(o, live_shape))
+            {
                 // Live reference: the OUTER subscript stays unwrapped.
                 // Decide per-index whether to recurse:
                 //
@@ -1331,104 +1339,6 @@ fn contains_unfreezable_previous(expr: &Expr0) -> bool {
     }
 }
 
-/// Does `expr` reference `source` as a BARE `Var` (NOT subscripted) nested
-/// inside the argument of an array-reducing builtin (`SUM`, `MEAN`, `MIN`,
-/// `MAX`, `STDDEV`)? This is the GH #779 silent-wrong-number shape: a bare
-/// reference to an ARRAYED variable inside an UN-HOISTED reducer.
-///
-/// The bare spelling's EXECUTION semantics are themselves anomalous
-/// (GH #789): an asymmetric probe of `growth[D1] = SUM(matrix[D1,*] * frac)`
-/// shows the engine computes `growth[r] = |D1| * Σ_d2 matrix[r,d2] * frac[r]`
-/// -- a spurious `|D1|` factor, NOT a clean per-slot iteration of the bare
-/// `frac`. The changed-last partial the GH #743 chooser would build --
-/// `sum(matrix[d1,*] * PREVIOUS(source))`, compiled per target slot --
-/// provably disagrees with whatever execution computes for the bare
-/// spelling (a sustained ~3x link/loop-score error for SUM in the canonical
-/// symmetric repro), so the score is silently wrong. The SUBSCRIPTED feeder
-/// spelling (`source[D1]`) is hoisted into an aggregate node and scored
-/// correctly (GH #767/T5); the read-slice vocabulary cannot express a BARE
-/// reducer-feeder read, so the reducer stays un-hoisted and the changed-last
-/// fallback is reached -- where this shape must be DECLINED loudly
-/// (GH #779), not given the silent wrong number.
-///
-/// The walk is reducer-context-aware (`in_reducer`): only a bare `source`
-/// occurrence WITHIN a recognized reducer's argument matters. A bare arrayed
-/// `source` OUTSIDE any reducer (`growth[D1] = source * 2`) is the
-/// bread-and-butter `Bare` A2A case -- its changed-FIRST partial keeps the
-/// reference live and compiles, so it never reaches the changed-last leg and
-/// must not be touched. References already inside a `PREVIOUS(...)`/`INIT(...)`
-/// call are skipped (already lagged/frozen, not a live read this partial
-/// must account for). The reducer set comes from
-/// [`crate::ltm_agg::reducer_collapses_to_scalar`], so it also includes SIZE
-/// -- harmless: an equation whose only reducer is SIZE keeps the changed-first
-/// convention (the whole reducer is freezable as `PREVIOUS(size(...))`,
-/// because [`expr_is_array_slice_valued`] reads the SAME predicate), so it
-/// does not reach this gate. RANK is excluded by that predicate: it is
-/// array-valued and uses its own agg-routing path (GH #771/#776), so its
-/// bare arg is not this scalar-reducer feeder shape.
-///
-/// This is deliberately NOT `db::ltm_ir::OccurrenceSite::in_reducer`, which
-/// looks like the same "is this reference inside a reducer?" question but is
-/// the LTM ROUTING one ("did an aggregate node get minted for this call?") and
-/// therefore inverts on exactly SIZE and RANK. Consuming the IR bit here would
-/// flip a bare arrayed source inside `RANK(...)` from scored (via the GH #742
-/// arrayed-capture path) to loudly declined -- a user-visible score change
-/// with no argument behind it. Assessed in GH #982 and left as two predicates;
-/// `ltm_agg::reducer_collapses_to_scalar`'s doc carries the comparison and
-/// `ltm_agg::REDUCER_DECISION_TABLE` pins both of them row by row, so neither
-/// can drift.
-fn references_bare_source_inside_reducer(
-    expr: &Expr0,
-    source: &Ident<Canonical>,
-    in_reducer: bool,
-) -> bool {
-    match expr {
-        Expr0::Const(..) => false,
-        Expr0::Var(ident, _) => in_reducer && &Ident::<Canonical>::new(ident.as_str()) == source,
-        // A subscripted reference is NOT the bare feeder shape -- it is
-        // either the hoisted feeder spelling (`source[D1]`) or an explicit
-        // per-element read, both handled by their own paths. Recurse into
-        // index expressions only to catch a bare `source` used as an index
-        // (defensive; not a reachable feeder shape today).
-        Expr0::Subscript(_, indices, _) => indices.iter().any(|idx| match idx {
-            IndexExpr0::Expr(e) => references_bare_source_inside_reducer(e, source, in_reducer),
-            IndexExpr0::Range(l, r, _) => {
-                references_bare_source_inside_reducer(l, source, in_reducer)
-                    || references_bare_source_inside_reducer(r, source, in_reducer)
-            }
-            IndexExpr0::Wildcard(_)
-            | IndexExpr0::StarRange(_, _)
-            | IndexExpr0::DimPosition(_, _) => false,
-        }),
-        Expr0::App(UntypedBuiltinFn(name, args), _) => {
-            // Contents of PREVIOUS/INIT are already lagged; a bare source
-            // there is not a live read this partial must account for.
-            if name.eq_ignore_ascii_case("previous") || name.eq_ignore_ascii_case("init") {
-                return false;
-            }
-            // A scalar-collapsing array reducer sets the in-reducer marker
-            // for its argument; nested reducers keep it set.
-            let child_in_reducer = in_reducer
-                || crate::ltm_agg::reducer_collapses_to_scalar(
-                    &name.to_ascii_lowercase(),
-                    args.len(),
-                );
-            args.iter()
-                .any(|a| references_bare_source_inside_reducer(a, source, child_in_reducer))
-        }
-        Expr0::Op1(_, inner, _) => references_bare_source_inside_reducer(inner, source, in_reducer),
-        Expr0::Op2(_, l, r, _) => {
-            references_bare_source_inside_reducer(l, source, in_reducer)
-                || references_bare_source_inside_reducer(r, source, in_reducer)
-        }
-        Expr0::If(c, t, e, _) => {
-            references_bare_source_inside_reducer(c, source, in_reducer)
-                || references_bare_source_inside_reducer(t, source, in_reducer)
-                || references_bare_source_inside_reducer(e, source, in_reducer)
-        }
-    }
-}
-
 /// Freeze ONLY the matching-shape occurrences of `live_source` at
 /// `PREVIOUS`, leaving every other reference current -- the "changed-last"
 /// attribution dual of [`wrap_non_matching_in_previous`] (cf.
@@ -1496,7 +1406,10 @@ fn wrap_live_shaped_in_previous(
                     }
                     return Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![bare]), loc);
                 }
-                if node_shape == Some(live_shape) {
+                if occ
+                    .get(path)
+                    .is_some_and(|o| occurrence_realizes_shape(o, live_shape))
+                {
                     let subscript = Expr0::Subscript(ident, indices, loc);
                     if frozen_ref.is_none() {
                         *frozen_ref = Some(subscript.clone());
@@ -1770,30 +1683,6 @@ fn shaped_guard_form_text(
     // all. Taking the AST as the parameter removes both the parse and the
     // possibility that the two conventions ever walk different trees.
     let ast = target_expr.clone();
-
-    // GH #779: decline the BARE-spelled feeder of an un-hoisted multi-source
-    // reducer. When the live source is referenced BARE (unsubscripted) and is
-    // ARRAYED (it has declared dimensions), the spelling's own execution
-    // semantics are anomalous (GH #789: the engine computes a spurious
-    // iterated-dim-cardinality factor, not a clean per-slot read of the bare
-    // reference) -- and the changed-last partial below, which freezes the
-    // bare reference and compiles per target slot, provably disagrees with
-    // whatever execution computes, producing a SILENT wrong score (a
-    // sustained ~3x error for SUM in the canonical repro). The subscripted
-    // spelling `source[D1]` is hoisted and scored correctly (GH #767/T5);
-    // the bare spelling cannot be expressed by the read-slice vocabulary, so
-    // it must be declined LOUDLY (the GH #780 `Unscoreable` plumbing records
-    // the edge and drops dependent loop scores) rather than scored wrong
-    // silently. This is the only point the shape is reachable: a bare
-    // arrayed source OUTSIDE a reducer keeps the live reference in its
-    // changed-FIRST partial (which compiles), so it never reaches this
-    // fallback.
-    if matches!(shape, RefShape::Bare)
-        && !source_dim_names.is_empty()
-        && references_bare_source_inside_reducer(&ast, from, false)
-    {
-        return Err(PartialEquationError::bare_reducer_feeder(&err_text()));
-    }
 
     let mut frozen_ref: Option<Expr0> = None;
     let changed_last = wrap_live_shaped_in_previous(ast, from, shape, &mut frozen_ref, occ, &[]);
@@ -2166,21 +2055,20 @@ fn pin_iterated_dim_indices(expr: Expr0, dims: &[String], parts: &[String]) -> O
 /// type is just how the answer travels to the rewrite.
 #[derive(Clone)]
 pub(crate) struct DepElementPin {
-    /// The resolved axes for an already-SUBSCRIPTED reference whose index names
-    /// one of the dep's own dimensions (`dep[Region]`), as
-    /// `(dimension name, element spelling)` in the dep's declaration order. An
-    /// axis that does not project is simply absent, which is all such a
-    /// reference needs -- it spells its other axes itself.
-    pub(crate) axes: Vec<(String, String)>,
+    /// Per axis of the dep, in its declaration order, the spellings an
+    /// already-SUBSCRIPTED reference may use for that axis -- `(dimension name
+    /// the index spells, element spelling)`, the axis's own dimension first
+    /// -- resolved for this target element. An axis with no spelling is an
+    /// empty list, which is all such a reference needs -- it spells its other
+    /// axes itself. The lookup is by index POSITION and spelled name; see
+    /// `post_transform::dep_element_pins` for why a name alone is not enough.
+    pub(crate) axes: Vec<Vec<(String, String)>>,
     /// The full row a BARE reference (`dep`) is spelled with, in the dep's
     /// declaration order, or `None` when some axis does not project (a bare
-    /// reference must be spelled at the dep's full arity or not at all).
-    ///
-    /// A separate row rather than a `complete` flag over `axes` because the two
-    /// spellings resolve by DIFFERENT rules (GH #997): a bare reference is
-    /// rewritten into the iterated spelling and read positionally, while a
-    /// dimension-name subscript follows the declared element map. See
-    /// `post_transform::dep_element_pins`.
+    /// reference must be spelled at the dep's full arity or not at all). The
+    /// same elements as `axes` where every axis projects: both spellings
+    /// resolve through `DimensionsContext::executed_read_correspondence`
+    /// (GH #997). See `post_transform::dep_element_pins`.
     pub(crate) bare_row: Option<Vec<String>>,
 }
 
@@ -2284,12 +2172,14 @@ fn subscript_idents_in_expr0(
         }
         // An already-subscripted reference to a pinned dep: indices that are
         // *element literals* are already pinned and stay, but an index that
-        // names one of that dep's own DIMENSIONS gets this element's coordinate
-        // for it. The lookup is over the DEP's dimensions, so a subset-dims or
-        // reordered dep resolves each of its axes correctly (GH #974) -- and an
-        // axis the target does not project (`pop[Region, idx]` under a
-        // `growth[Region]` target, whose `Age` axis the reference pins itself)
-        // simply has no entry, which is why an INCOMPLETE pin still applies here.
+        // names a DIMENSION -- the dep's own for that axis, or one the target
+        // iterates and reads the axis through -- gets this element's coordinate
+        // for it. The lookup is by the index's POSITION on the dep's axes and
+        // the name it spells, so a subset-dims or reordered dep resolves each of
+        // its axes correctly (GH #974) -- and an axis the target does not
+        // project (`pop[Region, idx]` under a `growth[Region]` target, whose
+        // `Age` axis the reference pins itself) simply has no entry, which is
+        // why an INCOMPLETE pin still applies here.
         Expr0::Subscript(ident, indices, loc) => {
             let canonical = Ident::new(ident.as_str());
             let Some(pin) = pins.get(&canonical) else {
@@ -2297,14 +2187,15 @@ fn subscript_idents_in_expr0(
             };
             let indices = indices
                 .into_iter()
-                .map(|idx| {
+                .enumerate()
+                .map(|(i, idx)| {
                     if let IndexExpr0::Expr(Expr0::Var(name, _)) = &idx {
                         let idx_canonical = canonicalize(name.as_str());
-                        if let Some((_, elem)) = pin
-                            .axes
-                            .iter()
-                            .find(|(dim, _)| dim.as_str() == idx_canonical.as_ref())
-                        {
+                        if let Some((_, elem)) = pin.axes.get(i).and_then(|spellings| {
+                            spellings
+                                .iter()
+                                .find(|(dim, _)| dim.as_str() == idx_canonical.as_ref())
+                        }) {
                             return pin_index(elem);
                         }
                     }
@@ -3941,9 +3832,20 @@ fn generate_flow_to_stock_equation(
     // every occurrence is a scalar per-element access; see the function
     // doc for why a bare arrayed name breaks the nested-PREVIOUS terms.
     // For a scalar stock/flow the suffix is empty and the references stay
-    // bare, exactly as before.
+    // bare, exactly as before. A flow declared over OTHER dimensions than
+    // its stock's (`inflow[dimb]` into `level[suba]`, `dimb -> dima` with
+    // `suba` inside `dima`) is spelled bare too: under the score's
+    // iteration over the stock's dimensions the compiler resolves a bare
+    // arrayed name through its implicit subscripts (`get_implicit_subscripts`,
+    // the pairing the wiring itself used to fold the flow into the stock),
+    // where `inflow[dimb]` names an axis that iteration does not carry and
+    // does not lower.
     let stock_ref = format!("{stock}{}", dimension_subscript_suffix(stock_var));
-    let flow_ref = format!("{flow}{}", dimension_subscript_suffix(flow_var));
+    let flow_ref = if target_equation_dims(flow_var) == target_equation_dims(stock_var) {
+        format!("{flow}{}", dimension_subscript_suffix(flow_var))
+    } else {
+        flow.to_string()
+    };
 
     // Per the corrected 2023 formula (Schoenberg et al., Eq. 3):
     //   LS(inflow -> S)  = |Delta(i) / (Delta(S_t) - Delta(S_{t-dt}))| * (+1)
