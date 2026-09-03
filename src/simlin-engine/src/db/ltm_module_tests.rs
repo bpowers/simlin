@@ -5,9 +5,12 @@
 //! Integration tests for LTM compilation with models containing modules
 //! (stdlib SMOOTH/DELAY and user-defined passthrough modules).
 
+use std::collections::BTreeSet;
+
 use super::*;
 use crate::datamodel;
-use crate::testutils::{x_aux, x_flow, x_model, x_module, x_stock};
+use crate::test_common::TestProject;
+use crate::testutils::{x_aux, x_flow, x_model, x_module, x_module_named, x_stock};
 
 /// AC1.1: A model with SMTH1 in a feedback loop generates LTM synthetic
 /// variables including link_score entries when LTM is enabled, and the
@@ -1856,4 +1859,75 @@ fn test_multi_output_module_link_score_holds_document_order_first_live() {
         !eqn_ba.contains(&live_diff("out_a")),
         "out_a (read second) is frozen: {eqn_ba}"
     );
+}
+
+/// A sub-model output whose only reader is a stdlib instance with
+/// bare-identifier arguments is an output port: `SMTH1(m.a, tau)` hoists no
+/// argument, so the instance is wired straight from `m·a`, and
+/// `find_model_output_ports` reads every helper's `Dt` reads ("Phase 8.5
+/// semantic divergences" 6). The sub-model is instrumented, and a loop
+/// through it selects the `via⁚a` exit override at the instance.
+#[test]
+fn a_stdlib_instance_with_bare_arguments_reads_an_output_port() {
+    let child = || {
+        x_model(
+            "child",
+            vec![
+                x_aux("inp", "0", None),
+                x_aux("a", "inp * 0.5", None),
+                x_aux("b", "inp * 0.25", None),
+            ],
+        )
+    };
+    let ltm_names = |project: &datamodel::Project, model: &str| -> BTreeSet<String> {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, project);
+        set_project_ltm_enabled(&mut db, sync.project, true);
+        model_ltm_variables(&db, sync.models[model].source, sync.project)
+            .vars
+            .iter()
+            .map(|v| v.name.clone())
+            .collect()
+    };
+    // `|` for the `⁚` segment separator and `>` for the `→` of a link.
+    let name = |s: &str| s.replace('|', "\u{205A}").replace('>', "\u{2192}");
+
+    let mut reader = TestProject::new("main")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .aux("k", "4", None)
+        .aux("tau", "3", None)
+        .aux("sm", "SMTH1(m.a, tau)", None)
+        .build_datamodel();
+    reader.models[0]
+        .variables
+        .push(x_module_named("m", "child", &[(".k", "m.inp")], None));
+    reader.models.push(child());
+    assert_eq!(
+        ltm_names(&reader, "child"),
+        [
+            "$|ltm|composite|inp",
+            "$|ltm|link_score|inp>a",
+            "$|ltm|link_score|inp>b",
+            "$|ltm|path|inp|0",
+        ]
+        .into_iter()
+        .map(name)
+        .collect::<BTreeSet<String>>()
+    );
+
+    let mut looped = TestProject::new("main")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .stock("level", "10", &["inflow"], &[], None)
+        .aux("tau", "3", None)
+        .flow("inflow", "SMTH1(m.a, tau)", None)
+        .build_datamodel();
+    looped.models[0]
+        .variables
+        .push(x_module_named("m", "child", &[(".level", "m.inp")], None));
+    looped.models.push(child());
+    let main = ltm_names(&looped, "main");
+    for key in ["$|ltm|link_score|level>m|via|a", "$|ltm|loop_score|u1"] {
+        assert!(main.contains(&name(key)), "{key} in {main:?}");
+    }
+    assert_eq!(ltm_names(&looped, "child").len(), 4);
 }

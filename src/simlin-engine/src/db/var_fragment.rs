@@ -81,19 +81,6 @@ pub(crate) fn is_implicit_global(name: &str) -> bool {
     matches!(name, "time" | "dt" | "initial_time" | "final_time")
 }
 
-/// Split a dependency reference into the name a fragment resolves it through
-/// and whether it is `·`-qualified: a leading `·` (a parent-scope reference,
-/// as XMILE spells it) is stripped, and a qualified `m·x` yields `m`, the
-/// module instance the read relocates through -- its sub-model variable is
-/// resolved at lowering from the instance's shape.
-pub(crate) fn dep_head(dep: &str) -> (&str, bool) {
-    let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
-    match effective.find('\u{00B7}') {
-        Some(pos) => (&effective[..pos], true),
-        None => (effective, false),
-    }
-}
-
 /// Resolve datamodel dimension names to the project's `Dimension`s. A name the
 /// project does not declare is dropped: the declaring variable's own fragment
 /// reports it, and a shape with fewer axes fails loudly at lowering rather than
@@ -143,6 +130,11 @@ pub(crate) fn implicit_dep_shape(
         ))
     }
 }
+
+/// The head of every name a variable resolves through, each with what the
+/// model declares it as: the projection of a variable's reads the lowering
+/// memos carry and the fragment constructors read the compiler's shapes from.
+pub(crate) type ResolvedHeads = Vec<(Ident<Canonical>, DeclaredName)>;
 
 /// What `model` declares a name as: one of its source variables, or a helper a
 /// parse of one of them synthesized -- each through its firewall query
@@ -264,16 +256,22 @@ pub(crate) fn flow_is_special_stock_driven(
     })
 }
 
-/// Every name `var`'s equation can reference: the two phases' data-flow
-/// dependencies, the lookup tables it calls (a table reference is a layout
-/// reference -- codegen needs the table's identity -- not a data-flow
-/// dependency, so it lives in `referenced_tables`, issue #606), and a stock's
-/// inflows and outflows (read by its update expression).
-fn referenced_names(db: &dyn Db, var: SourceVariable, deps: &VariableDeps) -> BTreeSet<String> {
-    let mut names: BTreeSet<String> = deps
-        .dt_deps
-        .iter()
-        .chain(deps.initial_deps.iter())
+/// Every name `var`'s equation resolves through: the head of each of its
+/// reads (the module instance a qualified read relocates through, whose
+/// sub-model variable is resolved at lowering from the instance's shape), the
+/// lookup tables it calls (a table reference is a layout reference -- codegen
+/// needs the table's identity -- not a data-flow dependency, so it lives in
+/// `referenced_tables`, issue #606), and a stock's inflows and outflows (read
+/// by its update expression).
+fn referenced_names(
+    db: &dyn Db,
+    var: SourceVariable,
+    deps: &VariableDeps,
+) -> BTreeSet<Ident<Canonical>> {
+    let mut names: BTreeSet<Ident<Canonical>> = deps
+        .deps
+        .heads()
+        .into_iter()
         .chain(deps.referenced_tables.iter())
         .cloned()
         .collect();
@@ -282,7 +280,7 @@ fn referenced_names(db: &dyn Db, var: SourceVariable, deps: &VariableDeps) -> BT
             var.inflows(db)
                 .iter()
                 .chain(var.outflows(db).iter())
-                .map(|flow| canonicalize(flow).into_owned()),
+                .map(|flow| Ident::new(flow)),
         );
     }
     names
@@ -309,34 +307,31 @@ fn source_self_shape(
     }
 }
 
-/// The head of every name in `names` that `model` declares, resolved once
-/// (the variable itself, the implicit globals and a repeated head skipped),
-/// and the first bare head the model declares nowhere -- an unknown
-/// dependency, reported by the fragment constructor. A qualified name whose
-/// instance the model does not declare (`module.output` after the module was
-/// deleted) is left out and refused at lowering, as `DoesNotExist` on the
-/// referencing phase.
+/// Every name in `names` that `model` declares, resolved once (the variable
+/// itself and the implicit globals skipped), and the first name the model
+/// declares nowhere -- an unknown dependency, reported by the fragment
+/// constructor. The instance a qualified read relocates through is proven by
+/// the dependency query, so it resolves; a qualified spelling the query could
+/// not prove (`module.output` after the module was deleted) is one local name
+/// the model declares nowhere and is reported as such.
 fn resolve_referenced_heads(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
     self_ident: &str,
-    names: &BTreeSet<String>,
-) -> (Vec<(Ident<Canonical>, DeclaredName)>, Option<String>) {
-    let mut heads: Vec<(Ident<Canonical>, DeclaredName)> = Vec::new();
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
-    let mut unknown: Option<String> = None;
-    for dep_name in names {
-        let (head, qualified) = dep_head(dep_name);
-        if head == self_ident || is_implicit_global(head) || !seen.insert(head) {
+    names: &BTreeSet<Ident<Canonical>>,
+) -> (ResolvedHeads, Option<Ident<Canonical>>) {
+    let mut heads: ResolvedHeads = Vec::new();
+    let mut unknown: Option<Ident<Canonical>> = None;
+    for head in names {
+        if head.as_str() == self_ident || is_implicit_global(head.as_str()) {
             continue;
         }
-        match DeclaredName::resolve(db, model, project, head) {
-            Some(declared) => heads.push((Ident::new(head), declared)),
-            None if qualified => {}
+        match DeclaredName::resolve(db, model, project, head.as_str()) {
+            Some(declared) => heads.push((head.clone(), declared)),
             None => {
                 if unknown.is_none() {
-                    unknown = Some(head.to_string());
+                    unknown = Some(head.clone());
                 }
             }
         }
@@ -415,10 +410,10 @@ pub(crate) struct LoweredSource {
     /// compiler's shapes and the tables it needs from these, so a variable's
     /// names are resolved once per revision rather than once by the memo and
     /// again by the fragment.
-    pub heads: Vec<(Ident<Canonical>, DeclaredName)>,
-    /// The first bare head the model declares nowhere -- the unknown
-    /// dependency `explicit_fragment_input` reports.
-    pub unknown: Option<String>,
+    pub heads: ResolvedHeads,
+    /// The first name the model declares nowhere -- the unknown dependency
+    /// `explicit_fragment_input` reports.
+    pub unknown: Option<Ident<Canonical>>,
 }
 
 /// One source variable in its `Expr2` form, lowered once under the
@@ -560,9 +555,10 @@ pub(crate) fn explicit_fragment_input<'db>(
     // value rather than called via `LOOKUP(table, x)` -- has no scalar value of
     // its own and is rejected (issue #606). After the table-reference /
     // data-flow-dependency split (`referenced_tables`), a lookup-only table can
-    // ONLY reach `dt_deps` / `initial_deps` via such a bare `Var(table)`
-    // reference (a real call lands in `referenced_tables`), so its presence in
-    // the dependency sets is exactly this error.
+    // ONLY be a read (`deps`) through such a bare `Var(table)` reference or as
+    // the source a module input is wired from, which copies a slot the table
+    // does not have (a real call lands in `referenced_tables`), so a read of
+    // it is exactly this error.
     {
         let bare_table_diags: Vec<Diagnostic> = heads
             .iter()
@@ -571,7 +567,7 @@ pub(crate) fn explicit_fragment_input<'db>(
                     return None;
                 };
                 let dep = ident.as_str();
-                let referenced_bare = deps.dt_deps.contains(dep) || deps.initial_deps.contains(dep);
+                let referenced_bare = deps.deps.reads_local(ident);
                 (referenced_bare && crate::db::source_var_is_table_only(db, *dep_sv)).then(|| {
                     diagnostic(DiagnosticError::Model(crate::common::Error::new(
                         crate::common::ErrorKind::Model,
@@ -620,7 +616,7 @@ pub(crate) fn explicit_fragment_input<'db>(
         let loc = parsed
             .variable
             .ast()
-            .and_then(|ast| ast.get_var_loc(head))
+            .and_then(|ast| ast.get_var_loc(head.as_str()))
             .unwrap_or_default();
         return ExplicitFragment::Fatal {
             unit_diags,

@@ -751,6 +751,128 @@ so no consumer knows the representation. What the memos retain beside the
 trees -- the `Variable` around each (its `eqn`, `units`, `tables` and `errors`
 duplicate the parse memo's), the resolved heads and the handle map -- is the
 larger share of the compile-only row and is the next slimming.
+
+**Phase 8.5: one structured dependency representation, classified once on
+`Expr1`.** `variable::classify_dependencies` is the one dependency walk, over
+a projection (`DepExpr`) of either typed tier: the dependency query runs it on
+the variable's `Expr1` (`ast::typed_ast`, the first half of `lower_ast`: builtins
+resolved and `dimension·element` spellings folded, before any array bound
+exists, which is all the walk reads) and LTM's per-slot readers run it on a
+retained `Expr2` subtree. The typed tier runs twice per variable -- once in the
+dependency query, once inside the lowering memo's `lower_ast` -- and that
+second typing is what stands where the base lowered every variable to `Expr2` a
+second time, under an empty scope, for its dependencies. The walk records each
+read as a `DepOccurrence { ident, lag }` -- `Current`, `Previous` (a `PREVIOUS`
+argument) or `Initial` (an `INIT` argument and a `PREVIOUS` fallback, which
+the initials phase populates) -- and each `LOOKUP` holder as a typed table
+reference beside the reads.
+
+`db::variable_direct_dependencies` attaches the phase and resolves each name
+into a `DepRef { target: DepTarget { module_path, variable, stock_output },
+phase, lag }` through `DepScope::resolve`, reading the owning model only
+through the per-name projections: the head of a `·`-spelled name is a hop only
+where it is a module instance -- an explicit `Module` variable, the parse's own
+or a sibling parse's implicit instance -- every further segment but the last a
+`Module` variable of the model the previous hop instantiates
+(`project_model_by_name`, `model_variable_by_name`), the last segment the
+variable whose kind in that model the same walk reads, a leading `·` XMILE's
+parent-scope spelling read as the bare name, and a spelling that fails a hop
+one local name (that `·` stripped) the compiler refuses at lowering (which is
+what a `dimension·element` of an undeclared dimension is; a declared one folds
+before the walk). One `DepRefs` value carries the reads of an explicit
+variable and of a helper alike, with one set of projections: `phase`, `heads`,
+`reads_local`, `dt_previous_only` (`Previous - Current`).
+
+Every consumer reads those projections and none splits a name: the dependency
+graph's `ordering_edges` (a `Dt`/`Current` read orders the dt phase unless its
+target is a sub-model stock at any depth, which the dt phase reads from the
+prior step; every init-phase read but `Previous` orders initials; `Dt`/`Initial`
+reads seed the initial snapshot), the causal-edge builder, the output-port
+scans, the pinned-loop and statelessness gates, the lowering memos' `heads`
+(the resolved `DeclaredName` of each read's head, tables and stock flows
+included), the layout (a module read is drawn to the module box) and the
+libsimlin surface (`simlin_model_get_incoming_links` lists variables of the
+model: a module read lists nothing, a module instance lists its input
+sources). The causal-edge builder records the sub-model outputs each node
+reads once (`CausalEdgesResult::module_outputs_read`, shared by the
+`CausalGraph`s built from it), and both LTM modes select a loop's exit port at
+a reader from it (`unique_module_output`: the one output of the module the
+reader reads, an equation and a module instance wired from it alike; several
+are ambiguous). Run invariance is the compiler-local walk
+(`compiler/invariance.rs`, every reference invariant, no callback) joined with
+the `Dt`/`Current` reads and the called tables. `Expr2` issues no temp id: an
+`ArrayBounds::Temp` is a shape, and the one temp counter is the fragment's
+`TempAllocator`.
+
+**Phase 8.5 semantic divergences.** Seven, each pinned. (1) The previous-only
+relation is `Previous - Current`: an `INIT(x)` read -- an `INIT` beside the
+`PREVIOUS`, or the fallback of the `PREVIOUS` itself -- is a frozen snapshot,
+not an instantaneous read, so it does not cancel the lag. Scheduling is
+unchanged (an `Initial` read never ordered the dt phase either way); the
+consequence is LTM's: the stockless cycle `y = x * 2`, `x = PREVIOUS(y,
+INIT(y)) + 1` is state and instrumented (the `x→y` and `y→x` link scores and
+the loop score read 1 from the second step) where it was stateless and
+bypassed. XMILE 1.0 3.5.6: `PREVIOUS(price, 0)` "returns the value of price in
+the last DT, or zero in the first DT", and INIT is the "initial value (i.e.,
+value at STARTTIME) of a variable" -- after the first DT `x` reads `y`'s
+last-DT value and the fallback is a constant, so the loop carries one DT of
+memory. Such a cycle compiles only with its init phase broken: the fallback is
+an init-phase read of `y`, whose initial value otherwise reads `x`, so `y`
+carries an initial equation of its own (without one both binaries refuse the
+model as `circular_dependency`). Pinned by
+`dep_ref_tests::an_initial_read_does_not_cancel_a_previous_only_lag` and the
+`both_lagged_*` / `previous_fallback_*` rows of
+`variable::test_classify_dependencies_matrix`. (2) Run invariance reads the
+source relation, so a conditional whose literal condition the compiler folds
+away keeps both arms' reads: a flow such as `IF 1 THEN k ELSE TIME` stays in
+the per-step program (`db::invariance::constant_selected_dynamic_branches_are_conservatively_variant`);
+the direction is under-hoisting, which changes no number, and no corpus model
+has the shape. (3) A qualified spelling no hop proves (`ghost.x` with no
+module `ghost`, or `m.x` where `m` is an aux) is one local name the model
+declares nowhere, reported as `UnknownDependency` at its reference site rather
+than as the compiler's `DoesNotExist`
+(`dep_ref_tests::an_unproven_qualified_spelling_is_one_local_name`); the model
+does not compile either way, and no corpus diagnostic moves. (4) A module
+input wired from a lookup-only table is refused at the instance with
+`LookupReferencedWithoutArgument` under XMILE's parent-scope spelling
+`from=".g"` as under the bare `g`
+(`lookup_only_tests::module_input_wired_from_lookup_only_is_compile_error`):
+an input port copies its source's slot each step and a table has none, so the
+wiring is the bare read the check names, where a leading `·` the base's
+dependency set kept un-stripped let the wiring through to an opaque assembly
+refusal (`failed to compile fragments for variables: profile`). The corpus's
+one such model, `sir_social_distancing_mixnot.stmx`, is refused either way (an
+unknown builtin and a sub-model conveyor) and gains that one row. (5) A
+qualified read of a sub-model STOCK is a prior-step read at any depth:
+`stock_read = m.n.level` does not order `stock_read` after `m` in the dt
+phase, so `feeder = stock_read * 2` wired into `m` runs before the instance
+and `m` reads the current `feeder`. The base resolved one hop (`n·level` looked
+up whole in `mid`, never found), kept the edge, and with `m`'s input fed from
+`feeder` closed the ordering cycle `stock_read -> m -> feeder -> stock_read`
+that the cycle relation cannot see (a module is a sink there); the sort
+emitted `m` before `feeder`, so `m·feed` read an unwritten slot every step
+after the first (`2, 0, 0, ...` where `feeder` is `2, 2.2, 2.42, ...`) -- the
+#591-c1 stale-input class at depth two, where the one-hop `m.level` was
+already right. A nested stock reader with no other dt read joins the initials
+runlist as a one-hop reader does. Pinned by
+`dep_ref_tests::a_nested_stock_read_is_a_prior_step_read_at_any_depth`; no
+corpus model has the shape. (6) The output-port scan
+(`ltm/loops.rs::find_model_output_ports`) reads every helper's `Dt` reads, so a
+sub-model output whose only reader is a stdlib instance with bare-identifier
+arguments (`sm = SMTH1(m.a, tau)`: no hoisted-argument helper, the instance
+wired straight from `m·a`) is a port: the sub-model is instrumented
+(`$⁚ltm⁚path⁚inp⁚0`, `$⁚ltm⁚composite⁚inp`, the `inp→a` / `inp→b` link scores)
+and a loop through it selects the `level→m⁚via⁚a` exit override. The base
+scanned a variable's helpers only when one of them was not a module instance,
+while `db.rs::model_module_output_ports` already scanned uniformly. LTM-only
+and additive: every user series identical. Pinned by
+`ltm_module_tests::a_stdlib_instance_with_bare_arguments_reads_an_output_port`;
+no corpus model has the shape. (7) `simlin_model_get_incoming_links` on a
+module instance lists its input sources under the parent-scope spelling
+`from=".driver"` (as `driver`) as it does the bare `k`; the base matched the
+un-stripped `·driver` against the model's variables and dropped a real
+dependency by spelling. Pinned by the module row of
+`test_get_incoming_links_lists_variables_of_the_model_not_module_reads`.
 <!-- END_PHASE_8 -->
 
 ## Additional Considerations
@@ -2427,3 +2549,4 @@ hash is not available to it.
 | 8.1 | `engine: lower Expr2 under the fragment's dependency shapes` | 7.2241 G (median of 3; range 7.2234-7.2271), **-4.32%** against `4f3bf7db` re-measured in the same session (7.5501 G, median of 3, range 7.5461-7.5525; interleaved pairs -4.23 / -4.33 / -4.35%) | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Artifacts byte-identical on C-LEARN, plain (every count, 1053 initial programs, 371 names, 7 modules, the full opcode histogram) and under `CLEARN_LTM=1` (29398 slots, 855713 / 1477 / 24669 opcodes, 14078 literals, 2166 views; LTM compile channel 82.8363 G against 83.3488 G, -0.62%, pairs -0.52 / -0.60 / -0.67%, `CLEARN_COMPILE_ITERS=5`). The saving is the deleted per-variable mini-stage: every fragment cloned its dependencies' parse memos into a `ModelStage0` literal to answer `get_dimensions`, which the shape map it already built answers. Sweep of 509 models plain and `--ltm`: 399 / 398 identical, 110 refused identically, 0 one-sided, the one `--ltm` mover the GH #859 flipper `arrays_cname` (the same two digests on both binaries in both modes, 6x each); the `test/` diagnostics corpus identical before and after (plain 471 rows over 366 `(model, variable, code)` keys, `--ltm` 856 over 391, the same per-code distribution, 0 row differences); one mechanism-level divergence -- a helper lowers under its parent's shapes -- pinned by a 48-row value table (helper kind x reducer x rank) and a 5-row refusal table ("Phase 8.1 semantic divergences"); engine suite (lib 5693, integration 783), libsimlin, CLI, mcp-core, clippy, `cargo fmt --all -- --check` and the default-feature check green, every golden unregenerated |
 | 8.2+8.3 | `engine: one lowered memo per variable` | 7.2435 G (median of 3; range 7.2367-7.2437), +0.23% against `75ee055a` re-measured in the same session (7.2268 G, median of 3, range 7.2260-7.2295; interleaved pairs +0.14 / +0.25 / +0.19%), inside the channel's floor and not investigated | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Artifacts byte-identical on C-LEARN, plain (every count, 1053 initial programs, 371 names, 7 modules, the full opcode histogram) and under `CLEARN_LTM=1` (29398 slots, 855713 / 1477 / 24669 opcodes, 14078 literals, 2166 views); LTM compile channel 80.2377 G against 82.8212 G, **-3.12%** (pairs -3.13 / -3.12 / -3.16%, `CLEARN_COMPILE_ITERS=5`); memory (counting allocator, C-LEARN, bytes the database and sync state retain above the parsed datamodel; peak = compile phase): plain compile-only 22.94 -> 32.16 MiB (peak 30.2 -> 39.3), plain with diagnostics 36.58 -> 33.54 (peak 43.9 -> 40.8), LTM 228.26 -> 225.98 (peak 270.0 -> 267.5), LTM with diagnostics 242.34 -> 227.02 (peak 284.1 -> 268.9); allocations plain 1,562,107 / 199.2 MiB -> 1,541,101 / 193.7 MiB, LTM 26.06 M / 2859.0 MiB -> 24.90 M / 2583.6 MiB; sweep of 509 models plain and `--ltm` 398 / 398 identical, 110 refused identically, 0 one-sided, the movers GH #859 flippers (`arrays_varname`, `arrays_cname`, `test_subscript_transposition`: the same two digests on both binaries in both modes, 6x each), 8 `--ltm` stderr line-order permutations (GH #1036); `test/` diagnostics corpus identical (plain 471 rows over 366 keys, `--ltm` 856 over 391). The +9.2 MiB is the lowered trees a compile-only caller retains for a unit pass or describer it never runs (pysimlin `Model.simulate()` used alone, a C/Go embedder holding a project without `get_errors`, serve's transient `simulate_sync` as peak only), while every path that collects diagnostics, the CLI's `simulate` included, retains less than the base. A per-element helper with a module head is pinned only under the module-cycle gate (`units_tests::a_module_cycle_reached_through_a_per_element_helper_still_unit_checks`: without it the unit pass on a cyclic project is salsa's `compute_layout` cycle panic), and the rename patch is syntactic over the equation text ("Phase 8.2 semantic divergences"). Engine suite (lib 5697, integration 783), libsimlin, CLI, mcp-core, clippy, `cargo fmt --all -- --check` and the default-feature check green, every golden unregenerated |
 | 8.3b | `engine: box the Expr2 node's array bounds` | 7.1283 G (median of 3; range 7.1281-7.1303), **-1.01%** against `a17e8027` re-measured in the same session (7.2008 G, median of 3, range 7.2004-7.2008; interleaved pairs -0.98 / -1.01 / -1.01%) | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Artifacts byte-identical on C-LEARN, plain (every count, 1053 initial programs, 371 names, 7 modules, the full opcode histogram) and under `CLEARN_LTM=1` (29398 slots, 855713 / 1477 / 24669 opcodes, 14078 literals, 2166 views; LTM compile channel 78.9676 G against 79.8251 G, **-1.07%**, pairs -1.10 / -1.07 / -1.12%, `CLEARN_COMPILE_ITERS=5`); `size_of::<Expr2>()` 128 -> 64 (the bounds slot 72 -> 8; `Expr3` 128 -> 64, `IndexExpr2` 264 -> 136, `variable::Variable` 680 -> 552); memory (counting allocator, C-LEARN, bytes the database and sync state retain above the parsed datamodel; peak = compile phase): plain compile-only 32.16 -> 29.49 MiB (peak 39.3 -> 36.7), plain with diagnostics 33.54 -> 30.73 (peak 40.8 -> 38.0), LTM 225.97 -> 223.12 (peak 267.4 -> 264.7), LTM with diagnostics 227.02 -> 224.20 (peak 268.9 -> 266.3); allocations plain 1,540,711 / 193.7 MiB -> 1,542,030 / 171.3 MiB, LTM 24,898,752 / 2583.6 MiB -> 24,905,400 / 2277.1 MiB; sweep of 509 models plain and `--ltm` 399 / 397 identical, 110 refused identically, 0 one-sided, the two `--ltm` movers GH #859 flippers (`arrays_varname`, `test_subscript_transposition`: the same two digests on both binaries in both modes, 6x each), 7 `--ltm` stderr line-order permutations (GH #1036); `test/` diagnostics corpus identical (plain 471 rows over 366 keys, `--ltm` 856 over 391). A representation change with the observable held fixed: the -2.7 MiB on every row is the retained `Expr2` trees at half a node, under a third of the +9.2 MiB the memos cost a compile-only caller (the `Variable` beside each tree, the heads and the handle map are the rest), so that row stays above the pre-memo base (22.94 MiB). The instruction saving is the node copies (every construction, clone and move of a node moves half the bytes), and the +0.1% / +0.03% allocations are one box per bound produced. Engine suite (lib 5699, integration 783), libsimlin, CLI, mcp-core, clippy, `cargo fmt --all -- --check` and the default-feature check green, every golden unregenerated |
+| 8.5 | `engine: one dependency representation, classified once` | 6.9918 G (median of 3; range 6.9895-6.9932), **-1.84%** against `9e6253cd` re-measured in the same session (7.1229 G, median of 3, range 7.1224-7.1313; interleaved pairs -1.96 / -1.87 / -1.81%) | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Artifacts byte-identical on C-LEARN, plain (every count, 1053 initial programs, 371 names, 7 modules, the full opcode histogram) and under `CLEARN_LTM=1` (29398 slots, 855713 / 1477 / 24669 opcodes, 14078 literals, 2166 views; LTM compile channel 77.7223 G against 79.0077 G, **-1.63%**, pairs -1.59 / -1.69 / -1.63%, `CLEARN_COMPILE_ITERS=5`); memory (counting allocator, C-LEARN, bytes the database and sync state retain above the parsed datamodel; peak = compile phase): plain compile-only 29.49 -> 28.97 MiB (peak 36.7 -> 36.2), plain with diagnostics 30.73 -> 30.18 (peak 38.0 -> 37.5), LTM 223.17 -> 222.52 (peak 264.9 -> 264.0), LTM with diagnostics 224.28 -> 223.55 (peak 266.1 -> 265.8); allocations plain 1,542,125 / 171.3 MiB -> 1,466,767 / 163.5 MiB, LTM 24,905,822 / 2277.5 MiB -> 24,226,276 / 2241.2 MiB; sweep of 509 models plain and `--ltm` 397 / 398 identical, 110 refused identically, 0 one-sided, the movers GH #859 flippers (the same two digests on both binaries in both modes, 6x each), 8 `--ltm` stderr line-order permutations (GH #1036); `test/` diagnostics corpus plain 471 -> 472 rows over 366 -> 367 keys, `--ltm` 856 -> 857 over 391 -> 392, the one added row divergence 4. The saving is deleted work: one classification per variable and helper over its `Expr1`, where the base lowered every one to `Expr2` a second time under an empty scope for its dependencies, and no `·` re-splitting at the consumers. Seven divergences pinned under "Phase 8.5 semantic divergences", none with a corpus model of its shape but divergence 4 (`sir_social_distancing_mixnot.stmx`, refused on both binaries): the nested-stock ordering (5) moves numbers on a model the base ran, from the #591-c1 stale-input class to the one-hop rule's, and the output-port scan (6) adds LTM series. Engine suite (lib 5686, integration 783), libsimlin (244), CLI, mcp-core, clippy, `cargo fmt --all -- --check` and the default-feature check green, every golden unregenerated |

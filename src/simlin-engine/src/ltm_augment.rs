@@ -3580,7 +3580,7 @@ fn build_arrayed_link_score_equation(
             None,
         );
         let deps_e: HashSet<Ident<Canonical>> = classified
-            .all
+            .names()
             .into_iter()
             .filter(|d| !source_dim_token_set.contains(d.as_str()))
             .collect();

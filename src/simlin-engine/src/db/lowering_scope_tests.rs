@@ -69,7 +69,6 @@ fn the_expr2_tier_reads_dependency_shapes() {
     assert_eq!(
         product.as_deref(),
         Some(&ArrayBounds::Temp {
-            id: 0,
             dims: vec![3],
             dim_names: Some(vec!["d".to_string()]),
         })
@@ -85,7 +84,6 @@ fn the_expr2_tier_reads_dependency_shapes() {
     assert_eq!(
         bounds.as_deref(),
         Some(&ArrayBounds::Temp {
-            id: 0,
             dims: vec![3],
             dim_names: Some(vec!["d".to_string()]),
         })
@@ -178,6 +176,61 @@ fn a_lowering_refusal_outranks_an_unknown_dependency() {
         codes_on("unknown_only"),
         vec![ErrorCode::UnknownDependency],
         "an unknown name alone is reported as such: {errs:?}"
+    );
+}
+
+/// An arrayed equation is typed as a whole before any arm gets its bounds
+/// (`ast::typed_ast`, the tier the dependency classification walks), so of
+/// two genuine refusals on different arms the typed tier's is the one row:
+/// `ABS(1, 2)` on the `a` element (a builtin arity, `BadBuiltinArgs`)
+/// outranks `x + s` on the default, which `control` shows is a bounds
+/// refusal on its own (`MismatchedDimensions`: `Small` pairs with `Big` as
+/// its subdimension at a different length). Within one tier the default's
+/// arm outranks the elements'.
+#[test]
+fn a_typed_tier_refusal_outranks_a_bounds_refusal_on_another_arm() {
+    let mut project = TestProject::new("tiers")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("Big", &["a", "b", "c"])
+        .named_dimension("Small", &["a", "b"])
+        .array_aux("x[Big]", "1")
+        .array_aux("s[Small]", "1")
+        .array_aux("control[Big]", "x + s")
+        .build_datamodel();
+    project.models[0]
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "y".to_string(),
+            equation: datamodel::Equation::Arrayed(
+                vec!["Big".to_string()],
+                vec![("a".to_string(), "ABS(1, 2)".to_string(), None, None)],
+                Some("x + s".to_string()),
+                false,
+            ),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+    let errs = TestProject::from_datamodel(project).error_diagnostics();
+    let codes_on = |var: &str| -> Vec<ErrorCode> {
+        let location = format!("main.{var}");
+        errs.iter()
+            .filter(|(loc, _)| *loc == location)
+            .map(|(_, code)| *code)
+            .collect()
+    };
+    assert_eq!(
+        codes_on("control"),
+        vec![ErrorCode::MismatchedDimensions],
+        "the default's arm alone is a bounds refusal: {errs:?}"
+    );
+    assert_eq!(
+        codes_on("y"),
+        vec![ErrorCode::BadBuiltinArgs],
+        "the typed tier's refusal is the one row: {errs:?}"
     );
 }
 

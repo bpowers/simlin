@@ -745,8 +745,7 @@ impl Context<'_> {
                 dims: result_dims,
                 dim_names,
             },
-            ast::ArrayBounds::Temp { id, .. } => ast::ArrayBounds::Temp {
-                id: *id,
+            ast::ArrayBounds::Temp { .. } => ast::ArrayBounds::Temp {
                 dims: result_dims,
                 dim_names,
             },

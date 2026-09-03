@@ -10,7 +10,7 @@ use indexmap::IndexMap;
 use crate::ast::Loc;
 #[cfg(test)]
 use crate::ast::LoweringScope;
-use crate::ast::{Ast, Expr0, Expr2, IndexExpr2};
+use crate::ast::{Ast, Expr0, Expr1, Expr2, IndexExpr1, IndexExpr2};
 use crate::builtins::{BuiltinContents, BuiltinFn, walk_builtin_expr};
 use crate::builtins_visitor::{
     SnapshotIndexFacts, empty_macro_registry, instantiate_implicit_modules,
@@ -1306,34 +1306,56 @@ where
     }
 }
 
-/// Result of classifying all dependency categories from a single AST walk.
+/// How one occurrence reads its dependency's value.
+///
+/// A property of the occurrence, not of the name: one equation can read the
+/// same variable currently and through `PREVIOUS`, and the scheduling
+/// questions -- does this read order the reader after the dependency, does it
+/// seed the initial snapshot, is the edge lagged -- are each answered by
+/// selecting the lags that matter rather than by subtracting name sets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DepLag {
+    /// The value the dependency holds in the phase being evaluated.
+    Current,
+    /// The prior step's committed value: a `PREVIOUS` argument.
+    Previous,
+    /// The frozen initial snapshot: an `INIT` argument, or a `PREVIOUS`
+    /// fallback, which the initials phase populates so the reader's first
+    /// step finds it (`db::dep_graph`'s `all_init_referenced` seeding).
+    Initial,
+}
+
+/// One name an equation reads, and how.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DepOccurrence {
+    /// The name as the equation spells it after canonicalization: a bare
+    /// variable, or a `·`-qualified module read whose hops
+    /// `db::variable_direct_dependencies` proves against the model.
+    pub ident: Ident<Canonical>,
+    pub lag: DepLag,
+}
+
+/// Every read of one AST, from a single walk ([`classify_dependencies`]).
 #[derive(Default)]
 pub struct DepClassification {
-    /// All referenced identifiers (current + lagged + init-only).
-    /// Dimension names are filtered out.
-    pub all: HashSet<Ident<Canonical>>,
-    /// Idents appearing as direct args to INIT() calls.
-    pub init_referenced: BTreeSet<String>,
-    /// Idents appearing as direct args to PREVIOUS() calls.
-    pub previous_referenced: BTreeSet<String>,
-    /// Idents referenced ONLY inside PREVIOUS() -- not outside it.
-    pub previous_only: BTreeSet<String>,
-    /// Idents referenced ONLY inside INIT() or PREVIOUS() -- not outside either.
-    pub init_only: BTreeSet<String>,
+    /// Every data read, each name once per lag. Dimension names, and element
+    /// names in subscript position, are syntax rather than reads and are
+    /// filtered out.
+    pub occurrences: BTreeSet<DepOccurrence>,
     /// Standalone lookup tables referenced via `LOOKUP(table, x)`. A table
     /// reference is a *layout* reference (codegen needs the table variable's
     /// offset for the table-identity reverse-map), NOT a data-flow dependency:
-    /// it is kept OUT of `all` so it never creates a runlist-ordering or
-    /// causal/LTM edge, and is reunited with the dependency set only when the
-    /// fragment compiler builds its metadata + tables map (issue #606).
+    /// it is kept OUT of `occurrences` so it never creates a runlist-ordering
+    /// or causal/LTM edge, and is reunited with the dependency set only when
+    /// the fragment compiler builds its metadata + tables map (issue #606).
     ///
     /// **A consumer wanting a table reference reads THIS FIELD; it is not, and
-    /// must not be, in `all`.** GH #606 justified the exclusion purely in terms
-    /// of runlist ordering and said nothing about the other questions a caller
-    /// can ask, which is how a later consumer came to read the omission as the
-    /// information being unavailable. It is not: this field rides the same
-    /// struct, from the same single pass, over the same AST. Spelled as the
-    /// three questions a caller might mean:
+    /// must not be, in `occurrences`.** GH #606 justified the exclusion purely
+    /// in terms of runlist ordering and said nothing about the other questions
+    /// a caller can ask, which is how a later consumer came to read the
+    /// omission as the information being unavailable. It is not: this field
+    /// rides the same struct, from the same single pass, over the same AST.
+    /// Spelled as the three questions a caller might mean:
     ///
     /// * **ordering** -- NOT a dependency. Static data imposes no
     ///   evaluation-order constraint, and a lookup-only holder is excluded from
@@ -1349,42 +1371,122 @@ pub struct DepClassification {
     ///   widens the per-element PIN candidates with this field while leaving the
     ///   ceteris-paribus wrap's dep set alone.
     ///
-    /// Moving these into `all` and filtering at the consumers was measured and
-    /// rejected: five consumer families see them, four must filter them out, and
-    /// the first one to break is compilation itself (a lookup-only holder has no
-    /// value slot, so the fragment compiler refuses -- `lookup_only_tests`).
-    /// Absent-by-default fails loudly (a consumer that needs tables sees nothing
-    /// and says so); present-by-default fails silently.
-    pub referenced_tables: BTreeSet<String>,
+    /// Moving these into `occurrences` and filtering at the consumers was
+    /// measured and rejected: five consumer families see them, four must filter
+    /// them out, and the first one to break is compilation itself (a
+    /// lookup-only holder has no value slot, so the fragment compiler refuses
+    /// -- `lookup_only_tests`). Absent-by-default fails loudly (a consumer that
+    /// needs tables sees nothing and says so); present-by-default fails
+    /// silently.
+    pub referenced_tables: BTreeSet<Ident<Canonical>>,
 }
 
-/// Unified AST walker that computes all dependency categories in a single pass.
+impl DepClassification {
+    /// Every name read, whatever the lag.
+    pub fn names(&self) -> HashSet<Ident<Canonical>> {
+        self.occurrences
+            .iter()
+            .map(|occurrence| occurrence.ident.clone())
+            .collect()
+    }
+}
+
+/// What the dependency walk reads off one node, at either typed tier.
 ///
-/// Maintains two boolean flags (`in_previous`, `in_init`) to track whether the
-/// current position is inside a PREVIOUS() or INIT() call. Accumulates identifiers
-/// into multiple sets:
+/// The walk runs over `Expr1` for the per-variable dependency query (the
+/// typed tree, before any array bound exists) and over the retained `Expr2`
+/// for LTM's per-slot readers, which classify one element's subtree of a
+/// lowered target. Both tiers project onto this view, so there is one walk.
+pub(crate) enum DepNode<'a, E: DepExpr> {
+    Const,
+    Var(&'a Ident<Canonical>),
+    App(&'a BuiltinFn<E>),
+    Subscript(&'a Ident<Canonical>, &'a [E::Index]),
+    Op1(&'a E),
+    Op2(&'a E, &'a E),
+    If(&'a E, &'a E, &'a E),
+}
+
+/// A subscript position as the walk reads it: the expressions it holds.
+pub(crate) enum DepIndex<'a, E> {
+    Range(&'a E, &'a E),
+    Expr(&'a E),
+    /// A wildcard, a `*:dimension` star range or a dimension position:
+    /// nothing is read.
+    Positional,
+}
+
+/// An expression tier the dependency walk can read ([`DepNode`]).
+pub(crate) trait DepExpr: Sized {
+    type Index;
+    fn dep_node(&self) -> DepNode<'_, Self>;
+    fn dep_index(index: &Self::Index) -> DepIndex<'_, Self>;
+}
+
+impl DepExpr for Expr1 {
+    type Index = IndexExpr1;
+
+    fn dep_node(&self) -> DepNode<'_, Self> {
+        match self {
+            Expr1::Const(..) => DepNode::Const,
+            Expr1::Var(id, _) => DepNode::Var(id),
+            Expr1::App(builtin, _) => DepNode::App(builtin),
+            Expr1::Subscript(id, args, _) => DepNode::Subscript(id, args),
+            Expr1::Op1(_, l, _) => DepNode::Op1(l),
+            Expr1::Op2(_, l, r, _) => DepNode::Op2(l, r),
+            Expr1::If(c, t, f, _) => DepNode::If(c, t, f),
+        }
+    }
+
+    fn dep_index(index: &IndexExpr1) -> DepIndex<'_, Self> {
+        match index {
+            IndexExpr1::Range(start, end, _) => DepIndex::Range(start, end),
+            IndexExpr1::Expr(expr) => DepIndex::Expr(expr),
+            IndexExpr1::Wildcard(_)
+            | IndexExpr1::StarRange(_, _)
+            | IndexExpr1::DimPosition(_, _) => DepIndex::Positional,
+        }
+    }
+}
+
+impl DepExpr for Expr2 {
+    type Index = IndexExpr2;
+
+    fn dep_node(&self) -> DepNode<'_, Self> {
+        match self {
+            Expr2::Const(..) => DepNode::Const,
+            Expr2::Var(id, _, _) => DepNode::Var(id),
+            Expr2::App(builtin, _, _) => DepNode::App(builtin),
+            Expr2::Subscript(id, args, _, _) => DepNode::Subscript(id, args),
+            Expr2::Op1(_, l, _, _) => DepNode::Op1(l),
+            Expr2::Op2(_, l, r, _, _) => DepNode::Op2(l, r),
+            Expr2::If(c, t, f, _, _) => DepNode::If(c, t, f),
+        }
+    }
+
+    fn dep_index(index: &IndexExpr2) -> DepIndex<'_, Self> {
+        match index {
+            IndexExpr2::Range(start, end, _) => DepIndex::Range(start, end),
+            IndexExpr2::Expr(expr) => DepIndex::Expr(expr),
+            IndexExpr2::Wildcard(_)
+            | IndexExpr2::StarRange(_, _)
+            | IndexExpr2::DimPosition(_, _) => DepIndex::Positional,
+        }
+    }
+}
+
+/// The one AST walk that records each read with its lag.
 ///
-/// - `all`: every referenced identifier, with dimension names filtered (same as
-///   `IdentifierSetVisitor`)
-/// - `init_referenced` / `previous_referenced`: direct Var/Subscript args of
-///   INIT() / PREVIOUS() calls
-/// - `non_previous`: idents seen outside any PREVIOUS() context
-/// - `non_init`: idents seen outside both INIT() and PREVIOUS() context
-///
-/// After walking, derived sets are computed:
-/// - `previous_only = previous_referenced - non_previous`
-/// - `init_only = init_referenced - non_init`
-///
-/// The walker preserves `IdentifierSetVisitor`'s behaviors: dimension-name
-/// filtering from index expressions, `IsModuleInput` branch selection via
-/// `module_inputs`, and `IndexExpr2::Range` endpoint walking.
+/// `in_previous` / `in_init` say whether the walk is inside a `PREVIOUS` or
+/// `INIT` argument; a read inside `PREVIOUS` is `Previous` whatever encloses
+/// it, a read inside `INIT` (or a `PREVIOUS` fallback) is `Initial`, and any
+/// other read is `Current`. A dimension name is never a read, an element name
+/// in subscript position is not either, and an `isModuleInput(...)`
+/// conditional walks only the live branch when the instance's inputs are
+/// known.
 struct ClassifyVisitor<'a> {
-    all: HashSet<Ident<Canonical>>,
-    init_referenced: BTreeSet<String>,
-    previous_referenced: BTreeSet<String>,
-    non_previous: BTreeSet<String>,
-    non_init: BTreeSet<String>,
-    referenced_tables: BTreeSet<String>,
+    occurrences: BTreeSet<DepOccurrence>,
+    referenced_tables: BTreeSet<Ident<Canonical>>,
     dimensions: &'a [Dimension],
     module_inputs: Option<&'a BTreeSet<Ident<Canonical>>>,
     in_previous: bool,
@@ -1413,126 +1515,121 @@ impl ClassifyVisitor<'_> {
         false
     }
 
-    /// Walk an expression, filtering out dimension names/elements
-    fn walk_index_expr(&mut self, expr: &Expr2) {
-        if let Expr2::Var(arg_ident, _, _) = expr {
-            if !self.is_dimension_or_element(arg_ident) {
-                self.walk(expr);
-            }
+    fn is_dimension(&self, ident: &Ident<Canonical>) -> bool {
+        self.dimensions
+            .iter()
+            .any(|dim| ident.as_str() == dim.canonical_name().as_str())
+    }
+
+    fn record(&mut self, ident: &Ident<Canonical>, lag: DepLag) {
+        self.occurrences.insert(DepOccurrence {
+            ident: ident.clone(),
+            lag,
+        });
+    }
+
+    /// The lag of a value read at the current position.
+    fn lag(&self) -> DepLag {
+        if self.in_previous {
+            DepLag::Previous
+        } else if self.in_init {
+            DepLag::Initial
         } else {
-            self.walk(expr)
+            DepLag::Current
         }
     }
 
-    fn walk_index(&mut self, e: &IndexExpr2) {
-        match e {
-            IndexExpr2::Wildcard(_) => {}
-            IndexExpr2::StarRange(_, _) => {}
-            IndexExpr2::Range(start, end, _) => {
+    /// Walk an index expression, filtering out dimension names/elements.
+    fn walk_index_expr<E: DepExpr>(&mut self, expr: &E) {
+        if let DepNode::Var(ident) = expr.dep_node()
+            && self.is_dimension_or_element(ident)
+        {
+            return;
+        }
+        self.walk(expr);
+    }
+
+    fn walk_index<E: DepExpr>(&mut self, index: &E::Index) {
+        match E::dep_index(index) {
+            DepIndex::Range(start, end) => {
                 self.walk_index_expr(start);
                 self.walk_index_expr(end);
             }
-            IndexExpr2::DimPosition(_, _) => {}
-            IndexExpr2::Expr(expr) => {
-                self.walk_index_expr(expr);
-            }
+            DepIndex::Expr(expr) => self.walk_index_expr(expr),
+            DepIndex::Positional => {}
         }
     }
 
-    /// Record an identifier string into the flag-dependent sets.
-    fn record_ident(&mut self, ident_str: &str) {
-        if !self.in_previous {
-            self.non_previous.insert(ident_str.to_owned());
-        }
-        // PREVIOUS() context also excludes from non_init, matching the existing
-        // behavior of init_only_referenced_idents_with_module_inputs where
-        // BuiltinFn::Previous sets in_init=true.
-        if !self.in_init && !self.in_previous {
-            self.non_init.insert(ident_str.to_owned());
-        }
-    }
-
-    fn walk(&mut self, e: &Expr2) {
-        match e {
-            Expr2::Const(_, _, _) => (),
-            Expr2::Var(id, _, _) => {
-                // `Dimension::canonical_name` is already canonical, as is `id`.
-                let is_dimension = self
-                    .dimensions
-                    .iter()
-                    .any(|dim| id.as_str() == dim.canonical_name().as_str());
-                if !is_dimension {
-                    self.all.insert(id.clone());
-                    if self.in_init && !self.in_previous {
-                        self.init_referenced.insert(id.to_string());
-                    }
+    fn walk<E: DepExpr>(&mut self, e: &E) {
+        match e.dep_node() {
+            DepNode::Const => {}
+            DepNode::Var(id) => {
+                if !self.is_dimension(id) {
+                    self.record(id, self.lag());
                 }
-                self.record_ident(id.as_str());
             }
-            Expr2::App(builtin, _, _) => match builtin {
+            DepNode::App(builtin) => match builtin {
                 BuiltinFn::Previous(arg, fallback) => {
-                    if let Expr2::Var(ident, _, _) | Expr2::Subscript(ident, _, _, _) = arg.as_ref()
-                    {
-                        self.previous_referenced.insert(ident.to_string());
-                    }
-
                     let old = self.in_previous;
                     self.in_previous = true;
-                    self.walk(arg);
+                    self.walk(arg.as_ref());
                     self.in_previous = old;
 
                     let old = self.in_init;
                     self.in_init = true;
-                    self.walk(fallback);
+                    self.walk(fallback.as_ref());
                     self.in_init = old;
                 }
                 BuiltinFn::Init(arg) => {
                     let old = self.in_init;
                     self.in_init = true;
-                    self.walk(arg);
+                    self.walk(arg.as_ref());
                     self.in_init = old;
                 }
                 _ => {
                     walk_builtin_expr(builtin, |contents| match contents {
+                        // The port an `isModuleInput` names is a structural
+                        // fact about the instance, resolved at lowering; it is
+                        // recorded as a current read wherever it appears, so a
+                        // snapshot around it neither lags nor seeds it.
                         BuiltinContents::Ident(id, _loc) => {
-                            self.all.insert(Ident::new(id));
+                            self.record(&Ident::new(id), DepLag::Current);
                         }
                         BuiltinContents::Expr(expr) => self.walk(expr),
                         // A graphical-function table reference is a *layout*
                         // reference, not a data-flow dependency: record it in
                         // `referenced_tables` (so the fragment compiler can find
-                        // the table's offset for the reverse-map) WITHOUT adding
-                        // it to `all`, keeping it off the runlist-ordering and
-                        // causal/LTM graphs (issue #606). A *bare* reference to
-                        // such a table is a plain `Var`, not a `LookupTable`, and
-                        // is rejected separately as a compile error.
+                        // the table's offset for the reverse-map) WITHOUT
+                        // recording a read, keeping it off the runlist-ordering
+                        // and causal/LTM graphs (issue #606). A *bare* reference
+                        // to such a table is a plain `Var`, not a `LookupTable`,
+                        // and is rejected separately as a compile error.
                         BuiltinContents::LookupTable(table_expr) => {
-                            if let Expr2::Var(id, _, _) | Expr2::Subscript(id, _, _, _) = table_expr
+                            if let DepNode::Var(id) | DepNode::Subscript(id, _) =
+                                table_expr.dep_node()
                             {
-                                self.referenced_tables.insert(id.to_string());
+                                self.referenced_tables.insert(id.clone());
                             }
                         }
                     });
                 }
             },
-            Expr2::Subscript(id, args, _, _) => {
-                self.all.insert(id.clone());
-                if self.in_init && !self.in_previous {
-                    self.init_referenced.insert(id.to_string());
+            DepNode::Subscript(id, args) => {
+                self.record(id, self.lag());
+                for arg in args {
+                    self.walk_index::<E>(arg);
                 }
-                self.record_ident(id.as_str());
-                args.iter().for_each(|arg| self.walk_index(arg));
             }
-            Expr2::Op2(_, l, r, _, _) => {
+            DepNode::Op2(l, r) => {
                 self.walk(l);
                 self.walk(r);
             }
-            Expr2::Op1(_, l, _, _) => {
+            DepNode::Op1(l) => {
                 self.walk(l);
             }
-            Expr2::If(cond, t, f, _, _) => {
+            DepNode::If(cond, t, f) => {
                 if let Some(module_inputs) = self.module_inputs
-                    && let Expr2::App(BuiltinFn::IsModuleInput(ident, _), _, _) = cond.as_ref()
+                    && let DepNode::App(BuiltinFn::IsModuleInput(ident, _)) = cond.dep_node()
                 {
                     if module_inputs.contains(&*canonicalize(ident)) {
                         self.walk(t);
@@ -1550,29 +1647,21 @@ impl ClassifyVisitor<'_> {
     }
 }
 
-/// Classify all dependency categories of an AST in a single walk.
+/// Classify every read of an AST, with its lag, in one walk.
 ///
-/// Returns a `DepClassification` with five sets:
-/// - `all`: every referenced identifier (dimension names filtered)
-/// - `init_referenced` / `previous_referenced`: direct args of INIT/PREVIOUS calls
-/// - `previous_only`: idents referenced ONLY inside PREVIOUS (not outside)
-/// - `init_only`: idents referenced ONLY inside INIT or PREVIOUS (not outside either)
-///
-/// This replaces five separate functions that previously required up to 10 calls
-/// per variable. The walker applies `IsModuleInput` branch selection when
-/// `module_inputs` is provided, and filters dimension/element names from index
-/// expressions.
-pub fn classify_dependencies(
-    ast: &Ast<Expr2>,
+/// The one dependency walk: `db::variable_direct_dependencies` runs it over
+/// a variable's typed `Expr1` and attaches the phase and the module path,
+/// and LTM's readers run it over a retained `Expr2` subtree. `dimensions`
+/// are the axes whose names and elements are syntax here; `module_inputs`
+/// selects the live branch of an `isModuleInput(...)` conditional and walks
+/// every branch when `None`.
+pub(crate) fn classify_dependencies<E: DepExpr>(
+    ast: &Ast<E>,
     dimensions: &[Dimension],
     module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
 ) -> DepClassification {
     let mut visitor = ClassifyVisitor {
-        all: HashSet::new(),
-        init_referenced: BTreeSet::new(),
-        previous_referenced: BTreeSet::new(),
-        non_previous: BTreeSet::new(),
-        non_init: BTreeSet::new(),
+        occurrences: BTreeSet::new(),
         referenced_tables: BTreeSet::new(),
         dimensions,
         module_inputs,
@@ -1591,45 +1680,33 @@ pub fn classify_dependencies(
             }
         }
     }
-    let previous_only = visitor
-        .previous_referenced
-        .difference(&visitor.non_previous)
-        .cloned()
-        .collect();
-    let init_only = visitor
-        .init_referenced
-        .difference(&visitor.non_init)
-        .cloned()
-        .collect();
     DepClassification {
-        all: visitor.all,
-        init_referenced: visitor.init_referenced,
-        previous_referenced: visitor.previous_referenced,
-        previous_only,
-        init_only,
+        occurrences: visitor.occurrences,
         referenced_tables: visitor.referenced_tables,
     }
 }
 
-pub fn identifier_set(
-    ast: &Ast<Expr2>,
+/// Every name an AST reads, whatever the lag: the projection of
+/// [`classify_dependencies`] the LTM rewriters consume.
+pub(crate) fn identifier_set<E: DepExpr>(
+    ast: &Ast<E>,
     dimensions: &[Dimension],
     module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
 ) -> HashSet<Ident<Canonical>> {
-    classify_dependencies(ast, dimensions, module_inputs).all
+    classify_dependencies(ast, dimensions, module_inputs).names()
 }
 
 /// Build an `Ast<Expr2>` from a scalar equation string via parse + lower, as
-/// the production dependency classification sees it.
+/// LTM's per-slot readers see a retained lowered tree.
 ///
-/// The scope carries no shapes, which is what `db::variable_direct_dependencies`
-/// lowers under before it classifies (a bounds-free lowering), so the rows
-/// built here classify the `Expr2` production classifies. Production lowers
-/// under the project's dimension context where this uses an empty one; the
-/// difference is inert for these rows because `DimensionsContext::lookup`
-/// constifies only a qualified `dim·elem` spelling and no row spells one, and
-/// a dimension name inside a `[..]` is filtered by `classify_dependencies` from
-/// the `dimensions` it is handed, never by the lowering.
+/// The scope carries no shapes (a bounds-free lowering), which is inert for a
+/// dependency row: `classify_dependencies` walks references, never bounds.
+/// Production lowers under the project's dimension context where this uses an
+/// empty one; the difference is inert for these rows because
+/// `DimensionsContext::lookup` constifies only a qualified `dim·elem` spelling
+/// and no row spells one, and a dimension name inside a `[..]` is filtered by
+/// `classify_dependencies` from the `dimensions` it is handed, never by the
+/// lowering.
 ///
 /// Panics on parse or lowering errors -- intended for test use only.
 #[cfg(test)]
@@ -1651,40 +1728,78 @@ pub(crate) fn scalar_ast(eqn: &str) -> Ast<Expr2> {
     lower_ast(&scope, &ast.unwrap(), false).unwrap()
 }
 
+/// The same equation at the typed tier, as `db::variable_direct_dependencies`
+/// classifies it.
+#[cfg(test)]
+fn scalar_typed(eqn: &str) -> Ast<Expr1> {
+    let (ast, err) = parse_equation(
+        &datamodel::Equation::Scalar(eqn.to_owned()),
+        &DimensionsContext::default(),
+        false,
+        None,
+    );
+    assert!(err.is_empty(), "parse error in test equation: {eqn}");
+    crate::ast::typed_ast(&ast.unwrap(), &DimensionsContext::default()).unwrap()
+}
+
 /// Table-driven matrix test for `classify_dependencies`.
 ///
-/// Covers all combinations of reference form (direct, PREVIOUS, INIT, mixed,
-/// both-lagged) x context (scalar, isModuleInput, ApplyToAll, subscript range),
-/// plus all 7 prior bug-fix edge cases. Each case asserts all 5 fields of
-/// `DepClassification`.
+/// Rows cover every reference form (direct, `PREVIOUS`, `INIT`, mixed,
+/// both-lagged, a `PREVIOUS` fallback) x context (scalar, `isModuleInput`,
+/// apply-to-all, arrayed, every `IndexExpr` arm), the dimension-name and
+/// element-name filters, the `isModuleInput` port rule and the table channel.
+/// Each row asserts the complete occurrence relation and the table set; a row
+/// given as an equation is classified at BOTH tiers -- the typed `Expr1` the
+/// dependency query walks and the lowered `Expr2` LTM walks -- and the two
+/// must agree, which is what pins the two `DepExpr` projections to one walk.
 #[test]
 fn test_classify_dependencies_matrix() {
     use crate::common::CanonicalElementName;
 
+    enum Source {
+        Eqn(&'static str),
+        Ast(Ast<Expr2>),
+    }
+
     struct DepTestCase {
-        /// Human-readable label for assertion messages
         label: &'static str,
-        /// The AST to classify
-        ast: Ast<Expr2>,
+        source: Source,
         /// Dimensions for filtering (empty for most cases)
         dimensions: Vec<Dimension>,
         /// Module inputs for IsModuleInput branch selection (None for most cases)
         module_inputs: Option<BTreeSet<Ident<Canonical>>>,
-        /// Expected: all referenced identifiers (as strings)
-        expected_all: HashSet<&'static str>,
-        /// Expected: direct INIT() argument names
-        expected_init_referenced: BTreeSet<&'static str>,
-        /// Expected: direct PREVIOUS() argument names
-        expected_previous_referenced: BTreeSet<&'static str>,
-        /// Expected: idents ONLY inside PREVIOUS (not outside)
-        expected_previous_only: BTreeSet<&'static str>,
-        /// Expected: idents ONLY inside INIT/PREVIOUS (not outside either)
-        expected_init_only: BTreeSet<&'static str>,
+        /// Expected: every `(name, lag)` occurrence
+        expected: &'static [(&'static str, DepLag)],
+        /// Expected: the `LOOKUP` table holders
+        expected_tables: &'static [&'static str],
     }
+
+    use DepLag::{Current, Initial, Previous};
 
     let loc = Loc::new(0, 1);
     let const_one = Expr2::Const("1".to_string(), crate::ast::Literal::new(1.0), loc);
     let const_zero = Expr2::Const("0".to_string(), crate::ast::Literal::new(0.0), loc);
+    let var = |name: &str| Expr2::Var(Ident::new(name), None, loc);
+    let previous = |name: &str| {
+        Expr2::App(
+            BuiltinFn::Previous(Box::new(var(name)), Box::new(const_zero.clone())),
+            None,
+            loc,
+        )
+    };
+    let init = |name: &str| Expr2::App(BuiltinFn::Init(Box::new(var(name))), None, loc);
+    let add = |l: Expr2, r: Expr2| {
+        Expr2::Op2(
+            crate::ast::BinaryOp::Add,
+            Box::new(l),
+            Box::new(r),
+            None,
+            loc,
+        )
+    };
+    let subscript = |name: &str, index: IndexExpr2| {
+        Ast::Scalar(Expr2::Subscript(Ident::new(name), vec![index], None, loc))
+    };
 
     let module_inputs_with_input: BTreeSet<Ident<Canonical>> =
         [Ident::new("input")].into_iter().collect();
@@ -1699,558 +1814,417 @@ fn test_classify_dependencies_matrix() {
         // -- Reference form: direct (no PREVIOUS/INIT) --
         DepTestCase {
             label: "direct_scalar",
-            ast: scalar_ast("a + b"),
+            source: Source::Eqn("a + b"),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["a", "b"].into(),
-            expected_init_referenced: [].into(),
-            expected_previous_referenced: [].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: [].into(),
+            expected: &[("a", Current), ("b", Current)],
+            expected_tables: &[],
         },
         DepTestCase {
             label: "direct_a2a",
-            ast: Ast::ApplyToAll(vec![dim1.clone()], {
-                // a + b wrapped in ApplyToAll
-                let a = Expr2::Var(Ident::new("a"), None, loc);
-                let b = Expr2::Var(Ident::new("b"), None, loc);
-                Expr2::Op2(
-                    crate::ast::BinaryOp::Add,
-                    Box::new(a),
-                    Box::new(b),
-                    None,
-                    loc,
-                )
-            }),
+            source: Source::Ast(Ast::ApplyToAll(vec![dim1.clone()], add(var("a"), var("b")))),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["a", "b"].into(),
-            expected_init_referenced: [].into(),
-            expected_previous_referenced: [].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: [].into(),
+            expected: &[("a", Current), ("b", Current)],
+            expected_tables: &[],
         },
         DepTestCase {
             label: "direct_arrayed",
-            ast: Ast::Arrayed(
+            source: Source::Ast(Ast::Arrayed(
                 vec![dim1.clone()],
                 {
                     let mut elements = HashMap::new();
-                    elements.insert(
-                        CanonicalElementName::from_raw("e1"),
-                        Expr2::Var(Ident::new("a"), None, loc),
-                    );
+                    elements.insert(CanonicalElementName::from_raw("e1"), var("a"));
                     elements
                 },
-                Some(Expr2::Var(Ident::new("b"), None, loc)),
+                Some(var("b")),
                 false,
-            ),
+            )),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["a", "b"].into(),
-            expected_init_referenced: [].into(),
-            expected_previous_referenced: [].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: [].into(),
+            expected: &[("a", Current), ("b", Current)],
+            expected_tables: &[],
         },
         DepTestCase {
             label: "direct_ismoduleinput",
-            ast: scalar_ast("if isModuleInput(input) then a else b"),
+            source: Source::Eqn("if isModuleInput(input) then a else b"),
             dimensions: vec![],
             module_inputs: Some(module_inputs_with_input.clone()),
-            expected_all: ["a"].into(),
-            expected_init_referenced: [].into(),
-            expected_previous_referenced: [].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: [].into(),
+            expected: &[("a", Current)],
+            expected_tables: &[],
         },
+        // -- Every `IndexExpr` arm --
         DepTestCase {
             label: "direct_range",
-            ast: Ast::Scalar(Expr2::Subscript(
-                Ident::new("arr"),
-                vec![IndexExpr2::Range(
-                    const_one.clone(),
-                    Expr2::Var(Ident::new("const"), None, loc),
-                    loc,
-                )],
-                None,
-                loc,
+            source: Source::Ast(subscript(
+                "arr",
+                IndexExpr2::Range(const_one.clone(), var("const"), loc),
             )),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["arr", "const"].into(),
-            expected_init_referenced: [].into(),
-            expected_previous_referenced: [].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: [].into(),
+            expected: &[("arr", Current), ("const", Current)],
+            expected_tables: &[],
+        },
+        DepTestCase {
+            label: "direct_index_expr",
+            source: Source::Ast(subscript("arr", IndexExpr2::Expr(var("index")))),
+            dimensions: vec![],
+            module_inputs: None,
+            expected: &[("arr", Current), ("index", Current)],
+            expected_tables: &[],
+        },
+        DepTestCase {
+            label: "direct_wildcard",
+            source: Source::Ast(subscript("arr", IndexExpr2::Wildcard(loc))),
+            dimensions: vec![],
+            module_inputs: None,
+            expected: &[("arr", Current)],
+            expected_tables: &[],
+        },
+        DepTestCase {
+            label: "direct_star_range",
+            source: Source::Ast(subscript(
+                "arr",
+                IndexExpr2::StarRange(crate::common::CanonicalDimensionName::from_raw("dim1"), loc),
+            )),
+            dimensions: vec![],
+            module_inputs: None,
+            expected: &[("arr", Current)],
+            expected_tables: &[],
+        },
+        DepTestCase {
+            label: "direct_dimension_position",
+            source: Source::Ast(subscript("arr", IndexExpr2::DimPosition(1, loc))),
+            dimensions: vec![],
+            module_inputs: None,
+            expected: &[("arr", Current)],
+            expected_tables: &[],
         },
         // -- Reference form: PREVIOUS only --
         DepTestCase {
-            // Edge case 1: PREVIOUS feedback
             label: "previous_scalar",
-            ast: scalar_ast("PREVIOUS(b)"),
+            source: Source::Eqn("PREVIOUS(b)"),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["b"].into(),
-            expected_init_referenced: [].into(),
-            expected_previous_referenced: ["b"].into(),
-            expected_previous_only: ["b"].into(),
-            expected_init_only: [].into(),
+            expected: &[("b", Previous)],
+            expected_tables: &[],
         },
         DepTestCase {
             label: "previous_a2a",
-            ast: Ast::ApplyToAll(
-                vec![dim1.clone()],
-                Expr2::App(
-                    BuiltinFn::Previous(
-                        Box::new(Expr2::Var(Ident::new("b"), None, loc)),
-                        Box::new(const_zero.clone()),
-                    ),
-                    None,
-                    loc,
-                ),
-            ),
+            source: Source::Ast(Ast::ApplyToAll(vec![dim1.clone()], previous("b"))),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["b"].into(),
-            expected_init_referenced: [].into(),
-            expected_previous_referenced: ["b"].into(),
-            expected_previous_only: ["b"].into(),
-            expected_init_only: [].into(),
+            expected: &[("b", Previous)],
+            expected_tables: &[],
         },
         DepTestCase {
             label: "previous_ismoduleinput",
-            ast: scalar_ast("if isModuleInput(input) then PREVIOUS(a) else b"),
+            source: Source::Eqn("if isModuleInput(input) then PREVIOUS(a) else b"),
             dimensions: vec![],
             module_inputs: Some(module_inputs_with_input.clone()),
-            expected_all: ["a"].into(),
-            expected_init_referenced: [].into(),
-            expected_previous_referenced: ["a"].into(),
-            expected_previous_only: ["a"].into(),
-            expected_init_only: [].into(),
+            expected: &[("a", Previous)],
+            expected_tables: &[],
         },
         DepTestCase {
             label: "previous_range",
-            ast: Ast::Scalar(Expr2::Subscript(
-                Ident::new("arr"),
-                vec![IndexExpr2::Range(
-                    const_one.clone(),
-                    Expr2::App(
-                        BuiltinFn::Previous(
-                            Box::new(Expr2::Var(Ident::new("lagged"), None, loc)),
-                            Box::new(const_zero.clone()),
-                        ),
-                        None,
-                        loc,
-                    ),
-                    loc,
-                )],
-                None,
-                loc,
+            source: Source::Ast(subscript(
+                "arr",
+                IndexExpr2::Range(const_one.clone(), previous("lagged"), loc),
             )),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["arr", "lagged"].into(),
-            expected_init_referenced: [].into(),
-            expected_previous_referenced: ["lagged"].into(),
-            expected_previous_only: ["lagged"].into(),
-            expected_init_only: [].into(),
+            expected: &[("arr", Current), ("lagged", Previous)],
+            expected_tables: &[],
         },
         // -- Reference form: INIT only --
         DepTestCase {
-            // Edge cases 4 and 5: INIT-only + fragment context (all contains b)
             label: "init_scalar",
-            ast: scalar_ast("INIT(b)"),
+            source: Source::Eqn("INIT(b)"),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["b"].into(),
-            expected_init_referenced: ["b"].into(),
-            expected_previous_referenced: [].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: ["b"].into(),
+            expected: &[("b", Initial)],
+            expected_tables: &[],
         },
         DepTestCase {
             label: "init_a2a",
-            ast: Ast::ApplyToAll(
-                vec![dim1.clone()],
-                Expr2::App(
-                    BuiltinFn::Init(Box::new(Expr2::Var(Ident::new("b"), None, loc))),
-                    None,
-                    loc,
-                ),
-            ),
+            source: Source::Ast(Ast::ApplyToAll(vec![dim1.clone()], init("b"))),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["b"].into(),
-            expected_init_referenced: ["b"].into(),
-            expected_previous_referenced: [].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: ["b"].into(),
+            expected: &[("b", Initial)],
+            expected_tables: &[],
         },
         DepTestCase {
             label: "init_ismoduleinput",
-            ast: scalar_ast("if isModuleInput(input) then INIT(a) else b"),
+            source: Source::Eqn("if isModuleInput(input) then INIT(a) else b"),
             dimensions: vec![],
             module_inputs: Some(module_inputs_with_input.clone()),
-            expected_all: ["a"].into(),
-            expected_init_referenced: ["a"].into(),
-            expected_previous_referenced: [].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: ["a"].into(),
+            expected: &[("a", Initial)],
+            expected_tables: &[],
         },
         DepTestCase {
             label: "init_range",
-            ast: Ast::Scalar(Expr2::Subscript(
-                Ident::new("arr"),
-                vec![IndexExpr2::Range(
-                    const_one.clone(),
-                    Expr2::App(
-                        BuiltinFn::Init(Box::new(Expr2::Var(Ident::new("seed"), None, loc))),
-                        None,
-                        loc,
-                    ),
-                    loc,
-                )],
-                None,
-                loc,
+            source: Source::Ast(subscript(
+                "arr",
+                IndexExpr2::Range(const_one.clone(), init("seed"), loc),
             )),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["arr", "seed"].into(),
-            expected_init_referenced: ["seed"].into(),
-            expected_previous_referenced: [].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: ["seed"].into(),
+            expected: &[("arr", Current), ("seed", Initial)],
+            expected_tables: &[],
         },
-        // -- Reference form: mixed (current + lagged) --
+        // -- Reference form: mixed (current + lagged): one name, two lags --
         DepTestCase {
-            // Edge case 2: mixed current+lagged -- b is NOT previous_only
             label: "mixed_prev_current",
-            ast: scalar_ast("PREVIOUS(b) + b"),
+            source: Source::Eqn("PREVIOUS(b) + b"),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["b"].into(),
-            expected_init_referenced: [].into(),
-            expected_previous_referenced: ["b"].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: [].into(),
+            expected: &[("b", Current), ("b", Previous)],
+            expected_tables: &[],
         },
         DepTestCase {
             label: "mixed_init_current",
-            ast: scalar_ast("INIT(b) + b"),
+            source: Source::Eqn("INIT(b) + b"),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["b"].into(),
-            expected_init_referenced: ["b"].into(),
-            expected_previous_referenced: [].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: [].into(),
+            expected: &[("b", Current), ("b", Initial)],
+            expected_tables: &[],
         },
         DepTestCase {
             label: "mixed_prev_current_a2a",
-            ast: Ast::ApplyToAll(vec![dim1.clone()], {
-                let prev = Expr2::App(
-                    BuiltinFn::Previous(
-                        Box::new(Expr2::Var(Ident::new("b"), None, loc)),
-                        Box::new(const_zero.clone()),
-                    ),
-                    None,
-                    loc,
-                );
-                let direct = Expr2::Var(Ident::new("b"), None, loc);
-                Expr2::Op2(
-                    crate::ast::BinaryOp::Add,
-                    Box::new(prev),
-                    Box::new(direct),
-                    None,
-                    loc,
-                )
-            }),
+            source: Source::Ast(Ast::ApplyToAll(
+                vec![dim1.clone()],
+                add(previous("b"), var("b")),
+            )),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["b"].into(),
-            expected_init_referenced: [].into(),
-            expected_previous_referenced: ["b"].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: [].into(),
+            expected: &[("b", Current), ("b", Previous)],
+            expected_tables: &[],
         },
         DepTestCase {
             label: "mixed_prev_current_ismoduleinput",
-            ast: scalar_ast("if isModuleInput(input) then PREVIOUS(a) + a else b"),
+            source: Source::Eqn("if isModuleInput(input) then PREVIOUS(a) + a else b"),
             dimensions: vec![],
             module_inputs: Some(module_inputs_with_input.clone()),
-            expected_all: ["a"].into(),
-            expected_init_referenced: [].into(),
-            expected_previous_referenced: ["a"].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: [].into(),
+            expected: &[("a", Current), ("a", Previous)],
+            expected_tables: &[],
         },
         DepTestCase {
-            // mixed x range: b appears as the PREVIOUS range start and as the direct
-            // range end.  b is in previous_referenced but also in non_previous (the
-            // direct range end occurrence), so previous_only is empty.
             label: "mixed_prev_range",
-            ast: Ast::Scalar(Expr2::Subscript(
-                Ident::new("arr"),
-                vec![IndexExpr2::Range(
-                    Expr2::App(
-                        BuiltinFn::Previous(
-                            Box::new(Expr2::Var(Ident::new("b"), None, loc)),
-                            Box::new(const_zero.clone()),
-                        ),
-                        None,
-                        loc,
-                    ),
-                    Expr2::Var(Ident::new("b"), None, loc),
-                    loc,
-                )],
-                None,
-                loc,
+            source: Source::Ast(subscript(
+                "arr",
+                IndexExpr2::Range(previous("b"), var("b"), loc),
             )),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["arr", "b"].into(),
-            expected_init_referenced: [].into(),
-            expected_previous_referenced: ["b"].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: [].into(),
+            expected: &[("arr", Current), ("b", Current), ("b", Previous)],
+            expected_tables: &[],
         },
-        // -- Reference form: both-lagged (PREVIOUS + INIT) --
+        // -- Reference form: both-lagged (PREVIOUS + INIT). Neither read is
+        // current, so the name is read only through snapshots: the dt phase
+        // orders nothing after it, and the `Previous` read stays a lagged
+        // edge ("Phase 8.5 semantic divergences") --
         DepTestCase {
-            // Edge case 6: PREVIOUS + INIT combined -- b is init_only
-            // (PREVIOUS context also counts as init-excluded).
-            // b is NOT previous_only because INIT(b) walks b outside PREVIOUS context.
             label: "both_lagged_scalar",
-            ast: scalar_ast("PREVIOUS(b) + INIT(b)"),
+            source: Source::Eqn("PREVIOUS(b) + INIT(b)"),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["b"].into(),
-            expected_init_referenced: ["b"].into(),
-            expected_previous_referenced: ["b"].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: ["b"].into(),
+            expected: &[("b", Previous), ("b", Initial)],
+            expected_tables: &[],
+        },
+        DepTestCase {
+            label: "previous_fallback_same_target",
+            source: Source::Eqn("PREVIOUS(b, b)"),
+            dimensions: vec![],
+            module_inputs: None,
+            expected: &[("b", Previous), ("b", Initial)],
+            expected_tables: &[],
+        },
+        DepTestCase {
+            label: "previous_fallback_other_target",
+            source: Source::Eqn("PREVIOUS(b, c)"),
+            dimensions: vec![],
+            module_inputs: None,
+            expected: &[("b", Previous), ("c", Initial)],
+            expected_tables: &[],
         },
         DepTestCase {
             label: "both_lagged_different",
-            ast: scalar_ast("PREVIOUS(a) + INIT(b)"),
+            source: Source::Eqn("PREVIOUS(a) + INIT(b)"),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["a", "b"].into(),
-            expected_init_referenced: ["b"].into(),
-            expected_previous_referenced: ["a"].into(),
-            expected_previous_only: ["a"].into(),
-            expected_init_only: ["b"].into(),
+            expected: &[("a", Previous), ("b", Initial)],
+            expected_tables: &[],
         },
         DepTestCase {
-            // Same semantics as both_lagged_scalar: INIT(b) walks b outside
-            // PREVIOUS context, so b is NOT previous_only.
             label: "both_lagged_a2a",
-            ast: Ast::ApplyToAll(vec![dim1.clone()], {
-                let prev = Expr2::App(
-                    BuiltinFn::Previous(
-                        Box::new(Expr2::Var(Ident::new("b"), None, loc)),
-                        Box::new(const_zero.clone()),
-                    ),
-                    None,
-                    loc,
-                );
-                let init = Expr2::App(
-                    BuiltinFn::Init(Box::new(Expr2::Var(Ident::new("b"), None, loc))),
-                    None,
-                    loc,
-                );
-                Expr2::Op2(
-                    crate::ast::BinaryOp::Add,
-                    Box::new(prev),
-                    Box::new(init),
-                    None,
-                    loc,
-                )
-            }),
-            dimensions: vec![],
-            module_inputs: None,
-            expected_all: ["b"].into(),
-            expected_init_referenced: ["b"].into(),
-            expected_previous_referenced: ["b"].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: ["b"].into(),
-        },
-        DepTestCase {
-            // both-lagged x isModuleInput: the active (then) branch is
-            // PREVIOUS(a) + INIT(a).  a is in both previous_referenced and
-            // init_referenced.  INIT(a) walks a outside PREVIOUS context, so
-            // a ends up in non_previous, making previous_only empty.  a is
-            // never walked outside any lagged context, so init_only={a}.
-            label: "both_lagged_ismoduleinput",
-            ast: scalar_ast("if isModuleInput(input) then PREVIOUS(a) + INIT(a) else b"),
-            dimensions: vec![],
-            module_inputs: Some(module_inputs_with_input.clone()),
-            expected_all: ["a"].into(),
-            expected_init_referenced: ["a"].into(),
-            expected_previous_referenced: ["a"].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: ["a"].into(),
-        },
-        DepTestCase {
-            // both-lagged x range: range start is PREVIOUS(x), range end is INIT(y).
-            // x is in previous_referenced and previous_only (never seen outside PREVIOUS).
-            // y is in init_referenced and init_only (never seen outside any lagged context).
-            label: "both_lagged_range",
-            ast: Ast::Scalar(Expr2::Subscript(
-                Ident::new("arr"),
-                vec![IndexExpr2::Range(
-                    Expr2::App(
-                        BuiltinFn::Previous(
-                            Box::new(Expr2::Var(Ident::new("x"), None, loc)),
-                            Box::new(const_zero.clone()),
-                        ),
-                        None,
-                        loc,
-                    ),
-                    Expr2::App(
-                        BuiltinFn::Init(Box::new(Expr2::Var(Ident::new("y"), None, loc))),
-                        None,
-                        loc,
-                    ),
-                    loc,
-                )],
-                None,
-                loc,
+            source: Source::Ast(Ast::ApplyToAll(
+                vec![dim1.clone()],
+                add(previous("b"), init("b")),
             )),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["arr", "x", "y"].into(),
-            expected_init_referenced: ["y"].into(),
-            expected_previous_referenced: ["x"].into(),
-            expected_previous_only: ["x"].into(),
-            expected_init_only: ["y"].into(),
+            expected: &[("b", Previous), ("b", Initial)],
+            expected_tables: &[],
+        },
+        DepTestCase {
+            label: "both_lagged_ismoduleinput",
+            source: Source::Eqn("if isModuleInput(input) then PREVIOUS(a) + INIT(a) else b"),
+            dimensions: vec![],
+            module_inputs: Some(module_inputs_with_input.clone()),
+            expected: &[("a", Previous), ("a", Initial)],
+            expected_tables: &[],
+        },
+        DepTestCase {
+            label: "both_lagged_range",
+            source: Source::Ast(subscript(
+                "arr",
+                IndexExpr2::Range(previous("x"), init("y"), loc),
+            )),
+            dimensions: vec![],
+            module_inputs: None,
+            expected: &[("arr", Current), ("x", Previous), ("y", Initial)],
+            expected_tables: &[],
         },
         // -- Additional edge cases --
         DepTestCase {
-            // Edge case 7: nested PREVIOUS
             label: "nested_previous",
-            ast: scalar_ast("PREVIOUS(PREVIOUS(x))"),
+            source: Source::Eqn("PREVIOUS(PREVIOUS(x))"),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["x"].into(),
-            expected_init_referenced: [].into(),
-            expected_previous_referenced: ["x"].into(),
-            expected_previous_only: ["x"].into(),
-            expected_init_only: [].into(),
+            expected: &[("x", Previous)],
+            expected_tables: &[],
         },
         DepTestCase {
+            // A module read is one name here; the dependency query proves
+            // its hops.
             label: "init_with_dotted_ref",
-            ast: scalar_ast("INIT(m.out1) + m.out2"),
+            source: Source::Eqn("INIT(m.out1) + m.out2"),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["m\u{00b7}out1", "m\u{00b7}out2"].into(),
-            expected_init_referenced: ["m\u{00b7}out1"].into(),
-            expected_previous_referenced: [].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: ["m\u{00b7}out1"].into(),
+            expected: &[("m\u{00b7}out1", Initial), ("m\u{00b7}out2", Current)],
+            expected_tables: &[],
         },
         DepTestCase {
-            // Dimension element names in subscript positions are filtered out.
-            // g[foo] with dim1={foo} -> only g appears in all.
-            label: "dim_filtering",
-            ast: scalar_ast("g[foo]"),
+            // An element name in subscript position is syntax.
+            label: "element_in_subscript_is_not_a_read",
+            source: Source::Eqn("g[foo]"),
             dimensions: vec![dim1.clone()],
             module_inputs: None,
-            expected_all: ["g"].into(),
-            expected_init_referenced: [].into(),
-            expected_previous_referenced: [].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: [].into(),
+            expected: &[("g", Current)],
+            expected_tables: &[],
         },
         DepTestCase {
-            // Without module_inputs, isModuleInput is not pruned
+            // A dimension name is syntax in any position.
+            label: "dimension_name_is_not_a_read",
+            source: Source::Eqn("g[dim1] + dim1"),
+            dimensions: vec![dim1.clone()],
+            module_inputs: None,
+            expected: &[("g", Current)],
+            expected_tables: &[],
+        },
+        DepTestCase {
+            // Without module_inputs, isModuleInput is not pruned and the port
+            // it names is a read.
             label: "ismoduleinput_no_pruning",
-            ast: scalar_ast("if isModuleInput(input) then a else b"),
+            source: Source::Eqn("if isModuleInput(input) then a else b"),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["input", "a", "b"].into(),
-            expected_init_referenced: [].into(),
-            expected_previous_referenced: [].into(),
-            expected_previous_only: [].into(),
-            expected_init_only: [].into(),
+            expected: &[("a", Current), ("b", Current), ("input", Current)],
+            expected_tables: &[],
         },
-        // -- Edge case 3: split by phase --
-        // classify_dependencies is phase-agnostic. The same equation produces
-        // identical classifications regardless of whether the caller considers it
-        // a dt AST or init AST. The "split" behavior is in how db.rs assigns
-        // results from separate classify_dependencies calls.
+        DepTestCase {
+            // The port is a structural fact: a snapshot around the
+            // conditional lags the branches, never the port.
+            label: "ismoduleinput_inside_init",
+            source: Source::Eqn("INIT(if isModuleInput(input) then a else b)"),
+            dimensions: vec![],
+            module_inputs: None,
+            expected: &[("a", Initial), ("b", Initial), ("input", Current)],
+            expected_tables: &[],
+        },
+        // -- The table channel --
+        DepTestCase {
+            label: "lookup_table_is_a_layout_reference",
+            source: Source::Eqn("LOOKUP(tbl, x)"),
+            dimensions: vec![],
+            module_inputs: None,
+            expected: &[("x", Current)],
+            expected_tables: &["tbl"],
+        },
+        DepTestCase {
+            label: "subscripted_lookup_table",
+            source: Source::Eqn("LOOKUP(tbl[foo], PREVIOUS(x))"),
+            dimensions: vec![dim1.clone()],
+            module_inputs: None,
+            expected: &[("x", Previous)],
+            expected_tables: &["tbl"],
+        },
+        // -- Split by phase: the walk is phase-agnostic; the phase is what
+        // `db::variable_direct_dependencies` attaches --
         DepTestCase {
             label: "split_phase",
-            ast: scalar_ast("PREVIOUS(b) + c"),
+            source: Source::Eqn("PREVIOUS(b) + c"),
             dimensions: vec![],
             module_inputs: None,
-            expected_all: ["b", "c"].into(),
-            expected_init_referenced: [].into(),
-            expected_previous_referenced: ["b"].into(),
-            expected_previous_only: ["b"].into(),
-            expected_init_only: [].into(),
+            expected: &[("b", Previous), ("c", Current)],
+            expected_tables: &[],
         },
     ];
 
+    let rows = |classified: &DepClassification| -> BTreeSet<(String, DepLag)> {
+        classified
+            .occurrences
+            .iter()
+            .map(|occurrence| (occurrence.ident.as_str().to_string(), occurrence.lag))
+            .collect()
+    };
+    let tables = |classified: &DepClassification| -> BTreeSet<String> {
+        classified
+            .referenced_tables
+            .iter()
+            .map(|table| table.as_str().to_string())
+            .collect()
+    };
+
     for case in &cases {
-        let result =
-            classify_dependencies(&case.ast, &case.dimensions, case.module_inputs.as_ref());
-
-        // Convert all to HashSet<&str> for comparison
-        let got_all: HashSet<&str> = result.all.iter().map(|id| id.as_str()).collect();
-        assert_eq!(case.expected_all, got_all, "case '{}': all", case.label);
-
-        let got_init_ref: BTreeSet<&str> =
-            result.init_referenced.iter().map(|s| s.as_str()).collect();
-        assert_eq!(
-            case.expected_init_referenced, got_init_ref,
-            "case '{}': init_referenced",
-            case.label
-        );
-
-        let got_prev_ref: BTreeSet<&str> = result
-            .previous_referenced
+        let expected: BTreeSet<(String, DepLag)> = case
+            .expected
             .iter()
-            .map(|s| s.as_str())
+            .map(|(name, lag)| (name.to_string(), *lag))
             .collect();
+        let expected_tables: BTreeSet<String> =
+            case.expected_tables.iter().map(|t| t.to_string()).collect();
+
+        let lowered = match &case.source {
+            Source::Eqn(eqn) => {
+                let typed = classify_dependencies(
+                    &scalar_typed(eqn),
+                    &case.dimensions,
+                    case.module_inputs.as_ref(),
+                );
+                assert_eq!(expected, rows(&typed), "case '{}': typed tier", case.label);
+                assert_eq!(
+                    expected_tables,
+                    tables(&typed),
+                    "case '{}': typed tier tables",
+                    case.label
+                );
+                scalar_ast(eqn)
+            }
+            Source::Ast(ast) => ast.clone(),
+        };
+        let result = classify_dependencies(&lowered, &case.dimensions, case.module_inputs.as_ref());
         assert_eq!(
-            case.expected_previous_referenced, got_prev_ref,
-            "case '{}': previous_referenced",
+            expected,
+            rows(&result),
+            "case '{}': lowered tier",
             case.label
         );
-
-        let got_prev_only: BTreeSet<&str> =
-            result.previous_only.iter().map(|s| s.as_str()).collect();
         assert_eq!(
-            case.expected_previous_only, got_prev_only,
-            "case '{}': previous_only",
+            expected_tables,
+            tables(&result),
+            "case '{}': lowered tier tables",
             case.label
-        );
-
-        let got_init_only: BTreeSet<&str> = result.init_only.iter().map(|s| s.as_str()).collect();
-        assert_eq!(
-            case.expected_init_only, got_init_only,
-            "case '{}': init_only",
-            case.label
-        );
-
-        // Structural invariant: `all` (as strings) must be a superset of
-        // init_referenced union previous_referenced.
-        // This is the fragment context invariant (edge case 5): compile_var_fragment
-        // uses `all` for dt_deps, so it must include INIT/PREVIOUS args.
-        let init_prev_union: HashSet<&str> = result
-            .init_referenced
-            .iter()
-            .chain(result.previous_referenced.iter())
-            .map(|s| s.as_str())
-            .collect();
-        assert!(
-            got_all.is_superset(&init_prev_union),
-            "case '{}': structural invariant violated -- `all` must be superset of \
-             init_referenced union previous_referenced.\n  all: {:?}\n  union: {:?}",
-            case.label,
-            got_all,
-            init_prev_union,
         );
     }
 }

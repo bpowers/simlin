@@ -19,17 +19,21 @@ use crate::ltm::strip_subscript;
 use super::endpoint_dimensions;
 
 use crate::db::{
-    Db, LoopCircuitsResult, ModuleInputSet, SourceModel, SourceProject, TieredCircuitsResult,
-    model_causal_edges, model_edge_shapes, parse_source_variable, variable_direct_dependencies,
+    Db, DepPhase, LoopCircuitsResult, ModuleInputSet, SourceModel, SourceProject,
+    TieredCircuitsResult, model_causal_edges, model_edge_shapes, variable_direct_dependencies,
 };
 
 /// Find the output ports for a model by scanning other models' variable
-/// dependencies for module·var references that target this model.
+/// dependencies for qualified reads through instances that target this
+/// model.
 ///
-/// When variable X depends on `module_var·internal_var` and `module_var`
-/// maps to this model (via `dynamic_modules`), then `internal_var` is
-/// an output port. The result is passed to `enumerate_pathways_to_outputs`
-/// so that composite scores are generated for the correct output ports.
+/// When variable X reads `module_var·internal_var` and `module_var` maps to
+/// this model (via `dynamic_modules`), then `internal_var` is an output
+/// port. The result is passed to `enumerate_pathways_to_outputs` so that
+/// composite scores are generated for the correct output ports. The dt-phase
+/// reads of every explicit variable and of every parse-synthesized helper
+/// count: SMOOTH/DELAY expansion synthesizes helpers whose reads may be the
+/// only readers of a module output.
 ///
 /// The returned `Vec` is sorted (GH #680): the source set is a `HashSet`,
 /// so without the sort the iteration order is process-nondeterministic.
@@ -44,7 +48,6 @@ pub(super) fn find_model_output_ports(
 ) -> Vec<Ident<Canonical>> {
     let model_name = model.name(db);
     let project_models = project.models(db);
-    let middot = '\u{00B7}';
     // The input-agnostic dependency sets, shared with `model_causal_edges`.
     let empty_inputs = ModuleInputSet::empty(db);
     let mut output_ports: HashSet<Ident<Canonical>> = HashSet::new();
@@ -56,49 +59,33 @@ pub(super) fn find_model_output_ports(
         let other_edges = model_causal_edges(db, *other_model, project);
 
         // Build a set of module variable names that reference this model
-        let module_var_names: HashSet<&String> = other_edges
+        let module_var_names: HashSet<&str> = other_edges
             .dynamic_modules
             .iter()
             .filter(|(_var_name, mn)| mn.as_str() == model_name.as_str())
-            .map(|(var_name, _mn)| var_name)
+            .map(|(var_name, _mn)| var_name.as_str())
             .collect();
 
         if module_var_names.is_empty() {
             continue;
         }
 
-        // Scan dependencies for module·internal_var references
-        let other_vars = other_model.variables(db);
-        for source_var in other_vars.values() {
-            let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
-            for dep in &deps.dt_deps {
-                if let Some(dot_pos) = dep.find(middot) {
-                    let module_part = &dep[..dot_pos];
-                    let internal_var = &dep[dot_pos + middot.len_utf8()..];
-                    if module_var_names.contains(&module_part.to_string()) {
-                        output_ports.insert(Ident::new(internal_var));
-                    }
-                }
+        let mut record = |dep: &crate::db::DepRef| {
+            if let (Some(instance), Some(port)) =
+                (dep.target.module_path.first(), dep.target.output_port())
+                && module_var_names.contains(instance.as_str())
+            {
+                output_ports.insert(port);
             }
-
-            // Also check implicit variable deps (SMOOTH/DELAY expansion
-            // creates helper auxes whose deps may reference module outputs)
-            let parsed = parse_source_variable(db, *source_var, project);
-            for implicit_dm_var in &parsed.implicit_vars {
-                if implicit_dm_var.is_module() {
-                    continue;
-                }
-                let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
-                for iv_dep in &deps.implicit_vars {
-                    for dep in &iv_dep.dt_deps {
-                        if let Some(dot_pos) = dep.find(middot) {
-                            let module_part = &dep[..dot_pos];
-                            let internal_var = &dep[dot_pos + middot.len_utf8()..];
-                            if module_var_names.contains(&module_part.to_string()) {
-                                output_ports.insert(Ident::new(internal_var));
-                            }
-                        }
-                    }
+        };
+        for source_var in other_model.variables(db).values() {
+            let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
+            for dep in deps.deps.phase(DepPhase::Dt) {
+                record(dep);
+            }
+            for iv_dep in &deps.implicit_vars {
+                for dep in iv_dep.deps.phase(DepPhase::Dt) {
+                    record(dep);
                 }
             }
         }

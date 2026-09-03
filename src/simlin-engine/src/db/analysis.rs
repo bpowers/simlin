@@ -21,17 +21,52 @@
 //!   the causal and polarity graphs read, as handles to the per-variable memos)
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::canonicalize;
 use crate::capture::CaptureKind;
+use crate::common::{Canonical, Ident};
 use crate::datamodel;
 
 use super::{
-    Db, LtmMode, ModuleInputSet, SourceModel, SourceProject, SourceVariableKind,
-    lowered_implicit_variable, lowered_source_variable, model_implicit_var_info, model_ltm_mode,
-    parse_source_variable, project_datamodel_dims, project_dimensions_context,
+    Db, DepPhase, DepRefs, DepTarget, LtmMode, ModuleInputSet, SourceModel, SourceProject,
+    SourceVariableKind, lowered_implicit_variable, lowered_source_variable,
+    model_implicit_var_info, model_ltm_mode, project_datamodel_dims, project_dimensions_context,
     variable_direct_dependencies,
 };
+
+/// The sub-model outputs each node of a model reads in the dt phase, by
+/// reader: the qualified [`DepTarget`]s of an explicit variable's equation, a
+/// module instance's input sources and a parse-synthesized helper's body,
+/// each instance path proven by `variable_direct_dependencies`.
+pub type ModuleOutputsRead = HashMap<String, BTreeSet<DepTarget>>;
+
+/// The one output of `module` that `reader` reads, named inside the instance
+/// (`x` for `m·x`, `n·x` for `m·n·x`): the exit port a loop through `module`
+/// takes at `reader`. `None` when the reader reads none, reads several
+/// distinct ones (an ambiguous exit, left to the base link score), or reads
+/// only the instance's LTM internals (`m·$⁚ltm⁚…`), which are never a model
+/// output.
+pub(crate) fn unique_module_output(
+    reads: &ModuleOutputsRead,
+    reader: &str,
+    module: &Ident<Canonical>,
+) -> Option<Ident<Canonical>> {
+    let mut found: Option<Ident<Canonical>> = None;
+    for target in reads.get(reader)? {
+        if target.module_path.first() != Some(module)
+            || crate::ltm::is_synthetic_node_name(target.variable.as_str())
+        {
+            continue;
+        }
+        let port = target.output_port()?;
+        match &found {
+            Some(prev) if *prev != port => return None,
+            _ => found = Some(port),
+        }
+    }
+    found
+}
 
 /// Causal edge structure for a model, built from variable dependency sets
 /// and structural info (stock inflows/outflows, module refs).
@@ -43,6 +78,21 @@ pub struct CausalEdgesResult {
     pub stocks: BTreeSet<String>,
     /// Module var_name -> model_name for dynamic modules
     pub dynamic_modules: HashMap<String, String>,
+    /// The sub-model outputs each node reads, recorded while the edges are
+    /// built; shared with every `CausalGraph` built from this result, so
+    /// exhaustive and discovery mode select a loop's exit port from one map.
+    pub module_outputs_read: Arc<ModuleOutputsRead>,
+}
+
+impl CausalEdgesResult {
+    /// See [`unique_module_output`].
+    pub(crate) fn unique_module_output(
+        &self,
+        reader: &str,
+        module: &Ident<Canonical>,
+    ) -> Option<Ident<Canonical>> {
+        unique_module_output(&self.module_outputs_read, reader, module)
+    }
 }
 
 /// Element-level causal edge structure for a model.
@@ -1426,24 +1476,10 @@ pub struct CyclePartitionsResult {
     pub stock_partition: HashMap<String, usize>,
 }
 
-/// Normalize a dependency/reference name by stripping a leading middot
-/// (XMILE parent-scope refs like `.area` canonicalize to `·area`) and then
-/// truncating at the first remaining middot to collapse `module·output`
-/// qualifiers down to the module variable name.
-pub(super) fn normalize_module_ref_str(s: &str) -> String {
-    let effective = s.strip_prefix('\u{00B7}').unwrap_or(s);
-    if let Some(pos) = effective.find('\u{00B7}') {
-        effective[..pos].to_string()
-    } else {
-        effective.to_string()
-    }
-}
-
 /// Construct a lightweight CausalGraph from a CausalEdgesResult.
 /// Variables and module_graphs are empty -- suitable for graph algorithms
 /// (circuit finding, SCC computation) but not for polarity analysis.
 pub fn causal_graph_from_edges(result: &CausalEdgesResult) -> crate::ltm::CausalGraph {
-    use crate::common::{Canonical, Ident};
     use std::collections::HashSet;
 
     let edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = result
@@ -1458,12 +1494,7 @@ pub fn causal_graph_from_edges(result: &CausalEdgesResult) -> crate::ltm::Causal
         .collect();
     let stocks: HashSet<Ident<Canonical>> = result.stocks.iter().map(|s| Ident::new(s)).collect();
 
-    crate::ltm::CausalGraph {
-        edges,
-        stocks,
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    }
+    crate::ltm::CausalGraph::new(edges, stocks)
 }
 
 /// Build a full CausalGraph with variables populated for polarity analysis
@@ -1477,48 +1508,32 @@ pub(crate) fn causal_graph_with_modules(
     model: SourceModel,
     project: SourceProject,
 ) -> crate::ltm::CausalGraph {
-    use crate::common::{Canonical, Ident};
-    use std::collections::HashSet;
-
-    let edges_result = model_causal_edges(db, model, project);
-    let edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = edges_result
-        .edges
-        .iter()
-        .map(|(from, tos)| {
-            (
-                Ident::new(from),
-                tos.iter().map(|t| Ident::new(t)).collect(),
-            )
-        })
-        .collect();
-    let stocks: HashSet<Ident<Canonical>> =
-        edges_result.stocks.iter().map(|s| Ident::new(s)).collect();
-
-    let (variables, module_graphs) = model_variables_and_module_graphs(db, model, project);
-
-    crate::ltm::CausalGraph {
-        edges,
-        stocks,
-        variables,
-        module_graphs,
-    }
+    let mut graph = causal_graph_from_edges(model_causal_edges(db, model, project));
+    let (variables, module_outputs_read, module_graphs) =
+        model_variables_and_module_graphs(db, model, project);
+    graph.variables = variables;
+    graph.module_outputs_read = module_outputs_read;
+    graph.module_graphs = module_graphs;
+    graph
 }
 
-/// The `(variables, module_graphs)` maps a CausalGraph carries for polarity
-/// analysis, stock enrichment, and the GH #698 per-exit-port recompute.
+/// The `(variables, module_outputs_read, module_graphs)` maps a CausalGraph
+/// carries for polarity analysis, stock enrichment, and the GH #698
+/// per-exit-port recompute.
 type CausalGraphModuleData = (
-    std::sync::Arc<crate::variable::LoweredVariableMap>,
-    HashMap<crate::common::Ident<crate::common::Canonical>, Box<crate::ltm::CausalGraph>>,
+    Arc<crate::variable::LoweredVariableMap>,
+    Arc<ModuleOutputsRead>,
+    HashMap<Ident<Canonical>, Box<crate::ltm::CausalGraph>>,
 );
 
-/// Build the `(variables, module_graphs)` pair a CausalGraph needs for
-/// polarity analysis, stock enrichment, and the discovery-mode per-exit-port
-/// pathway recompute (GH #698) -- shared by `causal_graph_with_modules` (which
-/// pairs it with a variable-level edge set) and
-/// `causal_graph_from_element_edges_with_modules` (which pairs it with an
-/// element-level edge set). The element-level graph names its module nodes by
-/// the bare module instance name, the same key `module_graphs` and the module
-/// `Variable` use, so the recompute resolves a module hop either way.
+/// Build the maps a CausalGraph needs for polarity analysis, stock
+/// enrichment, and the discovery-mode per-exit-port pathway recompute (GH
+/// #698) -- shared by `causal_graph_with_modules` (which pairs them with a
+/// variable-level edge set) and `causal_graph_from_element_edges_with_modules`
+/// (which pairs them with an element-level edge set). The element-level graph
+/// names its module nodes by the bare module instance name, the same key
+/// `module_graphs`, `module_outputs_read` and the module `Variable` use, so
+/// the recompute resolves a module hop either way.
 ///
 /// A sub-graph is built for EVERY referenced sub-model, not only stockful
 /// dynamic modules: a stockless *passthrough* with an input->output pathway
@@ -1531,9 +1546,6 @@ fn model_variables_and_module_graphs(
     model: SourceModel,
     project: SourceProject,
 ) -> CausalGraphModuleData {
-    use crate::common::{Canonical, Ident};
-    use std::collections::HashSet;
-
     let edges_result = model_causal_edges(db, model, project);
     let variables = model_lowered_variables(db, model, project);
 
@@ -1543,34 +1555,18 @@ fn model_variables_and_module_graphs(
     for (module_var_name, sub_model_name) in &edges_result.dynamic_modules {
         if let Some(sub_source_model) = project_models.get(sub_model_name.as_str()) {
             let sub_edges_result = model_causal_edges(db, *sub_source_model, project);
-            let sub_edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = sub_edges_result
-                .edges
-                .iter()
-                .map(|(from, tos)| {
-                    (
-                        Ident::new(from),
-                        tos.iter().map(|t| Ident::new(t)).collect(),
-                    )
-                })
-                .collect();
-            let sub_stocks: HashSet<Ident<Canonical>> = sub_edges_result
-                .stocks
-                .iter()
-                .map(|s| Ident::new(s))
-                .collect();
-            let sub_variables = model_lowered_variables(db, *sub_source_model, project);
-
-            let sub_graph = crate::ltm::CausalGraph {
-                edges: sub_edges,
-                stocks: sub_stocks,
-                variables: sub_variables,
-                module_graphs: HashMap::new(),
-            };
+            let mut sub_graph = causal_graph_from_edges(sub_edges_result);
+            sub_graph.variables = model_lowered_variables(db, *sub_source_model, project);
+            sub_graph.module_outputs_read = Arc::clone(&sub_edges_result.module_outputs_read);
             module_graphs.insert(Ident::new(module_var_name), Box::new(sub_graph));
         }
     }
 
-    (variables, module_graphs)
+    (
+        variables,
+        Arc::clone(&edges_result.module_outputs_read),
+        module_graphs,
+    )
 }
 
 /// Element-level CausalGraph (as [`causal_graph_from_element_edges`]) ENRICHED
@@ -1587,8 +1583,10 @@ pub fn causal_graph_from_element_edges_with_modules(
     element_edges: &ElementCausalEdgesResult,
 ) -> crate::ltm::CausalGraph {
     let mut graph = causal_graph_from_element_edges(element_edges);
-    let (variables, module_graphs) = model_variables_and_module_graphs(db, model, project);
+    let (variables, module_outputs_read, module_graphs) =
+        model_variables_and_module_graphs(db, model, project);
     graph.variables = variables;
+    graph.module_outputs_read = module_outputs_read;
     graph.module_graphs = module_graphs;
     graph
 }
@@ -1635,11 +1633,44 @@ pub fn model_causal_edges(
     let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut stocks = BTreeSet::new();
     let mut dynamic_modules = HashMap::new();
+    let mut module_outputs_read: ModuleOutputsRead = HashMap::new();
+
+    // The dt-phase reads of one node, as edges into it. A read of an INIT-only
+    // capture is a read of a snapshot: no edge. A module instance's read of
+    // its own output (a Stella import wires those as inputs) is no edge
+    // either; a local self-read stays, as every read of a local name does.
+    fn record_reads(
+        edges: &mut HashMap<String, BTreeSet<String>>,
+        module_outputs_read: &mut ModuleOutputsRead,
+        init_captures: &HashSet<String>,
+        reader: &str,
+        deps: &DepRefs,
+    ) {
+        for dep in deps.phase(DepPhase::Dt) {
+            let node = dep.target.head();
+            if dep.target.is_local() {
+                if init_captures.contains(node.as_str()) {
+                    continue;
+                }
+            } else {
+                if node.as_str() == reader {
+                    continue;
+                }
+                module_outputs_read
+                    .entry(reader.to_string())
+                    .or_default()
+                    .insert(dep.target.clone());
+            }
+            edges
+                .entry(node.as_str().to_string())
+                .or_default()
+                .insert(reader.to_string());
+        }
+    }
 
     for (name, source_var) in source_vars.iter() {
-        let kind = source_var.kind(db);
-
-        match kind {
+        let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
+        match source_var.kind(db) {
             SourceVariableKind::Stock => {
                 stocks.insert(name.clone());
                 for flow in source_var
@@ -1655,87 +1686,48 @@ pub fn model_causal_edges(
                 }
             }
             SourceVariableKind::Module => {
-                let self_prefix = format!("{name}\u{00B7}");
-                for mr in source_var.module_refs(db).iter() {
-                    let canonical_src = canonicalize(&mr.src).into_owned();
-                    // Skip output refs where src is within the module's own
-                    // namespace (Stella imports include these); normalizing
-                    // them would create false self-loops.
-                    if canonical_src.starts_with(&self_prefix) {
-                        continue;
-                    }
-                    let normalized = normalize_module_ref_str(&canonical_src);
-                    edges.entry(normalized).or_default().insert(name.clone());
-                }
+                // A module instance's dependencies are the sources feeding
+                // its input ports.
+                record_reads(
+                    &mut edges,
+                    &mut module_outputs_read,
+                    &init_captures,
+                    name,
+                    &deps.deps,
+                );
                 let model_name = source_var.model_name(db);
                 if !model_name.is_empty() {
                     dynamic_modules.insert(name.clone(), model_name.clone());
                 }
             }
-            _ => {
-                let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
-                for dep in deps
-                    .dt_deps
-                    .iter()
-                    .filter(|dep| !init_captures.contains(*dep))
-                {
-                    let normalized = normalize_module_ref_str(dep);
-                    edges.entry(normalized).or_default().insert(name.clone());
-                }
-            }
+            _ => record_reads(
+                &mut edges,
+                &mut module_outputs_read,
+                &init_captures,
+                name,
+                &deps.deps,
+            ),
         }
 
-        // Include implicit variables (module instances from SMOOTH/DELAY expansion)
-        let parsed = parse_source_variable(db, *source_var, project);
-        for implicit_var in &parsed.implicit_vars {
-            let imp_name = canonicalize(implicit_var.ident()).into_owned();
-
-            match implicit_var.module() {
-                // A module instance's dependencies are the sources feeding its
-                // input ports. A source under the instance's own `ident·` prefix
-                // is one of the instance's OWN outputs read back, not an
-                // incoming edge.
-                Some(m) => {
-                    let self_prefix = format!("{imp_name}\u{00B7}");
-                    for mr in &m.references {
-                        let canonical_src = canonicalize(&mr.src).into_owned();
-                        if canonical_src.starts_with(&self_prefix) {
-                            continue;
-                        }
-                        let normalized = normalize_module_ref_str(&canonical_src);
-                        edges
-                            .entry(normalized)
-                            .or_default()
-                            .insert(imp_name.clone());
-                    }
-                    dynamic_modules.insert(imp_name.clone(), m.model_name.clone());
+        // The helpers the parse synthesized: a module instance (from
+        // SMOOTH/DELAY expansion) is a node like an explicit one; a capture or
+        // a hoisted call argument is an aux, unless it is an INIT-only capture,
+        // which is no causal node.
+        for implicit in &deps.implicit_vars {
+            if implicit.is_module {
+                if let Some(model_name) = &implicit.model_name {
+                    dynamic_modules.insert(implicit.name.clone(), model_name.clone());
                 }
-                // A capture or a hoisted call argument: an aux, whose deps the
-                // parent's own dependency classification already carries.
-                None => {
-                    if init_captures.contains(&imp_name) {
-                        continue;
-                    }
-                    // For implicit flows/auxes, get deps from the parent's
-                    // variable_direct_dependencies result.
-                    let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
-                    if let Some(implicit_dep) =
-                        deps.implicit_vars.iter().find(|iv| iv.name == imp_name)
-                    {
-                        for dep in implicit_dep
-                            .dt_deps
-                            .iter()
-                            .filter(|dep| !init_captures.contains(*dep))
-                        {
-                            let normalized = normalize_module_ref_str(dep);
-                            edges
-                                .entry(normalized)
-                                .or_default()
-                                .insert(imp_name.clone());
-                        }
-                    }
-                }
+            } else if init_captures.contains(&implicit.name) {
+                continue;
             }
+            record_reads(
+                &mut edges,
+                &mut module_outputs_read,
+                &init_captures,
+                &implicit.name,
+                &implicit.deps,
+            );
         }
     }
 
@@ -1743,6 +1735,7 @@ pub fn model_causal_edges(
         edges,
         stocks,
         dynamic_modules,
+        module_outputs_read: Arc::new(module_outputs_read),
     }
 }
 
@@ -3051,12 +3044,7 @@ pub fn causal_graph_from_element_edges(
         .collect();
     let stocks: HashSet<Ident<Canonical>> = result.stocks.iter().map(|s| Ident::new(s)).collect();
 
-    crate::ltm::CausalGraph {
-        edges,
-        stocks,
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    }
+    crate::ltm::CausalGraph::new(edges, stocks)
 }
 
 /// Find all elementary loop circuits in a model's element-level causal graph.
@@ -3373,12 +3361,7 @@ pub fn model_loop_circuits_tiered(
                 )
             })
             .collect();
-        let graph = crate::ltm::CausalGraph {
-            edges: sub_edge_idents,
-            stocks: sub_stocks,
-            variables: std::sync::Arc::new(HashMap::new()),
-            module_graphs: HashMap::new(),
-        };
+        let graph = crate::ltm::CausalGraph::new(sub_edge_idents, sub_stocks);
         let scc = graph.largest_scc_size();
         if scc > crate::ltm::MAX_LTM_SCC_NODES {
             // Skip Johnson on a huge cross-element subgraph; the

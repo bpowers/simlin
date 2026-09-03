@@ -82,13 +82,13 @@ fn pinnable_arrayed_deps(
     model: SourceModel,
     project: SourceProject,
     deps: &HashSet<Ident<Canonical>>,
-    tables: &std::collections::BTreeSet<String>,
+    tables: &std::collections::BTreeSet<Ident<Canonical>>,
     keep: impl Fn(&Ident<Canonical>) -> bool,
 ) -> Vec<(Ident<Canonical>, Vec<crate::dimensions::Dimension>)> {
     let mut pinnable: Vec<(Ident<Canonical>, Vec<crate::dimensions::Dimension>)> = deps
         .iter()
+        .chain(tables.iter())
         .cloned()
-        .chain(tables.iter().map(|t| Ident::new(t)))
         .collect::<HashSet<_>>()
         .iter()
         .filter(|d| keep(d))
@@ -1176,7 +1176,7 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
                 let class = crate::variable::classify_dependencies(ast, target_ast_dims, None);
                 (
                     Some(crate::patch::expr2_to_expr0(expr)),
-                    class.all,
+                    class.names(),
                     class.referenced_tables,
                 )
             }
@@ -1190,7 +1190,7 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
                         );
                         (
                             Some(crate::patch::expr2_to_expr0(expr)),
-                            class.all,
+                            class.names(),
                             class.referenced_tables,
                         )
                     }
@@ -1661,10 +1661,11 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
     // `tables` is threaded alongside `deps` because a LOOKUP table holder is
     // absent from the dep set by construction but still needs its index pinned
     // -- see `pinnable_arrayed_deps`.
-    let pinnable_deps = |deps: &HashSet<Ident<Canonical>>,
-                         tables: &std::collections::BTreeSet<String>| {
-        pinnable_arrayed_deps(db, model, project, deps, tables, |_| true)
-    };
+    let pinnable_deps =
+        |deps: &HashSet<Ident<Canonical>>,
+         tables: &std::collections::BTreeSet<Ident<Canonical>>| {
+            pinnable_arrayed_deps(db, model, project, deps, tables, |_| true)
+        };
 
     let dim_element_lists: Vec<Vec<String>> = to_dims
         .iter()
@@ -1837,7 +1838,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         Ast::ApplyToAll(_, expr) => {
             let elem_eqn = crate::patch::expr2_to_expr0(expr);
             let elem_dep_class = crate::variable::classify_dependencies(ast, target_ast_dims, None);
-            let elem_deps = elem_dep_class.all.clone();
+            let elem_deps = elem_dep_class.names();
             let pinnable = pinnable_deps(&elem_deps, &elem_dep_class.referenced_tables);
             for element in &elements {
                 match build_var(
@@ -1866,7 +1867,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                 let (elem_eqn, elem_deps, elem_tables): (
                     Option<crate::ast::Expr0>,
                     HashSet<Ident<Canonical>>,
-                    std::collections::BTreeSet<String>,
+                    std::collections::BTreeSet<Ident<Canonical>>,
                 ) = match slot {
                     Some(expr) => {
                         let class = crate::variable::classify_dependencies(
@@ -1876,7 +1877,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                         );
                         (
                             Some(crate::patch::expr2_to_expr0(expr)),
-                            class.all,
+                            class.names(),
                             class.referenced_tables,
                         )
                     }
@@ -2979,10 +2980,11 @@ fn emit_per_element_link_scores(
     // over its OWN declared dimensions (mirroring
     // `try_scalar_to_arrayed_link_scores`); the source itself is excluded --
     // its occurrences are pinned per-row by the wrap's own row lowering.
-    let pinnable_deps = |deps: &HashSet<Ident<Canonical>>,
-                         tables: &std::collections::BTreeSet<String>| {
-        pinnable_arrayed_deps(db, model, project, deps, tables, |d| d.as_str() != from)
-    };
+    let pinnable_deps =
+        |deps: &HashSet<Ident<Canonical>>,
+         tables: &std::collections::BTreeSet<Ident<Canonical>>| {
+            pinnable_arrayed_deps(db, model, project, deps, tables, |d| d.as_str() != from)
+        };
 
     let to_dim_element_lists: Vec<Vec<String>> = to_dims
         .iter()
@@ -2995,7 +2997,7 @@ fn emit_per_element_link_scores(
     let a2a_parts: Option<ElemEqnParts> = if let Ast::ApplyToAll(_, expr) = ast {
         let eqn = crate::patch::expr2_to_expr0(expr);
         let class = crate::variable::classify_dependencies(ast, target_ast_dims, None);
-        let deps = class.all.clone();
+        let deps = class.names();
         let pinnable = pinnable_deps(&deps, &class.referenced_tables);
         Some((eqn, deps, pinnable))
     } else {
@@ -3062,7 +3064,7 @@ fn emit_per_element_link_scores(
                             target_ast_dims,
                             None,
                         );
-                        let deps = class.all.clone();
+                        let deps = class.names();
                         let pinnable = pinnable_deps(&deps, &class.referenced_tables);
                         Some((eqn, deps, pinnable))
                     }
@@ -4223,7 +4225,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                             target_ast_dims,
                             None,
                         )
-                        .all;
+                        .names();
                         slot_deps.insert(agg_canonical.clone());
                         for other_agg in reducer_subst.values() {
                             slot_deps.insert(Ident::<Canonical>::new(other_agg));

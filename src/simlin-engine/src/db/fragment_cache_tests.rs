@@ -641,13 +641,16 @@ fn test_init_feedback_does_not_create_dt_cycle() {
     let model = sync.models["main"].source;
     let dep_graph = model_dependency_graph(&db, model, sync.project, ModuleInputSet::empty(&db));
 
+    let b = crate::common::Ident::new("b");
     assert!(
-        deps.dt_deps.contains("b"),
-        "INIT(b) should remain in direct deps for fragment compilation context"
+        deps.deps.reads_local(&b),
+        "INIT(b) should remain a read for fragment compilation context"
     );
     assert!(
-        deps.init_referenced_vars.contains("b"),
-        "INIT(b) should still track b for initials runlist seeding"
+        deps.deps
+            .phase(crate::db::DepPhase::Dt)
+            .any(|dep| dep.lag == crate::variable::DepLag::Initial && dep.target.variable == b),
+        "INIT(b) should still be an initial read of b for initials runlist seeding"
     );
     assert!(
         !dep_graph.dt_dependencies["a"].contains("b"),

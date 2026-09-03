@@ -301,7 +301,7 @@ fn model_is_stateless(
 /// PREVIOUS-lagged dt dependency -- the lagged-state leg of
 /// [`model_is_stateless`] (GH #749).
 ///
-/// Checks `previous_only` references (`dt_previous_referenced_vars`): a
+/// Checks the previous-only reads (`DepRefs::dt_previous_only`): a
 /// reference that appears both inside and outside `PREVIOUS(...)` keeps its
 /// instantaneous edge, so a cycle through it could only compile if some
 /// OTHER edge breaks it -- and that breaking edge is itself previous-only
@@ -331,7 +331,8 @@ fn model_has_lagged_dt_deps(db: &dyn Db, model: SourceModel, project: SourceProj
             sv.kind(db),
             SourceVariableKind::Stock | SourceVariableKind::Module
         ) && !super::variable_direct_dependencies(db, *sv, project, empty_inputs)
-            .dt_previous_referenced_vars
+            .deps
+            .dt_previous_only()
             .is_empty()
     })
 }
@@ -472,39 +473,6 @@ struct ModuleLinkOverrides {
     overrides: LoopLinkOverrides,
     /// The alias synthetic vars (deduped by name) the overrides reference.
     alias_vars: Vec<super::LtmSyntheticVar>,
-}
-
-/// Read the output port a (non-module) variable `y` reads off module `m`.
-///
-/// `y`'s equation references the module output via interpunct notation
-/// `m·{port}`; return `{port}`. LTM-internal references (`m·$⁚ltm⁚…`) are
-/// excluded -- the loop traverses a real model output, never a synthetic.
-/// Returns the unique such port, or `None` when `y` reads zero or several
-/// (a multi-output read in one variable is ambiguous and left to the base
-/// link score's fallback).
-fn module_exit_port_for_reader(
-    module_name: &str,
-    reader: &crate::variable::Variable,
-) -> Option<String> {
-    let ast = reader.ast()?;
-    let deps = crate::variable::identifier_set(ast, &[], None);
-    let prefix = format!("{module_name}\u{00B7}");
-    let mut found: Option<String> = None;
-    for dep in deps {
-        let Some(port) = dep.as_str().strip_prefix(&prefix) else {
-            continue;
-        };
-        // Skip the module's synthetic LTM internals (`m·$⁚ltm⁚…`).
-        if port.starts_with('$') {
-            continue;
-        }
-        if found.is_some() {
-            // Two distinct output ports read by the same variable: ambiguous.
-            return None;
-        }
-        found = Some(port.to_string());
-    }
-    found
 }
 
 /// The selection equation + accumulator helpers that pick the pathway with the
@@ -675,8 +643,8 @@ fn compute_module_link_overrides(
             // `from` feeds MORE THAN ONE input port of the module, the collapsed
             // `from -> module` edge is genuinely ambiguous (no single entry
             // pathway to override against), so skip it and leave the base link
-            // score (its composite reference) in place -- mirroring
-            // `module_exit_port_for_reader`'s multi-match -> None semantics and
+            // score (its composite reference) in place -- mirroring the exit
+            // port's multi-match -> None semantics (`unique_module_output`) and
             // the discovery-side `recompute_module_input_edge_series` (GH #698 /
             // PR #705 r3353459409).
             let module_var = lowered_variable_by_name(db, model, project, module_name);
@@ -697,58 +665,20 @@ fn compute_module_link_overrides(
                 continue;
             }
 
-            // Exit port from the next link `(m → y)`.
+            // Exit port from the next link `(m → y)`: the one output of `m`
+            // that `y` reads -- through its equation or, for a module `y`,
+            // through its input wiring -- as the causal-edge builder recorded
+            // it. `y` reading TWO DISTINCT outputs of `m` leaves the collapsed
+            // `m -> y` edge no unique exit port: decline (ambiguous) and leave
+            // the base link score in place, as the discovery-side
+            // `recompute_module_input_edge_series` does (GH #698 / PR #705
+            // r3353597299). Two inputs naming the SAME `m·port` are NOT
+            // ambiguous: a unique distinct port is fine.
             let y = strip_subscript(next.to.as_str());
-            let exit_port = {
-                let y_is_module = edges_result.dynamic_modules.contains_key(y)
-                    || source_vars
-                        .get(y)
-                        .is_some_and(|sv| sv.kind(db) == SourceVariableKind::Module);
-                if y_is_module {
-                    // `y` is a module: m's output feeds y's input port(s). y's
-                    // ModuleInput src is the qualified `m·{port}`; the exit port
-                    // is the `{port}` whose normalized ref is `m`. If `y` reads
-                    // TWO DISTINCT output ports of `m` on different inputs, the
-                    // collapsed `m -> y` edge has no unique exit port -- decline
-                    // (ambiguous) and leave the base link score in place,
-                    // mirroring `module_exit_port_for_reader`'s multi-match ->
-                    // None semantics and the discovery-side
-                    // `recompute_module_input_edge_series` (GH #698 / PR #705
-                    // r3353597299). Two inputs naming the SAME `m·port` are NOT
-                    // ambiguous: a unique distinct port is fine.
-                    let y_var = lowered_variable_by_name(db, model, project, y);
-                    let module_ident = Ident::<Canonical>::new(module_name);
-                    match y_var.as_deref().map(|v| &v.kind) {
-                        Some(crate::variable::VarKind::Module { inputs: y_in, .. }) => {
-                            let mut exit: Option<String> = None;
-                            let mut ambiguous = false;
-                            for inp in y_in {
-                                if normalize_module_ref(&inp.src) != module_ident {
-                                    continue;
-                                }
-                                let Some((_, port)) = inp.src.as_str().split_once('\u{00B7}')
-                                else {
-                                    continue;
-                                };
-                                match &exit {
-                                    Some(prev) if prev != port => {
-                                        ambiguous = true;
-                                        break;
-                                    }
-                                    Some(_) => {}
-                                    None => exit = Some(port.to_string()),
-                                }
-                            }
-                            if ambiguous { None } else { exit }
-                        }
-                        _ => None,
-                    }
-                } else {
-                    lowered_variable_by_name(db, model, project, y)
-                        .and_then(|y_var| module_exit_port_for_reader(module_name, &y_var))
-                }
-            };
-            let Some(exit_port) = exit_port else {
+            let Some(exit_port) = edges_result
+                .unique_module_output(y, &Ident::<Canonical>::new(module_name))
+                .map(|port| port.as_str().to_string())
+            else {
                 continue;
             };
 

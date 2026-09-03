@@ -2928,8 +2928,8 @@ fn model_dep_graph_single_var_self_recurrence_byte_identical_to_phase1() {
 // element-self-loops, every one a `SymLoadPrev`). After Part A the element
 // graph inherits `build_var_info`'s per-phase PREVIOUS/INIT strip
 // (`db/dep_graph.rs` real-var :261-264 / implicit :283-287; `SymLoadPrev`
-// is the element-level analogue of `dt_previous_referenced_vars` /
-// `initial_previous_referenced_vars`, stripped in BOTH phases), so the
+// is the element-level analogue of a `DepLag::Previous` read, which orders
+// nothing in EITHER phase), so the
 // lagged self-read contributes no edge and the (acyclic, current-value)
 // element graph resolves -- exactly as the variable-level relation already
 // does for the whole-variable PREVIOUS self-edge.
@@ -3009,7 +3009,7 @@ fn resolve_dt_sample_if_true_shaped_scc_resolves_despite_previous_self_read() {
          once the PREVIOUS same-element lagged self-read is excluded from \
          the element graph (it is a prior-timestep snapshot, not a \
          current-timestep ordering edge -- the element-level analogue of \
-         `build_var_info` stripping `dt_previous_referenced_vars`): there \
+         `build_var_info` keeping no `PREVIOUS` read): there \
          MUST be no unresolved SCC"
     );
     assert_eq!(

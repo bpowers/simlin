@@ -219,8 +219,9 @@ pub enum ResultKind {
 }
 
 /// How a builtin's value relates to simulation time, read by the
-/// run-invariance classifier (`compiler::invariance`) and by the dt-time
-/// dependency walk that feeds it (`db::assemble::collect_expr_refs`).
+/// run-invariance classifier (`compiler::invariance`); `Snapshot` and
+/// `Lagged` are the two forms whose arguments the dependency walk records
+/// under a lag (`variable::DepLag`).
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Invariance {

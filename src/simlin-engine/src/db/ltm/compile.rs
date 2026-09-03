@@ -22,14 +22,12 @@ use crate::common::{Canonical, Ident, IdentMap};
 
 use crate::compiler::fragment::{DepShape, FragmentInput, lower_fragment};
 use crate::db::var_fragment::{
-    dep_head, dimensions_named, implicit_dep_shape, is_implicit_global, model_dep_shape,
-    source_dep_shape,
+    dimensions_named, is_implicit_global, model_dep_shape, source_dep_shape,
 };
 use crate::db::{
-    Db, LtmLinkId, LtmSyntheticVar, RefShape, SourceModel, SourceProject, SourceVariableKind,
-    VarFragmentResult, build_module_inputs, canonical_module_input_set,
-    compile_phase_to_per_var_bytecodes, lowered_variable_by_name, model_implicit_var_info,
-    module_dep_shape, module_input_prefix, project_converted_dimensions,
+    Db, LtmLinkId, LtmSyntheticVar, RefShape, SourceModel, SourceProject, VarFragmentResult,
+    build_module_inputs, canonical_module_input_set, compile_phase_to_per_var_bytecodes,
+    lowered_variable_by_name, module_dep_shape, module_input_prefix, project_converted_dimensions,
     project_dimensions_context, variable_tables,
 };
 
@@ -516,42 +514,30 @@ impl Drop for ForcePartialEquationErrorGuard {
 
 /// Result of [`lower_ltm_variable`]: the lowered variable plus the
 /// dependency classification of its lowered AST, computed once during
-/// lowering. Callers reuse `dep_idents`/`referenced_tables` to build their
-/// dependency shapes instead of re-running `classify_dependencies` on the
-/// returned variable -- the classification is a per-fragment AST walk, and
-/// duplicating it across every LTM fragment was a measurable slice of
-/// C-LEARN's LTM compile time.
+/// lowering. Callers read `deps` to build their dependency shapes instead of
+/// re-running `classify_dependencies` on the returned variable -- the
+/// classification is a per-fragment AST walk, and duplicating it across every
+/// LTM fragment was a measurable slice of C-LEARN's LTM compile time.
+///
+/// The classification's sets are ORDERED (`BTreeSet`s), and both consumers
+/// walk them in that order to build per-dependency shapes -- **deliberately,
+/// even though no consumer is order-sensitive.** The shapes land in an
+/// ident-keyed map (first-inserted-wins over distinct idents) and an
+/// ident-keyed map of tables, and `Compiler::new` sorts the table idents it
+/// lays graphical functions out from, so iteration order does not reach the
+/// emitted fragment. The rule this upholds is the reason to keep it: a
+/// query's intermediate state must be a function of its inputs, not of the
+/// hash seed. That is the same rule `db::assemble::temp_sizes_by_id`
+/// upholds, and the class of defect it prevents (GH #595) does not announce
+/// itself -- it surfaces as salsa backdating quietly failing or a compiled
+/// artifact that is not reproducible run to run, neither of which a test
+/// would attribute back to here.
 struct LoweredLtmVariable {
     variable: crate::variable::Variable,
-    /// `classify_dependencies(..).all` of the lowered AST
-    /// (`Variable::ast()`, which for the Aux-parsed Vars LTM produces is
-    /// the dt AST).
-    ///
-    /// ORDERED, not a `HashSet` -- **deliberately, even though no consumer is
-    /// order-sensitive.** Keep it that way; the reasoning is not "something
-    /// breaks if you don't", so a reader who checks only that will wrongly
-    /// conclude it is free to change.
-    ///
-    /// Both consumers walk this set to build per-dependency shapes, which land
-    /// in an ident-keyed map (first-inserted-wins over distinct idents) and an
-    /// ident-keyed map of tables, and `Compiler::new` sorts the table idents it
-    /// lays graphical functions out from -- so iteration order does not reach
-    /// the emitted fragment. The rule this upholds is the reason to keep it: a
-    /// query's intermediate state must be a function of its inputs, not of the
-    /// hash seed. That is the same rule `db::assemble::temp_sizes_by_id`
-    /// upholds, and the class of defect it prevents (GH #595) does not
-    /// announce itself -- it surfaces as salsa backdating quietly failing or a
-    /// compiled artifact that is not reproducible run to run, neither of which
-    /// a test would attribute back to here. It costs nothing, and the explicit
-    /// and implicit constructors (`db::var_fragment`, `db::fragment_compile`)
-    /// walk a `BTreeSet` too.
-    ///
-    /// This does NOT explain the separately-reported nondeterministic
-    /// *invalidation* of `compile_ltm_var_fragment`: salsa verifies a
-    /// dependency SET, which an ordering cannot alter.
-    dep_idents: BTreeSet<Ident<Canonical>>,
-    /// `classify_dependencies(..).referenced_tables` of the same AST.
-    referenced_tables: BTreeSet<String>,
+    /// `classify_dependencies` of the lowered AST (`Variable::ast()`, which
+    /// for the Aux-parsed Vars LTM produces is the dt AST): every read and
+    /// every table holder. Empty when the lowering failed.
+    deps: crate::variable::DepClassification,
 }
 
 /// Lower a parsed LTM Stage0 variable bounds-free (a `LoweringScope` with no
@@ -591,19 +577,43 @@ fn lower_ltm_variable(
     // Aux-parsed Var whose dt AST is its sole AST, and even a hypothetical
     // stock-shaped input is covered because `ast()` returns a Stock's init
     // AST.
-    let classification = prelim
+    let deps = prelim
         .ast()
-        .map(|ast| crate::variable::classify_dependencies(ast, &[], None));
-    let (dep_idents, referenced_tables) = match classification {
-        Some(c) => (c.all.into_iter().collect(), c.referenced_tables),
-        None => (BTreeSet::new(), BTreeSet::new()),
-    };
+        .map(|ast| crate::variable::classify_dependencies(ast, &[], None))
+        .unwrap_or_default();
 
     LoweredLtmVariable {
         variable: prelim,
-        dep_idents,
-        referenced_tables,
+        deps,
     }
+}
+
+/// The name each read of an LTM equation resolves through, each once: the
+/// instance a qualified read relocates through (`model_dep_shape` answers
+/// with the instance's shape), otherwise the read's own name.
+///
+/// Resolved through the one dependency resolver, with the equation's own
+/// synthesized helpers as the parse-local instances -- an LTM equation, being
+/// generated from an already-expanded source tree, synthesizes captures and
+/// never a module instance, so the parse-local set is inert and every hop is
+/// proven against the model.
+fn ltm_read_heads(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    own_helpers: &[crate::capture::ImplicitVar],
+    deps: &crate::variable::DepClassification,
+) -> BTreeSet<Ident<Canonical>> {
+    let scope = crate::db::DepScope {
+        db,
+        model: Some(model),
+        project,
+        own_helpers,
+    };
+    deps.occurrences
+        .iter()
+        .map(|occurrence| scope.resolve(&occurrence.ident).head().clone())
+        .collect()
 }
 
 /// Build the fragment input of one LTM synthetic variable: parse its typed
@@ -660,8 +670,7 @@ pub(crate) fn ltm_fragment_input<'db>(
     // computed so the lowered AST is not walked again here.
     let LoweredLtmVariable {
         variable: lowered,
-        dep_idents,
-        referenced_tables,
+        deps: classified,
     } = lower_ltm_variable(db, &parsed.variable, project);
 
     let var_name_canonical = canonicalize(var_name).into_owned();
@@ -688,20 +697,20 @@ pub(crate) fn ltm_fragment_input<'db>(
                 .unwrap_or_default(),
         ),
     );
-    for dep in &dep_idents {
-        let (head, _qualified) = dep_head(dep.as_str());
-        if head == var_name_canonical || is_implicit_global(head) || deps.contains_key(head) {
+    for head in ltm_read_heads(db, model, project, &parsed.implicit_vars, &classified) {
+        if head.as_str() == var_name_canonical || is_implicit_global(head.as_str()) {
             continue;
         }
-        let shape = if let Some(helper) = parsed_implicit(head) {
+        let shape = if let Some(helper) = parsed_implicit(head.as_str()) {
             match helper.module() {
                 Some(dm_module) => module_dep_shape(db, project, &dm_module.model_name),
                 None => DepShape::var(dimensions_named(helper.equation_dims(), dim_context)),
             }
         } else {
-            ltm_dep_shape(db, model, project, head).unwrap_or_else(|| DepShape::var(Vec::new()))
+            ltm_dep_shape(db, model, project, head.as_str())
+                .unwrap_or_else(|| DepShape::var(Vec::new()))
         };
-        deps.insert(Ident::new(head), shape);
+        deps.insert(head, shape);
     }
 
     // Lookup-table references (issue #606): a `LOOKUP(table, x)` call's table
@@ -711,22 +720,18 @@ pub(crate) fn ltm_fragment_input<'db>(
     // both, the fragment fails to compile and the link score silently reads a
     // constant 0 -- the failure mode behind WRLD3's identically-zero
     // table-mediated link scores (food_per_capita -> lifetime_multiplier_from_food
-    // and 50+ siblings). Module-namespaced tables can't be referenced from LTM
-    // equations.
+    // and 50+ siblings). A table is a variable of this model: a name the model
+    // does not declare (a module-namespaced spelling included) has none.
     let mut tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
-    for table_name in &referenced_tables {
-        let (head, qualified) = dep_head(table_name);
-        if qualified {
-            continue;
-        }
-        let Some(table_sv) = source_vars.get(head) else {
+    for table in &classified.referenced_tables {
+        let Some(table_sv) = source_vars.get(table.as_str()) else {
             continue;
         };
         let table_data = variable_tables(db, *table_sv, project).clone();
         if !table_data.is_empty() {
-            tables.insert(Ident::new(head), table_data);
+            tables.insert(table.clone(), table_data);
         }
-        deps.entry(Ident::new(head))
+        deps.entry(table.clone())
             .or_insert_with(|| source_dep_shape(db, *table_sv, project));
     }
 
@@ -853,7 +858,7 @@ pub(crate) fn compile_ltm_equation_fragment(
         },
         // LTM synthetic vars use PREVIOUS -- always dynamic; not classified
         // for run-invariance.
-        flow_invariance: None,
+        flow_locally_invariant: None,
     })
 }
 
@@ -1378,29 +1383,25 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
             var_ident.clone(),
             module_dep_shape(db, project, &dm_module.model_name),
         );
-        let ltm_implicit_all = model_ltm_implicit_var_info(db, model, project);
+        let scope = crate::db::DepScope {
+            db,
+            model: Some(model),
+            project,
+            own_helpers: &[],
+        };
         for mr in &dm_module.references {
-            let src = canonicalize(&mr.src);
-            let (head, qualified) = dep_head(&src);
-            if head == implicit_name || is_implicit_global(head) || deps.contains_key(head) {
+            let head = scope.resolve(&Ident::new(&mr.src)).head().clone();
+            if head.as_str() == implicit_name
+                || is_implicit_global(head.as_str())
+                || deps.contains_key(&head)
+            {
                 continue;
             }
-            let shape = if qualified {
-                // `module_var·output`: the instance the read relocates through,
-                // another module-typed LTM implicit variable.
-                match ltm_implicit_all.get(head) {
-                    Some(ref_meta) if ref_meta.is_module => {
-                        module_dep_shape(db, project, ref_meta.model_name.as_deref().unwrap_or(""))
-                    }
-                    _ => continue,
-                }
-            } else if let Some(dep_sv) = source_vars.get(head) {
-                source_dep_shape(db, *dep_sv, project)
-            } else {
-                // Another LTM var or implicit helper: scalar.
-                DepShape::var(Vec::new())
-            };
-            deps.insert(Ident::new(head), shape);
+            // A model variable, a module instance the source relocates
+            // through, or -- another LTM var or helper -- a scalar.
+            let shape = ltm_dep_shape(db, model, project, head.as_str())
+                .unwrap_or_else(|| DepShape::var(Vec::new()));
+            deps.insert(head, shape);
         }
         crate::variable::Variable::module_instance(
             var_ident,
@@ -1421,8 +1422,7 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
         // from the same lowering, so the lowered AST is not walked again.
         let LoweredLtmVariable {
             variable: lowered,
-            dep_idents,
-            referenced_tables,
+            deps: classified,
         } = lower_ltm_variable(db, &parsed_implicit, project);
         // An arrayed capture helper occupies one slot per element.
         deps.insert(
@@ -1434,55 +1434,32 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
                     .unwrap_or_default(),
             ),
         );
-        // No lowered AST -> no dependency shapes: if lowering surfaced an
-        // equation error, `lowered.ast()` is `None` and the
-        // fragment compiles to nothing anyway.
-        let (dep_idents, referenced_tables) = if lowered.ast().is_some() {
-            (dep_idents, referenced_tables)
-        } else {
-            (BTreeSet::new(), BTreeSet::new())
-        };
-        let implicit_info = model_implicit_var_info(db, model, project);
-        for dep in &dep_idents {
-            let (head, qualified) = dep_head(dep.as_str());
-            if head == implicit_name || is_implicit_global(head) || deps.contains_key(head) {
+        // `classified` is empty when the lowering surfaced an equation error
+        // (`lowered.ast()` is `None`), and the fragment compiles to nothing.
+        for head in ltm_read_heads(db, model, project, &[], &classified) {
+            if head.as_str() == implicit_name || is_implicit_global(head.as_str()) {
                 continue;
             }
-            let shape = if qualified {
-                // `module·port`: the instance the read relocates through -- one
-                // of the model's SMOOTH/DELAY instances, or an explicit module
-                // variable of the parent model.
-                if let Some(im_meta) = implicit_info.get(head).filter(|m| m.is_module) {
-                    implicit_dep_shape(db, project, im_meta)
-                } else if let Some(dep_sv) = source_vars
-                    .get(head)
-                    .filter(|sv| sv.kind(db) == SourceVariableKind::Module)
-                {
-                    source_dep_shape(db, *dep_sv, project)
-                } else {
-                    continue;
-                }
-            } else {
-                ltm_dep_shape(db, model, project, head).unwrap_or_else(|| DepShape::var(Vec::new()))
-            };
-            deps.insert(Ident::new(head), shape);
+            // A model variable, the instance a `module·port` read relocates
+            // through (one of the model's SMOOTH/DELAY instances, or an
+            // explicit module variable of the parent model), or -- another
+            // LTM var or helper -- a scalar.
+            let shape = ltm_dep_shape(db, model, project, head.as_str())
+                .unwrap_or_else(|| DepShape::var(Vec::new()));
+            deps.insert(head, shape);
         }
         // Referenced lookup tables: shape + graphical-function data, so a
         // `lookup(table, ...)` inside a synthesized helper compiles (issue
         // #606; see `ltm_fragment_input`).
-        for table_name in &referenced_tables {
-            let (head, qualified) = dep_head(table_name);
-            if qualified {
-                continue;
-            }
-            let Some(table_sv) = source_vars.get(head) else {
+        for table in &classified.referenced_tables {
+            let Some(table_sv) = source_vars.get(table.as_str()) else {
                 continue;
             };
             let table_data = variable_tables(db, *table_sv, project).clone();
             if !table_data.is_empty() {
-                tables.insert(Ident::new(head), table_data);
+                tables.insert(table.clone(), table_data);
             }
-            deps.entry(Ident::new(head))
+            deps.entry(table.clone())
                 .or_insert_with(|| source_dep_shape(db, *table_sv, project));
         }
         lowered
@@ -1591,6 +1568,6 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
         },
         // LTM implicit helpers are always dynamic; not classified for
         // run-invariance.
-        flow_invariance: None,
+        flow_locally_invariant: None,
     })
 }

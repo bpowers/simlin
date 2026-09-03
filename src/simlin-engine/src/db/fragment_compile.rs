@@ -24,7 +24,7 @@ use crate::ast::LoweringScope;
 use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::fragment::{DepShape, FragmentInput, lower_fragment};
 use crate::db::var_fragment::{
-    DeclaredName, ExplicitFragment, dep_head, explicit_fragment_input, is_implicit_global,
+    DeclaredName, ExplicitFragment, ResolvedHeads, explicit_fragment_input, is_implicit_global,
 };
 
 // Test-only per-thread record of which fragment-compiler bodies ran.
@@ -294,13 +294,12 @@ pub fn compile_var_fragment<'db>(
         _ => None,
     };
 
-    // Pre-compute flow invariance support for `model_flows_invariant` (GH
-    // #712). Stored on the salsa-cached result so the topological fixpoint
-    // pass in `model_flows_invariant` can read it without re-lowering. Only
-    // meaningful for vars in the flows runlist.
-    let flow_invariance = match &noninitial {
+    // The compiler-local half of run invariance (GH #712), stored on the
+    // salsa-cached result so `model_flows_invariant`'s fixpoint reads it
+    // without re-lowering. Only meaningful for vars in the flows runlist.
+    let flow_locally_invariant = match &noninitial {
         Some(lowered) if in_flows_runlist => {
-            crate::db::assemble::compute_flow_invariance_support(lowered, &var_ident_canonical)
+            crate::db::assemble::flow_is_locally_invariant(lowered)
         }
         _ => None,
     };
@@ -317,7 +316,7 @@ pub fn compile_var_fragment<'db>(
             flow_bytecodes,
             stock_bytecodes,
         },
-        flow_invariance,
+        flow_locally_invariant,
     })
 }
 
@@ -332,8 +331,8 @@ pub(crate) enum ImplicitInputError {
     Lowering(Vec<crate::common::EquationError>),
 }
 
-/// Every name a helper's equation can reference: both phases' data-flow
-/// dependencies from the parent's dependency extraction
+/// Every name a helper's equation resolves through: the head of each of its
+/// reads from the parent's dependency extraction
 /// (`variable_direct_dependencies(parent).implicit_vars`, built input-agnostic
 /// so both branches of an `isModuleInput(...)` conditional stay compilable),
 /// the lookup tables it calls (layout references, not data-flow deps -- issue
@@ -343,60 +342,52 @@ fn implicit_referenced_names<MI, E>(
     meta: &ImplicitVarMeta,
     project: SourceProject,
     helper: &crate::variable::Variable<MI, E>,
-) -> BTreeSet<String> {
+) -> BTreeSet<Ident<Canonical>> {
     let parent_deps = variable_direct_dependencies(
         db,
         meta.parent_source_var,
         project,
         ModuleInputSet::empty(db),
     );
-    let mut names: BTreeSet<String> = parent_deps
+    let mut names: BTreeSet<Ident<Canonical>> = parent_deps
         .implicit_vars
         .iter()
         .filter(|iv| canonicalize(&iv.name) == meta.name)
         .flat_map(|iv| {
-            iv.dt_deps
-                .iter()
-                .chain(iv.initial_deps.iter())
+            iv.deps
+                .heads()
+                .into_iter()
                 .chain(iv.referenced_tables.iter())
+                .cloned()
         })
-        .cloned()
         .collect();
     if let crate::variable::VarKind::Stock {
         inflows, outflows, ..
     } = &helper.kind
     {
-        names.extend(
-            inflows
-                .iter()
-                .chain(outflows.iter())
-                .map(|flow| flow.as_str().to_string()),
-        );
+        names.extend(inflows.iter().chain(outflows.iter()).cloned());
     }
     names
 }
 
-/// The head of every name in `names` that `model` declares (the helper
-/// itself, the implicit globals and a repeated head skipped), each resolved
-/// once through `DeclaredName`. A helper's dependencies are explicit variables
-/// of the same model or other helpers; a name that is neither fails to resolve
-/// at lowering.
+/// Every name in `names` that `model` declares (the helper itself and the
+/// implicit globals skipped), each resolved once through `DeclaredName`. A
+/// helper's dependencies are explicit variables of the same model or other
+/// helpers; a name that is neither fails to resolve at lowering.
 fn implicit_referenced_heads(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
     self_name: &str,
-    names: &BTreeSet<String>,
-) -> Vec<(Ident<Canonical>, DeclaredName)> {
-    let mut heads: Vec<(Ident<Canonical>, DeclaredName)> = Vec::new();
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
-    for dep_name in names {
-        let (head, _qualified) = dep_head(dep_name);
-        if head == self_name || is_implicit_global(head) || !seen.insert(head) {
+    names: &BTreeSet<Ident<Canonical>>,
+) -> ResolvedHeads {
+    let mut heads: ResolvedHeads = Vec::new();
+    for head in names {
+        if head.as_str() == self_name || is_implicit_global(head.as_str()) {
             continue;
         }
-        if let Some(declared) = DeclaredName::resolve(db, model, project, head) {
-            heads.push((Ident::new(head), declared));
+        if let Some(declared) = DeclaredName::resolve(db, model, project, head.as_str()) {
+            heads.push((head.clone(), declared));
         }
     }
     heads
@@ -411,7 +402,7 @@ pub(crate) struct LoweredImplicit {
     /// The head of every name the helper references that the model declares
     /// ([`implicit_referenced_heads`]); `implicit_fragment_input` projects the
     /// compiler's shapes and the tables it needs from these.
-    pub heads: Vec<(Ident<Canonical>, DeclaredName)>,
+    pub heads: ResolvedHeads,
 }
 
 /// One implicit helper (a SMOOTH/DELAY/TREND instance, a hoisted argument
@@ -663,7 +654,7 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
                 flow_bytecodes: None,
                 stock_bytecodes: None,
             },
-            flow_invariance: None,
+            flow_locally_invariant: None,
         })
     };
     let input = match implicit_fragment_input(db, meta, model, project, module_input_names) {
@@ -775,6 +766,6 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
         },
         // Implicit helpers (SMOOTH/DELAY/TREND) are always dynamic; the
         // run-invariance analysis only applies to explicit source variables.
-        flow_invariance: None,
+        flow_locally_invariant: None,
     })
 }

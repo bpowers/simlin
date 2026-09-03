@@ -22,7 +22,7 @@ mod literal;
 
 pub use array_view::{ArrayView, SparseInfo};
 pub use expr0::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
-pub use expr1::Expr1;
+pub use expr1::{Expr1, IndexExpr1};
 #[allow(unused_imports)]
 pub use expr2::{ArrayBounds, Expr2, Expr2Context, IndexExpr2, NodeBounds};
 #[allow(unused_imports)]
@@ -140,11 +140,9 @@ pub(crate) struct LoweringScope<'a> {
 }
 
 /// The `Expr2Context` one equation lowers under: its [`LoweringScope`] plus
-/// the per-equation state (temp ids, the array-context and dimension-union
-/// gates).
+/// the per-equation state (the array-context and dimension-union gates).
 struct ArrayContext<'a> {
     scope: &'a LoweringScope<'a>,
-    next_temp_id: u32,
     is_array: bool,
     /// When true, allows union of named dimensions (cross-product).
     /// Set inside array reduction builtins like SUM.
@@ -155,7 +153,6 @@ impl<'a> ArrayContext<'a> {
     fn new(scope: &'a LoweringScope<'a>, is_array: bool) -> Self {
         Self {
             scope,
-            next_temp_id: 0,
             is_array,
             allow_dimension_union: false,
         }
@@ -168,12 +165,6 @@ impl Expr2Context for ArrayContext<'_> {
         // scope does not hold lowers without bounds: whether it exists is the
         // dependency gate's question, reported there.
         self.scope.shapes.get(ident)?.dimensions()
-    }
-
-    fn allocate_temp_id(&mut self) -> u32 {
-        let id = self.next_temp_id;
-        self.next_temp_id += 1;
-        id
     }
 
     fn is_dimension_name(&self, ident: &str) -> bool {
@@ -216,7 +207,40 @@ impl Expr2Context for ArrayContext<'_> {
     }
 }
 
-/// Lower one equation's parsed AST to `Expr2`.
+/// One equation's parsed AST at the typed tier: every call resolved against
+/// the builtin signature table and every `dimension·element` spelling folded to
+/// its constant. What the dependency classification walks
+/// (`db::variable_direct_dependencies`), and the first half of [`lower_ast`].
+///
+/// An arrayed equation's element errors are collected before the default is
+/// lowered, and the default's error takes precedence -- the order the
+/// `Expr2` stage keeps as well.
+pub(crate) fn typed_ast(
+    ast: &Ast<Expr0>,
+    dimensions: &DimensionsContext,
+) -> EquationResult<Ast<Expr1>> {
+    let typed = |expr: &Expr0| Expr1::from(expr).map(|expr| expr.constify_dimensions(dimensions));
+    match ast {
+        Ast::Scalar(expr) => typed(expr).map(Ast::Scalar),
+        Ast::ApplyToAll(dims, expr) => typed(expr).map(|expr| Ast::ApplyToAll(dims.clone(), expr)),
+        Ast::Arrayed(dims, elements, default_expr, apply_default_to_missing) => {
+            let elements: EquationResult<HashMap<CanonicalElementName, Expr1>> = elements
+                .iter()
+                .map(|(id, expr)| typed(expr).map(|expr| (id.clone(), expr)))
+                .collect();
+            let default_expr = default_expr.as_ref().map(typed).transpose()?;
+            Ok(Ast::Arrayed(
+                dims.clone(),
+                elements?,
+                default_expr,
+                *apply_default_to_missing,
+            ))
+        }
+    }
+}
+
+/// Lower one equation's parsed AST to `Expr2`: [`typed_ast`], then the array
+/// bounds under `scope`.
 ///
 /// `element_scoped` is true for a per-element helper's scalar equation
 /// (`variable::ElementScope`): its body was written inside an apply-to-all
@@ -228,52 +252,30 @@ pub(crate) fn lower_ast(
     ast: &Ast<Expr0>,
     element_scoped: bool,
 ) -> EquationResult<Ast<Expr2>> {
-    match ast {
+    match typed_ast(ast, scope.dimensions)? {
         Ast::Scalar(expr) => {
             let mut ctx = ArrayContext::new(scope, element_scoped);
-            Expr1::from(expr)
-                .map(|expr| expr.constify_dimensions(scope.dimensions))
-                .and_then(|expr| Expr2::from(expr, &mut ctx))
-                .map(Ast::Scalar)
+            Expr2::from(expr, &mut ctx).map(Ast::Scalar)
         }
         Ast::ApplyToAll(dims, expr) => {
             let mut ctx = ArrayContext::new(scope, true);
-            Expr1::from(expr)
-                .map(|expr| expr.constify_dimensions(scope.dimensions))
-                .and_then(|expr| Expr2::from(expr, &mut ctx))
-                .map(|expr| Ast::ApplyToAll(dims.clone(), expr))
+            Expr2::from(expr, &mut ctx).map(|expr| Ast::ApplyToAll(dims, expr))
         }
         Ast::Arrayed(dims, elements, default_expr, apply_default_to_missing) => {
             let mut ctx = ArrayContext::new(scope, true);
             let elements: EquationResult<HashMap<CanonicalElementName, Expr2>> = elements
-                .iter()
-                .map(|(id, expr)| {
-                    match Expr1::from(expr)
-                        .map(|expr| expr.constify_dimensions(scope.dimensions))
-                        .and_then(|expr| Expr2::from(expr, &mut ctx))
-                    {
-                        Ok(expr) => Ok((id.clone(), expr)),
-                        Err(err) => Err(err),
-                    }
-                })
+                .into_iter()
+                .map(|(id, expr)| Expr2::from(expr, &mut ctx).map(|expr| (id, expr)))
                 .collect();
-            let default_expr = match default_expr {
-                Some(expr) => Some(
-                    Expr1::from(expr)
-                        .map(|expr| expr.constify_dimensions(scope.dimensions))
-                        .and_then(|expr| Expr2::from(expr, &mut ctx))?,
-                ),
-                None => None,
-            };
-            match elements {
-                Ok(elements) => Ok(Ast::Arrayed(
-                    dims.clone(),
-                    elements,
-                    default_expr,
-                    *apply_default_to_missing,
-                )),
-                Err(err) => Err(err),
-            }
+            let default_expr = default_expr
+                .map(|expr| Expr2::from(expr, &mut ctx))
+                .transpose()?;
+            Ok(Ast::Arrayed(
+                dims,
+                elements?,
+                default_expr,
+                apply_default_to_missing,
+            ))
         }
     }
 }

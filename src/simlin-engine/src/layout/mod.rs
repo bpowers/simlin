@@ -4580,11 +4580,12 @@ pub fn compute_metadata(
                 let empty_inputs = crate::db::ModuleInputSet::empty(db);
                 let var_deps =
                     crate::db::variable_direct_dependencies(db, sv, source_project, empty_inputs);
+                // A module read is drawn to the module box: the read's head.
                 let mut combined: Vec<String> = var_deps
-                    .dt_deps
-                    .iter()
-                    .chain(var_deps.initial_deps.iter())
-                    .cloned()
+                    .deps
+                    .heads()
+                    .into_iter()
+                    .map(|head| head.as_str().to_string())
                     .collect();
                 combined.sort();
                 combined.dedup();

@@ -1690,11 +1690,10 @@ fn pinned_loop_through_stockless_passthrough_rejected() {
 /// GH #749 follow-up: a parent-level PREVIOUS lag of a MODULE OUTPUT
 /// (`reader = PREVIOUS(sub.output, 0)` through a stockless passthrough
 /// `sub`) is a lagged edge like any other and the pin must validate. The
-/// lagged dependency is recorded UN-normalized (`sub·output`) while the
-/// cycle node is the module-normalized `sub`, so `cycle_has_lagged_edge`
-/// must normalize each previous_only entry through the same
-/// `normalize_module_ref_str` collapse `model_causal_edges` applies --
-/// without it the pin is rejected "contains no stock" even though the
+/// lagged read names the module output (`sub·output`) while the cycle node
+/// is the instance `sub`, so `cycle_has_lagged_edge` must compare each
+/// previous-only target's head -- the node `model_causal_edges` links from
+/// -- without which the pin is rejected "contains no stock" even though the
 /// stateless gate counts the lag (non-emptiness needs no normalization),
 /// the enumerator scores the loop, AND the post-#749 rejection message
 /// ("... or other state, such as a PREVIOUS-lagged reference") is false

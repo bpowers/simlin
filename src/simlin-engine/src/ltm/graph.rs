@@ -140,11 +140,43 @@ pub struct CausalGraph {
     /// query that needs polarity or module structure) while the variables in
     /// it do not change between those builds.
     pub(crate) variables: std::sync::Arc<crate::variable::LoweredVariableMap>,
+    /// The sub-model outputs each node reads, as `db::model_causal_edges`
+    /// recorded them: what discovery selects a loop's exit port from after
+    /// simulation, when no database is in hand. Shared with the edges memo
+    /// for the same reason `variables` is.
+    pub(crate) module_outputs_read: std::sync::Arc<crate::db::ModuleOutputsRead>,
     /// Module instances and their internal graphs
     pub(crate) module_graphs: HashMap<Ident<Canonical>, Box<CausalGraph>>,
 }
 
 impl CausalGraph {
+    /// A graph of `edges` and `stocks` alone: no variables, module reads or
+    /// module graphs -- what circuit finding and SCC computation need, and
+    /// what an enriched constructor fills in afterwards.
+    pub(crate) fn new(
+        edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
+        stocks: HashSet<Ident<Canonical>>,
+    ) -> Self {
+        CausalGraph {
+            edges,
+            stocks,
+            variables: Default::default(),
+            module_outputs_read: Default::default(),
+            module_graphs: HashMap::new(),
+        }
+    }
+
+    /// The one output of `module` that `reader` reads, named inside the
+    /// instance (`db::unique_module_output`): the exit port a loop through
+    /// `module` takes at `reader`, whether `reader` is an equation or a
+    /// module instance wired from it.
+    pub(crate) fn unique_module_output(
+        &self,
+        reader: &Ident<Canonical>,
+        module: &Ident<Canonical>,
+    ) -> Option<Ident<Canonical>> {
+        crate::db::unique_module_output(&self.module_outputs_read, reader.as_str(), module)
+    }
     /// Read-only access to the adjacency list (for benchmarks / debugging).
     pub fn edges(&self) -> &HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> {
         &self.edges
@@ -157,7 +189,7 @@ impl CausalGraph {
 
     /// Read-only access to the variable map (name -> `Variable`), used by the
     /// discovery-mode per-exit-port pathway recompute (GH #698) to find a
-    /// module instance's input ports and the port a downstream reader reads.
+    /// module instance's input ports.
     pub(crate) fn variables(&self) -> &crate::variable::LoweredVariableMap {
         &self.variables
     }

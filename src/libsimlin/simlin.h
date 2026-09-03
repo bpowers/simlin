@@ -1014,7 +1014,13 @@ void simlin_model_get_var_names(SimlinModel *model,
                                 uintptr_t *out_written,
                                 SimlinError **out_error);
 
-// Gets the incoming links (dependencies) for a variable
+// Gets the incoming links (dependencies) for a variable: the variables of
+// this model it reads, itself or through the private helpers its equation
+// synthesizes. A read of another model's variable through a module instance
+// (`child.output`) is not a variable of this model and is not listed --
+// neither the composite nor the instance; a diagram draws that link to the
+// module box (`layout::rendered_dependency_ident`), this surface lists
+// variables.
 //
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel

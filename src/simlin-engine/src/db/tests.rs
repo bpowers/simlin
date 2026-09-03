@@ -21,6 +21,18 @@ fn deps_no_inputs(db: &dyn Db, var: SourceVariable, project: SourceProject) -> &
     variable_direct_dependencies(db, var, project, ModuleInputSet::empty(db))
 }
 
+/// The local names a variable reads in `phase`, whatever the lag; the shape
+/// the pre-`DepRef` assertions below compare against.
+fn local_names(deps: &VariableDeps, phase: DepPhase) -> BTreeSet<String> {
+    deps.deps
+        .phase(phase)
+        .map(|dep| {
+            assert!(dep.target.is_local(), "{:?} is a module read", dep.target);
+            dep.target.variable.as_str().to_string()
+        })
+        .collect()
+}
+
 pub(crate) fn simple_project() -> datamodel::Project {
     datamodel::Project {
         name: "test".to_string(),
@@ -586,8 +598,14 @@ fn test_variable_direct_dependencies_constant() {
     let pop_var = result.models["main"].variables["population"].source;
     let deps = deps_no_inputs(&db, pop_var, result.project);
 
-    assert!(deps.dt_deps.is_empty(), "constant has no deps");
-    assert!(deps.initial_deps.is_empty(), "constant has no initial deps");
+    assert!(
+        local_names(deps, DepPhase::Dt).is_empty(),
+        "constant has no deps"
+    );
+    assert!(
+        local_names(deps, DepPhase::Init).is_empty(),
+        "constant has no initial deps"
+    );
 }
 
 #[test]
@@ -648,7 +666,7 @@ fn test_variable_direct_dependencies_with_refs() {
     let deps = deps_no_inputs(&db, births_var, result.project);
 
     assert_eq!(
-        deps.dt_deps,
+        local_names(deps, DepPhase::Dt),
         ["population", "rate"]
             .iter()
             .map(|s| s.to_string())
@@ -692,8 +710,8 @@ fn test_variable_direct_dependencies_stock() {
     let deps = deps_no_inputs(&db, stock_var, result.project);
 
     // Stock's init equation references "initial_value"
-    assert!(deps.dt_deps.contains("initial_value"));
-    assert!(deps.initial_deps.contains("initial_value"));
+    assert!(local_names(deps, DepPhase::Dt).contains("initial_value"));
+    assert!(local_names(deps, DepPhase::Init).contains("initial_value"));
 }
 
 #[test]
@@ -740,7 +758,7 @@ fn test_variable_direct_dependencies_module() {
     let deps = deps_no_inputs(&db, mod_var, result.project);
 
     assert_eq!(
-        deps.dt_deps,
+        local_names(deps, DepPhase::Dt),
         ["input_x", "input_y"]
             .iter()
             .map(|s| s.to_string())
@@ -816,13 +834,16 @@ fn test_incrementality_same_deps_no_recompute() {
     let (beta_dt_before, beta_init_before) = {
         let deps = deps_no_inputs(&db, beta_src, source_project);
         assert_eq!(
-            deps.dt_deps,
+            local_names(deps, DepPhase::Dt),
             ["alpha", "gamma"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect::<BTreeSet<_>>()
         );
-        (deps.dt_deps.clone(), deps.initial_deps.clone())
+        (
+            local_names(deps, DepPhase::Dt),
+            local_names(deps, DepPhase::Init),
+        )
     };
 
     let graph_before = model_dependency_graph(
@@ -841,8 +862,11 @@ fn test_incrementality_same_deps_no_recompute() {
 
     // Beta's deps should be the same (alpha, gamma)
     let beta_deps_after = deps_no_inputs(&db, beta_src, source_project);
-    assert_eq!(beta_dt_before, beta_deps_after.dt_deps);
-    assert_eq!(beta_init_before, beta_deps_after.initial_deps);
+    assert_eq!(beta_dt_before, local_names(beta_deps_after, DepPhase::Dt));
+    assert_eq!(
+        beta_init_before,
+        local_names(beta_deps_after, DepPhase::Init)
+    );
 
     // The dep graph should be returned from cache (pointer-equal)
     let graph_after = model_dependency_graph(
@@ -1175,13 +1199,6 @@ fn test_model_dependency_graph_circular_emits_diagnostic() {
 }
 
 use crate::testutils::feedback_loop_project;
-
-#[test]
-fn test_normalize_module_ref_str() {
-    assert_eq!(normalize_module_ref_str("foo\u{00B7}output"), "foo");
-    assert_eq!(normalize_module_ref_str("plain_name"), "plain_name");
-    assert_eq!(normalize_module_ref_str(""), "");
-}
 
 #[test]
 fn test_generate_max_abs_selection_small_counts() {
@@ -1572,9 +1589,8 @@ fn test_model_causal_edges_skips_internal_module_refs() {
 fn test_model_causal_edges_normalizes_leading_middot_parent_refs() {
     // A submodel's module instance can reference parent-scope variables via
     // leading-dot syntax (e.g. ".area"), which canonicalizes to a leading
-    // middot ("·area").  normalize_module_ref_str must strip the leading
-    // middot before truncating at the module qualifier, otherwise "·area"
-    // yields an empty-string key.
+    // middot ("·area"). The dependency resolver reads it as the bare name;
+    // taking the separator as a module hop would yield an empty-string key.
     let db = SimlinDb::default();
     let project = datamodel::Project {
         name: "parent_ref_edges".to_string(),

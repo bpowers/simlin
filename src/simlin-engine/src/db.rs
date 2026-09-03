@@ -80,14 +80,15 @@ pub(crate) use input::{source_model_is_stdlib, source_var_is_table_only};
 
 mod query;
 pub use query::{
-    ImplicitVarMeta, ModuleReferenceGraph, ParsedVariableResult, UnitsContextResult, VariableDeps,
-    model_implicit_var_info, parse_source_variable, project_converted_dimensions,
-    project_datamodel_dims, project_dimensions_context, project_module_graph,
-    project_units_context, project_units_context_result, variable_dimensions,
-    variable_direct_dependencies, variable_relevant_dimensions, variable_size,
+    DepPhase, DepRef, DepRefs, DepTarget, ImplicitVarMeta, ModuleReferenceGraph,
+    ParsedVariableResult, UnitsContextResult, VariableDeps, model_implicit_var_info,
+    parse_source_variable, project_converted_dimensions, project_datamodel_dims,
+    project_dimensions_context, project_module_graph, project_units_context,
+    project_units_context_result, variable_dimensions, variable_direct_dependencies,
+    variable_relevant_dimensions, variable_size,
 };
 pub(crate) use query::{
-    canonical_module_input_set, model_implicit_var_by_name, model_variable_by_name,
+    DepScope, canonical_module_input_set, model_implicit_var_by_name, model_variable_by_name,
 };
 
 mod sync;
@@ -172,10 +173,11 @@ pub(crate) use ltm::ForcePartialEquationErrorGuard;
 
 mod analysis;
 pub use analysis::RefShape;
-pub use analysis::causal_graph_from_edges;
 pub use analysis::causal_graph_from_element_edges;
 pub use analysis::causal_graph_from_element_edges_with_modules;
 pub(crate) use analysis::model_lowered_variables;
+pub(crate) use analysis::unique_module_output;
+pub use analysis::{ModuleOutputsRead, causal_graph_from_edges};
 // The variable-level graph with module sub-graphs, for tests outside `db` that
 // pin edge normalization and polarity on the production graph constructor.
 pub(crate) use analysis::causal_graph_with_modules;
@@ -588,8 +590,8 @@ pub(super) fn black_box_unit_transfer_equation(from_ref: &str, to_ref: &str) -> 
 }
 
 /// Map each module variable in `model` to the sub-model internal variables
-/// the rest of the model actually reads through it (the `port` suffixes of
-/// `module·port` dependency references), each port list sorted for
+/// the rest of the model actually reads through it (the port a qualified
+/// `module·port` read names inside the instance), each port list sorted for
 /// determinism.
 ///
 /// One cached pass over the model's variable dependency sets (mirroring the
@@ -604,29 +606,26 @@ pub fn model_module_output_ports(
     model: SourceModel,
     project: SourceProject,
 ) -> HashMap<String, Vec<String>> {
-    let middot = '\u{00B7}';
     let empty_inputs = ModuleInputSet::empty(db);
     let mut ports: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
-    let record = |dep: &str, ports: &mut HashMap<String, std::collections::BTreeSet<String>>| {
-        if let Some(dot_pos) = dep.find(middot) {
-            let module_part = &dep[..dot_pos];
-            let internal_var = &dep[dot_pos + middot.len_utf8()..];
-            if !module_part.is_empty() && !internal_var.is_empty() {
-                ports
-                    .entry(module_part.to_string())
-                    .or_default()
-                    .insert(internal_var.to_string());
-            }
+    let mut record = |dep: &DepRef| {
+        if let (Some(instance), Some(port)) =
+            (dep.target.module_path.first(), dep.target.output_port())
+        {
+            ports
+                .entry(instance.as_str().to_string())
+                .or_default()
+                .insert(port.as_str().to_string());
         }
     };
     for source_var in model.variables(db).values() {
         let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
-        for dep in deps.dt_deps.iter().chain(deps.initial_deps.iter()) {
-            record(dep, &mut ports);
+        for dep in deps.deps.iter() {
+            record(dep);
         }
         for iv_deps in &deps.implicit_vars {
-            for dep in &iv_deps.dt_deps {
-                record(dep, &mut ports);
+            for dep in iv_deps.deps.phase(DepPhase::Dt) {
+                record(dep);
             }
         }
     }
@@ -1416,6 +1415,8 @@ mod capture_tests;
 mod combined_fragment_proptest;
 #[cfg(test)]
 mod combined_fragment_tests;
+#[cfg(test)]
+mod dep_ref_tests;
 #[cfg(test)]
 mod diagnostic_determinism_tests;
 #[cfg(test)]

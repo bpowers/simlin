@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Run-invariance classification of lowered flow-phase expressions (GH #712,
+//! The compiler-local half of run-invariance classification (GH #712,
 //! stage B1).
 //!
 //! A root-model flow-phase variable is *run-invariant* iff its dt-phase lowered
@@ -14,13 +14,12 @@
 //! See `docs/design-plans/2026-06-04-time-invariant-hoisting.md` for the full
 //! definition and the soundness argument.
 //!
-//! This is the **functional core**: a pure walk over the lowered `Expr` tree
-//! parameterized by a reference-classification callback. The callback resolves a
-//! [`VarRef`] to the run-invariance verdict of the variable it names (invariant,
-//! or variant because it is a dynamic var / a stock / a module instance / a
-//! time-global other than DT/INITIAL/FINAL). Both compile paths look the
-//! variable up by the name the reference carries, and share this walk, so they
-//! classify identically.
+//! This walk answers the LOCAL half of that: whether the expression holds a
+//! time-dependent builtin, a lagged read, a module evaluation or a module
+//! input, treating every variable reference as invariant. Which references
+//! actually are invariant is a question about the model's dependency
+//! relation, which `db::invariance::model_flows_invariant` answers over the
+//! variable's `DepRef`s; the two halves together are the verdict.
 //!
 //! The walk is **exhaustive** over every `Expr` variant with explicit arms and
 //! is **default-variant**: anything not positively recognized as invariant is
@@ -30,81 +29,44 @@
 
 use crate::builtins::{BuiltinFn, Invariance};
 
-use super::expr::{Expr, SubscriptIndex, VarRef};
-
-/// The run-invariance verdict for the variable a reference names.
-///
-/// The classification callback returns this for an `Expr::Var` /
-/// `Expr::Subscript` / `Expr::StaticSubscript` base reference. `Variant` covers
-/// every non-invariant source: a dynamic variable, a stock, a module instance,
-/// and a time-global other than DT/INITIAL/FINAL (those three reach the lowered
-/// Expr as builtins, not as variable references, but the callback rejects a
-/// stray reference to any implicit-global slot defensively).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum RefClass {
-    /// The reference resolves to a run-invariant variable.
-    Invariant,
-    /// The reference resolves to a variant source (dynamic var, stock, module
-    /// instance, or a time-global other than DT/INITIAL/FINAL).
-    ///
-    /// In production, `compute_flow_invariance_support` always returns
-    /// `Invariant` (to check structural purity only), so `Variant` is only
-    /// constructed in tests and by external callers building real callbacks.
-    #[allow(dead_code)]
-    Variant,
-}
+use super::expr::{Expr, SubscriptIndex};
 
 /// Returns true iff every expression in `exprs` (one variable's lowered
-/// flow-phase statement list) is run-invariant, given the dependency verdicts
-/// from `classify_ref`.
+/// flow-phase statement list) is locally run-invariant.
 ///
 /// `exprs` is the variable's own `Var.ast`: a list of statements that ends in
 /// `AssignCurr`/`AssignNext`/`AssignTemp` writes plus any `AssignTemp`
 /// scratch-array precomputations. A variable is invariant iff ALL of its
 /// statements are invariant.
-pub(crate) fn exprs_are_invariant<F>(exprs: &[Expr], classify_ref: &F) -> bool
-where
-    F: Fn(&VarRef) -> RefClass,
-{
-    exprs
-        .iter()
-        .all(|expr| expr_is_invariant(expr, classify_ref))
+pub(crate) fn exprs_are_locally_invariant(exprs: &[Expr]) -> bool {
+    exprs.iter().all(expr_is_invariant)
 }
 
-/// Returns true iff a single lowered expression is run-invariant.
+/// Returns true iff a single lowered expression is locally run-invariant.
 ///
 /// Exhaustive over every `Expr` variant. Default-variant: a variant is
 /// invariant only if positively matched here.
-fn expr_is_invariant<F>(expr: &Expr, classify_ref: &F) -> bool
-where
-    F: Fn(&VarRef) -> RefClass,
-{
+fn expr_is_invariant(expr: &Expr) -> bool {
     match expr {
         // Literals and DT are run-invariant by definition.
         Expr::Const(_, _) | Expr::Dt(_) => true,
 
-        // A variable / array reference is invariant iff its owning variable is
-        // invariant (the callback rejects stocks, module-instance slots, and
-        // time-globals other than DT/INITIAL/FINAL). Dynamic-subscript index
-        // exprs must ALSO be invariant -- a variant index changes which element
-        // is read each step even when the base array is invariant.
-        Expr::Var(var, _) => classify_ref(var) == RefClass::Invariant,
-        Expr::StaticSubscript(base, _, _) => classify_ref(base) == RefClass::Invariant,
-        Expr::Subscript(base, indices, _, _) => {
-            classify_ref(base) == RefClass::Invariant
-                && indices
-                    .iter()
-                    .all(|idx| subscript_index_is_invariant(idx, classify_ref))
-        }
+        // A variable / array reference is invariant here: whether the
+        // variable it names is invariant is the dependency relation's
+        // question. Dynamic-subscript index exprs must be invariant -- a
+        // variant index changes which element is read each step even when
+        // the base array is invariant.
+        Expr::Var(_, _) | Expr::StaticSubscript(_, _, _) => true,
+        Expr::Subscript(_, indices, _, _) => indices.iter().all(subscript_index_is_invariant),
 
         // Temp arrays are intra-statement scratch: a `TempArray`/
         // `TempArrayElement` read is invariant iff the `AssignTemp` that
         // produced it was invariant. Because a variable's statement list is
         // classified as a whole (every statement must be invariant), and the
         // `AssignTemp` precedes its reads, the producing assignment's own
-        // invariance is already checked by `exprs_are_invariant`. So a temp
-        // *read* contributes no new variant source -- it is invariant here, and
-        // the producing `AssignTemp` carries the real verdict.
+        // invariance is already checked by `exprs_are_locally_invariant`. So a
+        // temp *read* contributes no new variant source -- it is invariant
+        // here, and the producing `AssignTemp` carries the real verdict.
         Expr::TempArray(_, _, _) | Expr::TempArrayElement(_, _, _, _) => true,
 
         // Module evaluation and module inputs are conservatively variant: a
@@ -113,42 +75,33 @@ where
         Expr::EvalModule(_, _, _, _) | Expr::ModuleInput(_, _) => false,
 
         // Builtins: see `builtin_is_invariant`.
-        Expr::App(builtin, _) => builtin_is_invariant(builtin, classify_ref),
+        Expr::App(builtin, _) => builtin_is_invariant(builtin),
 
         // Compound exprs: invariant iff all operands are.
-        Expr::Op2(_, l, r, _) => {
-            expr_is_invariant(l, classify_ref) && expr_is_invariant(r, classify_ref)
-        }
-        Expr::Op1(_, operand, _) => expr_is_invariant(operand, classify_ref),
+        Expr::Op2(_, l, r, _) => expr_is_invariant(l) && expr_is_invariant(r),
+        Expr::Op1(_, operand, _) => expr_is_invariant(operand),
         Expr::If(cond, t, f, _) => {
             // The VM evaluates BOTH branches every step, so all three must be
             // invariant.
-            expr_is_invariant(cond, classify_ref)
-                && expr_is_invariant(t, classify_ref)
-                && expr_is_invariant(f, classify_ref)
+            expr_is_invariant(cond) && expr_is_invariant(t) && expr_is_invariant(f)
         }
 
         // Assignments: invariant iff the assigned expression is.
         Expr::AssignCurr(_, rhs) | Expr::AssignNext(_, rhs) | Expr::AssignTemp(_, rhs, _) => {
-            expr_is_invariant(rhs, classify_ref)
+            expr_is_invariant(rhs)
         }
     }
 }
 
 /// A dynamic-subscript index component is invariant iff its index expr(s) are.
-fn subscript_index_is_invariant<F>(idx: &SubscriptIndex, classify_ref: &F) -> bool
-where
-    F: Fn(&VarRef) -> RefClass,
-{
+fn subscript_index_is_invariant(idx: &SubscriptIndex) -> bool {
     match idx {
-        SubscriptIndex::Single(e) => expr_is_invariant(e, classify_ref),
-        SubscriptIndex::Range(start, end) => {
-            expr_is_invariant(start, classify_ref) && expr_is_invariant(end, classify_ref)
-        }
+        SubscriptIndex::Single(e) => expr_is_invariant(e),
+        SubscriptIndex::Range(start, end) => expr_is_invariant(start) && expr_is_invariant(end),
     }
 }
 
-/// Returns true iff a builtin application is run-invariant.
+/// Returns true iff a builtin application is locally run-invariant.
 ///
 /// Decided by the signature's `Invariance`: a `Pure` builtin is invariant iff
 /// every argument is (a graphical-function lookup's table holder and index
@@ -157,15 +110,9 @@ where
 /// initials phase, so its argument is deliberately NOT walked; `TIME`,
 /// `PULSE`/`RAMP`/`STEP` (time-dependent even with constant args) and
 /// `PREVIOUS` (reads `prev_values`) are variant whatever their arguments.
-fn builtin_is_invariant<F>(builtin: &BuiltinFn<Expr>, classify_ref: &F) -> bool
-where
-    F: Fn(&VarRef) -> RefClass,
-{
+fn builtin_is_invariant(builtin: &BuiltinFn<Expr>) -> bool {
     match builtin.signature().invariance {
-        Invariance::Pure => builtin
-            .args()
-            .into_iter()
-            .all(|e| expr_is_invariant(e, classify_ref)),
+        Invariance::Pure => builtin.args().into_iter().all(expr_is_invariant),
         Invariance::Snapshot => true,
         Invariance::TimeDependent | Invariance::Lagged => false,
     }
@@ -175,22 +122,10 @@ where
 mod tests {
     use super::*;
     use crate::ast::{BinaryOp, Loc};
+    use crate::builtins::BuiltinSig;
+    use crate::compiler::VarRef;
     use crate::compiler::dimensions::UnaryOp;
 
-    /// A callback where a fixed set of variables is invariant and all others
-    /// are variant. Mirrors the per-model verdict map both production paths
-    /// supply.
-    fn classifier(invariant: &[usize]) -> impl Fn(&VarRef) -> RefClass + '_ {
-        move |var: &VarRef| {
-            if invariant.iter().any(|n| vref(*n).name == var.name) {
-                RefClass::Invariant
-            } else {
-                RefClass::Variant
-            }
-        }
-    }
-
-    /// A distinct variable reference per test slot.
     fn vref(n: usize) -> VarRef {
         VarRef::base(crate::common::Ident::new(&format!("v{n}")))
     }
@@ -203,372 +138,247 @@ mod tests {
         Expr::Var(vref(n), Loc::default())
     }
 
-    fn add(l: Expr, r: Expr) -> Expr {
-        Expr::Op2(BinaryOp::Add, Box::new(l), Box::new(r), Loc::default())
+    fn time() -> Expr {
+        Expr::App(BuiltinFn::Time, Loc::default())
     }
 
-    /// A bare constant assignment: `dst = 3` lowered as `AssignCurr(0, Const)`.
-    #[test]
-    fn constant_is_invariant() {
-        let exprs = vec![Expr::AssignCurr(vref(0), Box::new(lit(3.0)))];
-        assert!(exprs_are_invariant(&exprs, &classifier(&[])));
+    fn assign(rhs: Expr) -> Expr {
+        Expr::AssignCurr(vref(0), Box::new(rhs))
     }
 
-    /// `dst = a + 2` where `a` (`v1`) is an invariant variable.
+    /// Every `Expr` variant, as a row of the local verdict: the leaves, the
+    /// compound forms with an invariant and a variant operand, and every
+    /// write form. A variable reference is locally invariant by definition
+    /// -- what it names is the dependency relation's question -- so the
+    /// variant rows are the time-dependent builtin, the module forms and a
+    /// variant subscript index.
     #[test]
-    fn const_derived_chain_is_invariant() {
-        let exprs = vec![Expr::AssignCurr(vref(0), Box::new(add(var(1), lit(2.0))))];
-        assert!(exprs_are_invariant(&exprs, &classifier(&[1])));
-    }
-
-    /// `dst = a + 2` where `a` (`v1`) is a *variant* variable.
-    #[test]
-    fn variant_dependency_is_variant() {
-        let exprs = vec![Expr::AssignCurr(vref(0), Box::new(add(var(1), lit(2.0))))];
-        assert!(!exprs_are_invariant(&exprs, &classifier(&[])));
-    }
-
-    /// `dst = TIME` is variant (the canonical time dependency).
-    #[test]
-    fn time_builtin_is_variant() {
-        let exprs = vec![Expr::AssignCurr(
-            vref(0),
-            Box::new(Expr::App(BuiltinFn::Time, Loc::default())),
-        )];
-        assert!(!exprs_are_invariant(&exprs, &classifier(&[])));
-    }
-
-    /// `dst = DT` is invariant (DT is fixed for the run).
-    #[test]
-    fn dt_is_invariant() {
-        let exprs = vec![Expr::AssignCurr(
-            vref(0),
-            Box::new(Expr::Dt(Loc::default())),
-        )];
-        assert!(exprs_are_invariant(&exprs, &classifier(&[])));
-    }
-
-    /// TIME_STEP / INITIAL_TIME / FINAL_TIME / PI / INF are invariant builtins.
-    #[test]
-    fn fixed_time_globals_and_constants_are_invariant() {
-        for bf in [
-            BuiltinFn::TimeStep,
-            BuiltinFn::StartTime,
-            BuiltinFn::FinalTime,
-            BuiltinFn::Pi,
-            BuiltinFn::Inf,
-        ] {
-            let exprs = vec![Expr::AssignCurr(
-                vref(0),
-                Box::new(Expr::App(bf, Loc::default())),
-            )];
-            assert!(exprs_are_invariant(&exprs, &classifier(&[])));
-        }
-    }
-
-    /// `dst = PULSE(1, 2)` is variant even with constant arguments (time-dependent).
-    #[test]
-    fn pulse_is_variant() {
-        let exprs = vec![Expr::AssignCurr(
-            vref(0),
-            Box::new(Expr::App(
-                BuiltinFn::Pulse(Box::new(lit(1.0)), Box::new(lit(2.0)), None),
-                Loc::default(),
-            )),
-        )];
-        assert!(!exprs_are_invariant(&exprs, &classifier(&[])));
-    }
-
-    /// `dst = RAMP(1, 2)` is variant.
-    #[test]
-    fn ramp_is_variant() {
-        let exprs = vec![Expr::AssignCurr(
-            vref(0),
-            Box::new(Expr::App(
-                BuiltinFn::Ramp(Box::new(lit(1.0)), Box::new(lit(2.0)), None),
-                Loc::default(),
-            )),
-        )];
-        assert!(!exprs_are_invariant(&exprs, &classifier(&[])));
-    }
-
-    /// `dst = STEP(1, 2)` is variant.
-    #[test]
-    fn step_is_variant() {
-        let exprs = vec![Expr::AssignCurr(
-            vref(0),
-            Box::new(Expr::App(
-                BuiltinFn::Step(Box::new(lit(1.0)), Box::new(lit(2.0))),
-                Loc::default(),
-            )),
-        )];
-        assert!(!exprs_are_invariant(&exprs, &classifier(&[])));
-    }
-
-    /// `dst = PREVIOUS(a, 0)` is variant (reads prev_values), even of an
-    /// invariant variable.
-    #[test]
-    fn previous_is_variant() {
-        let exprs = vec![Expr::AssignCurr(
-            vref(0),
-            Box::new(Expr::App(
-                BuiltinFn::Previous(Box::new(var(1)), Box::new(lit(0.0))),
-                Loc::default(),
-            )),
-        )];
-        assert!(!exprs_are_invariant(&exprs, &classifier(&[1])));
-    }
-
-    /// `dst = INIT(a)` is invariant for ANY `a` -- even a variant one -- because
-    /// the initial-values buffer is frozen after the initials phase.
-    #[test]
-    fn init_of_any_variable_is_invariant() {
-        let exprs = vec![Expr::AssignCurr(
-            vref(0),
-            Box::new(Expr::App(BuiltinFn::Init(Box::new(var(1))), Loc::default())),
-        )];
-        // `v1` is NOT invariant, yet INIT(a) is still invariant.
-        assert!(exprs_are_invariant(&exprs, &classifier(&[])));
-    }
-
-    /// `dst = LOOKUP(table, 3)` -- a lookup of a constant index -- is invariant.
-    /// The table arg is a `Var(off)` to a static lookup-only holder, which the
-    /// callback classifies invariant; the index is a constant.
-    #[test]
-    fn lookup_of_constant_is_invariant() {
-        let exprs = vec![Expr::AssignCurr(
-            vref(0),
-            Box::new(Expr::App(
-                BuiltinFn::Lookup(Box::new(var(5)), Box::new(lit(3.0)), Loc::default()),
-                Loc::default(),
-            )),
-        )];
-        // `v5` (the static table holder) is invariant.
-        assert!(exprs_are_invariant(&exprs, &classifier(&[5])));
-    }
-
-    /// `dst = LOOKUP(table, TIME)` -- a lookup whose index is TIME -- is variant.
-    #[test]
-    fn lookup_of_time_is_variant() {
-        let exprs = vec![Expr::AssignCurr(
-            vref(0),
-            Box::new(Expr::App(
-                BuiltinFn::Lookup(
-                    Box::new(var(5)),
-                    Box::new(Expr::App(BuiltinFn::Time, Loc::default())),
+    fn every_expr_variant_has_its_local_verdict() {
+        let view = crate::ast::ArrayView::contiguous(vec![3]);
+        let sum = |arg: Expr| Expr::App(BuiltinFn::Sum(Box::new(arg)), Loc::default());
+        let rows: Vec<(&str, Expr, bool)> = vec![
+            ("Const", assign(lit(3.0)), true),
+            ("Dt", assign(Expr::Dt(Loc::default())), true),
+            ("Var", assign(var(1)), true),
+            (
+                "StaticSubscript",
+                assign(Expr::StaticSubscript(vref(2), view.clone(), Loc::default())),
+                true,
+            ),
+            (
+                "Subscript, invariant index",
+                assign(Expr::Subscript(
+                    vref(2),
+                    vec![SubscriptIndex::Single(lit(1.0))],
+                    vec![3],
                     Loc::default(),
+                )),
+                true,
+            ),
+            (
+                "Subscript, variant index",
+                assign(Expr::Subscript(
+                    vref(2),
+                    vec![SubscriptIndex::Single(time())],
+                    vec![3],
+                    Loc::default(),
+                )),
+                false,
+            ),
+            (
+                "Subscript, variant range end",
+                assign(Expr::Subscript(
+                    vref(2),
+                    vec![SubscriptIndex::Range(lit(1.0), time())],
+                    vec![3],
+                    Loc::default(),
+                )),
+                false,
+            ),
+            (
+                "TempArray",
+                assign(Expr::TempArray(0, view.clone(), Loc::default())),
+                true,
+            ),
+            (
+                "TempArrayElement",
+                assign(Expr::TempArrayElement(0, view.clone(), 0, Loc::default())),
+                true,
+            ),
+            (
+                "EvalModule",
+                Expr::EvalModule(
+                    crate::common::Ident::new("m"),
+                    crate::common::Ident::new("sub"),
+                    std::collections::BTreeSet::new(),
+                    vec![],
                 ),
-                Loc::default(),
-            )),
-        )];
-        assert!(!exprs_are_invariant(&exprs, &classifier(&[5])));
-    }
-
-    /// False-positive class 1: a module-output read via a plain `Var` reference
-    /// is variant (the callback classifies the module instance as Variant).
-    #[test]
-    fn module_output_read_is_variant() {
-        let exprs = vec![Expr::AssignCurr(vref(0), Box::new(var(7)))];
-        // `v7` is a slot inside a module instance -> Variant.
-        assert!(!exprs_are_invariant(&exprs, &classifier(&[])));
-    }
-
-    /// False-positive class 2: a whole-array view read of a *variant* array via
-    /// `StaticSubscript` is variant.
-    #[test]
-    fn static_subscript_of_variant_array_is_variant() {
-        let view = crate::ast::ArrayView::contiguous(vec![3]);
-        let exprs = vec![Expr::AssignCurr(
-            vref(0),
-            Box::new(Expr::StaticSubscript(vref(2), view, Loc::default())),
-        )];
-        // `v2` (the array) is variant.
-        assert!(!exprs_are_invariant(&exprs, &classifier(&[])));
-    }
-
-    /// A `StaticSubscript` read of an *invariant* array is invariant.
-    #[test]
-    fn static_subscript_of_invariant_array_is_invariant() {
-        let view = crate::ast::ArrayView::contiguous(vec![3]);
-        let exprs = vec![Expr::AssignCurr(
-            vref(0),
-            Box::new(Expr::StaticSubscript(vref(2), view, Loc::default())),
-        )];
-        assert!(exprs_are_invariant(&exprs, &classifier(&[2])));
-    }
-
-    /// `ModuleInput` is always variant (module instances are conservatively
-    /// variant).
-    #[test]
-    fn module_input_is_variant() {
-        let exprs = vec![Expr::AssignCurr(
-            vref(0),
-            Box::new(Expr::ModuleInput(0, Loc::default())),
-        )];
-        assert!(!exprs_are_invariant(&exprs, &classifier(&[])));
-    }
-
-    /// `EvalModule` is variant.
-    #[test]
-    fn eval_module_is_variant() {
-        use crate::common::Ident;
-        use std::collections::BTreeSet;
-        let exprs = vec![Expr::EvalModule(
-            Ident::new("m"),
-            Ident::new("sub"),
-            BTreeSet::new(),
-            vec![],
-        )];
-        assert!(!exprs_are_invariant(&exprs, &classifier(&[])));
-    }
-
-    /// A dynamic `Subscript` whose index is invariant and whose base is
-    /// invariant is invariant.
-    #[test]
-    fn dynamic_subscript_invariant_base_and_index_is_invariant() {
-        let exprs = vec![Expr::AssignCurr(
-            vref(0),
-            Box::new(Expr::Subscript(
-                vref(2),
-                vec![SubscriptIndex::Single(lit(1.0))],
-                vec![3],
-                Loc::default(),
-            )),
-        )];
-        assert!(exprs_are_invariant(&exprs, &classifier(&[2])));
-    }
-
-    /// A dynamic `Subscript` whose index expr is variant (e.g. references a
-    /// variant variable) is variant even if the base array is invariant.
-    #[test]
-    fn dynamic_subscript_variant_index_is_variant() {
-        let exprs = vec![Expr::AssignCurr(
-            vref(0),
-            Box::new(Expr::Subscript(
-                vref(2),
-                vec![SubscriptIndex::Single(var(9))],
-                vec![3],
-                Loc::default(),
-            )),
-        )];
-        // the base `v2` is invariant, but the index `v9` is variant.
-        assert!(!exprs_are_invariant(&exprs, &classifier(&[2])));
-    }
-
-    /// A `Sum` reducer of an invariant array is invariant; of a variant array,
-    /// variant.
-    #[test]
-    fn sum_reducer_tracks_argument() {
-        let view = crate::ast::ArrayView::contiguous(vec![3]);
-        let inv = vec![Expr::AssignCurr(
-            vref(0),
-            Box::new(Expr::App(
-                BuiltinFn::Sum(Box::new(Expr::StaticSubscript(
-                    vref(2),
+                false,
+            ),
+            (
+                "ModuleInput",
+                assign(Expr::ModuleInput(0, Loc::default())),
+                false,
+            ),
+            ("App, pure of invariant", assign(sum(var(2))), true),
+            ("App, pure of variant", assign(sum(time())), false),
+            (
+                "Op2, both invariant",
+                assign(Expr::Op2(
+                    BinaryOp::Add,
+                    Box::new(var(1)),
+                    Box::new(lit(2.0)),
+                    Loc::default(),
+                )),
+                true,
+            ),
+            (
+                "Op2, one variant",
+                assign(Expr::Op2(
+                    BinaryOp::Add,
+                    Box::new(var(1)),
+                    Box::new(time()),
+                    Loc::default(),
+                )),
+                false,
+            ),
+            (
+                "Op1, invariant",
+                assign(Expr::Op1(UnaryOp::Not, Box::new(var(1)), Loc::default())),
+                true,
+            ),
+            (
+                "Op1, variant",
+                assign(Expr::Op1(UnaryOp::Not, Box::new(time()), Loc::default())),
+                false,
+            ),
+            (
+                "If, all invariant",
+                assign(Expr::If(
+                    Box::new(lit(1.0)),
+                    Box::new(var(1)),
+                    Box::new(lit(0.0)),
+                    Loc::default(),
+                )),
+                true,
+            ),
+            (
+                // The VM evaluates both branches every step.
+                "If, untaken branch variant",
+                assign(Expr::If(
+                    Box::new(lit(1.0)),
+                    Box::new(var(1)),
+                    Box::new(time()),
+                    Loc::default(),
+                )),
+                false,
+            ),
+            (
+                "AssignNext",
+                Expr::AssignNext(vref(0), Box::new(var(1))),
+                true,
+            ),
+            (
+                "AssignTemp",
+                Expr::AssignTemp(
+                    0,
+                    Box::new(Expr::StaticSubscript(vref(3), view.clone(), Loc::default())),
                     view.clone(),
-                    Loc::default(),
-                ))),
-                Loc::default(),
-            )),
-        )];
-        assert!(exprs_are_invariant(&inv, &classifier(&[2])));
-
-        let variant = vec![Expr::AssignCurr(
-            vref(0),
-            Box::new(Expr::App(
-                BuiltinFn::Sum(Box::new(Expr::StaticSubscript(
-                    vref(2),
-                    view,
-                    Loc::default(),
-                ))),
-                Loc::default(),
-            )),
-        )];
-        assert!(!exprs_are_invariant(&variant, &classifier(&[])));
-    }
-
-    /// AssignTemp / TempArray / TempArrayElement self-references within the
-    /// statement list are classified by the expression assigned to the temp:
-    /// an invariant temp computation makes the whole var invariant.
-    #[test]
-    fn arrayed_invariant_chain_via_temp_is_invariant() {
-        let view = crate::ast::ArrayView::contiguous(vec![2]);
-        let exprs = vec![
-            // temp 0 = invariant array (base var 3, which is invariant)
+                ),
+                true,
+            ),
+            (
+                "AssignTemp, variant producer",
+                Expr::AssignTemp(0, Box::new(time()), view.clone()),
+                false,
+            ),
+        ];
+        for (label, expr, expected) in rows {
+            assert_eq!(
+                exprs_are_locally_invariant(std::slice::from_ref(&expr)),
+                expected,
+                "{label}"
+            );
+        }
+        // A statement list is invariant iff every statement is.
+        let chain = vec![
             Expr::AssignTemp(
                 0,
                 Box::new(Expr::StaticSubscript(vref(3), view.clone(), Loc::default())),
                 view.clone(),
             ),
-            // dst[0] = temp0[0]
-            Expr::AssignCurr(
-                vref(0),
-                Box::new(Expr::TempArrayElement(0, view.clone(), 0, Loc::default())),
+            assign(Expr::TempArrayElement(0, view.clone(), 0, Loc::default())),
+        ];
+        assert!(exprs_are_locally_invariant(&chain));
+        let broken = vec![
+            Expr::AssignTemp(0, Box::new(time()), view.clone()),
+            assign(Expr::TempArrayElement(0, view, 0, Loc::default())),
+        ];
+        assert!(!exprs_are_locally_invariant(&broken));
+    }
+
+    /// Every builtin takes its local verdict from its signature's
+    /// `Invariance` class, so the rows are the four classes, each pinned by
+    /// one builtin the table files under it, with `INIT` of a variant
+    /// argument as the `Snapshot` arm's whole content and `PREVIOUS` of an
+    /// invariant argument as `Lagged`'s.
+    #[test]
+    fn every_invariance_class_has_its_local_verdict() {
+        let rows: Vec<(BuiltinFn<Expr>, Invariance, bool)> = vec![
+            (BuiltinFn::Time, Invariance::TimeDependent, false),
+            (
+                BuiltinFn::Pulse(Box::new(lit(1.0)), Box::new(lit(2.0)), None),
+                Invariance::TimeDependent,
+                false,
             ),
-            // dst[1] = temp0[1]
-            Expr::AssignCurr(
-                vref(1),
-                Box::new(Expr::TempArrayElement(0, view, 1, Loc::default())),
+            (
+                BuiltinFn::Ramp(Box::new(lit(1.0)), Box::new(lit(2.0)), None),
+                Invariance::TimeDependent,
+                false,
+            ),
+            (
+                BuiltinFn::Step(Box::new(lit(1.0)), Box::new(lit(2.0))),
+                Invariance::TimeDependent,
+                false,
+            ),
+            (
+                BuiltinFn::Previous(Box::new(var(1)), Box::new(lit(0.0))),
+                Invariance::Lagged,
+                false,
+            ),
+            (
+                BuiltinFn::Init(Box::new(time())),
+                Invariance::Snapshot,
+                true,
+            ),
+            (BuiltinFn::TimeStep, Invariance::Pure, true),
+            (BuiltinFn::StartTime, Invariance::Pure, true),
+            (BuiltinFn::FinalTime, Invariance::Pure, true),
+            (BuiltinFn::Pi, Invariance::Pure, true),
+            (BuiltinFn::Inf, Invariance::Pure, true),
+            (
+                BuiltinFn::Lookup(Box::new(var(5)), Box::new(lit(3.0)), Loc::default()),
+                Invariance::Pure,
+                true,
+            ),
+            (
+                BuiltinFn::Lookup(Box::new(var(5)), Box::new(time()), Loc::default()),
+                Invariance::Pure,
+                false,
             ),
         ];
-        assert!(exprs_are_invariant(&exprs, &classifier(&[3])));
-    }
-
-    /// A temp computed from a *variant* array makes the whole var variant.
-    #[test]
-    fn arrayed_variant_chain_via_temp_is_variant() {
-        let view = crate::ast::ArrayView::contiguous(vec![2]);
-        let exprs = vec![
-            Expr::AssignTemp(
-                0,
-                Box::new(Expr::StaticSubscript(vref(3), view.clone(), Loc::default())),
-                view.clone(),
-            ),
-            Expr::AssignCurr(
-                vref(0),
-                Box::new(Expr::TempArrayElement(0, view, 0, Loc::default())),
-            ),
-        ];
-        // base var 3 is variant.
-        assert!(!exprs_are_invariant(&exprs, &classifier(&[])));
-    }
-
-    /// `If(cond, t, f)` is invariant iff cond, t, AND f are all invariant (the
-    /// VM evaluates both branches).
-    #[test]
-    fn if_invariant_when_all_branches_invariant() {
-        let inv = vec![Expr::AssignCurr(
-            vref(0),
-            Box::new(Expr::If(
-                Box::new(lit(1.0)),
-                Box::new(var(1)),
-                Box::new(lit(0.0)),
-                Loc::default(),
-            )),
-        )];
-        assert!(exprs_are_invariant(&inv, &classifier(&[1])));
-
-        let variant = vec![Expr::AssignCurr(
-            vref(0),
-            Box::new(Expr::If(
-                Box::new(lit(1.0)),
-                Box::new(var(1)),
-                Box::new(Expr::App(BuiltinFn::Time, Loc::default())),
-                Loc::default(),
-            )),
-        )];
-        // the false branch is TIME -> variant.
-        assert!(!exprs_are_invariant(&variant, &classifier(&[1])));
-    }
-
-    /// Op1 (logical not) tracks its operand.
-    #[test]
-    fn op1_tracks_operand() {
-        let exprs = vec![Expr::AssignCurr(
-            vref(0),
-            Box::new(Expr::Op1(UnaryOp::Not, Box::new(var(1)), Loc::default())),
-        )];
-        assert!(exprs_are_invariant(&exprs, &classifier(&[1])));
-        assert!(!exprs_are_invariant(&exprs, &classifier(&[])));
+        let mut classes_seen = std::collections::BTreeSet::new();
+        for (builtin, class, expected) in rows {
+            assert_eq!(builtin.signature().invariance, class, "{}", builtin.name());
+            classes_seen.insert(format!("{class:?}"));
+            let exprs = vec![assign(Expr::App(builtin, Loc::default()))];
+            assert_eq!(exprs_are_locally_invariant(&exprs), expected);
+        }
+        // The rows span the enumeration.
+        let all_classes: std::collections::BTreeSet<String> = BuiltinSig::ALL
+            .iter()
+            .map(|sig| format!("{:?}", sig.invariance))
+            .collect();
+        assert_eq!(classes_seen, all_classes);
     }
 }
