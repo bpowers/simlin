@@ -67,3 +67,5 @@ For build/test/lint commands, see [docs/dev/commands.md](/docs/dev/commands.md).
 ## Benchmarks
 
 `tests/backend-bench.ts` (runner) + `tests/bench-stats.ts` (pure median/warmup harness, always unit-tested) measure node VM-vs-wasm eval time via `Model.simulate({ engine })`. The runner is gated behind `RUN_BENCH` so it stays out of the default `pnpm test`. See [docs/dev/benchmarks.md](/docs/dev/benchmarks.md#node-vm-vs-wasm-eval-benchmark).
+
+`bench/clearn-alloc.mjs` is a standalone script (not a test) that compares two or more wasm bundles -- builds with different global allocators -- on the whole C-LEARN pipeline through this package's public API, per stage, with peak `memory.size`. See [docs/dev/benchmarks.md](/docs/dev/benchmarks.md#node-allocator-benchmark-for-the-wasm-bundle).

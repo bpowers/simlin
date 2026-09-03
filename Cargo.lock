@@ -390,9 +390,9 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "chacha20"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81"
+checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
@@ -3284,6 +3284,7 @@ dependencies = [
  "serde_json",
  "simlin-engine",
  "wasm-interpreter",
+ "wasmalloc",
 ]
 
 [[package]]
@@ -4200,6 +4201,12 @@ dependencies = [
  "libm",
  "log_wrapper",
 ]
+
+[[package]]
+name = "wasmalloc"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "065f25b3013d594aa09b24789faf58b6ce2db1623c6843eeebd161b5f080736e"
 
 [[package]]
 name = "winapi-util"
