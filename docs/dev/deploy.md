@@ -9,7 +9,7 @@ Read this before your first deploy after a long gap: the deploy is one local com
 ## Prerequisites
 
 - `gcloud` authenticated against the production project (`gcloud auth login`, `gcloud config set project ...`).
-- A Rust toolchain with the `wasm32-unknown-unknown` target (the toolchain file pins it; `rustup show` to check) and `wasm-opt` on `PATH`. Without `wasm-opt` the deploy still works but ships an unoptimized ~9 MB WASM blob. `./scripts/dev-init.sh` sets most of this up.
+- A Rust toolchain with the `wasm32-unknown-unknown` target (the toolchain file pins it; `rustup show` to check) and `wasm-opt` on `PATH`. Without `wasm-opt` the deploy still works but ships an unoptimized ~11 MB WASM blob. `./scripts/dev-init.sh` sets most of this up.
 - Node 24 locally, matching the GAE runtime.
 - A clean working tree. The deploy scripts copy build output into the tracked `public/` directory and `git checkout` it back afterward; starting dirty makes that unreliable.
 - `.app.prod.yaml` in the repo root. It's gitignored -- you keep it locally. See [The two app.yaml files](#the-two-appyaml-files) below.
@@ -93,7 +93,7 @@ This deliberately uses **your own** credentials (`gcloud auth print-access-token
 
 `gcloud app deploy` uploads the whole repo except `.gcloudignore` entries: `node_modules`, `target/`, `test/`, `/build*`, `scripts/`, `.github/`, `website/`, `examples/`, `src/jupyter/`, `src/app/public`, `src/app/build*`, `src/server/public`, `src/server/config`, `src/app/firebase.json`, and `.app.prod.yaml` itself. Not excluded, and load-bearing:
 
-- `src/server/lib/`, `src/core/lib/`, `src/engine/lib/`, `src/engine/lib.browser/`, `src/engine/core/libsimlin.wasm` -- the compiled output of `pnpm build`. Gitignored but uploaded; skip the build and you ship stale or missing code. The engine builds two WASM artifacts: `libsimlin.wasm` (full, with `png_render` -- the server's preview pipeline needs it) and `libsimlin-browser.wasm` (slim, no PNG rasterization stack, ~28% smaller -- what rsbuild bundles into `public/static/wasm/`). The image carries exactly one copy of each: the slim source artifact and the `*.wasm.raw` build caches are excluded in `.gcloudignore` since browsers fetch the hashed bundled copy.
+- `src/server/lib/`, `src/core/lib/`, `src/engine/lib/`, `src/engine/lib.browser/`, `src/engine/core/libsimlin.wasm` -- the compiled output of `pnpm build`. Gitignored but uploaded; skip the build and you ship stale or missing code. The engine builds two WASM artifacts: `libsimlin.wasm` (full, with `png_render` -- the server's preview pipeline needs it) and `libsimlin-browser.wasm` (slim, no PNG rasterization stack, ~17% smaller -- what rsbuild bundles into `public/static/wasm/`). The image carries exactly one copy of each: the slim source artifact and the `*.wasm.raw` build caches are excluded in `.gcloudignore` since browsers fetch the hashed bundled copy.
 - `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `.npmrc` -- GAE's Node buildpack runs `pnpm install` at the repo root on the instance, which recreates the `node_modules/@simlin/*` workspace symlinks pointing at the uploaded `src/*/lib`.
 - `config/default.json` + `config/production.json` -- the server's config layering.
 - `default_projects/` -- example models copied into each new account at signup.

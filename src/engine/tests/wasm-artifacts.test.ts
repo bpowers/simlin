@@ -9,7 +9,7 @@
  *   preview rendering depends on `simlin_project_render_png`).
  * - `core/libsimlin-browser.wasm` is the slim build bundlers ship to the
  *   browser; it must NOT carry the PNG render stack (resvg + text shaping
- *   + an embedded font, ~28% of the full binary).
+ *   + an embedded font, ~17% of the full binary).
  *
  * A regression here is silent: the browser bundle still works, it just
  * ships megabytes of dead rasterization code to every visitor.
@@ -54,9 +54,11 @@ describe('wasm build artifacts', () => {
   it('browser artifact is meaningfully smaller than the full artifact', () => {
     const full = fs.statSync(path.join(CORE_DIR, 'libsimlin.wasm')).size;
     const slim = fs.statSync(path.join(CORE_DIR, 'libsimlin-browser.wasm')).size;
-    // The PNG render stack is ~28% of the full binary; require at least a
-    // 15% delta so the test stays robust to unrelated size drift while
-    // still catching "both artifacts accidentally built identically".
-    expect(slim).toBeLessThan(full * 0.85);
+    // The PNG render stack is ~17% of the full binary under the shipping
+    // build configuration (opt-level 3, LTO), so the slim artifact is ~0.83
+    // of the full one. The limit sits halfway between that and the ~1.0 of
+    // the failure this guards against ("both artifacts accidentally built
+    // identically"), leaving room for unrelated size drift on either side.
+    expect(slim).toBeLessThan(full * 0.9);
   });
 });

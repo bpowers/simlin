@@ -12,7 +12,7 @@
 // and instantiation logic live in ./wasm-runtime.ts.
 //
 // The browser artifact is the slim build (no png_render: the resvg/text
-// shaping stack is ~28% of the full binary and only Node-side PNG previews
+// shaping stack is ~17% of the full binary and only Node-side PNG previews
 // use it); Node loads the full libsimlin.wasm via wasm.node.ts instead.
 // @ts-expect-error TypeScript doesn't understand .wasm imports
 import * as wasmModule from '../../core/libsimlin-browser.wasm';
