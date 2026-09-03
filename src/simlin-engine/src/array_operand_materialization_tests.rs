@@ -2718,7 +2718,7 @@ fn a_repeated_dimension_operand_declines_rather_than_guessing_which_axis() {
         assert_declines_because(
             square(name).array_aux("out[d,d]", eqn),
             "out",
-            "Cannot push view for expression type",
+            "an array operand here must be a variable",
         );
     }
 

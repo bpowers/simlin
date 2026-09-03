@@ -16,6 +16,7 @@ use crate::ast::{Ast, Expr0, Expr2, LoweringScope, lower_ast};
 use crate::canonicalize;
 use crate::datamodel;
 use crate::db::{build_module_inputs, module_input_prefix};
+use crate::diagnostic::DiagnosticError;
 use crate::variable::{VarKind, Variable};
 
 /// A variable as the parse leaves it: `Expr0` equations and a module's
@@ -27,19 +28,19 @@ pub type ParsedVariable = Variable<datamodel::ModuleReference, Expr0>;
 /// Everything but `kind` carries over unchanged, so this is a map over the
 /// kind: lower the ASTs a `Stock`/`Aux` holds against the scope's dimension
 /// context and dependency shapes, appending whatever `lower_ast` raised to the
-/// variable's error channel, and resolve the input wiring a `Module` holds
+/// variable's diagnostics, and resolve the input wiring a `Module` holds
 /// through `db::build_module_inputs`, the one owner of that wiring. Total: a
-/// variable whose equation does not lower keeps its errors and loses its AST,
-/// and the caller decides what that means.
+/// variable whose equation does not lower keeps its diagnostics and loses its
+/// AST, and the caller decides what that means.
 pub(crate) fn lower_variable(scope: &LoweringScope, parsed: &ParsedVariable) -> Variable {
-    let mut errors = parsed.errors.clone();
+    let mut diagnostics = parsed.diagnostics.clone();
     let element_scoped = parsed.element_scope().is_some();
     let mut lower = |ast: &Option<Ast<Expr0>>| -> Option<Ast<Expr2>> {
         ast.as_ref()
             .and_then(|ast| match lower_ast(scope, ast, element_scoped) {
                 Ok(ast) => Some(ast),
                 Err(err) => {
-                    errors.push(err);
+                    diagnostics.push(DiagnosticError::Equation(err));
                     None
                 }
             })
@@ -90,8 +91,7 @@ pub(crate) fn lower_variable(scope: &LoweringScope, parsed: &ParsedVariable) -> 
         ident: parsed.ident.clone(),
         units: parsed.units.clone(),
         eqn: parsed.eqn.clone(),
-        errors,
-        unit_errors: parsed.unit_errors.clone(),
+        diagnostics,
         kind,
     }
 }
@@ -149,17 +149,13 @@ fn lower_variable_preserves_every_field_of_every_kind() {
         let parsed = &parse_source_variable(&db, synced.source, sync.project).variable;
         let lowered = &lowered_source_variable(&db, synced.source, main, sync.project).variable;
 
-        // The five kind-independent fields pass through verbatim.
+        // The four kind-independent fields pass through verbatim.
         assert_eq!(parsed.ident, lowered.ident, "{ident}: ident");
         assert_eq!(parsed.units, lowered.units, "{ident}: units");
         assert_eq!(parsed.eqn, lowered.eqn, "{ident}: eqn");
         assert_eq!(
-            parsed.unit_errors, lowered.unit_errors,
-            "{ident}: unit_errors"
-        );
-        assert_eq!(
-            parsed.errors, lowered.errors,
-            "{ident}: errors (this fixture raises none, so lowering must add none)"
+            parsed.diagnostics, lowered.diagnostics,
+            "{ident}: diagnostics (this fixture raises none, so lowering must add none)"
         );
 
         match (&parsed.kind, &lowered.kind) {

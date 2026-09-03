@@ -188,8 +188,9 @@ fn explicit_constructor_is_compile_var_fragments_input() {
             .as_ref()
             .expect("usesub compiles");
 
-    let crate::db::var_fragment::ExplicitFragment::Ready { input, .. } =
-        crate::db::var_fragment::explicit_fragment_input(&db, var, model, sync.project, &[])
+    let crate::db::var_fragment::ExplicitFragment {
+        input: Some(input), ..
+    } = crate::db::var_fragment::explicit_fragment_input(&db, var, model, sync.project, &[])
     else {
         panic!("usesub must lower");
     };
@@ -396,8 +397,9 @@ fn cross_module_read_offsets_through_the_sub_models_shape() {
         .offset;
 
     let var = model.variables(&db)["pick"];
-    let crate::db::var_fragment::ExplicitFragment::Ready { input, .. } =
-        crate::db::var_fragment::explicit_fragment_input(&db, var, model, sync.project, &[])
+    let crate::db::var_fragment::ExplicitFragment {
+        input: Some(input), ..
+    } = crate::db::var_fragment::explicit_fragment_input(&db, var, model, sync.project, &[])
     else {
         panic!("pick must lower");
     };

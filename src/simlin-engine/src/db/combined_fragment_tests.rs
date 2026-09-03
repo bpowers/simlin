@@ -703,7 +703,7 @@ fn assemble_module_resolved_scc_member_offsets_match_acyclic_layout() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "Task 5b precondition: the element-acyclic {{ce,ecc}} SCC must \
          survive the cycle gate (has_cycle == false)"
     );

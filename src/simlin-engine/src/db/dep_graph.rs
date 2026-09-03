@@ -35,7 +35,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use salsa::Accumulator;
 
 use crate::canonicalize;
 use crate::capture::CaptureKind;
@@ -44,9 +43,8 @@ use crate::capture::CaptureKind;
 // `#[cfg(test)]` SCC accessors.
 use crate::common::{Canonical, Ident};
 use crate::db::{
-    CompilationDiagnostic, Db, DepPhase, DepRefs, Diagnostic, DiagnosticError, DiagnosticSeverity,
-    ModuleInputSet, SourceModel, SourceProject, SourceVariable, SourceVariableKind,
-    project_module_graph, variable_direct_dependencies,
+    Db, DepPhase, DepRefs, ModuleInputSet, SourceModel, SourceProject, SourceVariable,
+    SourceVariableKind, project_module_graph, variable_direct_dependencies,
 };
 use crate::variable::DepLag;
 
@@ -544,21 +542,7 @@ pub(crate) fn dt_cycle_sccs_engine_consistent(
     let empty_inputs = ModuleInputSet::empty(db);
     let dep_graph = model_dependency_graph(db, model, project, empty_inputs);
     let resolved_sccs = dep_graph.resolved_sccs.clone();
-    let diags = model_dependency_graph::accumulated::<CompilationDiagnostic>(
-        db,
-        model,
-        project,
-        empty_inputs,
-    );
-    let engine_raises_circular = diags.iter().any(|d| {
-        matches!(
-            d.0.error,
-            DiagnosticError::Model(crate::common::Error {
-                code: crate::common::ErrorCode::CircularDependency,
-                ..
-            })
-        )
-    });
+    let engine_raises_circular = dep_graph.has_cycle();
     if let Some(reason) =
         dt_cycle_sccs_consistency_violation(&sccs, &resolved_sccs, engine_raises_circular)
     {
@@ -1137,9 +1121,8 @@ pub(crate) struct DtSccResolution {
     /// (element-cyclic -- including a genuine multi-variable element cycle
     /// the symbolic builder detects -- or not element-sourceable). When
     /// `false`, every back-edge in this phase is fully explained by
-    /// resolvable recurrences and the phase's cycle gate must NOT set
-    /// `has_cycle` / accumulate `CircularDependency` (loud-safe: any doubt
-    /// leaves this `true`).
+    /// resolvable recurrences and the phase's cycle gate must NOT record a
+    /// `CircularDependency` (loud-safe: any doubt leaves this `true`).
     pub(crate) has_unresolved: bool,
 }
 
@@ -1198,7 +1181,7 @@ pub(crate) struct DtSccResolution {
 /// are the same rule, not a flat "suppress any resolved member's edge"
 /// set) -- and treat that SCC as one collapsed node. `compute_transitive`
 /// re-runs over the real *with-inputs* `var_info`, and its
-/// `.unwrap_or_else` arm clears `resolved_sccs` + sets `has_cycle` on any
+/// `.unwrap_or_else` arm clears `resolved_sccs` + records the cycle on any
 /// residual genuine cycle, so the worst case is a *missed resolution* (a
 /// conservative `CircularDependency`), never an unsound one: a back-edge
 /// that is NOT within one resolved SCC -- a genuine cycle, a
@@ -1221,8 +1204,8 @@ pub(crate) struct DtSccResolution {
 /// plumbed into either side, because the with-inputs `compute_transitive` re-run is the
 /// soundness backstop for the multi-member (N>=2) SCCs Subcomponent B
 /// resolves *exactly as it is for the N=1 single-variable self-recurrence
-/// case*: that re-run's `.unwrap_or_else` clears `resolved_sccs` and sets
-/// `has_cycle` on any residual genuine cycle (the init re-run has the
+/// case*: that re-run's `.unwrap_or_else` clears `resolved_sccs` and records
+/// the cycle on any residual genuine cycle (the init re-run has the
 /// symmetric `Err` arm), so the only way the no-input vs with-inputs
 /// wiring can differ for an input-wired sub-model's self/multi-recurrence
 /// is a *conservative* `CircularDependency` (a missed resolution) -- never
@@ -1380,18 +1363,20 @@ pub(crate) fn var_noninitial_lowered_exprs(
         );
     };
 
-    match explicit_fragment_input(db, *sv, model, project, &[]) {
-        ExplicitFragment::Ready { input, .. } => match lower_fragment(&input, false) {
-            Ok(v) => v.ast,
-            Err(e) => panic!(
-                "var_noninitial_lowered_exprs: var {var_name:?} non-initial \
-                 lowering errored ({e:?}) -- cannot source its production \
-                 lowered exprs (abort, never silent-skip)"
-            ),
-        },
-        ExplicitFragment::Fatal { .. } => panic!(
+    let ExplicitFragment { diagnostics, input } =
+        explicit_fragment_input(db, *sv, model, project, &[]);
+    let Some(input) = input else {
+        panic!(
             "var_noninitial_lowered_exprs: var {var_name:?} failed to lower \
-             (ExplicitFragment::Fatal) -- cannot source its production \
+             ({diagnostics:?}) -- cannot source its production lowered exprs \
+             (abort, never silent-skip)"
+        );
+    };
+    match lower_fragment(&input, false) {
+        Ok(v) => v.ast,
+        Err(e) => panic!(
+            "var_noninitial_lowered_exprs: var {var_name:?} non-initial \
+             lowering errored ({e:?}) -- cannot source its production \
              lowered exprs (abort, never silent-skip)"
         ),
     }
@@ -1507,6 +1492,12 @@ pub struct ResolvedScc {
     pub phase: SccPhase,
 }
 
+impl ModelDepGraphResult {
+    pub fn has_cycle(&self) -> bool {
+        !self.cycle_variables.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelDepGraphResult {
     /// Interned-ident-keyed dependency maps, on the std `HashMap` (default
@@ -1521,7 +1512,13 @@ pub struct ModelDepGraphResult {
     pub runlist_initials: Vec<String>,
     pub runlist_flows: Vec<String>,
     pub runlist_stocks: Vec<String>,
-    pub has_cycle: bool,
+    /// The variable each phase's dependency walk reported a genuine back-edge
+    /// on (the dt phase's, then the init phase's): the model's
+    /// `CircularDependency` facts, which `db::model_all_diagnostics` reports
+    /// under the empty input set. Empty exactly when the cycle gate passes
+    /// ([`ModelDepGraphResult::has_cycle`]); a model with no cycle can still
+    /// fail to compile.
+    pub cycle_variables: Vec<String>,
     /// Recurrence SCCs whose induced element graph the cycle gate proved
     /// acyclic and element-sourceable, so they are resolved rather than
     /// rejected with `CircularDependency`. Empty on the acyclic happy
@@ -1631,26 +1628,6 @@ fn membership_in(dep_graph: &ModelDepGraphResult, name: &str) -> RunlistMembersh
 // here, alongside the relation it consumes -- a `db` submodule (like
 // `ltm_ir` / `macro_registry`) split out purely for the per-file line
 // cap.
-
-/// Accumulate a model-level `CircularDependency` diagnostic for
-/// `var_name` (the variable the dependency walk reported the back-edge
-/// on). Factored out of `model_dependency_graph_impl` because the
-/// dt-phase, the dt-phase residual-after-resolution, and the init-phase
-/// cycle paths all emit the identical diagnostic; keeping one definition
-/// prevents the four sites from drifting.
-pub(crate) fn cycle_diagnostic(db: &dyn Db, model: SourceModel, var_name: String) {
-    CompilationDiagnostic(Diagnostic {
-        model: model.name(db).clone(),
-        variable: Some(var_name),
-        error: DiagnosticError::Model(crate::common::Error {
-            kind: crate::common::ErrorKind::Model,
-            code: crate::common::ErrorCode::CircularDependency,
-            details: None,
-        }),
-        severity: DiagnosticSeverity::Error,
-    })
-    .accumulate(db);
-}
 
 /// Build the SCC-aware back-edge map consumed by
 /// `compute_transitive`/`compute_inner`: every member of `resolved[i]`
@@ -2007,7 +1984,7 @@ pub(crate) fn model_dependency_graph_impl(
                 .collect())
         };
 
-    let mut has_cycle = false;
+    let mut cycle_variables: Vec<String> = Vec::new();
     let mut resolved_sccs: Vec<ResolvedScc> = Vec::new();
 
     let no_scc: BTreeMap<Ident<Canonical>, usize> = BTreeMap::new();
@@ -2054,8 +2031,7 @@ pub(crate) fn model_dependency_graph_impl(
         Err(first_cycle_var) => {
             if dt_scc_map.is_empty() {
                 // Unresolved: keep the conservative `CircularDependency`.
-                has_cycle = true;
-                cycle_diagnostic(db, model, first_cycle_var);
+                cycle_variables.push(first_cycle_var);
                 HashMap::new()
             } else {
                 // Re-run with every resolved SCC treated as one collapsed
@@ -2063,9 +2039,8 @@ pub(crate) fn model_dependency_graph_impl(
                 // edges alike -- broken; every other back-edge still
                 // errors). A residual genuine cycle is still loud-safe.
                 compute_transitive(false, &dt_scc_map).unwrap_or_else(|var_name| {
-                    has_cycle = true;
                     resolved_sccs.clear();
-                    cycle_diagnostic(db, model, var_name);
+                    cycle_variables.push(var_name);
                     HashMap::new()
                 })
             }
@@ -2130,8 +2105,7 @@ pub(crate) fn model_dependency_graph_impl(
                 // identified init SCC was already dt-covered yet the
                 // gate still errs (a genuine residual cycle). Loud-safe:
                 // keep the conservative `CircularDependency`.
-                has_cycle = true;
-                cycle_diagnostic(db, model, first_init_cycle_var);
+                cycle_variables.push(first_init_cycle_var);
                 HashMap::new()
             } else {
                 // Break the init-only resolved SCCs' intra edges too (in
@@ -2152,9 +2126,8 @@ pub(crate) fn model_dependency_graph_impl(
                         deps
                     }
                     Err(var_name) => {
-                        has_cycle = true;
                         resolved_sccs.clear();
-                        cycle_diagnostic(db, model, var_name);
+                        cycle_variables.push(var_name);
                         HashMap::new()
                     }
                 }
@@ -2520,7 +2493,7 @@ pub(crate) fn model_dependency_graph_impl(
         runlist_initials,
         runlist_flows,
         runlist_stocks,
-        has_cycle,
+        cycle_variables,
         // Populated by the element-cycle refinement
         // (`resolve_recurrence_sccs`) when a cycle gate's back-edge is
         // fully explained by resolvable single-variable self-recurrences:

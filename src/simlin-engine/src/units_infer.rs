@@ -1847,8 +1847,7 @@ pub(crate) fn infer(
             ident: Ident::new("time"),
             units: Some(time_units),
             eqn: None,
-            errors: vec![],
-            unit_errors: vec![],
+            diagnostics: vec![],
             kind: VarKind::Aux {
                 ast: None,
                 init_ast: None,

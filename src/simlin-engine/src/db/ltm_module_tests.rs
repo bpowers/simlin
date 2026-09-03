@@ -1071,14 +1071,14 @@ fn parallel_pathways_module_project(paths: usize) -> datamodel::Project {
 /// GH #649: a module body with more internal input->output pathways than the
 /// per-port pathway budget has its pathway enumeration truncated
 /// deterministically: the kept pathway count equals the budget,
-/// `LtmVariablesResult.pathways_truncated` is set, and a `CompilationDiagnostic`
+/// `LtmVariablesResult.pathways_truncated` is set, and a `Diagnostic`
 /// `Warning` names the module, the budget, and the clipped input port. The
 /// fixture is tiny (12 parallel pathways) and the budget is shrunk to 4 via the
 /// test-only `ModulePathwayBudgetGuard` so the budget is what clips (never trip
 /// the real 8192 gate with a giant fixture; docs/dev/rust.md#test-time-budgets).
 #[test]
 fn module_pathway_enumeration_truncates_at_budget() {
-    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+    use crate::db::{DiagnosticError, DiagnosticSeverity};
     use salsa::Setter;
 
     const PATHS: usize = 12;
@@ -1128,9 +1128,8 @@ fn module_pathway_enumeration_truncates_at_budget() {
         "a truncated module must still emit a composite var over the kept prefix"
     );
 
-    let diags =
-        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, sub_model, source_project);
-    let has_warning = diags.iter().any(|CompilationDiagnostic(d)| {
+    let diags = &model_ltm_variables(&db, sub_model, source_project).diagnostics;
+    let has_warning = diags.iter().any(|d| {
         d.severity == DiagnosticSeverity::Warning
             && matches!(
                 &d.error,
@@ -1144,7 +1143,7 @@ fn module_pathway_enumeration_truncates_at_budget() {
         has_warning,
         "pathway truncation must emit a Warning mentioning truncation, the budget \
          ({TEST_BUDGET}), and the clipped input port; got: {:?}",
-        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+        diags
     );
 }
 
@@ -1153,7 +1152,6 @@ fn module_pathway_enumeration_truncates_at_budget() {
 /// pathway (the under-budget byte-identical-to-before guarantee).
 #[test]
 fn module_pathway_enumeration_under_budget_no_truncation() {
-    use crate::db::CompilationDiagnostic;
     use salsa::Setter;
 
     const PATHS: usize = 4;
@@ -1185,9 +1183,8 @@ fn module_pathway_enumeration_under_budget_no_truncation() {
         path_var_count, PATHS,
         "every pathway must be enumerated when under budget"
     );
-    let diags =
-        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, sub_model, source_project);
-    let has_truncation_warning = diags.iter().any(|CompilationDiagnostic(d)| {
+    let diags = &model_ltm_variables(&db, sub_model, source_project).diagnostics;
+    let has_truncation_warning = diags.iter().any(|d| {
         matches!(&d.error, crate::db::DiagnosticError::Assembly(msg) if msg.contains("module-pathway"))
     });
     assert!(

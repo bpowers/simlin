@@ -173,8 +173,8 @@ fn unit_pass_diagnostics(
     db: &SimlinDb,
     model: SourceModel,
     project: SourceProject,
-) -> Vec<&CompilationDiagnostic> {
-    crate::db::units::check_model_units::accumulated::<CompilationDiagnostic>(db, model, project)
+) -> Vec<&Diagnostic> {
+    crate::db::units::check_model_units::accumulated::<Diagnostic>(db, model, project)
 }
 
 /// The canonical model names in `model`'s unit-inference scope.
@@ -343,7 +343,7 @@ fn unit_warning_reaches_both_harvest_points() {
     assert!(
         direct
             .iter()
-            .any(|cd| matches!(&cd.0.error, DiagnosticError::Unit(_))),
+            .any(|d| matches!(&d.error, DiagnosticError::Unit(_))),
         "check_model_units::accumulated must carry the unit warning: {direct:?}"
     );
 
@@ -381,7 +381,7 @@ fn a_stdlib_prefixed_model_with_an_unknown_suffix_is_unit_checked() {
     assert!(
         direct
             .iter()
-            .any(|cd| matches!(&cd.0.error, DiagnosticError::Unit(_))),
+            .any(|d| matches!(&d.error, DiagnosticError::Unit(_))),
         "a prefix-only model must be unit-checked, not skipped: {direct:?}"
     );
 
@@ -558,7 +558,7 @@ fn a_module_cycle_reached_through_a_per_element_helper_still_unit_checks() {
     let unit_rows = |db: &SimlinDb, sync: &SyncResult| -> Vec<(Option<String>, String)> {
         unit_pass_diagnostics(db, sync.models["main"].source, sync.project)
             .iter()
-            .map(|cd| (cd.0.variable.clone(), format!("{:?}", cd.0.error)))
+            .map(|d| (d.variable.clone(), format!("{:?}", d.error)))
             .collect()
     };
     let is_cycle = |d: &Diagnostic| matches!(&d.error, DiagnosticError::Model(err) if err.code == ErrorCode::CircularDependency);
@@ -690,12 +690,10 @@ fn a_two_hop_cross_module_unit_mismatch_is_still_reported() {
 
     let diagnostics = unit_pass_diagnostics(&db, sync.models["main"].source, sync.project);
     assert!(
-        diagnostics.iter().any(|cd| matches!(
-            &cd.0.error,
-            DiagnosticError::Model(e) if e.code == ErrorCode::UnitMismatch
-        )),
-        "the two-hop widget/gadget contradiction must still be reported: {:?}",
-        diagnostics.iter().map(|cd| &cd.0).collect::<Vec<_>>()
+        diagnostics
+            .iter()
+            .any(|d| d.is(DiagnosticCategory::UnitInference, ErrorCode::UnitMismatch)),
+        "the two-hop widget/gadget contradiction must still be reported: {diagnostics:?}"
     );
 }
 

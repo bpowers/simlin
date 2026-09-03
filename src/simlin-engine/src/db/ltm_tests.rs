@@ -107,7 +107,7 @@ fn ltm_capture_helpers_compile_exactly_the_phases_their_kind_demands() {
             project_dimensions_context(&db, sync.project),
             ltm_model_var_names(&db, model, sync.project),
         );
-        assert!(parsed.variable.errors.is_empty(), "{text}");
+        assert!(parsed.variable.diagnostics.is_empty(), "{text}");
         let helpers: Vec<_> = parsed
             .implicit_vars
             .iter()

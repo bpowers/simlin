@@ -491,8 +491,9 @@ fn var_phase_symbolic_fragment_memo(
     };
 
     // The variable did not lower at all => `None` (loud-safe).
-    let ExplicitFragment::Ready { input, .. } =
-        explicit_fragment_input(db, *sv, model, project, &[])
+    let ExplicitFragment {
+        input: Some(input), ..
+    } = explicit_fragment_input(db, *sv, model, project, &[])
     else {
         return None;
     };
@@ -1474,7 +1475,7 @@ pub fn assemble_module<'db>(
     };
 
     let dep_graph = model_dependency_graph(db, model, project, module_inputs);
-    if dep_graph.has_cycle {
+    if dep_graph.has_cycle() {
         return Err(format!(
             "model '{}' has circular dependencies",
             model.name(db)

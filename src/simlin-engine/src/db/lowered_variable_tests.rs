@@ -64,12 +64,9 @@ fn ready_input<'db>(
     var: &str,
 ) -> Box<crate::compiler::fragment::FragmentInput<'db>> {
     let source = sync.models[model].variables[var].source;
-    match explicit_fragment_input(db, source, sync.models[model].source, sync.project, &[]) {
-        ExplicitFragment::Ready { input, .. } => input,
-        ExplicitFragment::Fatal { fatal_diags, .. } => {
-            panic!("{model}.{var} must lower for this fixture: {fatal_diags:?}")
-        }
-    }
+    let ExplicitFragment { diagnostics, input } =
+        explicit_fragment_input(db, source, sync.models[model].source, sync.project, &[]);
+    input.unwrap_or_else(|| panic!("{model}.{var} must lower for this fixture: {diagnostics:?}"))
 }
 
 /// The fragment compiler borrows the memo, and the LTM map and the unit view

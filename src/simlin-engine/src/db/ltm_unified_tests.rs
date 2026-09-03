@@ -672,7 +672,7 @@ fn test_model_ltm_variables_stays_exhaustive_below_scc_threshold() {
 /// `model_ltm_mode`.
 #[test]
 fn test_model_ltm_variables_circuit_budget_truncation_flips_to_discovery() {
-    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+    use crate::db::{DiagnosticError, DiagnosticSeverity};
 
     let _guard = crate::ltm::LtmCircuitBudgetGuard::new(1);
 
@@ -705,8 +705,8 @@ fn test_model_ltm_variables_circuit_budget_truncation_flips_to_discovery() {
          (incomplete) circuit list"
     );
 
-    let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
-    let has_budget_warning = diags.iter().any(|CompilationDiagnostic(d)| {
+    let diags = &model_ltm_variables(&db, model, sync.project).diagnostics;
+    let has_budget_warning = diags.iter().any(|d| {
         d.severity == DiagnosticSeverity::Warning
             && matches!(
                 &d.error,
@@ -717,7 +717,7 @@ fn test_model_ltm_variables_circuit_budget_truncation_flips_to_discovery() {
     assert!(
         has_budget_warning,
         "budget truncation should emit a Warning naming MAX_LTM_CIRCUITS; got: {:?}",
-        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+        diags
     );
 }
 
@@ -904,14 +904,14 @@ fn test_stockless_previous_free_model_still_bails() {
     );
 }
 
-/// Auto-flip must surface a `CompilationDiagnostic::Warning` so the
+/// Auto-flip must surface a `Diagnostic` `Warning` so the
 /// caller can explain the mode change to the user.  The diagnostic is
 /// accumulated by `model_ltm_variables` itself (not via
 /// `model_all_diagnostics`), so we collect it directly from the
 /// tracked function.
 #[test]
 fn test_model_ltm_variables_auto_flip_emits_warning_diagnostic() {
-    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+    use crate::db::{DiagnosticError, DiagnosticSeverity};
 
     let project = build_chain_scc_project("auto_flip_diag", 51);
     let db = SimlinDb::default();
@@ -920,9 +920,9 @@ fn test_model_ltm_variables_auto_flip_emits_warning_diagnostic() {
 
     let _ = model_ltm_variables(&db, model, sync.project);
 
-    let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
+    let diags = &model_ltm_variables(&db, model, sync.project).diagnostics;
 
-    let has_auto_flip_warning = diags.iter().any(|CompilationDiagnostic(d)| {
+    let has_auto_flip_warning = diags.iter().any(|d| {
         d.severity == DiagnosticSeverity::Warning
             && matches!(
                 &d.error,
@@ -932,7 +932,7 @@ fn test_model_ltm_variables_auto_flip_emits_warning_diagnostic() {
     assert!(
         has_auto_flip_warning,
         "auto-flip should emit a Warning diagnostic mentioning 'discovery mode'; got: {:?}",
-        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+        diags
     );
 }
 
@@ -1129,7 +1129,7 @@ fn test_ltm_fragment_compile_failure_surfaces_warning() {
 /// the failure is injected via `LtmFragmentFailureGuard` (GH #547).
 #[test]
 fn test_model_ltm_fragment_diagnostics_emits_warning() {
-    use crate::db::{CompilationDiagnostic, LtmFragmentFailureGuard};
+    use crate::db::LtmFragmentFailureGuard;
     use salsa::Setter;
 
     let project = build_chain_scc_project("frag_fail_direct", 5);
@@ -1144,19 +1144,13 @@ fn test_model_ltm_fragment_diagnostics_emits_warning() {
 
     let _force_failure = LtmFragmentFailureGuard::new("loop_score");
     model_ltm_fragment_diagnostics(&db, model, source_project);
-    let diags = model_ltm_fragment_diagnostics::accumulated::<CompilationDiagnostic>(
-        &db,
-        model,
-        source_project,
-    );
+    let diags = model_ltm_fragment_diagnostics(&db, model, source_project);
 
     assert!(
-        diags
-            .iter()
-            .any(|CompilationDiagnostic(d)| is_ltm_fragment_failure(d)),
+        diags.iter().any(is_ltm_fragment_failure),
         "model_ltm_fragment_diagnostics must accumulate a compile-failure \
          Warning for the guard-failed loop-score fragment; got: {:?}",
-        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+        diags
     );
 }
 
@@ -1176,7 +1170,7 @@ fn test_model_ltm_fragment_diagnostics_emits_warning() {
 /// guard pattern cannot silently match nothing.
 #[test]
 fn test_model_ltm_fragment_diagnostics_covers_implicit_helpers() {
-    use crate::db::{CompilationDiagnostic, LtmFragmentFailureGuard, model_ltm_implicit_var_info};
+    use crate::db::{LtmFragmentFailureGuard, model_ltm_implicit_var_info};
     use salsa::Setter;
 
     let project = build_chain_scc_project("implicit_frag_fail", 5);
@@ -1201,25 +1195,21 @@ fn test_model_ltm_fragment_diagnostics_covers_implicit_helpers() {
     // warning below is the helper leg's.
     let _force_failure = LtmFragmentFailureGuard::new("arg0");
     model_ltm_fragment_diagnostics(&db, model, source_project);
-    let diags = model_ltm_fragment_diagnostics::accumulated::<CompilationDiagnostic>(
-        &db,
-        model,
-        source_project,
-    );
+    let diags = model_ltm_fragment_diagnostics(&db, model, source_project);
 
     let helper_failures: Vec<_> = diags
         .iter()
-        .filter(|CompilationDiagnostic(d)| is_ltm_fragment_failure(d))
+        .filter(|d| is_ltm_fragment_failure(d))
         .collect();
     assert!(
         !helper_failures.is_empty(),
         "a failed LTM implicit-helper fragment must surface a Warning; got: {:?}",
-        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+        diags
     );
     // Each warning names the helper (the `variable` field) AND its parent
     // LTM score variable (in the message), so a caller can locate both the
     // stubbed slot and the score it degrades.
-    for CompilationDiagnostic(d) in &helper_failures {
+    for d in &helper_failures {
         assert!(
             d.variable.as_deref().is_some_and(|v| v.contains("arg0")),
             "helper-failure warning must name the helper; got: {d:?}"
@@ -1469,82 +1459,6 @@ fn test_ltm_partial_equation_warning_message_contract() {
     );
 }
 
-/// Test-only salsa-tracked query that drives the production accumulating
-/// emitter [`emit_ltm_partial_equation_warning`] with a synthetic
-/// `PartialEquationError`. Salsa accumulators can only be appended from
-/// inside a tracked query, so this is the minimal harness that exercises the
-/// real `.accumulate(db)` path the six production call sites share -- as
-/// opposed to `test_ltm_partial_equation_warning_message_contract`, which
-/// only covers the pure message body.
-#[cfg(test)]
-#[salsa::tracked]
-fn ltm311_emit_probe(db: &dyn crate::db::Db, model: SourceModel, _project: SourceProject) {
-    let err = crate::ltm_augment::PartialEquationError {
-        equation_text: "source * other".to_string(),
-        kind: crate::ltm_augment::PartialEquationErrorKind::Parse,
-    };
-    super::ltm::emit_ltm_partial_equation_warning(
-        db,
-        model,
-        "$\u{205A}ltm\u{205A}link_score\u{205A}source\u{2192}target",
-        &err,
-    );
-}
-
-/// GH #311 end-to-end through salsa: a `PartialEquationError` handed to the
-/// db-bearing emitter must accumulate a `CompilationDiagnostic` with
-/// `Warning` severity, the skipped variable's name in `variable`, and a
-/// message carrying the variable name + the offending equation text. This
-/// covers the actual salsa-accumulation glue the six production call sites
-/// (db.rs, db/ltm/compile.rs, db/ltm/link_scores.rs) reuse; the production
-/// route that *produces* the error is effectively unreachable (the equation
-/// text is always a `print_eqn` re-print, and an empty equation is rejected
-/// as an `EmptyEquation` Error upstream before LTM augmentation runs), which
-/// is documented on `PartialEquationError`.
-#[test]
-fn test_ltm_partial_equation_warning_accumulates_via_salsa() {
-    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
-
-    let db = SimlinDb::default();
-    let project = feedback_loop_project();
-    let sync = sync_from_datamodel(&db, &project);
-    let model = sync.models["main"].source;
-
-    ltm311_emit_probe(&db, model, sync.project);
-    let diags = ltm311_emit_probe::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
-
-    let warning = diags
-        .iter()
-        .map(|CompilationDiagnostic(d)| d)
-        .find(|d| {
-            d.severity == DiagnosticSeverity::Warning
-                && matches!(
-                    &d.error,
-                    DiagnosticError::Assembly(msg) if msg.contains("magnitude of 1")
-                )
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "the partial-equation parse failure must accumulate a Warning via salsa; got: {:?}",
-                diags.iter().map(|c| &c.0).collect::<Vec<_>>()
-            )
-        });
-
-    let var_name = "$\u{205A}ltm\u{205A}link_score\u{205A}source\u{2192}target";
-    assert_eq!(
-        warning.variable.as_deref(),
-        Some(var_name),
-        "the Warning must name the skipped link-score variable in its `variable` field"
-    );
-    let DiagnosticError::Assembly(msg) = &warning.error else {
-        unreachable!("matched Assembly above")
-    };
-    assert!(
-        msg.contains(var_name) && msg.contains("source * other"),
-        "the Warning message must carry the variable name + offending equation text; got: {msg}"
-    );
-}
-
 /// Adversarial corner case for Option A: the auto-flip gate must key on
 /// the *largest* SCC, not on total SCC count or total node count.  Two
 /// disjoint 40-node cycles (80 nodes total) must stay exhaustive because
@@ -1582,7 +1496,7 @@ fn test_auto_flip_keys_on_largest_scc_not_total_nodes() {
 /// user chose discovery themselves would be confusing noise.
 #[test]
 fn test_user_discovery_mode_does_not_emit_auto_flip_warning() {
-    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+    use crate::db::{DiagnosticError, DiagnosticSeverity};
     use salsa::Setter;
 
     let project = build_chain_scc_project("user_discovery_no_warning", 51);
@@ -1595,13 +1509,9 @@ fn test_user_discovery_mode_does_not_emit_auto_flip_warning() {
 
     let _ = model_ltm_variables(&db, source_model, source_project);
 
-    let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(
-        &db,
-        source_model,
-        source_project,
-    );
+    let diags = &model_ltm_variables(&db, source_model, source_project).diagnostics;
 
-    let has_auto_flip_warning = diags.iter().any(|CompilationDiagnostic(d)| {
+    let has_auto_flip_warning = diags.iter().any(|d| {
         d.severity == DiagnosticSeverity::Warning
             && matches!(
                 &d.error,
@@ -1611,7 +1521,7 @@ fn test_user_discovery_mode_does_not_emit_auto_flip_warning() {
     assert!(
         !has_auto_flip_warning,
         "user-requested discovery mode must NOT emit auto-flip warning; got: {:?}",
-        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+        diags
     );
 }
 
@@ -3435,7 +3345,7 @@ fn count_loops_through_agg(ltm: &super::LtmVariablesResult, min_petals: usize) -
 /// cross-element-through-aggregate loops (not zero, as the pre-#515 hard
 /// `petals.len() > MAX_AGG_PETALS -> continue` drop produced for >8-element
 /// dims), `LtmVariablesResult.agg_recovery_truncated` is `true`, and a
-/// `CompilationDiagnostic` `Warning` naming the truncation, the budget, and
+/// `Diagnostic` `Warning` naming the truncation, the budget, and
 /// the truncated aggregate node is emitted. The fixture is tiny (5 elements
 /// -- well under the 50-node auto-flip SCC gate); the loop budget is shrunk
 /// to 3 via the test-only `AggLoopBudgetGuard` so the budget is what clips
@@ -3443,7 +3353,7 @@ fn count_loops_through_agg(ltm: &super::LtmVariablesResult, min_petals: usize) -
 /// giant fixture).
 #[test]
 fn cross_agg_loop_recovery_truncates_at_budget() {
-    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+    use crate::db::{DiagnosticError, DiagnosticSeverity};
 
     const TEST_BUDGET: usize = 3;
     let project = share_reducer_loop_fixture(5);
@@ -3475,11 +3385,11 @@ fn cross_agg_loop_recovery_truncates_at_budget() {
          budget ({TEST_BUDGET})"
     );
 
-    let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
+    let diags = &model_ltm_variables(&db, model, sync.project).diagnostics;
     // The single reducer `SUM(pop[*])` hoists to `$⁚ltm⁚agg⁚0`; with 5
     // disjoint petals through it and a budget of 3, the budget fires while
     // enumerating that one agg, so the Warning names it.
-    let has_truncation_warning = diags.iter().any(|CompilationDiagnostic(d)| {
+    let has_truncation_warning = diags.iter().any(|d| {
         d.severity == DiagnosticSeverity::Warning
             && matches!(
                 &d.error,
@@ -3494,7 +3404,7 @@ fn cross_agg_loop_recovery_truncates_at_budget() {
         "cross-agg loop truncation must emit a Warning mentioning truncation, \
          the budget ({TEST_BUDGET}), and the truncated agg ({SHARE_REDUCER_AGG}); \
          got: {:?}",
-        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+        diags
     );
 }
 
@@ -3552,7 +3462,7 @@ fn truncated_cross_agg_recovery_keeps_detected_and_scored_ids_aligned() {
 /// with `agg_recovery_truncated == false` and no truncation `Warning`.
 #[test]
 fn cross_agg_loop_recovery_three_petals_no_truncation() {
-    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+    use crate::db::{DiagnosticError, DiagnosticSeverity};
 
     let project = share_reducer_loop_fixture(3);
     let db = SimlinDb::default();
@@ -3581,14 +3491,14 @@ fn cross_agg_loop_recovery_three_petals_no_truncation() {
         "the full 3-petal subset yields exactly one canonical loop; got {three_petal}"
     );
 
-    let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
+    let diags = &model_ltm_variables(&db, model, sync.project).diagnostics;
     assert!(
-        !diags.iter().any(|CompilationDiagnostic(d)| {
+        !diags.iter().any(|d| {
             d.severity == DiagnosticSeverity::Warning
                 && matches!(&d.error, DiagnosticError::Assembly(msg) if msg.contains("truncated"))
         }),
         "no truncation Warning expected for a 3-petal model; got: {:?}",
-        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+        diags
     );
 }
 
@@ -4694,10 +4604,10 @@ fn square_source_duplicate_dim_reducer_is_loudly_skipped() {
 
     // The skip is loud: one edge-level Warning per duplicated-dim source edge
     // (`cube -> x` and `frac -> x`), both naming the square-source decline.
-    let diags = model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, sync.project);
+    let diags = &model_ltm_variables(&db, model, sync.project).diagnostics;
     let square_warnings: Vec<&str> = diags
         .iter()
-        .filter_map(|CompilationDiagnostic(d)| match (&d.severity, &d.error) {
+        .filter_map(|d| match (&d.severity, &d.error) {
             (DiagnosticSeverity::Warning, DiagnosticError::Assembly(msg))
                 if msg.contains("square-source") =>
             {
@@ -4801,9 +4711,7 @@ fn gh780_two_loop_project() -> datamodel::Project {
 /// score.
 #[test]
 fn gh780_forced_partial_equation_drops_dependent_loops_not_others() {
-    use crate::db::{
-        CompilationDiagnostic, DiagnosticError, DiagnosticSeverity, ForcePartialEquationErrorGuard,
-    };
+    use crate::db::{DiagnosticError, DiagnosticSeverity, ForcePartialEquationErrorGuard};
     use salsa::Setter;
 
     let project = gh780_two_loop_project();
@@ -4866,11 +4774,9 @@ fn gh780_forced_partial_equation_drops_dependent_loops_not_others() {
     }
 
     // (1) Exactly one Assembly warning, naming the doomed edge.
-    let diags =
-        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, source_project);
+    let diags = &model_ltm_variables(&db, model, source_project).diagnostics;
     let assembly: Vec<_> = diags
         .iter()
-        .map(|CompilationDiagnostic(d)| d)
         .filter(|d| {
             d.severity == DiagnosticSeverity::Warning
                 && matches!(d.error, DiagnosticError::Assembly(_))
@@ -4935,7 +4841,7 @@ fn gh780_forced_partial_equation_drops_dependent_loops_not_others() {
 #[test]
 fn gh780_forced_partial_equation_discovery_mode_still_warns() {
     use crate::db::ForcePartialEquationErrorGuard;
-    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+    use crate::db::{DiagnosticError, DiagnosticSeverity};
     use salsa::Setter;
 
     let project = gh780_two_loop_project();
@@ -4966,11 +4872,9 @@ fn gh780_forced_partial_equation_discovery_mode_still_warns() {
 
     // The one loud Warning still fires (accumulator replays on every
     // evaluation, cached or fresh).
-    let diags =
-        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, source_project);
+    let diags = &model_ltm_variables(&db, model, source_project).diagnostics;
     let assembly: Vec<_> = diags
         .iter()
-        .map(|CompilationDiagnostic(d)| d)
         .filter(|d| {
             d.severity == DiagnosticSeverity::Warning
                 && matches!(d.error, DiagnosticError::Assembly(_))
@@ -5024,7 +4928,7 @@ fn gh780_forced_partial_equation_discovery_mode_still_warns() {
 #[test]
 fn gh780_forced_partial_equation_discovery_pinned_loop_dropped() {
     use crate::db::ForcePartialEquationErrorGuard;
-    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+    use crate::db::{DiagnosticError, DiagnosticSeverity};
     use salsa::Setter;
 
     let mut project = gh780_two_loop_project();
@@ -5097,11 +5001,9 @@ fn gh780_forced_partial_equation_discovery_pinned_loop_dropped() {
 
     // Diagnostics: the partial-equation warning naming the doomed edge AND
     // the pinned-loop drop warning naming the growth pin.
-    let diags =
-        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, source_project);
+    let diags = &model_ltm_variables(&db, model, source_project).diagnostics;
     let assembly: Vec<_> = diags
         .iter()
-        .map(|CompilationDiagnostic(d)| d)
         .filter(|d| {
             d.severity == DiagnosticSeverity::Warning
                 && matches!(d.error, DiagnosticError::Assembly(_))
@@ -5124,9 +5026,7 @@ fn gh780_forced_partial_equation_discovery_pinned_loop_dropped() {
 /// per-shape stand-in.
 #[test]
 fn gh780_forced_partial_equation_disjoint_dim_edge_drops_loop() {
-    use crate::db::{
-        CompilationDiagnostic, DiagnosticError, DiagnosticSeverity, ForcePartialEquationErrorGuard,
-    };
+    use crate::db::{DiagnosticError, DiagnosticSeverity, ForcePartialEquationErrorGuard};
     use salsa::Setter;
 
     let project = crate::test_common::TestProject::new("gh780_disjoint")
@@ -5172,11 +5072,9 @@ fn gh780_forced_partial_equation_disjoint_dim_edge_drops_loop() {
     // The model still compiles -- no fragment-failure cascade.
     compile_project_incremental(&db, source_project, "main")
         .expect("the disjoint doomed-edge model still compiles");
-    let diags =
-        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, source_project);
+    let diags = &model_ltm_variables(&db, model, source_project).diagnostics;
     let assembly: Vec<_> = diags
         .iter()
-        .map(|CompilationDiagnostic(d)| d)
         .filter(|d| {
             d.severity == DiagnosticSeverity::Warning
                 && matches!(d.error, DiagnosticError::Assembly(_))
@@ -5197,9 +5095,7 @@ fn gh780_forced_partial_equation_disjoint_dim_edge_drops_loop() {
 /// this fix touches.
 #[test]
 fn gh780_forced_partial_equation_scalar_to_arrayed_drops_loop() {
-    use crate::db::{
-        CompilationDiagnostic, DiagnosticError, DiagnosticSeverity, ForcePartialEquationErrorGuard,
-    };
+    use crate::db::{DiagnosticError, DiagnosticSeverity, ForcePartialEquationErrorGuard};
     use salsa::Setter;
 
     // driver (scalar stock) -> grid[d1] (arrayed) -> feedback (scalar) -> driver.
@@ -5242,11 +5138,9 @@ fn gh780_forced_partial_equation_scalar_to_arrayed_drops_loop() {
 
     compile_project_incremental(&db, source_project, "main")
         .expect("the scalar->arrayed doomed-edge model still compiles");
-    let diags =
-        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, source_project);
+    let diags = &model_ltm_variables(&db, model, source_project).diagnostics;
     let assembly: Vec<_> = diags
         .iter()
-        .map(|CompilationDiagnostic(d)| d)
         .filter(|d| {
             d.severity == DiagnosticSeverity::Warning
                 && matches!(d.error, DiagnosticError::Assembly(_))
@@ -5282,7 +5176,7 @@ fn gh780_forced_partial_equation_scalar_to_arrayed_drops_loop() {
 #[test]
 fn gh780_doomed_edge_pinned_revisit_warns_once() {
     use crate::db::ForcePartialEquationErrorGuard;
-    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+    use crate::db::{DiagnosticError, DiagnosticSeverity};
     use salsa::Setter;
 
     let mut project = crate::test_common::TestProject::new("gh780_revisit")
@@ -5330,11 +5224,9 @@ fn gh780_doomed_edge_pinned_revisit_warns_once() {
     let _force = ForcePartialEquationErrorGuard::new("driver", "grid");
 
     let _ = model_ltm_variables(&db, model, source_project);
-    let diags =
-        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, model, source_project);
+    let diags = &model_ltm_variables(&db, model, source_project).diagnostics;
     let partial_warnings: Vec<_> = diags
         .iter()
-        .map(|CompilationDiagnostic(d)| d)
         .filter(|d| {
             d.severity == DiagnosticSeverity::Warning
                 && d.variable
@@ -5459,69 +5351,6 @@ fn test_conveyor_ltm_degraded_warning_absent_without_ltm() {
     );
 }
 
-/// A conveyor living in a sub-model that a PARENT model references as a MODULE
-/// must surface EXACTLY ONE `ConveyorLtmDegraded` warning over the whole
-/// project -- not two.
-///
-/// Regression guard for the double-drain: `model_ltm_variables(parent)` reaches
-/// `model_ltm_variables(child)` transitively (a module-output read drives the
-/// parent's port/composite discovery into the child), so the child's memo sits
-/// in BOTH the parent's and the child's `model_all_diagnostics` accumulator
-/// DFS. Emitting from `model_ltm_variables` (drained once per memo but reachable
-/// from two models) reported the warning twice; emitting from the per-model
-/// `model_all_diagnostics` trigger (which `collect_all_diagnostics` drains
-/// exactly once per model and which is NOT invoked across module edges) reports
-/// it once regardless of nesting.
-#[test]
-fn test_conveyor_ltm_degraded_warning_emitted_once_across_module_boundary() {
-    use crate::db::collect_all_diagnostics;
-    use salsa::Setter;
-
-    // Child = the minimal conveyor model, named to match the module ident
-    // (`x_module` sets `model_name == ident`). The parent reads a child output
-    // (`belt·graduating`), which is what pulls the parent's LTM pass into the
-    // child's `model_ltm_variables`.
-    let fixture = minimal_conveyor_datamodel();
-    let sim_specs = fixture.sim_specs.clone();
-    let mut child = fixture.models.into_iter().next().expect("one model");
-    child.name = "belt".to_string();
-
-    let parent = x_model(
-        "main",
-        vec![
-            x_module("belt", &[], None),
-            x_aux("reader", "belt·graduating", None),
-        ],
-    );
-
-    let project = datamodel::Project {
-        name: "conveyor_module".to_string(),
-        sim_specs,
-        dimensions: vec![],
-        units: vec![],
-        models: vec![parent, child],
-        source: Default::default(),
-        ai_information: None,
-    };
-
-    let mut db = SimlinDb::default();
-    let source_project = sync_from_datamodel(&db, &project).project;
-    source_project.set_ltm_enabled(&mut db).to(true);
-
-    let diags = collect_all_diagnostics(&db, source_project);
-
-    let degraded: Vec<_> = diags
-        .iter()
-        .filter(|d| is_conveyor_ltm_degraded(d, "Students"))
-        .collect();
-    assert_eq!(
-        degraded.len(),
-        1,
-        "a conveyor in a module-referenced sub-model must warn exactly once across the whole \
-         project; got: {diags:?}"
-    );
-}
-
 /// The warning is advisory, not a hard error: the same conveyor model still
 /// compiles and simulates through the special-stock build path (which expands
 /// the belt and clears the marker), independent of the LTM diagnostic overlay.
@@ -5613,52 +5442,5 @@ fn test_queue_ltm_degraded_warning_absent_without_ltm() {
     assert!(
         !diags.iter().any(|d| is_queue_ltm_degraded(d, "waiting")),
         "LTM-disabled project must not emit the queue degradation warning; got: {diags:?}"
-    );
-}
-
-/// A queue in a sub-model referenced as a MODULE by a parent must surface
-/// EXACTLY ONE `QueueLtmDegraded` warning over the whole project -- the same
-/// cross-module double-drain regression the conveyor twin guards, closed by
-/// emitting from the per-model `model_all_diagnostics` trigger.
-#[test]
-fn test_queue_ltm_degraded_warning_emitted_once_across_module_boundary() {
-    use crate::db::collect_all_diagnostics;
-    use salsa::Setter;
-
-    let fixture = queue_drain_datamodel();
-    let sim_specs = fixture.sim_specs.clone();
-    let mut child = fixture.models.into_iter().next().expect("one model");
-    child.name = "q".to_string();
-
-    let parent = x_model(
-        "main",
-        vec![x_module("q", &[], None), x_aux("reader", "q·served", None)],
-    );
-
-    let project = datamodel::Project {
-        name: "queue_module".to_string(),
-        sim_specs,
-        dimensions: vec![],
-        units: vec![],
-        models: vec![parent, child],
-        source: Default::default(),
-        ai_information: None,
-    };
-
-    let mut db = SimlinDb::default();
-    let source_project = sync_from_datamodel(&db, &project).project;
-    source_project.set_ltm_enabled(&mut db).to(true);
-
-    let diags = collect_all_diagnostics(&db, source_project);
-
-    let degraded: Vec<_> = diags
-        .iter()
-        .filter(|d| is_queue_ltm_degraded(d, "waiting"))
-        .collect();
-    assert_eq!(
-        degraded.len(),
-        1,
-        "a queue in a module-referenced sub-model must warn exactly once across the whole \
-         project; got: {diags:?}"
     );
 }

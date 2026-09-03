@@ -23,8 +23,9 @@ use crate::test_common::TestProject;
 fn lowered_body(db: &SimlinDb, sync: &SyncResult, var: &str) -> Expr2 {
     let model = sync.models["main"].source;
     let source = model.variables(db)[var];
-    let ExplicitFragment::Ready { input, .. } =
-        explicit_fragment_input(db, source, model, sync.project, &[])
+    let ExplicitFragment {
+        input: Some(input), ..
+    } = explicit_fragment_input(db, source, model, sync.project, &[])
     else {
         panic!("{var} must lower");
     };

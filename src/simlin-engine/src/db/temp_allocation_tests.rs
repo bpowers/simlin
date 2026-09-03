@@ -195,16 +195,12 @@ fn flow_fragment(project: &TestProject, var: &str) -> (Vec<Expr>, Vec<(u32, usiz
         .get(var)
         .unwrap_or_else(|| panic!("fixture declares `{var}`"));
 
-    let exprs = match explicit_fragment_input(&db, source_var, model, source_project, &[]) {
-        ExplicitFragment::Ready { input, .. } => {
-            lower_fragment(&input, false)
-                .unwrap_or_else(|e| panic!("`{var}` must lower: {e:?}"))
-                .ast
-        }
-        ExplicitFragment::Fatal { fatal_diags, .. } => {
-            panic!("`{var}` must lower, got {fatal_diags:?}")
-        }
-    };
+    let ExplicitFragment { diagnostics, input } =
+        explicit_fragment_input(&db, source_var, model, source_project, &[]);
+    let input = input.unwrap_or_else(|| panic!("`{var}` must lower, got {diagnostics:?}"));
+    let exprs = lower_fragment(&input, false)
+        .unwrap_or_else(|e| panic!("`{var}` must lower: {e:?}"))
+        .ast;
 
     let input_set = ModuleInputSet::from_names(&db, &[]);
     let fragment = compile_var_fragment(&db, source_var, model, source_project, input_set)

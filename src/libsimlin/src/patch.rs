@@ -344,11 +344,13 @@ impl ErrorDetailBuilder {
             errors::FormattedErrorKind::Units => SimlinErrorKind::Units,
             errors::FormattedErrorKind::Simulation => SimlinErrorKind::Simulation,
         };
-        let unit_error_kind = match error.unit_error_kind {
-            Some(errors::UnitErrorKind::Definition) => SimlinUnitErrorKind::Definition,
-            Some(errors::UnitErrorKind::Consistency) => SimlinUnitErrorKind::Consistency,
-            Some(errors::UnitErrorKind::Inference) => SimlinUnitErrorKind::Inference,
-            None => SimlinUnitErrorKind::NotApplicable,
+        let unit_error_kind = match error.category {
+            Some(engine::db::DiagnosticCategory::UnitDefinition) => SimlinUnitErrorKind::Definition,
+            Some(engine::db::DiagnosticCategory::UnitConsistency) => {
+                SimlinUnitErrorKind::Consistency
+            }
+            Some(engine::db::DiagnosticCategory::UnitInference) => SimlinUnitErrorKind::Inference,
+            _ => SimlinUnitErrorKind::NotApplicable,
         };
         let mut builder = ErrorDetailBuilder::new(error.code)
             .kind(kind)
@@ -420,20 +422,32 @@ fn first_error_code(
 ) -> Option<SimlinErrorCode> {
     for d in diagnostics {
         if d.severity == engine::db::DiagnosticSeverity::Error {
-            return Some(diagnostic_to_error_code(&d.error));
+            return Some(diagnostic_to_error_code(d));
         }
     }
 
     sim_error.map(|error| SimlinErrorCode::from(error.code))
 }
 
-fn diagnostic_to_error_code(error: &engine::db::DiagnosticError) -> SimlinErrorCode {
-    match error {
-        engine::db::DiagnosticError::Equation(e) => SimlinErrorCode::from(e.code),
-        engine::db::DiagnosticError::Model(e) => SimlinErrorCode::from(e.code),
-        engine::db::DiagnosticError::Unit(_) => SimlinErrorCode::UnitDefinitionErrors,
-        engine::db::DiagnosticError::Assembly(_) => SimlinErrorCode::NotSimulatable,
+/// The wire code of a diagnostic: its own code, except that every unit
+/// diagnostic reports as `UnitDefinitionErrors` (the one unit code the wire
+/// numbering had before the per-definition parse codes were added).
+fn diagnostic_to_error_code(diagnostic: &engine::db::Diagnostic) -> SimlinErrorCode {
+    if is_unit_diagnostic(diagnostic) {
+        SimlinErrorCode::UnitDefinitionErrors
+    } else {
+        SimlinErrorCode::from(diagnostic.code())
     }
+}
+
+fn is_unit_diagnostic(diagnostic: &engine::db::Diagnostic) -> bool {
+    use engine::db::DiagnosticCategory;
+    matches!(
+        diagnostic.category(),
+        DiagnosticCategory::UnitDefinition
+            | DiagnosticCategory::UnitConsistency
+            | DiagnosticCategory::UnitInference
+    )
 }
 
 /// Collects models that have unit warnings as a set of model names.
@@ -446,23 +460,11 @@ fn diagnostic_to_error_code(error: &engine::db::DiagnosticError) -> SimlinErrorC
 fn collect_models_with_unit_warnings(
     diagnostics: &[engine::db::Diagnostic],
 ) -> std::collections::HashSet<String> {
-    let mut models_with_warnings = std::collections::HashSet::new();
-
-    for d in diagnostics {
-        if d.severity == engine::db::DiagnosticSeverity::Warning {
-            if let engine::db::DiagnosticError::Unit(_) = &d.error {
-                models_with_warnings.insert(d.model.clone());
-            }
-            // Also catch model-level UnitMismatch warnings (from unit inference)
-            if let engine::db::DiagnosticError::Model(e) = &d.error {
-                if e.code == engine::common::ErrorCode::UnitMismatch {
-                    models_with_warnings.insert(d.model.clone());
-                }
-            }
-        }
-    }
-
-    models_with_warnings
+    diagnostics
+        .iter()
+        .filter(|d| d.severity == engine::db::DiagnosticSeverity::Warning && is_unit_diagnostic(d))
+        .map(|d| d.model.clone())
+        .collect()
 }
 
 // ── patch application ──────────────────────────────────────────────────

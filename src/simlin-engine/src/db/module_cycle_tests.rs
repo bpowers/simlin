@@ -329,7 +329,10 @@ fn unused_draft_cycle_does_not_block_valid_main() {
     // ...and main's own passes still ran, so its own problem is still reported.
     assert!(
         diags.iter().any(|d| d.model == "main"
-            && matches!(&d.error, DiagnosticError::Model(e) if e.code == ErrorCode::UnitMismatch)),
+            && d.is(
+                crate::db::DiagnosticCategory::UnitInference,
+                ErrorCode::UnitMismatch
+            )),
         "a valid model's own diagnostics must not be hidden by an unrelated \
          draft cycle: {diags:?}"
     );

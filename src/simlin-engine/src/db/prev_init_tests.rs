@@ -1073,7 +1073,7 @@ fn a_positional_capture_shared_by_init_and_previous_unions_its_phases() {
             sync.project,
         );
         assert!(
-            parsed.variable.errors.is_empty(),
+            parsed.variable.diagnostics.is_empty(),
             "{}: one storage read by two consumers is not a helper collision",
             row.dt_equation
         );

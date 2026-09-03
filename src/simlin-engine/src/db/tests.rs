@@ -1176,25 +1176,18 @@ fn test_model_dependency_graph_circular_emits_diagnostic() {
         ModuleInputSet::empty(&db),
     );
 
-    // Collect diagnostics emitted by model_dependency_graph
-    let diags = model_dependency_graph::accumulated::<CompilationDiagnostic>(
-        &db,
-        result.models["main"].source,
-        result.project,
-        ModuleInputSet::empty(&db),
-    );
-    let has_circular = diags.iter().any(|d| {
-        matches!(
-            d.0.error,
-            DiagnosticError::Model(crate::common::Error {
-                code: crate::common::ErrorCode::CircularDependency,
-                ..
-            })
-        )
-    });
+    // The cycle is a fact on the graph, which the per-model owner reports.
     assert!(
-        has_circular,
-        "circular dependency between a and b should emit a diagnostic"
+        _graph.has_cycle(),
+        "circular dependency between a and b must be recorded on the graph"
+    );
+    let diags = collect_all_diagnostics(&db, result.project);
+    assert!(
+        diags.iter().any(|d| d.is(
+            DiagnosticCategory::Model,
+            crate::common::ErrorCode::CircularDependency
+        )),
+        "circular dependency between a and b should emit a diagnostic: {diags:?}"
     );
 }
 
@@ -2196,7 +2189,7 @@ fn test_accumulator_parse_error_bad_equation() {
         sync.project,
     );
     assert!(
-        parsed.variable.equation_errors().is_some(),
+        parsed.variable.fatal_diagnostics().next().is_some(),
         "struct fields should show equation errors for 'if then'"
     );
 
@@ -2276,9 +2269,9 @@ fn test_accumulator_parity_with_struct_fields() {
     let mut field_equation_errors: HashSet<(String, crate::common::EquationError)> = HashSet::new();
     for (var_name, synced_var) in &sync.models["main"].variables {
         let parsed = parse_var_no_module_ctx(&db, synced_var.source, sync.project);
-        if let Some(errors) = parsed.variable.equation_errors() {
-            for err in errors {
-                field_equation_errors.insert((var_name.clone(), err));
+        for diagnostic in &parsed.variable.diagnostics {
+            if let DiagnosticError::Equation(err) = diagnostic {
+                field_equation_errors.insert((var_name.clone(), err.clone()));
             }
         }
     }
@@ -3123,11 +3116,11 @@ fn variable_source_producers_agree_for_every_source_variable_kind() {
         _ => panic!("`demand_table` did not parse as an aux"),
     }
     assert!(
-        parsed["demand_table"].errors.is_empty(),
+        parsed["demand_table"].diagnostics.is_empty(),
         "a lookup-only table's empty equation is not an EmptyEquation error"
     );
     assert!(
-        parsed["imported_input"].errors.is_empty(),
+        parsed["imported_input"].diagnostics.is_empty(),
         "`can_be_module_input` suppresses EmptyEquation on an empty equation"
     );
     assert_eq!(

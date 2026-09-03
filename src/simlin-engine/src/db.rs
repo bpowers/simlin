@@ -27,7 +27,7 @@ use std::collections::BTreeSet;
 // * `input`      -- the `#[salsa::input]` structs + interned key types.
 // * `query`      -- demand-driven read queries (parse, dims, deps, module map).
 // * `sync`       -- datamodel -> salsa-input sync (fresh + incremental).
-// * `diagnostic` -- the `CompilationDiagnostic` accumulator + drain helpers.
+// * `diagnostic` -- the per-model diagnostic owner + drain helpers.
 // * `layout`     -- the per-model body layout query.
 // * `var_fragment` / `fragment_compile` -- the lowering / emission halves of
 //   per-variable compilation.
@@ -66,10 +66,8 @@ mod var_fragment;
 pub(crate) use var_fragment::lowered_source_variable;
 
 mod diagnostic;
-pub use diagnostic::{
-    CompilationDiagnostic, Diagnostic, DiagnosticError, DiagnosticSeverity,
-    collect_all_diagnostics, collect_model_diagnostics, model_all_diagnostics,
-};
+pub use crate::diagnostic::{Diagnostic, DiagnosticCategory, DiagnosticError, DiagnosticSeverity};
+pub use diagnostic::{collect_all_diagnostics, collect_model_diagnostics, model_all_diagnostics};
 
 mod input;
 pub use input::{
@@ -519,18 +517,23 @@ pub enum LtmMode {
 /// cross-element-through-aggregate loops (`recover_cross_agg_loops`, GH
 /// #515) hit its loop-count budget (`ltm::MAX_CROSS_AGG_LOOPS`) or its
 /// per-aggregate petal cap, so the recovered loop list is incomplete (a
-/// `CompilationDiagnostic` `Warning` is also emitted then -- the flag is
-/// the robust signal, the `Warning`'s reachability being #466's concern).
-/// Always `false` in discovery mode and for models with no synthetic aggs.
+/// `Warning` is among `diagnostics` then -- the flag is the robust signal,
+/// the `Warning`'s reachability being #466's concern). Always `false` in
+/// discovery mode and for models with no synthetic aggs.
 ///
 /// `pathways_truncated` is `true` when internal module-pathway enumeration hit
 /// the per-input-port pathway budget (`ltm::MAX_MODULE_PATHWAYS`, GH #649), so
 /// at least one input port's composite link score was computed over a
 /// deterministic prefix of its pathways rather than the complete set -- the
-/// score is degraded, not wrong-by-panic. A `CompilationDiagnostic` `Warning`
-/// naming the module + clipped port(s) accompanies it; the flag is the robust
-/// signal. Only ever `true` for a model with input ports (a sub-model or a
-/// discovery-mode model) whose pathway count exceeds the budget.
+/// score is degraded, not wrong-by-panic. A `Warning` naming the module +
+/// clipped port(s) accompanies it; the flag is the robust signal. Only ever
+/// `true` for a model with input ports (a sub-model or a discovery-mode model)
+/// whose pathway count exceeds the budget.
+///
+/// `diagnostics` is every `Warning` the derivation raised, in order (the mode
+/// flips, truncations, declined edges and unhonoured pins): facts on the
+/// value, never accumulated, which only `model_all_diagnostics` emits (see
+/// `db::ltm::LtmWarnings`).
 /// (`Debug`/`Eq` are conditional/absent for the same reasons as
 /// `LtmSyntheticVar`.)
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -541,6 +544,7 @@ pub struct LtmVariablesResult {
     pub agg_recovery_truncated: bool,
     pub pathways_truncated: bool,
     pub mode: LtmMode,
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 /// Compute the link score equation text for a single causal link.
@@ -1419,6 +1423,8 @@ mod combined_fragment_tests;
 mod dep_ref_tests;
 #[cfg(test)]
 mod diagnostic_determinism_tests;
+#[cfg(test)]
+mod diagnostic_payload_tests;
 #[cfg(test)]
 mod diagnostic_tests;
 #[cfg(test)]

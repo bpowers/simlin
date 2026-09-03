@@ -231,7 +231,7 @@ fn test_previous_lagged_feedback_does_not_create_cycle() {
     let model = sync.models["main"].source;
     let dep_graph = model_dependency_graph(&db, model, sync.project, ModuleInputSet::empty(&db));
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "PREVIOUS(b) should be treated as a lagged dependency, not a same-step cycle"
     );
 }
@@ -363,7 +363,7 @@ fn test_active_initial_previous_is_lagged_in_initial_graph() {
     let dep_graph = model_dependency_graph(&db, model, sync.project, ModuleInputSet::empty(&db));
 
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "active_initial PREVIOUS references should be lagged and not induce initial-step cycles"
     );
     assert!(
@@ -760,7 +760,7 @@ fn test_previous_plus_init_does_not_keep_current_step_dependency() {
     let dep_graph = model_dependency_graph(&db, model, sync.project, ModuleInputSet::empty(&db));
 
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "PREVIOUS+INIT lagged/snapshot refs should not create dt cycles when initials are acyclic"
     );
     let a_dt = dep_graph

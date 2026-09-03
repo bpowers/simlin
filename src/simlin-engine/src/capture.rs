@@ -359,8 +359,10 @@ fn subtree_parsed_variable(
         ident: Ident::<Canonical>::new(ident),
         units: None,
         eqn: Some(eqn),
-        errors,
-        unit_errors: vec![],
+        diagnostics: errors
+            .into_iter()
+            .map(crate::diagnostic::DiagnosticError::Equation)
+            .collect(),
         kind: VarKind::Aux {
             ast,
             // A helper's body is one expression. It has no separate
@@ -517,8 +519,7 @@ impl ImplicitModule {
             ident: Ident::<Canonical>::new(&self.ident),
             units: None,
             eqn: None,
-            errors: vec![],
-            unit_errors: vec![],
+            diagnostics: vec![],
             kind: VarKind::Module {
                 model_name: Ident::new(&self.model_name),
                 inputs: self.references.clone(),

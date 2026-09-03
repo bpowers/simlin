@@ -12,7 +12,7 @@ use crate::datamodel::{self, Dimension, Equation, Project, SimSpecs, Variable};
 #[cfg(test)]
 use crate::db::sync_from_datamodel;
 use crate::db::{
-    DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
+    DiagnosticCategory, DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
     compile_project_incremental, sync_from_datamodel_incremental,
 };
 use crate::vm::{CompiledSimulation, Vm};
@@ -795,16 +795,8 @@ impl TestProject {
             .into_iter()
             .filter_map(|d| {
                 let detail = match &d.error {
-                    DiagnosticError::Unit(UnitError::ConsistencyError(_, _, details)) => {
-                        details.clone().unwrap_or_default()
-                    }
                     DiagnosticError::Unit(UnitError::DefinitionError(err)) => format!("{err}"),
-                    DiagnosticError::Unit(UnitError::InferenceError { details, .. }) => {
-                        details.clone().unwrap_or_default()
-                    }
-                    DiagnosticError::Model(e) if e.code == ErrorCode::UnitMismatch => {
-                        e.details.clone().unwrap_or_default()
-                    }
+                    DiagnosticError::Unit(_) => d.reason().unwrap_or_default().to_string(),
                     _ => return None,
                 };
                 Some((d.variable.clone(), detail))
@@ -851,17 +843,7 @@ impl TestProject {
                     (model, Some(var)) => format!("{model}.{var}"),
                     (model, None) => model.to_string(),
                 };
-                let code = match &d.error {
-                    DiagnosticError::Equation(eq_err) => eq_err.code,
-                    DiagnosticError::Model(err) => err.code,
-                    DiagnosticError::Unit(unit_err) => match unit_err {
-                        UnitError::DefinitionError(eq_err) => eq_err.code,
-                        UnitError::ConsistencyError(code, _, _) => *code,
-                        UnitError::InferenceError { code, .. } => *code,
-                    },
-                    DiagnosticError::Assembly(_) => ErrorCode::NotSimulatable,
-                };
-                (location, code)
+                (location, d.code())
             })
             .collect()
     }
@@ -872,11 +854,11 @@ impl TestProject {
 
         let has_error = diagnostics.iter().any(|d| {
             d.severity == DiagnosticSeverity::Error
-                && match &d.error {
-                    DiagnosticError::Equation(eq_err) => eq_err.code == expected_error,
-                    DiagnosticError::Model(err) => err.code == expected_error,
-                    _ => false,
-                }
+                && matches!(
+                    d.category(),
+                    DiagnosticCategory::Equation | DiagnosticCategory::Model
+                )
+                && d.code() == expected_error
         });
 
         if !has_error {
@@ -902,16 +884,7 @@ impl TestProject {
         let diagnostics = self.diagnostics_incremental();
 
         let has_unit_mismatch = diagnostics.iter().any(|d| {
-            if let DiagnosticError::Unit(unit_err) = &d.error {
-                let code = match unit_err {
-                    UnitError::DefinitionError(eq_err) => eq_err.code,
-                    UnitError::ConsistencyError(code, _, _) => *code,
-                    UnitError::InferenceError { code, .. } => *code,
-                };
-                code == ErrorCode::UnitMismatch
-            } else {
-                false
-            }
+            matches!(&d.error, DiagnosticError::Unit(_)) && d.code() == ErrorCode::UnitMismatch
         });
 
         if !has_unit_mismatch {

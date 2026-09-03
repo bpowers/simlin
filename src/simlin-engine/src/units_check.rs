@@ -3,12 +3,11 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::collections::{HashMap, HashSet};
-use std::result::Result as StdResult;
 
 use crate::ast::{Ast, BinaryOp, Expr2};
 use crate::builtins::{BuiltinFn, Loc};
 use crate::common::{
-    Canonical, EquationError, ErrorCode, Ident, Result, UnitError, UnitResult, canonicalize,
+    Canonical, EquationError, ErrorCode, Ident, UnitError, UnitResult, canonicalize,
 };
 use crate::datamodel::UnitMap;
 use crate::units::{Context, UnitOp, Units, combine};
@@ -482,8 +481,7 @@ fn time_variable(ctx: &Context) -> Variable {
         ident: Ident::new("time"),
         units: Some(model_time_units(ctx)),
         eqn: None,
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Aux {
             ast: None,
             init_ast: None,
@@ -528,15 +526,15 @@ pub fn evaluate_expr_units(
     evaluator.check(expr)
 }
 
-// check uses the model's variables' equations and unit definitions to
-// calculate the concrete units for each equation.  The outer result
-// indicates if we had a problem running the analysis.  The inner result
-// returns a list of unit problems, if there was one.
+/// Evaluate every equation of `model` under `ctx` (and the inferred units of
+/// the variables that declare none) and return each variable's unit problem:
+/// the list is the analysis' whole outcome, empty when every equation agrees
+/// with its declared units.
 pub fn check(
     ctx: &Context,
     inferred_units: &HashMap<Ident<Canonical>, UnitMap>,
     model: &UnitModel,
-) -> Result<StdResult<(), UnitErrorList>> {
+) -> UnitErrorList {
     use UnitError::{ConsistencyError, DefinitionError};
     let mut errors: Vec<(Ident<Canonical>, UnitError)> = vec![];
 
@@ -775,5 +773,5 @@ pub fn check(
     // unit definitions to calculate the concrete units for each
     // equation.  If these don't match the units as defined, we
     // log an error.
-    Ok(Err(errors))
+    errors
 }

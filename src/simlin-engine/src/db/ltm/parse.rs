@@ -86,8 +86,10 @@ pub(super) fn parse_ltm_equation(
         ident: Ident::new(var_name),
         units: None,
         eqn: None,
-        errors,
-        unit_errors: vec![],
+        diagnostics: errors
+            .into_iter()
+            .map(crate::diagnostic::DiagnosticError::Equation)
+            .collect(),
         kind: crate::variable::VarKind::Aux {
             ast,
             init_ast: None,

@@ -1627,8 +1627,9 @@ path silently collapsed the per-element `Equation::Arrayed` to the first
 slot's text, since `link_score_dimensions` returned `[]` for the disjoint
 edge.) If the target references the source via a *non-literal* index (a
 `DynamicIndex` site) the edge is not statically scoreable:
-`emit_unscoreable_disjoint_edge_warning` accumulates a `CompilationDiagnostic`
-`Warning` naming the edge, *no* link-score variable is emitted, and the caller
+`emit_unscoreable_disjoint_edge_warning` records a `Warning` naming the edge
+on the derivation's facts (`LtmVariablesResult::diagnostics`), *no* link-score
+variable is emitted, and the caller
 does not fall through to the per-shape fallback (which would build the
 misleading scalarized stand-in).
 
@@ -1980,8 +1981,9 @@ cases remain deliberate carve-outs:
    for the measurements. (The legacy per-loop relative-score equation synthesis
    compounded this with an O(P^2) text blowup; moving the normalization
    post-simulation -- divergence 6 below -- removed that factor from
-   augmentation cost.) Auto-flip emits a `CompilationDiagnostic` at
-   `Warning` severity so callers can surface the fallback to users.
+   augmentation cost.) Auto-flip records a `Warning` on the derivation's
+   facts (`LtmVariablesResult::diagnostics`, emitted once per model by
+   `db::model_all_diagnostics`) so callers can surface the fallback to users.
 
    The node-count gates alone do not bound enumeration cost -- elementary-
    circuit count is super-exponential in SCC *density*, not node count (a

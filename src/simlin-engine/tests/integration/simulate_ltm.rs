@@ -7391,8 +7391,6 @@ fn test_disjoint_dim_arrayed_target_per_source_element_link_scores() {
 /// variable (no scalar stand-in). The model still compiles and simulates.
 #[test]
 fn test_disjoint_dim_unscoreable_edge_warns_and_emits_no_link_score() {
-    use simlin_engine::db::CompilationDiagnostic;
-
     let project = build_disjoint_dim_unscoreable_model("disjoint_dim_unscoreable");
 
     let mut db = SimlinDb::default();
@@ -7419,9 +7417,8 @@ fn test_disjoint_dim_unscoreable_edge_warns_and_emits_no_link_score() {
     );
 
     // A Warning diagnostic naming the unscoreable source -> target edge.
-    let diags =
-        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, source_model, sync.project);
-    let has_warning = diags.iter().any(|CompilationDiagnostic(d)| {
+    let diags = &model_ltm_variables(&db, source_model, sync.project).diagnostics;
+    let has_warning = diags.iter().any(|d| {
         d.severity == simlin_engine::db::DiagnosticSeverity::Warning
             && matches!(
                 &d.error,
@@ -7432,7 +7429,7 @@ fn test_disjoint_dim_unscoreable_edge_warns_and_emits_no_link_score() {
     assert!(
         has_warning,
         "expected a Warning diagnostic naming the unscoreable source -> target edge; got: {:?}",
-        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+        diags
     );
 
     // The model still compiles and simulates (a missing link score is graceful).

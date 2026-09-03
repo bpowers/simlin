@@ -4436,7 +4436,7 @@ fn init_recurrence_mdl_multi_member_init_scc_simulates() {
     let dep_graph = model_dependency_graph(&db, model, sync.project, ModuleInputSet::empty(&db));
 
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "init_recurrence.mdl: the element-acyclic MULTI-member init-only \
          recurrence behind stocks must NOT set has_cycle (resolved_sccs = \
          {:?})",
@@ -4568,7 +4568,7 @@ fn helper_recurrence_mdl_synthetic_helper_in_scc_simulates() {
     // helper is unsourceable -> SCC `Unresolved` -> `has_cycle` true ->
     // `CircularDependency`.
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "helper_recurrence.mdl: the helper-bearing recurrence must NOT set \
          has_cycle once the synthetic helper is parent-sourced (AC3.1); \
          resolved_sccs = {:?}",
@@ -6416,12 +6416,14 @@ fn macro_attributable_classifier_separates_macro_from_nonmacro() {
     let registry_build = Diagnostic {
         model: String::new(),
         variable: None,
+        owner: None,
         error: model_err(ErrorCode::CircularDependency),
         severity: DiagnosticSeverity::Error,
     };
     let macro_body_error = Diagnostic {
         model: macro_model.clone(),
         variable: Some("m".to_string()),
+        owner: None,
         error: eq(ErrorCode::UnknownDependency),
         severity: DiagnosticSeverity::Error,
     };
@@ -6440,6 +6442,7 @@ fn macro_attributable_classifier_separates_macro_from_nonmacro() {
     let cascade_resolution_failure = Diagnostic {
         model: "main".to_string(),
         variable: Some("x".to_string()),
+        owner: None,
         error: eq(ErrorCode::UnknownBuiltin),
         severity: DiagnosticSeverity::Error,
     };
@@ -6466,12 +6469,14 @@ fn macro_attributable_classifier_separates_macro_from_nonmacro() {
     let model_logic_cycle = Diagnostic {
         model: "main".to_string(),
         variable: Some("previous_emissions_intensity_vs_refyr".to_string()),
+        owner: None,
         error: model_err(ErrorCode::CircularDependency),
         severity: DiagnosticSeverity::Error,
     };
     let dim_mismatch = Diagnostic {
         model: "main".to_string(),
         variable: Some("c_in_mixed_layer".to_string()),
+        owner: None,
         error: eq(ErrorCode::MismatchedDimensions),
         severity: DiagnosticSeverity::Error,
     };
@@ -6480,6 +6485,7 @@ fn macro_attributable_classifier_separates_macro_from_nonmacro() {
     let non_time_dollar = Diagnostic {
         model: "main".to_string(),
         variable: Some("\"goal_1.5_for_temperature\"".to_string()),
+        owner: None,
         error: eq(ErrorCode::DoesNotExist),
         severity: DiagnosticSeverity::Error,
     };
@@ -6488,6 +6494,7 @@ fn macro_attributable_classifier_separates_macro_from_nonmacro() {
     let macro_body_unit_warning = Diagnostic {
         model: macro_model.clone(),
         variable: Some("m".to_string()),
+        owner: None,
         error: model_err(ErrorCode::UnitMismatch),
         severity: DiagnosticSeverity::Warning,
     };

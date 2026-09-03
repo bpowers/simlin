@@ -246,21 +246,24 @@ post-simulation `discover_loops()` is unchanged.
 
 ### Error Handling
 
-Errors move from struct fields (`ModelStage1.errors`, `Variable.errors`) to a
-`#[salsa::accumulator]`:
+The one diagnostic payload is a `#[salsa::accumulator]`:
 
 ```rust
 #[salsa::accumulator]
-pub struct CompilationDiagnostic {
-    pub model: ModelId,
-    pub variable: Option<VariableId>,
-    pub error: Error,
+pub struct Diagnostic {
+    pub model: String,
+    pub variable: Option<String>,
+    pub owner: Option<String>,
+    pub severity: DiagnosticSeverity,
+    pub error: DiagnosticError, // Equation | Model | Unit | Assembly, typed
 }
 ```
 
-Tracked functions `accumulate()` errors as a side channel. Callers collect via
-`compile::accumulated::<CompilationDiagnostic>(db)`. Errors don't affect whether
-downstream queries need recomputation.
+A `Variable` carries the context-free `DiagnosticError`s its parse and lowering
+raised; the fragment constructors attach the model and variable, and the
+tracked queries the per-model owner `model_all_diagnostics` drives accumulate.
+Callers collect via `collect_all_diagnostics(db, project)`. Errors don't affect
+whether downstream queries need recomputation.
 
 ### libsimlin Integration
 

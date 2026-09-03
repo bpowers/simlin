@@ -207,13 +207,49 @@ impl Expr2Context for ArrayContext<'_> {
     }
 }
 
+/// Lower every element arm of an arrayed equation and, when several fail,
+/// report the first in the dimensions' declared element order (the product
+/// `compiler::expand_per_element` walks, so the arm the compiler would have
+/// compiled first) -- or, for arms naming no declared element, the smallest
+/// key. `elements` is a `HashMap`, whose iteration order would otherwise pick
+/// the arm at random; only the failure path walks the product.
+fn lower_arrayed_arms<A, B>(
+    dims: &[crate::dimensions::Dimension],
+    elements: impl IntoIterator<Item = (CanonicalElementName, A)>,
+    mut lower: impl FnMut(A) -> EquationResult<B>,
+) -> EquationResult<HashMap<CanonicalElementName, B>> {
+    let elements = elements.into_iter();
+    let mut lowered = HashMap::with_capacity(elements.size_hint().0);
+    let mut failures = Vec::new();
+    for (id, arm) in elements {
+        match lower(arm) {
+            Ok(arm) => {
+                lowered.insert(id, arm);
+            }
+            Err(err) => failures.push((id, err)),
+        }
+    }
+    if failures.is_empty() {
+        return Ok(lowered);
+    }
+    for combination in crate::dimensions::SubscriptIterator::new(dims) {
+        let key = CanonicalElementName::from_raw(&combination.join(","));
+        if let Some(first) = failures.iter().position(|(id, _)| *id == key) {
+            return Err(failures.swap_remove(first).1);
+        }
+    }
+    failures.sort_by(|(a, _), (b, _)| a.cmp(b));
+    Err(failures.swap_remove(0).1)
+}
+
 /// One equation's parsed AST at the typed tier: every call resolved against
 /// the builtin signature table and every `dimension·element` spelling folded to
 /// its constant. What the dependency classification walks
 /// (`db::variable_direct_dependencies`), and the first half of [`lower_ast`].
 ///
-/// An arrayed equation's element errors are collected before the default is
-/// lowered, and the default's error takes precedence -- the order the
+/// An arrayed equation's element arms are lowered before the default, and
+/// the default's error takes precedence over a failing arm's
+/// ([`lower_arrayed_arms`]: the first in declared order) -- the order the
 /// `Expr2` stage keeps as well.
 pub(crate) fn typed_ast(
     ast: &Ast<Expr0>,
@@ -224,10 +260,11 @@ pub(crate) fn typed_ast(
         Ast::Scalar(expr) => typed(expr).map(Ast::Scalar),
         Ast::ApplyToAll(dims, expr) => typed(expr).map(|expr| Ast::ApplyToAll(dims.clone(), expr)),
         Ast::Arrayed(dims, elements, default_expr, apply_default_to_missing) => {
-            let elements: EquationResult<HashMap<CanonicalElementName, Expr1>> = elements
-                .iter()
-                .map(|(id, expr)| typed(expr).map(|expr| (id.clone(), expr)))
-                .collect();
+            let elements = lower_arrayed_arms(
+                dims,
+                elements.iter().map(|(id, expr)| (id.clone(), expr)),
+                typed,
+            );
             let default_expr = default_expr.as_ref().map(typed).transpose()?;
             Ok(Ast::Arrayed(
                 dims.clone(),
@@ -263,10 +300,7 @@ pub(crate) fn lower_ast(
         }
         Ast::Arrayed(dims, elements, default_expr, apply_default_to_missing) => {
             let mut ctx = ArrayContext::new(scope, true);
-            let elements: EquationResult<HashMap<CanonicalElementName, Expr2>> = elements
-                .into_iter()
-                .map(|(id, expr)| Expr2::from(expr, &mut ctx).map(|expr| (id, expr)))
-                .collect();
+            let elements = lower_arrayed_arms(&dims, elements, |expr| Expr2::from(expr, &mut ctx));
             let default_expr = default_expr
                 .map(|expr| Expr2::from(expr, &mut ctx))
                 .transpose()?;

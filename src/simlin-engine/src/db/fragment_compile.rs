@@ -130,27 +130,14 @@ pub fn compile_var_fragment<'db>(
     // takes them as a slice.
     let module_input_names = module_inputs.names(db);
 
-    let (unit_diags, input) =
-        match explicit_fragment_input(db, var, model, project, module_input_names) {
-            ExplicitFragment::Fatal {
-                unit_diags,
-                fatal_diags,
-            } => {
-                // Non-fatal unit diagnostics were recorded before the fatal
-                // site; replay them first to preserve emission order, then
-                // the fatal diagnostic(s), then bail out (whole-variable None).
-                for diag in unit_diags.into_iter().chain(fatal_diags) {
-                    CompilationDiagnostic(diag).accumulate(db);
-                }
-                return None;
-            }
-            ExplicitFragment::Ready { unit_diags, input } => (unit_diags, input),
-        };
-
-    // Malformed-unit diagnostics are non-fatal: record them and continue.
-    for diag in unit_diags {
-        CompilationDiagnostic(diag).accumulate(db);
+    // Every diagnostic the constructor raised is replayed in its order; a
+    // fatal one leaves no input, and the variable compiles to nothing.
+    let ExplicitFragment { diagnostics, input } =
+        explicit_fragment_input(db, var, model, project, module_input_names);
+    for diag in diagnostics {
+        diag.accumulate(db);
     }
+    let input = input?;
 
     // Which runlists this variable belongs to, read through the three-bit
     // projection rather than the whole `ModelDepGraphResult`: the projection
@@ -221,14 +208,15 @@ pub fn compile_var_fragment<'db>(
             Ok(bytecodes) => Some(bytecodes),
             Err(reason) => {
                 let ident = var.ident(db);
-                CompilationDiagnostic(Diagnostic {
+                Diagnostic {
                     model: model.name(db).clone(),
                     variable: Some(ident.clone()),
+                    owner: None,
+                    severity: DiagnosticSeverity::Error,
                     error: DiagnosticError::Assembly(format!(
                         "variable '{ident}' failed to compile: {reason}"
                     )),
-                    severity: DiagnosticSeverity::Error,
-                })
+                }
                 .accumulate(db);
                 None
             }
@@ -252,12 +240,13 @@ pub fn compile_var_fragment<'db>(
     // the identifier a `MismatchedDimensions` could not shape -- rides along
     // with it. The error has no span, so the conversion leaves `0..0`.
     let accumulate_var_compile_error = |err: &crate::Error| {
-        CompilationDiagnostic(Diagnostic {
+        Diagnostic {
             model: model.name(db).clone(),
             variable: Some(var.ident(db).clone()),
-            error: DiagnosticError::Equation(err.clone().into()),
+            owner: None,
             severity: DiagnosticSeverity::Error,
-        })
+            error: DiagnosticError::Equation(err.clone().into()),
+        }
         .accumulate(db);
     };
 
@@ -325,10 +314,10 @@ pub(crate) enum ImplicitInputError {
     /// This parse synthesized no helper of that name: nothing to compile, and
     /// nothing to attribute beyond the caller's batch message.
     Absent,
-    /// The helper's body did not parse or lower; these are its errors, whose
-    /// spans index the PARENT's equation text (where the helper's subtree was
-    /// written), so they are reported as equation diagnostics on the parent.
-    Lowering(Vec<crate::common::EquationError>),
+    /// The helper's body did not parse or lower; these are its diagnostics,
+    /// whose spans index the PARENT's equation text (where the helper's
+    /// subtree was written), so they are reported on the parent.
+    Lowering(Vec<DiagnosticError>),
 }
 
 /// Every name a helper's equation resolves through: the head of each of its
@@ -504,8 +493,9 @@ pub(crate) fn implicit_fragment_input<'db>(
     } = lowered_implicit_variable(db, model, project, meta.name.clone())
         .as_ref()
         .ok_or(ImplicitInputError::Absent)?;
-    if let Some(errors) = lowered.equation_errors().filter(|e| !e.is_empty()) {
-        return Err(ImplicitInputError::Lowering(errors));
+    let failures: Vec<DiagnosticError> = lowered.fatal_diagnostics().cloned().collect();
+    if !failures.is_empty() {
+        return Err(ImplicitInputError::Lowering(failures));
     }
 
     let dim_context = project_dimensions_context(db, project);
@@ -609,37 +599,32 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
     // Each runlist-gated phase threads the GH #1000 `why` channel: a member
     // phase that fails to compile lands in `assemble_module`'s batch
     // "failed to compile fragments" message, so the reason is accumulated
-    // HERE. A CODEGEN refusal is a diagnostic naming the helper
-    // (interpolated into the message -- `errors.rs`'s `Assembly` arm never
-    // renders the `variable` field) and the parent it was synthesized for.
+    // HERE. A CODEGEN refusal is a diagnostic filed under the helper's
+    // physical name, whose `owner` is the parent it was synthesized for --
+    // the name a consumer presents it under -- and whose message names both
+    // (`errors.rs`'s `Assembly` arm never renders the `variable` field).
     // Accumulation attaches to the enclosing query: `model_all_diagnostics`'
     // implicit probe (drained by `collect_all_diagnostics`) or
     // `assemble_module` (dormant until GH #581). Severity is `Error` for the
     // same measured reason as the explicit path's (see
     // `compile_var_fragment`): the fragment's absence fails the build, and
     // the corpus sweep shape holds -- added rows land only on projects that
-    // already fail to compile.
-    // Identical reasons across phases collapse to ONE row (a helper whose
-    // initial and flow phases refuse the same construct is one defect, and
-    // duplicate rows are user-visible noise); distinct per-phase reasons
-    // each get their own row.
-    let mut reported_reasons: Vec<String> = Vec::new();
-    let mut report = |reason: String| {
-        if reported_reasons.contains(&reason) {
-            return;
-        }
-        reported_reasons.push(reason.clone());
-        CompilationDiagnostic(Diagnostic {
+    // already fail to compile. A helper whose initial and flow phases refuse
+    // the same construct raises two identical rows, which the drain collapses
+    // to one; distinct per-phase reasons each keep their row.
+    let report = |reason: String| {
+        Diagnostic {
             model: model.name(db).clone(),
             variable: Some(meta.name.clone()),
+            owner: Some(meta.parent_source_var.ident(db).clone()),
+            severity: DiagnosticSeverity::Error,
             error: DiagnosticError::Assembly(format!(
                 "implicit variable '{}' (synthesized while parsing '{}') failed to compile: \
                  {reason}",
                 meta.name,
                 meta.parent_source_var.ident(db)
             )),
-            severity: DiagnosticSeverity::Error,
-        })
+        }
         .accumulate(db);
     };
 
@@ -660,20 +645,21 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
     let input = match implicit_fragment_input(db, meta, model, project, module_input_names) {
         Ok(input) => input,
         Err(ImplicitInputError::Absent) => return None,
-        // A body's equation errors are the PARENT's: their spans index the
+        // A body's diagnostics are the PARENT's: their spans index the
         // parent's equation text, where the argument was written, so they are
         // reported against the parent and render as a snippet under the
         // argument, exactly as a plain equation's errors do. Identical errors
         // from the per-element helpers of one parent collapse to one row.
-        Err(ImplicitInputError::Lowering(errors)) => {
+        Err(ImplicitInputError::Lowering(failures)) => {
             let parent = meta.parent_source_var.ident(db).clone();
-            for err in errors {
-                CompilationDiagnostic(Diagnostic {
+            for error in failures {
+                Diagnostic {
                     model: model.name(db).clone(),
                     variable: Some(parent.clone()),
-                    error: DiagnosticError::Equation(err),
+                    owner: None,
                     severity: DiagnosticSeverity::Error,
-                })
+                    error,
+                }
                 .accumulate(db);
             }
             return unemitted();
@@ -711,7 +697,7 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
             .map(|arg| arg.get_loc())
     };
     let emit_ctx = input.emit_ctx();
-    let mut phase = |is_initial: bool| -> Option<PerVarBytecodes> {
+    let phase = |is_initial: bool| -> Option<PerVarBytecodes> {
         match lower_fragment(&input, is_initial) {
             Ok(var) => {
                 match crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting(
@@ -726,17 +712,18 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
             }
             Err(err) => {
                 match parent_argument_span() {
-                    Some(loc) => CompilationDiagnostic(Diagnostic {
+                    Some(loc) => Diagnostic {
                         model: model.name(db).clone(),
                         variable: Some(meta.parent_source_var.ident(db).clone()),
+                        owner: None,
+                        severity: DiagnosticSeverity::Error,
                         error: DiagnosticError::Equation(crate::common::EquationError {
                             start: loc.start,
                             end: loc.end,
                             code: err.code,
                             details: err.details,
                         }),
-                        severity: DiagnosticSeverity::Error,
-                    })
+                    }
                     .accumulate(db),
                     None => report(format!("could not be lowered: {err}")),
                 }

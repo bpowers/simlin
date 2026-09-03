@@ -422,7 +422,7 @@ fn dt_cycle_sccs_resolved_self_recurrence_has_no_circular() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "an element-acyclic single-variable self-recurrence must NOT set \
          has_cycle"
     );
@@ -472,7 +472,7 @@ fn dt_cycle_sccs_genuine_two_cycle_still_circular() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        dep_graph.has_cycle,
+        dep_graph.has_cycle(),
         "a genuine 2-cycle still sets has_cycle (Phase 1 does not resolve \
          multi-variable SCCs)"
     );
@@ -1218,7 +1218,7 @@ fn init_recurrence_behind_stock_model_dep_graph_resolves_no_circular() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "an element-acyclic init-only recurrence behind a stock must NOT \
          set has_cycle"
     );
@@ -1239,21 +1239,9 @@ fn init_recurrence_behind_stock_model_dep_graph_resolves_no_circular() {
             .collect::<BTreeSet<_>>()
     );
 
-    // No CircularDependency diagnostic was accumulated.
-    let diags = crate::db::model_dependency_graph::accumulated::<crate::db::CompilationDiagnostic>(
-        &db,
-        model,
-        result.project,
-        crate::db::ModuleInputSet::empty(&db),
-    );
+    // No CircularDependency was recorded.
     assert!(
-        !diags.iter().any(|d| matches!(
-            d.0.error,
-            crate::db::DiagnosticError::Model(crate::common::Error {
-                code: crate::common::ErrorCode::CircularDependency,
-                ..
-            })
-        )),
+        dep_graph.cycle_variables.is_empty(),
         "no CircularDependency must be raised for the resolved init-only \
          recurrence"
     );
@@ -1296,7 +1284,7 @@ fn init_same_element_self_cycle_behind_stock_is_unresolved() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        dep_graph.has_cycle,
+        dep_graph.has_cycle(),
         "a genuine init element self-cycle still sets has_cycle"
     );
     assert!(
@@ -1335,7 +1323,7 @@ fn dt_self_recurrence_not_double_resolved_as_init_scc() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "the aux self-recurrence must still resolve (no CircularDependency)"
     );
     assert_eq!(
@@ -1569,7 +1557,7 @@ fn two_stock_init_recurrence_model_dep_graph_resolves_no_circular() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "an element-acyclic MULTI-member init-only recurrence behind \
          stocks must NOT set has_cycle"
     );
@@ -1641,7 +1629,7 @@ fn two_stock_init_genuine_element_cycle_is_unresolved() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        dep_graph.has_cycle,
+        dep_graph.has_cycle(),
         "a genuine multi-variable init element cycle still sets has_cycle"
     );
     assert!(
@@ -1714,7 +1702,7 @@ fn model_dep_graph_result_equality_observes_resolved_sccs() {
         runlist_initials: Vec::new(),
         runlist_flows: Vec::new(),
         runlist_stocks: Vec::new(),
-        has_cycle: false,
+        cycle_variables: Vec::new(),
         resolved_sccs: Vec::new(),
     };
 
@@ -1877,7 +1865,7 @@ fn resolve_dt_genuine_element_two_cycle_is_unresolved() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        dep_graph.has_cycle,
+        dep_graph.has_cycle(),
         "a genuine multi-variable element 2-cycle still sets has_cycle"
     );
     assert!(
@@ -2122,7 +2110,7 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
             crate::db::ModuleInputSet::empty(&db),
         );
         assert!(
-            !dep_graph.has_cycle,
+            !dep_graph.has_cycle(),
             "positive control: the well-founded self-recurrence must \
              resolve when nothing forces a node unsourceable"
         );
@@ -2164,7 +2152,7 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        dep_graph.has_cycle,
+        dep_graph.has_cycle(),
         "an unsourceable in-SCC node must fall back to CircularDependency \
          (has_cycle), never silently miscompile"
     );
@@ -2176,20 +2164,18 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
 
     // The fallback must surface the loud `CircularDependency` diagnostic
     // (the model is rejected, not silently miscompiled).
-    let diags = crate::db::model_dependency_graph::accumulated::<crate::db::CompilationDiagnostic>(
-        &db,
-        model,
-        result.project,
-        crate::db::ModuleInputSet::empty(&db),
-    );
     assert!(
-        diags.iter().any(|d| matches!(
-            &d.0.error,
-            crate::db::DiagnosticError::Model(e)
-                if e.code == crate::common::ErrorCode::CircularDependency
+        !dep_graph.cycle_variables.is_empty(),
+        "the loud-safe fallback must record a CircularDependency \
+         (model rejected, not silently miscompiled)"
+    );
+    let diags = crate::db::collect_all_diagnostics(&db, result.project);
+    assert!(
+        diags.iter().any(|d| d.is(
+            crate::db::DiagnosticCategory::Model,
+            crate::common::ErrorCode::CircularDependency
         )),
-        "the loud-safe fallback must accumulate a CircularDependency \
-         diagnostic (model rejected, not silently miscompiled)"
+        "the recorded cycle must reach collect_all_diagnostics: {diags:?}"
     );
 
     // And the focused-accessor contract: the forced-unsourceable member
@@ -2458,7 +2444,7 @@ fn model_dep_graph_two_member_ref_scc_resolves_with_external_deps() {
     );
 
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "an element-acyclic multi-member recurrence SCC must NOT set \
          has_cycle (the intra-SCC cross-edges are not real \
          variable-granularity ordering constraints once the SCC is one \
@@ -2615,7 +2601,7 @@ fn model_dep_graph_scc_members_contiguous_with_interposing_external_var() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "the element-acyclic {{aaa,zzz}} SCC must NOT set has_cycle"
     );
     assert_eq!(
@@ -2670,7 +2656,7 @@ fn model_dep_graph_two_member_ref_scc_resolves_no_external_deps() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "the bare ref-shaped {{ce,ecc}} SCC (no external dep) must NOT set \
          has_cycle"
     );
@@ -2719,7 +2705,7 @@ fn model_dep_graph_interleaved_shaped_multi_member_scc_resolves() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "x -> a[A1] -> y -> a[A2] is element-acyclic through the a<->y \
          whole-variable 2-cycle: model_dependency_graph must NOT set \
          has_cycle"
@@ -2775,7 +2761,7 @@ fn model_dep_graph_genuine_element_two_cycle_stays_circular() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        dep_graph.has_cycle,
+        dep_graph.has_cycle(),
         "a genuine multi-variable element 2-cycle MUST still set \
          has_cycle (loud-safe: it is absent from the resolved-SCC map so \
          its back-edge still errs)"
@@ -2804,7 +2790,7 @@ fn model_dep_graph_genuine_scalar_two_cycle_stays_circular() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        dep_graph.has_cycle,
+        dep_graph.has_cycle(),
         "a genuine scalar 2-cycle MUST still set has_cycle (loud-safe)"
     );
     assert!(
@@ -2835,7 +2821,7 @@ fn model_dep_graph_acyclic_control_unaffected_by_scc_aware_break() {
         result.project,
         crate::db::ModuleInputSet::empty(&db),
     );
-    assert!(!dep_graph.has_cycle, "an acyclic model has no cycle");
+    assert!(!dep_graph.has_cycle(), "an acyclic model has no cycle");
     assert!(
         dep_graph.resolved_sccs.is_empty(),
         "an acyclic model resolves no SCC (zero refinement work)"
@@ -2877,7 +2863,7 @@ fn model_dep_graph_single_var_self_recurrence_byte_identical_to_phase1() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "the N=1 self-recurrence (1-member SCC) must NOT set has_cycle"
     );
     assert_eq!(
@@ -3054,7 +3040,7 @@ fn resolve_dt_sample_if_true_shaped_scc_resolves_despite_previous_self_read() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "the SAMPLE IF TRUE-shaped SCC must NOT set has_cycle once the \
          element-level lagged-read strip lands (the false C-LEARN \
          CircularDependency)"
@@ -3169,7 +3155,7 @@ fn resolve_dt_self_loop_subsumed_by_multi_scc_resolves_no_duplicate() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "a self-edge subsumed by a resolved multi-member SCC must NOT \
          produce a residual CircularDependency: the >= 2 SCC's combined \
          per-element fragment already evaluates `a`'s self-edge in the \

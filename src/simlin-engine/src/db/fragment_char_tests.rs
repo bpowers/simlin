@@ -824,7 +824,7 @@ fn render_resolved_scc(db: &SimlinDb, project: SourceProject) -> String {
     let model = *project.models(db).get("main").unwrap();
     let dep_graph = model_dependency_graph(db, model, project, ModuleInputSet::empty(db));
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "the SCC fixture's element-acyclic recurrence must survive the cycle gate"
     );
     assert_eq!(

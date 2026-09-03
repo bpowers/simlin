@@ -875,6 +875,130 @@ dependency by spelling. Pinned by the module row of
 `test_get_incoming_links_lists_variables_of_the_model_not_module_reads`.
 <!-- END_PHASE_8 -->
 
+<!-- START_PHASE_9 -->
+### Phase 9: One diagnostic payload
+
+**Goal:** one typed payload from a raising site to `collect_all_diagnostics`,
+context attached once, and exactly-once emission by construction (DoD 8).
+
+**Phase 9: one diagnostic payload from raising site to collection.**
+`diagnostic::Diagnostic { model, variable, owner, severity, error:
+DiagnosticError }` is the payload and the salsa accumulator; `DiagnosticError
+::{Equation(EquationError), Model(Error), Unit(UnitError), Assembly(String)}`
+is the typed error exactly as its raising site produced it, and `code()`,
+`category()` (`DiagnosticCategory`: the four arms with `Unit` split by
+`UnitError`'s three), `location()`, `reason()` and `is()` are the projections
+every consumer reads, so a consumer never restates the arm-by-arm plumbing and
+the sum carries every field its site had. Context attachment is a type: a
+`Variable` carries the context-free `DiagnosticError`s its parse and lowering
+raised (`Variable::diagnostics`, one channel where a `Unit` entry is a
+malformed `<units>` string compiled past and every other entry stops the
+variable, `Variable::fatal_diagnostics`), and a `Diagnostic` is built at the
+salsa layer's raising sites, where the model, the variable and the severity
+are known -- the fragment constructors (`explicit_fragment_input`, whose
+`ExplicitFragment { diagnostics, input: Option<..> }` carries every row the
+constructor raised beside the input it built or did not, and
+`implicit_fragment_input`), the per-model advisories, the unit pass and the
+LTM `ltm_warning` -- so nothing between a site and the drain re-attaches
+context and nothing asserts it.
+
+**Phase 9: presentation.** `variable` is the physical name a row is filed
+under (a helper's `$⁚…` name, the identity the layout and the drain's
+de-duplication use) and `owner` the variable a helper was synthesized for --
+a user variable, or for an LTM helper the synthetic link score -- which is
+the name a consumer presents the row under: `errors::FormattedError`, the one
+presentation adapter, presents `owner.or(variable)` and carries the category
+in place of a second unit-kind spelling (libsimlin's `SimlinUnitErrorKind`
+derives from it). The unit-inference umbrella is a `Unit(InferenceError)`
+filed under no variable, formatted by the same arm as every inference error,
+each involved variable named once. The drain collapses identical rows by full
+equality after attribution -- one fragment's two phases, one parent's
+per-element helpers -- and any row differing in a field survives.
+
+**Phase 9: facts, not accumulation.** A recursive or multiply-keyed query
+never accumulates: `model_ltm_variables` records its warnings and its
+declined edges in one `LtmWarnings` sink and returns them as
+`LtmVariablesResult::diagnostics`, `model_ltm_fragment_diagnostics` returns
+its `Vec<Diagnostic>`, `link_score_equation_text_shaped` carries a declined
+edge's warning as `ShapedLinkScore::Unscoreable`'s payload, and the
+dependency graph records its cycle as `ModelDepGraphResult::cycle_variables`.
+The non-recursive `model_all_diagnostics` emits each model's facts once, in
+the accumulator walk's order -- a memo's own rows, then each input's in the
+order it was first read: the rows the owner files itself (the duplicates and
+the advisories), then the variables' rows, the cycle rows (a cycle member's
+own failure comes first, the row libsimlin's `SimlinError.code` reports, and
+a cycle whose every member is fatal is reported like any other), the
+helpers', the unit pass, the wiring check and the LTM facts, each a tracked
+child read in that order -- and `collect_all_diagnostics` emits the project
+facts (unit declarations, the macro set, module cycles) from their memos.
+When several arms of an arrayed equation fail to lower, the arm reported is the first in the dimensions'
+declared element order, the first the compiler would have compiled
+(`ast::lower_arrayed_arms`, a walk only the failure path pays for; the
+default arm's error takes precedence over any element arm's), and codegen's
+array-operand refusal names the expression kind it cannot read
+(`walk_expr_as_view`).
+
+**Phase 9 semantic divergences.** Eight, each pinned. (1) The unit-inference
+umbrella presents as `units inference warning in model '{m}' involving
+{vars}: unit_mismatch -- {reason}` rather than `warning in model '{m}':
+ModelError{unit_mismatch: {reason}}`: the same row (model, no variable,
+`UnitMismatch`, Warning, `FormattedErrorKind::Units`, inference kind, the
+same bare reason and zero offsets) under the inference arm's summary line.
+The 33 corpus models carrying an umbrella move exactly that line, plain and
+`--ltm` alike
+(`errors::tests::inference_umbrella_presents_as_a_unit_inference_warning`,
+`unit_checking_test::inference_umbrella_detail_is_user_facing`). (2) An
+arrayed equation with several failing arms reports the first in declared
+order on every database, the default arm's error over any element arm's, and
+the smallest key among failing arms naming no declared element; no corpus
+model has two failing arms
+(`db::diagnostic_payload_tests::the_first_failing_element_arm_in_declared_order_is_reported`).
+(3) The codegen refusal reads `an array operand here must be a variable, a
+subscripted array or an array temp, but it is an arithmetic or comparison
+expression` rather than the base's `Cannot push view for expression type
+Discriminant(N)`; no corpus row carried the old text
+(`db::diagnostic_payload_tests::a_codegen_refusal_names_the_expression_kind`).
+(4) A generated helper's row presents under its owner:
+`FormattedError.variable_name` -- libsimlin's `SimlinErrorDetail.variable_name`,
+pysimlin's `ErrorDetail.variable_name` and the TypeScript `variableName` the
+diagram attaches errors by -- is the parent for a user helper's codegen
+refusal (`$⁚aggx⁚0⁚arg0` -> `aggx`) and the synthetic link score for an LTM
+implicit helper's fragment failure, where the base presented the `$⁚…`
+name; 16 `--ltm` corpus rows in four models (`conveyor_containers.xmile`,
+`covid19_severity.stmx`, `arrays_cname.xmile`, `arrays_varname.xmile`) move
+that field and no CLI text
+(`errors::tests::a_helpers_row_presents_under_its_owner`,
+`ltm_unified_tests::test_model_ltm_fragment_diagnostics_covers_implicit_helpers`).
+(5) A sub-model's LTM warnings are reported once per project, not once per
+model reaching it (GH #866): under two parents, or two instances in one
+parent, the base reported a circuit-budget flip, a bogus pin, a declined edge
+or an ungenerable partial equation three or two times
+(`db::diagnostic_payload_tests::every_warning_family_is_emitted_once_across_revisions`,
+every family under one parent, two parents and two instances). No corpus
+model has the shape. (6) A cycle's row follows the rows of the variables in
+it, and a cycle whose every member is itself fatal is reported: the base
+accumulated the cycle inside the dependency graph, where it reached the
+drain only through the first non-fatal member's fragment. The mixed shape
+`a = b + bogus`, `b = a` reports `a: UnknownDependency` then
+`b: CircularDependency` on both, and libsimlin's `SimlinError.code` is
+`UnknownDependency` on both; the all-fatal shape `a = b + bogus`,
+`b = a + bogus` reports the cycle beside the two members' own failures where
+the base reported the members only. One corpus model carries a cycle beside
+variable rows, `test/metasd/beer-game/RealBeer4-Sterman13.mdl`: its cycle row moves
+from first to after them, plain and `--ltm` alike, order-only
+(`db::diagnostic_payload_tests::a_cycles_row_follows_its_members_rows`,
+libsimlin `test_error_code_of_a_failing_cycle_member_is_its_own_failure`).
+(7) A model's rows come out in the accumulator walk's order above, the LTM
+facts one child read last in derivation order where the base's
+`model_ltm_fragment_diagnostics` led its own fragment-failure rows over the
+derivation's; order is no contract (GH #1036), and 8 `--ltm` corpus
+models' stderr lines permute, each sorted-line-identical. (8) A per-variable inference row names each involved
+variable once (`errors::involved_names`) where the base joined every source,
+so a variable at two locations read "involving x, x"; message-only, and no
+corpus row has the shape
+(`errors::tests::an_inference_row_names_each_involved_variable_once`).
+<!-- END_PHASE_9 -->
+
 ## Additional Considerations
 
 **Team process.** One checkout holds the branch; at most three agents run at
@@ -2550,3 +2674,4 @@ hash is not available to it.
 | 8.2+8.3 | `engine: one lowered memo per variable` | 7.2435 G (median of 3; range 7.2367-7.2437), +0.23% against `75ee055a` re-measured in the same session (7.2268 G, median of 3, range 7.2260-7.2295; interleaved pairs +0.14 / +0.25 / +0.19%), inside the channel's floor and not investigated | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Artifacts byte-identical on C-LEARN, plain (every count, 1053 initial programs, 371 names, 7 modules, the full opcode histogram) and under `CLEARN_LTM=1` (29398 slots, 855713 / 1477 / 24669 opcodes, 14078 literals, 2166 views); LTM compile channel 80.2377 G against 82.8212 G, **-3.12%** (pairs -3.13 / -3.12 / -3.16%, `CLEARN_COMPILE_ITERS=5`); memory (counting allocator, C-LEARN, bytes the database and sync state retain above the parsed datamodel; peak = compile phase): plain compile-only 22.94 -> 32.16 MiB (peak 30.2 -> 39.3), plain with diagnostics 36.58 -> 33.54 (peak 43.9 -> 40.8), LTM 228.26 -> 225.98 (peak 270.0 -> 267.5), LTM with diagnostics 242.34 -> 227.02 (peak 284.1 -> 268.9); allocations plain 1,562,107 / 199.2 MiB -> 1,541,101 / 193.7 MiB, LTM 26.06 M / 2859.0 MiB -> 24.90 M / 2583.6 MiB; sweep of 509 models plain and `--ltm` 398 / 398 identical, 110 refused identically, 0 one-sided, the movers GH #859 flippers (`arrays_varname`, `arrays_cname`, `test_subscript_transposition`: the same two digests on both binaries in both modes, 6x each), 8 `--ltm` stderr line-order permutations (GH #1036); `test/` diagnostics corpus identical (plain 471 rows over 366 keys, `--ltm` 856 over 391). The +9.2 MiB is the lowered trees a compile-only caller retains for a unit pass or describer it never runs (pysimlin `Model.simulate()` used alone, a C/Go embedder holding a project without `get_errors`, serve's transient `simulate_sync` as peak only), while every path that collects diagnostics, the CLI's `simulate` included, retains less than the base. A per-element helper with a module head is pinned only under the module-cycle gate (`units_tests::a_module_cycle_reached_through_a_per_element_helper_still_unit_checks`: without it the unit pass on a cyclic project is salsa's `compute_layout` cycle panic), and the rename patch is syntactic over the equation text ("Phase 8.2 semantic divergences"). Engine suite (lib 5697, integration 783), libsimlin, CLI, mcp-core, clippy, `cargo fmt --all -- --check` and the default-feature check green, every golden unregenerated |
 | 8.3b | `engine: box the Expr2 node's array bounds` | 7.1283 G (median of 3; range 7.1281-7.1303), **-1.01%** against `a17e8027` re-measured in the same session (7.2008 G, median of 3, range 7.2004-7.2008; interleaved pairs -0.98 / -1.01 / -1.01%) | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Artifacts byte-identical on C-LEARN, plain (every count, 1053 initial programs, 371 names, 7 modules, the full opcode histogram) and under `CLEARN_LTM=1` (29398 slots, 855713 / 1477 / 24669 opcodes, 14078 literals, 2166 views; LTM compile channel 78.9676 G against 79.8251 G, **-1.07%**, pairs -1.10 / -1.07 / -1.12%, `CLEARN_COMPILE_ITERS=5`); `size_of::<Expr2>()` 128 -> 64 (the bounds slot 72 -> 8; `Expr3` 128 -> 64, `IndexExpr2` 264 -> 136, `variable::Variable` 680 -> 552); memory (counting allocator, C-LEARN, bytes the database and sync state retain above the parsed datamodel; peak = compile phase): plain compile-only 32.16 -> 29.49 MiB (peak 39.3 -> 36.7), plain with diagnostics 33.54 -> 30.73 (peak 40.8 -> 38.0), LTM 225.97 -> 223.12 (peak 267.4 -> 264.7), LTM with diagnostics 227.02 -> 224.20 (peak 268.9 -> 266.3); allocations plain 1,540,711 / 193.7 MiB -> 1,542,030 / 171.3 MiB, LTM 24,898,752 / 2583.6 MiB -> 24,905,400 / 2277.1 MiB; sweep of 509 models plain and `--ltm` 399 / 397 identical, 110 refused identically, 0 one-sided, the two `--ltm` movers GH #859 flippers (`arrays_varname`, `test_subscript_transposition`: the same two digests on both binaries in both modes, 6x each), 7 `--ltm` stderr line-order permutations (GH #1036); `test/` diagnostics corpus identical (plain 471 rows over 366 keys, `--ltm` 856 over 391). A representation change with the observable held fixed: the -2.7 MiB on every row is the retained `Expr2` trees at half a node, under a third of the +9.2 MiB the memos cost a compile-only caller (the `Variable` beside each tree, the heads and the handle map are the rest), so that row stays above the pre-memo base (22.94 MiB). The instruction saving is the node copies (every construction, clone and move of a node moves half the bytes), and the +0.1% / +0.03% allocations are one box per bound produced. Engine suite (lib 5699, integration 783), libsimlin, CLI, mcp-core, clippy, `cargo fmt --all -- --check` and the default-feature check green, every golden unregenerated |
 | 8.5 | `engine: one dependency representation, classified once` | 6.9918 G (median of 3; range 6.9895-6.9932), **-1.84%** against `9e6253cd` re-measured in the same session (7.1229 G, median of 3, range 7.1224-7.1313; interleaved pairs -1.96 / -1.87 / -1.81%) | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Artifacts byte-identical on C-LEARN, plain (every count, 1053 initial programs, 371 names, 7 modules, the full opcode histogram) and under `CLEARN_LTM=1` (29398 slots, 855713 / 1477 / 24669 opcodes, 14078 literals, 2166 views; LTM compile channel 77.7223 G against 79.0077 G, **-1.63%**, pairs -1.59 / -1.69 / -1.63%, `CLEARN_COMPILE_ITERS=5`); memory (counting allocator, C-LEARN, bytes the database and sync state retain above the parsed datamodel; peak = compile phase): plain compile-only 29.49 -> 28.97 MiB (peak 36.7 -> 36.2), plain with diagnostics 30.73 -> 30.18 (peak 38.0 -> 37.5), LTM 223.17 -> 222.52 (peak 264.9 -> 264.0), LTM with diagnostics 224.28 -> 223.55 (peak 266.1 -> 265.8); allocations plain 1,542,125 / 171.3 MiB -> 1,466,767 / 163.5 MiB, LTM 24,905,822 / 2277.5 MiB -> 24,226,276 / 2241.2 MiB; sweep of 509 models plain and `--ltm` 397 / 398 identical, 110 refused identically, 0 one-sided, the movers GH #859 flippers (the same two digests on both binaries in both modes, 6x each), 8 `--ltm` stderr line-order permutations (GH #1036); `test/` diagnostics corpus plain 471 -> 472 rows over 366 -> 367 keys, `--ltm` 856 -> 857 over 391 -> 392, the one added row divergence 4. The saving is deleted work: one classification per variable and helper over its `Expr1`, where the base lowered every one to `Expr2` a second time under an empty scope for its dependencies, and no `·` re-splitting at the consumers. Seven divergences pinned under "Phase 8.5 semantic divergences", none with a corpus model of its shape but divergence 4 (`sir_social_distancing_mixnot.stmx`, refused on both binaries): the nested-stock ordering (5) moves numbers on a model the base ran, from the #591-c1 stale-input class to the one-hop rule's, and the output-port scan (6) adds LTM series. Engine suite (lib 5686, integration 783), libsimlin (244), CLI, mcp-core, clippy, `cargo fmt --all -- --check` and the default-feature check green, every golden unregenerated |
+| 9 | `engine: one diagnostic payload from site to collection` | 7.0152 G (median of 3; range 7.0119-7.0152), +0.38% against `baeac250` re-measured in the same session (6.9890 G, median of 3, range 6.9825-6.9902; interleaved pairs +0.33 / +0.47 / +0.36%), inside the channel's floor and not investigated | 5189 | 28505 / 1477 / 24669 | 1368 / 162 / 28 / 627 | Artifacts byte-identical on C-LEARN, plain (every count, 1053 initial programs, 371 names, 7 modules, the full opcode histogram) and under `CLEARN_LTM=1` (29398 slots, 855713 / 1477 / 24669 opcodes, 14078 literals, 2166 views); LTM compile channel 78.6850 G against 77.7404 G, +1.22% (pairs +1.18 / +1.32 / +1.13%, `CLEARN_COMPILE_ITERS=5`), with compile-phase allocations plain 1,466,823 / 163.9 MiB -> 1,466,145 / 163.5 MiB and LTM 24,226,667 / 2242.7 MiB -> 24,224,380 / 2241.5 MiB and a symbol-level profile whose whole delta sits in untouched lowering and lexing functions (the code this phase touches is under 0.01% of samples), so it is recorded as build-layout perturbation; sweep of 509 models plain and `--ltm` 396 / 398 identical, 110 refused identically, 0 one-sided, the movers the GH #859 flippers `arrays_cname`, `arrays_varname` and `subscript_transposition` (each the same two digests on both binaries in both modes, 6x each), one plain stderr line-order permutation (`RealBeer4-Sterman13.mdl`, its cycle row after the variable rows, divergence 6) and 8 `--ltm` (GH #1036, divergence 7); `test/` diagnostics corpus plain 472 rows over 367 keys and `--ltm` 857 over 392 on both binaries, the same per-code distribution but the 33 umbrella rows (divergence 1), which move from the `Model` arm's rendering to the inference arm's. A diagnostic is one typed payload from its raising site to `collect_all_diagnostics`, context attached once by type, recursive queries returning facts and the per-model owner emitting them exactly once (`db::diagnostic_payload_tests`: the producer x category x severity matrix, the once-across-revisions matrix over every warning family, one-variable invalidation under `ProbedDb`). Engine suite (lib 5693, integration 783), libsimlin (245), CLI, mcp-core, clippy, `cargo fmt --all -- --check` and the default-feature check green, every golden unregenerated, `simlin.h` byte-identical under cbindgen |

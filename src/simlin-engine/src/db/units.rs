@@ -45,10 +45,9 @@ use crate::common::{Canonical, Ident};
 use crate::datamodel;
 use crate::db::var_fragment::{implicit_dep_shape, source_dep_shape};
 use crate::db::{
-    CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceModel,
-    SourceProject, SourceVariable, SourceVariableKind, model_implicit_var_info,
-    model_lowered_variables, project_dimensions_context, project_units_context,
-    source_model_is_stdlib,
+    Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceModel, SourceProject,
+    SourceVariable, SourceVariableKind, model_implicit_var_info, model_lowered_variables,
+    project_dimensions_context, project_units_context, source_model_is_stdlib,
 };
 use crate::units_check::UnitModel;
 
@@ -272,7 +271,7 @@ pub(crate) fn unit_model(db: &dyn Db, model: SourceModel, project: SourceProject
 /// templates that only make sense when instantiated with concrete inputs.
 #[salsa::tracked]
 pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject) {
-    use crate::common::{ErrorCode, ErrorKind};
+    use crate::common::ErrorCode;
 
     // Skip stdlib models -- they are generic and unit checking doesn't
     // apply until instantiated with concrete inputs. The gate is the crate's
@@ -345,16 +344,18 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
     // available on the `InferenceResult` for callers that want it.
     let inference = crate::units_infer::infer(&models, units_ctx, target_model);
     if has_declared_units && !inference.conflicts.is_empty() {
-        // The diagnostic detail is user-facing (it reaches the GUI's error
-        // panel): a plain-language sentence naming the involved variables,
-        // not the raw `1 == unit-expression` constraint dump. The full
-        // conflict list (with constraint text) remains available on the
-        // `InferenceResult` for callers that want it.
-        let friendly = match &inference.conflicts[0] {
+        // The umbrella is the first conflict, an inference error naming the
+        // variables it involves, with a detail that is user-facing (it reaches
+        // the GUI's error panel): a plain-language sentence naming those
+        // variables, not the raw `1 == unit-expression` constraint dump.
+        let (sources, friendly) = match &inference.conflicts[0] {
             crate::common::UnitError::InferenceError {
                 sources, details, ..
-            } => crate::errors::unit_inference_reason(sources, details.as_deref()),
-            other => format!("{other}"),
+            } => (
+                sources.clone(),
+                crate::errors::unit_inference_reason(sources, details.as_deref()),
+            ),
+            other => (vec![], format!("{other}")),
         };
         let detail = if inference.conflicts.len() == 1 {
             friendly
@@ -364,16 +365,17 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
                 inference.conflicts.len()
             )
         };
-        CompilationDiagnostic(Diagnostic {
+        Diagnostic {
             model: model_name.clone(),
             variable: None,
-            error: DiagnosticError::Model(crate::common::Error {
-                kind: ErrorKind::Model,
+            owner: None,
+            severity: DiagnosticSeverity::Warning,
+            error: DiagnosticError::Unit(crate::common::UnitError::InferenceError {
                 code: ErrorCode::UnitMismatch,
+                sources,
                 details: Some(detail),
             }),
-            severity: DiagnosticSeverity::Warning,
-        })
+        }
         .accumulate(db);
     }
     let inferred_units = inference.resolved;
@@ -456,9 +458,11 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
                         let (first_src, first_units) = &group_units[0];
                         for (other_src, other_units) in &group_units[1..] {
                             if first_units != other_units {
-                                CompilationDiagnostic(Diagnostic {
+                                Diagnostic {
                                     model: model_name.clone(),
                                     variable: Some(var_ident.to_string()),
+                                    owner: None,
+                                    severity: DiagnosticSeverity::Warning,
                                     error: DiagnosticError::Unit(
                                         crate::common::UnitError::ConsistencyError(
                                             ErrorCode::UnitMismatch,
@@ -475,8 +479,7 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
                                             )),
                                         ),
                                     ),
-                                    severity: DiagnosticSeverity::Warning,
-                                })
+                                }
                                 .accumulate(db);
                             }
                         }
@@ -497,32 +500,15 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
     if !has_declared_units {
         return;
     }
-    match crate::units_check::check(units_ctx, &inferred_units, target_model) {
-        Ok(Ok(())) => {}
-        Ok(Err(errors)) => {
-            for (ident, err) in errors.into_iter() {
-                CompilationDiagnostic(Diagnostic {
-                    model: model_name.clone(),
-                    variable: Some(ident.to_string()),
-                    error: DiagnosticError::Unit(err),
-                    severity: DiagnosticSeverity::Warning,
-                })
-                .accumulate(db);
-            }
+    for (ident, err) in crate::units_check::check(units_ctx, &inferred_units, target_model) {
+        Diagnostic {
+            model: model_name.clone(),
+            variable: Some(ident.to_string()),
+            owner: None,
+            severity: DiagnosticSeverity::Warning,
+            error: DiagnosticError::Unit(err),
         }
-        Err(err) => {
-            CompilationDiagnostic(Diagnostic {
-                model: model_name.clone(),
-                variable: None,
-                error: DiagnosticError::Model(crate::common::Error {
-                    kind: ErrorKind::Model,
-                    code: ErrorCode::Generic,
-                    details: Some(format!("unit checking failed: {}", err)),
-                }),
-                severity: DiagnosticSeverity::Warning,
-            })
-            .accumulate(db);
-        }
+        .accumulate(db);
     }
 
     // Conveyor block parameter unit checks (docs/design/conveyors.md §9.8).
@@ -801,16 +787,17 @@ fn check_conveyor_param_units(
         };
 
         if let Some(detail) = diagnostic_detail {
-            CompilationDiagnostic(Diagnostic {
+            Diagnostic {
                 model: model_name.to_string(),
                 variable: Some(param.stock.clone()),
+                owner: None,
+                severity: DiagnosticSeverity::Warning,
                 error: DiagnosticError::Unit(UnitError::ConsistencyError(
                     ErrorCode::UnitMismatch,
                     crate::builtins::Loc::default(),
                     Some(detail),
                 )),
-                severity: DiagnosticSeverity::Warning,
-            })
+            }
             .accumulate(db);
         }
     }
@@ -819,7 +806,7 @@ fn check_conveyor_param_units(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{SimlinDb, sync_from_datamodel};
+    use crate::db::{DiagnosticCategory, SimlinDb, sync_from_datamodel};
     use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_project};
 
     /// A module freshly drawn in the editor carries an EMPTY model_name -- it
@@ -897,19 +884,17 @@ mod tests {
 
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &project);
-        let diagnostics = check_model_units::accumulated::<CompilationDiagnostic>(
+        let diagnostics = check_model_units::accumulated::<Diagnostic>(
             &db,
             sync.models["a"].source,
             sync.project,
         );
 
         assert!(
-            diagnostics.iter().any(|cd| matches!(
-                &cd.0.error,
-                DiagnosticError::Model(e) if e.code == ErrorCode::UnitMismatch
-            )),
-            "a model's own unit error must still be reported despite the cycle, got: {:?}",
-            diagnostics.iter().map(|cd| &cd.0).collect::<Vec<_>>()
+            diagnostics
+                .iter()
+                .any(|d| d.is(DiagnosticCategory::UnitInference, ErrorCode::UnitMismatch)),
+            "a model's own unit error must still be reported despite the cycle, got: {diagnostics:?}"
         );
     }
 
@@ -988,10 +973,10 @@ mod tests {
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, project);
         let source = sync.models["main"].source;
-        check_model_units::accumulated::<CompilationDiagnostic>(&db, source, sync.project)
+        check_model_units::accumulated::<Diagnostic>(&db, source, sync.project)
             .into_iter()
-            .map(|cd| cd.0.clone())
             .filter(|d| unit_detail(d).contains("conveyor"))
+            .cloned()
             .collect()
     }
 

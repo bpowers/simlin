@@ -86,7 +86,7 @@ pub(crate) fn model_flows_invariant<'db>(
     let dep_graph = model_dependency_graph(db, model, project, module_inputs);
     // A model with a genuine cycle is rejected at assembly; classifying it is
     // pointless (and its runlists are empty), so bail to the safe empty set.
-    if dep_graph.has_cycle {
+    if dep_graph.has_cycle() {
         return Arc::new(BTreeSet::new());
     }
 

@@ -300,7 +300,7 @@ fn freeze_helper_reads_name_correct_rows_for_scattered_subdim() {
 /// The per-target-element emitter path (the C-LEARN "139" shape): a scalar
 /// source feeding an `Ast::Arrayed` target whose partials freeze a bare-`*`
 /// slice and a mixed pinned+`*` slice. These used to EMIT fragments that
-/// failed codegen ("Cannot push view ... expected array expression"); they
+/// failed codegen ("an array operand here must be a variable ..."); they
 /// must now compile via freeze helpers.
 fn scalar_to_arrayed_fixture() -> TestProject {
     TestProject::new("scalar_to_arrayed_freeze")

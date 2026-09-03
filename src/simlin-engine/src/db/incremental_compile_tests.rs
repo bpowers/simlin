@@ -953,7 +953,7 @@ fn test_circular_dependency_blocks_incremental_compilation() {
         sync.project,
         ModuleInputSet::empty(&db),
     );
-    assert!(dep_graph.has_cycle, "should detect circular dependency");
+    assert!(dep_graph.has_cycle(), "should detect circular dependency");
 
     let result = assemble_simulation(&db, sync.project, "main".to_string());
     assert!(

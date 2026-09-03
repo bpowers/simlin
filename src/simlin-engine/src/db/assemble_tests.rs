@@ -591,7 +591,10 @@ fn each_program_emits_in_runlist_order_then_the_ltm_tail() {
     let inputs = ModuleInputSet::empty(&db);
 
     let dep_graph = model_dependency_graph(&db, model, project, inputs);
-    assert!(!dep_graph.has_cycle, "the element-acyclic SCC must resolve");
+    assert!(
+        !dep_graph.has_cycle(),
+        "the element-acyclic SCC must resolve"
+    );
     assert_eq!(
         dep_graph.resolved_sccs.len(),
         1,
