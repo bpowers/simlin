@@ -181,10 +181,31 @@ impl<'a> OccurrenceLookup<'a> {
             p.len() > prefix.len()
                 && p.starts_with(prefix)
                 && !o.index_nested
-                && &o.shape == shape
+                && occurrence_realizes_shape(o, shape)
                 && occurrence_names_source(&o.reference, live)
         })
     }
+}
+
+/// Whether occurrence `occ` is a reading at the edge's access shape
+/// `live_shape` -- the one predicate behind every by-shape live/frozen
+/// decision the wrap makes (the subscript arm's live match, the whole-reducer
+/// freeze's lookahead, the frozen-reference walker). Shapes match by
+/// equality, with one deliberate widening: a `DynamicIndex` live shape is
+/// also realized by a `Wildcard` occurrence inside a reducer. The
+/// reference-site IR classifies the wildcard argument of a reducer it did
+/// NOT hoist as `DynamicIndex` for the edge consumers (the conservative
+/// cross-product), while the occurrence keeps the walker's `Wildcard`; read
+/// by equality alone the wrap finds no live occurrence for such an edge,
+/// freezes the reducer whole and scores it a silent 0: for
+/// `x = other + SUM(pop * w[*])` with `w` live, `PREVIOUS(sum(pop * w[*]))`
+/// moves with nothing. Held live, the argument stays and the co-sources
+/// freeze around it (`sum(PREVIOUS(pop) * w[*])`).
+pub(super) fn occurrence_realizes_shape(occ: &OccurrenceSite, live_shape: &RefShape) -> bool {
+    &occ.shape == live_shape
+        || (matches!(live_shape, RefShape::DynamicIndex)
+            && matches!(occ.shape, RefShape::Wildcard)
+            && occ.in_reducer)
 }
 
 /// Whether occurrence reference `reference` names the live source `live` --

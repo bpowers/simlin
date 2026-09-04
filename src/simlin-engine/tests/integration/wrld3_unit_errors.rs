@@ -20,7 +20,7 @@
 //!   inference and checking paths produce mismatch diagnostics citing both
 //!   `resource_unit` and `resource_units` as distinct units.
 
-use simlin_engine::common::{ErrorCode, UnitError};
+use simlin_engine::common::UnitError;
 use simlin_engine::db::{
     Diagnostic, DiagnosticError, SimlinDb, collect_all_diagnostics, sync_from_datamodel_incremental,
 };
@@ -95,11 +95,7 @@ fn wrld3_parses_without_hard_errors() {
     // having a parseable datamodel.  Check that no *blocking* equation errors exist.
     let blocking: Vec<_> = diagnostics
         .iter()
-        .filter(|d| match &d.error {
-            DiagnosticError::Unit(_) => false,
-            DiagnosticError::Model(e) if e.code == ErrorCode::UnitMismatch => false,
-            _ => true,
-        })
+        .filter(|d| !matches!(&d.error, DiagnosticError::Unit(_)))
         .collect();
     assert!(
         blocking.is_empty(),
@@ -139,13 +135,8 @@ fn wrld3_resource_unit_alias_should_not_conflict() {
     let conflicts: Vec<_> = diagnostics
         .iter()
         .filter(|d| {
-            // Only consider unit-related diagnostics (either Unit variant or
-            // model-level UnitMismatch).
-            let is_unit_diag = matches!(&d.error, DiagnosticError::Unit(_))
-                || matches!(
-                    &d.error,
-                    DiagnosticError::Model(e) if e.code == ErrorCode::UnitMismatch
-                );
+            // Only consider unit-related diagnostics.
+            let is_unit_diag = matches!(&d.error, DiagnosticError::Unit(_));
             if !is_unit_diag {
                 return false;
             }

@@ -5,12 +5,16 @@
 //! Regression tests for the module input-wiring diagnostic
 //! (`model_module_wiring_diagnostics`).
 //!
-//! `build_module_inputs` silently drops a module reference whose `dst` does not
-//! name an input of the target model, so the port reads its default and the
-//! simulation is quietly wrong. The salsa compile path had lost the legacy
-//! `BadModuleInputDst`/`BadModuleInputSrc` check; these tests pin that a
-//! mis-wired input now surfaces a Warning while a correct (module-qualified)
-//! wiring and empty placeholder rows stay clean.
+//! `build_module_inputs` runs at lowering and binds only what `bound_port`
+//! returns, raising no error for what it does not: a module reference whose
+//! `dst` is not this instance's `{module}·{port}`, or whose `src` is inside the
+//! instance's namespace, is dropped there silently, and a `dst` naming a port
+//! the target model does not declare binds a slot nothing reads. Either way the
+//! port reads its default and the simulation is quietly wrong. The diagnostic
+//! pass is the one place that wiring is validated
+//! (`BadModuleInputDst`/`BadModuleInputSrc`); these tests pin that a mis-wired
+//! input surfaces a Warning while a correct (module-qualified) wiring and empty
+//! placeholder rows stay clean.
 
 use crate::common::{Error, ErrorCode};
 use crate::datamodel::{self, Equation, Variable, Visibility};
@@ -123,6 +127,75 @@ fn dangling_src_warns() {
     assert!(
         has_warning(&diags, ErrorCode::BadModuleInputSrc),
         "a src naming no parent variable must warn: {diags:?}"
+    );
+}
+
+/// A reference whose `src` is inside the instance's own namespace binds no
+/// port (`db::assemble::bound_port`), so it warns as a bad source -- for a
+/// lone internal reference and beside a correctly bound port alike. Both
+/// fixtures are read through `open_xmile`, the spelling a writer emits.
+#[test]
+fn internal_src_warns_that_it_binds_nothing() {
+    let cases = [
+        // r3: the instance's only reference is internal.
+        (
+            r#"<module name="bridge" model_name="leaf"><connect to="bridge.input" from="bridge.output"/></module>"#,
+            r#"<aux name="input"><eqn>2</eqn></aux><aux name="output"><eqn>input + 1</eqn></aux>"#,
+        ),
+        // r3b: an internal reference beside a bound port.
+        (
+            r#"<aux name="source"><eqn>5</eqn></aux>
+<module name="bridge" model_name="leaf"><connect to="bridge.input" from="bridge.output"/><connect to="bridge.gain" from="source"/></module>"#,
+            r#"<aux name="input"><eqn>2</eqn></aux><aux name="gain"><eqn>1</eqn></aux><aux name="output"><eqn>input * gain + 1</eqn></aux>"#,
+        ),
+    ];
+    for (main_vars, leaf_vars) in cases {
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+<header><name>r3</name><vendor>simlin</vendor><product version="1.0">simlin</product></header>
+<sim_specs method="Euler"><start>0</start><stop>4</stop><dt>1</dt></sim_specs>
+<model name="main"><variables>{main_vars}<aux name="reader"><eqn>bridge.output</eqn></aux></variables></model>
+<model name="leaf"><variables>{leaf_vars}</variables></model>
+</xmile>"#
+        );
+        let project = crate::compat::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+            .expect("the fixture is well-formed XMILE");
+        let diags = diagnostics(&project);
+        let internal: Vec<&Diagnostic> = diags
+            .iter()
+            .filter(|d| {
+                d.severity == DiagnosticSeverity::Warning
+                    && matches!(&d.error, DiagnosticError::Model(Error { code: ErrorCode::BadModuleInputSrc, details: Some(m), .. }) if m.contains("own namespace") && m.contains("bridge\u{00B7}output"))
+            })
+            .collect();
+        assert_eq!(
+            internal.len(),
+            1,
+            "one warning names the internal source as binding nothing: {diags:?}"
+        );
+        assert!(
+            !has_warning(&diags, ErrorCode::BadModuleInputDst),
+            "the internal reference's dst names a real port: {diags:?}"
+        );
+    }
+}
+
+/// A connection between two instances recorded on the SOURCE instance (a
+/// `src` inside its namespace, a `dst` in another instance's -- the shape
+/// Stella writes for a module-to-module connect) is the `dst` arm's report,
+/// not an internal reference: it warns `BadModuleInputDst` only.
+#[test]
+fn a_cross_instance_reference_on_the_source_instance_is_a_dst_report_only() {
+    let diags = diagnostics(&project_with_reference("m·output", "other·port"));
+    assert!(
+        has_warning(&diags, ErrorCode::BadModuleInputDst),
+        "the dst names no port of this instance: {diags:?}"
+    );
+    assert!(
+        !has_warning(&diags, ErrorCode::BadModuleInputSrc),
+        "a src inside the namespace is reported as internal only when the dst is this \
+         instance's port: {diags:?}"
     );
 }
 

@@ -66,8 +66,9 @@ fn n_ary_mean_lowers_its_operands_as_scalars_like_n_ary_max() {
 
 /// `RANK` consumes its first argument as a whole array, exactly as
 /// `VECTOR SORT ORDER` does, so an operand that unions two named dimensions
-/// (`a[*] + b[*]` over `a[X]` and `b[Y]`, a 2 x 3 cross product that Pass 1
-/// evaluates into a temp) is accepted by both when the builtin ITSELF is what
+/// (`a[*] + b[*]` over `a[X]` and `b[Y]`, a 2 x 3 cross product the
+/// materializer evaluates into a temp) is accepted by both when the builtin
+/// ITSELF is what
 /// opens the `Expr2` dimension-union gate: the apply-to-all
 /// `out[X,Y] = RANK(a[*] + b[*], 1)`. (Under an outer reducer --
 /// `SUM(RANK(...))` -- the reducer opens the gate, so that spelling tells the
@@ -112,13 +113,17 @@ fn rank_accepts_the_cross_dimension_operand_vector_sort_order_accepts() {
 }
 
 /// The apply-to-all spelling of the same operand, `a[X] + b[Y]` inside an
-/// equation over `[X, Y]`, is refused by both builtins on the same grounds: the
-/// two element references are promoted to whole-array reads whose shapes
-/// (`[X]` and `[Y]`) neither contain the other, so no temp shape can be derived
-/// and codegen declines the operand (`compiler::array_operand`). The two
-/// spellings fail with the same diagnostics.
+/// equation over `[X, Y]`, is the SAME operand and gives the same array: a
+/// vector builtin promotes an apply-to-all element reference back to the whole
+/// axis, so both spellings arrive at `[X]` beside `[Y]`, and two shapes neither
+/// of which contains the other broadcast into their cross product.
+///
+/// The two spellings used to disagree -- the wildcard one compiled and the
+/// apply-to-all one was refused -- because two passes decided the operand's
+/// shape and only one of them knew the union. One pass decides it now, so this
+/// row is what says the spelling does not change the answer.
 #[test]
-fn rank_and_vector_sort_order_refuse_the_same_incomparable_a2a_operand() {
+fn rank_and_vector_sort_order_read_the_same_operand_in_both_spellings() {
     let fixture = |name: &str| {
         TestProject::new(name)
             .with_sim_time(0.0, 1.0, 1.0)
@@ -127,21 +132,12 @@ fn rank_and_vector_sort_order_refuse_the_same_incomparable_a2a_operand() {
             .array_with_ranges("a[X]", vec![("x1", "1"), ("x2", "2")])
             .array_with_ranges("b[Y]", vec![("y1", "30"), ("y2", "10"), ("y3", "20")])
     };
-    let codes = |project: &TestProject| -> Vec<String> {
-        project
-            .diagnostics_incremental()
-            .into_iter()
-            .map(|d| format!("{:?}", d.error))
-            .collect()
-    };
 
-    let sorted =
-        fixture("rank_refusal_vso").array_aux("out[X,Y]", "VECTOR SORT ORDER(a[X] + b[Y], 1)");
-    let ranked = fixture("rank_refusal_rank").array_aux("out[X,Y]", "RANK(a[X] + b[Y], 1)");
-    assert!(
-        sorted.compile_incremental().is_err() && ranked.compile_incremental().is_err(),
-        "both spellings are refused"
-    );
-    assert_eq!(codes(&sorted), codes(&ranked));
-    assert!(!codes(&ranked).is_empty(), "the refusal is reported");
+    let sorted = fixture("rank_a2a_vso").array_aux("out[X,Y]", "VECTOR SORT ORDER(a[X] + b[Y], 1)");
+    sorted.assert_compiles_incremental();
+    sorted.assert_vm_result("out", &[1.0, 2.0, 0.0, 1.0, 2.0, 0.0]);
+
+    let ranked = fixture("rank_a2a_rank").array_aux("out[X,Y]", "RANK(a[X] + b[Y], 1)");
+    ranked.assert_compiles_incremental();
+    ranked.assert_vm_result("out", &[5.0, 1.0, 3.0, 6.0, 2.0, 4.0]);
 }

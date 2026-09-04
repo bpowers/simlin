@@ -493,126 +493,90 @@ struct Denotation {
     dim_lists: Vec<Vec<u16>>,
 }
 
+/// What blanking makes of one operand: a resource id becomes 0; a variable
+/// reference, a jump offset, a table count and plain data stay.
+macro_rules! blank_operand {
+    (LiteralId, $operand:ident) => {
+        0
+    };
+    (GraphicalFunctionId, $operand:ident) => {
+        0
+    };
+    (ModuleId, $operand:ident) => {
+        0
+    };
+    (ViewId, $operand:ident) => {
+        0
+    };
+    (TempId, $operand:ident) => {
+        0
+    };
+    (DimListId, $operand:ident) => {
+        0
+    };
+    (SymVarRef, $operand:ident) => {
+        $operand.clone()
+    };
+    ($ty:ident, $operand:ident) => {
+        *$operand
+    };
+}
+
+/// The binding the oracle's match arm gives one operand: `_` for a resource
+/// id (its value is replaced, never read), the operand's name otherwise.
+/// Invoked in pattern position.
+macro_rules! bind_unless_blanked {
+    (LiteralId, $operand:ident) => {
+        _
+    };
+    (GraphicalFunctionId, $operand:ident) => {
+        _
+    };
+    (ModuleId, $operand:ident) => {
+        _
+    };
+    (ViewId, $operand:ident) => {
+        _
+    };
+    (TempId, $operand:ident) => {
+        _
+    };
+    (DimListId, $operand:ident) => {
+        _
+    };
+    ($ty:ident, $operand:ident) => {
+        $operand
+    };
+}
+
 /// Blank every resource id in `op`, leaving the instruction and all its
 /// non-id operands (including `SymVarRef`s and jump offsets) untouched.
 ///
-/// The match is EXHAUSTIVE with no catch-all arm, on purpose: a new
-/// `SymbolicOpcode` variant must be classified here before this file compiles,
-/// where a catch-all would silently treat its ids as constants.
-///
-/// That is a narrower guarantee than it looks, and the gap is worth naming.
-/// Exhaustiveness forces a DECISION about a new variant; it does not force the
-/// decision to be right, and it says nothing about the production side.
-/// `renumber_opcode` still ends in `other => other.clone()`, so a variant
-/// classified here as id-carrying but never given a renumber arm there would
-/// come through unrenumbered -- and the properties would not see it either,
-/// because the generators emit a fixed opcode set that a new variant is not in
-/// until someone adds it. Adding a resource-bearing opcode means touching three
-/// places, and only the first is compiler-enforced.
-fn blank_resource_ids(op: &SymbolicOpcode) -> SymbolicOpcode {
-    match op {
-        // ── carry resource ids ──────────────────────────────────────────
-        SymbolicOpcode::LoadConstant { .. } => SymbolicOpcode::LoadConstant { id: 0 },
-        SymbolicOpcode::AssignConstCurr { var, .. } => SymbolicOpcode::AssignConstCurr {
-            var: var.clone(),
-            literal_id: 0,
-        },
-        SymbolicOpcode::Lookup {
-            table_count, mode, ..
-        } => SymbolicOpcode::Lookup {
-            base_gf: 0,
-            table_count: *table_count,
-            mode: *mode,
-        },
-        SymbolicOpcode::LookupDirect {
-            table_count,
-            elem,
-            mode,
-            ..
-        } => SymbolicOpcode::LookupDirect {
-            base_gf: 0,
-            table_count: *table_count,
-            elem: *elem,
-            mode: *mode,
-        },
-        SymbolicOpcode::LookupArray {
-            table_count, mode, ..
-        } => SymbolicOpcode::LookupArray {
-            base_gf: 0,
-            table_count: *table_count,
-            mode: *mode,
-            write_temp_id: 0,
-        },
-        SymbolicOpcode::EvalModule { n_inputs, .. } => SymbolicOpcode::EvalModule {
-            id: 0,
-            n_inputs: *n_inputs,
-        },
-        SymbolicOpcode::PushStaticView { .. } => SymbolicOpcode::PushStaticView { view_id: 0 },
-        SymbolicOpcode::PushVarViewDirect { var, .. } => SymbolicOpcode::PushVarViewDirect {
-            var: var.clone(),
-            dim_list_id: 0,
-        },
-        SymbolicOpcode::LoadTempConst { index, .. } => SymbolicOpcode::LoadTempConst {
-            temp_id: 0,
-            index: *index,
-        },
-        SymbolicOpcode::BeginIter { has_write_temp, .. } => SymbolicOpcode::BeginIter {
-            write_temp_id: 0,
-            has_write_temp: *has_write_temp,
-        },
-        SymbolicOpcode::VectorElmMap {
-            full_source_len, ..
-        } => SymbolicOpcode::VectorElmMap {
-            write_temp_id: 0,
-            // NOT a resource id: an absolute element count of the source
-            // variable, invariant under renumbering, so it stays in the
-            // skeleton where a change to it fails the comparison.
-            full_source_len: *full_source_len,
-        },
-        SymbolicOpcode::VectorSortOrder { .. } => {
-            SymbolicOpcode::VectorSortOrder { write_temp_id: 0 }
+/// Derived from `symbolic_opcode_table!` with `blank_operand!`'s per-kind
+/// rules, so this oracle and `renumber_opcode` agree by construction on
+/// WHICH operands are resource ids. What neither can check is that a row
+/// types its operands truthfully -- a temp id declared as a bare `u8` is
+/// data to both, and `VectorElmMap::full_source_len` is a `u32` precisely
+/// because it is an absolute element count and not a temp id -- which is
+/// what review of the table is for.
+macro_rules! blanking_oracle {
+    ($(
+        $(#[$meta:meta])*
+        $name:ident $({ $( $(#[$fmeta:meta])* $field:ident : $ty:ident ),* $(,)? })?
+            => $cname:ident $({ $( $cfield:ident $(: $csrc:ident)? ),* $(,)? })? ,
+    )*) => {
+        fn blank_resource_ids(op: &SymbolicOpcode) -> SymbolicOpcode {
+            match op {
+                $( SymbolicOpcode::$name $({
+                    $( $field: bind_unless_blanked!($ty, $field) ),*
+                })? => SymbolicOpcode::$name $({
+                    $( $field: blank_operand!($ty, $field) ),*
+                })?, )*
+            }
         }
-        SymbolicOpcode::Rank { .. } => SymbolicOpcode::Rank { write_temp_id: 0 },
-        SymbolicOpcode::AllocateAvailable { .. } => {
-            SymbolicOpcode::AllocateAvailable { write_temp_id: 0 }
-        }
-        SymbolicOpcode::AllocateByPriority { .. } => {
-            SymbolicOpcode::AllocateByPriority { write_temp_id: 0 }
-        }
-
-        // ── carry no resource id ────────────────────────────────────────
-        SymbolicOpcode::Op2 { .. }
-        | SymbolicOpcode::Not { .. }
-        | SymbolicOpcode::LoadVar { .. }
-        | SymbolicOpcode::SymLoadPrev { .. }
-        | SymbolicOpcode::SymLoadInitial { .. }
-        | SymbolicOpcode::LoadGlobalVar { .. }
-        | SymbolicOpcode::PushSubscriptIndex { .. }
-        | SymbolicOpcode::LoadSubscript { .. }
-        | SymbolicOpcode::SetCond { .. }
-        | SymbolicOpcode::If { .. }
-        | SymbolicOpcode::Ret
-        | SymbolicOpcode::LoadModuleInput { .. }
-        | SymbolicOpcode::AssignCurr { .. }
-        | SymbolicOpcode::Apply { .. }
-        | SymbolicOpcode::BinOpAssignCurr { .. }
-        | SymbolicOpcode::BinOpAssignNext { .. }
-        | SymbolicOpcode::ViewSubscriptDynamic { .. }
-        | SymbolicOpcode::ViewRangeDynamic { .. }
-        | SymbolicOpcode::PopView { .. }
-        | SymbolicOpcode::LoadIterViewAt { .. }
-        | SymbolicOpcode::StoreIterElement { .. }
-        | SymbolicOpcode::NextIterOrJump { .. }
-        | SymbolicOpcode::EndIter { .. }
-        | SymbolicOpcode::ArraySum { .. }
-        | SymbolicOpcode::ArrayMax { .. }
-        | SymbolicOpcode::ArrayMin { .. }
-        | SymbolicOpcode::ArrayMean { .. }
-        | SymbolicOpcode::ArrayStddev { .. }
-        | SymbolicOpcode::ArraySize { .. }
-        | SymbolicOpcode::VectorSelect { .. } => op.clone(),
-    }
+    };
 }
+symbolic_opcode_table!(blanking_oracle);
 
 /// Bit patterns of one GF table, so tables compare by exact content.
 fn table_bits(table: &[(f64, f64)]) -> Vec<(u64, u64)> {
@@ -653,8 +617,9 @@ fn denote(op: &SymbolicOpcode, tables: &ResourceTables<'_>) -> Result<Denotation
         }
         // Every opcode carrying a GF run, taken from `SymbolicOpcode::gf_run`
         // rather than re-listed here, so this oracle cannot fall behind the
-        // opcode set: that match is exhaustive with no `_`, which makes a new
-        // lookup variant a compile error there instead of a silent skip here.
+        // opcode set: `gf_run` is derived from the table's
+        // `GraphicalFunctionId` operands, so a new lookup row reports itself
+        // there instead of being silently skipped here.
         op if op.gf_run().is_some() => {
             let (base_gf, table_count) = op.gf_run().unwrap();
             for k in 0..table_count {

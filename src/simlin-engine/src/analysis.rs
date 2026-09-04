@@ -285,7 +285,8 @@ pub fn build_sub_model_output_ports(
 /// declared dimensions via the salsa-cached `variable_dimensions` -- the SAME
 /// query `model_element_causal_edges` reads, so the from-side projection and
 /// the element graph derive dims identically. `dim_ctx` is the project's
-/// dimension-mapping correspondence (the GH #527 positional-mapping diagonal).
+/// dimension context (the executed correspondence of a mapped pair), and
+/// `flow_to_stock` the structural edges the wiring's pairing applies to.
 ///
 /// Public so the engine's LTM discovery tests can drive
 /// `discover_loops_with_graph` through the exact production decision rather
@@ -306,9 +307,23 @@ pub fn build_link_expansion_context(
         })
         .collect();
     let dim_ctx = crate::db::project_dimensions_context(db, source_project).clone();
+    let flow_to_stock = source_model
+        .variables(db)
+        .iter()
+        .filter(|(_, var)| var.kind(db) == crate::db::SourceVariableKind::Stock)
+        .flat_map(|(stock, var)| {
+            let stock = crate::common::Ident::<crate::common::Canonical>::new(stock.as_str());
+            var.inflows(db)
+                .iter()
+                .chain(var.outflows(db).iter())
+                .map(move |flow| (crate::common::Ident::new(flow.as_str()), stock.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
     crate::ltm_finding::LinkExpansionContext {
         declared_dims,
         dim_ctx,
+        flow_to_stock,
     }
 }
 
@@ -374,13 +389,13 @@ fn run_ltm_pipeline(
 
     // `build_sim` routes a conveyor/queue model through its special expansion
     // build path -- so the model compiles and runs correctly rather than tripping
-    // the ordinary path's NotExpanded guard (which previously surfaced here as a
-    // spurious `analysis_error`) -- while an ordinary model still compiles through
+    // the ordinary path's NotExpanded guard (which would otherwise surface here
+    // as a spurious `analysis_error`) -- while an ordinary model still compiles through
     // the incremental path with the caller's `ltm_enabled` intact. The special
     // path compiles the db's EXPANDED `SourceProject`, whose `ltm_enabled` is
     // always false, so it synthesizes no LTM variables: a conveyor/queue model's
     // loop analysis degrades to empty loops (conveyor/queue + LTM is a documented
-    // degradation) but no longer reports a false error.
+    // degradation) and reports no false error.
     //
     // A compile failure here is still the actionable GH #660 case: the GH #486
     // non-Euler hard-fail (and any other compile/`Vm::new`/`run_to_end` error)
@@ -533,7 +548,7 @@ fn to_feedback_loop(fl: &crate::ltm_finding::FoundLoop) -> FeedbackLoop {
 
     // Feed the SIGNED partition-relative loop score into dominant-period
     // selection so periods are share-based, not raw-magnitude-based: a loop in
-    // a high-raw-magnitude partition no longer dominates the period labels just
+    // a high-raw-magnitude partition does not dominate the period labels just
     // because its absolute score is large.  `rel_scores` is already normalized
     // per partition into [-1, 1] (see `to_loop_summary`); NaN coerces to 0 so
     // `calculate_dominant_periods` sees a finite series.
@@ -1015,7 +1030,7 @@ mod tests {
         assert_ne!(lone.partition, competitive.partition);
 
         // Periods exist for the competitive partition -- the lone loop's
-        // constant share no longer smothers it.
+        // constant share does not smother it.
         assert!(
             analysis
                 .dominant_loops_by_period
@@ -2014,13 +2029,11 @@ mod tests {
     /// TWO loops, not one, and not four: `m` is scalar, so every element of
     /// `growth` genuinely reads it, but each `growth[e]` feeds only `s[e]`, so
     /// the cycles are `s[e] → total → m → growth[e] → s[e]` per element with no
-    /// cross-element pair among them. The old comment's "a reinforcing module
-    /// loop" (singular) anticipated this shape imprecisely.
+    /// cross-element pair among them.
     ///
-    /// It also un-blocks what it used to describe as unreachable: the
-    /// per-exit-port recompute's element-subscript handling (PR #705
-    /// r3353758167) is no longer latent, since an arrayed module loop now
-    /// reaches it end to end. The unit-level guard for that path remains
+    /// This is also the end-to-end reach of the per-exit-port recompute's
+    /// element-subscript handling (PR #705 r3353758167): an arrayed module loop
+    /// exercises it live. The unit-level guard for that path is
     /// `recompute_strips_element_subscripts_before_port_match` in
     /// `ltm_finding.rs`.
     #[test]

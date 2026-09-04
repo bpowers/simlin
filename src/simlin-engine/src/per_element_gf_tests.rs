@@ -21,8 +21,7 @@
 
 use crate::datamodel;
 use crate::db::{
-    SimlinDb, compile_project_incremental, extract_tables_from_source_var,
-    sync_from_datamodel_incremental,
+    SimlinDb, compile_project_incremental, sync_from_datamodel_incremental, variable_tables,
 };
 use crate::vm::Vm;
 
@@ -1109,8 +1108,8 @@ fn arrayed_gf_project_with_mixed_eqns(
     }
 }
 
-/// TEST (extract_tables_from_source_var, non-sorted declared order): the
-/// production salsa DEPENDENCY-table path (`extract_tables_from_source_var`,
+/// TEST (variable_tables, non-sorted declared order): the
+/// production salsa DEPENDENCY-table path (`variable_tables`,
 /// db.rs, consumed via `db/var_fragment.rs` / db.rs for `LOOKUP(dep, x)`
 /// dependency tables) must also lay each element's table at its DECLARED
 /// dimension index, not its `Equation::Arrayed` Vec position. Declared order
@@ -1134,7 +1133,7 @@ fn extract_tables_non_sorted_declared_order_lands_by_dimension_index() {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let var = sync.models["main"].variables["g"].source;
-    let tables = extract_tables_from_source_var(&db, &var, sync.project);
+    let tables = variable_tables(&db, var, sync.project).clone();
 
     assert_eq!(
         tables.len(),
@@ -1150,7 +1149,7 @@ fn extract_tables_non_sorted_declared_order_lands_by_dimension_index() {
     assert_eq!(
         ys,
         vec![1000.0, 2000.0, 3000.0],
-        "extract_tables_from_source_var must order tables by DECLARED dimension \
+        "variable_tables must order tables by DECLARED dimension \
          index (Z=1000 @0, A=2000 @1, M=3000 @2), not Equation::Arrayed Vec \
          order (A=2000, M=3000, Z=1000); got {ys:?}"
     );

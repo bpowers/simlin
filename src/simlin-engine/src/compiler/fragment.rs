@@ -25,6 +25,7 @@
 //! [`DepKind::Module`] carries -- recursively, so a nested `m·n·x` resolves
 //! through the chain of shapes.
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
@@ -117,8 +118,13 @@ pub(crate) struct ShapeEntry {
 /// Everything the lowering and emission of one variable's fragments read,
 /// besides the phase. Built by one of the four constructors in `db/`.
 pub(crate) struct FragmentInput<'a> {
-    /// The variable being lowered, in its `Expr2` form.
-    pub target: Variable,
+    /// The variable being lowered, in its `Expr2` form: borrowed from its
+    /// per-variable memo (`db::lowered_source_variable`,
+    /// `db::lowered_implicit_variable`) by the two in-model constructors, so
+    /// compiling a variable retains no second copy of its lowered tree; owned
+    /// by the two LTM constructors, whose generated equations exist only for
+    /// the fragment.
+    pub target: Cow<'a, Variable>,
     /// The shape of every name the target can reference, its own included.
     pub deps: IdentMap<Ident<Canonical>, DepShape>,
     /// Graphical-function tables, keyed by the variable that declares them:
@@ -139,7 +145,7 @@ pub(crate) struct FragmentInput<'a> {
 
 impl<'a> FragmentInput<'a> {
     pub(crate) fn new(
-        target: Variable,
+        target: Cow<'a, Variable>,
         deps: IdentMap<Ident<Canonical>, DepShape>,
         tables: HashMap<Ident<Canonical>, Vec<Table>>,
         module_inputs: BTreeSet<Ident<Canonical>>,
@@ -181,19 +187,65 @@ impl<'a> FragmentInput<'a> {
     }
 }
 
+impl FragmentInput<'_> {
+    /// The context every lowering of this fragment runs under.
+    fn context(&self, is_initial: bool) -> Context<'_> {
+        Context::new(
+            ContextCore {
+                dimensions: self.dimensions,
+                dimensions_ctx: self.dimensions_ctx,
+                deps: &self.deps,
+                var_sizes: &self.var_sizes,
+                inputs: &self.module_inputs,
+            },
+            is_initial,
+        )
+    }
+
+    /// The target with its element scope resolved into its body: every read
+    /// the scope's element pins to one element spelled as that element's
+    /// static index (`Context::pin_element_reads`), and no scope left, so a
+    /// describer that classifies reads by their spelling (LTM's reference-site
+    /// IR) sees the reads the compiled fragment makes. A target with no scope
+    /// is returned as it is.
+    pub(crate) fn element_pinned_target(&self) -> Variable {
+        let Some(scope) = self.target.element_scope() else {
+            return self.target.as_ref().clone();
+        };
+        let ctx = self.context(false);
+        let Ok((_, elem_ctx, _)) = ctx.element_scope_context(scope) else {
+            return self.target.as_ref().clone();
+        };
+        let pin = |ast: &Option<crate::ast::Ast<crate::ast::Expr2>>| {
+            ast.as_ref().map(|ast| match ast {
+                crate::ast::Ast::Scalar(expr) => {
+                    crate::ast::Ast::Scalar(elem_ctx.pin_element_reads(expr))
+                }
+                other => other.clone(),
+            })
+        };
+        let mut pinned = self.target.as_ref().clone();
+        if let crate::variable::VarKind::Aux {
+            ast,
+            init_ast,
+            element_scope,
+            ..
+        } = &mut pinned.kind
+        {
+            *ast = pin(ast);
+            *init_ast = pin(init_ast);
+            *element_scope = None;
+        }
+        pinned
+    }
+}
+
 /// Lower one phase of a fragment: the target's initial-value form when
 /// `is_initial`, its flow or stock-update form otherwise. The `Err` is the
 /// phase's lowering failure, reported by the caller as a per-variable
 /// diagnostic; the other phase may still lower.
 pub(crate) fn lower_fragment(input: &FragmentInput<'_>, is_initial: bool) -> Result<Var> {
-    let core = ContextCore {
-        dimensions: input.dimensions,
-        dimensions_ctx: input.dimensions_ctx,
-        deps: &input.deps,
-        var_sizes: &input.var_sizes,
-        inputs: &input.module_inputs,
-    };
-    Var::new(&Context::new(core, is_initial), &input.target)
+    Var::new(&input.context(is_initial), input.target.as_ref())
 }
 
 /// The extent of every variable a reference over `deps` can address **in

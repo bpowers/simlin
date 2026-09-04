@@ -35,18 +35,18 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use salsa::Accumulator;
 
 use crate::canonicalize;
+use crate::capture::CaptureKind;
 // `Canonical`/`Ident` are used in production by the element-cycle
 // refinement (`resolve_recurrence_sccs` and friends), not only by the
 // `#[cfg(test)]` SCC accessors.
 use crate::common::{Canonical, Ident};
 use crate::db::{
-    CompilationDiagnostic, Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ModuleInputSet,
-    SourceModel, SourceProject, SourceVariable, SourceVariableKind, VariableDeps,
-    model_module_ident_context, variable_direct_dependencies,
+    Db, DepPhase, DepRefs, ModuleInputSet, SourceModel, SourceProject, SourceVariable,
+    SourceVariableKind, project_module_graph, variable_direct_dependencies,
 };
+use crate::variable::DepLag;
 
 /// Per-variable dependency facts used to build the model dependency
 /// graph.
@@ -63,13 +63,19 @@ pub(crate) struct VarInfo {
     /// saved output, because it is a static table indexed by callers, not a
     /// value-bearing variable (issue #606).
     pub(crate) is_table_only: bool,
-    /// Interned canonical dt-phase deps. `Ident<Canonical>` `Ord` is
-    /// lexicographic, so this `BTreeSet` iterates in the SAME order as the
-    /// former `BTreeSet<String>` (byte-stability preserved), while `Clone`
-    /// is an Arc-refcount bump (the O(V^2) transitive-closure clones become
-    /// cheap) and `Hash`/`Eq` are value-based.
+    /// A `PREVIOUS`/`INIT` capture's phase demand, which is its runlist
+    /// membership: `Previous` storage is refreshed in flows and never seeded
+    /// into initials, `Init` storage is populated in initials and enters flows
+    /// only when a per-step definition reads its current value. `None` for
+    /// every other variable.
+    pub(crate) capture_kind: Option<CaptureKind>,
+    /// The local nodes this variable's dt-phase reads order it after
+    /// (`ordering_edges`). `Ident<Canonical>` `Ord` is lexicographic, so the
+    /// set iterates in name order (byte-stable), `Clone` is an Arc-refcount
+    /// bump (the O(V^2) transitive-closure clones are cheap) and `Hash`/`Eq`
+    /// are value-based.
     pub(crate) dt_deps: BTreeSet<Ident<Canonical>>,
-    /// Interned canonical init-phase deps (same rationale as `dt_deps`).
+    /// The local nodes its init-phase reads order it after.
     pub(crate) initial_deps: BTreeSet<Ident<Canonical>>,
 }
 
@@ -125,16 +131,13 @@ pub(crate) struct VarInfo {
 /// In both phases module-targeted deps are KEPT -- a module node has no
 /// successors so Tarjan cannot route a cycle through it, matching
 /// `compute_inner` exactly (its `!dep_info.is_module` guard governs only
-/// transitive *absorption*, not which deps the loop iterates). Lagged deps
-/// are already absent (pruned when the phase's dep set is built in
-/// `build_var_info`: `dt_previous_referenced_vars` from `dt_deps`,
-/// `initial_previous_referenced_vars` from `initial_deps`). The returned
-/// references borrow `var_info`'s interned dep keys and iterate in
-/// `BTreeSet` (lexicographic) order -- the same order the former
-/// `BTreeSet<String>` produced -- so the relation is byte-stable across
-/// runs. Returning `&Ident<Canonical>` (not `&str`) lets `compute_inner`
-/// Arc-clone a successor into the transitive set instead of allocating a
-/// fresh `String`.
+/// transitive *absorption*, not which deps the loop iterates). Lagged and
+/// snapshot reads are already absent: `ordering_edges` keeps only the reads
+/// that order a phase. The returned references borrow `var_info`'s interned
+/// dep keys and iterate in `BTreeSet` (lexicographic) order, so the relation
+/// is byte-stable across runs. Returning `&Ident<Canonical>` (not `&str`)
+/// lets `compute_inner` Arc-clone a successor into the transitive set
+/// instead of allocating a fresh `String`.
 pub(crate) fn walk_successors<'a>(
     var_info: &'a FxHashMap<Ident<Canonical>, VarInfo>,
     name: &str,
@@ -191,139 +194,19 @@ pub(crate) fn build_var_info(
     FxHashSet<Ident<Canonical>>,
 ) {
     let source_vars = model.variables(db);
-    let module_input_names = module_input_names.to_vec();
-    let module_ident_context =
-        model_module_ident_context(db, model, project, module_input_names.clone());
-    // Intern the module-input wiring once. An empty set is the no-inputs case
-    // (the old `None`-inputs path); `variable_direct_dependencies` maps it back
-    // to `None` internally, so the classification is byte-identical to the old
-    // empty-vs-nonempty dispatch.
-    let module_inputs = ModuleInputSet::from_names(db, &module_input_names);
+    // Intern the module-input wiring once. An empty set is the no-inputs case;
+    // `variable_direct_dependencies` maps it to `None` internally, so no
+    // `isModuleInput` branch is selected for an uninstantiated model.
+    let module_inputs = ModuleInputSet::from_names(db, module_input_names);
 
     let mut var_info: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
     let mut all_init_referenced: FxHashSet<Ident<Canonical>> = FxHashSet::default();
 
-    // Normalize a raw dep string to the bare variable/module ident it
-    // imposes an ordering edge on, then intern it. A `submodel·subvar`
-    // dependency collapses to its leading `submodel` module name (the dt
-    // chain-break filter `keep_dt_dep` runs first); a leading `·` separator
-    // is stripped. Both the prefix slice and the whole string are canonical
-    // substrings of an already-canonical dep, so `from_str_unchecked`
-    // (intern, no re-canonicalization scan) is sound.
-    let normalize_dep = |dep: &str| -> Ident<Canonical> {
-        let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
-        if let Some(dot_pos) = effective.find('\u{00B7}') {
-            Ident::from_str_unchecked(&effective[..dot_pos])
-        } else {
-            Ident::from_str_unchecked(effective)
-        }
-    };
-    let normalize_deps = |deps: &BTreeSet<String>| -> BTreeSet<Ident<Canonical>> {
-        deps.iter().map(|d| normalize_dep(d)).collect()
-    };
-
-    let project_models = project.models(db);
-
-    // Per-variable deps, computed once and reused (salsa-cached). A pre-pass
-    // both seeds the instance->model map below and is reused in the main loop.
-    let var_deps: Vec<(&String, &VariableDeps)> = source_vars
-        .iter()
-        .map(|(name, source_var)| {
-            let deps = variable_direct_dependencies(
-                db,
-                *source_var,
-                project,
-                module_ident_context,
-                module_inputs,
-            );
-            (name, deps)
-        })
-        .collect();
-
-    // Map each module-INSTANCE name to its model name, so a `instance·subvar`
-    // dependency can be resolved to the right submodel. A module instance name
-    // is NOT itself a key in `project_models` (keyed by MODEL name). Both
-    // declared module variables (`source_vars`) AND synthesized/implicit module
-    // instances (e.g. a SMOOTH's `$⁚..⁚smth1⁚<elem>`, which live only in a
-    // variable's `implicit_vars`) must be covered, since the
-    // stock-output-reading consumer references the implicit instance's output.
-    let mut module_instance_model: HashMap<String, String> = source_vars
-        .iter()
-        .filter(|(_, sv)| sv.kind(db) == SourceVariableKind::Module)
-        .map(|(n, sv)| (n.clone(), canonicalize(sv.model_name(db)).into_owned()))
-        .collect();
-    for (_, deps) in &var_deps {
-        for implicit in &deps.implicit_vars {
-            if implicit.is_module
-                && let Some(model_name) = &implicit.model_name
-            {
-                module_instance_model
-                    .insert(implicit.name.clone(), canonicalize(model_name).into_owned());
-            }
-        }
-    }
-
-    for (name, deps) in &var_deps {
-        let init_only_dt = deps.dt_init_only_referenced_vars.clone();
-        let lagged_dt_previous = deps.dt_previous_referenced_vars.clone();
-        let lagged_initial_previous = deps.initial_previous_referenced_vars.clone();
-        let kind = source_vars[name.as_str()].kind(db);
-        // A `submodel·subvar` dependency whose `subvar` is a Stock is read
-        // from the PRIOR timestep in the dt phase (a stock breaks the
-        // dependency chain), so it must NOT impose a same-step ordering edge.
-        // It used to mirror the same rule in `model.rs::module_output_deps`
-        // (`if ctx.is_initial || !output_var.is_stock()` -- the dt-phase case
-        // omitted the module dependency for a stock output); that second
-        // dependency walk is gone (GH #568) and this is the only statement of
-        // the rule left. It applies to EVERY
-        // reader, not just module variables: a NON-module variable that reads
-        // a stock submodel output (e.g. `v = SMOOTH(...)·output`, the SMOOTH
-        // output being an INTEG stock) must likewise drop the dt edge.
-        // Otherwise `normalize_deps` collapses `submodel·output` to the bare
-        // `submodel` module name and the reader gains a spurious `reader ->
-        // module` dt edge; combined with the module being a sink in the cycle
-        // relation (`walk_successors`) but carrying its input src as a
-        // direct dep in `dt_dependencies`, this forms an ordering cycle invisible
-        // to cycle detection that `topo_sort_str` breaks arbitrarily -- sometimes
-        // emitting the module BEFORE its input, so the module reads a stale input
-        // each flows step (C-LEARN's `emissions_with_stopped_growth` drop-to-0,
-        // #591-c1). The init phase keeps the edge (stocks do not break the chain
-        // there), so only `dt_deps` is filtered.
-        let keep_dt_dep = |dep: &str| -> bool {
-            let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
-            if let Some(dot_pos) = effective.find('\u{00B7}') {
-                let module_name = &effective[..dot_pos];
-                let var_name = &effective[dot_pos + '\u{00B7}'.len_utf8()..];
-                // Resolve `module_name` to a submodel: it is either a module
-                // INSTANCE (the common case -- a synthesized stdlib/macro
-                // instance, keyed by its own ident) or, for a nested-module
-                // reference, already a MODEL name. Try the instance map first,
-                // then fall back to a direct model-name lookup.
-                let sub_canonical = canonicalize(module_name);
-                let sub_model = module_instance_model
-                    .get(module_name)
-                    .and_then(|m| project_models.get(m.as_str()))
-                    .or_else(|| project_models.get(sub_canonical.as_ref()));
-                if let Some(sub_model) = sub_model {
-                    let sub_vars = sub_model.variables(db);
-                    if let Some(sub_var) = sub_vars.get(var_name) {
-                        return sub_var.kind(db) != SourceVariableKind::Stock;
-                    }
-                }
-            }
-            true
-        };
-        let mut dt_deps: BTreeSet<String> = deps
-            .dt_deps
-            .iter()
-            .filter(|d| keep_dt_dep(d))
-            .cloned()
-            .collect();
-        dt_deps.retain(|dep| !init_only_dt.contains(dep));
-        dt_deps.retain(|dep| !lagged_dt_previous.contains(dep));
-        let mut initial_deps = deps.initial_deps.clone();
-        initial_deps.retain(|dep| !lagged_initial_previous.contains(dep));
-
+    for (name, source_var) in source_vars {
+        // Per-variable deps, computed once and reused (salsa-cached).
+        let deps = variable_direct_dependencies(db, *source_var, project, module_inputs);
+        let kind = source_var.kind(db);
+        let (dt_deps, initial_deps) = ordering_edges(&deps.deps);
         var_info.insert(
             // `source_vars` keys are canonical (canonicalized at sync time),
             // so interning unchecked is sound.
@@ -331,51 +214,87 @@ pub(crate) fn build_var_info(
             VarInfo {
                 is_stock: kind == SourceVariableKind::Stock,
                 is_module: kind == SourceVariableKind::Module,
-                is_table_only: crate::db::source_var_is_table_only(db, source_vars[name.as_str()]),
-                dt_deps: normalize_deps(&dt_deps),
-                initial_deps: normalize_deps(&initial_deps),
+                is_table_only: crate::db::source_var_is_table_only(db, *source_var),
+                capture_kind: None,
+                dt_deps,
+                initial_deps,
             },
         );
+        // Every `INIT` referent of a live definition, explicit or synthesized,
+        // seeds the initials runlist: the frozen snapshot has to hold it
+        // whether or not the reader itself runs in initials (a `PREVIOUS`
+        // capture over `INIT(x) + 1` is flow-only and still needs `x` frozen).
         all_init_referenced.extend(
-            deps.init_referenced_vars
-                .iter()
-                .map(|d| Ident::from_str_unchecked(d)),
+            std::iter::once(&deps.deps)
+                .chain(deps.implicit_vars.iter().map(|implicit| &implicit.deps))
+                .flat_map(initial_reads),
         );
 
         // Include implicit variables from this variable's deps result.
         // Since we read this from variable_direct_dependencies (not
-        // parse_source_variable_with_module_context), salsa's backdating
-        // ensures that if the deps + implicit vars haven't changed, this
-        // function is cached.
+        // parse_source_variable), salsa's backdating ensures that if the
+        // deps + implicit vars haven't changed, this function is cached.
         for implicit in &deps.implicit_vars {
-            // Same stock-submodel-output dt chain-break as above (an implicit
-            // var can also read a stock submodel output).
-            let mut dt_deps: BTreeSet<String> = implicit
-                .dt_deps
-                .iter()
-                .filter(|d| keep_dt_dep(d))
-                .cloned()
-                .collect();
-            dt_deps.retain(|dep| !implicit.dt_init_only_referenced_vars.contains(dep));
-            dt_deps.retain(|dep| !implicit.dt_previous_referenced_vars.contains(dep));
-            let mut initial_deps = implicit.initial_deps.clone();
-            initial_deps.retain(|dep| !implicit.initial_previous_referenced_vars.contains(dep));
+            let (dt_deps, initial_deps) = ordering_edges(&implicit.deps);
             var_info.insert(
                 // `implicit.name` is canonicalized in `extract_implicit_var_deps`.
                 Ident::from_str_unchecked(&implicit.name),
                 VarInfo {
-                    is_stock: implicit.is_stock,
+                    // A helper is a capture, a hoisted argument or a module
+                    // instance; the parse synthesizes no stock.
+                    is_stock: false,
                     is_module: implicit.is_module,
                     // Implicit SMOOTH/DELAY/TREND internals are never lookup tables.
                     is_table_only: false,
-                    dt_deps: normalize_deps(&dt_deps),
-                    initial_deps: normalize_deps(&initial_deps),
+                    capture_kind: implicit.capture_kind,
+                    dt_deps,
+                    initial_deps,
                 },
             );
         }
     }
 
     (var_info, all_init_referenced)
+}
+
+/// The local nodes a reader's dependencies order it after, per phase.
+///
+/// A dt-phase read orders the reader after the node it reads from the
+/// current step: a current read of a local variable, or of a module
+/// instance's non-stock output. A `PREVIOUS` read is the prior step's value
+/// and an `INIT` read (or a `PREVIOUS` fallback) the frozen snapshot, so
+/// neither orders anything. A qualified read of a sub-model STOCK is a
+/// prior-step read in the dt phase as well (`DepTarget::stock_output`, which
+/// `DepScope::resolve` reads at the terminal of the path, so the rule holds
+/// at any depth: `m.n.level` as `m.level`): keeping it would order the
+/// reader after the module instance and, with
+/// the instance carrying its input source as a direct dependency, form an
+/// ordering cycle the cycle relation cannot see (a module is a sink there)
+/// and `topo_sort_str` breaks arbitrarily -- sometimes emitting the module
+/// BEFORE its input, so it reads a stale input each step (C-LEARN's
+/// `emissions_with_stopped_growth` drop-to-0, #591-c1). The init phase keeps
+/// every read but `PREVIOUS`: a stock does not break the init chain, and an
+/// `INIT(x)` read during initialization orders `x`'s initial value first.
+fn ordering_edges(deps: &DepRefs) -> (BTreeSet<Ident<Canonical>>, BTreeSet<Ident<Canonical>>) {
+    let dt = deps
+        .phase(DepPhase::Dt)
+        .filter(|dep| dep.lag == DepLag::Current && !dep.target.stock_output)
+        .map(|dep| dep.target.head().clone())
+        .collect();
+    let initial = deps
+        .phase(DepPhase::Init)
+        .filter(|dep| dep.lag != DepLag::Previous)
+        .map(|dep| dep.target.head().clone())
+        .collect();
+    (dt, initial)
+}
+
+/// The local nodes a reader's dt equation reads through `INIT` -- the
+/// initialization roots its frozen snapshot must hold.
+fn initial_reads(deps: &DepRefs) -> impl Iterator<Item = Ident<Canonical>> + '_ {
+    deps.phase(DepPhase::Dt)
+        .filter(|dep| dep.lag == DepLag::Initial)
+        .map(|dep| dep.target.head().clone())
 }
 
 /// Strongly-connected components of the real dt-phase cycle relation
@@ -623,27 +542,71 @@ pub(crate) fn dt_cycle_sccs_engine_consistent(
     let empty_inputs = ModuleInputSet::empty(db);
     let dep_graph = model_dependency_graph(db, model, project, empty_inputs);
     let resolved_sccs = dep_graph.resolved_sccs.clone();
-    let diags = model_dependency_graph::accumulated::<CompilationDiagnostic>(
-        db,
-        model,
-        project,
-        empty_inputs,
-    );
-    let engine_raises_circular = diags.iter().any(|d| {
-        matches!(
-            d.0.error,
-            DiagnosticError::Model(crate::common::Error {
-                code: crate::common::ErrorCode::CircularDependency,
-                ..
-            })
-        )
-    });
+    let engine_raises_circular = dep_graph.has_cycle();
     if let Some(reason) =
         dt_cycle_sccs_consistency_violation(&sccs, &resolved_sccs, engine_raises_circular)
     {
         panic!("{reason}");
     }
     sccs
+}
+
+/// Every CURRENT-(phase-)timestep read `op` makes, as `(variable, element)`
+/// pairs, appended to `out`. `false` means the fragment is malformed (a static
+/// view id outside `static_views`) and the caller must decline.
+///
+/// This is the ONE statement of which reads a per-element ordering has to
+/// respect, and it has two readers that must not drift: the element graph in
+/// [`symbolic_phase_element_order`], which ORDERS the segments, and
+/// `db::assemble::combine_scc_fragment`, which checks that the order it was
+/// handed actually satisfies a member prologue's reads. The rule itself, and
+/// the soundness argument for each exclusion, is
+/// [`symbolic_phase_element_order`]'s rustdoc: a `SymLoadPrev` reads a
+/// prior-timestep snapshot and is an ordering edge in neither phase, a
+/// `SymLoadInitial` reads the initial-values snapshot and is one in
+/// `SccPhase::Initial` only, and everything variable-backed and current is
+/// kept. A view carries the same classification through its base.
+pub(crate) fn ordering_reads(
+    op: &crate::compiler::symbolic::SymbolicOpcode,
+    static_views: &[crate::compiler::symbolic::SymbolicStaticView],
+    phase: &crate::db::SccPhase,
+    out: &mut BTreeSet<(Ident<Canonical>, usize)>,
+) -> bool {
+    use crate::compiler::symbolic::{SymStaticViewBase as ViewBase, SymbolicOpcode};
+    match op {
+        SymbolicOpcode::LoadVar { var }
+        | SymbolicOpcode::LoadSubscript { var }
+        | SymbolicOpcode::PushVarViewDirect { var, .. } => {
+            out.insert((var.name.clone(), var.element_offset));
+        }
+        SymbolicOpcode::SymLoadPrev { .. } => {}
+        SymbolicOpcode::SymLoadInitial { var } => {
+            if matches!(phase, crate::db::SccPhase::Initial) {
+                out.insert((var.name.clone(), var.element_offset));
+            }
+        }
+        SymbolicOpcode::PushStaticView { view_id } => {
+            let Some(view) = static_views.get(*view_id as usize) else {
+                return false;
+            };
+            let read_name = match &view.base {
+                ViewBase::Var(v) => Some(&v.name),
+                ViewBase::InitialVar(v) if matches!(phase, crate::db::SccPhase::Initial) => {
+                    Some(&v.name)
+                }
+                ViewBase::InitialVar(_) | ViewBase::PrevVar(_) | ViewBase::Temp(_) => None,
+            };
+            if let Some(name) = read_name {
+                for elem in static_view_element_offsets(view) {
+                    out.insert((name.clone(), elem));
+                }
+            }
+        }
+        // Writes, control flow, constants, temp access: no current-value read
+        // of a model variable.
+        _ => {}
+    }
+    true
 }
 
 /// Enumerate the exact set of *element offsets within `base.name`* that a
@@ -807,21 +770,16 @@ enum SccVerdict {
 /// A lagged/snapshot read is not a current-timestep ordering edge, so the
 /// read-opcode arm inherits `build_var_info`'s exact per-phase
 /// PREVIOUS/INIT strip (the element-level analogue of the variable-level
-/// strip), `phase`-awarely:
+/// `ordering_edges`), `phase`-awarely:
 /// - `SymLoadPrev` (PREVIOUS, `prev_values` snapshot, prior timestep):
-///   contributes NO element edge in EITHER phase -- the analogue of
-///   `build_var_info` retaining `dt_deps` against `lagged_dt_previous`
-///   (`deps.dt_previous_referenced_vars`, `db/dep_graph.rs:262`) AND
-///   `initial_deps` against `lagged_initial_previous`
-///   (`deps.initial_previous_referenced_vars`, `:264`).
+///   contributes NO element edge in EITHER phase -- the analogue of a
+///   `DepLag::Previous` read ordering nothing in either phase.
 /// - `SymLoadInitial` (INIT, `initial_values` snapshot): NO edge in
-///   `SccPhase::Dt` -- the analogue of `dt_deps` being retained against
-///   `init_only_dt` (`deps.dt_init_only_referenced_vars`, `:261`); but
-///   KEEPS the edge in `SccPhase::Initial`, because `build_var_info`
-///   strips ONLY `lagged_initial_previous` from `initial_deps` (`:264`)
-///   and does NOT strip INIT-refs (an `INIT(x)` read during the
-///   initial-value computation is a genuine init-phase ordering edge;
-///   `init_referenced_vars` feeds the Initials runlist, not a strip).
+///   `SccPhase::Dt` -- the analogue of a `DepLag::Initial` read ordering
+///   nothing in the dt phase; but KEEPS the edge in `SccPhase::Initial`,
+///   because an `INIT(x)` read during the initial-value computation is a
+///   genuine init-phase ordering edge (`ordering_edges` keeps every
+///   init-phase read but `PREVIOUS`).
 /// - `LoadVar`/`LoadSubscript`/`PushVarViewDirect` and a `Var`-based
 ///   `PushStaticView`: current-value reads, kept unchanged -- the reads
 ///   `build_var_info` never strips. (These are ALL the `SymVarRef`-carrying
@@ -862,19 +820,23 @@ fn symbolic_phase_element_order(
     members: &BTreeSet<Ident<Canonical>>,
     phase: crate::db::SccPhase,
 ) -> Option<Vec<(Ident<Canonical>, usize)>> {
-    use crate::compiler::symbolic::SymbolicOpcode;
-
     // The set of member canonical names, for the "is this read an in-SCC
     // member?" test. `SymVarRef.name` is the canonical variable name
     // (an `Ident<Canonical>`), so a member's `as_str()` compares directly.
     let member_names: BTreeSet<&str> = members.iter().map(|m| m.as_str()).collect();
 
-    // Build the induced element graph by segmenting each member's
-    // symbolic code on its per-element write opcode. For each member
-    // element (M, e), every `SymVarRef` read in its segment whose name is
-    // an in-SCC member (M', e') contributes a data-flow edge
-    // (M', e') -> (M, e). Any member whose symbolic fragment cannot be
-    // sourced => not element-sourceable => unresolved (loud-safe).
+    // Build the induced element graph from the SAME segmentation the combined
+    // fragment is assembled with (`db::assemble::segment_member_by_element`):
+    // a member's PROLOGUE plus one slice per element. For each member element
+    // (M, e), every current-value read in its slice whose name is an in-SCC
+    // member (M', e') contributes a data-flow edge (M', e') -> (M, e). A read
+    // in the PROLOGUE contributes an edge into every element of M that READS
+    // one of the prologue's temps, because the prologue is emitted once,
+    // immediately ahead of the first of those readers, so whatever it reads
+    // has to be evaluated before all of them -- and only them: an element that
+    // reads nothing of the prologue may run first, and must when the prologue
+    // reads it. Any member whose symbolic fragment cannot be sourced or
+    // segmented => not element-sourceable => unresolved (loud-safe).
     let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
     let mut self_loop = false;
     // `members` is a BTreeSet, so this iterates in sorted member order;
@@ -888,141 +850,76 @@ fn symbolic_phase_element_order(
             phase.clone(),
         )?;
         let member_name = member.as_str();
+        let seg = crate::db::assemble::segment_member_by_element(
+            member_name,
+            &frag.symbolic.code,
+            &frag.static_views,
+        )
+        .ok()?;
 
-        // Reads accumulated since the previous per-element write of THIS
-        // member, as (read-name, read-element) pairs. A read is an
-        // in-SCC edge source only if its name is an SCC member.
-        let mut pending_reads: BTreeSet<(Ident<Canonical>, usize)> = BTreeSet::new();
-        // True once at least one per-element write of this member has
-        // been seen: a malformed fragment with no write for the member
-        // means it is not element-sourceable in the simple per-element
-        // shape this refinement assumes (loud-safe: keep
-        // `CircularDependency`).
-        let mut saw_write = false;
-
-        for op in &frag.symbolic.code {
-            match op {
-                // ── Per-element WRITE of this member: terminate the
-                // current element segment, define node (member, elem),
-                // and wire every pending in-SCC read as a predecessor.
-                SymbolicOpcode::AssignCurr { var }
-                | SymbolicOpcode::AssignConstCurr { var, .. }
-                | SymbolicOpcode::BinOpAssignCurr { var, .. }
-                    if var.name.as_str() == member_name =>
-                {
-                    saw_write = true;
-                    let node = element_node_key(member_name, var.element_offset);
-                    edges.entry(node.clone()).or_default();
-                    // Deterministic successor order: BTreeSet pending
-                    // reads -> sorted by the read node's encoded key.
-                    let mut preds: BTreeSet<Ident<Canonical>> = BTreeSet::new();
-                    for (rname, relem) in &pending_reads {
-                        if member_names.contains(rname.as_str()) {
-                            preds.insert(element_node_key(rname.as_str(), *relem));
-                        }
-                    }
-                    for pred in preds {
-                        if pred == node {
-                            // A node reading its own slot is a size-1 SCC
-                            // Tarjan does NOT surface as a >=2 component,
-                            // so detect element self-loops directly from
-                            // adjacency (mirrors `dt_cycle_sccs`).
-                            self_loop = true;
-                        }
-                        edges.entry(pred).or_default().push(node.clone());
-                    }
-                    pending_reads.clear();
-                }
-                // ── Current-value reads consumed by the current element
-                // segment. These are the literal current-(phase-)timestep
-                // data-flow reads a genuine element cycle is made of; they
-                // are exactly the reads the variable-level relation keeps
-                // (`build_var_info` never strips a current-value dep).
-                SymbolicOpcode::LoadVar { var }
-                | SymbolicOpcode::LoadSubscript { var }
-                | SymbolicOpcode::PushVarViewDirect { var, .. } => {
-                    pending_reads.insert((var.name.clone(), var.element_offset));
-                }
-                // ── PREVIOUS (`prev_values` snapshot, prior timestep):
-                // NEVER a current-timestep ordering edge, in EITHER phase.
-                // This is the element-level analogue of `build_var_info`
-                // stripping `lagged_dt_previous`
-                // (`deps.dt_previous_referenced_vars`) from `dt_deps`
-                // (`db/dep_graph.rs:262`) AND `lagged_initial_previous`
-                // (`deps.initial_previous_referenced_vars`) from
-                // `initial_deps` (`:264`) -- both phases. Contributing no
-                // edge makes the element graph MATCH the engine's actual
-                // per-phase relation; it cannot drop a genuine-cycle edge
-                // because a genuine current-timestep element cycle is a
-                // cycle of *current-value* reads and a `SymLoadPrev` reads
-                // a prior-timestep snapshot, never the current timestep's
-                // value (the AC4 soundness argument; see the fn rustdoc).
-                SymbolicOpcode::SymLoadPrev { .. } => {}
-                // ── INIT (`initial_values` snapshot): PHASE-AWARE. In the
-                // dt graph it is NOT a current-dt ordering edge -- the
-                // element-level analogue of `build_var_info` stripping
-                // `init_only_dt` (`deps.dt_init_only_referenced_vars`)
-                // from `dt_deps` (`db/dep_graph.rs:261`). In the init
-                // graph it IS a genuine init-phase dependency: an INIT(x)
-                // read during the initial-value computation orders x's
-                // initial value before this element, and `build_var_info`
-                // strips ONLY `lagged_initial_previous` from `initial_deps`
-                // (`:264`) -- it does NOT strip INIT-refs (those feed
-                // `init_referenced_vars`, the Initials runlist, not a
-                // strip). Excluding it in `Dt` cannot drop a genuine dt
-                // cycle (same AC4 argument: it is an initial-snapshot read,
-                // not a current-dt-timestep value); keeping it in
-                // `Initial` is required so a genuine init element cycle
-                // through INIT() is still detected.
-                SymbolicOpcode::SymLoadInitial { var } => {
-                    if matches!(phase, crate::db::SccPhase::Initial) {
-                        pending_reads.insert((var.name.clone(), var.element_offset));
-                    }
-                }
-                SymbolicOpcode::PushStaticView { view_id } => {
-                    // Resolve the static view's base; if it is a model
-                    // variable, enumerate the EXACT element set it
-                    // addresses (the symbolic-space analogue of the prior
-                    // `collect_read_slots` `StaticSubscript` enumeration,
-                    // so a genuinely element-acyclic model still
-                    // resolves). An out-of-range `view_id` is a malformed
-                    // fragment (loud-safe: unresolved).
-                    let view = frag.static_views.get(*view_id as usize)?;
-                    // A view's base carries the SAME lagged/current
-                    // classification as the scalar read opcodes above, and for
-                    // the same reasons (GH #995 gave `PREVIOUS`/`INIT` array
-                    // forms, which lower to a view over the snapshot region
-                    // instead of to `SymLoadPrev`/`SymLoadInitial`): a `curr`
-                    // view is a current-value read; a PREVIOUS view is a
-                    // prior-timestep snapshot and is an ordering edge in
-                    // NEITHER phase; an INIT view is an initial-snapshot read,
-                    // an edge in `SccPhase::Initial` only.
-                    use crate::compiler::symbolic::SymStaticViewBase as ViewBase;
-                    let read_name = match &view.base {
-                        ViewBase::Var(v) => Some(&v.name),
-                        ViewBase::InitialVar(v)
-                            if matches!(phase, crate::db::SccPhase::Initial) =>
-                        {
-                            Some(&v.name)
-                        }
-                        ViewBase::InitialVar(_) | ViewBase::PrevVar(_) | ViewBase::Temp(_) => None,
-                    };
-                    if let Some(name) = read_name {
-                        for elem in static_view_element_offsets(view) {
-                            pending_reads.insert((name.clone(), elem));
-                        }
-                    }
-                }
-                // Other write targets (a different member, or
-                // `BinOpAssignNext` -- a stock-update, not a per-element
-                // current-value write of THIS member) do not terminate
-                // this member's element segment and carry no read; ignore.
-                _ => {}
-            }
+        // Every element node of this member, in a deterministic order.
+        let mut elements: Vec<usize> = seg.segments.keys().copied().collect();
+        elements.sort_unstable();
+        if elements.is_empty() {
+            // No per-element write: not element-sourceable in the simple
+            // per-element shape this refinement assumes (loud-safe).
+            return None;
+        }
+        for elem in &elements {
+            edges
+                .entry(element_node_key(member_name, *elem))
+                .or_default();
         }
 
-        if !saw_write {
-            return None;
+        let wire = |edges: &mut HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
+                    self_loop: &mut bool,
+                    reads: &BTreeSet<(Ident<Canonical>, usize)>,
+                    targets: &[usize]| {
+            // Deterministic successor order: BTreeSet pending reads -> sorted
+            // by the read node's encoded key.
+            let mut preds: BTreeSet<Ident<Canonical>> = BTreeSet::new();
+            for (rname, relem) in reads {
+                if member_names.contains(rname.as_str()) {
+                    preds.insert(element_node_key(rname.as_str(), *relem));
+                }
+            }
+            for pred in preds {
+                for elem in targets {
+                    let node = element_node_key(member_name, *elem);
+                    if pred == node {
+                        // A node reading its own slot is a size-1 SCC Tarjan
+                        // does NOT surface as a >=2 component, so detect
+                        // element self-loops directly from adjacency (mirrors
+                        // `dt_cycle_sccs`).
+                        *self_loop = true;
+                    }
+                    edges.entry(pred.clone()).or_default().push(node);
+                }
+            }
+        };
+
+        let mut prologue_reads: BTreeSet<(Ident<Canonical>, usize)> = BTreeSet::new();
+        for op in &seg.prologue {
+            if !ordering_reads(op, &frag.static_views, &phase, &mut prologue_reads) {
+                return None;
+            }
+        }
+        let readers: Vec<usize> = seg.prologue_readers.iter().copied().collect();
+        wire(&mut edges, &mut self_loop, &prologue_reads, &readers);
+
+        for elem in &elements {
+            let mut reads: BTreeSet<(Ident<Canonical>, usize)> = BTreeSet::new();
+            for op in &seg.segments[elem] {
+                if !ordering_reads(op, &frag.static_views, &phase, &mut reads) {
+                    return None;
+                }
+            }
+            wire(
+                &mut edges,
+                &mut self_loop,
+                &reads,
+                std::slice::from_ref(elem),
+            );
         }
     }
 
@@ -1224,9 +1121,8 @@ pub(crate) struct DtSccResolution {
     /// (element-cyclic -- including a genuine multi-variable element cycle
     /// the symbolic builder detects -- or not element-sourceable). When
     /// `false`, every back-edge in this phase is fully explained by
-    /// resolvable recurrences and the phase's cycle gate must NOT set
-    /// `has_cycle` / accumulate `CircularDependency` (loud-safe: any doubt
-    /// leaves this `true`).
+    /// resolvable recurrences and the phase's cycle gate must NOT record a
+    /// `CircularDependency` (loud-safe: any doubt leaves this `true`).
     pub(crate) has_unresolved: bool,
 }
 
@@ -1285,7 +1181,7 @@ pub(crate) struct DtSccResolution {
 /// are the same rule, not a flat "suppress any resolved member's edge"
 /// set) -- and treat that SCC as one collapsed node. `compute_transitive`
 /// re-runs over the real *with-inputs* `var_info`, and its
-/// `.unwrap_or_else` arm clears `resolved_sccs` + sets `has_cycle` on any
+/// `.unwrap_or_else` arm clears `resolved_sccs` + records the cycle on any
 /// residual genuine cycle, so the worst case is a *missed resolution* (a
 /// conservative `CircularDependency`), never an unsound one: a back-edge
 /// that is NOT within one resolved SCC -- a genuine cycle, a
@@ -1308,8 +1204,8 @@ pub(crate) struct DtSccResolution {
 /// plumbed into either side, because the with-inputs `compute_transitive` re-run is the
 /// soundness backstop for the multi-member (N>=2) SCCs Subcomponent B
 /// resolves *exactly as it is for the N=1 single-variable self-recurrence
-/// case*: that re-run's `.unwrap_or_else` clears `resolved_sccs` and sets
-/// `has_cycle` on any residual genuine cycle (the init re-run has the
+/// case*: that re-run's `.unwrap_or_else` clears `resolved_sccs` and records
+/// the cycle on any residual genuine cycle (the init re-run has the
 /// symmetric `Err` arm), so the only way the no-input vs with-inputs
 /// wiring can differ for an input-wired sub-model's self/multi-recurrence
 /// is a *conservative* `CircularDependency` (a missed resolution) -- never
@@ -1415,50 +1311,10 @@ pub(crate) fn resolve_recurrence_sccs(
     }
 }
 
-/// The set of main-model variables whose own production-lowered
-/// per-element `Vec<Expr>` is, or recursively contains, an
-/// array-producing builtin
-/// (VectorElmMap/VectorSortOrder/Rank/AllocateAvailable/AllocateByPriority).
-///
-/// The universe is the identical `build_var_info(.., &[])` keyset
-/// `dt_cycle_sccs` iterates, on the same `(db, model, project)` triple,
-/// so a caller can intersect `{multi ∪ self_loops}` with this set over
-/// one shared universe. Each variable's lowered `Vec<Expr>` is sourced
-/// from the engine's own per-variable production lowering via
-/// `var_noninitial_lowered_exprs` (never a re-derivation), and the
-/// complete list is fed to
-/// `crate::compiler::exprs_contain_array_producing_builtin`. Sourcing the
-/// real lowering output -- not a hoist-set subset -- is what makes the
-/// membership test complete: `var_noninitial_lowered_exprs` aborts (never
-/// silent-skips) on any universe variable whose production lowered exprs
-/// cannot be sourced, because a silent skip would under-count and produce
-/// a false negative. Sorted/byte-stable.
-#[cfg(test)]
-pub(crate) fn array_producing_vars(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-) -> BTreeSet<Ident<Canonical>> {
-    // The identical universe `dt_cycle_sccs` uses -- the same
-    // `build_var_info(.., &[])` keyset on the same `(db, model, project)`
-    // triple -- so a caller intersects `{multi ∪ self_loops}` and this
-    // set over one universe.
-    let (var_info, _all_init_referenced) = build_var_info(db, model, project, &[]);
-
-    let mut out: BTreeSet<Ident<Canonical>> = BTreeSet::new();
-    for name in var_info.keys() {
-        let exprs = var_noninitial_lowered_exprs(db, model, project, name.as_str());
-        if crate::compiler::exprs_contain_array_producing_builtin(&exprs) {
-            out.insert(name.clone());
-        }
-    }
-    out
-}
-
 /// The engine's OWN per-variable production-lowered non-initial (dt/flow)
 /// `Vec<Expr>` for the canonical `var_name`.
 ///
-/// Two test surfaces read it: `array_producing_vars` below, and
+/// Two test surfaces read it: `dep_graph_tests::array_producing_vars`, and
 /// `test_common::TestProject::flow_exprs`, through which every structural
 /// lowering assertion in the crate constrains the production fragment compiler.
 ///
@@ -1507,18 +1363,20 @@ pub(crate) fn var_noninitial_lowered_exprs(
         );
     };
 
-    match explicit_fragment_input(db, *sv, model, project, &[]) {
-        ExplicitFragment::Ready { input, .. } => match lower_fragment(&input, false) {
-            Ok(v) => v.ast,
-            Err(e) => panic!(
-                "var_noninitial_lowered_exprs: var {var_name:?} non-initial \
-                 lowering errored ({e:?}) -- cannot source its production \
-                 lowered exprs (abort, never silent-skip)"
-            ),
-        },
-        ExplicitFragment::Fatal { .. } => panic!(
+    let ExplicitFragment { diagnostics, input } =
+        explicit_fragment_input(db, *sv, model, project, &[]);
+    let Some(input) = input else {
+        panic!(
             "var_noninitial_lowered_exprs: var {var_name:?} failed to lower \
-             (ExplicitFragment::Fatal) -- cannot source its production \
+             ({diagnostics:?}) -- cannot source its production lowered exprs \
+             (abort, never silent-skip)"
+        );
+    };
+    match lower_fragment(&input, false) {
+        Ok(v) => v.ast,
+        Err(e) => panic!(
+            "var_noninitial_lowered_exprs: var {var_name:?} non-initial \
+             lowering errored ({e:?}) -- cannot source its production \
              lowered exprs (abort, never silent-skip)"
         ),
     }
@@ -1634,6 +1492,12 @@ pub struct ResolvedScc {
     pub phase: SccPhase,
 }
 
+impl ModelDepGraphResult {
+    pub fn has_cycle(&self) -> bool {
+        !self.cycle_variables.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelDepGraphResult {
     /// Interned-ident-keyed dependency maps, on the std `HashMap` (default
@@ -1648,7 +1512,13 @@ pub struct ModelDepGraphResult {
     pub runlist_initials: Vec<String>,
     pub runlist_flows: Vec<String>,
     pub runlist_stocks: Vec<String>,
-    pub has_cycle: bool,
+    /// The variable each phase's dependency walk reported a genuine back-edge
+    /// on (the dt phase's, then the init phase's): the model's
+    /// `CircularDependency` facts, which `db::model_all_diagnostics` reports
+    /// under the empty input set. Empty exactly when the cycle gate passes
+    /// ([`ModelDepGraphResult::has_cycle`]); a model with no cycle can still
+    /// fail to compile.
+    pub cycle_variables: Vec<String>,
     /// Recurrence SCCs whose induced element graph the cycle gate proved
     /// acyclic and element-sourceable, so they are resolved rather than
     /// rejected with `CircularDependency`. Empty on the acyclic happy
@@ -1758,26 +1628,6 @@ fn membership_in(dep_graph: &ModelDepGraphResult, name: &str) -> RunlistMembersh
 // here, alongside the relation it consumes -- a `db` submodule (like
 // `ltm_ir` / `macro_registry`) split out purely for the per-file line
 // cap.
-
-/// Accumulate a model-level `CircularDependency` diagnostic for
-/// `var_name` (the variable the dependency walk reported the back-edge
-/// on). Factored out of `model_dependency_graph_impl` because the
-/// dt-phase, the dt-phase residual-after-resolution, and the init-phase
-/// cycle paths all emit the identical diagnostic; keeping one definition
-/// prevents the four sites from drifting.
-pub(crate) fn cycle_diagnostic(db: &dyn Db, model: SourceModel, var_name: String) {
-    CompilationDiagnostic(Diagnostic {
-        model: model.name(db).clone(),
-        variable: Some(var_name),
-        error: DiagnosticError::Model(crate::common::Error {
-            kind: crate::common::ErrorKind::Model,
-            code: crate::common::ErrorCode::CircularDependency,
-            details: None,
-        }),
-        severity: DiagnosticSeverity::Error,
-    })
-    .accumulate(db);
-}
 
 /// Build the SCC-aware back-edge map consumed by
 /// `compute_transitive`/`compute_inner`: every member of `resolved[i]`
@@ -2134,7 +1984,7 @@ pub(crate) fn model_dependency_graph_impl(
                 .collect())
         };
 
-    let mut has_cycle = false;
+    let mut cycle_variables: Vec<String> = Vec::new();
     let mut resolved_sccs: Vec<ResolvedScc> = Vec::new();
 
     let no_scc: BTreeMap<Ident<Canonical>, usize> = BTreeMap::new();
@@ -2181,8 +2031,7 @@ pub(crate) fn model_dependency_graph_impl(
         Err(first_cycle_var) => {
             if dt_scc_map.is_empty() {
                 // Unresolved: keep the conservative `CircularDependency`.
-                has_cycle = true;
-                cycle_diagnostic(db, model, first_cycle_var);
+                cycle_variables.push(first_cycle_var);
                 HashMap::new()
             } else {
                 // Re-run with every resolved SCC treated as one collapsed
@@ -2190,9 +2039,8 @@ pub(crate) fn model_dependency_graph_impl(
                 // edges alike -- broken; every other back-edge still
                 // errors). A residual genuine cycle is still loud-safe.
                 compute_transitive(false, &dt_scc_map).unwrap_or_else(|var_name| {
-                    has_cycle = true;
                     resolved_sccs.clear();
-                    cycle_diagnostic(db, model, var_name);
+                    cycle_variables.push(var_name);
                     HashMap::new()
                 })
             }
@@ -2257,8 +2105,7 @@ pub(crate) fn model_dependency_graph_impl(
                 // identified init SCC was already dt-covered yet the
                 // gate still errs (a genuine residual cycle). Loud-safe:
                 // keep the conservative `CircularDependency`.
-                has_cycle = true;
-                cycle_diagnostic(db, model, first_init_cycle_var);
+                cycle_variables.push(first_init_cycle_var);
                 HashMap::new()
             } else {
                 // Break the init-only resolved SCCs' intra edges too (in
@@ -2279,9 +2126,8 @@ pub(crate) fn model_dependency_graph_impl(
                         deps
                     }
                     Err(var_name) => {
-                        has_cycle = true;
                         resolved_sccs.clear();
-                        cycle_diagnostic(db, model, var_name);
+                        cycle_variables.push(var_name);
                         HashMap::new()
                     }
                 }
@@ -2461,21 +2307,33 @@ pub(crate) fn model_dependency_graph_impl(
     // dependencies -- must ALSO be seeded. This is the structural signature
     // of an `INITIAL(...)`-backed variable (`v = INITIAL(x)` compiles to a
     // bare `LoadInitial`; `x` is an init-time dep but not a current-value
-    // one). Such a variable can be a module/macro *primary output* that a
-    // parent reads during the parent's OWN initials phase (e.g. C-LEARN's
-    // `:MACRO: INIT(x) INIT = INITIAL(x)`, invoked as
-    // `volumetric_heat_capacity = INITIAL(...)`); the sub-model's dep graph
-    // is computed in isolation and cannot see that cross-model read. Without
-    // this clause the output is compiled only into the flows phase, its
-    // initials slot is never written, and the parent snapshots the
-    // uninitialized slot (0 in a clean buffer, `inf`/NaN in a reused one) into
-    // `initial_values`, served forever by `LoadInitial` (GH #584). General
-    // principle: any variable whose value comes from `INITIAL()` and is read
-    // during initials must be evaluated in the initials phase; the bounded,
-    // structurally-keyed realization here is the empty-`dt_deps` /
-    // non-empty-`initial_deps` set, whose initials value is provably its true
-    // t=0 value (its init-time deps are themselves pulled into the runlist by
-    // the transitive closure below).
+    // one), whose initials value is provably its true t=0 value (its
+    // init-time deps are themselves pulled into the runlist by the transitive
+    // closure below); without the seed its initials slot is never written and
+    // a `LoadInitial` of it reads an uninitialized slot forever (GH #584).
+    // A `PREVIOUS` capture with that signature (`PREVIOUS(INIT(x) + 1)`) is
+    // NOT seeded: nothing reads its initials value -- `LoadPrev` takes the
+    // fallback until the first step commits -- and its `INIT` referents are
+    // roots of their own through `all_init_referenced`.
+    //
+    // Every value-bearing variable of a model that is INSTANTIATED AS A
+    // MODULE is seeded too. XMILE's model is one flat graph in which a module
+    // is a namespace, so a parent's initials phase may read any port of an
+    // instance -- `level = INTEG(.., sub·output)` over a stockless sub-model,
+    // a stdlib instance fed from one, `INIT(sub·output)` -- and the value has
+    // to exist when the read happens. The sub-model's own graph cannot see
+    // which ports a parent reads, so the rule is one flat bit per model (is
+    // it a module target?) rather than a per-instance propagation of the
+    // ports each parent reads: it costs one initial evaluation per sub-model
+    // aux, and the ordering the closure below already provides (a stock does
+    // not break an init chain; a module pulls in its input sources) is what
+    // makes those evaluations correct (GH #1028). A root that no other model
+    // instantiates keeps exactly the seeds above; a root some model does
+    // instantiate takes the rule like any target, which costs it initial
+    // evaluations and changes no number.
+    let instantiated_as_module = crate::db::source_model_is_stdlib(db, model)
+        || model.macro_spec(db).is_some()
+        || project_module_graph(db, project).is_target(&canonicalize(model.name(db)));
     let runlist_initials = {
         use std::collections::HashSet;
         // `needed` borrows `var_names` (owned `String`s). `init_set` works in
@@ -2495,7 +2353,10 @@ pub(crate) fn model_dependency_graph_impl(
                         !i.is_table_only
                             && (i.is_stock
                                 || i.is_module
-                                || (i.dt_deps.is_empty() && !i.initial_deps.is_empty()))
+                                || instantiated_as_module
+                                || (i.capture_kind.is_none_or(CaptureKind::needs_initials)
+                                    && i.dt_deps.is_empty()
+                                    && !i.initial_deps.is_empty()))
                     })
                     .unwrap_or(false)
                     || all_init_referenced.contains(n.as_str())
@@ -2567,17 +2428,44 @@ pub(crate) fn model_dependency_graph_impl(
         .map(|s| canonicalize(s).into_owned())
         .collect();
     let runlist_flows = {
+        let flow_by_kind = |n: &str| {
+            let is_input = module_input_set.contains(canonicalize(n).as_ref());
+            var_info
+                .get(n)
+                // A lookup-only table is a static table, not a flow: it is
+                // never lowered and emits no bytecode (issue #606).
+                .map(|i| (is_input || !i.is_stock) && !i.is_table_only)
+                .unwrap_or(false)
+        };
+        let per_step = |n: &str| {
+            flow_by_kind(n)
+                && var_info[n]
+                    .capture_kind
+                    .is_none_or(CaptureKind::needs_flows)
+        };
+        // An INIT-only capture is populated once, in initials, and `INIT`
+        // reads the frozen snapshot, so its per-step evaluation is dead unless
+        // some per-step definition reads its CURRENT value. `dt_dependencies`
+        // is the transitive current-value relation with every `INIT`- and
+        // `PREVIOUS`-only edge already stripped (`build_var_info`), so a
+        // capture is promoted into flows exactly when it is in the closure of
+        // a definition that runs there by kind -- and a read from another
+        // INIT-only capture promotes nothing, since that reader is not one.
+        // Only such captures can be promoted, so only they are collected.
+        let current_reads: FxHashSet<&str> = var_names
+            .iter()
+            .filter(|n| per_step(n))
+            .flat_map(|n| dt_dependencies.get(n.as_str()))
+            .flat_map(|deps| deps.iter().map(|d| d.as_str()))
+            .filter(|d| {
+                var_info
+                    .get(*d)
+                    .is_some_and(|i| i.capture_kind == Some(CaptureKind::Init))
+            })
+            .collect();
         let flow_names: Vec<&String> = var_names
             .iter()
-            .filter(|n| {
-                let is_input = module_input_set.contains(canonicalize(n).as_ref());
-                var_info
-                    .get(n.as_str())
-                    // A lookup-only table is a static table, not a flow: it is
-                    // never lowered and emits no bytecode (issue #606).
-                    .map(|i| (is_input || !i.is_stock) && !i.is_table_only)
-                    .unwrap_or(false)
-            })
+            .filter(|n| per_step(n) || (flow_by_kind(n) && current_reads.contains(n.as_str())))
             .collect();
         topo_sort_str(
             flow_names,
@@ -2605,7 +2493,7 @@ pub(crate) fn model_dependency_graph_impl(
         runlist_initials,
         runlist_flows,
         runlist_stocks,
-        has_cycle,
+        cycle_variables,
         // Populated by the element-cycle refinement
         // (`resolve_recurrence_sccs`) when a cycle gate's back-edge is
         // fully explained by resolvable single-variable self-recurrences:

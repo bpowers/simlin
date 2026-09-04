@@ -6,26 +6,31 @@ use super::*;
 use crate::datamodel;
 use salsa::plumbing::AsId;
 
-/// Parse with an empty module-ident context (test convenience).
+/// The variable's parse (test convenience).
 fn parse_var_no_module_ctx(
     db: &dyn Db,
     var: SourceVariable,
     project: SourceProject,
 ) -> &ParsedVariableResult {
-    parse_source_variable_with_module_context(db, var, project, ModuleIdentContext::new(db, vec![]))
+    parse_source_variable(db, var, project)
 }
 
-/// Direct dependencies with an empty module-ident context and no module
-/// inputs -- the default (input-agnostic) path the old no-arg
-/// `variable_direct_dependencies` took. A test convenience.
+/// Direct dependencies with no module inputs -- the input-agnostic path. A
+/// test convenience.
 fn deps_no_inputs(db: &dyn Db, var: SourceVariable, project: SourceProject) -> &VariableDeps {
-    variable_direct_dependencies(
-        db,
-        var,
-        project,
-        ModuleIdentContext::new(db, vec![]),
-        ModuleInputSet::empty(db),
-    )
+    variable_direct_dependencies(db, var, project, ModuleInputSet::empty(db))
+}
+
+/// The local names a variable reads in `phase`, whatever the lag; the shape
+/// the pre-`DepRef` assertions below compare against.
+fn local_names(deps: &VariableDeps, phase: DepPhase) -> BTreeSet<String> {
+    deps.deps
+        .phase(phase)
+        .map(|dep| {
+            assert!(dep.target.is_local(), "{:?} is a module read", dep.target);
+            dep.target.variable.as_str().to_string()
+        })
+        .collect()
 }
 
 pub(crate) fn simple_project() -> datamodel::Project {
@@ -593,8 +598,14 @@ fn test_variable_direct_dependencies_constant() {
     let pop_var = result.models["main"].variables["population"].source;
     let deps = deps_no_inputs(&db, pop_var, result.project);
 
-    assert!(deps.dt_deps.is_empty(), "constant has no deps");
-    assert!(deps.initial_deps.is_empty(), "constant has no initial deps");
+    assert!(
+        local_names(deps, DepPhase::Dt).is_empty(),
+        "constant has no deps"
+    );
+    assert!(
+        local_names(deps, DepPhase::Init).is_empty(),
+        "constant has no initial deps"
+    );
 }
 
 #[test]
@@ -655,7 +666,7 @@ fn test_variable_direct_dependencies_with_refs() {
     let deps = deps_no_inputs(&db, births_var, result.project);
 
     assert_eq!(
-        deps.dt_deps,
+        local_names(deps, DepPhase::Dt),
         ["population", "rate"]
             .iter()
             .map(|s| s.to_string())
@@ -699,8 +710,8 @@ fn test_variable_direct_dependencies_stock() {
     let deps = deps_no_inputs(&db, stock_var, result.project);
 
     // Stock's init equation references "initial_value"
-    assert!(deps.dt_deps.contains("initial_value"));
-    assert!(deps.initial_deps.contains("initial_value"));
+    assert!(local_names(deps, DepPhase::Dt).contains("initial_value"));
+    assert!(local_names(deps, DepPhase::Init).contains("initial_value"));
 }
 
 #[test]
@@ -747,7 +758,7 @@ fn test_variable_direct_dependencies_module() {
     let deps = deps_no_inputs(&db, mod_var, result.project);
 
     assert_eq!(
-        deps.dt_deps,
+        local_names(deps, DepPhase::Dt),
         ["input_x", "input_y"]
             .iter()
             .map(|s| s.to_string())
@@ -823,13 +834,16 @@ fn test_incrementality_same_deps_no_recompute() {
     let (beta_dt_before, beta_init_before) = {
         let deps = deps_no_inputs(&db, beta_src, source_project);
         assert_eq!(
-            deps.dt_deps,
+            local_names(deps, DepPhase::Dt),
             ["alpha", "gamma"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect::<BTreeSet<_>>()
         );
-        (deps.dt_deps.clone(), deps.initial_deps.clone())
+        (
+            local_names(deps, DepPhase::Dt),
+            local_names(deps, DepPhase::Init),
+        )
     };
 
     let graph_before = model_dependency_graph(
@@ -848,8 +862,11 @@ fn test_incrementality_same_deps_no_recompute() {
 
     // Beta's deps should be the same (alpha, gamma)
     let beta_deps_after = deps_no_inputs(&db, beta_src, source_project);
-    assert_eq!(beta_dt_before, beta_deps_after.dt_deps);
-    assert_eq!(beta_init_before, beta_deps_after.initial_deps);
+    assert_eq!(beta_dt_before, local_names(beta_deps_after, DepPhase::Dt));
+    assert_eq!(
+        beta_init_before,
+        local_names(beta_deps_after, DepPhase::Init)
+    );
 
     // The dep graph should be returned from cache (pointer-equal)
     let graph_after = model_dependency_graph(
@@ -1159,36 +1176,22 @@ fn test_model_dependency_graph_circular_emits_diagnostic() {
         ModuleInputSet::empty(&db),
     );
 
-    // Collect diagnostics emitted by model_dependency_graph
-    let diags = model_dependency_graph::accumulated::<CompilationDiagnostic>(
-        &db,
-        result.models["main"].source,
-        result.project,
-        ModuleInputSet::empty(&db),
-    );
-    let has_circular = diags.iter().any(|d| {
-        matches!(
-            d.0.error,
-            DiagnosticError::Model(crate::common::Error {
-                code: crate::common::ErrorCode::CircularDependency,
-                ..
-            })
-        )
-    });
+    // The cycle is a fact on the graph, which the per-model owner reports.
     assert!(
-        has_circular,
-        "circular dependency between a and b should emit a diagnostic"
+        _graph.has_cycle(),
+        "circular dependency between a and b must be recorded on the graph"
+    );
+    let diags = collect_all_diagnostics(&db, result.project);
+    assert!(
+        diags.iter().any(|d| d.is(
+            DiagnosticCategory::Model,
+            crate::common::ErrorCode::CircularDependency
+        )),
+        "circular dependency between a and b should emit a diagnostic: {diags:?}"
     );
 }
 
 use crate::testutils::feedback_loop_project;
-
-#[test]
-fn test_normalize_module_ref_str() {
-    assert_eq!(normalize_module_ref_str("foo\u{00B7}output"), "foo");
-    assert_eq!(normalize_module_ref_str("plain_name"), "plain_name");
-    assert_eq!(normalize_module_ref_str(""), "");
-}
 
 #[test]
 fn test_generate_max_abs_selection_small_counts() {
@@ -1579,9 +1582,8 @@ fn test_model_causal_edges_skips_internal_module_refs() {
 fn test_model_causal_edges_normalizes_leading_middot_parent_refs() {
     // A submodel's module instance can reference parent-scope variables via
     // leading-dot syntax (e.g. ".area"), which canonicalizes to a leading
-    // middot ("·area").  normalize_module_ref_str must strip the leading
-    // middot before truncating at the module qualifier, otherwise "·area"
-    // yields an empty-string key.
+    // middot ("·area"). The dependency resolver reads it as the bare name;
+    // taking the separator as a module hop would yield an empty-string key.
     let db = SimlinDb::default();
     let project = datamodel::Project {
         name: "parent_ref_edges".to_string(),
@@ -2007,7 +2009,7 @@ fn two_loop_project() -> datamodel::Project {
 ///
 /// The meaningful cache is the compiled fragment (`compile_ltm_var_fragment`),
 /// not the equation-text query. The per-shape equation-text query
-/// `link_score_equation_text_shaped(.., Bare)` (which `compile_ltm_var_fragment`
+/// `shaped_link_score(.., Bare)` (which `compile_ltm_var_fragment`
 /// now sources from) reads the whole-model occurrence IR
 /// (`model_ltm_reference_sites`) so the compiled fragment matches the emitted
 /// one -- so editing ANY variable re-runs it. But it produces an UNCHANGED value
@@ -2187,7 +2189,7 @@ fn test_accumulator_parse_error_bad_equation() {
         sync.project,
     );
     assert!(
-        parsed.variable.equation_errors().is_some(),
+        parsed.variable.fatal_diagnostics().next().is_some(),
         "struct fields should show equation errors for 'if then'"
     );
 
@@ -2267,9 +2269,9 @@ fn test_accumulator_parity_with_struct_fields() {
     let mut field_equation_errors: HashSet<(String, crate::common::EquationError)> = HashSet::new();
     for (var_name, synced_var) in &sync.models["main"].variables {
         let parsed = parse_var_no_module_ctx(&db, synced_var.source, sync.project);
-        if let Some(errors) = parsed.variable.equation_errors() {
-            for err in errors {
-                field_equation_errors.insert((var_name.clone(), err));
+        for diagnostic in &parsed.variable.diagnostics {
+            if let DiagnosticError::Equation(err) = diagnostic {
+                field_equation_errors.insert((var_name.clone(), err.clone()));
             }
         }
     }
@@ -3114,11 +3116,11 @@ fn variable_source_producers_agree_for_every_source_variable_kind() {
         _ => panic!("`demand_table` did not parse as an aux"),
     }
     assert!(
-        parsed["demand_table"].errors.is_empty(),
+        parsed["demand_table"].diagnostics.is_empty(),
         "a lookup-only table's empty equation is not an EmptyEquation error"
     );
     assert!(
-        parsed["imported_input"].errors.is_empty(),
+        parsed["imported_input"].diagnostics.is_empty(),
         "`can_be_module_input` suppresses EmptyEquation on an empty equation"
     );
     assert_eq!(
@@ -3141,8 +3143,8 @@ fn variable_source_producers_agree_for_every_source_variable_kind() {
 /// parse error.
 ///
 /// The `datamodel::Variable` producer deliberately does NOT apply it: that path
-/// parses synthesized implicit variables and the `ModelStage0` oracle, neither
-/// of which is ever a conveyor, and the ordinary compile path hard-rejects an
+/// parses synthesized helpers and the unit check's conveyor parameters, neither
+/// of which is ever a conveyor stock, and the ordinary compile path hard-rejects an
 /// un-expanded conveyor marker before reading the equation at all.
 #[test]
 fn variable_source_rewrites_a_conveyor_init_list_only_on_the_salsa_path() {

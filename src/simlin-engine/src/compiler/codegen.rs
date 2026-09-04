@@ -858,11 +858,33 @@ impl<'module> Compiler<'module> {
                 Ok(())
             }
             _ => {
+                // Every view over storage codegen can push is an arm above;
+                // anything else is a value `compiler/array_operand.rs` left
+                // in place (deliberately, for `ALLOCATE AVAILABLE`'s priority
+                // profile), named by what it is so the refusal can be acted on.
+                let kind = match expr {
+                    Expr::Const(..) => "a constant",
+                    Expr::TempArrayElement(..) => "one element of an array temp",
+                    Expr::Dt(..) => "DT",
+                    Expr::App(..) => "a builtin call",
+                    Expr::EvalModule(..) => "a module evaluation",
+                    Expr::ModuleInput(..) => "a module input",
+                    Expr::Op2(..) => "an arithmetic or comparison expression",
+                    Expr::Op1(..) => "a negation or NOT",
+                    Expr::If(..) => "a conditional",
+                    Expr::AssignCurr(..) | Expr::AssignNext(..) | Expr::AssignTemp(..) => {
+                        "an assignment"
+                    }
+                    Expr::Var(..)
+                    | Expr::Subscript(..)
+                    | Expr::StaticSubscript(..)
+                    | Expr::TempArray(..) => unreachable!("handled above"),
+                };
                 sim_err!(
                     Generic,
                     format!(
-                        "Cannot push view for expression type {:?} - expected array expression",
-                        std::mem::discriminant(expr)
+                        "an array operand here must be a variable, a subscripted array or an \
+                         array temp, but it is {kind}"
                     )
                 )
             }

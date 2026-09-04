@@ -25,9 +25,8 @@ use simlin_engine::data_provider::FilesystemDataProvider;
 use simlin_engine::datamodel::Project as DatamodelProject;
 use simlin_engine::db::{
     PersistentSyncState, SimlinDb, SourceProject, collect_all_diagnostics,
-    compile_project_incremental, model_detected_loops, model_module_ident_context,
-    parse_source_variable_with_module_context, set_project_ltm_enabled, sync_from_datamodel,
-    sync_from_datamodel_incremental,
+    compile_project_incremental, model_detected_loops, parse_source_variable,
+    set_project_ltm_enabled, sync_from_datamodel, sync_from_datamodel_incremental,
 };
 use simlin_engine::errors::{
     FormattedError, FormattedErrorKind, FormattedErrors, collect_formatted_errors,
@@ -186,6 +185,17 @@ fn resolve_input_format(input: &InputArgs) -> InputFormat {
 /// pairs in declaration order.
 type VisibleStocks = Vec<(String, String)>;
 
+/// The model file's bytes, or the refusal `open_model` dies with: the path
+/// and the OS's reason. Stdin is read as `/dev/stdin`.
+fn read_model_file(file_path: &str) -> StdResult<Vec<u8>, String> {
+    std::fs::read(file_path).map_err(|err| format!("model '{file_path}': {err}"))
+}
+
+/// A text format's file as UTF-8, refused with the path when it is not.
+fn model_text(file_path: &str, bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|err| die!("model '{}': {}", file_path, err))
+}
+
 /// Load a model file, dispatching on format. Exits on error.
 /// For systems format, also returns the visible stocks list (declaration
 /// order, original names) for filtered output.
@@ -196,27 +206,20 @@ fn open_model(input: &InputArgs) -> (DatamodelProject, Option<VisibleStocks>) {
         .as_ref()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "/dev/stdin".to_string());
+    let bytes = read_model_file(&file_path).unwrap_or_else(|reason| die!("{}", reason));
 
     let (result, visible) = match format {
         InputFormat::Vensim => {
-            let contents = std::fs::read_to_string(&file_path).unwrap();
+            let contents = model_text(&file_path, bytes);
             // `input.path` is the user's intent: `Some` for a named model file
             // (anchors the external-data root), `None` for stdin (pipe or
             // `< file`) where no data root can be inferred.
             (open_vensim_model(input.path.as_deref(), &contents), None)
         }
-        InputFormat::Protobuf => {
-            let file = File::open(&file_path).unwrap();
-            let mut reader = BufReader::new(file);
-            (open_binary(&mut reader), None)
-        }
-        InputFormat::Xmile => {
-            let file = File::open(&file_path).unwrap();
-            let mut reader = BufReader::new(file);
-            (open_xmile(&mut reader), None)
-        }
+        InputFormat::Protobuf => (open_binary(&mut BufReader::new(bytes.as_slice())), None),
+        InputFormat::Xmile => (open_xmile(&mut BufReader::new(bytes.as_slice())), None),
         InputFormat::Systems => {
-            let contents = std::fs::read_to_string(&file_path).unwrap();
+            let contents = model_text(&file_path, bytes);
             let systems_model = simlin_engine::systems::parse(&contents)
                 .unwrap_or_else(|e| die!("model '{}' parse error: {}", &file_path, e));
             let visible = simlin_engine::systems::translate::visible_stocks(&systems_model);
@@ -513,25 +516,40 @@ fn run_datamodel_with_errors(project: &DatamodelProject) -> Results {
     }
 }
 
+/// The `--ltm` loop listing: a header per model that has loops, then one line
+/// per loop. A stdlib template is left out. A model the project's module graph
+/// reaches a cycle from lists nothing, since `model_detected_loops` carries
+/// that gate; the cycle is the model error the diagnostics pass prints.
+fn ltm_loop_report(db: &SimlinDb, source_project: SourceProject) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (model_name, source_model) in source_project.models(db).iter() {
+        if model_name.starts_with("stdlib\u{205A}") {
+            continue;
+        }
+        let detected = model_detected_loops(db, *source_model, source_project);
+        if detected.loops.is_empty() {
+            continue;
+        }
+        lines.push(format!("# Loops in model '{model_name}':"));
+        for loop_item in &detected.loops {
+            lines.push(format!(
+                "{} := {}",
+                loop_item.id,
+                loop_item.variables.join(" -> ")
+            ));
+        }
+    }
+    lines
+}
+
 fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
     if enable_ltm {
         let mut db = SimlinDb::default();
         let sync_state = sync_from_datamodel_incremental(&mut db, project, None);
         let source_project = sync_state.project;
 
-        // Detect and report loops via the salsa path
-        let models = source_project.models(&db);
-        for (model_name, source_model) in models.iter() {
-            if model_name.starts_with("stdlib\u{205A}") {
-                continue;
-            }
-            let detected = model_detected_loops(&db, *source_model, source_project);
-            if !detected.loops.is_empty() {
-                eprintln!("# Loops in model '{}':", model_name);
-                for loop_item in &detected.loops {
-                    eprintln!("{} := {}", loop_item.id, loop_item.variables.join(" -> "));
-                }
-            }
+        for line in ltm_loop_report(&db, source_project) {
+            eprintln!("{line}");
         }
 
         // Enable LTM BEFORE harvesting diagnostics. `model_all_diagnostics` emits
@@ -592,8 +610,6 @@ fn print_equations(project: &DatamodelProject, output: Option<PathBuf>) {
 
         let var_names = source_model.variable_names(&db);
         let vars = source_model.variables(&db);
-        let module_ident_context =
-            model_module_ident_context(&db, source_model, sync.project, vec![]);
 
         output_file
             .write_fmt(format_args!("% {model_name}\n"))
@@ -609,12 +625,7 @@ fn print_equations(project: &DatamodelProject, output: Option<PathBuf>) {
                 None => continue,
             };
 
-            let parsed = parse_source_variable_with_module_context(
-                &db,
-                source_var,
-                sync.project,
-                module_ident_context,
-            );
+            let parsed = parse_source_variable(&db, source_var, sync.project);
             let var = &parsed.variable;
 
             let is_stock = var.is_stock();
@@ -788,6 +799,32 @@ fn main() {
                 results.print_tsv_comparison(Some(&reference_data));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod open_model_tests {
+    use super::*;
+
+    /// A model file the CLI cannot read is refused with the path and the
+    /// OS's reason -- the message `open_model` dies with -- never a panic.
+    #[test]
+    fn an_unreadable_model_file_is_refused_with_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent.mdl");
+        let missing = missing.to_string_lossy().into_owned();
+        let reason = read_model_file(&missing).expect_err("a missing file is refused");
+        assert!(
+            reason.contains(&missing),
+            "the refusal names the path: {reason}"
+        );
+
+        let present = dir.path().join("present.xmile");
+        std::fs::write(&present, b"<xmile/>").unwrap();
+        assert_eq!(
+            read_model_file(&present.to_string_lossy()).unwrap(),
+            b"<xmile/>"
+        );
     }
 }
 
@@ -967,6 +1004,70 @@ mod diagnostic_reporting_tests {
             .iter()
             .filter_map(|e| e.message.clone())
             .collect()
+    }
+
+    /// A project whose module graph is a cycle (`a -> b -> a`) that `main`
+    /// reaches through an instance a per-element helper reads
+    /// (`x[d] = SMTH1(m.out + y[d], 1)`): the shape whose loop detection
+    /// recurses into the instance's sub-model layout.
+    fn module_cycle_project() -> DatamodelProject {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>cycle</name><vendor>simlin</vendor><product version="1.0">simlin</product></header>
+  <sim_specs method="Euler" time_units="Month"><start>0</start><stop>1</stop><dt>1</dt></sim_specs>
+  <dimensions><dim name="d"><elem name="north"/><elem name="south"/></dim></dimensions>
+  <model><variables>
+    <aux name="driver"><eqn>2</eqn></aux>
+    <aux name="y"><eqn>1</eqn><dimensions><dim name="d"/></dimensions></aux>
+    <module name="m" simlin:model_name="a" xmlns:simlin="https://simlin.com/XMILE/v1.0">
+      <connect to="m.inp" from=".driver"/>
+    </module>
+    <aux name="x"><eqn>SMTH1(m.out + y[d], 1)</eqn><dimensions><dim name="d"/></dimensions></aux>
+  </variables></model>
+  <model name="a"><variables>
+    <aux name="inp"><eqn>1</eqn></aux>
+    <aux name="out" access="output"><eqn>inp * 2</eqn></aux>
+    <module name="to_b" simlin:model_name="b" xmlns:simlin="https://simlin.com/XMILE/v1.0">
+      <connect to="to_b.binp" from="out"/>
+    </module>
+  </variables></model>
+  <model name="b"><variables>
+    <aux name="binp"><eqn>1</eqn></aux>
+    <module name="to_a" simlin:model_name="a" xmlns:simlin="https://simlin.com/XMILE/v1.0">
+      <connect to="to_a.inp" from="binp"/>
+    </module>
+  </variables></model>
+</xmile>"#;
+        open_xmile(&mut std::io::BufReader::new(xml.as_bytes())).expect("parse the cyclic project")
+    }
+
+    /// `simulate --ltm` on a module cycle, end to end: the loop listing has
+    /// nothing for a model that reaches the cycle (the gate is
+    /// `model_detected_loops`'), and the diagnostics pass reports the cycle as
+    /// the model error that makes the run die after printing it.
+    #[test]
+    fn ltm_loop_report_lists_nothing_for_a_module_cycle_that_the_diagnostics_report() {
+        let project = module_cycle_project();
+        let mut db = SimlinDb::default();
+        let sync_state = sync_from_datamodel_incremental(&mut db, &project, None);
+        assert_eq!(
+            ltm_loop_report(&db, sync_state.project),
+            Vec::<String>::new(),
+            "no model of a cyclic project lists loops"
+        );
+
+        let formatted = cli_diagnostics(&project, true);
+        let messages = messages(&formatted);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("error in model") && m.contains("circular module reference")),
+            "the cycle is reported as a model error: {messages:?}"
+        );
+        assert!(
+            formatted.has_model_errors,
+            "an error-severity diagnostic, so the simulate path dies after printing it"
+        );
     }
 
     /// The issue's reproduce case, at the level the CLI actually decides things:

@@ -703,7 +703,7 @@ fn assemble_module_resolved_scc_member_offsets_match_acyclic_layout() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "Task 5b precondition: the element-acyclic {{ce,ecc}} SCC must \
          survive the cycle gate (has_cycle == false)"
     );
@@ -1050,5 +1050,287 @@ fn assembled_init_combined_fragment_is_byte_stable_across_fresh_dbs() {
          the synthetic-ident SymbolicCompiledInitial carries) must be \
          byte-identical across two fresh-DB compiles (AC2.3 determinism, \
          init path)"
+    );
+}
+
+/// A one-member fragment with a PROLOGUE: a hoisted `VECTOR SORT ORDER` block
+/// writing temp 0, then three elements. Each element listed in `readers` reads
+/// one cell of temp 0; every other element is the constant 7.
+///
+/// `view_base` is the static view the prologue's operand is read through:
+/// `src`, outside the SCC, or one of the member's own elements.
+fn prologue_member_fragments(
+    view_base: SymVarRef,
+    readers: &[usize],
+) -> HashMap<Ident<Canonical>, PerVarBytecodes> {
+    let mut code = vec![
+        // PROLOGUE: one materialized array, written once.
+        SymbolicOpcode::PushStaticView { view_id: 0 },
+        SymbolicOpcode::VectorSortOrder { write_temp_id: 0 },
+        SymbolicOpcode::PopView {},
+    ];
+    for elem in 0..3 {
+        if readers.contains(&elem) {
+            // m[e] = temp0[e]
+            code.push(SymbolicOpcode::LoadTempConst {
+                temp_id: 0,
+                index: elem as u16,
+            });
+            code.push(SymbolicOpcode::AssignCurr {
+                var: vref("m", elem),
+            });
+        } else {
+            // m[e] = 7
+            code.push(SymbolicOpcode::AssignConstCurr {
+                var: vref("m", elem),
+                literal_id: 0,
+            });
+        }
+    }
+    code.push(SymbolicOpcode::Ret);
+    let m = PerVarBytecodes {
+        symbolic: SymbolicByteCode {
+            literals: vec![7.0],
+            code,
+        },
+        graphical_functions: vec![],
+        module_decls: vec![],
+        static_views: vec![SymbolicStaticView {
+            base: SymStaticViewBase::Var(view_base),
+            dims: SmallVec::new(),
+            strides: SmallVec::new(),
+            offset: 0,
+            sparse: SmallVec::new(),
+            dim_ids: SmallVec::new(),
+        }],
+        temp_sizes: vec![(0, 3)],
+        dim_lists: vec![],
+    };
+    let mut frags = HashMap::new();
+    frags.insert(id("m"), m);
+    frags
+}
+
+/// The index of the prologue's `VectorSortOrder` in a combined fragment.
+fn prologue_position(bc: &PerVarBytecodes) -> usize {
+    bc.symbolic
+        .code
+        .iter()
+        .position(|op| matches!(op, SymbolicOpcode::VectorSortOrder { .. }))
+        .expect("the prologue's sort order is emitted")
+}
+
+/// A member's hoisted materialization is emitted ONCE, ahead of the first
+/// element that reads it in `element_order` -- not folded into the element
+/// that happened to be written first.
+///
+/// The order here is BACKWARD (`m[2] -> m[1] -> m[0]`), which is what a
+/// recurrence over a shifted subrange produces and what the other rows in this
+/// file never exercise: they build members with no prologue and forward orders
+/// only. Folded into `m[0]`'s segment, the temp would be written LAST and the
+/// two elements ahead of it would read whatever `temp_storage` happened to
+/// hold -- a well-formed program with wrong numbers.
+///
+/// The boundary is derived through the production segmenter, so this pins the
+/// placement rather than a restatement of it.
+#[test]
+fn a_member_prologue_precedes_its_first_reader_in_a_backward_order() {
+    let frags = prologue_member_fragments(vref("src", 0), &[0, 1, 2]);
+    let resolved = scc(vec![(id("m"), 2), (id("m"), 1), (id("m"), 0)]);
+
+    let combined =
+        combine_scc_fragment(&resolved, &frags).expect("a well-formed prologue must combine");
+
+    // The prologue's three opcodes come first, before any per-element write.
+    let code = &combined.symbolic.code;
+    assert!(
+        matches!(code[0], SymbolicOpcode::PushStaticView { .. })
+            && matches!(code[1], SymbolicOpcode::VectorSortOrder { .. })
+            && matches!(code[2], SymbolicOpcode::PopView {}),
+        "the prologue must be emitted first, got {:?}",
+        &code[..3.min(code.len())]
+    );
+
+    // ...and the elements follow in `element_order`.
+    assert_eq!(
+        write_refs(&combined),
+        vec![vref("m", 2), vref("m", 1), vref("m", 0)],
+        "the per-element writes must follow element_order"
+    );
+
+    // Nothing is dropped or duplicated: 3 prologue + 3 x 2 element opcodes,
+    // plus the single trailing `Ret`.
+    assert_eq!(code.len(), 3 + 6 + 1, "opcodes must be conserved");
+    assert_eq!(code.last(), Some(&SymbolicOpcode::Ret));
+}
+
+/// A prologue is placed after the non-reader element it reads.
+///
+/// `m[2]` is a constant the prologue reads; `m[0]` and `m[1]` read the
+/// prologue's temp. The prologue goes immediately before `m[0]`, the first
+/// reader in `element_order`, so `m[2]` precedes it exactly as the element
+/// graph requires -- and an order that puts `m[2]` LAST is refused, because
+/// the prologue would then read a slot nothing had written.
+#[test]
+fn a_prologue_is_emitted_after_the_non_reader_element_it_reads() {
+    let frags = prologue_member_fragments(vref("m", 2), &[0, 1]);
+
+    let resolved = scc(vec![(id("m"), 2), (id("m"), 0), (id("m"), 1)]);
+    let combined = combine_scc_fragment(&resolved, &frags)
+        .expect("the read element precedes the first reader, so this combines");
+    assert_eq!(
+        write_refs(&combined),
+        vec![vref("m", 2), vref("m", 0), vref("m", 1)],
+        "the per-element writes must follow element_order"
+    );
+    assert_eq!(
+        prologue_position(&combined),
+        2,
+        "the prologue follows m[2]'s one-opcode segment and precedes m[0]'s: {:?}",
+        combined.symbolic.code
+    );
+    // 1 (m[2]) + 3 (prologue) + 2 + 2 (the readers) + Ret.
+    assert_eq!(combined.symbolic.code.len(), 1 + 3 + 4 + 1);
+
+    let read_last = scc(vec![(id("m"), 0), (id("m"), 1), (id("m"), 2)]);
+    let err = combine_scc_fragment(&read_last, &frags)
+        .expect_err("a prologue reading an element ordered after its first reader is refused");
+    assert!(
+        err.contains("prologue reads"),
+        "the refusal must name the prologue read, got: {err}"
+    );
+}
+
+/// A prologue that reads an element which reads the prologue back is a cycle
+/// in EVERY order, and the combiner refuses it rather than trusting the order
+/// it was handed.
+///
+/// The element graph makes this unreachable (`symbolic_phase_element_order`
+/// wires a prologue read into every element that reads the prologue, so this
+/// shape is an element self-loop there), so this is the guard against the two
+/// DRIFTING: they live in different files, and a disagreement between them is
+/// what produces a well-formed program reading a temp nothing has written.
+#[test]
+fn a_prologue_reading_one_of_its_own_readers_is_refused_in_every_order() {
+    let frags = prologue_member_fragments(vref("m", 0), &[0, 1, 2]);
+    for order in [
+        vec![(id("m"), 2), (id("m"), 1), (id("m"), 0)],
+        vec![(id("m"), 0), (id("m"), 1), (id("m"), 2)],
+    ] {
+        let err = combine_scc_fragment(&scc(order.clone()), &frags)
+            .expect_err("a prologue reading one of its own readers must be refused");
+        assert!(
+            err.contains("prologue reads"),
+            "{order:?}: the refusal must name the prologue read, got: {err}"
+        );
+    }
+}
+
+/// A once-written temp only the first element materializes is NOT lifted into
+/// the prologue, even beside a shared temp.
+///
+/// `m[0]`'s own block (temp 1, read by `m[0]` alone) follows the shared block
+/// (temp 0, read by every element) and reads `m[2]`. Lifted, that read would
+/// be the prologue's and would have to precede every reader of temp 0 --
+/// `m[2]` included, a false self-loop. Left where it is, `m[2]` merely has to
+/// precede `m[0]`, which the order below does.
+#[test]
+fn a_private_block_beside_a_shared_temp_stays_in_its_element() {
+    let m = PerVarBytecodes {
+        symbolic: SymbolicByteCode {
+            literals: vec![7.0],
+            code: vec![
+                // Shared: temp 0, read by every element.
+                SymbolicOpcode::PushStaticView { view_id: 0 },
+                SymbolicOpcode::VectorSortOrder { write_temp_id: 0 },
+                SymbolicOpcode::PopView {},
+                // Private to m[0]: temp 1, over a view of m[2].
+                SymbolicOpcode::PushStaticView { view_id: 1 },
+                SymbolicOpcode::VectorSortOrder { write_temp_id: 1 },
+                SymbolicOpcode::PopView {},
+                // m[0] reads both temps.
+                SymbolicOpcode::LoadTempConst {
+                    temp_id: 0,
+                    index: 0,
+                },
+                SymbolicOpcode::LoadTempConst {
+                    temp_id: 1,
+                    index: 0,
+                },
+                SymbolicOpcode::AssignCurr { var: vref("m", 0) },
+                // m[1] = temp0[1]
+                SymbolicOpcode::LoadTempConst {
+                    temp_id: 0,
+                    index: 1,
+                },
+                SymbolicOpcode::AssignCurr { var: vref("m", 1) },
+                // m[2] = temp0[2]
+                SymbolicOpcode::LoadTempConst {
+                    temp_id: 0,
+                    index: 2,
+                },
+                SymbolicOpcode::AssignCurr { var: vref("m", 2) },
+                SymbolicOpcode::Ret,
+            ],
+        },
+        graphical_functions: vec![],
+        module_decls: vec![],
+        static_views: vec![
+            SymbolicStaticView {
+                base: SymStaticViewBase::Var(vref("src", 0)),
+                dims: SmallVec::new(),
+                strides: SmallVec::new(),
+                offset: 0,
+                sparse: SmallVec::new(),
+                dim_ids: SmallVec::new(),
+            },
+            SymbolicStaticView {
+                base: SymStaticViewBase::Var(vref("m", 2)),
+                dims: SmallVec::new(),
+                strides: SmallVec::new(),
+                offset: 0,
+                sparse: SmallVec::new(),
+                dim_ids: SmallVec::new(),
+            },
+        ],
+        temp_sizes: vec![(0, 3), (1, 3)],
+        dim_lists: vec![],
+    };
+    let mut frags = HashMap::new();
+    frags.insert(id("m"), m);
+
+    // m[2] before m[0], as the private block's read requires; m[1] first,
+    // which is where a lifted prologue would have had to precede m[2].
+    let resolved = scc(vec![(id("m"), 1), (id("m"), 2), (id("m"), 0)]);
+    let combined = combine_scc_fragment(&resolved, &frags)
+        .expect("a private block reading a sibling is that element's own, not the prologue's");
+    assert_eq!(
+        write_refs(&combined),
+        vec![vref("m", 1), vref("m", 2), vref("m", 0)],
+        "the per-element writes must follow element_order"
+    );
+    let code = &combined.symbolic.code;
+    let sorts: Vec<usize> = code
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| matches!(op, SymbolicOpcode::VectorSortOrder { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    let m2_write = code
+        .iter()
+        .position(|op| matches!(op, SymbolicOpcode::AssignCurr { var } if *var == vref("m", 2)))
+        .expect("m[2] is written");
+    assert_eq!(
+        sorts[0], 1,
+        "the shared sort is the prologue, emitted first"
+    );
+    assert!(
+        sorts[1] > m2_write,
+        "the private sort stays in m[0]'s segment, after m[2]'s write: {code:?}"
+    );
+    assert_eq!(
+        code.len(),
+        3 + 3 + 3 + 2 + 2 + 1,
+        "opcodes must be conserved"
     );
 }

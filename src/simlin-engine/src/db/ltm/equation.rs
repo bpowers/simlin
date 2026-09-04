@@ -18,15 +18,19 @@
 //! the characterization dump (`db/ltm_char_tests.rs`) and the partial-equation
 //! warning read it, and it preserves the source spelling byte-for-byte -- while
 //! the AST is the sole compiled representation. They are created together from
-//! one generator output (`expr = Expr0::new(text)`) and only ever moved as a
-//! unit (`scalarize`/`retarget_dims` re-tag dimensions, never rewrite an arm),
-//! so they cannot drift.
+//! one generator output -- a text generator's arm is parsed ONCE
+//! (`expr = Expr0::new(text)`, [`LtmArm::new`]), a typed generator's arm is its
+//! tree with the canonical print as its text ([`LtmArm::from_typed`]) -- and
+//! only ever moved as a unit (`scalarize`/`retarget_dims` re-tag dimensions,
+//! never rewrite an arm), so they cannot drift. A generator that has to
+//! inspect its own arm (the per-element emitters' completeness guard) reads the
+//! arm's tree and moves the arm into the equation rather than parsing again.
 
 use std::collections::HashMap;
 
 use std::sync::Arc;
 
-use crate::ast::{Ast, Expr0};
+use crate::ast::{Ast, Expr0, print_eqn};
 use crate::common::{CanonicalElementName, EquationError};
 use crate::lexer::LexerType;
 
@@ -55,7 +59,7 @@ pub struct LtmArm {
     /// The authoritative compiled AST (`Expr0::new(text)`).
     ///
     /// Behind an `Arc` because every emitted link score is cloned out of the
-    /// `link_score_equation_text_shaped` memo (`db/ltm/link_scores.rs`) into
+    /// `shaped_link_score` memo (`db/ltm/link_scores.rs`) into
     /// `model_ltm_variables`' own list, so the tree would otherwise be retained
     /// TWICE for the whole life of the database -- on C-LEARN, two copies of
     /// 12.78 MB of equations, whose ASTs dominate that query's ~273 MiB. Sharing
@@ -112,6 +116,19 @@ impl LtmArm {
             text,
             expr,
             parse_error,
+        }
+    }
+
+    /// An arm the generator built as a typed tree (an aggregate node's
+    /// reducer, `AggNode::reducer_expr0`): the tree is the arm, and the
+    /// diagnostic text is its canonical print -- the same spelling
+    /// [`LtmArm::new`] would have been handed, so a golden reads one form
+    /// whichever way an arm was made. Nothing is parsed.
+    pub(crate) fn from_typed(expr: Expr0) -> Self {
+        Self {
+            text: print_eqn(&expr),
+            expr: Some(Arc::new(expr)),
+            parse_error: None,
         }
     }
 }
@@ -391,7 +408,7 @@ mod tests {
     /// Salsa backdates a re-executed query's memo by `PartialEq`, and the
     /// literal on `Expr0::Const` is an `ast::Literal` compared by bit pattern,
     /// so a NaN-bearing LTM equation is equal to an identical rebuild of
-    /// itself -- which is what lets `link_score_equation_text_shaped` backdate
+    /// itself -- which is what lets `shaped_link_score` backdate
     /// and the expensive `compile_ltm_var_fragment` be reused (GH #981).
     ///
     /// The controls (an ordinary equation, and a genuinely edited one) are what

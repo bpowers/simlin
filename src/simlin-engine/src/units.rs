@@ -316,7 +316,7 @@ impl Context {
         Self::new(&combined_units, sim_specs)
     }
     pub fn new(units: &[Unit], sim_specs: &SimSpecs) -> (Self, Vec<(String, Vec<EquationError>)>) {
-        let mut unit_errors: Vec<(String, Vec<EquationError>)> = Vec::new();
+        let mut definition_errors: Vec<(String, Vec<EquationError>)> = Vec::new();
 
         // Vensim's MDL files routinely repeat the same `22:` unit-equivalence
         // line in the settings footer (e.g. wrld3-03.mdl declares each
@@ -367,7 +367,7 @@ impl Context {
                     }
                     Entry::Occupied(e) => {
                         if e.get() != &unit_name {
-                            unit_errors.push(alias_err(e.key(), &unit_name, e.get()));
+                            definition_errors.push(alias_err(e.key(), &unit_name, e.get()));
                         }
                     }
                 }
@@ -380,7 +380,7 @@ impl Context {
             // canonicalize to `yr`) is also benign: we must still register the
             // prime unit so that the name and its aliases resolve via lookup.
             if matches!(aliases.get(&unit_name), Some(target) if target != &unit_name) {
-                unit_errors.push(dup_err(&unit_name));
+                definition_errors.push(dup_err(&unit_name));
             } else {
                 let new_map: UnitMap = [(unit_name.clone(), 1)].iter().cloned().collect();
                 match parsed_units.entry(unit_name.clone()) {
@@ -389,7 +389,7 @@ impl Context {
                     }
                     Entry::Occupied(e) => {
                         if e.get() != &new_map {
-                            unit_errors.push(dup_err(&unit_name));
+                            definition_errors.push(dup_err(&unit_name));
                         }
                     }
                 }
@@ -427,7 +427,7 @@ impl Context {
         /// bare `no_app_in_units` with nothing to look at.
         fn resolve_equation_unit(
             ctx: &mut Context,
-            unit_errors: &mut Vec<(String, Vec<EquationError>)>,
+            definition_errors: &mut Vec<(String, Vec<EquationError>)>,
             dup_err: &dyn Fn(&str) -> (String, Vec<EquationError>),
             unit_name: &str,
             ast: &Option<Expr0>,
@@ -441,7 +441,8 @@ impl Context {
                     // the modeler a bare `no_app_in_units` with no offset into
                     // the equation and nothing to read.
                     Err(err) => {
-                        unit_errors.push((unit_name.to_owned(), vec![err.in_context(context)]));
+                        definition_errors
+                            .push((unit_name.to_owned(), vec![err.in_context(context)]));
                         return;
                     }
                 },
@@ -451,7 +452,7 @@ impl Context {
             // As in step 1: only an alias of *another* unit is a conflict; a
             // self-alias is benign and the prime unit must still be registered.
             if matches!(ctx.aliases.get(unit_name), Some(target) if target != unit_name) {
-                unit_errors.push(dup_err(unit_name));
+                definition_errors.push(dup_err(unit_name));
             } else {
                 match ctx.units.entry(unit_name.to_owned()) {
                     Entry::Vacant(e) => {
@@ -459,7 +460,7 @@ impl Context {
                     }
                     Entry::Occupied(e) => {
                         if e.get() != &unit_components {
-                            unit_errors.push(dup_err(unit_name));
+                            definition_errors.push(dup_err(unit_name));
                         }
                     }
                 }
@@ -509,7 +510,7 @@ impl Context {
                     }
                     Entry::Occupied(e) => {
                         if e.get() != &unit_name {
-                            unit_errors.push(alias_err(e.key(), &unit_name, e.get()));
+                            definition_errors.push(alias_err(e.key(), &unit_name, e.get()));
                         }
                     }
                 }
@@ -534,7 +535,7 @@ impl Context {
                     context,
                 }),
                 Err(errors) => {
-                    unit_errors.push((
+                    definition_errors.push((
                         unit_name.clone(),
                         errors
                             .into_iter()
@@ -567,7 +568,7 @@ impl Context {
                 }
                 resolve_equation_unit(
                     &mut ctx,
-                    &mut unit_errors,
+                    &mut definition_errors,
                     &dup_err,
                     &p.name,
                     &p.ast,
@@ -584,7 +585,7 @@ impl Context {
                 for p in deferred {
                     resolve_equation_unit(
                         &mut ctx,
-                        &mut unit_errors,
+                        &mut definition_errors,
                         &dup_err,
                         &p.name,
                         &p.ast,
@@ -603,7 +604,7 @@ impl Context {
         // the context-layer parallel of the inference partial-results fix
         // (GH #614): an empty context would lose all alias normalization
         // (yr/year, person/people) and re-create a spurious mismatch flood.
-        (ctx, unit_errors)
+        (ctx, definition_errors)
     }
 
     /// Alias-resolving map lookup WITHOUT `resolve_name`'s dimensionless

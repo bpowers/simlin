@@ -627,7 +627,7 @@ mod tests {
             end_offset: 9,
             kind: FormattedErrorKind::Variable,
             severity: DiagnosticSeverity::Error,
-            unit_error_kind: None,
+            category: None,
             details: None,
         };
         let output = ErrorOutput::from(&fe);
@@ -692,7 +692,7 @@ mod tests {
                 end_offset: 0,
                 kind: FormattedErrorKind::Variable,
                 severity: DiagnosticSeverity::Error,
-                unit_error_kind: None,
+                category: None,
                 details: None,
             };
             let output = ErrorOutput::from(&fe);

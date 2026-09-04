@@ -50,9 +50,10 @@
 //! The second half of the file measures INCREMENTALITY, which no golden can
 //! see: which fragment-compiler bodies actually re-execute after an edit, using
 //! the `#[cfg(test)]` execution records in `db::fragment_compile` rather than
-//! memo pointer equality. Read `layout_only_edits_and_fragment_cache_reuse`'s
-//! header comment for what that measurement found and for the two documented
-//! reasons a module-instantiating add is still saturated.
+//! memo pointer equality, and -- for the AC3.1 pins -- every tracked query's
+//! body entries through `db::exec_probe::ProbedDb`. Read
+//! `layout_only_edits_and_fragment_cache_reuse`'s header comment for what that
+//! measurement found.
 //!
 //! **That half is now the load-bearing one.** The value-equality assertions were
 //! written when a fragment COULD have absorbed a layout dependency and still
@@ -823,7 +824,7 @@ fn render_resolved_scc(db: &SimlinDb, project: SourceProject) -> String {
     let model = *project.models(db).get("main").unwrap();
     let dep_graph = model_dependency_graph(db, model, project, ModuleInputSet::empty(db));
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "the SCC fixture's element-acyclic recurrence must survive the cycle gate"
     );
     assert_eq!(
@@ -1453,10 +1454,10 @@ fn char_modules_and_stdlib_call() {
                 ("main::src", "initial+flow"),
                 ("main::sub", "initial+flow+stock"),
                 ("main::usesub", "flow"),
-                ("producer::input", "flow"),
-                ("producer::output", "flow"),
-                ("producer::input", "flow"),
-                ("producer::output", "flow"),
+                ("producer::input", "initial+flow"),
+                ("producer::output", "initial+flow"),
+                ("producer::input", "initial+flow"),
+                ("producer::output", "initial+flow"),
             ],
             why: "A module variable is the ONLY shape that compiles all three \
                   phases: it is not a stock, so the `!is_stock` arm of the \
@@ -1467,7 +1468,12 @@ fn char_modules_and_stdlib_call() {
                   initial equation into the initials runlist as well: `src`, \
                   the synthesized `arg1` delay-time helper, `smoothed` (which \
                   reads the instance's output), and `sub`. `usesub` is not \
-                  among them because `producer` holds no stock. \
+                  among them because `producer` holds no stock and `main` is \
+                  not a module target. `producer::input` and `producer::output` \
+                  carry an initial fragment at BOTH input sets because \
+                  `producer` IS one: every value-bearing variable of an \
+                  instantiated model is an initials member, which is what lets \
+                  a parent's initials read its ports (GH #1028). \
                   `producer::input` carries a flow fragment at BOTH input sets, \
                   and for the ordinary reason: it is an Aux, so `!is_stock` \
                   already satisfies the flows gate. The `is_module_input` arm \
@@ -1522,7 +1528,7 @@ fn char_prev_and_init() {
         prev_init_model(),
         FixtureExpect::plain(
             &[
-                ("main::$⁚init_expr⁚0⁚arg0", "initial+flow"),
+                ("main::$⁚init_expr⁚0⁚arg0", "initial"),
                 ("main::$⁚prev_expr⁚0⁚arg0", "flow"),
                 ("main::init_direct", "initial+flow"),
                 ("main::init_expr", "initial+flow"),
@@ -1531,13 +1537,15 @@ fn char_prev_and_init() {
                 ("main::x", "initial+flow"),
             ],
             "`INIT(...)` reads the frozen initial-values buffer, so everything \
-             an INIT argument reaches must also be evaluated in the initials \
-             phase: `x`, the `INIT(x + 1)` capture helper, and the two INIT \
-             consumers. `PREVIOUS` reads the PRIOR step's committed values, \
-             which the initials phase has not produced, so both PREVIOUS \
-             consumers and the `PREVIOUS(x + 1)` capture helper are flow-only \
-             -- the asymmetry between the two synthesized `arg0` helpers is \
-             the load-bearing detail here.",
+             an INIT argument reaches must be evaluated in the initials phase: \
+             `x`, the `INIT(x + 1)` capture helper, and the two INIT consumers. \
+             The capture is evaluated ONLY there -- nothing reads its per-step \
+             value, so it has no flow fragment and no results series. \
+             `PREVIOUS` reads the PRIOR step's committed values, which the \
+             initials phase has not produced, so both PREVIOUS consumers and \
+             the `PREVIOUS(x + 1)` capture helper are flow-only. The two \
+             synthesized `arg0` helpers occupy disjoint phases: a capture's \
+             kind is its phase demand.",
             &[
                 // x = 2 * time -> 0, 2, 4.
                 (0, "x", 0.0),
@@ -1661,18 +1669,9 @@ fn char_ltm_fragments_exhaustive() {
         FixtureExpect {
             models: &[("main", &[])],
             phases: &[
-                (
-                    "main::$⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0",
-                    "initial+flow",
-                ),
-                (
-                    "main::$⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0",
-                    "initial+flow",
-                ),
-                (
-                    "main::$⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0",
-                    "initial+flow",
-                ),
+                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0", "flow"),
+                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0", "flow"),
+                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0", "flow"),
                 ("main::$⁚ltm⁚link_score⁚growth→level", "flow"),
                 ("main::$⁚ltm⁚link_score⁚level→growth", "flow"),
                 ("main::$⁚ltm⁚loop_score⁚r1", "flow"),
@@ -1686,9 +1685,10 @@ fn char_ltm_fragments_exhaustive() {
                   `rate→growth`, a causal edge no circuit traverses, gets no \
                   score here (contrast the discovery fixture). Every synthetic \
                   is a scalar aux, hence flow-only. Only the `growth→level` \
-                  score synthesizes PREVIOUS capture helpers, and those land in \
-                  the initials runlist because a stock's initial equation \
-                  reaches them.",
+                  score synthesizes PREVIOUS capture helpers, and a PREVIOUS \
+                  capture is flow-only too: its kind is its phase demand, and \
+                  the intrinsic's fallback covers every read before the first \
+                  step commits.",
             spot_checks: LTM_LOOP_SPOT_CHECKS,
             ltm: FixtureLtm::Exhaustive,
             expect_one_resolved_scc: false,
@@ -1704,18 +1704,9 @@ fn char_ltm_fragments_discovery() {
         FixtureExpect {
             models: &[("main", &[])],
             phases: &[
-                (
-                    "main::$⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0",
-                    "initial+flow",
-                ),
-                (
-                    "main::$⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0",
-                    "initial+flow",
-                ),
-                (
-                    "main::$⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0",
-                    "initial+flow",
-                ),
+                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚0⁚arg0", "flow"),
+                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚1⁚arg0", "flow"),
+                ("main::$⁚$⁚ltm⁚link_score⁚growth→level⁚2⁚arg0", "flow"),
                 ("main::$⁚ltm⁚link_score⁚growth→level", "flow"),
                 ("main::$⁚ltm⁚link_score⁚level→growth", "flow"),
                 ("main::$⁚ltm⁚link_score⁚rate→growth", "flow"),
@@ -1731,9 +1722,8 @@ fn char_ltm_fragments_discovery() {
                   Every score is a scalar aux, hence flow-only. Only the \
                   `growth→level` score -- the stock-update edge, whose \
                   ceteris-paribus numerator re-integrates the stock -- \
-                  synthesizes PREVIOUS capture helpers, and those land in the \
-                  initials runlist because a stock's initial equation reaches \
-                  them.",
+                  synthesizes PREVIOUS capture helpers, and a PREVIOUS capture \
+                  is flow-only too: its kind is its phase demand.",
             spot_checks: LTM_LOOP_SPOT_CHECKS,
             ltm: FixtureLtm::Discovery,
             expect_one_resolved_scc: false,
@@ -1778,15 +1768,12 @@ fn char_ltm_fragments_discovery() {
 // synthesizes an implicit helper, so it has its own test below rather than a
 // row here.
 //
-// **These counts are the gate C1c is measured against, and they are TIGHT
-// WITHIN A BOUND that `implicit_helper_add_is_tight_but_module_helper_add_is_not`
-// states exactly.** Tight for a plain aux (this test) and for a
-// PREVIOUS/INIT-helper-bearing variable; still saturated for a variable that
-// instantiates a MODULE, for two reasons neither edge narrowing reaches. Read
-// that test before relying on "the counts are tight" as a blanket claim: a
-// stage-3 rewrite that reintroduces a model-wide dependency reds here on the
-// count, not merely on the value assertions below, but only for the shapes
-// these fixtures actually cover.
+// **These counts are the gate C1c is measured against.** Tight for a plain
+// aux (this test), for a PREVIOUS/INIT-helper-bearing variable and for a
+// module-instantiating one (`implicit_helper_add_is_tight_for_plain_and_module_helpers`,
+// `module_helper_add_reparses_only_the_added_variable`). A rewrite that
+// reintroduces a model-wide dependency reds on the count, not merely on the
+// value assertions below, but only for the shapes these fixtures cover.
 // ---------------------------------------------------------------------------
 
 /// A flat model: `probe` (the fragment under test) reads `k`; every other
@@ -2343,13 +2330,12 @@ fn parent_fragment_tracks_the_sub_models_layout_and_nothing_else() {
     // not recompile.
     //
     // The execution set is measured, not assumed: exactly `["sub"]`, stable
-    // across repeated runs. `sub` re-executes because growing the project's
-    // model set re-keys the interned module-ident context, which is the
-    // saturation `implicit_helper_add_is_tight_but_module_helper_add_is_not`
-    // pins with both causes named -- so this test does not re-litigate it. What
-    // it does pin is that `usesub`, the cross-module READER this test is about,
-    // is not in the set: its fragment is a function of `producer`'s layout, and
-    // `producer` did not move.
+    // across repeated runs. `sub` re-executes because a module variable's
+    // fragment resolves its target model through the project's model map
+    // (`db::layout::module_dep_shape` reads `project.models`), and growing
+    // the project changes that map. What this test pins is that `usesub`, the
+    // cross-module READER it is about, is not in the set: its fragment is a
+    // function of `producer`'s layout, and `producer` did not move.
     //
     // Value equality alone could not make that claim. It cannot distinguish
     // "correctly cached" from "recompiled and happened to agree", which is
@@ -2407,17 +2393,11 @@ fn equation_only_edit_recompiles_only_the_edited_fragment() {
          that variable's fragment"
     );
 
-    // ...but the blast radius is one hop wide, not zero: `explicit_fragment_input`
-    // builds its dependency-granular mini `ModelStage0` by PARSING each
-    // dependency, so a consumer's fragment depends on its dependencies'
-    // equation text and not merely on their shape. Editing `k`'s constant
-    // therefore recompiles `probe` as well.
-    //
-    // That one hop is intrinsic to the mini-stage design (track-C invariant 2:
-    // pointing the mini stage at a whole-project cached stage would make the
-    // radius the whole project instead), so it is pinned as the CURRENT
-    // contract, not flagged as a defect. If a later stage widens it beyond one
-    // hop, this reds.
+    // ...and the blast radius is ZERO hops: a consumer's fragment reads its
+    // dependencies' shapes (`variable_dimensions`) and graphical-function
+    // tables (`variable_tables`) through tracked projections that backdate
+    // when the shape and the tables are unchanged, so an edit to `k`'s
+    // constant recompiles `k` and nothing that reads it.
     let mut k_edited = cache_probe_project(&[("independent", "11")], true);
     assert_eq!(
         k_edited.models[0].variables[0].get_ident(),
@@ -2438,9 +2418,9 @@ fn equation_only_edit_recompiles_only_the_edited_fragment() {
     let (_state4, k_execs) = resync_and_assemble(&mut db, &k_edited, Some(&state3));
     assert_eq!(
         explicit_execs(&k_execs),
-        vec!["k", "probe"],
-        "editing `k` recompiles `k` AND its one consumer `probe`, whose mini \
-         ModelStage0 re-parses `k`; it must not reach any further"
+        vec!["k"],
+        "editing `k` recompiles `k` alone: its consumer `probe` reads `k`'s shape and \
+         tables through projections that backdate on an equation-only edit"
     );
 }
 
@@ -2469,17 +2449,17 @@ fn equation_only_edit_recompiles_only_the_edited_fragment() {
 fn implicit_and_ltm_fragment_cache_granularity() {
     use salsa::Setter;
 
-    let project_with = |smoothed_input: &str, unrelated: &str| {
+    let project_with = |smoothed_input: &str, unrelated: &str, delay: &str| {
         TestProject::new("frag_cache_implicit")
             .with_sim_time(0.0, 1.0, 1.0)
             .scalar_aux("src", smoothed_input)
-            .scalar_aux("smoothed", "SMTH1(src, 2)")
+            .scalar_aux("smoothed", &format!("SMTH1(src, {delay})"))
             .scalar_aux("unrelated", unrelated)
             .build_datamodel()
     };
 
     let mut db = SimlinDb::default();
-    let base = project_with("3", "1");
+    let base = project_with("3", "1", "2");
     let state1 = sync_from_datamodel_incremental(&mut db, &base, None);
     assemble_simulation(&db, state1.to_sync_result().project, "main".to_string())
         .expect("priming assemble");
@@ -2492,7 +2472,7 @@ fn implicit_and_ltm_fragment_cache_granularity() {
     );
 
     // Edit a variable the SMTH1 helper does not read.
-    let edited = project_with("3", "2");
+    let edited = project_with("3", "2", "2");
     let (state3, execs) = resync_and_assemble(&mut db, &edited, Some(&state2));
     assert_eq!(
         explicit_execs(&execs),
@@ -2512,19 +2492,18 @@ fn implicit_and_ltm_fragment_cache_granularity() {
          helper, so its granularity is the helper's, not `assemble_module`'s"
     );
 
-    // The complement, so the assertion above cannot pass by the query having
-    // become unreachable: editing a variable a helper DOES read must still
-    // recompile it.
-    //
-    // Only ONE of the two helpers reads `src`, and which one is a property of
-    // `builtins_visitor`'s synthesis rather than of this cache: an argument
-    // that is already a bare `Var` is passed through by name and gets no helper
-    // at all, so `SMTH1(src, 2)` synthesizes `⁚arg1` for the literal `2` and
-    // wires `src` straight into the `⁚smth1` module instance. The granularity
-    // is therefore per HELPER, not per parent variable -- editing `src` leaves
-    // the constant-capture helper's fragment cached.
-    let src_edited = project_with("5", "2");
-    let (_state4, src_execs) = resync_and_assemble(&mut db, &src_edited, Some(&state3));
+    // A helper's fragment reads its dependencies' SHAPES and TABLES, both
+    // through projections that backdate on an equation-only edit, so editing
+    // `src`'s constant recompiles `src` alone: the `⁚smth1` instance that
+    // wires `src` into its input port names it by `VarRef` and emits the same
+    // bytecode whatever `src` evaluates to.
+    let src_edited = project_with("5", "2", "2");
+    let (state4, src_execs) = resync_and_assemble(&mut db, &src_edited, Some(&state3));
+    assert_eq!(
+        explicit_execs(&src_execs),
+        vec!["src"],
+        "editing `src`'s constant recompiles `src` alone"
+    );
     let implicit_after_src: Vec<&str> = src_execs
         .iter()
         .filter(|(kind, _)| *kind == FragmentExecKind::Implicit)
@@ -2532,10 +2511,35 @@ fn implicit_and_ltm_fragment_cache_granularity() {
         .collect();
     assert_eq!(
         implicit_after_src,
-        vec!["smoothed#$\u{205A}smoothed\u{205A}0\u{205A}smth1"],
-        "editing `src` must still recompile the helper that reads it (a query \
-         that never re-executed would be a cache bug, not a cache win), and \
-         must NOT recompile `\u{205A}arg1`, which captures the literal `2`"
+        Vec::<&str>::new(),
+        "no helper's fragment reads `src`'s value"
+    );
+
+    // The complement, so the assertions above cannot pass by the query having
+    // become unreachable: an edit that changes a helper's BODY must recompile
+    // that helper, and only that one.
+    //
+    // Which helper is a property of `builtins_visitor`'s synthesis rather than
+    // of this cache: an argument that is already a bare `Var` is passed through
+    // by name and gets no helper at all, so `SMTH1(src, 2)` synthesizes `⁚arg1`
+    // for the literal `2` and wires `src` straight into the `⁚smth1` module
+    // instance. Editing the literal re-parses `smoothed` and changes `⁚arg1`'s
+    // body; the instance's wiring is unchanged, so its lowering backdates and
+    // its fragment stays cached. The granularity is therefore per HELPER, not
+    // per parent variable.
+    let delay_edited = project_with("5", "2", "3");
+    let (_state5, delay_execs) = resync_and_assemble(&mut db, &delay_edited, Some(&state4));
+    let implicit_after_delay: Vec<&str> = delay_execs
+        .iter()
+        .filter(|(kind, _)| *kind == FragmentExecKind::Implicit)
+        .map(|(_, name)| name.as_str())
+        .collect();
+    assert_eq!(
+        implicit_after_delay,
+        vec!["smoothed#$\u{205A}smoothed\u{205A}0\u{205A}arg1"],
+        "editing the literal argument recompiles the helper that captures it (a \
+         query that never re-executed would be a cache bug, not a cache win), and \
+         must NOT recompile the `\u{205A}smth1` instance, whose wiring is unchanged"
     );
 
     // The LTM link fragments, on the same shape of edit.
@@ -2583,7 +2587,7 @@ fn implicit_and_ltm_fragment_cache_granularity() {
     //
     // What that nondeterminism is, established by measurement rather than
     // inferred: `compile_ltm_var_fragment`'s returned VALUE is equal before and
-    // after the edit in every repetition, and `link_score_equation_text_shaped`
+    // after the edit in every repetition, and `shaped_link_score`
     // backdates correctly in every repetition -- only whether the body re-runs
     // varies. Salsa backdates the equal value, so no consumer observes a
     // difference and no artifact changes (both `ltm_loop_*` goldens hold across
@@ -2620,9 +2624,8 @@ fn implicit_and_ltm_fragment_cache_granularity() {
     );
 }
 
-/// The THIRD coarse edge (`model_implicit_var_info`), pinned in BOTH
-/// directions: narrowed for a plain implicit helper, still saturated for one
-/// that instantiates a module.
+/// The THIRD coarse edge (`model_implicit_var_info`), pinned for both kinds of
+/// helper: a plain `PREVIOUS`/`INIT` capture and a module-instantiating call.
 ///
 /// `layout_only_edits_and_fragment_cache_reuse` above adds a plain aux, which
 /// synthesizes no implicit variable at all and so never touches this edge. A
@@ -2631,31 +2634,18 @@ fn implicit_and_ltm_fragment_cache_granularity() {
 /// model re-executed for it -- `explicit_fragment_input` read the whole
 /// implicit-var map to answer a per-name question.
 ///
-/// The `SMTH1` half is the honest limit, asserted as the CURRENT CONTRACT so
-/// it cannot be quietly over-claimed. Narrowing this edge does not make a
-/// module-instantiating helper tight, because one whole-model dependency
-/// survives on that path and it is not a projection away:
-/// `model_module_ident_context` is an INTERNED handle keyed on the model's
-/// module-ident set. Adding a module instance grows that set, which mints a NEW
-/// interned id, which becomes a new cache key for every variable's
-/// `parse_source_variable_with_module_context`. A changed key cannot backdate
-/// -- there is no prior memo to compare against -- so this is a cache-key
-/// problem, not a value-equality problem, and no projection over the existing
-/// query can fix it.
-///
-/// The `SMTH1` expectation below also lists the five `stdlib⁚smth1` template
-/// variables, and those are NOT saturation: they are a sub-model compiling for
-/// the first time. `module_helper_add_saturates_only_through_the_module_ident_context`
-/// separates the two by measuring every tracked query, and rules out the
-/// splice of the stdlib template as a cause at all -- `db::sync` splices every
-/// stdlib model on every sync, so the template is in `project.models` from the
-/// first sync of a project that never mentions it.
-///
-/// If someone deletes the module-ident context, this test reds on the `SMTH1`
-/// assertion rather than leaving a stale sentence in a doc comment. That is the
-/// point of pinning a limitation instead of describing it.
+/// The `SMTH1` half is what AC3.1 asks for. The five `stdlib⁚smth1` template
+/// variables in its expectation are a sub-model compiling for the first time,
+/// and `k` legitimately recompiles: the new instance is an initials member
+/// whose input source is `k`, so `k` gains initials membership and an initial
+/// fragment. `probe` -- which reads `k` and nothing the edit touched -- must
+/// not: every parse is keyed on the variable and the project, so nothing the
+/// edit did re-keys it. `module_helper_add_reparses_only_the_added_variable`
+/// measures the same boundary over every tracked query.
 #[test]
-fn implicit_helper_add_is_tight_but_module_helper_add_is_not() {
+fn implicit_helper_add_is_tight_for_plain_and_module_helpers() {
+    use crate::db::exec_probe::ProbedDb;
+
     // `probe` reads `k`; the added variable is independent of both, so this is
     // a layout-only edit from `probe`'s point of view in every case.
     let project_with = |extra: Option<(&str, &str)>| {
@@ -2702,26 +2692,35 @@ fn implicit_helper_add_is_tight_but_module_helper_add_is_not() {
          it about a name whose answer moved"
     );
 
-    // ── An SMTH1 helper: still saturated, for the two reasons above.
-    let mut db2 = SimlinDb::default();
+    // ── An SMTH1 helper: the template and the instance's input source are
+    // new work; `probe` is not.
+    let mut probed = ProbedDb::new();
     let base2 = project_with(None);
-    let s1 = sync_from_datamodel_incremental(&mut db2, &base2, None);
-    assemble_simulation(&db2, s1.to_sync_result().project, "main".to_string())
+    let s1 = sync_from_datamodel_incremental(probed.db_mut(), &base2, None);
+    assemble_simulation(probed.db(), s1.to_sync_result().project, "main".to_string())
         .expect("priming assemble");
 
-    let (s2, control2) = resync_and_assemble(&mut db2, &base2, Some(&s1));
+    probed.reset();
+    let (s2, control2) = resync_and_assemble(probed.db_mut(), &base2, Some(&s1));
     assert_eq!(
         control2,
         Vec::new(),
         "control: re-syncing the identical project must re-execute nothing"
     );
+    assert!(
+        probed.counts().is_empty(),
+        "control: re-syncing the identical project must re-execute no tracked \
+         query at all; got {:?}",
+        probed.counts()
+    );
 
     let with_smth = project_with(Some(("smoothed", "SMTH1(k, 2)")));
-    let (_s3, smth_execs) = resync_and_assemble(&mut db2, &with_smth, Some(&s2));
+    probed.reset();
+    let (_s3, smth_execs) = resync_and_assemble(probed.db_mut(), &with_smth, Some(&s2));
     // `delay_time`/`flow`/`initial_value`/`input`/`output` are the spliced
-    // `stdlib⁚smth1` template's own variables, compiling for the first time --
-    // those are legitimately new work. `k` and `probe` are not: they are the
-    // saturation this test pins.
+    // `stdlib⁚smth1` template's own variables, compiling for the first time.
+    // `k` is the new instance's input source: the instance is an initials
+    // member and pulls `k` in after it, so `k` gains an initial fragment.
     assert_eq!(
         explicit_execs(&smth_execs),
         vec![
@@ -2731,18 +2730,42 @@ fn implicit_helper_add_is_tight_but_module_helper_add_is_not() {
             "input",
             "k",
             "output",
-            "probe",
             "smoothed"
         ],
-        "CURRENT CONTRACT, not an aspiration: adding a MODULE-instantiating \
-         helper still re-executes every PRE-EXISTING fragment (`k`, `probe`), \
-         because the interned `ModuleIdentContext` key every parse is \
-         memoized under changes. The five `stdlib\u{205A}smth1` names beside \
-         them are that sub-model compiling for the first time, not \
-         saturation. If this assertion reds because `k` and `probe` dropped \
-         out, someone deleted the module-ident context and this pin should be \
-         tightened to match"
+        "adding a module-instantiating helper must compile the new variable, \
+         the template's first instance and the input source whose initials \
+         membership changed -- and reuse `probe`, which none of that touches"
     );
+    assert_eq!(
+        implicit_execs(&smth_execs),
+        vec![
+            "smoothed#$\u{205A}smoothed\u{205A}0\u{205A}arg1",
+            "smoothed#$\u{205A}smoothed\u{205A}0\u{205A}smth1"
+        ],
+        "the instance and its hoisted delay time are the edit's only helpers"
+    );
+    let template_variables =
+        _s3.to_sync_result().project.models(probed.db())["stdlib\u{205A}smth1"]
+            .variables(probed.db())
+            .len();
+    assert_eq!(
+        probed
+            .counts()
+            .get("parse_source_variable")
+            .map(|(runs, _)| *runs),
+        Some(1 + template_variables),
+        "one parse for `smoothed` and one per `stdlib\u{205A}smth1` template \
+         variable; `k`'s recompile reuses its parse and `probe` is not touched \
+         at all"
+    );
+}
+
+fn implicit_execs(execs: &[(FragmentExecKind, String)]) -> Vec<&str> {
+    execs
+        .iter()
+        .filter(|(kind, _)| *kind == FragmentExecKind::Implicit)
+        .map(|(_, name)| name.as_str())
+        .collect()
 }
 
 fn ltm_execs_of(execs: &[(FragmentExecKind, String)]) -> Vec<&str> {
@@ -2810,12 +2833,9 @@ fn multi_temp_fragment_is_byte_identical_across_fresh_databases() {
     }
 }
 
-/// The saturation `implicit_helper_add_is_tight_but_module_helper_add_is_not`
-/// pins, isolated to its ONE cause by salsa execution counts over every
-/// tracked query (`db::exec_probe`), not just the fragment compilers.
-///
-/// That test pins the saturation; this one isolates its cause, and the
-/// difference decides what has to change for AC3.1 to flip:
+/// AC3.1 over every tracked query: adding a module instance re-executes the
+/// parse of the added variable and nothing else, measured by salsa execution
+/// counts (`db::exec_probe`) rather than the fragment compilers alone.
 ///
 /// * **`project.models` changing is not a cause.** Both scenarios below assert
 ///   the map is IDENTICAL across the edit, and that `stdlib⁚smth1` is already
@@ -2823,41 +2843,52 @@ fn multi_temp_fragment_is_byte_identical_across_fresh_databases() {
 ///   every sync (`sync_from_datamodel_incremental`) and calls `set_models` only
 ///   on a changed map, so instantiating a SMOOTH adds no model: the template
 ///   was there from the first sync of a project that never mentions it.
-/// * **The interned `ModuleIdentContext` is the cause, on its own.** Scenario A
-///   adds a plain aux to a model that ALREADY holds a module instance -- the
-///   stdlib template compiled, the instance wired -- and is completely tight.
-///   Scenario B adds a SECOND module instance to that same model, changing
-///   nothing but the model's module-ident set, and every pre-existing variable
-///   re-parses and recompiles.
-///
-/// So the remedy is the parse-key rule (`parse_source_variable(var, project)`,
-/// D1/D3 decided at lowering, `ModuleIdentContext` deleted), and no projection
-/// substitutes for it: `model_module_ident_context`'s value is a genuinely
-/// whole-model set that every variable's parse consults, and it is a salsa KEY
-/// as well as a read, so a re-key cannot backdate at all. The third cause the
-/// Phase 7 investigation named -- a whole-`model_module_map` clone inside
-/// `compile_var_fragment` -- no longer exists: Phase 3 deleted that query, and
-/// it appears in neither scenario's execution table.
+/// * **Nothing model-wide keys a parse.** Scenario A adds a plain aux to a
+///   model that ALREADY holds a module instance -- the stdlib template
+///   compiled, the instance wired. Scenario B adds a SECOND module instance to
+///   that same model. Both parse and compile exactly the added variable: the
+///   parse key is the variable and the project, and which of the model's names
+///   are module instances is not a fact the parse reads.
+/// * **The one model fact a parse does read is per name.** `probe` snapshots
+///   a bare element of `vals`, which the source parse resolves against
+///   `vals`' declared axis through `model_variable_by_name` and
+///   `variable_dimensions` (`builtins_visitor::SnapshotIndexFacts::Axes`).
+///   Adding a variable moves the model's variable map, so that projection
+///   re-runs -- and backdates, so `probe`'s parse does not.
 #[test]
-fn module_helper_add_saturates_only_through_the_module_ident_context() {
+fn module_helper_add_reparses_only_the_added_variable() {
     use crate::db::exec_probe::ProbedDb;
 
-    // `probe` reads `k`; `smoothed` reads `k` through a SMTH1 instance. The
-    // variable each scenario adds is independent of all three.
+    // `probe` reads an element of `vals`; `smoothed` reads `k` through a
+    // SMTH1 instance. The variable each scenario adds is independent of all
+    // of them.
     let project_with = |extra: Option<(&str, &str)>| {
         let mut tp = TestProject::new("frag_cache_module_ident_edge")
             .with_sim_time(0.0, 2.0, 1.0)
+            .named_dimension("d", &["e1", "e2"])
+            .array_with_ranges("vals[d]", vec![("e1", "10"), ("e2", "20")])
             .scalar_aux("k", "3")
-            .scalar_aux("probe", "k * 2")
+            .scalar_aux("probe", "PREVIOUS(vals[e2], 0)")
             .scalar_aux("smoothed", "SMTH1(k, 2)");
         if let Some((name, eqn)) = extra {
             tp = tp.scalar_aux(name, eqn);
         }
         tp.build_datamodel()
     };
+    // The probe must actually take the axis projection: a capture would make
+    // it an ordinary dependency edge and the assertion below vacuous.
+    {
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project_with(None));
+        assert!(
+            crate::test_common::implicit_vars_of(&db, &sync, "main", "probe").is_empty(),
+            "`PREVIOUS(vals[e2], 0)` must read the element's slot directly"
+        );
+    }
 
-    // Returns (fragment bodies that ran, whole-query execution table, whether
-    // the project's model map moved) for one edit off the primed base.
+    // Returns (explicit fragment bodies that ran, implicit ones, whole-query
+    // execution table, whether the project's model map moved) for one edit
+    // off the primed base.
     let measure = |extra: Option<(&str, &str)>| {
         let mut probed = ProbedDb::new();
         let base = project_with(None);
@@ -2891,7 +2922,7 @@ fn module_helper_add_saturates_only_through_the_module_ident_context() {
         assert!(
             models_before.contains_key("stdlib\u{205A}smth1"),
             "the stdlib template must already be spliced BEFORE the edit, or \
-             this fixture cannot tell a splice apart from an ident-set change"
+             this fixture cannot tell a splice apart from an instance add"
         );
 
         probed.reset();
@@ -2903,15 +2934,18 @@ fn module_helper_add_saturates_only_through_the_module_ident_context() {
                 .into_iter()
                 .map(str::to_string)
                 .collect::<Vec<_>>(),
+            implicit_execs(&execs)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
             probed.counts(),
             models_before == models_after,
         )
     };
 
     // ── Scenario A: a plain aux, added to a model that already instantiates a
-    // module. Tight. The spliced stdlib template and the existing instance do
-    // not, by themselves, saturate anything.
-    let (a_fragments, a_counts, a_models_unchanged) = measure(Some(("other", "1")));
+    // module.
+    let (a_fragments, a_helpers, a_counts, a_models_unchanged) = measure(Some(("other", "1")));
     assert!(
         a_models_unchanged,
         "adding a plain aux must not move `project.models`"
@@ -2923,19 +2957,22 @@ fn module_helper_add_saturates_only_through_the_module_ident_context() {
          adding an unrelated aux must compile only that aux"
     );
     assert_eq!(
-        a_counts
-            .get("parse_source_variable_with_module_context")
-            .map(|(runs, _)| *runs),
+        a_helpers,
+        Vec::<String>::new(),
+        "a plain aux synthesizes no helper"
+    );
+    assert_eq!(
+        a_counts.get("parse_source_variable").map(|(runs, _)| *runs),
         Some(1),
-        "...and must parse only that aux: the model's module-ident set is \
-         unchanged, so every other variable's parse keeps its cache key"
+        "...and must parse only that aux"
     );
 
     // ── Scenario B: a SECOND module instance in the same model. The module
-    // map does not move and the stdlib template does not recompile -- only the
-    // model's module-ident set grows -- and that alone re-parses and
-    // recompiles every pre-existing variable.
-    let (b_fragments, b_counts, b_models_unchanged) = measure(Some(("smoothed2", "SMTH1(k, 3)")));
+    // map does not move and the stdlib template does not recompile (the
+    // instance's input set is the first one's), so the added variable is the
+    // whole of the work.
+    let (b_fragments, b_helpers, b_counts, b_models_unchanged) =
+        measure(Some(("smoothed2", "SMTH1(k, 3)")));
     assert!(
         b_models_unchanged,
         "adding a second module instance must not move `project.models` \
@@ -2944,29 +2981,21 @@ fn module_helper_add_saturates_only_through_the_module_ident_context() {
     );
     assert_eq!(
         b_fragments,
-        vec!["k", "probe", "smoothed", "smoothed2"],
-        "CURRENT CONTRACT, not an aspiration: a second module instance \
-         recompiles every PRE-EXISTING variable of the model (`k`, `probe`, \
-         `smoothed`) because the interned `ModuleIdentContext` their parses \
-         are memoized under is a new value, and a changed key cannot \
-         backdate. The `stdlib\u{205A}smth1` template's own variables are \
-         absent because THEIR model's ident set did not change -- which is \
-         the evidence that the model map is not what saturates this. If this \
-         assertion reds because `k` and `probe` dropped out, chunk 7.4 landed \
-         and this pin should be tightened to match"
+        vec!["smoothed2"],
+        "a second module instance must compile only its own parent variable: \
+         `k`, `probe` and the first `smoothed` keep their parses and fragments"
     );
     assert_eq!(
-        b_counts
-            .get("parse_source_variable_with_module_context")
-            .map(|(runs, _)| *runs),
-        Some(4),
-        "one re-parse per variable of the edited model, under the model's new \
-         interned module-ident context"
+        b_helpers,
+        vec![
+            "smoothed2#$\u{205A}smoothed2\u{205A}0\u{205A}arg1",
+            "smoothed2#$\u{205A}smoothed2\u{205A}0\u{205A}smth1"
+        ],
+        "a second module instance must compile only its own two helpers"
     );
     assert_eq!(
-        b_counts.get("model_module_map"),
-        None,
-        "the whole-model module map the Phase 7 investigation named as a third \
-         cause no longer exists (Phase 3), so it cannot be one"
+        b_counts.get("parse_source_variable").map(|(runs, _)| *runs),
+        Some(1),
+        "only the added variable may parse"
     );
 }

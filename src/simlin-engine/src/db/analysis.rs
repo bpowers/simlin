@@ -17,20 +17,56 @@
 //! - model_element_loop_circuits, model_element_cycle_partitions
 //!   (element-level loop and partition analysis)
 //! - model_detected_loops (matches LTM augmentation loop IDs)
-//! - reconstruct_model_variables, reconstruct_single_variable
+//! - model_lowered_variables, lowered_variable_by_name (the lowered variables
+//!   the causal and polarity graphs read, as handles to the per-variable memos)
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::canonicalize;
-use crate::capture::ImplicitVar;
+use crate::capture::CaptureKind;
+use crate::common::{Canonical, Ident};
 use crate::datamodel;
 
 use super::{
-    Db, LtmMode, ModuleIdentContext, ModuleInputSet, SourceModel, SourceProject,
-    SourceVariableKind, build_module_inputs, model_ltm_mode, model_module_ident_context,
-    parse_source_variable_with_module_context, project_datamodel_dims, project_dimensions_context,
+    Db, DepPhase, DepRefs, DepTarget, LtmMode, ModuleInputSet, SourceModel, SourceProject,
+    SourceVariableKind, lowered_implicit_variable, lowered_source_variable,
+    model_implicit_var_info, model_ltm_mode, project_datamodel_dims, project_dimensions_context,
     variable_direct_dependencies,
 };
+
+/// The sub-model outputs each node of a model reads in the dt phase, by
+/// reader: the qualified [`DepTarget`]s of an explicit variable's equation, a
+/// module instance's input sources and a parse-synthesized helper's body,
+/// each instance path proven by `variable_direct_dependencies`.
+pub type ModuleOutputsRead = HashMap<String, BTreeSet<DepTarget>>;
+
+/// The one output of `module` that `reader` reads, named inside the instance
+/// (`x` for `m·x`, `n·x` for `m·n·x`): the exit port a loop through `module`
+/// takes at `reader`. `None` when the reader reads none, reads several
+/// distinct ones (an ambiguous exit, left to the base link score), or reads
+/// only the instance's LTM internals (`m·$⁚ltm⁚…`), which are never a model
+/// output.
+pub(crate) fn unique_module_output(
+    reads: &ModuleOutputsRead,
+    reader: &str,
+    module: &Ident<Canonical>,
+) -> Option<Ident<Canonical>> {
+    let mut found: Option<Ident<Canonical>> = None;
+    for target in reads.get(reader)? {
+        if target.module_path.first() != Some(module)
+            || crate::ltm::is_synthetic_node_name(target.variable.as_str())
+        {
+            continue;
+        }
+        let port = target.output_port()?;
+        match &found {
+            Some(prev) if *prev != port => return None,
+            _ => found = Some(port),
+        }
+    }
+    found
+}
 
 /// Causal edge structure for a model, built from variable dependency sets
 /// and structural info (stock inflows/outflows, module refs).
@@ -42,6 +78,21 @@ pub struct CausalEdgesResult {
     pub stocks: BTreeSet<String>,
     /// Module var_name -> model_name for dynamic modules
     pub dynamic_modules: HashMap<String, String>,
+    /// The sub-model outputs each node reads, recorded while the edges are
+    /// built; shared with every `CausalGraph` built from this result, so
+    /// exhaustive and discovery mode select a loop's exit port from one map.
+    pub module_outputs_read: Arc<ModuleOutputsRead>,
+}
+
+impl CausalEdgesResult {
+    /// See [`unique_module_output`].
+    pub(crate) fn unique_module_output(
+        &self,
+        reader: &str,
+        module: &Ident<Canonical>,
+    ) -> Option<Ident<Canonical>> {
+        unique_module_output(&self.module_outputs_read, reader, module)
+    }
 }
 
 /// Element-level causal edge structure for a model.
@@ -102,8 +153,9 @@ fn format_multi_element_name(var_name: &str, elements: &[&str]) -> String {
 /// A site that is *not* a hoisted reducer's argument -- a bare dynamic index
 /// (`arr[i+1]`, a range), the dynamic-index reducer carve-out
 /// (`SUM(pop[idx, *])`, `idx` non-literal, reclassified to `DynamicIndex`),
-/// a sliced reducer the correspondence declines -- an UNDECLARED pair, a
-/// cardinality mismatch, or a `MappedRead` axis (GH #997), all of which
+/// a sliced reducer the correspondence declines -- an UNDECLARED pair with
+/// disjoint element names, a cardinality mismatch, a many-to-one map (no
+/// one-slot-per-row remap), or a `MappedRead` axis (GH #997), all of which
 /// `enumerate_agg_nodes` refuses, so the reference stays `Direct` and is
 /// reclassified `DynamicIndex` (a DECLARED mapping is accepted in either
 /// direction since GH #757, an explicit element map included since GH #997)
@@ -138,10 +190,14 @@ pub enum RefShape {
     /// Invariants (enforced by `classify_iterated_dim_shape`): no
     /// `Reduced` entries (a non-reducer reference never collapses an
     /// axis); not all-`Pinned` (that canonicalizes to `FixedIndex`) and
-    /// not all-`Iterated` (that canonicalizes to `Bare`) -- so every
-    /// existing `Bare`/`FixedIndex` link-score NAME is untouched and
-    /// `PerElement` is minted only where the pre-T6 classifier said
-    /// `DynamicIndex` and was wrong.
+    /// not all-`Iterated` paired as the two declared dimension lists pair
+    /// (that canonicalizes to `Bare`, whose projection re-derives the pairing
+    /// from the lists through `bare_axis_pairing`). An all-`Iterated`
+    /// subscript whose pairing only the SUBSCRIPT knows -- a foreign axis
+    /// sharing element names with the iterated dimension under no declared
+    /// mapping, a transposition the lists would pair the other way -- keeps
+    /// its axes here, so the edges and scores land the rows the compiler
+    /// resolves rather than a cross-product.
     ///
     /// The element graph emits the diagonal-with-pinned-axes edges
     /// (`pop[r,young] -> row_sum[r]`, never the cross-product); emission
@@ -214,7 +270,7 @@ fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
 /// | non-empty   | []         | Bare                          | `from[d] -> to` for each cartesian d          |
 /// | non-empty   | non-empty (same dims)  | Bare              | `from[d] -> to[d]` per shared element         |
 /// | non-empty   | non-empty (partial collapse) | Bare        | `from[d1,d2] -> to[d1]` (delegates to `expand_same_element`)|
-/// | non-empty   | non-empty (mapped dims, GH #527) | Bare    | the mapping's diagonal `from[mapped(d)] -> to[d]` per target element when a usable (positional) correspondence exists, else broadcast (via `expand_same_element` + `dim_ctx`) |
+/// | non-empty   | non-empty (mapped dims, GH #527) | Bare    | the executed correspondence's rows `from[read(d)] -> to[d]` per target element (`bare_axis_pairing`), else broadcast |
 /// | non-empty   | any        | Wildcard / DynamicIndex       | full cross product (NxM)                      |
 /// | non-empty   | []         | FixedIndex(elems)             | `from[elems] -> to` (one edge)                |
 /// | non-empty   | non-empty  | FixedIndex(elems)             | `from[elems] -> to[d]` for each cartesian d   |
@@ -255,6 +311,7 @@ fn emit_edges_for_reference(
     shape: &RefShape,
     target_element: Option<&str>,
     dim_ctx: &crate::dimensions::DimensionsContext,
+    spelling: BareSpelling,
     element_edges: &mut HashMap<String, BTreeSet<String>>,
 ) {
     let from_is_scalar = from_dims.is_empty();
@@ -324,6 +381,7 @@ fn emit_edges_for_reference(
                     from_dims,
                     to_dims,
                     dim_ctx,
+                    spelling,
                     &mut scratch,
                 );
                 let target_set: BTreeSet<String> = target_nodes.iter().cloned().collect();
@@ -344,6 +402,7 @@ fn emit_edges_for_reference(
                     from_dims,
                     to_dims,
                     dim_ctx,
+                    spelling,
                     element_edges,
                 );
             }
@@ -556,144 +615,143 @@ fn cartesian_element_names(var_name: &str, dims: &[crate::dimensions::Dimension]
         .collect()
 }
 
-/// Per element of `to_dim` in declared order, the `from_dim` elements a
-/// same-element (`RefShape::Bare`) reference may read -- the UNION of the two
-/// spellings' correspondences (GH #527, re-keyed by GH #997).
-///
-/// `RefShape::Bare` is the one shape covering references that resolve by two
-/// different rules, and nothing downstream of the classification tells them
-/// apart:
-///
-/// * a bare or iterated-dimension reference in an equation body
-///   (`target[State] = x` / `= x[State]`) resolves POSITIONALLY;
-/// * a structural flow-to-stock edge (`level[State] = INTEG(x, 0)` with `x`
-///   over `Region`) is labelled `Bare` by `model_edge_shapes` with no AST
-///   reference behind it at all, and resolves name-first then through the
-///   declared element map.
-///
-/// Both are legal, both ship, and the element graph must not emit FEWER edges
-/// than either reads. So this returns both answers and the expansion emits
-/// their union: exact wherever the two rules agree -- which is every
-/// positional mapping between dimensions with disjoint element names, i.e.
-/// everything that resolved before GH #997 -- and a two-edge superset per
-/// target element where they genuinely differ (an explicit element map, or a
-/// pair sharing element names).
-///
-/// Keeping the union in ONE function is also what keeps the element graph and
-/// discovery's from-node projection in lockstep. `expand_same_element` has two
-/// consumers, and only one of them can see the reference site: the element
-/// graph does, `ltm_finding::expand_a2a_link_offsets` re-derives the from-node
-/// from a link score's dimensions alone. A rule chosen per site would have put
-/// them back out of step, which is the GH #754 failure -- a from-node naming
-/// no real element node, so every loop through it dangles.
-///
-/// # EDGES may be a union; SCORES may not
-///
-/// The union is sound for edges precisely because an extra edge is the safe
-/// direction. It is NOT sound for a link SCORE, and the two must be gated
-/// separately -- [`mapped_pair_projects_uniquely`] is that gate.
-///
-/// A Bare A2A link score is one arrayed variable with one slot per TARGET
-/// element, and `ltm_finding::expand_a2a_link_offsets` maps every edge this
-/// function emits for a target element onto that element's single slot. Where
-/// the two rules DISAGREE, one of the two source elements is a phantom for the
-/// site that actually exists -- and it would read the real edge's non-zero
-/// score out of the shared slot. That is a compilable, confidently wrong
-/// number, which this repo treats as worse than no score at all (GH #758): the
-/// edge is denied the arrayed retarget and takes the loud skip instead.
-///
-/// So the two questions are deliberately different:
-/// * "which element edges exist?" -> every element in this function's answer;
-/// * "may this edge carry an arrayed score?" -> only when every target
-///   element's answer is a SINGLETON, i.e. the two rules agree everywhere and
-///   no slot is shared by a phantom.
-///
-/// Every mapping that resolved before GH #997 is a singleton (the two rules
-/// coincide on a positional mapping between disjointly-named dimensions), and
-/// so is C-LEARN's many-to-one element map -- there the positional rule
-/// declines outright, leaving the executed rule alone in the union. What is
-/// NOT a singleton is an equal-cardinality PERMUTED element map, or a pair
-/// sharing element names in a different order.
-///
-/// `None` when the two dimensions are not related by a declared mapping at
-/// all; the caller then broadcasts.
-pub(crate) fn bare_reference_correspondence(
-    dim_ctx: &crate::dimensions::DimensionsContext,
-    to_dim: &crate::common::CanonicalDimensionName,
-    from_dim: &crate::common::CanonicalDimensionName,
-) -> Option<Vec<Vec<crate::common::CanonicalElementName>>> {
-    let positional = dim_ctx.positional_correspondence(to_dim, from_dim);
-    let executed = dim_ctx.executed_read_correspondence(to_dim, from_dim);
-    let len = positional
-        .as_ref()
-        .or(executed.as_ref())
-        .map(Vec::len)
-        .filter(|n| *n > 0)?;
-    Some(
-        (0..len)
-            .map(|i| {
-                let mut elems: Vec<crate::common::CanonicalElementName> = Vec::with_capacity(2);
-                for corr in [positional.as_ref(), executed.as_ref()]
-                    .into_iter()
-                    .flatten()
-                {
-                    if let Some(e) = corr.get(i)
-                        && !elems.contains(e)
-                    {
-                        elems.push(e.clone());
-                    }
-                }
-                elems
-            })
-            .collect(),
-    )
+/// How one source axis of a `Bare` read pairs with the target's axes, and
+/// which source element each target element reads through the pair -- one
+/// entry per source axis, from [`bare_axis_pairing`].
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum BareAxis {
+    /// Paired with target axis `pos` by name, or as two indexed axes of one
+    /// size: the target's i-th element reads the source's i-th.
+    Positional(usize),
+    /// Paired with target axis `pos` through a declared correspondence:
+    /// `reads[i]` is the source element the target's i-th element reads.
+    Mapped {
+        pos: usize,
+        reads: Vec<crate::common::CanonicalElementName>,
+    },
+    /// No target axis supplies it: the axis is collapsed (iterated but not
+    /// projected).
+    Collapsed,
 }
 
-/// May a `Bare` edge across this dimension pair carry an ARRAYED (per-target-
-/// element) link score? True only when every target element's
-/// [`bare_reference_correspondence`] entry is a SINGLETON -- the two spellings
-/// agree, so no target slot is shared by a source element that only one of them
-/// reads.
-///
-/// See [`bare_reference_correspondence`]'s "EDGES may be a union; SCORES may
-/// not" section for why this is a separate, stricter question than which edges
-/// exist. A pair this declines keeps its element-edge union (the never-fewer
-/// direction is untouched) and loses only the retarget, which sends the edge to
-/// the GH #758 loud skip: one Warning naming it, no link-score variable, and
-/// loop scores through it dropped.
-pub(crate) fn mapped_pair_projects_uniquely(
-    dim_ctx: &crate::dimensions::DimensionsContext,
-    to_dim: &crate::common::CanonicalDimensionName,
-    from_dim: &crate::common::CanonicalDimensionName,
-) -> bool {
-    bare_reference_correspondence(dim_ctx, to_dim, from_dim)
-        .is_some_and(|corr| corr.iter().all(|elems| elems.len() == 1))
+impl BareAxis {
+    /// The target axis this source axis is paired with, if any.
+    pub(crate) fn target_pos(&self) -> Option<usize> {
+        match self {
+            BareAxis::Positional(pos) | BareAxis::Mapped { pos, .. } => Some(*pos),
+            BareAxis::Collapsed => None,
+        }
+    }
 }
 
-/// Expand same-element edges with possible partial dimension collapse.
+/// Which of the compiler's two executed rules a `Bare` read follows: the
+/// relations its axis pairing consults.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BareSpelling {
+    /// A read in an equation body -- a bare arrayed name, or an
+    /// iterated-dimension subscript. Pass 0 (`compiler::context::lower_pass0`)
+    /// and `normalize_subscripts3` pair its axes under
+    /// [`crate::dimensions::DirectMappingsOnly`]: a mapping declared on a
+    /// PARENT dimension is withheld, so `y[suba] = SUM(src)` over `src[dimb]`
+    /// with `dimb -> dima` and `suba` inside `dima` reads all of `src`.
+    Equation,
+    /// A stock's inflow/outflow reference and its own initial
+    /// (`Context::fold_flows`, `compiler::Var::new`), paired by
+    /// `get_implicit_subscript_off` under the full `DimensionsContext`,
+    /// parent mappings included.
+    StockFlow,
+}
+
+/// The ONE pairing of a `Bare` read's source axes with its target's axes,
+/// read by the element graph ([`expand_same_element`]), by discovery's
+/// from-node projection (`ltm_finding::expand_a2a_link_offsets`, through it),
+/// by the score admission (`link_scores::link_score_dimensions`), by the
+/// dependency pins' bare row (`ltm_augment_post_transform::dep_axis_elements`)
+/// and by the classifications that decide a reference is `Bare` at all
+/// (`db::ltm_ir`: an iterated-dimension subscript whose lists reproduce its
+/// pairing, a reducer's bare argument that pairs with some axis).
 ///
-/// For each source element tuple, constructs the target element tuple(s) by
-/// matching shared dimension names -- or, when names differ, a declared
-/// dimension MAPPING between a target dimension and a source dimension
-/// (GH #527; the correspondence comes from
-/// [`bare_reference_correspondence`], which is the union of the two
-/// spellings' diagonals -- see there for why a `Bare` site cannot pick one).
-/// Dimensions in the source that correspond to
-/// no target dimension are collapsed (their elements are iterated but do
-/// not appear in the target subscript); target dimensions that correspond
-/// to no source dimension broadcast over all their elements.
+/// `RefShape::Bare` covers three spellings -- a bare reference in an equation
+/// body, an iterated-dimension subscript, and a structural flow-to-stock edge
+/// -- and the pairing is what the compiler's own axis matcher gives each of
+/// them: [`crate::dimensions::match_axes_partial`] over the two declared
+/// dimension lists (exact name, then a declared mapping, then two indexed
+/// axes of one size; positional and one-to-one, so a repeated dimension pairs
+/// each occurrence with its own axis, as
+/// `compiler::subscript::normalize_subscripts3` allocates the active
+/// positions), under the relations the spelling's own lowering consults
+/// ([`BareSpelling`]). A pair the matcher relates through a declared mapping
+/// reads through [`crate::dimensions::DimensionsContext::executed_read_correspondence`];
+/// a declared relation the executed rule cannot translate (a positional
+/// mapping between different sizes, a common mapping target -- which the
+/// compiler reads by ordinal at equal size, the GH #527 class) leaves the
+/// axis `Collapsed`, which broadcasts, and the score admission declines it
+/// loudly; a superset of edges is harmless where a subset would hide a loop.
+///
+/// An iterated-dimension subscript can pair axes the dimension lists alone
+/// cannot -- `stock[Region]` over an `Other`-declared `stock` that shares
+/// element names with `Region` under no mapping -- and
+/// `classify_iterated_dim_shape` keeps such a reference `PerElement`, carrying
+/// its axes, rather than `Bare`; so a `Bare` site's pairing IS this one, by
+/// construction, and the edges, the discovery from-nodes and the score's
+/// per-slot reads all name the same rows.
+pub(crate) fn bare_axis_pairing(
+    from_dims: &[crate::dimensions::Dimension],
+    to_dims: &[crate::dimensions::Dimension],
+    dim_ctx: &crate::dimensions::DimensionsContext,
+    spelling: BareSpelling,
+) -> Vec<BareAxis> {
+    use crate::dimensions::{
+        AxisMatch, AxisRelations, DirectMappingsOnly, axes_of, match_axes_partial,
+    };
+    let direct = DirectMappingsOnly(dim_ctx);
+    let relations: &dyn AxisRelations = match spelling {
+        BareSpelling::Equation => &direct,
+        BareSpelling::StockFlow => dim_ctx,
+    };
+    match_axes_partial(&axes_of(from_dims), &axes_of(to_dims), relations)
+        .into_iter()
+        .enumerate()
+        .map(|(i, paired)| match paired {
+            Some((pos, AxisMatch::Exact | AxisMatch::BySize)) => BareAxis::Positional(pos),
+            Some((pos, AxisMatch::Mapped { .. })) => dim_ctx
+                .executed_read_correspondence(
+                    to_dims[pos].canonical_name(),
+                    from_dims[i].canonical_name(),
+                )
+                .map_or(BareAxis::Collapsed, |reads| BareAxis::Mapped { pos, reads }),
+            // `DimensionsContext` admits no subdimension pairing (see
+            // `AxisRelations::is_subdimension`).
+            Some((_, AxisMatch::Subdimension)) => {
+                unreachable!("DimensionsContext pairs no axes as subdimensions")
+            }
+            None => BareAxis::Collapsed,
+        })
+        .collect()
+}
+
+/// Expand same-element edges for a `Bare` read: for each source element tuple,
+/// the target element tuple(s) that read it under [`bare_axis_pairing`]. A
+/// positionally paired axis reads the same index; a mapped axis reads the
+/// preimage of the executed correspondence (several target elements under a
+/// many-to-one map, none for a source element nothing maps to); a target axis
+/// no source axis supplies broadcasts over every element; a collapsed source
+/// axis is iterated but not projected.
 ///
 /// Examples:
 /// - `from[D1,D2] -> to[D1]`: `from[d1,d2] -> to[d1]` for all `(d1,d2)`
 ///   (partial collapse).
 /// - `from[Region] -> to[State]` with a positional `State→Region` mapping:
-///   the mapping's diagonal -- `from[mapped(s)] -> to[s]` for each State
-///   element `s`.
-/// - `from[Region] -> to[State]` with an explicit element map: the union of
-///   the map's diagonal and the positional one -- at most two source elements
-///   per target element, and one where the two agree.
-/// - `from[Region] -> to[State]` with NO mapping: the conservative broadcast
-///   (every source element feeds every target element).
+///   the diagonal `from[i] -> to[i]`.
+/// - `from[Region] -> to[State]` with an explicit element map: the map's
+///   rows, `from[map(s)] -> to[s]`.
+/// - `from[Region] -> to[State]` with NO mapping and disjoint element names:
+///   the conservative broadcast (every source element feeds every target
+///   element).
+/// - `from[D,D] -> to[D,D]`: each occurrence paired with its own axis, so
+///   `from[i,j] -> to[i,j]` -- the cell the compiler reads.
 ///
 /// Besides the element graph (`emit_edges_for_reference`'s `Bare` arm), this
 /// is also consumed by discovery's `ltm_finding::expand_a2a_link_offsets`
@@ -706,86 +764,14 @@ pub(crate) fn expand_same_element(
     from_dims: &[crate::dimensions::Dimension],
     to_dims: &[crate::dimensions::Dimension],
     dim_ctx: &crate::dimensions::DimensionsContext,
+    spelling: BareSpelling,
     element_edges: &mut HashMap<String, BTreeSet<String>>,
 ) {
-    // Build a map of target dimension name -> position for matching
-    let to_dim_positions: HashMap<&str, usize> = to_dims
-        .iter()
-        .enumerate()
-        .map(|(i, d)| (d.name(), i))
-        .collect();
-
-    // For each source dimension, record which target dimension position
-    // it corresponds to (if any) -- by name first, then by a declared
-    // dimension mapping. Source dimensions with no correspondence are
-    // "collapsed" (iterated but not projected).
-    #[derive(Clone)]
-    enum Correspondence {
-        /// Same-named target dimension at this position: target element =
-        /// same index as the source element.
-        SameName(usize),
-        /// Mapped target dimension at this position. The outer Vec is
-        /// indexed by TARGET element index and holds the SOURCE element
-        /// indices that target element may read -- the diagonal direction
-        /// [`bare_reference_correspondence`] defines, with one entry per
-        /// spelling whose answers differ. The expansion below inverts it per
-        /// source element, and is written for the general shape: a source
-        /// element may have no preimage (nothing maps to it) or several (a
-        /// many-to-one element map).
-        Mapped(usize, Vec<Vec<usize>>),
-        /// No corresponding target dimension: collapse.
-        Collapsed,
-    }
-
-    // Name matches first (every source dim gets a chance before mapped
-    // matching claims a position), so adding a mapping to a model can
-    // never change which dimensions pair up by name.
-    let mut correspondence: Vec<Correspondence> = from_dims
-        .iter()
-        .map(|d| match to_dim_positions.get(d.name()) {
-            Some(&pos) => Correspondence::SameName(pos),
-            None => Correspondence::Collapsed,
-        })
-        .collect();
+    let pairing = bare_axis_pairing(from_dims, to_dims, dim_ctx, spelling);
     let mut claimed: Vec<bool> = vec![false; to_dims.len()];
-    for c in &correspondence {
-        if let Correspondence::SameName(pos) = c {
-            claimed[*pos] = true;
-        }
-    }
-    for (i, c) in correspondence.iter_mut().enumerate() {
-        if !matches!(c, Correspondence::Collapsed) {
-            continue;
-        }
-        let from_canon = from_dims[i].canonical_name();
-        for (pos, to_dim) in to_dims.iter().enumerate() {
-            if claimed[pos] {
-                continue;
-            }
-            let Some(elems) =
-                bare_reference_correspondence(dim_ctx, to_dim.canonical_name(), from_canon)
-            else {
-                continue;
-            };
-            // Resolve the per-target-element source names to source element
-            // indices. The correspondence only returns elements of the source
-            // dimension, so the lookup can't fail for a well-formed context;
-            // bail to Collapsed (broadcast) if it does.
-            let Some(idxs) = elems
-                .iter()
-                .map(|per_target| {
-                    per_target
-                        .iter()
-                        .map(|e| from_dims[i].get_offset(e))
-                        .collect::<Option<Vec<usize>>>()
-                })
-                .collect::<Option<Vec<Vec<usize>>>>()
-            else {
-                continue;
-            };
-            *c = Correspondence::Mapped(pos, idxs);
+    for axis in &pairing {
+        if let Some(pos) = axis.target_pos() {
             claimed[pos] = true;
-            break;
         }
     }
 
@@ -823,50 +809,38 @@ pub(crate) fn expand_same_element(
         };
 
         // Per target position, the candidate element names this source
-        // tuple connects to: a singleton for a SameName position, the
-        // (possibly empty) preimage of the source element for a Mapped
-        // position, and every element for an unclaimed (broadcast)
-        // position. The target node set is the cartesian product.
+        // tuple connects to: the same index for a positional pair, the
+        // (possibly empty, possibly several-element) preimage of the source
+        // element for a mapped one, and every element for an unclaimed
+        // (broadcast) position. The target node set is the cartesian product.
         let mut to_elem_options: Vec<Vec<&str>> = to_dim_elements
             .iter()
             .enumerate()
             .map(|(pos, elems)| {
                 if claimed[pos] {
-                    Vec::new() // filled from the correspondence below
+                    Vec::new() // filled from the pairing below
                 } else {
                     elems.iter().map(String::as_str).collect()
                 }
             })
             .collect();
-        for (src_dim_idx, c) in correspondence.iter().enumerate() {
+        for (src_dim_idx, axis) in pairing.iter().enumerate() {
             let src_elem_idx = from_indices[src_dim_idx];
-            match c {
-                Correspondence::SameName(pos) => {
-                    // Use the element name from the target dimension at the
-                    // corresponding position. If the source element index is
-                    // out of range for the target dimension (dimension size
-                    // mismatch), fall back to the source element name.
-                    let name = if src_elem_idx < to_dim_elements[*pos].len() {
-                        to_dim_elements[*pos][src_elem_idx].as_str()
-                    } else {
-                        from_dim_elements[src_dim_idx][src_elem_idx].as_str()
-                    };
-                    to_elem_options[*pos].push(name);
+            match axis {
+                // Two axes of one name (or two indexed axes of one size) list
+                // the same elements, so the index carries across.
+                BareAxis::Positional(pos) => {
+                    to_elem_options[*pos].push(to_dim_elements[*pos][src_elem_idx].as_str());
                 }
-                Correspondence::Mapped(pos, target_to_source) => {
-                    // Preimage: every target element that reads this source
-                    // element under either spelling. A singleton for a
-                    // positional mapping between disjointly-named dimensions;
-                    // empty for a source element nothing maps to; several for
-                    // a many-to-one element map, or where the two spellings
-                    // disagree.
-                    for (target_idx, src_idxs) in target_to_source.iter().enumerate() {
-                        if src_idxs.contains(&src_elem_idx) {
+                BareAxis::Mapped { pos, reads } => {
+                    let src_elem = from_dim_elements[src_dim_idx][src_elem_idx].as_str();
+                    for (target_idx, read) in reads.iter().enumerate() {
+                        if read.as_str() == src_elem {
                             to_elem_options[*pos].push(to_dim_elements[*pos][target_idx].as_str());
                         }
                     }
                 }
-                Correspondence::Collapsed => {}
+                BareAxis::Collapsed => {}
             }
         }
 
@@ -1256,6 +1230,7 @@ fn emit_agg_routed_edges(
             &iterated_dims,
             to_dims,
             dim_ctx,
+            BareSpelling::Equation,
             element_edges,
         );
     }
@@ -1425,24 +1400,10 @@ pub struct CyclePartitionsResult {
     pub stock_partition: HashMap<String, usize>,
 }
 
-/// Normalize a dependency/reference name by stripping a leading middot
-/// (XMILE parent-scope refs like `.area` canonicalize to `·area`) and then
-/// truncating at the first remaining middot to collapse `module·output`
-/// qualifiers down to the module variable name.
-pub(super) fn normalize_module_ref_str(s: &str) -> String {
-    let effective = s.strip_prefix('\u{00B7}').unwrap_or(s);
-    if let Some(pos) = effective.find('\u{00B7}') {
-        effective[..pos].to_string()
-    } else {
-        effective.to_string()
-    }
-}
-
 /// Construct a lightweight CausalGraph from a CausalEdgesResult.
 /// Variables and module_graphs are empty -- suitable for graph algorithms
 /// (circuit finding, SCC computation) but not for polarity analysis.
 pub fn causal_graph_from_edges(result: &CausalEdgesResult) -> crate::ltm::CausalGraph {
-    use crate::common::{Canonical, Ident};
     use std::collections::HashSet;
 
     let edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = result
@@ -1457,12 +1418,7 @@ pub fn causal_graph_from_edges(result: &CausalEdgesResult) -> crate::ltm::Causal
         .collect();
     let stocks: HashSet<Ident<Canonical>> = result.stocks.iter().map(|s| Ident::new(s)).collect();
 
-    crate::ltm::CausalGraph {
-        edges,
-        stocks,
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    }
+    crate::ltm::CausalGraph::new(edges, stocks)
 }
 
 /// Build a full CausalGraph with variables populated for polarity analysis
@@ -1476,50 +1432,32 @@ pub(crate) fn causal_graph_with_modules(
     model: SourceModel,
     project: SourceProject,
 ) -> crate::ltm::CausalGraph {
-    use crate::common::{Canonical, Ident};
-    use std::collections::HashSet;
-
-    let edges_result = model_causal_edges(db, model, project);
-    let edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = edges_result
-        .edges
-        .iter()
-        .map(|(from, tos)| {
-            (
-                Ident::new(from),
-                tos.iter().map(|t| Ident::new(t)).collect(),
-            )
-        })
-        .collect();
-    let stocks: HashSet<Ident<Canonical>> =
-        edges_result.stocks.iter().map(|s| Ident::new(s)).collect();
-
-    let (variables, module_graphs) = model_variables_and_module_graphs(db, model, project);
-
-    crate::ltm::CausalGraph {
-        edges,
-        stocks,
-        variables,
-        module_graphs,
-    }
+    let mut graph = causal_graph_from_edges(model_causal_edges(db, model, project));
+    let (variables, module_outputs_read, module_graphs) =
+        model_variables_and_module_graphs(db, model, project);
+    graph.variables = variables;
+    graph.module_outputs_read = module_outputs_read;
+    graph.module_graphs = module_graphs;
+    graph
 }
 
-/// The `(variables, module_graphs)` maps a CausalGraph carries for polarity
-/// analysis, stock enrichment, and the GH #698 per-exit-port recompute.
+/// The `(variables, module_outputs_read, module_graphs)` maps a CausalGraph
+/// carries for polarity analysis, stock enrichment, and the GH #698
+/// per-exit-port recompute.
 type CausalGraphModuleData = (
-    std::sync::Arc<
-        HashMap<crate::common::Ident<crate::common::Canonical>, crate::variable::Variable>,
-    >,
-    HashMap<crate::common::Ident<crate::common::Canonical>, Box<crate::ltm::CausalGraph>>,
+    Arc<crate::variable::LoweredVariableMap>,
+    Arc<ModuleOutputsRead>,
+    HashMap<Ident<Canonical>, Box<crate::ltm::CausalGraph>>,
 );
 
-/// Build the `(variables, module_graphs)` pair a CausalGraph needs for
-/// polarity analysis, stock enrichment, and the discovery-mode per-exit-port
-/// pathway recompute (GH #698) -- shared by `causal_graph_with_modules` (which
-/// pairs it with a variable-level edge set) and
-/// `causal_graph_from_element_edges_with_modules` (which pairs it with an
-/// element-level edge set). The element-level graph names its module nodes by
-/// the bare module instance name, the same key `module_graphs` and the module
-/// `Variable` use, so the recompute resolves a module hop either way.
+/// Build the maps a CausalGraph needs for polarity analysis, stock
+/// enrichment, and the discovery-mode per-exit-port pathway recompute (GH
+/// #698) -- shared by `causal_graph_with_modules` (which pairs them with a
+/// variable-level edge set) and `causal_graph_from_element_edges_with_modules`
+/// (which pairs them with an element-level edge set). The element-level graph
+/// names its module nodes by the bare module instance name, the same key
+/// `module_graphs`, `module_outputs_read` and the module `Variable` use, so
+/// the recompute resolves a module hop either way.
 ///
 /// A sub-graph is built for EVERY referenced sub-model, not only stockful
 /// dynamic modules: a stockless *passthrough* with an input->output pathway
@@ -1532,11 +1470,8 @@ fn model_variables_and_module_graphs(
     model: SourceModel,
     project: SourceProject,
 ) -> CausalGraphModuleData {
-    use crate::common::{Canonical, Ident};
-    use std::collections::HashSet;
-
     let edges_result = model_causal_edges(db, model, project);
-    let variables = reconstruct_model_variables(db, model, project);
+    let variables = model_lowered_variables(db, model, project);
 
     let project_models = project.models(db);
     let mut module_graphs: HashMap<Ident<Canonical>, Box<crate::ltm::CausalGraph>> = HashMap::new();
@@ -1544,34 +1479,18 @@ fn model_variables_and_module_graphs(
     for (module_var_name, sub_model_name) in &edges_result.dynamic_modules {
         if let Some(sub_source_model) = project_models.get(sub_model_name.as_str()) {
             let sub_edges_result = model_causal_edges(db, *sub_source_model, project);
-            let sub_edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = sub_edges_result
-                .edges
-                .iter()
-                .map(|(from, tos)| {
-                    (
-                        Ident::new(from),
-                        tos.iter().map(|t| Ident::new(t)).collect(),
-                    )
-                })
-                .collect();
-            let sub_stocks: HashSet<Ident<Canonical>> = sub_edges_result
-                .stocks
-                .iter()
-                .map(|s| Ident::new(s))
-                .collect();
-            let sub_variables = reconstruct_model_variables(db, *sub_source_model, project);
-
-            let sub_graph = crate::ltm::CausalGraph {
-                edges: sub_edges,
-                stocks: sub_stocks,
-                variables: sub_variables,
-                module_graphs: HashMap::new(),
-            };
+            let mut sub_graph = causal_graph_from_edges(sub_edges_result);
+            sub_graph.variables = model_lowered_variables(db, *sub_source_model, project);
+            sub_graph.module_outputs_read = Arc::clone(&sub_edges_result.module_outputs_read);
             module_graphs.insert(Ident::new(module_var_name), Box::new(sub_graph));
         }
     }
 
-    (variables, module_graphs)
+    (
+        variables,
+        Arc::clone(&edges_result.module_outputs_read),
+        module_graphs,
+    )
 }
 
 /// Element-level CausalGraph (as [`causal_graph_from_element_edges`]) ENRICHED
@@ -1588,8 +1507,10 @@ pub fn causal_graph_from_element_edges_with_modules(
     element_edges: &ElementCausalEdgesResult,
 ) -> crate::ltm::CausalGraph {
     let mut graph = causal_graph_from_element_edges(element_edges);
-    let (variables, module_graphs) = model_variables_and_module_graphs(db, model, project);
+    let (variables, module_outputs_read, module_graphs) =
+        model_variables_and_module_graphs(db, model, project);
     graph.variables = variables;
+    graph.module_outputs_read = module_outputs_read;
     graph.module_graphs = module_graphs;
     graph
 }
@@ -1597,11 +1518,24 @@ pub fn causal_graph_from_element_edges_with_modules(
 /// Build the causal edge structure for a model from salsa-tracked
 /// dependency sets and structural variable info.
 ///
-/// Reads `variable_direct_dependencies` (establishing salsa dep on dep
-/// sets) and `parse_source_variable_with_module_context` (for implicit variable details like
-/// module input refs). Salsa backdating ensures that when equation text
-/// changes without changing the resulting edge structure, the cached
-/// result is reused and downstream graph algorithms are skipped.
+/// Reads `variable_direct_dependencies` under the input-agnostic empty
+/// `ModuleInputSet` (establishing salsa dep on dep sets) and
+/// `parse_source_variable` (for implicit variable details like module input
+/// refs) -- the one parse memo every consumer shares. The dependency sets are
+/// the input-agnostic ones on purpose: an instantiated sub-model's compile
+/// graph selects the live `isModuleInput` branch per input set, while the
+/// causal graph has no instance in hand and sees every branch. Salsa
+/// backdating ensures that when equation text changes without changing the
+/// resulting edge structure, the cached result is reused and downstream graph
+/// algorithms are skipped.
+///
+/// An INIT-only capture is no causal node. It is populated once, in initials,
+/// and the `INIT` that reads it takes the frozen snapshot, so neither the
+/// names its body reads nor the variable that snapshots it are linked to it
+/// per step: an edge through it would score a slot nothing writes after
+/// initials -- the slot the results map hides for that reason
+/// (`db::layout::flattened_offsets`). A `PREVIOUS` capture, or one shared by
+/// both consumers, is refreshed every step and stays a node.
 #[salsa::tracked(returns(ref))]
 pub fn model_causal_edges(
     db: &dyn Db,
@@ -1609,20 +1543,58 @@ pub fn model_causal_edges(
     project: SourceProject,
 ) -> CausalEdgesResult {
     let source_vars = model.variables(db);
-    let module_ctx = model_module_ident_context(db, model, project, vec![]);
-    // The old no-arg `variable_direct_dependencies` used a literally-empty
-    // module-ident context (NOT `module_ctx`) and the `None`-inputs path;
-    // reproduce that exactly with the empty context and empty input set.
-    let empty_ctx = ModuleIdentContext::new(db, vec![]);
     let empty_inputs = ModuleInputSet::empty(db);
+    let init_captures: HashSet<String> = source_vars
+        .values()
+        .flat_map(|source_var| {
+            variable_direct_dependencies(db, *source_var, project, empty_inputs)
+                .implicit_vars
+                .iter()
+                .filter(|iv| iv.capture_kind == Some(CaptureKind::Init))
+                .map(|iv| iv.name.clone())
+        })
+        .collect();
     let mut edges: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut stocks = BTreeSet::new();
     let mut dynamic_modules = HashMap::new();
+    let mut module_outputs_read: ModuleOutputsRead = HashMap::new();
+
+    // The dt-phase reads of one node, as edges into it. A read of an INIT-only
+    // capture is a read of a snapshot: no edge. A module instance's read of
+    // its own output (a Stella import wires those as inputs) is no edge
+    // either; a local self-read stays, as every read of a local name does.
+    fn record_reads(
+        edges: &mut HashMap<String, BTreeSet<String>>,
+        module_outputs_read: &mut ModuleOutputsRead,
+        init_captures: &HashSet<String>,
+        reader: &str,
+        deps: &DepRefs,
+    ) {
+        for dep in deps.phase(DepPhase::Dt) {
+            let node = dep.target.head();
+            if dep.target.is_local() {
+                if init_captures.contains(node.as_str()) {
+                    continue;
+                }
+            } else {
+                if node.as_str() == reader {
+                    continue;
+                }
+                module_outputs_read
+                    .entry(reader.to_string())
+                    .or_default()
+                    .insert(dep.target.clone());
+            }
+            edges
+                .entry(node.as_str().to_string())
+                .or_default()
+                .insert(reader.to_string());
+        }
+    }
 
     for (name, source_var) in source_vars.iter() {
-        let kind = source_var.kind(db);
-
-        match kind {
+        let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
+        match source_var.kind(db) {
             SourceVariableKind::Stock => {
                 stocks.insert(name.clone());
                 for flow in source_var
@@ -1638,88 +1610,48 @@ pub fn model_causal_edges(
                 }
             }
             SourceVariableKind::Module => {
-                let self_prefix = format!("{name}\u{00B7}");
-                for mr in source_var.module_refs(db).iter() {
-                    let canonical_src = canonicalize(&mr.src).into_owned();
-                    // Skip output refs where src is within the module's own
-                    // namespace (Stella imports include these); normalizing
-                    // them would create false self-loops.
-                    if canonical_src.starts_with(&self_prefix) {
-                        continue;
-                    }
-                    let normalized = normalize_module_ref_str(&canonical_src);
-                    edges.entry(normalized).or_default().insert(name.clone());
-                }
+                // A module instance's dependencies are the sources feeding
+                // its input ports.
+                record_reads(
+                    &mut edges,
+                    &mut module_outputs_read,
+                    &init_captures,
+                    name,
+                    &deps.deps,
+                );
                 let model_name = source_var.model_name(db);
                 if !model_name.is_empty() {
                     dynamic_modules.insert(name.clone(), model_name.clone());
                 }
             }
-            _ => {
-                let deps =
-                    variable_direct_dependencies(db, *source_var, project, empty_ctx, empty_inputs);
-                for dep in &deps.dt_deps {
-                    let normalized = normalize_module_ref_str(dep);
-                    edges.entry(normalized).or_default().insert(name.clone());
-                }
-            }
+            _ => record_reads(
+                &mut edges,
+                &mut module_outputs_read,
+                &init_captures,
+                name,
+                &deps.deps,
+            ),
         }
 
-        // Include implicit variables (module instances from SMOOTH/DELAY expansion)
-        let parsed =
-            parse_source_variable_with_module_context(db, *source_var, project, module_ctx);
-        for implicit_var in &parsed.implicit_vars {
-            let imp_name = canonicalize(implicit_var.ident()).into_owned();
-
-            match implicit_var.synthesized() {
-                Some(datamodel::Variable::Stock(s)) => {
-                    stocks.insert(imp_name.clone());
-                    for flow in s.inflows.iter().chain(s.outflows.iter()) {
-                        let canonical_flow = canonicalize(flow).into_owned();
-                        edges
-                            .entry(canonical_flow)
-                            .or_default()
-                            .insert(imp_name.clone());
-                    }
+        // The helpers the parse synthesized: a module instance (from
+        // SMOOTH/DELAY expansion) is a node like an explicit one; a capture or
+        // a hoisted call argument is an aux, unless it is an INIT-only capture,
+        // which is no causal node.
+        for implicit in &deps.implicit_vars {
+            if implicit.is_module {
+                if let Some(model_name) = &implicit.model_name {
+                    dynamic_modules.insert(implicit.name.clone(), model_name.clone());
                 }
-                Some(datamodel::Variable::Module(m)) => {
-                    let self_prefix = format!("{imp_name}\u{00B7}");
-                    for mr in &m.references {
-                        let canonical_src = canonicalize(&mr.src).into_owned();
-                        if canonical_src.starts_with(&self_prefix) {
-                            continue;
-                        }
-                        let normalized = normalize_module_ref_str(&canonical_src);
-                        edges
-                            .entry(normalized)
-                            .or_default()
-                            .insert(imp_name.clone());
-                    }
-                    dynamic_modules.insert(imp_name.clone(), m.model_name.clone());
-                }
-                _ => {
-                    // For implicit flows/auxes, get deps from the parent's
-                    // variable_direct_dependencies result.
-                    let deps = variable_direct_dependencies(
-                        db,
-                        *source_var,
-                        project,
-                        empty_ctx,
-                        empty_inputs,
-                    );
-                    if let Some(implicit_dep) =
-                        deps.implicit_vars.iter().find(|iv| iv.name == imp_name)
-                    {
-                        for dep in &implicit_dep.dt_deps {
-                            let normalized = normalize_module_ref_str(dep);
-                            edges
-                                .entry(normalized)
-                                .or_default()
-                                .insert(imp_name.clone());
-                        }
-                    }
-                }
+            } else if init_captures.contains(&implicit.name) {
+                continue;
             }
+            record_reads(
+                &mut edges,
+                &mut module_outputs_read,
+                &init_captures,
+                &implicit.name,
+                &implicit.deps,
+            );
         }
     }
 
@@ -1727,6 +1659,7 @@ pub fn model_causal_edges(
         edges,
         stocks,
         dynamic_modules,
+        module_outputs_read: Arc::new(module_outputs_read),
     }
 }
 
@@ -1779,6 +1712,21 @@ pub struct EdgeShapesResult {
     /// feeder); an arrayed reducer argument is `Wildcard` and already
     /// classifies as cross-element on shape alone.
     pub agg_routed_edges: BTreeSet<(String, String)>,
+    /// The variable-level edges every one of whose reference sites sits in
+    /// an `Ast::Arrayed` slot of the target, and whose slots together cover
+    /// a STRICT subset of the target's storage (`births[NYC] = population *
+    /// 0.1` with `births[Boston] = 0`): the edge exists at those elements
+    /// and at no other. Its shape set is `{Bare}` and its endpoints may
+    /// share one dimension list, which on shape and dimensions alone would
+    /// classify a cycle through it as one A2A loop over the WHOLE
+    /// dimension -- a loop claimed at slots where no circuit exists.
+    /// `classify_cycle` sends such a cycle down the element-level slow
+    /// path, and `build_element_level_loops` keeps its circuits per element
+    /// rather than collapsing them into a dimensioned loop. A site with no
+    /// slot (`Ast::Scalar`, `ApplyToAll`, or an `Arrayed` DEFAULT
+    /// expression, which walks with `target_element: None` and stands for
+    /// every element no explicit slot claimed) makes the edge unrestricted.
+    pub target_restricted_edges: BTreeSet<(String, String)>,
 }
 
 /// Tag every variable-level edge with the set of `RefShape`s observed
@@ -1826,6 +1774,7 @@ pub fn model_edge_shapes(
 
     let mut edge_shapes: HashMap<(String, String), BTreeSet<RefShape>> = HashMap::new();
     let mut agg_routed_edges: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut target_restricted_edges: BTreeSet<(String, String)> = BTreeSet::new();
     let agg_nodes = crate::ltm_agg::enumerate_agg_nodes(db, model, project);
     for (from_name, to_set) in &variable_edges.edges {
         for to_name in to_set {
@@ -1884,15 +1833,27 @@ pub fn model_edge_shapes(
             // score derivation, and the slow-path loop routing consult.
             // Inert pre-T5: the identical-slices acceptance could never
             // produce a projection-feeder source.
-            let to_dims = source_vars
-                .get(to_name)
-                .filter(|sv| sv.kind(db) != super::SourceVariableKind::Module)
-                .map(|sv| super::variable_dimensions(db, *sv, project).as_slice())
-                .unwrap_or(&[]);
-            if crate::ltm_agg::variable_backed_reduce_agg(agg_nodes, from_name, to_name, to_dims)
+            let to_dims =
+                super::ltm::endpoint_dimensions(db, model, project, to_name).unwrap_or_default();
+            if crate::ltm_agg::variable_backed_reduce_agg(agg_nodes, from_name, to_name, &to_dims)
                 .is_some_and(|a| a.source_is_projection_feeder(from_name))
             {
                 agg_routed_edges.insert((from_name.clone(), to_name.clone()));
+            }
+            // An edge read only from explicit `Ast::Arrayed` slots exists at
+            // exactly those slots. Fewer distinct slots than the target has
+            // elements makes it target-restricted; one site with no slot (a
+            // default expression, which stands for every unclaimed element)
+            // makes it unrestricted, which is conservative: a default read
+            // over-broadcasts to overridden elements the same way it does in
+            // the element graph.
+            if let Some(sites) = sites.filter(|sites| !sites.is_empty()) {
+                let slots: Option<BTreeSet<&str>> =
+                    sites.iter().map(|s| s.target_element.as_deref()).collect();
+                let storage: usize = to_dims.iter().map(|d| d.len()).product();
+                if slots.is_some_and(|slots| slots.len() < storage) {
+                    target_restricted_edges.insert((from_name.clone(), to_name.clone()));
+                }
             }
         }
     }
@@ -1900,6 +1861,7 @@ pub fn model_edge_shapes(
     EdgeShapesResult {
         edge_shapes,
         agg_routed_edges,
+        target_restricted_edges,
     }
 }
 
@@ -1975,6 +1937,11 @@ pub enum CycleClass {
 ///    (`scale` in `SUM(pop[*] * scale)`) and the same-dims projection
 ///    feeder (`frac[D1]` in `SUM(matrix[D1,*] * frac[D1])`); arrayed
 ///    reducer arguments are `Wildcard` and already caught by rule 1.
+///    An edge in `EdgeShapesResult::target_restricted_edges` (read from a
+///    strict subset of the target's `Ast::Arrayed` slots) is sent the same
+///    way for the opposite reason: its shape is Bare and its endpoints may
+///    share one dimension list, but the loop exists only at the slots that
+///    read the source, and only the element-level circuit says which.
 /// 3. If every variable has an empty dimension list (all scalar),
 ///    `PureScalar`.
 /// 4. If every variable has the *same* non-empty dimension list,
@@ -2005,7 +1972,9 @@ pub(crate) fn classify_cycle(
         // its shapes are all Bare (a scalar feeder of a hoisted reducer) --
         // the loop must traverse the `from → $⁚ltm⁚agg⁚{n} → to` element
         // hops so its score composes the agg-half link scores (GH #737).
-        if edge_shapes.agg_routed_edges.contains(&key) {
+        if edge_shapes.agg_routed_edges.contains(&key)
+            || edge_shapes.target_restricted_edges.contains(&key)
+        {
             return CycleClass::CrossElementOrMixed;
         }
         let shapes = match edge_shapes.edge_shapes.get(&key) {
@@ -2115,10 +2084,7 @@ pub fn model_element_causal_edges(
         if let Some(dims) = cache.get(name) {
             return dims.clone();
         }
-        let dims = source_vars
-            .get(name)
-            .map(|sv| super::variable_dimensions(db, *sv, project).to_vec())
-            .unwrap_or_default();
+        let dims = super::ltm::endpoint_dimensions(db, model, project, name).unwrap_or_default();
         cache.insert(name.to_string(), dims.clone());
         dims
     };
@@ -2200,6 +2166,14 @@ pub fn model_element_causal_edges(
                 && !from_dims.is_empty()
                 && !to_dims.is_empty();
             if is_structural_flow_to_stock || classified.map(Vec::is_empty).unwrap_or(true) {
+                // A flow feeds its stock through the wiring's pairing (the
+                // full context); every other reference here is an equation
+                // read.
+                let spelling = if is_structural_flow_to_stock {
+                    BareSpelling::StockFlow
+                } else {
+                    BareSpelling::Equation
+                };
                 emit_edges_for_reference(
                     from_name,
                     to_name,
@@ -2208,6 +2182,7 @@ pub fn model_element_causal_edges(
                     &RefShape::Bare,
                     None,
                     dim_ctx,
+                    spelling,
                     &mut element_edges,
                 );
                 continue;
@@ -2298,6 +2273,7 @@ pub fn model_element_causal_edges(
                             &site.shape,
                             site.target_element.as_deref(),
                             dim_ctx,
+                            BareSpelling::Equation,
                             &mut element_edges,
                         );
                     }
@@ -2482,12 +2458,31 @@ fn resolve_loop_partitions(
     (per_loop, meta)
 }
 
+/// The loops of `model`: the exhaustive enumeration the scored surface shares,
+/// or the pinned loops alone in discovery mode.
+///
+/// An analysis entry point, so it carries the module-cycle gate itself, the
+/// rule `analyze_model` applies: a model the project's module graph reaches a
+/// cycle from has no detected loops -- the empty result -- because the cycle
+/// is the model error the diagnostics pass reports for it, and enumerating its
+/// loops recurses into an instance's sub-model layout, which under a module
+/// cycle is salsa's dependency-graph panic (GH #806).
 pub fn model_detected_loops(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
 ) -> DetectedLoopsResult {
     use crate::common::{Canonical, Ident};
+
+    if crate::db::project_module_graph(db, project)
+        .cycle_error_from(model.name(db))
+        .is_some()
+    {
+        return DetectedLoopsResult {
+            loops: vec![],
+            partitions: vec![],
+        };
+    }
 
     let graph = causal_graph_with_modules(db, model, project);
     // The ELEMENT-level cycle partitions -- the same granularity the scored
@@ -2614,11 +2609,9 @@ pub fn model_detected_loops(
             partitions: parts,
         };
     }
-    let source_vars = model.variables(db);
     let (mut loops, _truncated_aggs) = crate::db::ltm::build_loops_from_tiered(
         tiered,
         &graph,
-        source_vars,
         db,
         model,
         project,
@@ -2923,7 +2916,7 @@ fn detected_polarity_from_ltm(polarity: &crate::ltm::LoopPolarity) -> DetectedLo
 }
 
 /// Compute per-link polarity for all causal edges in a model by
-/// reconstructing variable ASTs from the salsa-tracked parse results
+/// reading each variable's lowered form (`model_lowered_variables`)
 /// and analyzing how each source variable appears in the target's
 /// equation.
 pub fn compute_link_polarities(
@@ -2985,12 +2978,7 @@ pub fn causal_graph_from_element_edges(
         .collect();
     let stocks: HashSet<Ident<Canonical>> = result.stocks.iter().map(|s| Ident::new(s)).collect();
 
-    crate::ltm::CausalGraph {
-        edges,
-        stocks,
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    }
+    crate::ltm::CausalGraph::new(edges, stocks)
 }
 
 /// Find all elementary loop circuits in a model's element-level causal graph.
@@ -3172,7 +3160,6 @@ pub fn model_loop_circuits_tiered(
     }
 
     let edge_shapes = model_edge_shapes(db, model, project);
-    let source_vars = model.variables(db);
 
     // Per-variable dimension lookup. Cached locally because a variable
     // can appear in many cycles; the salsa-tracked `variable_dimensions`
@@ -3183,10 +3170,7 @@ pub fn model_loop_circuits_tiered(
         if let Some(dims) = dim_cache.get(name) {
             return dims.clone();
         }
-        let dims = source_vars
-            .get(name)
-            .map(|sv| super::variable_dimensions(db, *sv, project).to_vec())
-            .unwrap_or_default();
+        let dims = super::ltm::endpoint_dimensions(db, model, project, name).unwrap_or_default();
         dim_cache.insert(name.to_string(), dims.clone());
         dims
     };
@@ -3311,12 +3295,7 @@ pub fn model_loop_circuits_tiered(
                 )
             })
             .collect();
-        let graph = crate::ltm::CausalGraph {
-            edges: sub_edge_idents,
-            stocks: sub_stocks,
-            variables: std::sync::Arc::new(HashMap::new()),
-            module_graphs: HashMap::new(),
-        };
+        let graph = crate::ltm::CausalGraph::new(sub_edge_idents, sub_stocks);
         let scc = graph.largest_scc_size();
         if scc > crate::ltm::MAX_LTM_SCC_NODES {
             // Skip Johnson on a huge cross-element subgraph; the
@@ -3482,202 +3461,138 @@ pub fn model_element_cycle_partitions(
     }
 }
 
-/// Reconstruct `Variable` objects from salsa-tracked parse results for
-/// all variables in a model (including implicit variables).
+/// Every variable of a model in its lowered `Expr2` form, by canonical name:
+/// handles to the per-variable memos, never a second copy of a lowered tree.
 ///
-/// Cached, and returning a SHARED map, because it is expensive and repeated:
-/// it lowers every variable in the model, and the LTM pipeline builds a causal
-/// graph once per query that needs polarity or module structure. On a world3
-/// LTM compile it ran 923 times and was 58% of all instructions executed.
-/// Nothing between those calls can change its answer -- it reads only the
-/// model's variable set and the per-variable parse memos -- so the repetition
-/// was pure recomputation.
+/// The one map builder for every whole-model consumer -- the unit pass
+/// (`db::units::unit_model`), the causal graphs, the LTM reference-site IR and
+/// aggregate-node enumeration, and the rename patch -- so that they cannot
+/// disagree about what a name resolves to. Each explicit variable's entry is
+/// its `lowered_source_variable` memo's `Arc`; each helper's is its
+/// `lowered_implicit_variable` memo's, except an element-scoped helper (a
+/// per-element hoisted argument), whose entry is the memo's element-pinned
+/// projection: the describers classify a read by its SPELLING, so `x[State]`
+/// in a scalar equation would read as a dynamic index and cost the edge its
+/// precision. The helper's fragment input spells every read the element pins
+/// as the static index the compiler resolves it to
+/// (`compiler::fragment::FragmentInput::element_pinned_target`); the compiler
+/// is the one resolver, and the LTM edge into the helper names the slot the
+/// helper's fragment reads. A helper whose fragment input cannot be built (its
+/// body does not lower) keeps its unpinned memo and the errors it carries, as
+/// any variable that fails to lower does; so does every helper of a model the
+/// project's module graph reaches a cycle from (below). An explicit variable wins a
+/// canonical-name collision with a helper -- unreachable today, since helper
+/// names carry the reserved `$⁚` prefix, but stated so the two cannot differ.
+///
+/// Cached because the LTM pipeline reads it once per query that needs
+/// polarity or module structure (on a world3 LTM compile, hundreds of times);
+/// what it caches is a map of handles, so a memo backdated by an unrelated
+/// edit leaves every reader's map equal.
 #[salsa::tracked(returns(clone))]
-pub(crate) fn reconstruct_model_variables(
+pub(crate) fn model_lowered_variables(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
-) -> std::sync::Arc<
-    HashMap<crate::common::Ident<crate::common::Canonical>, crate::variable::Variable>,
-> {
+) -> std::sync::Arc<crate::variable::LoweredVariableMap> {
     use crate::common::{Canonical, Ident};
 
-    let source_vars = model.variables(db);
-    let module_ctx = model_module_ident_context(db, model, project, vec![]);
-    // The canonicalized dimension context comes from the project-global
-    // salsa-cached query; every parse and lowering below reads that one value.
-    let dim_context = project_dimensions_context(db, project);
-    let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
-        dimensions: dim_context,
-        model_name: "",
-    };
+    let mut variables: crate::variable::LoweredVariableMap = HashMap::new();
+    for (name, source_var) in model.variables(db) {
+        variables.insert(
+            Ident::new(name),
+            std::sync::Arc::clone(
+                &lowered_source_variable(db, *source_var, model, project).variable,
+            ),
+        );
+    }
 
-    let mut variables: HashMap<Ident<Canonical>, crate::variable::Variable> = HashMap::new();
-
-    for (name, source_var) in source_vars.iter() {
-        // Explicit module instances take the same direct-construction path as
-        // implicit ones: the generic parse+lower path resolves module inputs
-        // against `scope.models`, which is EMPTY here, so `resolve_module_input`
-        // drops every input and the reconstructed `Variable::Module` carries
-        // `inputs: []`. The discovery-mode per-exit-port pathway recompute (GH
-        // #698) matches the loop edge's source against those inputs to find the
-        // module's entry port; with the inputs lost it bails and falls back to
-        // the wrong-signed composite. (`reconstruct_single_variable` already
-        // takes this branch for the exhaustive override; both reconstructions
-        // must keep module wiring.)
-        if source_var.kind(db) == crate::db::SourceVariableKind::Module {
-            let lowered = module_instance_from_refs(
-                model.name(db),
-                Ident::new(source_var.ident(db)),
-                Ident::new(source_var.model_name(db)),
-                source_var.module_refs(db),
-            );
-            variables.insert(Ident::new(name), lowered);
+    // The pinned projection is the helper's FRAGMENT input with its element
+    // resolved (`FragmentInput::element_pinned_target`), and a fragment input
+    // resolves every head to the compiler's shape -- a subscripted module-output
+    // read (`m.outarr[d]`) pins through the instance's sub-model layout
+    // (`model_shape`, a recursive query). A module cycle turns that query into
+    // salsa's dependency-graph panic, and the unit pass reaches this map on a
+    // cyclic project (its scope walk is iterative for that reason), so the
+    // projection is taken only where the project's module graph is acyclic
+    // from this model -- the same gate every LTM entry point passes before it
+    // reads a helper's element -- and a cyclic project holds the memo's
+    // unpinned handle, which the unit pass reads identically (a subscript
+    // index carries no units).
+    let module_graph = crate::db::project_module_graph(db, project);
+    let pinning_allowed = module_graph.cycle_error_from(model.name(db)).is_none();
+    let implicit_info = model_implicit_var_info(db, model, project);
+    let mut helper_names: Vec<&String> = implicit_info.keys().collect();
+    helper_names.sort_unstable();
+    for name in helper_names {
+        let ident: Ident<Canonical> = Ident::new(name);
+        if variables.contains_key(&ident) {
             continue;
         }
-
-        let parsed =
-            parse_source_variable_with_module_context(db, *source_var, project, module_ctx);
-        let lowered = crate::model::lower_variable(&scope, &parsed.variable);
-        variables.insert(Ident::new(name), lowered);
-
-        // Add implicit variables (module instances from SMOOTH/DELAY expansion)
-        for implicit_var in &parsed.implicit_vars {
-            let imp_name = canonicalize(implicit_var.ident()).into_owned();
-            // `or_insert_with`, not `insert`: an explicit variable wins a
-            // canonical-name collision with a synthesized implicit one. That
-            // is the precedence `reconstruct_single_variable` had when it
-            // searched explicit variables first, and it now reads this map.
-            // Unreachable today -- implicit names carry the reserved `$⁚`
-            // prefix -- so this fixes no bug; it keeps the two from being
-            // able to differ.
-            variables
-                .entry(Ident::new(&imp_name))
-                .or_insert_with(|| reconstruct_implicit_variable(db, model, &scope, implicit_var));
-        }
+        let Some(memo) = lowered_implicit_variable(db, model, project, name.clone()) else {
+            continue;
+        };
+        let memo = &memo.variable;
+        let entry = if pinning_allowed
+            && memo.element_scope().is_some()
+            && let Ok(input) = crate::db::fragment_compile::implicit_fragment_input(
+                db,
+                &implicit_info[name],
+                model,
+                project,
+                &[],
+            ) {
+            std::sync::Arc::new(input.element_pinned_target())
+        } else {
+            std::sync::Arc::clone(memo)
+        };
+        variables.insert(ident, entry);
     }
 
     std::sync::Arc::new(variables)
 }
 
-/// Reconstruct a single `Variable` by name from a model's parse results.
-///
-/// A projection of [`reconstruct_model_variables`] rather than its own
-/// parse-and-lower: the map that query caches already holds every explicit and
-/// implicit variable, built by the same construction against the same scope.
-/// Deriving one from the other is not merely cheaper (the LTM link-score
-/// emitter calls this once per link, and on C-LEARN that is 6,721 times) --
-/// it also means the two can no longer disagree about what a name resolves
-/// to, which they could when each searched the model its own way.
-///
-/// Returns None if the name doesn't match any variable in the model.
-///
-/// A `&str`-taking wrapper over the tracked query below, so that no caller has
-/// to own its name to ask.
-pub(super) fn reconstruct_single_variable(
+/// One lowered variable of `model` by name -- an explicit variable or a
+/// helper, as [`model_lowered_variables`] holds it -- or `None` when the model
+/// declares neither. A `&str`-taking wrapper over the tracked projection
+/// below, so no caller has to own its name to ask.
+pub(super) fn lowered_variable_by_name(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
     var_name: &str,
-) -> Option<crate::variable::Variable> {
-    reconstruct_named_variable(db, model, project, var_name.to_string())
+) -> Option<std::sync::Arc<crate::variable::Variable>> {
+    lowered_variable_named(db, model, project, var_name.to_string())
 }
 
-/// The salsa FIREWALL over [`reconstruct_model_variables`], and the reason
-/// this is a tracked query rather than a plain map lookup.
+/// The salsa FIREWALL over [`model_lowered_variables`], and the reason this
+/// is a tracked query rather than a plain map lookup.
 ///
-/// The map is whole-model: any variable's equation edit changes it, because it
-/// holds every variable's LOWERED form. A caller that reads it directly
-/// therefore depends on every variable in the model -- which for
-/// `link_score_equation_text_shaped` (tracked per `(from, to, shape)`, and
-/// documented as "recomputed only when the involved variables change") meant
-/// one unrelated edit regenerated EVERY link score. On C-LEARN that is 6,721
-/// of them per keystroke.
-///
-/// This query still reads the whole map and so still re-executes on any edit,
-/// but its VALUE is one variable, so salsa backdates it whenever that variable
-/// is untouched and no reader re-runs. Same shape, and the same reason, as
-/// `db::query::model_variable_by_name` over `SourceModel::variables`.
+/// The map is whole-model: any variable's equation edit changes it. A caller
+/// that read it directly would depend on every variable in the model -- which
+/// for `shaped_link_score` (tracked per `(from, to, shape)`, and
+/// documented as "recomputed only when the involved variables change") means
+/// one unrelated edit regenerating EVERY link score, on C-LEARN 6,721 of them
+/// per keystroke. This query still reads the whole map and so re-executes on
+/// any edit, but its VALUE is one handle, so salsa backdates it whenever that
+/// variable's lowered form is unchanged and no reader re-runs. Same shape, and
+/// the same reason, as `db::query::model_variable_by_name` over
+/// `SourceModel::variables`.
 ///
 /// Pinned by `db::ltm_tests::an_unrelated_equation_edit_does_not_regenerate_
 /// every_link_score`, which counts query-body entries -- pointer equality
 /// cannot see this, since backdating leaves the memo in place either way.
 #[salsa::tracked(returns(clone))]
-fn reconstruct_named_variable(
+fn lowered_variable_named(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
     var_name: String,
-) -> Option<crate::variable::Variable> {
-    reconstruct_model_variables(db, model, project)
+) -> Option<std::sync::Arc<crate::variable::Variable>> {
+    model_lowered_variables(db, model, project)
         .get(&crate::common::Ident::<crate::common::Canonical>::new(
             &var_name,
         ))
         .cloned()
-}
-
-/// Reconstruct an implicit (compiler-generated) variable from its datamodel form.
-///
-/// Module instances need special handling: `parse_var` does not preserve the
-/// `references` list from the datamodel, so input wiring (built via
-/// `build_module_inputs`) would be lost.  We short-circuit that case and
-/// construct `Variable::Module` directly from the stored `ModuleReference`s.
-fn reconstruct_implicit_variable(
-    db: &dyn Db,
-    model: SourceModel,
-    scope: &crate::model::ScopeStage0<'_>,
-    implicit_var: &ImplicitVar,
-) -> crate::variable::Variable {
-    use crate::common::{Canonical, Ident};
-
-    if let Some(dm_module) = implicit_var.module() {
-        return module_instance_from_refs(
-            model.name(db),
-            Ident::<Canonical>::new(implicit_var.ident()),
-            Ident::new(&dm_module.model_name),
-            &dm_module.references,
-        );
-    }
-
-    // A capture holds its body as an AST subtree; a hoisted module-call
-    // argument still carries equation text.
-    let parsed_imp = match implicit_var {
-        ImplicitVar::Capture(capture) => capture.variable_stage0(scope.dimensions),
-        ImplicitVar::Synthesized(dm_var) => {
-            let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-            let mut dummy_implicits = Vec::new();
-            let ctx = crate::variable::ParseContext::new(scope.dimensions, &units_ctx);
-            crate::variable::parse_var(&ctx, dm_var.as_ref(), &mut dummy_implicits, |mi| {
-                Ok(Some(mi.clone()))
-            })
-        }
-    };
-    crate::model::lower_variable(scope, &parsed_imp)
-}
-
-/// A module instance's lowered form, built straight from its stored
-/// `ModuleReference`s.
-///
-/// `parse_var` does not preserve the `references` list, so a module that went
-/// through the generic parse+lower path would lose its input wiring; both
-/// reconstructions (explicit and implicit) therefore short-circuit to this.
-fn module_instance_from_refs(
-    parent_model_name: &str,
-    ident: crate::common::Ident<crate::common::Canonical>,
-    model_name: crate::common::Ident<crate::common::Canonical>,
-    references: &[datamodel::ModuleReference],
-) -> crate::variable::Variable {
-    let module_var_prefix = format!("{}·", ident.as_str());
-    let inputs = build_module_inputs(
-        parent_model_name,
-        &module_var_prefix,
-        references
-            .iter()
-            .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
-    );
-    crate::variable::Variable::module_instance(ident, model_name, inputs)
 }
 
 #[cfg(test)]
@@ -3729,6 +3644,7 @@ mod emit_edges_for_reference_tests {
             &RefShape::Bare,
             None,
             &empty_dim_ctx(),
+            BareSpelling::Equation,
             &mut edges,
         );
 
@@ -3754,6 +3670,7 @@ mod emit_edges_for_reference_tests {
             &RefShape::FixedIndex(vec!["nyc".to_string()]),
             None,
             &empty_dim_ctx(),
+            BareSpelling::Equation,
             &mut edges,
         );
 
@@ -3787,6 +3704,7 @@ mod emit_edges_for_reference_tests {
             &RefShape::Bare,
             None,
             &empty_dim_ctx(),
+            BareSpelling::Equation,
             &mut edges,
         );
 
@@ -3817,6 +3735,7 @@ mod emit_edges_for_reference_tests {
             &RefShape::FixedIndex(vec!["nyc".to_string()]),
             Some("boston"),
             &empty_dim_ctx(),
+            BareSpelling::Equation,
             &mut edges,
         );
 
@@ -3845,6 +3764,7 @@ mod emit_edges_for_reference_tests {
             &RefShape::Bare,
             Some("boston"),
             &empty_dim_ctx(),
+            BareSpelling::Equation,
             &mut edges,
         );
 
@@ -3877,21 +3797,18 @@ mod emit_edges_for_reference_tests {
     }
 
     /// GH #527 / GH #997: a `Bare` edge between dimensions related by a
-    /// POSITIONAL mapping projects the single diagonal both spellings agree on;
-    /// a pair related by an EXPLICIT element map projects the UNION of the two
-    /// spellings' diagonals, because a `Bare` site can be an in-equation
-    /// reference (positional) or a structural flow-to-stock edge (map-following)
-    /// and nothing downstream of the shape tells them apart -- see
-    /// [`bare_reference_correspondence`].
+    /// declared mapping projects the executed correspondence's rows -- the
+    /// diagonal under a positional `maps_to`, the map's rows under an explicit
+    /// element map -- through [`bare_axis_pairing`].
     ///
-    /// Exercised directly (no salsa pipeline) so both arms of the
-    /// correspondence decision are pinned at the emitter level. The 2-element
-    /// permuted case below produces the FULL broadcast, which is what this test
-    /// asserted before GH #997 and would still pass for the old reason; the
-    /// 3-element case after it is the one that distinguishes a union from a
-    /// broadcast.
+    /// Exercised directly (no salsa pipeline) so the emitter-level projection
+    /// is pinned on its own. The 2-element permuted map is the row where the
+    /// map's answer and the ordinal's differ on every element; the 3-element
+    /// 3-cycle after it separates "the map's row" from every other pairing, so
+    /// a describer emitting the ordinal's row, a union of both, or a broadcast
+    /// fails a different assertion each.
     #[test]
-    fn bare_mapped_dims_positional_diagonal_element_map_broadcast() {
+    fn bare_mapped_dims_project_the_executed_correspondence() {
         // Positional mapping: diagonal.
         let mut state = crate::datamodel::Dimension::named(
             "State".to_string(),
@@ -3915,6 +3832,7 @@ mod emit_edges_for_reference_tests {
             &RefShape::Bare,
             None,
             &dim_ctx,
+            BareSpelling::Equation,
             &mut edges,
         );
         assert_eq!(
@@ -3928,7 +3846,7 @@ mod emit_edges_for_reference_tests {
             "positional mapping: x[b] feeds only its positional twin"
         );
 
-        // Explicit element map (permuted s1↦b, s2↦a): broadcast.
+        // Explicit element map (permuted s1↦b, s2↦a): the map's rows.
         let mut state_em = crate::datamodel::Dimension::named(
             "State".to_string(),
             vec!["s1".to_string(), "s2".to_string()],
@@ -3953,27 +3871,24 @@ mod emit_edges_for_reference_tests {
             &RefShape::Bare,
             None,
             &dim_ctx_em,
+            BareSpelling::Equation,
             &mut edges_em,
         );
-        let broadcast = BTreeSet::from(["target[s1]".to_string(), "target[s2]".to_string()]);
         assert_eq!(
             edges_em.get("x[a]"),
-            Some(&broadcast),
-            "element map: x[a] keeps the conservative broadcast"
+            Some(&BTreeSet::from(["target[s2]".to_string()])),
+            "element map: x[a] feeds the target the map sends to it"
         );
         assert_eq!(
             edges_em.get("x[b]"),
-            Some(&broadcast),
-            "element map: x[b] keeps the conservative broadcast"
+            Some(&BTreeSet::from(["target[s1]".to_string()])),
+            "element map: x[b] feeds the target the map sends to it"
         );
 
-        // Three elements, so the two rules' answers are a strict SUBSET of the
-        // broadcast and the union is observable. The map is the 3-cycle
-        // s1->b, s2->c, s3->a; the positional diagonal is s1->a, s2->b, s3->c.
-        // Each source element therefore feeds exactly TWO targets, never all
-        // three -- which is the property the flow-to-stock spelling needs (its
-        // map-following read must have an edge) without giving up the tightening
-        // (the third pair is a phantom either way).
+        // Three elements under the 3-cycle s1->b, s2->c, s3->a (the positional
+        // diagonal would be s1->a, s2->b, s3->c): each source element feeds
+        // exactly the ONE target the map names, never its ordinal twin and
+        // never the third.
         let mut state3 = crate::datamodel::Dimension::named(
             "State".to_string(),
             vec!["s1".to_string(), "s2".to_string(), "s3".to_string()],
@@ -4001,16 +3916,14 @@ mod emit_edges_for_reference_tests {
             &RefShape::Bare,
             None,
             &dim_ctx3,
+            BareSpelling::Equation,
             &mut edges3,
         );
-        for (src, positional, mapped) in [("a", "s1", "s3"), ("b", "s2", "s1"), ("c", "s3", "s2")] {
+        for (src, mapped) in [("a", "s3"), ("b", "s1"), ("c", "s2")] {
             assert_eq!(
                 edges3.get(&format!("x[{src}]")),
-                Some(&BTreeSet::from([
-                    format!("target[{positional}]"),
-                    format!("target[{mapped}]")
-                ])),
-                "x[{src}] must feed exactly its positional and its mapped target"
+                Some(&BTreeSet::from([format!("target[{mapped}]")])),
+                "x[{src}] must feed exactly the target the map names"
             );
         }
     }
@@ -5057,6 +4970,7 @@ mod classify_cycle_tests {
         EdgeShapesResult {
             edge_shapes,
             agg_routed_edges: BTreeSet::new(),
+            target_restricted_edges: BTreeSet::new(),
         }
     }
 
@@ -5096,6 +5010,148 @@ mod classify_cycle_tests {
         assert_eq!(
             classify_cycle(&cycle, &edges, &lookup),
             CycleClass::CrossElementOrMixed
+        );
+    }
+
+    /// Rule 2's other marker: an all-Bare cycle over one shared dimension
+    /// whose edge is target-restricted (the target reads the source in a
+    /// strict subset of its `Ast::Arrayed` slots) must NOT classify
+    /// PureSameElementA2A -- a fast-path loop over the whole dimension would
+    /// claim slots no circuit exists at.
+    #[test]
+    fn target_restricted_bare_edge_forces_slow_path() {
+        let dim = make_dim("region");
+        let cycle = vec!["population".to_string(), "births".to_string()];
+        let mut edges = shapes_with(&[
+            ("population", "births", &[RefShape::Bare]),
+            ("births", "population", &[RefShape::Bare]),
+        ]);
+        let dims = vec![dim];
+        let lookup = dim_lookup(&["population", "births"], &dims);
+        // Without the marker the cycle is the A2A fast path (sanity check
+        // that the marker, not the shapes or dimensions, reclassifies it).
+        assert_eq!(
+            classify_cycle(&cycle, &edges, &lookup),
+            CycleClass::PureSameElementA2A {
+                dimensions: vec!["region".to_string()],
+            }
+        );
+        edges
+            .target_restricted_edges
+            .insert(("population".to_string(), "births".to_string()));
+        assert_eq!(
+            classify_cycle(&cycle, &edges, &lookup),
+            CycleClass::CrossElementOrMixed
+        );
+    }
+
+    /// The plain-`Ast::Arrayed` form of a target-restricted edge, end to
+    /// end: `births` reads `population` in its NYC slot only, so the loop
+    /// exists at NYC and nowhere else. On shapes and dimensions alone
+    /// (`{Bare}`, both variables over `[Region]`) the cycle would take the
+    /// fast path as one A2A loop over every element, scoring two loops that
+    /// do not exist; `model_edge_shapes` records the restriction, the tiered
+    /// enumerator takes the element-level slow path, which finds the NYC
+    /// circuit alone, and the loop builder emits it as ONE scalar loop whose
+    /// score is live in the simulation.
+    #[test]
+    fn partial_slot_arrayed_reference_takes_the_slow_path() {
+        use crate::db::{
+            DiagnosticError, SimlinDb, collect_all_diagnostics, model_ltm_variables,
+            set_project_ltm_enabled, sync_from_datamodel,
+        };
+        use crate::test_common::TestProject;
+
+        let project = TestProject::new("partial_slot")
+            .with_sim_time(0.0, 4.0, 1.0)
+            .named_dimension("Region", &["NYC", "Boston", "LA"])
+            .array_stock("population[Region]", "100", &["births"], &[], None)
+            .array_flow_with_ranges(
+                "births[Region]",
+                vec![("NYC", "population * 0.1"), ("Boston", "0"), ("LA", "0")],
+            );
+        let datamodel = project.build_datamodel();
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let (model, source_project) = (sync.models["main"].source, sync.project);
+
+        let shapes = model_edge_shapes(&db, model, source_project);
+        assert_eq!(
+            shapes.target_restricted_edges,
+            [("population".to_string(), "births".to_string())]
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            "the NYC-only read is the one restricted edge; got {shapes:?}"
+        );
+
+        let result = model_loop_circuits_tiered(&db, model, source_project);
+        assert!(
+            result.fast_path.is_empty(),
+            "a restricted edge must keep the cycle off the A2A fast path, got {result:?}"
+        );
+        let circuits: Vec<BTreeSet<&str>> = (0..result.slow_path.circuits.len())
+            .map(|i| result.slow_path.circuit_names(i).collect())
+            .collect();
+        assert_eq!(
+            circuits,
+            vec![
+                ["births[nyc]", "population[nyc]"]
+                    .into_iter()
+                    .collect::<BTreeSet<_>>()
+            ],
+            "the element graph holds the NYC circuit and no other"
+        );
+
+        set_project_ltm_enabled(&mut db, source_project, true);
+        let ltm = model_ltm_variables(&db, model, source_project);
+        let loop_scores: Vec<&crate::db::LtmSyntheticVar> = ltm
+            .vars
+            .iter()
+            .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}"))
+            .collect();
+        assert_eq!(
+            loop_scores.len(),
+            1,
+            "one loop, at NYC; got {:?}",
+            loop_scores.iter().map(|v| &v.name).collect::<Vec<_>>()
+        );
+        assert!(
+            loop_scores[0].dimensions.is_empty(),
+            "the NYC loop is one scalar loop, not an A2A loop over Region: {:?}",
+            loop_scores[0]
+        );
+
+        let failures: Vec<String> = collect_all_diagnostics(&db, source_project)
+            .iter()
+            .filter_map(|d| match &d.error {
+                DiagnosticError::Assembly(msg) if msg.contains("failed to compile") => {
+                    Some(format!("{:?}: {msg}", d.variable))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "LTM fragments failed to compile:\n{failures:?}"
+        );
+
+        let compiled = crate::db::compile_project_incremental(&db, source_project, "main")
+            .expect("the LTM-enabled fixture compiles");
+        let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation succeeds");
+        vm.run_to_end().expect("the simulation runs to completion");
+        let results = vm.into_results();
+        let name = &loop_scores[0].name;
+        let offset = *compiled
+            .offsets
+            .get(name.as_str())
+            .unwrap_or_else(|| panic!("{name} has no results offset"));
+        let series: Vec<f64> = (0..results.step_count)
+            .map(|step| results.data[step * results.step_size + offset])
+            .collect();
+        assert!(
+            series.iter().any(|v| v.is_finite() && *v != 0.0),
+            "{name} is identically zero across the run, which is what a dropped \
+             fragment looks like: {series:?}"
         );
     }
 

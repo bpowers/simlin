@@ -408,7 +408,13 @@ pub unsafe extern "C" fn simlin_model_get_var_names(
     *out_written = count;
 }
 
-/// Gets the incoming links (dependencies) for a variable
+/// Gets the incoming links (dependencies) for a variable: the variables of
+/// this model it reads, itself or through the private helpers its equation
+/// synthesizes. A read of another model's variable through a module instance
+/// (`child.output`) is not a variable of this model and is not listed --
+/// neither the composite nor the instance; a diagram draws that link to the
+/// module box (`layout::rendered_dependency_ident`), this surface lists
+/// variables.
 ///
 /// # Safety
 /// - `model` must be a valid pointer to a SimlinModel
@@ -505,40 +511,35 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
         }
     };
 
-    // The empty module-ident context and empty input set reproduce the old
-    // no-arg `variable_direct_dependencies` default path.
-    let empty_ctx = engine::db::ModuleIdentContext::new(&*db_locked, vec![]);
+    // The input-agnostic dependency set: no module instance is in hand here,
+    // and this is the memo the compiler's own dependency graph reads for an
+    // uninstantiated model.
     let empty_inputs = engine::db::ModuleInputSet::empty(&*db_locked);
     let var_deps = engine::db::variable_direct_dependencies(
         &*db_locked,
         source_var,
         source_project,
-        empty_ctx,
         empty_inputs,
     );
-    // Combine dt and initial deps from the variable itself plus any
-    // implicit variables. Implicit vars arise from SMOOTH/DELAY expansion
-    // and carry the transitive public deps we need.
+    // The variables of THIS model the variable reads, in either phase and
+    // under any lag, itself and through the helpers its parse synthesized
+    // (a SMOOTH/DELAY instance's inputs are the public dependencies the
+    // expansion moved into the instance's wiring). A read of another model's
+    // variable through a module instance (`m·x`) is not a variable of this
+    // model and is listed as nothing -- neither the composite nor the
+    // instance; a diagram draws that link to the module box, this surface
+    // lists variables. A private helper name is not a variable of the model
+    // either.
     let source_vars = source_model.variables(&*db_locked);
-    let mut all_deps = std::collections::BTreeSet::new();
-    for dep in var_deps.dt_deps.iter().chain(var_deps.initial_deps.iter()) {
-        all_deps.insert(dep.clone());
-    }
-    // For implicit module variables, also include their dependencies
-    // (these are the public inputs to SMOOTH/DELAY modules).
-    for implicit in &var_deps.implicit_vars {
-        for dep in implicit.dt_deps.iter().chain(implicit.initial_deps.iter()) {
-            all_deps.insert(dep.clone());
-        }
-    }
-    // Filter to only include public variables -- those that exist
-    // as source variables in the model. This excludes private/synthetic
-    // names from SMOOTH/DELAY expansion.
-    let mut deps: Vec<String> = all_deps
-        .into_iter()
+    let deps: Vec<String> = std::iter::once(&var_deps.deps)
+        .chain(var_deps.implicit_vars.iter().map(|implicit| &implicit.deps))
+        .flat_map(|deps| deps.iter())
+        .filter(|dep| dep.target.is_local())
+        .map(|dep| dep.target.variable.as_str().to_string())
         .filter(|name| source_vars.contains_key(name.as_str()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
         .collect();
-    deps.sort();
 
     if max == 0 {
         *out_written = deps.len();
@@ -737,13 +738,7 @@ pub unsafe extern "C" fn simlin_model_get_latex_equation(
         return ptr::null_mut();
     }
 
-    let empty_ctx = engine::db::ModuleIdentContext::new(&*db_locked, vec![]);
-    let parsed = engine::db::parse_source_variable_with_module_context(
-        &*db_locked,
-        source_var,
-        source_project,
-        empty_ctx,
-    );
+    let parsed = engine::db::parse_source_variable(&*db_locked, source_var, source_project);
     let ast = match parsed.variable.ast() {
         Some(a) => a,
         None => return ptr::null_mut(),

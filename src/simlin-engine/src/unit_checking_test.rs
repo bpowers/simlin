@@ -863,20 +863,11 @@ mod tests {
         // Diagnostics should surface the unit mismatch (as Unit diagnostic
         // or as a Model-level UnitMismatch error from inference failure)
         let diagnostics = collect_all_diagnostics(&db, sync_result.project);
-        let has_unit_issues = diagnostics.iter().any(|d| {
-            matches!(d.error, DiagnosticError::Unit(_))
-                || matches!(
-                    &d.error,
-                    DiagnosticError::Model(e) if e.code == crate::ErrorCode::UnitMismatch
-                )
-        });
+        let has_unit_issues = diagnostics
+            .iter()
+            .any(|d| matches!(d.error, DiagnosticError::Unit(_)));
         let has_blocking_errors = diagnostics.iter().any(|d| {
-            d.severity == DiagnosticSeverity::Error
-                && !matches!(d.error, DiagnosticError::Unit(_))
-                && !matches!(
-                    &d.error,
-                    DiagnosticError::Model(e) if e.code == crate::ErrorCode::UnitMismatch
-                )
+            d.severity == DiagnosticSeverity::Error && !matches!(d.error, DiagnosticError::Unit(_))
         });
 
         assert!(
@@ -940,20 +931,11 @@ mod tests {
 
         // Diagnostics should surface the unit mismatch
         let diagnostics = collect_all_diagnostics(&db, sync_result.project);
-        let has_unit_issues = diagnostics.iter().any(|d| {
-            matches!(d.error, DiagnosticError::Unit(_))
-                || matches!(
-                    &d.error,
-                    DiagnosticError::Model(e) if e.code == crate::ErrorCode::UnitMismatch
-                )
-        });
+        let has_unit_issues = diagnostics
+            .iter()
+            .any(|d| matches!(d.error, DiagnosticError::Unit(_)));
         let has_blocking_errors = diagnostics.iter().any(|d| {
-            d.severity == DiagnosticSeverity::Error
-                && !matches!(d.error, DiagnosticError::Unit(_))
-                && !matches!(
-                    &d.error,
-                    DiagnosticError::Model(e) if e.code == crate::ErrorCode::UnitMismatch
-                )
+            d.severity == DiagnosticSeverity::Error && !matches!(d.error, DiagnosticError::Unit(_))
         });
 
         assert!(
@@ -998,12 +980,13 @@ mod tests {
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
         let diagnostics = collect_all_diagnostics(&db, sync.project);
-        let umbrella = diagnostics.iter().find_map(|d| match &d.error {
-            DiagnosticError::Model(e) if e.code == crate::ErrorCode::UnitMismatch => {
-                Some(e.details.clone().unwrap_or_default())
-            }
-            _ => None,
-        });
+        let umbrella =
+            diagnostics.iter().find_map(|d| match &d.error {
+                DiagnosticError::Unit(crate::common::UnitError::InferenceError {
+                    details, ..
+                }) if d.variable.is_none() => Some(details.clone().unwrap_or_default()),
+                _ => None,
+            });
         let detail = umbrella.expect("expected a model-level unit inference warning");
         assert!(
             !detail.contains('\n') && !detail.contains("1 =="),

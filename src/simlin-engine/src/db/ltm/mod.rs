@@ -27,9 +27,9 @@ use crate::datamodel;
 use crate::ltm::strip_subscript;
 
 use super::{
-    Db, SourceModel, SourceProject, SourceVariable, SourceVariableKind, compute_layout,
-    model_causal_edges, model_implicit_var_info, project_datamodel_dims,
-    project_dimensions_context, reconstruct_single_variable,
+    Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceModel, SourceProject,
+    SourceVariable, SourceVariableKind, lowered_variable_by_name, model_causal_edges,
+    project_datamodel_dims, project_dimensions_context,
 };
 
 mod compile;
@@ -45,11 +45,11 @@ pub use equation::{LtmArm, LtmEquation};
 // `use ltm::*` / `pub use ltm::{...}` blocks) reach. The directory keeps the
 // internal helpers `pub(super)` within the `ltm` subtree; only the names that
 // escape it are widened here.
-// `compile_ltm_var_fragment` / `link_score_equation_text_shaped` keep the `pub`
+// `compile_ltm_var_fragment` / `shaped_link_score` keep the `pub`
 // surface the `db.rs` root re-exports with `pub use ltm::{...}`.
 #[cfg(test)]
 pub(crate) use compile::ForcePartialEquationErrorGuard;
-pub use compile::{ShapedLinkScore, compile_ltm_var_fragment, link_score_equation_text_shaped};
+pub use compile::{ShapedLinkScore, compile_ltm_var_fragment, shaped_link_score};
 pub(crate) use compile::{
     compile_ltm_fragment_for, compile_ltm_implicit_var_fragment, model_ltm_fragment_diagnostics,
 };
@@ -59,8 +59,6 @@ pub(crate) use compile::{
 // variable's compile directly rather than through a whole-model walk.
 #[cfg(test)]
 pub(crate) use compile::compile_ltm_synthetic_fragment;
-pub(crate) use link_scores::emit_ltm_partial_equation_warning;
-#[cfg(test)]
 pub(crate) use link_scores::ltm_partial_equation_warning_message;
 pub(crate) use loops::build_loops_from_tiered;
 // The single row/slot derivation (invariant I4 of the shape-expressiveness
@@ -111,6 +109,81 @@ use link_scores::{
 };
 pub(crate) use loops::recover_agg_hop_polarities;
 use parse::parse_ltm_equation;
+
+/// An LTM `Warning` as `model_ltm_variables` derives it: against `variable`
+/// when the advisory is about one synthetic variable or pin, else against the
+/// model. Assembly-shaped -- the analysis overlay refusing or degrading a
+/// construct, in prose -- so it can never read as a project compile error.
+pub(super) fn ltm_warning(model: &str, variable: Option<&str>, message: String) -> Diagnostic {
+    Diagnostic {
+        model: model.to_string(),
+        variable: variable.map(str::to_owned),
+        owner: None,
+        severity: DiagnosticSeverity::Warning,
+        error: DiagnosticError::Assembly(message),
+    }
+}
+
+/// What `model_ltm_variables` records beside the variables it emits: the
+/// warnings it raised, in order -- returned as `LtmVariablesResult::diagnostics`,
+/// never accumulated, since a parent reaches a child's derivation through
+/// module scoring and layout and only `db::model_all_diagnostics` emits a
+/// model's facts -- and the edges it declined to score (the GH #758 contract:
+/// no link-score variable, every loop score through the edge dropped rather
+/// than a zero stub; `insert` returning `false` keeps a re-visit silent).
+pub(super) struct LtmWarnings {
+    model: String,
+    pub(super) unscoreable_edges: HashSet<(String, String)>,
+    pub(super) diagnostics: Vec<Diagnostic>,
+}
+
+impl LtmWarnings {
+    fn new(model: String) -> Self {
+        LtmWarnings {
+            model,
+            unscoreable_edges: HashSet::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    /// Record a `Warning` against `variable`, or against the model.
+    pub(super) fn warn(&mut self, variable: Option<&str>, message: String) {
+        self.diagnostics
+            .push(ltm_warning(&self.model, variable, message));
+    }
+}
+
+/// The declared dimensions of a causal-graph endpoint of `model` -- the one
+/// answer to "what shape does the name `name` have" that every LTM surface
+/// reads: causal edges, the element graph, scores, loops and pins.
+///
+/// The projection of [`crate::db::var_fragment::model_dep_shape`] -- the
+/// fragment compiler's own dependency shape, through the per-name firewall
+/// queries -- onto plain variables: an explicit variable's declared axes, a
+/// parse-synthesized helper's storage (a structural `PREVIOUS`/`INIT` capture
+/// is arrayed over its parent's declared axes, every other helper is one
+/// slot), `None` for a module instance, explicit or implicit (a scalar node
+/// in the graph whatever its ports' shapes), and for a name the model does
+/// not declare.
+///
+/// One shape answer is not one emitter. An element-bound helper (a
+/// per-element capture or hoisted argument of an apply-to-all body) is scalar
+/// storage whose edge into its arrayed parent exists at ONE element, so the
+/// scalar-source emitters (`try_scalar_to_arrayed_link_scores`, the
+/// scalar-feeder arm of `emit_source_to_agg_link_scores`) admit only explicit
+/// scalar sources and leave that edge to
+/// `try_implicit_scalar_to_arrayed_link_scores`, which scores it into the one
+/// element that reads it.
+pub(crate) fn endpoint_dimensions(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    name: &str,
+) -> Option<Vec<crate::dimensions::Dimension>> {
+    use crate::compiler::fragment::DepKind;
+    let shape = crate::db::var_fragment::model_dep_shape(db, model, project, name)?;
+    matches!(shape.kind, DepKind::Var).then_some(shape.dims)
+}
 
 /// The single integration method the assembled simulation actually runs, when
 /// it is NOT Euler.
@@ -269,7 +342,7 @@ fn model_is_stateless(
 /// PREVIOUS-lagged dt dependency -- the lagged-state leg of
 /// [`model_is_stateless`] (GH #749).
 ///
-/// Checks `previous_only` references (`dt_previous_referenced_vars`): a
+/// Checks the previous-only reads (`DepRefs::dt_previous_only`): a
 /// reference that appears both inside and outside `PREVIOUS(...)` keeps its
 /// instantaneous edge, so a cycle through it could only compile if some
 /// OTHER edge breaks it -- and that breaking edge is itself previous-only
@@ -290,18 +363,17 @@ fn model_is_stateless(
 /// (GH #773). A parent-level lag OF a module output (`PREVIOUS(m.out)`)
 /// IS counted: the previous_only entry is the parent variable's own.
 ///
-/// Uses the same empty module-ident context / empty input set as
-/// `model_causal_edges`, so the per-variable dependency queries are shared
-/// salsa cache hits.
+/// Uses the same empty input set as `model_causal_edges`, so the per-variable
+/// dependency queries are shared salsa cache hits.
 fn model_has_lagged_dt_deps(db: &dyn Db, model: SourceModel, project: SourceProject) -> bool {
-    let empty_ctx = super::ModuleIdentContext::new(db, vec![]);
     let empty_inputs = super::ModuleInputSet::empty(db);
     model.variables(db).values().any(|sv| {
         !matches!(
             sv.kind(db),
             SourceVariableKind::Stock | SourceVariableKind::Module
-        ) && !super::variable_direct_dependencies(db, *sv, project, empty_ctx, empty_inputs)
-            .dt_previous_referenced_vars
+        ) && !super::variable_direct_dependencies(db, *sv, project, empty_inputs)
+            .deps
+            .dt_previous_only()
             .is_empty()
     })
 }
@@ -360,7 +432,19 @@ fn modules_carry_state(
 /// Every LTM parse site MUST pass the same set: `model_ltm_implicit_var_info`
 /// (which decides which helpers exist and get layout slots) and the fragment
 /// compilers / `assemble_module` (which compile them) have to agree on
-/// whether a given PREVIOUS argument synthesizes a helper.
+/// whether a given PREVIOUS argument synthesizes a helper. It is the ONE
+/// model-level fact an LTM parse reads; which names are module instances is
+/// not one: a generated equation spells a module output as the quoted
+/// composite `"m·port"` that lowering resolves to the port's slot, and a bare
+/// `PREVIOUS(m)` of an instance is refused at lowering rather than captured
+/// (`db::ltm_tests::test_ltm_bare_module_snapshot_is_refused_at_lowering`).
+///
+/// The source parse decides the same index against the referenced variable's
+/// declared axis instead (`builtins_visitor::SnapshotIndexFacts::Axes`). The
+/// generated path cannot: a generated equation may subscript an LTM synthetic
+/// variable or a helper, neither of which is a `SourceVariable` with declared
+/// axes to ask, so it resolves a bare element against every dimension and
+/// this whole name set.
 #[salsa::tracked(returns(ref))]
 pub(super) fn ltm_model_var_names(
     db: &dyn Db,
@@ -372,37 +456,6 @@ pub(super) fn ltm_model_var_names(
         .keys()
         .map(|name| Ident::new(name))
         .collect()
-}
-
-/// Salsa-tracked: the LTM fragment compilers consult this once per synthetic
-/// variable (tens of thousands of times on large models), and rebuilding the
-/// set from every source variable per call was a measurable fraction of LTM
-/// compile time (GH #655).
-#[salsa::tracked(returns(ref))]
-pub(super) fn ltm_module_idents(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-) -> HashSet<Ident<Canonical>> {
-    let source_vars = model.variables(db);
-    let mut module_idents: HashSet<Ident<Canonical>> = source_vars
-        .iter()
-        .filter_map(|(name, source_var)| {
-            if source_var.kind(db) == SourceVariableKind::Module {
-                Some(Ident::new(name))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    for (name, meta) in model_implicit_var_info(db, model, project).iter() {
-        if meta.is_module {
-            module_idents.insert(Ident::new(name));
-        }
-    }
-
-    module_idents
 }
 
 /// The canonical cyclic rotation of a loop's **variable-level** node
@@ -461,39 +514,6 @@ struct ModuleLinkOverrides {
     overrides: LoopLinkOverrides,
     /// The alias synthetic vars (deduped by name) the overrides reference.
     alias_vars: Vec<super::LtmSyntheticVar>,
-}
-
-/// Read the output port a (non-module) variable `y` reads off module `m`.
-///
-/// `y`'s equation references the module output via interpunct notation
-/// `m·{port}`; return `{port}`. LTM-internal references (`m·$⁚ltm⁚…`) are
-/// excluded -- the loop traverses a real model output, never a synthetic.
-/// Returns the unique such port, or `None` when `y` reads zero or several
-/// (a multi-output read in one variable is ambiguous and left to the base
-/// link score's fallback).
-fn module_exit_port_for_reader(
-    module_name: &str,
-    reader: &crate::variable::Variable,
-) -> Option<String> {
-    let ast = reader.ast()?;
-    let deps = crate::variable::identifier_set(ast, &[], None);
-    let prefix = format!("{module_name}\u{00B7}");
-    let mut found: Option<String> = None;
-    for dep in deps {
-        let Some(port) = dep.as_str().strip_prefix(&prefix) else {
-            continue;
-        };
-        // Skip the module's synthetic LTM internals (`m·$⁚ltm⁚…`).
-        if port.starts_with('$') {
-            continue;
-        }
-        if found.is_some() {
-            // Two distinct output ports read by the same variable: ambiguous.
-            return None;
-        }
-        found = Some(port.to_string());
-    }
-    found
 }
 
 /// The selection equation + accumulator helpers that pick the pathway with the
@@ -664,11 +684,11 @@ fn compute_module_link_overrides(
             // `from` feeds MORE THAN ONE input port of the module, the collapsed
             // `from -> module` edge is genuinely ambiguous (no single entry
             // pathway to override against), so skip it and leave the base link
-            // score (its composite reference) in place -- mirroring
-            // `module_exit_port_for_reader`'s multi-match -> None semantics and
+            // score (its composite reference) in place -- mirroring the exit
+            // port's multi-match -> None semantics (`unique_module_output`) and
             // the discovery-side `recompute_module_input_edge_series` (GH #698 /
             // PR #705 r3353459409).
-            let module_var = reconstruct_single_variable(db, model, project, module_name);
+            let module_var = lowered_variable_by_name(db, model, project, module_name);
             let Some(crate::variable::VarKind::Module { inputs, .. }) =
                 module_var.as_ref().map(|v| &v.kind)
             else {
@@ -686,58 +706,20 @@ fn compute_module_link_overrides(
                 continue;
             }
 
-            // Exit port from the next link `(m → y)`.
+            // Exit port from the next link `(m → y)`: the one output of `m`
+            // that `y` reads -- through its equation or, for a module `y`,
+            // through its input wiring -- as the causal-edge builder recorded
+            // it. `y` reading TWO DISTINCT outputs of `m` leaves the collapsed
+            // `m -> y` edge no unique exit port: decline (ambiguous) and leave
+            // the base link score in place, as the discovery-side
+            // `recompute_module_input_edge_series` does (GH #698 / PR #705
+            // r3353597299). Two inputs naming the SAME `m·port` are NOT
+            // ambiguous: a unique distinct port is fine.
             let y = strip_subscript(next.to.as_str());
-            let exit_port = {
-                let y_is_module = edges_result.dynamic_modules.contains_key(y)
-                    || source_vars
-                        .get(y)
-                        .is_some_and(|sv| sv.kind(db) == SourceVariableKind::Module);
-                if y_is_module {
-                    // `y` is a module: m's output feeds y's input port(s). y's
-                    // ModuleInput src is the qualified `m·{port}`; the exit port
-                    // is the `{port}` whose normalized ref is `m`. If `y` reads
-                    // TWO DISTINCT output ports of `m` on different inputs, the
-                    // collapsed `m -> y` edge has no unique exit port -- decline
-                    // (ambiguous) and leave the base link score in place,
-                    // mirroring `module_exit_port_for_reader`'s multi-match ->
-                    // None semantics and the discovery-side
-                    // `recompute_module_input_edge_series` (GH #698 / PR #705
-                    // r3353597299). Two inputs naming the SAME `m·port` are NOT
-                    // ambiguous: a unique distinct port is fine.
-                    let y_var = reconstruct_single_variable(db, model, project, y);
-                    let module_ident = Ident::<Canonical>::new(module_name);
-                    match y_var.map(|v| v.kind) {
-                        Some(crate::variable::VarKind::Module { inputs: y_in, .. }) => {
-                            let mut exit: Option<String> = None;
-                            let mut ambiguous = false;
-                            for inp in &y_in {
-                                if normalize_module_ref(&inp.src) != module_ident {
-                                    continue;
-                                }
-                                let Some((_, port)) = inp.src.as_str().split_once('\u{00B7}')
-                                else {
-                                    continue;
-                                };
-                                match &exit {
-                                    Some(prev) if prev != port => {
-                                        ambiguous = true;
-                                        break;
-                                    }
-                                    Some(_) => {}
-                                    None => exit = Some(port.to_string()),
-                                }
-                            }
-                            if ambiguous { None } else { exit }
-                        }
-                        _ => None,
-                    }
-                } else {
-                    reconstruct_single_variable(db, model, project, y)
-                        .and_then(|y_var| module_exit_port_for_reader(module_name, &y_var))
-                }
-            };
-            let Some(exit_port) = exit_port else {
+            let Some(exit_port) = edges_result
+                .unique_module_output(y, &Ident::<Canonical>::new(module_name))
+                .map(|port| port.as_str().to_string())
+            else {
                 continue;
             };
 
@@ -815,42 +797,37 @@ fn compute_module_link_overrides(
     }
 }
 
-/// Metadata about implicit variables generated by LTM equation parsing.
+/// Metadata about the capture helpers generated by LTM equation parsing.
 ///
-/// LTM equations may synthesize helper auxes for intrinsic PREVIOUS/INIT
-/// routing and may also expand stdlib module calls such as SMOOTH/DELAY.
-/// This structure collects those implicit variables across all LTM
-/// equations in a model so that `compute_layout` can allocate slots and
-/// `assemble_module` can compile them.
+/// An LTM equation synthesizes `PREVIOUS`/`INIT` capture helpers and nothing
+/// else: it is generated from a target's already-expanded tree, so it
+/// contains no module-function call to expand into an instance. This
+/// structure collects those helpers across all LTM equations in a model so
+/// that `compute_layout` can allocate slots and `assemble_module` can compile
+/// them; the module-instance universe is the source models' alone
+/// (`db::assemble::enumerate_module_instances`).
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
 pub struct LtmImplicitVarMeta {
     /// Canonical name of the LTM variable that created this implicit var
     pub ltm_parent_name: String,
-    /// Whether this implicit var is a stock
-    pub is_stock: bool,
-    /// Whether this implicit var is a module
-    pub is_module: bool,
-    /// Sub-model name if is_module is true
-    pub model_name: Option<String>,
-    /// Size in slots (for scalar vars: 1; for modules: sub-model n_slots)
+    /// Size in slots: 1 for a scalar capture, product(dim lengths) for a
+    /// structural capture over its parent's axes.
     pub size: usize,
     /// The implicit variable itself, exactly as LTM equation parsing
     /// synthesized it. Carrying it here means downstream consumers
-    /// (`assemble_module`'s LTM-implicit compile loop, the implicit fragment
-    /// compiler, module-instance enumeration) read it directly instead of
-    /// re-parsing the parent LTM equation -- which previously happened 2-3
-    /// times per synthetic variable and was a measurable fraction of LTM
-    /// compile time on large models (GH #655).
+    /// (`assemble_module`'s LTM-implicit compile loop and the implicit
+    /// fragment compiler) read it directly instead of re-parsing the parent
+    /// LTM equation -- 2-3 parses per synthetic variable, a measurable
+    /// fraction of LTM compile time on large models (GH #655).
     pub variable: crate::capture::ImplicitVar,
 }
 
 /// Cached implicit variable info for all LTM synthetic variables.
 ///
-/// Parses each LTM equation to discover implicit helper/module variables,
-/// caching the results. Both `compute_layout` and `assemble_module` read
-/// this to allocate slots and compile fragments for those implicit vars
-/// within LTM equations.
+/// Parses each LTM equation to discover its capture helpers, caching the
+/// results. Both `compute_layout` and `assemble_module` read this to allocate
+/// slots and compile fragments for those helpers.
 ///
 /// **The parse here is DELIBERATELY duplicated** with the one
 /// `compile_ltm_equation_fragment` performs, and that is a measured space-time
@@ -890,58 +867,26 @@ pub fn model_ltm_implicit_var_info(
     let ltm_vars = model_ltm_variables(db, model, project);
 
     let dim_ctx = project_dimensions_context(db, project);
-    let module_idents = ltm_module_idents(db, model, project);
     let model_var_names = ltm_model_var_names(db, model, project);
 
     let mut result = HashMap::new();
 
     for ltm_var in &ltm_vars.vars {
-        let parsed = parse_ltm_equation(
-            &ltm_var.name,
-            &ltm_var.equation,
-            dim_ctx,
-            Some(module_idents),
-            Some(model_var_names),
-        );
-
-        let project_models = project.models(db);
+        let parsed = parse_ltm_equation(&ltm_var.name, &ltm_var.equation, dim_ctx, model_var_names);
 
         for implicit_var in parsed.implicit_vars.iter() {
             let im_name = canonicalize(implicit_var.ident()).into_owned();
-            let is_module = implicit_var.is_module();
-            let is_stock = implicit_var.is_stock();
-            let model_name = implicit_var.module().map(|m| m.model_name.clone());
-            let size = if is_module {
-                model_name
-                    .as_deref()
-                    .and_then(|mn| {
-                        let sub_canonical = canonicalize(mn);
-                        project_models
-                            .get(sub_canonical.as_ref())
-                            .map(|sm| compute_layout(db, *sm, project).n_slots)
-                    })
-                    .unwrap_or(1)
-            } else {
-                // A non-module helper is usually a scalar aux (1 slot), but
-                // an ARRAYED capture helper -- the GH #541 arrayed
-                // `PREVIOUS`/`INIT` capture, extended to array-valued builtin
-                // subtrees like `rank(pop, 1)` by GH #742 -- occupies
-                // product(dim lengths) slots. Laid out at size 1 it would
-                // overlap its successors' slots and consumers would read it
-                // as scalar.
-                ltm_implicit_helper_size(
-                    crate::db::project_dimensions_context(db, project),
-                    implicit_var,
-                )
-            };
+            // A helper is usually a scalar aux (1 slot), but a structural
+            // capture -- a snapshot-only apply-to-all body, captured once over
+            // the parent's dimensions -- occupies product(dim lengths) slots.
+            // Laid out at size 1 it would overlap its successors' slots and
+            // consumers would read it as scalar.
+            let size = ltm_implicit_helper_size(dim_ctx, implicit_var);
 
             result.insert(
                 im_name,
                 LtmImplicitVarMeta {
                     ltm_parent_name: ltm_var.name.clone(),
-                    is_stock,
-                    is_module,
-                    model_name,
                     size,
                     variable: implicit_var.clone(),
                 },
@@ -952,10 +897,10 @@ pub fn model_ltm_implicit_var_info(
     result
 }
 
-/// Slot count of a non-module LTM implicit helper: 1 for a scalar one,
-/// product(dim lengths) for an arrayed capture. An unknown dimension name
-/// degrades to 1 per axis (defensive -- the helper's own fragment compile
-/// rejects it loudly).
+/// Slot count of an LTM implicit helper: 1 for a scalar one, product(dim
+/// lengths) for an arrayed capture. An unknown dimension name degrades to 1
+/// per axis (defensive -- the helper's own fragment compile rejects it
+/// loudly).
 fn ltm_implicit_helper_size(
     dim_ctx: &crate::dimensions::DimensionsContext,
     var: &crate::capture::ImplicitVar,
@@ -1092,18 +1037,17 @@ pub fn model_ltm_variables(
 ) -> super::LtmVariablesResult {
     use crate::common::Ident;
     use crate::ltm::{CyclePartitions, Loop};
-    use salsa::Accumulator;
     use std::collections::HashSet;
 
     use super::{
-        CompilationDiagnostic, Diagnostic, DiagnosticError, DiagnosticSeverity, LtmSyntheticVar,
-        LtmVariablesResult, causal_graph_from_edges, causal_graph_with_modules,
+        LtmSyntheticVar, LtmVariablesResult, causal_graph_from_edges, causal_graph_with_modules,
         generate_max_abs_selection, model_causal_edges, model_element_cycle_partitions,
         model_loop_circuits_tiered, model_pinned_loops, module_input_pathways_from_edges,
     };
 
     use super::LtmMode;
 
+    let mut warnings = LtmWarnings::new(model.name(db).clone());
     let edges_result = model_causal_edges(db, model, project);
 
     // Determine output ports for this model and the internal input->output
@@ -1152,6 +1096,7 @@ pub fn model_ltm_variables(
             agg_recovery_truncated: false,
             pathways_truncated: false,
             mode: model_ltm_mode(db, model, project),
+            diagnostics: warnings.diagnostics,
         };
     }
 
@@ -1187,19 +1132,14 @@ pub fn model_ltm_variables(
             rejection.axis.describe(),
             rejection.limit,
         );
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: Some(rejection.variable.clone()),
-            error: DiagnosticError::Assembly(msg),
-            severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
+        warnings.warn(Some(&rejection.variable), msg);
         return LtmVariablesResult {
             vars: vec![],
             loop_partitions: indexmap::IndexMap::new(),
             agg_recovery_truncated: false,
             pathways_truncated: false,
             mode: model_ltm_mode(db, model, project),
+            diagnostics: warnings.diagnostics,
         };
     }
 
@@ -1272,13 +1212,7 @@ pub fn model_ltm_variables(
             var_scc_size,
             crate::ltm::MAX_LTM_SCC_NODES,
         );
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: None,
-            error: DiagnosticError::Assembly(msg),
-            severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
+        warnings.warn(None, msg);
     }
     let mut is_discovery = is_discovery_user || var_auto_flipped;
 
@@ -1308,13 +1242,7 @@ pub fn model_ltm_variables(
             model.name(db).as_str(),
             ports,
         );
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: None,
-            error: DiagnosticError::Assembly(msg),
-            severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
+        warnings.warn(None, msg);
     }
 
     let mut vars = Vec::new();
@@ -1342,18 +1270,15 @@ pub fn model_ltm_variables(
         if !agg.is_synthetic {
             continue;
         }
-        // The equation text is the canonical reducer subexpression. A
+        // The equation is the classified reducer itself, as a typed arm. A
         // whole-extent or pinned-slice reducer (`SUM(pop[*])`,
         // `SUM(pop[NYC,*])`) has a scalar result; a partial-reduce slice over
         // an iterated dimension (`SUM(matrix[D1,*])` inside an A2A-over-`D1`
         // body) has `result_dims = [D1]` -- in an A2A-over-`D1` body
         // `matrix[D1,*]` is exactly "the `D1`-th row, all of axis 2", so this
         // evaluates correctly as the `Equation::ApplyToAll` body.
-        let equation = if agg.result_dims.is_empty() {
-            LtmEquation::scalar(agg.equation_text.clone())
-        } else {
-            LtmEquation::apply_to_all(agg.result_dims.clone(), agg.equation_text.clone())
-        };
+        let equation = LtmEquation::Scalar(LtmArm::from_typed(agg.reducer_expr0()))
+            .retarget_dims(&agg.result_dims);
         vars.push(LtmSyntheticVar {
             name: agg.name.clone(),
             equation,
@@ -1409,13 +1334,7 @@ pub fn model_ltm_variables(
                  strategy.",
                 crate::ltm::ltm_circuit_budget(),
             );
-            CompilationDiagnostic(Diagnostic {
-                model: model.name(db).clone(),
-                variable: None,
-                error: DiagnosticError::Assembly(msg),
-                severity: DiagnosticSeverity::Warning,
-            })
-            .accumulate(db);
+            warnings.warn(None, msg);
             is_discovery = true;
             None
         }
@@ -1436,13 +1355,7 @@ pub fn model_ltm_variables(
                 tiered.slow_path_largest_scc,
                 crate::ltm::MAX_LTM_SCC_NODES,
             );
-            CompilationDiagnostic(Diagnostic {
-                model: model.name(db).clone(),
-                variable: None,
-                error: DiagnosticError::Assembly(msg),
-                severity: DiagnosticSeverity::Warning,
-            })
-            .accumulate(db);
+            warnings.warn(None, msg);
             is_discovery = true;
             None
         } else if tiered.fast_path.is_empty() && tiered.slow_path.is_empty() {
@@ -1455,6 +1368,7 @@ pub fn model_ltm_variables(
                     agg_recovery_truncated: false,
                     pathways_truncated: false,
                     mode: LtmMode::Exhaustive,
+                    diagnostics: warnings.diagnostics,
                 };
             }
             None
@@ -1467,7 +1381,6 @@ pub fn model_ltm_variables(
             let (mut detected, truncated_aggs) = build_loops_from_tiered(
                 tiered,
                 &var_graph,
-                source_vars,
                 db,
                 model,
                 project,
@@ -1492,13 +1405,7 @@ pub fn model_ltm_variables(
                     cross_agg_budget,
                     truncated_aggs.join(", "),
                 );
-                CompilationDiagnostic(Diagnostic {
-                    model: model.name(db).clone(),
-                    variable: None,
-                    error: DiagnosticError::Assembly(msg),
-                    severity: DiagnosticSeverity::Warning,
-                })
-                .accumulate(db);
+                warnings.warn(None, msg);
             }
             agg_recovery_truncated = !truncated_aggs.is_empty();
             // GH #516: hops into/out of synthetic `$⁚ltm⁚agg⁚{n}` nodes come
@@ -1520,16 +1427,6 @@ pub fn model_ltm_variables(
     // identical to the pre-#461 compile-time emitter (GH #468).
     let mut loop_partitions: indexmap::IndexMap<String, Vec<Option<usize>>> =
         indexmap::IndexMap::new();
-
-    // GH #758: the (from, to) edges the conservative per-shape emitter
-    // declined to score (arrayed endpoints whose dimensions don't
-    // correspond -- see `emit_unscoreable_conservative_edge_warning`).
-    // Such an edge has no link-score variable, so a loop-score product
-    // through it could only be a guaranteed-zero stub (its fragment either
-    // fail-warns on the subscripted missing name or silently multiplies a
-    // 0 stub-dep): loop scores traversing any of these edges are dropped
-    // below, covered by the edge's single Warning.
-    let mut unscoreable_edges: HashSet<(String, String)> = HashSet::new();
 
     // Part 1: Link scores.
     // Sub-models and discovery mode need scores for ALL edges (pathways
@@ -1556,7 +1453,7 @@ pub fn model_ltm_variables(
                     dm_dims,
                     /* skip_agg_halves = */ false,
                     &mut vars,
-                    &mut unscoreable_edges,
+                    &mut warnings,
                 );
             }
         }
@@ -1605,19 +1502,18 @@ pub fn model_ltm_variables(
                         model,
                         project,
                         &mut vars,
-                        &mut unscoreable_edges,
+                        &mut warnings,
                     );
                 } else if let Some(agg) = agg_by_name(from_var_level) {
                     emit_agg_to_target_link_scores(
                         db,
-                        source_vars,
                         agg_nodes,
                         agg,
                         to_var_level,
                         model,
                         project,
                         &mut vars,
-                        &mut unscoreable_edges,
+                        &mut warnings,
                     );
                 } else {
                     emit_link_scores_for_edge(
@@ -1631,7 +1527,7 @@ pub fn model_ltm_variables(
                         dm_dims,
                         /* skip_agg_halves = */ true,
                         &mut vars,
-                        &mut unscoreable_edges,
+                        &mut warnings,
                     );
                 }
             }
@@ -1652,9 +1548,8 @@ pub fn model_ltm_variables(
     // cycles). Such a loop's score product would multiply a never-emitted
     // link-score name -- a guaranteed-zero stub -- so it is dropped from
     // scoring; the edge's single Warning covers the degradation. Takes the
-    // edge set as a parameter (rather than capturing `unscoreable_edges`)
-    // because the pinned-loop pass below still mutates the set between
-    // calls.
+    // edge set as a parameter (rather than capturing `warnings`) because the
+    // pinned-loop pass below still mutates it between calls.
     fn traverses_unscoreable(
         l: &crate::ltm::Loop,
         unscoreable_edges: &HashSet<(String, String)>,
@@ -1670,18 +1565,15 @@ pub fn model_ltm_variables(
         link_hits(&l.links) || l.slot_links.iter().any(|(_, links)| link_hits(links))
     }
 
-    fn emit_unresolved_loop_score_warning(db: &dyn Db, model: SourceModel, loop_id: &str) {
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: Some(format!("$⁚ltm⁚loop_score⁚{loop_id}")),
-            error: DiagnosticError::Assembly(format!(
+    fn emit_unresolved_loop_score_warning(warnings: &mut LtmWarnings, loop_id: &str) {
+        warnings.warn(
+            Some(&format!("$⁚ltm⁚loop_score⁚{loop_id}")),
+            format!(
                 "LTM loop score {loop_id} was not emitted because its link-score product \
                  references a link-score variable that was not emitted; the affected loop is \
                  not scored instead of compiling through a missing-name zero stub"
-            )),
-            severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
+            ),
+        );
     }
 
     if let Some(ref detected_loops) = loops {
@@ -1689,12 +1581,12 @@ pub fn model_ltm_variables(
         // (no unscoreable edge) borrows `detected_loops` unfiltered so the
         // hot path allocates nothing.
         let filtered_loops: Vec<crate::ltm::Loop>;
-        let detected_loops: &[crate::ltm::Loop] = if unscoreable_edges.is_empty() {
+        let detected_loops: &[crate::ltm::Loop] = if warnings.unscoreable_edges.is_empty() {
             detected_loops
         } else {
             filtered_loops = detected_loops
                 .iter()
-                .filter(|l| !traverses_unscoreable(l, &unscoreable_edges))
+                .filter(|l| !traverses_unscoreable(l, &warnings.unscoreable_edges))
                 .cloned()
                 .collect();
             &filtered_loops
@@ -1789,7 +1681,7 @@ pub fn model_ltm_variables(
         for l in detected_loops {
             let expected = format!("$⁚ltm⁚loop_score⁚{}", l.id);
             if !emitted_loop_score_names.contains(&expected) {
-                emit_unresolved_loop_score_warning(db, model, l.id.as_str());
+                emit_unresolved_loop_score_warning(&mut warnings, l.id.as_str());
             }
         }
         for (name, equation) in loop_vars {
@@ -1831,13 +1723,7 @@ pub fn model_ltm_variables(
         // mode change: a `Warning`. Without this a typo'd or stale pin would
         // silently score nothing, which is the failure mode #466 warns about.
         let _ = name;
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: None,
-            error: DiagnosticError::Assembly(reason.clone()),
-            severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
+        warnings.warn(None, reason.clone());
     }
     if !pinned.loops.is_empty() {
         // The variable-level node set of each already-emitted enumerated loop,
@@ -1926,19 +1812,18 @@ pub fn model_ltm_variables(
                             model,
                             project,
                             &mut vars,
-                            &mut unscoreable_edges,
+                            &mut warnings,
                         );
                     } else if let Some(agg) = agg_by_name(from_var_level) {
                         emit_agg_to_target_link_scores(
                             db,
-                            source_vars,
                             agg_nodes,
                             agg,
                             to_var_level,
                             model,
                             project,
                             &mut vars,
-                            &mut unscoreable_edges,
+                            &mut warnings,
                         );
                     } else {
                         emit_link_scores_for_edge(
@@ -1952,7 +1837,7 @@ pub fn model_ltm_variables(
                             dm_dims,
                             /* skip_agg_halves = */ true,
                             &mut vars,
-                            &mut unscoreable_edges,
+                            &mut warnings,
                         );
                     }
                 }
@@ -1965,21 +1850,18 @@ pub fn model_ltm_variables(
                 // Checked AFTER the link-score emission above so the gate
                 // has classified this cycle's edges even when no enumerated
                 // loop visited them.
-                if traverses_unscoreable(pin_loop, &unscoreable_edges) {
+                if traverses_unscoreable(pin_loop, &warnings.unscoreable_edges) {
                     if !warned_unscoreable_pin {
                         warned_unscoreable_pin = true;
-                        CompilationDiagnostic(Diagnostic {
-                            model: model.name(db).clone(),
-                            variable: None,
-                            error: DiagnosticError::Assembly(format!(
+                        warnings.warn(
+                            None,
+                            format!(
                                 "pinned loop '{}' traverses a causal edge whose link \
                                  score could not be computed (see the unscoreable-edge \
                                  warning); its affected instances are not scored",
                                 pin.name
-                            )),
-                            severity: DiagnosticSeverity::Warning,
-                        })
-                        .accumulate(db);
+                            ),
+                        );
                     }
                     continue;
                 }
@@ -2017,7 +1899,7 @@ pub fn model_ltm_variables(
                     &crate::ltm_augment::LoopLinkOverrides::new(),
                 );
                 if pin_loop_vars.is_empty() {
-                    emit_unresolved_loop_score_warning(db, model, pin_loop.id.as_str());
+                    emit_unresolved_loop_score_warning(&mut warnings, pin_loop.id.as_str());
                 }
                 for (lname, equation) in pin_loop_vars {
                     let dimensions = parse::ltm_equation_dimensions(&equation).to_vec();
@@ -2100,8 +1982,7 @@ pub fn model_ltm_variables(
                         ))
                     {
                         emit_unresolved_pathway_link_warning(
-                            db,
-                            model,
+                            &mut warnings,
                             input_port.as_str(),
                             link.from.as_str(),
                             link.to.as_str(),
@@ -2228,6 +2109,7 @@ pub fn model_ltm_variables(
         // branching above; `model_ltm_mode` is the single source of truth for
         // the decision itself).
         mode: model_ltm_mode(db, model, project),
+        diagnostics: warnings.diagnostics,
     }
 }
 
@@ -2255,15 +2137,12 @@ mod ltm_tests;
 /// `⁚via⁚` aliases `compute_module_link_overrides` mints for module hops -- and
 /// until that exists this warning is what keeps the zero attributable.
 fn emit_unresolved_pathway_link_warning(
-    db: &dyn Db,
-    model: SourceModel,
+    warnings: &mut LtmWarnings,
     input_port: &str,
     from: &str,
     to: &str,
     attempted: &str,
 ) {
-    use crate::db::{CompilationDiagnostic, Diagnostic, DiagnosticError, DiagnosticSeverity};
-    use salsa::Accumulator;
     let msg = format!(
         "LTM pathway score for input port {input_port} references link score \
          '{attempted}' for edge {from} -> {to}, which was not emitted (the edge is \
@@ -2271,11 +2150,5 @@ fn emit_unresolved_pathway_link_warning(
          that factor reads a constant 0, so this pathway, the composite built from \
          it, and any loop through this module are degraded"
     );
-    CompilationDiagnostic(Diagnostic {
-        model: model.name(db).clone(),
-        variable: None,
-        error: DiagnosticError::Assembly(msg),
-        severity: DiagnosticSeverity::Warning,
-    })
-    .accumulate(db);
+    warnings.warn(None, msg);
 }

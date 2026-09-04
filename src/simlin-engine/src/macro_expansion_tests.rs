@@ -321,11 +321,17 @@ fn macro_call_expands_to_synthetic_module_structurally() {
     );
 
     let (transformed, vars) = crate::builtins_visitor::instantiate_implicit_modules(
-        "y", ast, None, None, None, &registry, None,
+        "y",
+        ast,
+        None,
+        crate::builtins_visitor::SnapshotIndexFacts::NoModel,
+        &registry,
+        None,
     )
     .expect("a macro call must expand");
 
-    let modules: Vec<&crate::datamodel::Module> = vars.iter().filter_map(|v| v.module()).collect();
+    let modules: Vec<&crate::capture::ImplicitModule> =
+        vars.iter().filter_map(|v| v.module()).collect();
     assert_eq!(
         modules.len(),
         1,
@@ -364,34 +370,137 @@ fn macro_call_expands_to_synthetic_module_structurally() {
     );
 }
 
-/// `contains_module_call` macro-awareness (item 4 of Task 3): with a
-/// registry containing macro `MYMACRO`, it returns `true` for an *arrayed*
-/// macro `App` (`MYMACRO(x[Dim], k)`), `true` for a stdlib call
-/// (`SMTH1(x, 5)`), and `false` for a plain arithmetic expression
-/// (`a + b`).
+/// What an apply-to-all body asks of the expansion
+/// (`builtins_visitor::per_element_requirements`), one row per arm of
+/// `MacroRegistry::resolve_call` crossed with what the call lowers as, plus
+/// the positions a call can sit in.
+///
+/// The rows ARE the routing enumeration: `Expand` (a macro instance),
+/// `Passthrough` (a macro that lowers as the builtin it names, here the
+/// snapshot intrinsic `INIT`), `RenamedBuiltinSelfCall` (the enclosing
+/// macro's own renamed builtin, here the stdlib alias `DELAYN`) and
+/// `Unresolved` (a stdlib call, a snapshot intrinsic, an ordinary builtin, no
+/// call). A body's requirement is the maximum over its calls wherever they
+/// sit -- an argument, a subscript index, a range bound -- so the last rows
+/// nest one inside another.
 #[test]
-fn contains_module_call_is_macro_aware() {
+fn apply_to_all_requirements_follow_every_macro_call_resolution_arm() {
     use crate::ast::Expr0;
+    use crate::builtins_visitor::{PerElement, per_element_requirements};
 
-    let registry = mymacro_registry();
+    // `mymacro` expands; `init` is a genuine passthrough of the renamed
+    // builtin; `delayn` is a macro whose body calls the like-named stdlib
+    // alias, which inside its own body is the builtin (GH #554).
+    let macro_model = |name: &str, params: &[&str], body: &str| crate::datamodel::Model {
+        name: name.to_string(),
+        sim_specs: None,
+        variables: std::iter::once(mk_aux(name, body))
+            .chain(params.iter().map(|p| mk_aux(p, "0")))
+            .collect(),
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: Some(crate::datamodel::MacroSpec {
+            parameters: params.iter().map(|p| p.to_string()).collect(),
+            primary_output: name.to_string(),
+            additional_outputs: vec![],
+        }),
+    };
+    let registry = crate::module_functions::MacroRegistry::build(&[
+        macro_model("mymacro", &["p1", "p2"], "p1 + p2"),
+        macro_model("init", &["x"], "init(x)"),
+        macro_model("delayn", &["x", "t", "n"], "delayn(x, t, n)"),
+    ])
+    .expect("valid registry");
     let parse = |s: &str| {
         Expr0::new(s, crate::lexer::LexerType::Equation)
             .expect("parse")
             .expect("non-empty")
     };
 
-    assert!(
-        crate::builtins_visitor::contains_module_call(&parse("MYMACRO(x[Dim], k)"), &registry),
-        "an arrayed macro App must be recognized by the apply-to-all gate",
-    );
-    assert!(
-        crate::builtins_visitor::contains_module_call(&parse("SMTH1(x, 5)"), &registry),
-        "a stdlib call must still be recognized by the apply-to-all gate",
-    );
-    assert!(
-        !crate::builtins_visitor::contains_module_call(&parse("a + b"), &registry),
-        "a plain arithmetic expression is not a module call",
-    );
+    // `(body, enclosing macro model, routing arm, requirement)`.
+    let rows: &[(&str, Option<&str>, &str, PerElement)] = &[
+        (
+            "MYMACRO(x[Dim], k)",
+            None,
+            "Expand",
+            PerElement::ModuleInstance,
+        ),
+        (
+            "INIT(x)",
+            None,
+            "Passthrough: lowers as the snapshot intrinsic",
+            PerElement::SnapshotOnly,
+        ),
+        (
+            "DELAYN(x, 2, 3)",
+            Some("delayn"),
+            "RenamedBuiltinSelfCall: lowers as the stdlib alias",
+            PerElement::ModuleInstance,
+        ),
+        (
+            "SMTH1(x, 5)",
+            None,
+            "Unresolved: a stdlib call",
+            PerElement::ModuleInstance,
+        ),
+        (
+            "DELAY(x, 5)",
+            None,
+            "Unresolved: the DELAY alias",
+            PerElement::ModuleInstance,
+        ),
+        (
+            "PREVIOUS(x, 0)",
+            None,
+            "Unresolved: PREVIOUS",
+            PerElement::SnapshotOnly,
+        ),
+        (
+            "ABS(x) + MAX(a, b)",
+            None,
+            "Unresolved: ordinary builtins",
+            PerElement::None,
+        ),
+        ("a + b", None, "no call", PerElement::None),
+        (
+            "ABS(PREVIOUS(x, 0)) + 1",
+            None,
+            "a snapshot nested in a builtin argument",
+            PerElement::SnapshotOnly,
+        ),
+        (
+            "PREVIOUS(SMTH1(x, 1), 0)",
+            None,
+            "the maximum: a module call nested in a snapshot argument",
+            PerElement::ModuleInstance,
+        ),
+        (
+            "vals[PREVIOUS(i, 1)]",
+            None,
+            "a snapshot in a subscript index",
+            PerElement::SnapshotOnly,
+        ),
+        (
+            "vals[1:SMTH1(n, 1)]",
+            None,
+            "a module call in a range bound",
+            PerElement::ModuleInstance,
+        ),
+        (
+            "IF a > 0 THEN INIT(x) ELSE SMTH1(x, 1)",
+            None,
+            "the maximum over the branches of an IF",
+            PerElement::ModuleInstance,
+        ),
+    ];
+    for (body, enclosing, arm, expected) in rows {
+        assert_eq!(
+            per_element_requirements(&parse(body), &registry, *enclosing),
+            *expected,
+            "{arm}: `{body}`"
+        );
+    }
 }
 
 /// macros.AC2.1 smoke: a trivial single-output macro `M(a, b) = a * b`
@@ -685,6 +794,218 @@ y=
 // params so the invocation is not rewritten to `LOOKUP` (the unrelated #553
 // 1-arg-call heuristic) -- the `INITIAL(x)`->`INIT(x)` rename inside the body
 // (the #554 trigger) is independent of the invocation's arity.
+
+/// GH #554's model, through the production MDL import: C-LEARN's uninvoked
+/// `:MACRO: INIT(x) ... INIT = INITIAL(x)`, whose body the importer's necessary
+/// `INITIAL -> INIT` rename turns into the self-call `init = init(x)`.
+///
+/// The registry must build with no `init -> init` cycle (the false recursion
+/// that emptied the registry and un-shadowed every other macro), the sibling
+/// macro must still expand, and the two routes a call to `init` can take must
+/// both land on the builtin: the body's own call is the enclosing macro's
+/// renamed builtin (`MacroCallResolution::RenamedBuiltinSelfCall`, a direct
+/// slot read of the port, so no helper at all), and `INITIAL(k * 2)` in `main`
+/// is the passthrough at an external call site
+/// (`MacroCallResolution::Passthrough`), which captures its computed argument
+/// exactly as the bare builtin does.
+#[test]
+fn issue_554_model_imports_registers_and_routes_both_init_calls_to_the_builtin() {
+    use crate::capture::{CaptureKind, ImplicitVar};
+    use crate::db::sync_from_datamodel;
+    use crate::test_common::implicit_vars_of;
+
+    let source = mdl(r#":MACRO: INIT(x)
+INIT = INITIAL(x)
+	~	dmnl
+	~	C-LEARN's uninvoked macro: the body's INITIAL is renamed to INIT
+	|
+
+:END OF MACRO:
+:MACRO: SSHAPE(a, b)
+SSHAPE = a * b
+	~	dmnl
+	~	sibling macro, shadowing the 3-arg SSHAPE builtin
+	|
+
+:END OF MACRO:
+k = 3
+	~	dmnl
+	~	|
+sibling = SSHAPE(4, 5)
+	~	dmnl
+	~	|
+frozen = INITIAL(k * 2)
+	~	dmnl
+	~	|
+"#);
+
+    let diags = diagnostics_for(&source);
+    assert!(
+        !has_model_error(&diags, ErrorCode::CircularDependency),
+        "the body's renamed INITIAL is not a recursive macro call; diagnostics: {diags:?}"
+    );
+    let registry = crate::module_functions::MacroRegistry::build(
+        &open_vensim(&source)
+            .expect("the issue's model imports")
+            .models,
+    )
+    .expect("the registry builds: no false init -> init cycle");
+    assert!(
+        registry
+            .resolve_macro("init")
+            .expect("the uninvoked macro is registered")
+            .passthrough,
+        "the importer's `init = init(x)` body is a genuine passthrough"
+    );
+
+    let sibling = run_mdl_var(&source, "sibling");
+    assert!(
+        sibling.iter().all(|&v| (v - 20.0).abs() < 1e-9),
+        "SSHAPE(4, 5) = 20: the sibling macro still shadows the builtin: {sibling:?}"
+    );
+    let frozen = run_mdl_var(&source, "frozen");
+    assert!(
+        frozen.iter().all(|&v| (v - 6.0).abs() < 1e-9),
+        "INITIAL(k * 2) = 6 at every step: {frozen:?}"
+    );
+
+    let project = open_vensim(&source).expect("the issue's model imports");
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let frozen_helpers = implicit_vars_of(&db, &sync, "main", "frozen");
+    assert!(
+        matches!(
+            frozen_helpers.as_slice(),
+            [ImplicitVar::Capture(c)]
+                if c.ident() == "$⁚frozen⁚0⁚arg0" && c.kind() == CaptureKind::Init
+        ),
+        "the external call lowers as the INIT builtin and captures its computed argument"
+    );
+    let body_helpers = implicit_vars_of(&db, &sync, "init", "init");
+    assert!(
+        body_helpers.is_empty(),
+        "the body's INIT(x) lowers as the builtin reading the port `x`'s own slot -- \
+         never as an instance of itself, and with no capture of the port; got {:?}",
+        body_helpers
+            .iter()
+            .map(|v| v.ident().to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A passthrough macro keeps the arity the model declared, even though a
+/// valid call lowers as the builtin. `PREVIOUS(x)` declares one parameter;
+/// the builtin it lowers to also accepts a fallback, so without the check
+/// `PREVIOUS(input, 0)` would compile as the builtin behind a macro that says
+/// otherwise.
+///
+/// XMILE rather than MDL: unary `PREVIOUS` is engine/XMILE syntax, not a
+/// Vensim builtin, so the MDL converter's one-argument heuristic would import
+/// `PREVIOUS(x)` as `LOOKUP(previous, x)`.
+#[test]
+fn a_passthrough_macro_keeps_its_declared_arity_at_an_external_call_site() {
+    let project_for = |call_args: &str| {
+        let source = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><vendor>Simlin</vendor><product>arity</product><name>main</name></header>
+  <sim_specs><start>0</start><stop>2</stop><dt>1</dt></sim_specs>
+  <model name="main"><variables>
+    <aux name="input"><eqn>10</eqn></aux>
+    <aux name="out"><eqn>PREVIOUS({call_args})</eqn></aux>
+  </variables></model>
+  <macro name="PREVIOUS">
+    <parm>x</parm>
+    <eqn>PREVIOUS(x)</eqn>
+  </macro>
+</xmile>"#
+        );
+        crate::compat::open_xmile(&mut source.as_bytes()).expect("the XMILE imports")
+    };
+    let compile = |project: &crate::datamodel::Project| {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, project, None);
+        (
+            compile_project_incremental(&db, sync.project, "main"),
+            collect_all_diagnostics(&db, sync.project),
+        )
+    };
+
+    let valid = project_for("input");
+    assert!(
+        crate::module_functions::MacroRegistry::build(&valid.models)
+            .expect("the registry builds")
+            .resolve_macro("previous")
+            .expect("the macro is registered")
+            .passthrough,
+        "the fixture must be a genuine passthrough, or the arm under test is not reached"
+    );
+    let (compiled, diags) = compile(&valid);
+    assert!(
+        compiled.is_ok(),
+        "the declared one-argument call lowers as the builtin; diagnostics: {diags:?}"
+    );
+
+    let (compiled, diags) = compile(&project_for("input, 0"));
+    assert_eq!(
+        compiled.map(|_| ()).unwrap_err().code,
+        ErrorCode::NotSimulatable,
+        "a call that violates the macro's declared arity is refused"
+    );
+    let arity = diags.iter().find_map(|d| match &d.error {
+        DiagnosticError::Equation(e)
+            if e.code == ErrorCode::BadBuiltinArgs && d.variable.as_deref() == Some("out") =>
+        {
+            Some(e.details.clone().unwrap_or_default())
+        }
+        _ => None,
+    });
+    assert_eq!(
+        arity.as_deref(),
+        Some("macro previous takes exactly 1 argument(s), but 2 were given"),
+        "the refusal names the macro's contract, not the builtin's; diagnostics: {diags:?}"
+    );
+}
+
+/// Two helpers of one call claiming one name is refused, not silently
+/// overwritten. A macro named `ARG1` invoked as `ARG1(k, k * 2)` mints its
+/// instance as `$⁚out⁚0⁚arg1` -- the call name is the instance's part -- and
+/// its second argument's helper under the same name. With a last-wins map the
+/// instance replaced the helper and wired its second port to itself.
+#[test]
+fn a_macro_named_arg1_cannot_alias_its_own_hoisted_argument() {
+    let source = mdl(r#":MACRO: ARG1(a, b)
+ARG1 = a + b
+	~	dmnl
+	~	named so that its instance and its argument 1 helper derive one name
+	|
+
+:END OF MACRO:
+k = 3
+	~	dmnl
+	~	|
+out = ARG1(k, k * 2)
+	~	dmnl
+	~	|
+"#);
+
+    let err = compile_mdl(&source).expect_err("two helpers claiming one name must refuse");
+    assert_eq!(err.code, ErrorCode::NotSimulatable);
+    let diags = diagnostics_for(&source);
+    let collision = diags.iter().find_map(|d| match &d.error {
+        DiagnosticError::Equation(e)
+            if e.code == ErrorCode::DuplicateVariable && d.variable.as_deref() == Some("out") =>
+        {
+            Some(e.details.clone().unwrap_or_default())
+        }
+        _ => None,
+    });
+    assert_eq!(
+        collision.as_deref(),
+        Some("two different synthesized helpers both claim the name '$⁚out⁚0⁚arg1'"),
+        "diagnostics: {diags:?}"
+    );
+}
 
 /// Part A + B together: a macro whose body wraps its own same-named `INIT`
 /// intrinsic, INVOKED alongside a sibling macro, must (1) build the registry
@@ -1290,5 +1611,65 @@ y =
         macro_diags.is_empty(),
         "unit checking must skip macro-marked models; diagnostics attributed \
          to the `badunits` macro model:\n{macro_diags:#?}",
+    );
+}
+
+/// A macro body's `INITIAL(input)` of its formal parameter reads the bound
+/// port's own slot: the invoked value is the parameter's t=0 value, and no
+/// capture is synthesized for it.
+///
+/// `EXPRESSION MACRO(input, parameter) = INITIAL(input) * parameter +
+/// SMOOTH(input, 2)` over `macro input = Time + 5` and `macro parameter =
+/// 1.1` over the control tail's `TIME = 0..2` at dt 1: `INITIAL(input) *
+/// parameter = 5 * 1.1 = 5.5`, and the `SMOOTH` starts at its input and
+/// follows it with delay 2 (`5, 5, 5.5`), so the output is `10.5, 10.5, 11`.
+///
+/// The body's helpers are the `SMOOTH` call's alone, numbered from 0: a
+/// capture of the port would have taken `⁚0⁚` and pushed the instance to
+/// `⁚1⁚smth1`. Helper names are external keys (the results offset map, the
+/// LTM causal graph libsimlin surfaces), so which name the instance carries
+/// is pinned rather than left to drift.
+#[test]
+fn a_macro_body_snapshot_of_its_formal_parameter_reads_the_bound_port() {
+    use crate::db::sync_from_datamodel;
+    use crate::test_common::implicit_vars_of;
+
+    let source = mdl(r#":MACRO: EXPRESSION MACRO(input, parameter)
+EXPRESSION MACRO = INITIAL(input) * parameter + SMOOTH(input, 2)
+	~	input
+	~	a macro whose body snapshots its formal parameter through INITIAL
+	|
+
+:END OF MACRO:
+macro input=
+	Time + 5
+	~
+	~		|
+
+macro output=
+	EXPRESSION MACRO(macro input,macro parameter)
+	~
+	~		|
+
+macro parameter=
+	1.1
+	~
+	~		|
+"#);
+    let output = run_mdl_var(&source, "macro_output");
+    assert_eq!(output, vec![10.5, 10.5, 11.0]);
+
+    let project = open_vensim(&source).expect("the macro source imports");
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let names: Vec<String> = implicit_vars_of(&db, &sync, "expression_macro", "expression_macro")
+        .iter()
+        .map(|v| v.ident().to_string())
+        .collect();
+    assert_eq!(
+        names,
+        ["$⁚expression_macro⁚0⁚arg1", "$⁚expression_macro⁚0⁚smth1"],
+        "INITIAL of the bound port captures nothing, so the SMOOTH call's helpers \
+         are the body's only ones and take walk index 0"
     );
 }

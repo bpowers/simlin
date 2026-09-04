@@ -3,20 +3,39 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::collections::{HashMap, HashSet};
-use std::result::Result as StdResult;
 
 use crate::ast::{Ast, BinaryOp, Expr2};
 use crate::builtins::{BuiltinFn, Loc};
 use crate::common::{
-    Canonical, EquationError, ErrorCode, Ident, Result, UnitError, UnitResult, canonicalize,
+    Canonical, EquationError, ErrorCode, Ident, UnitError, UnitResult, canonicalize,
 };
 use crate::datamodel::UnitMap;
-use crate::model::ModelStage1;
 use crate::units::{Context, UnitOp, Units, combine};
-use crate::variable::{VarKind, Variable};
+use crate::variable::{LoweredVariableMap, VarKind, Variable};
 
 // Type alias to reduce complexity
 type UnitErrorList = Vec<(Ident<Canonical>, UnitError)>;
+
+/// One model as unit inference and checking read it: its canonical name, its
+/// variables in their lowered `Expr2` form, and -- for a macro-marked model --
+/// the formal parameters whose names a body's declared units may use.
+///
+/// Assembled per unit check by `db::units::unit_model`, on the stack, from
+/// the per-variable lowering memos; `variables` is the shared handle map
+/// `db::model_lowered_variables` holds (the same map the LTM describers
+/// read), so the unit pass owns no lowered tree of its own. A macro is a
+/// polymorphic template: its body variables' declared units may name the
+/// macro's formal parameters (a Vensim idiom, e.g. `~ xfrom` inside RAMP FROM
+/// TO), so inference lowers those names to the parameters' metavariables
+/// rather than treating them as concrete base units (GH #619).
+pub(crate) struct UnitModel {
+    pub name: Ident<Canonical>,
+    pub variables: std::sync::Arc<LoweredVariableMap>,
+    pub is_macro: bool,
+    /// Canonical formal-parameter names when `is_macro` is true; empty
+    /// otherwise.
+    pub macro_params: Vec<Ident<Canonical>>,
+}
 
 /// The numeric value of a literal exponent expression, seeing through unary
 /// sign operators (the lexer takes no leading sign, so `x^-2`'s exponent is
@@ -34,7 +53,7 @@ pub(crate) fn literal_exponent(expr: &Expr2) -> Option<f64> {
 }
 
 struct UnitEvaluator<'a> {
-    model: &'a ModelStage1,
+    model: &'a UnitModel,
     inferred_units: &'a HashMap<Ident<Canonical>, UnitMap>,
     // units for module inputs
     time: Variable,
@@ -462,8 +481,7 @@ fn time_variable(ctx: &Context) -> Variable {
         ident: Ident::new("time"),
         units: Some(model_time_units(ctx)),
         eqn: None,
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Aux {
             ast: None,
             init_ast: None,
@@ -471,6 +489,7 @@ fn time_variable(ctx: &Context) -> Variable {
             non_negative: false,
             is_flow: false,
             is_table_only: false,
+            element_scope: None,
         },
     }
 }
@@ -496,7 +515,7 @@ fn time_variable(ctx: &Context) -> Variable {
 pub fn evaluate_expr_units(
     ctx: &Context,
     inferred_units: &HashMap<Ident<Canonical>, UnitMap>,
-    model: &ModelStage1,
+    model: &UnitModel,
     expr: &Expr2,
 ) -> UnitResult<Units> {
     let evaluator = UnitEvaluator {
@@ -507,15 +526,15 @@ pub fn evaluate_expr_units(
     evaluator.check(expr)
 }
 
-// check uses the model's variables' equations and unit definitions to
-// calculate the concrete units for each equation.  The outer result
-// indicates if we had a problem running the analysis.  The inner result
-// returns a list of unit problems, if there was one.
+/// Evaluate every equation of `model` under `ctx` (and the inferred units of
+/// the variables that declare none) and return each variable's unit problem:
+/// the list is the analysis' whole outcome, empty when every equation agrees
+/// with its declared units.
 pub fn check(
     ctx: &Context,
     inferred_units: &HashMap<Ident<Canonical>, UnitMap>,
-    model: &ModelStage1,
-) -> Result<StdResult<(), UnitErrorList>> {
+    model: &UnitModel,
+) -> UnitErrorList {
     use UnitError::{ConsistencyError, DefinitionError};
     let mut errors: Vec<(Ident<Canonical>, UnitError)> = vec![];
 
@@ -541,7 +560,11 @@ pub fn check(
     // its per-instance iteration order used to decide the ORDER of the
     // per-variable consistency errors -- an observable of the diagnostics
     // collection. The GH #595/#633 recipe: sort before iterating.
-    let mut sorted_vars: Vec<(&Ident<Canonical>, &Variable)> = model.variables.iter().collect();
+    let mut sorted_vars: Vec<(&Ident<Canonical>, &Variable)> = model
+        .variables
+        .iter()
+        .map(|(id, var)| (id, var.as_ref()))
+        .collect();
     sorted_vars.sort_unstable_by_key(|(id, _)| id.as_str());
     for (ident, var) in sorted_vars {
         if var.table().is_some() {
@@ -750,5 +773,5 @@ pub fn check(
     // unit definitions to calculate the concrete units for each
     // equation.  If these don't match the units as defined, we
     // log an error.
-    Ok(Err(errors))
+    errors
 }

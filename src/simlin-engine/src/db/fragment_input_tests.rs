@@ -28,7 +28,7 @@ use crate::test_common::TestProject;
 /// output beside a reduction over the arrayed variable -- so its fragment has
 /// an arrayed dependency and a module dependency at once. `producer` exposes
 /// `input`, an arrayed `arr[d] = input * d`, and `output = SUM(arr)`.
-fn module_and_array_project() -> datamodel::Project {
+pub(super) fn module_and_array_project() -> datamodel::Project {
     let mut project = TestProject::new("fragment_input")
         .with_sim_time(0.0, 1.0, 1.0)
         .indexed_dimension("d", 3)
@@ -188,8 +188,9 @@ fn explicit_constructor_is_compile_var_fragments_input() {
             .as_ref()
             .expect("usesub compiles");
 
-    let crate::db::var_fragment::ExplicitFragment::Ready { input, .. } =
-        crate::db::var_fragment::explicit_fragment_input(&db, var, model, sync.project, &[])
+    let crate::db::var_fragment::ExplicitFragment {
+        input: Some(input), ..
+    } = crate::db::var_fragment::explicit_fragment_input(&db, var, model, sync.project, &[])
     else {
         panic!("usesub must lower");
     };
@@ -324,7 +325,9 @@ fn ltm_constructor_is_compile_ltm_equation_fragments_input() {
     }
 }
 
-/// Row 4 of 4: the LTM implicit-helper constructor.
+/// Row 4 of 4: the LTM implicit-helper constructor. The phases compared are
+/// the ones the helper's capture kind demands -- the generator's helpers are
+/// `PREVIOUS` captures, so flow only.
 #[test]
 fn ltm_implicit_constructor_is_compile_ltm_implicit_var_fragments_input() {
     let mut db = SimlinDb::default();
@@ -350,13 +353,23 @@ fn ltm_implicit_constructor_is_compile_ltm_implicit_var_fragments_input() {
         let input =
             crate::db::ltm::ltm_implicit_fragment_input(&db, meta, model, sync.project, &[])
                 .unwrap_or_else(|| panic!("{name} has a fragment input"));
+        let kind = meta
+            .variable
+            .capture()
+            .unwrap_or_else(|| panic!("{name} is a capture"))
+            .kind();
         assert_eq!(
-            lower_and_emit(&input, false),
+            kind.needs_flows()
+                .then(|| lower_and_emit(&input, false))
+                .flatten(),
             production.fragment.flow_bytecodes,
-            "{name}: the flow fragment is the constructor's input lowered and emitted"
+            "{name}: the flow fragment is the constructor's input lowered and emitted, \
+             when the kind demands it"
         );
         assert_eq!(
-            lower_and_emit(&input, true),
+            kind.needs_initials()
+                .then(|| lower_and_emit(&input, true))
+                .flatten(),
             production.fragment.initial_bytecodes,
             "{name}: the initial fragment likewise"
         );
@@ -384,8 +397,9 @@ fn cross_module_read_offsets_through_the_sub_models_shape() {
         .offset;
 
     let var = model.variables(&db)["pick"];
-    let crate::db::var_fragment::ExplicitFragment::Ready { input, .. } =
-        crate::db::var_fragment::explicit_fragment_input(&db, var, model, sync.project, &[])
+    let crate::db::var_fragment::ExplicitFragment {
+        input: Some(input), ..
+    } = crate::db::var_fragment::explicit_fragment_input(&db, var, model, sync.project, &[])
     else {
         panic!("pick must lower");
     };
@@ -453,12 +467,9 @@ fn run_series(
 /// Expected values, derived from the rules: `sub·output = 3 * 10 = 30`, so the
 /// helper -- and the SMTH1 instance's `input` -- is 60 on every step. The
 /// instance's stock starts from the value `input` has during the parent's
-/// INITIALS phase, and `producer` has no stocks, so its initials runlist is
-/// empty and `sub·output` is 0 there (the pre-existing cross-model initials
-/// boundary `db::dep_graph`'s runlist seeding documents, shared with an
-/// explicit stock -- see the residual pin below); the smooth therefore rises
-/// from 0 toward 60 with delay 2 at dt 1: `0, 0 + (60-0)/2 = 30, 30 + (60-30)/2
-/// = 45`.
+/// INITIALS phase; `producer` evaluates `output` there because every
+/// value-bearing variable of an instantiated model is an initials member
+/// (GH #1028), so the smooth starts at 60 and stays there.
 #[test]
 fn smooth_argument_reading_a_module_output_compiles() {
     let db = SimlinDb::default();
@@ -471,21 +482,19 @@ fn smooth_argument_reading_a_module_output_compiles() {
     let series = run_series(&db, sync.project);
     assert_eq!(series["$⁚sm⁚0⁚arg0"], vec![60.0, 60.0, 60.0]);
     assert_eq!(series["$⁚sm⁚0⁚smth1·input"], vec![60.0, 60.0, 60.0]);
-    assert_eq!(series["sm"], vec![0.0, 30.0, 45.0]);
+    assert_eq!(series["sm"], vec![60.0, 60.0, 60.0]);
 }
 
-/// Disclosed pre-existing residual, independent of the fragment compiler: a
-/// stock initialized from a STOCKLESS sub-model's output reads 0 at t=0. A
-/// model's initials runlist is seeded by its own stocks, modules and
-/// INIT-referenced variables and closed within the model, so `producer`
-/// (`input`, `output`, no stock) evaluates nothing in the initials phase and
-/// the parent's `level = INTEG(0, sub·output)` snapshots an unwritten 0 where
-/// the true t=0 value is 30. The same boundary gives the SMTH1 instance above
-/// its 0 start. Pinned so the number is a known one rather than a surprise;
-/// the fix is cross-model seeding of the initials runlist, which is a
-/// dependency-graph change, not a lowering one (GH #1028).
+/// GH #1028: a stock initialized from a STOCKLESS sub-model's output reads
+/// the output's t=0 value. This is the issue's repro model: `producer`
+/// (`input`, `output = input * 10`, no stock) is instantiated by `main` with
+/// `src = 3`, and `level = INTEG(0, sub·output)` must start at 30 -- which it
+/// does because every value-bearing variable of an instantiated model is an
+/// initials member of that model, so `output` exists when the parent's
+/// initials read it. The `sm = SMTH1(sub·output * 2, 2)` beside it is the
+/// issue's second symptom, pinned at 60 by the test above.
 #[test]
-fn stock_initialized_from_a_stockless_modules_output_is_a_pre_existing_residual() {
+fn stock_initialized_from_a_stockless_modules_output_reads_its_t0_value() {
     let mut project = smooth_of_module_output_project();
     project.models[0]
         .variables
@@ -504,12 +513,129 @@ fn stock_initialized_from_a_stockless_modules_output_is_a_pre_existing_residual(
     let sync = sync_from_datamodel(&db, &project);
     let series = run_series(&db, sync.project);
     assert_eq!(series["sub·output"], vec![30.0, 30.0, 30.0]);
-    assert_eq!(
-        series["level"],
-        vec![0.0, 0.0, 0.0],
-        "the stock's initial reads the sub-model output before the sub-model has \
-         evaluated anything; 30 is the value a cross-model initials seed would give"
-    );
+    assert_eq!(series["level"], vec![30.0, 30.0, 30.0]);
+}
+
+/// A plain aux of `main`, the `producer` module's port wiring, and the stock
+/// reading a module output, as `datamodel` variables.
+fn plain_aux(ident: &str, equation: &str, active_initial: Option<&str>) -> datamodel::Variable {
+    datamodel::Variable::Aux(datamodel::Aux {
+        ident: ident.to_string(),
+        equation: datamodel::Equation::Scalar(equation.to_string()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat {
+            active_initial: active_initial.map(str::to_string),
+            ..datamodel::Compat::default()
+        },
+    })
+}
+
+fn module_var(ident: &str, model_name: &str, refs: &[(&str, &str)]) -> datamodel::Variable {
+    datamodel::Variable::Module(datamodel::Module {
+        ident: ident.to_string(),
+        model_name: model_name.to_string(),
+        documentation: String::new(),
+        units: None,
+        references: refs
+            .iter()
+            .map(|(src, dst)| datamodel::ModuleReference {
+                src: src.to_string(),
+                dst: dst.to_string(),
+            })
+            .collect(),
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    })
+}
+
+fn stock_from(ident: &str, equation: &str) -> datamodel::Variable {
+    datamodel::Variable::Stock(datamodel::Stock {
+        ident: ident.to_string(),
+        equation: datamodel::Equation::Scalar(equation.to_string()),
+        documentation: String::new(),
+        units: None,
+        inflows: vec![],
+        outflows: vec![],
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    })
+}
+
+/// GH #1028 through a NESTED instance: `main` instantiates `outer_model` as
+/// `outer`, which instantiates `producer` as `inner` and exposes `out =
+/// inner·output`. Both sub-models are stockless, both are module targets, so
+/// both evaluate every aux in their initials, and `level = INTEG(0,
+/// outer·out)` starts at 30.
+#[test]
+fn stock_initialized_through_a_nested_stockless_module_reads_its_t0_value() {
+    let mut project = smooth_of_module_output_project();
+    project.models.push(datamodel::Model {
+        name: "outer_model".to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "feed".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat {
+                    can_be_module_input: true,
+                    ..datamodel::Compat::default()
+                },
+            }),
+            module_var("inner", "producer", &[("feed", "inner.input")]),
+            plain_aux("out", "inner.output", None),
+        ],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    });
+    project.models[0]
+        .variables
+        .push(module_var("outer", "outer_model", &[("src", "outer.feed")]));
+    project.models[0]
+        .variables
+        .push(stock_from("level", "outer.out"));
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let series = run_series(&db, sync.project);
+    assert_eq!(series["outer·out"], vec![30.0, 30.0, 30.0]);
+    assert_eq!(series["level"], vec![30.0, 30.0, 30.0]);
+}
+
+/// GH #1028 with an `ACTIVE INITIAL`: the sub-model's initials evaluate its
+/// auxes' INITIAL equations, so a parent stock initialized from a port whose
+/// `ACTIVE INITIAL` is `input * 100` starts at 300 while the port's own
+/// series is its dt equation's 30.
+#[test]
+fn stock_initialized_from_an_active_initial_module_output_reads_the_initial_equation() {
+    let mut project = smooth_of_module_output_project();
+    let producer = project
+        .models
+        .iter_mut()
+        .find(|m| m.name == "producer")
+        .expect("fixture has producer");
+    producer
+        .variables
+        .push(plain_aux("staged", "input * 10", Some("input * 100")));
+    project.models[0]
+        .variables
+        .push(stock_from("level", "sub.staged"));
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let series = run_series(&db, sync.project);
+    assert_eq!(series["sub·staged"], vec![30.0, 30.0, 30.0]);
+    assert_eq!(series["level"], vec![300.0, 300.0, 300.0]);
 }
 
 /// `module_input_set` is the one owner of "which ports does this wiring bind":
@@ -529,4 +655,160 @@ fn module_input_set_strips_the_instance_prefix_and_drops_foreign_targets() {
     );
     let expected: BTreeSet<Ident<Canonical>> = [Ident::new("alpha"), Ident::new("zeta")].into();
     assert_eq!(set, expected);
+}
+
+/// An XMILE document with the given main-model variables and extra models,
+/// over `TIME = 0..3` at `dt = 1`, read through the production reader.
+fn xmile_project(main_variables: &str, extra_models: &str) -> datamodel::Project {
+    let source = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:simlin="https://simlin.com/XMILE/v1.0" version="1.0">
+  <header><vendor>test</vendor><product lang="en">test</product></header>
+  <sim_specs method="Euler" time_units="Month"><start>0</start><stop>3</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <aux name="src"><eqn>TIME + 3</eqn></aux>
+    {main_variables}
+  </variables></model>
+  {extra_models}
+</xmile>"#
+    );
+    crate::compat::open_xmile(&mut source.as_bytes()).expect("the XMILE fixture imports")
+}
+
+/// The t=0 value of every variable of `project`'s root, keyed by canonical
+/// name.
+fn t0_values(project: &datamodel::Project) -> std::collections::HashMap<String, f64> {
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, project);
+    run_series(&db, sync.project)
+        .into_iter()
+        .map(|(name, series)| (name, series[0]))
+        .collect()
+}
+
+/// GH #1028, the shapes a per-instance propagation of "which ports does the
+/// parent read" would get wrong and the flat rule gets right by construction.
+/// Each row is a parent stock initialized from a sub-model port, with the
+/// value derived from the flat-model reading of the equations.
+///
+/// * A sub-model aux that reads a sub-model STOCK: `out = s * 10 + input`
+///   over `s = INTEG(input, input * 2)` with `input = 3` at t=0 is
+///   `6 * 10 + 3 = 63`; the initials closure orders `s` before `out`.
+/// * One sub-model instantiated twice with different input sets: `sub1`
+///   leaves `extra` unwired (its own equation, 1) and `sub2` wires it to
+///   `bonus = 100`, so `output = input * 10 + extra` is `31` and `130`.
+/// * Stdlib instances inside a sub-model: `SMTH1(input, 2)` starts at its
+///   input (3); `DELAY3(input, 2)` starts in equilibrium at its input (3);
+///   `TREND(input, 2, 0.5)` starts at its initial trend (`stock = input / (1 +
+///   2 * 0.5) = 1.5`, `output = (3 - 1.5) / (1.5 * 2) = 0.5`).
+#[test]
+fn stocks_initialized_from_module_ports_read_the_flat_model_values() {
+    /// (what, main-model variables, extra models, expected t=0 values).
+    type Row = (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static [(&'static str, f64)],
+    );
+    let rows: [Row; 3] = [
+        (
+            "sub-model aux reading a sub-model stock",
+            r#"<module name="sub"><connect to="sub.input" from="src"/></module>
+               <stock name="level"><eqn>sub.out</eqn></stock>
+               <aux name="init_out"><eqn>INIT(sub.out)</eqn></aux>"#,
+            r#"<model name="sub"><variables>
+                 <aux name="input" access="input"><eqn>0</eqn></aux>
+                 <flow name="inflow"><eqn>input</eqn></flow>
+                 <stock name="s"><eqn>input * 2</eqn><inflow>inflow</inflow></stock>
+                 <aux name="out" access="output"><eqn>s * 10 + input</eqn></aux>
+               </variables></model>"#,
+            &[("level", 63.0), ("init_out", 63.0)],
+        ),
+        (
+            "two instances with different input sets",
+            r#"<aux name="bonus"><eqn>100</eqn></aux>
+               <module name="sub1" simlin:model_name="sub"><connect to="sub1.input" from="src"/></module>
+               <module name="sub2" simlin:model_name="sub">
+                 <connect to="sub2.input" from="src"/><connect to="sub2.extra" from="bonus"/>
+               </module>
+               <stock name="level1"><eqn>sub1.output</eqn></stock>
+               <stock name="level2"><eqn>sub2.output</eqn></stock>"#,
+            r#"<model name="sub"><variables>
+                 <aux name="input" access="input"><eqn>0</eqn></aux>
+                 <aux name="extra" access="input"><eqn>1</eqn></aux>
+                 <aux name="output" access="output"><eqn>input * 10 + extra</eqn></aux>
+               </variables></model>"#,
+            &[("level1", 31.0), ("level2", 130.0)],
+        ),
+        (
+            "stdlib instances inside a sub-model",
+            r#"<module name="sub"><connect to="sub.input" from="src"/></module>
+               <stock name="level_s"><eqn>sub.smoothed</eqn></stock>
+               <stock name="level_d"><eqn>sub.delayed</eqn></stock>
+               <stock name="level_t"><eqn>sub.trended</eqn></stock>"#,
+            r#"<model name="sub"><variables>
+                 <aux name="input" access="input"><eqn>0</eqn></aux>
+                 <aux name="smoothed" access="output"><eqn>SMTH1(input, 2)</eqn></aux>
+                 <aux name="delayed" access="output"><eqn>DELAY3(input, 2)</eqn></aux>
+                 <aux name="trended" access="output"><eqn>TREND(input, 2, 0.5)</eqn></aux>
+               </variables></model>"#,
+            &[("level_s", 3.0), ("level_d", 3.0), ("level_t", 0.5)],
+        ),
+    ];
+    for (what, main_variables, extra_models, expected) in rows {
+        let values = t0_values(&xmile_project(main_variables, extra_models));
+        for (name, want) in expected.iter() {
+            assert_eq!(values[*name], *want, "{what}: `{name}` at t=0");
+        }
+    }
+}
+
+/// A root model that some other model instantiates is a module target too,
+/// so the flat rule seeds every value-bearing variable of it into its own
+/// initials -- and that is only extra initial-phase work, never a different
+/// number: the root simulates identically with and without the instantiating
+/// model in the project.
+#[test]
+fn a_root_that_another_model_instantiates_simulates_as_it_does_alone() {
+    let main_variables = r#"<aux name="prev_k"><eqn>PREVIOUS(src, -1)</eqn></aux>
+        <aux name="init_k"><eqn>INIT(src)</eqn></aux>
+        <flow name="inflow"><eqn>src</eqn></flow>
+        <stock name="s"><eqn>10</eqn><inflow>inflow</inflow></stock>
+        <aux name="reads_stock"><eqn>s * 2</eqn></aux>"#;
+    let alone = xmile_project(main_variables, "");
+    let instantiated = xmile_project(
+        main_variables,
+        r#"<model name="other"><variables>
+             <module name="m" simlin:model_name="main"></module>
+             <aux name="o"><eqn>m.src</eqn></aux>
+           </variables></model>"#,
+    );
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &instantiated);
+    let main = main_model(&db, sync.project);
+    let initials = &model_dependency_graph(&db, main, sync.project, ModuleInputSet::empty(&db))
+        .runlist_initials;
+    assert!(
+        initials.iter().any(|n| n == "reads_stock") && initials.iter().any(|n| n == "prev_k"),
+        "an instantiated root's auxes are initials members; got {initials:?}"
+    );
+    let with = run_series(&db, sync.project);
+
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &alone);
+    let main = main_model(&db, sync.project);
+    let initials = &model_dependency_graph(&db, main, sync.project, ModuleInputSet::empty(&db))
+        .runlist_initials;
+    assert!(
+        !initials.iter().any(|n| n == "reads_stock"),
+        "a root nothing instantiates keeps only the seeds; got {initials:?}"
+    );
+    let alone = run_series(&db, sync.project);
+
+    assert_eq!(
+        with, alone,
+        "the root's series must not depend on being a target"
+    );
+    assert_eq!(alone["reads_stock"], vec![20.0, 26.0, 34.0, 44.0]);
 }

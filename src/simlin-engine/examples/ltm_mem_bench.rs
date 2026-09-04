@@ -312,6 +312,7 @@ fn build_synthetic_edges_result(
         edges.entry(from).or_default().insert(to);
     }
     CausalEdgesResult {
+        module_outputs_read: Default::default(),
         edges,
         stocks: BTreeSet::new(),
         dynamic_modules: HashMap::new(),

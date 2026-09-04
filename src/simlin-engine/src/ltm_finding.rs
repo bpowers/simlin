@@ -149,6 +149,10 @@ pub struct LinkExpansionContext {
     pub declared_dims: HashMap<Ident<Canonical>, Vec<crate::dimensions::Dimension>>,
     /// Dimension-mapping element correspondence for the mapped (#527) leg.
     pub dim_ctx: crate::dimensions::DimensionsContext,
+    /// The structural `(flow, stock)` edges: a flow feeds its stock through
+    /// the wiring's axis pairing (`db::BareSpelling::StockFlow`), every other
+    /// Bare link through the equation's.
+    pub flow_to_stock: HashSet<(Ident<Canonical>, Ident<Canonical>)>,
 }
 
 // --- Constants (from the paper) ---
@@ -804,17 +808,12 @@ fn parse_link_offsets(
 /// (`scale[a]`, `boost[r,a]`, `x[s]`) that named no real element node, so
 /// every loop through such a feeder dangled and was silently undiscoverable.
 ///
-/// The MAPPED leg covers every pair whose two reference spellings AGREE, which
-/// since GH #997 includes an explicit element map at unequal cardinality
-/// (C-LEARN's many-to-one). It cannot cover a pair whose spellings DISAGREE,
-/// and does not have to: `expand_same_element` emits the UNION of both
-/// diagonals there, which would put two from-nodes on the one slot this
-/// function assigns per target element -- so `link_score_dimensions` denies
-/// such a pair the arrayed retarget (`db::analysis::mapped_pair_projects_uniquely`)
-/// and it takes the GH #758 loud skip instead, leaving no dimensioned score for
-/// `parse_link_offsets` to expand. That is the whole reason the gate is
-/// STRICTER than the element graph's rule; the lockstep with
-/// `expand_same_element` is what makes the from-node names match either way.
+/// The MAPPED leg covers every pair `db::analysis::bare_axis_pairing` relates
+/// through a declared correspondence, an explicit element map at unequal
+/// cardinality (C-LEARN's many-to-one) included: each target element reads ONE
+/// source element under the executed correspondence, so each slot gets exactly
+/// the from-nodes the element graph emits for it, and the lockstep with
+/// `expand_same_element` is what makes the from-node names match.
 fn expand_a2a_link_offsets(
     from_var: &str,
     to_var: &str,
@@ -864,12 +863,21 @@ fn expand_a2a_link_offsets(
         (Some(fd), Some(td)) => {
             let mut element_edges: HashMap<String, std::collections::BTreeSet<String>> =
                 HashMap::new();
+            let spelling = if expansion
+                .flow_to_stock
+                .contains(&(from_ident.clone(), to_ident.clone()))
+            {
+                crate::db::BareSpelling::StockFlow
+            } else {
+                crate::db::BareSpelling::Equation
+            };
             crate::db::expand_same_element(
                 from_var,
                 to_var,
                 fd,
                 td,
                 &expansion.dim_ctx,
+                spelling,
                 &mut element_edges,
             );
             for (from_node, to_nodes) in element_edges {
@@ -1965,37 +1973,6 @@ pub fn discovery_graph_stats(
     }
 }
 
-/// Read the output port a (non-module) variable `reader` reads off module
-/// instance `module_name` via interpunct notation `m·{port}`, ignoring the
-/// module's synthetic LTM internals (`m·$⁚ltm⁚…`). Returns the unique such
-/// port, or `None` when the reader reads zero or several (ambiguous).
-///
-/// This is the post-simulation twin of `db::ltm::module_exit_port_for_reader`
-/// (the exhaustive-mode override's exit-port determinator); both must agree so
-/// discovery and exhaustive select the same pathway for the same loop edge.
-fn discovery_module_exit_port(
-    module_name: &Ident<Canonical>,
-    reader: &crate::variable::Variable,
-) -> Option<Ident<Canonical>> {
-    let ast = reader.ast()?;
-    let deps = crate::variable::identifier_set(ast, &[], None);
-    let prefix = format!("{}\u{00B7}", module_name.as_str());
-    let mut found: Option<Ident<Canonical>> = None;
-    for dep in deps {
-        let Some(port) = dep.as_str().strip_prefix(&prefix) else {
-            continue;
-        };
-        if port.starts_with('$') {
-            continue;
-        }
-        if found.is_some() {
-            return None;
-        }
-        found = Some(Ident::new(port));
-    }
-    found
-}
-
 /// Recompute a module-input loop edge's link-score series from the sub-model's
 /// per-pathway scores, selecting the pathway(s) that terminate at the exit port
 /// the loop actually traverses (GH #698).
@@ -2096,38 +2073,16 @@ fn recompute_module_input_edge_series_for(
         return None;
     }
 
-    // Exit port, resolved off the reader `y` supplied by the caller.
-    let y_var = causal_graph.variables().get(exit_reader)?;
-    let exit_port = match &y_var.kind {
-        // `y` is itself a module: m's output feeds y's input port(s). y's
-        // ModuleInput src is the qualified `m·{port}`; the exit port is the
-        // `{port}` whose normalized ref is `m`. If `y` reads TWO DISTINCT
-        // output ports of `m` on different inputs (`m·early -> y.p` AND
-        // `m·late -> y.q`), the collapsed `m -> y` edge has no unique exit
-        // port -- decline (ambiguous) and fall back to the base composite,
-        // mirroring the non-module `discovery_module_exit_port` arm and the
-        // exhaustive twin (GH #698 / PR #705 r3353597299). Two inputs naming
-        // the SAME `m·port` are NOT ambiguous: a unique distinct port is fine.
-        VarKind::Module { inputs: y_in, .. } => {
-            let mut exit: Option<Ident<Canonical>> = None;
-            for inp in y_in {
-                if normalize_module_ref(&inp.src) != *module_name {
-                    continue;
-                }
-                let Some((_, port)) = inp.src.as_str().split_once('\u{00B7}') else {
-                    continue;
-                };
-                let port = Ident::<Canonical>::new(port);
-                match &exit {
-                    Some(prev) if *prev != port => return None, // two distinct ports
-                    Some(_) => {}                               // same port repeated: fine
-                    None => exit = Some(port),
-                }
-            }
-            exit
-        }
-        _ => discovery_module_exit_port(module_name, y_var),
-    }?;
+    // Exit port, resolved off the reader `y` supplied by the caller: the one
+    // output of `m` that `y` reads, through its equation or -- for a module
+    // `y` -- through its input wiring, as the causal-edge builder recorded
+    // it. If `y` reads TWO DISTINCT output ports of `m` (`m·early -> y.p` AND
+    // `m·late -> y.q`), the collapsed `m -> y` edge has no unique exit port
+    // -- decline (ambiguous) and fall back to the base composite, as the
+    // exhaustive twin `compute_module_link_overrides` does (GH #698 / PR #705
+    // r3353597299). Two inputs naming the SAME `m·port` are NOT ambiguous: a
+    // unique distinct port is fine.
+    let exit_port = causal_graph.unique_module_output(exit_reader, module_name)?;
 
     // Recompute the sub-model's pathway map over the same sorted output-port
     // set the sub-model emitted against, so pathway indices match index-for-

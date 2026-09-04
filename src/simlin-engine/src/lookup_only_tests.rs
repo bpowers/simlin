@@ -488,3 +488,66 @@ fn bare_reference_to_lookup_only_is_compile_error() {
          LookupReferencedWithoutArgument for 'y'; got: {diags:?}"
     );
 }
+
+/// Wiring a lookup-only table into a module's input port is the same read of
+/// the table as a value: an input port copies its source's slot each step,
+/// and a table has none. The refusal lands on the instance, under either
+/// spelling XMILE gives a `<connect from=..>` source -- the parent-scope
+/// `.g`, which the sync canonicalizes to a leading `·`, and the bare `g`.
+#[test]
+fn module_input_wired_from_lookup_only_is_compile_error() {
+    for src in [".g", "g"] {
+        let mut project = project_with(
+            "lookup_module_input",
+            vec![],
+            vec![
+                aux_lookup_only("g", year_gf(11.0, 22.0, 33.0)),
+                aux("reader", "m.y"),
+                datamodel::Variable::Module(datamodel::Module {
+                    ident: "m".to_string(),
+                    model_name: "sub".to_string(),
+                    documentation: String::new(),
+                    units: None,
+                    references: vec![datamodel::ModuleReference {
+                        src: src.to_string(),
+                        dst: "m.g".to_string(),
+                    }],
+                    ai_state: None,
+                    uid: None,
+                    compat: datamodel::Compat::default(),
+                }),
+            ],
+        );
+        let mut port = aux("g", "0");
+        if let datamodel::Variable::Aux(port) = &mut port {
+            port.compat.can_be_module_input = true;
+        }
+        project.models.push(datamodel::Model {
+            name: "sub".to_string(),
+            sim_specs: None,
+            variables: vec![port, aux("y", "g")],
+            views: vec![],
+            loop_metadata: vec![],
+            groups: vec![],
+            macro_spec: None,
+        });
+
+        let diags = diagnostics_of(&project);
+        let refused_at_instance = diags.iter().any(|d| {
+            d.variable.as_deref() == Some("m")
+                && matches!(
+                    &d.error,
+                    DiagnosticError::Model(crate::common::Error {
+                        code: ErrorCode::LookupReferencedWithoutArgument,
+                        ..
+                    })
+                )
+                && d.severity == DiagnosticSeverity::Error
+        });
+        assert!(
+            refused_at_instance,
+            "wiring the table `g` into `m` (from {src:?}) must raise \
+             LookupReferencedWithoutArgument on 'm'; got: {diags:?}"
+        );
+    }
+}

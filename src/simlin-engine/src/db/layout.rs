@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 
 use super::*;
+use crate::capture::CaptureKind;
 use crate::common::{Canonical, Ident};
 
 #[salsa::tracked(returns(ref))]
@@ -157,12 +158,25 @@ pub fn compute_layout(
 /// module instance: a top-level variable is keyed by its canonical name at its
 /// layout slot; a module variable contributes no key of its own but its
 /// sub-model's map, each name prefixed `module·` and each slot based at the
-/// module's; an arrayed explicit variable is keyed per element as
-/// `name[e1,e2]` in the VM's row-major storage order (the conveyor and queue
-/// plans index belts by these keys); an arrayed implicit or LTM variable is
-/// keyed once, by its bare name, at its base slot (readers widen it by the
-/// variable's own dimensions); and a standalone lookup-only table keeps its
-/// layout slot but has no key, because it produces no series (GH #606).
+/// module's; an arrayed variable -- explicit, or a structural capture helper
+/// -- is keyed per element as `name[e1,e2]` in the VM's row-major storage
+/// order (the conveyor and queue plans index belts by these keys); an arrayed
+/// LTM synthetic variable is keyed once, by its bare name, at its base slot,
+/// because its only readers (the LTM result readers) look a score up by that
+/// bare name and widen it by the variable's own dimensions, so a per-element
+/// key would be a second spelling of a slot nothing looks up; and a slot
+/// nothing writes per step keeps its
+/// layout slot but has no key, because it produces no series -- a standalone
+/// lookup-only table (GH #606) or an INIT-only capture, which is populated
+/// in initials and read from the frozen snapshot. Exposing such a slot would
+/// put the two backends' scratch values side by side: the VM's step chunks
+/// start zeroed where wasm's linear memory keeps the last value, so the
+/// series would disagree while every value a model reads agrees -- and LTM
+/// takes no edge through such a capture (`db::analysis::model_causal_edges`),
+/// so no score reads the slot either. The capture is hidden whether or not a
+/// current read promotes it into flows (`db::dep_graph`): promotion is
+/// decided per module instance and this map is per model, and hiding a
+/// written slot costs nothing.
 pub(crate) fn flattened_offsets(
     db: &dyn Db,
     project: SourceProject,
@@ -175,14 +189,17 @@ pub(crate) fn flattened_offsets(
 }
 
 /// How one layout entry reaches the results map.
-enum Flatten<'a> {
+enum Flatten {
     /// A module instance: its sub-model's map, based at this slot. `None`
     /// when the project holds no such model -- there is nothing to flatten.
     Module(Option<SourceModel>),
-    /// A static table (GH #606): the slot is reserved, there is no series.
-    Table,
-    /// An arrayed explicit variable: one key per element, row-major.
-    Elements(&'a [crate::dimensions::Dimension]),
+    /// A static table (GH #606) or an INIT-only capture: the slot is
+    /// reserved, there is no series.
+    Hidden,
+    /// An arrayed variable -- explicit, or a structural capture helper (GH
+    /// #1033) -- whose storage these dimensions describe: one key per
+    /// element, row-major.
+    Elements(Vec<crate::dimensions::Dimension>),
     /// One key at the entry's base slot.
     Series,
 }
@@ -203,7 +220,11 @@ fn flatten_model(
     let source_vars = model.variables(db);
     let implicit_info = model_implicit_var_info(db, model, project);
     let ltm_implicit = model_ltm_implicit_var_info(db, model, project);
+    let dim_context = project_dimensions_context(db, project);
     let sub_model = |name: &str| project_models.get(canonicalize(name).as_ref()).copied();
+    let helper_elements = |dims: &[String]| {
+        Flatten::Elements(super::var_fragment::dimensions_named(dims, dim_context))
+    };
     let qualified = |local: Ident<Canonical>| match prefix {
         Some(prefix) => Ident::join(&prefix.as_canonical_str(), &local.as_canonical_str()),
         None => local,
@@ -215,24 +236,36 @@ fn flatten_model(
             if svar.kind(db) == SourceVariableKind::Module {
                 Flatten::Module(sub_model(svar.model_name(db)))
             } else if source_var_is_table_only(db, *svar) {
-                Flatten::Table
+                Flatten::Hidden
             } else if entry.size > 1 {
                 // The entry's size is the product of these dimensions.
-                Flatten::Elements(variable_dimensions(db, *svar, project))
+                Flatten::Elements(variable_dimensions(db, *svar, project).clone())
             } else {
                 Flatten::Series
             }
-        } else if let Some(info) = implicit_info.get(name)
-            && info.is_module
-        {
-            Flatten::Module(info.model_name.as_deref().and_then(sub_model))
-        } else if let Some(meta) = ltm_implicit.get(name)
-            && meta.is_module
-        {
-            Flatten::Module(meta.model_name.as_deref().and_then(sub_model))
+        } else if let Some(info) = implicit_info.get(name) {
+            if info.is_module {
+                Flatten::Module(info.model_name.as_deref().and_then(sub_model))
+            } else if info.capture_kind == Some(CaptureKind::Init) {
+                Flatten::Hidden
+            } else if entry.size > 1 {
+                helper_elements(&info.dimensions)
+            } else {
+                Flatten::Series
+            }
+        } else if let Some(meta) = ltm_implicit.get(name) {
+            // A generated helper is a capture (never a module instance).
+            if meta.variable.capture().map(|c| c.kind()) == Some(CaptureKind::Init) {
+                // The same rule for a generated helper; the generator emits
+                // `PREVIOUS` captures only, so nothing reaches this arm today.
+                Flatten::Hidden
+            } else if entry.size > 1 {
+                helper_elements(meta.variable.equation_dims())
+            } else {
+                Flatten::Series
+            }
         } else {
-            // A scalar or arrayed implicit helper, an LTM synthetic variable,
-            // or one of the root's implicit globals.
+            // An LTM synthetic variable, or one of the root's implicit globals.
             Flatten::Series
         };
         match kind {
@@ -249,9 +282,10 @@ fn flatten_model(
                     offsets,
                 );
             }
-            Flatten::Module(None) | Flatten::Table => {}
+            Flatten::Module(None) | Flatten::Hidden => {}
             Flatten::Elements(dims) => {
-                for (j, subscripts) in crate::dimensions::SubscriptIterator::new(dims).enumerate() {
+                for (j, subscripts) in crate::dimensions::SubscriptIterator::new(&dims).enumerate()
+                {
                     let element = format!("{name}[{}]", subscripts.join(","));
                     offsets.insert(
                         qualified(Ident::<Canonical>::from_unchecked(element)),
@@ -348,28 +382,16 @@ pub(crate) fn model_shape(
             let Some(entry) = layout.get(im_name) else {
                 continue;
             };
-            let shape = if meta.is_module {
-                module_dep_shape(db, project, meta.model_name.as_deref().unwrap_or(""))
-            } else {
-                // An `LtmImplicitVarMeta` carries no `dimensions` field (its
-                // `ImplicitVarMeta` sibling does), so the helper's axes come
-                // from its synthesized equation's declared dimension names --
-                // the same read `ltm_fragment_input`'s `helper_dims` and
-                // `ltm_implicit_fragment_input` make, so a parent resolving
-                // this helper through the model's shape sizes it exactly as
-                // this model's own fragments do.
-                DepShape::var(
-                    meta.variable
-                        .equation_dims()
-                        .iter()
-                        .filter_map(|name| {
-                            dim_context
-                                .get(&crate::common::CanonicalDimensionName::from_raw(name))
-                                .cloned()
-                        })
-                        .collect(),
-                )
-            };
+            // An `LtmImplicitVarMeta` carries no `dimensions` field (its
+            // `ImplicitVarMeta` sibling does), so the helper's axes come from
+            // its synthesized equation's declared dimension names -- the same
+            // read the LTM fragment constructors make (`ltm_dep_shape`), so a
+            // parent resolving this helper through the model's shape sizes it
+            // exactly as this model's own fragments do.
+            let shape = DepShape::var(super::var_fragment::dimensions_named(
+                meta.variable.equation_dims(),
+                dim_context,
+            ));
             vars.entry(Ident::new(im_name)).or_insert(ShapeEntry {
                 offset: entry.offset,
                 shape,

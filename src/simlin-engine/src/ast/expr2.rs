@@ -32,8 +32,6 @@ pub enum ArrayBounds {
     },
     /// Array bounds for a temporary (intermediate result)
     Temp {
-        /// Temporary ID allocated for this array expression
-        id: u32,
         /// Maximum size of each dimension
         dims: Vec<usize>,
         /// Dimension names (if available)
@@ -72,6 +70,19 @@ impl ArrayBounds {
         }
     }
 }
+
+/// The bounds slot of a lowered node: `None` on a scalar node, boxed on an
+/// arrayed one.
+///
+/// Boxed, not inline, because the trees carrying it are RETAINED (the
+/// per-variable lowering memos, the LTM handle maps) and a bound is `None` on
+/// every scalar subexpression: an inline [`ArrayBounds`] -- a name and two
+/// `Vec`s -- would be paid by every node for the few that carry one, where a
+/// `None` box costs one pointer. Readers go through `get_array_bounds`, a copy
+/// of a node clones the slot as it stands, and the box is spelled only where a
+/// bound is produced ([`Expr2::from`] and the compiler's bare-reference
+/// rewrite).
+pub type NodeBounds = Option<Box<ArrayBounds>>;
 
 /// IndexExpr represents a parsed equation, after calls to
 /// builtin functions have been checked/resolved.
@@ -155,7 +166,8 @@ impl IndexExpr2 {
 /// builtin functions have been checked/resolved.
 ///
 /// `Eq` is derived for the reason spelled out on [`crate::ast::Expr0`]: this is
-/// the layer that rides on `ModelStage1` and `ltm_agg::AggNodesResult`, whose
+/// the layer that rides on the lowered-variable memos and
+/// `ltm_agg::AggNodesResult`, whose
 /// salsa backdating is decided by comparing a memo with its own rebuild, so a
 /// field that is not equal to itself defeats it. `Eq` makes that a compile-time
 /// property rather than a convention.
@@ -164,22 +176,19 @@ impl IndexExpr2 {
 #[derive(PartialEq, Eq, Clone)]
 pub enum Expr2 {
     Const(String, Literal, Loc),
-    Var(Ident<Canonical>, Option<ArrayBounds>, Loc),
-    App(BuiltinFn<Expr2>, Option<ArrayBounds>, Loc),
-    Subscript(Ident<Canonical>, Vec<IndexExpr2>, Option<ArrayBounds>, Loc),
-    Op1(UnaryOp, Box<Expr2>, Option<ArrayBounds>, Loc),
-    Op2(BinaryOp, Box<Expr2>, Box<Expr2>, Option<ArrayBounds>, Loc),
-    If(Box<Expr2>, Box<Expr2>, Box<Expr2>, Option<ArrayBounds>, Loc),
+    Var(Ident<Canonical>, NodeBounds, Loc),
+    App(BuiltinFn<Expr2>, NodeBounds, Loc),
+    Subscript(Ident<Canonical>, Vec<IndexExpr2>, NodeBounds, Loc),
+    Op1(UnaryOp, Box<Expr2>, NodeBounds, Loc),
+    Op2(BinaryOp, Box<Expr2>, Box<Expr2>, NodeBounds, Loc),
+    If(Box<Expr2>, Box<Expr2>, Box<Expr2>, NodeBounds, Loc),
 }
 
 /// Context trait for converting Expr1 to Expr2
-/// Provides access to variable dimension information and temp ID allocation
+/// Provides access to variable dimension information
 pub trait Expr2Context {
     /// Get the dimensions of a variable, or None if it's a scalar
     fn get_dimensions(&self, ident: &str) -> Option<&[Dimension]>;
-
-    /// Allocate a new temp ID for the current equation
-    fn allocate_temp_id(&mut self) -> u32;
 
     /// Check if an identifier is a dimension name
     fn is_dimension_name(&self, ident: &str) -> bool;
@@ -241,8 +250,8 @@ impl Expr2 {
     ///
     /// Both stripped fields are artifacts of *where* an expression was
     /// written rather than *what* it means: a `Loc` is a byte range into one
-    /// variable's equation text, and a `Temp` bound carries a temp id the
-    /// lowering context handed out in equation order. Two occurrences of the
+    /// variable's equation text, and a bound is the shape a subexpression
+    /// resolved to under one equation's lowering scope. Two occurrences of the
     /// same subexpression in different equations therefore differ in both
     /// while denoting the same thing, so a cache that stores an expression
     /// keyed on its canonical printed form (`ltm_agg::AggNode`) must store
@@ -293,39 +302,34 @@ impl Expr2 {
         }
     }
 
-    /// Extract the array bounds from an expression, if it has one
+    /// The array bounds of this node: `None` on a scalar node, always on a
+    /// `Const`.
     pub(crate) fn get_array_bounds(&self) -> Option<&ArrayBounds> {
         match self {
             Expr2::Const(_, _, _) => None,
-            Expr2::Var(_, array_bounds, _) => array_bounds.as_ref(),
-            Expr2::App(_, array_bounds, _) => array_bounds.as_ref(),
-            Expr2::Subscript(_, _, array_bounds, _) => array_bounds.as_ref(),
-            Expr2::Op1(_, _, array_bounds, _) => array_bounds.as_ref(),
-            Expr2::Op2(_, _, _, array_bounds, _) => array_bounds.as_ref(),
-            Expr2::If(_, _, _, array_bounds, _) => array_bounds.as_ref(),
+            Expr2::Var(_, array_bounds, _) => array_bounds.as_deref(),
+            Expr2::App(_, array_bounds, _) => array_bounds.as_deref(),
+            Expr2::Subscript(_, _, array_bounds, _) => array_bounds.as_deref(),
+            Expr2::Op1(_, _, array_bounds, _) => array_bounds.as_deref(),
+            Expr2::Op2(_, _, _, array_bounds, _) => array_bounds.as_deref(),
+            Expr2::If(_, _, _, array_bounds, _) => array_bounds.as_deref(),
         }
     }
 
-    /// Allocates a new temp ID for an array with given dimensions
-    fn allocate_temp_array<C: Expr2Context>(ctx: &mut C, dims: Vec<usize>) -> ArrayBounds {
-        ArrayBounds::Temp {
-            id: ctx.allocate_temp_id(),
+    /// The bound of an intermediate array result over `dims`.
+    fn temp_bound(dims: Vec<usize>) -> Box<ArrayBounds> {
+        Box::new(ArrayBounds::Temp {
             dims,
             dim_names: None, // Temp arrays don't have dimension names initially
-        }
+        })
     }
 
-    /// Allocates a new temp ID for an array with given dimensions and names
-    fn allocate_temp_array_with_names<C: Expr2Context>(
-        ctx: &mut C,
-        dims: Vec<usize>,
-        names: Vec<String>,
-    ) -> ArrayBounds {
-        ArrayBounds::Temp {
-            id: ctx.allocate_temp_id(),
+    /// The bound of an intermediate array result over `dims` named `names`.
+    fn temp_bound_with_names(dims: Vec<usize>, names: Vec<String>) -> Box<ArrayBounds> {
+        Box::new(ArrayBounds::Temp {
             dims,
             dim_names: Some(names),
-        }
+        })
     }
 
     fn unify_array_bounds<C: Expr2Context>(
@@ -333,7 +337,7 @@ impl Expr2 {
         l: Option<&ArrayBounds>,
         r: Option<&ArrayBounds>,
         loc: Loc,
-    ) -> EquationResult<Option<ArrayBounds>> {
+    ) -> EquationResult<NodeBounds> {
         match (l, r) {
             // Both sides are arrays - check dimensions match
             (Some(left), Some(right)) => {
@@ -348,21 +352,20 @@ impl Expr2 {
                 )?;
 
                 if let Some(names) = dim_names {
-                    Ok(Some(Self::allocate_temp_array_with_names(ctx, dims, names)))
+                    Ok(Some(Self::temp_bound_with_names(dims, names)))
                 } else {
-                    Ok(Some(Self::allocate_temp_array(ctx, dims)))
+                    Ok(Some(Self::temp_bound(dims)))
                 }
             }
             // one side is array, the other is scalar: broadcast
             (Some(array), None) | (None, Some(array)) => {
                 if let Some(names) = array.dim_names() {
-                    Ok(Some(Self::allocate_temp_array_with_names(
-                        ctx,
+                    Ok(Some(Self::temp_bound_with_names(
                         array.dims().to_vec(),
                         names.to_vec(),
                     )))
                 } else {
-                    Ok(Some(Self::allocate_temp_array(ctx, array.dims().to_vec())))
+                    Ok(Some(Self::temp_bound(array.dims().to_vec())))
                 }
             }
             // Both scalars
@@ -584,11 +587,11 @@ impl Expr2 {
                     let dim_sizes: Vec<usize> = dims.iter().map(|d| d.len()).collect();
                     let dim_names: Vec<String> =
                         dims.iter().map(|d| d.name().to_string()).collect();
-                    Some(ArrayBounds::Named {
+                    Some(Box::new(ArrayBounds::Named {
                         name: id.as_str().to_string(),
                         dims: dim_sizes,
                         dim_names: Some(dim_names),
-                    })
+                    }))
                 } else {
                     None
                 };
@@ -683,11 +686,7 @@ impl Expr2 {
                     if result_dims.is_empty() {
                         None // Result is scalar
                     } else {
-                        Some(Self::allocate_temp_array_with_names(
-                            ctx,
-                            result_dims,
-                            result_dim_names,
-                        ))
+                        Some(Self::temp_bound_with_names(result_dims, result_dim_names))
                     }
                 } else {
                     None // Scalar variable or unknown variable
@@ -702,27 +701,27 @@ impl Expr2 {
                 let array_bounds = match (&op, l_expr.get_array_bounds()) {
                     (UnaryOp::Transpose, Some(bounds)) => {
                         // Transpose reverses both dimensions and dimension names.
-                        // Preserving names is critical: when this expression gets
-                        // decomposed into a TempArray by Pass1, the temp view's
-                        // dim_ids must match the source view's transposed dim_ids
-                        // for the VM's LoadIterViewAt dimension matching to succeed.
+                        // Preserving names is critical: when this expression is
+                        // materialized into a temp (`compiler::array_operand`),
+                        // the temp view's dim_ids must match the source view's
+                        // transposed dim_ids for the VM's LoadIterViewAt
+                        // dimension matching to succeed.
                         let mut transposed_dims = bounds.dims().to_vec();
                         transposed_dims.reverse();
                         if let Some(names) = bounds.dim_names() {
                             let mut transposed_names = names.to_vec();
                             transposed_names.reverse();
-                            Some(Self::allocate_temp_array_with_names(
-                                ctx,
+                            Some(Self::temp_bound_with_names(
                                 transposed_dims,
                                 transposed_names,
                             ))
                         } else {
-                            Some(Self::allocate_temp_array(ctx, transposed_dims))
+                            Some(Self::temp_bound(transposed_dims))
                         }
                     }
                     (_, Some(bounds)) => {
                         // Other unary ops preserve array structure
-                        Some(Self::allocate_temp_array(ctx, bounds.dims().to_vec()))
+                        Some(Self::temp_bound(bounds.dims().to_vec()))
                     }
                     _ => None,
                 };
@@ -760,7 +759,8 @@ impl Expr2 {
                 // If the branches are both scalar but the condition is
                 // array-valued, the IF expression should inherit the
                 // condition's dimensions (broadcasting scalar branches).
-                let array_bounds = branch_bounds.or_else(|| cond_expr.get_array_bounds().cloned());
+                let array_bounds = branch_bounds
+                    .or_else(|| cond_expr.get_array_bounds().map(|b| Box::new(b.clone())));
 
                 Expr2::If(
                     Box::new(cond_expr),
@@ -858,14 +858,12 @@ mod tests {
 
     // Common test context for Expr2Context
     struct TestContext {
-        temp_counter: u32,
         dimensions: HashMap<String, Vec<Dimension>>,
     }
 
     impl TestContext {
         fn new() -> Self {
             Self {
-                temp_counter: 0,
                 dimensions: HashMap::new(),
             }
         }
@@ -874,12 +872,6 @@ mod tests {
     impl Expr2Context for TestContext {
         fn get_dimensions(&self, ident: &str) -> Option<&[Dimension]> {
             self.dimensions.get(ident).map(|dims| dims.as_slice())
-        }
-
-        fn allocate_temp_id(&mut self) -> u32 {
-            let id = self.temp_counter;
-            self.temp_counter += 1;
-            id
         }
 
         fn is_dimension_name(&self, _ident: &str) -> bool {
@@ -919,7 +911,6 @@ mod tests {
 
         // Test Temp variant
         let temp_bounds = ArrayBounds::Temp {
-            id: 5,
             dims: vec![2, 3],
             dim_names: None,
         };
@@ -928,7 +919,6 @@ mod tests {
 
         // Test scalar (empty dims)
         let scalar_bounds = ArrayBounds::Temp {
-            id: 1,
             dims: vec![],
             dim_names: None,
         };
@@ -944,7 +934,6 @@ mod tests {
 
         // Test 3D array
         let bounds_3d = ArrayBounds::Temp {
-            id: 3,
             dims: vec![2, 3, 4],
             dim_names: None,
         };
@@ -991,7 +980,7 @@ mod tests {
                 assert_eq!(id.as_str(), "array_var");
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
-                match bounds {
+                match *bounds {
                     ArrayBounds::Named { name, dims, .. } => {
                         assert_eq!(name, "array_var");
                         assert_eq!(dims, vec![3, 4]);
@@ -1035,9 +1024,8 @@ mod tests {
                 assert_eq!(args.len(), 2);
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
-                match bounds {
-                    ArrayBounds::Temp { id, dims, .. } => {
-                        assert_eq!(id, 0); // First temp allocation
+                match *bounds {
+                    ArrayBounds::Temp { dims, .. } => {
                         assert_eq!(dims, vec![4]); // Only second dimension remains
                     }
                     _ => panic!("Expected Temp array bounds"),
@@ -1104,9 +1092,8 @@ mod tests {
             Expr2::Op1(UnaryOp::Negative, _, array_bounds, _) => {
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
-                match bounds {
-                    ArrayBounds::Temp { id, dims, .. } => {
-                        assert_eq!(id, 0); // First temp allocation
+                match *bounds {
+                    ArrayBounds::Temp { dims, .. } => {
                         assert_eq!(dims, vec![2, 3]); // Dimensions preserved
                     }
                     _ => panic!("Expected Temp array bounds"),
@@ -1140,9 +1127,8 @@ mod tests {
             Expr2::Op1(UnaryOp::Transpose, _, array_bounds, _) => {
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
-                match bounds {
-                    ArrayBounds::Temp { id, dims, .. } => {
-                        assert_eq!(id, 0); // First temp allocation
+                match *bounds {
+                    ArrayBounds::Temp { dims, .. } => {
                         assert_eq!(dims, vec![4, 3]); // Dimensions reversed
                     }
                     _ => panic!("Expected Temp array bounds"),
@@ -1181,9 +1167,8 @@ mod tests {
             Expr2::Op2(BinaryOp::Add, _, _, array_bounds, _) => {
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
-                match bounds {
-                    ArrayBounds::Temp { id, dims, .. } => {
-                        assert_eq!(id, 0); // First temp allocation
+                match *bounds {
+                    ArrayBounds::Temp { dims, .. } => {
                         assert_eq!(dims, vec![2, 3]); // Array dimensions preserved
                     }
                     _ => panic!("Expected Temp array bounds"),
@@ -1220,9 +1205,8 @@ mod tests {
             Expr2::Op2(BinaryOp::Add, _, _, array_bounds, _) => {
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
-                match bounds {
-                    ArrayBounds::Temp { id, dims, .. } => {
-                        assert_eq!(id, 0); // First temp allocation
+                match *bounds {
+                    ArrayBounds::Temp { dims, .. } => {
                         assert_eq!(dims, vec![3, 4]); // Dimensions preserved
                     }
                     _ => panic!("Expected Temp array bounds"),
@@ -1260,72 +1244,14 @@ mod tests {
             Expr2::If(_, _, _, array_bounds, _) => {
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
-                match bounds {
-                    ArrayBounds::Temp { id, dims, .. } => {
-                        assert_eq!(id, 0); // First temp allocation
+                match *bounds {
+                    ArrayBounds::Temp { dims, .. } => {
                         assert_eq!(dims, vec![2, 2]); // Dimensions preserved
                     }
                     _ => panic!("Expected Temp array bounds"),
                 }
             }
             _ => panic!("Expected If expression"),
-        }
-    }
-
-    #[test]
-    fn test_expr2_temp_id_allocation() {
-        use crate::ast::expr1::Expr1;
-        use crate::ast::{BinaryOp, UnaryOp};
-        use crate::common::Ident;
-
-        let mut ctx = TestContext::new();
-
-        // Add dimensions to context
-        ctx.dimensions
-            .insert("array1".to_string(), indexed_dims(&[2, 2]));
-        ctx.dimensions
-            .insert("array2".to_string(), indexed_dims(&[2, 2]));
-
-        // Create multiple array operations to test temp ID allocation
-        // First operation: -array1 (should get temp_id 0)
-        let neg_expr = Expr1::Op1(
-            UnaryOp::Negative,
-            Box::new(Expr1::Var(Ident::new("array1"), Loc::default())),
-            Loc::default(),
-        );
-        let expr2_1 = Expr2::from(neg_expr, &mut ctx).unwrap();
-
-        // Second operation: array1 + array2 (should get temp_id 1)
-        let add_expr = Expr1::Op2(
-            BinaryOp::Add,
-            Box::new(Expr1::Var(Ident::new("array1"), Loc::default())),
-            Box::new(Expr1::Var(Ident::new("array2"), Loc::default())),
-            Loc::default(),
-        );
-        let expr2_2 = Expr2::from(add_expr, &mut ctx).unwrap();
-
-        // Check first operation got temp_id 0
-        match expr2_1 {
-            Expr2::Op1(_, _, array_bounds, _) => {
-                assert!(array_bounds.is_some());
-                match array_bounds.unwrap() {
-                    ArrayBounds::Temp { id, .. } => assert_eq!(id, 0),
-                    _ => panic!("Expected Temp array bounds"),
-                }
-            }
-            _ => panic!("Expected Op1"),
-        }
-
-        // Check second operation got temp_id 1
-        match expr2_2 {
-            Expr2::Op2(_, _, _, array_bounds, _) => {
-                assert!(array_bounds.is_some());
-                match array_bounds.unwrap() {
-                    ArrayBounds::Temp { id, .. } => assert_eq!(id, 1),
-                    _ => panic!("Expected Temp array bounds"),
-                }
-            }
-            _ => panic!("Expected Op2"),
         }
     }
 }

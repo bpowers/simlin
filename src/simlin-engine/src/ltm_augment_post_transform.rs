@@ -60,11 +60,10 @@ use crate::lexer::LexerType;
 /// `(site, target element)` instantiation of a `PerElement` link score
 /// (GH #525, T6 of the shape-expressiveness design).
 ///
-/// Notably absent since the lowering became IR-driven: the source's per-axis
-/// element-name lists and the iterated-dim recognition context. Those were the
-/// inputs to the Expr0 per-axis CLASSIFIER this lowering used to run; the
-/// per-axis truth now comes off the occurrence IR (`OccurrenceSite::axes`), so
-/// only the projection data survives.
+/// It carries no per-axis element-name lists and no iterated-dim recognition
+/// context: the per-axis truth comes off the occurrence IR
+/// (`OccurrenceSite::axes`), so this lowering holds projection data only and
+/// never classifies an axis itself.
 pub(super) struct PerElementRefCtx<'a> {
     /// The live source variable (canonical).
     pub(super) from: &'a Ident<Canonical>,
@@ -107,14 +106,13 @@ pub(super) fn qualify_axis_element(elem: &str, dim: &crate::dimensions::Dimensio
 /// mid-edit inconsistency; callers degrade conservatively) -- and for any
 /// `Reduced` axis, which the `PerElement` invariant excludes.
 ///
-/// The two projected axes take DIFFERENT correspondences, which is the whole
-/// of GH #997 at the per-axis level: an `Iterated` index spells a dimension
-/// the equation iterates and is folded to an ordinal, so it reads the
-/// POSITIONAL diagonal; a `MappedRead` index spells a non-active dimension,
-/// survives to `IndexOp::ActiveDimRef`, and is resolved name-first then
-/// through the declared element map. Both correspondences are indexed by
-/// TARGET element position and yield the source element the executed
-/// simulation reads for it.
+/// Both projected axes read the one executed correspondence
+/// (`DimensionsContext::executed_read_correspondence`, indexed by TARGET
+/// element position and yielding the source element the executed simulation
+/// reads for it): an `Iterated` index and a `MappedRead` index differ only in
+/// which target dimension they are driven by, and every dimension-named
+/// subscript survives to `IndexOp::ActiveDimRef` and is resolved name-first,
+/// then through the declared element map (GH #997).
 ///
 /// This is the SINGLE row derivation for the `PerElement` family's
 /// emission: the link-score NAME's row (computed by
@@ -131,20 +129,11 @@ pub(crate) fn per_element_row_for_target(
     axes.iter()
         .map(|ax| match ax {
             AxisRead::Pinned(e) => Some(e.clone()),
-            AxisRead::Iterated { dim, source_dim } => {
+            AxisRead::Iterated { dim, source_dim } | AxisRead::MappedRead { dim, source_dim } => {
                 let (elem, idx) = target_elem_by_dim.get(dim)?;
                 if dim == source_dim {
-                    Some(elem.clone())
-                } else {
-                    let corr = dim_ctx.positional_correspondence(
-                        &CanonicalDimensionName::from_raw(dim),
-                        &CanonicalDimensionName::from_raw(source_dim),
-                    )?;
-                    corr.get(*idx).map(|e| e.as_str().to_string())
+                    return Some(elem.clone());
                 }
-            }
-            AxisRead::MappedRead { dim, source_dim } => {
-                let (_, idx) = target_elem_by_dim.get(dim)?;
                 let corr = dim_ctx.executed_read_correspondence(
                     &CanonicalDimensionName::from_raw(dim),
                     &CanonicalDimensionName::from_raw(source_dim),
@@ -157,8 +146,8 @@ pub(crate) fn per_element_row_for_target(
 }
 
 /// Per DECLARED dimension of a dep, the element it reads at ONE target element
-/// -- `None` for a dimension the target element does not supply. Bare element
-/// names, in the dep's own declaration order.
+/// when referenced BARE -- `None` for a dimension the target element does not
+/// supply. Bare element names, in the dep's own declaration order.
 ///
 /// A bare arrayed reference inside an apply-to-all body reads, for each of its
 /// OWN axes, the element the enclosing iteration selects on the target axis that
@@ -174,90 +163,50 @@ pub(crate) fn per_element_row_for_target(
 /// another order (GH #974).
 ///
 /// **The ALLOCATION is not decided here.** Which target axis supplies which dep
-/// axis is `compiler::dimensions::allocate_implicit_axes` -- the same function
-/// the compiler's own `get_implicit_subscripts` calls to resolve exactly this
-/// reference -- so a pin cannot spell a row the simulation does not read. This
-/// used to be a per-axis `.find` over the target's dimension NAMES, and it got
-/// two shapes wrong for the one reason: a name is not an axis identity. A target
-/// repeating a dimension (`target[D,D]`) has two axes with one name, and a
-/// name-keyed map keeps only the last (the simulation reads the FIRST, measured
-/// by `repeated_target_dimension_reads_the_first_axis`); and two dep axes that
-/// can each map to the same target axis both claimed it, because an independent
-/// search tracks no `used` set (the simulation allocates one-to-one, measured by
-/// `doubly_mapped_dep_axes_are_allocated_one_to_one`). That is the SECOND time in
-/// this area a table keyed by dimension name produced a wrong row -- GH #986 was
-/// the first -- so the rule is now asked for rather than restated.
-///
-/// What remains here is the per-axis ELEMENT translation, which is LTM's own and
-/// deliberately narrower than the compiler's: an axis allocated to a target axis
-/// of a DIFFERENT name resolves through the spelling-keyed correspondence
-/// `spelling` selects (GH #997), so this accepts exactly the mapped pairs
-/// `ltm_agg::classify_axis_access` accepts for that same spelling.
+/// axis, and through which correspondence, is
+/// [`crate::db::bare_axis_pairing`] -- the one pairing of two declared
+/// dimension lists, the same answer behind the element graph's
+/// `expand_same_element` and the arrayed score's admission -- so a pin cannot
+/// spell a row the simulation does not read. A per-axis `.find` over the
+/// target's dimension NAMES must not stand in for it, because a name is not an
+/// axis identity: a target repeating a dimension (`target[D,D]`) has two axes
+/// with one name, and a name-keyed map keeps only the last (the simulation
+/// reads the FIRST, measured by `repeated_target_dimension_reads_the_first_axis`);
+/// and two dep axes that can each map to the same target axis would both claim
+/// it, because an independent search tracks no `used` set (the simulation
+/// allocates one-to-one, measured by
+/// `doubly_mapped_dep_axes_are_allocated_one_to_one`). A table keyed by
+/// dimension name is what produced GH #986's wrong row, so the rule is asked
+/// for rather than restated.
 fn dep_axis_elements(
     dep_dims: &[crate::dimensions::Dimension],
     target_dims: &[crate::dimensions::Dimension],
     target_elements: &[String],
     dim_ctx: &crate::dimensions::DimensionsContext,
-    spelling: DepSpelling,
 ) -> Vec<Option<String>> {
     use crate::common::CanonicalElementName;
+    use crate::db::BareAxis;
     if target_dims.len() != target_elements.len() {
         return vec![None; dep_dims.len()];
     }
-    let alloc =
-        crate::compiler::dimensions::allocate_implicit_axes_partial(dep_dims, target_dims, dim_ctx);
-    dep_dims
-        .iter()
-        .zip(alloc)
-        .map(|(dep_dim, target_pos)| {
-            let target_dim = target_dims.get(target_pos?)?;
-            let target_elem = target_elements.get(target_pos?)?;
-            if dep_dim.canonical_name() == target_dim.canonical_name() {
-                return Some(target_elem.clone());
-            }
-            let corr = spelling.correspondence(
-                dim_ctx,
-                target_dim.canonical_name(),
-                dep_dim.canonical_name(),
-            )?;
-            let idx = target_dim.get_offset(&CanonicalElementName::from_raw(target_elem))?;
-            corr.get(idx).map(|e| e.as_str().to_string())
-        })
-        .collect()
-}
-
-/// Which resolution rule a dep reference gets, because the two forms
-/// [`dep_element_pins`] serves are spelled differently and execution resolves
-/// them differently (GH #997).
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DepSpelling {
-    /// A BARE reference (`dep`) in an equation body. `compiler::context`'s
-    /// `lower_pass0` rewrites it into the iterated-dimension spelling, whose
-    /// index `ast::expr3` Pass 1 folds to an ordinal -- so it reads
-    /// POSITIONALLY and never consults a declared element map.
-    Bare,
-    /// An already-subscripted reference whose index names one of the dep's OWN
-    /// declared dimensions (`dep[Region]` under a `State`-iterating target).
-    /// That index survives to `IndexOp::ActiveDimRef` and
-    /// `compiler::subscript`'s `build_view_from_ops` resolves it name-first,
-    /// then through the declared element map.
-    OwnDimSubscript,
-}
-
-impl DepSpelling {
-    fn correspondence(
-        self,
-        dim_ctx: &crate::dimensions::DimensionsContext,
-        target_dim: &crate::common::CanonicalDimensionName,
-        dep_dim: &crate::common::CanonicalDimensionName,
-    ) -> Option<Vec<crate::common::CanonicalElementName>> {
-        match self {
-            DepSpelling::Bare => dim_ctx.positional_correspondence(target_dim, dep_dim),
-            DepSpelling::OwnDimSubscript => {
-                dim_ctx.executed_read_correspondence(target_dim, dep_dim)
-            }
+    crate::db::bare_axis_pairing(
+        dep_dims,
+        target_dims,
+        dim_ctx,
+        crate::db::BareSpelling::Equation,
+    )
+    .iter()
+    .map(|axis| match axis {
+        BareAxis::Positional(pos) => target_elements.get(*pos).cloned(),
+        BareAxis::Mapped { pos, reads } => {
+            let target_dim = target_dims.get(*pos)?;
+            let target_elem = CanonicalElementName::from_raw(target_elements.get(*pos)?);
+            let idx = target_dim.get_offset(&target_elem)?;
+            reads.get(idx).map(|e| e.as_str().to_string())
         }
-    }
+        BareAxis::Collapsed => None,
+    })
+    .collect()
 }
 
 /// The element a variable declared over `dep_dims` reads at ONE target element
@@ -271,42 +220,47 @@ pub(crate) fn dep_row_for_target(
     target_elements: &[String],
     dim_ctx: &crate::dimensions::DimensionsContext,
 ) -> Option<Vec<String>> {
-    dep_axis_elements(
-        dep_dims,
-        target_dims,
-        target_elements,
-        dim_ctx,
-        DepSpelling::Bare,
-    )
-    .into_iter()
-    .collect()
+    dep_axis_elements(dep_dims, target_dims, target_elements, dim_ctx)
+        .into_iter()
+        .collect()
 }
 
 /// The element-pin table for ONE target element: each dep in `pinnable` mapped
-/// to the elements IT reads there ([`DepElementPin`]), qualified in its own
-/// dimensions' space so a frozen read compiles to a direct LoadPrev.
+/// to what IT reads there ([`DepElementPin`]), qualified in its own dimensions'
+/// space so a frozen read compiles to a direct LoadPrev.
 ///
-/// A dep no axis of which projects under EITHER spelling is ABSENT from the
-/// table entirely (nothing to rewrite). A dep only SOME of whose axes project
-/// is present but has no [`bare_row`](DepElementPin::bare_row): its
-/// dimension-name indices are still substituted -- that is the GH #654
-/// helper-aux fix, and it only needs the axes the reference actually spells as
-/// dimension names -- while a BARE reference to it is left alone, since no
-/// correct full-arity subscript exists. Leaving it bare is the loud direction:
-/// a bare multi-slot reference in a scalar fragment fails to compile and
-/// surfaces an `Assembly` warning, where the pre-GH #974 full-target-tuple pin
-/// silently mis-read the dep whenever the arity happened to match.
+/// Per dep axis, one entry per DIMENSION NAME a subscript index on that axis
+/// may spell, each resolved by the rule the compiler applies to that spelling:
 ///
-/// The two rows come from two DIFFERENT correspondences, and that is the whole
-/// content of GH #997 in miniature: `axes` serves an already-subscripted
-/// `dep[<its own dimension>]`, which execution resolves name-first then through
-/// the declared element map, while `bare_row` serves a bare `dep`, which pass 0
-/// rewrites into the iterated spelling and execution resolves by ordinal. They
-/// coincide for every positional mapping between dimensions with disjoint
-/// element names -- the only pairs that projected at all before GH #997 -- and
-/// differ under an explicit element map or where the two dimensions share
-/// element names. One table answering both spellings with one rule is what made
-/// C-LEARN's element-mapped deps unpinnable.
+/// - the axis's own dimension -- `dep[Region]` over a `Region` axis, or
+///   `mapped[State]` over a `State` axis the target reads through a declared
+///   map (`IndexOp::ActiveDimRef` resolves it name-first, then through the
+///   map, GH #997) -- reads the element of the bare row, since a bare `dep` is
+///   what pass 0 rewrites into exactly this spelling;
+/// - every dimension the target iterates that reads this axis --
+///   `energy[nonrenewable]` over a `source` axis, `w[Region]` over a `State`
+///   axis mapped onto `Region` -- reads that dimension's coordinate of the
+///   target element through `DimensionsContext::executed_read_correspondence`,
+///   the derivation [`per_element_row_for_target`] runs for the live source's
+///   `Iterated` axes, so a frozen other-dep and the live reference cannot
+///   disagree about one spelling.
+///
+/// The entries are grouped by AXIS POSITION and looked up by an index's
+/// position and spelled name, never by name alone: two dep axes can both be
+/// readable through one target dimension (`m[State, County]` with both mapped
+/// onto `Region`), and a name-keyed table hands the second axis the first's
+/// element.
+///
+/// A dep no axis of which has an entry is ABSENT from the table entirely
+/// (nothing to rewrite). A dep only SOME of whose axes project is present but
+/// has no [`bare_row`](DepElementPin::bare_row): its dimension-name indices are
+/// still substituted -- that is the GH #654 helper-aux fix, and it only needs
+/// the axes the reference actually spells as dimension names -- while a BARE
+/// reference to it is left alone, since no correct full-arity subscript
+/// exists. Leaving it bare is the loud direction: a bare multi-slot reference
+/// in a scalar fragment fails to compile and surfaces an `Assembly` warning,
+/// where the pre-GH #974 full-target-tuple pin silently mis-read the dep
+/// whenever the arity happened to match.
 ///
 /// `pinnable` carries each dep's declared `Dimension`s, resolved ONCE per
 /// target equation by the caller; only the projection is per element.
@@ -316,39 +270,55 @@ pub(crate) fn dep_element_pins(
     target_elements: &[String],
     dim_ctx: &crate::dimensions::DimensionsContext,
 ) -> HashMap<Ident<Canonical>, DepElementPin> {
+    use crate::common::CanonicalElementName;
     pinnable
         .iter()
         .filter_map(|(ident, dep_dims)| {
-            let qualify = |elems: &[Option<String>]| -> Vec<(String, String)> {
-                elems
-                    .iter()
-                    .zip(dep_dims)
-                    .filter_map(|(elem, dim)| {
-                        elem.as_ref()
-                            .map(|e| (dim.name().to_string(), qualify_axis_element(e, dim)))
-                    })
-                    .collect()
-            };
-            let subscripted = dep_axis_elements(
-                dep_dims,
-                target_dims,
-                target_elements,
-                dim_ctx,
-                DepSpelling::OwnDimSubscript,
-            );
-            let bare = dep_axis_elements(
-                dep_dims,
-                target_dims,
-                target_elements,
-                dim_ctx,
-                DepSpelling::Bare,
-            );
-            let axes = qualify(&subscripted);
-            let bare_row = bare
+            let bare = dep_axis_elements(dep_dims, target_dims, target_elements, dim_ctx);
+            let axes: Vec<Vec<(String, String)>> = dep_dims
                 .iter()
-                .all(Option::is_some)
-                .then(|| qualify(&bare).into_iter().map(|(_, elem)| elem).collect());
-            if axes.is_empty() && bare_row.is_none() {
+                .zip(&bare)
+                .map(|(dep_dim, bare_elem)| {
+                    let mut spellings: Vec<(String, String)> = bare_elem
+                        .iter()
+                        .map(|e| (dep_dim.name().to_string(), qualify_axis_element(e, dep_dim)))
+                        .collect();
+                    if target_dims.len() != target_elements.len() {
+                        return spellings;
+                    }
+                    for (target_dim, target_elem) in target_dims.iter().zip(target_elements) {
+                        // The axis's own name is the bare row's entry above, and
+                        // a repeated target dimension is the FIRST axis's read.
+                        if spellings.iter().any(|(name, _)| name == target_dim.name()) {
+                            continue;
+                        }
+                        let Some(reads) = dim_ctx.executed_read_correspondence(
+                            target_dim.canonical_name(),
+                            dep_dim.canonical_name(),
+                        ) else {
+                            continue;
+                        };
+                        let Some(idx) =
+                            target_dim.get_offset(&CanonicalElementName::from_raw(target_elem))
+                        else {
+                            continue;
+                        };
+                        if let Some(e) = reads.get(idx) {
+                            spellings.push((
+                                target_dim.name().to_string(),
+                                qualify_axis_element(e.as_str(), dep_dim),
+                            ));
+                        }
+                    }
+                    spellings
+                })
+                .collect();
+            let bare_row = bare.iter().all(Option::is_some).then(|| {
+                axes.iter()
+                    .map(|spellings| spellings[0].1.clone())
+                    .collect()
+            });
+            if axes.iter().all(Vec::is_empty) && bare_row.is_none() {
                 return None;
             }
             Some((ident.clone(), DepElementPin { axes, bare_row }))
@@ -560,9 +530,10 @@ enum IndexVerdict {
     /// No pin can spell it, because NEITHER shared row derivation
     /// ([`per_element_row_for_target`] on an `Iterated` or a `MappedRead` axis)
     /// can resolve it: a dimension the target does not iterate and no iterated
-    /// dimension is mapped to, an iterated dimension with no usable positional
-    /// correspondence to this source axis (unmapped, or a transposition), an
-    /// ambiguous mapped pairing, an index no axis owns. Left alone it keeps a
+    /// dimension is mapped to, an iterated dimension with no usable
+    /// correspondence to this source axis (an undeclared pair with disjoint
+    /// names, or a transposition), an ambiguous mapped pairing, an index no
+    /// axis owns. Left alone it keeps a
     /// DIMENSION-name subscript, which cannot resolve in a scalar fragment, so
     /// this one is LOUD -- a compilability verdict.
     Unspellable,
@@ -638,8 +609,8 @@ fn mapped_read_axis(
 ///   [`pin_bare_source_ref`] performs for a bare `Var`) and a MAPPED axis
 ///   (`effect[State, ..]` over a `Region` axis with a `State`/`Region` mapping,
 ///   either declaration direction -- GH #527 / #757) ONE arm rather than two: the
-///   derivation resolves both through `positional_correspondence`, which is the
-///   rule execution applies to an iterated-dimension index;
+///   derivation resolves both through `executed_read_correspondence`, the rule
+///   execution applies to every dimension-named index;
 /// - otherwise, an index spelling a NON-ITERATED dimension that execution pairs
 ///   with one of the target's iterated dims (`effect[Aggregated Regions, ..]`
 ///   under a `COP`-iterating target -- C-LEARN's shape, GH #997) is replaced the
@@ -668,20 +639,20 @@ fn mapped_read_axis(
 /// verdict: a dimension-name subscript that survives into a scalar fragment does
 /// not resolve, so the partial is abandoned rather than emitted.
 ///
-/// This rule used to be loud about a RUNTIME index too, conditionally on an
-/// enclosing freeze, because a bare `LOOKUP` table argument is the one place the
-/// wrap wrapped nothing -- so the index stayed live, `codegen::extract_table_info`
-/// evaluated it at the current step, and the partial isolating one source varied
-/// with another's movement. That is GH #984, and it is now fixed at the source
-/// rather than refused here: [`crate::ltm_augment::freeze_lookup_table_indices`]
-/// puts the table argument's indices through the wrap's own index pass, having
-/// first WIDENED that descent's dep set with the indices' own idents -- without
-/// which the freeze would not fire at all, since `classify_dependencies` does not
-/// walk a table expression and so reports no dependency for an index variable
+/// A RUNTIME index is not a loud verdict here, and the reason is upstream: a
+/// bare `LOOKUP` table argument is the one place the wrap would otherwise wrap
+/// nothing, leaving the index live so that `codegen::extract_table_info`
+/// evaluated it at the current step and the partial isolating one source
+/// varied with another's movement (GH #984). That is discharged at the source:
+/// [`crate::ltm_augment::freeze_lookup_table_indices`] puts the table
+/// argument's indices through the wrap's own index pass, having first WIDENED
+/// that descent's dep set with the indices' own idents -- without which the
+/// freeze would not fire at all, since `classify_dependencies` does not walk a
+/// table expression and so reports no dependency for an index variable
 /// referenced only there. A runtime index therefore arrives here already frozen
 /// (or, inside an enclosing freeze, already lagged) for ANY ident, not just one
 /// that happens to be a dependency elsewhere. One rule discharges it on every
-/// path, this rule keeps it, and the refusal plus its `frozen` plumbing are gone.
+/// path, and this rule keeps it.
 ///
 /// There is no `RefShape` here, no live-vs-frozen decision, and this can never
 /// make the reference live-selectable (the pin-only descent records no
@@ -745,9 +716,9 @@ fn pin_dimension_name_indices(
                     // The index names one of the TARGET's ITERATED dimensions, so this
                     // axis reads whatever element this target element projects onto it.
                     // WHICH element that is -- the identity for a same-named axis, the
-                    // positional correspondence for a mapped one -- is the shared row
-                    // derivation's answer, not this rule's: it declines an unmapped or
-                    // element-mapped pair, and a name-directed pin therefore accepts
+                    // executed correspondence for a foreign one -- is the shared row
+                    // derivation's answer, not this rule's: it declines an undeclared
+                    // disjoint-name pair, and a name-directed pin therefore accepts
                     // exactly the pairs the occurrence-driven one does.
                     crate::dimensions::AxisIndexName::IteratedDim => {
                         let axis = crate::ltm_agg::AxisRead::Iterated {

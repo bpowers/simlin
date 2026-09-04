@@ -11,7 +11,7 @@
 //!
 //!   cargo test -p simlin-engine --test integration -- --ignored --nocapture
 
-use simlin_engine::common::{ErrorCode, UnitError};
+use simlin_engine::common::UnitError;
 use simlin_engine::db::{
     Diagnostic, DiagnosticError, SimlinDb, collect_all_diagnostics, sync_from_datamodel_incremental,
 };
@@ -39,14 +39,9 @@ fn diag_details(d: &Diagnostic) -> String {
     }
 }
 
-/// Is this diagnostic unit-related (either a `Unit` variant or a model-level
-/// `UnitMismatch`)?
+/// Is this diagnostic unit-related?
 fn is_unit_diag(d: &Diagnostic) -> bool {
     matches!(&d.error, DiagnosticError::Unit(_))
-        || matches!(
-            &d.error,
-            DiagnosticError::Model(e) if e.code == ErrorCode::UnitMismatch
-        )
 }
 
 /// Regression guard: the C-LEARN unit-error flood (481 spurious diagnostics)

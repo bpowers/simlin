@@ -5,33 +5,209 @@
 use super::{compile_ltm_equation_fragment, scalarize_ltm_equation};
 use crate::datamodel;
 use crate::db::{
-    LtmLinkId, RefShape, ShapedLinkScore, SimlinDb, compute_layout,
-    link_score_equation_text_shaped, sync_from_datamodel,
+    LtmLinkId, RefShape, ShapedLinkScore, SimlinDb, compute_layout, shaped_link_score,
+    sync_from_datamodel,
 };
 use crate::test_common::TestProject;
 
-fn phase_sym_load_prev_names(
-    phase: &Option<crate::compiler::symbolic::PerVarBytecodes>,
-) -> Vec<&str> {
-    phase
-        .as_ref()
-        .map(|bc| {
-            bc.symbolic
-                .code
-                .iter()
-                .filter_map(|op| match op {
-                    crate::compiler::symbolic::SymbolicOpcode::SymLoadPrev { var } => {
-                        Some(var.name.as_str())
-                    }
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+/// The bare-element rule at each of the two parse boundaries, for both
+/// intrinsics. The source parse resolves `base_val[b2]` against `base_val`'s
+/// own declared axis -- XMILE 1.0 footnote 9, the element wins over a
+/// same-named variable -- so it never captures. The generated LTM parse has
+/// no declared axis to ask (its target may be a synthetic variable) and
+/// captures once a variable shadows the name
+/// (`builtins_visitor::SnapshotIndexFacts`). `b2` is declared by two
+/// dimensions at different positions, so nothing project-wide could have
+/// decided either row.
+///
+/// Both parses are the production ones: the source row is
+/// `parse_source_variable` over the synced variable, the LTM row is
+/// `parse_ltm_equation` under `ltm_model_var_names`, exactly as
+/// `model_ltm_implicit_var_info` calls it.
+#[test]
+fn a_bare_element_snapshot_captures_on_the_generated_path_only_when_shadowed() {
+    use super::{LtmEquation, ltm_model_var_names, parse_ltm_equation};
+    use crate::db::{parse_source_variable, project_dimensions_context};
+
+    let classify = |call: &str, shadowed: bool| -> (usize, usize) {
+        let mut tp = TestProject::new("bare_element_shadowing")
+            .named_dimension("DimA", &["a1", "b2"])
+            .named_dimension("DimB", &["b2", "x1"])
+            .array_aux("base_val[DimA]", "1")
+            .aux("lagged", call, None);
+        if shadowed {
+            tp = tp.aux("b2", "1", None);
+        }
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &tp.build_datamodel());
+        let model = sync.models["main"].source;
+        let source = parse_source_variable(
+            &db,
+            sync.models["main"].variables["lagged"].source,
+            sync.project,
+        );
+        let ltm = parse_ltm_equation(
+            "$\u{205A}ltm\u{205A}probe",
+            &LtmEquation::scalar(call.to_string()),
+            project_dimensions_context(&db, sync.project),
+            ltm_model_var_names(&db, model, sync.project),
+        );
+        (ltm.implicit_vars.len(), source.implicit_vars.len())
+    };
+
+    for call in ["PREVIOUS(base_val[b2], -7)", "INIT(base_val[b2])"] {
+        assert_eq!(
+            classify(call, false),
+            (0, 0),
+            "{call}: an unshadowed element is direct on both paths"
+        );
+        assert_eq!(
+            classify(call, true),
+            (1, 0),
+            "{call}: a shadowed element captures on the generated path and is direct \
+             on the source path"
+        );
+    }
 }
 
+/// An LTM helper's compiled phases are its capture kind, for both kinds, and
+/// the diagnostic predicate demands exactly those phases.
+///
+/// Today's score generator emits `PREVIOUS` captures only, so the `INIT` row
+/// is driven through `parse_ltm_equation` over a scalar `LtmEquation` built
+/// as the generator builds one; its `LtmImplicitVarMeta` carries the fields
+/// `model_ltm_implicit_var_info` computes for every scalar capture (not a
+/// module, one slot), stated here because that query cannot be handed an
+/// equation the generator does not produce.
 #[test]
-fn test_ltm_previous_module_var_uses_helper_rewrite() {
+fn ltm_capture_helpers_compile_exactly_the_phases_their_kind_demands() {
+    use salsa::Setter;
+
+    use super::compile::{compile_ltm_implicit_var_fragment, ltm_helper_phases_present};
+    use super::{LtmEquation, LtmImplicitVarMeta, ltm_model_var_names, parse_ltm_equation};
+    use crate::capture::CaptureKind;
+    use crate::db::project_dimensions_context;
+
+    let project = TestProject::new("ltm_capture_phases")
+        .aux("k", "1 + TIME", None)
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    sync.project.set_ltm_enabled(&mut db).to(true);
+    let model = sync.models["main"].source;
+
+    for (text, kind) in [
+        ("PREVIOUS(k * 2, -7)", CaptureKind::Previous),
+        ("INIT(k * 2)", CaptureKind::Init),
+    ] {
+        let parent = format!("$\u{205A}ltm\u{205A}probe\u{205A}{}", kind.as_str());
+        let parsed = parse_ltm_equation(
+            &parent,
+            &LtmEquation::scalar(text.to_string()),
+            project_dimensions_context(&db, sync.project),
+            ltm_model_var_names(&db, model, sync.project),
+        );
+        assert!(parsed.variable.diagnostics.is_empty(), "{text}");
+        let helpers: Vec<_> = parsed
+            .implicit_vars
+            .iter()
+            .filter(|helper| helper.capture().is_some())
+            .collect();
+        assert_eq!(helpers.len(), 1, "{text}: one capture");
+        assert_eq!(helpers[0].capture().unwrap().kind(), kind, "{text}");
+        let meta = LtmImplicitVarMeta {
+            ltm_parent_name: parent.clone(),
+            size: 1,
+            variable: helpers[0].clone(),
+        };
+        let mut reason = None;
+        let fragment = compile_ltm_implicit_var_fragment(
+            &db,
+            &meta,
+            model,
+            sync.project,
+            &[],
+            Some(&mut reason),
+        )
+        .unwrap_or_else(|| panic!("{text}: the helper compiles"));
+        assert!(reason.is_none(), "{text}: {reason:?}");
+        assert_eq!(
+            (
+                fragment.fragment.initial_bytecodes.is_some(),
+                fragment.fragment.flow_bytecodes.is_some(),
+                fragment.fragment.stock_bytecodes.is_some(),
+            ),
+            (kind.needs_initials(), kind.needs_flows(), false),
+            "{text}: the phases are the kind's demand"
+        );
+        assert!(ltm_helper_phases_present(&meta, Some(&fragment)));
+
+        let mut missing = fragment.clone();
+        if kind.needs_initials() {
+            missing.fragment.initial_bytecodes = None;
+        } else {
+            missing.fragment.flow_bytecodes = None;
+        }
+        assert!(
+            !ltm_helper_phases_present(&meta, Some(&missing)),
+            "{text}: a demanded phase without bytecode is a dropped helper"
+        );
+    }
+}
+
+/// The helpers the score generator actually mints -- the flow-to-stock
+/// score's nested `PREVIOUS` captures -- are flow-only: no initial fragment,
+/// since `PREVIOUS`'s fallback covers every read before the first step
+/// commits.
+#[test]
+fn generated_ltm_capture_helpers_are_flow_only() {
+    use salsa::Setter;
+
+    use super::compile::{compile_ltm_implicit_var_fragment, ltm_helper_phases_present};
+    use super::model_ltm_implicit_var_info;
+    use crate::capture::CaptureKind;
+
+    let project = TestProject::new("generated_ltm_capture_phases")
+        .stock("level", "100", &["growth"], &[], None)
+        .flow("growth", "level * rate", None)
+        .aux("rate", "0.1", None)
+        .build_datamodel();
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    sync.project.set_ltm_enabled(&mut db).to(true);
+    let model = sync.models["main"].source;
+    let info = model_ltm_implicit_var_info(&db, model, sync.project);
+    let captures: Vec<_> = info
+        .values()
+        .filter(|meta| meta.variable.capture().is_some())
+        .collect();
+    assert!(
+        !captures.is_empty(),
+        "the flow-to-stock score mints nested PREVIOUS captures"
+    );
+    for meta in captures {
+        assert_eq!(
+            meta.variable.capture().unwrap().kind(),
+            CaptureKind::Previous,
+            "the generator emits no INIT"
+        );
+        let fragment = compile_ltm_implicit_var_fragment(&db, meta, model, sync.project, &[], None)
+            .expect("the generated helper compiles");
+        assert!(fragment.fragment.initial_bytecodes.is_none());
+        assert!(fragment.fragment.flow_bytecodes.is_some());
+        assert!(ltm_helper_phases_present(meta, Some(&fragment)));
+    }
+}
+
+/// `PREVIOUS(producer)` of a bare module instance in a generated LTM equation
+/// is refused at lowering exactly as it is in a user equation
+/// (`db::prev_init_tests::module_snapshot_arguments_are_resolved_at_lowering`):
+/// an instance has no storage of its own, so a direct read would be slot zero
+/// of whichever sub-model variable the layout put first, and the LTM parse --
+/// which reads no module-ident set -- leaves the reference for lowering to
+/// refuse rather than capturing it.
+#[test]
+fn test_ltm_bare_module_snapshot_is_refused_at_lowering() {
     let project = datamodel::Project {
         name: "ltm_prev_module_regression".to_string(),
         sim_specs: datamodel::SimSpecs::default(),
@@ -83,33 +259,26 @@ fn test_ltm_previous_module_var_uses_helper_rewrite() {
     let sync = sync_from_datamodel(&db, &project);
     let source_model = sync.models["main"].source;
 
+    let mut why = None;
     let fragment = compile_ltm_equation_fragment(
         &db,
         "$⁚ltm⁚test_prev_module",
         &crate::db::LtmEquation::scalar("PREVIOUS(producer)".to_string()),
         source_model,
         sync.project,
-        None,
+        Some(&mut why),
     )
-    .expect("LTM equation should compile");
-
-    let initial_prev_names = phase_sym_load_prev_names(&fragment.fragment.initial_bytecodes);
-    let flow_prev_names = phase_sym_load_prev_names(&fragment.fragment.flow_bytecodes);
-    let stock_prev_names = phase_sym_load_prev_names(&fragment.fragment.stock_bytecodes);
+    .expect("the LTM compiler keeps a fragment whose lowering failed, for reporting");
 
     assert!(
-        initial_prev_names.is_empty(),
-        "initial phase should not use SymLoadPrev for PREVIOUS(module_var)",
+        fragment.fragment.flow_bytecodes.is_none(),
+        "PREVIOUS of a bare module instance must emit no bytecode rather than read \
+         slot zero of the instance"
     );
+    let why = why.expect("the lowering refusal must reach the LTM diagnostic channel");
     assert!(
-        flow_prev_names
-            .iter()
-            .all(|name| name.starts_with("$⁚$⁚ltm⁚test_prev_module⁚0⁚arg0")),
-        "flow phase should use SymLoadPrev only for the synthesized helper arg, got {flow_prev_names:?}",
-    );
-    assert!(
-        stock_prev_names.is_empty(),
-        "stock phase should not use SymLoadPrev for PREVIOUS(module_var)",
+        why.contains("bare module instance 'producer'"),
+        "the refusal must name the module read, got {why}"
     );
 }
 
@@ -278,7 +447,7 @@ fn test_stock_to_flow_link_score_handles_apply_to_all() {
     // output as the (deleted) legacy `(from, to)`-keyed query did.
     let link_id = LtmLinkId::new(&db, "population".to_string(), "births".to_string());
     let ShapedLinkScore::Scored { var: lsv, .. } =
-        link_score_equation_text_shaped(&db, link_id, RefShape::Bare, source_model, sync.project)
+        shaped_link_score(&db, link_id, RefShape::Bare, source_model, sync.project)
     else {
         panic!("stock-to-flow link score should be generated for arrayed model");
     };
@@ -400,7 +569,7 @@ fn test_stock_to_flow_link_score_handles_arrayed() {
     // shaped entry point with the FixedIndex shape so the arrayed equation
     // survives intact.
     let link_id = LtmLinkId::new(&db, "population".to_string(), "births".to_string());
-    let result = link_score_equation_text_shaped(
+    let result = shaped_link_score(
         &db,
         link_id,
         RefShape::FixedIndex(vec!["nyc".to_string()]),
@@ -518,7 +687,7 @@ fn link_score_quotes_a_canonical_name_that_cannot_be_bare() {
 
     // The `1stock -> inflow` edge: the guard form spells both endpoints.
     let link_id = LtmLinkId::new(&db, "1stock".to_string(), "inflow".to_string());
-    let scored = link_score_equation_text_shaped(&db, link_id, RefShape::Bare, model, sync.project);
+    let scored = shaped_link_score(&db, link_id, RefShape::Bare, model, sync.project);
     let ShapedLinkScore::Scored { var: lsv, .. } = scored else {
         panic!("the 1stock -> inflow link score should be scored, got: {scored:?}");
     };
@@ -569,8 +738,7 @@ fn link_score_quotes_every_keyword_named_source() {
         let model = sync.models["main"].source;
 
         let link_id = LtmLinkId::new(&db, keyword.to_string(), "inflow".to_string());
-        let scored =
-            link_score_equation_text_shaped(&db, link_id, RefShape::Bare, model, sync.project);
+        let scored = shaped_link_score(&db, link_id, RefShape::Bare, model, sync.project);
         let ShapedLinkScore::Scored { var: lsv, .. } = scored else {
             panic!("the {keyword} -> inflow link score should be scored, got: {scored:?}");
         };
@@ -1663,7 +1831,7 @@ fn a_dimension_name_index_is_not_frozen_when_the_axis_is_known() {
     );
 }
 
-/// `link_score_equation_text_shaped` documents that "a per-shape link score is
+/// `shaped_link_score` documents that "a per-shape link score is
 /// recomputed only when the involved variables (and their shape-classifying
 /// dimensions) change". This is that claim, measured.
 ///
@@ -1673,8 +1841,8 @@ fn a_dimension_name_index_is_not_frozen_when_the_axis_is_known() {
 /// in `db::ltm::compile` beside the query.
 ///
 /// The failure this pins is not hypothetical. Routing
-/// `reconstruct_single_variable` straight through the whole-model
-/// `reconstruct_model_variables` map -- which is what a naive "read the cached
+/// `lowered_variable_by_name` straight through the whole-model
+/// `model_lowered_variables` map -- which is what a naive "read the cached
 /// map" refactor does -- makes every link score depend on every variable's
 /// lowered form, so ONE unrelated equation edit regenerates all of them. On a
 /// model with thousands of links that is a full LTM rebuild per keystroke.
@@ -1746,17 +1914,20 @@ fn an_unrelated_equation_edit_does_not_regenerate_every_link_score() {
 /// declared over `agg` -- a dimension with DISJOINT element names and NO
 /// mapping to `cop`.
 ///
-/// It COMPILES because `cop` is the dimension the equation ITERATES, so
-/// `ast::expr3`'s Pass 1 folds the index to that dimension's ordinal and it
-/// indexes `agg`'s storage raw: `target[c1]` reads `agg`'s FIRST element, by
-/// POSITION, consulting neither names nor mappings
+/// It COMPILES because `cop` is the dimension the equation ITERATES and the two
+/// dimensions declare no correspondence at all, which is the ORDINAL last
+/// resort of `build_view_from_ops`'s `ActiveDimRef` arm: `target[c1]` reads
+/// `agg`'s FIRST element, by POSITION, neither name nor mapping having
+/// resolved it
 /// (`mapped_reference_semantics_tests`' `no_mapping_equal_cardinality` measures
 /// exactly this -- a cross-dimension read between two dimensions declared to
 /// have nothing to do with each other compiles and produces numbers).
 /// `build_view_from_ops` is never reached. The DESCRIBER declines because
-/// `allocate_implicit_axes_partial` pairs axes by name or by a DECLARED
-/// mapping and this pair has neither, so `dep_element_pins` can project no axis
-/// of `aggregated` and the dep is absent from the pin table entirely.
+/// `db::bare_axis_pairing` relates axes by name, by a DECLARED mapping, or by
+/// equal indexed size, and `DimensionsContext::executed_read_correspondence`
+/// resolves an element by name or through a map -- this pair has none of
+/// those, so `dep_element_pins` can project no axis of `aggregated` and the
+/// dep is absent from the pin table entirely.
 ///
 /// The element names are deliberately disjoint. An earlier revision used `cop`'s
 /// own names on `agg`, which made the values look name-matched when the read is
@@ -2232,9 +2403,10 @@ fn a_lookup_table_index_is_element_pinned_in_a_per_element_partial() {
 /// reads `other[region]`, where `other` is declared over `agg` -- a dimension
 /// with DISJOINT element names and no declared mapping -- so that dep has no
 /// projectable element and its dimension-name subscript would survive into the
-/// scalar partial. The read itself is POSITIONAL (`region` is the iterated
-/// dimension, folded to an ordinal by Pass 1), which is what makes an unrelated
-/// pair legal; see `an_uncoverable_arrayed_dep_declines_the_edge_loudly` for
+/// scalar partial. The read itself is POSITIONAL -- `region` and `agg` declare
+/// no correspondence, so it reaches the ordinal last resort -- which is what
+/// makes an unrelated pair legal; see
+/// `an_uncoverable_arrayed_dep_declines_the_edge_loudly` for
 /// the full mechanism and for why this shape rather than an explicit element
 /// map (GH #997 made the latter projectable). Nothing exotic: a 2-D read and an
 /// undeclared-mapping dep.
@@ -2443,7 +2615,7 @@ fn first_arm_expr(eq: &crate::db::LtmEquation) -> &std::sync::Arc<crate::ast::Ex
 }
 
 /// `model_ltm_variables` must SHARE each emitted score's parsed AST with the
-/// `link_score_equation_text_shaped` memo it came from, not deep-copy it.
+/// `shaped_link_score` memo it came from, not deep-copy it.
 ///
 /// The emission loop clones the shaped result out of the memo for every score,
 /// so before the ASTs were shared each equation was retained twice for the life
@@ -2478,8 +2650,7 @@ fn an_emitted_link_score_shares_its_ast_with_the_shaped_memo() {
         });
 
     let link_id = LtmLinkId::new(&db, "growth".to_string(), "pop".to_string());
-    let shaped =
-        link_score_equation_text_shaped(&db, link_id, RefShape::Bare, model, source_project);
+    let shaped = shaped_link_score(&db, link_id, RefShape::Bare, model, source_project);
     let ShapedLinkScore::Scored { var: memo_var, .. } = shaped else {
         panic!("the growth->pop edge must be scored; got: {shaped:?}");
     };
@@ -2496,4 +2667,109 @@ fn an_emitted_link_score_shares_its_ast_with_the_shaped_memo() {
         std::sync::Arc::ptr_eq(memo_expr, emitted_expr),
         "the emitted score must SHARE the memo's AST, not hold a deep copy"
     );
+}
+
+/// An XMILE project with a stdlib `DELAY3` whose input ramps, at the main
+/// level (`delayed = DELAY3(src, 2)`) or inside a sub-model whose `input`
+/// port is wired from the parent's `src`.
+fn delay3_ramp_project(in_submodel: bool) -> datamodel::Project {
+    let main_body = if in_submodel {
+        r#"<module name="sub"><connect to="sub.input" from="src"/></module>
+           <stock name="acc"><eqn>0</eqn><inflow>inflow</inflow></stock>
+           <flow name="inflow"><eqn>sub.delayed</eqn></flow>"#
+    } else {
+        r#"<aux name="delayed"><eqn>DELAY3(src, 2)</eqn></aux>
+           <stock name="acc"><eqn>0</eqn><inflow>inflow</inflow></stock>
+           <flow name="inflow"><eqn>delayed</eqn></flow>"#
+    };
+    let sub_model = if in_submodel {
+        r#"<model name="sub"><variables>
+             <aux name="input" access="input"><eqn>0</eqn></aux>
+             <aux name="delayed" access="output"><eqn>DELAY3(input, 2)</eqn></aux>
+           </variables></model>"#
+    } else {
+        ""
+    };
+    let source = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+  <header><vendor>test</vendor><product lang="en">test</product></header>
+  <sim_specs method="Euler" time_units="Month"><start>0</start><stop>4</stop><dt>1</dt></sim_specs>
+  <model><variables>
+    <aux name="src"><eqn>TIME + 3</eqn></aux>
+    {main_body}
+  </variables></model>
+  {sub_model}
+</xmile>"#
+    );
+    crate::compat::open_xmile(&mut source.as_bytes()).expect("the XMILE fixture imports")
+}
+
+/// The `input -> stock` link score of a `DELAY3` instance reads the bound
+/// port's two-step lag through a capture helper, at the main level and inside
+/// a sub-model alike.
+///
+/// The flow-to-stock score (`ltm_augment::generate_flow_to_stock_equation`,
+/// Schoenberg et al. 2023 Eq. 3) is
+/// `|dt * (PREVIOUS(input) - PREVIOUS(PREVIOUS(input)))| / |second difference
+/// of stock|`, zero for the first two steps. The nested lag is a capture
+/// helper (`..⁚1⁚arg0 = PREVIOUS(input, 0)`) inside the `stdlib⁚delay3`
+/// instance, whose body snapshots the instance's BOUND port `input`; lowering
+/// resolves that port to its own slot (`Context::snapshot_storage`), so the
+/// helper is `0, 3, 4, 5, 6` (the fallback, then the lagged ramp).
+///
+/// Derived from the template (`stdlib/delay3.stmx`: `stock` inflow `input`,
+/// outflow `flow_1 = stock / (delay_time / 3)`, `delay_time = 2`, so
+/// `stock(0) = 3 * 2/3 = 2`): `stock = 2, 2, 3, 3.5, 4.25`, the numerator is
+/// `1` from t=2 on (the ramp rises by 1 per step), and the second differences
+/// are `1, -0.5, 0.25`, so the score is `1, 2, 4` at t=2..4.
+///
+/// A parse that captured the port, or a lowering that could not address it,
+/// gave the helper no fragment at all -- the LTM tail appends helpers by
+/// bytecode presence, so the score silently read an unwritten 0 for the
+/// two-step lag and printed `4, 10, 24` (the numerator degenerated to the
+/// one-step-lagged ramp `4, 5, 6`) with no diagnostic. That is the
+/// silent-wrong-number class the invariant forbids, which is why the values
+/// are pinned here rather than only the helper's presence.
+#[test]
+fn delay3_input_to_stock_link_score_uses_the_two_step_lag_of_the_bound_port() {
+    for (in_submodel, prefix) in [(false, ""), (true, "sub\u{00B7}")] {
+        let project = delay3_ramp_project(in_submodel);
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &project);
+        crate::db::set_project_ltm_enabled(&mut db, sync.project, true);
+        let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
+            .expect("the DELAY3 fixture compiles under LTM");
+        let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+        vm.run_to_end().expect("runs");
+        let results = crate::test_common::collect_results(&vm.into_results());
+        let series = |name: String| -> Vec<f64> {
+            results.get(&name).cloned().unwrap_or_else(|| {
+                let candidates: Vec<&String> = results
+                    .keys()
+                    .filter(|k| k.contains("input\u{2192}stock"))
+                    .collect();
+                panic!("{name} not in results; input->stock names: {candidates:?}")
+            })
+        };
+        let score = series(format!(
+            "{prefix}$⁚delayed⁚0⁚delay3\u{00B7}$⁚ltm⁚link_score⁚input\u{2192}stock"
+        ));
+        assert_eq!(
+            score,
+            vec![0.0, 0.0, 1.0, 2.0, 4.0],
+            "in_submodel={in_submodel}: the input -> stock link score must use the \
+             two-step lag of the bound port (it was 0, 0, 4, 10, 24 when the nested \
+             lag's helper silently failed to compile)"
+        );
+        let helper = series(format!(
+            "{prefix}$⁚delayed⁚0⁚delay3\u{00B7}$⁚$⁚ltm⁚link_score⁚input\u{2192}stock⁚1⁚arg0"
+        ));
+        assert_eq!(
+            helper,
+            vec![0.0, 3.0, 4.0, 5.0, 6.0],
+            "in_submodel={in_submodel}: the nested-lag helper holds PREVIOUS(input, 0) \
+             of the bound port"
+        );
+    }
 }

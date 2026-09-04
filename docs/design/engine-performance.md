@@ -1,10 +1,10 @@
 # Engine performance: profile and optimization opportunities
 
-Status: analysis + four rounds of wins landed. Round 1 2026-05-19; round 2
-(constant folding + linear-run fast paths) 2026-06-03; round 3 2026-08-10 —
-the salsa pipeline's own redundancy on the compile side, a superinstruction
-family on the run side, and the LTM link-score arms that were being
-materialized only to evaluate to zero.
+This is the measured profile of the engine on its hero model and the record of
+the optimizations taken against it, run side and compile side. The compile
+pipeline it profiles is the one `docs/design-plans/2026-08-25-compiler-unification.md`
+describes; that plan's ledger carries the per-commit compile numbers, and
+"Measuring a change" below is the protocol every one of those rows used.
 
 This documents an empirical CPU/memory profile of **compiling and simulating the
 C-LEARN hero model** (the largest model we have: ~53k MDL lines / 1.4 MB, 934
@@ -65,6 +65,29 @@ single binary, Apple M-series) has a wider instruction-channel floor: 0.13%
 across nine identical-binary runs, so a compile delta under ~0.15% is
 unresolved there and needs interleaved A/B pairs with every run on one side
 landing on one side of every run on the other.
+
+**A compile change is measured on four channels, and an LTM-touching one on
+five.** (1) The compile channel above, plain. (2) The same under `CLEARN_LTM=1`
+(`CLEARN_COMPILE_ITERS=2` where the LTM compile is long): a change to the
+LTM generators or their lowering shows there and nowhere else. (3) The
+artifact: `CompiledSimulation::bytecode_profile()` on C-LEARN, plain and under
+`CLEARN_LTM=1`, byte-identical or every count that moved explained (the
+compiler-unification ledger's artifact column). (4) The differential CLI
+sweep: the base and the tree `simlin simulate` over every model under `test/`,
+once plain and once with `--ltm`, diffing stdout and stderr; a model refused on
+one side only is a finding, a mover is either a named divergence or one of the
+GH #859 importer flippers (`arrays_cname`, `arrays_varname`,
+`subscript_transposition` alternate between two outputs on BOTH binaries, so
+a flipper is separated from a mover by resampling each binary several times).
+The sweep's stderr is also the diagnostics corpus: the rows counted per
+`(model, variable, code)` and per code, so a diagnostics change is measured as
+which rows moved rather than as a row count. (5) When the change touches
+dependency classification, runlists, run-invariance or the causal edges, the
+sweep cannot see a changed runlist order that happens to produce the same
+numbers, so the per-model runlists, cycle verdict, resolved SCCs,
+dependency-graph edge multiset, run-invariant prefix length and (LTM on, both
+modes) LTM variable set and detected loops are dumped on both trees and
+diffed.
 
 So a few-percent effect is resolved by one build pair on the instruction
 channel and is **not** resolvable on the cycles channel without a deliberate
@@ -417,7 +440,7 @@ deterministic. Folding also cascades into deeper 3-address fusion
 "no sparse mappings, strides are row-major for the current dims", i.e.
 `is_contiguous` minus the `offset == 0` requirement -- keys three fast paths:
 `offset_for_iter_index` (direct `start + k`), the `BeginIter` precompute
-decision (offset slices no longer precompute a `Vec` of offsets), and a
+decision (offset slices skip the precomputed `Vec` of offsets), and a
 slice-fold fast path in `reduce_view` (same row-major order, bit-identical
 reductions). `vector_elm_map` (168 sites on C-LEARN, the largest
 `flat_offset` caller at ~4% of the run) hoists the offset view's addressing
@@ -554,49 +577,27 @@ remains a UX problem after the build levers (it matters for the salsa
 
 ### C1. Arena-allocate the transient parse AST — NOT the dominant allocator
 
-Re-measured after compile round 3: the parser is no longer where the
-allocations are. Per cold C-LEARN compile, `Expr0::clone` accounts for 212,184
+The parser is not where the allocations are. Per cold C-LEARN compile, `Expr0::clone` accounts for 212,184
 allocations (3.4% of compile instructions) and the `Expr0`/`Expr2`/`Expr3` drop
 glue for ~7% — so an arena is worth ~10% for a large, medium-risk change, and
 the top allocation site is not the parser at all but `Compiler::intern_name`
-(320,650 allocations per compile, ~10% of all 3.24M; see C5). The original
-figure below (3.86M transient allocations) predates the salsa pipeline and no
-longer describes the code.
+(320,650 allocations per compile, ~10% of all 3.24M; see C5). The constraint
+an arena would have to respect: the salsa-cached parse result must be owned,
+so an arena can only back the transient parse -> lower step.
 
-### C1. Arena-allocate the transient parse AST
+### C2. `reconstruct_variable` — does not exist
 
-The equation parser builds `Expr0` with `Box` children + `Vec` args — 3.86M+
-transient heap allocations, all lowered to `VariableStage0` and dropped.
-Allocating the AST in a per-parse arena (a `bumpalo`-style bump allocator; the
-engine carries no such dependency) would turn these into pointer bumps. The constraint: the salsa-cached result
-(`ParsedVariableResult`) must be owned/`'static`, so the arena can only back the
-transient parse→lower step, with the cached value being the owned lowered form.
-Much of this benefit is captured more cheaply by mimalloc (B); pursue the arena
-only if profiling after B still shows the parser as a hotspot.
-
-- Effort: large (thread an arena through the parser; verify nothing cached
-  retains an arena reference). Risk: medium.
-
-### C2. Halve `reconstruct_variable` — MOOT
-
-`reconstruct_variable` is now the salsa-cached `reconstruct_model_variables`,
-and every caller is on the LTM / analysis / patch path; it does not appear in
-an ordinary compile profile at all. The 2x duplication that WAS real, and is
-fixed, was a different function: `variable_dimensions` demanded the per-variable
-parse under an empty `ModuleIdentContext`, a cache key nothing else used, so
-every variable was parsed twice per compile.
-
-### C2. Halve `reconstruct_variable` (6.4% of compile)
-
-`reconstruct_variable` rebuilds a full `datamodel::Variable` (ident/equation/
-inflows/outflows/compat clones) and is called ~2× per variable: once in the
-per-variable parse, and once in `module_ident_context_for_model` →
-`collect_module_idents`. The latter only needs each variable's `(ident, kind,
-is-module-call)` — a lighter projection straight from `SourceVariable` would
-avoid ~half the full reconstructions (and their clones).
-
-- Effort: medium. Risk: low–medium (changes the `collect_module_idents` input
-  type; behavior must stay identical).
+The baseline's `reconstruct_variable` (6.4% of a cold compile, called about
+twice per variable to rebuild a `datamodel::Variable`) has no successor on the
+compile path: a variable is parsed once from a borrowed `VariableSource` over
+the salsa inputs and lowered once into a per-variable memo
+(`db::lowered_source_variable`), and the whole-model consumers -- the unit
+pass, the LTM describers, the layout -- read a map of handles to those memos
+(`db::model_lowered_variables`). What that costs and saves is in the
+compiler-unification ledger (rows 4, 8.2+8.3, 8.3b and 8.5: LTM compile -3.12%,
+-1.07% and -1.63%; plain compile-only residency +6.0 MiB at 8.5 -- 28.97 MiB
+against the pre-memo 22.94 -- for a caller that never runs the unit pass the
+memos serve).
 
 ### C3. `canonicalize` — the lever is call elimination, not a faster slow path
 
@@ -623,53 +624,35 @@ about the separators the engine itself mints (`·` in every `submodel·var`
 ident), which is answered from a three-character list rather than the Unicode
 case tables.
 
-### C3. `canonicalize` ASCII fast-path + ident interning
+### Compile round 3: the salsa pipeline's own keying
 
-6.1M `to_lowercase` calls; ~4.6M are the `canonicalize` slow path (Vensim names
-have spaces/capitals so they don't hit the alloc-free fast path). Two levers:
-(a) lowercase ASCII in place into the output buffer instead of allocating a
-per-part intermediate `String` (careful: keep Unicode correctness — the function
-has extensive idempotence tests, #559); (b) **intern** canonical idents so
-repeated canonicalization of the same name is a hashmap hit rather than a
-re-derivation. (b) is broader but touches many call sites.
-
-- Effort: (a) small/careful, (b) medium–large. Risk: (a) medium (correctness-
-  critical function), (b) medium.
-
-### Compile round 3 (2026-08-10): the salsa pipeline's own redundancy
-
-Cold C-LEARN compile 2.119G -> 1.602G retired instructions, **−24.4%**, and a
-warm single-equation edit **−47%** (median wall 38 ms -> 4.3 ms). Every change
-is artifact-identical: 5215 slots, 58291 opcodes (31525 flow + 1477 stock +
-25289 initial), same literal / GF / temp / dimension / view / name / module
-counts. Measured as retired instructions throughout, because the machine was
-contended and the cycles channel cannot resolve effects this size there.
-
-What the round found, stated as the standing shape of the problem rather than
-as five fixes: **the cold compile's redundancy was in the salsa layer's own
-keying, not in the compiler.** Four of the five were a query being asked a
-question it had already answered, under a key that did not say so.
-
-| what | mechanism | share of cold compile |
-|---|---|---|
-| `is_dimension_name` | re-canonicalized every declared dimension name per call | −5.0% |
-| `variable_dimensions` | demanded the parse under an empty `ModuleIdentContext` -> every variable parsed twice | −3.5% |
-| `compile_implicit_var_fragment` | not tracked: every SMOOTH/DELAY/TREND helper recompiled per assembly | −12% cold, **−28% of a warm edit** |
-| `var_phase_symbolic_fragment_prod` | not tracked: cycle gate built 135 fragments per compile for 57 distinct keys | −14.3% |
-| topo-sort probe maps, `changes_when_lowercased` | SipHash and Unicode tables on the engine's own idents | −1.8%, −2.4% |
+Cold C-LEARN compile 2.119G -> 1.602G retired instructions (-24.4%) and a warm
+single-equation edit -47% (median wall 38 ms -> 4.3 ms), artifact-identical
+throughout (5215 slots, 58291 opcodes), measured as retired instructions
+because the machine was contended. Every one of the five removals was a query
+answering a question it had already answered under a key that did not say so:
+an un-keyed per-helper compile (-12% cold, -28% of a warm edit), an un-keyed
+cycle-gate fragment probe (-14.3%), a parse demanded under a second context
+(-3.5%), dimension names re-canonicalized per call (-5.0%), and SipHash and
+Unicode case tables over the engine's own idents (-1.8%, -2.4%). The
+compiler-unification ledger continues the cold-compile series from there:
+10.788 G at its baseline (a whole-process measurement with
+`CLEARN_COMPILE_ITERS=5`) to 6.9521 G at `engine: ltm describes the executed read`.
 
 Two constraints follow, and both are cheap to violate:
 
 - **A per-variable helper needs a per-variable key.** The two biggest wins were
   functions whose comment said salsa already cached them, because their *parse*
-  was cached. Lowering and codegen are the expensive half and were not. When
-  adding a per-variable compiler, the question is not "is something upstream
-  memoized" but "does this function have a key of its own".
-- **A projection is what keeps a per-variable query per-variable.** Both new
+  was cached. Lowering and codegen are the expensive half. When adding a
+  per-variable compiler, the question is not "is something upstream memoized"
+  but "does this function have a key of its own".
+- **A projection is what keeps a per-variable query per-variable.** The keyed
   queries read a three-bit `RunlistMembership` rather than the whole
   `ModelDepGraphResult`; taking the whole result would re-execute every
   fragment whenever any variable's dependencies moved, silently restoring the
-  coarseness the key was introduced to remove.
+  coarseness the key was introduced to remove. `db::exec_probe::ProbedDb`
+  counts every tracked query's body executions over an edit, and is how each
+  projection's worth is measured rather than assumed.
 
 ### C4. Parallel fan-out of per-variable fragment compilation — designed and measured, NOT implemented
 
@@ -764,30 +747,17 @@ edit now costs 40.6M instructions and its profile is almost entirely salsa's
 own `maybe_changed_after` verification plus the lexer re-reading the one edited
 equation, which is what proportional looks like.
 
-**What still costs a full recompile: an edit that changes the dependency
-structure.** Measured at 1.798G instructions -- 85% of a cold compile -- and it
-decomposes as:
-
-| | calls | Ir | share |
-|---|---:|---:|---:|
-| `compile_var_fragment` | **911** of ~955 | 402M | 22% |
-| `model_dependency_graph` | 1 | 565M | 31% |
-| ...of which `resolve_recurrence_sccs` | 2 | 245M | 14% |
-| `compile_implicit_var_fragment` | **651** (all) | 233M | 13% |
-
-Nearly every fragment in the model recompiles, which the per-variable keys
-should have prevented. The reason is already written down one level away, on
-`model_implicit_var_by_name`: a structural edit can change the model's implicit
-helper set, `model_module_ident_context` is an INTERNED handle whose id changes
-when that set grows, and a new key cannot backdate at all -- so every variable's
-parse is re-keyed and every fragment behind it recompiles. The bound is pinned
-by `implicit_helper_add_is_tight_but_module_helper_add_is_not`, which asserts
-exactly this asymmetry.
-
-So the next lever for interactive latency is **not** the dependency graph and
-not the fragment compilers: it is the granularity of the module-ident context's
-interning, which is GH #372's context-stable naming. Anything else attacks the
-22% and 13% rows while leaving the mechanism that produced them in place.
+**A structure-changing edit.** Under the `(variable, project)` parse key
+(`parse_source_variable` reads nothing of the owning model) a
+module-instantiating add recompiles the added variable, the template's first
+instance and the input source whose initials membership changed, and nothing
+else (`db::fragment_char_tests::implicit_helper_add_is_tight_for_plain_and_module_helpers`,
+`module_helper_add_reparses_only_the_added_variable`, both measured over every
+tracked query with `db::exec_probe`); an equation-text edit recompiles the
+edited variable alone (`equation_only_edit_recompiles_only_the_edited_fragment`).
+What a structural edit costs in retired instructions under that key is not
+profiled; the execution-count tests say what recompiles, and no instruction
+count does.
 
 ### C5. `Compiler::intern_name` — the top allocation site, blocked on artifact identity
 
@@ -830,19 +800,18 @@ short of it rather than taking a ~2-3%.
    `PREVIOUS`-heavy forms pay most: post-fusion flow opcodes −44.3%, retired
    instructions −28.3% on C-LEARN and −33.6% on WORLD3-03. An instruction/branch
    win, not a predictor win.
-6. ~~**C2 / C3**~~ — answered, and not as proposed: C2 is moot (the function
-   is salsa-cached and off the ordinary compile path) and C3's two halves are
-   already done or the wrong lever. The compile round 3 section above records
-   what the profile actually pointed at, and what it cost.
+6. ~~**C2 / C3**~~ — answered, and not as proposed: C2's function does not
+   exist (the per-variable lowering memo took its place) and C3's two halves
+   are already done or the wrong lever. The compile round 3 section above
+   records what the profile pointed at, and what it cost.
 7. **C4 (parallel fan-out)** — the largest remaining compile lever and the only
    one that needs a design rather than a fix. Read its two hazards before
    starting; both are silent, and one is a process abort.
 8. **C5 (`Compiler::intern_name`)** — the top allocation site, blocked on
    `NameId` assignment order being part of the compiled artifact.
-9. **C6's residual** — the remaining interactive lever, and it is GH #372's
-   context-stable helper naming rather than anything in the compile path: a
-   structural edit re-keys `model_module_ident_context`, and a new interned key
-   cannot backdate, so every fragment behind it recompiles.
+9. **C6's residual** — a profile of the structural edit under the
+   `(variable, project)` parse key; the execution-count tests say what
+   recompiles, and no instruction count does.
 10. **LTM link-score arms** — the dominant cost of an LTM-enabled run on an
     arrayed model, and mostly a generation question rather than a VM one. An
     arm whose ceteris-paribus partial is *provably* `PREVIOUS(target)` is

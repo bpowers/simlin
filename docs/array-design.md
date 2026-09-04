@@ -26,13 +26,17 @@ Array expressions go through a multi-phase compilation pipeline:
    - Expands bare array references to explicit subscripts
    - Normalizes wildcards (e.g., `*` to `dim.*`)
    - Ensures all Var references can be treated as scalars in later phases
-4. **Pass 1 (Expr2 -> Expr3)**: Generates temp array assignments
-   - Creates `AssignTemp` expressions for complex array builtin arguments
-   - Handles expressions that don't need A2A-element-specific behavior
+4. **Expr3 lowering (Expr2 -> Expr3)**: Structural, no temps
+   - Resolves every wildcard to an explicit star range
+   - Gives every bare array reference its subscripts
 5. **Compiler (Expr3 -> Expr)**: Creates optimized expressions
    - Resolves static subscripts into `ArrayView` instances
-   - Generates `StaticSubscript`, `TempArray`, `TempArrayElement` expressions
-6. **Bytecode Generation**: Emits VM opcodes
+   - Generates `StaticSubscript` expressions
+6. **Materialization (`compiler::array_operand`)**: the one pass that moves an
+   array value into a temp -- the array-producing builtins, the per-element
+   arrayed-GF applies, and the computed array operands -- so codegen only ever
+   sees views. Generates `AssignTemp`, `TempArray`, `TempArrayElement`
+7. **Bytecode Generation**: Emits VM opcodes
    - View stack operations for array access
    - Iteration loops for element-wise operations
    - Reduction opcodes for array builtins

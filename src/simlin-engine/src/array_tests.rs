@@ -4634,8 +4634,8 @@ TIME STEP = 1 ~~|
     }
 }
 
-/// Regression tests for GH #580 Bug A: when `make_temp_arg` lifts a per-element
-/// scalar helper out of an `INITIAL(...)`-wrapped apply-to-all parent, a
+/// Regression tests for GH #580 Bug A: when `hoist_capture` lifts a per-element
+/// scalar capture out of an `INITIAL(...)`-wrapped apply-to-all parent, a
 /// cross-dimension subscript that is related by a *group* (unequal-cardinality)
 /// mapping must still be translated to a concrete element. Before the fix the
 /// bare full-dimension subscript survived into a scalar helper aux, lowering to
@@ -4707,32 +4707,32 @@ TIME STEP = 1 ~~|
         }
     }
 
-    /// Part B (loud-safe companion -- AC7.5 / "no silent miscompile"): when a
-    /// helper lifted out of an `INITIAL(...)`-wrapped A2A parent references a
+    /// Part B (loud-safe companion -- AC7.5 / "no silent miscompile"): when
+    /// the capture of an `INITIAL(...)`-wrapped A2A parent references a
     /// dimension that genuinely has *no* mapping to the parent dimension, the
-    /// cross-dimension subscript cannot be element-resolved and lowers to
-    /// `DimensionInScalarContext`. `lower_variable` then discards the helper's
-    /// AST; without the post-lower re-check in `lower_implicit_var` the helper
-    /// would carry an `ast == None` that `Var::new` later rejects as
-    /// `EmptyEquation`. Either way the residual must surface as a **clean,
-    /// named error** -- the failing compile `Err` must name the specific
-    /// `$⁚out⁚…⁚arg0⁚…` helper -- never a silent all-`None` fragment that reads
-    /// a wrong value. (Surfacing the residual through the per-variable
-    /// diagnostic API rather than only the aggregate `Err` is a separate,
-    /// pre-existing concern tracked as GH #466.)
+    /// compiler refuses the capture's apply-to-all body exactly as it refuses
+    /// `out[Big] = oth[Other]`: `MismatchedDimensions`. The residual must
+    /// surface as a **clean, named error** -- the failing compile `Err` names
+    /// the `$⁚out⁚0⁚arg0` capture, and the diagnostics carry the refusal on
+    /// the PARENT with the plain equation's code -- never a silent all-`None`
+    /// fragment that reads a wrong value.
     #[test]
     fn unresolvable_helper_fails_loudly_not_silently() {
-        use crate::db::{compile_project_incremental, sync_from_datamodel_incremental};
+        use crate::common::ErrorCode;
+        use crate::db::{
+            DiagnosticError, collect_all_diagnostics, compile_project_incremental,
+            sync_from_datamodel_incremental,
+        };
 
-        // `Other` has NO mapping to `Big`, so `out[Big] = INITIAL(other[Other])`
-        // cannot translate the bare `[other]` subscript per `Big` element. This
+        // `Other` has NO mapping to `Big`, so `out[Big] = INITIAL(oth[Other])`
+        // cannot translate the bare `[Other]` subscript per `Big` element. This
         // is the residual shape Part A does NOT resolve (no mapping exists).
         let mdl = "\
 {UTF-8}
 Big: e1, e2, e3, e4 ~~|
 Other: o1, o2 ~~|
-other[Other] = 1, 2 ~~|
-out[Big] = INITIAL(other[Other]) ~~|
+oth[Other] = 1, 2 ~~|
+out[Big] = INITIAL(oth[Other]) ~~|
 INITIAL TIME = 0 ~~|
 FINAL TIME = 1 ~~|
 SAVEPER = 1 ~~|
@@ -4750,9 +4750,22 @@ TIME STEP = 1 ~~|
         // not be a silent miscompile into a wrong value or an opaque generic
         // error with no offending variable.
         assert!(
-            msg.contains("⁚out⁚") && msg.contains("⁚arg0⁚"),
-            "the compile Err must name the offending `$⁚out⁚…⁚arg0⁚…` helper \
+            msg.contains("⁚out⁚") && msg.contains("⁚arg0"),
+            "the compile Err must name the offending `$⁚out⁚0⁚arg0` capture \
              (loud, actionable -- AC7.5); got: {msg}"
+        );
+        let on_parent: Vec<ErrorCode> = collect_all_diagnostics(&db, sync.project)
+            .iter()
+            .filter(|d| d.variable.as_deref() == Some("out"))
+            .filter_map(|d| match &d.error {
+                DiagnosticError::Equation(e) => Some(e.code),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            on_parent,
+            [ErrorCode::MismatchedDimensions],
+            "the refusal is the parent's equation error, with the plain equation's code"
         );
     }
 }
@@ -5294,7 +5307,7 @@ mod cross_module_array_reference_tests {
     /// resolve the wildcard.
     ///
     /// It did not, so `SUM(m.arr[*])` -- the ordinary way to reduce over a
-    /// sub-model's arrayed output, and the shape `db::stages_tests`'
+    /// sub-model's arrayed output, and the shape `db::units_tests`'
     /// `arrayed_module_project` fixture is built from -- was rejected as
     /// `CantSubscriptScalar` and the whole variable failed to compile. That
     /// fixture never noticed because it stops at Stage1 lowering, which uses

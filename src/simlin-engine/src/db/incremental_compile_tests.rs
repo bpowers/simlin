@@ -953,7 +953,7 @@ fn test_circular_dependency_blocks_incremental_compilation() {
         sync.project,
         ModuleInputSet::empty(&db),
     );
-    assert!(dep_graph.has_cycle, "should detect circular dependency");
+    assert!(dep_graph.has_cycle(), "should detect circular dependency");
 
     let result = assemble_simulation(&db, sync.project, "main".to_string());
     assert!(
@@ -1123,13 +1123,13 @@ fn test_sparse_per_element_gfs_preserve_table_indices() {
     let sync = sync_from_datamodel(&db, &project);
     let var = sync.models["main"].variables["lookup_var"].source;
 
-    // extract_tables_from_source_var must produce exactly 3 tables (one per
+    // variable_tables must produce exactly 3 tables (one per
     // element), including an empty placeholder for element B. The dimension is
     // declared in sorted order (A, B, C), so the element-name -> dimension-index
     // mapping is the identity here: index i holds element i's table. This pins
     // the table CONTENT per slot (not just count/emptiness), so the
     // per-element-GF mapping fix must be byte-identical for sorted order.
-    let tables = extract_tables_from_source_var(&db, &var, sync.project);
+    let tables = variable_tables(&db, var, sync.project).clone();
     assert_eq!(
         tables.len(),
         3,

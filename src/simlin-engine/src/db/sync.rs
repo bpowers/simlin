@@ -247,7 +247,7 @@ pub(crate) fn build_stdlib_models(db: &SimlinDb) -> StdlibModels {
         let mut source_var_map = HashMap::new();
         for dm_var in &dm_model.variables {
             let canonical_var_name = canonicalize(dm_var.get_ident()).into_owned();
-            let source_var = source_variable_from_datamodel(db, dm_var);
+            let source_var = source_variable_from_datamodel(db, dm_var, &canonical);
             source_var_map.insert(canonical_var_name.clone(), source_var);
             variables.insert(canonical_var_name, PersistentVariableState { source_var });
         }
@@ -301,7 +301,7 @@ pub fn sync_from_datamodel(db: &SimlinDb, project: &datamodel::Project) -> SyncR
         for dm_var in &dm_model.variables {
             let canonical_var_name = canonicalize(dm_var.get_ident()).into_owned();
 
-            let source_var = source_variable_from_datamodel(db, dm_var);
+            let source_var = source_variable_from_datamodel(db, dm_var, &canonical_model_name);
             source_var_map.insert(canonical_var_name.clone(), source_var);
 
             variables.insert(canonical_var_name, SyncedVariable { source: source_var });
@@ -391,15 +391,17 @@ struct SourceVariableFields {
     outflows: Vec<String>,
     module_refs: Vec<datamodel::ModuleReference>,
     /// A `Module` variable's referenced target model; empty for every other
-    /// kind (NOT the owning model -- see `enclosing_macro_for_var`).
+    /// kind (NOT the owning model, which is `owner_model`).
     referenced_model_name: String,
+    /// The canonical name of the model the variable belongs to.
+    owner_model: String,
     non_negative: bool,
     can_be_module_input: bool,
     compat: datamodel::Compat,
 }
 
 impl SourceVariableFields {
-    fn from_datamodel(var: &datamodel::Variable) -> Self {
+    fn from_datamodel(var: &datamodel::Variable, owner_model: &str) -> Self {
         let (inflows, outflows) = match var {
             datamodel::Variable::Stock(s) => (s.inflows.clone(), s.outflows.clone()),
             _ => (Vec::new(), Vec::new()),
@@ -425,6 +427,7 @@ impl SourceVariableFields {
             outflows,
             module_refs,
             referenced_model_name,
+            owner_model: owner_model.to_string(),
             // Only a stock and a flow carry the non-negativity flag.
             non_negative: match var {
                 datamodel::Variable::Stock(s) => s.compat.non_negative,
@@ -442,8 +445,12 @@ impl SourceVariableFields {
     }
 }
 
-fn source_variable_from_datamodel(db: &SimlinDb, var: &datamodel::Variable) -> SourceVariable {
-    let f = SourceVariableFields::from_datamodel(var);
+fn source_variable_from_datamodel(
+    db: &SimlinDb,
+    var: &datamodel::Variable,
+    owner_model: &str,
+) -> SourceVariable {
+    let f = SourceVariableFields::from_datamodel(var, owner_model);
     SourceVariable::new(
         db,
         f.ident,
@@ -455,6 +462,7 @@ fn source_variable_from_datamodel(db: &SimlinDb, var: &datamodel::Variable) -> S
         f.outflows,
         f.module_refs,
         f.referenced_model_name,
+        f.owner_model,
         f.non_negative,
         f.can_be_module_input,
         f.compat,
@@ -474,10 +482,11 @@ fn update_source_variable(
     db: &mut SimlinDb,
     source_var: SourceVariable,
     dm_var: &datamodel::Variable,
+    owner_model: &str,
 ) {
     use salsa::Setter;
 
-    let f = SourceVariableFields::from_datamodel(dm_var);
+    let f = SourceVariableFields::from_datamodel(dm_var, owner_model);
 
     if *source_var.ident(&*db) != f.ident {
         source_var.set_ident(db).to(f.ident);
@@ -505,6 +514,9 @@ fn update_source_variable(
     }
     if *source_var.model_name(&*db) != f.referenced_model_name {
         source_var.set_model_name(db).to(f.referenced_model_name);
+    }
+    if *source_var.owner_model(&*db) != f.owner_model {
+        source_var.set_owner_model(db).to(f.owner_model);
     }
     if source_var.non_negative(&*db) != f.non_negative {
         source_var.set_non_negative(db).to(f.non_negative);
@@ -616,13 +628,14 @@ pub fn sync_from_datamodel_incremental(
 
                 if let Some(prev_var) = prev_model.variables.get(&canonical_var_name) {
                     let source_var = prev_var.source_var;
-                    update_source_variable(db, source_var, dm_var);
+                    update_source_variable(db, source_var, dm_var, &canonical_model_name);
                     source_var_map.insert(canonical_var_name.clone(), source_var);
 
                     new_vars.insert(canonical_var_name, PersistentVariableState { source_var });
                 } else {
                     // New variable
-                    let source_var = source_variable_from_datamodel(&*db, dm_var);
+                    let source_var =
+                        source_variable_from_datamodel(&*db, dm_var, &canonical_model_name);
                     source_var_map.insert(canonical_var_name.clone(), source_var);
 
                     new_vars.insert(canonical_var_name, PersistentVariableState { source_var });
@@ -662,7 +675,8 @@ pub fn sync_from_datamodel_incremental(
 
             for dm_var in &dm_model.variables {
                 let canonical_var_name = canonicalize(dm_var.get_ident()).into_owned();
-                let source_var = source_variable_from_datamodel(&*db, dm_var);
+                let source_var =
+                    source_variable_from_datamodel(&*db, dm_var, &canonical_model_name);
                 source_var_map.insert(canonical_var_name.clone(), source_var);
 
                 new_vars.insert(canonical_var_name, PersistentVariableState { source_var });

@@ -7,7 +7,7 @@
 //!
 //! This is the emission side of the LTM pipeline: the per-link salsa
 //! fragment (`compile_ltm_var_fragment`), the shape-aware link-score
-//! equation-text query (`link_score_equation_text_shaped`), the two LTM
+//! equation-text query (`shaped_link_score`), the two LTM
 //! constructors of `compiler::fragment::FragmentInput` (`ltm_fragment_input`
 //! for a synthetic variable, `ltm_implicit_fragment_input` for a helper its
 //! parse synthesized) with the emitters over them
@@ -19,25 +19,21 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::canonicalize;
 use crate::common::{Canonical, Ident, IdentMap};
-use crate::datamodel;
 
 use crate::compiler::fragment::{DepShape, FragmentInput, lower_fragment};
 use crate::db::var_fragment::{
-    dep_head, dimensions_named, implicit_dep_shape, is_implicit_global, source_dep_shape,
+    dimensions_named, is_implicit_global, model_dep_shape, source_dep_shape,
 };
 use crate::db::{
-    Db, LtmLinkId, LtmSyntheticVar, RefShape, SourceModel, SourceProject, SourceVariableKind,
-    VarFragmentResult, build_module_inputs, canonical_module_input_set,
-    compile_phase_to_per_var_bytecodes, extract_tables_from_source_var, model_implicit_var_info,
-    model_module_ident_context, module_dep_shape, module_input_prefix,
-    parse_source_variable_with_module_context, project_converted_dimensions,
-    project_dimensions_context, project_units_context, reconstruct_single_variable,
-    variable_dimensions,
+    Db, Diagnostic, DiagnosticError, LtmLinkId, LtmSyntheticVar, RefShape, SourceModel,
+    SourceProject, VarFragmentResult, canonical_module_input_set,
+    compile_phase_to_per_var_bytecodes, lowered_variable_by_name, project_converted_dimensions,
+    project_dimensions_context, variable_tables,
 };
 
 use super::parse::{parse_ltm_equation, scalarize_ltm_equation};
 use super::{
-    LtmEquation, LtmImplicitVarMeta, ltm_module_idents, model_ltm_implicit_var_info,
+    LtmEquation, LtmImplicitVarMeta, endpoint_dimensions, model_ltm_implicit_var_info,
     model_ltm_var_name_index, model_ltm_variables,
 };
 
@@ -52,23 +48,19 @@ use super::{
 /// LTM equations are pure scalar aux equations that may reference:
 /// - Model variables (stocks, flows, auxes) from the parent model
 /// - Other LTM variables (loop scores referencing link scores)
-/// - Implicit helper/module variables created during parsing
+/// - PREVIOUS/INIT capture helpers created while parsing an LTM equation
 /// - Implicit time/dt/initial_time/final_time variables
 ///
-/// Parsed LTM equations may synthesize helper auxes for PREVIOUS/INIT
-/// and may also expand stdlib module calls, so those implicit vars need
-/// to be handled the same way as in `compile_var_fragment`.
+/// Parsed LTM equations may synthesize helper auxes for PREVIOUS/INIT, so
+/// those helpers are handled the same way as in `compile_var_fragment`.
 ///
-/// The equation is sourced from the per-shape query
-/// [`link_score_equation_text_shaped`] with the `Bare` shape -- the SAME query
-/// `model_ltm_variables` emits and reports the standard scalar Bare score from
-/// -- so the compiled fragment and the reported/serialized equation are
-/// single-sourced and cannot drift. (The former `(from, to)`-keyed
-/// `link_score_equation_text` query was a second derivation of the same score;
-/// it passed an empty dims context and `dim_ctx=None`, which the prior stage
-/// had to re-align occurrence-stream-by-occurrence-stream to keep byte-identical
-/// -- routing through the shaped twin retires that parallel derivation
-/// entirely.) This fragment stays keyed by `(from, to)` for per-link
+/// The equation is sourced from the per-shape query [`shaped_link_score`]
+/// with the `Bare` shape -- the SAME query `model_ltm_variables` emits and
+/// reports the standard scalar Bare score from -- so the compiled fragment
+/// and the reported/serialized equation are single-sourced and cannot drift;
+/// a second `(from, to)`-keyed derivation of the same score would have to
+/// reproduce that query's dimension context and occurrence stream exactly,
+/// so there is none. This fragment stays keyed by `(from, to)` for per-link
 /// incrementality; the shaped query is keyed by `(from, to, Bare)`, so an edit
 /// to an unrelated edge backdates both and this fragment's bytecode is reused.
 ///
@@ -99,7 +91,7 @@ pub fn compile_ltm_var_fragment(
     );
 
     let ShapedLinkScore::Scored { var: lsv, .. } =
-        link_score_equation_text_shaped(db, link_id, RefShape::Bare, model, project)
+        shaped_link_score(db, link_id, RefShape::Bare, model, project)
     else {
         return None;
     };
@@ -108,15 +100,16 @@ pub fn compile_ltm_var_fragment(
     compile_ltm_equation_fragment(db, &lsv.name, &equation, model, project, None)
 }
 
-// How many times `link_score_equation_text_shaped`'s body has run on this
+// How many times `shaped_link_score`'s body has run on this
 // thread (test-only).
 //
 // The query documents a per-involved-variable incrementality claim, and only a
 // body-entry count can check it: salsa BACKDATES a re-executed query whose
 // value compares equal, so the memo neither moves nor changes and pointer
-// equality reads identical whether the body ran or not. Thread-local for the
-// same reasons `db::stages`' counters are -- see the note there, including the
-// warning about what happens if this subtree is ever parallelized.
+// equality reads identical whether the body ran or not. Thread-local so a
+// parallel test run cannot charge one test's queries to another; the bump
+// happens INSIDE the body, on whatever thread salsa ran it, so parallelizing
+// this subtree means moving the counter to a shared atomic in the same change.
 #[cfg(test)]
 thread_local! {
     static SHAPED_LINK_SCORE_EXECUTIONS: std::cell::Cell<usize> = const {
@@ -137,7 +130,7 @@ pub(crate) fn shaped_link_score_executions() -> usize {
     SHAPED_LINK_SCORE_EXECUTIONS.with(|c| c.get())
 }
 
-/// Outcome of [`link_score_equation_text_shaped`] for one
+/// Outcome of [`shaped_link_score`] for one
 /// `(from, to, shape)` tuple.
 ///
 /// The shaped equation-text query has three distinct terminal states that
@@ -151,12 +144,13 @@ pub(crate) fn shaped_link_score_executions() -> usize {
 ///   built; emit it.
 /// - [`Unscoreable`](ShapedLinkScore::Unscoreable) -- a
 ///   [`PartialEquationError`](crate::ltm_augment::PartialEquationError)
-///   (the GH #311 parse class, the GH #526/T7 both-legs-doomed
-///   mismatched-dep class, or the GH #779 bare-reducer-feeder decline)
-///   made this `(from, to)` edge unscoreable. The
-///   loud `Warning` was already accumulated by the query; the caller MUST
-///   record the edge in `unscoreable_edges` so loop scores traversing it
-///   are DROPPED (the #758 contract), not stubbed.
+///   (the GH #311 parse class, or the GH #526/T7 both-legs-doomed
+///   mismatched-dep class) made this `(from, to)` edge unscoreable. The
+///   loud `Warning` is the
+///   variant's payload -- a fact on the memoized value, never accumulated by
+///   the query -- and the caller MUST record the edge in its
+///   `LtmWarnings` so loop scores traversing it are DROPPED (the #758
+///   contract), not stubbed.
 /// - [`NoVariable`](ShapedLinkScore::NoVariable) -- no variable for benign
 ///   structural reasons (the target could not be reconstructed, or a
 ///   module link has no composite/output to score). NOT an unscoreable
@@ -164,10 +158,9 @@ pub(crate) fn shaped_link_score_executions() -> usize {
 ///   did, and loop scores through it are unaffected.
 ///
 /// Surfacing the partial-equation signal through the query's RETURN value
-/// (rather than a side channel) keeps it consistent under salsa caching:
-/// the salsa accumulator already replays the `Warning` on every cache hit,
-/// and the caller re-reads this memoized value -- and so re-inserts into
-/// the freshly-rebuilt `unscoreable_edges` set -- on every
+/// (rather than a side channel) keeps it consistent under salsa caching: the
+/// caller re-reads this memoized value -- and so re-records the edge and its
+/// warning in the freshly-built `LtmWarnings` -- on every
 /// `model_ltm_variables` evaluation, whether the query body re-ran or not.
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
@@ -183,9 +176,10 @@ pub enum ShapedLinkScore {
         var: Box<LtmSyntheticVar>,
         freeze_helpers: Vec<LtmSyntheticVar>,
     },
-    /// A `PartialEquationError` made the edge unscoreable; the warning is
-    /// accumulated and the caller records the edge in `unscoreable_edges`.
-    Unscoreable,
+    /// A `PartialEquationError` made the edge unscoreable: the warning
+    /// naming why, which the caller records with the edge. Boxed so the
+    /// memoized value stays the size of its `Scored` arm.
+    Unscoreable(Box<Diagnostic>),
     /// No variable for benign structural reasons; not an unscoreable edge.
     NoVariable,
 }
@@ -199,10 +193,8 @@ pub enum ShapedLinkScore {
 /// per unique shape, and the standard scalar `Bare` score's fragment
 /// compiler ([`compile_ltm_var_fragment`]) reads the SAME `(from, to, Bare)`
 /// result -- so the compiled fragment and the reported/serialized equation
-/// are single-sourced and cannot drift. (A former `(from, to)`-keyed
-/// `link_score_equation_text` query was a second derivation of the same
-/// score; it was deleted in favour of routing every consumer through this
-/// query.)
+/// are single-sourced and cannot drift: every consumer of a link score's
+/// equation routes through this query, never through a second derivation.
 ///
 /// Returns a [`ShapedLinkScore`] (NOT a bare `Option`) so the emission loop
 /// can distinguish a `PartialEquationError`-driven unscoreable skip from a
@@ -223,7 +215,7 @@ pub enum ShapedLinkScore {
 /// Lives in `db/ltm/compile.rs` rather than `db.rs` so the latter stays
 /// under the project's per-file line cap.
 #[salsa::tracked(returns(ref))]
-pub fn link_score_equation_text_shaped<'db>(
+pub fn shaped_link_score<'db>(
     db: &'db dyn Db,
     link_id: LtmLinkId<'db>,
     shape: RefShape,
@@ -242,12 +234,12 @@ pub fn link_score_equation_text_shaped<'db>(
     let from_ident = Ident::<Canonical>::new(from_name);
     let to_ident = Ident::<Canonical>::new(to_name);
 
-    let from_var = reconstruct_single_variable(db, model, project, from_name);
+    let from_var = lowered_variable_by_name(db, model, project, from_name);
     // A target that cannot be reconstructed is a benign structural skip
     // (degenerate edge), NOT a partial-equation failure -- no `Warning`, no
     // unscoreable-edge recording. Loop scores through such an edge are
     // unaffected, exactly as the pre-GH #780 `None` behaved.
-    let Some(to_var) = reconstruct_single_variable(db, model, project, to_name) else {
+    let Some(to_var) = lowered_variable_by_name(db, model, project, to_name) else {
         return ShapedLinkScore::NoVariable;
     };
 
@@ -299,17 +291,11 @@ pub fn link_score_equation_text_shaped<'db>(
     // `[NYC]` against the source's actual dimensions. For scalar sources
     // this is empty, which is the right input for Bare-shape calls (no
     // subscripts to classify).
-    let source_dim_elements: Vec<Vec<String>> =
-        if let Some(from_sv) = model.variables(db).get(from_name) {
-            variable_dimensions(db, *from_sv, project)
-                .iter()
-                .map(crate::ltm_augment::dimension_element_names)
-                .collect()
-        } else {
-            // Implicit variables (SMOOTH/DELAY expansions) aren't in
-            // source_vars and are scalar by construction.
-            Vec::new()
-        };
+    let source_dim_elements: Vec<Vec<String>> = endpoint_dimensions(db, model, project, from_name)
+        .unwrap_or_default()
+        .iter()
+        .map(crate::ltm_augment::dimension_element_names)
+        .collect();
 
     let mut all_vars = HashMap::new();
     if let Some(ref fv) = from_var {
@@ -341,12 +327,8 @@ pub fn link_score_equation_text_shaped<'db>(
             crate::variable::identifier_set(ast, target_ast_dims, None)
                 .into_iter()
                 .filter_map(|dep| {
-                    let sv = model.variables(db).get(dep.as_str())?;
-                    if sv.kind(db) == SourceVariableKind::Module {
-                        return None;
-                    }
-                    let dims = variable_dimensions(db, *sv, project);
-                    (!dims.is_empty()).then(|| (dep.as_str().to_string(), dims.clone()))
+                    let dims = endpoint_dimensions(db, model, project, dep.as_str())?;
+                    (!dims.is_empty()).then(|| (dep.as_str().to_string(), dims))
                 })
                 .collect()
         })
@@ -359,12 +341,10 @@ pub fn link_score_equation_text_shaped<'db>(
     // [`force_partial_equation_error`] override was added to exercise the
     // unscoreable-edge contract end-to-end (per
     // docs/dev/rust.md#test-time-budgets -- a test-only override and a tiny
-    // fixture, not a contrived production input). The GH #779
-    // bare-reducer-feeder decline has since made the terminal LIVE-reachable
-    // (`bare_feeder_of_unhoisted_reducer_declines_loudly`); the seam is
-    // retained because it can doom ONE arbitrary edge of a multi-edge model
+    // fixture, not a contrived production input). The seam is retained
+    // because it can doom ONE arbitrary edge of a multi-edge model
     // independent of any equation shape, which the surgical-degradation
-    // tests still need. (The AGG-HALF feeder emitter's DUPLICATE-DIM
+    // tests need. (The AGG-HALF feeder emitter's DUPLICATE-DIM
     // `UnfreezablePartial` bail -- `pin_iterated_dim_indices`, PR #787 --
     // was its only live square-source caller, but the GH #778/#785 decline
     // now skips that whole shape at agg minting, so that specific terminal
@@ -375,8 +355,11 @@ pub fn link_score_equation_text_shaped<'db>(
         let err = crate::ltm_augment::PartialEquationError::new(
             "<test-forced partial-equation failure (GH #780)>",
         );
-        super::emit_ltm_partial_equation_warning(db, model, &var_name, &err);
-        return ShapedLinkScore::Unscoreable;
+        return ShapedLinkScore::Unscoreable(Box::new(super::ltm_warning(
+            model.name(db),
+            Some(&var_name),
+            super::ltm_partial_equation_warning_message(&var_name, &err),
+        )));
     }
 
     // The generator returns the equation already tagged with the target's
@@ -387,10 +370,9 @@ pub fn link_score_equation_text_shaped<'db>(
     // (set when `shape` is not `Bare`) with the per-shape policy result.
     // A `PartialEquationError` means the target's equation text could not
     // be rendered as a compilable ceteris-paribus partial -- the GH #311
-    // parse class, the GH #526/T7 both-legs-doomed mismatched-dep class, or
-    // the GH #779 bare-reducer-feeder decline.
-    // Warn, and report the edge as `Unscoreable` so the emission loop
-    // records it in `unscoreable_edges` and DROPS dependent loop scores
+    // parse class, or the GH #526/T7 both-legs-doomed mismatched-dep class.
+    // Report the edge as `Unscoreable`, carrying the warning, so the emission
+    // loop records both and DROPS dependent loop scores
     // (GH #758/#780); emitting a silently non-ceteris-paribus link score
     // would compile cleanly, so `model_ltm_fragment_diagnostics` would not
     // catch it, and degrading dependent loops to warned constant-0 stubs
@@ -421,8 +403,11 @@ pub fn link_score_equation_text_shaped<'db>(
     ) {
         Ok(eqn) => eqn,
         Err(err) => {
-            super::emit_ltm_partial_equation_warning(db, model, &var_name, &err);
-            return ShapedLinkScore::Unscoreable;
+            return ShapedLinkScore::Unscoreable(Box::new(super::ltm_warning(
+                model.name(db),
+                Some(&var_name),
+                super::ltm_partial_equation_warning_message(&var_name, &err),
+            )));
         }
     };
 
@@ -468,7 +453,7 @@ pub(super) fn freeze_helper_var(h: crate::ltm_augment::ArrayFreezeHelper) -> Ltm
     }
 }
 
-// Test-only override: forces [`link_score_equation_text_shaped`] to report
+// Test-only override: forces [`shaped_link_score`] to report
 // the sentinel edge as a `PartialEquationError` (GH #780). Scoped by an
 // active `ForcePartialEquationErrorGuard`; off in production builds. The
 // forced edge is matched by `(from, to)` exactly, so a test can doom ONE
@@ -496,7 +481,7 @@ pub(super) fn force_partial_equation_error(from: &str, to: &str) -> bool {
 
 /// RAII guard (test-only) installing a forced-`PartialEquationError` edge
 /// for the current thread, restored on drop so a panicking test does not
-/// leak it. Because `link_score_equation_text_shaped` and
+/// leak it. Because `shaped_link_score` and
 /// `model_ltm_variables` are salsa-memoized, the guard must outlive every
 /// LTM query in the test it controls, and each test must use a fresh `db`
 /// (the override is not a salsa input, so a memoized result would otherwise
@@ -525,390 +510,163 @@ impl Drop for ForcePartialEquationErrorGuard {
     }
 }
 
-/// Result of [`lower_ltm_variable`]: the lowered variable plus the
-/// dependency classification of its lowered AST, computed once during
-/// lowering. Callers reuse `dep_idents`/`referenced_tables` to build their
-/// dependency shapes instead of re-running `classify_dependencies` on the
-/// returned variable -- the classification is a per-fragment AST walk, and
-/// duplicating it across every LTM fragment was a measurable slice of
-/// C-LEARN's LTM compile time.
+/// One generated equation lowered under the shapes of the names it
+/// references: what both LTM constructors of `FragmentInput` build from a
+/// parsed synthetic variable or helper ([`lower_ltm_variable`]).
 struct LoweredLtmVariable {
     variable: crate::variable::Variable,
-    /// `classify_dependencies(..).all` of the lowered AST
-    /// (`Variable::ast()`, which for the Aux-parsed Vars LTM produces is
-    /// the dt AST). Identifier sets are lowering-scope-independent, so
-    /// this is valid for the returned `variable` whether or not the
-    /// scoped re-lower ran.
-    ///
-    /// ORDERED, not a `HashSet` -- **deliberately, even though no consumer is
-    /// order-sensitive.** Keep it that way; the reasoning is not "something
-    /// breaks if you don't", so a reader who checks only that will wrongly
-    /// conclude it is free to change.
-    ///
-    /// Both consumers walk this set to build per-dependency shapes, which land
-    /// in an ident-keyed map (first-inserted-wins over distinct idents) and an
-    /// ident-keyed map of tables, and `Compiler::new` sorts the table idents it
-    /// lays graphical functions out from -- so iteration order does not reach
-    /// the emitted fragment. The rule this upholds is the reason to keep it: a
-    /// query's intermediate state must be a function of its inputs, not of the
-    /// hash seed. That is the same rule `db::assemble::temp_sizes_by_id`
-    /// upholds, and the class of defect it prevents (GH #595) does not
-    /// announce itself -- it surfaces as salsa backdating quietly failing or a
-    /// compiled artifact that is not reproducible run to run, neither of which
-    /// a test would attribute back to here. It costs nothing, and the explicit
-    /// and implicit constructors (`db::var_fragment`, `db::fragment_compile`)
-    /// walk a `BTreeSet` too.
-    ///
-    /// This does NOT explain the separately-reported nondeterministic
-    /// *invalidation* of `compile_ltm_var_fragment`: salsa verifies a
-    /// dependency SET, which an ordering cannot alter.
-    dep_idents: BTreeSet<Ident<Canonical>>,
-    /// `classify_dependencies(..).referenced_tables` of the same AST.
-    referenced_tables: BTreeSet<String>,
+    /// The compiler's shape of every name the equation references, itself
+    /// first (`FragmentInput::deps`), and the map its `Expr2` lowering ran
+    /// under.
+    deps: IdentMap<Ident<Canonical>, DepShape>,
+    /// The graphical-function tables of the lookup tables it calls.
+    tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>>,
 }
 
-/// `true` when the lowered AST contains a construct whose compilation
-/// consumes the Expr2 `ArrayBounds` that only the dependency-aware
-/// lowering scope can recover -- i.e. a Pass-1 temp-decomposition site.
+/// Lower a parsed LTM variable -- a synthetic equation or a helper its parse
+/// synthesized -- to `Expr2` under the shapes of the names it references, as
+/// `db::lowered_source_variable` lowers a source variable.
 ///
-/// This is [`lower_ltm_variable`]'s gate for the scoped re-lower, and it
-/// must be sound against `ast::expr3`'s Pass-1 decomposition set -- NOT
-/// the agg-hoistable reducer set (`ltm_agg::reducer_kind_from_name`),
-/// which differs: `SIZE` is never hoisted into an agg (its link score is
-/// constant 0) yet Pass-1 decomposes its argument exactly like `SUM`'s, and
-/// `RANK` -- array-valued, routed through its own LTM agg path (GH #776) --
-/// has a Pass-1-decomposed array argument too (`ArgKind::Array`, GH #995).
-/// Deriving the original (text-scan) gate from
-/// the wrong set silently stubbed any fragment embedding
-/// `SIZE(<array expression>)` -- the demonstrated GH #738 round-2
-/// regression, pinned by
-/// `ltm_array_agg::size_reducer_previous_helper_compiles_and_is_correct`.
-fn ast_contains_pass1_decomposition_site(ast: &crate::ast::Ast<crate::ast::Expr2>) -> bool {
-    use crate::ast::Ast;
-    match ast {
-        Ast::Scalar(e) | Ast::ApplyToAll(_, e) => expr_contains_pass1_decomposition_site(e),
-        Ast::Arrayed(_, elements, default, _) => {
-            elements
-                .values()
-                .any(expr_contains_pass1_decomposition_site)
-                || default
-                    .as_ref()
-                    .is_some_and(expr_contains_pass1_decomposition_site)
-        }
-    }
-}
-
-/// Expression-level walk for [`ast_contains_pass1_decomposition_site`].
+/// The equation is typed once (`ast::typed_ast`): its reads are classified on
+/// that tree (as `db::variable_direct_dependencies` classifies a source
+/// variable) and resolved to their heads through the one dependency resolver
+/// ([`ltm_read_heads`]), so the shapes exist before the lowering runs, one
+/// map serves both the `Expr2` tier and the fragment compiler, and the same
+/// tree is lowered (`model::lower_variable_from_typed`). Every head's
+/// shape is `ltm_dep_shape`'s answer -- a model variable's, an LTM helper's, an
+/// LTM synthetic variable's -- except a helper THIS parse synthesized, which
+/// no model-wide map holds (a loop score compiled outside
+/// `model_ltm_variables`) and which is scalar or, for a structural capture,
+/// arrayed over its declared axes. A name none of those declares lowers as a
+/// scalar, so the reference compiles to a bare slot read and assembly's
+/// `fragment_vars_in_layout` filter decides whether it is in this model's
+/// layout (the sub-model stdlib-instance case).
 ///
-/// Sound BY CONSTRUCTION: a Pass-1 decomposition site is a builtin with a
-/// non-scalar argument position in the signature table
-/// (`BuiltinFn::arg_kinds`) -- an array operand, which
-/// `transform_builtin_inner`'s `maybe_decompose_array_arg_inner` turns into an
-/// `AssignTemp` (`SUM` / 1-arg `MEAN` / `STDDEV` / `SIZE` / 1-arg `MIN` / 1-arg
-/// `MAX` / `RANK` / `VECTOR SELECT` / `VECTOR ELM MAP` / `VECTOR SORT ORDER` /
-/// `ALLOCATE AVAILABLE` / `ALLOCATE BY PRIORITY`), or a lookup's table
-/// position, which `transform_inner`'s arrayed-GF apply decomposition reads (a
-/// LOOKUP-family call whose *table* operand carries multi-element bounds;
-/// flagged for every lookup since the table's arrayedness is exactly what the
-/// recovered bounds determine). Pass 1 reads the same kinds, so the gate
-/// cannot drift from it, and a new `BuiltinFn` variant is classified in the
-/// table or fails to compile there.
-/// `pass1_gate_covers_each_decomposition_builtin` pins the classification.
-///
-/// The one bounds consumer deliberately NOT gated on is the non-A2A Op2
-/// dimension-reordering pass (`compiler::context`'s Op2 lowering): it
-/// requires a whole-array Op2 *result* outside any reducer, which in a
-/// scalar LTM equation is ill-typed under either lowering, and in an
-/// A2A/per-element LTM equation is unreachable (per-element expansion
-/// lowers with `active_dimension` set, which skips the pass). A gated-out
-/// fragment therefore compiles byte-identically to its empty-scope
-/// (pre-GH #738) lowering.
-fn expr_contains_pass1_decomposition_site(expr: &crate::ast::Expr2) -> bool {
-    use crate::ast::{Expr2, IndexExpr2};
-    match expr {
-        Expr2::Const(..) | Expr2::Var(..) => false,
-        Expr2::Subscript(_, indices, _, _) => indices.iter().any(|idx| match idx {
-            IndexExpr2::Expr(e) => expr_contains_pass1_decomposition_site(e),
-            IndexExpr2::Range(l, r, _) => {
-                expr_contains_pass1_decomposition_site(l)
-                    || expr_contains_pass1_decomposition_site(r)
-            }
-            IndexExpr2::Wildcard(_)
-            | IndexExpr2::StarRange(_, _)
-            | IndexExpr2::DimPosition(_, _) => false,
-        }),
-        Expr2::App(builtin, _, _) => {
-            use crate::builtins::ArgKind;
-            if builtin
-                .arg_kinds()
-                .iter()
-                .any(|kind| !matches!(kind, ArgKind::Scalar))
-            {
-                return true;
-            }
-            // A decomposition site can hide anywhere in a non-decomposing
-            // builtin's arguments (`ABS(SUM(a[*] * 2))`).
-            builtin
-                .args()
-                .into_iter()
-                .any(expr_contains_pass1_decomposition_site)
-        }
-        Expr2::Op1(_, e, _, _) => expr_contains_pass1_decomposition_site(e),
-        Expr2::Op2(_, l, r, _, _) => {
-            expr_contains_pass1_decomposition_site(l) || expr_contains_pass1_decomposition_site(r)
-        }
-        Expr2::If(c, t, f, _, _) => {
-            expr_contains_pass1_decomposition_site(c)
-                || expr_contains_pass1_decomposition_site(t)
-                || expr_contains_pass1_decomposition_site(f)
-        }
-    }
-}
-
-/// Lower a parsed LTM Stage0 variable with a lowering scope that can
-/// resolve the dimensions of its model-variable dependencies (GH #738).
-///
-/// Expr1 -> Expr2 lowering computes each subexpression's `ArrayBounds` via
-/// `ArrayContext::get_dimensions`, which reads `ScopeStage0.models`. Pass-1
-/// temp decomposition (`Pass1Context::needs_decomposition`) gates on those
-/// bounds: a reducer over an array *expression* (`SUM(pop[*] * scale)`) is
-/// hoisted into an `AssignTemp` only when the Op2 carries them. With an
-/// empty scope the bounds are never computed, the array expression stays
-/// inline under the reducer, and codegen rejects the fragment ("Cannot push
-/// view for expression type ..."), silently stubbing the LTM variable to a
-/// constant 0. Mirrors `explicit_fragment_input`'s minimal-`ModelStage0`
-/// construction for ordinary per-variable fragments.
-///
-/// Strategy: lower once with an empty scope (cheap, and byte-identical to
-/// the populated-scope lowering when no dependency is arrayed -- the scope
-/// only feeds `get_dimensions`, which returns `None` for scalars either
-/// way); only when the lowered AST contains a Pass-1 temp-decomposition
-/// site ([`ast_contains_pass1_decomposition_site`]) AND an arrayed
-/// dependency is present, re-lower with a scope carrying the parsed Stage0
-/// variables of self plus the deps. The dependency identifier set is
-/// scope-independent (the scope affects only bounds metadata), so the
-/// classification computed on the preliminary lowering is returned
-/// alongside whichever lowering wins.
-///
-/// An arrayed dependency can be a model source variable OR an arrayed
-/// implicit helper aux synthesized while parsing an LTM equation (the GH
-/// #541 `PREVIOUS(<bare arrayed name>)` capture, which a ceteris-paribus
-/// link score references inside its reducer). `equation_implicits` carries
-/// the implicits from the caller's own parse; cross-equation helper refs
-/// resolve through the cached `model_ltm_implicit_var_info` registry.
-///
-/// Boundary: dependencies that are neither model source variables nor LTM
-/// parse-time implicit helpers stay OUTSIDE the lowering scope and lower
-/// with unresolved (scalar) bounds, exactly as before GH #738. That
-/// notably includes other LTM *synthetic* variables -- e.g. an A2A link
-/// score referenced by a loop score -- which is sound because loop and
-/// relative-score equations reference those deps only in plain products,
-/// never inside reducers; their multi-slot layout is handled separately by
-/// the compile stage's dimension-aware dependency shapes (the LTM-var dep
-/// branch in `ltm_fragment_input`, tech-debt #34). `·`-dotted
-/// module-output refs likewise stay outside (they are not flat variables).
+/// A `LOOKUP(table, x)` call's table is not a read but needs the table's
+/// shape and its graphical-function data (issue #606), which are collected
+/// here for both constructors. `own_helpers` are the helpers the parse of this
+/// equation synthesized (captures only: a generated equation is built from an
+/// already-expanded tree and contains no module-function call).
 fn lower_ltm_variable(
     db: &dyn Db,
-    parsed_variable: &crate::model::VariableStage0,
-    equation_implicits: &[crate::capture::ImplicitVar],
     model: SourceModel,
     project: SourceProject,
+    parsed: &crate::model::ParsedVariable,
+    own_helpers: &[crate::capture::ImplicitVar],
 ) -> LoweredLtmVariable {
     let dim_context = project_dimensions_context(db, project);
-    let empty_models = HashMap::new();
-    let empty_scope = crate::model::ScopeStage0 {
-        models: &empty_models,
-        dimensions: dim_context,
-        model_name: "",
-    };
-    let prelim = crate::model::lower_variable(&empty_scope, parsed_variable);
+    let converted_dims = project_converted_dimensions(db, project);
+    let var_ident = parsed.ident.clone();
 
-    // Classify dependencies ONCE on the preliminary lowering; the set is
-    // scope-independent, so it serves both the re-lower decision below and
-    // the caller's dependency-shape construction. `Variable::ast()` is the
-    // right (and only needed) source: every LTM Stage0 input here is an
-    // Aux-parsed Var whose dt AST is its sole AST, and even a hypothetical
-    // stock-shaped input is covered because `ast()` returns a Stock's init
-    // AST.
-    let classification = prelim
+    // Typed once: the reads are classified on this tree and the tree is what
+    // the lowering below runs on. A typed-tier failure (an unknown builtin, a
+    // bad arity) leaves no reads; the lowering records it on the variable and
+    // the fragment pass reports the equation.
+    let typed = parsed
         .ast()
-        .map(|ast| crate::variable::classify_dependencies(ast, &[], None));
-    let (dep_idents, referenced_tables) = match classification {
-        Some(c) => (c.all.into_iter().collect(), c.referenced_tables),
-        None => (BTreeSet::new(), BTreeSet::new()),
-    };
+        .map(|ast| crate::ast::typed_ast(ast, dim_context));
+    let classified = typed
+        .as_ref()
+        .and_then(|typed| typed.as_ref().ok())
+        .map(|typed| crate::variable::classify_dependencies(typed, converted_dims, None))
+        .unwrap_or_default();
 
-    // Structural gate: without a Pass-1 temp-decomposition site in the
-    // lowered AST, the Expr2 bounds the scoped re-lower would recover
-    // cannot change the compile outcome -- skip the per-dep arrayedness
-    // lookups and the second lowering entirely (the common case: most
-    // link/loop scores contain no reducer even on heavily arrayed models).
-    if !prelim
-        .ast()
-        .is_some_and(ast_contains_pass1_decomposition_site)
-    {
-        return LoweredLtmVariable {
-            variable: prelim,
-            dep_idents,
-            referenced_tables,
-        };
-    }
-
-    // Dependencies of the LTM equation (data-flow deps plus referenced
-    // lookup tables -- an arrayed graphical function's per-element apply
-    // also needs its dimensions resolved). `·`-dotted module-output refs
-    // are not flat variables and keep resolving to scalar (None) exactly
-    // as before.
-    let mut dep_names: BTreeSet<&str> = BTreeSet::new();
-    for dep in dep_idents
-        .iter()
-        .map(|d| d.as_str())
-        .chain(referenced_tables.iter().map(|s| s.as_str()))
-    {
-        let effective = dep.strip_prefix('\u{00B7}').unwrap_or(dep);
-        if !effective.contains('\u{00B7}') {
-            dep_names.insert(effective);
+    let mut deps: IdentMap<Ident<Canonical>, DepShape> = Default::default();
+    deps.insert(
+        var_ident.clone(),
+        DepShape::var(
+            parsed
+                .get_dimensions()
+                .map(<[crate::dimensions::Dimension]>::to_vec)
+                .unwrap_or_default(),
+        ),
+    );
+    for head in ltm_read_heads(db, model, project, own_helpers, &classified) {
+        if head == var_ident || is_implicit_global(head.as_str()) {
+            continue;
         }
+        let shape = own_helpers
+            .iter()
+            .find(|helper| canonicalize(helper.ident()) == head.as_str())
+            .map(|helper| DepShape::var(dimensions_named(helper.equation_dims(), dim_context)))
+            .or_else(|| ltm_dep_shape(db, model, project, head.as_str()))
+            .unwrap_or_else(|| DepShape::var(Vec::new()));
+        deps.insert(head, shape);
     }
 
     let source_vars = model.variables(db);
-    let ltm_implicit_info = model_ltm_implicit_var_info(db, model, project);
-    // Resolve a dep that is an LTM-parse-time implicit helper aux to its
-    // datamodel form (modules are scalar nodes in equations; only helper
-    // auxes can be arrayed).
-    let find_implicit_dm = |name: &str| -> Option<&crate::capture::ImplicitVar> {
-        equation_implicits
-            .iter()
-            .find(|v| canonicalize(v.ident()) == name)
-            .or_else(|| {
-                ltm_implicit_info
-                    .get(name)
-                    .filter(|meta| !meta.is_module)
-                    .map(|meta| &meta.variable)
-            })
-    };
-    let dm_var_is_arrayed = |v: &crate::capture::ImplicitVar| !v.equation_dims().is_empty();
-    // An ARRAYED sibling LTM var referenced as a dep -- today that is the
-    // GH #995 freeze helper, a whole-array operand of a vector builtin
-    // (`VECTOR SELECT("$⁚ltm⁚freeze⁚…", …)`). The Pass-1 temp decomposition
-    // below can only materialize a computed array argument (`helper * k`) if
-    // the lowering scope knows the helper's dims; without them the reference
-    // lowers as a scalar and codegen rejects the fragment ("expected array
-    // expression"). Same registry lookup (and the same safety argument) as
-    // the LTM-var dep branch in `ltm_fragment_input`: this runs from
-    // fragment compilation, strictly after `model_ltm_variables` completed.
-    let find_arrayed_ltm_dep = |name: &str| -> Option<Vec<String>> {
-        let idx = *model_ltm_var_name_index(db, model, project).get(name)?;
-        let lsv = &model_ltm_variables(db, model, project).vars[idx];
-        (!lsv.dimensions.is_empty()).then(|| lsv.dimensions.clone())
-    };
-
-    let any_arrayed_dep = dep_names.iter().any(|name| {
-        source_vars
-            .get(*name)
-            .is_some_and(|sv| !variable_dimensions(db, *sv, project).is_empty())
-            || find_implicit_dm(name).is_some_and(dm_var_is_arrayed)
-            || find_arrayed_ltm_dep(name).is_some()
-    });
-    if !any_arrayed_dep {
-        return LoweredLtmVariable {
-            variable: prelim,
-            dep_idents,
-            referenced_tables,
+    let mut tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
+    for table in &classified.referenced_tables {
+        // A table is a variable of this model: a name the model does not
+        // declare (a module-namespaced spelling included) has none.
+        let Some(table_sv) = source_vars.get(table.as_str()) else {
+            continue;
         };
-    }
-
-    let model_name_str = model.name(db);
-    let module_ctx = model_module_ident_context(db, model, project, vec![]);
-    let dim_ctx = project_dimensions_context(db, project);
-    let units_ctx = project_units_context(db, project);
-    let mut stage0_vars: HashMap<Ident<Canonical>, crate::model::VariableStage0> = HashMap::new();
-    stage0_vars.insert(Ident::new(parsed_variable.ident()), parsed_variable.clone());
-    for dep_name in &dep_names {
-        if let Some(dep_sv) = source_vars.get(*dep_name) {
-            let dep_parsed =
-                parse_source_variable_with_module_context(db, *dep_sv, project, module_ctx);
-            stage0_vars.insert(Ident::new(dep_name), dep_parsed.variable.clone());
-        } else if let Some(implicit_dep) = find_implicit_dm(dep_name) {
-            // Nested implicits of an implicit are registered (and compiled)
-            // in their own right; here only the dep's own dimensions matter.
-            let dep_parsed = match implicit_dep {
-                crate::capture::ImplicitVar::Capture(capture) => capture.variable_stage0(dim_ctx),
-                crate::capture::ImplicitVar::Synthesized(dm_var) => {
-                    let mut nested = Vec::new();
-                    let dep_ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
-                    crate::variable::parse_var(&dep_ctx, dm_var.as_ref(), &mut nested, |mi| {
-                        Ok(Some(mi.clone()))
-                    })
-                }
-            };
-            stage0_vars.insert(Ident::new(dep_name), dep_parsed);
-        } else if let Some(ltm_dims) = find_arrayed_ltm_dep(dep_name) {
-            // An arrayed sibling LTM var (the GH #995 freeze helper): a
-            // zero-bodied dims-only stub -- only the dep's dimensions matter
-            // to the lowering, exactly like the implicit branch above.
-            let stub = datamodel::Variable::Aux(datamodel::Aux {
-                ident: (*dep_name).to_string(),
-                equation: datamodel::Equation::ApplyToAll(ltm_dims, "0".to_string()),
-                documentation: String::new(),
-                units: None,
-                gf: None,
-                ai_state: None,
-                uid: None,
-                compat: datamodel::Compat::default(),
-            });
-            let mut nested = Vec::new();
-            let dep_ctx = crate::variable::ParseContext::new(dim_ctx, units_ctx);
-            let dep_parsed =
-                crate::variable::parse_var(&dep_ctx, &stub, &mut nested, |mi| Ok(Some(mi.clone())));
-            stage0_vars.insert(Ident::new(dep_name), dep_parsed);
+        let table_data = variable_tables(db, *table_sv, project).clone();
+        if !table_data.is_empty() {
+            tables.insert(table.clone(), table_data);
         }
+        deps.entry(table.clone())
+            .or_insert_with(|| source_dep_shape(db, *table_sv, project));
     }
 
-    let mini_model = crate::model::ModelStage0 {
-        ident: Ident::new(model_name_str),
-        display_name: model_name_str.to_string(),
-        variables: stage0_vars,
-        implicit: false,
-        // Single-variable fragment lowering only; not a macro template.
-        is_macro: false,
-        macro_params: vec![],
-    };
-    let mut models: HashMap<Ident<Canonical>, &crate::model::ModelStage0> = HashMap::new();
-    models.insert(Ident::new(model_name_str), &mini_model);
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
+    let model_ident: Ident<Canonical> = Ident::new(model.name(db));
+    let scope = crate::ast::LoweringScope {
         dimensions: dim_context,
-        model_name: model_name_str,
+        shapes: &deps,
+        model_name: model_ident.as_str(),
     };
     LoweredLtmVariable {
-        variable: crate::model::lower_variable(&scope, parsed_variable),
-        dep_idents,
-        referenced_tables,
+        variable: crate::model::lower_variable_from_typed(&scope, parsed, typed),
+        deps,
+        tables,
     }
+}
+
+/// The name each read of an LTM equation resolves through, each once: the
+/// instance a qualified read relocates through (`model_dep_shape` answers
+/// with the instance's shape), otherwise the read's own name.
+///
+/// Resolved through the one dependency resolver, with the equation's own
+/// synthesized helpers as the parse-local instances -- an LTM equation, being
+/// generated from an already-expanded source tree, synthesizes captures and
+/// never a module instance, so the parse-local set is inert and every hop is
+/// proven against the model.
+fn ltm_read_heads(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    own_helpers: &[crate::capture::ImplicitVar],
+    deps: &crate::variable::DepClassification,
+) -> BTreeSet<Ident<Canonical>> {
+    let scope = crate::db::DepScope {
+        db,
+        model: Some(model),
+        project,
+        own_helpers,
+    };
+    deps.occurrences
+        .iter()
+        .map(|occurrence| scope.resolve(&occurrence.ident).head().clone())
+        .collect()
 }
 
 /// Build the fragment input of one LTM synthetic variable: parse its typed
 /// equation (running the SAME implicit-module / PREVIOUS-INIT visitor the
-/// ordinary variable parse runs), lower it with a scope that can resolve its
-/// arrayed dependencies' bounds (GH #738), and resolve the shape of every name
-/// it references. `Err` carries the reason the generated equation did not
-/// parse.
+/// ordinary variable parse runs), then lower it under the shapes of every
+/// name it references ([`lower_ltm_variable`]). `Err` carries the reason the
+/// generated equation did not parse.
 ///
 /// LTM equations are scalar (or A2A) aux equations that may reference model
 /// variables from the parent model, other LTM variables (a loop score reads
 /// link scores; an A2A loop score must see an A2A link score's dimensions so
 /// the compiler emits per-element fetches rather than collapsing every slot to
-/// slot 0, tech-debt #34), implicit helper/module variables synthesized while
-/// parsing this or another LTM equation (an ARRAYED capture helper -- the GH
-/// #541 arrayed `PREVIOUS`/`INIT` capture, extended to array-valued builtin
-/// subtrees like `rank(pop, 1)` by GH #742 -- needs its dimensions so the
-/// consuming `helper[dim·elem]` subscript resolves), the model's own
-/// SMOOTH/DELAY instances and capture helpers, and the implicit time globals.
-/// A name that is none of those resolves to a scalar shape, so the reference
-/// compiles (to a bare slot read) and assembly's `fragment_vars_in_layout`
-/// filter decides whether it is in this model's layout -- the sub-model
-/// stdlib-instance case.
+/// slot 0, tech-debt #34), capture helpers synthesized while parsing this or
+/// another LTM equation (an ARRAYED capture helper -- the GH #541 arrayed
+/// `PREVIOUS`/`INIT` capture, extended to array-valued builtin subtrees like
+/// `rank(pop, 1)` by GH #742 -- needs its dimensions so the consuming
+/// `helper[dim·elem]` subscript resolves), the model's own SMOOTH/DELAY
+/// instances and capture helpers, and the implicit time globals.
 ///
 /// The variant of `equation` determines the variable's slot count: a
 /// `Scalar` equation gets 1 slot; an `ApplyToAll`/`Arrayed` equation
@@ -924,127 +682,21 @@ pub(crate) fn ltm_fragment_input<'db>(
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
 
-    let module_idents = ltm_module_idents(db, model, project);
     let model_var_names = super::ltm_model_var_names(db, model, project);
 
-    let parsed = parse_ltm_equation(
-        var_name,
-        equation,
-        dim_context,
-        Some(module_idents),
-        Some(model_var_names),
-    );
-    if let Some(errs) = parsed.variable.equation_errors()
-        && !errs.is_empty()
-    {
-        return Err(format!(
-            "the generated equation did not parse: {}",
-            errs.iter()
-                .map(|e| format!("{:?} at {}..{}", e.code, e.start, e.end))
-                .collect::<Vec<_>>()
-                .join("; ")
-        ));
+    let parsed = parse_ltm_equation(var_name, equation, dim_context, model_var_names);
+    if let Some(failures) = fatal_summary(parsed.variable.fatal_diagnostics()) {
+        return Err(format!("the generated equation did not parse: {failures}"));
     }
 
-    // `lower_ltm_variable` threads the dependencies (model variables and
-    // arrayed parse-time helpers) into the lowering scope so array bounds
-    // resolve (GH #738), and hands back the dependency classification it
-    // computed so the lowered AST is not walked again here.
     let LoweredLtmVariable {
         variable: lowered,
-        dep_idents,
-        referenced_tables,
-    } = lower_ltm_variable(db, &parsed.variable, &parsed.implicit_vars, model, project);
-
-    let var_name_canonical = canonicalize(var_name).into_owned();
-    let var_ident: Ident<Canonical> = Ident::new(&var_name_canonical);
-    let source_vars = model.variables(db);
-    let implicit_info = model_implicit_var_info(db, model, project);
-    let ltm_implicit_info = model_ltm_implicit_var_info(db, model, project);
-
-    // A helper this equation's own parse synthesized, by canonical name.
-    let parsed_implicit = |name: &str| {
-        parsed
-            .implicit_vars
-            .iter()
-            .find(|v| canonicalize(v.ident()) == name)
-    };
-    let helper_dims = |helper: &crate::capture::ImplicitVar| {
-        dimensions_named(helper.equation_dims(), dim_context)
-    };
-
-    let mut deps: IdentMap<Ident<Canonical>, DepShape> = Default::default();
-    deps.insert(
-        var_ident,
-        DepShape::var(
-            lowered
-                .get_dimensions()
-                .map(<[crate::dimensions::Dimension]>::to_vec)
-                .unwrap_or_default(),
-        ),
-    );
-    for dep in &dep_idents {
-        let (head, _qualified) = dep_head(dep.as_str());
-        if head == var_name_canonical || is_implicit_global(head) || deps.contains_key(head) {
-            continue;
-        }
-        let shape = if let Some(sv) = source_vars.get(head) {
-            source_dep_shape(db, *sv, project)
-        } else if let Some(helper) = parsed_implicit(head) {
-            match helper.module() {
-                Some(dm_module) => module_dep_shape(db, project, &dm_module.model_name),
-                None => DepShape::var(helper_dims(helper)),
-            }
-        } else if let Some(meta) = implicit_info.get(head) {
-            implicit_dep_shape(db, project, meta)
-        } else if let Some(meta) = ltm_implicit_info.get(head) {
-            if meta.is_module {
-                module_dep_shape(db, project, meta.model_name.as_deref().unwrap_or(""))
-            } else {
-                DepShape::var(helper_dims(&meta.variable))
-            }
-        } else if let Some(&idx) = model_ltm_var_name_index(db, model, project).get(head) {
-            // Another LTM synthetic variable. The indexed lookup matters: most
-            // unresolved deps here are PREVIOUS-helper names that are NOT LTM
-            // vars, and a linear scan over all LTM vars per dep was O(N^2)
-            // across a model's compile (~145k lookups over 6.7k vars on
-            // C-LEARN).
-            let lsv = &model_ltm_variables(db, model, project).vars[idx];
-            DepShape::var(dimensions_named(&lsv.dimensions, dim_context))
-        } else {
-            DepShape::var(Vec::new())
-        };
-        deps.insert(Ident::new(head), shape);
-    }
-
-    // Lookup-table references (issue #606): a `LOOKUP(table, x)` call's table
-    // argument is not a data-flow dep, but the fragment still needs (a) the
-    // table's shape so lowering resolves the table ident, and (b) the table's
-    // graphical-function data so the Lookup opcode gets a base_gf. Without
-    // both, the fragment fails to compile and the link score silently reads a
-    // constant 0 -- the failure mode behind WRLD3's identically-zero
-    // table-mediated link scores (food_per_capita -> lifetime_multiplier_from_food
-    // and 50+ siblings). Module-namespaced tables can't be referenced from LTM
-    // equations.
-    let mut tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
-    for table_name in &referenced_tables {
-        let (head, qualified) = dep_head(table_name);
-        if qualified {
-            continue;
-        }
-        let Some(table_sv) = source_vars.get(head) else {
-            continue;
-        };
-        let table_data = extract_tables_from_source_var(db, table_sv, project);
-        if !table_data.is_empty() {
-            tables.insert(Ident::new(head), table_data);
-        }
-        deps.entry(Ident::new(head))
-            .or_insert_with(|| source_dep_shape(db, *table_sv, project));
-    }
+        deps,
+        tables,
+    } = lower_ltm_variable(db, model, project, &parsed.variable, &parsed.implicit_vars);
 
     Ok(FragmentInput::new(
-        lowered,
+        std::borrow::Cow::Owned(lowered),
         deps,
         tables,
         BTreeSet::new(),
@@ -1052,6 +704,42 @@ pub(crate) fn ltm_fragment_input<'db>(
         converted_dims,
         dim_context,
     ))
+}
+
+/// The shape of a name an LTM equation or an LTM helper references:
+/// [`model_dep_shape`]'s answer for an explicit variable or one of the model's
+/// own helpers, plus the two kinds only a generated equation can reference --
+/// an LTM helper (a structural capture is arrayed) and an LTM synthetic
+/// variable. `None` for a name nothing declares. One statement, so a helper's
+/// fragment and its parent's shape a shared dependency identically: a
+/// generated capture that reads a sibling capture arrayed over the parent's
+/// dimensions lowers `sibling[Dim]` against those dimensions.
+fn ltm_dep_shape(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    head: &str,
+) -> Option<DepShape> {
+    if let Some(shape) = model_dep_shape(db, model, project, head) {
+        return Some(shape);
+    }
+    let dim_context = project_dimensions_context(db, project);
+    if let Some(meta) = model_ltm_implicit_var_info(db, model, project).get(head) {
+        return Some(DepShape::var(dimensions_named(
+            meta.variable.equation_dims(),
+            dim_context,
+        )));
+    }
+    // Another LTM synthetic variable. The indexed lookup matters: most
+    // unresolved deps here are PREVIOUS-helper names that are NOT LTM vars,
+    // and a linear scan over all LTM vars per dep was O(N^2) across a
+    // model's compile (~145k lookups over 6.7k vars on C-LEARN).
+    let idx = *model_ltm_var_name_index(db, model, project).get(head)?;
+    let lsv = &model_ltm_variables(db, model, project).vars[idx];
+    Some(DepShape::var(dimensions_named(
+        &lsv.dimensions,
+        dim_context,
+    )))
 }
 
 /// Compile an arbitrary LTM `Equation` to symbolic bytecodes: its
@@ -1129,7 +817,7 @@ pub(crate) fn compile_ltm_equation_fragment(
         },
         // LTM synthetic vars use PREVIOUS -- always dynamic; not classified
         // for run-invariance.
-        flow_invariance: None,
+        flow_locally_invariant: None,
     })
 }
 
@@ -1141,22 +829,29 @@ pub(crate) fn compile_ltm_equation_fragment(
 /// is there, since "empty equation" describes a formula that was printed in
 /// full.
 fn lowering_failure_reason(input: &FragmentInput<'_>, err: &crate::common::Error) -> String {
-    let lowered_errs = input.target.equation_errors().unwrap_or_default();
-    if lowered_errs.is_empty() {
-        format!("could not be lowered: {err}")
-    } else {
-        format!(
-            "could not be lowered: {}",
-            lowered_errs
-                .iter()
-                .map(|e| match &e.details {
-                    Some(reason) => format!("{:?} at {}..{}: {reason}", e.code, e.start, e.end),
-                    None => format!("{:?} at {}..{}", e.code, e.start, e.end),
-                })
-                .collect::<Vec<_>>()
-                .join("; ")
-        )
+    match fatal_summary(input.target.fatal_diagnostics()) {
+        Some(failures) => format!("could not be lowered: {failures}"),
+        None => format!("could not be lowered: {err}"),
     }
+}
+
+/// `code[ at start..end][: reason]` for each fatal diagnostic of a synthetic
+/// equation, joined by `; ` -- the shape every LTM failure reason quotes them
+/// in -- or `None` when it raised none.
+fn fatal_summary<'a>(diagnostics: impl Iterator<Item = &'a DiagnosticError>) -> Option<String> {
+    let parts: Vec<String> = diagnostics
+        .map(|d| {
+            let mut part = format!("{:?}", d.code());
+            if let Some(loc) = d.location() {
+                part.push_str(&format!(" at {}..{}", loc.start, loc.end));
+            }
+            if let Some(reason) = d.reason() {
+                part.push_str(&format!(": {reason}"));
+            }
+            part
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("; "))
 }
 
 /// Select-and-compile a single LTM synthetic variable's flow-phase
@@ -1166,7 +861,7 @@ fn lowering_failure_reason(input: &FragmentInput<'_>, err: &crate::common::Error
 /// (`compile_direct`); the one exception is the standard scalar Bare
 /// `from→to` link score, which routes through the salsa-cached
 /// `(from, to)`-keyed `compile_ltm_var_fragment` (itself sourced from the
-/// per-shape `link_score_equation_text_shaped(.., Bare)` query) so an equation
+/// per-shape `shaped_link_score(.., Bare)` query) so an equation
 /// edit that does not change the dependency set reuses the cached fragment.
 ///
 /// Returns `None` -- or a `VarFragmentResult` whose `flow_bytecodes` is
@@ -1201,7 +896,7 @@ pub(crate) fn compile_ltm_synthetic_fragment(
     // Used for everything except the standard scalar Bare `from→to`
     // link score, which goes through the salsa-cached
     // `compile_ltm_var_fragment` path below: that path re-derives the
-    // equation from `link_score_equation_text_shaped(.., Bare)` (always scalar,
+    // equation from `shaped_link_score(.., Bare)` (always scalar,
     // Bare; per-shape dimensions, element subscripts and reducer
     // substitutions are applied later in `model_ltm_variables`), so
     // for anything that carries those it would produce the wrong (or
@@ -1223,8 +918,9 @@ pub(crate) fn compile_ltm_synthetic_fragment(
             //     the var to zero).
             // (d) Aggregate-node link score (from = $⁚ltm⁚agg⁚n, or to =
             //     $⁚ltm⁚agg⁚n): compile directly. The (from, to)-keyed salsa
-            //     path would `reconstruct_single_variable` the synthetic agg
-            //     name, get `None`, and emit a degenerate ceteris-paribus
+            //     path would resolve the synthetic agg name through
+            //     `lowered_variable_by_name`, get `None`, and emit a degenerate
+            //     ceteris-paribus
             //     equation against the *target's* original (reducer-bearing)
             //     equation -- which the agg name appears nowhere in -- so the
             //     numerator collapses to zero. `model_ltm_variables` already
@@ -1289,8 +985,8 @@ pub(crate) fn compile_ltm_synthetic_fragment(
 /// the whole-model `model_ltm_variables`, so it re-executes on any edit, but its
 /// VALUE is one fragment -- so salsa backdates it whenever that variable's
 /// fragment is unchanged and `assemble_module` is not re-run. Same shape, and
-/// the same reason, as `reconstruct_named_variable` over
-/// `reconstruct_model_variables`.
+/// the same reason, as `lowered_variable_by_name` over
+/// `model_lowered_variables`.
 ///
 /// An out-of-range index yields `None`, which is also what a variable whose
 /// fragment failed to compile yields; callers treat both as "no fragment",
@@ -1403,8 +1099,9 @@ impl Drop for LtmFragmentFailureGuard {
 
 /// Salsa-tracked diagnostic pass that compiles every LTM synthetic
 /// variable -- and every LTM *implicit helper* (GH #741) -- the way
-/// `assemble_module` does and emits a `Warning` for each one whose
-/// fragment fails to compile.
+/// `assemble_module` does and returns a `Warning` for each one whose
+/// fragment fails to compile: facts on the memoized value, in name order,
+/// which `db::model_all_diagnostics` emits exactly once per model.
 ///
 /// Why this exists: `assemble_module` silently drops a synthetic
 /// fragment that fails to compile -- the variable keeps its layout slot
@@ -1414,7 +1111,7 @@ impl Drop for LtmFragmentFailureGuard {
 /// plausible-but-wrong loop scores went unnoticed precisely because of
 /// this). Surfacing the failure makes a degraded LTM analysis *visible*
 /// instead of silently wrong. The implicit helpers (the PREVIOUS/INIT
-/// capture auxes `builtins_visitor::make_temp_arg` synthesizes while
+/// capture auxes `builtins_visitor::hoist_capture` synthesizes while
 /// parsing LTM equations, `$⁚$⁚ltm⁚…⁚arg{n}`) ride the exact same
 /// silent-drop assembly path, and a dropped helper corrupts every link
 /// score that reads it -- with, before GH #741, no diagnostic anywhere.
@@ -1424,9 +1121,9 @@ impl Drop for LtmFragmentFailureGuard {
 /// every `ltm_enabled` model that hits a single bad fragment. This
 /// mirrors the auto-flip-to-discovery warning in `model_ltm_variables`.
 ///
-/// `model_all_diagnostics` drives this when `ltm_enabled`, so the
-/// warning reaches `collect_all_diagnostics` exactly when the auto-flip
-/// warning does. (GH #466 tracks the separate plumbing gap: the
+/// `model_all_diagnostics` drives this when `ltm_enabled` and emits what it
+/// returns, so the warning reaches `collect_all_diagnostics` exactly when the
+/// auto-flip warning does. (GH #466 tracks the separate plumbing gap: the
 /// diagnostic-collection FFI paths leave `ltm_enabled` false by default,
 /// so neither this warning nor the auto-flip warning reaches
 /// `simlin_project_get_errors` today.)
@@ -1437,12 +1134,15 @@ impl Drop for LtmFragmentFailureGuard {
 /// (`assemble_module`'s `fragment_vars_in_layout` drop), where the root
 /// model emits an equivalent fragment under qualified names -- that drop
 /// is intentionally left silent.
-#[salsa::tracked]
-pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: SourceProject) {
-    use salsa::Accumulator;
+#[salsa::tracked(returns(ref))]
+pub fn model_ltm_fragment_diagnostics(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> Vec<Diagnostic> {
+    use crate::db::DiagnosticSeverity;
 
-    use crate::db::{CompilationDiagnostic, Diagnostic, DiagnosticError, DiagnosticSeverity};
-
+    let mut diagnostics = Vec::new();
     let ltm_vars = model_ltm_variables(db, model, project);
     for (index, ltm_var) in ltm_vars.vars.iter().enumerate() {
         // Through the memoized per-index query, so this pass READS assembly's
@@ -1492,13 +1192,7 @@ pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: 
              equation the compiler rejected.{}",
             ltm_var.name, detail,
         );
-        CompilationDiagnostic(Diagnostic {
-            model: model.name(db).clone(),
-            variable: Some(ltm_var.name.clone()),
-            error: DiagnosticError::Assembly(msg),
-            severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
+        diagnostics.push(super::ltm_warning(model.name(db), Some(&ltm_var.name), msg));
     }
 
     // GH #741: probe the LTM implicit helpers the same way. `assemble_module`
@@ -1529,7 +1223,7 @@ pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: 
     // the assembly loop.
     let ltm_implicit = model_ltm_implicit_var_info(db, model, project);
     if ltm_implicit.is_empty() {
-        return;
+        return diagnostics;
     }
     let mut implicit_names: Vec<&String> = ltm_implicit.keys().collect();
     implicit_names.sort();
@@ -1544,29 +1238,12 @@ pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: 
             &[],
             Some(&mut helper_reason),
         );
-        // The helper's value-bearing phase must have produced bytecode:
-        // `compile_ltm_implicit_var_fragment` returns `Some` even when every
-        // phase failed (each phase is compiled independently and a failed one
+        // Every phase the helper's consumers demand must have produced
+        // bytecode: `compile_ltm_implicit_var_fragment` returns `Some` even
+        // when a phase failed (each is compiled independently and a failed one
         // is just `None` in the fragment), and `assemble_module` appends only
-        // the phases that exist to the runlists. A plain aux helper (the
-        // PREVIOUS-capture case, the only kind LTM parsing produces today) is
-        // recomputed each step via its flow bytecode; a stock or module
-        // helper is advanced via its stock bytecode.
-        //
-        // Defense-in-depth boundary: this is deliberately blind to the INIT
-        // phase. A helper whose flow phase compiles while its init phase
-        // fails would pass unchecked and `PREVIOUS(helper)` would read 0 at
-        // t=0 only. Both phases compile from the same lowered equation, so a
-        // divergent failure is likely unreachable; if one ever surfaces,
-        // extend this check to `initial_bytecodes`.
-        let compiled_ok = fragment.as_ref().is_some_and(|r| {
-            if meta.is_stock || meta.is_module {
-                r.fragment.stock_bytecodes.is_some()
-            } else {
-                r.fragment.flow_bytecodes.is_some()
-            }
-        });
-        if compiled_ok {
+        // the phases that exist to the runlists.
+        if ltm_helper_phases_present(meta, fragment.as_ref()) {
             continue;
         }
         let helper_detail = match &helper_reason {
@@ -1581,30 +1258,60 @@ pub fn model_ltm_fragment_diagnostics(db: &dyn Db, model: SourceModel, project: 
              augmentation layer emitted an equation the compiler rejected.{}",
             im_name, meta.ltm_parent_name, helper_detail,
         );
-        CompilationDiagnostic(Diagnostic {
+        // Filed under the helper's physical name; the synthetic variable it
+        // was synthesized for is its owner, the name a consumer presents it
+        // under.
+        diagnostics.push(Diagnostic {
             model: model.name(db).clone(),
             variable: Some(im_name.clone()),
-            error: DiagnosticError::Assembly(msg),
+            owner: Some(meta.ltm_parent_name.clone()),
             severity: DiagnosticSeverity::Warning,
-        })
-        .accumulate(db);
+            error: DiagnosticError::Assembly(msg),
+        });
+    }
+    diagnostics
+}
+
+/// Whether an LTM helper's fragment holds bytecode for every phase its
+/// consumers demand ([`ltm_helper_phase_demand`]). A demanded phase without
+/// bytecode is a helper that keeps its layout slot and reads as a constant 0,
+/// which `model_ltm_fragment_diagnostics` reports.
+pub(super) fn ltm_helper_phases_present(
+    meta: &LtmImplicitVarMeta,
+    fragment: Option<&VarFragmentResult>,
+) -> bool {
+    let Some(result) = fragment else {
+        return false;
+    };
+    let (initials, flows) = ltm_helper_phase_demand(meta);
+    (!initials || result.fragment.initial_bytecodes.is_some())
+        && (!flows || result.fragment.flow_bytecodes.is_some())
+}
+
+/// The `(initials, flows)` phases an LTM helper is evaluated in: a capture's
+/// kind (`CaptureKind`), and both for any other helper -- a generated equation
+/// synthesizes captures only, so no other kind is minted, and a helper of
+/// another kind would be recomputed each step through its flow bytecode.
+fn ltm_helper_phase_demand(meta: &LtmImplicitVarMeta) -> (bool, bool) {
+    match meta.variable.capture().map(|c| c.kind()) {
+        Some(kind) => (kind.needs_initials(), kind.needs_flows()),
+        None => (true, true),
     }
 }
 
-/// Build the fragment input of one implicit helper an LTM equation's parse
-/// synthesized (a PREVIOUS/INIT capture aux, or -- should an LTM equation ever
-/// contain a module-function call -- a module instance): the helper's lowered
-/// form and the shape of every name it references.
+/// Build the fragment input of one capture helper an LTM equation's parse
+/// synthesized: the helper's lowered form under the shapes of every name it
+/// references ([`lower_ltm_variable`]).
 ///
 /// The helper rides on its `LtmImplicitVarMeta` (captured when
 /// `model_ltm_implicit_var_info` parsed the LTM equations), so no parent
-/// equation is re-parsed. A capture helper's dependencies are the model
-/// variables its expression reads (including `module·port` outputs, which
-/// resolve through the module's shape); a name that is neither a model variable
-/// nor a module instance -- another LTM variable or helper -- resolves to a
-/// scalar shape, so the reference compiles to a bare slot read and assembly's
-/// layout filter judges it. `None` when the helper's equation does not parse
-/// (the diagnostic pass reports the missing bytecode).
+/// equation is re-parsed. Its dependencies are the model variables its
+/// expression reads (including `module·port` outputs, which resolve through
+/// the module's shape); a name that is neither a model variable nor a module
+/// instance -- another LTM variable or helper -- resolves to a scalar shape,
+/// so the reference compiles to a bare slot read and assembly's layout filter
+/// judges it. `None` when the helper's equation does not parse (the diagnostic
+/// pass reports the missing bytecode).
 pub(crate) fn ltm_implicit_fragment_input<'db>(
     db: &'db dyn Db,
     meta: &LtmImplicitVarMeta,
@@ -1612,167 +1319,24 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
     project: SourceProject,
     module_input_names: &[String],
 ) -> Option<FragmentInput<'db>> {
-    let implicit_dm_var = &meta.variable;
-    let implicit_name = canonicalize(implicit_dm_var.ident()).into_owned();
-    let var_ident: Ident<Canonical> = Ident::new(&implicit_name);
-
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
 
-    // A capture holds its body as an AST subtree; a hoisted module-call
-    // argument still carries equation text. Neither can synthesize a further
-    // generation of helpers -- both bodies are already walked -- and the sink
-    // is shared across the two arms so that stays asserted rather than assumed,
-    // as it is in `db::stages::model_stage0` and `ModelStage0::new_in_project`.
-    let mut nested_implicits = Vec::new();
-    let parsed_implicit = match implicit_dm_var {
-        crate::capture::ImplicitVar::Capture(capture) => capture.variable_stage0(dim_context),
-        crate::capture::ImplicitVar::Synthesized(dm_var) => {
-            let units_ctx = project_units_context(db, project);
-            let ctx = crate::variable::ParseContext::new(dim_context, units_ctx);
-            crate::variable::parse_var(&ctx, dm_var.as_ref(), &mut nested_implicits, |mi| {
-                Ok(Some(mi.clone()))
-            })
-        }
-    };
-    debug_assert!(
-        nested_implicits.is_empty(),
-        "an implicit helper must not synthesize further implicit helpers"
-    );
-    if parsed_implicit
-        .equation_errors()
-        .is_some_and(|e| !e.is_empty())
-    {
+    let parsed = meta.variable.parsed_variable(dim_context);
+    if parsed.fatal_diagnostics().next().is_some() {
         return None;
     }
 
-    let source_vars = model.variables(db);
-    let mut deps: IdentMap<Ident<Canonical>, DepShape> = Default::default();
-    let mut tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
-
-    let lowered = if meta.is_module {
-        // A module-typed helper is its wiring (a module has no equation); its
-        // dependencies are the sources its inputs read.
-        let dm_module = implicit_dm_var.module()?;
-        deps.insert(
-            var_ident.clone(),
-            module_dep_shape(db, project, &dm_module.model_name),
-        );
-        let ltm_implicit_all = model_ltm_implicit_var_info(db, model, project);
-        for mr in &dm_module.references {
-            let src = canonicalize(&mr.src);
-            let (head, qualified) = dep_head(&src);
-            if head == implicit_name || is_implicit_global(head) || deps.contains_key(head) {
-                continue;
-            }
-            let shape = if qualified {
-                // `module_var·output`: the instance the read relocates through,
-                // another module-typed LTM implicit variable.
-                match ltm_implicit_all.get(head) {
-                    Some(ref_meta) if ref_meta.is_module => {
-                        module_dep_shape(db, project, ref_meta.model_name.as_deref().unwrap_or(""))
-                    }
-                    _ => continue,
-                }
-            } else if let Some(dep_sv) = source_vars.get(head) {
-                source_dep_shape(db, *dep_sv, project)
-            } else {
-                // Another LTM var or implicit helper: scalar.
-                DepShape::var(Vec::new())
-            };
-            deps.insert(Ident::new(head), shape);
-        }
-        crate::variable::Variable::module_instance(
-            var_ident,
-            Ident::new(&dm_module.model_name),
-            build_module_inputs(
-                model.name(db),
-                &module_input_prefix(&implicit_name),
-                dm_module
-                    .references
-                    .iter()
-                    .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
-            ),
-        )
-    } else {
-        // Same dependency-aware lowering scope as `ltm_fragment_input` (GH
-        // #738): a synthesized helper aux whose equation embeds a reducer over
-        // an array expression needs its deps' dimensions resolvable for Pass-1
-        // temp decomposition. The classification comes back from the same
-        // lowering, so the lowered AST is not walked again.
-        let LoweredLtmVariable {
-            variable: lowered,
-            dep_idents,
-            referenced_tables,
-        } = lower_ltm_variable(db, &parsed_implicit, &nested_implicits, model, project);
-        // An arrayed capture helper occupies one slot per element.
-        deps.insert(
-            var_ident,
-            DepShape::var(
-                lowered
-                    .get_dimensions()
-                    .map(<[crate::dimensions::Dimension]>::to_vec)
-                    .unwrap_or_default(),
-            ),
-        );
-        // No lowered AST -> no dependency shapes: if the scoped re-lower
-        // surfaced an equation error, `lowered.ast()` is `None` and the
-        // fragment compiles to nothing anyway.
-        let (dep_idents, referenced_tables) = if lowered.ast().is_some() {
-            (dep_idents, referenced_tables)
-        } else {
-            (BTreeSet::new(), BTreeSet::new())
-        };
-        let implicit_info = model_implicit_var_info(db, model, project);
-        for dep in &dep_idents {
-            let (head, qualified) = dep_head(dep.as_str());
-            if head == implicit_name || is_implicit_global(head) || deps.contains_key(head) {
-                continue;
-            }
-            let shape = if qualified {
-                // `module·port`: the instance the read relocates through -- one
-                // of the model's SMOOTH/DELAY instances, or an explicit module
-                // variable of the parent model.
-                if let Some(im_meta) = implicit_info.get(head).filter(|m| m.is_module) {
-                    implicit_dep_shape(db, project, im_meta)
-                } else if let Some(dep_sv) = source_vars
-                    .get(head)
-                    .filter(|sv| sv.kind(db) == SourceVariableKind::Module)
-                {
-                    source_dep_shape(db, *dep_sv, project)
-                } else {
-                    continue;
-                }
-            } else if let Some(dep_sv) = source_vars.get(head) {
-                source_dep_shape(db, *dep_sv, project)
-            } else {
-                DepShape::var(Vec::new())
-            };
-            deps.insert(Ident::new(head), shape);
-        }
-        // Referenced lookup tables: shape + graphical-function data, so a
-        // `lookup(table, ...)` inside a synthesized helper compiles (issue
-        // #606; see `ltm_fragment_input`).
-        for table_name in &referenced_tables {
-            let (head, qualified) = dep_head(table_name);
-            if qualified {
-                continue;
-            }
-            let Some(table_sv) = source_vars.get(head) else {
-                continue;
-            };
-            let table_data = extract_tables_from_source_var(db, table_sv, project);
-            if !table_data.is_empty() {
-                tables.insert(Ident::new(head), table_data);
-            }
-            deps.entry(Ident::new(head))
-                .or_insert_with(|| source_dep_shape(db, *table_sv, project));
-        }
-        lowered
-    };
+    // A helper's own parse synthesizes nothing further (its body was walked
+    // by its parent's parse), so it has no parse-local helpers of its own.
+    let LoweredLtmVariable {
+        variable: lowered,
+        deps,
+        tables,
+    } = lower_ltm_variable(db, model, project, &parsed, &[]);
 
     Some(FragmentInput::new(
-        lowered,
+        std::borrow::Cow::Owned(lowered),
         deps,
         tables,
         canonical_module_input_set(module_input_names),
@@ -1788,10 +1352,10 @@ pub(crate) fn ltm_implicit_fragment_input<'db>(
 ///
 /// This is analogous to `compile_implicit_var_fragment` but for implicit
 /// variables generated by LTM equation parsing rather than by
-/// SourceVariable parsing. LTM implicit vars participate in whichever
-/// phases their lowered form needs; assembly appends them to the runlists by
-/// bytecode presence (they are not part of the dependency graph), so every
-/// available phase is compiled.
+/// SourceVariable parsing. An LTM helper is not in the dependency graph:
+/// assembly appends it to the runlists by bytecode presence, so the phases
+/// compiled here ARE its runlist membership -- a capture's kind
+/// (`ltm_helper_phase_demand`).
 pub(crate) fn compile_ltm_implicit_var_fragment(
     db: &dyn Db,
     meta: &LtmImplicitVarMeta,
@@ -1825,198 +1389,49 @@ pub(crate) fn compile_ltm_implicit_var_fragment(
 
     let input = ltm_implicit_fragment_input(db, meta, model, project, module_input_names)?;
     let emit_ctx = input.emit_ctx();
-    let compile_phase = |exprs: &[crate::compiler::Expr]| -> Option<PerVarBytecodes> {
-        compile_phase_to_per_var_bytecodes(&emit_ctx, exprs)
-    };
-
-    let initial_bytecodes = match lower_fragment(&input, true) {
-        Ok(var_result) => compile_phase(&var_result.ast),
-        Err(_) => None,
-    };
-
-    // Only the value-bearing phase's reason is captured: that is the phase
-    // `model_ltm_fragment_diagnostics` gates on, so it is the one whose
-    // failure turns the helper into a silent constant 0.
-    let flow_bytecodes = if !meta.is_stock {
-        match lower_fragment(&input, false) {
-            Ok(var_result) => {
-                if why.is_some() {
+    // The first demanded phase to fail leaves its reason in `why`, when the
+    // caller wired one: that is what `model_ltm_fragment_diagnostics` reports
+    // for the helper that would otherwise read as a silent constant 0.
+    let mut emit = |is_initial: bool| -> Option<PerVarBytecodes> {
+        match lower_fragment(&input, is_initial) {
+            Ok(var_result) => match why.as_deref_mut() {
+                Some(slot) => {
                     match crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting(
                         &emit_ctx,
                         &var_result.ast,
                     ) {
                         Ok(bytecodes) => Some(bytecodes),
                         Err(err) => {
-                            if let Some(slot) = why.as_deref_mut() {
-                                *slot = Some(err);
-                            }
+                            slot.get_or_insert(err);
                             None
                         }
                     }
-                } else {
-                    compile_phase(&var_result.ast)
                 }
-            }
+                None => compile_phase_to_per_var_bytecodes(&emit_ctx, &var_result.ast),
+            },
             Err(err) => {
-                if let Some(slot) = why {
-                    *slot = Some(lowering_failure_reason(&input, &err));
+                if let Some(slot) = why.as_deref_mut() {
+                    slot.get_or_insert(lowering_failure_reason(&input, &err));
                 }
                 None
             }
         }
-    } else {
-        None
     };
 
-    let stock_bytecodes = if meta.is_stock || meta.is_module {
-        match lower_fragment(&input, false) {
-            Ok(var_result) => compile_phase(&var_result.ast),
-            Err(_) => None,
-        }
-    } else {
-        None
-    };
+    let (initials, flows) = ltm_helper_phase_demand(meta);
+    let initial_bytecodes = initials.then(|| emit(true)).flatten();
+    let flow_bytecodes = flows.then(|| emit(false)).flatten();
 
     Some(VarFragmentResult {
         fragment: CompiledVarFragment {
             ident: implicit_name,
             initial_bytecodes,
             flow_bytecodes,
-            stock_bytecodes,
+            // A capture is an aux: it has no stock phase.
+            stock_bytecodes: None,
         },
         // LTM implicit helpers are always dynamic; not classified for
         // run-invariance.
-        flow_invariance: None,
+        flow_locally_invariant: None,
     })
-}
-
-#[cfg(test)]
-mod pass1_gate_tests {
-    use super::expr_contains_pass1_decomposition_site;
-    use crate::ast::{Expr2, IndexExpr2, Loc};
-    use crate::builtins::BuiltinFn;
-    use crate::common::{Canonical, Ident};
-
-    fn c() -> Box<Expr2> {
-        Box::new(Expr2::Const(
-            "0".to_string(),
-            crate::ast::Literal::new(0.0),
-            Loc::default(),
-        ))
-    }
-
-    fn app(builtin: BuiltinFn<Expr2>) -> Expr2 {
-        Expr2::App(builtin, None, Loc::default())
-    }
-
-    /// The guard test tying the gate to Pass-1's decomposition set
-    /// (`ast::expr3::Pass1Context::transform_builtin_inner` /
-    /// `transform_inner`'s arrayed-GF apply): every builtin Pass-1
-    /// decomposes must flag the gate, and the non-decomposing near-misses
-    /// (n-ary MEAN, 2-arg MIN/MAX) must not flag it on their own. The
-    /// signature table is the compile-time half of this guard -- a new
-    /// `BuiltinFn` variant fails to build until its argument kinds are
-    /// stated there -- while this test pins the classification of the
-    /// existing variants so a refactor cannot silently flip one (the
-    /// round-2 GH #738 regression was exactly such a divergence: the gate
-    /// was derived from the agg-hoistable reducer set, which omits SIZE).
-    #[test]
-    fn pass1_gate_covers_each_decomposition_builtin() {
-        let decomposing: Vec<(&str, BuiltinFn<Expr2>)> = vec![
-            ("sum", BuiltinFn::Sum(c())),
-            ("mean_1arg", BuiltinFn::Mean(vec![*c()])),
-            ("stddev", BuiltinFn::Stddev(c())),
-            ("size", BuiltinFn::Size(c())),
-            ("min_1arg", BuiltinFn::Min(c(), None)),
-            ("max_1arg", BuiltinFn::Max(c(), None)),
-            (
-                "vector_select",
-                BuiltinFn::VectorSelect(c(), c(), c(), c(), c()),
-            ),
-            ("vector_elm_map", BuiltinFn::VectorElmMap(c(), c())),
-            ("vector_sort_order", BuiltinFn::VectorSortOrder(c(), c())),
-            (
-                "allocate_available",
-                BuiltinFn::AllocateAvailable(c(), c(), c()),
-            ),
-            (
-                "allocate_by_priority",
-                BuiltinFn::AllocateByPriority(c(), c(), c(), c(), c()),
-            ),
-            ("lookup", BuiltinFn::Lookup(c(), c(), Loc::default())),
-            (
-                "lookup_forward",
-                BuiltinFn::LookupForward(c(), c(), Loc::default()),
-            ),
-            (
-                "lookup_backward",
-                BuiltinFn::LookupBackward(c(), c(), Loc::default()),
-            ),
-        ];
-        for (name, builtin) in decomposing {
-            assert!(
-                expr_contains_pass1_decomposition_site(&app(builtin)),
-                "{name} is a Pass-1 decomposition site and must flag the gate"
-            );
-        }
-
-        let decomposing_rank = app(BuiltinFn::Rank(c(), c()));
-        assert!(
-            expr_contains_pass1_decomposition_site(&decomposing_rank),
-            "RANK's array argument decomposes like VECTOR SORT ORDER's"
-        );
-
-        // n-ary MEAN is the scalar mean of its arguments (every position is
-        // `ArgKind::Scalar`), so it is not a decomposition site on its own.
-        let non_decomposing: Vec<(&str, BuiltinFn<Expr2>)> = vec![
-            ("mean_2arg", BuiltinFn::Mean(vec![*c(), *c()])),
-            ("min_2arg", BuiltinFn::Min(c(), Some(c()))),
-            ("max_2arg", BuiltinFn::Max(c(), Some(c()))),
-            ("abs", BuiltinFn::Abs(c())),
-            ("previous", BuiltinFn::Previous(c(), c())),
-            ("init", BuiltinFn::Init(c())),
-        ];
-        for (name, builtin) in non_decomposing {
-            assert!(
-                !expr_contains_pass1_decomposition_site(&app(builtin)),
-                "{name} is not a Pass-1 decomposition site and must not flag the gate alone"
-            );
-        }
-    }
-
-    /// A decomposition site nested inside a non-decomposing construct
-    /// (a builtin argument, an Op2 operand, a subscript index) must still
-    /// flag the gate -- the walk recurses everywhere Pass-1's transform
-    /// recurses.
-    #[test]
-    fn pass1_gate_finds_nested_decomposition_sites() {
-        let nested_in_builtin = app(BuiltinFn::Abs(Box::new(app(BuiltinFn::Sum(c())))));
-        assert!(expr_contains_pass1_decomposition_site(&nested_in_builtin));
-
-        let nested_in_op2 = Expr2::Op2(
-            crate::ast::BinaryOp::Mul,
-            c(),
-            Box::new(app(BuiltinFn::Size(c()))),
-            None,
-            Loc::default(),
-        );
-        assert!(expr_contains_pass1_decomposition_site(&nested_in_op2));
-
-        let nested_in_subscript = Expr2::Subscript(
-            Ident::<Canonical>::new("a"),
-            vec![IndexExpr2::Expr(app(BuiltinFn::Sum(c())))],
-            None,
-            Loc::default(),
-        );
-        assert!(expr_contains_pass1_decomposition_site(&nested_in_subscript));
-
-        let plain = Expr2::Op2(
-            crate::ast::BinaryOp::Add,
-            c(),
-            Box::new(app(BuiltinFn::Previous(c(), c()))),
-            None,
-            Loc::default(),
-        );
-        assert!(!expr_contains_pass1_decomposition_site(&plain));
-    }
 }

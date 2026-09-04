@@ -19,7 +19,9 @@
 
 use std::collections::HashSet;
 
-use crate::builtins_visitor::{empty_macro_registry, instantiate_implicit_modules};
+use crate::builtins_visitor::{
+    SnapshotIndexFacts, empty_macro_registry, instantiate_implicit_modules,
+};
 use crate::common::{Canonical, Ident};
 use crate::dimensions::DimensionsContext;
 
@@ -42,12 +44,16 @@ use super::LtmEquation;
 /// visitor over the same arm bodies, synthesizing the *same-named* helpers that
 /// dedup away (`model_ltm_implicit_var_info` keys implicit vars by canonical
 /// name), so it is skipped.
+///
+/// `model_var_names` is the model's whole variable-name set, the generated
+/// path's rule for a bare element subscript of a `PREVIOUS`/`INIT` argument
+/// (`SnapshotIndexFacts::ModelNames`); every LTM parse site passes
+/// `ltm_model_var_names` so the helper set and the compiled helpers agree.
 pub(super) fn parse_ltm_equation(
     var_name: &str,
     equation: &LtmEquation,
     dims: &DimensionsContext,
-    module_idents: Option<&HashSet<Ident<Canonical>>>,
-    model_var_names: Option<&HashSet<Ident<Canonical>>>,
+    model_var_names: &HashSet<Ident<Canonical>>,
 ) -> ParsedVariableResult {
     let (flow_ast, mut errors) = equation.to_flow_ast(dims);
 
@@ -57,8 +63,7 @@ pub(super) fn parse_ltm_equation(
             var_name,
             ast,
             Some(dims),
-            module_idents,
-            model_var_names,
+            SnapshotIndexFacts::ModelNames(model_var_names),
             // LTM synthetic equations are engine-generated and never contain
             // user macro invocations -> no registry needed; and are never a
             // macro body, so no enclosing-macro context (#554).
@@ -81,8 +86,10 @@ pub(super) fn parse_ltm_equation(
         ident: Ident::new(var_name),
         units: None,
         eqn: None,
-        errors,
-        unit_errors: vec![],
+        diagnostics: errors
+            .into_iter()
+            .map(crate::diagnostic::DiagnosticError::Equation)
+            .collect(),
         kind: crate::variable::VarKind::Aux {
             ast,
             init_ast: None,
@@ -90,6 +97,7 @@ pub(super) fn parse_ltm_equation(
             non_negative: false,
             is_flow: false,
             is_table_only: false,
+            element_scope: None,
         },
     };
 

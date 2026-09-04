@@ -20,12 +20,13 @@ use std::collections::{HashMap, HashSet};
 
 use crate::common::{Canonical, Ident};
 use crate::db::{
-    CycleClass, Db, LoopCircuitsResult, ModuleIdentContext, ModuleInputSet, SourceModel,
-    SourceProject, SourceVariable, SourceVariableKind, causal_graph_with_modules, classify_cycle,
-    model_edge_shapes, model_element_causal_edges, project_datamodel_dims, variable_dimensions,
-    variable_direct_dependencies,
+    CycleClass, Db, LoopCircuitsResult, ModuleInputSet, SourceModel, SourceProject, SourceVariable,
+    SourceVariableKind, causal_graph_with_modules, classify_cycle, model_edge_shapes,
+    model_element_causal_edges, project_datamodel_dims, variable_direct_dependencies,
 };
 use crate::ltm::{Loop, strip_subscript};
+
+use super::endpoint_dimensions;
 
 use super::loops::{
     build_a2a_loop_stocks, build_element_level_loops, cross_agg_loop_budget,
@@ -210,10 +211,7 @@ pub(crate) fn model_pinned_loops(
         // as scalar graph nodes.
         let cycle_strs: Vec<String> = cycle.iter().map(|c| c.as_str().to_string()).collect();
         let dim_lookup = |name: &str| -> Vec<crate::dimensions::Dimension> {
-            source_vars
-                .get(name)
-                .map(|sv| variable_dimensions(db, *sv, project).to_vec())
-                .unwrap_or_default()
+            endpoint_dimensions(db, model, project, name).unwrap_or_default()
         };
         let loops = match classify_cycle(&cycle_strs, edge_shapes, &dim_lookup) {
             // PureScalar: the pre-#653 scalar construction is correct.
@@ -222,15 +220,7 @@ pub(crate) fn model_pinned_loops(
                 vec![build_a2a_pin_loop(&graph, &cycle, id, &dimensions, dm_dims)]
             }
             CycleClass::CrossElementOrMixed => {
-                match expand_pin_on_element_graph(
-                    db,
-                    model,
-                    project,
-                    &graph,
-                    &cycle,
-                    source_vars,
-                    dm_dims,
-                ) {
+                match expand_pin_on_element_graph(db, model, project, &graph, &cycle, dm_dims) {
                     Ok(mut loops) => {
                         // A pin expanded through a hoisted reducer carries
                         // synthetic-agg hops, which come back Unknown-polarity
@@ -265,36 +255,33 @@ pub(crate) fn model_pinned_loops(
 }
 
 /// Whether any edge `from -> to` of the ordered cycle is a PREVIOUS-lagged
-/// reference: `to` references `from` ONLY inside `PREVIOUS(...)` in its dt
-/// equation (`dt_previous_referenced_vars`, the `previous_only`
-/// classification). Such an edge is the one-DT memory that lets a stockless
-/// cycle compile -- and `PREVIOUS` retains state (LTM ref section 7), so the
-/// cycle is a genuine feedback loop the pin validation must accept (GH #749).
+/// reference: `to` reads `from` ONLY through `PREVIOUS(...)` in its dt
+/// equation (`DepRefs::dt_previous_only`). Such an edge is the one-DT memory
+/// that lets a stockless cycle compile -- and `PREVIOUS` retains state (LTM
+/// ref section 7), so the cycle is a genuine feedback loop the pin
+/// validation must accept (GH #749).
 ///
-/// `previous_only` (rather than any-PREVIOUS) is the right test: a reference
-/// appearing both inside and outside `PREVIOUS` keeps its instantaneous
-/// edge, so a cycle through it only compiles when some OTHER edge breaks it
-/// -- and that breaking edge is itself previous-only or a stock (which the
-/// caller's stock check already accepted).
+/// `dt_previous_only` (rather than any-PREVIOUS) is the right test: a
+/// reference appearing both inside and outside `PREVIOUS` keeps its
+/// instantaneous edge, so a cycle through it only compiles when some OTHER
+/// edge breaks it -- and that breaking edge is itself previous-only or a
+/// stock (which the caller's stock check already accepted).
 ///
 /// Module and stock nodes are skipped as the EDGE TARGET: a stock is state
 /// in its own right (the caller's check), and a module's lagged INTERNAL
 /// state is deliberately invisible here, mirroring `model_is_stateless`'s
 /// parent-level-only lagged leg (GH #773). A module as the edge SOURCE is
 /// fine: `reader = PREVIOUS(sub.output, 0)` is a parent-level lag of the
-/// module's output, recorded in previous_only as the UN-normalized
-/// `sub·output` -- while the cycle node is the module-normalized `sub` --
-/// so each entry is collapsed through the same `normalize_module_ref_str`
-/// the causal-edge builder applies before comparing. Uses the same empty
-/// module-ident context / empty input set as `model_causal_edges`, so the
-/// per-variable dependency queries are shared salsa cache hits.
+/// module's output, a qualified target whose head is the cycle node `sub`
+/// -- the same node the causal-edge builder links from. Uses the same empty
+/// input set as `model_causal_edges`, so the per-variable dependency queries
+/// are shared salsa cache hits.
 fn cycle_has_lagged_edge(
     db: &dyn Db,
     project: SourceProject,
     source_vars: &HashMap<String, SourceVariable>,
     cycle: &[Ident<Canonical>],
 ) -> bool {
-    let empty_ctx = ModuleIdentContext::new(db, vec![]);
     let empty_inputs = ModuleInputSet::empty(db);
     cycle.iter().enumerate().any(|(i, from)| {
         let to = &cycle[(i + 1) % cycle.len()];
@@ -307,10 +294,11 @@ fn cycle_has_lagged_edge(
         ) {
             return false;
         }
-        variable_direct_dependencies(db, *sv, project, empty_ctx, empty_inputs)
-            .dt_previous_referenced_vars
+        variable_direct_dependencies(db, *sv, project, empty_inputs)
+            .deps
+            .dt_previous_only()
             .iter()
-            .any(|dep| crate::db::analysis::normalize_module_ref_str(dep) == from.as_str())
+            .any(|target| target.head() == from)
     })
 }
 
@@ -365,7 +353,6 @@ fn expand_pin_on_element_graph(
     project: SourceProject,
     var_graph: &crate::ltm::CausalGraph,
     cycle: &[Ident<Canonical>],
-    source_vars: &HashMap<String, SourceVariable>,
     dm_dims: &[crate::datamodel::Dimension],
 ) -> Result<Vec<Loop>, String> {
     let pin_var_set: HashSet<&str> = cycle.iter().map(|c| c.as_str()).collect();
@@ -395,12 +382,7 @@ fn expand_pin_on_element_graph(
         .filter(|s| pin_var_set.contains(strip_subscript(s.as_str())))
         .map(|s| Ident::new(s))
         .collect();
-    let sub_graph = crate::ltm::CausalGraph {
-        edges: sub_edges,
-        stocks: sub_stocks,
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    };
+    let sub_graph = crate::ltm::CausalGraph::new(sub_edges, sub_stocks);
 
     // Step 2: SCC guard.
     let scc = sub_graph.largest_scc_size();
@@ -456,7 +438,6 @@ fn expand_pin_on_element_graph(
     let (loops, _truncated_aggs) = build_element_level_loops(
         &filtered,
         var_graph,
-        source_vars,
         db,
         model,
         project,

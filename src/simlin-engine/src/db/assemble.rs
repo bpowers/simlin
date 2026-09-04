@@ -5,10 +5,11 @@
 //! Module/simulation assembly: turning per-variable symbolic fragments into
 //! a concrete `CompiledModule`/`CompiledSimulation`.
 //!
-//! Holds the table extraction helper (`extract_tables_from_source_var`), the
-//! two owners of module input wiring (`build_module_inputs` and
-//! `module_input_set`, the only places a wiring is derived from `(src, dst)`
-//! reference strings), the per-variable emission tail
+//! Holds the table extraction helper (`variable_tables`), the two projections
+//! of a module instance's wiring (`build_module_inputs` and
+//! `module_input_set`, over the one bound-port rule `bound_port`; the only
+//! places a wiring is derived from `(src, dst)` reference strings), the
+//! per-variable emission tail
 //! (`compile_phase_to_per_var_bytecodes` and the `VarFragmentResult` value),
 //! the production element-graph source `var_phase_symbolic_fragment_prod`,
 //! the resolved recurrence-SCC interleaver (`segment_member_by_element` /
@@ -25,14 +26,23 @@ use super::*;
 use crate::common::{Canonical, Ident};
 use crate::compiler::symbolic::Phase;
 
-/// Extract compiler::Table data directly from a SourceVariable's graphical
-/// function fields, for a fragment's tables map: the lookup tables the
-/// variable calls.
-pub(crate) fn extract_tables_from_source_var(
+/// The `compiler::Table`s a source variable's graphical function declares,
+/// for the tables map of every fragment that calls it through `LOOKUP`.
+///
+/// Salsa-tracked so a fragment depends on its dependency's TABLES rather than
+/// on the equation those tables are keyed by: the per-element tables of an
+/// `Arrayed` equation are read off the equation's element list, so an
+/// untracked read would make every caller of a variable recompile on an edit
+/// to that variable's equation text. Tracked, the value backdates when the
+/// tables are unchanged and an equation-only edit recompiles the edited
+/// variable alone (`db::lowered_variable_tests`).
+#[salsa::tracked(returns(ref))]
+pub(crate) fn variable_tables(
     db: &dyn Db,
-    source_var: &SourceVariable,
+    var: SourceVariable,
     project: SourceProject,
 ) -> Vec<crate::compiler::Table> {
+    let source_var = &var;
     let ident = source_var.ident(db);
     let eq = source_var.equation(db);
 
@@ -109,12 +119,37 @@ pub(crate) fn module_input_prefix(instance: &str) -> String {
     format!("{instance}\u{00B7}")
 }
 
-/// Build module input mappings from raw (src, dst) reference pairs.
-///
-/// Filters out references where src is an internal module input (starts
-/// with the module's own prefix), strips the module prefix from dst,
-/// and strips leading middots from src in the "main" model (where parent
-/// scope refs are represented as `·var` after canonicalization).
+/// The port a canonical reference `dst` names inside module instance
+/// `module_var_prefix` (`module_input_prefix`): the bare sub-model variable
+/// name, or `None` for a `dst` outside the instance's namespace. The one
+/// reading of a reference's destination, shared by the bound-port rule below
+/// and by `model_module_wiring_diagnostics`, which validates every reference's
+/// port -- an internal one included.
+pub(crate) fn port_of<'a>(module_var_prefix: &str, dst: &'a str) -> Option<&'a str> {
+    dst.strip_prefix(module_var_prefix)
+}
+
+/// The port one canonical `(src, dst)` reference of a module instance binds:
+/// [`port_of`]`(dst)` when `src` is outside the instance's namespace, `None`
+/// otherwise -- a `src` inside it is an internal reference, which reads the
+/// instance's own value rather than feeding a port from the parent, and binds
+/// nothing (the wiring diagnostics warn about it). The one bound-port rule:
+/// the ports an instance is enumerated with (`module_input_set`, its
+/// compilation identity) and the ports it is lowered with
+/// (`build_module_inputs`, its wiring) are the same set by construction, so
+/// `isModuleInput(port)` selects the same live branch in the compiled
+/// sub-model as the instance's inputs write.
+fn bound_port<'a>(module_var_prefix: &str, src: &str, dst: &'a str) -> Option<&'a str> {
+    if src.starts_with(module_var_prefix) {
+        return None;
+    }
+    port_of(module_var_prefix, dst)
+}
+
+/// Build module input mappings from canonical (src, dst) reference pairs:
+/// every bound port ([`bound_port`]) with its source, a leading `·` on the
+/// source stripped in the "main" model (where a parent-scope reference is
+/// spelled `·var` after canonicalization).
 pub(crate) fn build_module_inputs<S1: AsRef<str>, S2: AsRef<str>>(
     model_name: &str,
     module_var_prefix: &str,
@@ -122,12 +157,7 @@ pub(crate) fn build_module_inputs<S1: AsRef<str>, S2: AsRef<str>>(
 ) -> Vec<crate::variable::ModuleInput> {
     refs.filter_map(|(src, dst)| {
         let src = src.as_ref();
-        let dst = dst.as_ref();
-        // Skip internal module inputs (src within the module's own namespace)
-        if src.starts_with(module_var_prefix) {
-            return None;
-        }
-        let dst_stripped = dst.strip_prefix(module_var_prefix)?;
+        let dst_stripped = bound_port(module_var_prefix, src, dst.as_ref())?;
         let src_str = if model_name == "main" && src.starts_with('\u{00B7}') {
             &src['\u{00B7}'.len_utf8()..]
         } else {
@@ -141,210 +171,56 @@ pub(crate) fn build_module_inputs<S1: AsRef<str>, S2: AsRef<str>>(
     .collect()
 }
 
-/// The set of ports a module instance's wiring binds: each `dst` of `refs`
-/// with the instance's prefix (`module_input_prefix`) stripped to the bare
-/// sub-model variable name; a `dst` outside the instance's namespace binds
-/// nothing. This is the instance's identity at assembly -- the same
-/// `stdlib⁚smth1` model compiles to a distinct module per distinct port set,
-/// because `isModuleInput(port)` selects the live branch from it.
+/// The set of ports a module instance's wiring binds ([`bound_port`] over
+/// each reference, both ends canonicalized). This is the instance's identity
+/// at assembly -- the same `stdlib⁚smth1` model compiles to a distinct module
+/// per distinct port set, because `isModuleInput(port)` selects the live
+/// branch from it.
 pub(crate) fn module_input_set<S1: AsRef<str>, S2: AsRef<str>>(
     module_var_prefix: &str,
     refs: impl Iterator<Item = (S1, S2)>,
 ) -> BTreeSet<Ident<Canonical>> {
-    refs.filter_map(|(_src, dst)| {
+    refs.filter_map(|(src, dst)| {
+        let src_canonical = canonicalize(src.as_ref());
         let dst_canonical = canonicalize(dst.as_ref());
-        let bare = dst_canonical.strip_prefix(module_var_prefix)?;
+        let bare = bound_port(
+            module_var_prefix,
+            src_canonical.as_ref(),
+            dst_canonical.as_ref(),
+        )?;
         Some(Ident::new(bare))
     })
     .collect()
-}
-
-/// Pre-computed invariance data for the flow phase, stored on
-/// `VarFragmentResult` so `model_flows_invariant` can run its topological
-/// fixpoint pass without re-lowering the fragment (the compile-time
-/// regression fix, GH #712).
-///
-/// `locally_pure`: the variable's flow-phase expression is invariant assuming
-/// every dependency is invariant — i.e., no `TIME`/`PULSE`/`RAMP`/`STEP`/
-/// `PREVIOUS`/`EvalModule`/`ModuleInput` appears anywhere in the AST. If
-/// `false`, the variable is definitely variant regardless of deps.
-///
-/// `dep_names`: the canonical names of every dependency whose offset is
-/// referenced in the flow-phase expression (excluding the variable's own
-/// offset, which is a self-reference). `model_flows_invariant` checks that
-/// all of these are in the accumulated invariant set.
-///
-/// Together, `locally_pure && dep_names ⊆ invariant` is exactly the
-/// per-variable verdict the topological pass needs, with no re-lowering.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct FlowInvarianceSupport {
-    pub locally_pure: bool,
-    pub dep_names: std::sync::Arc<std::collections::BTreeSet<String>>,
 }
 
 /// Result of per-variable compilation: symbolic bytecodes for each phase.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct VarFragmentResult {
     pub fragment: crate::compiler::symbolic::CompiledVarFragment,
-    /// Invariance support for the flow phase. `None` when the variable has
-    /// no flow phase (not in the flows runlist) or when the noninitial
-    /// lowering failed. Used by `model_flows_invariant` to avoid re-lowering.
-    pub flow_invariance: Option<FlowInvarianceSupport>,
+    /// The compiler-local half of the flow phase's run-invariance verdict
+    /// (GH #712): whether the lowered flow expression is invariant given
+    /// that every name it reads is. `None` when the variable has no flow
+    /// phase (not in the flows runlist) or when the noninitial lowering
+    /// failed. `model_flows_invariant` pairs it with the variable's
+    /// `DepRef`s, so it costs no re-lowering and carries no second
+    /// dependency set.
+    pub flow_locally_invariant: Option<bool>,
 }
 
-/// Walk `exprs` and push the NAME of every variable referenced by a `Var`,
-/// `Subscript`, or `StaticSubscript` node into `out`.
-///
-/// This is NOT the same as calling `exprs_are_invariant`: it collects names
-/// without returning a verdict. It is used by `compute_flow_invariance_support`
-/// to determine which variables are actually referenced in the *flow*
-/// expression (as opposed to the init expression, which must not pollute the
-/// dep_names set).
-///
-/// The walk is exhaustive over every `Expr` variant; a builtin's arguments
-/// are walked or skipped by its signature's `Invariance` class.
-fn collect_expr_refs(exprs: &[crate::compiler::Expr], out: &mut HashSet<Ident<Canonical>>) {
-    use crate::builtins::Invariance;
-    use crate::compiler::Expr;
-    use crate::compiler::expr::SubscriptIndex;
-
-    fn walk(expr: &Expr, out: &mut HashSet<Ident<Canonical>>) {
-        match expr {
-            // Leaf: referenced variable.
-            Expr::Var(var, _)
-            | Expr::Subscript(var, _, _, _)
-            | Expr::StaticSubscript(var, _, _) => {
-                out.insert(var.name.clone());
-                // For Subscript, also walk the index expressions (they may
-                // reference other variables).
-                if let Expr::Subscript(_, indices, _, _) = expr {
-                    for idx in indices {
-                        match idx {
-                            SubscriptIndex::Single(e) => walk(e, out),
-                            SubscriptIndex::Range(s, e) => {
-                                walk(s, out);
-                                walk(e, out);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // No slot reference in these leaves.
-            Expr::Const(_, _)
-            | Expr::Dt(_)
-            | Expr::TempArray(_, _, _)
-            | Expr::TempArrayElement(_, _, _, _)
-            | Expr::ModuleInput(_, _) => {}
-
-            // Compound expressions: recurse into subexpressions.
-            Expr::Op2(_, l, r, _) => {
-                walk(l, out);
-                walk(r, out);
-            }
-            Expr::Op1(_, operand, _) => walk(operand, out),
-            Expr::If(cond, t, f, _) => {
-                walk(cond, out);
-                walk(t, out);
-                walk(f, out);
-            }
-            Expr::AssignCurr(_, rhs) | Expr::AssignNext(_, rhs) => walk(rhs, out),
-            Expr::AssignTemp(_, rhs, _) => walk(rhs, out),
-
-            // Module evaluation: walk the argument expressions.
-            Expr::EvalModule(_, _, _, args) => {
-                for arg in args {
-                    walk(arg, out);
-                }
-            }
-
-            // Builtins: walk every argument expression, except where the
-            // builtin's invariance class says the argument is not a dt-time
-            // read. `INIT(a)`: the initial-values buffer is frozen after the
-            // initials phase -- `INIT(dynamic_var)` is run-invariant
-            // regardless of what `a` references, so `a` is NOT a dependency
-            // here (mirroring `builtin_is_invariant`, which returns `true`
-            // without walking the argument). `PREVIOUS` is already variant
-            // (caught by `locally_pure`), and its argument is skipped for the
-            // same consistency with the invariance classifier.
-            Expr::App(builtin, _) => match builtin.signature().invariance {
-                Invariance::Snapshot | Invariance::Lagged => {}
-                Invariance::Pure | Invariance::TimeDependent => {
-                    for arg in builtin.args() {
-                        walk(arg, out);
-                    }
-                }
-            },
-        }
-    }
-
-    for expr in exprs {
-        walk(expr, out);
-    }
-}
-
-/// Compute `FlowInvarianceSupport` for a variable's flow phase, for use by
-/// `model_flows_invariant` (GH #712).
-///
-/// `locally_pure` is determined by running `exprs_are_invariant` with a
-/// callback that always returns `Invariant` (so only TIME/PULSE/etc. in the
-/// expression can make it `false`).
-///
-/// `dep_names` is determined by walking the *flow* expression (`flow_var.ast`)
-/// and reading the owning variable's name off every reference. This is precise:
-/// it considers only flow-expression references, not init-only deps that were
-/// never read at dt time. Using the fragment's whole dependency set would
-/// over-approximate: a variable `v` with `y = INIT(k)` in its init equation
-/// would include `k` in dep_names even though `k` does not appear in `v`'s flow
-/// expression, causing `k` being variant to incorrectly classify `v` as variant
-/// too.
-///
-/// Returns `None` if `flow_var` is an `Err` (noninitial lowering failed) or
-/// the expression list is empty.
-pub(crate) fn compute_flow_invariance_support(
+/// The compiler-local half of run invariance for a variable's flow phase
+/// (`compiler::invariance::exprs_are_locally_invariant`): `None` when
+/// `flow_var` is an `Err` (noninitial lowering failed) or the expression list
+/// is empty.
+pub(crate) fn flow_is_locally_invariant(
     flow_var: &Result<crate::compiler::Var, crate::common::Error>,
-    var_ident_canonical: &Ident<Canonical>,
-) -> Option<FlowInvarianceSupport> {
-    use crate::compiler::invariance::{RefClass, exprs_are_invariant};
-    use std::collections::BTreeSet;
-    use std::sync::Arc;
-
-    let flow_var = match flow_var {
-        Ok(v) => v,
-        Err(_) => return None,
-    };
+) -> Option<bool> {
+    let flow_var = flow_var.as_ref().ok()?;
     if flow_var.ast.is_empty() {
         return None;
     }
-
-    // Structural purity check: does the expression contain any variant
-    // builtins (TIME, PULSE, RAMP, STEP, PREVIOUS, EvalModule, ModuleInput)?
-    // All reference lookups return Invariant so only the builtin arms matter.
-    let locally_pure = exprs_are_invariant(&flow_var.ast, &|_var| RefClass::Invariant);
-
-    // Walk the flow expression to collect only the variables actually
-    // referenced there (not init-only deps).
-    //
-    // This used to reverse-map each referenced slot offset through the
-    // fragment's private offset layout, with a `debug_assert!` guarding the case
-    // where an offset resolved to no owner -- a silently dropped dependency
-    // would be INVISIBLE to the invariance fixpoint, the over-classification
-    // direction. Reading the name off the reference removes the failure mode
-    // rather than guarding it: there is no lookup left to fail.
-    let mut referenced: HashSet<Ident<Canonical>> = HashSet::new();
-    collect_expr_refs(&flow_var.ast, &mut referenced);
-
-    // The variable's own references are self-references, never dependencies.
-    let dep_names: BTreeSet<String> = referenced
-        .iter()
-        .filter(|name| *name != var_ident_canonical)
-        .map(|name| name.as_str().to_string())
-        .collect();
-
-    Some(FlowInvarianceSupport {
-        locally_pure,
-        dep_names: Arc::new(dep_names),
-    })
+    Some(crate::compiler::invariance::exprs_are_locally_invariant(
+        &flow_var.ast,
+    ))
 }
 
 /// Flatten a phase's temp-id -> size map into the `(temp_id, size)` vector
@@ -640,8 +516,9 @@ fn var_phase_symbolic_fragment_memo(
     };
 
     // The variable did not lower at all => `None` (loud-safe).
-    let ExplicitFragment::Ready { input, .. } =
-        explicit_fragment_input(db, *sv, model, project, &[])
+    let ExplicitFragment {
+        input: Some(input), ..
+    } = explicit_fragment_input(db, *sv, model, project, &[])
     else {
         return None;
     };
@@ -651,18 +528,180 @@ fn var_phase_symbolic_fragment_memo(
     compile_phase_to_per_var_bytecodes(&input.emit_ctx(), &var.ast)
 }
 
-/// Segment one member's symbolic opcode stream into per-element slices,
-/// keyed by `element_offset`.
+/// One member's symbolic opcode stream, split into the pieces the combined
+/// fragment relocates independently.
+pub(crate) struct MemberSegments {
+    /// Whole `AssignTemp` blocks at the head of the member's code that write
+    /// temps nothing else in the member writes: the materializations
+    /// `compiler::array_operand` hoists ahead of the element code because two
+    /// or more elements read them. The prologue belongs to no element --
+    /// folding it into the first one and then reordering the segments leaves
+    /// every LATER-ordered element reading a temp nothing has written yet --
+    /// so `combine_scc_fragment` emits it once, immediately before the first
+    /// of its READERS in `element_order`.
+    pub(crate) prologue: Vec<crate::compiler::symbolic::SymbolicOpcode>,
+    /// The elements whose slice reads a temp the prologue writes. These are
+    /// the elements the prologue has to precede, and the ONLY ones: an element
+    /// that reads none of its temps may run before it -- and has to, when the
+    /// prologue reads that element. Non-empty whenever `prologue` is, because
+    /// a candidate block no element reads is not lifted out at all.
+    pub(crate) prologue_readers: BTreeSet<usize>,
+    /// The per-element slices, keyed by `element_offset`.
+    pub(crate) segments: HashMap<usize, Vec<crate::compiler::symbolic::SymbolicOpcode>>,
+}
+
+/// The temp `op` reads, if it reads one: a cell (`LoadTempConst`) or a static
+/// view whose base is a temp (`PushStaticView`, resolved through
+/// `static_views`). `None` for a view id outside the table, which the caller
+/// treats as a malformed fragment.
+fn temp_read_by(
+    op: &crate::compiler::symbolic::SymbolicOpcode,
+    static_views: &[crate::compiler::symbolic::SymbolicStaticView],
+) -> Result<Option<u32>, String> {
+    use crate::compiler::symbolic::{SymStaticViewBase, SymbolicOpcode};
+    Ok(match op {
+        SymbolicOpcode::LoadTempConst { temp_id, .. } => Some(*temp_id as u32),
+        SymbolicOpcode::PushStaticView { view_id } => {
+            let view = static_views
+                .get(*view_id as usize)
+                .ok_or_else(|| format!("static view {view_id} is outside the fragment's table"))?;
+            match view.base {
+                SymStaticViewBase::Temp(id) => Some(id),
+                SymStaticViewBase::Var(_)
+                | SymStaticViewBase::PrevVar(_)
+                | SymStaticViewBase::InitialVar(_) => None,
+            }
+        }
+        _ => None,
+    })
+}
+
+/// The temp `op` writes, if it writes one.
+///
+/// These are the opcodes `compiler::codegen`'s `AssignTemp` arm emits as a
+/// block's result: the `BeginIter` loop form (which fills its temp through
+/// `StoreIterElement`) and the array-producing / `LookupArray` forms, which
+/// write theirs directly. Exhaustive over the variants that carry a temp id;
+/// `LoadTempConst` READS one and is deliberately not here.
+fn temp_written_by(
+    op: &crate::compiler::symbolic::SymbolicOpcode,
+) -> Option<crate::bytecode::TempId> {
+    use crate::compiler::symbolic::SymbolicOpcode;
+    match op {
+        SymbolicOpcode::BeginIter {
+            write_temp_id,
+            has_write_temp,
+        } => has_write_temp.then_some(*write_temp_id),
+        SymbolicOpcode::VectorElmMap { write_temp_id, .. }
+        | SymbolicOpcode::VectorSortOrder { write_temp_id }
+        | SymbolicOpcode::Rank { write_temp_id }
+        | SymbolicOpcode::LookupArray { write_temp_id, .. }
+        | SymbolicOpcode::AllocateAvailable { write_temp_id }
+        | SymbolicOpcode::AllocateByPriority { write_temp_id } => Some(*write_temp_id),
+        _ => None,
+    }
+}
+
+/// One candidate prologue block: a whole `AssignTemp` block at the head of a
+/// member's code, ending at `end` (exclusive), writing `temp` -- a temp the
+/// member writes exactly once -- and reading the temps in `reads`.
+struct LeadingBlock {
+    end: usize,
+    temp: u32,
+    reads: Vec<u32>,
+}
+
+/// The leading temp-writing blocks of `body`: the longest prefix before the
+/// first per-element write that consists of WHOLE blocks each writing a temp
+/// the member writes EXACTLY ONCE, in order.
+///
+/// A block runs from a temp WRITE (`temp_written_by`) to the first point after
+/// it where the view stack and the iteration nesting are both back to zero --
+/// which is how `compiler::codegen`'s `AssignTemp` arm ends one, whichever form
+/// it took: its rustdoc says "AssignTemp doesn't produce a value on the stack",
+/// and it pops every view it pushed. Only such a point ends a block. That is
+/// what stops the candidates at the end of the hoisted blocks rather than
+/// running on into the first element's code, whose own reads balance the view
+/// stack too but write no temp. It is an assumption about a DIFFERENT file's
+/// emission shape, which is why it is computed and checked here rather than
+/// asserted in prose.
+///
+/// Writing once separates a temp several elements share from one the elements
+/// RECYCLE -- `compiler::array_operand` reissues a recycled id per element, so
+/// it is written once per element and must stay inside the element that
+/// writes it. It does NOT separate a shared temp from a PRIVATE one that only
+/// the first element materializes: the materializer emits the shared blocks
+/// first and the first element's own blocks right after them, and a private
+/// temp is written once too. Which candidates are prologue is decided by who
+/// reads them (`segment_member_by_element`).
+fn leading_temp_blocks(
+    body: &[crate::compiler::symbolic::SymbolicOpcode],
+    first_write: usize,
+    static_views: &[crate::compiler::symbolic::SymbolicStaticView],
+) -> Result<Vec<LeadingBlock>, String> {
+    use crate::compiler::symbolic::SymbolicOpcode;
+
+    let mut total_writes: HashMap<crate::bytecode::TempId, usize> = HashMap::new();
+    for op in body {
+        if let Some(id) = temp_written_by(op) {
+            *total_writes.entry(id).or_insert(0) += 1;
+        }
+    }
+
+    let mut blocks: Vec<LeadingBlock> = Vec::new();
+    let mut view_depth: isize = 0;
+    let mut iter_depth: isize = 0;
+    // The temp the block in progress writes, once its write has been seen.
+    let mut writing: Option<crate::bytecode::TempId> = None;
+    let mut reads: Vec<u32> = Vec::new();
+    for (i, op) in body.iter().take(first_write).enumerate() {
+        match op {
+            SymbolicOpcode::PushStaticView { .. } | SymbolicOpcode::PushVarViewDirect { .. } => {
+                view_depth += 1
+            }
+            SymbolicOpcode::PopView {} => view_depth -= 1,
+            SymbolicOpcode::BeginIter { .. } => iter_depth += 1,
+            SymbolicOpcode::EndIter {} => iter_depth -= 1,
+            _ => {}
+        }
+        if let Some(read) = temp_read_by(op, static_views)? {
+            reads.push(read);
+        }
+        if let Some(id) = temp_written_by(op) {
+            writing = Some(id);
+        }
+        if let Some(id) = writing
+            && view_depth == 0
+            && iter_depth == 0
+        {
+            // A recycled id (written again by a later element) ends the
+            // candidates: everything from here on is the first element's own.
+            if total_writes.get(&id).copied().unwrap_or(0) != 1 {
+                break;
+            }
+            blocks.push(LeadingBlock {
+                end: i + 1,
+                temp: id as u32,
+                reads: std::mem::take(&mut reads),
+            });
+            writing = None;
+        }
+    }
+    Ok(blocks)
+}
+
+/// Segment one member's symbolic opcode stream into a prologue and per-element
+/// slices, keyed by `element_offset`.
 ///
 /// A per-element slice for element `e` is the run of opcodes up to and
 /// including the **write** opcode whose `var.name == member` and
 /// `var.element_offset == e` (`AssignCurr | AssignConstCurr |
-/// BinOpAssignCurr`). This is the *exact* segmentation
-/// `crate::db::dep_graph::symbolic_phase_element_order` performs to build
-/// the SCC element graph (GH #575) -- the verdict and the combined
-/// fragment MUST agree on segment boundaries or `element_order` would
-/// reference a slice the combiner cannot reproduce, so the two share this
-/// definition's contract.
+/// BinOpAssignCurr`), starting after the prologue for the first one. This is
+/// the *exact* segmentation `crate::db::dep_graph::symbolic_phase_element_order`
+/// builds the SCC element graph from (GH #575) -- the verdict and the combined
+/// fragment MUST agree on both boundaries or `element_order` would reference a
+/// slice the combiner cannot reproduce, so they share this function rather than
+/// a documented contract.
 ///
 /// A trailing `Ret` is stripped first (the combined fragment carries one
 /// terminal `Ret`). Any opcodes after the member's final per-element write
@@ -676,25 +715,27 @@ fn var_phase_symbolic_fragment_memo(
 /// - opcodes present but no per-element write at all (not element-
 ///   sourceable in the simple per-element shape, mirroring
 ///   `symbolic_phase_element_order`'s `saw_write` guard);
-/// - a backward jump whose target lies in an EARLIER segment. Segments are
-///   emitted in `element_order`, not in their original order, and a jump
-///   offset is relative, so a jump that escaped its own segment would land on
-///   whatever opcode happened to sit that far back after the interleave -- a
-///   silent miscompile with no bad id and no bad reference to notice. Codegen
-///   cannot currently produce one (a `BeginIter` loop writes a TEMP through
-///   `StoreIterElement`, and a member's per-element `AssignCurr` is emitted
-///   after `EndIter`, so a loop is always wholly inside one segment), which is
-///   exactly why it is worth checking rather than asserting in prose: this is
-///   an assumption about a DIFFERENT file's emission shape, and nothing else
-///   would notice it changing.
+/// - a backward jump whose target lies in an EARLIER segment, or in the
+///   prologue. Segments are emitted in `element_order`, not in their original
+///   order, and a jump offset is relative, so a jump that escaped its own
+///   segment would land on whatever opcode happened to sit that far back after
+///   the interleave -- a silent miscompile with no bad id and no bad reference
+///   to notice. Codegen cannot currently produce one (a `BeginIter` loop writes
+///   a TEMP through `StoreIterElement`, and a member's per-element `AssignCurr`
+///   is emitted after `EndIter`, so a loop is always wholly inside one
+///   segment), which is exactly why it is worth checking rather than asserting
+///   in prose: this is an assumption about a DIFFERENT file's emission shape,
+///   and nothing else would notice it changing.
 ///
 /// Consumed by `combine_scc_fragment`, which `assemble_module` invokes
 /// for every resolved recurrence SCC (the dt flows program and the
-/// synthetic-ident init `SymbolicCompiledInitial` path).
-fn segment_member_by_element(
+/// synthetic-ident init `SymbolicCompiledInitial` path), and by the element
+/// graph that orders them.
+pub(crate) fn segment_member_by_element(
     member: &str,
     code: &[crate::compiler::symbolic::SymbolicOpcode],
-) -> Result<HashMap<usize, Vec<crate::compiler::symbolic::SymbolicOpcode>>, String> {
+    static_views: &[crate::compiler::symbolic::SymbolicStaticView],
+) -> Result<MemberSegments, String> {
     use crate::compiler::symbolic::SymbolicOpcode;
 
     // Strip a trailing Ret -- the combined fragment appends a single Ret.
@@ -707,8 +748,7 @@ fn segment_member_by_element(
 
     // The opcode that terminates one of THIS member's per-element segments. A
     // write to a *different* member, or a `BinOpAssignNext` (a stock update,
-    // not a per-element current-value write of this member), does not --
-    // exactly the `symbolic_phase_element_order` rule.
+    // not a per-element current-value write of this member), does not.
     let write_element = |op: &SymbolicOpcode| -> Option<usize> {
         match op {
             SymbolicOpcode::AssignCurr { var }
@@ -722,14 +762,105 @@ fn segment_member_by_element(
         }
     };
 
+    let Some(first_write) = body.iter().position(|op| write_element(op).is_some()) else {
+        return Err(format!(
+            "SCC member `{member}` has no per-element write \
+             opcode; not element-sourceable for the combined \
+             fragment"
+        ));
+    };
+    let first_elem = write_element(&body[first_write])
+        .expect("first_write indexes a per-element write by construction");
+    let blocks = leading_temp_blocks(body, first_write, static_views)?;
+    let prefix_end = blocks.last().map_or(0, |b| b.end);
+
+    // Which elements read each temp, over the code after the candidate
+    // prefix: a segment reading a temp, whether as a cell or as a view, and
+    // the opcodes trailing the final write belonging to the last element.
+    let mut element_readers: HashMap<u32, BTreeSet<usize>> = HashMap::new();
+    let mut segment_reads: BTreeSet<u32> = BTreeSet::new();
+    let mut scanned_elem: Option<usize> = None;
+    for op in &body[prefix_end..] {
+        if let Some(id) = temp_read_by(op, static_views)? {
+            segment_reads.insert(id);
+        }
+        if let Some(elem) = write_element(op) {
+            for id in std::mem::take(&mut segment_reads) {
+                element_readers.entry(id).or_default().insert(elem);
+            }
+            scanned_elem = Some(elem);
+        }
+    }
+    if let Some(elem) = scanned_elem {
+        for id in segment_reads {
+            element_readers.entry(id).or_default().insert(elem);
+        }
+    }
+
+    // A candidate block is prologue when two or more elements read its temp,
+    // or when a later prologue block does (a shared body materialized from a
+    // shared operand: the operand is read by that body alone). Decided in
+    // reverse so the later block's verdict is known, and a block that is NOT
+    // prologue belongs to the first written element, whose own reads of the
+    // shared temps it carries count as that element's. The prologue is the
+    // qualifying PREFIX: the materializer emits every shared block ahead of
+    // the first element's own, so a qualifying block behind a private one is
+    // an emission shape this segmentation does not cover, and it is refused
+    // rather than left inside an element other readers may precede.
+    let mut prologue: Vec<bool> = vec![false; blocks.len()];
+    for i in (0..blocks.len()).rev() {
+        let temp = blocks[i].temp;
+        let mut readers: BTreeSet<usize> = element_readers.get(&temp).cloned().unwrap_or_default();
+        let mut read_by_later_prologue = false;
+        for (later, block) in blocks.iter().enumerate().skip(i + 1) {
+            if block.reads.contains(&temp) {
+                if prologue[later] {
+                    read_by_later_prologue = true;
+                } else {
+                    readers.insert(first_elem);
+                }
+            }
+        }
+        prologue[i] = readers.len() >= 2 || read_by_later_prologue;
+    }
+    let prologue_blocks = prologue.iter().position(|is| !is).unwrap_or(blocks.len());
+    if prologue[prologue_blocks..].iter().any(|is| *is) {
+        return Err(format!(
+            "SCC member `{member}` has a temp several elements read behind one \
+             only its first element reads; not element-sourceable for the \
+             combined fragment"
+        ));
+    }
+    let prologue_len = if prologue_blocks == 0 {
+        0
+    } else {
+        blocks[prologue_blocks - 1].end
+    };
+    let mut prologue_readers: BTreeSet<usize> = BTreeSet::new();
+    for block in &blocks[..prologue_blocks] {
+        if let Some(readers) = element_readers.get(&block.temp) {
+            prologue_readers.extend(readers.iter().copied());
+        }
+        if blocks[prologue_blocks..]
+            .iter()
+            .any(|later| later.reads.contains(&block.temp))
+        {
+            prologue_readers.insert(first_elem);
+        }
+    }
+
     // Jump containment. `lower_bound[pc]` is the first index of the segment
     // `pc` ends up in: segments start just after the previous per-element
-    // write, except that opcodes trailing the FINAL write are appended to the
-    // last segment rather than starting a new one (see below), so their bound
-    // is that segment's start.
+    // write (or after the prologue for the first), except that opcodes
+    // trailing the FINAL write are appended to the last segment rather than
+    // starting a new one (see below), so their bound is that segment's start.
+    // A prologue opcode's bound is 0: the prologue is relocated as a unit.
     let mut lower_bound: Vec<usize> = Vec::with_capacity(body.len());
     let mut start = 0usize;
     for (pc, op) in body.iter().enumerate() {
+        if pc == prologue_len {
+            start = prologue_len;
+        }
         lower_bound.push(start);
         if write_element(op).is_some() {
             start = pc + 1;
@@ -766,11 +897,12 @@ fn segment_member_by_element(
         }
     }
 
+    let prologue: Vec<SymbolicOpcode> = body[..prologue_len].to_vec();
     let mut segments: HashMap<usize, Vec<SymbolicOpcode>> = HashMap::new();
     let mut current: Vec<SymbolicOpcode> = Vec::new();
     let mut last_written_elem: Option<usize> = None;
 
-    for op in body {
+    for op in &body[prologue_len..] {
         current.push(op.clone());
         if let Some(elem) = write_element(op) {
             if segments.contains_key(&elem) {
@@ -806,7 +938,11 @@ fn segment_member_by_element(
         }
     }
 
-    Ok(segments)
+    Ok(MemberSegments {
+        prologue,
+        prologue_readers,
+        segments,
+    })
 }
 
 /// Interleave a multi-member recurrence SCC's per-element symbolic
@@ -873,6 +1009,11 @@ pub(crate) fn combine_scc_fragment(
     // `(member, element)` identity `element_order` carries.
     let mut renumbered_segments: HashMap<(Ident<Canonical>, usize), Vec<SymbolicOpcode>> =
         HashMap::new();
+    // Per-member prologues, keyed by the `element_order` index they are emitted
+    // immediately before: the member's first READER of the prologue's temps.
+    // Two members' first readers are two different entries, so the keys never
+    // collide.
+    let mut prologue_before: HashMap<usize, Vec<SymbolicOpcode>> = HashMap::new();
 
     for (member, _elem) in &scc.element_order {
         if absorbed.contains_key(member) {
@@ -892,25 +1033,84 @@ pub(crate) fn combine_scc_fragment(
         let (off, gf_remap) = merger.absorb(frag)?;
         absorbed.insert(member.clone(), off);
 
-        // Segment the member's symbolic code on its per-element write
-        // opcodes (identical contract to the Task 4 verdict builder), then
-        // renumber every opcode of every segment by THIS member's offsets
-        // and GF remap.
-        let segments = segment_member_by_element(member.as_str(), &frag.symbolic.code)?;
-        for (elem, ops) in segments {
-            let mut renumbered = Vec::with_capacity(ops.len());
-            for op in &ops {
-                renumbered.push(renumber_opcode(
+        // Segment the member's symbolic code into its prologue and its
+        // per-element slices (the same function the Task 4 verdict builder
+        // orders them with, so the two cannot disagree about a boundary),
+        // then renumber every opcode by THIS member's offsets and GF remap.
+        let seg =
+            segment_member_by_element(member.as_str(), &frag.symbolic.code, &frag.static_views)?;
+        let renumber_all = |ops: &[SymbolicOpcode]| -> Result<Vec<SymbolicOpcode>, String> {
+            ops.iter()
+                .map(|op| {
+                    renumber_opcode(
+                        op,
+                        off.lit_offset,
+                        &gf_remap,
+                        off.mod_offset,
+                        off.view_offset,
+                        off.temp_offset,
+                        off.dl_offset,
+                    )
+                })
+                .collect()
+        };
+
+        // The prologue is emitted once, immediately before the first of its
+        // readers in `element_order`, so every CURRENT-value read it makes of
+        // an in-SCC element has to be evaluated before that point. The element
+        // graph adds exactly that constraint (`symbolic_phase_element_order`
+        // wires a prologue read into every reader of the prologue), so this
+        // never fires on an order that graph produced -- it is here because
+        // the two live in different files and a disagreement between them is
+        // precisely the class of bug that produces a well-formed program
+        // reading a temp nothing has written.
+        if !seg.prologue.is_empty() {
+            let first_reader = scc
+                .element_order
+                .iter()
+                .position(|(m, e)| m == member && seg.prologue_readers.contains(e))
+                .ok_or_else(|| {
+                    format!(
+                        "SCC member `{}` has a prologue but none of its readers is in element_order; keeping CircularDependency",
+                        member.as_str()
+                    )
+                })?;
+            let mut reads: BTreeSet<(Ident<Canonical>, usize)> = BTreeSet::new();
+            for op in &seg.prologue {
+                if !crate::db::dep_graph::ordering_reads(
                     op,
-                    off.lit_offset,
-                    &gf_remap,
-                    off.mod_offset,
-                    off.view_offset,
-                    off.temp_offset,
-                    off.dl_offset,
-                )?);
+                    &frag.static_views,
+                    &scc.phase,
+                    &mut reads,
+                ) {
+                    return Err(format!(
+                        "SCC member `{}` has a prologue opcode referencing a static view outside its fragment; keeping CircularDependency",
+                        member.as_str()
+                    ));
+                }
             }
-            renumbered_segments.insert((member.clone(), elem), renumbered);
+            for (name, elem) in &reads {
+                if !scc.members.contains(name) {
+                    continue;
+                }
+                let read_at = scc
+                    .element_order
+                    .iter()
+                    .position(|(m, e)| m == name && e == elem);
+                if read_at.is_none_or(|at| at >= first_reader) {
+                    return Err(format!(
+                        "SCC member `{}`'s prologue reads `{}`[{}], which element_order does not evaluate before the prologue's first reader; keeping CircularDependency",
+                        member.as_str(),
+                        name.as_str(),
+                        elem
+                    ));
+                }
+            }
+            prologue_before.insert(first_reader, renumber_all(&seg.prologue)?);
+        }
+
+        for (elem, ops) in seg.segments {
+            renumbered_segments.insert((member.clone(), elem), renumber_all(&ops)?);
         }
     }
 
@@ -920,7 +1120,12 @@ pub(crate) fn combine_scc_fragment(
     // `element_order` (which the Task 4 builder cannot produce -- nodes
     // are unique) would try to reuse a removed segment and fail loud-safe.
     let mut combined_code: Vec<SymbolicOpcode> = Vec::new();
-    for (member, elem) in &scc.element_order {
+    for (index, (member, elem)) in scc.element_order.iter().enumerate() {
+        // A member's prologue precedes the first of its readers, wherever the
+        // order puts that reader.
+        if let Some(prologue) = prologue_before.remove(&index) {
+            combined_code.extend(prologue);
+        }
         let seg = renumbered_segments
             .remove(&(member.clone(), *elem))
             .ok_or_else(|| {
@@ -1295,7 +1500,7 @@ pub fn assemble_module<'db>(
     };
 
     let dep_graph = model_dependency_graph(db, model, project, module_inputs);
-    if dep_graph.has_cycle {
+    if dep_graph.has_cycle() {
         return Err(format!(
             "model '{}' has circular dependencies",
             model.name(db)
@@ -1666,14 +1871,85 @@ fn enumerate_module_instances(
     Ok(modules)
 }
 
+/// Which of a model's two instance namespaces a candidate came from -- an
+/// explicit `Module` variable, or an instance a parse synthesized for a
+/// stdlib or macro call -- which selects the wording of a missing-target
+/// refusal and nothing else.
+#[derive(Clone, Copy)]
+enum ModuleNamespace {
+    Explicit,
+    Implicit,
+}
+
+/// One module instance found in a model: its name, the model it instantiates
+/// and its wiring. Both namespaces produce this one shape, and
+/// [`record_module_instance`] is the one derivation of an instance's identity
+/// (its target model and the ports its wiring binds) from it.
+struct ModuleInstanceCandidate<'a> {
+    instance_name: &'a str,
+    target_model_name: &'a str,
+    references: &'a [datamodel::ModuleReference],
+    namespace: ModuleNamespace,
+}
+
+impl ModuleInstanceCandidate<'_> {
+    fn missing_target_error(&self) -> String {
+        match self.namespace {
+            ModuleNamespace::Explicit => format!(
+                "model '{}' referenced as module but not found",
+                self.target_model_name
+            ),
+            ModuleNamespace::Implicit => format!(
+                "implicit module '{}' references model '{}' which was not found",
+                self.instance_name, self.target_model_name
+            ),
+        }
+    }
+}
+
+/// Record one instance under `(target model, bound-port set)` and descend
+/// into the target model the first time it is seen.
+///
+/// The bound-port set is [`module_input_set`], the same rule the instance's
+/// lowered wiring follows. A target model is descended into once: the
+/// instances inside it do not depend on which of its ports a parent binds,
+/// and the first-visit rule is what terminates the walk on a module cycle
+/// (the assembly entry point refuses a reachable cycle before enumerating,
+/// but the walk stays total on any input).
+fn record_module_instance(
+    db: &dyn Db,
+    project: SourceProject,
+    modules: &mut ModuleInstanceMap,
+    candidate: &ModuleInstanceCandidate<'_>,
+) -> Result<(), String> {
+    let target_canonical = canonicalize(candidate.target_model_name);
+    if !project.models(db).contains_key(target_canonical.as_ref()) {
+        return Err(candidate.missing_target_error());
+    }
+    let inputs = module_input_set(
+        &module_input_prefix(candidate.instance_name),
+        candidate.references.iter().map(|mr| (&mr.src, &mr.dst)),
+    );
+    let key = Ident::<Canonical>::new(candidate.target_model_name);
+    let first_visit = !modules.contains_key(&key);
+    modules.entry(key).or_default().insert(inputs);
+    if first_visit {
+        enumerate_module_instances_inner(db, project, candidate.target_model_name, modules)?;
+    }
+    Ok(())
+}
+
+/// Record every module instance of `model_name`: its explicit `Module`
+/// variables, then the instances its parses synthesized (stdlib and macro
+/// calls), each in name order so a missing-target refusal and the recursion
+/// are deterministic. A generated LTM equation synthesizes captures only, so
+/// LTM adds no instance to this universe (`db::ltm::LtmImplicitVarMeta`).
 fn enumerate_module_instances_inner(
     db: &dyn Db,
     project: SourceProject,
     model_name: &str,
     modules: &mut ModuleInstanceMap,
 ) -> Result<(), String> {
-    use crate::common::{Canonical, Ident};
-
     let project_models = project.models(db);
     let canonical_name = canonicalize(model_name);
     let source_model = project_models
@@ -1681,133 +1957,52 @@ fn enumerate_module_instances_inner(
         .ok_or_else(|| format!("model '{}' not found", model_name))?;
 
     let source_vars = source_model.variables(db);
-    for (var_name, source_var) in source_vars.iter() {
-        if source_var.kind(db) != SourceVariableKind::Module {
-            continue;
-        }
-
-        let sub_model_name = source_var.model_name(db);
-        let sub_canonical = canonicalize(sub_model_name);
-
-        if !project_models.contains_key(sub_canonical.as_ref()) {
-            return Err(format!(
-                "model '{}' referenced as module but not found",
-                sub_model_name,
-            ));
-        }
-
-        let inputs = module_input_set(
-            &module_input_prefix(var_name),
-            source_var
-                .module_refs(db)
-                .iter()
-                .map(|mr| (&mr.src, &mr.dst)),
-        );
-
-        let key = Ident::<Canonical>::new(sub_model_name);
-        let is_new = !modules.contains_key(&key);
-
-        modules.entry(key).or_default().insert(inputs);
-
-        if is_new {
-            enumerate_module_instances_inner(db, project, sub_model_name, modules)?;
-        }
-    }
-
-    // Include implicit MODULE variables (e.g. from SMOOTH, DELAY builtins)
-    let implicit_info = model_implicit_var_info(db, *source_model, project);
-    for (name, meta) in implicit_info.iter() {
-        if !meta.is_module {
-            continue;
-        }
-        let sub_model_name = match &meta.model_name {
-            Some(n) => n,
-            None => continue,
-        };
-        let sub_canonical = canonicalize(sub_model_name);
-        if !project_models.contains_key(sub_canonical.as_ref()) {
-            return Err(format!(
-                "implicit module '{}' references model '{}' which was not found",
-                name, sub_model_name,
-            ));
-        }
-        let module_ident_context = model_module_ident_context(db, *source_model, project, vec![]);
-        let parsed = parse_source_variable_with_module_context(
+    let mut explicit: Vec<(&String, &SourceVariable)> = source_vars
+        .iter()
+        .filter(|(_, source_var)| source_var.kind(db) == SourceVariableKind::Module)
+        .collect();
+    explicit.sort_unstable_by_key(|(name, _)| *name);
+    for (name, source_var) in explicit {
+        record_module_instance(
             db,
-            meta.parent_source_var,
             project,
-            module_ident_context,
-        );
-        let inputs: BTreeSet<Ident<Canonical>> =
-            if let Some(dm_module) = meta.find_in(parsed).and_then(|iv| iv.module()) {
-                module_input_set(
-                    &module_input_prefix(name),
-                    dm_module.references.iter().map(|mr| (&mr.src, &mr.dst)),
-                )
-            } else {
-                BTreeSet::new()
-            };
-
-        let key = Ident::<Canonical>::new(sub_model_name);
-        let is_new = !modules.contains_key(&key);
-
-        modules.entry(key).or_default().insert(inputs);
-
-        if is_new {
-            enumerate_module_instances_inner(db, project, sub_model_name, modules)?;
-        }
+            modules,
+            &ModuleInstanceCandidate {
+                instance_name: name,
+                target_model_name: source_var.model_name(db),
+                references: source_var.module_refs(db),
+                namespace: ModuleNamespace::Explicit,
+            },
+        )?;
     }
 
-    // Include LTM implicit MODULE variables (e.g. PREVIOUS instances from
-    // feedback loop instrumentation). These are only present when LTM is
-    // enabled. Models without feedback loops produce empty lists.
-    //
-    // Module-typed LTM implicit vars are the only ones that contribute module
-    // instances, and they are rare (in the current architecture LTM equations
-    // never contain module-function calls, so there are usually none). Drive
-    // the loop from the salsa-cached module-typed projection; each implicit
-    // variable rides on its meta, so no parent equation is (re-)parsed here.
-    if project.ltm_enabled(db) {
-        let ltm_implicit = ltm::model_ltm_implicit_var_info(db, *source_model, project);
-        let mut module_typed: Vec<(&String, &crate::db::LtmImplicitVarMeta)> = ltm_implicit
-            .iter()
-            .filter(|(_, meta)| meta.is_module)
-            .collect();
-        // Deterministic processing order: the recursive sub-model discovery
-        // below allocates entries in `modules` as it goes.
-        module_typed.sort_unstable_by(|a, b| a.0.cmp(b.0));
-
-        if !module_typed.is_empty() {
-            for (im_name, im_meta) in module_typed {
-                let sub_model_name = match &im_meta.model_name {
-                    Some(n) => n,
-                    None => continue,
-                };
-                let sub_canonical = canonicalize(sub_model_name);
-                if !project_models.contains_key(sub_canonical.as_ref()) {
-                    continue;
-                }
-
-                let inputs: BTreeSet<Ident<Canonical>> =
-                    if let Some(dm_module) = im_meta.variable.module() {
-                        module_input_set(
-                            &module_input_prefix(im_name),
-                            dm_module.references.iter().map(|mr| (&mr.src, &mr.dst)),
-                        )
-                    } else {
-                        BTreeSet::new()
-                    };
-
-                let key = Ident::<Canonical>::new(sub_model_name);
-                let is_new = !modules.contains_key(&key);
-
-                modules.entry(key).or_default().insert(inputs);
-
-                if is_new {
-                    enumerate_module_instances_inner(db, project, sub_model_name, modules)?;
-                }
-            }
-        }
+    let implicit_info = model_implicit_var_info(db, *source_model, project);
+    let mut implicit: Vec<(&String, &ImplicitVarMeta)> = implicit_info
+        .iter()
+        .filter(|(_, meta)| meta.is_module)
+        .collect();
+    implicit.sort_unstable_by_key(|(name, _)| *name);
+    for (name, meta) in implicit {
+        let Some(target_model_name) = meta.model_name.as_deref() else {
+            continue;
+        };
+        let parsed = parse_source_variable(db, meta.parent_source_var, project);
+        let references = meta
+            .find_in(parsed)
+            .and_then(|helper| helper.module())
+            .map(|instance| instance.references.as_slice())
+            .unwrap_or_default();
+        record_module_instance(
+            db,
+            project,
+            modules,
+            &ModuleInstanceCandidate {
+                instance_name: name,
+                target_model_name,
+                references,
+                namespace: ModuleNamespace::Implicit,
+            },
+        )?;
     }
 
     Ok(())

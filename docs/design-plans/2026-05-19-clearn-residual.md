@@ -233,8 +233,7 @@ C-LEARN-specific code.
 A variable whose equation is the graphical-function sentinel `0+0` (an inline
 table with no functional argument; `mdl/mod.rs::LOOKUP_SENTINEL`) is lowered
 inconsistently: the scalar path wraps it `LOOKUP(self, 0) -> gf(0)`
-(`compiler/mod.rs:~770-801`), while the arrayed and apply-to-all paths
-(`expand_arrayed_with_hoisting:~1605`, `expand_a2a_with_hoisting:~1692`) leave it
+(`compiler/mod.rs:~770-801`), while the arrayed and apply-to-all paths (`expand_per_element`) leave it
 literally `0`. Neither matches genuine Vensim's saved value for a standalone
 lookup. The fix determines Vensim's rule empirically, then lowers all three
 shapes uniformly to match it, reusing the per-element table layout that already
@@ -340,7 +339,7 @@ shapes — resolving the inconsistent `gf(0)`-vs-`0` lowering.
   by instrumenting `run_clearn_vs_vdf` (`tests/simulate.rs`) against `Ref.vdf`.
   This decides the target semantics before any code change.
 - Uniform lookup-only lowering in `src/simlin-engine/src/compiler/mod.rs`:
-  `expand_arrayed_with_hoisting` and `expand_a2a_with_hoisting` apply the
+  `expand_per_element` applies the
   per-element table to match the determined semantics, and the scalar path
   (`:~770-801`) is reconciled to the same rule. Reuses
   `variable.rs::build_tables`/`reorder_arrayed_element_tables` and the

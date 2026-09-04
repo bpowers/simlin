@@ -481,8 +481,7 @@ fn test_polarity_div_denominator_value_sign_guards_numerator_polarity() {
         ident: ttc.clone(),
         units: None,
         eqn: Some(crate::datamodel::Equation::Scalar("5".to_string())),
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: crate::variable::VarKind::Aux {
             ast: Some(Ast::Scalar(cnst(5.0))),
             init_ast: None,
@@ -490,10 +489,11 @@ fn test_polarity_div_denominator_value_sign_guards_numerator_polarity() {
             non_negative: false,
             is_flow: false,
             is_table_only: false,
+            element_scope: None,
         },
     };
     let mut vars = HashMap::new();
-    vars.insert(ttc.clone(), ttc_variable);
+    vars.insert(ttc.clone(), std::sync::Arc::new(ttc_variable));
     let expr = op2(BinaryOp::Div, var("x"), var("ttc"));
     assert_eq!(
         analyze_link_polarity(&Ast::Scalar(expr), &x_var, &vars),
@@ -922,8 +922,7 @@ fn gf_var_for_test(
         ident: Ident::new(ident),
         units: None,
         eqn: None,
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Aux {
             ast: Some(Ast::ApplyToAll(
                 dims,
@@ -938,6 +937,7 @@ fn gf_var_for_test(
             non_negative: false,
             is_flow: false,
             is_table_only: false,
+            element_scope: None,
         },
     }
 }
@@ -1009,7 +1009,7 @@ fn test_lookup_table_polarity_defensive_subscript_branches() {
         let mut vars = HashMap::new();
         vars.insert(
             Ident::new("curve"),
-            gf_var_for_test("curve", vec![region.clone()], tables),
+            std::sync::Arc::new(gf_var_for_test("curve", vec![region.clone()], tables)),
         );
         vars
     };
@@ -1049,11 +1049,11 @@ fn test_lookup_table_polarity_defensive_subscript_branches() {
     let mut multi_dim_vars = HashMap::new();
     multi_dim_vars.insert(
         Ident::new("curve"),
-        gf_var_for_test(
+        std::sync::Arc::new(gf_var_for_test(
             "curve",
             vec![region.clone(), other.clone()],
             vec![increasing.clone(), increasing.clone()],
-        ),
+        )),
     );
     let multi_dim_lookup = Ast::Scalar(Expr2::App(
         BuiltinFn::Lookup(
@@ -1398,12 +1398,7 @@ fn test_loop_polarity_from_runtime_scores_neg_inf_with_finite_balancing() {
 #[test]
 fn test_calculate_polarity_all_unknown_links() {
     // When all links have Unknown polarity, the loop should be Undetermined
-    let graph = CausalGraph {
-        edges: HashMap::new(),
-        stocks: HashSet::new(),
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    };
+    let graph = CausalGraph::new(HashMap::new(), HashSet::new());
 
     let links = vec![
         Link {
@@ -1429,12 +1424,7 @@ fn test_calculate_polarity_all_unknown_links() {
 #[test]
 fn test_calculate_polarity_mixed_unknown_and_known() {
     // Conservative approach: if ANY link is unknown, the loop is Undetermined
-    let graph = CausalGraph {
-        edges: HashMap::new(),
-        stocks: HashSet::new(),
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    };
+    let graph = CausalGraph::new(HashMap::new(), HashSet::new());
 
     // One negative link, one unknown -> should be Undetermined
     let links_one_negative = vec![
@@ -1487,12 +1477,7 @@ fn test_calculate_polarity_mixed_unknown_and_known() {
 #[test]
 fn test_calculate_polarity_all_known_links() {
     // When all links have known polarity, count negative links
-    let graph = CausalGraph {
-        edges: HashMap::new(),
-        stocks: HashSet::new(),
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    };
+    let graph = CausalGraph::new(HashMap::new(), HashSet::new());
 
     // All positive links -> Reinforcing (even number of negatives: 0)
     let links_all_positive = vec![
@@ -3066,12 +3051,7 @@ fn test_enumerate_pathways_to_outputs_non_standard_output() {
     edges.insert(Ident::new("input_val"), vec![Ident::new("intermediate")]);
     edges.insert(Ident::new("intermediate"), vec![Ident::new("result")]);
 
-    let graph = CausalGraph {
-        edges,
-        stocks: HashSet::new(),
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    };
+    let graph = CausalGraph::new(edges, HashSet::new());
 
     // enumerate_module_pathways with hard-coded "output" finds nothing
     let pathways_old = graph.enumerate_module_pathways(&Ident::new("output"));
@@ -3105,12 +3085,7 @@ fn test_enumerate_pathways_to_outputs_standard_output() {
     let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> = HashMap::new();
     edges.insert(Ident::new("input"), vec![Ident::new("output")]);
 
-    let graph = CausalGraph {
-        edges,
-        stocks: HashSet::new(),
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    };
+    let graph = CausalGraph::new(edges, HashSet::new());
 
     // Auto-detection: "output" node is a sink, so it's found automatically
     let pathways = graph.enumerate_pathways_to_outputs(&[]);
@@ -3150,12 +3125,7 @@ fn test_enumerate_module_pathways_deeper_than_legacy_cap() {
         vec![Ident::new("output")],
     );
 
-    let graph = CausalGraph {
-        edges,
-        stocks: HashSet::new(),
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    };
+    let graph = CausalGraph::new(edges, HashSet::new());
 
     let pathways = graph.enumerate_module_pathways(&Ident::new("output"));
     let from_input = pathways.get(&Ident::new("input")).expect(
@@ -3213,12 +3183,7 @@ fn diamond_chain_graph(n: usize, permute: bool) -> CausalGraph {
         edges.insert(b, vec![next.clone()]);
         prev = next;
     }
-    CausalGraph {
-        edges,
-        stocks: HashSet::new(),
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    }
+    CausalGraph::new(edges, HashSet::new())
 }
 
 /// Render a single pathway's node sequence as a stable string key so two
@@ -3379,12 +3344,7 @@ fn module_pathways_work_bounded_on_dead_end_frontier() {
         edges.insert(b, vec![next.clone()]);
         prev = next;
     }
-    let graph = CausalGraph {
-        edges,
-        stocks: HashSet::new(),
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    };
+    let graph = CausalGraph::new(edges, HashSet::new());
 
     // No pathway completes (target "output" is unreachable), but the call
     // must return promptly because the work bound caps node expansions.
@@ -3427,12 +3387,7 @@ fn enrich_with_module_stocks_falls_back_to_all_stocks_on_truncation() {
     let mut sub_stocks = HashSet::new();
     sub_stocks.insert(Ident::new("early_stock"));
     sub_stocks.insert(Ident::new("late_stock"));
-    let sub_graph = CausalGraph {
-        edges: sub_edges,
-        stocks: sub_stocks,
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    };
+    let sub_graph = CausalGraph::new(sub_edges, sub_stocks);
 
     // Parent graph: a circuit `driver -> mod_node -> driver` where `mod_node`
     // is the module whose `input` port the predecessor `driver` feeds.
@@ -3440,8 +3395,7 @@ fn enrich_with_module_stocks_falls_back_to_all_stocks_on_truncation() {
         ident: Ident::new("mod_node"),
         units: None,
         eqn: None,
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Module {
             model_name: Ident::new("sub"),
             inputs: vec![ModuleInput {
@@ -3451,15 +3405,12 @@ fn enrich_with_module_stocks_falls_back_to_all_stocks_on_truncation() {
         },
     };
     let mut parent_variables = HashMap::new();
-    parent_variables.insert(Ident::new("mod_node"), module_var);
+    parent_variables.insert(Ident::new("mod_node"), std::sync::Arc::new(module_var));
     let mut module_graphs = HashMap::new();
     module_graphs.insert(Ident::new("mod_node"), Box::new(sub_graph));
-    let parent = CausalGraph {
-        edges: HashMap::new(),
-        stocks: HashSet::new(),
-        variables: std::sync::Arc::new(parent_variables),
-        module_graphs,
-    };
+    let mut parent = CausalGraph::new(HashMap::new(), HashSet::new());
+    parent.variables = std::sync::Arc::new(parent_variables);
+    parent.module_graphs = module_graphs;
 
     let circuit = vec![Ident::new("driver"), Ident::new("mod_node")];
 
@@ -3503,12 +3454,7 @@ fn tiny_cycle_graph() -> CausalGraph {
     edges.insert(Ident::new("a"), vec![Ident::new("b")]);
     edges.insert(Ident::new("b"), vec![Ident::new("c")]);
     edges.insert(Ident::new("c"), vec![Ident::new("a")]);
-    CausalGraph {
-        edges,
-        stocks: HashSet::new(),
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    }
+    CausalGraph::new(edges, HashSet::new())
 }
 
 #[test]
@@ -3555,12 +3501,7 @@ fn build_causal_graph(edges: &[(&str, &[&str])]) -> CausalGraph {
             .or_default()
             .extend(tos.iter().map(|t| Ident::new(t)));
     }
-    CausalGraph {
-        edges: map,
-        stocks: HashSet::new(),
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    }
+    CausalGraph::new(map, HashSet::new())
 }
 
 fn circuits_as_sorted_name_sets(circuits: &[Vec<Ident<Canonical>>]) -> Vec<Vec<String>> {
@@ -3585,12 +3526,7 @@ fn indexed_graph_empty_round_trip() {
     assert!(graph.succ.is_empty());
     assert!(graph.node_to_idx.is_empty());
 
-    let cg = CausalGraph {
-        edges,
-        stocks: HashSet::new(),
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    };
+    let cg = CausalGraph::new(edges, HashSet::new());
     let circuits = cg
         .find_circuit_node_lists_with_limit(usize::MAX)
         .expect("empty graph must not trip the budget");
@@ -3767,12 +3703,7 @@ fn assert_johnson_matches_tiernan(cg: &CausalGraph) {
 
 #[test]
 fn johnson_empty_graph_no_circuits() {
-    let cg = CausalGraph {
-        edges: HashMap::new(),
-        stocks: HashSet::new(),
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    };
+    let cg = CausalGraph::new(HashMap::new(), HashSet::new());
     let circuits = cg.find_circuit_node_lists_with_limit(usize::MAX).unwrap();
     assert!(circuits.is_empty(), "empty graph must have zero circuits");
 }
@@ -4660,12 +4591,7 @@ fn graph_from_edges(edges: &[(&str, &str)]) -> CausalGraph {
             .or_default()
             .push(Ident::new(to));
     }
-    CausalGraph {
-        edges: map,
-        stocks: HashSet::new(),
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    }
+    CausalGraph::new(map, HashSet::new())
 }
 
 fn var_set(names: &[&str]) -> HashSet<Ident<Canonical>> {
@@ -4806,12 +4732,7 @@ fn build_graph_from_pairs(n: usize, pairs: &[(u8, u8)]) -> CausalGraph {
             map.entry(Ident::new(&f)).or_default().push(Ident::new(&t));
         }
     }
-    CausalGraph {
-        edges: map,
-        stocks: HashSet::new(),
-        variables: std::sync::Arc::new(HashMap::new()),
-        module_graphs: HashMap::new(),
-    }
+    CausalGraph::new(map, HashSet::new())
 }
 
 proptest! {

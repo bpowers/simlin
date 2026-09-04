@@ -58,9 +58,10 @@ pub(crate) enum SnapshotIndex {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SnapshotArg {
     /// The argument is a reference to one variable's stored values. False for
-    /// a computed expression, a temp, and a module-backed name (a module
-    /// instance occupies a slot range whose sub-variable a fixed offset cannot
-    /// name).
+    /// a computed expression, a temp, and -- on the parse side -- the output
+    /// of a module instance synthesized in the same walk; every other name is
+    /// a reference here, and whether it has snapshot storage of its own is
+    /// lowering's question (`compiler::context::Context::snapshot_storage`).
     base_names_storage: bool,
     /// At least one subscript index is read at run time.
     any_index_dynamic: bool,

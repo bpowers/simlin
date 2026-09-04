@@ -18,13 +18,119 @@
 use super::*;
 use crate::datamodel;
 
-/// Parse with an empty module-ident context (test convenience).
+/// A qualified `PREVIOUS`/`INIT` index depends on the one element it spells,
+/// through `project_has_qualified_element`, not on the project's dimension
+/// list: an unrelated dimension edit re-checks the projection and backdates
+/// it, so the scalar variable's parse stays cached, while removing the
+/// selected element re-parses it (and the argument then captures). Reordering
+/// the selector's elements changes the POSITION the index selects without
+/// changing whether it exists, so the parse stays cached and the new position
+/// still reaches the value: the position is lowering's fact, not the parse's.
+/// The selector dimension is unrelated to `vals`' axis on purpose, since a
+/// qualified position is applied to whatever axis is referenced.
+#[test]
+fn a_qualified_snapshot_index_depends_on_its_own_element_only() {
+    use crate::db::exec_probe::ProbedDb;
+    use crate::test_common::TestProject;
+
+    let build = |selector: &[&str], unrelated: &[&str]| {
+        TestProject::new("qualified_snapshot_invalidation")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .named_dimension("Data", &["d1", "d2", "d3"])
+            .named_dimension("Selector", selector)
+            .named_dimension("Unrelated", unrelated)
+            .array_with_ranges("vals[Data]", vec![("d1", "10"), ("d2", "20"), ("d3", "30")])
+            .scalar_aux("probe", "PREVIOUS(vals[Selector.s2], 0)")
+            .build_datamodel()
+    };
+    let parse_probe = |db: &ProbedDb, state: &PersistentSyncState| {
+        parse_source_variable(
+            db.db(),
+            state.models["main"].variables["probe"].source_var,
+            state.project,
+        )
+        .implicit_vars
+        .len()
+    };
+    let probe_value = |db: &ProbedDb, state: &PersistentSyncState| -> f64 {
+        let compiled =
+            compile_project_incremental(db.db(), state.project, "main").expect("compiles");
+        let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+        vm.run_to_end().expect("runs");
+        crate::test_common::collect_results(&vm.into_results())["probe"][1]
+    };
+    let runs = |db: &ProbedDb, query: &str| db.counts().get(query).map(|(runs, _)| *runs);
+
+    let mut db = ProbedDb::new();
+    let state1 = sync_from_datamodel_incremental(
+        db.db_mut(),
+        &build(&["s1", "s2", "s3"], &["u1", "u2"]),
+        None,
+    );
+    assert_eq!(
+        parse_probe(&db, &state1),
+        0,
+        "the qualified element is direct"
+    );
+    assert_eq!(probe_value(&db, &state1), 20.0);
+
+    db.reset();
+    let state2 = sync_from_datamodel_incremental(
+        db.db_mut(),
+        &build(&["s1", "s2", "s3"], &["u1", "u3"]),
+        Some(&state1),
+    );
+    parse_probe(&db, &state2);
+    assert_eq!(
+        runs(&db, "parse_source_variable"),
+        None,
+        "an unrelated dimension edit must not re-parse the probe"
+    );
+    assert_eq!(
+        runs(&db, "project_has_qualified_element"),
+        Some(1),
+        "the projection re-checks the dimension list and backdates"
+    );
+
+    db.reset();
+    let state3 = sync_from_datamodel_incremental(
+        db.db_mut(),
+        &build(&["s2", "s1", "s3"], &["u1", "u3"]),
+        Some(&state2),
+    );
+    parse_probe(&db, &state3);
+    assert_eq!(
+        runs(&db, "parse_source_variable"),
+        None,
+        "moving the selected element changes no fact the parse reads"
+    );
+    assert_eq!(
+        probe_value(&db, &state3),
+        10.0,
+        "the moved position reaches the value through lowering"
+    );
+
+    db.reset();
+    let state4 = sync_from_datamodel_incremental(
+        db.db_mut(),
+        &build(&["renamed", "s1", "s3"], &["u1", "u3"]),
+        Some(&state3),
+    );
+    assert_eq!(
+        parse_probe(&db, &state4),
+        1,
+        "an index naming no element captures, so the parse re-runs"
+    );
+    assert_eq!(runs(&db, "parse_source_variable"), Some(1));
+}
+
+/// The variable's parse (test convenience).
 fn parse_var_no_module_ctx(
     db: &dyn Db,
     var: SourceVariable,
     project: SourceProject,
 ) -> &ParsedVariableResult {
-    parse_source_variable_with_module_context(db, var, project, ModuleIdentContext::new(db, vec![]))
+    parse_source_variable(db, var, project)
 }
 
 /// AC8.1: A scalar variable should be immune to dimension changes.
@@ -496,10 +602,11 @@ mod expand_maps_to_chains_tests {
 /// a plain accessor: it re-executes but backdates on the equal `Context`, so its
 /// readers are left alone. With a plain accessor every reader takes a dependency
 /// on the whole result and rebuilds on each keystroke -- measured here as
-/// `model_stage0` rebuilds, since it reads the context and nothing else that
-/// this edit touches.
+/// `parse_source_variable` re-runs (it reads the context and nothing else that
+/// this edit touches), and, through it, `lowered_source_variable`.
 #[test]
 fn unit_definition_error_only_change_does_not_invalidate_context_readers() {
+    use crate::db::exec_probe::ProbedDb;
     use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_project};
 
     let project_with_malformed_unit = |eqn: &str| {
@@ -515,22 +622,38 @@ fn unit_definition_error_only_change_does_not_invalidate_context_readers() {
         });
         dm
     };
+    let lower_x = |probed: &ProbedDb, sync: &SyncResult| {
+        let db = probed.db();
+        let _ = lowered_source_variable(
+            db,
+            sync.models["main"].variables["x"].source,
+            sync.models["main"].source,
+            sync.project,
+        );
+    };
+    let reader_counts = |probed: &ProbedDb| {
+        let counts = probed.counts();
+        (
+            counts.get("parse_source_variable").copied(),
+            counts.get("lowered_source_variable").copied(),
+        )
+    };
 
-    let mut db = SimlinDb::default();
+    let mut probed = ProbedDb::new();
     let first = project_with_malformed_unit("widget/");
-    let state1 = sync_from_datamodel_incremental(&mut db, &first, None);
+    let state1 = sync_from_datamodel_incremental(probed.db_mut(), &first, None);
     let sync1 = state1.to_sync_result();
-    let _ = model_stage0(&db, sync1.models["main"].source, sync1.project);
+    lower_x(&probed, &sync1);
 
     // Control: re-syncing the identical project rebuilds nothing, so a rebuild
     // below is attributable to the edit and not to the re-sync itself.
-    reset_query_executions();
-    let state2 = sync_from_datamodel_incremental(&mut db, &first, Some(&state1));
+    probed.reset();
+    let state2 = sync_from_datamodel_incremental(probed.db_mut(), &first, Some(&state1));
     let sync2 = state2.to_sync_result();
-    let _ = model_stage0(&db, sync2.models["main"].source, sync2.project);
+    lower_x(&probed, &sync2);
     assert_eq!(
-        query_executions().stage0,
-        0,
+        reader_counts(&probed),
+        (None, None),
         "re-syncing an unchanged project must not rebuild anything"
     );
 
@@ -538,32 +661,34 @@ fn unit_definition_error_only_change_does_not_invalidate_context_readers() {
     // handle and mutates its fields, so `sync2.project` and `sync3.project` are
     // the same salsa input -- reading through it after the edit yields the NEW
     // value for both.
-    let ctx_before = project_units_context(&db, sync2.project).clone();
-    let errors_before = project_units_context_result(&db, sync2.project)
+    let ctx_before = project_units_context(probed.db(), sync2.project).clone();
+    let errors_before = project_units_context_result(probed.db(), sync2.project)
         .definition_errors
         .clone();
 
     // A DIFFERENT malformed equation for the same unit: both are rejected.
     let second = project_with_malformed_unit("widget * ");
-    reset_query_executions();
-    let state3 = sync_from_datamodel_incremental(&mut db, &second, Some(&state2));
+    probed.reset();
+    let state3 = sync_from_datamodel_incremental(probed.db_mut(), &second, Some(&state2));
     let sync3 = state3.to_sync_result();
 
     assert_eq!(
-        *project_units_context(&db, sync3.project),
+        *project_units_context(probed.db(), sync3.project),
         ctx_before,
         "the fixture must leave the units context unchanged, or it proves nothing"
     );
-    let errors_after = &project_units_context_result(&db, sync3.project).definition_errors;
+    let errors_after = project_units_context_result(probed.db(), sync3.project)
+        .definition_errors
+        .clone();
     assert_ne!(
-        errors_after, &errors_before,
+        errors_after, errors_before,
         "the fixture must change the definition errors, or it proves nothing"
     );
 
-    let _ = model_stage0(&db, sync3.models["main"].source, sync3.project);
+    lower_x(&probed, &sync3);
     assert_eq!(
-        query_executions().stage0,
-        0,
+        reader_counts(&probed),
+        (None, None),
         "a change to the unit-definition errors alone must not rebuild a reader \
          of the units context; errors are now {errors_after:?}"
     );

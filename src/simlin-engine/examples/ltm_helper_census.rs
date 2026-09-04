@@ -129,14 +129,12 @@ fn main() {
     let ltm_vars = model_ltm_variables(&db, source_model, source_project);
     let implicit_info = model_ltm_implicit_var_info(&db, source_model, source_project);
 
-    let n_implicit_modules = implicit_info.values().filter(|m| m.is_module).count();
     let implicit_slots: usize = implicit_info.values().map(|m| m.size).sum();
 
     println!("LTM synthetic vars: {}", ltm_vars.vars.len());
     println!(
-        "LTM implicit (helper) vars: {} ({} modules), {} slots",
+        "LTM implicit (capture helper) vars: {}, {} slots",
         implicit_info.len(),
-        n_implicit_modules,
         implicit_slots
     );
 

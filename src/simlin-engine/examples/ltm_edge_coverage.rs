@@ -107,7 +107,7 @@ fn failure_class(reason: &str, from: &str) -> &'static str {
         } else {
             "array-valued operand frozen at PREVIOUS (#995)"
         }
-    } else if reason.contains("Cannot push view")
+    } else if reason.contains("an array operand here must be")
         || reason.contains("array-producing builtin outside AssignTemp")
         || reason.contains("is used where a single value is required")
     {

@@ -414,12 +414,12 @@ pub(crate) fn is_live_source_iterated_dim_subscript(
 }
 
 /// Does iterated-dimension index `d` (canonical) line up with the live
-/// source's `i`-th axis -- by name, or through a usable positional-mapping
-/// remap? The mapped arm consults the SAME
+/// source's `i`-th axis -- by name, or through a usable executed
+/// correspondence? The mapped arm consults the SAME
 /// [`crate::ltm_agg::iterated_axis_slot_elements`] /
-/// `positional_correspondence` gate the Expr2 classifier
-/// (`ltm_agg::classify_axis_access`) uses -- BOTH declaration directions
-/// (GH #757) -- so the partial
+/// `DimensionsContext::executed_read_correspondence` gate the Expr2
+/// classifier (`ltm_agg::classify_axis_access`) uses -- BOTH declaration
+/// directions (GH #757) -- so the partial
 /// builder's live-shape match and the reference-site IR agree by
 /// construction. (No mapping context ⇒ no mapped recognition; the by-name
 /// check still applies.)
@@ -621,11 +621,12 @@ pub(crate) fn other_dep_occurrence_axes(
 }
 
 /// Does iterated-dimension index `d` (canonical) line up with a non-live
-/// dep's declared axis `dep_dim` -- by name, or through a usable
-/// positional-mapping remap? The dep-side sibling of
+/// dep's declared axis `dep_dim` -- by name, or through a usable executed
+/// correspondence? The dep-side sibling of
 /// [`expr0_iterated_axis_lines_up`], consulting the SAME
 /// [`crate::ltm_agg::iterated_axis_slot_elements`] /
-/// `positional_correspondence` gate (both declaration directions) so the
+/// `DimensionsContext::executed_read_correspondence` gate (both declaration
+/// directions) so the
 /// live-source and other-dep recognizers can never disagree about which
 /// mapped pairs are usable.
 #[cfg(test)]

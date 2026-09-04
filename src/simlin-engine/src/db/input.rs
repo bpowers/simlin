@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 //! The salsa INPUT layer: the interned key types
-//! (`LtmLinkId`/`ModuleIdentContext`/`ModuleInputSet`), the variable-kind
+//! (`LtmLinkId`/`ModuleInputSet`), the variable-kind
 //! tag (`SourceVariableKind`), the three `#[salsa::input]` structs
 //! (`SourceProject`/`SourceModel`/`SourceVariable`) that hold the synced
 //! datamodel field-by-field for fine-grained invalidation, the
@@ -25,12 +25,6 @@ pub struct LtmLinkId<'db> {
     pub link_from: String,
     #[returns(ref)]
     pub link_to: String,
-}
-
-#[salsa::interned(debug)]
-pub struct ModuleIdentContext<'db> {
-    #[returns(ref)]
-    pub idents: Vec<String>,
 }
 
 /// Interned identity for a module instance's input-variable wiring: the
@@ -231,8 +225,18 @@ pub struct SourceVariable {
     pub outflows: Vec<String>,
     #[returns(ref)]
     pub module_refs: Vec<datamodel::ModuleReference>,
+    /// A `Module` variable's referenced target model; empty for every other
+    /// kind. NOT the owning model, which is `owner_model`.
     #[returns(ref)]
     pub model_name: String,
+    /// The canonical name of the model this variable belongs to, set at
+    /// sync. Carried by name rather than as a `SourceModel` handle because a
+    /// model's `variables` map is a constructor argument of the model, so the
+    /// variables exist before their model does, and a salsa input field can
+    /// only be set afterwards through `&mut`, which the fresh sync path does
+    /// not hold. `db::variable_owner_model` resolves it to the handle.
+    #[returns(ref)]
+    pub owner_model: String,
     #[returns(clone)]
     pub non_negative: bool,
     #[returns(clone)]
@@ -255,6 +259,35 @@ pub struct SourceVariable {
 #[salsa::tracked(returns(clone))]
 pub(crate) fn source_var_is_table_only(db: &dyn Db, var: SourceVariable) -> bool {
     crate::variable::is_lookup_only(var.equation(db), var.gf(db).as_ref())
+}
+
+/// Is `canonical_model_name` one of the stdlib models `db::sync` splices into
+/// every project?
+///
+/// The `stdlib⁚` prefix alone is NOT sufficient. It uses a punctuation
+/// separator that ordinary model creation never produces, but an import can
+/// still carry a model whose name has the prefix and a suffix naming no stdlib
+/// model; flagging that model as a template would skip a user model's unit
+/// check. Requiring the suffix to be a real stdlib model name keeps the flag
+/// on exactly the models the stdlib splice introduced.
+///
+/// This is the ONE stdlib test in the engine's diagnostic path (GH #988): the
+/// unit-check skip gate (`db::units`), the module-input fallback rule
+/// (`db::diagnostic`) and the sub-model initials rule (`db::dep_graph`) all
+/// call [`source_model_is_stdlib`] rather than carrying a looser spelling.
+pub(crate) fn model_is_stdlib(canonical_model_name: &str) -> bool {
+    canonical_model_name
+        .strip_prefix("stdlib\u{205A}")
+        .is_some_and(|suffix| crate::stdlib::MODEL_NAMES.contains(&suffix))
+}
+
+/// [`model_is_stdlib`] for a salsa model handle.
+///
+/// `SourceModel::name` holds the DISPLAY name, so it is canonicalized first --
+/// the project's model map is canonically keyed, and an imported model spelled
+/// `Stdlib⁚Smth1` is the same model as `stdlib⁚smth1`.
+pub(crate) fn source_model_is_stdlib(db: &dyn Db, model: SourceModel) -> bool {
+    model_is_stdlib(Ident::<Canonical>::new(model.name(db)).as_str())
 }
 
 /// The parser's borrowed view of a variable's salsa input fields.

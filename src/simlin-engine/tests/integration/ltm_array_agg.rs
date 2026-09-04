@@ -51,11 +51,11 @@
 //! *bare* (unsubscripted) arrayed name inside a *nested* `PREVIOUS` --
 //! `p2bare[region] = PREVIOUS(PREVIOUS(pop))` -- now compiles and
 //! simulates, producing the same per-element values as the explicitly
-//! subscripted form. `builtins_visitor`'s `make_temp_arg` synthesizes an
-//! *arrayed* (`Equation::ApplyToAll`) helper aux over the active A2A
-//! dimensions for the inner `PREVIOUS(pop)` and references it
-//! `helper[<element>]`, so the bare arrayed name keeps its array shape
-//! instead of landing ill-typed in a scalar helper. This was exactly the
+//! subscripted form. A snapshot-only apply-to-all body is captured
+//! structurally: `hoist_capture` synthesizes ONE apply-to-all
+//! (`Equation::ApplyToAll`) helper over the parent's dimensions whose body
+//! the compiler lowers per element, so the bare arrayed name keeps its
+//! array shape instead of landing ill-typed in a scalar helper. This was exactly the
 //! shape the LTM flow-to-stock link-score generator emits; "Finding 2" of
 //! the review was this bug surfacing *through* the generator, and Piece 2
 //! worked around it generator-side, but the underlying engine limitation
@@ -687,23 +687,21 @@ fn variable_backed_partial_reduce_loop_scores_finite_and_sustained() {
 /// element-graph fix is pinned directly by
 /// `element_graph_tests::element_graph_scalar_feeder_*`.
 ///
-/// The two follow-on gaps this scalar-target scenario originally exposed are
-/// both fixed now:
+/// Two more properties of this scalar-target scenario, each pinned:
 ///
-/// 1. (FIXED, GH #738) The synthetic agg `$⁚ltm⁚agg⁚0` for
-///    `SUM(pop[*] * scale)` (arrayed `pop` times scalar `scale`, reduced to a
-///    scalar target) used to FAIL fragment compilation and was stubbed to a
-///    constant `0` with an `Assembly` Warning: `compile_ltm_equation_fragment`
-///    lowered the equation with an empty `ScopeStage0.models`, so the
-///    `pop[*] * scale` Op2 never got its Expr2 `ArrayBounds` and Pass-1 temp
-///    decomposition never hoisted it out of the reducer. The agg now compiles
-///    and tracks the inlined reducer's value -- asserted below, and pinned in
-///    detail by `scalar_target_agg_value_matches_inlined_reducer`.
+/// 1. (GH #738) The synthetic agg `$⁚ltm⁚agg⁚0` for `SUM(pop[*] * scale)`
+///    (arrayed `pop` times scalar `scale`, reduced to a scalar target)
+///    compiles and tracks the inlined reducer's value: the LTM lowering is
+///    bounds-free, and the Op2 under the reducer is materialized from the
+///    dependency shapes on the lowered `compiler::Expr`, never from `Expr2`
+///    bounds -- a materializer that needed them stubbed the agg to a constant
+///    `0` with an `Assembly` Warning. Asserted below, and pinned in detail by
+///    `scalar_target_agg_value_matches_inlined_reducer`.
 ///
-/// 2. (FIXED, GH #737) The loop-score *builder* now routes the loop through
-///    the agg: `classify_cycle` sends a cycle that traverses a
-///    `ThroughAgg`-routed edge down the element-level slow path (it is no
-///    longer `PureScalar`), where the post-#533 element graph's
+/// 2. (GH #737) The loop-score *builder* routes the loop through the agg:
+///    `classify_cycle` sends a cycle that traverses a `ThroughAgg`-routed
+///    edge down the element-level slow path (it is not `PureScalar`), where
+///    the element graph's
 ///    `scale → $⁚ltm⁚agg⁚0 → grow` hops are traversed, so the loop score
 ///    composes the two agg-half link scores instead of the direct
 ///    `scale → grow` link. That matters because the DIRECT `scale→grow` link
@@ -977,12 +975,12 @@ fn size_reducer_previous_helper_compiles_and_is_correct() {
 /// stubbed to `0`, collapsing the loop score. Piece 2 worked around it
 /// generator-side; this engine-level fix removes the root cause.
 ///
-/// Fix (GH #541): `make_temp_arg` in `builtins_visitor.rs` now synthesizes
-/// an *arrayed* (`Equation::ApplyToAll`) helper aux over the active A2A
-/// dimensions when the captured argument carries a bare variable reference,
-/// and references it `helper[<element>]`. The bare arrayed name keeps its
-/// array shape, and dimension matching (including transposed contexts) is
-/// delegated to the existing apply-to-all lowering.
+/// The rule (GH #541): a snapshot-only apply-to-all body is captured
+/// structurally -- `hoist_capture` synthesizes one apply-to-all
+/// (`Equation::ApplyToAll`) helper over the parent's dimensions, read under
+/// the active element. The bare arrayed name keeps its array shape, and
+/// dimension matching (including transposed contexts) is the apply-to-all
+/// lowering's.
 ///
 /// `pop[region]` and `scalar_pop` share identical dynamics, so each arrayed
 /// slot must track `PREVIOUS(PREVIOUS(pop[region]))` -- which
@@ -1151,7 +1149,7 @@ fn subscripted_arrayed_nested_previous_matches_scalar() {
 /// GH #541, multi-dimensional case: a bare arrayed name in a nested
 /// `PREVIOUS` inside an apply-to-all equation over *two* dimensions
 /// compiles and matches the explicitly subscripted form per element.
-/// `make_temp_arg`'s arrayed helper is `ApplyToAll([region, age], ...)`, so
+/// `hoist_capture`'s arrayed helper is `ApplyToAll([region, age], ...)`, so
 /// the bare `pop` reference keeps its full 2-D shape.
 #[test]
 fn bare_arrayed_nested_previous_multidim_matches_subscripted() {
@@ -1322,14 +1320,12 @@ fn bare_arrayed_nested_previous_transposed_matches_subscripted() {
 /// `DimensionMapping` does not reproduce the same `find_mapping_parent_of` /
 /// `translate_via_mapping` resolution).
 ///
-/// The original #541 path wrapped the whole `INITIAL` body in an
-/// `Equation::ApplyToAll(["cop"], ...)` helper and SKIPPED
-/// `substitute_dimension_refs`, so the foreign `[Aggregated Regions]` subscript
-/// stayed un-translated and the helper fragment failed (`BadDimensionName` ->
-/// silently dropped -> `NotSimulatable`). The fix keeps a subscripted argument
-/// on the per-element scalar-helper path, which translates each mapped
-/// subscript to a concrete element. The per-element values must be exactly the
-/// mapped source values (`Agg` element `Ai` -> `COP` element `Ci`).
+/// The `INITIAL` body is captured structurally, as an
+/// `Equation::ApplyToAll(["cop"], ...)` helper, and the compiler resolves the
+/// foreign `[Aggregated Regions]` subscript per element through the declared
+/// mapping (`DimensionsContext::resolve_mapped_read`) exactly as it resolves
+/// the parent's own body. The per-element values must be exactly the mapped
+/// source values (`Agg` element `Ai` -> `COP` element `Ci`).
 #[test]
 fn a2a_init_mapped_dim_subscript_matches_mapped_source() {
     const MDL: &str = r#"{UTF-8}
@@ -1424,65 +1420,6 @@ fn arrayed_helper_resolves_capitalized_dimension() {
          the arrayed helper's canonical ApplyToAll dims must resolve against the \
          capitalized dimension name",
     );
-}
-
-/// Regression for the LTM-vs-plain divergence the arrayed-helper path caused
-/// on C-LEARN: a bare arrayed name *inside an array reducer*
-/// (`PREVIOUS(SUM(arr))`) must use a SCALAR helper, not the arrayed-helper
-/// path. The reducer collapses its arrayed argument to a scalar, so wrapping
-/// `SUM(arr)` in an `Equation::ApplyToAll` would broadcast a scalar reduce
-/// across the active dimensions and corrupt the value -- exactly the shape of
-/// an LTM link-score numerator, which is why enabling LTM diverged from plain.
-/// The non-reducer bare-name case (`PREVIOUS(PREVIOUS(arr))`) still takes the
-/// arrayed path; this pins that the reducer case does not.
-#[test]
-fn bare_arrayed_inside_reducer_uses_scalar_helper() {
-    // `agg[region] = PREVIOUS(SUM(pop))`: SUM(pop) is a whole-array scalar
-    // reduce, so every element of `agg` holds the same lagged total. A
-    // wrongly-arrayed helper would broadcast/mis-shape it.
-    let arrayed = TestProject::new("reducer_bare")
-        .with_sim_time(0.0, 4.0, 1.0)
-        .named_dimension("region", &["north", "south"])
-        .array_stock("pop[region]", "100", &["growth"], &[], None)
-        .array_flow("growth[region]", "pop[region] * 0.1", None)
-        .array_aux_direct(
-            "agg",
-            vec!["region".to_string()],
-            "PREVIOUS(SUM(pop))",
-            None,
-        )
-        .build_datamodel();
-
-    // Scalar reference: `sref = PREVIOUS(SUM(pop))` computed once.
-    let scalar = TestProject::new("reducer_scalar")
-        .with_sim_time(0.0, 4.0, 1.0)
-        .named_dimension("region", &["north", "south"])
-        .array_stock("pop[region]", "100", &["growth"], &[], None)
-        .array_flow("growth[region]", "pop[region] * 0.1", None)
-        .scalar_aux("sref", "PREVIOUS(SUM(pop))")
-        .build_datamodel();
-
-    let run = |project: &datamodel::Project| -> Results {
-        let mut db = SimlinDb::default();
-        let sync = sync_from_datamodel_incremental(&mut db, project, None);
-        let compiled = compile_project_incremental(&db, sync.project, "main")
-            .expect("PREVIOUS(SUM(arr)) in an A2A equation must compile");
-        let mut vm = Vm::new(compiled).expect("VM construction should succeed");
-        vm.run_to_end()
-            .expect("simulation should run to completion");
-        vm.into_results()
-    };
-    let arr = run(&arrayed);
-    let sca = run(&scalar);
-    let sref = series_at(&sca, offset_of(&sca, "sref"));
-    for region in ["north", "south"] {
-        let agg = series_at(&arr, offset_of(&arr, &format!("agg[{region}]")));
-        assert_eq!(
-            agg, sref,
-            "agg[{region}] = PREVIOUS(SUM(pop)) must equal the scalar PREVIOUS(SUM(pop)) \
-             (the whole-array reduce is a scalar broadcast to every element)"
-        );
-    }
 }
 
 /// Run a plain (non-LTM) simulation of `project` to completion.
@@ -1665,7 +1602,7 @@ fn arrayed_per_element_same_body_previous_correct() {
 }
 
 /// The `INIT` twin of `arrayed_per_element_previous_keeps_per_slot_identity`:
-/// `INIT` arguments take the same `make_temp_arg` arrayed-helper path, so a
+/// `INIT` arguments take the same `hoist_capture` arrayed-helper path, so a
 /// per-element slot collision would corrupt initial values too. `INIT(z)` is
 /// `z` at the initial step held constant, so each slot must equal its own
 /// scalar's initial value.
@@ -4084,19 +4021,21 @@ fn non_projection_feeder_co_source_closure_stays_loud() {
 
 /// Build the GH #779 fixture: an A2A flow `growth[D1]` whose RHS is a
 /// multi-source reducer over `matrix[D1,*]` with the per-row coefficient
-/// `frac` (arrayed over `D1`) referenced BARE -- unsubscripted. Feedback
-/// loops close through `matrix` (`pop -> matrix -> growth -> pop`) and
-/// through `frac` (`pop -> frac -> growth -> pop`).
+/// `frac` (arrayed over `D1`) as its feeder, spelled `feeder` -- bare
+/// (`frac`) or iterated (`frac[D1]`). Feedback loops close through `matrix`
+/// (`pop -> matrix -> growth -> pop`) and through `frac`
+/// (`pop -> frac -> growth -> pop`). The two elements start apart (100 and
+/// 200) so a read of the wrong element shows in the numbers.
 ///
 /// `reducer` selects the array-reducing builtin (`SUM`, `MEAN`, `MAX`, ...)
-/// so the decline can be exercised across the whole reducer class, not just
-/// `SUM`.
-fn gh779_bare_feeder_fixture(reducer: &str) -> datamodel::Project {
+/// so the shape can be exercised across the whole reducer class.
+fn gh779_bare_feeder_fixture(reducer: &str, feeder: &str) -> datamodel::Project {
     TestProject::new("gh779_bare_feeder")
         .with_sim_time(0.0, 8.0, 1.0)
         .named_dimension("D1", &["a", "b"])
         .named_dimension("D2", &["c", "d"])
-        .array_stock("pop[D1]", "100", &["growth"], &[], None)
+        .array_with_ranges("init[D1]", vec![("a", "100"), ("b", "200")])
+        .array_stock("pop[D1]", "init[D1]", &["growth"], &[], None)
         .array_aux_direct(
             "matrix",
             vec!["D1".into(), "D2".into()],
@@ -4106,332 +4045,1253 @@ fn gh779_bare_feeder_fixture(reducer: &str) -> datamodel::Project {
         .array_aux("frac[D1]", "pop[D1] * 0.005")
         .array_flow(
             "growth[D1]",
-            &format!("{reducer}(matrix[D1, *] * frac)"),
+            &format!("{reducer}(matrix[D1, *] * {feeder})"),
             None,
         )
         .build_datamodel()
 }
 
-/// GH #779: the BARE-spelled feeder of an un-hoisted multi-source reducer
-/// must be DECLINED LOUDLY, not given a silent wrong changed-last score.
-///
-/// In `growth[D1] = SUM(matrix[D1, *] * frac)` the bare `frac` reference is
-/// not expressible by the read-slice vocabulary (`compute_read_slice` maps
-/// `Expr2::Var` to all-`Reduced`, the slices disagree), so the reducer is
-/// not hoisted. The bare spelling's EXECUTION semantics are themselves
-/// anomalous (GH #789: an asymmetric probe shows the engine computes
-/// `growth[r] = |D1| * Σ_d2 matrix[r,d2] * frac[r]`, a spurious `|D1|`
-/// factor). Pre-fix, the `frac -> growth` edge classified `Bare` and the
-/// GH #743 changed-last chooser emitted the per-element partial
-/// `sum(matrix[d1,*] * PREVIOUS(frac))`, which provably disagrees with
-/// whatever execution computes for the bare spelling -- a sustained,
-/// unwarned link score of ~2.92 (~3x wrong) and an identically-wrong
-/// frac-closure loop score. That is the silent-wrong-number this test
-/// guards against (the worst kind).
-///
-/// The fix declines the bare-feeder shape via the GH #780 machinery: the
-/// shaped query returns `Unscoreable`, the edge is recorded, ONE warning
-/// names the edge, no `frac -> growth` link-score variable is emitted, and
-/// the frac-closure loop is DROPPED. The matrix-closure loops are untouched
-/// (they ride the pre-existing loud degraded path, out of scope for #779).
-/// The subscripted spelling `frac[D1]` stays fully hoisted and correct
-/// (`iterated_dim_feeder_closure_scores_via_hoist`) -- users hitting this
-/// have that easy workaround.
-#[test]
-fn bare_feeder_of_unhoisted_reducer_declines_loudly() {
-    let project = gh779_bare_feeder_fixture("SUM");
+/// Every LTM synthetic variable's series, one entry per slot, sorted by
+/// name and slot -- the whole LTM output of a run, for comparing two
+/// spellings of one model.
+fn ltm_series(
+    results: &Results,
+    ltm_vars: &[LtmSyntheticVar],
+    dims: &[Dimension],
+) -> Vec<(String, usize, Vec<f64>)> {
+    let mut out = Vec::new();
+    for var in ltm_vars {
+        let base = offset_of(results, &var.name);
+        for slot in 0..slot_count(var, dims) {
+            out.push((var.name.clone(), slot, series_at(results, base + slot)));
+        }
+    }
+    out.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+    out
+}
 
-    let mut db = SimlinDb::default();
-    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
-        .vars
-        .clone();
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
-
-    // No `frac -> growth` link-score variable: the edge is declined, not
-    // given the silently-wrong changed-last per-element partial.
-    let frac_growth = format!("{LINK_SCORE_PREFIX}frac\u{2192}growth");
-    assert!(
-        !ltm_vars.iter().any(|v| v.name == frac_growth),
-        "the bare-feeder edge must be DECLINED -- no {frac_growth:?} link score; got: {:?}",
-        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
-    );
-
-    // Exactly ONE warning names the declined `frac -> growth` edge (the
-    // matrix-closure loops surface their own separate warnings -- those are
-    // the pre-existing loud degraded path, out of scope here).
-    let all_warnings = assembly_warnings(&db, sync.project);
-    let frac_edge_warnings = all_warnings
-        .iter()
-        .filter(|d| {
-            d.variable
-                .as_deref()
-                .is_some_and(|v| v == frac_growth.as_str())
-        })
-        .count();
-    assert_eq!(
-        frac_edge_warnings, 1,
-        "the declined bare-feeder edge must surface EXACTLY ONE warning naming it; got: {all_warnings:?}"
-    );
-
-    // No frac-closure loop survives: every loop score that references the
-    // (now non-existent) `frac -> growth` link must be dropped, not stubbed.
-    for v in &ltm_vars {
-        if v.name.starts_with(LOOP_SCORE_PREFIX) {
+/// Assert two runs' LTM series ([`ltm_series`]) agree slot by slot and step
+/// by step, naming the first disagreement.
+fn assert_same_ltm_series(
+    left: &[(String, usize, Vec<f64>)],
+    right: &[(String, usize, Vec<f64>)],
+    what: &str,
+) {
+    assert_eq!(left.len(), right.len(), "{what}: different slot counts");
+    for ((name, slot, a), (rname, rslot, b)) in left.iter().zip(right) {
+        assert_eq!((name, slot), (rname, rslot), "{what}: different slots");
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "{what}: {name} slot {slot}: different step counts"
+        );
+        for (step, (x, y)) in a.iter().zip(b).enumerate() {
             assert!(
-                !v.equation.source_text().contains("frac\u{2192}growth"),
-                "the frac-closure loop must be DROPPED, not retained referencing the \
-                 declined edge; loop {} has equation {}",
-                v.name,
-                v.equation.source_text()
+                (x - y).abs() <= 1e-9 * x.abs().max(1.0),
+                "{what}: {name} slot {slot} step {step}: {x} vs {y}"
+            );
+        }
+    }
+}
+
+/// The sorted names of a run's LTM synthetic variables.
+fn ltm_names(ltm_vars: &[LtmSyntheticVar]) -> Vec<String> {
+    let mut names: Vec<String> = ltm_vars.iter().map(|v| v.name.clone()).collect();
+    names.sort();
+    names
+}
+
+/// The assembly warnings of `project` compiled with LTM enabled, as text.
+fn ltm_warning_texts(project: &datamodel::Project) -> Vec<String> {
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let _ = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    assembly_warnings(&db, sync.project)
+        .iter()
+        .map(|d| format!("{:?}", d.error))
+        .collect()
+}
+
+/// GH #779 / GH #789: the BARE feeder of a multi-source reducer reads its own
+/// element -- `growth[r] = SUM(matrix[r,*] * frac[r])`, measured below, not the
+/// `|D1|`-scaled value GH #789 reported -- so the reducer is hoisted exactly as
+/// its iterated spelling `frac[D1]` is: the same variables, the same per-row
+/// scores and the same loop scores, bit for bit (V9b-4 in the
+/// compiler-unification design plan).
+///
+/// The oracle behind the twin comparison is the executed read itself: per
+/// slot, the co-source rows' changed-first shares and the feeder's
+/// changed-last share of the one bilinear body sum to one identically
+/// (`generate_iterated_feeder_to_agg_equation`), which a partial reading any
+/// other element of `frac` cannot satisfy.
+#[test]
+fn a_bare_reducer_feeder_is_hoisted_like_its_iterated_spelling() {
+    let bare = gh779_bare_feeder_fixture("SUM", "frac");
+    let iterated = gh779_bare_feeder_fixture("SUM", "frac[D1]");
+    let (results, ltm_vars) = run_ltm(&bare);
+    let (twin_results, twin_vars) = run_ltm(&iterated);
+
+    // The executed read: each element's own `frac`, no `|D1|` factor.
+    for r in ["a", "b"] {
+        let growth = series_at(&results, offset_of(&results, &format!("growth[{r}]")));
+        let frac = series_at(&results, offset_of(&results, &format!("frac[{r}]")));
+        let row: Vec<Vec<f64>> = ["c", "d"]
+            .iter()
+            .map(|c| series_at(&results, offset_of(&results, &format!("matrix[{r},{c}]"))))
+            .collect();
+        for step in 0..growth.len() {
+            let want = (row[0][step] + row[1][step]) * frac[step];
+            assert!(
+                (growth[step] - want).abs() <= 1e-9 * want.abs().max(1.0),
+                "growth[{r}] step {step}: {} reads frac[{r}] = {} under SUM",
+                growth[step],
+                frac[step]
             );
         }
     }
 
-    // The model still simulates; no frac-closure loop reads the silent
-    // wrong ~2.92.
-    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
-    vm.run_to_end()
-        .expect("VM simulation should run to completion");
-    let results = vm.into_results();
+    // Described like the iterated spelling: the same variables, the same
+    // series, the same (absence of) warnings.
+    assert_eq!(
+        ltm_names(&ltm_vars),
+        ltm_names(&twin_vars),
+        "the bare spelling emits the iterated spelling's LTM variables"
+    );
+    assert_same_ltm_series(
+        &ltm_series(&results, &ltm_vars, &bare.dimensions),
+        &ltm_series(&twin_results, &twin_vars, &iterated.dimensions),
+        "the bare spelling's series equal the iterated spelling's",
+    );
     assert!(
-        !results
-            .offsets
-            .keys()
-            .any(|k| k.as_str() == frac_growth.as_str()),
-        "the declined edge must not appear in the simulated results either"
+        ltm_warning_texts(&bare).is_empty(),
+        "got: {:?}",
+        ltm_warning_texts(&bare)
     );
 
-    // DISCOVERY mode reaches the same shaped query and consumes
-    // `unscoreable_edges` in its pinned-loop pass, so the decline holds there
-    // too: no `frac -> growth` link score is minted.
+    // The shares of one slot sum to one: the feeder's changed-last partial
+    // and the rows' changed-first partials are complementary for the
+    // bilinear body -- an identity only a per-element read of `frac` holds.
+    for r in ["a", "b"] {
+        let feeder = series_at(
+            &results,
+            offset_of(
+                &results,
+                &format!("{LINK_SCORE_PREFIX}frac[{r}]\u{2192}growth[{r}]"),
+            ),
+        );
+        let rows: Vec<Vec<f64>> = ["c", "d"]
+            .iter()
+            .map(|c| {
+                series_at(
+                    &results,
+                    offset_of(
+                        &results,
+                        &format!("{LINK_SCORE_PREFIX}matrix[{r},{c}]\u{2192}growth[{r}]"),
+                    ),
+                )
+            })
+            .collect();
+        for step in 1..feeder.len() {
+            let total = feeder[step] + rows[0][step] + rows[1][step];
+            assert!(
+                (total - 1.0).abs() < 1e-9,
+                "slot {r} step {step}: feeder {} + rows {} + {} must sum to 1",
+                feeder[step],
+                rows[0][step],
+                rows[1][step]
+            );
+        }
+    }
+
+    // Discovery mode reaches the same aggregate and mints the same rows.
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &bare, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    set_project_ltm_discovery_mode(&mut db, sync.project, true);
+    let disc = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let row = format!("{LINK_SCORE_PREFIX}frac[a]\u{2192}growth[a]");
+    assert!(
+        disc.vars.iter().any(|v| v.name == row),
+        "discovery mode scores the bare feeder's rows; got: {:?}",
+        ltm_names(&disc.vars)
+    );
+}
+
+/// The whole reducer class: `MEAN`/`MIN`/`MAX`/`STDDEV` over a bare feeder
+/// hoist and score exactly as their iterated spelling does -- the same
+/// variables, series and warnings -- and the loops through `frac` score.
+#[test]
+fn bare_reducer_feeders_hoist_across_the_reducer_class() {
+    for reducer in ["MEAN", "MIN", "MAX", "STDDEV"] {
+        let bare = gh779_bare_feeder_fixture(reducer, "frac");
+        let iterated = gh779_bare_feeder_fixture(reducer, "frac[D1]");
+        let (results, ltm_vars) = run_ltm(&bare);
+        let (twin_results, twin_vars) = run_ltm(&iterated);
+        assert_eq!(
+            ltm_names(&ltm_vars),
+            ltm_names(&twin_vars),
+            "{reducer}: the bare spelling emits the iterated spelling's variables"
+        );
+        assert_same_ltm_series(
+            &ltm_series(&results, &ltm_vars, &bare.dimensions),
+            &ltm_series(&twin_results, &twin_vars, &iterated.dimensions),
+            &format!("{reducer}: the bare spelling's series equal the iterated spelling's"),
+        );
+        assert_eq!(
+            ltm_warning_texts(&bare),
+            ltm_warning_texts(&iterated),
+            "{reducer}: and the same warnings"
+        );
+        let row = format!("{LINK_SCORE_PREFIX}frac[a]\u{2192}growth[a]");
+        assert!(
+            ltm_vars
+                .iter()
+                .any(|v| v.name.starts_with(LOOP_SCORE_PREFIX)
+                    && v.equation.source_text().contains(&row)),
+            "{reducer}: a loop through the feeder row {row:?} scores; got: {:?}",
+            ltm_names(&ltm_vars)
+        );
+    }
+}
+
+/// GH #788: a bare arrayed reducer argument inside a product,
+/// `growth[D1] = SUM(other) * frac`, reads its own element -- `growth[e] =
+/// other[e] * frac[e]`, measured below -- and is hoisted exactly as
+/// `SUM(other[D1])` is: an aggregate over `D1` whose slot `e` holds `other[e]`,
+/// with the row score `other[e] -> agg[e]`, the agg's `agg[e] -> growth[e]`,
+/// the Bare `frac -> growth` score, and every loop through them scored
+/// (V9b-4).
+///
+/// The oracle is the executed read: each partial is the target's own equation
+/// re-evaluated with one input held at its previous value, so the recorded
+/// score must equal the ratio the recorded series give -- with `other[e]`,
+/// not the whole-array sum, as the frozen and the live reducer value.
+#[test]
+fn a_bare_reducer_argument_in_a_product_scores_per_element() {
+    let project = TestProject::new("gh788_bare_arrayed_reducer_arg")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .array_with_ranges("init[D1]", vec![("a", "100"), ("b", "200")])
+        .array_stock("pop[D1]", "init[D1]", &["growth"], &[], None)
+        .array_aux("other[D1]", "pop * 0.01")
+        .array_aux("frac[D1]", "pop * 0.005")
+        .array_flow("growth[D1]", "SUM(other) * frac", None)
+        .build_datamodel();
+    let (results, ltm_vars) = run_ltm(&project);
+    let names = ltm_names(&ltm_vars);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let frac_growth = format!("{LINK_SCORE_PREFIX}frac\u{2192}growth");
+    assert_eq!(
+        ltm_var(&ltm_vars, agg).dimensions,
+        vec!["D1".to_string()],
+        "SUM(other) is an aggregate over the iterated dimension, not a scalar"
+    );
+    for e in ["a", "b"] {
+        for name in [
+            format!("{LINK_SCORE_PREFIX}other[{e}]\u{2192}{agg}[{e}]"),
+            format!("{LINK_SCORE_PREFIX}{agg}[{e}]\u{2192}growth[{e}]"),
+        ] {
+            assert!(names.contains(&name), "expected {name:?}; got: {names:?}");
+        }
+    }
+    assert!(
+        names.contains(&frac_growth),
+        "expected {frac_growth:?}; got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.starts_with(LOOP_SCORE_PREFIX)),
+        "the loops through the aggregate score; got: {names:?}"
+    );
+    assert!(
+        ltm_warning_texts(&project).is_empty(),
+        "got: {:?}",
+        ltm_warning_texts(&project)
+    );
+
+    let frac_base = offset_of(&results, &frac_growth);
+    let agg_base = offset_of(&results, agg);
+    for (slot, e) in ["a", "b"].into_iter().enumerate() {
+        let growth = series_at(&results, offset_of(&results, &format!("growth[{e}]")));
+        let other = series_at(&results, offset_of(&results, &format!("other[{e}]")));
+        let frac = series_at(&results, offset_of(&results, &format!("frac[{e}]")));
+        assert_eq!(
+            series_at(&results, agg_base + slot),
+            other,
+            "the aggregate's slot {e} is other[{e}]"
+        );
+        for step in 0..growth.len() {
+            assert!(
+                (growth[step] - other[step] * frac[step]).abs() < 1e-9,
+                "growth[{e}] step {step} reads other[{e}] under SUM"
+            );
+        }
+        let frac_score = series_at(&results, frac_base + slot);
+        let agg_score = series_at(
+            &results,
+            offset_of(
+                &results,
+                &format!("{LINK_SCORE_PREFIX}{agg}[{e}]\u{2192}growth[{e}]"),
+            ),
+        );
+        let row_score = series_at(
+            &results,
+            offset_of(
+                &results,
+                &format!("{LINK_SCORE_PREFIX}other[{e}]\u{2192}{agg}[{e}]"),
+            ),
+        );
+        for step in 1..growth.len() {
+            let delta = growth[step] - growth[step - 1];
+            // `frac` live, the reducer (its aggregate) at its previous value.
+            let want_frac = (other[step - 1] * frac[step] - growth[step - 1]) / delta;
+            assert!(
+                (frac_score[step] - want_frac).abs() < 1e-9,
+                "frac -> growth[{e}] step {step}: {} vs {want_frac} from the series",
+                frac_score[step]
+            );
+            // The aggregate live, `frac` at its previous value.
+            let want_agg = (other[step] * frac[step - 1] - growth[step - 1]) / delta;
+            assert!(
+                (agg_score[step] - want_agg).abs() < 1e-9,
+                "agg[{e}] -> growth[{e}] step {step}: {} vs {want_agg} from the series",
+                agg_score[step]
+            );
+            // The one row of a one-row linear reduce carries it whole.
+            assert!(
+                (row_score[step] - 1.0).abs() < 1e-9,
+                "other[{e}] -> agg[{e}] step {step}: {}",
+                row_score[step]
+            );
+        }
+    }
+
+    // Discovery mode mints the same aggregate and link scores (it finds its
+    // loops after the run, so it emits no loop score, and it scores every
+    // causal edge, so it adds the variable-level `other -> growth`).
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
-    let disc_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
-        .vars
-        .clone();
-    assert!(
-        !disc_vars.iter().any(|v| v.name == frac_growth),
-        "discovery mode must also decline the bare-feeder edge; got: {:?}",
-        disc_vars
-            .iter()
-            .map(|v| v.name.as_str())
-            .collect::<Vec<_>>()
-    );
+    let disc =
+        ltm_names(&model_ltm_variables(&db, sync.models["main"].source_model, sync.project).vars);
+    for name in names.iter().filter(|n| !n.starts_with(LOOP_SCORE_PREFIX)) {
+        assert!(
+            disc.contains(name),
+            "discovery mode also emits {name:?}; got: {disc:?}"
+        );
+    }
 }
 
-/// GH #779, the whole reducer class: MEAN/MIN/MAX/STDDEV bare-feeder shapes
-/// decline identically to SUM. A bare arrayed reference inside ANY
-/// array-reducer argument carries the same execution-vs-partial
-/// disagreement (and the same anomalous execution semantics, GH #789), so
-/// the decline must cover the class.
+/// GH #788 / #795: an additive bare reducer argument, `growth[D1] = local +
+/// SUM(pop)`, reads its own element -- `growth[e] = local[e] + pop[e]` -- so
+/// both inputs score exactly and their shares sum to one: the independent
+/// `local -> growth` partial and the aggregate's `agg[e] -> growth[e]` partial
+/// are the two terms' deltas over the target's.
 #[test]
-fn bare_feeder_decline_covers_reducer_class() {
-    for reducer in ["MEAN", "MIN", "MAX", "STDDEV"] {
-        let project = gh779_bare_feeder_fixture(reducer);
-        let mut db = SimlinDb::default();
-        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-        set_project_ltm_enabled(&mut db, sync.project, true);
-        let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
-            .vars
-            .clone();
-        compile_project_incremental(&db, sync.project, "main")
-            .unwrap_or_else(|e| panic!("{reducer}: LTM-enabled compilation should succeed: {e:?}"));
+fn an_additive_bare_reducer_argument_scores_its_own_element() {
+    let project = TestProject::new("gh795_bare_arrayed_reducer_scope")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("D1", &["a", "b"])
+        .array_with_ranges("init[D1]", vec![("a", "100"), ("b", "200")])
+        .array_stock("pop[D1]", "init[D1]", &["growth"], &[], None)
+        .array_aux("local[D1]", "pop * 0.01")
+        .array_flow("growth[D1]", "local + SUM(pop)", None)
+        .build_datamodel();
+    let (results, ltm_vars) = run_ltm(&project);
+    let names = ltm_names(&ltm_vars);
+    let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
+    let local_growth = format!("{LINK_SCORE_PREFIX}local\u{2192}growth");
+    assert!(
+        names.contains(&local_growth),
+        "expected {local_growth:?}; got: {names:?}"
+    );
+    assert!(
+        ltm_warning_texts(&project).is_empty(),
+        "got: {:?}",
+        ltm_warning_texts(&project)
+    );
 
-        let frac_growth = format!("{LINK_SCORE_PREFIX}frac\u{2192}growth");
-        assert!(
-            !ltm_vars.iter().any(|v| v.name == frac_growth),
-            "{reducer}: the bare-feeder edge must be declined -- no {frac_growth:?}; got: {:?}",
-            ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    let local_base = offset_of(&results, &local_growth);
+    for (slot, e) in ["a", "b"].into_iter().enumerate() {
+        let growth = series_at(&results, offset_of(&results, &format!("growth[{e}]")));
+        let local = series_at(&results, offset_of(&results, &format!("local[{e}]")));
+        let pop = series_at(&results, offset_of(&results, &format!("pop[{e}]")));
+        for step in 0..growth.len() {
+            assert!(
+                (growth[step] - (local[step] + pop[step])).abs() < 1e-9,
+                "growth[{e}] step {step} reads pop[{e}] under SUM"
+            );
+        }
+        let local_score = series_at(&results, local_base + slot);
+        let agg_score = series_at(
+            &results,
+            offset_of(
+                &results,
+                &format!("{LINK_SCORE_PREFIX}{agg}[{e}]\u{2192}growth[{e}]"),
+            ),
         );
-        for v in &ltm_vars {
-            if v.name.starts_with(LOOP_SCORE_PREFIX) {
+        for step in 1..growth.len() {
+            let delta = growth[step] - growth[step - 1];
+            let want_local = (local[step] - local[step - 1]) / delta;
+            let want_agg = (pop[step] - pop[step - 1]) / delta;
+            assert!(
+                (local_score[step] - want_local).abs() < 1e-9,
+                "local -> growth[{e}] step {step}: {} vs {want_local}",
+                local_score[step]
+            );
+            assert!(
+                (agg_score[step] - want_agg).abs() < 1e-9,
+                "agg[{e}] -> growth[{e}] step {step}: {} vs {want_agg}",
+                agg_score[step]
+            );
+            assert!(
+                (local_score[step] + agg_score[step] - 1.0).abs() < 1e-9,
+                "the two additive shares sum to one at step {step}"
+            );
+        }
+    }
+}
+
+/// The synthetic aggregate nodes of a run, `(name, dimensions)`, sorted.
+fn agg_nodes_of(ltm_vars: &[LtmSyntheticVar]) -> Vec<(String, Vec<String>)> {
+    let mut aggs: Vec<(String, Vec<String>)> = ltm_vars
+        .iter()
+        .filter(|v| v.name.starts_with("$\u{205A}ltm\u{205A}agg\u{205A}"))
+        .map(|v| (v.name.clone(), v.dimensions.clone()))
+        .collect();
+    aggs.sort();
+    aggs
+}
+
+/// Two owners spell the same reducer text `SUM(pop)` under different
+/// iterations -- `a[region] = SUM(pop) * k` reads `pop[e]`, `b = SUM(pop) * 2`
+/// the whole array (both measured) -- so they are two aggregate nodes: the
+/// synthetic dedup keys on the SPELLED reducer (`sum(pop[region])` against
+/// `sum(pop)`, `AggNodesResult::synthetic_by_key`), not on the owner's text.
+/// Keyed on the text, the owner that sorts first minted the node and the other
+/// routed through it: the A2A owner first, `agg -> b` failed to compile (loud)
+/// and `emit_agg_routed_edges` asserted in a debug build; the scalar owner
+/// first, `b[north]` scored 287.9 against the whole-array node, silently.
+/// The two declaration orders are the two arms of that decision, and the
+/// suite runs under debug assertions, so this pin is also the "no assertion"
+/// pin. Each `agg -> owner` partial equals the ratio the recorded series give.
+#[test]
+fn two_owners_of_one_reducer_text_under_different_iterations_get_their_own_nodes() {
+    for (a2a_name, scalar_name) in [("a", "b"), ("b", "aa")] {
+        let project = TestProject::new("dedup_by_spelled_reducer")
+            .with_sim_time(0.0, 8.0, 1.0)
+            .named_dimension("region", &["north", "south"])
+            .array_with_ranges("init[region]", vec![("north", "100"), ("south", "200")])
+            .array_stock("pop[region]", "init[region]", &["growth"], &[], None)
+            .scalar_aux("k", "0.01")
+            .array_aux(&format!("{a2a_name}[region]"), "SUM(pop) * k")
+            .scalar_aux(scalar_name, "SUM(pop) * 2")
+            .array_flow(
+                "growth[region]",
+                &format!("{a2a_name}[region] * 0.1 + {scalar_name} * 0.001"),
+                None,
+            )
+            .build_datamodel();
+        let (results, ltm_vars) = run_ltm(&project);
+        let aggs = agg_nodes_of(&ltm_vars);
+        assert_eq!(
+            aggs.len(),
+            2,
+            "{a2a_name}/{scalar_name}: two nodes; got {aggs:?}"
+        );
+        let arrayed = aggs
+            .iter()
+            .find(|(_, dims)| dims == &["region".to_string()])
+            .unwrap_or_else(|| panic!("the A2A owner's node is over region; got {aggs:?}"));
+        let scalar = aggs
+            .iter()
+            .find(|(_, dims)| dims.is_empty())
+            .unwrap_or_else(|| panic!("the scalar owner's node is scalar; got {aggs:?}"));
+        assert!(
+            ltm_warning_texts(&project).is_empty(),
+            "got: {:?}",
+            ltm_warning_texts(&project)
+        );
+
+        let pop: Vec<Vec<f64>> = ["north", "south"]
+            .iter()
+            .map(|e| series_at(&results, offset_of(&results, &format!("pop[{e}]"))))
+            .collect();
+        let whole: Vec<f64> = (0..pop[0].len()).map(|i| pop[0][i] + pop[1][i]).collect();
+        assert_eq!(
+            series_at(&results, offset_of(&results, &scalar.0)),
+            whole,
+            "the scalar owner's node holds the whole array"
+        );
+        let scalar_score = series_at(
+            &results,
+            offset_of(
+                &results,
+                &format!("{LINK_SCORE_PREFIX}{}\u{2192}{scalar_name}", scalar.0),
+            ),
+        );
+        let b = series_at(&results, offset_of(&results, scalar_name));
+        for step in 1..b.len() {
+            assert!((b[step] - whole[step] * 2.0).abs() < 1e-9);
+            let want = (whole[step] * 2.0 - b[step - 1]) / (b[step] - b[step - 1]);
+            assert!(
+                (scalar_score[step] - want).abs() < 1e-9,
+                "agg -> {scalar_name} step {step}: {} vs {want}",
+                scalar_score[step]
+            );
+        }
+        let arrayed_base = offset_of(&results, &arrayed.0);
+        for (slot, e) in ["north", "south"].into_iter().enumerate() {
+            assert_eq!(
+                series_at(&results, arrayed_base + slot),
+                pop[slot],
+                "the A2A owner's node holds pop[{e}]"
+            );
+            let a = series_at(&results, offset_of(&results, &format!("{a2a_name}[{e}]")));
+            let score = series_at(
+                &results,
+                offset_of(
+                    &results,
+                    &format!(
+                        "{LINK_SCORE_PREFIX}{}[{e}]\u{2192}{a2a_name}[{e}]",
+                        arrayed.0
+                    ),
+                ),
+            );
+            for step in 1..a.len() {
                 assert!(
-                    !v.equation.source_text().contains("frac\u{2192}growth"),
-                    "{reducer}: frac-closure loop must drop, not retain the declined edge; {}",
-                    v.name
+                    (a[step] - pop[slot][step] * 0.01).abs() < 1e-9,
+                    "{a2a_name}[{e}] reads pop[{e}]"
+                );
+                let want = (pop[slot][step] * 0.01 - a[step - 1]) / (a[step] - a[step - 1]);
+                assert!(
+                    (score[step] - want).abs() < 1e-9,
+                    "agg[{e}] -> {a2a_name}[{e}] step {step}: {} vs {want}",
+                    score[step]
                 );
             }
         }
     }
 }
 
-/// GH #788: a bare arrayed reducer arg inside an A2A equation is currently
-/// outside LTM's scoreable vocabulary. Execution does not use the scalar
-/// synthetic-agg value LTM would get from hoisting `SUM(other)`, and a feeder
-/// partial such as `frac -> growth` would freeze that same wrong reducer
-/// value. Until LTM can model the bare spelling's active-slot semantics, the
-/// whole target edge surface must decline loudly.
+/// The same identity over two DIFFERENT iterations of one 2-D source:
+/// `rowsum[d1] = SUM(m) * 0.01` reads the row, `colsum[d2] = SUM(m) * 0.02` the
+/// column (measured), so `sum(m[d1, *])` and `sum(m[*, d2])` are two nodes,
+/// each holding what its owner reads. Keyed on the text, `rowsum` routed
+/// through the column node and its `agg -> rowsum` failed to compile.
 #[test]
-fn bare_arrayed_reducer_arg_in_a2a_target_declines_loudly() {
-    let project = TestProject::new("gh788_bare_arrayed_reducer_arg")
+fn a_row_sum_and_a_column_sum_of_one_text_get_their_own_nodes() {
+    let project = TestProject::new("dedup_two_dims")
         .with_sim_time(0.0, 8.0, 1.0)
-        .named_dimension("D1", &["a", "b"])
-        .array_stock("pop[D1]", "100", &["growth"], &[], None)
-        .array_aux("other[D1]", "pop * 0.01")
-        .array_aux("frac[D1]", "pop * 0.005")
-        .array_flow("growth[D1]", "SUM(other) * frac", None)
+        .named_dimension("d1", &["a", "b"])
+        .named_dimension("d2", &["c", "d"])
+        .array_with_ranges("pinit[d1]", vec![("a", "10"), ("b", "20")])
+        .array_with_ranges("qinit[d2]", vec![("c", "1"), ("d", "3")])
+        .array_stock("p[d1]", "pinit[d1]", &["fp"], &[], None)
+        .array_stock("q[d2]", "qinit[d2]", &["fq"], &[], None)
+        .array_aux("m[d1, d2]", "p[d1] * q[d2]")
+        .array_aux("rowsum[d1]", "SUM(m) * 0.01")
+        .array_aux("colsum[d2]", "SUM(m) * 0.02")
+        .array_flow("fp[d1]", "rowsum[d1] * 0.1", None)
+        .array_flow("fq[d2]", "colsum[d2] * 0.1", None)
         .build_datamodel();
-
-    let mut db = SimlinDb::default();
-    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
-        .vars
-        .clone();
-    compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
-
-    for edge in ["other\u{2192}growth", "frac\u{2192}growth"] {
-        let link_name = format!("{LINK_SCORE_PREFIX}{edge}");
-        assert!(
-            !ltm_vars.iter().any(|v| v.name == link_name),
-            "edge {edge} must be declined, not scored; got: {:?}",
-            ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
-        );
-    }
+    let (results, ltm_vars) = run_ltm(&project);
+    let aggs = agg_nodes_of(&ltm_vars);
+    assert_eq!(aggs.len(), 2, "got {aggs:?}");
     assert!(
-        !ltm_vars
-            .iter()
-            .any(|v| v.name.starts_with(LOOP_SCORE_PREFIX)),
-        "loops through the declined bare-arrayed reducer target must be dropped; got: {:?}",
-        ltm_vars
-            .iter()
-            .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
-            .map(|v| v.name.as_str())
-            .collect::<Vec<_>>()
+        ltm_warning_texts(&project).is_empty(),
+        "got: {:?}",
+        ltm_warning_texts(&project)
     );
-    assert!(
-        !ltm_vars
+    let m = |r: &str, c: &str| series_at(&results, offset_of(&results, &format!("m[{r},{c}]")));
+    for (dims, owner, rows) in [
+        (
+            vec!["d1".to_string()],
+            "rowsum",
+            vec![
+                ("a", [m("a", "c"), m("a", "d")]),
+                ("b", [m("b", "c"), m("b", "d")]),
+            ],
+        ),
+        (
+            vec!["d2".to_string()],
+            "colsum",
+            vec![
+                ("c", [m("a", "c"), m("b", "c")]),
+                ("d", [m("a", "d"), m("b", "d")]),
+            ],
+        ),
+    ] {
+        let (node, _) = aggs
             .iter()
-            .any(|v| v.name.contains("$\u{205A}ltm\u{205A}agg")),
-        "SUM(other) must not be hoisted into a whole-array scalar agg; got: {:?}",
-        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
-    );
-
-    let warnings = assembly_warnings(&db, sync.project);
-    for edge in ["other -> growth", "frac -> growth"] {
-        assert!(
-            warnings.iter().any(|d| match &d.error {
-                DiagnosticError::Assembly(msg) => {
-                    let lower = msg.to_ascii_lowercase();
-                    msg.contains(edge)
-                        && msg.contains("bare arrayed reducer argument")
-                        && lower.contains("sum(other)")
-                }
-                _ => false,
-            }),
-            "expected warning for declined {edge}; got: {warnings:?}"
-        );
-    }
-
-    let mut db = SimlinDb::default();
-    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    set_project_ltm_discovery_mode(&mut db, sync.project, true);
-    let disc_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
-        .vars
-        .clone();
-    for edge in ["other\u{2192}growth", "frac\u{2192}growth"] {
-        let link_name = format!("{LINK_SCORE_PREFIX}{edge}");
-        assert!(
-            !disc_vars.iter().any(|v| v.name == link_name),
-            "discovery mode must also decline {edge}; got: {:?}",
-            disc_vars
-                .iter()
-                .map(|v| v.name.as_str())
-                .collect::<Vec<_>>()
-        );
+            .find(|(_, d)| *d == dims)
+            .unwrap_or_else(|| panic!("{owner}'s node is over {dims:?}; got {aggs:?}"));
+        let base = offset_of(&results, node);
+        for (slot, (e, parts)) in rows.iter().enumerate() {
+            let want: Vec<f64> = (0..parts[0].len())
+                .map(|i| parts[0][i] + parts[1][i])
+                .collect();
+            assert_eq!(
+                series_at(&results, base + slot),
+                want,
+                "{owner}[{e}]'s node reads its line of m"
+            );
+            let score = series_at(
+                &results,
+                offset_of(
+                    &results,
+                    &format!("{LINK_SCORE_PREFIX}{node}[{e}]\u{2192}{owner}[{e}]"),
+                ),
+            );
+            for (step, value) in score.iter().enumerate().skip(1) {
+                assert!(
+                    (value - 1.0).abs() < 1e-9,
+                    "{node}[{e}] -> {owner}[{e}] step {step}: {value}"
+                );
+            }
+        }
     }
 }
 
-/// GH #788/#795 review regression: a bare arrayed reducer in an A2A target
-/// does not make every incoming edge unscoreable. Independent additive sources
-/// still have sound ceteris-paribus partials because changing them does not
-/// freeze or perturb the unsafe reducer value.
+/// A per-element (`Ast::Arrayed`) owner beside an A2A owner of one text: the
+/// A2A owner `b[region] = SUM(pop) * k` reads `pop[e]` (measured) and gets its
+/// own `[region]` node; the slots of `a` share the scalar whole-array node.
+/// Keyed on the text, `b` routed through that node and scored loops at 16767
+/// with no diagnostic.
+///
+/// The slot's own read -- `a[north] = SUM(pop) * 0.5` is `pop[north] * 0.5` on
+/// the VM, the ROW the slot's element pins -- is not what the whole-array node
+/// holds, so `pop -> a` is declined loudly and no `agg -> a[e]` score exists
+/// (`a_per_element_slots_bare_reducer_argument_is_declined_not_scored`).
 #[test]
-fn bare_arrayed_reducer_decline_keeps_independent_additive_source() {
-    let project = TestProject::new("gh795_bare_arrayed_reducer_scope")
+fn a_per_element_owner_beside_an_a2a_owner_of_one_text_keeps_the_a2a_node() {
+    let project = TestProject::new("dedup_arrayed_owner")
         .with_sim_time(0.0, 8.0, 1.0)
-        .named_dimension("D1", &["a", "b"])
-        .array_stock("pop[D1]", "100", &["growth"], &[], None)
-        .array_aux("local[D1]", "pop * 0.01")
-        .array_flow("growth[D1]", "local + SUM(pop)", None)
+        .named_dimension("region", &["north", "south"])
+        .array_with_ranges("init[region]", vec![("north", "100"), ("south", "200")])
+        .array_stock("pop[region]", "init[region]", &["growth"], &[], None)
+        .scalar_aux("k", "0.01")
+        .array_with_ranges(
+            "a[region]",
+            vec![("north", "SUM(pop) * 0.5"), ("south", "SUM(pop) * 0.25")],
+        )
+        .array_aux("b[region]", "SUM(pop) * k")
+        .array_flow(
+            "growth[region]",
+            "a[region] * 0.001 + b[region] * 0.1",
+            None,
+        )
         .build_datamodel();
-
-    let mut db = SimlinDb::default();
-    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
-        .vars
-        .clone();
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
-
-    let local_growth = format!("{LINK_SCORE_PREFIX}local\u{2192}growth");
+    let (results, ltm_vars) = run_ltm(&project);
+    let aggs = agg_nodes_of(&ltm_vars);
+    let (node, _) = aggs
+        .iter()
+        .find(|(_, d)| d == &["region".to_string()])
+        .unwrap_or_else(|| panic!("b's node is over region; got {aggs:?}"));
+    let warnings = ltm_warning_texts(&project);
     assert!(
-        ltm_vars.iter().any(|v| v.name == local_growth),
-        "independent additive edge {local_growth:?} must remain scoreable; got: {:?}",
-        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
-    );
-
-    let pop_growth = format!("{LINK_SCORE_PREFIX}pop\u{2192}growth");
-    assert!(
-        !ltm_vars.iter().any(|v| v.name == pop_growth),
-        "edge reading the bare reducer arg must be declined; got: {:?}",
-        ltm_vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
-    );
-
-    let warnings = assembly_warnings(&db, sync.project);
-    assert!(
-        warnings.iter().any(|d| match &d.error {
-            DiagnosticError::Assembly(msg) => {
-                let lower = msg.to_ascii_lowercase();
-                msg.contains("pop -> growth")
-                    && msg.contains("bare arrayed reducer argument")
-                    && lower.contains("sum(pop)")
-            }
-            _ => false,
-        }),
-        "expected warning for declined pop -> growth; got: {warnings:?}"
+        !warnings.iter().any(|w| w.contains("failed to compile")),
+        "got: {warnings:?}"
     );
     assert!(
-        !warnings.iter().any(|d| match &d.error {
-            DiagnosticError::Assembly(msg) => {
-                msg.contains("local -> growth") && msg.contains("bare arrayed reducer argument")
-            }
-            _ => false,
-        }),
-        "local -> growth is independent of the bare reducer and must not warn; got: {warnings:?}"
+        warnings
+            .iter()
+            .any(|w| w.contains("LTM link score for edge pop -> a could not be computed")),
+        "the slot's edge through the whole-array node is declined loudly; got: {warnings:?}"
     );
-
-    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
-    vm.run_to_end()
-        .expect("VM simulation should run to completion");
-    let results = vm.into_results();
-    let local_base = offset_of(&results, &local_growth);
-    for (slot, elem) in ["a", "b"].into_iter().enumerate() {
-        let score = series_at(&results, local_base + slot);
-        for (step, &value) in score.iter().enumerate() {
+    assert!(
+        !ltm_names(&ltm_vars)
+            .iter()
+            .any(|n| n.contains("\u{2192}a[")),
+        "no agg -> a[e] score; got: {:?}",
+        ltm_names(&ltm_vars)
+    );
+    let base = offset_of(&results, node);
+    for (slot, e) in ["north", "south"].into_iter().enumerate() {
+        let pop = series_at(&results, offset_of(&results, &format!("pop[{e}]")));
+        let a = series_at(&results, offset_of(&results, &format!("a[{e}]")));
+        let b = series_at(&results, offset_of(&results, &format!("b[{e}]")));
+        let factor = if e == "north" { 0.5 } else { 0.25 };
+        assert_eq!(
+            series_at(&results, base + slot),
+            pop,
+            "b's node holds pop[{e}]"
+        );
+        for step in 0..b.len() {
             assert!(
-                value.is_finite(),
-                "local -> growth score for {elem} at step {step} must stay finite; got {score:?}"
+                (b[step] - pop[step] * 0.01).abs() < 1e-9,
+                "b[{e}] reads pop[{e}]"
+            );
+            assert!(
+                (a[step] - pop[step] * factor).abs() < 1e-9,
+                "a[{e}]'s slot reads pop[{e}]"
+            );
+        }
+        let score = series_at(
+            &results,
+            offset_of(
+                &results,
+                &format!("{LINK_SCORE_PREFIX}{node}[{e}]\u{2192}b[{e}]"),
+            ),
+        );
+        for (step, value) in score.iter().enumerate().skip(1) {
+            assert!(
+                (value - 1.0).abs() < 1e-9,
+                "{node}[{e}] -> b[{e}] step {step}: {value}"
             );
         }
     }
 }
 
-/// GH #779 precision pin: the WHOLE-RHS bare reducer (`total = SUM(pop)`)
-/// is NOT the declined feeder shape -- it is variable-backed and its
-/// `pop -> total` edge is scored per read row by
-/// `try_cross_dimensional_link_scores`, never reaching the changed-last
-/// chooser the #779 gate lives in. With `growth[D1] = total * 0.01` closing
-/// the loop, the two per-circuit loops each score 0.5 (the per-row link
-/// scores split the +1 across |D1| = 2 rows) with zero warnings.
+/// `y[d1] = SUM(matrix) * frac` beside `z = SUM(matrix) * 0.001` over a 2-D
+/// `matrix`: `sum(matrix[d1, *])` and `sum(matrix)` are two nodes, the row and
+/// the whole, and `agg -> z` and `agg[e] -> y[e]` equal the ratios the series
+/// give (the base minted one node and `agg -> z` failed to compile).
+#[test]
+fn a_row_reducer_owner_and_a_whole_reducer_owner_of_one_text_get_their_own_nodes() {
+    let project = TestProject::new("dedup_a2a_vs_scalar_2d")
+        .with_sim_time(0.0, 8.0, 1.0)
+        .named_dimension("d1", &["a", "b"])
+        .named_dimension("d2", &["c", "d"])
+        .array_with_ranges("init[d1]", vec![("a", "100"), ("b", "200")])
+        .array_stock("pop[d1]", "init[d1]", &["growth"], &[], None)
+        .array_with_ranges("w[d2]", vec![("c", "0.3"), ("d", "0.32")])
+        .array_aux("matrix[d1, d2]", "pop[d1] * w[d2]")
+        .array_aux("frac[d1]", "0.01 + pop[d1] * 0.0001")
+        .array_aux("y[d1]", "SUM(matrix) * frac")
+        .scalar_aux("z", "SUM(matrix) * 0.001")
+        .array_flow("growth[d1]", "y[d1] * 0.1 + z * 0.01", None)
+        .build_datamodel();
+    let (results, ltm_vars) = run_ltm(&project);
+    let aggs = agg_nodes_of(&ltm_vars);
+    assert_eq!(aggs.len(), 2, "got {aggs:?}");
+    assert!(
+        ltm_warning_texts(&project).is_empty(),
+        "got: {:?}",
+        ltm_warning_texts(&project)
+    );
+    let (row_node, _) = aggs
+        .iter()
+        .find(|(_, d)| d == &["d1".to_string()])
+        .expect("y's node");
+    let (whole_node, _) = aggs.iter().find(|(_, d)| d.is_empty()).expect("z's node");
+    let m =
+        |r: &str, c: &str| series_at(&results, offset_of(&results, &format!("matrix[{r},{c}]")));
+    let z = series_at(&results, offset_of(&results, "z"));
+    let whole = series_at(&results, offset_of(&results, whole_node));
+    let z_score = series_at(
+        &results,
+        offset_of(
+            &results,
+            &format!("{LINK_SCORE_PREFIX}{whole_node}\u{2192}z"),
+        ),
+    );
+    for step in 0..z.len() {
+        let all = m("a", "c")[step] + m("a", "d")[step] + m("b", "c")[step] + m("b", "d")[step];
+        assert!((whole[step] - all).abs() < 1e-9 && (z[step] - all * 0.001).abs() < 1e-9);
+        if step > 0 {
+            let want = (all * 0.001 - z[step - 1]) / (z[step] - z[step - 1]);
+            assert!(
+                (z_score[step] - want).abs() < 1e-9,
+                "agg -> z step {step}: {} vs {want}",
+                z_score[step]
+            );
+        }
+    }
+    let row_base = offset_of(&results, row_node);
+    for (slot, e) in ["a", "b"].into_iter().enumerate() {
+        let row: Vec<f64> = (0..z.len()).map(|i| m(e, "c")[i] + m(e, "d")[i]).collect();
+        assert_eq!(
+            series_at(&results, row_base + slot),
+            row,
+            "y[{e}]'s node reads row {e}"
+        );
+        let y = series_at(&results, offset_of(&results, &format!("y[{e}]")));
+        let frac = series_at(&results, offset_of(&results, &format!("frac[{e}]")));
+        let score = series_at(
+            &results,
+            offset_of(
+                &results,
+                &format!("{LINK_SCORE_PREFIX}{row_node}[{e}]\u{2192}y[{e}]"),
+            ),
+        );
+        for step in 1..y.len() {
+            let want = (row[step] * frac[step - 1] - y[step - 1]) / (y[step] - y[step - 1]);
+            assert!(
+                (score[step] - want).abs() < 1e-9,
+                "agg[{e}] -> y[{e}] step {step}: {} vs {want}",
+                score[step]
+            );
+        }
+    }
+}
+
+/// A bare argument whose only relation to the enclosing iteration is a mapping
+/// declared on a PARENT dimension -- `y[suba] = SUM(src)` over `src[dimb]`
+/// with `dimb -> dima` and `suba` inside `dima` -- reads the WHOLE array:
+/// pass 0 pairs a bare in-equation read under `DirectMappingsOnly`, which
+/// withholds the parent rung (`y[a1] = y[a3] = src[b1] + src[b2] + src[b3]`,
+/// measured; `yi[suba] = SUM(src[*])` is the same read spelled). The IR says
+/// so (`Wildcard`, the pairing `BareSpelling::Equation`), the element graph
+/// carries all six `src[b] -> y[a]` edges, and the `src -> y` score is the
+/// loud decline the spelled `yi` gets (an arrayed pair with no correspondence).
+/// Paired under the full context -- the stock/flow wiring's rule -- the parent
+/// mapping related `dimb` to `suba` and the graph carried `src[b1] -> y[a1]`
+/// and `src[b3] -> y[a3]` alone: a strict subset of the executed reads, and
+/// no loop through `src[b2]` could be found.
+///
+/// The plain `z[suba] = src` is the other executed rule: pass 0 pairs nothing,
+/// and the bare reference then resolves through the compiler's implicit
+/// subscripts under the full context (`z[a1] = src[b1]`, `z[a3] = src[b3]`,
+/// measured). The equation pairing describes it as the broadcast -- every
+/// `src[b] -> z[a]`, a superset of the two reads -- and declines its score
+/// loudly, as it declines `src -> y`.
+#[test]
+fn a_parent_mapped_bare_argument_reads_the_whole_array() {
+    let project = TestProject::new("parent_mapped_bare")
+        .with_sim_time(0.0, 4.0, 1.0)
+        .named_dimension("dima", &["a1", "a2", "a3"])
+        .named_dimension("suba", &["a1", "a3"])
+        .named_dimension_with_mapping("dimb", &["b1", "b2", "b3"], "dima")
+        .array_with_ranges("init[dimb]", vec![("b1", "10"), ("b2", "20"), ("b3", "40")])
+        .array_stock("src[dimb]", "init[dimb]", &["f"], &[], None)
+        .array_aux("y[suba]", "SUM(src)")
+        .array_aux("yi[suba]", "SUM(src[*])")
+        .array_aux("z[suba]", "src")
+        // Every target sits on a loop, so exhaustive mode scores (or declines)
+        // each of the three edges.
+        .array_flow(
+            "f[dimb]",
+            "src[dimb] * 0.01 + SUM(y) * 0.001 + SUM(z) * 0.0001 + SUM(yi) * 0.00001",
+            None,
+        )
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let _ = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let edges = model_element_causal_edges(&db, sync.models["main"].source_model, sync.project);
+    for b in ["b1", "b2", "b3"] {
+        for a in ["a1", "a3"] {
+            for target in ["y", "yi", "z"] {
+                assert!(
+                    edges
+                        .edges
+                        .get(&format!("src[{b}]"))
+                        .is_some_and(|t| t.contains(&format!("{target}[{a}]"))),
+                    "element edge src[{b}] -> {target}[{a}]; got: {:?}",
+                    edges.edges.get(&format!("src[{b}]"))
+                );
+            }
+        }
+    }
+    let warnings = assembly_warnings(&db, sync.project);
+    for edge in ["src -> y", "src -> yi", "src -> z"] {
+        assert!(
+            warnings.iter().any(|w| match &w.error {
+                DiagnosticError::Assembly(m) => m.contains(&format!(
+                    "LTM link score for edge {edge} could not be computed"
+                )),
+                _ => false,
+            }),
+            "{edge} is declined loudly; got: {warnings:?}"
+        );
+    }
+
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end().expect("VM simulation should run");
+    let results = vm.into_results();
+    let src: Vec<Vec<f64>> = ["b1", "b2", "b3"]
+        .iter()
+        .map(|b| series_at(&results, offset_of(&results, &format!("src[{b}]"))))
+        .collect();
+    for (a, mapped) in [("a1", 0), ("a3", 2)] {
+        let y = series_at(&results, offset_of(&results, &format!("y[{a}]")));
+        let yi = series_at(&results, offset_of(&results, &format!("yi[{a}]")));
+        let z = series_at(&results, offset_of(&results, &format!("z[{a}]")));
+        for step in 0..y.len() {
+            let whole = src[0][step] + src[1][step] + src[2][step];
+            assert!(
+                (y[step] - whole).abs() < 1e-9,
+                "y[{a}] step {step} reads the whole array"
+            );
+            assert!(
+                (yi[step] - whole).abs() < 1e-9,
+                "yi[{a}] step {step} reads the whole array"
+            );
+            assert!(
+                (z[step] - src[mapped][step]).abs() < 1e-9,
+                "z[{a}] step {step} reads through the parent mapping"
+            );
+        }
+    }
+}
+
+/// The direct-mapping control: `dimb3 -> suba3` declared onto the iterated
+/// dimension itself (equal size) pairs under both rules, `y[suba3] = SUM(src)`
+/// reads `src[b_i]` in slot `a_i` (measured), and the reducer hoists with one
+/// row per slot.
+#[test]
+fn a_directly_mapped_bare_argument_reads_its_slot() {
+    let project = TestProject::new("direct_mapped_bare")
+        .with_sim_time(0.0, 4.0, 1.0)
+        .named_dimension("suba3", &["a1", "a2", "a3"])
+        .named_dimension_with_mapping("dimb3", &["b1", "b2", "b3"], "suba3")
+        .array_with_ranges(
+            "init[dimb3]",
+            vec![("b1", "10"), ("b2", "20"), ("b3", "40")],
+        )
+        .array_stock("src[dimb3]", "init[dimb3]", &["f"], &[], None)
+        .array_aux("y[suba3]", "SUM(src)")
+        .array_flow("f[dimb3]", "src[dimb3] * 0.01 + SUM(y) * 0.001", None)
+        .build_datamodel();
+    let (results, ltm_vars) = run_ltm(&project);
+    let names = ltm_names(&ltm_vars);
+    let (node, _) = agg_nodes_of(&ltm_vars)
+        .into_iter()
+        .find(|(_, d)| d == &["suba3".to_string()])
+        .unwrap_or_else(|| panic!("y's node is over suba3; got {names:?}"));
+    for (b, a) in [("b1", "a1"), ("b2", "a2"), ("b3", "a3")] {
+        let row = format!("{LINK_SCORE_PREFIX}src[{b}]\u{2192}{node}[{a}]");
+        assert!(names.contains(&row), "expected {row:?}; got: {names:?}");
+        let src = series_at(&results, offset_of(&results, &format!("src[{b}]")));
+        let y = series_at(&results, offset_of(&results, &format!("y[{a}]")));
+        assert_eq!(src, y, "y[{a}] reads src[{b}] through the map");
+    }
+}
+
+/// A live reducer argument beside a WILDCARD co-source, the reducer un-hoisted
+/// (the I1 acceptance declines `pop`'s `[Iterated]` beside `w[*]`'s
+/// `[Reduced]`): `x[region] = other + SUM(pop * w[*]) / 1000` with `w`
+/// varying. The `w -> x` partial holds `w[*]` live and freezes the co-source
+/// `pop` around it -- `sum(PREVIOUS(pop) * w[*])` -- so it equals the ratio the
+/// recorded series give; frozen whole with the reducer, the partial moved with
+/// nothing and the score was 0 at every step with no diagnostic (V9b-5).
+/// `pop -> x` holds `pop` live with `w[*]` frozen, the mirror image.
+#[test]
+fn a_live_wildcard_argument_of_an_unhoisted_reducer_stays_live() {
+    let project = TestProject::new("wildcard_co_source_live")
+        .with_sim_time(0.0, 4.0, 1.0)
+        .named_dimension("region", &["north", "south"])
+        .array_with_ranges("init[region]", vec![("north", "100"), ("south", "200")])
+        .array_stock("pop[region]", "init[region]", &["growth"], &[], None)
+        .array_aux("w[region]", "1 + pop[region] * 0.0001")
+        .array_aux("other[region]", "1 + pop[region] / 10000")
+        .array_aux("x[region]", "other + SUM(pop * w[*]) / 1000")
+        .array_flow("growth[region]", "pop[region] * 0.1 * x[region]", None)
+        .build_datamodel();
+    let (results, ltm_vars) = run_ltm(&project);
+    let names = ltm_names(&ltm_vars);
+    assert!(
+        !names.iter().any(|n| n.contains("\u{205A}agg\u{205A}")),
+        "the wildcard co-source keeps the reducer out of the hoist; got {names:?}"
+    );
+    let w: Vec<Vec<f64>> = ["north", "south"]
+        .iter()
+        .map(|e| series_at(&results, offset_of(&results, &format!("w[{e}]"))))
+        .collect();
+    let sum_w: Vec<f64> = (0..w[0].len()).map(|i| w[0][i] + w[1][i]).collect();
+    let w_base = offset_of(&results, &format!("{LINK_SCORE_PREFIX}w\u{2192}x"));
+    let pop_base = offset_of(&results, &format!("{LINK_SCORE_PREFIX}pop\u{2192}x"));
+    for (slot, e) in ["north", "south"].into_iter().enumerate() {
+        let x = series_at(&results, offset_of(&results, &format!("x[{e}]")));
+        let other = series_at(&results, offset_of(&results, &format!("other[{e}]")));
+        let pop = series_at(&results, offset_of(&results, &format!("pop[{e}]")));
+        let w_score = series_at(&results, w_base + slot);
+        let pop_score = series_at(&results, pop_base + slot);
+        for step in 0..x.len() {
+            assert!(
+                (x[step] - (other[step] + pop[step] * sum_w[step] / 1000.0)).abs() < 1e-9,
+                "x[{e}] step {step} reads pop[{e}] under SUM"
+            );
+        }
+        for step in 1..x.len() {
+            let delta = x[step] - x[step - 1];
+            let want_w =
+                (other[step - 1] + pop[step - 1] * sum_w[step] / 1000.0 - x[step - 1]) / delta;
+            assert!(
+                (w_score[step] - want_w).abs() < 1e-9,
+                "w -> x[{e}] step {step}: {} vs {want_w} from the series",
+                w_score[step]
+            );
+            assert!(w_score[step].abs() > 1e-6, "the w -> x partial moves");
+            let want_pop =
+                (other[step - 1] + pop[step] * sum_w[step - 1] / 1000.0 - x[step - 1]) / delta;
+            assert!(
+                (pop_score[step] - want_pop).abs() < 1e-9,
+                "pop -> x[{e}] step {step}: {} vs {want_pop} from the series",
+                pop_score[step]
+            );
+        }
+    }
+}
+
+/// A bare reducer argument in a per-element (`Ast::Arrayed`) slot reads the
+/// ROW the slot's element pins -- `slot[a] = SUM(m) * 0.001` is `m[a,*]`'s sum
+/// on the VM -- while the only node its identity `sum(m)` mints is the whole
+/// array, shared with the scalar owner `z = SUM(m) * 0.0001` (which reads
+/// exactly that). The per-element-owner rule (GH #792,
+/// `unhoisted_reducer_source_read`'s `Ast::Arrayed` arm) sees the bare
+/// argument whether or not a node was hoisted for it, so `m -> slot` is
+/// declined loudly -- one warning, no `agg -> slot[e]` score, the loops
+/// through `slot` dropped -- instead of scored against the node (2050.5 for
+/// `slot[a]`, V9b-6). `z`'s `agg -> z` and `row[d1] = SUM(m) * 0.004`'s own
+/// row node are untouched. The exact per-slot description is a tracked
+/// follow-up.
+#[test]
+fn a_per_element_slots_bare_reducer_argument_is_declined_not_scored() {
+    let project = TestProject::new("per_element_slot_bare_argument")
+        .with_sim_time(0.0, 4.0, 1.0)
+        .named_dimension("d1", &["a", "b", "c"])
+        .named_dimension("d2", &["x", "y"])
+        .array_with_ranges("init[d1]", vec![("a", "10"), ("b", "20"), ("c", "40")])
+        .array_stock("p[d1]", "init[d1]", &["fp"], &[], None)
+        .array_aux("q[d2]", "3")
+        .array_aux("m[d1, d2]", "p[d1] * q[d2] + 1")
+        .array_with_ranges(
+            "slot[d1]",
+            vec![
+                ("a", "SUM(m) * 0.001"),
+                ("b", "SUM(m) * 0.002"),
+                ("c", "SUM(m) * 0.003"),
+            ],
+        )
+        .scalar_aux("z", "SUM(m) * 0.0001")
+        .array_aux("row[d1]", "SUM(m) * 0.004")
+        .array_flow("fp[d1]", "row[d1] * 0.1 + slot[d1] * 0.01 + z * 0.1", None)
+        .build_datamodel();
+    let (results, ltm_vars) = run_ltm(&project);
+    let names = ltm_names(&ltm_vars);
+    let aggs = agg_nodes_of(&ltm_vars);
+    let (row_node, _) = aggs
+        .iter()
+        .find(|(_, d)| d == &["d1".to_string()])
+        .expect("row's node");
+    let (whole_node, _) = aggs.iter().find(|(_, d)| d.is_empty()).expect("z's node");
+
+    assert!(
+        !names.iter().any(|n| n.contains("\u{2192}slot[")),
+        "no score into a slot of the per-element owner; got: {names:?}"
+    );
+    let warnings = ltm_warning_texts(&project);
+    let declines = warnings
+        .iter()
+        .filter(|w| w.contains("LTM link score for edge m -> slot could not be computed"))
+        .count();
+    assert_eq!(
+        declines, 1,
+        "one loud decline for the slot's edge; got: {warnings:?}"
+    );
+    assert!(
+        !warnings.iter().any(|w| w.contains("failed to compile")),
+        "got: {warnings:?}"
+    );
+    for loop_var in ltm_vars
+        .iter()
+        .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
+    {
+        assert!(
+            !loop_var.equation.source_text().contains("\u{2192}slot"),
+            "a loop through the declined edge is dropped, not scored: {}",
+            loop_var.name
+        );
+    }
+
+    let m = |r: &str, c: &str| series_at(&results, offset_of(&results, &format!("m[{r},{c}]")));
+    let z = series_at(&results, offset_of(&results, "z"));
+    let z_score = series_at(
+        &results,
+        offset_of(
+            &results,
+            &format!("{LINK_SCORE_PREFIX}{whole_node}\u{2192}z"),
+        ),
+    );
+    let row_base = offset_of(&results, row_node);
+    for (slot, e) in ["a", "b", "c"].into_iter().enumerate() {
+        let row: Vec<f64> = (0..z.len()).map(|i| m(e, "x")[i] + m(e, "y")[i]).collect();
+        let slot_series = series_at(&results, offset_of(&results, &format!("slot[{e}]")));
+        let factor = [0.001, 0.002, 0.003][slot];
+        for step in 0..z.len() {
+            assert!(
+                (slot_series[step] - row[step] * factor).abs() < 1e-9,
+                "slot[{e}] step {step} reads row {e}, not the whole array"
+            );
+        }
+        assert_eq!(
+            series_at(&results, row_base + slot),
+            row,
+            "row[{e}]'s node reads row {e}"
+        );
+        let row_score = series_at(
+            &results,
+            offset_of(
+                &results,
+                &format!("{LINK_SCORE_PREFIX}{row_node}[{e}]\u{2192}row[{e}]"),
+            ),
+        );
+        for (step, value) in row_score.iter().enumerate().skip(1) {
+            assert!(
+                (value - 1.0).abs() < 1e-9,
+                "{row_node}[{e}] -> row[{e}] step {step}: {value}"
+            );
+        }
+    }
+    for step in 1..z.len() {
+        let all: f64 = ["a", "b", "c"]
+            .iter()
+            .map(|r| m(r, "x")[step] + m(r, "y")[step])
+            .sum();
+        let want = (all * 0.0001 - z[step - 1]) / (z[step] - z[step - 1]);
+        assert!(
+            (z_score[step] - want).abs() < 1e-9,
+            "agg -> z step {step}: {} vs {want}",
+            z_score[step]
+        );
+    }
+}
+
+/// A flow feeding its stock through a PARENT mapping -- `inflow[dimb]` into
+/// `level[suba]` with `dimb -> dima` and `suba` inside `dima` -- is paired by
+/// the wiring's rule (`get_implicit_subscript_off`, the full context): the VM
+/// integrates `inflow[b1]` into `level[a1]` and `inflow[b3]` into `level[a3]`.
+/// The score admission pairs the structural edge the same way
+/// (`BareSpelling::StockFlow`), so `inflow -> level` is one arrayed score over
+/// `suba` whose slot equals the flow-to-stock ratio the recorded series give,
+/// and the element edges are the two the wiring makes (V9b-7). The
+/// direct-mapping control `dimb3 -> suba3` scores per slot the same way.
+#[test]
+fn a_flow_feeding_its_stock_through_a_parent_mapping_scores_per_slot() {
+    for (stock_dim, flow_dim, dims, pairs) in [
+        (
+            "suba",
+            "dimb",
+            vec![("dima", vec!["a1", "a2", "a3"]), ("suba", vec!["a1", "a3"])],
+            vec![("b1", "a1"), ("b3", "a3")],
+        ),
+        (
+            "suba3",
+            "dimb3",
+            vec![("suba3", vec!["a1", "a2", "a3"])],
+            vec![("b1", "a1"), ("b2", "a2"), ("b3", "a3")],
+        ),
+    ] {
+        let mut tp = TestProject::new("flow_to_stock_parent_map").with_sim_time(0.0, 4.0, 1.0);
+        for (name, elems) in &dims {
+            tp = tp.named_dimension(name, elems);
+        }
+        let mapped_to = dims[0].0;
+        let inits: Vec<(&str, &str)> = pairs
+            .iter()
+            .map(|(_, a)| {
+                (
+                    *a,
+                    match *a {
+                        "a1" => "10",
+                        "a2" => "20",
+                        _ => "40",
+                    },
+                )
+            })
+            .collect();
+        let project = tp
+            .named_dimension_with_mapping(flow_dim, &["b1", "b2", "b3"], mapped_to)
+            .array_with_ranges(&format!("init[{stock_dim}]"), inits)
+            .array_stock(
+                &format!("level[{stock_dim}]"),
+                &format!("init[{stock_dim}]"),
+                &["inflow"],
+                &[],
+                None,
+            )
+            .array_aux(&format!("src[{flow_dim}]"), "1 + TIME / 10")
+            .array_flow(
+                &format!("inflow[{flow_dim}]"),
+                &format!("src[{flow_dim}] * 0.1 + SUM(level[*]) * 0.001"),
+                None,
+            )
+            .build_datamodel();
+
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+        set_project_ltm_enabled(&mut db, sync.project, true);
+        let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+        let score_name = format!("{LINK_SCORE_PREFIX}inflow\u{2192}level");
+        assert_eq!(
+            ltm_var(&ltm.vars, &score_name).dimensions,
+            vec![stock_dim.to_string()],
+            "{stock_dim}: the flow-to-stock score is arrayed over the stock's dimension"
+        );
+        let warnings = assembly_warnings(&db, sync.project);
+        assert!(warnings.is_empty(), "{stock_dim}: got: {warnings:?}");
+        let edges = model_element_causal_edges(&db, sync.models["main"].source_model, sync.project);
+        for b in ["b1", "b2", "b3"] {
+            let targets = edges
+                .edges
+                .get(&format!("inflow[{b}]"))
+                .cloned()
+                .unwrap_or_default();
+            let want: Vec<String> = pairs
+                .iter()
+                .filter(|(from, _)| *from == b)
+                .map(|(_, a)| format!("level[{a}]"))
+                .collect();
+            let got: Vec<String> = targets
+                .iter()
+                .filter(|t| t.starts_with("level["))
+                .cloned()
+                .collect();
+            assert_eq!(
+                got, want,
+                "{stock_dim}: the element edges of inflow[{b}] are the wiring's"
+            );
+        }
+
+        let compiled = compile_project_incremental(&db, sync.project, "main")
+            .expect("LTM-enabled compilation should succeed");
+        let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+        vm.run_to_end().expect("VM simulation should run");
+        let results = vm.into_results();
+        let score_base = offset_of(&results, &score_name);
+        for (slot, (b, a)) in pairs.iter().enumerate() {
+            let level = series_at(&results, offset_of(&results, &format!("level[{a}]")));
+            let inflow = series_at(&results, offset_of(&results, &format!("inflow[{b}]")));
+            let score = series_at(&results, score_base + slot);
+            for step in 1..level.len() {
+                assert!(
+                    (level[step] - (level[step - 1] + inflow[step - 1])).abs() < 1e-9,
+                    "{stock_dim}: level[{a}] step {step} integrates inflow[{b}]"
+                );
+            }
+            for step in 2..level.len() {
+                let numerator = inflow[step - 1] - inflow[step - 2];
+                let denominator =
+                    (level[step] - level[step - 1]) - (level[step - 1] - level[step - 2]);
+                let want = if denominator == 0.0 {
+                    0.0
+                } else {
+                    (numerator / denominator).abs()
+                };
+                assert!(
+                    (score[step] - want).abs() < 1e-9,
+                    "{stock_dim}: inflow -> level[{a}] step {step}: {} vs {want} from the series",
+                    score[step]
+                );
+            }
+        }
+    }
+}
+
+/// The WHOLE-RHS bare reducer in a SCALAR owner (`total = SUM(pop)`) reads
+/// the whole array -- there is no iteration for the bare argument to pair
+/// with -- so it is variable-backed and its `pop -> total` edge is scored
+/// per read row by `try_cross_dimensional_link_scores`. With
+/// `growth[D1] = total * 0.01` closing the loop, the two per-circuit loops
+/// each score 0.5 (the per-row link scores split the +1 across |D1| = 2
+/// rows) with zero warnings.
 #[test]
 fn whole_rhs_bare_reducer_stays_scored() {
     let project = TestProject::new("gh779_whole_rhs_bare")
@@ -4501,10 +5361,11 @@ fn whole_rhs_bare_reducer_stays_scored() {
 /// indexes `Region`'s storage raw -- a POSITIONAL read consulting neither names
 /// nor mappings, and the shape
 /// `mapped_reference_semantics_tests::no_mapping_equal_cardinality` measures.
-/// `build_view_from_ops` is never reached. `positional_correspondence`
-/// nonetheless declines, because GH #527's rule is that the DESCRIBED diagonal
-/// follows a correspondence the MODEL declares; the reducer is therefore NOT
-/// hoisted and the `matrix → growth` reference stays on the conservative path.
+/// `build_view_from_ops` is never reached. `executed_read_correspondence`
+/// nonetheless declines, because GH #527's rule is that the DESCRIBED read
+/// follows an element name or a correspondence the MODEL declares, never the
+/// ordinal; the reducer is therefore NOT hoisted and the `matrix → growth`
+/// reference stays on the conservative path.
 /// The feedback loops close through
 /// `pop → matrix → growth → SUM(growth[*]) → inflow → pop`, so every enumerated
 /// loop traverses the declined edge.
@@ -4514,11 +5375,11 @@ fn whole_rhs_bare_reducer_stays_scored() {
 /// it is positional -- true only by the coincidence that both lists were
 /// declared in the same order.
 ///
-/// This fixture used an explicit ELEMENT MAP until GH #997. That pair is no
-/// longer declined -- the same ordinal fold applies, so it hoists with
-/// positional slots (`element_mapped_sliced_reducer_hoists_and_scores_its_loops`
-/// asserts the recovery). The undeclared pair keeps the decline, so the GH #758
-/// contract is pinned by a shape that still reaches it.
+/// This fixture used an explicit ELEMENT MAP until GH #997. That pair is not
+/// declined -- the read follows the map, and so do the hoisted slots
+/// (`element_mapped_sliced_reducer_hoists_and_scores_its_loops`). The
+/// undeclared pair keeps the decline, so the GH #758 contract is pinned by a
+/// shape that still reaches it.
 ///
 /// With `with_drain`, a second, independent loop `pop → drain → pop`
 /// (A2A over Region, not traversing the declined edge) is added so tests
@@ -4648,16 +5509,17 @@ fn declined_sliced_reducer_edge_skips_loudly() {
 }
 
 /// GH #997: the shape the GH #758 fixture USED to be -- the same sliced reducer
-/// over an EXPLICIT element-mapped pair -- now hoists, and every loop through it
-/// scores.
+/// over an EXPLICIT element-mapped pair -- hoists, its slots follow the map,
+/// and every loop through it scores (V9b-1).
 ///
-/// `SUM(matrix[State,*])` names the dimension the equation ITERATES, which
-/// `ast::expr3`'s Pass 1 folds to an ordinal
-/// (`mapped_reference_semantics_tests`' `(Permuted, IteratedDim)` cell, measured
-/// against the VM), so the slots are POSITIONAL and the declared map is not
-/// consulted. The map here is the reverse permutation (CA -> east), so the
-/// element-graph assertions below distinguish the two rules rather than passing
-/// on either.
+/// `SUM(matrix[State,*])` names the dimension the equation ITERATES; the index
+/// survives to `IndexOp::ActiveDimRef` and `build_view_from_ops` resolves it
+/// name-first, then through the declared map
+/// (`mapped_reference_semantics_tests`' `(Permuted, IteratedDim)` cell,
+/// measured against the VM). The map here is the reverse permutation
+/// (CA -> east) and the two regions start apart, so the value and the
+/// element-graph assertions below distinguish the map from the ordinal
+/// rather than passing on either.
 #[test]
 fn element_mapped_sliced_reducer_hoists_and_scores_its_loops() {
     let project = TestProject::new("gh997_element_mapped")
@@ -4678,7 +5540,8 @@ fn element_mapped_sliced_reducer_hoists_and_scores_its_loops() {
         )
         .array_aux("growth[State]", "1 + SUM(matrix[State, *])")
         .array_flow("inflow[Region]", "SUM(growth[*]) * 0.01", None)
-        .array_stock("pop[Region]", "100", &["inflow"], &[], None)
+        .array_with_ranges("init[Region]", vec![("west", "100"), ("east", "200")])
+        .array_stock("pop[Region]", "init[Region]", &["inflow"], &[], None)
         .build_datamodel();
 
     let mut db = SimlinDb::default();
@@ -4687,10 +5550,10 @@ fn element_mapped_sliced_reducer_hoists_and_scores_its_loops() {
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
     let names: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
 
-    // The reducer is hoisted, and the source rows land on the POSITIONAL slot:
-    // `west` is Region's first element, `ca` is State's first. The declared map
-    // says the opposite, so these two names are the discriminator.
-    for (row, slot) in [("west", "ca"), ("east", "ny")] {
+    // The reducer is hoisted, and the source rows land on the slot the MAP
+    // names: `ca` reads `east` (the ordinal would say `west`, Region's first
+    // element, so these two names are the discriminator).
+    for (row, slot) in [("east", "ca"), ("west", "ny")] {
         for d2 in ["x", "y"] {
             let want = format!(
                 "{LINK_SCORE_PREFIX}matrix[{row},{d2}]\u{2192}$\u{205A}ltm\u{205A}agg\u{205A}0[{slot}]"
@@ -4710,12 +5573,30 @@ fn element_mapped_sliced_reducer_hoists_and_scores_its_loops() {
         "loops through the hoisted reducer must score; got: {names:?}"
     );
 
-    // And the scores are real numbers, not stubs.
+    // The executed read is the map's: `growth[ca]` sums `matrix[east,*]`.
     let compiled = compile_project_incremental(&db, sync.project, "main")
         .expect("LTM-enabled compilation should succeed");
     let mut vm = Vm::new(compiled).expect("VM construction should succeed");
     vm.run_to_end().expect("VM simulation should run");
     let results = vm.into_results();
+    for (state, region) in [("ca", "east"), ("ny", "west")] {
+        let growth = series_at(&results, offset_of(&results, &format!("growth[{state}]")));
+        let x = series_at(
+            &results,
+            offset_of(&results, &format!("matrix[{region},x]")),
+        );
+        let y = series_at(
+            &results,
+            offset_of(&results, &format!("matrix[{region},y]")),
+        );
+        for step in 0..growth.len() {
+            assert!(
+                (growth[step] - (1.0 + x[step] + y[step])).abs() < 1e-9,
+                "growth[{state}] step {step} sums matrix[{region},*] through the map"
+            );
+        }
+    }
+    // And the scores are real numbers, not stubs.
     for name in ltm_score_var_names(&results) {
         let var = ltm_var(&ltm.vars, &name);
         let base = offset_of(&results, &name);
@@ -4730,45 +5611,45 @@ fn element_mapped_sliced_reducer_hoists_and_scores_its_loops() {
 }
 
 // ---------------------------------------------------------------------------
-// GH #997 blocker 1: EDGES may be a union, SCORES may not
+// GH #997: a mapped pair is read through its map, and described so
 // ---------------------------------------------------------------------------
 
 /// The `x[State] -> target[State]` loop fixture used by the two tests below,
 /// with the `State`/`Region` correspondence supplied by the caller.
 ///
-/// `target[State] = x[State] * 1.02` reads the ITERATED spelling (positional);
-/// `x[Region] = level[Region] * 0.5` and a stock close the loop, so every
-/// element edge of the mapped pair sits on a cycle and would carry a loop score
-/// if the edge were scored.
+/// `target[State] = x[State] * w` reads the ITERATED spelling, which resolves
+/// name-first, then through the declared map; `w = 1 + TIME / 100` is a
+/// varying scalar the `x -> target` partial freezes, so that partial's value
+/// depends on WHICH element of `x` it reads. `x[Region] = level[Region] * 0.5`
+/// and a stock close the loop, so every element edge of the mapped pair sits
+/// on a cycle; the two regions start apart so the elements are telling.
 fn gh997_mapped_loop_fixture(state: datamodel::Dimension) -> datamodel::Project {
     TestProject::new("gh997_mapped_loop")
         .with_sim_time(0.0, 6.0, 1.0)
         .named_dimension("Region", &["a", "b"])
         .with_dimension(state)
+        .scalar_aux("w", "1 + TIME / 100")
         .array_aux_direct("x", vec!["Region".into()], "level[Region] * 0.5", None)
-        .array_aux_direct("target", vec!["State".into()], "x[State] * 1.02", None)
+        .array_aux_direct("target", vec!["State".into()], "x[State] * w", None)
         .array_flow("inflow[Region]", "SUM(target[*]) * 0.01", None)
-        .array_stock("level[Region]", "100", &["inflow"], &[], None)
+        .array_with_ranges("init[Region]", vec![("a", "100"), ("b", "200")])
+        .array_stock("level[Region]", "init[Region]", &["inflow"], &[], None)
         .build_datamodel()
 }
 
-/// A mapped pair whose two spellings DISAGREE must NOT get an arrayed link
-/// score, even though its element edges are the union of both diagonals.
+/// A mapped pair whose element map PERMUTES the ordinal diagonal (s1 -> b,
+/// s2 -> a) is read through the map by every spelling
+/// (`mapped_reference_semantics_tests`, and `target[s1] = x[b] * w` measured
+/// below), so the IR describes exactly that: the element edges are the map's
+/// diagonal alone, the `x -> target` score is arrayed over `State` and reads
+/// `x[b]` in slot `s1`, and the loops through it score (V9b-1).
 ///
-/// The permuted element map (s1↦b, s2↦a) is one-to-one, so the union carries
-/// TWO source elements per target element: the positional diagonal (s1→a) and
-/// the map's (s1→b). A Bare A2A score has ONE slot per target element and
-/// `ltm_finding::expand_a2a_link_offsets` maps both union edges onto it, so the
-/// phantom from-node would read the real edge's non-zero score -- a compilable,
-/// confidently wrong number, which GH #758 treats as worse than none.
-///
-/// `db::analysis::mapped_pair_projects_uniquely` is the gate. Before it, this
-/// fixture emitted one arrayed score and ZERO warnings where the pre-GH #997
-/// tree emitted none and two; it now takes the same loud skip the pre-#997 tree
-/// did, for a reason stated in terms of the score's slot rather than of the
-/// correspondence's existence.
+/// The partial's oracle is the recorded series: with `w` frozen, the score in
+/// slot `s1` is `(x[b] * PREVIOUS(w) - PREVIOUS(target[s1])) / delta target[s1]`,
+/// and the same ratio built from `x[a]` -- the ordinal read -- is a different
+/// number, asserted below so the pin cannot pass on either rule.
 #[test]
-fn a_disagreeing_mapped_pair_is_denied_the_arrayed_score() {
+fn a_permuted_mapped_pair_scores_the_maps_diagonal() {
     let mut state = datamodel::Dimension::named(
         "State".to_string(),
         vec!["s1".to_string(), "s2".to_string()],
@@ -4786,59 +5667,226 @@ fn a_disagreeing_mapped_pair_is_denied_the_arrayed_score() {
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
-    let names: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
+    let names = ltm_names(&ltm.vars);
 
-    assert!(
-        !names
-            .iter()
-            .any(|n| n.contains("link_score\u{205A}x\u{2192}target")),
-        "a disagreeing mapped pair must emit NO x->target link score; got: {names:?}"
+    let score_name = format!("{LINK_SCORE_PREFIX}x\u{2192}target");
+    assert_eq!(
+        ltm_var(&ltm.vars, &score_name).dimensions,
+        vec!["State".to_string()],
+        "the score is arrayed over the target's dimension"
     );
-    // The decline must be LOUD, and the assertion must name the EDGE rather
-    // than two substrings a dozen unrelated messages contain.
+    assert!(
+        names.iter().any(|n| n.starts_with(LOOP_SCORE_PREFIX)),
+        "the loops through the mapped edge score; got: {names:?}"
+    );
     let warnings = assembly_warnings(&db, sync.project);
-    assert!(
-        warnings.iter().any(|w| match &w.error {
-            DiagnosticError::Assembly(m) =>
-                m.contains("LTM link score for edge x -> target could not be computed"),
-            _ => false,
-        }),
-        "the decline must be LOUD -- one warning naming the edge; got: {warnings:?}"
-    );
+    assert!(warnings.is_empty(), "got: {warnings:?}");
 
-    // And the consequence the gate exists for: the loop through the denied edge
-    // must drop, not score. Without the gate this fixture emits six loop scores
-    // whose attribution runs through a phantom from-node reading the real
-    // edge's series out of the shared slot.
-    assert!(
-        !names
-            .iter()
-            .any(|n| n.starts_with("$\u{205A}ltm\u{205A}loop_score\u{205A}")),
-        "no loop score may survive through the denied edge; got: {names:?}"
-    );
-
-    // The never-fewer-edges direction is untouched: the element graph still
-    // emits BOTH diagonals. The gate withholds the score, not the edges.
+    // The element graph names the map's diagonal and nothing else.
     let edges = model_element_causal_edges(&db, sync.models["main"].source_model, sync.project);
-    for (src, tgt) in [("a", "s1"), ("b", "s1"), ("a", "s2"), ("b", "s2")] {
-        assert!(
+    for (src, tgt, want) in [
+        ("b", "s1", true),
+        ("a", "s2", true),
+        ("a", "s1", false),
+        ("b", "s2", false),
+    ] {
+        assert_eq!(
             edges
                 .edges
                 .get(&format!("x[{src}]"))
                 .is_some_and(|t| t.contains(&format!("target[{tgt}]"))),
-            "element edge x[{src}] -> target[{tgt}] must survive the score gate; \
-             got: {:?}",
+            want,
+            "element edge x[{src}] -> target[{tgt}]; got: {:?}",
             edges.edges.get(&format!("x[{src}]"))
         );
     }
+
+    // The executed read and the score it implies.
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end().expect("VM simulation should run");
+    let results = vm.into_results();
+    let w = series_at(&results, offset_of(&results, "w"));
+    let score_base = offset_of(&results, &score_name);
+    for (slot, (state, region, other)) in
+        [("s1", "b", "a"), ("s2", "a", "b")].into_iter().enumerate()
+    {
+        let target = series_at(&results, offset_of(&results, &format!("target[{state}]")));
+        let read = series_at(&results, offset_of(&results, &format!("x[{region}]")));
+        let ordinal = series_at(&results, offset_of(&results, &format!("x[{other}]")));
+        let score = series_at(&results, score_base + slot);
+        for step in 0..target.len() {
+            assert!(
+                (target[step] - read[step] * w[step]).abs() < 1e-9,
+                "target[{state}] step {step} reads x[{region}] through the map"
+            );
+        }
+        for step in 1..target.len() {
+            let delta = target[step] - target[step - 1];
+            let want = (read[step] * w[step - 1] - target[step - 1]) / delta;
+            let ordinal_want = (ordinal[step] * w[step - 1] - target[step - 1]) / delta;
+            assert!(
+                (score[step] - want).abs() < 1e-9,
+                "x -> target[{state}] step {step}: {} vs {want} from x[{region}]",
+                score[step]
+            );
+            assert!(
+                (score[step] - ordinal_want).abs() > 1e-3,
+                "step {step}: the ordinal read x[{other}] would give {ordinal_want}, \
+                 which must differ from the map's {want} for this pin to discriminate"
+            );
+        }
+    }
 }
 
-/// The companion: a pair whose two spellings AGREE keeps the arrayed score.
-///
-/// A plain positional `maps_to` is the shape every pre-GH #997 mapped edge had,
-/// so this is what the singleton gate must not cost. The union is a singleton
-/// per target element, the retarget fires, and the score is arrayed over
-/// `State` with the diagonal element edges.
+/// A subrange-named read of a SUPERSET-dimensioned variable inside an
+/// apply-to-all over the subrange -- FREE6's `Energy Carbon
+/// Emissions[nonrenewable] = Energy Production[nonrenewable] * Carbon
+/// Content[nonrenewable]` over `Energy Production[source]`, `nonrenewable`
+/// two of `source`'s four elements -- resolves each element by NAME
+/// (`build_view_from_ops`: `coal` is an element of `source`), while no declared
+/// relation pairs the two dimension lists, so a bare `energy` does not even
+/// lower there. The IR describes the read as `PerElement` (V9b-3): the element
+/// edges are `energy[coal] -> prod[coal]` and `energy[oilgas] -> prod[oilgas]`,
+/// the per-element scores exist, and -- the two consumers that must follow the
+/// site rather than the lists -- the `y -> prod` partial freezes
+/// `energy[nonrenewable]` as written (`OtherDepVerdict`: a `PerElement`
+/// occurrence is never collapsed to the bare spelling, which cannot lower) and
+/// the `energy[coal] -> y[coal]` partial pins the other dep `ref[nonrenewable]`
+/// over `ref[source]` by name (`dep_element_pins`).
+#[test]
+fn a_subrange_named_read_of_a_superset_variable_is_read_by_element_name() {
+    let project = TestProject::new("subrange_read_of_superset")
+        .with_sim_time(0.0, 4.0, 1.0)
+        .named_dimension("source", &["coal", "oilgas", "hn", "new"])
+        .named_dimension("nonrenewable", &["coal", "oilgas"])
+        .array_with_ranges("init[nonrenewable]", vec![("coal", "10"), ("oilgas", "20")])
+        .array_stock(
+            "cum[nonrenewable]",
+            "init[nonrenewable]",
+            &["prod"],
+            &[],
+            None,
+        )
+        .scalar_aux("total", "SUM(cum[*])")
+        .array_with_ranges(
+            "base[source]",
+            vec![("coal", "1"), ("oilgas", "2"), ("hn", "3"), ("new", "4")],
+        )
+        .array_aux("energy[source]", "base[source] * (1 + total / 100)")
+        .array_with_ranges(
+            "carbon[nonrenewable]",
+            vec![("coal", "0.5"), ("oilgas", "0.25")],
+        )
+        .array_with_ranges(
+            "ref[source]",
+            vec![
+                ("coal", "100"),
+                ("oilgas", "200"),
+                ("hn", "300"),
+                ("new", "400"),
+            ],
+        )
+        .array_aux(
+            "y[nonrenewable]",
+            "energy[nonrenewable] / ref[nonrenewable]",
+        )
+        .array_flow(
+            "prod[nonrenewable]",
+            "energy[nonrenewable] * carbon[nonrenewable] * (1 + y[nonrenewable])",
+            None,
+        )
+        .build_datamodel();
+
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    set_project_ltm_enabled(&mut db, sync.project, true);
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let names = ltm_names(&ltm.vars);
+
+    // The element graph names the elements execution reads, by name.
+    let edges = model_element_causal_edges(&db, sync.models["main"].source_model, sync.project);
+    for (src, tgt, want) in [
+        ("coal", "prod[coal]", true),
+        ("oilgas", "prod[oilgas]", true),
+        ("hn", "prod[coal]", false),
+        ("oilgas", "prod[coal]", false),
+        ("coal", "y[coal]", true),
+        ("hn", "y[coal]", false),
+    ] {
+        assert_eq!(
+            edges
+                .edges
+                .get(&format!("energy[{src}]"))
+                .is_some_and(|t| t.contains(tgt)),
+            want,
+            "element edge energy[{src}] -> {tgt}; got: {:?}",
+            edges.edges.get(&format!("energy[{src}]"))
+        );
+    }
+
+    // The scores: per element into `prod` and `y`, arrayed for `y -> prod`.
+    for name in [
+        format!("{LINK_SCORE_PREFIX}energy[coal]\u{2192}prod[coal]"),
+        format!("{LINK_SCORE_PREFIX}energy[oilgas]\u{2192}prod[oilgas]"),
+        format!("{LINK_SCORE_PREFIX}energy[coal]\u{2192}y[coal]"),
+        format!("{LINK_SCORE_PREFIX}energy[oilgas]\u{2192}y[oilgas]"),
+        format!("{LINK_SCORE_PREFIX}y\u{2192}prod"),
+    ] {
+        assert!(names.contains(&name), "expected {name:?}; got: {names:?}");
+    }
+    // Every emitted fragment compiles: no score silently reads a constant 0.
+    let compiled = compile_project_incremental(&db, sync.project, "main")
+        .expect("LTM-enabled compilation should succeed");
+    let warnings = assembly_warnings(&db, sync.project);
+    assert!(
+        !warnings.iter().any(|d| match &d.error {
+            DiagnosticError::Assembly(m) => m.contains("failed to compile"),
+            _ => false,
+        }),
+        "got: {warnings:?}"
+    );
+
+    // The executed read, and the `y -> prod` partial it implies: `energy`
+    // and `carbon` frozen at their previous values, `y` live.
+    let mut vm = Vm::new(compiled).expect("VM construction should succeed");
+    vm.run_to_end().expect("VM simulation should run");
+    let results = vm.into_results();
+    let y_prod_base = offset_of(&results, &format!("{LINK_SCORE_PREFIX}y\u{2192}prod"));
+    for (slot, e) in ["coal", "oilgas"].into_iter().enumerate() {
+        let prod = series_at(&results, offset_of(&results, &format!("prod[{e}]")));
+        let energy = series_at(&results, offset_of(&results, &format!("energy[{e}]")));
+        let carbon = series_at(&results, offset_of(&results, &format!("carbon[{e}]")));
+        let y = series_at(&results, offset_of(&results, &format!("y[{e}]")));
+        let reference = series_at(&results, offset_of(&results, &format!("ref[{e}]")));
+        for step in 0..prod.len() {
+            assert!(
+                (y[step] - energy[step] / reference[step]).abs() < 1e-9,
+                "y[{e}] step {step} reads energy[{e}] and ref[{e}] by name"
+            );
+            assert!(
+                (prod[step] - energy[step] * carbon[step] * (1.0 + y[step])).abs() < 1e-9,
+                "prod[{e}] step {step} reads energy[{e}] by name"
+            );
+        }
+        let score = series_at(&results, y_prod_base + slot);
+        for step in 1..prod.len() {
+            let delta = prod[step] - prod[step - 1];
+            let want =
+                (energy[step - 1] * carbon[step - 1] * (1.0 + y[step]) - prod[step - 1]) / delta;
+            assert!(
+                (score[step] - want).abs() < 1e-9,
+                "y -> prod[{e}] step {step}: {} vs {want} from the series",
+                score[step]
+            );
+        }
+    }
+}
+
+/// The companion: a plain positional `maps_to`, the shape most mapped edges
+/// have. The map's diagonal IS the ordinal one, the score is arrayed over
+/// `State`, and the element edges are that single diagonal.
 #[test]
 fn an_agreeing_mapped_pair_keeps_the_arrayed_score() {
     let mut state = datamodel::Dimension::named(
@@ -5247,14 +6295,11 @@ fn module_only_root_with_pinned_index_sub_scores_cleanly() {
 /// must compile and read the per-element rank of the *lagged* array.
 ///
 /// `RANK(arr, dir)` is array-valued (the rank of each element -- Vensim's
-/// VECTOR RANK), but `builtins_visitor::arg_has_bare_var_ref` treated every
-/// `reducer_kind_from_name` builtin as scalar-collapsing and refused to
-/// descend, so the PREVIOUS capture landed in a per-element SCALAR helper
-/// whose equation `rank(pop, 1)` is ill-typed (array-valued in scalar
-/// context) and the model failed to compile. Treating RANK as
-/// array-valued routes the capture through the GH #541 ARRAYED helper
-/// (`Equation::ApplyToAll` over the active dims, referenced at the active
-/// element), which compiles exactly like the model's own A2A equation.
+/// VECTOR RANK). A snapshot-only apply-to-all body is captured structurally,
+/// as an `Equation::ApplyToAll` helper over the active dims whose body the
+/// compiler lowers per element, so `rank(pop, 1)` is lowered under the
+/// capture's own dimensions -- exactly like the model's own A2A equation --
+/// rather than in a scalar helper where it is ill-typed.
 #[test]
 fn previous_of_rank_compiles_per_element() {
     let project = TestProject::new("prev_rank")
@@ -5507,13 +6552,13 @@ fn rank_frozen_subtree_link_score_scores_correctly() {
         .expect("VM simulation should run to completion");
     let results = vm.into_results();
 
-    // The frozen-RANK capture helper is ONE arrayed (deduped) helper whose
-    // slots read the current-step per-element ranks -- constant [1, 2].
+    // The frozen-RANK capture helper is ONE arrayed (structural) helper,
+    // keyed per element like any arrayed variable, whose slots read the
+    // current-step per-element ranks -- constant [1, 2].
     let helper =
         "$\u{205A}$\u{205A}ltm\u{205A}link_score\u{205A}scale\u{2192}grow\u{205A}0\u{205A}arg0";
-    let helper_base = offset_of(&results, helper);
-    let helper_north = series_at(&results, helper_base);
-    let helper_south = series_at(&results, helper_base + 1);
+    let helper_north = series_at(&results, offset_of(&results, &format!("{helper}[north]")));
+    let helper_south = series_at(&results, offset_of(&results, &format!("{helper}[south]")));
     assert!(
         helper_north.iter().all(|&v| v == 1.0),
         "the arrayed capture helper's north slot must hold rank 1; got {helper_north:?}"
@@ -7056,10 +8101,10 @@ fn per_element_body_with_iterated_other_dep_scores() {
 /// `mid[State] = pop[State, young] * 0.05` over `pop[Region, Age]` with a
 /// positional `State→Region` mapping -- exercises
 /// `per_element_row_for_target`'s `AxisRead::Iterated` arm, hence
-/// `positional_correspondence`: the
-/// row's Region element is the positional preimage of the target's State
-/// element (s1↔r1, s2↔r2), so the emitted names carry the SOURCE-dim row
-/// and the diagonal only.
+/// `DimensionsContext::executed_read_correspondence`: the row's Region
+/// element is the map's partner of the target's State element (s1↔r1,
+/// s2↔r2 under a positional map), so the emitted names carry the SOURCE-dim
+/// row and the diagonal only.
 ///
 /// Parent (`ad6bdeb8`) evidence: this fixture classified `DynamicIndex`
 /// and took the GH #758 loud skip -- NO `pop→mid` score of any form plus
@@ -10267,17 +11312,15 @@ fn gh791_strict_slice_decline_holds_in_discovery_mode() {
 }
 
 /// GH #791 regression pin (the blast-radius boundary): a multi-source reducer
-/// whose source read is the FULL EXTENT must keep its cartesian diagonal scores
-/// -- the strict-slice decline fires ONLY for Pinned/subset reads. Here
-/// `growth[D1] = SUM(matrix[D1,*] * frac)` declines the I1 acceptance (the bare
-/// `frac` feeder, GH #779), so `matrix -> growth` lands on the cartesian
-/// derivation, but `matrix[D1,*]`'s slice is `[Iterated(d1), Reduced]` -- a
-/// full-extent read -- so its four correct diagonal scores
-/// (`matrix[a,c]→growth[a]`, ...) are preserved, NOT loud-skipped. (The bare
-/// `frac -> growth` edge keeps its own separate GH #779 decline.)
+/// whose source read is the FULL EXTENT keeps its per-row diagonal scores --
+/// the strict-slice decline fires ONLY for Pinned/subset reads. Here
+/// `growth[D1] = SUM(matrix[D1,*] * frac)` is variable-backed (the reducer is
+/// the whole RHS) with `matrix[D1,*]`'s slice `[Iterated(d1), Reduced]` -- a
+/// full-extent read -- so its four diagonal scores
+/// (`matrix[a,c]→growth[a]`, ...) are emitted, NOT loud-skipped.
 #[test]
 fn gh791_full_extent_multisource_read_stays_scored() {
-    let project = gh779_bare_feeder_fixture("SUM");
+    let project = gh779_bare_feeder_fixture("SUM", "frac");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
@@ -11441,12 +12484,9 @@ fn gh754_lower_dim_feeder_loop_discoverable_in_discovery_mode() {
 /// `pop[<mapped source elem>]` (e.g. `pop[r1]`) in lockstep with the element
 /// graph, so the mapped loop is discoverable.
 ///
-/// (Only pairs whose two reference spellings AGREE reach here -- every
-/// positional mapping, and since GH #997 a many-to-one element map too. A pair
-/// whose spellings DISAGREE is declined upstream by `link_score_dimensions`
-/// via `db::analysis::mapped_pair_projects_uniquely`, precisely because
-/// `expand_same_element`'s union would put two from-nodes on one score slot,
-/// so no phantom can be minted for it either.)
+/// (Every mapped pair reaches here: both spellings resolve through the one
+/// executed correspondence, so the from-node `expand_same_element` spells is
+/// the element the score's slot reads, whatever the map's shape.)
 #[test]
 fn gh754_mapped_feeder_loop_discoverable_in_discovery_mode() {
     let project = TestProject::new("gh754_mapped_feeder")

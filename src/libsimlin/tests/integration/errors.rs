@@ -49,6 +49,43 @@ fn test_error_kind_equation_error() {
     }
 }
 
+/// A variable that fails on its own and is also in a cycle reports its own
+/// failure: the cycle row follows the variable rows, so the first detail --
+/// the code `simlin_project_get_errors` returns -- is the member's.
+#[test]
+fn test_error_code_of_a_failing_cycle_member_is_its_own_failure() {
+    let datamodel = TestProject::new("cycle_member")
+        .aux("a", "b + bogus", None)
+        .aux("b", "a", None)
+        .aux("ok", "1", None)
+        .build_datamodel();
+    let proj = open_project_from_datamodel(&datamodel);
+
+    unsafe {
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);
+        assert!(err.is_null());
+        assert!(!all_errors.is_null());
+        assert_eq!(
+            simlin_error_get_code(all_errors),
+            SimlinErrorCode::UnknownDependency
+        );
+        let count = simlin_error_get_detail_count(all_errors);
+        let details = std::slice::from_raw_parts(simlin_error_get_details(all_errors), count);
+        let codes: Vec<SimlinErrorCode> = details.iter().map(|d| d.code).collect();
+        assert!(
+            codes.starts_with(&[
+                SimlinErrorCode::UnknownDependency,
+                SimlinErrorCode::CircularDependency
+            ]),
+            "{codes:?}"
+        );
+
+        simlin_error_free(all_errors);
+        simlin_project_unref(proj);
+    }
+}
+
 #[test]
 fn test_error_kind_unit_consistency_error() {
     let datamodel = TestProject::new("unit_kind_test")

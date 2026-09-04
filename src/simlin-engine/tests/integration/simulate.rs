@@ -967,6 +967,94 @@ fn ensure_wasm_matches_runs_supported_scalar_model() {
     );
 }
 
+/// `DELAYN`/`SMTHN` with no initial value are the canonical
+/// `DELAY1`/`DELAY3`/`SMTH1`/`SMTH3` with the INPUT as the initial value (the
+/// stdlib model's `isModuleInput(initial_value)` guard, XMILE 1.0 section
+/// 3.5.3), an explicit fourth argument is that twin with the argument as the
+/// initial value, and `DELAY` is `DELAY1` -- on the VM, on wasm
+/// (`ensure_wasm_matches` panics on any divergence), and across a reset and
+/// rerun. The input varies in time so the initial value is observable: the
+/// default twins start at the input's `t0` value, the explicit ones at 7.
+#[test]
+fn delayn_and_smthn_omitted_initial_values_are_the_input_on_both_backends() {
+    use simlin_engine::common::Ident;
+
+    let datamodel = simlin_engine::test_common::TestProject::new("alias_init")
+        .with_sim_time(0.0, 10.0, 0.5)
+        .aux("inp", "10 + TIME", None)
+        .aux("d1_default", "DELAYN(inp, 2, 1)", None)
+        .aux("d1_twin", "DELAY1(inp, 2, inp)", None)
+        .aux("d3_default", "DELAYN(inp, 2, 3)", None)
+        .aux("d3_twin", "DELAY3(inp, 2, inp)", None)
+        .aux("s1_default", "SMTHN(inp, 2, 1)", None)
+        .aux("s1_twin", "SMTH1(inp, 2, inp)", None)
+        .aux("s3_default", "SMTHN(inp, 2, 3)", None)
+        .aux("s3_twin", "SMTH3(inp, 2, inp)", None)
+        .aux("d3_explicit", "DELAYN(inp, 2, 3, 7)", None)
+        .aux("d3_explicit_twin", "DELAY3(inp, 2, 7)", None)
+        .aux("s1_explicit", "SMTHN(inp, 2, 1, 7)", None)
+        .aux("s1_explicit_twin", "SMTH1(inp, 2, 7)", None)
+        .aux("alias", "DELAY(inp, 2)", None)
+        .aux("alias_twin", "DELAY1(inp, 2)", None)
+        .build_datamodel();
+
+    let expected = vm_results(&datamodel);
+    let series = |results: &Results, name: &str| -> Vec<f64> {
+        let off = results.offsets[&Ident::new(name)];
+        (0..results.step_count)
+            .map(|step| results.data[step * results.step_size + off])
+            .collect()
+    };
+    for (spelling, twin) in [
+        ("d1_default", "d1_twin"),
+        ("d3_default", "d3_twin"),
+        ("s1_default", "s1_twin"),
+        ("s3_default", "s3_twin"),
+        ("d3_explicit", "d3_explicit_twin"),
+        ("s1_explicit", "s1_explicit_twin"),
+        ("alias", "alias_twin"),
+    ] {
+        assert_eq!(
+            series(&expected, spelling),
+            series(&expected, twin),
+            "{spelling} is {twin}"
+        );
+    }
+    // The initial value is observable, so the equalities above are not
+    // trivially true: the default and explicit spellings differ at t0.
+    for (default, explicit) in [("d3_default", "d3_explicit"), ("s1_default", "s1_explicit")] {
+        assert_ne!(
+            series(&expected, default)[0],
+            series(&expected, explicit)[0],
+            "{default} starts at the input, {explicit} at 7"
+        );
+    }
+
+    // A reset and rerun reproduces every series bit for bit.
+    let mut vm = Vm::new(compile_vm(&datamodel)).unwrap();
+    vm.run_to(4.0).unwrap();
+    vm.reset();
+    vm.run_to_end().unwrap();
+    let rerun = vm.into_results();
+    // Bit for bit: an unwired `initial_value` port's slot holds NaN, which
+    // `==` never equates.
+    assert!(
+        rerun.data.len() == expected.data.len()
+            && rerun
+                .data
+                .iter()
+                .zip(expected.data.iter())
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+        "a reset VM reruns to the same series"
+    );
+
+    let outcome = ensure_wasm_matches(&datamodel, "main", &expected, &[]);
+    assert!(
+        matches!(outcome, WasmRunOutcome::Ran),
+        "the alias spellings must run through the wasm backend, got {outcome:?}"
+    );
+}
+
 /// GH #1027: a star range over a NON-CONTIGUOUS subdimension survives a
 /// transpose, both as the operand of a reducer and read per element.
 ///
@@ -4348,7 +4436,7 @@ fn init_recurrence_mdl_multi_member_init_scc_simulates() {
     let dep_graph = model_dependency_graph(&db, model, sync.project, ModuleInputSet::empty(&db));
 
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "init_recurrence.mdl: the element-acyclic MULTI-member init-only \
          recurrence behind stocks must NOT set has_cycle (resolved_sccs = \
          {:?})",
@@ -4407,7 +4495,7 @@ fn init_recurrence_mdl_multi_member_init_scc_simulates() {
 /// `INITIAL(<expr>)` (Vensim's spelling of XMILE `INIT`) over the shifted
 /// subrange expands element-wise to `ecc[t2] = INITIAL(ecc[t1] * 2)` and
 /// `ecc[t3] = INITIAL(ecc[t2] * 2)`. Because the `INITIAL` argument is an
-/// *expression* (not a bare scalar slot), `builtins_visitor::make_temp_arg`
+/// *expression* (not a bare scalar slot), `builtins_visitor::hoist_capture`
 /// synthesizes a scalar helper aux per recurrence element -- the canonical
 /// `$\u{205A}ecc\u{205A}0\u{205A}arg0\u{205A}t2` /
 /// `$\u{205A}ecc\u{205A}0\u{205A}arg0\u{205A}t3` form (design deviation 2):
@@ -4480,7 +4568,7 @@ fn helper_recurrence_mdl_synthetic_helper_in_scc_simulates() {
     // helper is unsourceable -> SCC `Unresolved` -> `has_cycle` true ->
     // `CircularDependency`.
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "helper_recurrence.mdl: the helper-bearing recurrence must NOT set \
          has_cycle once the synthetic helper is parent-sourced (AC3.1); \
          resolved_sccs = {:?}",
@@ -5817,10 +5905,11 @@ fn simulates_macro_multi_output_mdl() {
 // ===========================================================================
 // Phase 4 / Task 2: arrayed (apply-to-all) macro invocation
 //
-// Phase 3 made `instantiate_implicit_modules`'s apply-to-all path
-// macro-aware (`contains_module_call`), so an arrayed macro invocation
-// `out[Region] = SCALE(inp[Region], factor)` rides the EXISTING per-element
-// module-expansion machinery -- one independent synthetic Variable::Module
+// `instantiate_implicit_modules`'s apply-to-all path is macro-aware
+// (`per_element_requirements` follows `MacroRegistry::resolve_call`), so an
+// arrayed macro invocation `out[Region] = SCALE(inp[Region], factor)` rides
+// the per-element module-expansion machinery -- one independent synthetic
+// Variable::Module
 // per dimension element -- with no new mechanism. These tests verify that
 // (macros.AC3.4) and the per-element-independent-stock edge (macros.AC3.5).
 //
@@ -6327,12 +6416,14 @@ fn macro_attributable_classifier_separates_macro_from_nonmacro() {
     let registry_build = Diagnostic {
         model: String::new(),
         variable: None,
+        owner: None,
         error: model_err(ErrorCode::CircularDependency),
         severity: DiagnosticSeverity::Error,
     };
     let macro_body_error = Diagnostic {
         model: macro_model.clone(),
         variable: Some("m".to_string()),
+        owner: None,
         error: eq(ErrorCode::UnknownDependency),
         severity: DiagnosticSeverity::Error,
     };
@@ -6351,6 +6442,7 @@ fn macro_attributable_classifier_separates_macro_from_nonmacro() {
     let cascade_resolution_failure = Diagnostic {
         model: "main".to_string(),
         variable: Some("x".to_string()),
+        owner: None,
         error: eq(ErrorCode::UnknownBuiltin),
         severity: DiagnosticSeverity::Error,
     };
@@ -6377,12 +6469,14 @@ fn macro_attributable_classifier_separates_macro_from_nonmacro() {
     let model_logic_cycle = Diagnostic {
         model: "main".to_string(),
         variable: Some("previous_emissions_intensity_vs_refyr".to_string()),
+        owner: None,
         error: model_err(ErrorCode::CircularDependency),
         severity: DiagnosticSeverity::Error,
     };
     let dim_mismatch = Diagnostic {
         model: "main".to_string(),
         variable: Some("c_in_mixed_layer".to_string()),
+        owner: None,
         error: eq(ErrorCode::MismatchedDimensions),
         severity: DiagnosticSeverity::Error,
     };
@@ -6391,6 +6485,7 @@ fn macro_attributable_classifier_separates_macro_from_nonmacro() {
     let non_time_dollar = Diagnostic {
         model: "main".to_string(),
         variable: Some("\"goal_1.5_for_temperature\"".to_string()),
+        owner: None,
         error: eq(ErrorCode::DoesNotExist),
         severity: DiagnosticSeverity::Error,
     };
@@ -6399,6 +6494,7 @@ fn macro_attributable_classifier_separates_macro_from_nonmacro() {
     let macro_body_unit_warning = Diagnostic {
         model: macro_model.clone(),
         variable: Some("m".to_string()),
+        owner: None,
         error: model_err(ErrorCode::UnitMismatch),
         severity: DiagnosticSeverity::Warning,
     };
@@ -6728,6 +6824,32 @@ fn corpus_clearn_macros_import() {
 /// same names, all rank-like-partial) and the margin is still wide: 35,413 free
 /// against the 65,536-slot ceiling.
 ///
+/// A user equation's `PREVIOUS`/`INIT` of one declared element (`vals[e1]`,
+/// `vals[Dim.e1]`) reads the slot directly instead of through a capture
+/// helper, and an INIT-only capture is no causal node (an `INIT` read is a
+/// snapshot, not a per-step link; `db::analysis::model_causal_edges`). Both
+/// move the count DOWN, 7,163 -> 6,193, measured with `ltm_var_dump`. The 26
+/// element captures C-LEARN no longer mints (`init_c_in_deep_ocean_per_meter`
+/// and `target_year`) each carried a scalar source->capture and
+/// capture->target score, 52 variables that become 17 direct source->target
+/// scores arrayed over their targets' declared dimensions (330 slots). The
+/// 207 INIT-only captures each carried one capture->parent score (identically
+/// 0: the parent reads the frozen value) and between them 714 source->capture
+/// scores from 104 sources -- 921 scalar scores that do not exist because the
+/// edges do not -- plus the 14 array-freeze helpers (two slots each) of the
+/// scores into `$⁚last_set_target_year⁚0⁚arg0`. Width 30,123 -> 29,398 slots
+/// (-26 capture slots, -973 scalar scores, -28 freeze slots, -28 `PREVIOUS`
+/// helpers of the removed scores, +330), from the release LTM
+/// `bytecode_profile`; the margin is 36,138 free against the 65,536-slot
+/// ceiling.
+///
+/// The count is unchanged by structural captures, which change the HELPERS of
+/// the generated equations, not the equations: a generated snapshot argument
+/// subscripted by a mapped foreign dimension (`PREVIOUS(x[aggregated_regions])`)
+/// captures where the per-element substitution read the slot directly, seven
+/// arrayed helpers of three scores, so the width is 29,398 -> 29,447 slots
+/// and the margin 36,089 free against the 65,536-slot ceiling.
+///
 /// The pin below catches emission changes in EITHER direction, and re-deriving
 /// it means re-measuring BOTH numbers, not just the count.
 #[test]
@@ -6753,7 +6875,7 @@ fn clearn_ltm_var_count_guardrail() {
         })
         .sum();
     assert_eq!(
-        total, 7163,
+        total, 6193,
         "C-LEARN's emitted LTM var count moved; if this is an intentional \
          emission change, re-derive the layout-slot impact (the #654 \
          ceiling) and update this pin with the new numbers"
@@ -7156,5 +7278,602 @@ fn assert_fusion_depth_never_rises(path: &str) {
         checked > 0,
         "{path}: compiled but produced no fusion-depth checks -- the audit \
          found no fused phase, so this model verifies nothing"
+    );
+}
+
+/// Each occurrence of a repeated active dimension reads its OWN axis, on both
+/// backends.
+///
+/// `o[D,D] = square[D,D]` and `o[D,D] = square` are the same reference by the
+/// time anything resolves them (`Context::lower_pass0` rewrites the bare form
+/// into the subscripted one), and both used to read the DIAGONAL
+/// `square[d_i,d_i]`: the two `D` subscripts each took the FIRST active axis
+/// that matched their name, so every cell of a row read the same source cell.
+/// The wildcard spelling `square[*,*]` did not, which is what made this a fork
+/// rather than a uniform convention.
+///
+/// One rule answers all three now.
+/// `compiler::subscript::normalize_subscripts3` allocates the active positions
+/// ONE TO ONE across a reference's subscripts, so the second `D` takes the
+/// second axis; and `compiler::project_var_index_to_temp` pairs a temp's axes to
+/// the variable's the same way, which is what makes the sort row -- whose
+/// operand is materialized into a `[D,D]`-shaped temp -- come back out per row
+/// rather than down the diagonal.
+///
+/// This shape is not in the `test/` corpus: Vensim rejects a repeated-dimension
+/// declaration outright ("DimA appears more than once on LHS", measured in
+/// Vensim DSS 2026-08-04 on `vensim-probes/repeated_dimension.mdl`), so no
+/// MDL-imported model carries it. XMILE v1.0 does exemplify the declaration
+/// ("A 2D non-apply-to-all array with dimensions X by X, where X is size 2",
+/// verified in `docs/reference/xmile-v1.0.html`) and says nothing about what
+/// such a REFERENCE means, so the reading is Simlin's to define and this is
+/// where it is defined.
+#[test]
+fn each_occurrence_of_a_repeated_active_dimension_reads_its_own_axis() {
+    let datamodel = simlin_engine::test_common::TestProject::new("repeated_active_dim")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .indexed_dimension("D", 3)
+        .array_with_ranges(
+            "square[D,D]",
+            vec![
+                ("1,1", "11"),
+                ("1,2", "12"),
+                ("1,3", "13"),
+                ("2,1", "21"),
+                ("2,2", "22"),
+                ("2,3", "23"),
+                ("3,1", "31"),
+                ("3,2", "32"),
+                ("3,3", "33"),
+            ],
+        )
+        // The three spellings of one read.
+        .array_aux("o_sub[D,D]", "square[D,D]")
+        .array_aux("o_bare[D,D]", "square")
+        .array_aux("o_star[D,D]", "square[*,*]")
+        // Through a temp: the operand is the whole matrix, and each row of it
+        // ascends, so every row's sort order is `[0,1,2]`.
+        .array_aux("o_sort[D,D]", "VECTOR SORT ORDER(square[D,D], 1)")
+        .build_datamodel();
+
+    let expected = vm_results(&datamodel);
+    let last = expected.iter().next_back().unwrap().to_vec();
+    let at = |name: &str| -> f64 {
+        let off = *expected
+            .offsets
+            .get(&simlin_engine::common::Ident::new(name))
+            .unwrap_or_else(|| panic!("{name} missing from results"));
+        last[off]
+    };
+
+    for (i, j, value) in [
+        (1, 1, 11.0),
+        (1, 2, 12.0),
+        (1, 3, 13.0),
+        (2, 1, 21.0),
+        (2, 2, 22.0),
+        (2, 3, 23.0),
+        (3, 1, 31.0),
+        (3, 2, 32.0),
+        (3, 3, 33.0),
+    ] {
+        for var in ["o_sub", "o_bare", "o_star"] {
+            assert_eq!(at(&format!("{var}[{i},{j}]")), value, "{var}[{i},{j}]");
+        }
+        assert_eq!(
+            at(&format!("o_sort[{i},{j}]")),
+            (j - 1) as f64,
+            "o_sort[{i},{j}]: every row of `square` ascends"
+        );
+    }
+
+    // The reading has to be the same on both backends: `ensure_wasm_matches`
+    // panics on any divergence.
+    let outcome = ensure_wasm_matches(&datamodel, "main", &expected, &[]);
+    assert!(
+        matches!(outcome, WasmRunOutcome::Ran),
+        "the wasm backend must run this model, got {outcome:?}"
+    );
+}
+
+/// A reference subscripted with a SUBRANGE the equation iterates reads the
+/// element that subrange NAMES, matching Vensim.
+///
+/// `test/test-models/tests/subrange_merge/` ships genuine Vensim output beside
+/// its `.mdl`, and nothing simulated it: the corpus list above is built from
+/// `.xmile` files and that directory has none, so the model reaches only the MDL
+/// round-trip. This is the gate.
+///
+/// `lower values[lower] = value per layer[lower]` over `lower: Layer2, Layer3,
+/// Layer4` and `value per layer[Layers] = 1, 2, 3, 4` reads by ELEMENT NAME:
+/// `output.tab` gives `lower values[Layer2] = 2`, `[Layer3] = 3`, `[Layer4] = 4`
+/// and `merged lower = 10, 2, 3, 4`. Resolving the subscript to the active
+/// element's ORDINAL WITHIN `lower` instead -- 0, 1, 2 indexing `Layers` raw --
+/// gives `1, 2, 3`, which is what this engine returned until every
+/// dimension-named subscript went through the one mapped-read rule
+/// (`DimensionsContext::resolve_mapped_read`: the element's own name on the
+/// source axis first).
+///
+/// `upper values[upper]` over `upper: Layer1, Layer2, Layer3` is the control
+/// that says the fixture is not vacuous the other way: there the subrange starts
+/// at the parent's first element, so both readings give `1, 2, 3` and the row
+/// cannot tell them apart.
+#[test]
+fn a_subrange_subscript_reads_the_element_it_names() {
+    let path = "../../test/test-models/tests/subrange_merge/test_subrange_merge.mdl";
+    let contents = std::fs::read_to_string(path).expect("the fixture MDL is checked in");
+    let datamodel = open_vensim(&contents).expect("the fixture MDL parses");
+
+    let results = {
+        let compiled = compile_vm(&datamodel);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        vm.into_results()
+    };
+    let last = results.iter().next_back().unwrap().to_vec();
+    let at = |name: &str| -> f64 {
+        let off = *results
+            .offsets
+            .get(&simlin_engine::common::Ident::new(name))
+            .unwrap_or_else(|| panic!("{name} missing from results"));
+        last[off]
+    };
+
+    // Every cell `output.tab`'s header names, in its order.
+    for (cell, value) in [
+        ("lower values[Layer2]", 2.0),
+        ("lower values[Layer3]", 3.0),
+        ("lower values[Layer4]", 4.0),
+        ("merged lower[Layer1]", 10.0),
+        ("merged lower[Layer2]", 2.0),
+        ("merged lower[Layer3]", 3.0),
+        ("merged lower[Layer4]", 4.0),
+        ("merged upper[Layer1]", 1.0),
+        ("merged upper[Layer2]", 2.0),
+        ("merged upper[Layer3]", 3.0),
+        ("merged upper[Layer4]", 40.0),
+        ("upper values[Layer1]", 1.0),
+        ("upper values[Layer2]", 2.0),
+        ("upper values[Layer3]", 3.0),
+    ] {
+        assert_eq!(at(cell), value, "{cell}: Vensim's own output.tab");
+    }
+}
+
+/// GH #1029's own model: an apply-to-all over a SUBRANGE reading the parent
+/// array by dimension name reads each element by NAME -- `q_dimref[C]` is
+/// `src[C]`, 400, not the `Sub`-relative position's `src[B]` -- and the four
+/// spellings of the intent agree: `src[Sub]` and `SUM(src[*:Sub])` compile to
+/// the named elements, the bare `src` and `src[Parent]` are refused
+/// (`MismatchedDimensions`, the whole diagnostic vector), and none reads
+/// positionally. Vensim's ground truth for the same read is
+/// `a_subrange_subscript_reads_the_element_it_names`; this is the issue's
+/// fixture through `open_xmile`, on the VM and on wasm.
+#[test]
+fn a_subrange_dimension_reference_reads_by_name_in_every_spelling() {
+    let xmile = |probe: &str| -> simlin_engine::datamodel::Project {
+        let text = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+<header><name>gh1029</name><vendor>simlin</vendor><product version="1.0">simlin</product></header>
+<sim_specs method="Euler"><start>0</start><stop>1</stop><dt>1</dt></sim_specs>
+<dimensions>
+    <dim name="Parent"><elem name="A"/><elem name="B"/><elem name="C"/><elem name="D"/></dim>
+    <dim name="Sub"><elem name="A"/><elem name="C"/></dim>
+</dimensions>
+<model><variables>
+    <aux name="src">
+        <element subscript="A"><eqn>100</eqn></element>
+        <element subscript="B"><eqn>200</eqn></element>
+        <element subscript="C"><eqn>400</eqn></element>
+        <element subscript="D"><eqn>800</eqn></element>
+        <dimensions><dim name="Parent"/></dimensions>
+    </aux>
+    {probe}
+</variables></model>
+</xmile>"#
+        );
+        simlin_engine::open_xmile(&mut BufReader::new(text.as_bytes()))
+            .unwrap_or_else(|e| panic!("open_xmile: {e}"))
+    };
+
+    let datamodel = xmile(
+        r#"<aux name="q_dimref"><eqn>src[Sub]</eqn><dimensions><dim name="Sub"/></dimensions></aux>
+    <aux name="ctl_a"><eqn>src[A]</eqn></aux>
+    <aux name="ctl_c"><eqn>src[C]</eqn></aux>
+    <aux name="q_star"><eqn>SUM(src[*:Sub])</eqn></aux>"#,
+    );
+    let results = {
+        let compiled = compile_vm(&datamodel);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        vm.into_results()
+    };
+    let last = results.iter().next_back().unwrap().to_vec();
+    let at = |name: &str| -> f64 {
+        let off = *results
+            .offsets
+            .get(&simlin_engine::common::Ident::new(name))
+            .unwrap_or_else(|| panic!("{name} missing from results"));
+        last[off]
+    };
+    for (cell, value) in [
+        ("q_dimref[A]", 100.0),
+        ("q_dimref[C]", 400.0),
+        ("q_star", 500.0),
+        ("ctl_a", 100.0),
+        ("ctl_c", 400.0),
+    ] {
+        assert_eq!(at(cell), value, "{cell}: the element it names");
+    }
+    assert!(
+        matches!(
+            ensure_wasm_matches(&datamodel, "main", &results, &[]),
+            WasmRunOutcome::Ran
+        ),
+        "the wasm backend reads the same elements"
+    );
+
+    for (probe, variable) in [
+        (
+            r#"<aux name="q_bare"><eqn>src</eqn><dimensions><dim name="Sub"/></dimensions></aux>"#,
+            "main.q_bare",
+        ),
+        (
+            r#"<aux name="q_parent"><eqn>src[Parent]</eqn><dimensions><dim name="Sub"/></dimensions></aux>"#,
+            "main.q_parent",
+        ),
+    ] {
+        let project = simlin_engine::test_common::TestProject::from_datamodel(xmile(probe));
+        assert_eq!(
+            project.error_diagnostics(),
+            vec![(variable.to_string(), ErrorCode::MismatchedDimensions)],
+            "{variable}: refused rather than read positionally"
+        );
+    }
+}
+
+/// A shared materialization inside a resolved recurrence SCC is evaluated
+/// before every element that reads it, whichever order the elements run in.
+///
+/// `compiler::array_operand` hoists a body two or more elements read ahead of
+/// the element code, and `db::assemble::combine_scc_fragment` REORDERS a
+/// resolved recurrence SCC's per-element segments to follow `element_order`.
+/// Those two meet here: a backward recurrence evaluates its LAST element
+/// first, so a hoist left inside the first element's segment would be written
+/// after the elements that read it -- a well-formed program reading
+/// zero-initialised temp storage, with no bad id and no bad reference to
+/// notice. It shows only as numbers, and only on the first step: `temp_storage`
+/// persists across steps, so from step 2 on the elements read the previous
+/// step's value and look right.
+///
+/// The hoisted blocks are therefore the member's PROLOGUE, relocated as a unit
+/// ahead of the first of its readers in `element_order` rather than riding on
+/// one element's segment; `symbolic_phase_element_order` wires a prologue
+/// read into every reader so the order it produces satisfies that placement,
+/// and the combiner refuses loud-safe if it does not.
+///
+/// The three rows are the shapes that reach it -- a reducer over a computed
+/// array, an array-producing builtin, and the same recurrence in a stock's
+/// INIT (which would be wrong for the whole run rather than the first step,
+/// the initials phase having no second step to paper over it) -- plus the
+/// control that must NOT change: an operand that VARIES with the element is
+/// materialized per element on a recycled id and has no prologue.
+///
+/// The models are in Vensim syntax because the subrange-with-mapping
+/// declaration a recurrence needs (`tPrev: t1, t2, t3 -> tNext`) has no
+/// `TestProject` spelling; each subrange arm is one equation text, so its
+/// elements share every body that does not vary with the element.
+#[test]
+fn a_shared_materialization_inside_a_recurrence_scc_precedes_every_reader() {
+    let model = |body: &str| -> String {
+        format!(
+            "{{UTF-8}}\n\
+             T: t1, t2, t3, t4 ~~|\n\
+             tPrev: t1, t2, t3 -> tNext ~~|\n\
+             tNext: t2, t3, t4 ~~|\n\
+             {body}\
+             INITIAL TIME = 0 ~~|\n\
+             FINAL TIME = 2 ~~|\n\
+             SAVEPER = 1 ~~|\n\
+             TIME STEP = 1 ~~|\n"
+        )
+    };
+
+    // Every row runs the recurrence x[t4] = 100, x[e] = x[next(e)] * 0.5 + K,
+    // so the values fall out of K by three halvings from 100.
+    for (what, body, var, expected) in [
+        // K = SUM(v * 2) = 2 * (1+2+3+4) = 20, the same computed array in every
+        // element: one hoisted temp. 100 -> 70 -> 55 -> 47.5.
+        (
+            "a reducer over a computed array",
+            "v[T] = 1, 2, 3, 4 ~~|\n\
+             x[t4] = 100 ~~|\n\
+             x[tPrev] = x[tNext] * 0.5 + SUM(v[T!] * 2) ~~|\n",
+            "x",
+            [47.5, 55.0, 70.0, 100.0],
+        ),
+        // K = SUM(RANK(v, 1)) = 1+2+3+4 = 10 whatever the values, and the RANK
+        // itself is the hoisted temp. 100 -> 60 -> 40 -> 30.
+        (
+            "an array-producing builtin",
+            "v[T] = 3, 1, 4, 2 ~~|\n\
+             x[t4] = 100 ~~|\n\
+             x[tPrev] = x[tNext] * 0.5 + SUM(RANK(v[T!], 1)) ~~|\n",
+            "x",
+            [30.0, 40.0, 60.0, 100.0],
+        ),
+        // The CONTROL: `w[tPrev]` makes the operand differ per element, so it
+        // is materialized per element on a recycled id and there is no
+        // prologue. With w all 1 the sum is 10, the same arithmetic as the RANK
+        // row -- the numbers are a control on the values, not on the mechanism.
+        (
+            "an element-varying operand (control: no prologue)",
+            "v[T] = 1, 2, 3, 4 ~~|\n\
+             w[T] = 1, 1, 1, 1 ~~|\n\
+             x[t4] = 100 ~~|\n\
+             x[tPrev] = x[tNext] * 0.5 + SUM(v[T!] * w[tPrev]) ~~|\n",
+            "x",
+            [30.0, 40.0, 60.0, 100.0],
+        ),
+        // The same recurrence in a stock's INIT. The initials phase runs once,
+        // so this row is wrong for the WHOLE run when the prologue is misplaced
+        // rather than only on the first step.
+        (
+            "the same recurrence in a stock's INIT",
+            "v[T] = 1, 2, 3, 4 ~~|\n\
+             s[t4] = INTEG(0, 100) ~~|\n\
+             s[tPrev] = INTEG(0, s[tNext] * 0.5 + SUM(v[T!] * 2)) ~~|\n",
+            "s",
+            [47.5, 55.0, 70.0, 100.0],
+        ),
+    ] {
+        let datamodel = open_vensim(&model(body)).unwrap_or_else(|e| panic!("{what}: {e}"));
+        let results = {
+            let compiled = compile_vm(&datamodel);
+            let mut vm = Vm::new(compiled).unwrap();
+            vm.run_to_end().unwrap();
+            vm.into_results()
+        };
+        // EVERY step, not just the last: the misplacement showed only on the
+        // first one, because the temp region persists across steps.
+        for (step, row) in results.iter().enumerate() {
+            let row = row.to_vec();
+            for (i, want) in expected.iter().enumerate() {
+                let cell = format!("{var}[t{}]", i + 1);
+                let off = *results
+                    .offsets
+                    .get(&simlin_engine::common::Ident::new(&cell))
+                    .unwrap_or_else(|| panic!("{what}: {cell} missing from results"));
+                assert_eq!(row[off], *want, "{what}: {cell} at step {step}");
+            }
+        }
+
+        // The wasm backend assembles the same combined fragment, so the
+        // placement has to hold there too.
+        let outcome = ensure_wasm_matches(&datamodel, "main", &results, &[]);
+        assert!(
+            matches!(outcome, WasmRunOutcome::Ran),
+            "{what}: the wasm backend must run this model, got {outcome:?}"
+        );
+    }
+}
+
+/// Two explicit arms of one recurrence that EACH materialize a temp compile
+/// and give the right numbers, in both element orders.
+///
+/// Each arm's `VECTOR SORT ORDER` is its own body (the arms are different
+/// equation strings, so the bodies differ in source position and are not
+/// shared), so each element evaluates its own on an id the elements reissue,
+/// and the second arm additionally materializes its computed operand. Nothing
+/// is hoisted ahead of the elements, and a per-element temp is written and
+/// read inside one element's segment, so the segments can be emitted in
+/// whichever order the element graph demands. A guard that refused any temp
+/// id touched by two segments would refuse this model as a
+/// `CircularDependency` although interleaving the arms in either order is
+/// safe.
+///
+/// Values: the ascending sort order of `[2, 1]` is `[1, 0]`, summing to 1, so
+/// the arm without the self-reference is 1 and the other is `1 + 1 = 2`.
+#[test]
+fn two_arms_each_materializing_a_temp_inside_a_recurrence_compile_in_both_orders() {
+    let model = |d1: &str, d2: &str| -> String {
+        format!(
+            "{{UTF-8}}\n\
+             D: d1, d2 ~~|\n\
+             input[D] = 2, 1 ~~|\n\
+             a[d1] = {d1} ~~|\n\
+             a[d2] = {d2} ~~|\n\
+             INITIAL TIME = 0 ~~|\n\
+             FINAL TIME = 2 ~~|\n\
+             SAVEPER = 1 ~~|\n\
+             TIME STEP = 1 ~~|\n"
+        )
+    };
+    for (what, d1, d2, expected) in [
+        (
+            "forward: a[d2] reads a[d1]",
+            "SUM(VECTOR SORT ORDER(input[D], 1))",
+            "a[d1] + SUM(VECTOR SORT ORDER(input[D], 1) * 1)",
+            [1.0, 2.0],
+        ),
+        (
+            "backward: a[d1] reads a[d2]",
+            "a[d2] + SUM(VECTOR SORT ORDER(input[D], 1) * 1)",
+            "SUM(VECTOR SORT ORDER(input[D], 1))",
+            [2.0, 1.0],
+        ),
+    ] {
+        let datamodel = open_vensim(&model(d1, d2)).unwrap_or_else(|e| panic!("{what}: {e}"));
+        let results = {
+            let compiled = compile_vm(&datamodel);
+            let mut vm = Vm::new(compiled).unwrap();
+            vm.run_to_end().unwrap();
+            vm.into_results()
+        };
+        for (step, row) in results.iter().enumerate() {
+            let row = row.to_vec();
+            for (i, want) in expected.iter().enumerate() {
+                let cell = format!("a[d{}]", i + 1);
+                let off = *results
+                    .offsets
+                    .get(&simlin_engine::common::Ident::new(&cell))
+                    .unwrap_or_else(|| panic!("{what}: {cell} missing from results"));
+                assert_eq!(row[off], *want, "{what}: {cell} at step {step}");
+            }
+        }
+        let outcome = ensure_wasm_matches(&datamodel, "main", &results, &[]);
+        assert!(
+            matches!(outcome, WasmRunOutcome::Ran),
+            "{what}: the wasm backend must run this model, got {outcome:?}"
+        );
+    }
+}
+
+/// A temp only ONE element materializes stays inside that element's segment,
+/// even when it is written once and sits beside a shared temp -- and a shared
+/// temp that reads an override element is evaluated after it, whichever arm
+/// the override is.
+///
+/// Both rows are recurrences the element graph must order: the first element
+/// reads the third through its own materialization, or the shared default
+/// reads the override. A prologue rule that lifted every once-written leading
+/// block would carry the first row's private block (and its `a[d3]` read)
+/// into the prologue and wire that read into every reader of the shared temp,
+/// `a[d3]` included -- a false element self-loop and a `CircularDependency`
+/// refusal of a correct model. The prologue is only what two or more elements
+/// read (`db::assemble::segment_member_by_element`), so the private block is
+/// `a[d1]`'s, `a[d3]` runs first, and the numbers are the same on every step
+/// and on both backends.
+///
+/// Values: every sort order here is `[0, 1, 2]` (the operands ascend), summing
+/// to 3, so the first row is `[3 + 3, 3, 3]` and the second `[7, 3, 3]`.
+#[test]
+fn a_private_materialization_beside_a_shared_one_stays_in_its_element() {
+    for (what, body, expected) in [
+        (
+            "a private block beside a shared temp, in the first element",
+            "D: d1, d2, d3 ~~|\n\
+             dRest: d2, d3 ~~|\n\
+             v[D] = 1, 2, 3 ~~|\n\
+             w[D] = 1, 2, 3 ~~|\n\
+             a[d1] = SUM(VECTOR SORT ORDER(v[D], 1)) + SUM(VECTOR SORT ORDER(w[D] * a[d3], 1)) ~~|\n\
+             a[dRest] = SUM(VECTOR SORT ORDER(v[D], 1)) ~~|\n",
+            [6.0, 3.0, 3.0],
+        ),
+        (
+            "a shared default reading the first element's override",
+            "D: d1, d2, d3 ~~|\n\
+             dRest: d2, d3 ~~|\n\
+             v[D] = 1, 2, 3 ~~|\n\
+             a[dRest] = SUM(VECTOR SORT ORDER(v[D] * a[d1], 1)) ~~|\n\
+             a[d1] = 7 ~~|\n",
+            [7.0, 3.0, 3.0],
+        ),
+    ] {
+        let mdl = format!(
+            "{{UTF-8}}\n{body}INITIAL TIME = 0 ~~|\nFINAL TIME = 2 ~~|\nSAVEPER = 1 ~~|\nTIME STEP = 1 ~~|\n"
+        );
+        let datamodel = open_vensim(&mdl).unwrap_or_else(|e| panic!("{what}: {e}"));
+        let results = {
+            let compiled = compile_vm(&datamodel);
+            let mut vm = Vm::new(compiled).unwrap();
+            vm.run_to_end().unwrap();
+            vm.into_results()
+        };
+        for (step, row) in results.iter().enumerate() {
+            let row = row.to_vec();
+            for (i, want) in expected.iter().enumerate() {
+                let cell = format!("a[d{}]", i + 1);
+                let off = *results
+                    .offsets
+                    .get(&simlin_engine::common::Ident::new(&cell))
+                    .unwrap_or_else(|| panic!("{what}: {cell} missing from results"));
+                assert_eq!(row[off], *want, "{what}: {cell} at step {step}");
+            }
+        }
+        let outcome = ensure_wasm_matches(&datamodel, "main", &results, &[]);
+        assert!(
+            matches!(outcome, WasmRunOutcome::Ran),
+            "{what}: the wasm backend must run this model, got {outcome:?}"
+        );
+    }
+}
+
+/// A temp axis the target does not NAME is read through the declared
+/// correspondence -- the element's own name on the temp's axis, then the
+/// declared mapping -- and refused when there is none.
+///
+/// `out[D] = VECTOR SORT ORDER(w[E], 1)` sorts a `[E]`-shaped array into a
+/// `[E]`-shaped temp that `out[D]` reads back one element at a time.
+/// `compiler::project_var_index_to_temp` pairs the temp's `E` axis to the
+/// variable's `D` axis by name first, and when the names differ resolves each
+/// element of `D` onto `E` exactly as an ordinary reference would
+/// (`DimensionsContext::resolve_mapped_read`): `e_i` for `d_i` under the
+/// declared `E -> D`, and the ordinal's numeral for two indexed dimensions.
+/// Two named dimensions that declare nothing have no correspondence, so the
+/// temp is read WHOLE and refused as an array in a one-value position rather
+/// than every element reading cell 0 (Phase 6b divergence 9).
+///
+/// `w = [3, 1, 2]` sorts ascending as `[1, 2, 0]`.
+#[test]
+fn a_temp_axis_the_target_does_not_name_is_read_through_the_declared_correspondence() {
+    use simlin_engine::test_common::TestProject;
+    for (what, project, cells) in [
+        (
+            "E maps onto D",
+            TestProject::new("temp_axis_mapped")
+                .with_sim_time(0.0, 1.0, 1.0)
+                .named_dimension("D", &["d1", "d2", "d3"])
+                .named_dimension_with_mapping("E", &["e1", "e2", "e3"], "D")
+                .array_with_ranges("w[E]", vec![("e1", "3"), ("e2", "1"), ("e3", "2")])
+                .array_aux("out[D]", "VECTOR SORT ORDER(w[E], 1)"),
+            ["out[d1]", "out[d2]", "out[d3]"],
+        ),
+        (
+            "D and E are both indexed",
+            TestProject::new("temp_axis_indexed")
+                .with_sim_time(0.0, 1.0, 1.0)
+                .indexed_dimension("D", 3)
+                .indexed_dimension("E", 3)
+                .array_with_ranges("w[E]", vec![("1", "3"), ("2", "1"), ("3", "2")])
+                .array_aux("out[D]", "VECTOR SORT ORDER(w[*], 1)"),
+            ["out[1]", "out[2]", "out[3]"],
+        ),
+    ] {
+        let datamodel = project.build_datamodel();
+        let results = vm_results(&datamodel);
+        let last = results.iter().next_back().unwrap().to_vec();
+        for (cell, want) in cells.iter().zip([1.0, 2.0, 0.0]) {
+            let off = *results
+                .offsets
+                .get(&simlin_engine::common::Ident::new(cell))
+                .unwrap_or_else(|| panic!("{what}: {cell} missing from results"));
+            assert_eq!(last[off], want, "{what}: {cell}");
+        }
+        let outcome = ensure_wasm_matches(&datamodel, "main", &results, &[]);
+        assert!(
+            matches!(outcome, WasmRunOutcome::Ran),
+            "{what}: the wasm backend must run this model, got {outcome:?}"
+        );
+    }
+
+    // Two named dimensions with no declared relation: nothing says which
+    // element of `E` a `d_i` reads, so the array is refused where a value is
+    // required rather than every element reading `temp[0]`. The refusal is
+    // codegen's, attributed to the variable.
+    let err = TestProject::new("temp_axis_unrelated")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("D", &["d1", "d2", "d3"])
+        .named_dimension("E", &["e1", "e2", "e3"])
+        .array_with_ranges("w[E]", vec![("e1", "3"), ("e2", "1"), ("e3", "2")])
+        .array_aux("out[D]", "VECTOR SORT ORDER(w[*], 1)")
+        .compile_incremental()
+        .expect_err("a temp axis with no correspondence to the target is refused");
+    assert_eq!(err.code, ErrorCode::NotSimulatable, "{err:?}");
+    let details = err.get_details().unwrap_or_default();
+    assert!(
+        details.contains("out"),
+        "the refusal must name the variable it belongs to, got {details:?}"
     );
 }

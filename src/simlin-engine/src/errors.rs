@@ -2,13 +2,13 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Helpers for formatting engine errors for human-readable output.
+//! `FormattedError`: the one presentation of a `Diagnostic`, shared by the
+//! terminal (the CLI), libsimlin and the MCP servers.
 
 use crate::builtins::Loc;
-use crate::common::{EquationError, Error, ErrorCode, UnitError};
+use crate::common::{Error, ErrorCode, UnitError};
 use crate::datamodel::{Equation, Project as DatamodelProject, Variable};
-use crate::db;
-use crate::db::DiagnosticSeverity;
+use crate::db::{self, DiagnosticCategory, DiagnosticError, DiagnosticSeverity};
 
 /// Categorisation of the formatted error used for presentation purposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,17 +18,6 @@ pub enum FormattedErrorKind {
     Variable,
     Units,
     Simulation,
-}
-
-/// Unit error kind for distinguishing types of unit-related errors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnitErrorKind {
-    /// Syntax error in unit string definition
-    Definition,
-    /// Dimensional analysis mismatch
-    Consistency,
-    /// Inference error spanning multiple variables
-    Inference,
 }
 
 /// The severity word the terminal-formatted summary line opens with, and the
@@ -51,6 +40,10 @@ pub struct FormattedError {
     pub code: ErrorCode,
     pub message: Option<String>,
     pub model_name: Option<String>,
+    /// The variable to present the error under: a generated helper's owner
+    /// (the variable it was synthesized for -- a user variable, or for an LTM
+    /// helper the synthetic link score), else the variable the diagnostic is
+    /// filed under.
     pub variable_name: Option<String>,
     pub start_offset: u16,
     pub end_offset: u16,
@@ -60,20 +53,20 @@ pub struct FormattedError {
     /// needs this only to route (filter, choose a stream, colour); a consumer
     /// that builds its own text should word it from here.
     pub severity: DiagnosticSeverity,
-    /// For unit errors, indicates the specific type of unit error.
-    /// None for non-unit errors.
-    pub unit_error_kind: Option<UnitErrorKind>,
+    /// The surface the diagnostic was raised on, which is how the FFI tells
+    /// the three unit kinds apart. `None` for a simulation-build failure,
+    /// which has no `Diagnostic` behind it.
+    pub category: Option<DiagnosticCategory>,
     /// The bare human-readable reason, without the source snippet or the
     /// model/variable summary line that `message` carries (e.g. "the equation
     /// computes to units 'people', but the variable's specified units are
     /// 'person'"). `message` is formatted for terminal output; GUI consumers
     /// that already show the variable in context render this instead.
     ///
-    /// Populated whenever the diagnostic carries one: from `Error::details`,
-    /// from `EquationError::details`, and from the `UnitError` variants
-    /// (inference errors always synthesize one via `unit_inference_reason`).
-    /// `None` when the raising site had nothing to add beyond the code and the
-    /// span -- a parse error, whose reason IS the snippet.
+    /// Populated whenever the diagnostic carries one (`Diagnostic::reason`;
+    /// an inference error's is rewritten by `unit_inference_reason`). `None`
+    /// when the raising site had nothing to add beyond the code and the span
+    /// -- a parse error, whose reason IS the snippet.
     pub details: Option<String>,
 }
 
@@ -125,7 +118,7 @@ pub fn format_simulation_error(model_name: &str, error: &Error) -> FormattedErro
         end_offset: 0,
         kind: FormattedErrorKind::Simulation,
         severity: DiagnosticSeverity::Error,
-        unit_error_kind: None,
+        category: None,
         details: None,
     }
 }
@@ -139,36 +132,6 @@ fn code_and_reason(code: ErrorCode, details: Option<&str>) -> String {
     match details {
         Some(details) => format!("{code} -- {details}"),
         None => code.to_string(),
-    }
-}
-
-fn format_equation_error(
-    model_name: &str,
-    var_name: &str,
-    var: Option<&Variable>,
-    error: &EquationError,
-    severity: DiagnosticSeverity,
-) -> FormattedError {
-    let snippet = var
-        .and_then(variable_equation_text)
-        .map(|eqn| format_snippet(&eqn, error.start, error.end));
-    let summary = format!(
-        "{} in model '{model_name}' variable '{var_name}': {}",
-        severity_word(severity),
-        code_and_reason(error.code, error.details.as_deref())
-    );
-    let message = combine_snippet_and_summary(snippet, summary);
-    FormattedError {
-        code: error.code,
-        message,
-        model_name: Some(model_name.to_string()),
-        variable_name: Some(var_name.to_string()),
-        start_offset: error.start,
-        end_offset: error.end,
-        kind: FormattedErrorKind::Variable,
-        severity,
-        unit_error_kind: None,
-        details: error.details.clone(),
     }
 }
 
@@ -186,6 +149,19 @@ fn join_quoted_names(names: &[&str]) -> String {
             format!("'{a}', '{b}', '{c}', and {} more", rest.len())
         }
     }
+}
+
+/// The variables a unit inference error involves, each named once in
+/// first-seen order: sources are deduped by (var, loc), so one variable can
+/// appear at several locations, and a sentence must never read "'x' and 'x'".
+fn involved_names(sources: &[(String, Option<Loc>)]) -> Vec<&str> {
+    let mut names: Vec<&str> = Vec::new();
+    for (var, _) in sources {
+        if !names.contains(&var.as_str()) {
+            names.push(var.as_str());
+        }
+    }
+    names
 }
 
 /// The bare, user-facing reason for a unit inference error.
@@ -209,15 +185,7 @@ pub(crate) fn unit_inference_reason(
     {
         return details.to_string();
     }
-    // Sources are deduped by (var, loc), so the same variable can appear at
-    // several locations; dedupe by name (order-preserving) so the sentence
-    // never reads "'x' and 'x'" and the 1-vs-many phrasing is right.
-    let mut names: Vec<&str> = Vec::new();
-    for (var, _) in sources {
-        if !names.contains(&var.as_str()) {
-            names.push(var.as_str());
-        }
-    }
+    let names = involved_names(sources);
     match names.len() {
         0 => "the units implied by the model's equations are inconsistent".to_string(),
         1 => format!(
@@ -231,236 +199,126 @@ pub(crate) fn unit_inference_reason(
     }
 }
 
-/// Format a unit diagnostic. `severity` decides the summary line's severity
-/// word: a unit *definition* error is a syntax error in a `<units>` string and
-/// is accumulated as `Error`, while a *consistency* or *inference* mismatch does
-/// not block simulation and is accumulated as `Warning` (`db/units.rs`). Both
-/// used to render as "units error", which read as though the model would not
-/// run.
-fn format_unit_error(
-    model_name: &str,
-    var_name: &str,
-    var: Option<&Variable>,
-    error: &UnitError,
-    severity: DiagnosticSeverity,
-) -> FormattedError {
-    let word = severity_word(severity);
-    match error {
-        UnitError::DefinitionError(eq_error) => {
-            let snippet = var
-                .and_then(|v| v.get_units())
-                .map(|units| format_snippet(units, eq_error.start, eq_error.end));
-            let summary = format!(
-                "units {word} in model '{model_name}' variable '{var_name}': {}",
-                code_and_reason(eq_error.code, eq_error.details.as_deref())
-            );
-            FormattedError {
-                code: eq_error.code,
-                message: combine_snippet_and_summary(snippet, summary),
-                model_name: Some(model_name.to_string()),
-                variable_name: Some(var_name.to_string()),
-                start_offset: eq_error.start,
-                end_offset: eq_error.end,
-                kind: FormattedErrorKind::Units,
-                severity,
-                unit_error_kind: Some(UnitErrorKind::Definition),
-                details: eq_error.details.clone(),
-            }
-        }
-        UnitError::ConsistencyError(code, loc, details) => {
-            let snippet = var
-                .and_then(variable_equation_text)
-                .map(|eqn| format_snippet(&eqn, loc.start, loc.end));
-            let summary = match details {
-                Some(details) => format!(
-                    "units {word} in model '{model_name}' variable '{var_name}': {code} -- {details}"
-                ),
-                None => {
-                    format!("units {word} in model '{model_name}' variable '{var_name}': {code}")
-                }
-            };
-            FormattedError {
-                code: *code,
-                message: combine_snippet_and_summary(snippet, summary),
-                model_name: Some(model_name.to_string()),
-                variable_name: Some(var_name.to_string()),
-                start_offset: loc.start,
-                end_offset: loc.end,
-                kind: FormattedErrorKind::Units,
-                severity,
-                unit_error_kind: Some(UnitErrorKind::Consistency),
-                details: details.clone(),
-            }
-        }
-        UnitError::InferenceError {
-            code,
-            sources,
-            details,
-        } => {
-            let (start, end) = sources
-                .first()
-                .and_then(|(_, loc)| *loc)
-                .map(|loc| (loc.start, loc.end))
-                .unwrap_or((0, 0));
-            let snippet = var
-                .and_then(variable_equation_text)
-                .map(|eqn| format_snippet(&eqn, start, end));
-            let involved_vars: Vec<_> = sources.iter().map(|(v, _)| v.as_str()).collect();
-            let summary = match (details, involved_vars.len()) {
-                (Some(details), n) if n > 1 => format!(
-                    "units inference {word} in model '{model_name}' involving {}: {code} -- {details}",
-                    involved_vars.join(", ")
-                ),
-                (Some(details), _) => format!(
-                    "units inference {word} in model '{model_name}' variable '{var_name}': {code} -- {details}"
-                ),
-                (None, n) if n > 1 => format!(
-                    "units inference {word} in model '{model_name}' involving {}: {code}",
-                    involved_vars.join(", ")
-                ),
-                (None, _) => format!(
-                    "units inference {word} in model '{model_name}' variable '{var_name}': {code}"
-                ),
-            };
-            FormattedError {
-                code: *code,
-                message: combine_snippet_and_summary(snippet, summary),
-                model_name: Some(model_name.to_string()),
-                variable_name: Some(var_name.to_string()),
-                start_offset: start,
-                end_offset: end,
-                kind: FormattedErrorKind::Units,
-                severity,
-                unit_error_kind: Some(UnitErrorKind::Inference),
-                details: Some(unit_inference_reason(sources, details.as_deref())),
-            }
-        }
-    }
-}
-
-/// Convert a salsa accumulator diagnostic into a `FormattedError`.
+/// Convert a diagnostic into a `FormattedError`.
 ///
-/// This produces the same structure as the per-field formatters
-/// (`format_equation_error`, `format_unit_error`) but reads from a
-/// `Diagnostic` instead of walking model/variable fields. No datamodel
-/// variable is available, so snippets are omitted.
-///
-/// The diagnostic's `severity` rides through to the summary line's severity
-/// word and onto `FormattedError::severity`: a `Warning` (an LTM-degraded
-/// advisory, a conveyor spec advisory, a unit mismatch) reads as a warning
-/// rather than as a compilation failure.
+/// No datamodel variable is available, so snippets are omitted;
+/// [`format_diagnostic_with_datamodel`] renders them. The summary line's
+/// severity word and `FormattedError::severity` are the diagnostic's own
+/// (`severity_word`), so an advisory never reads as a compilation failure.
 pub fn format_diagnostic(diag: &db::Diagnostic) -> FormattedError {
-    use db::DiagnosticError;
-    let severity = diag.severity;
-    match &diag.error {
-        DiagnosticError::Equation(err) => {
-            let var_name = diag.variable.as_deref().unwrap_or("<unknown>");
-            let summary = format!(
-                "{} in model '{}' variable '{}': {}",
-                severity_word(severity),
-                diag.model,
-                var_name,
-                code_and_reason(err.code, err.details.as_deref())
-            );
-            FormattedError {
-                code: err.code,
-                message: Some(summary),
-                model_name: Some(diag.model.clone()),
-                variable_name: diag.variable.clone(),
-                start_offset: err.start,
-                end_offset: err.end,
-                kind: FormattedErrorKind::Variable,
-                severity,
-                unit_error_kind: None,
-                details: err.details.clone(),
-            }
-        }
-        DiagnosticError::Model(err) => {
-            let (kind, unit_error_kind) = if err.code == ErrorCode::UnitMismatch {
-                (FormattedErrorKind::Units, Some(UnitErrorKind::Inference))
-            } else {
-                (FormattedErrorKind::Model, None)
-            };
-            FormattedError {
-                code: err.code,
-                message: Some(format!(
-                    "{} in model '{}': {}",
-                    severity_word(severity),
-                    diag.model,
-                    err
-                )),
-                model_name: Some(diag.model.clone()),
-                variable_name: diag.variable.clone(),
-                start_offset: 0,
-                end_offset: 0,
-                kind,
-                severity,
-                unit_error_kind,
-                // Model-level `Error.details` is a bare reason by
-                // construction (e.g. the unit-inference umbrella built in
-                // db/units.rs), so it rides in `details` for GUI consumers
-                // just like per-variable unit errors.
-                details: err.details.clone(),
-            }
-        }
-        DiagnosticError::Unit(err) => {
-            let var_name = diag.variable.as_deref().unwrap_or("<unknown>");
-            let mut formatted = format_unit_error(&diag.model, var_name, None, err, severity);
-            // The `<unknown>` placeholder belongs in the human message only;
-            // the structured field carries the diagnostic's actual (possibly
-            // absent) variable, matching the Equation arm above.
-            formatted.variable_name = diag.variable.clone();
-            formatted
-        }
-        DiagnosticError::Assembly(msg) => FormattedError {
-            code: ErrorCode::NotSimulatable,
-            message: Some(format!(
-                "assembly {} in model '{}': {}",
-                severity_word(severity),
-                diag.model,
-                msg
-            )),
-            model_name: Some(diag.model.clone()),
-            variable_name: diag.variable.clone(),
-            start_offset: 0,
-            end_offset: 0,
-            kind: FormattedErrorKind::Simulation,
-            severity,
-            unit_error_kind: None,
-            details: None,
-        },
-    }
+    format_diagnostic_inner(diag, None)
 }
 
 /// Format a diagnostic with snippet context from the datamodel.
 ///
-/// Like `format_diagnostic`, but looks up the variable's equation text
-/// from `datamodel` to produce source-annotated snippet output for
+/// Like `format_diagnostic`, but looks up the variable's equation (or unit
+/// string) from `datamodel` to produce source-annotated snippet output for
 /// equation and unit errors.
 pub fn format_diagnostic_with_datamodel(
     diag: &db::Diagnostic,
     datamodel: &DatamodelProject,
 ) -> FormattedError {
-    use db::DiagnosticError;
     let dm_var = datamodel
         .get_model(&diag.model)
-        .and_then(|m| diag.variable.as_deref().and_then(|v| m.get_variable(v)));
-    match &diag.error {
-        DiagnosticError::Equation(err) => {
-            let var_name = diag.variable.as_deref().unwrap_or("<unknown>");
-            let mut formatted =
-                format_equation_error(&diag.model, var_name, dm_var, err, diag.severity);
-            formatted.variable_name = diag.variable.clone();
-            formatted
+        .and_then(|m| presented_variable(diag).and_then(|v| m.get_variable(v)));
+    format_diagnostic_inner(diag, dm_var)
+}
+
+/// The variable a diagnostic is presented under: a generated helper's owner,
+/// which is the equation the modeler can edit, else the variable it is filed
+/// under.
+fn presented_variable(diag: &db::Diagnostic) -> Option<&str> {
+    diag.owner.as_deref().or(diag.variable.as_deref())
+}
+
+/// The presentation kind, the category noun the summary line opens with and
+/// the text a snippet is rendered from follow `Diagnostic::category`; the
+/// line's shape follows the arm.
+fn format_diagnostic_inner(diag: &db::Diagnostic, var: Option<&Variable>) -> FormattedError {
+    let word = severity_word(diag.severity);
+    let model = &diag.model;
+    let presented = presented_variable(diag);
+    let var_name = presented.unwrap_or("<unknown>");
+    let code = diag.code();
+    let mut details = diag.reason().map(str::to_owned);
+    let (kind, noun, snippet_text) = match diag.category() {
+        DiagnosticCategory::Equation => (
+            FormattedErrorKind::Variable,
+            "",
+            var.and_then(variable_equation_text),
+        ),
+        DiagnosticCategory::Model => (FormattedErrorKind::Model, "", None),
+        DiagnosticCategory::UnitDefinition => (
+            FormattedErrorKind::Units,
+            "units ",
+            var.and_then(|v| v.get_units())
+                .map(|units| units.to_string()),
+        ),
+        DiagnosticCategory::UnitConsistency => (
+            FormattedErrorKind::Units,
+            "units ",
+            var.and_then(variable_equation_text),
+        ),
+        DiagnosticCategory::UnitInference => (
+            FormattedErrorKind::Units,
+            "units inference ",
+            var.and_then(variable_equation_text),
+        ),
+        DiagnosticCategory::Assembly => (FormattedErrorKind::Simulation, "assembly ", None),
+    };
+    let summary = match &diag.error {
+        // A model-level error renders whole (`ModelError{code: reason}`), and
+        // an assembly refusal's message is its whole payload, so neither
+        // carries a separate reason.
+        DiagnosticError::Model(err) => format!("{word} in model '{model}': {err}"),
+        DiagnosticError::Assembly(message) => {
+            details = None;
+            format!("{noun}{word} in model '{model}': {message}")
         }
-        DiagnosticError::Unit(err) => {
-            let var_name = diag.variable.as_deref().unwrap_or("<unknown>");
-            let mut formatted =
-                format_unit_error(&diag.model, var_name, dm_var, err, diag.severity);
-            formatted.variable_name = diag.variable.clone();
-            formatted
+        DiagnosticError::Unit(UnitError::InferenceError {
+            sources,
+            details: raw,
+            ..
+        }) => {
+            // The terminal summary keeps the raw constraint text; `details`
+            // carries the plain-language reason a GUI shows in place of it.
+            // A conflict names the variables it involves; the variable the
+            // row is filed under is the subject only when it is the single
+            // one involved (the model-level umbrella is filed under none).
+            details = Some(unit_inference_reason(sources, raw.as_deref()));
+            let involved = involved_names(sources);
+            let subject = match (presented, involved.as_slice()) {
+                (Some(_), [] | [_]) | (None, []) => format!("variable '{var_name}'"),
+                _ => format!("involving {}", involved.join(", ")),
+            };
+            format!(
+                "{noun}{word} in model '{model}' {subject}: {}",
+                code_and_reason(code, raw.as_deref())
+            )
         }
-        _ => format_diagnostic(diag),
+        DiagnosticError::Equation(_) | DiagnosticError::Unit(_) => format!(
+            "{noun}{word} in model '{model}' variable '{var_name}': {}",
+            code_and_reason(code, diag.reason())
+        ),
+    };
+    // A span is an offset into the presented variable's text; a diagnostic
+    // filed under no variable has nothing for it to index.
+    let (start_offset, end_offset) = match (presented, diag.location()) {
+        (Some(_), Some(loc)) => (loc.start, loc.end),
+        _ => (0, 0),
+    };
+    let snippet = snippet_text.map(|text| format_snippet(&text, start_offset, end_offset));
+    FormattedError {
+        code,
+        message: combine_snippet_and_summary(snippet, summary),
+        model_name: Some(model.clone()),
+        variable_name: presented.map(str::to_owned),
+        start_offset,
+        end_offset,
+        kind,
+        severity: diag.severity,
+        category: Some(diag.category()),
+        details,
     }
 }
 
@@ -518,9 +376,26 @@ fn combine_snippet_and_summary(snippet: Option<String>, summary: String) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::ErrorCode;
-    use crate::db::{SimlinDb, collect_all_diagnostics, sync_from_datamodel};
+    use crate::common::{EquationError, ErrorCode};
+    use crate::db::{Diagnostic, SimlinDb, collect_all_diagnostics, sync_from_datamodel};
     use crate::test_common::TestProject;
+
+    /// A unit diagnostic as `db/units.rs` files one, for the formatter arms
+    /// that no small production fixture reaches at every source shape.
+    fn unit_diagnostic(
+        model: &str,
+        variable: Option<&str>,
+        error: UnitError,
+        severity: DiagnosticSeverity,
+    ) -> Diagnostic {
+        Diagnostic {
+            model: model.to_string(),
+            variable: variable.map(str::to_owned),
+            owner: None,
+            severity,
+            error: DiagnosticError::Unit(error),
+        }
+    }
 
     #[test]
     fn equation_error_formats_snippet() {
@@ -541,6 +416,7 @@ mod tests {
 
         assert_eq!(error.code, ErrorCode::UnknownDependency);
         assert_eq!(error.kind, FormattedErrorKind::Variable);
+        assert_eq!(error.category, Some(DiagnosticCategory::Equation));
         assert_eq!(error.severity, DiagnosticSeverity::Error);
         let message = error.message.as_ref().expect("message missing");
         let mut lines = message.lines();
@@ -580,6 +456,7 @@ mod tests {
             .expect("unit error missing");
         assert_eq!(error.code, ErrorCode::UnitMismatch);
         assert_eq!(error.kind, FormattedErrorKind::Units);
+        assert_eq!(error.category, Some(DiagnosticCategory::UnitConsistency));
         // A unit *consistency* mismatch does not block simulation: `db/units.rs`
         // accumulates it as a Warning, so it must not claim to be an error.
         assert_eq!(error.severity, DiagnosticSeverity::Warning);
@@ -633,13 +510,93 @@ mod tests {
         let error = formatted
             .errors
             .iter()
-            .find(|err| err.unit_error_kind == Some(UnitErrorKind::Definition))
+            .find(|err| err.category == Some(DiagnosticCategory::UnitDefinition))
             .expect("unit definition error missing");
         assert_eq!(error.severity, DiagnosticSeverity::Error);
         let message = error.message.as_ref().expect("message missing");
         assert!(
             message.contains("units error in model"),
             "an Error-severity unit definition error keeps the error word: {message}"
+        );
+    }
+
+    /// The model-level inference umbrella `db/units.rs` raises (a
+    /// contradiction the constraint solver found, filed under no variable)
+    /// presents as a unit inference warning naming the variables it involves.
+    #[test]
+    fn inference_umbrella_presents_as_a_unit_inference_warning() {
+        let datamodel = TestProject::new("inference-umbrella")
+            .unit("apples", None)
+            .unit("oranges", None)
+            .aux("apple_count", "10", Some("apples"))
+            .aux("orange_count", "20", Some("oranges"))
+            .aux("fruit_total", "apple_count + orange_count", None)
+            .build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let diagnostics = collect_all_diagnostics(&db, sync.project);
+        let umbrella = diagnostics
+            .iter()
+            .find(|d| d.variable.is_none() && d.category() == DiagnosticCategory::UnitInference)
+            .expect("the model-level inference umbrella");
+        let formatted = format_diagnostic_with_datamodel(umbrella, &datamodel);
+        assert_eq!(formatted.code, ErrorCode::UnitMismatch);
+        assert_eq!(formatted.kind, FormattedErrorKind::Units);
+        assert_eq!(formatted.category, Some(DiagnosticCategory::UnitInference));
+        assert_eq!(formatted.severity, DiagnosticSeverity::Warning);
+        assert_eq!(formatted.variable_name, None);
+        assert_eq!(
+            (formatted.start_offset, formatted.end_offset),
+            (0, 0),
+            "a row filed under no variable has no text for a span to index"
+        );
+        let message = formatted.message.expect("message missing");
+        assert!(
+            message.starts_with("units inference warning in model 'main' involving ")
+                && message.contains("apple_count")
+                && message.contains("unit_mismatch"),
+            "the umbrella names the model and the variables involved: {message}"
+        );
+        let details = formatted.details.expect("details missing");
+        assert!(
+            !details.contains('\n') && !details.contains("1 =="),
+            "the bare reason is plain language, not the constraint dump: {details}"
+        );
+    }
+
+    /// A per-variable inference row names each involved variable once: the
+    /// sources are deduped by (variable, location), so one variable at two
+    /// locations is two sources and one name.
+    #[test]
+    fn an_inference_row_names_each_involved_variable_once() {
+        use crate::builtins::Loc;
+        use crate::common::UnitError;
+
+        let formatted = format_diagnostic(&unit_diagnostic(
+            "main",
+            Some("x"),
+            UnitError::InferenceError {
+                code: ErrorCode::UnitMismatch,
+                sources: vec![
+                    ("x".to_string(), Some(Loc::new(0, 1))),
+                    ("x".to_string(), Some(Loc::new(4, 5))),
+                    ("y".to_string(), None),
+                ],
+                details: None,
+            },
+            DiagnosticSeverity::Warning,
+        ));
+        let message = formatted.message.expect("message missing");
+        assert!(
+            message.starts_with("units inference warning in model 'main' involving x, y:"),
+            "{message}"
+        );
+        assert_eq!(
+            formatted.details.as_deref(),
+            Some(
+                "the units of 'x' and 'y' are inconsistent with each other; check the \
+                 equations and declared units of these variables"
+            )
         );
     }
 
@@ -657,15 +614,15 @@ mod tests {
         // Inference conflicts are accumulated as Warnings in production; the
         // Error rendering below proves the severity word is data-driven rather
         // than baked into the arm.
-        let formatted = format_unit_error(
+        let formatted = format_diagnostic(&unit_diagnostic(
             "test_model",
-            "my_var",
-            None,
-            &error,
+            Some("my_var"),
+            error.clone(),
             DiagnosticSeverity::Warning,
-        );
+        ));
         assert_eq!(formatted.code, ErrorCode::UnitMismatch);
         assert_eq!(formatted.kind, FormattedErrorKind::Units);
+        assert_eq!(formatted.category, Some(DiagnosticCategory::UnitInference));
         assert_eq!(formatted.severity, DiagnosticSeverity::Warning);
         assert_eq!(formatted.start_offset, 5);
         assert_eq!(formatted.end_offset, 10);
@@ -682,13 +639,12 @@ mod tests {
         );
         assert_eq!(formatted.details.as_deref(), Some("test details"));
 
-        let formatted = format_unit_error(
+        let formatted = format_diagnostic(&unit_diagnostic(
             "test_model",
-            "my_var",
-            None,
-            &error,
+            Some("my_var"),
+            error,
             DiagnosticSeverity::Error,
-        );
+        ));
         let msg = formatted.message.expect("should have message");
         assert!(
             msg.contains("units inference error"),
@@ -703,14 +659,12 @@ mod tests {
             ],
             details: None,
         };
-
-        let formatted = format_unit_error(
+        let formatted = format_diagnostic(&unit_diagnostic(
             "test_model",
-            "var_a",
-            None,
-            &error,
+            Some("var_a"),
+            error,
             DiagnosticSeverity::Warning,
-        );
+        ));
         let msg = formatted.message.expect("should have message");
         assert!(
             msg.contains("involving var_a, var_b"),
@@ -722,14 +676,12 @@ mod tests {
             sources: vec![("no_loc_var".to_string(), None)],
             details: None,
         };
-
-        let formatted = format_unit_error(
+        let formatted = format_diagnostic(&unit_diagnostic(
             "test_model",
-            "no_loc_var",
-            None,
-            &error,
+            Some("no_loc_var"),
+            error,
             DiagnosticSeverity::Warning,
-        );
+        ));
         assert_eq!(formatted.start_offset, 0);
         assert_eq!(formatted.end_offset, 0);
     }
@@ -751,13 +703,12 @@ mod tests {
             ],
             details: Some(dump.to_string()),
         };
-        let formatted = format_unit_error(
+        let formatted = format_diagnostic(&unit_diagnostic(
             "main",
-            "birth_rate",
-            None,
-            &error,
+            Some("birth_rate"),
+            error,
             DiagnosticSeverity::Warning,
-        );
+        ));
         let details = formatted.details.expect("details missing");
         assert!(
             details.contains("'birth_rate'") && details.contains("'population'"),
@@ -779,8 +730,12 @@ mod tests {
             sources: vec![("flow".to_string(), None)],
             details: Some(dump.to_string()),
         };
-        let formatted =
-            format_unit_error("main", "flow", None, &error, DiagnosticSeverity::Warning);
+        let formatted = format_diagnostic(&unit_diagnostic(
+            "main",
+            Some("flow"),
+            error,
+            DiagnosticSeverity::Warning,
+        ));
         let details = formatted.details.expect("details missing");
         assert!(
             details.contains("'flow'") && !details.contains('\n'),
@@ -793,7 +748,12 @@ mod tests {
             sources: vec![],
             details: None,
         };
-        let formatted = format_unit_error("main", "x", None, &error, DiagnosticSeverity::Warning);
+        let formatted = format_diagnostic(&unit_diagnostic(
+            "main",
+            Some("x"),
+            error,
+            DiagnosticSeverity::Warning,
+        ));
         let details = formatted.details.expect("details missing");
         assert!(!details.is_empty() && !details.contains('\n'));
 
@@ -807,7 +767,12 @@ mod tests {
             ],
             details: Some(dump.to_string()),
         };
-        let formatted = format_unit_error("main", "x", None, &error, DiagnosticSeverity::Warning);
+        let formatted = format_diagnostic(&unit_diagnostic(
+            "main",
+            Some("x"),
+            error,
+            DiagnosticSeverity::Warning,
+        ));
         let details = formatted.details.expect("details missing");
         assert_eq!(
             details.matches("'x'").count(),
@@ -863,13 +828,13 @@ mod tests {
     /// severity, so each arm's severity word can be checked in both states.
     fn diagnostic_arms(severity: DiagnosticSeverity) -> Vec<db::Diagnostic> {
         use crate::common::{Error as CommonError, ErrorKind, UnitError};
-        use crate::db::{Diagnostic, DiagnosticError};
 
         let arm = |error| Diagnostic {
             model: "main".to_string(),
             variable: Some("v".to_string()),
-            error,
+            owner: None,
             severity,
+            error,
         };
         vec![
             arm(DiagnosticError::Equation(EquationError::new(
@@ -927,8 +892,7 @@ mod tests {
     }
 
     /// The snippet-bearing twin of the check above: `format_diagnostic_with_datamodel`
-    /// takes a different route through `format_equation_error`/`format_unit_error`,
-    /// so it needs its own severity plumbing.
+    /// renders through the same arms with a datamodel variable in hand.
     #[test]
     fn diagnostic_with_datamodel_severity_drives_the_summary_word() {
         let datamodel = TestProject::new("severity-snippet")
@@ -955,6 +919,7 @@ mod tests {
             &CommonError::new(ErrorKind::Simulation, ErrorCode::NotSimulatable, None),
         );
         assert_eq!(fe.severity, DiagnosticSeverity::Error);
+        assert_eq!(fe.category, None);
         assert!(
             fe.message
                 .as_deref()
@@ -964,25 +929,23 @@ mod tests {
     }
 
     /// Beyond the severity word, `format_diagnostic` makes three per-arm
-    /// decisions -- the presentation `kind`, the `unit_error_kind`
-    /// refinement, and where the source offsets come from. The rows below
-    /// are the arms of that decision: `DiagnosticError`'s four variants,
-    /// with `Model` split on its `UnitMismatch` test and `Unit` split into
-    /// `UnitError`'s three variants. `diagnostic_arms` above ranges over
-    /// the same space but asserts only the severity wording, so this is
-    /// what holds the mapping itself.
+    /// decisions -- the presentation `kind`, the `category`, and where the
+    /// source offsets come from. The rows are the arms of that decision:
+    /// `DiagnosticError`'s four variants, with `Unit` split into `UnitError`'s
+    /// three, which is exactly `DiagnosticCategory`'s enumeration.
+    /// `diagnostic_arms` above ranges over the same space but asserts only the
+    /// severity wording, so this is what holds the mapping itself.
     #[test]
     fn format_diagnostic_maps_every_arm() {
         use crate::common::{Error as CommonError, ErrorKind, UnitError};
-        use crate::db::{Diagnostic, DiagnosticError};
 
-        // (label, error, expected code/kind/unit_error_kind/offsets)
+        // (label, error, expected code/kind/category/offsets)
         type ArmRow = (
             &'static str,
             DiagnosticError,
             ErrorCode,
             FormattedErrorKind,
-            Option<UnitErrorKind>,
+            DiagnosticCategory,
             (u16, u16),
         );
         let rows: Vec<ArmRow> = vec![
@@ -991,11 +954,11 @@ mod tests {
                 DiagnosticError::Equation(EquationError::new(ErrorCode::UnknownDependency, 4, 9)),
                 ErrorCode::UnknownDependency,
                 FormattedErrorKind::Variable,
-                None,
+                DiagnosticCategory::Equation,
                 (4, 9),
             ),
             (
-                "model, non-unit",
+                "model",
                 DiagnosticError::Model(CommonError {
                     kind: ErrorKind::Model,
                     code: ErrorCode::CircularDependency,
@@ -1003,22 +966,7 @@ mod tests {
                 }),
                 ErrorCode::CircularDependency,
                 FormattedErrorKind::Model,
-                None,
-                (0, 0),
-            ),
-            // A model-level UnitMismatch is the units-inference umbrella
-            // `db/units.rs` raises, so it presents as a unit error even
-            // though it arrives on the Model arm.
-            (
-                "model, unit mismatch",
-                DiagnosticError::Model(CommonError {
-                    kind: ErrorKind::Model,
-                    code: ErrorCode::UnitMismatch,
-                    details: None,
-                }),
-                ErrorCode::UnitMismatch,
-                FormattedErrorKind::Units,
-                Some(UnitErrorKind::Inference),
+                DiagnosticCategory::Model,
                 (0, 0),
             ),
             (
@@ -1031,7 +979,7 @@ mod tests {
                 ))),
                 ErrorCode::UnitDefinitionErrors,
                 FormattedErrorKind::Units,
-                Some(UnitErrorKind::Definition),
+                DiagnosticCategory::UnitDefinition,
                 (0, 3),
             ),
             (
@@ -1043,7 +991,7 @@ mod tests {
                 )),
                 ErrorCode::UnitMismatch,
                 FormattedErrorKind::Units,
-                Some(UnitErrorKind::Consistency),
+                DiagnosticCategory::UnitConsistency,
                 (2, 8),
             ),
             (
@@ -1055,7 +1003,7 @@ mod tests {
                 }),
                 ErrorCode::UnitMismatch,
                 FormattedErrorKind::Units,
-                Some(UnitErrorKind::Inference),
+                DiagnosticCategory::UnitInference,
                 (1, 6),
             ),
             (
@@ -1063,25 +1011,23 @@ mod tests {
                 DiagnosticError::Assembly("could not assemble".to_string()),
                 ErrorCode::NotSimulatable,
                 FormattedErrorKind::Simulation,
-                None,
+                DiagnosticCategory::Assembly,
                 (0, 0),
             ),
         ];
 
-        for (label, error, code, kind, unit_error_kind, (start, end)) in rows {
+        for (label, error, code, kind, category, (start, end)) in rows {
             let diag = Diagnostic {
                 model: "main".to_string(),
                 variable: Some("v".to_string()),
-                error,
+                owner: None,
                 severity: DiagnosticSeverity::Error,
+                error,
             };
             let fe = format_diagnostic(&diag);
             assert_eq!(fe.code, code, "{label}: code");
             assert_eq!(fe.kind, kind, "{label}: kind");
-            assert_eq!(
-                fe.unit_error_kind, unit_error_kind,
-                "{label}: unit_error_kind"
-            );
+            assert_eq!(fe.category, Some(category), "{label}: category");
             assert_eq!(fe.start_offset, start, "{label}: start_offset");
             assert_eq!(fe.end_offset, end, "{label}: end_offset");
             assert_eq!(
@@ -1093,20 +1039,17 @@ mod tests {
         }
     }
 
-    /// A diagnostic can carry no variable, and the two arms whose summary
-    /// line names one substitute the placeholder `<unknown>` rather than
-    /// dropping the clause and producing `variable ''`.
+    /// A diagnostic can carry no variable, and the arms whose summary line
+    /// names one substitute the placeholder `<unknown>` rather than dropping
+    /// the clause and producing `variable ''`.
     ///
-    /// The placeholder belongs in the human MESSAGE only: on both arms the
-    /// structured `variable_name` field carries `diag.variable` through
-    /// unchanged, so a variable-less diagnostic reports `None` rather than a
-    /// variable literally named `<unknown>` -- the leak to guard against is
-    /// an arm handing `format_unit_error`/`format_equation_error`'s
-    /// substituted name back as the field.
+    /// The placeholder belongs in the human MESSAGE only: the structured
+    /// `variable_name` field carries `diag.variable` through unchanged, so a
+    /// variable-less diagnostic reports `None` rather than a variable literally
+    /// named `<unknown>`.
     #[test]
     fn format_diagnostic_falls_back_to_unknown_variable() {
         use crate::common::UnitError;
-        use crate::db::{Diagnostic, DiagnosticError};
 
         let arms = [
             DiagnosticError::Equation(EquationError::new(ErrorCode::EmptyEquation, 0, 5)),
@@ -1121,8 +1064,9 @@ mod tests {
             let diag = Diagnostic {
                 model: "m".to_string(),
                 variable: None,
-                error,
+                owner: None,
                 severity: DiagnosticSeverity::Error,
+                error,
             };
             let fe = format_diagnostic(&diag);
             assert_eq!(fe.variable_name, None);
@@ -1132,6 +1076,39 @@ mod tests {
                 "a variable-less diagnostic must name the variable '<unknown>': {message}"
             );
         }
+    }
+
+    /// A generated helper's row is filed under its physical name and presented
+    /// under its owner: the owner is the variable a consumer can find and
+    /// edit, and the one whose equation text a snippet is rendered from. Read
+    /// through a production refusal: a reducer over arithmetic inside a
+    /// `PREVIOUS` capture, which codegen refuses on the helper.
+    #[test]
+    fn a_helpers_row_presents_under_its_owner() {
+        let datamodel = TestProject::new("helper-owner")
+            .named_dimension("region", &["north", "south"])
+            .array_const("pop[region]", 10.0)
+            .scalar_const("scale", 2.0)
+            .array_aux("aggx[region]", "PREVIOUS(SUM(pop * scale))")
+            .build_datamodel();
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        let diagnostics = collect_all_diagnostics(&db, sync.project);
+        let helper_row = diagnostics
+            .iter()
+            .find(|d| d.owner.as_deref() == Some("aggx"))
+            .expect("the helper's refusal names its owner");
+        assert!(
+            helper_row
+                .variable
+                .as_deref()
+                .is_some_and(|v| v.starts_with("$\u{205a}aggx\u{205a}")),
+            "the row is filed under the helper's physical name: {helper_row:?}"
+        );
+        let formatted = format_diagnostic_with_datamodel(helper_row, &datamodel);
+        assert_eq!(formatted.variable_name.as_deref(), Some("aggx"));
+        assert_eq!(formatted.kind, FormattedErrorKind::Simulation);
+        assert_eq!(formatted.category, Some(DiagnosticCategory::Assembly));
     }
 
     /// GH #919: `has_model_errors` / `has_variable_errors` gate failure-shaped

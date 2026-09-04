@@ -9,8 +9,6 @@
 //! (Reinforcing / Balancing / Undetermined) is then derived by counting
 //! negative links per cycle in `graph.rs`.
 
-use std::collections::HashMap;
-
 use crate::ast::{Ast, BinaryOp, Expr2, IndexExpr2};
 use crate::builtins::BuiltinFn;
 use crate::common::{Canonical, Ident};
@@ -22,7 +20,7 @@ use super::types::{LinkPolarity, normalize_module_ref};
 pub(super) fn analyze_link_polarity(
     ast: &Ast<Expr2>,
     from_var: &Ident<Canonical>,
-    variables: &HashMap<Ident<Canonical>, Variable>,
+    variables: &crate::variable::LoweredVariableMap,
 ) -> LinkPolarity {
     analyze_ast_polarity(ast, from_var, variables)
 }
@@ -44,22 +42,21 @@ pub(super) fn analyze_link_polarity(
 /// non-monotone reducer like STDDEV) stays Unknown -- never a confident
 /// wrong label.
 ///
-/// This used to be `analyze_link_polarity` with a feeder-hop-only
-/// `mul_convention` flag enabling the positive-by-convention Mul one-side
-/// rule; that rule is now part of the general analyzer (see the Mul arm of
-/// [`analyze_expr_polarity_with_context`]), so the only thing this entry
-/// point adds is accepting a bare `BuiltinFn` instead of a whole equation.
+/// The positive-by-convention Mul one-side rule is part of the general
+/// analyzer (see the Mul arm of [`analyze_expr_polarity_with_context`]), not a
+/// flag of this entry point; the only thing this entry point adds is accepting
+/// a bare `BuiltinFn` instead of a whole equation.
 ///
 /// `reducer` is the reducer call itself (`ltm_agg::AggNode::reducer`), not a
 /// whole equation: an aggregate node's equation IS one reducer application,
-/// so the `Ast` wrapper the caller used to reconstruct carried no
+/// so an `Ast` wrapper around it would carry no
 /// information -- [`analyze_ast_polarity`] treats `Ast::Scalar` and
 /// `Ast::ApplyToAll` through the same arm, and an agg is never
 /// `Ast::Arrayed`.
 pub(super) fn analyze_source_to_agg_polarity(
     reducer: &BuiltinFn<Expr2>,
     source: &Ident<Canonical>,
-    variables: &HashMap<Ident<Canonical>, Variable>,
+    variables: &crate::variable::LoweredVariableMap,
 ) -> LinkPolarity {
     analyze_builtin_polarity(reducer, source, LinkPolarity::Positive, Some(variables))
 }
@@ -70,7 +67,7 @@ pub(super) fn analyze_source_to_agg_polarity(
 fn analyze_ast_polarity(
     ast: &Ast<Expr2>,
     from_var: &Ident<Canonical>,
-    variables: &HashMap<Ident<Canonical>, Variable>,
+    variables: &crate::variable::LoweredVariableMap,
 ) -> LinkPolarity {
     match ast {
         Ast::Scalar(expr) | Ast::ApplyToAll(_, expr) => analyze_expr_polarity_with_context(
@@ -124,7 +121,7 @@ fn analyze_ast_polarity(
 /// `analyze_link_polarity` (which matches `Var(agg)` occurrences) returns
 /// `Unknown`. This substitutes the subexpression -- matched by its
 /// canonical printed form `reducer_subexpr_text` (exactly the
-/// `AggNode::equation_text` key `enumerate_agg_nodes` stores) -- with a
+/// `AggNode::reducer_key` `enumerate_agg_nodes` stores) -- with a
 /// bare `Var(agg_name)` and runs the ordinary analysis on the result.
 ///
 /// Returns `Unknown` if the subexpression isn't found (graceful: the hop
@@ -133,7 +130,7 @@ pub(super) fn analyze_agg_consumer_polarity(
     consumer_ast: &Ast<Expr2>,
     reducer_subexpr_text: &str,
     agg_name: &Ident<Canonical>,
-    variables: &HashMap<Ident<Canonical>, Variable>,
+    variables: &crate::variable::LoweredVariableMap,
 ) -> LinkPolarity {
     let analyze = |expr: &Expr2| -> LinkPolarity {
         let substituted = substitute_subexpr_in_expr2(expr, reducer_subexpr_text, agg_name);
@@ -260,7 +257,7 @@ fn analyze_builtin_polarity(
     builtin: &BuiltinFn<Expr2>,
     from_var: &Ident<Canonical>,
     current_polarity: LinkPolarity,
-    variables: Option<&HashMap<Ident<Canonical>, Variable>>,
+    variables: Option<&crate::variable::LoweredVariableMap>,
 ) -> LinkPolarity {
     match builtin {
         // All three lookup variants share the `(table_expr, index_expr, loc)`
@@ -389,7 +386,7 @@ pub(super) fn analyze_expr_polarity_with_context(
     expr: &Expr2,
     from_var: &Ident<Canonical>,
     current_polarity: LinkPolarity,
-    variables: Option<&HashMap<Ident<Canonical>, Variable>>,
+    variables: Option<&crate::variable::LoweredVariableMap>,
 ) -> LinkPolarity {
     match expr {
         Expr2::Const(_, _, _) => LinkPolarity::Unknown,
@@ -771,7 +768,7 @@ pub(super) fn literal_sign(expr: &Expr2) -> Option<bool> {
 /// historical `is_positive_variable` depth and cannot recurse on a cycle.
 pub(super) fn provable_value_sign(
     expr: &Expr2,
-    variables: Option<&HashMap<Ident<Canonical>, Variable>>,
+    variables: Option<&crate::variable::LoweredVariableMap>,
 ) -> Option<bool> {
     if let Some(sign) = literal_sign(expr) {
         return Some(sign);
@@ -803,7 +800,7 @@ pub(super) fn provable_value_sign(
 /// growth) come exactly from such factors.
 fn cofactor_value_sign(
     expr: &Expr2,
-    variables: Option<&HashMap<Ident<Canonical>, Variable>>,
+    variables: Option<&crate::variable::LoweredVariableMap>,
 ) -> Option<bool> {
     if let Some(sign) = provable_value_sign(expr, variables) {
         return Some(sign);
@@ -831,7 +828,7 @@ fn cofactor_value_sign(
 /// both-sides arms can only see operands that reference `from_var`.
 fn operand_positive_by_convention(
     expr: &Expr2,
-    variables: Option<&HashMap<Ident<Canonical>, Variable>>,
+    variables: Option<&crate::variable::LoweredVariableMap>,
 ) -> bool {
     match provable_value_sign(expr, variables) {
         Some(sign) => sign,
@@ -1036,7 +1033,7 @@ fn fold_per_element_table_polarity(tables: &[crate::variable::Table]) -> LinkPol
 /// `unreachable!()` here.
 fn lookup_table_polarity(
     table_expr: &Expr2,
-    variables: Option<&HashMap<Ident<Canonical>, Variable>>,
+    variables: Option<&crate::variable::LoweredVariableMap>,
 ) -> LinkPolarity {
     let Some(variables) = variables else {
         return LinkPolarity::Unknown;

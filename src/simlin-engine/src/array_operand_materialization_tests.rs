@@ -55,14 +55,11 @@
 //! axis, covered at `VECTOR SORT ORDER` arg0 and `RANK` arg0, the two arms the
 //! issue reports separately.
 //!
-//! **Why some rows carry a `+ SUM(VECTOR SORT ORDER(vals[*], 1))` tail.** A
-//! reducer or `VECTOR SELECT` argument only survives Pass 1 unmaterialized
-//! when the equation *also* holds an array-producing builtin: that is what
-//! makes `compiler::mod`'s apply-to-all hoister lower under
-//! `DimensionRefs::Preserve`, whose `Pass1Context` has no apply-to-all
-//! context and so defers every operand carrying a dimension reference. The
-//! tail is the smallest thing that forces that path; it contributes the
-//! constant 1 + 2 + 0 = 3.
+//! **Why some rows carry a `+ SUM(VECTOR SORT ORDER(vals[*], 1))` tail.** One
+//! pass materializes every operand whether or not the equation holds an
+//! array-producing builtin, so the tail selects no path; it is a second
+//! materialized value beside the row's own, and it contributes the constant
+//! `1 + 2 + 0 = 3` that the values below are derived with.
 //!
 //! **Values.** Every compiling row asserts VM numbers, chosen so that reading
 //! the *wrong* array gives a different answer than reading the computed one:
@@ -261,17 +258,49 @@ fn vector_elm_map_positions() {
     );
 }
 
+/// `VECTOR SELECT` in the ELEMENT spelling reads the element whether or not an
+/// array-producing sibling sits beside it.
+///
+/// `sel[d]` and `vals[d]` inside an equation over `d` are that element
+/// (`ArgKind::Array { whole: false }`, Vensim's `!` convention: an unmarked
+/// subscript is the equation's own element), so each element selects from a
+/// one-element range: `vals[d]` where `sel[d]` is 1, the missing value 0
+/// otherwise -- `[30, 10, 0]`. A sibling `+ SUM(VECTOR SORT ORDER(vals[*], 1))`
+/// adds its constant 3 and changes nothing else; one materialization pass
+/// means the sibling cannot select a different lowering of the operand, which
+/// is what makes the two rows agree.
+#[test]
+fn vector_select_element_spelling_reads_the_element_beside_any_sibling() {
+    assert_close(
+        &out_of("vsel_elem", "VECTOR SELECT(sel[d], vals[d], 0, 0, 0)"),
+        &[30.0, 10.0, 0.0],
+        "element spelling alone",
+    );
+    assert_close(
+        &out_of(
+            "vsel_elem_tail",
+            "VECTOR SELECT(sel[d], vals[d], 0, 0, 0) + SUM(VECTOR SORT ORDER(vals[*], 1))",
+        ),
+        &[33.0, 13.0, 3.0],
+        "element spelling beside an array-producing sibling",
+    );
+}
+
 #[test]
 fn vector_select_positions() {
     // VECTOR SELECT reduces to a scalar, so every element of `out` holds the
-    // same value; the `+ SUM(VECTOR SORT ORDER(vals[*], 1))` tail adds 3 and
-    // is what forces the lowering path these rows are about (module docs).
+    // same value; the `+ SUM(VECTOR SORT ORDER(vals[*], 1))` tail adds 3.
+    //
+    // The operands are spelled `[*]`: VECTOR SELECT reduces the axis its
+    // operands mark, so a `[d]` subscript inside an equation over `d` is that
+    // ELEMENT (`ArgKind::Array { whole: false }`, Vensim's `!` convention) and
+    // would make every row a degenerate one-element selection.
     //
     // Control: `sel = [1, 1, 0]` selects vals[0] + vals[1] = 40, plus 3.
     assert_close(
         &out_of(
             "vsel_ctl",
-            "VECTOR SELECT(sel[d], vals[d], 0, 0, 0) + SUM(VECTOR SORT ORDER(vals[*], 1))",
+            "VECTOR SELECT(sel[*], vals[*], 0, 0, 0) + SUM(VECTOR SORT ORDER(vals[*], 1))",
         ),
         &[43.0, 43.0, 43.0],
         "control: VECTOR SELECT over direct references",
@@ -284,7 +313,7 @@ fn vector_select_positions() {
     assert_close(
         &out_of(
             "vsel_arg0",
-            "VECTOR SELECT(sel[d] - mask[d], vals[d], 0, 0, 0) + SUM(VECTOR SORT ORDER(vals[*], 1))",
+            "VECTOR SELECT(sel[*] - mask[*], vals[*], 0, 0, 0) + SUM(VECTOR SORT ORDER(vals[*], 1))",
         ),
         &[13.0, 13.0, 13.0],
         "VECTOR SELECT arg0 (selection array), computed",
@@ -296,7 +325,7 @@ fn vector_select_positions() {
     assert_close(
         &out_of(
             "vsel_arg1",
-            "VECTOR SELECT(sel[d], vals[d] + bump[d], 0, 0, 0) + SUM(VECTOR SORT ORDER(vals[*], 1))",
+            "VECTOR SELECT(sel[*], vals[*] + bump[*], 0, 0, 0) + SUM(VECTOR SORT ORDER(vals[*], 1))",
         ),
         &[143.0, 143.0, 143.0],
         "VECTOR SELECT arg1 (value array), computed",
@@ -383,10 +412,9 @@ fn reducer_positions() {
 
     // Single-argument MEAN: means of [2,4,6] and [20,40,60] are 4 and 40.
     // Reading `matrix` raw would give 2 and 20. This row is the one that
-    // makes MEAN agree with its four sibling reducers: before, an array-shaped
-    // MEAN argument fell through codegen's scalar fallback and failed to
-    // compile, so the `[*]` spelling array-meaned through Pass 1 while the
-    // `[e,*]` spelling did not compile at all.
+    // makes MEAN agree with its four sibling reducers: an array-shaped MEAN
+    // argument used to fall through codegen's scalar fallback and fail to
+    // compile.
     assert_close(
         &row_out_of(
             "red_mean",
@@ -826,16 +854,13 @@ fn materializing_an_elm_map_source_confines_the_mapping_to_the_temp() {
     );
 }
 
-/// C1: `Pass1Context`'s `Rank` arm decomposes its array argument like all five
-/// of its siblings.
+/// C1: `RANK`'s array argument is materialized like all five of its siblings'.
 ///
-/// This is not observable from VM values -- the post-lowering pass materializes
-/// the same operand either way, and the numbers agree -- so it is pinned at the
-/// lowered-fragment level, through the production per-variable lowering
-/// (`TestProject::flow_exprs`). What differs is WHERE the temp is allocated: Pass 1
-/// numbers the operand's temp before the apply-to-all hoister numbers the
-/// builtin's result, while the post-lowering pass continues past the highest id
-/// the fragment already uses, so the two temps come out in the opposite order.
+/// This is not observable from VM values -- the operand is materialized either
+/// way and the numbers agree -- so it is pinned at the lowered-fragment level,
+/// through the production per-variable lowering (`TestProject::flow_exprs`).
+/// What it constrains is the SHAPE of the fragment: an operand temp written
+/// before the builtin's own, both read where the equation reads them.
 ///
 /// Stating it as "RANK's fragment has the same temp structure as VECTOR SORT
 /// ORDER's" is the actual C1 claim (arm consistency) and reds if the arm
@@ -860,14 +885,13 @@ fn the_rank_arm_decomposes_its_array_argument_like_its_siblings() {
     assert_eq!(
         vso,
         vec![0, 1],
-        "the sibling arm decomposes in Pass 1: operand temp 0, then the \
-         builtin's own result temp 1"
+        "the operand is materialized first (temp 0), then the builtin's own \
+         result (temp 1)"
     );
     assert_eq!(
         rank, vso,
-        "RANK must decompose its array argument in Pass 1 like VECTOR SORT \
-         ORDER does; a fragment numbered the other way means the arm fell \
-         through to the post-lowering pass instead"
+        "RANK must materialize its array argument like VECTOR SORT ORDER \
+         does; a fragment numbered the other way means the two arms disagree"
     );
 }
 
@@ -878,9 +902,10 @@ fn the_rank_arm_decomposes_its_array_argument_like_its_siblings() {
 
 #[test]
 fn both_apply_to_all_spellings_materialize() {
-    // `VECTOR SORT ORDER`'s star spelling reaches Pass 1 with no unresolved
-    // dimension reference, so it already compiled; the active-dimension
-    // spelling did not. Both must now agree.
+    // The two spellings of one operand: the star one carries no
+    // active-dimension reference, and the active-dimension one has its
+    // references promoted back to whole axes by the vector builtin's own
+    // operand rule. Both must agree.
     assert_close(
         &out_of("spell_vso_star", "VECTOR SORT ORDER(vals[*] + bump[*], 1)"),
         &[2.0, 0.0, 1.0],
@@ -892,9 +917,9 @@ fn both_apply_to_all_spellings_materialize() {
         "VECTOR SORT ORDER, active-dimension spelling",
     );
 
-    // `RANK` is the arm whose Pass-1 recursion never called
-    // `maybe_decompose_array_arg_inner`, unlike all five of its siblings, so
-    // BOTH spellings failed. Ranks of [30, 110, 20] ascending: 2, 3, 1.
+    // `RANK` is the arm whose array argument used to be classified as a scalar
+    // position, so BOTH spellings failed. Ranks of [30, 110, 20] ascending:
+    // 2, 3, 1.
     assert_close(
         &out_of("spell_rank_star", "RANK(vals[*] + bump[*], 1)"),
         &[2.0, 3.0, 1.0],
@@ -1091,7 +1116,7 @@ fn previous_operands_are_views_over_the_prev_snapshot() {
         &moving_series(
             "c3_sel_sel",
             "out[d]",
-            "VECTOR SELECT(PREVIOUS(sel[d]), vals[d], 0, 0, 0) \
+            "VECTOR SELECT(PREVIOUS(sel[*]), vals[*], 0, 0, 0) \
              + SUM(VECTOR SORT ORDER(fixed[*], 1))",
             3,
         ),
@@ -1106,7 +1131,7 @@ fn previous_operands_are_views_over_the_prev_snapshot() {
         &moving_series(
             "c3_sel_val",
             "out[d]",
-            "VECTOR SELECT(sel[d], PREVIOUS(vals[d]), 0, 0, 0) \
+            "VECTOR SELECT(sel[*], PREVIOUS(vals[*]), 0, 0, 0) \
              + SUM(VECTOR SORT ORDER(fixed[*], 1))",
             3,
         ),
@@ -1201,13 +1226,12 @@ fn previous_reducer_operands_read_the_previous_row() {
 /// QUALIFIED spelling the LTM wrap generates --
 /// `PREVIOUS(matrix[region·nyc,*])` -- pins the row by NAME instead, and it
 /// reaches this SAME view route from an ordinary APPLY-TO-ALL user equation:
-/// `arg_is_array_shaped` accepts it (the qualified index is static, the `*`
-/// spans), so no capture helper is synthesized and the argument passes through
-/// to lowering. Measured: `out[row] = SUM(PREVIOUS(wide[row·r1,*]))` compiles
-/// with ZERO synthesized helpers and reads r1's previous row at every step,
-/// while with `arg_is_array_shaped` reverted (HEAD's visitor) the same equation
-/// declines through a capture helper. So the qualified spelling is neither
-/// LTM-only nor pre-existing -- C3 is what routes it here.
+/// `SnapshotArg::access` classifies it as a view (the qualified index is
+/// static, the `*` spans), so no capture helper is synthesized and the
+/// argument passes through to lowering. Measured: `out[row] =
+/// SUM(PREVIOUS(wide[row·r1,*]))` compiles with ZERO synthesized helpers and
+/// reads r1's previous row at every step. So the qualified spelling is
+/// neither LTM-only nor pre-existing -- C3 is what routes it here.
 ///
 /// What IS split is `Ast::Scalar` vs `Ast::ApplyToAll` inside
 /// `builtins_visitor::instantiate_implicit_modules`, not user-vs-LTM: both
@@ -1409,7 +1433,7 @@ fn nested_previous_and_init_operands_materialize() {
         &moving_series(
             "c3n_sel_sel",
             "out[d]",
-            "VECTOR SELECT(PREVIOUS(sel[d]) * 1, vals[d], 0, 0, 0) \
+            "VECTOR SELECT(PREVIOUS(sel[*]) * 1, vals[*], 0, 0, 0) \
              + SUM(VECTOR SORT ORDER(fixed[*], 1))",
             3,
         ),
@@ -1422,7 +1446,7 @@ fn nested_previous_and_init_operands_materialize() {
         &moving_series(
             "c3n_sel_val",
             "out[d]",
-            "VECTOR SELECT(sel[d], PREVIOUS(vals[d]) + fixed[d], 0, 0, 0) \
+            "VECTOR SELECT(sel[*], PREVIOUS(vals[*]) + fixed[*], 0, 0, 0) \
              + SUM(VECTOR SORT ORDER(fixed[*], 1))",
             3,
         ),
@@ -1795,13 +1819,10 @@ fn a_non_default_array_previous_fallback_declines_loudly() {
 
 /// The three spellings of an arrayed reference, at `VECTOR SORT ORDER` arg0.
 ///
-/// They arrive from three different directions and only one of them ever
-/// reached lowering intact before: `vals` (a bare name) already lowered to a
-/// whole-array view; `vals[*]` and `vals[d]` were claimed by
-/// `builtins_visitor`'s capture-helper synthesis, which cannot hold an array
-/// (`vals[*]` in a scalar `Equation::Scalar` helper does not compile) or pinned
-/// them to one element (`substitute_dimension_refs` rewriting `d` to `d·elem`).
-/// All three must now mean the same array.
+/// They arrive from three different directions: `vals` (a bare name) lowers
+/// to a whole-array view, and `vals[*]` and `vals[d]` are static views the
+/// parse reads directly (`SnapshotArg::access`), never captured. All three
+/// mean the same array.
 #[test]
 fn all_three_arrayed_previous_spellings_agree() {
     let expected = [[0.0, 1.0, 0.0], [1.0, 2.0, 1.0], [2.0, 0.0, 2.0]];
@@ -2073,11 +2094,11 @@ fn the_hoisted_assignment_is_emitted_before_its_reader() {
 // ===========================================================================
 // The `TempId` namespace (GH #583).
 //
-// The per-element hoisting path allocates one temp per array ELEMENT -- each
-// element re-evaluates the builtin with its own scalar argument -- and
-// materializing a computed operand doubles that. `TempId` is a `u8`, so a few
-// hundred elements is past the namespace, and BOTH tests below live at that
-// boundary.
+// A body only one element reads is evaluated per element on an id the elements
+// REISSUE, so an equation costs one id per simultaneously-live temp rather than
+// one per element and a few hundred elements is nowhere near the `u8`
+// namespace. Both rows below sit where the old one-id-per-element numbering ran
+// out, and check that the arithmetic is right rather than that it is large.
 // ===========================================================================
 
 /// A per-element hoist over `sort_project`'s dimension: `vals` descends and the
@@ -2142,70 +2163,82 @@ fn a_per_element_hoist_past_the_temp_namespace_without_a_temp_view_is_correct() 
     );
 }
 
-/// The same hoist WITH a materialized operand puts a temp in a view position,
-/// and a view base is the one place a temp id is carried as a `u32` while
-/// every writer narrows it to `u8` -- so above 255 the view reads storage no
-/// opcode wrote. `symbolic::resolve_static_view` rejects that rather than
-/// emitting a well-formed program with wrong numbers.
+/// The same hoist WITH a materialized operand, which is where the `u8` `TempId`
+/// namespace used to be spent one id per element (GH #583): the operand is a
+/// temp read as a static VIEW, the one place an id is carried as a `u32` while
+/// every writer narrows it to `u8`, so above 255 the view read storage no
+/// opcode wrote.
 ///
-/// Both spellings are covered because they arrive from different directions,
-/// and only one of them is new: the `vals[*]` spelling ALREADY put a Pass-1
-/// temp in a view position, so at HEAD it returned a silently wrong array from
-/// element 128 on (a pre-existing #583 instance, not caused by this work); the
-/// `vals[d]` spelling did not compile at all before this module's fix, and
-/// would have joined it. Both are now loud.
+/// It costs two ids now, whatever the element count: the operand
+/// `301 - vals[*]` is the same body in every element and is materialized ONCE,
+/// and the sort that reads it varies with `dir[d]` and RECYCLES a second id
+/// across the elements. A 300-element equation therefore stays as far inside
+/// the namespace as a 3-element one, which is what makes the arithmetic below
+/// checkable rather than merely large.
 ///
-/// 130 elements is the smallest round size past the boundary (two temps per
-/// element, so ids cross 255 at element 128).
+/// The refusal itself is not deleted -- `symbolic::resolve_static_view` still
+/// rejects a view over a temp above 255, pinned directly by
+/// `symbolic::tests::test_resolve_static_view_temp_past_the_id_namespace` --
+/// but no equation this shape can reach it any more.
+///
+/// Both spellings are rowed because they arrive from different directions: the
+/// `vals[*]` operand was always element-invariant, while `vals[d]` is promoted
+/// back to the whole axis by the vector builtin's own operand rule and so
+/// becomes the same body.
 #[test]
-fn a_temp_read_as_a_view_past_the_temp_namespace_is_rejected() {
+fn a_per_element_hoist_over_a_shared_operand_costs_two_ids_at_any_size() {
+    const N: usize = 300;
     for (name, eqn) in [
         ("temp_view_dim", "VECTOR SORT ORDER(301 - vals[d], dir[d])"),
         ("temp_view_star", "VECTOR SORT ORDER(301 - vals[*], dir[d])"),
     ] {
-        let err = sort_project(name, 130, eqn)
-            .compile_incremental()
-            .err()
-            .unwrap_or_else(|| panic!("{eqn}: a view over a temp above 255 must be rejected"));
-        let details = err.get_details().unwrap_or_default();
-        assert!(
-            details.contains("TempId capacity"),
-            "{eqn}: expected the temp-namespace rejection, got {err:?}"
-        );
+        let project = sort_project(name, N, eqn);
+        project.assert_compiles_incremental();
+        // `vals` DEcreases and the operand `301 - vals` INcreases, so the two
+        // sort orders are exact swaps of the sibling row's: element `k` sorts
+        // ascending when `k` is odd (`sort_project`'s `dir`), and over an
+        // increasing operand ascending is the identity `k` while descending is
+        // the reversal `N - 1 - k`.
+        let expected: Vec<f64> = (0..N)
+            .map(|k| if k % 2 == 1 { k } else { N - 1 - k } as f64)
+            .collect();
+        assert_close(&project.vm_result("out"), &expected, eqn);
     }
 }
 
-/// A residual this work does NOT fix, pinned so it is loud rather than
-/// silently rediscovered: an array-producing builtin nested inside
-/// *arithmetic* that is itself an array operand.
+/// An array-producing builtin nested inside *arithmetic* that is itself an
+/// array operand: two temps, the inner one written before the outer body reads
+/// it.
 ///
-/// `VECTOR SORT ORDER(VECTOR ELM MAP(a, b) + c, 1)` materializes the `Op2` into
-/// a temp correctly -- for the star spelling that already happened in Pass 1,
-/// before this work -- but the resulting `AssignTemp` body still holds the
-/// inner `App(VectorElmMap)`, and codegen's `AssignTemp` arm only routes an
-/// array-producing builtin to its opcode when the builtin is the body's *root*.
-/// Anywhere else in the body it reaches the `BeginIter` loop and is rejected
-/// with "array-producing builtin outside AssignTemp context".
+/// This is where "materialize every array value" earns the word EVERY. The
+/// enclosing `Op2` is an operand and has to become a temp; codegen evaluates
+/// such a temp with a `BeginIter` loop, which has no way to run an
+/// array-producing opcode inside its body. So the inner call is materialized
+/// FIRST, in its own array-valued position, and the `Op2` that reads it is an
+/// ordinary elementwise body.
 ///
-/// That is a different contract from the one this module is about -- where an
-/// array-producing `App` may APPEAR, not whether an operand is a view -- and
-/// fixing it needs a notion of "this subexpression is array-valued" that the
-/// lowered `Expr` tree does not carry locally. The bare nested form
-/// (`VECTOR SORT ORDER(VECTOR ELM MAP(a, b), 1)`, no arithmetic) does work; see
-/// [`computed_operand_shapes`].
+/// Values: `VECTOR ELM MAP(vals, offs)` over `vals = [30, 10, 20]` and
+/// `offs = [2, 0, 1]` is `[vals[2], vals[0], vals[1]] = [20, 30, 10]`; plus
+/// `bump = [0, 100, 0]` that is `[20, 130, 10]`; sorting ascending gives the
+/// source indices in value order, `[2, 0, 1]`. Both spellings of the operand --
+/// the wildcard one and the apply-to-all one, which promotes its element
+/// references back to whole axes -- are the same operand and give the same
+/// array.
 #[test]
-fn a_nested_array_producing_builtin_inside_arithmetic_is_a_separate_residual() {
+fn a_nested_array_producing_builtin_inside_arithmetic_materializes_first() {
     for (name, eqn) in [
         (
-            "residual_dim",
+            "nested_dim",
             "VECTOR SORT ORDER(VECTOR ELM MAP(vals[d], offs[d]) + bump[d], 1)",
         ),
         (
-            "residual_star",
+            "nested_star",
             "VECTOR SORT ORDER(VECTOR ELM MAP(vals[*], offs[*]) + bump[*], 1)",
         ),
     ] {
-        assert_fails_attributed(fixture(name).array_aux("out[d]", eqn), eqn);
+        let project = fixture(name).array_aux("out[d]", eqn);
+        project.assert_compiles_incremental();
+        assert_close(&project.vm_result("out"), &[2.0, 0.0, 1.0], eqn);
     }
 }
 
@@ -2218,13 +2251,12 @@ fn a_nested_array_producing_builtin_inside_arithmetic_is_a_separate_residual() {
 /// view -- a legitimate `VECTOR ELM MAP` base (the mapping ranges over the whole
 /// source variable) and a degenerate one-element `VECTOR SELECT`.
 ///
-/// The SPELLING decides which route the element takes, and the two are
-/// different: a NUMERIC index (`vals[1]`) reaches the view over the snapshot,
-/// while the bare element NAME the issue's table uses (`vals[e1]`) is not
-/// accepted as a static index on the user-equation parse path, so it is read
-/// through a scalar capture helper of extent one instead. Both are asserted
-/// below, each against its own oracle, rather than one standing in for the
-/// other -- the comments on each `compare` call carry the difference.
+/// The numeric spelling (`vals[1]`) and the bare element NAME the issue's
+/// table uses (`vals[e1]`) reach the same single-element view over the
+/// snapshot: the first is static by syntax, the second because `e1` is an
+/// element of `vals`' declared axis (`builtins_visitor::SnapshotIndexFacts`).
+/// Both are asserted below rather than one standing in for the other, since
+/// only the front end decides that they are one route.
 #[test]
 fn every_row_of_the_issue_995_table_compiles() {
     // The issue's own dimension: element names, so `vals[e1]` is a literal
@@ -2322,25 +2354,16 @@ fn every_row_of_the_issue_995_table_compiles() {
         "VECTOR ELM MAP(PREVIOUS(vals[1]), offs[d])",
         "VECTOR ELM MAP(cap[1], offs[d])",
     );
-    // The SAME element spelled with its bare NAME takes a different route, and
-    // that is the spelling the issue's table uses. `index_is_static` will not
-    // accept an unqualified element name on the user-equation parse path (such a
-    // name can be shadowed by a variable, and the disambiguating check is
-    // deliberately disabled there to stay incremental under renames), so
-    // `builtins_visitor` synthesizes a scalar capture helper and `PREVIOUS`
-    // reads THAT. The source is then the helper -- one slot -- and ELM MAP's
-    // "range over the source variable's full storage" rule applies to it. That
-    // is the same rule a materialized operand follows
-    // (`materializing_an_elm_map_source_confines_the_mapping_to_the_temp`) and
-    // the same answer a practitioner gets by writing the capture out, so it is
-    // self-consistent rather than a second semantics -- but the two spellings DO
-    // mean different things, and only the front end decides which, so both are
-    // pinned rather than one standing in for the other.
+    // The SAME element spelled with its bare NAME, the spelling the issue's
+    // table uses, is the same collapsed view: `e1` is an element of `vals`'
+    // own axis, so the parse leaves it in place and ELM MAP's base is the
+    // element's slot inside `vals`, with the mapping ranging over the whole
+    // previous array exactly as for the numeric spelling.
     compare(
         "VECTOR ELM MAP with a bare-element-name PREVIOUS base",
-        ("h", "PREVIOUS(vals[e1])"),
+        ("cap[d]", "PREVIOUS(vals[d])"),
         "VECTOR ELM MAP(PREVIOUS(vals[e1]), offs[d])",
-        "VECTOR ELM MAP(h, offs[d])",
+        "VECTOR ELM MAP(cap[1], offs[d])",
     );
     compare(
         "VECTOR SELECT over a single-element PREVIOUS selection",
@@ -2555,37 +2578,49 @@ fn every_operand_shape_reaches_the_mixed_shape_join() {
     );
 }
 
-/// Two shapes neither of which contains the other DECLINE, and the decline is
-/// the same loud, variable-attributed codegen rejection the two deliberately
-/// unmaterialized positions produce.
+/// Two shapes neither of which CONTAINS the other broadcast into their CROSS
+/// PRODUCT, and the axis order is the order the operand names its axes.
 ///
-/// The union `[e] u [d] = [e,d]` would compile, and that is exactly why it is
-/// refused: nothing in `rowv[e] + vals[d]` says whether the result is `[e,d]`
-/// or `[d,e]`, and the temp's axis order is the axis `VECTOR SORT ORDER` sorts
-/// along. Guessing it produces a plausible array of wrong numbers -- which is
-/// what the first-wins rule did, returning the sort order of `[e]`-shaped NaNs
-/// (`[0,0,0, 1,1,1]`) with no diagnostic at all.
+/// That order is not a guess: it is the same left-to-right union `ast::Expr2`
+/// already assigns to the expression's bounds, so the temp has the shape the
+/// type checker gave the operand. It IS observable, because the axis order is
+/// the axis `VECTOR SORT ORDER` sorts along -- and the two operand orders are
+/// rowed here for exactly that reason, so the property is pinned rather than
+/// discovered later.
 ///
-/// The transposed row is the same refusal reached from the other side: `[e,d]`
-/// and `[d,e]` CONTAIN each other, so containment alone leaves two maximal
-/// candidates and picking either would reintroduce the operand-order
-/// dependence in the axis order.
+/// Values, over `rowv = [5, 50]` and `vals = [30, 10, 20]`:
+///
+/// * `rowv[e] + vals[d]` is `[e,d]` = `[[35,15,25],[80,60,70]]`; sorting within
+///   each innermost (`d`) row ascending gives `[1,2,0]` twice.
+/// * `vals[d] + rowv[e]` is `[d,e]` = `[[35,80],[15,60],[25,70]]`; the
+///   innermost row is now `e`, two wide, and every one of them is already
+///   ascending, so the sort order is `[0,1]` three times. `out[e,d]` projects
+///   that temp by NAME, so element `(e_i, d_j)` reads `temp[d_j][e_i] = i`.
+/// * `matrix[e,d] + matrixt[d,e]` CONTAIN each other, so containment leaves two
+///   maximal candidates and the union takes the first: `[e,d]`, holding
+///   `2 * matrix`, whose innermost rows are ascending.
 #[test]
-fn incomparable_operand_shapes_decline_loudly() {
-    for (name, eqn) in [
-        ("incomp_rc", "VECTOR SORT ORDER(rowv[e] + vals[d], 1)"),
-        ("incomp_cr", "VECTOR SORT ORDER(vals[d] + rowv[e], 1)"),
+fn incomparable_operand_shapes_broadcast_into_their_cross_product() {
+    for (name, eqn, expected) in [
+        (
+            "incomp_rc",
+            "VECTOR SORT ORDER(rowv[e] + vals[d], 1)",
+            [1.0, 2.0, 0.0, 1.0, 2.0, 0.0],
+        ),
+        (
+            "incomp_cr",
+            "VECTOR SORT ORDER(vals[d] + rowv[e], 1)",
+            [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        ),
         (
             "incomp_transpose",
             "VECTOR SORT ORDER(matrix[e,d] + matrixt[d,e], 1)",
+            [0.0, 1.0, 2.0, 0.0, 1.0, 2.0],
         ),
     ] {
-        assert_fails_attributed(wide_fixture(name).array_aux("out[e,d]", eqn), eqn);
-        assert_declines_because(
-            wide_fixture(name).array_aux("out[e,d]", eqn),
-            "out",
-            "Cannot push view for expression type",
-        );
+        let project = wide_fixture(name).array_aux("out[e,d]", eqn);
+        project.assert_compiles_incremental();
+        assert_close(&project.vm_result("out"), &expected, eqn);
     }
 }
 
@@ -2634,22 +2669,16 @@ fn an_array_view_inside_a_module_instance_reads_that_instance() {
 }
 
 /// Every operand carrying a REPEATED-dimension view declines -- mixed with
-/// another shape or as the operand's SOLE shape -- and the reason is that this
-/// branch is what made them compilable in the first place.
+/// another shape or as the operand's SOLE shape.
 ///
-/// Measured at the MERGE BASE `ccf7ed34`, not at a branch commit: the computed
-/// spelling `VECTOR SORT ORDER(matrix[d,d] * 2, 1)` FAILS to compile there. So
-/// the numbers it produced mid-branch were a regression this work introduced,
-/// not a pre-existing wrong answer inherited from main -- an earlier revision of
-/// this test said the latter, having measured at `b45a0ca1`, which already
-/// carries the materializer that makes it compile.
-///
-/// `[d,d]` names one dimension twice, and every layer that projects between an
-/// array and a temp matches BY NAME and takes the first hit
-/// (`compiler::project_var_index_to_temp` gives both axes the same coordinate,
-/// so `out[i,j]` reads `temp[i,i]`; `codegen::array_view_to_static_temp` keys
-/// `DimId`s the same way). There is no answer to give, so the pass gives none.
-/// What that costs is nothing: at the merge base none of these compiled.
+/// `[d,d]` names one dimension twice. The compile-time projection
+/// (`compiler::project_var_index_to_temp`) pairs a temp's axes one to one and
+/// would read such a temp back correctly; the RUNTIME broadcast does not:
+/// `codegen::array_view_to_static_temp` keys a temp view's `DimId`s by name and
+/// `dimensions::match_dimensions_two_pass` pairs a source axis with the FIRST
+/// iteration axis of that id, so a `BeginIter` body evaluating
+/// `matrix[d,d] * 2` into a `[d,d]` temp would read the diagonal. There is no
+/// correct temp to give, so the pass gives none and codegen refuses loudly.
 #[test]
 fn a_repeated_dimension_operand_declines_rather_than_guessing_which_axis() {
     let square = |name: &str| {
@@ -2689,7 +2718,7 @@ fn a_repeated_dimension_operand_declines_rather_than_guessing_which_axis() {
         assert_declines_because(
             square(name).array_aux("out[d,d]", eqn),
             "out",
-            "Cannot push view for expression type",
+            "an array operand here must be a variable",
         );
     }
 
@@ -2712,22 +2741,20 @@ fn a_repeated_dimension_operand_declines_rather_than_guessing_which_axis() {
 }
 
 /// The complement, and the boundary of the refusal above: reading a repeated
-/// dimension DIRECTLY still compiles, and still returns the wrong numbers it
-/// returned at the merge base.
+/// dimension DIRECTLY compiles, and reads the cell rather than the diagonal.
 ///
-/// This is a **disclosed pre-existing residual**, pinned in both directions so
-/// it is loud rather than silently rediscovered, and deliberately not fixed
-/// here. Measured at `ccf7ed34` and identical on this branch:
+/// | equation | result |
+/// |---|---|
+/// | `out[d,d] = square[d,d]` | the matrix |
+/// | `out[d,d] = VECTOR SORT ORDER(square[d,d], 1)` | `[0,1,2]` per row |
 ///
-/// | equation | result | correct |
-/// |---|---|---|
-/// | `out[d,d] = square[d,d]` | `[11,11,11, 22,22,22, 33,33,33]` | the matrix |
-/// | `out[d,d] = VECTOR SORT ORDER(square[d,d], 1)` | `[0,0,0, 1,1,1, 2,2,2]` | `[0,1,2]` per row |
-///
-/// Both are the same first-axis-wins projection: `out[i,j]` reads `[i,i]`. The
-/// fix is to give the projection an axis identity rather than a dimension name
-/// -- the same root cause as `db::analysis::expand_same_element`'s
-/// repeated-target residual, and its own change.
+/// Both follow from one rule stated in the two places that pair axes by
+/// name: `compiler::subscript::normalize_subscripts3` allocates the
+/// active positions one to one across a reference's subscripts, and
+/// `compiler::project_var_index_to_temp` pairs a temp's axes to the variable's
+/// the same way. `db::analysis::expand_same_element`'s repeated-target residual
+/// is the same root cause on the LTM side and is NOT fixed here
+/// (`mapped_reference_semantics_tests::a_repeated_target_dimension_reads_each_axis_on_the_executed_path`).
 ///
 /// **Blast radius, measured.** Vensim REJECTS the declaration: run in Vensim DSS
 /// 2026-08-04, `vensim-probes/repeated_dimension.mdl` refuses to simulate with
@@ -2736,16 +2763,16 @@ fn a_repeated_dimension_operand_declines_rather_than_guessing_which_axis() {
 /// It is not illegitimate, though -- the XMILE v1.0 spec exemplifies the
 /// declaration ("A 2D non-apply-to-all array with dimensions X by X, where X is
 /// size 2", verified in `docs/reference/xmile-v1.0.html`) -- so the shape must
-/// keep working and this test still pins OUR behaviour with no claim it is
-/// right. What the spec exemplifies is only the DECLARATION; what a REFERENCE
-/// like `sq[X,X]` means is the open part, and
+/// keep working and this test pins OUR reading of it. What the spec
+/// exemplifies is only the DECLARATION; what a REFERENCE like `sq[X,X]` means
+/// is Simlin's to define, and
 /// `vensim-probes/stella_repeated_dimension.stmx` asks Stella. Note the defect
 /// is narrower than "repeated dimensions are broken": on that probe Simlin's
 /// STORAGE is a correct 2-D array (`SUM(sq[X,*])` gives the true row sums
 /// 36/66/96 and `SUM(sq[*,*])` gives 198, both measured); only the subscripted
 /// reference collapses.
 #[test]
-fn a_repeated_dimension_read_directly_is_a_pre_existing_residual() {
+fn a_repeated_dimension_read_directly_reads_each_axis() {
     let square = |name: &str| {
         fixture(name).array_with_ranges(
             "square[d,d]",
@@ -2766,31 +2793,31 @@ fn a_repeated_dimension_read_directly_is_a_pre_existing_residual() {
     copy.assert_compiles_incremental();
     assert_close(
         &copy.vm_result("out"),
-        &[11.0, 11.0, 11.0, 22.0, 22.0, 22.0, 33.0, 33.0, 33.0],
-        "residual: a direct repeated-dimension read projects to [i,i]",
+        &[11.0, 12.0, 13.0, 21.0, 22.0, 23.0, 31.0, 32.0, 33.0],
+        "a direct repeated-dimension read copies the matrix",
     );
 
     let sorted = square("sqdirect_sort").array_aux("out[d,d]", "VECTOR SORT ORDER(square[d,d], 1)");
     sorted.assert_compiles_incremental();
+    // Each row of `square` ascends, so the sort order of every row is `[0,1,2]`
+    // and the temp's second `d` axis has to be read as the second one for that
+    // to come back out.
     assert_close(
         &sorted.vm_result("out"),
-        &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0],
-        "residual: the per-row orders are [0,1,2] throughout, not this",
+        &[0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0],
+        "the per-row orders are [0,1,2] throughout",
     );
 
     // The direct read NESTED IN A REDUCER, which is the row that says WHERE the
-    // refusal above may live. These reach a hoisting site
-    // (`compiler::replace_nested_builtins_for_element` and its two siblings),
-    // which sizes the hoisted temp from `find_expr_array_view` and SUBSTITUTES
-    // the variable's own view when that is `None` -- no diagnostic, and at a
-    // different size. Putting the repeated-dimension refusal inside
-    // `compiler::join_array_views` therefore sized these temps at `out3`'s three
-    // slots while the builtin still wrote nine elements, and the VM indexed past
-    // the temp: a panic, and under `panic = abort` a dead host process. All four
-    // return these numbers at the merge base `ccf7ed34`, so that would have been
-    // a regression, not a newly-refused shape. (The numbers themselves are the
-    // same first-axis-wins residual as above: nine ranks over the whole square,
-    // broadcast to every element of `out3`.)
+    // refusal above may live. An array-producing builtin sizes its temp from
+    // `find_expr_array_view` and SUBSTITUTES the variable's own view when that
+    // is `None` -- no diagnostic, and at a different size. Putting the
+    // repeated-dimension refusal inside `compiler::join_array_views` therefore
+    // sized these temps at `out3`'s three slots while the builtin still wrote
+    // nine elements, and the VM indexed past the temp: a panic, and under
+    // `panic = abort` a dead host process. (The values are reductions over the
+    // whole nine-cell square, so the one-to-one axis pairing above does not
+    // move them.)
     for (name, eqn, expected) in [
         ("sqred_sum", "SUM(VECTOR SORT ORDER(square[d,d], 1))", 9.0),
         ("sqred_mean", "MEAN(RANK(square[d,d], 1))", 5.0),
@@ -2834,4 +2861,162 @@ fn an_array_view_inside_a_nested_module_instance_reads_that_instance() {
             .unwrap_or_else(|| panic!("no series for {name}"));
         assert_close(actual, &expected, name);
     }
+}
+
+// ===========================================================================
+// Once per equation. An array-producing builtin whose operands do not depend
+// on the active element is evaluated ONCE and every element reads the temp.
+// ===========================================================================
+
+/// The number of `AssignTemp`s a variable's non-initial lowering emits, through
+/// the production per-variable lowering: one per materialized array value.
+fn materialized_temps(project: &TestProject, var: &str) -> usize {
+    project
+        .flow_exprs(var)
+        .iter()
+        .filter(|expr| matches!(expr, crate::compiler::Expr::AssignTemp(..)))
+        .count()
+}
+
+/// C-LEARN's `sorted target X[COP,Target] = VECTOR ELM MAP(Src[COP,t1],
+/// Target Order[COP,Target])`: the source names the iterated axis beside a
+/// FIXED column. A vector builtin's operand is read whole, so the promoted
+/// source is the `[cop]`-shaped column slice whichever element is active, and
+/// the equation materializes ONE map that every element reads back.
+///
+/// Both spellings of the source are rowed because they must be the same
+/// operand: the explicit `src[*,t1]` and the promoted `src[cop,t1]` give one
+/// temp and identical numbers. Values follow Vensim's rule
+/// (`vm_vector_elm_map.rs`): `out[c,t] = src_flat[base(c,t1) + off[c,t]]`, the
+/// base being the column cell's flat index.
+#[test]
+fn an_elm_map_over_a_fixed_column_slice_is_materialized_once_per_equation() {
+    let project = |name: &str, source: &str| {
+        TestProject::new(name)
+            .with_sim_time(0.0, 1.0, 1.0)
+            .named_dimension("cop", &["c1", "c2", "c3"])
+            .named_dimension("tgt", &["t1", "t2", "t3"])
+            .array_with_ranges(
+                "src[cop,tgt]",
+                vec![
+                    ("c1,t1", "11"),
+                    ("c1,t2", "12"),
+                    ("c1,t3", "13"),
+                    ("c2,t1", "21"),
+                    ("c2,t2", "22"),
+                    ("c2,t3", "23"),
+                    ("c3,t1", "31"),
+                    ("c3,t2", "32"),
+                    ("c3,t3", "33"),
+                ],
+            )
+            .array_with_ranges(
+                "off[cop,tgt]",
+                vec![
+                    ("c1,t1", "0"),
+                    ("c1,t2", "1"),
+                    ("c1,t3", "2"),
+                    ("c2,t1", "2"),
+                    ("c2,t2", "0"),
+                    ("c2,t3", "1"),
+                    ("c3,t1", "1"),
+                    ("c3,t2", "2"),
+                    ("c3,t3", "0"),
+                ],
+            )
+            .array_aux(
+                "out[cop,tgt]",
+                &format!("VECTOR ELM MAP({source}, off[cop,tgt])"),
+            )
+    };
+    let expected = [11.0, 12.0, 13.0, 23.0, 21.0, 22.0, 32.0, 33.0, 31.0];
+    for (name, source) in [
+        ("elm_once_col", "src[cop,t1]"),
+        ("elm_once_star", "src[*,t1]"),
+    ] {
+        let project = project(name, source);
+        assert_eq!(
+            materialized_temps(&project, "out"),
+            1,
+            "{source}: one VECTOR ELM MAP for the whole equation"
+        );
+        assert_close(&project.vm_result("out"), &expected, source);
+    }
+}
+
+/// `VECTOR SORT ORDER(vals[d], 1)` inside an equation over `d` reads the whole
+/// of `vals` whichever element is active, so it is sorted once; the
+/// element-varying `vals[d]` beside it materializes nothing.
+///
+/// Values: the ascending order of `[30, 10, 20]` is `[1, 2, 0]`, summing to 3,
+/// so `out = vals + 3`.
+#[test]
+fn a_sort_order_over_the_iterated_axis_is_materialized_once_per_equation() {
+    let project =
+        fixture("sort_once").array_aux("out[d]", "SUM(VECTOR SORT ORDER(vals[d], 1)) + vals[d]");
+    assert_eq!(
+        materialized_temps(&project, "out"),
+        1,
+        "one VECTOR SORT ORDER for the whole equation"
+    );
+    assert_close(
+        &project.vm_result("out"),
+        &[33.0, 13.0, 23.0],
+        "vals + the sum of one sort order",
+    );
+}
+
+/// A reducer over a computed operand whose every array reference is pinned to
+/// the enclosing element has a 0-d operand: in `x[region] = SUM(pop * 2)` the
+/// bare `pop` is pass 0's `pop[region]`, one slot under the `region`
+/// iteration, the `Op2` over it has no axis, and `materialize_view_operand`
+/// declines a dimensionless view, so codegen refuses the reducer's argument
+/// as no view over storage. `SUM(pop) * 2` -- the same value under the
+/// engine's bare-name rule
+/// (`db::lowering_scope_tests::a_helper_reads_what_the_plain_spelling_reads`)
+/// -- compiles, because a collapsed `StaticSubscript` IS a view.
+///
+/// GH #1051 owns compiling the former to the degenerate reduce of one value
+/// (`[200, 400, 600]`); until it lands, the refusal is the loud arm of "Phase
+/// 6b semantic divergences" item 10 and this row pins its text, so a change
+/// that compiles it moves a test rather than a silent number.
+#[test]
+fn a_reducer_over_a_zero_d_operand_in_an_apply_to_all_body_is_refused_loudly() {
+    let model = |eqn: &str| {
+        TestProject::new("zero_d_reducer")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .named_dimension("region", &["north", "south", "east"])
+            .array_with_ranges(
+                "pop[region]",
+                vec![("north", "100"), ("south", "200"), ("east", "300")],
+            )
+            .array_aux("x[region]", eqn)
+    };
+    let control = model("SUM(pop) * 2");
+    control.assert_compiles_incremental();
+    assert_eq!(control.vm_result("x"), vec![200.0, 400.0, 600.0]);
+
+    let refused: Vec<(Option<String>, ErrorCode, String)> = model("SUM(pop * 2)")
+        .diagnostics_incremental()
+        .into_iter()
+        .filter(|d| d.severity == crate::db::DiagnosticSeverity::Error)
+        .map(|d| {
+            (
+                d.variable.clone(),
+                d.code(),
+                d.reason().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(refused.len(), 1, "one refusal, on x: {refused:?}");
+    let (variable, code, reason) = &refused[0];
+    assert_eq!(variable.as_deref(), Some("x"));
+    assert_eq!(*code, ErrorCode::NotSimulatable);
+    assert!(
+        reason.contains(
+            "an array operand here must be a variable, a subscripted array or an array \
+             temp, but it is an arithmetic or comparison expression"
+        ),
+        "the materializer's decline surfaces as codegen's view refusal: {reason}"
+    );
 }

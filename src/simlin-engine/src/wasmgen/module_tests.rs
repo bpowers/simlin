@@ -958,6 +958,56 @@ fn compile_simulation_init_from_initial_matches_vm() {
     );
 }
 
+/// An INIT-only capture is populated by initials and never refreshed in
+/// flows, on both backends: the frozen user value matches the VM step for
+/// step, a second `run` on the same instance reseeds it, and the capture's
+/// slot -- which the VM's fresh step chunks leave at zero where wasm's linear
+/// memory keeps the initial value -- is in neither backend's results map, so
+/// the map exposes only slots the two agree on.
+#[test]
+fn compile_simulation_init_capture_without_flow_refresh_matches_vm_and_reruns() {
+    let datamodel = crate::test_common::TestProject::new("init_capture_wasm")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .aux("driver", "1 + TIME", None)
+        .aux("frozen", "INIT(driver * 2)", None)
+        .build_datamodel();
+
+    let sim = compile_sim(&datamodel, "main");
+    let capture = "$\u{205A}frozen\u{205A}0\u{205A}arg0";
+    assert!(
+        sim.offsets.keys().all(|name| name.as_str() != capture),
+        "an INIT-only capture has no results key"
+    );
+    let artifact = compile_simulation(&sim).expect("wasm codegen");
+    assert!(
+        artifact
+            .layout
+            .var_offsets
+            .iter()
+            .all(|(name, _)| name != capture),
+        "the wasm layout is the same map"
+    );
+    let runs = run_artifact_results_repeated(&artifact, 2);
+    assert_eq!(
+        runs[0], runs[1],
+        "a second run on one instance reseeds INIT"
+    );
+
+    let checked = assert_matches_vm(sim, &artifact);
+    assert!(checked >= 2, "expected to compare driver + frozen");
+    let frozen_offset = artifact
+        .layout
+        .var_offsets
+        .iter()
+        .find(|(name, _)| name == "frozen")
+        .map(|(_, offset)| *offset)
+        .expect("frozen offset");
+    assert!(runs.iter().all(|run| {
+        (0..artifact.layout.n_chunks)
+            .all(|step| run[step * artifact.layout.n_slots + frozen_offset] == 2.0)
+    }));
+}
+
 // ── RK2 / RK4 integration loops (Task 2) ──────────────────────────────
 
 /// A logistic-growth model: `pop' = rate * pop * (1 - pop/capacity)`. The

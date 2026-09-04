@@ -10,15 +10,19 @@ The implementation is split across these modules in `src/simlin-engine/src/`:
 
 | Module | Responsibility |
 |--------|---------------|
-| `ltm.rs` | Causal graph construction, loop detection (Johnson's algorithm), static polarity analysis, cycle partitions |
-| `ltm_augment.rs` | Synthetic variable generation: link score and loop score equations |
+| `ltm/` | The vocabulary (`types.rs`: `Link`, `Loop`, polarity), `CausalGraph` (`graph.rs`), Johnson's circuit enumerator and Tarjan SCC (`indexed.rs`), cycle partitions (`partitions.rs`), static polarity analysis (`polarity.rs`) |
+| `db/ltm_ir.rs` | The reference-site classification IR: every reference's access shape and aggregate routing, decided once per variable |
+| `ltm_agg.rs` | Aggregate-node enumeration: each statically describable reducer subexpression as a node with a per-source read slice |
+| `db/analysis.rs` | Causal edges at variable and element level, tiered circuit enumeration, cycle partitions, detected loops |
+| `ltm_augment.rs` and `ltm_augment_*.rs` | Synthetic variable generation: the ceteris-paribus link score and loop score equations |
+| `db/ltm/` | Generation and compilation of the synthetic variables (`mod.rs` `model_ltm_variables`, `link_scores.rs`, `loops.rs`, `pinned.rs`, `equation.rs`, `compile.rs`, `parse.rs`) |
 | `ltm_finding.rs` | Post-simulation loop discovery for models too large for exhaustive enumeration: scoring, retention, ranking, and the cap |
 | `ltm_finding_enum.rs` | Discovery's exact candidate generator: union-graph elementary-circuit enumeration and its retention pass |
 | `ltm_finding_fallback.rs` | Discovery's shortest-path candidate generator, used when the enumeration cannot finish within its budgets or the caller's deadline |
 | `ltm_post.rs` | Post-simulation computation: normalizes loop scores into relative loop scores using the cycle-partition mapping produced during LTM compilation |
 
 The production entry point is the `model_ltm_variables` tracked function in
-`db/ltm.rs`, invoked as part of `compile_project_incremental`. LTM compilation
+`db/ltm/mod.rs`, invoked as part of `compile_project_incremental`. LTM compilation
 is controlled by two flags on `SourceProject`:
 
 - **`ltm_enabled`** -- When true, LTM synthetic variables are generated for every
@@ -41,7 +45,7 @@ supported via element-level graph expansion (see "Array Support" below).
 
 ## Key Data Structures
 
-### CausalGraph (`ltm.rs`)
+### CausalGraph (`ltm/graph.rs`)
 
 ```rust
 pub struct CausalGraph {
@@ -52,8 +56,10 @@ pub struct CausalGraph {
 }
 ```
 
-The adjacency-list representation of a model's causal structure. Built from a
-`ModelStage1` by `CausalGraph::from_model()`, which:
+The adjacency-list representation of a model's causal structure. Built from
+`model_causal_edges` by `db::analysis::causal_graph_from_edges` and its
+module-enriched twins, with `variables` the shared `db::model_lowered_variables`
+handle map (an `Arc<Variable>` per name); the edges:
 
 - Creates edges from each variable's equation dependencies to the variable itself
 - Handles stocks specially: edges come from inflows and outflows, not from the
@@ -64,18 +70,18 @@ The adjacency-list representation of a model's causal structure. Built from a
 - Normalizes module output references (e.g. `module·output`) to point to the
   module node itself via `normalize_module_ref()`
 
-### Link (`ltm.rs`)
+### Link (`ltm/types.rs`)
 
 A single causal connection between two variables, with a statically-analyzed
 polarity (`Positive`, `Negative`, or `Unknown`).
 
-### Loop (`ltm.rs`)
+### Loop (`ltm/types.rs`)
 
 A feedback loop: a list of `Link`s forming a closed path, the stocks it contains
 (including module-internal stocks), a polarity classification, and a deterministic
 ID (e.g., `r1`, `b2`, `u1`).
 
-### CyclePartitions (`ltm.rs`)
+### CyclePartitions (`ltm/partitions.rs`)
 
 Groups of stocks connected by feedback paths (strongly connected components in
 the stock-to-stock reachability graph). Each partition gets its own set of
@@ -295,7 +301,7 @@ For a link from `x` to `z` where `z = f(x, y, ...)`:
 3. Build the ceteris-paribus partial equation using `build_partial_equation()`,
    which parses the equation into an `Expr0` AST, recursively walks the tree
    wrapping variable references in `PREVIOUS()` for all dependencies except `x`
-   (`wrap_deps_in_previous`), and prints the result back to equation text. This
+   (`wrap_non_matching_in_previous`), and prints the result back to equation text. This
    AST-based approach avoids the pitfalls of text-based replacement (e.g.,
    replacing `x` inside `x_rate`, or corrupting function names like `MAX`).
 4. The link score is:
@@ -339,10 +345,10 @@ stock's contribution.
 ### Module Links
 
 `module_link_score_equation` in `db.rs` is the single source of truth for a
-module-involved link's equation, shared verbatim by the `(from, to)`-keyed
-`link_score_equation_text` and the per-shape `link_score_equation_text_shaped`
-(a module link's equation does not depend on the reference `RefShape`, so the
-two twins delegate to the same helper and can never drift). It handles three
+module-involved link's equation, read by the per-shape `shaped_link_score`
+for every `RefShape`
+(a module link's equation does not depend on the reference shape, so every
+shape delegates to the same helper and cannot drift). It handles three
 cases, each preferring a faithful link score and only falling back to the
 signed unit transfer when nothing better exists:
 
@@ -438,9 +444,9 @@ and the shared `db::analysis::model_variables_and_module_graphs` used by
 `causal_graph_from_element_edges_with_modules`) build a recursive internal
 sub-graph for **every** referenced sub-model -- DynamicModule and passthrough
 alike -- since the discovery-mode per-exit-port pathway recompute (GH #698)
-needs the passthrough's sub-graph too. (Before GH #698 only DynamicModules got a
-sub-graph, gated by a now-removed `classify_module_for_ltm` stock check; a
-pathless module's sub-graph enumerates no pathways, so building it is harmless.)
+needs the passthrough's sub-graph too; a pathless module's sub-graph enumerates
+no pathways, so building it is harmless. A stock-count gate on sub-graph
+construction must not come back: the recompute needs the passthrough's graph.
 The bare `causal_graph_from_element_edges` constructor still leaves `variables`
 / `module_graphs` empty -- it is used where module data is not needed; the
 production discovery path (`analyze_model`) uses the `_with_modules` enriching
@@ -448,11 +454,11 @@ variant.
 
 #### Passthrough composites and per-exit-port loop scoring (PR #684)
 
-`model_ltm_variables` no longer suppresses LTM vars for a stockless sub-model
-that has parent-visible input→output pathways: the stock-free early return now
-fires only when the model is genuinely STATELESS -- neither parent-level
-stocks, nor input-port pathways, nor (since GH #748) any transitively
-stock-carrying module instance (`modules_carry_state`). A parent-stock-free
+`model_ltm_variables` emits LTM vars for a stockless sub-model that has
+parent-visible input→output pathways: the stock-free early return fires only
+when the model is genuinely STATELESS -- neither parent-level stocks, nor
+input-port pathways, nor any transitively stock-carrying module instance
+(`modules_carry_state`, GH #748). A parent-stock-free
 *root* whose only state lives inside modules (a SMOOTH/DELAY instance or a
 user sub-model with an INTEG) therefore runs the pass and scores its loops; a
 truly stateless root -- with no parent reading `module·var`, hence no output
@@ -542,7 +548,7 @@ short-circuit to exactly `["output"]`) via the public
 `analysis::build_sub_model_output_ports`, so the recompute and emission are
 identity-by-construction. The db-less `discover_loops(&Results, &Project)`
 convenience path reconstructs the same set with the same project-wide-union +
-stdlib-output semantics (`project_sub_model_output_ports`). This is
+stdlib-output semantics (`analysis::build_sub_model_output_ports`). This is
 `recompute_module_input_edge_series` in `ltm_finding.rs`; it falls back to the
 base composite offset whenever the entry or exit port is indeterminate (e.g. an
 ambiguous multi-output reader), the sub-model is absent from the map, or no
@@ -561,16 +567,15 @@ in `db/analysis.rs`). Both that helper and `CausalGraph::from_model` (the
 `discover_loops` convenience path) build a sub-graph for **every** referenced
 sub-model, not only stockful `DynamicModule`s: a stockless passthrough emits
 pathway vars (PR #684) but otherwise has no sub-graph to consult; a pathless
-module's sub-graph enumerates no pathways and is harmless. (This is why the
-prior `classify_module_for_ltm` stock gate on sub-graph construction is gone.)
+module's sub-graph enumerates no pathways and is harmless.
 The element-level module nodes are keyed by the bare module instance name --
 the same key `module_graphs` and the module `Variable` use -- so the recompute's
-lookups resolve. `reconstruct_model_variables` reconstructs a module instance
-through `reconstruct_implicit_variable` (not the generic parse+lower path, which
-resolves inputs against an empty `scope.models` and so drops them), so the
-recompute can read a module's entry/exit ports off its preserved `ModuleInput`s
--- the same fix `reconstruct_single_variable` already applied for the exhaustive
-override.
+lookups resolve. A module instance's lowered form (`db::lowered_source_variable`,
+`db::lowered_implicit_variable`) is its wiring, resolved by
+`model::lower_variable`'s module arm through `db::build_module_inputs`, so the
+recompute reads a module's entry/exit ports off its `ModuleInput`s whether it
+reached the instance through the whole-model map or by name
+(`lowered_variable_by_name`).
 
 Because the discovery graph is element-level, an arrayed loop's non-module
 nodes carry element subscripts (`s[nyc] → m → growth[nyc]`).
@@ -582,12 +587,11 @@ which strips `link.from`/`link.to`/`next.from`/`next.to` (PR #705 r3353758167).
 The pathway vars stay namespaced by the bare module instance (`m·$⁚ltm⁚path…`),
 so they are looked up with the stripped module name. This defense is LIVE, not latent, since
 GH #716 closed. A scalar module output feeding an arrayed reader
-(`growth[Region] = m·pos`) used to emit a single scalar constant-0 link score
-that dropped the loop in discovery; such an edge is now scored per target
-element by `db::ltm::link_scores::try_implicit_scalar_to_arrayed_link_scores`,
-which also owns the per-element module INSTANCES that a per-element expansion
-mints (`$⁚growth⁚0⁚smth1⁚north`), whose partials were previously `scalarize`d
-onto element 0's arm. The unit-level
+(`growth[Region] = m·pos`) is scored per target element by
+`db::ltm::link_scores::try_implicit_scalar_to_arrayed_link_scores` (a single
+scalar constant-0 score would drop the loop in discovery), which also owns the
+per-element module INSTANCES a per-element expansion mints
+(`$⁚growth⁚0⁚smth1⁚north`), each scored at its own element. The unit-level
 `recompute_strips_element_subscripts_before_port_match` exercises the matching
 code directly, and `analyze_model_arrayed_module_loop_is_discovered_per_element`
 pins the end-to-end result: one loop per element of the reader, none crossing
@@ -643,12 +647,12 @@ score is the "LTM interface" of a module -- the parent model's link score for
    These are compiled and included as part of the incremental compilation
    pipeline via the salsa tracked function graph.
 
-3. **Pathway enumeration**: `enumerate_module_pathways()` in `ltm.rs` finds all
+3. **Pathway enumeration**: `CausalGraph::enumerate_module_pathways()` (`ltm/graph.rs`) finds all
    simple paths from each input port to the output variable within the module's
    internal causal graph. Input ports are identified as nodes with no incoming
    edges within the module. For smth1, the sole pathway is `input -> flow -> output`.
 
-4. **Composite selection**: `generate_max_abs_chain()` produces a deterministic
+4. **Composite selection**: `generate_max_abs_selection()` (`db.rs`) produces a deterministic
    nested selection equation. For a single pathway, this is just the pathway
    score. For multiple pathways, it generates a chain:
    `if ABS(p1) >= ABS(p2) then p1 else p2`.
@@ -686,7 +690,7 @@ module's internal graph.
 
 ### Static Polarity
 
-`analyze_link_polarity()` in `ltm.rs` determines link polarity from the compiled
+`analyze_link_polarity()` in `ltm/polarity.rs` determines link polarity from the compiled
 AST (`Ast<Expr2>`) at compile time. The recursive analysis
 (`analyze_expr_polarity_with_context`) handles:
 
@@ -735,14 +739,15 @@ AST (`Ast<Expr2>`) at compile time. The recursive analysis
   functions (`analyze_graphical_function_polarity`) -- checks consecutive
   y-values to decide if the table is monotonically increasing (Positive),
   decreasing (Negative), or neither (Unknown), then combines with the
-  argument's polarity. The strict-monotonicity test uses a y-range-relative
-  epsilon, `max(EPSILON, range_rel * (y_max - y_min))` (#492), so a near-flat
-  arm with imported numeric noise (`...12.0001, 12.0000, 12.0002...`) no longer
-  flips an otherwise-monotone curve to `Unknown`. Comparing the y-delta `dy`
-  rather than the slope `dy/dx` is correct for the sign question: a
-  piecewise-linear interpolation between y-points that increase consecutively
-  is monotone regardless of x-spacing (slope magnitude varies, its sign does
-  not), so non-uniform x-spacing cannot misclassify a valid table -- the only
+  argument's polarity. The strict-monotonicity test classifies each segment by
+  its slope `dy/dx` against the tolerance `1e-6 * (y_max - y_min) / avg_dx`,
+  `avg_dx` the average x-spacing (on a uniformly spaced table this is exactly
+  the y-range-relative epsilon of #492), so a near-flat arm with imported
+  numeric noise (`...12.0001, 12.0000, 12.0002...`) does not flip an
+  otherwise-monotone curve to `Unknown`, and a narrow steep segment on a
+  non-uniformly spaced table is still caught (GH #536). A degenerate
+  `x[i] == x[i-1]` segment is skipped as a duplicate point or, for a genuine
+  vertical step, classifies the curve `Unknown` -- the only
   exposure is a table whose x-points are themselves non-monotone, which is
   malformed input (GH #536 is narrower than its title suggests).
 - **Per-element graphical functions** (#502): when an *arrayed* source feeds an
@@ -1059,7 +1064,7 @@ World3 and C-LEARN, not by argument; the sweep tables are in the design plan's
   through both the seed AND that edge, the strength-weighted analogue of edge
   coverage. It is the lever that earns its cost. A closure whose two tree halves
   share a node is not elementary and is SKIPPED rather than spliced -- a spliced
-  walk is no longer the minimum-weight cycle through its edge, so it would not
+  walk is not the minimum-weight cycle through its edge, so it would not
   be the thing this policy claims to emit.
 - **Tie-break** (`FallbackTieBreak::{Hops, NodeId}`, default `Hops`). Under the
   clamp's zero-weight plateau many routes tie exactly, and something has to
@@ -1279,10 +1284,12 @@ reducer" decider), and buckets every `Expr2::Var` / `Expr2::Subscript`
 reference by its `(from, to)` causal edge into a `Vec<ClassifiedSite>`. Each
 `ClassifiedSite` carries:
 
-- `shape: RefShape` -- `Bare`, `FixedIndex(elems)`, `Wildcard`, or
-  `DynamicIndex` (the AST-walker helpers `classify_subscript_shape` /
-  `resolve_literal_index` / `classify_iterated_dim_shape` live in
-  `db/ltm_ir.rs`);
+- `shape: RefShape` -- `Bare`, `FixedIndex(elems)`, `PerElement(axes)`,
+  `Wildcard`, or `DynamicIndex` (the AST-walker helpers
+  `classify_subscript_shape` / `resolve_literal_index` /
+  `classify_iterated_dim_shape` live in `db/ltm_ir.rs`; a dimension-named
+  index is classified by the compiler's own per-axis rule,
+  `ltm_agg::classify_axis_access`);
 - `target_element: Option<String>` -- set when the reference is inside an
   `Ast::Arrayed` per-element expression, pinning the target node set to that
   one element tuple;
@@ -1317,6 +1324,7 @@ table for `Direct` sites:
 | arrayed | arrayed (partial collapse) | Bare | `from[d1,d2] -> to[d1]` (delegates to `expand_same_element`) |
 | arrayed | scalar | FixedIndex(elems) | `from[elems] -> to` (one edge) |
 | arrayed | arrayed | FixedIndex(elems) | `from[elems] -> to[d]` for each target element d |
+| arrayed | arrayed (iterated axes that do not reproduce the declared pairing) | PerElement(axes) | `from[..] -> to[e]` per target element, each axis through its executed correspondence |
 | arrayed | any | Wildcard / DynamicIndex | conservative full cross-product (N×M) |
 
 `Wildcard` covers a subscript with at least one `Wildcard` index, or all
@@ -1336,11 +1344,23 @@ indices are *exactly* the target equation's iterated (apply-to-all)
 dimensions, in the position matching the source's declared dimension order --
 `row_sum[Region]` inside `growth[Region, Age] = ... + row_sum[Region] * c`,
 where each index `d_i` either names the source's `i`-th dim or a dimension
-that *maps* to it (the AC3.5 mapped case) -- classifies as `Bare`, not
-`DynamicIndex`. Such a reference reads the *same* `Region` element of
-`row_sum` per iterated tuple, so `emit_edges_for_reference` projects it via
-`expand_same_element` (`row_sum[d1] -> growth[d1, d2]` for each `d2`), not
-the N×M cross-product. (A *sliced reducer argument* with the same shape --
+that *maps* to it (the AC3.5 mapped case) -- classifies as `Bare` when the
+two declared dimension lists reproduce that pairing (`db::bare_axis_pairing`:
+by name, by a declared mapping, by equal indexed size), and as `PerElement`
+carrying the per-axis reads otherwise (shared element names under no mapping,
+a subrange over a superset, a transposition) -- never `DynamicIndex`. The
+relations the pairing consults are the spelling's own (`db::BareSpelling`):
+pass 0's `DirectMappingsOnly` for a read in an equation body
+(`BareSpelling::Equation`), which withholds a mapping declared on a parent
+dimension, and the full context for a stock's flows (`BareSpelling::StockFlow`,
+the wiring's relations, which is how a flow declared over other dimensions than
+its stock's is integrated). Each axis is resolved as the compiler resolves it
+(`DimensionsContext::executed_read_correspondence`: the element's name first,
+then the declared element map, in either declaration direction). A `Bare`
+reference reads the *same* `Region` element of `row_sum` per iterated tuple,
+so `emit_edges_for_reference` projects it via `expand_same_element`
+(`row_sum[d1] -> growth[d1, d2]` for each `d2`), not the N×M cross-product;
+a `PerElement` one is projected per target element through its axes. (A *sliced reducer argument* with the same shape --
 `SUM(matrix[D1, *])` inside an A2A body over `D1` -- is a different path: it
 is hoisted into an arrayed agg by `enumerate_agg_nodes`, so its reference is
 `ThroughAgg` and its `Wildcard` shape is ignored. The iterated-dim `Bare`
@@ -1358,20 +1378,29 @@ positionally-MAPPED sliced reducer (`SUM(matrix[State, *])` over
 `matrix[Region, D2]` with a positional `State→Region` mapping, GH #534) is
 hoisted too: the `Iterated` axis carries the (target, source) dimension
 pair, the agg is arrayed over the TARGET dim (`State`), and each source row
-is remapped to the slot of its positionally-corresponding target element
+is remapped to the slot of the target element that reads it
 (`iterated_axis_slot_elements` -- the preimage of
-`positional_correspondence`, which is the right rule here because
-`matrix[State, *]` names the dimension the equation ITERATES and execution
-folds that to an ordinal; an explicit element map is therefore honoured as a
-DECLARED correspondence but not READ, GH #997). The only reducers *not*
-hoisted are the dynamic-index carve-out (`SUM(pop[idx, *])`, `idx`
-non-literal -- not statically describable, reclassified `DynamicIndex`), a
-pair with no declared correspondence at all, and a `MappedRead` axis
+`DimensionsContext::executed_read_correspondence`: `matrix[State, *]` names
+the dimension the equation ITERATES, the index survives to
+`IndexOp::ActiveDimRef`, and `build_view_from_ops` resolves it name-first,
+then through the declared element map, GH #997; a source element no target
+element reads -- a superset source read through a subrange -- is no row).
+A BARE arrayed argument reads what pass 0 spells for it (its axes paired with
+the enclosing iteration by `match_axes_partial` under `DirectMappingsOnly`,
+the rest reduced), so `SUM(matrix[D1, *] * frac)` and `SUM(other)` inside an
+A2A body hoist exactly as `frac[D1]` and `SUM(other[D1])` do. The only
+reducers *not* hoisted are the dynamic-index carve-out (`SUM(pop[idx, *])`,
+`idx` non-literal -- not statically describable, reclassified
+`DynamicIndex`), a pair with no correspondence at all, and a `MappedRead` axis
 (`SUM(matrix[Region, *])` naming a NON-iterated dimension, GH #997: its
 executed rule admits a many-to-one correspondence that the one-slot-per-row
 remap cannot express, so `compute_read_slice` declines it) -- all of which
 keep the conservative cross-product; a bare non-literal index
 (`arr[i+1]`) is a dynamic reference, not a reducer, so it stays conservative.
+A reducer the hoist declines still has its wildcard argument held live in its
+own edge's partial (`ltm_augment_occurrence::occurrence_realizes_shape`: the
+edge's `DynamicIndex` site is realized by the walker's `Wildcard` occurrence
+inside the reducer), with the co-sources frozen around it.
 Variable-backed aggs (`total_population = SUM(population[*])`) are already
 real nodes -- their edges come from the normal arrayed→scalar /
 scalar→arrayed reference walker -- so they are not rerouted.
@@ -1403,10 +1432,10 @@ becomes `population[NYC]`, `population[Boston]`, etc. When no variables in a
 model are arrayed, the element graph is identical to the variable graph (zero
 overhead).
 
-This per-reference design replaces the earlier `ElementDependencyKind`
-classifier that collapsed every reference between a `(from, to)` pair to a
-single kind. That collapse over-expanded fixed-index references to N^2 edges
-(resolving tech-debt #20) and forced the link-score partial equation to wrap
+A per-`(from, to)` classifier that collapses every reference between a pair
+to a single kind must not come back: that collapse over-expands fixed-index
+references to N^2 edges (tech-debt #20) and forces the link-score partial
+equation to wrap
 every reference uniformly in `PREVIOUS()`, breaking targets that mixed bare
 and reducer references (resolving tech-debt #26). Reducer references went
 through a brief intermediate stage -- a per-shape
@@ -1416,11 +1445,9 @@ link score is decomposed into the chain `source[d] → $⁚ltm⁚agg⁚{n} → t
 each link of which has a real per-element score (see "Aggregate Nodes"). The
 post-refactor measurements in
 `docs/design-plans/2026-04-25-ltm-per-ref-elem-graph.md` show that the
-element-graph SCC sizes that previously drove tech-debt #25's auto-flip
-pressure on FixedIndex models are no longer inflated by spurious edges,
-though `MAX_LTM_SCC_NODES = 50` was retained because WRLD3-class models trip
-the gate from variable-level cycle structure rather than element-graph
-artifacts.
+element-graph SCC sizes on FixedIndex models are not inflated by spurious
+edges; `MAX_LTM_SCC_NODES = 50` stands because WRLD3-class models trip the
+gate from variable-level cycle structure rather than element-graph artifacts.
 
 ### Aggregate Nodes
 
@@ -1435,11 +1462,17 @@ subexpression. The recognized set -- `SUM`, `MEAN` (single-arg), `MIN` /
 `MAX` (single-arg), `STDDEV`, `RANK`, `SIZE` -- and its `Linear` / `Nonlinear`
 / `Constant` classification live in one table, `reducer_kind` /
 `ReducerKind` in `ltm_agg.rs`; every other reducer-recognition site in the
-LTM machinery (the Expr0-walk-time `is_array_reducer_name`, `classify_reducer`,
-the static-polarity `agg_reducer_is_monotone`) is a thin reader of it, so the
-"is this a reducer" / "what kind" answers can't drift apart. AST-identical
-subexpressions (keyed by canonical printed equation text, since `Expr2` is
-not `Hash` and so cannot key a map directly) dedupe to one node.
+LTM machinery (`ltm_augment::is_array_reducer_name`, `classify_reducer`) is a
+thin reader of it, so the "is this a reducer" / "what kind" answers can't drift
+apart; the static-polarity walk (`ltm/polarity.rs`) matches the reducer
+builtins by variant for their monotonicity, a per-variant semantic rather than
+a recognition. A node's identity is its SPELLED reducer -- the reducer with each bare arrayed
+argument's pass-0 subscripts written out -- printed (`AggNodesResult::synthetic_by_key`;
+`Expr2` is not `Hash`, so the printed form keys the map): two owners whose
+spelled reducers print alike share a node, while `SUM(pop)` in a scalar owner
+(`sum(pop)`, the whole array) and under a `region` iteration
+(`sum(pop[region])`) are two nodes. A reducer's text is resolved to a node only
+among its owner's own nodes (`by_var`), never across owners.
 
 **Read slice and result dims.** Each `AggNode` carries a
 `read_slice: Vec<AxisRead>` -- one `AxisRead ∈ {Pinned(elem), Iterated(dim),
@@ -1455,9 +1488,14 @@ scalar). `compute_read_slice` decides hoistability per axis:
   `Iterated{dim, source_dim}` (the agg's result varies per element of the
   TARGET dim `dim`; `dim == source_dim` for the literal case);
 - a literal element name / 1-based integer ⇒ `Pinned(elem)`;
-- anything else (`@N`, `Range`, a non-literal `Expr`, an iterated dim whose
-  mapping is element-mapped, reverse-declared, or non-positional) ⇒ `None`
-  -- the reducer is not statically describable, so it is not hoisted.
+- a dimension name the target does NOT iterate, paired with exactly one
+  iterated dimension through a declared mapping (GH #997) ⇒ `MappedRead`, a
+  direct-reference verdict only: `compute_read_slice` declines a reducer
+  slice containing one, since its correspondence may be many-to-one and the
+  slot remap needs a bijection;
+- anything else (`@N`, `Range`, a non-literal `Expr`, an undeclared pair with
+  disjoint element names, a positional mapping between different sizes) ⇒
+  `None` -- the reducer is not statically describable, so it is not hoisted.
 
 So `SUM(pop[*])` ⇒ all-`Reduced`, `result_dims = []` (a scalar agg);
 `SUM(pop[NYC, *])` over `pop[Region, Age]` ⇒ `[Pinned(nyc), Reduced]`,
@@ -1468,18 +1506,16 @@ slot per `D1` element); `SUM(matrix3d[D1, NYC, *])` over an A2A-`D1` body ⇒
 `matrix[Region, D2]` inside an A2A body over `State` (positional
 `State→Region` mapping) ⇒ `[Iterated{state, region}, Reduced]`,
 `result_dims = [State]` -- the agg is arrayed over the TARGET's iterated
-dim, and the emitters remap each source row to the slot of its
-positionally-corresponding target element (`iterated_axis_slot_elements`,
-the preimage inversion of `positional_correspondence`, the rule the ITERATED
-spelling gets). The carve-outs (tracked tech debt;
+dim, and the emitters remap each source row to the slot of the target
+element that reads it (`iterated_axis_slot_elements`, the preimage
+inversion of `executed_read_correspondence`, the one rule every
+dimension-named spelling gets). The carve-outs (tracked tech debt;
 the conservative cross-product / coarse link score stays in place) are: a
 reducer over a *dynamic index* (`SUM(pop[idx, *])`, `idx` non-literal -- the
 IR reclassifies its reference to `DynamicIndex`); a mapped sliced reducer
-the correspondence declines -- a pair with no declared correspondence, or a
-`MappedRead` axis whose executed rule the slot remap cannot invert
-(GH #997) -- or a mapping declared
-only in the reverse direction (on the source's dimension; GH #757 tracks
-that direction's classification); and a multi-source reducer whose arrayed
+the correspondence declines -- a pair with no declared correspondence, a
+many-to-one map, or a `MappedRead` axis whose executed rule the slot remap
+cannot invert (GH #997); and a multi-source reducer whose arrayed
 args read incompatible slices (`combined_read_slice` returns `None` on
 disagreement -- a multi-source reducer whose args *agree*, `SUM(a[*] +
 b[*])` over the same dim, mints one agg carrying the combined slice and
@@ -1555,9 +1591,8 @@ papers, they're machinery, not a variable the modeler authored. The discovery
 and exhaustive paths report each `FoundLoop` / `Loop` with the synthetic agg
 nodes trimmed out of the node sequence (the loop-score equation, however, is
 the product of the *un-trimmed* link-score chain, so the agg's two halves are
-both factored in). This resolves GH #503: a cross-element loop through a
-reducer is no longer normalized by the wrong (diagonal A2A) link score; the
-denominator is naturally Δ(aggregate).
+both factored in). This is GH #503's rule: a cross-element loop through a
+reducer is normalized by Δ(aggregate), not by the diagonal A2A link score.
 
 ### Link Score Classification
 
@@ -1625,8 +1660,9 @@ path silently collapsed the per-element `Equation::Arrayed` to the first
 slot's text, since `link_score_dimensions` returned `[]` for the disjoint
 edge.) If the target references the source via a *non-literal* index (a
 `DynamicIndex` site) the edge is not statically scoreable:
-`emit_unscoreable_disjoint_edge_warning` accumulates a `CompilationDiagnostic`
-`Warning` naming the edge, *no* link-score variable is emitted, and the caller
+`emit_unscoreable_disjoint_edge_warning` records a `Warning` naming the edge
+on the derivation's facts (`LtmVariablesResult::diagnostics`), *no* link-score
+variable is emitted, and the caller
 does not fall through to the per-shape fallback (which would build the
 misleading scalarized stand-in).
 
@@ -1670,7 +1706,7 @@ different cycle partitions (the slot's stocks differ). Relative loop scores are
 derived post-simulation by `compute_rel_loop_scores` consumers (e.g.
 `libsimlin::analysis`), normalizing each `(partition, slot)` loop score against
 the sum of absolute scores in that partition at that slot -- so an independent
-A2A loop's normalization no longer cross-pollutes a sibling A2A loop that
+A2A loop's normalization does not cross-pollute a sibling A2A loop that
 happens to share a loop ID but lives in a different partition.
 
 **Cross-element / mixed loops**: Circuits containing scalar nodes or with
@@ -1909,13 +1945,18 @@ cases remain deliberate carve-outs:
   non-literal/computed index -- `SUM(pop[idx, *])` with a dynamic `idx`,
   `arr[i+1]` -- is not statically describable, so it is not hoisted into an
   aggregate node; its reference stays on the conservative `DynamicIndex`
-  cross-product path (a coarse `from[d] → to[e]` for every pair). Related: a
-  scalar feeder of a hoisted reducer whose target is also scalar bypasses
-  `ThroughAgg` routing on the both-scalar fast path (GH #533), and mapped-
-  dimension sliced reducers (`SUM(matrix[State, *])` over `matrix[Region, D2]`
-  with a `State→Region` mapping) decline hoisting because the `Iterated`-driven
-  machinery assumes the agg result axis and the source row axis are literally
-  the same dimension (GH #534).
+  cross-product path (a coarse `from[d] → to[e]` for every pair), and the
+  link score keeps the delta-ratio stand-in with no diagnostic.
+- **Two executed reads are declined rather than described.** The ordinal
+  fallback of an undeclared pair with disjoint element names at equal
+  cardinality (GH #527, a read Vensim rejects) is declined loudly, never
+  described positionally; and a bare reducer argument in a per-element
+  (`Ast::Arrayed`) slot reads the row its element pins while the only node its
+  identity mints is the whole array, so the slot's edge is declined loudly
+  (GH #792) rather than scored against that node -- the exact per-slot node is
+  the tracked follow-up. A plain bare read of a shared-name pair under no
+  mapping, or of a pair related only through a parent mapping, is described as
+  the broadcast (a superset of the executed read) with its score declined.
 - **RANK keeps the delta-ratio approximation.** RANK is an order statistic --
   non-differentiable and unreachable as a real scalar/A2A reducer RHS (it
   returns an array) -- so its link score is the delta-ratio stand-in, pinned by
@@ -1928,15 +1969,7 @@ cases remain deliberate carve-outs:
   `agg_recovery_truncated`, and emits a `Warning`.
 - **Multi-dim per-element graphical-function polarity is conservative.** A
   per-element graphical function over a single dimension gets per-element static
-  polarity (#502); over more than one dimension it stays `Unknown`. The
-  monotonicity check itself compares the y-delta `dy`, not the slope `dy/dx`,
-  so a non-uniform x-spacing can still misclassify (GH #536).
-- **Smaller magnitude/over-conservatism nits.** A transposed non-live array
-  dependency's magnitude estimate in an A2A link-score partial can be
-  imprecise (GH #526); `expand_same_element` takes the full cross-product
-  instead of the positional-mapping diagonal for mapped dimensions (GH #527);
-  and the partial-iterated arrayed subscript in an A2A link-score partial
-  fails to compile because the `PREVIOUS` argument must be a `Var` (GH #525).
+  polarity (#502); over more than one dimension it stays `Unknown`.
 
 ## Divergences from the Papers
 
@@ -1965,21 +1998,22 @@ cases remain deliberate carve-outs:
    exhaustive enumeration on a composite (max-score) network. The implementation
    does not build that composite pre-reduction: `ltm_enabled` runs exhaustive
    enumeration and `ltm_discovery_mode` runs `discover_loops()`. However,
-   `model_ltm_variables` in `src/simlin-engine/src/db/ltm.rs` does automatically
+   `model_ltm_variables` in `src/simlin-engine/src/db/ltm/mod.rs` does automatically
    switch from exhaustive to discovery in two phases. The early gate fires on
    the variable-level causal graph's largest SCC (cheap Tarjan, no Johnson
    yet). The late gate fires on the slow-path element-level subgraph's largest
    SCC, computed inside `model_loop_circuits_tiered` after variable-level
    cycles are classified. Both gates use `MAX_LTM_SCC_NODES` (currently 50,
-   defined in `src/simlin-engine/src/ltm.rs`). Above either size, Johnson
+   defined in `src/simlin-engine/src/ltm/mod.rs`). Above either size, Johnson
    circuit enumeration blows past reasonable memory and time budgets on its
    own; see `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md` and
    `docs/design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md`
    for the measurements. (The legacy per-loop relative-score equation synthesis
    compounded this with an O(P^2) text blowup; moving the normalization
    post-simulation -- divergence 6 below -- removed that factor from
-   augmentation cost.) Auto-flip emits a `CompilationDiagnostic` at
-   `Warning` severity so callers can surface the fallback to users.
+   augmentation cost.) Auto-flip records a `Warning` on the derivation's
+   facts (`LtmVariablesResult::diagnostics`, emitted once per model by
+   `db::model_all_diagnostics`) so callers can surface the fallback to users.
 
    The node-count gates alone do not bound enumeration cost -- elementary-
    circuit count is super-exponential in SCC *density*, not node count (a
@@ -2047,7 +2081,7 @@ cases remain deliberate carve-outs:
 
 ### Unit Tests
 
-- **`ltm.rs`**: Loop detection on known models (reinforcing, balancing, no-loop,
+- **`ltm/`** (`ltm/tests.rs`, `ltm/polarity_tests.rs`): Loop detection on known models (reinforcing, balancing, no-loop,
   module, multi-module), polarity analysis (AST expressions including addition,
   subtraction, multiplication, division, unary negation, IF-THEN-ELSE, graphical
   functions, arrayed equations, Max/Min builtins), flow-to-stock polarity, runtime

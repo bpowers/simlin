@@ -2,21 +2,35 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Captures: the `PREVIOUS`/`INIT` arguments the parse hoists out of their
-//! call, and the identity every synthesized helper is filed under.
+//! What one variable's parse synthesizes -- the `PREVIOUS`/`INIT` arguments it
+//! hoists out of their call, the module instances a stdlib or macro call
+//! expands into and the call arguments hoisted for them -- and the identity
+//! every one of them is filed under.
+//!
+//! Every helper is parsed DATA. A [`Capture`] and a [`HoistedArg`] carry an
+//! `Expr0` subtree, an [`ImplicitModule`] carries its target model and its
+//! input wiring, and [`ImplicitVar::parsed_variable`] is the one way a
+//! consumer turns any of them back into the parse-stage variable it stands
+//! for. Nothing prints a helper to equation text and parses it back, and
+//! nothing rewrites a helper's body: a body written inside an apply-to-all
+//! keeps the axes it was written for ([`CaptureShape::ApplyToAll`]) or the
+//! element it was expanded for ([`crate::variable::ElementScope`]), and
+//! lowering resolves it there.
 //!
 //! `PREVIOUS`/`INIT` compile to opcodes that read a fixed slot or a static
 //! view of the snapshot regions. An argument that addresses neither
 //! ([`crate::snapshot_arg::SnapshotAccess::Capture`]) has to be evaluated into
 //! storage of its own first, and that storage is a *capture*: a hidden
-//! per-callsite evaluation unit whose body is the argument.
+//! per-callsite evaluation unit whose body is the argument. A module instance's
+//! input ports likewise read variables by NAME, so a call argument that is not
+//! already a bare identifier is hoisted into an aux of its own.
 //!
 //! A capture carries the argument as an AST subtree. Its identity is
 //! positional -- the parent variable it was hoisted out of, plus the walk
 //! counter `id` the visitor was at -- and every stage downstream of the parse
 //! consumes the subtree directly.
 //!
-//! **Never route a capture's body through the printer and the lexer.** Whenever
+//! **Never route a helper's body through the printer and the lexer.** Whenever
 //! those two disagree about one spelling, a legal model stops compiling, and the
 //! quiet half of that class is worse than the loud half: an `If` printed bare
 //! under an operator re-parses with the operator moved inside its else branch,
@@ -34,13 +48,14 @@
 //! plus the active element. Internal code addresses a capture by `(parent,
 //! id)`; only the stages listed above use the name.
 
-use crate::ast::{Ast, Expr0, print_eqn};
-use crate::builtins_visitor::{empty_macro_registry, instantiate_implicit_modules};
-use crate::common::{Canonical, EquationError, Ident};
+use indexmap::IndexMap;
+
+use crate::ast::{Ast, Expr0};
+use crate::common::{Canonical, EquationError, ErrorCode, Ident};
 use crate::datamodel;
 use crate::dimensions::DimensionsContext;
-use crate::model::VariableStage0;
-use crate::variable::{VarKind, Variable, get_dimensions};
+use crate::model::ParsedVariable;
+use crate::variable::{ElementScope, VarKind, Variable, get_dimensions};
 
 /// The name a synthesized helper of `parent` is filed under.
 ///
@@ -71,33 +86,92 @@ pub(crate) fn synthetic_ident(parent: &str, n: usize, part: &str, suffix: Option
     }
 }
 
-/// Which builtin's argument a capture holds.
+/// The element suffix of a per-element helper's name: the active element's
+/// coordinates joined by `,`, lowercased -- the one spelling of an element
+/// tuple the helper names carry.
+pub(crate) fn element_suffix(scope: &ElementScope) -> String {
+    scope
+        .element
+        .iter()
+        .map(|e| e.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Which snapshot builtins read a capture's storage, and therefore which
+/// phases have to evaluate it: a capture's kind is its phase demand.
 ///
-/// The two differ in how the dependency graph schedules them -- a `Previous`
-/// capture carries no edge from its parent in either phase, an `Init` capture
-/// keeps the parent's initial edge and is seeded into the initials runlist --
-/// but that difference is derived from the parent's own classification rather
-/// than read from here. This field records what the call was, so a later
-/// change that wants to treat the two differently (taking `Init` captures out
-/// of the flows runlist, which is a shape change with its own ledger row) has
-/// the fact in hand rather than having to re-derive it from the parent's AST.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// `PREVIOUS` reads the prior step's committed value, so its capture is
+/// refreshed in flows and needs no initial evaluation -- every read before the
+/// first snapshot exists takes the intrinsic's fallback. `INIT` reads the
+/// frozen initial-values snapshot, so its capture is populated once, in
+/// initials, and has no flow fragment unless a per-step definition reads its
+/// current value (`db::dep_graph::model_dependency_graph` decides both). The
+/// dt and active-initial passes of one variable restart the walk counter, so
+/// they can mint the same positional storage for different consumers; one
+/// capture then serves both and its demand is the union
+/// ([`Capture::merge_same_definition`]).
+// `Debug` is unconditional: `db::ImplicitVarDeps` derives it in every build
+// and carries a `CaptureKind`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaptureKind {
     Previous,
     Init,
+    PreviousAndInit,
 }
 
 impl CaptureKind {
-    /// The builtin this capture was hoisted out of, spelled as a model writes
-    /// it. No production caller: `Debug` is feature-gated crate-wide, so the
-    /// tests that pin each capture shape's kind need a printable spelling.
+    /// The consumer, spelled as a model writes it; a shared capture names
+    /// both. No production caller: `Debug` is feature-gated crate-wide, so
+    /// the tests that pin each capture shape's kind need a printable spelling.
     pub fn as_str(self) -> &'static str {
         match self {
             CaptureKind::Previous => "PREVIOUS",
             CaptureKind::Init => "INIT",
+            CaptureKind::PreviousAndInit => "PREVIOUS+INIT",
         }
     }
+
+    /// The storage is refreshed every step, ahead of the snapshot a
+    /// `PREVIOUS` reads.
+    pub const fn needs_flows(self) -> bool {
+        matches!(self, CaptureKind::Previous | CaptureKind::PreviousAndInit)
+    }
+
+    /// The storage is populated in initials, ahead of the snapshot an `INIT`
+    /// reads.
+    pub const fn needs_initials(self) -> bool {
+        matches!(self, CaptureKind::Init | CaptureKind::PreviousAndInit)
+    }
+
+    const fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (CaptureKind::Previous, CaptureKind::Previous) => CaptureKind::Previous,
+            (CaptureKind::Init, CaptureKind::Init) => CaptureKind::Init,
+            _ => CaptureKind::PreviousAndInit,
+        }
+    }
+}
+
+/// The storage a capture occupies and the context its body is resolved in --
+/// decided by where the `PREVIOUS`/`INIT` call was written.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
+pub enum CaptureShape {
+    /// A scalar equation's argument: one slot, a scalar body.
+    Scalar,
+    /// An apply-to-all body's argument, kept structural: one slot per element
+    /// of the parent's declared axes (canonical dimension names), the body
+    /// resolved per element by the same apply-to-all lowering the parent gets,
+    /// and read back by the parent as `capture[Dim..]` -- the reference that
+    /// leaves each axis standing for lowering to pin to the active element.
+    ApplyToAll(Vec<String>),
+    /// One element's argument, minted while the parent's body was walked for
+    /// that element -- a module-bearing apply-to-all body, an explicit
+    /// `Ast::Arrayed` slot, or a module-bearing EXCEPT default materialized
+    /// for a slot no explicit element claims: one slot, a scalar body
+    /// resolved as that element (`ElementScope`).
+    Element(ElementScope),
 }
 
 /// One `PREVIOUS`/`INIT` argument, hoisted into its own unit of evaluation.
@@ -113,40 +187,32 @@ pub struct Capture {
     /// identity; the name is derived from it.
     id: usize,
     kind: CaptureKind,
-    /// The argument, exactly as the walk left it -- already dimension-
-    /// substituted for a scalar capture in an apply-to-all body, and
-    /// deliberately NOT substituted for an arrayed one, so a bare arrayed name
-    /// inside it keeps its array shape (GH #541).
+    /// The argument, exactly as the walk left it: a subscript naming an axis
+    /// of the parent stays that subscript, and lowering resolves it under the
+    /// shape's axes or element.
     arg: Expr0,
-    /// The active apply-to-all element, when this capture is one element's own.
-    suffix: Option<String>,
-    /// The canonical dimension names an arrayed capture applies over; empty for
-    /// a scalar one. An arrayed capture occupies one slot per element and is
-    /// read back per element by the rewritten call, so every consumer that
-    /// lays it out or subscripts it needs its declared shape.
-    dims: Vec<String>,
+    shape: CaptureShape,
 }
 
 impl Capture {
     /// Mint the capture for one `PREVIOUS`/`INIT` call of `parent`.
-    ///
-    /// `dims` empty makes a scalar capture; non-empty makes the arrayed one
-    /// (GH #541), whose body is held unsubstituted over those dimensions.
     pub(crate) fn new(
         parent: &str,
         id: usize,
         kind: CaptureKind,
         arg: Expr0,
-        suffix: Option<String>,
-        dims: Vec<String>,
+        shape: CaptureShape,
     ) -> Self {
+        let suffix = match &shape {
+            CaptureShape::Element(scope) => Some(element_suffix(scope)),
+            CaptureShape::Scalar | CaptureShape::ApplyToAll(_) => None,
+        };
         Capture {
             ident: synthetic_ident(parent, id, "arg0", suffix.as_deref()),
             id,
             kind,
             arg,
-            suffix,
-            dims,
+            shape,
         }
     }
 
@@ -166,17 +232,21 @@ impl Capture {
         &self.arg
     }
 
-    pub fn suffix(&self) -> Option<&str> {
-        self.suffix.as_deref()
+    pub fn shape(&self) -> &CaptureShape {
+        &self.shape
     }
 
-    /// The canonical dimension names this capture applies over; empty when it
-    /// is scalar.
+    /// The canonical dimension names this capture's STORAGE applies over;
+    /// empty when it is one slot.
     pub fn dims(&self) -> &[String] {
-        &self.dims
+        match &self.shape {
+            CaptureShape::ApplyToAll(dims) => dims,
+            CaptureShape::Scalar | CaptureShape::Element(_) => &[],
+        }
     }
 
-    /// Do these two captures define the same value?
+    /// Absorb another capture that defines the same value: `true` when it
+    /// does, after which this capture's phase demand covers both consumers.
     ///
     /// Source position is deliberately excluded. A helper's identity has always
     /// been its BODY, not where the body was written: the apply-to-all
@@ -187,138 +257,254 @@ impl Capture {
     /// on a model that compiles today. `PartialEq` keeps positions, because
     /// salsa uses it to decide whether a re-parse changed anything and a moved
     /// span does change the diagnostics.
-    pub(crate) fn same_definition(&self, other: &Self) -> bool {
-        self.ident == other.ident
-            && self.kind == other.kind
-            && self.suffix == other.suffix
-            && self.dims == other.dims
-            && self.arg.eq_ignoring_loc(&other.arg)
-    }
-
-    /// The `datamodel::Equation` this capture stands for.
     ///
-    /// The only field of a parsed variable that is source text rather than an
-    /// AST is `Variable::eqn`, and a capture has no source text of its own, so
-    /// it prints its subtree here. Two consumers read it, both in LTM's
-    /// link-score generator, and both are why the field is filled rather than
-    /// left empty:
-    ///
-    /// * `ltm_augment::target_equation_dims` takes an ARRAYED target's
-    ///   datamodel-cased dimension names off it, and a link score whose target
-    ///   reports no dimensions is generated scalar;
-    /// * `ltm_augment::scalar_or_a2a_target_expr` falls back to
-    ///   `scalar_eqn_text_or_zero` and RE-PARSES this text whenever the target
-    ///   has no lowered AST. A capture can reach it that way:
-    ///   `db::analysis::reconstruct_implicit_variable` lowers every capture
-    ///   through `model::lower_variable`, which is total and discards the AST
-    ///   on a lowering error.
-    ///
-    /// So this text is parsed again on one path, and the deleted round trip is
-    /// the one on the COMPILE path, not every round trip in the engine. LTM's
-    /// ordinary link-score generation prints the target's LOWERED body
-    /// (`patch::expr2_to_expr0` + `print_eqn`) and re-parses it at
-    /// `db::ltm::equation::LtmArm::new` -- the GH #965 generated-text boundary,
-    /// which applies to every variable, captures included, and which this
-    /// module does not touch.
-    fn datamodel_equation(&self) -> datamodel::Equation {
-        let text = print_eqn(&self.arg);
-        if self.dims.is_empty() {
-            datamodel::Equation::Scalar(text)
-        } else {
-            datamodel::Equation::ApplyToAll(self.dims.clone(), text)
+    /// The kind is excluded too, and unioned instead: the same storage read by
+    /// a `PREVIOUS` in the dt equation and by an `INIT` in the active-initial
+    /// equation is one value evaluated in both phases, not two helpers
+    /// claiming one name.
+    pub(crate) fn merge_same_definition(&mut self, other: &Self) -> bool {
+        let same = self.ident == other.ident
+            && self.shape == other.shape
+            && self.arg.eq_ignoring_loc(&other.arg);
+        if same {
+            self.kind = self.kind.union(other.kind);
         }
+        same
     }
 
     /// This capture as the parse-stage variable it stands for.
     ///
-    /// Equivalent to what `variable::parse_var` produces for the synthesized
-    /// helper aux, minus the lexing and parsing: a plain, non-negative,
-    /// non-flow aux with no graphical function, no initial-phase equation of
-    /// its own, and no units. `db::capture_tests` pins the equivalence against
-    /// `parse_var` over the printed equation for every capture shape, so the
-    /// two cannot drift.
-    ///
     /// A dimension name this capture cannot resolve is recorded as an equation
     /// error and discards the AST, exactly as the parse does: the caller's
     /// loud-safe `None` then keeps the helper out of the compile rather than
-    /// laying it out at the wrong size.
-    ///
-    /// Any span such an error carries indexes the PARENT's equation text, since
-    /// that is where the subtree was written -- where a re-parse of the printed
-    /// helper indexed the printed text. Nothing observes the difference today:
-    /// `db::fragment_compile::lower_implicit_var` returns `None` on any error
-    /// here, and the helper surfaces through `assemble_module`'s batch
-    /// "failed to compile fragments" message, which names the helper rather
-    /// than rendering a snippet.
-    ///
-    /// The body goes through `instantiate_implicit_modules` because a parse of
-    /// it does, and the visitor is not a no-op on it: its
-    /// per-element gate fires on a bare `PREVIOUS`/`INIT` as well as on a
-    /// module call, so an ARRAYED capture whose body holds one becomes an
-    /// `Ast::Arrayed` of identical elements rather than staying an
-    /// `Ast::ApplyToAll`. That expansion decides the fragment's shape, so
-    /// skipping it here would change the compiled artifact. (Keeping the
-    /// `ApplyToAll` is a deliberate shape change with its own ledger row, not
-    /// a side effect of moving the body off text.) A second generation of
-    /// helpers is impossible -- a capture body is already walked -- and is
-    /// asserted rather than assumed.
-    pub(crate) fn variable_stage0(&self, dimensions: &DimensionsContext) -> VariableStage0 {
-        let ident = Ident::<Canonical>::new(&self.ident);
-        let mut errors: Vec<EquationError> = Vec::new();
-        let ast = if self.dims.is_empty() {
-            Some(Ast::Scalar(self.arg.clone()))
-        } else {
-            match get_dimensions(dimensions, &self.dims) {
-                Ok(dims) => Some(Ast::ApplyToAll(dims, self.arg.clone())),
-                Err(err) => {
-                    errors.push(err);
-                    None
-                }
-            }
+    /// laying it out at the wrong size. See [`subtree_parsed_variable`] for
+    /// what the body is.
+    fn parsed_variable(&self, dimensions: &DimensionsContext) -> ParsedVariable {
+        let (ast, scope, errors) = match &self.shape {
+            CaptureShape::Scalar => (Some(Ast::Scalar(self.arg.clone())), None, Vec::new()),
+            CaptureShape::Element(scope) => (
+                Some(Ast::Scalar(self.arg.clone())),
+                Some(scope.clone()),
+                Vec::new(),
+            ),
+            CaptureShape::ApplyToAll(dims) => match get_dimensions(dimensions, dims) {
+                Ok(resolved) => (
+                    Some(Ast::ApplyToAll(resolved, self.arg.clone())),
+                    None,
+                    vec![],
+                ),
+                Err(err) => (None, None, vec![err]),
+            },
         };
-        let ast = ast.and_then(|ast| {
-            match instantiate_implicit_modules(
-                ident.as_str(),
-                ast,
-                Some(dimensions),
-                // The same four model-level facts a parse of a synthesized
-                // helper has always been given: none of them. A capture body
-                // names no module the parent's walk did not already resolve,
-                // and it is not a macro body.
-                None,
-                None,
-                empty_macro_registry(),
-                None,
-            ) {
-                Ok((ast, nested)) => {
-                    debug_assert!(
-                        nested.is_empty(),
-                        "a capture body must synthesize no further helpers"
-                    );
-                    Some(ast)
-                }
-                Err(err) => {
-                    errors.push(err);
-                    None
-                }
-            }
-        });
+        subtree_parsed_variable(&self.ident, ast, scope, errors)
+    }
+}
 
-        Variable {
+/// The parse-stage variable of a helper whose body is an `Expr0` subtree -- a
+/// [`Capture`] or a [`HoistedArg`].
+///
+/// Equivalent to what `variable::parse_var` produces for the helper aux, minus
+/// the lexing and parsing: a plain, non-negative, non-flow aux with no
+/// graphical function, no initial-phase equation of its own (the parse produces
+/// none for a `Scalar`/`ApplyToAll` equation without an `ACTIVE INITIAL`), and
+/// no units. `db::capture_tests::a_captures_fragment_is_its_argument_compiled`
+/// and `db::implicit_module_tests::a_hoisted_arguments_fragment_is_the_argument_compiled`
+/// are the measurement: a helper and a sibling aux holding the same expression
+/// compile to identical bytecode.
+///
+/// `Variable::eqn` is the one field of a parsed variable that is source text
+/// rather than an AST, and a helper has none: its body is the subtree, and a
+/// printed projection of it would be engine-generated text that some reader
+/// would eventually parse again (the GH #965 boundary). The LTM generators
+/// read a target's dimensions and body off `ast()` and keep an `eqn` arm for
+/// SOURCE variables only, whose text is user-authored.
+///
+/// Any span an error here carries indexes the PARENT's equation text, since
+/// that is where the subtree was written, and that is how it is rendered:
+/// `db::fragment_compile::compile_implicit_var_fragment` reports the errors
+/// against the parent, so the snippet underlines the argument inside the
+/// parent's equation.
+///
+/// The body is not walked again. The parent's walk visited every node of it
+/// and every decision that walk makes is final: a call's arguments are walked
+/// before the call itself, so each `PREVIOUS`/`INIT` left in the body was
+/// routed to a direct read under the parent's snapshot-index facts and its
+/// declared axes, and a second walk here -- which has no owning model to ask
+/// -- could only re-decide such a read against a different rule and mint a
+/// helper the parent never filed.
+fn subtree_parsed_variable(
+    ident: &str,
+    ast: Option<Ast<Expr0>>,
+    element_scope: Option<ElementScope>,
+    errors: Vec<EquationError>,
+) -> ParsedVariable {
+    Variable {
+        ident: Ident::<Canonical>::new(ident),
+        units: None,
+        eqn: None,
+        diagnostics: errors
+            .into_iter()
+            .map(crate::diagnostic::DiagnosticError::Equation)
+            .collect(),
+        kind: VarKind::Aux {
+            ast,
+            // A helper's body is one expression. It has no separate
+            // initial-phase equation, so both phases run it.
+            init_ast: None,
+            tables: vec![],
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+            element_scope,
+        },
+    }
+}
+
+/// One module-call argument that is not a bare identifier, hoisted into an aux
+/// the instance's input port reads by name.
+///
+/// A bare identifier argument produces no `HoistedArg` at all -- it wires
+/// straight to its port -- so the `arg{i}` in the name is the argument's
+/// position in the CALL, not in any list of hoisted arguments, and
+/// [`ImplicitModule::references`] does not correspond one-to-one with the
+/// hoisted arguments of its call. The exceptions are the two bare names a
+/// scalar port cannot read directly: an arrayed variable and a dimension name,
+/// which under a per-element expansion mean one element's value, and are
+/// hoisted into a helper scoped to that element so lowering reads it.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
+pub struct HoistedArg {
+    /// The name every name-keyed stage files this argument under, derived by
+    /// [`synthetic_ident`] from the call's `(parent, id)`, the argument's
+    /// position and the active element; see [`Capture::ident`] for why one
+    /// exists.
+    ident: String,
+    /// The argument, exactly as the walk left it.
+    arg: Expr0,
+    /// The element this argument is one element of, when the parent is
+    /// expanded per element; `None` for a scalar parent's argument.
+    scope: Option<ElementScope>,
+}
+
+impl HoistedArg {
+    /// Mint the helper for argument `index` of the call `parent`'s walk is at
+    /// counter `id`, for element `scope` when the parent is walked per
+    /// element.
+    pub(crate) fn new(
+        parent: &str,
+        id: usize,
+        index: usize,
+        arg: Expr0,
+        scope: Option<ElementScope>,
+    ) -> Self {
+        let suffix = scope.as_ref().map(element_suffix);
+        HoistedArg {
+            ident: synthetic_ident(parent, id, &format!("arg{index}"), suffix.as_deref()),
+            arg,
+            scope,
+        }
+    }
+
+    pub fn ident(&self) -> &str {
+        &self.ident
+    }
+
+    pub fn arg(&self) -> &Expr0 {
+        &self.arg
+    }
+
+    pub fn scope(&self) -> Option<&ElementScope> {
+        self.scope.as_ref()
+    }
+
+    /// Do these two hoisted arguments define the same value? Source position
+    /// is excluded for the reason [`Capture::merge_same_definition`] gives.
+    pub(crate) fn same_definition(&self, other: &Self) -> bool {
+        self.ident == other.ident
+            && self.scope == other.scope
+            && self.arg.eq_ignoring_loc(&other.arg)
+    }
+
+    fn parsed_variable(&self) -> ParsedVariable {
+        subtree_parsed_variable(
+            &self.ident,
+            Some(Ast::Scalar(self.arg.clone())),
+            self.scope.clone(),
+            Vec::new(),
+        )
+    }
+}
+
+/// One stdlib or macro module-function call, expanded into a module instance.
+///
+/// A module instance has no equation: it IS its target model plus the wiring
+/// that feeds the model's input ports, and that wiring is the whole of what
+/// downstream stages read off it -- the dependency graph takes its `src`s as
+/// dependencies, `build_module_inputs` turns the pairs into the instance's
+/// inputs, and layout sizes the instance from the target model. The fields
+/// keep the names of `datamodel::Module`'s, which is what those readers were
+/// written against, so one reader serves an explicit instance and an implicit
+/// one alike.
+#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Clone, PartialEq)]
+pub struct ImplicitModule {
+    /// The name every name-keyed stage files this instance under, derived by
+    /// [`synthetic_ident`] from `(parent, id)`, the call name and the active
+    /// element. It is also the prefix the instance's output is read through
+    /// (`{ident}·{primary_output}`) and the prefix of every `dst` below.
+    pub(crate) ident: String,
+    /// The model this instance instantiates: `stdlib⁚{func}` for a stdlib
+    /// call, the macro's own model name for a macro.
+    pub(crate) model_name: String,
+    /// The input wiring, in call order: `src` is the variable feeding the port
+    /// (a user variable for a bare identifier argument, a [`HoistedArg`]'s
+    /// ident otherwise) and `dst` is `{ident}.{port}`.
+    ///
+    /// One entry per WIRED argument. A stdlib call may pass fewer arguments
+    /// than the target model has ports (`SMTH1` without an initial value), and
+    /// then only the leading ports are wired.
+    pub(crate) references: Vec<datamodel::ModuleReference>,
+}
+
+impl ImplicitModule {
+    /// Mint the instance for the call of `call_name` that `parent`'s walk is at
+    /// counter `id`, wiring each `(src, port)` pair in call order.
+    pub(crate) fn new<'p>(
+        parent: &str,
+        id: usize,
+        call_name: &str,
+        suffix: Option<&str>,
+        model_name: String,
+        wiring: impl IntoIterator<Item = (String, &'p str)>,
+    ) -> Self {
+        let ident = synthetic_ident(parent, id, call_name, suffix);
+        let references = wiring
+            .into_iter()
+            .map(|(src, port)| datamodel::ModuleReference {
+                src,
+                dst: format!("{ident}.{port}"),
+            })
+            .collect();
+        ImplicitModule {
             ident,
+            model_name,
+            references,
+        }
+    }
+
+    /// This instance as the parse-stage variable it stands for: the wiring as
+    /// the kind's `inputs`, no equation, and nothing that can fail -- the
+    /// sources are names, and whether they resolve is the dependency graph's
+    /// question, not the parse's.
+    fn parsed_variable(&self) -> ParsedVariable {
+        Variable {
+            ident: Ident::<Canonical>::new(&self.ident),
             units: None,
-            eqn: Some(self.datamodel_equation()),
-            errors,
-            unit_errors: vec![],
-            kind: VarKind::Aux {
-                ast,
-                // A capture's body is one expression: the argument. It has no
-                // separate initial-phase equation, so both phases run it.
-                init_ast: None,
-                tables: vec![],
-                non_negative: false,
-                is_flow: false,
-                is_table_only: false,
+            eqn: None,
+            diagnostics: vec![],
+            kind: VarKind::Module {
+                model_name: Ident::new(&self.model_name),
+                inputs: self.references.clone(),
             },
         }
     }
@@ -326,54 +512,44 @@ impl Capture {
 
 /// One helper the parse synthesized while walking a variable's equation.
 ///
-/// Two things ride this list, and they are at different stages of Phase 7:
-/// a [`Capture`] is an AST subtree with positional identity, while a stdlib or
-/// macro module instance and its hoisted call arguments are still
-/// `datamodel::Variable`s carrying printed equation text.
+/// The list a parse produces is ordered by synthesis, and that order is
+/// load-bearing: it rides two salsa-cached values with derived `PartialEq`
+/// (`ParsedVariableResult::implicit_vars` and `VariableDeps::implicit_vars`),
+/// so an unstable order defeats backdating and makes the compiled artifact
+/// irreproducible (GH #1002).
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, PartialEq)]
 pub enum ImplicitVar {
     /// A `PREVIOUS`/`INIT` argument hoisted out of its call.
     Capture(Capture),
-    /// A stdlib/macro module instance, or an argument aux hoisted out of such
-    /// a call.
-    ///
-    /// Boxed because a `datamodel::Variable` is an order of magnitude larger
-    /// than a capture, and this list is retained by salsa for every variable of
-    /// every model -- and, under LTM, for every synthetic variable too, where
-    /// the retention was measured at +82 MiB on C-LEARN
-    /// (`db::ltm::model_ltm_implicit_var_info`).
-    Synthesized(Box<datamodel::Variable>),
+    /// A module-call argument that is not a bare identifier, hoisted so a port
+    /// has a name to read.
+    HoistedArg(HoistedArg),
+    /// A stdlib or macro module-function call, expanded into a module instance.
+    Module(ImplicitModule),
 }
 
 impl ImplicitVar {
     pub fn ident(&self) -> &str {
         match self {
             ImplicitVar::Capture(c) => c.ident(),
-            ImplicitVar::Synthesized(v) => v.get_ident(),
+            ImplicitVar::HoistedArg(a) => a.ident(),
+            ImplicitVar::Module(m) => &m.ident,
         }
     }
 
     pub fn capture(&self) -> Option<&Capture> {
         match self {
             ImplicitVar::Capture(c) => Some(c),
-            ImplicitVar::Synthesized(_) => None,
-        }
-    }
-
-    /// The datamodel variable this helper is, when it is not a capture.
-    pub fn synthesized(&self) -> Option<&datamodel::Variable> {
-        match self {
-            ImplicitVar::Capture(_) => None,
-            ImplicitVar::Synthesized(v) => Some(v),
+            ImplicitVar::HoistedArg(_) | ImplicitVar::Module(_) => None,
         }
     }
 
     /// The module instance this helper is, if it is one.
-    pub fn module(&self) -> Option<&datamodel::Module> {
-        match self.synthesized() {
-            Some(datamodel::Variable::Module(m)) => Some(m),
-            _ => None,
+    pub fn module(&self) -> Option<&ImplicitModule> {
+        match self {
+            ImplicitVar::Module(m) => Some(m),
+            ImplicitVar::Capture(_) | ImplicitVar::HoistedArg(_) => None,
         }
     }
 
@@ -381,35 +557,104 @@ impl ImplicitVar {
         self.module().is_some()
     }
 
-    pub fn is_stock(&self) -> bool {
-        matches!(self.synthesized(), Some(datamodel::Variable::Stock(_)))
+    /// The argument subtree a subtree-bodied helper holds, whose spans index
+    /// the PARENT's equation text. `None` for a module instance: it is its
+    /// target model plus its port wiring, with no argument of its own, so a
+    /// failure to lower it has no span in the parent's equation to point at.
+    pub fn arg(&self) -> Option<&Expr0> {
+        match self {
+            ImplicitVar::Capture(c) => Some(c.arg()),
+            ImplicitVar::HoistedArg(a) => Some(a.arg()),
+            ImplicitVar::Module(_) => None,
+        }
     }
 
-    /// The dimension names this helper applies over, or `&[]` when it is
-    /// scalar. An arrayed helper occupies one slot per element, so a consumer
-    /// that lays it out or subscripts it reads this rather than assuming 1.
+    /// The dimension names this helper's STORAGE applies over, or `&[]` when
+    /// it is one slot. An arrayed helper occupies one slot per element, so a
+    /// consumer that lays it out or subscripts it reads this rather than
+    /// assuming 1. Only a structural capture is ever arrayed: a per-element
+    /// helper is one element's slot, and a module instance is sized by its
+    /// target model.
     pub fn equation_dims(&self) -> &[String] {
         match self {
             ImplicitVar::Capture(c) => c.dims(),
-            ImplicitVar::Synthesized(v) => match v.get_equation() {
-                Some(
-                    datamodel::Equation::ApplyToAll(dims, _)
-                    | datamodel::Equation::Arrayed(dims, _, _, _),
-                ) => dims,
-                _ => &[],
-            },
+            ImplicitVar::HoistedArg(_) | ImplicitVar::Module(_) => &[],
         }
     }
 
-    /// Do these two helpers define the same thing? The question the
-    /// synthesized-helper dedup asks when two of them claim one name; see
-    /// [`Capture::same_definition`] for why a capture answers it without
-    /// consulting source positions.
-    pub(crate) fn same_definition(&self, other: &Self) -> bool {
+    /// The element this helper's scalar body is one element of, when it was
+    /// minted for one element of its parent's apply-to-all body.
+    pub fn element_scope(&self) -> Option<&ElementScope> {
+        match self {
+            ImplicitVar::Capture(c) => match c.shape() {
+                CaptureShape::Element(scope) => Some(scope),
+                CaptureShape::Scalar | CaptureShape::ApplyToAll(_) => None,
+            },
+            ImplicitVar::HoistedArg(a) => a.scope(),
+            ImplicitVar::Module(_) => None,
+        }
+    }
+
+    /// Absorb another helper that defines the same thing: the question
+    /// [`insert_implicit_var`] asks when two of them claim one name. See
+    /// [`Capture::merge_same_definition`] for why the subtree-bodied arms
+    /// answer it without consulting source positions, and why a capture also
+    /// unions the other's phase demand; a module instance has neither
+    /// positions to ignore nor a demand to merge.
+    pub(crate) fn merge_same_definition(&mut self, other: &Self) -> bool {
         match (self, other) {
-            (ImplicitVar::Capture(a), ImplicitVar::Capture(b)) => a.same_definition(b),
-            (ImplicitVar::Synthesized(a), ImplicitVar::Synthesized(b)) => a == b,
+            (ImplicitVar::Capture(a), ImplicitVar::Capture(b)) => a.merge_same_definition(b),
+            (ImplicitVar::HoistedArg(a), ImplicitVar::HoistedArg(b)) => a.same_definition(b),
+            (ImplicitVar::Module(a), ImplicitVar::Module(b)) => a == b,
             _ => false,
         }
     }
+
+    /// This helper as the parse-stage variable it stands for -- the one
+    /// conversion every consumer of a helper uses, so no consumer can build a
+    /// helper's variable through a different representation than another.
+    ///
+    /// `dimensions` is the project's whole dimension context: a structural
+    /// capture's declared axes are resolved against it.
+    pub(crate) fn parsed_variable(&self, dimensions: &DimensionsContext) -> ParsedVariable {
+        match self {
+            ImplicitVar::Capture(c) => c.parsed_variable(dimensions),
+            ImplicitVar::HoistedArg(a) => a.parsed_variable(),
+            ImplicitVar::Module(m) => m.parsed_variable(),
+        }
+    }
+}
+
+/// File one synthesized helper under its name.
+///
+/// The one rule for two helpers claiming one name, applied wherever helpers
+/// accumulate: inside one walk (`BuiltinVisitor`), across the per-element walks
+/// of an apply-to-all or arrayed parent, and across the dt and initial passes
+/// of one variable (`variable::parse_var`). A same-definition repeat is
+/// absorbed into the first -- the dt and initial passes walk one equation
+/// twice, and a capture the two passes mint for different snapshot consumers
+/// is one helper serving both. A different helper claiming the name is refused
+/// before it can overwrite the first: the silent last-wins alternative made a
+/// later `Ast::Arrayed` slot read an earlier slot's capture (PR #668), and a
+/// macro named `ARG1` invoked as `ARG1(k, k * 2)` mints its instance and its
+/// second argument's helper under one name from ordinary source.
+/// `DuplicateVariable` because two helpers really do claim one name.
+pub(crate) fn insert_implicit_var(
+    vars: &mut IndexMap<Ident<Canonical>, ImplicitVar>,
+    var: ImplicitVar,
+) -> Result<(), EquationError> {
+    let ident = Ident::<Canonical>::new(var.ident());
+    let Some(existing) = vars.get_mut(&ident) else {
+        vars.insert(ident, var);
+        return Ok(());
+    };
+    if existing.merge_same_definition(&var) {
+        return Ok(());
+    }
+    Err(EquationError::detailed(
+        ErrorCode::DuplicateVariable,
+        0,
+        0,
+        format!("two different synthesized helpers both claim the name '{ident}'"),
+    ))
 }

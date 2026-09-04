@@ -5,9 +5,12 @@
 //! Integration tests for LTM compilation with models containing modules
 //! (stdlib SMOOTH/DELAY and user-defined passthrough modules).
 
+use std::collections::BTreeSet;
+
 use super::*;
 use crate::datamodel;
-use crate::testutils::{x_aux, x_flow, x_model, x_module, x_stock};
+use crate::test_common::TestProject;
+use crate::testutils::{x_aux, x_flow, x_model, x_module, x_module_named, x_stock};
 
 /// AC1.1: A model with SMTH1 in a feedback loop generates LTM synthetic
 /// variables including link_score entries when LTM is enabled, and the
@@ -237,7 +240,7 @@ fn custom_output_port_project() -> datamodel::Project {
                     x_flow("adjustment", "gap / 5", None),
                     // dst uses the XMILE `<connect to="module.var">` convention
                     // (prefixed with the module instance name); a bare dst is
-                    // dropped by `build_module_inputs` / `resolve_module_input`.
+                    // dropped by `build_module_inputs`.
                     x_module(
                         "custom_smooth",
                         &[
@@ -1068,14 +1071,14 @@ fn parallel_pathways_module_project(paths: usize) -> datamodel::Project {
 /// GH #649: a module body with more internal input->output pathways than the
 /// per-port pathway budget has its pathway enumeration truncated
 /// deterministically: the kept pathway count equals the budget,
-/// `LtmVariablesResult.pathways_truncated` is set, and a `CompilationDiagnostic`
+/// `LtmVariablesResult.pathways_truncated` is set, and a `Diagnostic`
 /// `Warning` names the module, the budget, and the clipped input port. The
 /// fixture is tiny (12 parallel pathways) and the budget is shrunk to 4 via the
 /// test-only `ModulePathwayBudgetGuard` so the budget is what clips (never trip
 /// the real 8192 gate with a giant fixture; docs/dev/rust.md#test-time-budgets).
 #[test]
 fn module_pathway_enumeration_truncates_at_budget() {
-    use crate::db::{CompilationDiagnostic, DiagnosticError, DiagnosticSeverity};
+    use crate::db::{DiagnosticError, DiagnosticSeverity};
     use salsa::Setter;
 
     const PATHS: usize = 12;
@@ -1125,9 +1128,8 @@ fn module_pathway_enumeration_truncates_at_budget() {
         "a truncated module must still emit a composite var over the kept prefix"
     );
 
-    let diags =
-        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, sub_model, source_project);
-    let has_warning = diags.iter().any(|CompilationDiagnostic(d)| {
+    let diags = &model_ltm_variables(&db, sub_model, source_project).diagnostics;
+    let has_warning = diags.iter().any(|d| {
         d.severity == DiagnosticSeverity::Warning
             && matches!(
                 &d.error,
@@ -1141,7 +1143,7 @@ fn module_pathway_enumeration_truncates_at_budget() {
         has_warning,
         "pathway truncation must emit a Warning mentioning truncation, the budget \
          ({TEST_BUDGET}), and the clipped input port; got: {:?}",
-        diags.iter().map(|c| &c.0).collect::<Vec<_>>()
+        diags
     );
 }
 
@@ -1150,7 +1152,6 @@ fn module_pathway_enumeration_truncates_at_budget() {
 /// pathway (the under-budget byte-identical-to-before guarantee).
 #[test]
 fn module_pathway_enumeration_under_budget_no_truncation() {
-    use crate::db::CompilationDiagnostic;
     use salsa::Setter;
 
     const PATHS: usize = 4;
@@ -1182,9 +1183,8 @@ fn module_pathway_enumeration_under_budget_no_truncation() {
         path_var_count, PATHS,
         "every pathway must be enumerated when under budget"
     );
-    let diags =
-        model_ltm_variables::accumulated::<CompilationDiagnostic>(&db, sub_model, source_project);
-    let has_truncation_warning = diags.iter().any(|CompilationDiagnostic(d)| {
+    let diags = &model_ltm_variables(&db, sub_model, source_project).diagnostics;
+    let has_truncation_warning = diags.iter().any(|d| {
         matches!(&d.error, crate::db::DiagnosticError::Assembly(msg) if msg.contains("module-pathway"))
     });
     assert!(
@@ -1856,4 +1856,75 @@ fn test_multi_output_module_link_score_holds_document_order_first_live() {
         !eqn_ba.contains(&live_diff("out_a")),
         "out_a (read second) is frozen: {eqn_ba}"
     );
+}
+
+/// A sub-model output whose only reader is a stdlib instance with
+/// bare-identifier arguments is an output port: `SMTH1(m.a, tau)` hoists no
+/// argument, so the instance is wired straight from `m·a`, and
+/// `find_model_output_ports` reads every helper's `Dt` reads ("Phase 8.5
+/// semantic divergences" 6). The sub-model is instrumented, and a loop
+/// through it selects the `via⁚a` exit override at the instance.
+#[test]
+fn a_stdlib_instance_with_bare_arguments_reads_an_output_port() {
+    let child = || {
+        x_model(
+            "child",
+            vec![
+                x_aux("inp", "0", None),
+                x_aux("a", "inp * 0.5", None),
+                x_aux("b", "inp * 0.25", None),
+            ],
+        )
+    };
+    let ltm_names = |project: &datamodel::Project, model: &str| -> BTreeSet<String> {
+        let mut db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, project);
+        set_project_ltm_enabled(&mut db, sync.project, true);
+        model_ltm_variables(&db, sync.models[model].source, sync.project)
+            .vars
+            .iter()
+            .map(|v| v.name.clone())
+            .collect()
+    };
+    // `|` for the `⁚` segment separator and `>` for the `→` of a link.
+    let name = |s: &str| s.replace('|', "\u{205A}").replace('>', "\u{2192}");
+
+    let mut reader = TestProject::new("main")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .aux("k", "4", None)
+        .aux("tau", "3", None)
+        .aux("sm", "SMTH1(m.a, tau)", None)
+        .build_datamodel();
+    reader.models[0]
+        .variables
+        .push(x_module_named("m", "child", &[(".k", "m.inp")], None));
+    reader.models.push(child());
+    assert_eq!(
+        ltm_names(&reader, "child"),
+        [
+            "$|ltm|composite|inp",
+            "$|ltm|link_score|inp>a",
+            "$|ltm|link_score|inp>b",
+            "$|ltm|path|inp|0",
+        ]
+        .into_iter()
+        .map(name)
+        .collect::<BTreeSet<String>>()
+    );
+
+    let mut looped = TestProject::new("main")
+        .with_sim_time(0.0, 3.0, 1.0)
+        .stock("level", "10", &["inflow"], &[], None)
+        .aux("tau", "3", None)
+        .flow("inflow", "SMTH1(m.a, tau)", None)
+        .build_datamodel();
+    looped.models[0]
+        .variables
+        .push(x_module_named("m", "child", &[(".level", "m.inp")], None));
+    looped.models.push(child());
+    let main = ltm_names(&looped, "main");
+    for key in ["$|ltm|link_score|level>m|via|a", "$|ltm|loop_score|u1"] {
+        assert!(main.contains(&name(key)), "{key} in {main:?}");
+    }
+    assert_eq!(ltm_names(&looped, "child").len(), 4);
 }

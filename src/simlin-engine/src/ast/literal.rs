@@ -7,7 +7,7 @@ use std::hash::{Hash, Hasher};
 /// The numeric value of a `Const` node in any of the four AST layers, compared
 /// by **bit pattern** rather than by IEEE equality.
 ///
-/// `Expr0`..`Expr3` (and everything holding one: `ModelStage0`/`ModelStage1`,
+/// `Expr0`..`Expr3` (and everything holding one: the lowered-variable memos,
 /// `db::query::ParsedVariableResult`, `db::ltm::LtmEquation`,
 /// `ltm_agg::AggNodesResult`, ...) derive `PartialEq`. Salsa decides whether to
 /// *backdate* a re-executed tracked function's memo by comparing the old value
@@ -80,8 +80,8 @@ use std::hash::{Hash, Hasher};
 ///   `PerVarBytecodes::graphical_functions` (GH #642);
 /// * `variable::Table`'s `x`/`y: Vec<f64>` lookup points and its two
 ///   `datamodel::GraphicalFunctionScale`s, which ride on `VarKind::Aux` into
-///   the same `ModelStage0` / `ModelStage1` / `db::query::ParsedVariableResult`
-///   memos this type's fix serves.
+///   the same `db::query::ParsedVariableResult` and lowered-variable memos this
+///   type's fix serves.
 ///
 /// Both keep the derived, IEEE-based `PartialEq`. That is an accepted state, not
 /// an open defect -- **what is accepted is the cost of NOT converting them, not
@@ -237,11 +237,12 @@ mod literal_tests {
 /// The same property one level up, through the PUBLIC parse API: an `Expr0`
 /// built twice from identical NaN-bearing text is equal to itself and backdates.
 ///
-/// `Expr0` is the layer that rides on `db::query::ParsedVariableResult` and
-/// `ModelStage0` (GH #987) and on `db::ltm::LtmArm` (GH #981). The higher
+/// `Expr0` is the layer that rides on `db::query::ParsedVariableResult`
+/// (GH #987) and on `db::ltm::LtmArm` (GH #981). The higher
 /// layers are covered where they are consumed: `Expr2` by
 /// `ltm_agg::tests::a_nan_literal_in_a_reducer_does_not_defeat_agg_backdating`
-/// and by `db::stages_tests`' whole-project value oracle, and `LtmEquation` by
+/// and by `db::units_tests::a_nan_bearing_lowering_compares_equal_to_its_rebuild`,
+/// and `LtmEquation` by
 /// `db::ltm::equation`'s own probe.
 #[cfg(test)]
 mod literal_ast_tests {

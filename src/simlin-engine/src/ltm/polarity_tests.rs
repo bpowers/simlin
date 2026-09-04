@@ -12,6 +12,8 @@
 //! lint; included via `#[path]` as a child of it, so `use super::*` resolves
 //! that file's imports and private helpers.
 
+use std::sync::Arc;
+
 use super::*;
 
 #[test]
@@ -85,8 +87,7 @@ fn test_provable_value_sign() {
         ident: Ident::new(ident),
         units: None,
         eqn: None,
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Aux {
             ast: Some(Ast::Scalar(eq)),
             init_ast: None,
@@ -94,6 +95,7 @@ fn test_provable_value_sign() {
             non_negative: false,
             is_flow: false,
             is_table_only: false,
+            element_scope: None,
         },
     };
 
@@ -102,12 +104,18 @@ fn test_provable_value_sign() {
     // parsed `-5` is a negation of the literal 5. The end-to-end twin
     // (`test_mul_negative_constant_valued_cofactor_flips`, which goes
     // through the real parse) is what pins that correspondence.
-    let mut variables: HashMap<Ident<Canonical>, Variable> = HashMap::new();
-    variables.insert(Ident::new("k_neg"), scalar_var("k_neg", neg(cnst(5.0))));
-    variables.insert(Ident::new("k_pos"), scalar_var("k_pos", cnst(5.0)));
+    let mut variables: crate::variable::LoweredVariableMap = HashMap::new();
+    variables.insert(
+        Ident::new("k_neg"),
+        Arc::new(scalar_var("k_neg", neg(cnst(5.0)))),
+    );
+    variables.insert(
+        Ident::new("k_pos"),
+        Arc::new(scalar_var("k_pos", cnst(5.0))),
+    );
     variables.insert(
         Ident::new("k_dyn"),
-        scalar_var(
+        Arc::new(scalar_var(
             "k_dyn",
             Expr2::Op2(
                 BinaryOp::Mul,
@@ -116,7 +124,7 @@ fn test_provable_value_sign() {
                 None,
                 Loc::default(),
             ),
-        ),
+        )),
     );
 
     let vars = Some(&variables);

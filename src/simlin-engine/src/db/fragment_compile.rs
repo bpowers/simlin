@@ -20,19 +20,19 @@ use std::collections::{BTreeSet, HashMap};
 use salsa::Accumulator;
 
 use super::*;
-use crate::capture::ImplicitVar;
+use crate::ast::LoweringScope;
 use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::fragment::{DepShape, FragmentInput, lower_fragment};
 use crate::db::var_fragment::{
-    ExplicitFragment, dep_head, explicit_fragment_input, is_implicit_global, model_dep_shape,
+    DeclaredName, ExplicitFragment, ResolvedHeads, explicit_fragment_input, is_implicit_global,
 };
 
 // Test-only per-thread record of which fragment-compiler bodies ran.
 //
 // Pointer equality of a memo does NOT prove a query body did not run: salsa
 // backdates a re-executed query whose value compares equal and keeps the memo
-// address (the trap `db::stages` documents at length). For the fragment
-// compilers that matters even more than it did there, because a fragment is
+// address. For the fragment compilers that matters especially, because a
+// fragment is
 // *designed* to be layout-independent -- so a layout-only edit produces an
 // EQUAL fragment whether or not the expensive compile re-ran, and every
 // pointer-based test passes either way. Recording each body entry, with the
@@ -43,9 +43,8 @@ use crate::db::var_fragment::{
 // ("an *unchanged* fragment is reused"), so an aggregate count cannot say
 // whether the one re-execution was the edited variable or an unrelated one.
 //
-// Thread-local rather than a global atomic, for the same reasons as
-// `db::stages`: no lock, and a parallel test run cannot charge one test's
-// work to another. The same caveat applies -- the record happens INSIDE the
+// Thread-local rather than a global atomic: no lock, and a parallel test run
+// cannot charge one test's work to another. The record happens INSIDE the
 // body, on whatever thread salsa ran it, so anyone introducing query
 // parallelism here must move this to a shared atomic in the same change.
 // `reset_fragment_executions()` at the start of a measured region is what
@@ -131,27 +130,14 @@ pub fn compile_var_fragment<'db>(
     // takes them as a slice.
     let module_input_names = module_inputs.names(db);
 
-    let (unit_diags, input) =
-        match explicit_fragment_input(db, var, model, project, module_input_names) {
-            ExplicitFragment::Fatal {
-                unit_diags,
-                fatal_diags,
-            } => {
-                // Non-fatal unit diagnostics were recorded before the fatal
-                // site; replay them first to preserve emission order, then
-                // the fatal diagnostic(s), then bail out (whole-variable None).
-                for diag in unit_diags.into_iter().chain(fatal_diags) {
-                    CompilationDiagnostic(diag).accumulate(db);
-                }
-                return None;
-            }
-            ExplicitFragment::Ready { unit_diags, input } => (unit_diags, input),
-        };
-
-    // Malformed-unit diagnostics are non-fatal: record them and continue.
-    for diag in unit_diags {
-        CompilationDiagnostic(diag).accumulate(db);
+    // Every diagnostic the constructor raised is replayed in its order; a
+    // fatal one leaves no input, and the variable compiles to nothing.
+    let ExplicitFragment { diagnostics, input } =
+        explicit_fragment_input(db, var, model, project, module_input_names);
+    for diag in diagnostics {
+        diag.accumulate(db);
     }
+    let input = input?;
 
     // Which runlists this variable belongs to, read through the three-bit
     // projection rather than the whole `ModelDepGraphResult`: the projection
@@ -222,14 +208,15 @@ pub fn compile_var_fragment<'db>(
             Ok(bytecodes) => Some(bytecodes),
             Err(reason) => {
                 let ident = var.ident(db);
-                CompilationDiagnostic(Diagnostic {
+                Diagnostic {
                     model: model.name(db).clone(),
                     variable: Some(ident.clone()),
+                    owner: None,
+                    severity: DiagnosticSeverity::Error,
                     error: DiagnosticError::Assembly(format!(
                         "variable '{ident}' failed to compile: {reason}"
                     )),
-                    severity: DiagnosticSeverity::Error,
-                })
+                }
                 .accumulate(db);
                 None
             }
@@ -253,12 +240,13 @@ pub fn compile_var_fragment<'db>(
     // the identifier a `MismatchedDimensions` could not shape -- rides along
     // with it. The error has no span, so the conversion leaves `0..0`.
     let accumulate_var_compile_error = |err: &crate::Error| {
-        CompilationDiagnostic(Diagnostic {
+        Diagnostic {
             model: model.name(db).clone(),
             variable: Some(var.ident(db).clone()),
-            error: DiagnosticError::Equation(err.clone().into()),
+            owner: None,
             severity: DiagnosticSeverity::Error,
-        })
+            error: DiagnosticError::Equation(err.clone().into()),
+        }
         .accumulate(db);
     };
 
@@ -295,13 +283,12 @@ pub fn compile_var_fragment<'db>(
         _ => None,
     };
 
-    // Pre-compute flow invariance support for `model_flows_invariant` (GH
-    // #712). Stored on the salsa-cached result so the topological fixpoint
-    // pass in `model_flows_invariant` can read it without re-lowering. Only
-    // meaningful for vars in the flows runlist.
-    let flow_invariance = match &noninitial {
+    // The compiler-local half of run invariance (GH #712), stored on the
+    // salsa-cached result so `model_flows_invariant`'s fixpoint reads it
+    // without re-lowering. Only meaningful for vars in the flows runlist.
+    let flow_locally_invariant = match &noninitial {
         Some(lowered) if in_flows_runlist => {
-            crate::db::assemble::compute_flow_invariance_support(lowered, &var_ident_canonical)
+            crate::db::assemble::flow_is_locally_invariant(lowered)
         }
         _ => None,
     };
@@ -318,138 +305,181 @@ pub fn compile_var_fragment<'db>(
             flow_bytecodes,
             stock_bytecodes,
         },
-        flow_invariance,
+        flow_locally_invariant,
     })
-}
-
-/// The genuinely-shared prefix of synthetic-helper sourcing: resolve a
-/// model's implicit variable from its parent's `implicit_vars`, build its
-/// parse-stage form, and lower it to a `crate::variable::Variable`.
-///
-/// This is the *single shared relation* for "given an `ImplicitVarMeta`,
-/// produce the helper's parsed + lowered form": the chain `parent → the
-/// parse's helper NAMED by the metadata → its parse-stage variable →
-/// lower_variable` (the non-module branch builds via `lower_variable`; the
-/// module branch is the instance's wiring, since a module has no equation).
-/// It is consumed by
-/// [`implicit_fragment_input`], which both `compile_implicit_var_fragment`
-/// (the production per-variable fragment compiler) and
-/// `var_phase_symbolic_fragment_prod`'s no-`SourceVariable` arm (parent-
-/// sourcing a synthetic helper that lands in a recurrence SCC) build their
-/// input through, so the accessor's relation is the engine's relation by
-/// construction.
-///
-/// Returns the helper's canonical name and the lowered variable. Loud-safe
-/// `None` (never panics): this parse synthesized no helper of that name, the
-/// module branch's datamodel variable is not actually a `Module`, or the
-/// implicit var has equation errors. (`lower_variable` itself is total -- any
-/// lowering error surfaces as `None` here, see below.)
-fn lower_implicit_var<'db>(
-    db: &'db dyn Db,
-    meta: &ImplicitVarMeta,
-    model: SourceModel,
-    project: SourceProject,
-    module_ident_context: ModuleIdentContext<'db>,
-) -> Option<(String, crate::variable::Variable)> {
-    let parsed = parse_source_variable_with_module_context(
-        db,
-        meta.parent_source_var,
-        project,
-        module_ident_context,
-    );
-    let implicit_var = meta.find_in(parsed)?;
-    let implicit_name = canonicalize(implicit_var.ident()).into_owned();
-
-    let dim_context = project_dimensions_context(db, project);
-
-    // A capture already holds its body as an AST subtree, so it is built
-    // directly; a module instance and a hoisted module-call argument still
-    // carry equation text and are parsed.
-    let parsed_implicit = match implicit_var {
-        ImplicitVar::Capture(capture) => capture.variable_stage0(dim_context),
-        ImplicitVar::Synthesized(dm_var) => {
-            let units_ctx = project_units_context(db, project);
-            let mut dummy_implicits = Vec::new();
-            let ctx = crate::variable::ParseContext::new(dim_context, units_ctx);
-            crate::variable::parse_var(&ctx, dm_var.as_ref(), &mut dummy_implicits, |mi| {
-                Ok(Some(mi.clone()))
-            })
-        }
-    };
-
-    if parsed_implicit
-        .equation_errors()
-        .is_some_and(|e| !e.is_empty())
-    {
-        return None;
-    }
-
-    // A module-typed helper is its wiring; `lower_variable`'s module arm would
-    // need a populated models map to validate the sources against.
-    let lowered = if meta.is_module {
-        let dm_module = implicit_var.module()?;
-        crate::variable::Variable::module_instance(
-            Ident::new(&implicit_name),
-            Ident::new(&dm_module.model_name),
-            build_module_inputs(
-                model.name(db),
-                &module_input_prefix(&implicit_name),
-                dm_module
-                    .references
-                    .iter()
-                    .map(|mr| (canonicalize(&mr.src), canonicalize(&mr.dst))),
-            ),
-        )
-    } else {
-        let models = HashMap::new();
-        let scope = crate::model::ScopeStage0 {
-            models: &models,
-            dimensions: dim_context,
-            model_name: "",
-        };
-        let lowered = crate::model::lower_variable(&scope, &parsed_implicit);
-
-        // Loud-safe (GH #580): `lower_variable` is total -- on a lowering error
-        // (e.g. an un-translatable cross-dimension subscript surviving into a
-        // scalar helper as `DimensionInScalarContext`) it records the error and
-        // discards the AST rather than failing. The pre-lowering check above
-        // only inspects the *parsed* implicit; a lowering-stage error would
-        // otherwise leave a helper with `ast == None` that `lower_fragment`
-        // rejects as `EmptyEquation`. Bail out with `None` so the error rides
-        // out via the caller's aggregate `missing_vars` string (GH #466 tracks
-        // surfacing assembly-stage errors through the per-variable diagnostic
-        // API).
-        if lowered.equation_errors().is_some() {
-            return None;
-        }
-
-        lowered
-    };
-
-    Some((implicit_name, lowered))
 }
 
 /// Why [`implicit_fragment_input`] produced no input.
 pub(crate) enum ImplicitInputError {
-    /// This parse synthesized no helper of that name, or the helper did not
-    /// parse or lower: nothing to compile, and nothing to attribute beyond the
-    /// caller's batch message.
+    /// This parse synthesized no helper of that name: nothing to compile, and
+    /// nothing to attribute beyond the caller's batch message.
     Absent,
-    /// The helper's graphical-function table failed to build; the reason names
-    /// the table error.
-    Table(String),
+    /// The helper's body did not parse or lower; these are its diagnostics,
+    /// whose spans index the PARENT's equation text (where the helper's
+    /// subtree was written), so they are reported on the parent.
+    Lowering(Vec<DiagnosticError>),
 }
 
-/// Build the fragment input of one implicit helper (a SMOOTH/DELAY/TREND
-/// instance, a hoisted argument aux, or a PREVIOUS/INIT capture) of `model`:
-/// the helper's lowered form and the shape of every name it references.
+/// Every name a helper's equation resolves through: the head of each of its
+/// reads from the parent's dependency extraction
+/// (`variable_direct_dependencies(parent).implicit_vars`, built input-agnostic
+/// so both branches of an `isModuleInput(...)` conditional stay compilable),
+/// the lookup tables it calls (layout references, not data-flow deps -- issue
+/// #606), and a stock helper's inflows and outflows.
+fn implicit_referenced_names<MI, E>(
+    db: &dyn Db,
+    meta: &ImplicitVarMeta,
+    project: SourceProject,
+    helper: &crate::variable::Variable<MI, E>,
+) -> BTreeSet<Ident<Canonical>> {
+    let parent_deps = variable_direct_dependencies(
+        db,
+        meta.parent_source_var,
+        project,
+        ModuleInputSet::empty(db),
+    );
+    let mut names: BTreeSet<Ident<Canonical>> = parent_deps
+        .implicit_vars
+        .iter()
+        .filter(|iv| canonicalize(&iv.name) == meta.name)
+        .flat_map(|iv| {
+            iv.deps
+                .heads()
+                .into_iter()
+                .chain(iv.referenced_tables.iter())
+                .cloned()
+        })
+        .collect();
+    if let crate::variable::VarKind::Stock {
+        inflows, outflows, ..
+    } = &helper.kind
+    {
+        names.extend(inflows.iter().chain(outflows.iter()).cloned());
+    }
+    names
+}
+
+/// Every name in `names` that `model` declares (the helper itself and the
+/// implicit globals skipped), each resolved once through `DeclaredName`. A
+/// helper's dependencies are explicit variables of the same model or other
+/// helpers; a name that is neither fails to resolve at lowering.
+fn implicit_referenced_heads(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    self_name: &str,
+    names: &BTreeSet<Ident<Canonical>>,
+) -> ResolvedHeads {
+    let mut heads: ResolvedHeads = Vec::new();
+    for head in names {
+        if head.as_str() == self_name || is_implicit_global(head.as_str()) {
+            continue;
+        }
+        if let Some(declared) = DeclaredName::resolve(db, model, project, head.as_str()) {
+            heads.push((head.clone(), declared));
+        }
+    }
+    heads
+}
+
+/// One implicit helper lowered once, with the names it references resolved
+/// once: what [`lowered_implicit_variable`] memoizes.
+#[derive(Clone, PartialEq)]
+pub(crate) struct LoweredImplicit {
+    /// The helper in its `Expr2` form.
+    pub variable: std::sync::Arc<crate::variable::Variable>,
+    /// The head of every name the helper references that the model declares
+    /// ([`implicit_referenced_heads`]); `implicit_fragment_input` projects the
+    /// compiler's shapes and the tables it needs from these.
+    pub heads: ResolvedHeads,
+}
+
+/// One implicit helper (a SMOOTH/DELAY/TREND instance, a hoisted argument
+/// aux, or a PREVIOUS/INIT capture) of `model` in its `Expr2` form, lowered
+/// once under the dimensions of the names it references
+/// ([`implicit_referenced_heads`]); `None` when the parent's parse
+/// synthesized no helper of that name.
 ///
-/// The helper's dependencies come from the parent variable's dependency
-/// extraction (`variable_direct_dependencies(parent).implicit_vars`), built
-/// input-agnostic (the empty `ModuleInputSet`) so both branches of an
-/// `isModuleInput(...)` conditional stay compilable. Every referenced name is
-/// resolved through the per-variable firewall queries, so the helper's fragment
-/// depends on exactly the names it looks up.
+/// The one owner of a helper's lowered form, keyed on the helper's canonical
+/// name -- the only identity a helper has (it exists solely inside its
+/// parent's parse), and the key `model_implicit_var_info` files it under.
+/// `implicit_fragment_input` borrows it and the LTM describers hold its `Arc`
+/// (`db::model_lowered_variables`; an element-scoped helper's map entry is
+/// the memo's element-pinned projection). A helper lowers under the shapes
+/// its parent's equation lowers under, so a hoisted argument is refused
+/// where, and with the code, the plain spelling is
+/// (`db::lowering_scope_tests`). `lower_variable` is total (GH #580): a body
+/// that does not parse or lower keeps its errors and has no AST, and the
+/// fragment constructor reports those errors against the parent.
+#[salsa::tracked(returns(ref))]
+pub(crate) fn lowered_implicit_variable(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    implicit_var_name: String,
+) -> Option<LoweredImplicit> {
+    let meta = model_implicit_var_by_name(db, model, project, implicit_var_name)?;
+    let parsed = parse_source_variable(db, meta.parent_source_var, project);
+    let implicit_var = meta.find_in(parsed)?;
+    let dim_context = project_dimensions_context(db, project);
+    let helper = implicit_var.parsed_variable(dim_context);
+
+    // A module-typed helper is its wiring, resolved by `lower_variable`'s
+    // module arm like an explicit instance's, under the model's canonical
+    // name; nothing is lowered under a shape, though its input sources are
+    // still resolved for the instance's fragment. Any other helper lowers
+    // under the dimensions of the names it references
+    // (`DeclaredName::dimensions_shape`): an arrayed helper (a structural
+    // apply-to-all capture) has its declared dimensions, every other helper
+    // is scalar.
+    let names = implicit_referenced_names(db, &meta, project, &helper);
+    let heads = implicit_referenced_heads(db, model, project, &meta.name, &names);
+    let mut shapes: IdentMap<Ident<Canonical>, DepShape> = Default::default();
+    if !meta.is_module {
+        shapes.insert(
+            Ident::new(&meta.name),
+            DepShape::var(
+                helper
+                    .get_dimensions()
+                    .map(<[crate::dimensions::Dimension]>::to_vec)
+                    .unwrap_or_default(),
+            ),
+        );
+        for (ident, declared) in &heads {
+            if let Some(shape) = declared.dimensions_shape(db, project) {
+                shapes.insert(ident.clone(), shape);
+            }
+        }
+    }
+    let model_ident: Ident<Canonical> = Ident::new(model.name(db));
+    let scope = LoweringScope {
+        dimensions: dim_context,
+        shapes: &shapes,
+        model_name: model_ident.as_str(),
+    };
+    Some(LoweredImplicit {
+        variable: std::sync::Arc::new(crate::model::lower_variable(&scope, &helper)),
+        heads,
+    })
+}
+
+/// Build the fragment input of one implicit helper of `model`: its lowered
+/// form ([`lowered_implicit_variable`], borrowed) plus the shape of every name
+/// it references and the tables it calls.
+///
+/// This is the *single relation* from an `ImplicitVarMeta` to a compilable
+/// helper, consumed by `compile_implicit_var_fragment` (the production
+/// per-variable fragment compiler), by `var_phase_symbolic_fragment_prod`'s
+/// no-`SourceVariable` arm (a helper that lands in a recurrence SCC) and by
+/// the LTM describers' element-pinned projection of an element-scoped helper,
+/// so every reader sees one lowering.
+///
+/// Loud-safe (never panics): `Absent` when this parse synthesized no helper of
+/// that name, `Lowering` with the body's equation errors when it did not parse
+/// or lower -- an un-translatable cross-dimension subscript surviving into a
+/// scalar helper as `DimensionInScalarContext` lands on the variable's error
+/// channel and discards the AST, which `lower_fragment` would otherwise reject
+/// as an `EmptyEquation`, so the caller reports the errors against the parent.
 pub(crate) fn implicit_fragment_input<'db>(
     db: &'db dyn Db,
     meta: &ImplicitVarMeta,
@@ -457,53 +487,27 @@ pub(crate) fn implicit_fragment_input<'db>(
     project: SourceProject,
     module_input_names: &[String],
 ) -> Result<FragmentInput<'db>, ImplicitInputError> {
-    let module_ident_context =
-        model_module_ident_context(db, model, project, module_input_names.to_vec());
-    let (implicit_name, lowered) =
-        lower_implicit_var(db, meta, model, project, module_ident_context)
-            .ok_or(ImplicitInputError::Absent)?;
-    let var_ident: Ident<Canonical> = Ident::new(&implicit_name);
+    let LoweredImplicit {
+        variable: lowered,
+        heads,
+    } = lowered_implicit_variable(db, model, project, meta.name.clone())
+        .as_ref()
+        .ok_or(ImplicitInputError::Absent)?;
+    let failures: Vec<DiagnosticError> = lowered.fatal_diagnostics().cloned().collect();
+    if !failures.is_empty() {
+        return Err(ImplicitInputError::Lowering(failures));
+    }
 
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
 
-    let parent_deps = variable_direct_dependencies(
-        db,
-        meta.parent_source_var,
-        project,
-        module_ident_context,
-        ModuleInputSet::empty(db),
-    );
-    let helper_deps = parent_deps
-        .implicit_vars
-        .iter()
-        .find(|iv| canonicalize(&iv.name) == implicit_name);
-
-    // Every name the helper references: both phases' data-flow dependencies,
-    // the lookup tables it calls (layout references, not data-flow deps --
-    // issue #606), and a stock helper's inflows and outflows.
-    let mut all_names: BTreeSet<&str> = helper_deps
-        .into_iter()
-        .flat_map(|iv| {
-            iv.dt_deps
-                .iter()
-                .chain(iv.initial_deps.iter())
-                .chain(iv.referenced_tables.iter())
-        })
-        .map(String::as_str)
-        .collect();
-    if let crate::variable::VarKind::Stock {
-        inflows, outflows, ..
-    } = &lowered.kind
-    {
-        all_names.extend(inflows.iter().chain(outflows.iter()).map(Ident::as_str));
-    }
-
+    // The shape of every name the helper can reference, itself included, as
+    // the compiler resolves them: a module-typed helper is its sub-model's
+    // shape, an arrayed helper (a structural apply-to-all capture) occupies
+    // one slot per element, and every other helper is scalar.
     let self_shape = if meta.is_module {
         module_dep_shape(db, project, meta.model_name.as_deref().unwrap_or(""))
     } else {
-        // An arrayed helper (the GH #541 bare-arrayed-PREVIOUS capture)
-        // occupies one slot per element; its dimensions are the parse's.
         DepShape::var(
             lowered
                 .get_dimensions()
@@ -512,53 +516,27 @@ pub(crate) fn implicit_fragment_input<'db>(
         )
     };
     let mut dep_shapes: IdentMap<Ident<Canonical>, DepShape> = Default::default();
-    dep_shapes.insert(var_ident.clone(), self_shape);
-    for dep_name in &all_names {
-        let (head, _qualified) = dep_head(dep_name);
-        if head == implicit_name || is_implicit_global(head) || dep_shapes.contains_key(head) {
-            continue;
-        }
-        // A helper's dependencies are explicit variables of the same model or
-        // other helpers; a name that is neither fails to resolve at lowering.
-        if let Some(shape) = model_dep_shape(db, model, project, head) {
-            dep_shapes.insert(Ident::new(head), shape);
-        }
+    dep_shapes.insert(Ident::new(&meta.name), self_shape);
+    for (ident, declared) in heads {
+        dep_shapes.insert(ident.clone(), declared.shape(db, project));
     }
 
+    // A synthesized helper carries no graphical function of its own
+    // (`ImplicitVar::parsed_variable` builds it with no tables); only the
+    // tables of the dependencies it reads through `LOOKUP(dep, x)` are needed.
     let mut tables: HashMap<Ident<Canonical>, Vec<crate::compiler::Table>> = HashMap::new();
-    let gf_tables = lowered.tables();
-    if !gf_tables.is_empty() {
-        match gf_tables
-            .iter()
-            .map(|t| crate::compiler::Table::new(&implicit_name, t))
-            .collect::<crate::Result<Vec<_>>>()
-        {
-            Ok(ts) if !ts.is_empty() => {
-                tables.insert(var_ident, ts);
-            }
-            Err(err) => {
-                return Err(ImplicitInputError::Table(format!(
-                    "its graphical-function table failed to build: {err}"
-                )));
-            }
-            _ => {}
-        }
-    }
-    for dep_name in &all_names {
-        let (head, qualified) = dep_head(dep_name);
-        if qualified || tables.contains_key(head) {
+    for (ident, declared) in heads {
+        let DeclaredName::Source(dep_sv) = declared else {
             continue;
-        }
-        if let Some(dep_sv) = model_variable_by_name(db, model, head.to_string()) {
-            let dep_tables = extract_tables_from_source_var(db, &dep_sv, project);
-            if !dep_tables.is_empty() {
-                tables.insert(Ident::new(head), dep_tables);
-            }
+        };
+        let dep_tables = variable_tables(db, *dep_sv, project);
+        if !dep_tables.is_empty() {
+            tables.insert(ident.clone(), dep_tables.clone());
         }
     }
 
     Ok(FragmentInput::new(
-        lowered,
+        std::borrow::Cow::Borrowed(lowered.as_ref()),
         dep_shapes,
         tables,
         canonical_module_input_set(module_input_names),
@@ -621,56 +599,70 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
     // Each runlist-gated phase threads the GH #1000 `why` channel: a member
     // phase that fails to compile lands in `assemble_module`'s batch
     // "failed to compile fragments" message, so the reason is accumulated
-    // HERE as a diagnostic naming the helper (interpolated into the message
-    // -- `errors.rs`'s `Assembly` arm never renders the `variable` field)
-    // and the parent it was synthesized for. Accumulation attaches to the
-    // enclosing query: `model_all_diagnostics`' implicit probe (drained by
-    // `collect_all_diagnostics`) or `assemble_module` (dormant until
-    // GH #581). Severity is `Error` for the same measured reason as the
-    // explicit path's (see `compile_var_fragment`): the fragment's absence
-    // fails the build, and the corpus sweep shape holds -- added rows land
-    // only on projects that already fail to compile.
-    // Identical reasons across phases collapse to ONE row (a helper whose
-    // initial and flow phases refuse the same construct is one defect, and
-    // duplicate rows are user-visible noise); distinct per-phase reasons
-    // each get their own row.
-    let mut reported_reasons: Vec<String> = Vec::new();
-    let mut report = |reason: String| {
-        if reported_reasons.contains(&reason) {
-            return;
-        }
-        reported_reasons.push(reason.clone());
-        CompilationDiagnostic(Diagnostic {
+    // HERE. A CODEGEN refusal is a diagnostic filed under the helper's
+    // physical name, whose `owner` is the parent it was synthesized for --
+    // the name a consumer presents it under -- and whose message names both
+    // (`errors.rs`'s `Assembly` arm never renders the `variable` field).
+    // Accumulation attaches to the enclosing query: `model_all_diagnostics`'
+    // implicit probe (drained by `collect_all_diagnostics`) or
+    // `assemble_module` (dormant until GH #581). Severity is `Error` for the
+    // same measured reason as the explicit path's (see
+    // `compile_var_fragment`): the fragment's absence fails the build, and
+    // the corpus sweep shape holds -- added rows land only on projects that
+    // already fail to compile. A helper whose initial and flow phases refuse
+    // the same construct raises two identical rows, which the drain collapses
+    // to one; distinct per-phase reasons each keep their row.
+    let report = |reason: String| {
+        Diagnostic {
             model: model.name(db).clone(),
             variable: Some(meta.name.clone()),
+            owner: Some(meta.parent_source_var.ident(db).clone()),
+            severity: DiagnosticSeverity::Error,
             error: DiagnosticError::Assembly(format!(
                 "implicit variable '{}' (synthesized while parsing '{}') failed to compile: \
                  {reason}",
                 meta.name,
                 meta.parent_source_var.ident(db)
             )),
-            severity: DiagnosticSeverity::Error,
-        })
+        }
         .accumulate(db);
     };
 
+    // A helper that exists but for which nothing can be emitted keeps its
+    // place in the fragment map (its runlist entries then surface as missing
+    // fragments).
+    let unemitted = || {
+        Some(VarFragmentResult {
+            fragment: CompiledVarFragment {
+                ident: meta.name.clone(),
+                initial_bytecodes: None,
+                flow_bytecodes: None,
+                stock_bytecodes: None,
+            },
+            flow_locally_invariant: None,
+        })
+    };
     let input = match implicit_fragment_input(db, meta, model, project, module_input_names) {
         Ok(input) => input,
         Err(ImplicitInputError::Absent) => return None,
-        // The helper exists but nothing can be emitted for it; report why, and
-        // keep the helper's place in the fragment map (its runlist entries
-        // then surface as missing fragments).
-        Err(ImplicitInputError::Table(reason)) => {
-            report(reason);
-            return Some(VarFragmentResult {
-                fragment: CompiledVarFragment {
-                    ident: meta.name.clone(),
-                    initial_bytecodes: None,
-                    flow_bytecodes: None,
-                    stock_bytecodes: None,
-                },
-                flow_invariance: None,
-            });
+        // A body's diagnostics are the PARENT's: their spans index the
+        // parent's equation text, where the argument was written, so they are
+        // reported against the parent and render as a snippet under the
+        // argument, exactly as a plain equation's errors do. Identical errors
+        // from the per-element helpers of one parent collapse to one row.
+        Err(ImplicitInputError::Lowering(failures)) => {
+            let parent = meta.parent_source_var.ident(db).clone();
+            for error in failures {
+                Diagnostic {
+                    model: model.name(db).clone(),
+                    variable: Some(parent.clone()),
+                    owner: None,
+                    severity: DiagnosticSeverity::Error,
+                    error,
+                }
+                .accumulate(db);
+            }
+            return unemitted();
         }
     };
 
@@ -684,10 +676,28 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
 
     // Runlist-gated phase selection: the Initial phase is compiled only for
     // helpers in `runlist_initials`; the non-initial phase feeds
-    // `flow_bytecodes` (non-stock) or `stock_bytecodes` (stock/module), each
-    // gated by the corresponding runlist.
+    // `flow_bytecodes` (a capture or hoisted argument) or `stock_bytecodes`
+    // (a module instance), each gated by the corresponding runlist. A
+    // capture's runlists are its phase demand (`CaptureKind`), decided by
+    // the dependency graph, so an INIT-only capture arrives here with no
+    // flows membership and gets no flow fragment.
+    // A body the COMPILER refuses is refused where the parent's plain
+    // equation would be, as the parent's equation error: a subtree-bodied
+    // helper is the whole or one element of the parent's body, so the
+    // compiler's verdict on it is the verdict on the plain spelling, its code
+    // is that spelling's code, and the argument's span in the parent's
+    // equation text is where the rendering underlines it. The drain collapses
+    // the per-element and per-phase repeats of one `(code, span)` into one
+    // row. A module instance has no argument of its own, so its lowering
+    // failure keeps the assembly row.
+    let parent_argument_span = || {
+        let parsed = parse_source_variable(db, meta.parent_source_var, project);
+        meta.find_in(parsed)
+            .and_then(crate::capture::ImplicitVar::arg)
+            .map(|arg| arg.get_loc())
+    };
     let emit_ctx = input.emit_ctx();
-    let mut phase = |is_initial: bool| -> Option<PerVarBytecodes> {
+    let phase = |is_initial: bool| -> Option<PerVarBytecodes> {
         match lower_fragment(&input, is_initial) {
             Ok(var) => {
                 match crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting(
@@ -701,7 +711,22 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
                 }
             }
             Err(err) => {
-                report(format!("could not be lowered: {err}"));
+                match parent_argument_span() {
+                    Some(loc) => Diagnostic {
+                        model: model.name(db).clone(),
+                        variable: Some(meta.parent_source_var.ident(db).clone()),
+                        owner: None,
+                        severity: DiagnosticSeverity::Error,
+                        error: DiagnosticError::Equation(crate::common::EquationError {
+                            start: loc.start,
+                            end: loc.end,
+                            code: err.code,
+                            details: err.details,
+                        }),
+                    }
+                    .accumulate(db),
+                    None => report(format!("could not be lowered: {err}")),
+                }
                 None
             }
         }
@@ -712,12 +737,8 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
     } else {
         None
     };
-    let flow_bytecodes = if !meta.is_stock && membership.flows {
-        phase(false)
-    } else {
-        None
-    };
-    let stock_bytecodes = if (meta.is_stock || meta.is_module) && membership.stocks {
+    let flow_bytecodes = if membership.flows { phase(false) } else { None };
+    let stock_bytecodes = if meta.is_module && membership.stocks {
         phase(false)
     } else {
         None
@@ -732,6 +753,6 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
         },
         // Implicit helpers (SMOOTH/DELAY/TREND) are always dynamic; the
         // run-invariance analysis only applies to explicit source variables.
-        flow_invariance: None,
+        flow_locally_invariant: None,
     })
 }

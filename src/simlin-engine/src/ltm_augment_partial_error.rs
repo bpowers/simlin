@@ -32,11 +32,13 @@ use crate::builtins::UntypedBuiltinFn;
 /// established "loud failure" pattern in this codebase
 /// (cf. `emit_unscoreable_disjoint_edge_warning`).
 ///
-/// The text being parsed is itself produced by the engine (`print_eqn` /
-/// `expr2_to_string` over a compiled AST), so `Err` is effectively
+/// The text being parsed is itself produced by the engine (the guard form a
+/// generator prints around a wrapped `Expr0`), so `Err` is effectively
 /// unreachable in production; `Ok(None)` is reachable for a target with an
 /// empty equation. Either way the failure is rare and unexpected -- exactly
 /// the case where a silent semantics-changing fallback is most dangerous.
+/// A target that has no lowered body at all is the separate
+/// `MissingTypedTarget` class: nothing is parsed for it, the edge is declined.
 ///
 /// `UnfreezablePartial` (GH #743) is the second loud-failure class: the
 /// equation parsed fine, but neither ceteris-paribus convention can be
@@ -62,26 +64,30 @@ pub(crate) enum PartialEquationErrorKind {
     /// The equation text failed to parse (or was empty); there is no AST
     /// to transform.
     Parse,
+    /// The target has no lowered body to differentiate: its `Expr0 -> Expr2`
+    /// lowering failed (a scope-dependent refusal such as
+    /// `MismatchedDimensions`, which leaves the causal edge into it standing
+    /// because dependencies are classified on the typed tier), or its body is
+    /// a per-element `Ast::Arrayed` that the arrayed generator did not route.
+    /// A project with such a target does not compile; the edge is declined
+    /// rather than scored around a body the compiler refused.
+    MissingTypedTarget,
     /// Neither the changed-first nor the changed-last ceteris-paribus
     /// convention can be rendered as a compilable equation (GH #743).
     UnfreezablePartial,
-    /// The live source is a BARE reference to an arrayed variable inside an
-    /// array-reducer argument (GH #779): the changed-last partial cannot be
-    /// rendered faithfully for it, and the spelling's own execution
-    /// semantics carry a spurious factor (GH #789). Selects a diagnostic
-    /// that names the shape and the subscripted-spelling workaround.
-    BareReducerFeeder,
     /// An arrayed dep of the target's equation cannot be projected onto the
     /// target element this partial is for, so no correct element subscript
     /// exists for it. `equation_text` carries `dep@element`. Emitting anyway
     /// leaves the dep's dimension-name subscript in a scalar fragment, which
     /// becomes a `PREVIOUS`-capture helper that cannot lower WHILE THE PARENT
     /// STILL COMPILES -- a score that silently reads part of its own equation
-    /// as 0. The reachable cause is a pair with no DECLARED correspondence at
-    /// all -- two dimensions sharing element names, which the simulation
-    /// resolves by name while `allocate_implicit_axes_partial` pairs axes only
-    /// by name or by a declared mapping. (An explicit element map was the
-    /// reachable cause until GH #997 made that spelling projectable.)
+    /// as 0. The reachable cause is a pair with NO correspondence the
+    /// describers admit: two dimensions with disjoint element names under no
+    /// declared mapping (the ordinal read the simulation performs there at
+    /// equal cardinality is deliberately left undescribed, GH #527), or a
+    /// many-to-one or transposed shape the row derivation declines. A pair
+    /// sharing element names, and an explicit element map, both project
+    /// (`DimensionsContext::executed_read_correspondence`, GH #997).
     UnprojectableDep,
     /// The target's equation applies an ORDER-STATISTIC, array-producing
     /// builtin (`VECTOR SORT ORDER`, `RANK`, `ALLOCATE AVAILABLE`,
@@ -90,10 +96,10 @@ pub(crate) enum PartialEquationErrorKind {
     /// to a single element, and an order statistic of one element is
     /// meaningless (`vm_vector_sort_order` on a 1-element view is rank 0
     /// always). Today such a fragment also fails codegen loudly
-    /// ("array-producing builtin outside AssignTemp context"); declining at
-    /// generation keeps the drop loud even if a future Pass-1 widening
-    /// (option A) makes the fragment compile -- which would otherwise convert
-    /// it into a silent constant-0 partial. The element pin belongs on the
+    /// (an array in a position that consumes one value); declining at
+    /// generation keeps the drop loud even if a future widening of the
+    /// materializer (option A) makes the fragment compile -- which would
+    /// otherwise convert it into a silent constant-0 partial. The element pin belongs on the
     /// RESULT (the A2A-shaped whole-array score, which stays emitted), never
     /// on a rank-like builtin's argument.
     RankLikePartial,
@@ -124,10 +130,12 @@ impl PartialEquationError {
         }
     }
 
-    pub(super) fn bare_reducer_feeder(equation_text: &str) -> Self {
+    /// `target` (the variable's name) has no lowered scalar or apply-to-all
+    /// body; `equation_text` names the target, since there is no equation.
+    pub(super) fn missing_typed_target(target: &str) -> Self {
         PartialEquationError {
-            equation_text: equation_text.to_string(),
-            kind: PartialEquationErrorKind::BareReducerFeeder,
+            equation_text: target.to_string(),
+            kind: PartialEquationErrorKind::MissingTypedTarget,
         }
     }
 
@@ -157,8 +165,8 @@ impl PartialEquationError {
 /// scalar fragment cannot hold. The order-statistic subset (everything but
 /// ELM MAP) is additionally a semantic trap: pinning its argument to one
 /// element changes the ranking rather than selecting a slot, so those must
-/// stay declined even if a future Pass-1 widening makes the fragment
-/// compile. Deliberately NOT in the set: `VECTOR SELECT`, whose selection
+/// stay declined even if a future widening of the materializer makes the
+/// fragment compile. Deliberately NOT in the set: `VECTOR SELECT`, whose selection
 /// reduces to a scalar (per-element pinning of the non-reduced axes is
 /// exactly right). This is the same result-type distinction
 /// `ltm_agg::reducer_collapses_to_scalar` draws for `RANK` (GH #771/#742),

@@ -9,10 +9,9 @@ use crate::canonicalize;
 use crate::common::{Canonical, Ident};
 use crate::datamodel;
 
-// `BTreeSet` is no longer used by the root module's own code after the
-// `db/` split, but the root-mounted `#[cfg(test)]` test modules pull it in
-// through their `use super::*` glob (preserving the pre-split import
-// surface), so keep it in scope for the test build only.
+// `BTreeSet` is imported for the root-mounted `#[cfg(test)]` test modules,
+// which reach it through their `use super::*` glob; the root module's own code
+// does not use it, so the import is test-only.
 #[cfg(test)]
 use std::collections::BTreeSet;
 
@@ -27,17 +26,18 @@ use std::collections::BTreeSet;
 // * `input`      -- the `#[salsa::input]` structs + interned key types.
 // * `query`      -- demand-driven read queries (parse, dims, deps, module map).
 // * `sync`       -- datamodel -> salsa-input sync (fresh + incremental).
-// * `diagnostic` -- the `CompilationDiagnostic` accumulator + drain helpers.
+// * `diagnostic` -- the per-model diagnostic owner + drain helpers.
 // * `layout`     -- the per-model body layout query.
 // * `var_fragment` / `fragment_compile` -- the lowering / emission halves of
 //   per-variable compilation.
 // * `assemble`   -- module/simulation assembly + flattened-offset map.
 // * `dep_graph`  -- the dependency-graph cycle gate + its result types.
-// * `analysis`   -- causal-graph analysis tracked functions.
-// * `stages`     -- the two cached model-compilation stages (Stage0/Stage1).
+// * `analysis`   -- causal-graph analysis tracked functions, and the handle
+//   map of a model's lowered variables (`model_lowered_variables`).
 // * `ltm` / `ltm_ir` / `macro_registry` / `units` -- LTM (a `ltm/` directory:
 //   mod/parse/compile/loops/link_scores), the reference-site IR, the macro
-//   registry, and the unit-check pass.
+//   registry, and the unit-check pass with its inference scope
+//   (`model_scope_models`).
 mod dep_graph;
 // The production per-variable lowering as a flow-phase `Vec<Expr>`, which
 // `test_common::TestProject::flow_exprs` reads from outside `db` so structural
@@ -58,42 +58,34 @@ pub(crate) use invariance::model_flows_invariant;
 // (`model_ltm_reference_sites`) it compares the Expr0 partial builder against.
 pub(crate) mod ltm_ir;
 mod macro_registry;
-mod stages;
-pub(crate) use stages::{
-    model_scope_models, model_scope_stage0, model_stage0, model_stage1, source_model_is_stdlib,
-};
-// Test-only: the execution counters for the two stage queries and the unit-check
-// pass, so `stages_tests` can prove each model's stages are BUILT at most once
-// per revision (GH #966), and that an unrelated model's edit re-executes none of
-// the three -- claims pointer equality of a `returns(ref)` memo cannot support.
-#[cfg(test)]
-pub(crate) use stages::{QueryExecutions, query_executions, reset_query_executions};
-mod units;
+// `pub(crate)` so `units_infer`'s tests drive `infer` over the same `UnitModel`
+// views (`units::unit_model`) the salsa pass builds.
+pub(crate) mod units;
 mod var_fragment;
+pub(crate) use var_fragment::lowered_source_variable;
 
 mod diagnostic;
-pub use diagnostic::{
-    CompilationDiagnostic, Diagnostic, DiagnosticError, DiagnosticSeverity,
-    collect_all_diagnostics, collect_model_diagnostics, model_all_diagnostics,
-};
+pub use crate::diagnostic::{Diagnostic, DiagnosticCategory, DiagnosticError, DiagnosticSeverity};
+pub use diagnostic::{collect_all_diagnostics, collect_model_diagnostics, model_all_diagnostics};
 
 mod input;
-pub(crate) use input::source_var_is_table_only;
 pub use input::{
-    LtmLinkId, ModuleIdentContext, ModuleInputSet, PinnedLoopSpec, SourceModel, SourceProject,
-    SourceVariable, SourceVariableKind, variable_source,
+    LtmLinkId, ModuleInputSet, PinnedLoopSpec, SourceModel, SourceProject, SourceVariable,
+    SourceVariableKind, variable_source,
 };
+pub(crate) use input::{source_model_is_stdlib, source_var_is_table_only};
 
 mod query;
 pub use query::{
-    ImplicitVarMeta, ModuleReferenceGraph, ParsedVariableResult, UnitsContextResult, VariableDeps,
-    model_implicit_var_info, model_module_ident_context, parse_source_variable_with_module_context,
-    project_converted_dimensions, project_datamodel_dims, project_dimensions_context,
-    project_module_graph, project_units_context, project_units_context_result, variable_dimensions,
-    variable_direct_dependencies, variable_relevant_dimensions, variable_size,
+    DepPhase, DepRef, DepRefs, DepTarget, ImplicitVarMeta, ModuleReferenceGraph,
+    ParsedVariableResult, UnitsContextResult, VariableDeps, model_implicit_var_info,
+    parse_source_variable, project_converted_dimensions, project_datamodel_dims,
+    project_dimensions_context, project_module_graph, project_units_context,
+    project_units_context_result, variable_dimensions, variable_direct_dependencies,
+    variable_relevant_dimensions, variable_size,
 };
 pub(crate) use query::{
-    canonical_module_input_set, model_implicit_var_by_name, model_variable_by_name,
+    DepScope, canonical_module_input_set, model_implicit_var_by_name, model_variable_by_name,
 };
 
 mod sync;
@@ -109,8 +101,8 @@ pub(crate) use layout::flattened_offsets;
 pub(crate) use layout::module_dep_shape;
 
 mod fragment_compile;
-pub(crate) use fragment_compile::compile_implicit_var_fragment;
 pub use fragment_compile::compile_var_fragment;
+pub(crate) use fragment_compile::{compile_implicit_var_fragment, lowered_implicit_variable};
 // Test-only: the per-thread record of which fragment-compiler bodies ran, so
 // `fragment_char_tests` can prove a layout-only edit did or did not recompile
 // a fragment. Pointer equality of a memo cannot prove that -- salsa backdates
@@ -124,7 +116,7 @@ pub(crate) use fragment_compile::{
 mod assemble;
 pub(crate) use assemble::{
     VarFragmentResult, build_module_inputs, compile_phase_to_per_var_bytecodes,
-    extract_tables_from_source_var, module_input_prefix, var_phase_symbolic_fragment_prod,
+    module_input_prefix, port_of, var_phase_symbolic_fragment_prod, variable_tables,
 };
 pub use assemble::{assemble_module, assemble_simulation};
 // `combine_scc_fragment` is consumed at runtime only WITHIN `assemble.rs`; the
@@ -143,8 +135,8 @@ mod ltm;
 use ltm::*;
 pub use ltm::{
     LtmArm, LtmEquation, LtmImplicitVarMeta, ShapedLinkScore, compile_ltm_var_fragment,
-    link_score_equation_text_shaped, model_ltm_implicit_var_info, model_ltm_mode,
-    model_ltm_var_name_index, model_ltm_variables,
+    model_ltm_implicit_var_info, model_ltm_mode, model_ltm_var_name_index, model_ltm_variables,
+    shaped_link_score,
 };
 // The cross-agg petal-stitching core, shared with `crate::ltm_finding`'s
 // discovery-mode recovery (GH #696).
@@ -178,10 +170,11 @@ pub(crate) use ltm::ForcePartialEquationErrorGuard;
 
 mod analysis;
 pub use analysis::RefShape;
-pub use analysis::causal_graph_from_edges;
 pub use analysis::causal_graph_from_element_edges;
 pub use analysis::causal_graph_from_element_edges_with_modules;
-pub(crate) use analysis::reconstruct_model_variables;
+pub(crate) use analysis::model_lowered_variables;
+pub(crate) use analysis::unique_module_output;
+pub use analysis::{ModuleOutputsRead, causal_graph_from_edges};
 // The variable-level graph with module sub-graphs, for tests outside `db` that
 // pin edge normalization and polarity on the production graph constructor.
 pub(crate) use analysis::causal_graph_with_modules;
@@ -192,6 +185,7 @@ pub(crate) use analysis::causal_graph_with_modules;
 // rather than re-deriving it with a subtly different rule (GH #754).
 pub(crate) use analysis::expand_same_element;
 use analysis::*;
+pub(crate) use analysis::{BareAxis, BareSpelling, bare_axis_pairing};
 // `model_element_loop_circuits` is `#[deprecated]` for LTM consumers (the
 // LTM pipeline uses `model_loop_circuits_tiered` instead). The re-export
 // itself triggers the deprecation lint, but we need to keep it visible
@@ -447,7 +441,7 @@ impl Db for SimlinDb {}
 /// `compile_directly` forces `assemble_module`'s LTM pass to compile this
 /// var's `equation` verbatim instead of re-deriving it from the
 /// `(from, to)`-keyed salsa cache (`compile_ltm_var_fragment` ->
-/// `link_score_equation_text_shaped(.., Bare)`). It is
+/// `shaped_link_score(.., Bare)`). It is
 /// set by `emit_per_shape_link_scores` for a scalar link score whose
 /// underlying reference shape is *not* `Bare` -- a `Wildcard`/`DynamicIndex`
 /// reference into a scalar target (e.g. `total = arr[idx]`), where the salsa
@@ -523,18 +517,23 @@ pub enum LtmMode {
 /// cross-element-through-aggregate loops (`recover_cross_agg_loops`, GH
 /// #515) hit its loop-count budget (`ltm::MAX_CROSS_AGG_LOOPS`) or its
 /// per-aggregate petal cap, so the recovered loop list is incomplete (a
-/// `CompilationDiagnostic` `Warning` is also emitted then -- the flag is
-/// the robust signal, the `Warning`'s reachability being #466's concern).
-/// Always `false` in discovery mode and for models with no synthetic aggs.
+/// `Warning` is among `diagnostics` then -- the flag is the robust signal,
+/// the `Warning`'s reachability being #466's concern). Always `false` in
+/// discovery mode and for models with no synthetic aggs.
 ///
 /// `pathways_truncated` is `true` when internal module-pathway enumeration hit
 /// the per-input-port pathway budget (`ltm::MAX_MODULE_PATHWAYS`, GH #649), so
 /// at least one input port's composite link score was computed over a
 /// deterministic prefix of its pathways rather than the complete set -- the
-/// score is degraded, not wrong-by-panic. A `CompilationDiagnostic` `Warning`
-/// naming the module + clipped port(s) accompanies it; the flag is the robust
-/// signal. Only ever `true` for a model with input ports (a sub-model or a
-/// discovery-mode model) whose pathway count exceeds the budget.
+/// score is degraded, not wrong-by-panic. A `Warning` naming the module +
+/// clipped port(s) accompanies it; the flag is the robust signal. Only ever
+/// `true` for a model with input ports (a sub-model or a discovery-mode model)
+/// whose pathway count exceeds the budget.
+///
+/// `diagnostics` is every `Warning` the derivation raised, in order (the mode
+/// flips, truncations, declined edges and unhonoured pins): facts on the
+/// value, never accumulated, which only `model_all_diagnostics` emits (see
+/// `db::ltm::LtmWarnings`).
 /// (`Debug`/`Eq` are conditional/absent for the same reasons as
 /// `LtmSyntheticVar`.)
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
@@ -545,6 +544,7 @@ pub struct LtmVariablesResult {
     pub agg_recovery_truncated: bool,
     pub pathways_truncated: bool,
     pub mode: LtmMode,
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 /// Compute the link score equation text for a single causal link.
@@ -594,8 +594,8 @@ pub(super) fn black_box_unit_transfer_equation(from_ref: &str, to_ref: &str) -> 
 }
 
 /// Map each module variable in `model` to the sub-model internal variables
-/// the rest of the model actually reads through it (the `port` suffixes of
-/// `module·port` dependency references), each port list sorted for
+/// the rest of the model actually reads through it (the port a qualified
+/// `module·port` read names inside the instance), each port list sorted for
 /// determinism.
 ///
 /// One cached pass over the model's variable dependency sets (mirroring the
@@ -610,30 +610,26 @@ pub fn model_module_output_ports(
     model: SourceModel,
     project: SourceProject,
 ) -> HashMap<String, Vec<String>> {
-    let middot = '\u{00B7}';
-    let empty_ctx = ModuleIdentContext::new(db, vec![]);
     let empty_inputs = ModuleInputSet::empty(db);
     let mut ports: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
-    let record = |dep: &str, ports: &mut HashMap<String, std::collections::BTreeSet<String>>| {
-        if let Some(dot_pos) = dep.find(middot) {
-            let module_part = &dep[..dot_pos];
-            let internal_var = &dep[dot_pos + middot.len_utf8()..];
-            if !module_part.is_empty() && !internal_var.is_empty() {
-                ports
-                    .entry(module_part.to_string())
-                    .or_default()
-                    .insert(internal_var.to_string());
-            }
+    let mut record = |dep: &DepRef| {
+        if let (Some(instance), Some(port)) =
+            (dep.target.module_path.first(), dep.target.output_port())
+        {
+            ports
+                .entry(instance.as_str().to_string())
+                .or_default()
+                .insert(port.as_str().to_string());
         }
     };
     for source_var in model.variables(db).values() {
-        let deps = variable_direct_dependencies(db, *source_var, project, empty_ctx, empty_inputs);
-        for dep in deps.dt_deps.iter().chain(deps.initial_deps.iter()) {
-            record(dep, &mut ports);
+        let deps = variable_direct_dependencies(db, *source_var, project, empty_inputs);
+        for dep in deps.deps.iter() {
+            record(dep);
         }
         for iv_deps in &deps.implicit_vars {
-            for dep in &iv_deps.dt_deps {
-                record(dep, &mut ports);
+            for dep in iv_deps.deps.phase(DepPhase::Dt) {
+                record(dep);
             }
         }
     }
@@ -717,27 +713,25 @@ fn module_composite_ports(
 /// DOCUMENT order (left-to-right over `to`'s reconstructed AST), or `None`
 /// when `to` reads no output of `module`.
 ///
-/// This is the deterministic replacement (GH #971) for
-/// [`module_link_score_equation`]'s former pick -- an arbitrary
-/// `{module}·`-prefixed dependency out of `identifier_set`'s `HashSet`, whose
-/// iteration order is per-process random. When `to` reads MORE THAN ONE
-/// output of one module instance the choice decides which output's change the
-/// link score attributes (the others are frozen), so the random pick made the
-/// emitted score -- and every loop score through it -- flap between processes.
-/// The reference-site IR already enumerates the module-output composites as
-/// `OccurrenceRef::ModuleOutput` occurrences in the walk's stable
-/// left-to-right order, so taking the first that names `module` is a
-/// reproducible choice over the SAME set the old scan considered.
+/// The choice is deterministic by construction (GH #971): the reference-site
+/// IR enumerates the module-output composites as `OccurrenceRef::ModuleOutput`
+/// occurrences in the walk's stable left-to-right order, so the first that
+/// names `module` is reproducible. It must never be drawn from a `HashSet` of
+/// `{module}·`-prefixed dependencies, whose iteration order is per-process
+/// random: when `to` reads MORE THAN ONE output of one module instance the
+/// choice decides which output's change the link score attributes (the others
+/// are frozen), so a random pick makes the emitted score -- and every loop
+/// score through it -- flap between processes.
 ///
-/// `None` no longer conflates a WIDTH-suppressed reference with a genuine
-/// absence. The occurrence stream is complete in that respect for every model
-/// that reaches here, because the LTM front door
+/// `None` is a genuine absence, never a WIDTH-suppressed reference. The
+/// occurrence stream is complete in that respect for every model that reaches
+/// here, because the LTM front door
 /// (`db::ltm_ir::model_ltm_reference_sites`' `site_width_rejection`, GH
 /// #978/#979) refuses a model holding an equation whose `SiteId` paths could not
 /// name every child, and `model_ltm_variables` then emits no link score for it
-/// at all. Until that check existed, an over-arity builtin child had its
-/// occurrence suppressed and looked identical here to "reads no output", so the
-/// caller silently approximated the first with the signed magnitude-1
+/// at all. Without that front door an over-arity builtin child's suppressed
+/// occurrence would look identical here to "reads no output", and the caller
+/// would silently approximate it with the signed magnitude-1
 /// `black_box_unit_transfer_equation`.
 ///
 /// One PRE-EXISTING source of `None` survives, deliberately and unrelated to
@@ -774,7 +768,7 @@ pub(crate) fn module_output_ref_in_document_order(
 
 /// Equation for a module-involved link score (`from` and/or `to` is a
 /// module node in the parent causal graph). Called by the per-shape
-/// [`crate::db::link_score_equation_text_shaped`]; a module link's equation
+/// [`crate::db::shaped_link_score`]; a module link's equation
 /// is independent of `RefShape` (modules are scalar nodes whose
 /// composite-reference / ceteris-paribus / unit-transfer formulas don't
 /// reach into the target's AST shape), so the scalar Bare score the compile
@@ -807,8 +801,8 @@ pub(crate) fn module_link_score_equation(
     project: SourceProject,
     from_name: &str,
     to_name: &str,
-    from_var: Option<&crate::variable::Variable>,
-    to_var: &crate::variable::Variable,
+    from_var: Option<&std::sync::Arc<crate::variable::Variable>>,
+    to_var: &std::sync::Arc<crate::variable::Variable>,
 ) -> Option<LtmEquation> {
     use crate::common::{Canonical, Ident};
 
@@ -936,7 +930,7 @@ pub(crate) fn module_link_score_equation(
             Some(output_ref) => {
                 let output_ident = Ident::<Canonical>::new(&output_ref);
                 let mut all_vars = HashMap::new();
-                all_vars.insert(to_ident.clone(), to_var.clone());
+                all_vars.insert(to_ident.clone(), std::sync::Arc::clone(to_var));
                 let dim_ctx = project_dimensions_context(db, project);
                 // The target's per-occurrence access-shape IR. The live source
                 // here is a `module·port` composite (an `OccurrenceRef::ModuleOutput`),
@@ -992,9 +986,9 @@ pub(crate) fn module_link_score_equation(
     Some(LtmEquation::scalar(equation))
 }
 
-// `link_score_equation_text_shaped` lives in `db/ltm/compile.rs` (where
+// `shaped_link_score` lives in `db/ltm/compile.rs` (where
 // the emission loop calls it) so this file stays under the project's
-// per-file line cap; see `ltm::link_score_equation_text_shaped`.
+// per-file line cap; see `ltm::shaped_link_score`.
 
 /// Build a causal graph from pre-computed edges and enumerate all pathways
 /// from each input port to the specified output ports (or auto-detect them).
@@ -1424,13 +1418,19 @@ mod combined_fragment_proptest;
 #[cfg(test)]
 mod combined_fragment_tests;
 #[cfg(test)]
+mod dep_ref_tests;
+#[cfg(test)]
 mod diagnostic_determinism_tests;
+#[cfg(test)]
+mod diagnostic_payload_tests;
 #[cfg(test)]
 mod diagnostic_tests;
 #[cfg(test)]
 mod dimension_context_cache_tests;
 #[cfg(test)]
 mod dimension_invalidation_tests;
+#[cfg(test)]
+mod element_scope_tests;
 #[cfg(test)]
 mod fragment_cache_tests;
 #[cfg(test)]
@@ -1442,7 +1442,13 @@ mod fragment_input_tests;
 #[cfg(test)]
 mod implicit_diag_tests;
 #[cfg(test)]
+mod implicit_module_tests;
+#[cfg(test)]
 mod incremental_compile_tests;
+#[cfg(test)]
+mod lowered_variable_tests;
+#[cfg(test)]
+mod lowering_scope_tests;
 #[cfg(test)]
 mod ltm_array_freeze_tests;
 #[cfg(test)]
@@ -1464,11 +1470,11 @@ mod module_wiring_tests;
 #[cfg(test)]
 mod prev_init_tests;
 #[cfg(test)]
-mod stages_tests;
-#[cfg(test)]
 mod temp_allocation_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod units_tests;
 #[cfg(test)]
 mod variable_dimensions_tests;
 #[cfg(test)]

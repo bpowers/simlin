@@ -4574,22 +4574,18 @@ pub fn compute_metadata(
         let deps: Vec<String> = source_model
             .and_then(|sm| {
                 let sv = sm.variables(db).get(&var_ident)?.to_owned();
-                // The old no-arg variant used an empty module-ident context and
-                // the `None`-inputs path; reproduce that with the empty sets.
-                let empty_ctx = crate::db::ModuleIdentContext::new(db, vec![]);
+                // The input-agnostic dependency set: a diagram has no module
+                // instance in hand, and the memo is the one the compiler's
+                // own dependency graph reads for an uninstantiated model.
                 let empty_inputs = crate::db::ModuleInputSet::empty(db);
-                let var_deps = crate::db::variable_direct_dependencies(
-                    db,
-                    sv,
-                    source_project,
-                    empty_ctx,
-                    empty_inputs,
-                );
+                let var_deps =
+                    crate::db::variable_direct_dependencies(db, sv, source_project, empty_inputs);
+                // A module read is drawn to the module box: the read's head.
                 let mut combined: Vec<String> = var_deps
-                    .dt_deps
-                    .iter()
-                    .chain(var_deps.initial_deps.iter())
-                    .cloned()
+                    .deps
+                    .heads()
+                    .into_iter()
+                    .map(|head| head.as_str().to_string())
                     .collect();
                 combined.sort();
                 combined.dedup();
@@ -4597,13 +4593,7 @@ pub fn compute_metadata(
                     // Check whether the equation actually parsed. If the AST
                     // is None, the equation has syntax errors and we fall back
                     // to string heuristics for approximate layout deps.
-                    let empty_ctx = crate::db::ModuleIdentContext::new(db, vec![]);
-                    let parsed = crate::db::parse_source_variable_with_module_context(
-                        db,
-                        sv,
-                        source_project,
-                        empty_ctx,
-                    );
+                    let parsed = crate::db::parse_source_variable(db, sv, source_project);
                     if parsed.variable.ast().is_none() {
                         return Some(extract_equation_deps(var, &all_idents));
                     }

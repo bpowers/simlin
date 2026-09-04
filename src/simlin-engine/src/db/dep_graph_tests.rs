@@ -40,6 +40,7 @@ fn vi_for_test(is_stock: bool, is_module: bool, dt_deps: &[&str]) -> VarInfo {
         is_stock,
         is_module,
         is_table_only: false,
+        capture_kind: None,
         dt_deps: dt_deps
             .iter()
             .map(|s| Ident::from_str_unchecked(s))
@@ -157,6 +158,7 @@ fn vi_init_for_test(is_stock: bool, is_module: bool, initial_deps: &[&str]) -> V
         is_stock,
         is_module,
         is_table_only: false,
+        capture_kind: None,
         dt_deps: BTreeSet::new(),
         initial_deps: initial_deps
             .iter()
@@ -420,7 +422,7 @@ fn dt_cycle_sccs_resolved_self_recurrence_has_no_circular() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "an element-acyclic single-variable self-recurrence must NOT set \
          has_cycle"
     );
@@ -470,7 +472,7 @@ fn dt_cycle_sccs_genuine_two_cycle_still_circular() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        dep_graph.has_cycle,
+        dep_graph.has_cycle(),
         "a genuine 2-cycle still sets has_cycle (Phase 1 does not resolve \
          multi-variable SCCs)"
     );
@@ -662,19 +664,18 @@ fn consistency_violation_none_for_init_only_resolved_scc_not_dt_instrumented() {
     );
 }
 
-// `array_producing_vars` membership over four cases. Both positive cases
-// are independently required: each defends `array_producing_vars` against
-// a different way of under-counting.
-//   case-1 (POS) top-level-scalar `= VECTOR ELM MAP(...)` -- the shape
-//     the scalar path does NOT hoist (`App` lives in `AssignCurr`);
-//     guards against an impl narrowed to only the compiler hoist-set.
-//   case-2 (POS) array-producing builtin nested so the compiler hoists
-//     it into a separate `AssignTemp` (`App` lives ONLY in the hoisted
-//     `AssignTemp`, NOT in `AssignCurr`/main); guards against an impl
-//     that sources only `AssignCurr` and drops hoisted temps.
+// `array_producing_vars` membership over four cases.
+//   case-1 (POS) top-level-scalar `= VECTOR ELM MAP(...)`;
+//   case-2 (POS) the same builtin nested inside `max(...)`;
 //   case-3 (NEG) plain scalar -- soundness.
 //   case-4 (NEG) merely references the VEM var -- its OWN lowered `Expr`
 //     has only a `Var` slot read, no `App`; soundness.
+// Both positives are required, and what they defend against is the same thing
+// from two sides: an array-producing `App` is ALWAYS materialized into an
+// `AssignTemp` of its own (`compiler::array_operand`), so an implementation
+// that sourced only `AssignCurr` would find neither, and one narrowed to a
+// particular nesting depth would find one. The shape guards below assert that
+// -- the `App` in an `AssignTemp` and NOT in an `AssignCurr` -- for both.
 // VEM shapes are the known-good `tests/integration/compiler_vector.rs` fixtures
 // (`vector_elm_map(source[*], offsets[*])` and the nested
 // `max(vector_elm_map(...), 15)` hoisting form) so the model compiles and
@@ -685,12 +686,11 @@ fn array_producing_vars_flags_exactly_the_two_positive_cases() {
         .indexed_dimension("D", 3)
         .array_with_ranges("source[D]", vec![("1", "10"), ("2", "20"), ("3", "30")])
         .array_with_ranges("offsets[D]", vec![("1", "0"), ("2", "2"), ("3", "1")])
-        // case-1 POSITIVE: top-level array-producing (scalar path does
-        // NOT hoist; `App` in `AssignCurr`).
+        // case-1 POSITIVE: top-level array-producing, in a scalar equation.
         .aux("case1_vem", "vector_elm_map(source[*], offsets[*])", None)
-        // case-2 POSITIVE: VEM nested inside `max(...)` -> the compiler
-        // hoists the VEM into a separate `AssignTemp`; `App` lives ONLY
-        // in the hoisted temp, `AssignCurr` reads it back.
+        // case-2 POSITIVE: VEM nested inside `max(...)`, in an apply-to-all
+        // equation. Both materialize the VEM into an `AssignTemp` of its own;
+        // `AssignCurr` reads it back.
         .array_aux(
             "case2_hoisted[D]",
             "max(vector_elm_map(source[*], offsets[*]), 15)",
@@ -743,27 +743,23 @@ fn array_producing_vars_flags_exactly_the_two_positive_cases() {
             })
             .cloned()
             .collect();
-        crate::compiler::exprs_contain_array_producing_builtin(&part)
+        exprs_contain_array_producing_builtin(&part)
     };
 
-    // case-1 (inverse of case-2): the array-producing `App` must live
-    // inside an `AssignCurr`/main element AND NOT inside any hoisted
-    // `AssignTemp`. The bare-scalar declaration lowers to
-    // `[AssignCurr(off, App(VEM,…))]` -- the scalar path does NOT hoist a
-    // top-level array-producing builtin -- so this is distinct from
-    // case-2 by construction. If the `App` is instead in a hoisted
-    // `AssignTemp`, the scalar lowering changed unexpectedly: surface it
-    // immediately, do NOT paper over.
+    // case-1: the array-producing `App` must live inside a materialized
+    // `AssignTemp` AND NOT inside an `AssignCurr`/main element, which reads the
+    // temp back. If the `App` is instead in the `AssignCurr`, the lowering
+    // changed unexpectedly: surface it immediately, do NOT paper over.
     let c1 = var_noninitial_lowered_exprs(&db, model, result.project, "case1_vem");
     let c1_in_curr = vem_in(&c1, false);
     let c1_in_temp = vem_in(&c1, true);
     assert!(
-        c1_in_curr && !c1_in_temp,
-        "case-1 shape (inverse of case-2): the VECTOR ELM MAP App must \
-         be in an AssignCurr/main element AND NOT in any hoisted \
-         AssignTemp (in_curr={c1_in_curr}, in_temp={c1_in_temp}, \
-         elems={}). in_temp=true means the scalar lowering changed \
-         unexpectedly -- surface immediately, do not work around.",
+        c1_in_temp && !c1_in_curr,
+        "case-1 shape: the VECTOR ELM MAP App must be in a materialized \
+         AssignTemp AND NOT in any AssignCurr/main element \
+         (in_curr={c1_in_curr}, in_temp={c1_in_temp}, elems={}). \
+         in_curr=true means the materializer stopped moving it -- surface \
+         immediately, do not work around.",
         c1.len()
     );
 
@@ -1222,7 +1218,7 @@ fn init_recurrence_behind_stock_model_dep_graph_resolves_no_circular() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "an element-acyclic init-only recurrence behind a stock must NOT \
          set has_cycle"
     );
@@ -1243,21 +1239,9 @@ fn init_recurrence_behind_stock_model_dep_graph_resolves_no_circular() {
             .collect::<BTreeSet<_>>()
     );
 
-    // No CircularDependency diagnostic was accumulated.
-    let diags = crate::db::model_dependency_graph::accumulated::<crate::db::CompilationDiagnostic>(
-        &db,
-        model,
-        result.project,
-        crate::db::ModuleInputSet::empty(&db),
-    );
+    // No CircularDependency was recorded.
     assert!(
-        !diags.iter().any(|d| matches!(
-            d.0.error,
-            crate::db::DiagnosticError::Model(crate::common::Error {
-                code: crate::common::ErrorCode::CircularDependency,
-                ..
-            })
-        )),
+        dep_graph.cycle_variables.is_empty(),
         "no CircularDependency must be raised for the resolved init-only \
          recurrence"
     );
@@ -1300,7 +1284,7 @@ fn init_same_element_self_cycle_behind_stock_is_unresolved() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        dep_graph.has_cycle,
+        dep_graph.has_cycle(),
         "a genuine init element self-cycle still sets has_cycle"
     );
     assert!(
@@ -1339,7 +1323,7 @@ fn dt_self_recurrence_not_double_resolved_as_init_scc() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "the aux self-recurrence must still resolve (no CircularDependency)"
     );
     assert_eq!(
@@ -1573,7 +1557,7 @@ fn two_stock_init_recurrence_model_dep_graph_resolves_no_circular() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "an element-acyclic MULTI-member init-only recurrence behind \
          stocks must NOT set has_cycle"
     );
@@ -1645,7 +1629,7 @@ fn two_stock_init_genuine_element_cycle_is_unresolved() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        dep_graph.has_cycle,
+        dep_graph.has_cycle(),
         "a genuine multi-variable init element cycle still sets has_cycle"
     );
     assert!(
@@ -1718,7 +1702,7 @@ fn model_dep_graph_result_equality_observes_resolved_sccs() {
         runlist_initials: Vec::new(),
         runlist_flows: Vec::new(),
         runlist_stocks: Vec::new(),
-        has_cycle: false,
+        cycle_variables: Vec::new(),
         resolved_sccs: Vec::new(),
     };
 
@@ -1881,7 +1865,7 @@ fn resolve_dt_genuine_element_two_cycle_is_unresolved() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        dep_graph.has_cycle,
+        dep_graph.has_cycle(),
         "a genuine multi-variable element 2-cycle still sets has_cycle"
     );
     assert!(
@@ -2126,7 +2110,7 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
             crate::db::ModuleInputSet::empty(&db),
         );
         assert!(
-            !dep_graph.has_cycle,
+            !dep_graph.has_cycle(),
             "positive control: the well-founded self-recurrence must \
              resolve when nothing forces a node unsourceable"
         );
@@ -2168,7 +2152,7 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        dep_graph.has_cycle,
+        dep_graph.has_cycle(),
         "an unsourceable in-SCC node must fall back to CircularDependency \
          (has_cycle), never silently miscompile"
     );
@@ -2180,20 +2164,18 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
 
     // The fallback must surface the loud `CircularDependency` diagnostic
     // (the model is rejected, not silently miscompiled).
-    let diags = crate::db::model_dependency_graph::accumulated::<crate::db::CompilationDiagnostic>(
-        &db,
-        model,
-        result.project,
-        crate::db::ModuleInputSet::empty(&db),
-    );
     assert!(
-        diags.iter().any(|d| matches!(
-            &d.0.error,
-            crate::db::DiagnosticError::Model(e)
-                if e.code == crate::common::ErrorCode::CircularDependency
+        !dep_graph.cycle_variables.is_empty(),
+        "the loud-safe fallback must record a CircularDependency \
+         (model rejected, not silently miscompiled)"
+    );
+    let diags = crate::db::collect_all_diagnostics(&db, result.project);
+    assert!(
+        diags.iter().any(|d| d.is(
+            crate::db::DiagnosticCategory::Model,
+            crate::common::ErrorCode::CircularDependency
         )),
-        "the loud-safe fallback must accumulate a CircularDependency \
-         diagnostic (model rejected, not silently miscompiled)"
+        "the recorded cycle must reach collect_all_diagnostics: {diags:?}"
     );
 
     // And the focused-accessor contract: the forced-unsourceable member
@@ -2216,7 +2198,7 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
 //
 // element-cycle-resolution.AC3.1: a well-founded recurrence whose SCC
 // includes a synthetic helper (here an INIT-expr-arg helper synthesized by
-// `make_temp_arg`, `$\u{205A}{parent}\u{205A}{n}\u{205A}arg0\u{205A}{sub}`
+// `hoist_capture`, `$\u{205A}{parent}\u{205A}{n}\u{205A}arg0\u{205A}{sub}`
 // per design deviation 2) is resolvable when the helper's symbolic
 // `PerVarBytecodes` is sourced from its parent variable's `implicit_vars`,
 // mirroring the production `compile_implicit_var_fragment` chain.
@@ -2233,7 +2215,7 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
 // in the element order.
 
 /// `ecc[t]` over `t=[t1,t2,t3]` with `ecc[t1] = INIT(seed * 2)` (an
-/// expression INIT arg -> `make_temp_arg` synthesizes a scalar helper aux,
+/// expression INIT arg -> `hoist_capture` synthesizes a scalar helper aux,
 /// the canonical `$\u{205A}ecc\u{205A}0\u{205A}arg0\u{205A}t1` form) and a
 /// well-founded forward element recurrence `ecc[t2]=ecc[t1]+1`,
 /// `ecc[t3]=ecc[t2]+1`. `seed` is an external constant the helper reads.
@@ -2462,7 +2444,7 @@ fn model_dep_graph_two_member_ref_scc_resolves_with_external_deps() {
     );
 
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "an element-acyclic multi-member recurrence SCC must NOT set \
          has_cycle (the intra-SCC cross-edges are not real \
          variable-granularity ordering constraints once the SCC is one \
@@ -2619,7 +2601,7 @@ fn model_dep_graph_scc_members_contiguous_with_interposing_external_var() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "the element-acyclic {{aaa,zzz}} SCC must NOT set has_cycle"
     );
     assert_eq!(
@@ -2674,7 +2656,7 @@ fn model_dep_graph_two_member_ref_scc_resolves_no_external_deps() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "the bare ref-shaped {{ce,ecc}} SCC (no external dep) must NOT set \
          has_cycle"
     );
@@ -2723,7 +2705,7 @@ fn model_dep_graph_interleaved_shaped_multi_member_scc_resolves() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "x -> a[A1] -> y -> a[A2] is element-acyclic through the a<->y \
          whole-variable 2-cycle: model_dependency_graph must NOT set \
          has_cycle"
@@ -2779,7 +2761,7 @@ fn model_dep_graph_genuine_element_two_cycle_stays_circular() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        dep_graph.has_cycle,
+        dep_graph.has_cycle(),
         "a genuine multi-variable element 2-cycle MUST still set \
          has_cycle (loud-safe: it is absent from the resolved-SCC map so \
          its back-edge still errs)"
@@ -2808,7 +2790,7 @@ fn model_dep_graph_genuine_scalar_two_cycle_stays_circular() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        dep_graph.has_cycle,
+        dep_graph.has_cycle(),
         "a genuine scalar 2-cycle MUST still set has_cycle (loud-safe)"
     );
     assert!(
@@ -2839,7 +2821,7 @@ fn model_dep_graph_acyclic_control_unaffected_by_scc_aware_break() {
         result.project,
         crate::db::ModuleInputSet::empty(&db),
     );
-    assert!(!dep_graph.has_cycle, "an acyclic model has no cycle");
+    assert!(!dep_graph.has_cycle(), "an acyclic model has no cycle");
     assert!(
         dep_graph.resolved_sccs.is_empty(),
         "an acyclic model resolves no SCC (zero refinement work)"
@@ -2881,7 +2863,7 @@ fn model_dep_graph_single_var_self_recurrence_byte_identical_to_phase1() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "the N=1 self-recurrence (1-member SCC) must NOT set has_cycle"
     );
     assert_eq!(
@@ -2932,8 +2914,8 @@ fn model_dep_graph_single_var_self_recurrence_byte_identical_to_phase1() {
 // element-self-loops, every one a `SymLoadPrev`). After Part A the element
 // graph inherits `build_var_info`'s per-phase PREVIOUS/INIT strip
 // (`db/dep_graph.rs` real-var :261-264 / implicit :283-287; `SymLoadPrev`
-// is the element-level analogue of `dt_previous_referenced_vars` /
-// `initial_previous_referenced_vars`, stripped in BOTH phases), so the
+// is the element-level analogue of a `DepLag::Previous` read, which orders
+// nothing in EITHER phase), so the
 // lagged self-read contributes no edge and the (acyclic, current-value)
 // element graph resolves -- exactly as the variable-level relation already
 // does for the whole-variable PREVIOUS self-edge.
@@ -3013,7 +2995,7 @@ fn resolve_dt_sample_if_true_shaped_scc_resolves_despite_previous_self_read() {
          once the PREVIOUS same-element lagged self-read is excluded from \
          the element graph (it is a prior-timestep snapshot, not a \
          current-timestep ordering edge -- the element-level analogue of \
-         `build_var_info` stripping `dt_previous_referenced_vars`): there \
+         `build_var_info` keeping no `PREVIOUS` read): there \
          MUST be no unresolved SCC"
     );
     assert_eq!(
@@ -3058,7 +3040,7 @@ fn resolve_dt_sample_if_true_shaped_scc_resolves_despite_previous_self_read() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "the SAMPLE IF TRUE-shaped SCC must NOT set has_cycle once the \
          element-level lagged-read strip lands (the false C-LEARN \
          CircularDependency)"
@@ -3173,7 +3155,7 @@ fn resolve_dt_self_loop_subsumed_by_multi_scc_resolves_no_duplicate() {
         crate::db::ModuleInputSet::empty(&db),
     );
     assert!(
-        !dep_graph.has_cycle,
+        !dep_graph.has_cycle(),
         "a self-edge subsumed by a resolved multi-member SCC must NOT \
          produce a residual CircularDependency: the >= 2 SCC's combined \
          per-element fragment already evaluates `a`'s self-edge in the \
@@ -3532,4 +3514,312 @@ fn an_init_view_is_an_init_phase_element_edge() {
         "the unresolved init SCC must reach the user as a CircularDependency on \
          's'; got: {diags:?}"
     );
+}
+
+/// A member prologue that reads an SCC member is an edge into EVERY element
+/// of that member, so a recurrence whose HOISTED operand reads the recurrence
+/// itself is refused.
+///
+/// The prologue -- `compiler::array_operand`'s materialization of a body two or
+/// more elements read -- is emitted once, ahead of the member's first segment
+/// in `element_order` (`db::assemble::segment_member_by_element`), so whatever
+/// it reads has to be evaluated before ALL of them. Wiring it into one element
+/// (the shape the per-segment reads take) would let the verdict call an element
+/// graph acyclic that the emitted order cannot satisfy.
+///
+/// The two rows are the same recurrence with the operand's source changed, and
+/// the CONTROL is what makes the refusal a statement about the read rather than
+/// about the shape: reading `v`, a variable outside the SCC, the hoist orders
+/// fine and the model resolves; reading `x`, the recurrence itself, every
+/// element would have to precede every element and the graph is cyclic.
+#[test]
+fn a_prologue_reading_an_scc_member_refuses_the_recurrence() {
+    let model = |operand: &str| -> String {
+        format!(
+            "{{UTF-8}}\n\
+             T: t1, t2, t3, t4 ~~|\n\
+             tPrev: t1, t2, t3 -> tNext ~~|\n\
+             tNext: t2, t3, t4 ~~|\n\
+             v[T] = 1, 2, 3, 4 ~~|\n\
+             x[t4] = 100 ~~|\n\
+             x[tPrev] = x[tNext] * 0.5 + SUM({operand}) ~~|\n\
+             INITIAL TIME = 0 ~~|\n\
+             FINAL TIME = 1 ~~|\n\
+             SAVEPER = 1 ~~|\n\
+             TIME STEP = 1 ~~|\n"
+        )
+    };
+    let compiles = |operand: &str| -> bool {
+        let datamodel = crate::open_vensim(&model(operand)).expect("the fixture MDL parses");
+        let db = SimlinDb::default();
+        let sync = sync_from_datamodel(&db, &datamodel);
+        crate::db::compile_project_incremental(&db, sync.project, "main").is_ok()
+    };
+
+    assert!(
+        compiles("v[T!] * 2"),
+        "the control must resolve: the hoisted operand reads `v`, which is not \
+         in the SCC, so it can be evaluated before every element of `x`"
+    );
+    assert!(
+        !compiles("x[T!] * 2"),
+        "a hoisted operand that reads the recurrence itself must be refused: it \
+         is evaluated once, before every element of `x`, so no order of those \
+         elements can supply it"
+    );
+}
+
+/// A prologue read of a member element that itself reads NOTHING of the
+/// prologue is an ordering edge into the prologue's READERS only, so the
+/// recurrence resolves and the read element runs first.
+///
+/// The prologue is emitted immediately before the first element that reads one
+/// of its temps, not before the member's first segment, so an element the
+/// prologue reads may legitimately come earlier. Wiring the read into every
+/// element would make the read element depend on itself and refuse a model
+/// whose element graph is acyclic.
+///
+/// The two explicit arms spell their `VECTOR SORT ORDER` identically at the
+/// same offset, so the materializer finds one body and shares it: structural
+/// identity includes source positions, and the trailing terms differ while
+/// the shared subtree does not. Two temps are shared -- the computed operand
+/// `v * a[t3]` and the sort order over it -- so the fragment carries exactly
+/// two `AssignTemp`s rather than one per arm. Values: `v * a[t3]` is
+/// `[7, 14, 21]`, ascending already, so the sort order is `[0, 1, 2]` and its
+/// sum is 3; `a[t1] = 3`, `a[t2] = 3`, `a[t3] = 7` -- on EVERY step, because
+/// a misplaced prologue shows only on the first one (temp storage persists
+/// across steps).
+#[test]
+fn a_prologue_read_of_a_non_reader_element_orders_that_element_first() {
+    let project = TestProject::new("prologue_reads_non_reader")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("t", &["t1", "t2", "t3"])
+        .array_with_ranges("v[t]", vec![("t1", "1"), ("t2", "2"), ("t3", "3")])
+        .array_with_ranges(
+            "a[t]",
+            vec![
+                ("t1", "SUM(VECTOR SORT ORDER(v[t] * a[t3], 1)) + a[t3] * 0"),
+                ("t2", "SUM(VECTOR SORT ORDER(v[t] * a[t3], 1)) + a[t1] * 0"),
+                ("t3", "7"),
+            ],
+        );
+    let shared_writes = project
+        .flow_exprs("a")
+        .iter()
+        .filter(|e| matches!(e, crate::compiler::Expr::AssignTemp(..)))
+        .count();
+    assert_eq!(
+        shared_writes, 2,
+        "the two arms must share their operand and their sort order -- the \
+         prologue this row is about -- rather than materialize two each"
+    );
+    let results = project
+        .run_vm()
+        .expect("an acyclic element graph with a prologue must resolve and run");
+    for (cell, want) in [("a[t1]", 3.0), ("a[t2]", 3.0), ("a[t3]", 7.0)] {
+        assert_eq!(
+            results[cell],
+            vec![want; 3],
+            "{cell} must hold {want} on every step; got {:?}",
+            results[cell]
+        );
+    }
+}
+
+/// An EXCEPT default shared by two elements reads a third element's override:
+/// the override runs first, the prologue next, then both readers -- on every
+/// step, which is what a prologue folded into one element's segment gets
+/// wrong (an element that reads only the hoisted temp has no ordering edge and
+/// is scheduled ahead of the hoist, reading zero-initialised temp storage on
+/// step 1). Values are the previous row's: `[3, 3, 7]` -- the same fragment
+/// reached by a different construction path: there two explicit arms share by
+/// spelling the body at the same offset, here the default is one arm.
+#[test]
+fn a_shared_default_reading_an_override_element_runs_the_override_first() {
+    let project = TestProject::new("shared_default_reads_override")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .named_dimension("t", &["t1", "t2", "t3"])
+        .array_with_ranges("v[t]", vec![("t1", "1"), ("t2", "2"), ("t3", "3")])
+        .array_with_default_and_overrides(
+            "a[t]",
+            "SUM(VECTOR SORT ORDER(v[t] * a[t3], 1))",
+            vec![("t3", "7")],
+        );
+    let results = project
+        .run_vm()
+        .expect("an acyclic element graph with a prologue must resolve and run");
+    for (cell, want) in [("a[t1]", 3.0), ("a[t2]", 3.0), ("a[t3]", 7.0)] {
+        assert_eq!(
+            results[cell],
+            vec![want; 3],
+            "{cell} must hold {want} on every step; got {:?}",
+            results[cell]
+        );
+    }
+}
+
+// ── The test-only classification of a variable by its production lowering ──
+//
+// `array_producing_vars` and the predicates under it classify a variable by
+// the array-producing builtins its lowered `Vec<Expr>` carries; no production
+// path asks this question (the materializer reads the signature table at the
+// position it materializes), so the predicates live with their one consumer.
+
+use crate::builtins::ResultKind;
+use crate::compiler::Expr;
+
+/// Check if an expression is an array-producing builtin that needs whole-array
+/// evaluation rather than per-element scalar evaluation
+/// (`ResultKind::Array`: a dedicated opcode writes the result into a temp).
+///
+/// Lowering does not ask this question: `compiler::array_operand` reads the
+/// signature table directly at the position it materializes. This is the
+/// test-side predicate `array_producing_vars` classifies a variable by.
+fn is_array_producing_builtin(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::App(builtin, _) if matches!(builtin.result_kind(), ResultKind::Array { .. })
+    )
+}
+
+/// Recursively check whether any subexpression is an array-producing builtin.
+fn contains_array_producing_builtin(expr: &Expr) -> bool {
+    if is_array_producing_builtin(expr) {
+        return true;
+    }
+    match expr {
+        Expr::Op2(_, lhs, rhs, _) => {
+            contains_array_producing_builtin(lhs) || contains_array_producing_builtin(rhs)
+        }
+        Expr::Op1(_, inner, _) | Expr::AssignTemp(_, inner, _) | Expr::AssignCurr(_, inner) => {
+            contains_array_producing_builtin(inner)
+        }
+        Expr::If(cond, t, f, _) => {
+            contains_array_producing_builtin(cond)
+                || contains_array_producing_builtin(t)
+                || contains_array_producing_builtin(f)
+        }
+        Expr::App(builtin, _) => builtin
+            .args()
+            .into_iter()
+            .any(contains_array_producing_builtin),
+        _ => false,
+    }
+}
+
+/// Test-only wrapper exposing the production recursive
+/// array-producing-builtin predicate (`contains_array_producing_builtin`,
+/// which delegates to the private `is_array_producing_builtin`): true iff
+/// any element of a variable's lowered per-element `Expr` list is, or
+/// contains, an array-producing builtin (VectorElmMap/VectorSortOrder/
+/// Rank/AllocateAvailable/AllocateByPriority), including nested as a
+/// subexpression or hoisted into an `AssignTemp`.
+/// `array_producing_vars` reuses this exact predicate rather than
+/// re-implementing the recursion.
+fn exprs_contain_array_producing_builtin(exprs: &[Expr]) -> bool {
+    exprs.iter().any(contains_array_producing_builtin)
+}
+
+/// The set of main-model variables whose own production-lowered
+/// per-element `Vec<Expr>` is, or recursively contains, an
+/// array-producing builtin
+/// (VectorElmMap/VectorSortOrder/Rank/AllocateAvailable/AllocateByPriority).
+///
+/// The universe is the identical `build_var_info(.., &[])` keyset
+/// `dt_cycle_sccs` iterates, on the same `(db, model, project)` triple,
+/// so a caller can intersect `{multi ∪ self_loops}` with this set over
+/// one shared universe. Each variable's lowered `Vec<Expr>` is sourced
+/// from the engine's own per-variable production lowering via
+/// `var_noninitial_lowered_exprs` (never a re-derivation), and the
+/// complete list is fed to
+/// `exprs_contain_array_producing_builtin`. Sourcing the
+/// real lowering output -- not a hoist-set subset -- is what makes the
+/// membership test complete: `var_noninitial_lowered_exprs` aborts (never
+/// silent-skips) on any universe variable whose production lowered exprs
+/// cannot be sourced, because a silent skip would under-count and produce
+/// a false negative. Sorted/byte-stable.
+fn array_producing_vars(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+) -> BTreeSet<Ident<Canonical>> {
+    // The identical universe `dt_cycle_sccs` uses -- the same
+    // `build_var_info(.., &[])` keyset on the same `(db, model, project)`
+    // triple -- so a caller intersects `{multi ∪ self_loops}` and this
+    // set over one universe.
+    let (var_info, _all_init_referenced) = build_var_info(db, model, project, &[]);
+
+    let mut out: BTreeSet<Ident<Canonical>> = BTreeSet::new();
+    for name in var_info.keys() {
+        let exprs = var_noninitial_lowered_exprs(db, model, project, name.as_str());
+        if exprs_contain_array_producing_builtin(&exprs) {
+            out.insert(name.clone());
+        }
+    }
+    out
+}
+
+mod exprs_contain_array_producing_builtin_tests {
+    use super::*;
+    use crate::ast::{ArrayView, Loc};
+    use crate::compiler::{BuiltinFn, VarRef};
+
+    fn vr(name: &str) -> VarRef {
+        VarRef::base(Ident::new(name))
+    }
+
+    fn vem() -> Expr {
+        // A minimal array-producing builtin call (args are irrelevant to
+        // the predicate; only the `BuiltinFn` discriminant matters).
+        Expr::App(
+            BuiltinFn::VectorElmMap(
+                Box::new(Expr::Const(0.0, Loc::default())),
+                Box::new(Expr::Const(0.0, Loc::default())),
+            ),
+            Loc::default(),
+        )
+    }
+
+    #[test]
+    fn flags_top_level_array_producing_element() {
+        // The scalar-lowering shape `AssignCurr(off, VECTOR ELM MAP(...))`
+        // -- the top-level case the scalar path does NOT hoist:
+        // `contains_ ⊇ is_` catches the top-level `App`.
+        let exprs = vec![Expr::AssignCurr(vr("dst"), Box::new(vem()))];
+        assert!(exprs_contain_array_producing_builtin(&exprs));
+    }
+
+    #[test]
+    fn flags_array_producing_only_in_a_hoisted_assign_temp() {
+        // The incomplete-sourcing guard: the `App` lives ONLY in a
+        // hoisted `AssignTemp` (a non-first element); `AssignCurr` reads
+        // the temp. `.iter().any` over the COMPLETE list + the
+        // `AssignTemp` recursion must still flag it.
+        let exprs = vec![
+            Expr::AssignCurr(
+                vr("dst"),
+                Box::new(Expr::TempArray(
+                    0,
+                    ArrayView::contiguous(vec![1]),
+                    Loc::default(),
+                )),
+            ),
+            Expr::AssignTemp(0, Box::new(vem()), ArrayView::contiguous(vec![1])),
+        ];
+        assert!(exprs_contain_array_producing_builtin(&exprs));
+    }
+
+    #[test]
+    fn does_not_flag_plain_exprs() {
+        let exprs = vec![
+            Expr::AssignCurr(vr("a"), Box::new(Expr::Const(1.0, Loc::default()))),
+            Expr::AssignCurr(vr("b"), Box::new(Expr::Var(vr("a"), Loc::default()))),
+        ];
+        assert!(!exprs_contain_array_producing_builtin(&exprs));
+    }
+
+    #[test]
+    fn does_not_flag_empty_list() {
+        assert!(!exprs_contain_array_producing_builtin(&[]));
+    }
 }

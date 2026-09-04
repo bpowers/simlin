@@ -6,21 +6,22 @@
 //! reference, pinned cell by cell against the VM (GH #997, and the
 //! execution-side issues #756 / #753 it describes).
 //!
-//! `DimensionsContext`'s two spelling-keyed correspondences
-//! (`positional_correspondence` and `executed_read_correspondence`, split out
-//! by GH #997) rest on a fork in executed behavior: which of THREE resolution rules a
-//! mapped reference gets -- by ordinal (POSITIONAL), by the element's own
-//! NAME in the source dimension, or by the declared ELEMENT MAP -- depends on
-//! how the reference is spelled, and the last two are a single name-first
-//! path rather than two independent ones. That account was assembled from
-//! reading the lowering plus one ground-truth comparison (C-LEARN's
-//! `Ref.vdf`, gated by `simulates_clearn`). This module measures it instead,
-//! so the rustdoc's rows are checkable and a change to any of them turns a
-//! test red rather than silently invalidating the reasoning built on top.
+//! ONE rule answers every spelling: the active element's own NAME in the
+//! source dimension, then the declared ELEMENT MAP in either direction, then a
+//! mapped parent of the active subdimension
+//! (`DimensionsContext::resolve_mapped_read`, GH #997). Reading by ORDINAL is
+//! the last resort, reached only where the two dimensions declare no
+//! correspondence at all -- the `no_mapping_*` controls, and the unpaired-axis
+//! case `Context::resolve_iteration_element` handles one axis-collapse later.
 //!
-//! The two-rule framing (positional versus element map) is the natural one
-//! and it is what an earlier revision of that rustdoc said. It is wrong; see
-//! "Three resolution rules, not two" below.
+//! That is worth measuring rather than reading off the lowering, because the
+//! four spellings reach the rule by four different ROUTES (below) and nothing
+//! but this module makes them answer the same. A route that folded a subscript
+//! naming the ITERATED dimension to that dimension's ordinal before anything
+//! mapped it would read a different array under a permuted element map, and
+//! would go unnoticed for as long as models declared only the
+//! `MappingKind::Positional` row, where every rule agrees -- which is the one
+//! people write.
 //!
 //! # The matrix
 //!
@@ -48,7 +49,11 @@
 //!
 //! 4 x 5 x 2 = 40 mapped cells, all in `every_cell_of_the_matrix`; the two
 //! controls contribute 4 cells each in `no_mapping_equal_cardinality` and
-//! `no_mapping_unequal_cardinality`. The three axis enumerations are walked
+//! `no_mapping_unequal_cardinality`, and
+//! `no_mapping_reads_by_ordinal_on_both_subscript_paths` walks the undeclared
+//! pair over a fourth axis, the SIBLING index ([`SiblingIndex`], 6 variants),
+//! which decides whether the static or the dynamic subscript path resolves
+//! the reference. The four axis enumerations are walked
 //! through `Spelling::all` / `MappingKind::all` / `Direction::all`, each
 //! built from a successor `match` so that adding a variant fails to compile
 //! rather than silently escaping the matrix.
@@ -59,15 +64,14 @@
 //! `fixture_discriminates` asserts which rows discriminate and which do not,
 //! so "not discriminating" is recorded rather than implied by a missing test.
 //!
-//! # Three resolution rules, not two
+//! # Name-first, not element-map-first
 //!
 //! The obvious framing is positional-versus-element-map. It is wrong, and
-//! [`MappingKind::SharedElementNames`] is the row that shows it: the two
-//! map-following spellings actually resolve **name-first**, trying the active
-//! element's own name in the source dimension and consulting the element map
-//! only when that misses. So there are three candidate answers per fixture,
-//! and [`assert_cell`] excludes every one that did not happen instead of
-//! merely matching the one that did.
+//! [`MappingKind::SharedElementNames`] is the row that shows it: resolution is
+//! **name-first**, trying the active element's own name in the source
+//! dimension and consulting the element map only when that misses. So there
+//! are three candidate answers per fixture, and [`assert_cell`] excludes every
+//! one that did not happen instead of merely matching the one that did.
 //!
 //! # What the Vensim reference actually says
 //!
@@ -118,9 +122,10 @@
 //! - which RULE Vensim applies to the iterated spelling. Example 3 cannot
 //!   say, because `PTASKS` is a full subrange copy of `TASKS` with identical
 //!   element names in the same order, so positional, name-identity and
-//!   map-following all coincide there. The residual doubt therefore runs
-//!   toward Vensim MAPPING on that spelling where this engine resolves
-//!   positionally -- not toward Vensim rejecting it.
+//!   map-following all coincide there. This engine maps on that spelling like
+//!   every other, which is the reading the page's prose leans toward -- it
+//!   credits a mapping for the shape -- but the page does not settle it, and
+//!   nothing here should be read as a parity claim.
 //! - anything about [`MappingKind::ReverseCardinality`]. That fixture leaves
 //!   one source element with no correspondent, which the page's Example 4
 //!   forbids ("the Subscript Ranges ... must not overlap and must completely
@@ -160,11 +165,10 @@
 //!   NAME in the source dimension first and consults
 //!   `DimensionsContext::translate_via_mapping` only when that misses.
 //!
-//! So the two subscript-less spellings disagree, and
-//! `a_bare_equation_reference_and_a_flow_reference_disagree` pins that
-//! disagreement directly, since it is the observable consequence of the
-//! routing and the thing a future refactor is most likely to erase by
-//! accident.
+//! So the two subscript-less spellings take different routes to the same rule,
+//! and `a_bare_equation_reference_and_a_flow_reference_agree` pins the
+//! agreement directly, since it is the thing a change to either route is most
+//! likely to break without noticing.
 
 use crate::common::ErrorCode;
 use crate::datamodel;
@@ -174,18 +178,19 @@ use crate::test_common::TestProject;
 #[derive(Copy, Clone)]
 enum Spelling {
     /// `target[State] = x[State]` -- the subscript names the dimension the
-    /// equation ITERATES. Pass 1 (`ast::expr3::Pass1Context`) folds an
-    /// active dimension name to that dimension's ordinal, which then indexes
-    /// the source's storage raw.
+    /// equation ITERATES.
     IteratedDim,
     /// `target[State] = x[Region]` -- the subscript names a dimension that is
-    /// NOT active, here the source's own. It survives pass 1 as an
-    /// `IndexExpr3::Dimension`, is normalized to an `IndexOp::ActiveDimRef`
-    /// by the free function `compiler::subscript::normalize_subscripts3`, and
-    /// is resolved in that module's `build_view_from_ops`, whose
-    /// `dim.get_offset(subscript).or_else(...)` tries the active element's own
-    /// NAME in the source dimension before falling back to
-    /// `DimensionsContext::translate_via_mapping`.
+    /// NOT active, here the source's own.
+    ///
+    /// Both this and [`Self::IteratedDim`] reach the rule the same way: the
+    /// subscript is an `IndexExpr3::Dimension`, normalized to an
+    /// `IndexOp::ActiveDimRef` by
+    /// `compiler::subscript::normalize_subscripts3` (which is what picks WHICH
+    /// active dimension it names) and resolved in that module's
+    /// `build_view_from_ops`, whose `dim.get_offset(subscript).or_else(...)`
+    /// runs `DimensionsContext::resolve_mapped_read` and, only where no
+    /// correspondence is declared at all, the active element's ordinal.
     SourceOwnDim,
     /// `target[State] = x` -- no subscript, inside an equation body.
     BareInEquation,
@@ -528,51 +533,39 @@ fn run_cell(
 fn expected(kind: MappingKind, spelling: Spelling) -> Expected {
     use MappingKind::*;
     use Spelling::*;
-    match (kind, spelling) {
-        // A positional mapping makes the two resolutions agree, so all four
-        // spellings return the same numbers. This row is why the fork below
-        // could go unnoticed for so long.
-        (Positional, IteratedDim)
-        | (Positional, SourceOwnDim)
-        | (Positional, BareInEquation)
-        | (Positional, StockFlow) => Expected::Reads(&[10.0, 20.0, 30.0]),
+    // Spelling is NOT a parameter of the answer: all four resolve a
+    // dimension-named subscript through the one executed rule
+    // (`DimensionsContext::resolve_mapped_read` -- the active element's own
+    // name on the source axis, then the declared mapping in either direction,
+    // then a mapped parent of the active subdimension). The enumeration is kept
+    // as a parameter because WHICH ROUTE each spelling takes to that rule is
+    // still different, and a change that reintroduced a fork would show up here
+    // as a cell that no longer matches its siblings.
+    match spelling {
+        IteratedDim | SourceOwnDim | BareInEquation | StockFlow => {}
+    }
+    match kind {
+        // A positional mapping makes map-following and ordinal reading agree,
+        // so this row cannot tell the rules apart. It is the control.
+        Positional => Expected::Reads(&[10.0, 20.0, 30.0]),
 
-        // The permuted row is the fork, in its clearest form: the same
-        // three source values, read in two different orders depending only
-        // on how the reference is spelled.
-        (Permuted, IteratedDim) => Expected::Reads(&[10.0, 20.0, 30.0]),
-        (Permuted, BareInEquation) => Expected::Reads(&[10.0, 20.0, 30.0]),
-        (Permuted, SourceOwnDim) => Expected::Reads(&[30.0, 10.0, 20.0]),
-        (Permuted, StockFlow) => Expected::Reads(&[30.0, 10.0, 20.0]),
+        // The permuted row is the clearest statement of the rule: the map is
+        // followed, so the three source values come back in the map's order.
+        Permuted => Expected::Reads(&[30.0, 10.0, 20.0]),
 
-        // Many-to-one: the positional spellings have no third source
-        // element to index and are refused. `Generic` is what the static
-        // subscript resolution reports ("Index out of bounds for dimension
-        // 0", `compiler::subscript`) -- it is pinned as the code that ships,
-        // not endorsed; a mapping-aware diagnostic would be better and is
-        // GH #753's territory.
-        (ManyToOne, IteratedDim) => Expected::Refused(ErrorCode::Generic),
-        (ManyToOne, BareInEquation) => Expected::Refused(ErrorCode::Generic),
-        (ManyToOne, SourceOwnDim) => Expected::Reads(&[10.0, 20.0, 10.0]),
-        (ManyToOne, StockFlow) => Expected::Reads(&[10.0, 20.0, 10.0]),
+        // Many-to-one: two target elements map onto one source element, which
+        // the map answers for every one of them. An ordinal read would have no
+        // third source element to index.
+        ManyToOne => Expected::Reads(&[10.0, 20.0, 10.0]),
 
-        // Reverse cardinality isolates WHY many-to-one is refused: it is the
-        // positional index leaving the source's range, not unequal
-        // cardinality as such. Here every target ordinal is in range, so the
-        // positional spellings compile -- and read the wrong elements.
-        (ReverseCardinality, IteratedDim) => Expected::Reads(&[10.0, 20.0]),
-        (ReverseCardinality, BareInEquation) => Expected::Reads(&[10.0, 20.0]),
-        (ReverseCardinality, SourceOwnDim) => Expected::Reads(&[30.0, 10.0]),
-        (ReverseCardinality, StockFlow) => Expected::Reads(&[30.0, 10.0]),
+        // The many-to-one arrangement with the cardinalities swapped, where an
+        // ordinal read would stay in range and read the wrong elements.
+        ReverseCardinality => Expected::Reads(&[30.0, 10.0]),
 
-        // Shared element names. The positional spellings are unmoved -- they
-        // never look at a name. The other two return NAME IDENTITY, not the
-        // element map: `Cal` reads `Cal` (30) though the map says `Bob` (20).
-        // Source values 10/20/30 over {Ann,Bob,Cal}; target {Cal,Ann,Bob}.
-        (SharedElementNames, IteratedDim) => Expected::Reads(&[10.0, 20.0, 30.0]),
-        (SharedElementNames, BareInEquation) => Expected::Reads(&[10.0, 20.0, 30.0]),
-        (SharedElementNames, SourceOwnDim) => Expected::Reads(&[30.0, 10.0, 20.0]),
-        (SharedElementNames, StockFlow) => Expected::Reads(&[30.0, 10.0, 20.0]),
+        // Shared element names: the rule is NAME identity FIRST, so `Cal`
+        // reads `Cal` (30) though the element map says `Bob` (20). Source
+        // values 10/20/30 over {Ann,Bob,Cal}; target {Cal,Ann,Bob}.
+        SharedElementNames => Expected::Reads(&[30.0, 10.0, 20.0]),
     }
 }
 
@@ -710,12 +703,13 @@ fn fixture_discriminates() {
 /// Control: with NO mapping declared at all, at equal cardinality.
 ///
 /// The point is that two of the four spellings do not require a mapping to
-/// exist. `IteratedDim` never consults one (pass 1 folds the active
-/// dimension to an ordinal and indexes the source raw), and
-/// `BareInEquation` falls back to a whole-array broadcast -- so a
-/// cross-dimension read between two dimensions declared to have NOTHING to
-/// do with each other compiles and silently produces numbers. The two
-/// spellings that DO consult the mapping are refused.
+/// exist. `IteratedDim` reaches the rule's LAST RESORT -- with no
+/// correspondence declared between the two dimensions the active element's
+/// ordinal indexes the source raw -- and `BareInEquation` falls back to a
+/// whole-array broadcast, so a cross-dimension read between two dimensions
+/// declared to have NOTHING to do with each other compiles and silently
+/// produces numbers. The two spellings that reach the mapping through a
+/// different route are refused.
 #[test]
 fn no_mapping_equal_cardinality() {
     let dims = || {
@@ -837,35 +831,575 @@ fn assert_no_mapping_cases(
     }
 }
 
-/// The two subscript-less spellings disagree, and this is the single
-/// assertion that says so out loud.
+/// How the index BESIDE the dimension-named one is spelled. The sibling
+/// decides the ROUTE a reference takes -- every index static keeps it on
+/// `normalize_subscripts3` + `build_view_from_ops`, one index needing runtime
+/// evaluation sends the whole subscript to `Context::lower_index_expr3` -- and
+/// must never decide the rule.
+#[derive(Copy, Clone, Debug)]
+enum SiblingIndex {
+    /// `m[State, 1]`: static.
+    Literal,
+    /// `m[State, c]`: static, an element name of the sibling axis.
+    ElementName,
+    /// `m[State, idx]`: dynamic, a variable reference.
+    Aux,
+    /// `m[State, 1 + TIME]`: dynamic, and the column it selects moves between
+    /// steps, which shows the sibling really is evaluated at runtime.
+    Time,
+    /// `m[State, k + 1]`: dynamic, arithmetic over a variable.
+    Arithmetic,
+    /// `m[State, @1]`: dynamic -- a dimension position inside an apply-to-all
+    /// body is bound per element by `lower_index_expr3`
+    /// (`Context::lower_static_subscript` returns `None` for it).
+    DimPosition,
+}
+
+impl SiblingIndex {
+    fn all() -> Vec<Self> {
+        successors(SiblingIndex::Literal, |s| match s {
+            SiblingIndex::Literal => Some(SiblingIndex::ElementName),
+            SiblingIndex::ElementName => Some(SiblingIndex::Aux),
+            SiblingIndex::Aux => Some(SiblingIndex::Time),
+            SiblingIndex::Time => Some(SiblingIndex::Arithmetic),
+            SiblingIndex::Arithmetic => Some(SiblingIndex::DimPosition),
+            SiblingIndex::DimPosition => None,
+        })
+    }
+
+    fn spelling(self) -> &'static str {
+        match self {
+            SiblingIndex::Literal => "1",
+            SiblingIndex::ElementName => "c",
+            SiblingIndex::Aux => "idx",
+            SiblingIndex::Time => "1 + TIME",
+            SiblingIndex::Arithmetic => "k + 1",
+            SiblingIndex::DimPosition => "@1",
+        }
+    }
+
+    /// Whether every index of `m[State, <sibling>]` is static, which is what
+    /// keeps the reference on the static subscript path.
+    fn is_static(self) -> bool {
+        matches!(self, SiblingIndex::Literal | SiblingIndex::ElementName)
+    }
+
+    /// The code an unresolvable dimension-named subscript is refused with on
+    /// this sibling's route: `Generic` from `build_view_from_ops`,
+    /// `MismatchedDimensions` from `lower_index_expr3`. `@N` takes the static
+    /// code although its in-range read is the dynamic arm's, because
+    /// `Context::lower_static_subscript` builds the view first and hands the
+    /// subscript to the dynamic path only afterwards.
+    fn refusal_code(self) -> ErrorCode {
+        match self {
+            SiblingIndex::Literal | SiblingIndex::ElementName | SiblingIndex::DimPosition => {
+                ErrorCode::Generic
+            }
+            SiblingIndex::Aux | SiblingIndex::Time | SiblingIndex::Arithmetic => {
+                ErrorCode::MismatchedDimensions
+            }
+        }
+    }
+
+    /// The 0-based column each saved step reads: every sibling evaluates to 1
+    /// (`c`) at `t = 0`, and `Time` alone moves to 2 (`d`) at `t = 1`.
+    fn columns(self) -> [usize; 2] {
+        match self {
+            SiblingIndex::Time => [0, 1],
+            _ => [0, 0],
+        }
+    }
+}
+
+/// Control: NO mapping and NO shared element name, on BOTH subscript paths.
 ///
-/// The two correspondences split "bare" between them for exactly this reason:
-/// a bare reference in an EQUATION is positional (`positional_correspondence`),
-/// while a stock's flow reference -- equally subscript-less -- resolves
-/// name-first and, where the names differ, follows the element map. The
-/// difference is entirely the lowering route (module docs), so any refactor
-/// that unifies the two -- which is a natural thing to want -- changes
-/// executed numbers on one side or the other, and this test is what makes
-/// that loud.
+/// `target[State] = m[State, <sibling>]` over `m[Region, D2]`, with `Region`
+/// and `State` declaring nothing and sharing no element name. The
+/// dimension-named index is spelled identically in every row; only its
+/// sibling differs, and the sibling picks the route ([`SiblingIndex`]). Both
+/// routes end in `DimensionsContext::resolve_dimension_subscript`, so every
+/// row reads `Region` at `State`'s ordinal -- `target[s1]` is `m[a, ..]` and
+/// `target[s2]` is `m[b, ..]` -- with the numbers `origin/main` computes for
+/// the same six models (`100`/`200` at `t = 0` on every row, measured with
+/// the CLI built from `d04593e6`; GH #1044 holds the static and `idx` rows).
+/// A route that refused the dynamic rows would turn a running model into a
+/// refusal by the edit `1` -> `idx`.
+///
+/// The other arms of `resolve_dimension_subscript` -- name, the declared map,
+/// a mapped parent, a declared map that fails to translate -- are
+/// `every_cell_of_the_matrix` and the `no_mapping_*` controls above, all on
+/// the static route; its two refusals are the next two tests. Not rowed
+/// anywhere: the hoisted and captured twins of a reference with a dynamic
+/// sibling.
+#[test]
+fn no_mapping_reads_by_ordinal_on_both_subscript_paths() {
+    let cell = |row: usize, column: usize| 100.0 * (row + 1) as f64 + 10.0 * column as f64;
+    for sibling in SiblingIndex::all() {
+        let label = sibling.label("target[State]", &["s1", "s2"]);
+        let results = sibling_model("target[State]", sibling)
+            .named_dimension("State", &["s1", "s2"])
+            .run_vm()
+            .unwrap_or_else(|e| panic!("{label}: expected it to run: {e}"));
+        let [col0, col1] = sibling.columns();
+        assert_eq!(
+            results["target[s1]"],
+            vec![cell(0, col0), cell(0, col1)],
+            "{label}: s1 reads Region's first element"
+        );
+        assert_eq!(
+            results["target[s2]"],
+            vec![cell(1, col0), cell(1, col1)],
+            "{label}: s2 reads Region's second element"
+        );
+    }
+}
+
+/// Past the source's extent -- three `State` elements over two `Region` ones
+/// -- the ordinal is out of range and both routes refuse, each with its own
+/// code ([`SiblingIndex::refusal_code`]). `origin/main` refused the static
+/// spellings too (`Index out of bounds`) but RAN the dynamic ones, the folded
+/// ordinal reaching the runtime bounds check and writing NaN into
+/// `target[s3]`; the refusal in its place is "Phase 6b semantic divergences"
+/// item 11.
+#[test]
+fn an_ordinal_past_the_sources_extent_is_refused_on_both_subscript_paths() {
+    for sibling in SiblingIndex::all() {
+        let state = ["s1", "s2", "s3"];
+        assert_eq!(
+            sibling_model("target[State]", sibling)
+                .named_dimension("State", &state)
+                .error_diagnostics(),
+            vec![("main.target".to_string(), sibling.refusal_code())],
+            "{}: three State elements over two Region ones",
+            sibling.label("target[State]", &state)
+        );
+    }
+}
+
+/// A subscript paired with its active dimension THROUGH a mapping never takes
+/// the ordinal: `target[Foo] = m[State, <sibling>]` with `Foo maps_to State`
+/// pairs `State` with `Foo` on both routes, and over `m[Region, D2]` -- `Region`
+/// related to neither -- there is no correspondence to follow and no ordinal
+/// to take, so both routes refuse with the route's code
+/// ([`SiblingIndex::refusal_code`]), as `origin/main` does (`Invalid active
+/// subscript 'f1'` static, `mismatched_dimensions` dynamic). The ordinal is
+/// for a subscript that NAMES its active dimension, the rows above; a pairing
+/// the mapping made has no positional meaning on an unrelated axis.
+#[test]
+fn a_candidate_paired_through_a_mapping_never_takes_the_ordinal() {
+    for sibling in SiblingIndex::all() {
+        let foo = ["f1", "f2"];
+        let project = sibling_model("target[Foo]", sibling)
+            .named_dimension("State", &["s1", "s2"])
+            .named_dimension_with_mapping("Foo", &foo, "State");
+        assert_eq!(
+            project.error_diagnostics(),
+            vec![("main.target".to_string(), sibling.refusal_code())],
+            "{}, Foo maps_to State: paired through the mapping, no ordinal",
+            sibling.label("target[Foo]", &foo)
+        );
+    }
+}
+
+/// `<target> = m[State, <sibling>]` over `m[Region, D2]` with `m[a,c] = 100,
+/// m[a,d] = 110, m[b,c] = 200, m[b,d] = 210`: the hundreds identify the ROW
+/// (`Region`) and the tens the COLUMN (the sibling's value). `Region` declares
+/// nothing and shares no element name with any other dimension. The caller
+/// declares the target's dimension (and `State`, when the target is not it).
+fn sibling_model(target: &str, sibling: SiblingIndex) -> TestProject {
+    let m = [
+        ("a,c", "100"),
+        ("a,d", "110"),
+        ("b,c", "200"),
+        ("b,d", "210"),
+    ];
+    TestProject::new("no_mapping_sibling")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("D2", &["c", "d"])
+        .array_with_ranges("m[Region,D2]", m.to_vec())
+        .aux("idx", "1", None)
+        .aux("k", "0", None)
+        .array_aux(target, &format!("m[State, {}]", sibling.spelling()))
+}
+
+impl SiblingIndex {
+    fn label(self, target: &str, target_elements: &[&str]) -> String {
+        format!(
+            "no mapping / {target} = m[State, {}] ({}, {} target elements)",
+            self.spelling(),
+            if self.is_static() {
+                "static path"
+            } else {
+                "dynamic path"
+            },
+            target_elements.len()
+        )
+    }
+}
+
+// ===========================================================================
+// The hoisted-argument column
+// ===========================================================================
+//
+// A module-function call inside an apply-to-all body hoists each computed
+// argument out of the body into a helper aux, one per element, and the
+// compiler lowers that helper as the element's slice of the body
+// (`variable::ElementScope`, GH #1035) -- the same `Context` the plain
+// equation's element is lowered under, so there is ONE place a
+// cross-dimension reference is resolved. The column below asserts that, for
+// every row above, `target[State] = SMTH1(<expr>, 1)` reads what
+// `target[State] = <expr>` reads, and is refused with the same code where the
+// plain equation is refused. A parse-time replay of the compiler's rule is
+// what must not be added: two resolvers of one spelling drift exactly where
+// the rule is non-trivial. (With a constant input a smooth equals its input
+// from the first step, so the reads are comparable.)
+//
+// A snapshot argument takes the other route out of the body: a snapshot-only
+// apply-to-all body is captured ONCE, structurally, as an apply-to-all
+// capture over the parent's dimensions whose body is the source subtree. The
+// third twin, `target[State] = PREVIOUS(<expr> + 0, 0)`, pins that route to
+// the same rule (`+ 0` keeps the argument from being a static slot the parse
+// reads directly; the lag is invisible against a constant source).
+
+/// What one cell does when run: the target's reads, or the distinct diagnostic
+/// codes it was refused with. The variable a refusal lands on is deliberately
+/// not part of the verdict: a hoisted argument's refusal is reported on the
+/// parent at the argument's span, and `error_diagnostics` also carries the
+/// assembly-level rows.
+#[derive(Debug, Clone, PartialEq)]
+enum Verdict {
+    Reads(Vec<f64>),
+    Refused(Vec<ErrorCode>),
+}
+
+fn verdict(project: &TestProject, target_elements: &[&str]) -> Verdict {
+    match project.run_vm() {
+        Ok(results) => Verdict::Reads(
+            target_elements
+                .iter()
+                .map(|elem| {
+                    *results[&format!("target[{}]", crate::canonicalize(elem))]
+                        .last()
+                        .expect("empty series")
+                })
+                .collect(),
+        ),
+        Err(_) => {
+            let mut codes: Vec<ErrorCode> = Vec::new();
+            for (_, code) in project.error_diagnostics() {
+                if !codes.contains(&code) {
+                    codes.push(code);
+                }
+            }
+            codes.sort_by_key(|c| format!("{c:?}"));
+            Verdict::Refused(codes)
+        }
+    }
+}
+
+impl Spelling {
+    /// The right-hand side of the target's equation, for the spellings that
+    /// are an equation (a stock's flow reference has no argument to hoist).
+    fn rhs(self) -> Option<&'static str> {
+        match self {
+            Spelling::IteratedDim => Some("x[State]"),
+            Spelling::SourceOwnDim => Some("x[Region]"),
+            Spelling::BareInEquation => Some("x"),
+            Spelling::StockFlow => None,
+        }
+    }
+}
+
+/// One cell of the column: the plain model, its hoisted twin (the target's
+/// right-hand side wrapped in `SMTH1(.., 1)`), its captured twin (wrapped in
+/// `PREVIOUS(.. + 0, 0)`), and the target's elements.
+struct HoistedCell {
+    label: String,
+    plain: TestProject,
+    hoisted: TestProject,
+    captured: TestProject,
+    target_elements: Vec<&'static str>,
+}
+
+/// The two routes out of an apply-to-all body, as the right-hand side each
+/// twin spells `rhs` with.
+fn hoisted_rhs(rhs: &str) -> String {
+    format!("SMTH1({rhs}, 1)")
+}
+
+fn captured_rhs(rhs: &str) -> String {
+    format!("PREVIOUS({rhs} + 0, 0)")
+}
+
+/// The matrix cell and its twins.
+fn matrix_cell(kind: MappingKind, direction: Direction, spelling: Spelling) -> Option<HoistedCell> {
+    let rhs = spelling.rhs()?;
+    let twin = |equation: &str| {
+        let mut twin = TestProject::new("mapped_reference_twin");
+        twin.dimensions = dimensions(kind, direction);
+        twin.array_with_ranges("x[Region]", kind.source().to_vec())
+            .array_aux("target[State]", equation)
+    };
+    Some(HoistedCell {
+        label: format!(
+            "{} / {} / declared on {}",
+            kind.label(),
+            spelling.label(),
+            match direction {
+                Direction::OnIteratedDim => "State",
+                Direction::OnSourceDim => "Region",
+            }
+        ),
+        plain: model(kind, direction, spelling),
+        hoisted: twin(&hoisted_rhs(rhs)),
+        captured: twin(&captured_rhs(rhs)),
+        target_elements: kind.target_elements().to_vec(),
+    })
+}
+
+/// The no-mapping control cell and its twins.
+fn no_mapping_cell(
+    state_elements: &'static [&'static str],
+    spelling: Spelling,
+) -> Option<HoistedCell> {
+    let rhs = spelling.rhs()?;
+    let dims = || {
+        vec![
+            datamodel::Dimension::named(
+                "Region".to_string(),
+                vec!["Ruby".to_string(), "Rose".to_string(), "Reed".to_string()],
+            ),
+            datamodel::Dimension::named(
+                "State".to_string(),
+                state_elements.iter().map(|s| s.to_string()).collect(),
+            ),
+        ]
+    };
+    let source = vec![("Ruby", "10"), ("Rose", "20"), ("Reed", "30")];
+    let build = |equation: &str| {
+        let mut project = TestProject::new("no_mapping");
+        project.dimensions = dims();
+        project
+            .array_with_ranges("x[Region]", source.clone())
+            .array_aux("target[State]", equation)
+    };
+    Some(HoistedCell {
+        label: format!(
+            "no mapping, {} State elements / {}",
+            state_elements.len(),
+            spelling.label()
+        ),
+        plain: build(rhs),
+        hoisted: build(&hoisted_rhs(rhs)),
+        captured: build(&captured_rhs(rhs)),
+        target_elements: state_elements.to_vec(),
+    })
+}
+
+/// The two-axes shapes of the section below, hoisted and captured.
+fn two_axes_cells() -> Vec<HoistedCell> {
+    let mapped = |equation: &str| {
+        two_mapped_axes_project("two_mapped_hoisted")
+            .array_with_ranges("matrix[Ra,Rb]", diagonal_matrix_cells())
+            .array_aux("target[State]", equation)
+    };
+    let iterated = |equation: &str| {
+        TestProject::new("two_iterated_hoisted")
+            .named_dimension_with_mappings(
+                "State",
+                &["s1", "s2", "s3"],
+                &[("Ra", &[]), ("Rb", &[])],
+            )
+            .named_dimension("Ra", &["ra1", "ra2", "ra3"])
+            .named_dimension("Rb", &["rb1", "rb2", "rb3"])
+            .array_with_ranges("matrix[Ra,Rb]", diagonal_matrix_cells())
+            .array_aux("target[State]", equation)
+    };
+    let same = |equation: &str| {
+        TestProject::new("same_dim_twice_hoisted")
+            .named_dimension("State", &["d1", "d2", "d3"])
+            .array_with_ranges(
+                "matrix[State,State]",
+                vec![
+                    ("d1,d1", "11"),
+                    ("d1,d2", "12"),
+                    ("d1,d3", "13"),
+                    ("d2,d1", "21"),
+                    ("d2,d2", "22"),
+                    ("d2,d3", "23"),
+                    ("d3,d1", "31"),
+                    ("d3,d2", "32"),
+                    ("d3,d3", "33"),
+                ],
+            )
+            .array_aux("target[State]", equation)
+    };
+    let repeated = |equation: &str| {
+        TestProject::new("square_owner_hoisted")
+            .named_dimension("State", &["r1", "r2"])
+            .array_with_ranges(
+                "pop[State,State]",
+                vec![
+                    ("r1,r1", "11"),
+                    ("r1,r2", "12"),
+                    ("r2,r1", "21"),
+                    ("r2,r2", "22"),
+                ],
+            )
+            .array_aux("target[State,State]", equation)
+    };
+    let cell = |label: &str,
+                build: &dyn Fn(&str) -> TestProject,
+                rhs: &str,
+                target_elements: &[&'static str]| HoistedCell {
+        label: label.to_string(),
+        plain: build(rhs),
+        hoisted: build(&hoisted_rhs(rhs)),
+        captured: build(&captured_rhs(rhs)),
+        target_elements: target_elements.to_vec(),
+    };
+    vec![
+        cell(
+            "two axes mapped to one target dimension: target[State] = matrix[Ra,Rb]",
+            &mapped,
+            "matrix[Ra,Rb]",
+            &["s1", "s2", "s3"],
+        ),
+        cell(
+            "two iterated axes: target[State] = matrix[State,State]",
+            &iterated,
+            "matrix[State,State]",
+            &["s1", "s2", "s3"],
+        ),
+        cell(
+            "one dimension named twice: target[State] = matrix[State,State]",
+            &same,
+            "matrix[State,State]",
+            &["d1", "d2", "d3"],
+        ),
+        // The compiler pairs a repeated target dimension's positions one to
+        // one (`square[D,D]` under `[D,D]` reads the cell), for the helper as
+        // for the plain equation.
+        cell(
+            "a repeated target dimension: target[State,State] = pop[State,State]",
+            &repeated,
+            "pop[State,State]",
+            &["r1,r1", "r1,r2", "r2,r1", "r2,r2"],
+        ),
+    ]
+}
+
+/// The wildcard spelling under an apply-to-all body, `target[C] = vals[*]`,
+/// reads the active element -- the compiler's rule for a wildcard over the
+/// target's own dimension in scalar position -- and its hoisted and captured
+/// twins read the same. Under a SCALAR parent the same argument is a whole
+/// array in a scalar position, which is what
+/// `db::implicit_diag_tests::failing_implicit_fixture` refuses.
+#[test]
+fn a_wildcard_argument_under_an_apply_to_all_body_reads_the_active_element() {
+    let build = |equation: &str| {
+        TestProject::new("wildcard_a2a")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .named_dimension("C", &["c1", "c2", "c3"])
+            .array_with_ranges("vals[C]", vec![("c1", "10"), ("c2", "20"), ("c3", "30")])
+            .array_aux("target[C]", equation)
+    };
+    let elements = ["c1", "c2", "c3"];
+    let plain = verdict(&build("vals[*]"), &elements);
+    assert_eq!(plain, Verdict::Reads(vec![10.0, 20.0, 30.0]));
+    assert_eq!(verdict(&build(&hoisted_rhs("vals[*]")), &elements), plain);
+    assert_eq!(verdict(&build(&captured_rhs("vals[*]")), &elements), plain);
+}
+
+/// Every cell of the matrix, of the no-mapping controls and of the two-axes
+/// section, hoisted into a module argument and captured under a snapshot,
+/// reads what the plain equation reads, and is refused with the plain
+/// equation's code where that is refused. No cell diverges: the compiler
+/// lowers each helper as the element of the body it is (GH #1035).
+#[test]
+fn a_hoisted_argument_reads_what_the_plain_equation_reads() {
+    let mut cells: Vec<HoistedCell> = Vec::new();
+    for kind in MappingKind::all() {
+        for direction in Direction::all() {
+            for spelling in Spelling::all() {
+                cells.extend(matrix_cell(kind, direction, spelling));
+            }
+        }
+    }
+    for state_elements in [&["Steel", "Slate", "Stone"][..], &["Steel", "Slate"][..]] {
+        for spelling in Spelling::all() {
+            cells.extend(no_mapping_cell(state_elements, spelling));
+        }
+    }
+    cells.extend(two_axes_cells());
+
+    let mut disagreements: Vec<String> = Vec::new();
+    let mut reads = 0usize;
+    let mut refusals = 0usize;
+    for cell in &cells {
+        let plain = verdict(&cell.plain, &cell.target_elements);
+        match &plain {
+            Verdict::Reads(_) => reads += 1,
+            Verdict::Refused(_) => refusals += 1,
+        }
+        for (route, twin) in [("hoisted", &cell.hoisted), ("captured", &cell.captured)] {
+            let got = verdict(twin, &cell.target_elements);
+            if got != plain {
+                disagreements.push(format!(
+                    "{} / {route}: plain {plain:?}, {route} {got:?}",
+                    cell.label
+                ));
+            }
+        }
+    }
+    assert!(
+        disagreements.is_empty(),
+        "twins that do not read what the plain equation reads:\n{}",
+        disagreements.join("\n")
+    );
+    // Both verdict kinds are exercised, so agreement on refusal codes is
+    // asserted and not merely absent.
+    assert!(
+        reads > 0 && refusals > 0,
+        "the column must hold both reading and refused cells: {reads} reads, {refusals} refusals"
+    );
+}
+
+/// The two subscript-less spellings AGREE, and this is the single assertion
+/// that says so out loud.
+///
+/// They reach the answer by different routes and always did -- a bare
+/// reference in an EQUATION is rewritten into the iterated-dimension spelling
+/// by `Context::lower_pass0` and resolves through the subscript path, while a
+/// stock's flow reference goes straight to `get_implicit_subscript_off`
+/// (module docs) -- so this is the assertion that keeps the two routes reading
+/// the same element. The direction matters: an equation route reading the
+/// target's ORDINAL returns a different array under a permuted element map,
+/// and the third assertion says the row can tell.
 ///
 /// `Permuted` is the kind to run it on: its two dimensions share no element
-/// names, so the flow reference reaches its element-map fallback rather than
-/// stopping at name identity.
+/// names, so both spellings reach the element map rather than stopping at name
+/// identity, and an ordinal read would be visibly different.
 #[test]
-fn a_bare_equation_reference_and_a_flow_reference_disagree() {
+fn a_bare_equation_reference_and_a_flow_reference_agree() {
     let kind = MappingKind::Permuted;
     for direction in Direction::all() {
         let bare = run_cell(kind, direction, Spelling::BareInEquation)
             .expect("the bare equation reference compiles");
         let flow =
             run_cell(kind, direction, Spelling::StockFlow).expect("the flow reference compiles");
-        assert_eq!(bare, kind.positional_reads().unwrap());
-        assert_eq!(flow, kind.map_reads());
+        assert_eq!(
+            bare,
+            kind.map_reads(),
+            "the bare equation reference must follow the element map"
+        );
+        assert_eq!(bare, flow, "the two subscript-less spellings must agree");
         assert_ne!(
-            bare, flow,
-            "the two subscript-less spellings must still disagree under a \
-             permuted element map"
+            bare,
+            kind.positional_reads().unwrap(),
+            "under a permuted element map the ordinal read is a different array, \
+             so this row is not vacuous"
         );
     }
 }
@@ -874,8 +1408,8 @@ fn a_bare_equation_reference_and_a_flow_reference_disagree() {
 /// BY MAPPING the active slot a later axis matches BY NAME.
 ///
 /// This is the hazard shape as a whole model rather than a hand-built call
-/// to `allocate_implicit_axes_partial`, the implicit-axis projection of
-/// `dimensions::match_axes_partial`. Reaching the allocator from a real
+/// to `dimensions::match_axes_partial`. Reaching the allocator
+/// (`compiler::dimensions::allocate_implicit_axes`) from a real
 /// model constrains the fixture: ordinary expression references never get
 /// there, because `Context::lower_pass0` rewrites a bare arrayed reference
 /// into an explicit subscript first (module docs). Tagging each call with its
@@ -1162,45 +1696,35 @@ fn two_iterated_axes_on_one_target_dimension_read_the_diagonal() {
     );
 }
 
-/// The boundary of the rule above: a TARGET that repeats the dimension.
+/// A TARGET that repeats the dimension: `cube[D1,D1] = pop[D1,D1]` resolves
+/// each of the reference's indices to its OWN active axis, so `cube[r1,r2]`
+/// reads `pop[r1,r2]` -- the whole matrix, four reads -- and the element graph
+/// names exactly those four.
 ///
-/// `cube[D1,D1] = pop[D1,D1]` resolves BOTH of the reference's indices to the
-/// target's FIRST `D1` axis, so `cube[r1,r2]` reads `pop[r1,r1]` -- four reads,
-/// which are NOT a diagonal in the target's own element tuple. Every
-/// per-element derivation addresses a target axis by dimension NAME, and this
-/// target has two coordinates for one name.
+/// Both sides pair axes positionally and one to one:
+/// `compiler::subscript::normalize_subscripts3` allocates the active positions
+/// across a reference's subscripts in order, and
+/// `db::analysis::bare_axis_pairing` -- the matcher behind `expand_same_element`
+/// -- pairs the two declared dimension lists the same way, so a repeated name is
+/// two axes on both sides rather than one map key. A name-keyed pairing kept
+/// only the LAST `D1` axis of the target and let both source axes claim it,
+/// which minted the phantom `pop[r1,r1] -> cube[r2,r1]` while dropping the real
+/// `pop[r1,r1] -> cube[r1,r2]`; the third instance of "a dimension name is not
+/// an axis identity" here after GH #974 and GH #986.
 ///
-/// **Why the retarget is narrowed to a singly-named target dimension, and what
-/// that costs.** The reason is the SCORE surface, not the edges. `RefShape`
-/// decides both, and `emit_per_element_link_scores` refuses a repeated-dimension
-/// target outright, so retargeting this shape would convert an emitted `Bare`
-/// link score into the loud per-element skip -- on every edge into or out of a
-/// repeated-dimension variable, with the loops through them dropped. That is a
-/// product decision about a shape this change is not about. On EDGES the
-/// retarget would be better, and the assertions below say so rather than hiding
-/// it: `Bare` emits 12 edges covering 2 of the 4 real reads, `PerElement` would
-/// emit exactly those same 2 and no phantoms. Both miss the same two real reads,
-/// so the retarget removes phantoms without fixing the missing half -- the half
-/// that breaks loop discovery.
-///
-/// **Pre-existing residual, pinned rather than fixed.** The missing half is
-/// `db::analysis::expand_same_element` keying target positions by dimension NAME
-/// (`HashMap<&str, usize>`), so a target repeating `D1` records only its LAST
-/// axis and both source axes claim it. Fixing it means teaching that function
-/// about repeated dimensions on either side -- the third instance of "a
-/// dimension name is not an axis identity" here after GH #974 and GH #986 --
-/// which changes the arm every ordinary bare arrayed reference uses plus
-/// `ltm_finding::expand_a2a_link_offsets`. Doing it there lets the edges and the
-/// scores move together instead of trading one for the other.
+/// The shape stays `Bare` (the lists reproduce the subscript's pairing), which
+/// is what keeps `pop -> cube` on the arrayed A2A score -- asserted below
+/// through the loop-carrying twin, since the per-element emitter declines a
+/// repeated-dimension target outright and a `PerElement` retarget would trade
+/// the score for a loud skip.
 ///
 /// **Blast radius, measured.** Vensim REJECTS a repeated-dimension declaration
 /// ("DimA appears more than once on LHS", `vensim-probes/repeated_dimension.mdl`
-/// in Vensim DSS 2026-08-04), so no MDL-imported model reaches this residual and
+/// in Vensim DSS 2026-08-04), so no MDL-imported model reaches this shape and
 /// it is confined to hand-authored XMILE/JSON/protobuf. The XMILE v1.0 spec does
-/// exemplify the declaration, so the shape stays legitimate and the residual
-/// stays worth fixing -- just not urgent, and not from an importer.
+/// exemplify the declaration, so the shape stays legitimate.
 #[test]
-fn a_repeated_target_dimension_reads_the_first_axis_on_both_sides() {
+fn a_repeated_target_dimension_reads_each_axis_on_the_executed_path() {
     let project = TestProject::new("square_owner_reads")
         .named_dimension("D1", &["r1", "r2"])
         .array_with_ranges(
@@ -1214,47 +1738,42 @@ fn a_repeated_target_dimension_reads_the_first_axis_on_both_sides() {
         )
         .array_aux("cube[D1,D1]", "pop[D1,D1]");
     let results = project.run_vm().expect("must compile and run");
+    // Each `D1` subscript reads its OWN active axis, so the copy is the whole
+    // matrix -- the executed read, and the oracle for the edges below.
     for (cell, want) in [
         ("cube[r1,r1]", 11.0),
-        ("cube[r1,r2]", 11.0),
-        ("cube[r2,r1]", 22.0),
+        ("cube[r1,r2]", 12.0),
+        ("cube[r2,r1]", 21.0),
         ("cube[r2,r2]", 22.0),
     ] {
         assert_eq!(
             *results[cell].last().expect("empty series"),
             want,
-            "{cell}: both indices resolve to the target's FIRST D1 axis"
+            "{cell}: each D1 subscript reads its own active axis"
         );
     }
 
-    // The DISCRIMINATOR for the narrowing. Both of the above hold under the
-    // retarget too -- `PerElement` drops the same real edge and, being phantom-
-    // free, would satisfy the first line and fail the second only incidentally.
-    // What actually separates the two is that `Bare` keeps this edge SCOREABLE.
-    // Under the retarget `pop -> cube` gets no link-score variable and a loud
-    // per-element skip instead, so this assertion is what the narrowing is for.
+    // The element graph names exactly the four executed reads: no phantom
+    // and nothing missing.
+    assert_eq!(
+        edges_from(&project, "pop["),
+        vec![
+            "pop[r1,r1] -> cube[r1,r1]".to_string(),
+            "pop[r1,r2] -> cube[r1,r2]".to_string(),
+            "pop[r2,r1] -> cube[r2,r1]".to_string(),
+            "pop[r2,r2] -> cube[r2,r2]".to_string(),
+        ],
+        "each source cell feeds the target cell that reads it"
+    );
+
+    // And the edge stays on the arrayed `Bare` score (the per-element emitter
+    // would decline a repeated-dimension target with a loud skip instead).
     let scored = square_owner_link_score_names();
     assert!(
         scored
             .iter()
             .any(|n| n.ends_with("link_score\u{205A}pop\u{2192}cube")),
-        "the narrowing keeps this edge on the Bare emitter, which scores it; \
-         retargeting it to PerElement replaces the score with a loud skip. \
-         got: {scored:?}"
-    );
-
-    // The RESIDUAL's current behaviour, in both its directions. Neither line is
-    // a statement of what should be true: a fix to `expand_same_element` reds
-    // this test and has to restate what became true, which is the point of
-    // pinning a defect rather than leaving it silent.
-    let edges = edges_from(&project, "pop[");
-    assert!(
-        !edges.contains(&"pop[r1,r1] -> cube[r1,r2]".to_string()),
-        "residual (missing): a real read still has no edge; got {edges:?}"
-    );
-    assert!(
-        edges.contains(&"pop[r1,r1] -> cube[r2,r1]".to_string()),
-        "residual (phantom): a read that never happens still has one; got {edges:?}"
+        "the repeated-dimension read keeps its arrayed Bare score; got: {scored:?}"
     );
 }
 

@@ -77,7 +77,7 @@ fn pin_table_with_completeness(
                 DepElementPin {
                     axes: axes
                         .iter()
-                        .map(|(dim, elem)| ((*dim).to_string(), (*elem).to_string()))
+                        .map(|(dim, elem)| vec![((*dim).to_string(), (*elem).to_string())])
                         .collect(),
                     // The fixture's two spellings read the same row (its axes
                     // are same-named, so no correspondence is consulted);
@@ -88,6 +88,24 @@ fn pin_table_with_completeness(
             )
         })
         .collect()
+}
+
+/// Parse a test equation into the typed tree the generators consume. For the
+/// feeder generators, whose production input is `AggNode::reducer_expr0()`,
+/// a parse of the reducer's key is that value up to `Loc`
+/// (`ltm_agg_tests::the_typed_reducer_is_the_parse_of_its_key`).
+fn expr(text: &str) -> Expr0 {
+    Expr0::new(text, crate::lexer::LexerType::Equation)
+        .expect("test equation must lex")
+        .expect("test equation must be non-empty")
+}
+
+/// Pin `text`'s references through [`subscript_idents_in_expr0`] and print
+/// the result -- the test-side spelling of the typed pin the per-element
+/// generators apply. The parse lowercases call names, so a `PREVIOUS(..)`
+/// in `text` prints back as `previous(..)`.
+fn pin_text(text: &str, pins: &HashMap<Ident<Canonical>, DepElementPin>) -> String {
+    print_eqn(&subscript_idents_in_expr0(expr(text), pins))
 }
 
 /// Source-dimension element names for the per-shape partial-equation
@@ -332,7 +350,7 @@ fn substitute_reducers_empty_reducers_passes_through_unparseable() {
     assert_eq!(out, bad);
 }
 
-// -- subscript_idents_at_element tests --
+// -- subscript_idents_in_expr0 tests --
 
 /// A dep referenced through the *dimension-name* subscript form
 /// (`reference_emissions[cop]`, the A2A iterated reference) must be
@@ -342,18 +360,15 @@ fn substitute_reducers_empty_reducers_passes_through_unparseable() {
 /// occurrence -- the dominant residual helper source on C-LEARN
 /// (~27k call sites, GH #654).
 #[test]
-fn test_subscript_idents_at_element_pins_dimension_name_indices() {
+fn test_subscript_idents_in_expr0_pins_dimension_name_indices() {
     let pins = pin_table(&[
         ("reference_emissions", &[("cop", "cop·oecd_us")]),
         ("pct_change", &[("cop", "cop·oecd_us")]),
     ]);
-    // Parsed function names round-trip lowercased through print_eqn, so
-    // the expected text spells `previous(...)`.
-    let result = subscript_idents_at_element(
+    let result = pin_text(
         "PREVIOUS(reference_emissions[cop]) * (PREVIOUS(pct_change[cop]) / c + 1)",
         &pins,
-    )
-    .unwrap();
+    );
     assert_eq!(
         result,
         "previous(reference_emissions[cop·oecd_us]) * (previous(pct_change[cop·oecd_us]) / c + 1)"
@@ -364,12 +379,12 @@ fn test_subscript_idents_at_element_pins_dimension_name_indices() {
 /// dep declared over a subset of the target's dimensions (or with them in
 /// a different order) pins each index to the right element.
 #[test]
-fn test_subscript_idents_at_element_pins_by_dimension_name() {
+fn test_subscript_idents_in_expr0_pins_by_dimension_name() {
     let pins = pin_table(&[
         ("row_input", &[("age", "age·adult")]),
         ("matrix", &[("age", "age·adult"), ("region", "region·nyc")]),
     ]);
-    let result = subscript_idents_at_element("row_input[age] + matrix[age,region]", &pins).unwrap();
+    let result = pin_text("row_input[age] + matrix[age,region]", &pins);
     assert_eq!(
         result,
         "row_input[age·adult] + matrix[age·adult, region·nyc]"
@@ -380,10 +395,10 @@ fn test_subscript_idents_at_element_pins_by_dimension_name() {
 /// left untouched: only an index naming one of the DEP's own dimensions is
 /// the "current element" form the pin substitutes.
 #[test]
-fn test_subscript_idents_at_element_leaves_literal_indices() {
+fn test_subscript_idents_in_expr0_leaves_literal_indices() {
     let pins = pin_table(&[("dep", &[("region", "region·la")])]);
     // `nyc` is an element literal, not the dimension name `region`.
-    let result = subscript_idents_at_element("dep[nyc] + dep[region]", &pins).unwrap();
+    let result = pin_text("dep[nyc] + dep[region]", &pins);
     assert_eq!(result, "dep[nyc] + dep[region·la]");
 }
 
@@ -404,13 +419,13 @@ fn test_subscript_idents_at_element_leaves_literal_indices() {
 /// resolve numerically, so the partial compiled and silently read
 /// `flip[young, boston]`.
 #[test]
-fn test_subscript_idents_at_element_pins_bare_refs_over_the_deps_own_dims() {
+fn test_subscript_idents_in_expr0_pins_bare_refs_over_the_deps_own_dims() {
     let pins = pin_table(&[
         ("same", &[("region", "region·nyc"), ("age", "age·old")]),
         ("flip", &[("age", "age·old"), ("region", "region·nyc")]),
         ("w", &[("age", "age·old")]),
     ]);
-    let result = subscript_idents_at_element("same * flip * w", &pins).unwrap();
+    let result = pin_text("same * flip * w", &pins);
     assert_eq!(
         result,
         "same[region·nyc, age·old] * flip[age·old, region·nyc] * w[age·old]"
@@ -430,9 +445,9 @@ fn test_subscript_idents_at_element_pins_bare_refs_over_the_deps_own_dims() {
 /// arity-1 `pop[region·nyc]` over a 2-D variable. Bare stays bare, which fails
 /// to compile LOUDLY rather than reading a wrong element.
 #[test]
-fn test_subscript_idents_at_element_incomplete_pin_leaves_bare_refs_alone() {
+fn test_subscript_idents_in_expr0_incomplete_pin_leaves_bare_refs_alone() {
     let pins = pin_table_with_completeness(&[("pop", &[("region", "region·nyc")])], false);
-    let result = subscript_idents_at_element("pop[Region, idx] + pop", &pins).unwrap();
+    let result = pin_text("pop[Region, idx] + pop", &pins);
     assert_eq!(result, "pop[region·nyc, idx] + pop");
 }
 
@@ -479,8 +494,7 @@ fn var_with_expr(expr: Expr2) -> Variable {
         ident: Ident::new("target"),
         units: None,
         eqn: None,
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Aux {
             ast: Some(Ast::Scalar(expr)),
             init_ast: None,
@@ -488,6 +502,7 @@ fn var_with_expr(expr: Expr2) -> Variable {
             non_negative: false,
             is_flow: false,
             is_table_only: false,
+            element_scope: None,
         },
     }
 }
@@ -707,8 +722,7 @@ fn test_classify_reducer_no_ast() {
         ident: Ident::new("target"),
         units: None,
         eqn: None,
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Aux {
             ast: None,
             init_ast: None,
@@ -716,6 +730,7 @@ fn test_classify_reducer_no_ast() {
             non_negative: false,
             is_flow: false,
             is_table_only: false,
+            element_scope: None,
         },
     };
     let result = classify_reducer(&var, "population");
@@ -2340,26 +2355,6 @@ fn build_partial_equation_shaped_no_deps_to_wrap_is_ok() {
     );
 }
 
-/// `subscript_idents_at_element` shares the same loud-failure contract:
-/// an unparseable (already-partial) equation returns `Err`, while an
-/// empty pin table is a legitimate no-op that returns the text unchanged.
-#[test]
-fn subscript_idents_at_element_parse_error_is_err() {
-    let pins = pin_table(&[("dep", &[("region", "region·nyc")])]);
-    let bad = "dep * * other";
-    let result = subscript_idents_at_element(bad, &pins);
-    match result {
-        Err(err) => assert_eq!(err.equation_text, bad),
-        Ok(out) => panic!("a parse failure must be a loud Err; got Ok({out:?})"),
-    }
-
-    // Empty pin table: nothing to pin, returns the text verbatim (even text
-    // that would not parse is irrelevant -- the function short-circuits).
-    let noop = subscript_idents_at_element(bad, &pin_table(&[]))
-        .expect("an empty pin table is a no-op, not a parse attempt");
-    assert_eq!(noop, bad);
-}
-
 // -- link_score_var_name: per-shape naming convention --
 //
 // The naming helper produces a stable name for each `(from, to, shape)`
@@ -3232,25 +3227,7 @@ fn arrayed_var_from_text(
         })
     };
 
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let mut implicit_vars = Vec::new();
-    let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
-        &crate::variable::ParseContext::new(
-            &crate::dimensions::DimensionsContext::from(dims),
-            &units_ctx,
-        ),
-        &dm_var,
-        &mut implicit_vars,
-        |mi| Ok(Some(mi.clone())),
-    );
-    let dim_ctx = crate::dimensions::DimensionsContext::from(dims);
-    let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
-        dimensions: &dim_ctx,
-        model_name: "test",
-    };
-    crate::model::lower_variable(&scope, &stage0)
+    lower_dm_var(dm_var, dims)
 }
 
 /// Look up the slot equation for `element` in an `Equation::Arrayed`,
@@ -3304,25 +3281,7 @@ fn scalar_aux_from_text(ident: &str, eqn_text: &str) -> Variable {
         uid: None,
         compat: crate::datamodel::Compat::default(),
     });
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let mut implicit_vars = Vec::new();
-    let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
-        &crate::variable::ParseContext::new(
-            &crate::dimensions::DimensionsContext::default(),
-            &units_ctx,
-        ),
-        &dm_var,
-        &mut implicit_vars,
-        |mi| Ok(Some(mi.clone())),
-    );
-    let dim_ctx = crate::dimensions::DimensionsContext::from(&[][..]);
-    let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
-        dimensions: &dim_ctx,
-        model_name: "test",
-    };
-    crate::model::lower_variable(&scope, &stage0)
+    lower_dm_var(dm_var, &[])
 }
 
 /// GH #311 end-to-end through the generator chain: a target whose
@@ -3340,8 +3299,8 @@ fn generate_link_score_equation_for_link_empty_target_is_err() {
     let from_var = scalar_aux_from_text("source", "1");
 
     let mut all_vars = HashMap::new();
-    all_vars.insert(from.clone(), from_var);
-    all_vars.insert(to.clone(), to_var.clone());
+    all_vars.insert(from.clone(), std::sync::Arc::new(from_var));
+    all_vars.insert(to.clone(), std::sync::Arc::new(to_var.clone()));
 
     let result = generate_link_score_equation_for_link(
         &from,
@@ -3374,9 +3333,12 @@ fn generate_link_score_equation_for_link_normal_target_is_ok() {
     let other_var = scalar_aux_from_text("other", "2");
 
     let mut all_vars = HashMap::new();
-    all_vars.insert(from.clone(), from_var);
-    all_vars.insert(Ident::<Canonical>::new("other"), other_var);
-    all_vars.insert(to.clone(), to_var.clone());
+    all_vars.insert(from.clone(), std::sync::Arc::new(from_var));
+    all_vars.insert(
+        Ident::<Canonical>::new("other"),
+        std::sync::Arc::new(other_var),
+    );
+    all_vars.insert(to.clone(), std::sync::Arc::new(to_var.clone()));
 
     let equation = generate_link_score_equation_for_link(
         &from,
@@ -3495,31 +3457,30 @@ fn arrayed_with_lookup_var(
     lower_dm_var(dm_var, dims)
 }
 
-/// Shared parse+lower tail for the with-lookup fixture builders above,
-/// mirroring `scalar_aux_from_text` / `arrayed_var_from_text`.
+/// Lower `dm_var` as the LTM describers read a variable: synced into a
+/// one-model project declaring `dims` and read back through
+/// `db::model_lowered_variables`, the production lowering every generator
+/// target comes from. The reconstruction is total, so a name the equation
+/// references but the project does not declare lowers like any other and a
+/// fixture need declare only the variable under test.
 fn lower_dm_var(
     dm_var: crate::datamodel::Variable,
     dims: &[crate::datamodel::Dimension],
 ) -> Variable {
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let mut implicit_vars = Vec::new();
-    let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
-        &crate::variable::ParseContext::new(
-            &crate::dimensions::DimensionsContext::from(dims),
-            &units_ctx,
-        ),
-        &dm_var,
-        &mut implicit_vars,
-        |mi| Ok(Some(mi.clone())),
+    use crate::db::{SimlinDb, model_lowered_variables, sync_from_datamodel};
+    use crate::testutils::{sim_specs_with_units, x_model, x_project};
+
+    let ident: Ident<Canonical> = Ident::new(dm_var.get_ident());
+    let mut project = x_project(
+        sim_specs_with_units("month"),
+        &[x_model("test", vec![dm_var])],
     );
-    let dim_ctx = crate::dimensions::DimensionsContext::from(dims);
-    let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
-        dimensions: &dim_ctx,
-        model_name: "test",
-    };
-    crate::model::lower_variable(&scope, &stage0)
+    project.dimensions = dims.to_vec();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    model_lowered_variables(&db, sync.models["test"].source, sync.project)[&ident]
+        .as_ref()
+        .clone()
 }
 
 /// GH #910: a scalar WITH-LOOKUP target's link-score partial must be
@@ -3535,9 +3496,12 @@ fn link_score_for_with_lookup_scalar_target_wraps_partial_in_lookup() {
     let other_var = scalar_aux_from_text("other", "2");
 
     let mut all_vars = HashMap::new();
-    all_vars.insert(from.clone(), from_var);
-    all_vars.insert(Ident::<Canonical>::new("other"), other_var);
-    all_vars.insert(to.clone(), to_var.clone());
+    all_vars.insert(from.clone(), std::sync::Arc::new(from_var));
+    all_vars.insert(
+        Ident::<Canonical>::new("other"),
+        std::sync::Arc::new(other_var),
+    );
+    all_vars.insert(to.clone(), std::sync::Arc::new(to_var.clone()));
 
     let equation = generate_link_score_equation_for_link(
         &from,
@@ -3579,8 +3543,8 @@ fn link_score_for_with_lookup_a2a_target_pins_shared_table() {
     let from_var = scalar_aux_from_text("source", "1");
 
     let mut all_vars = HashMap::new();
-    all_vars.insert(from.clone(), from_var);
-    all_vars.insert(to.clone(), to_var.clone());
+    all_vars.insert(from.clone(), std::sync::Arc::new(from_var));
+    all_vars.insert(to.clone(), std::sync::Arc::new(to_var.clone()));
 
     let equation = generate_link_score_equation_for_link(
         &from,
@@ -3628,8 +3592,8 @@ fn link_score_for_with_lookup_arrayed_target_wraps_per_slot() {
     let from_var = scalar_aux_from_text("source", "1");
 
     let mut all_vars = HashMap::new();
-    all_vars.insert(from.clone(), from_var);
-    all_vars.insert(to.clone(), to_var.clone());
+    all_vars.insert(from.clone(), std::sync::Arc::new(from_var));
+    all_vars.insert(to.clone(), std::sync::Arc::new(to_var.clone()));
 
     let equation = generate_link_score_equation_for_link(
         &from,
@@ -3812,7 +3776,7 @@ fn test_arrayed_link_score_population_to_migration_pressure_fixed_boston() {
 ///
 /// The instrument changed with GH #977 and the guarded property did not. A slot
 /// whose transformed partial is provably `PREVIOUS(target)` is now OMITTED from
-/// the element map (`compiler::expand_arrayed_with_hoisting` lowers an absent
+/// the element map (`compiler::expand_per_element` lowers an absent
 /// slot to one constant-zero assign), so "every slot references the flow's
 /// equation contents" can no longer be asked of `boston` and `la` -- those arms
 /// are gone by design. Asking it anyway would pin materialization, not
@@ -3912,8 +3876,7 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
         ident: Ident::new("scalar_target"),
         units: None,
         eqn: Some(Equation::Scalar("driver".to_string())),
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Aux {
             ast: Some(Ast::Scalar(var_ref("driver"))),
             init_ast: None,
@@ -3921,6 +3884,7 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
             non_negative: false,
             is_flow: false,
             is_table_only: false,
+            element_scope: None,
         },
     };
     let from = Ident::<Canonical>::new("driver");
@@ -3945,8 +3909,6 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
 
     // ApplyToAll target.
     let dims = vec![region_dm_dimension()];
-    let units_ctx = crate::units::Context::new(&[], &Default::default()).0;
-    let mut implicit = Vec::new();
     let a2a_dm = crate::datamodel::Variable::Aux(crate::datamodel::Aux {
         ident: "a2a_target".to_string(),
         equation: Equation::ApplyToAll(vec!["Region".to_string()], "driver * 0.5".to_string()),
@@ -3957,23 +3919,7 @@ fn test_scalar_and_a2a_link_scores_keep_their_shapes() {
         uid: None,
         compat: crate::datamodel::Compat::default(),
     });
-    let stage0 = crate::variable::parse_var::<crate::datamodel::ModuleReference, _>(
-        &crate::variable::ParseContext::new(
-            &crate::dimensions::DimensionsContext::from(dims.as_slice()),
-            &units_ctx,
-        ),
-        &a2a_dm,
-        &mut implicit,
-        |mi| Ok(Some(mi.clone())),
-    );
-    let dim_ctx = crate::dimensions::DimensionsContext::from(dims.as_slice());
-    let models = HashMap::new();
-    let scope = crate::model::ScopeStage0 {
-        models: &models,
-        dimensions: &dim_ctx,
-        model_name: "test",
-    };
-    let a2a_to = crate::model::lower_variable(&scope, &stage0);
+    let a2a_to = lower_dm_var(a2a_dm, &dims);
     let to_a2a = Ident::<Canonical>::new("a2a_target");
     let equation = generate_auxiliary_to_auxiliary_equation(
         &from,
@@ -4008,8 +3954,7 @@ fn flow_to_stock_test_stock(
         ident: Ident::new(ident),
         units: None,
         eqn: Some(eqn),
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Stock {
             init_ast: None,
             inflows: inflows.iter().map(|f| Ident::new(f)).collect(),
@@ -4026,8 +3971,7 @@ fn flow_to_stock_test_flow(ident: &str, eqn: Equation) -> Variable {
         ident: Ident::new(ident),
         units: None,
         eqn: Some(eqn),
-        errors: vec![],
-        unit_errors: vec![],
+        diagnostics: vec![],
         kind: VarKind::Aux {
             ast: None,
             init_ast: None,
@@ -4035,6 +3979,7 @@ fn flow_to_stock_test_flow(ident: &str, eqn: Equation) -> Variable {
             non_negative: false,
             is_flow: true,
             is_table_only: false,
+            element_scope: None,
         },
     }
 }
@@ -4600,10 +4545,9 @@ fn test_generate_scalar_feeder_to_agg_equation_freezes_only_feeder() {
     let eq = generate_scalar_feeder_to_agg_equation(
         "scale",
         "$\u{205A}ltm\u{205A}agg\u{205A}0",
-        "sum(pop[*] * scale)",
+        &expr("sum(pop[*] * scale)"),
         None,
-    )
-    .expect("the agg equation text must parse");
+    );
     // The frozen evaluation wraps the feeder, not the array reference.
     assert!(
         eq.contains("sum(pop[*] * PREVIOUS(scale))"),
@@ -4640,12 +4584,12 @@ fn test_generate_iterated_feeder_to_agg_equation_pins_slot_and_freezes_feeder() 
     let eq = generate_iterated_feeder_to_agg_equation(
         "frac",
         "growth",
-        "sum(matrix[d1, *] * frac[d1])",
+        &expr("sum(matrix[d1, *] * frac[d1])"),
         &["d1".to_string()],
         &["d1\u{B7}r1".to_string()],
         None,
     )
-    .expect("the agg equation text must parse");
+    .expect("the feeder occurrence freezes");
     assert_eq!(
         eq,
         "if (TIME = INITIAL_TIME) then 0 else if ((growth[d1\u{B7}r1] - \
@@ -4666,7 +4610,7 @@ fn test_generate_iterated_feeder_to_agg_equation_unfreezable_without_occurrence(
     let err = generate_iterated_feeder_to_agg_equation(
         "absent",
         "growth",
-        "sum(matrix[d1, *] * frac[d1])",
+        &expr("sum(matrix[d1, *] * frac[d1])"),
         &["d1".to_string()],
         &["d1\u{B7}r1".to_string()],
         None,
@@ -4688,7 +4632,7 @@ fn test_generate_iterated_feeder_to_agg_equation_bails_on_duplicate_dims() {
     let err = generate_iterated_feeder_to_agg_equation(
         "frac",
         "growth",
-        "sum(cube[d1, d1, *] * frac[d1, d1])",
+        &expr("sum(cube[d1, d1, *] * frac[d1, d1])"),
         &["d1".to_string(), "d1".to_string()],
         &["d1\u{B7}r1".to_string(), "d1\u{B7}r2".to_string()],
         None,
@@ -5406,143 +5350,17 @@ fn gh526_transposed_other_dep_with_threaded_dims_is_unfreezable() {
     );
 }
 
-// -- GH #779: bare-spelled feeder of an un-hoisted reducer declines loudly --
-
-/// The detector keys on a BARE `Var` reference to the source nested inside
-/// an array-reducer argument. It must fire for the bare reference and stay
-/// silent for the adjacent shapes (subscripted, outside-reducer, inside
-/// PREVIOUS, and other reducers) so the decline is precise.
-#[test]
-fn references_bare_source_inside_reducer_detects_only_the_dangerous_shape() {
-    let frac = Ident::<Canonical>::new("frac");
-    let parse = |eqn: &str| Expr0::new(eqn, LexerType::Equation).unwrap().unwrap();
-
-    // The GH #779 shape: bare `frac` inside SUM -> fires.
-    assert!(references_bare_source_inside_reducer(
-        &parse("SUM(matrix[D1, *] * frac)"),
-        &frac,
-        false
-    ));
-    // The whole reducer class is covered.
-    for reducer in ["MEAN", "MIN", "MAX", "STDDEV"] {
-        assert!(
-            references_bare_source_inside_reducer(
-                &parse(&format!("{reducer}(matrix[D1, *] * frac)")),
-                &frac,
-                false
-            ),
-            "{reducer}: bare feeder inside reducer must be detected"
-        );
-    }
-
-    // The SUBSCRIPTED feeder spelling is NOT the bare shape: it is hoisted
-    // and scored correctly elsewhere (GH #767/T5).
-    assert!(!references_bare_source_inside_reducer(
-        &parse("SUM(matrix[D1, *] * frac[D1])"),
-        &frac,
-        false
-    ));
-    // A bare `frac` OUTSIDE any reducer is the bread-and-butter Bare A2A
-    // case (its changed-first partial compiles), and must not fire.
-    assert!(!references_bare_source_inside_reducer(
-        &parse("frac * 2 + SUM(matrix[D1, *])"),
-        &frac,
-        false
-    ));
-    // A bare `frac` already inside PREVIOUS is lagged, not a live read the
-    // partial must account for.
-    assert!(!references_bare_source_inside_reducer(
-        &parse("SUM(matrix[D1, *] * PREVIOUS(frac))"),
-        &frac,
-        false
-    ));
-    // RANK is array-valued and uses its own agg-routing path (GH #771/#776):
-    // its bare arg is not the scalar-reducer feeder shape.
-    assert!(!references_bare_source_inside_reducer(
-        &parse("RANK(frac, 1)"),
-        &frac,
-        false
-    ));
-    // SIZE completes the reducer set (`reducer_kind_from_name` recognizes
-    // seven functions; the loop above covers five and RANK is the sixth).
-    // It IS in this predicate's set, because the question here is "does the
-    // subtree collapse to a scalar" and a count does -- see
-    // `ltm_agg::reducer_collapses_to_scalar`, whose OTHER consumer
-    // (`expr_is_array_slice_valued`, the GH #743 freezability test) reads the
-    // same predicate and is what makes this cell INERT: an equation whose only
-    // reducer is SIZE is freezable as `PREVIOUS(size(...))`, so its
-    // changed-first partial succeeds and the changed-last chooser never
-    // reaches this gate. The membership is pinned anyway, because the
-    // inertness is a property of the two call sites AGREEING, and nothing else
-    // would notice one of them moving (GH #982).
-    assert!(references_bare_source_inside_reducer(
-        &parse("SIZE(frac)"),
-        &frac,
-        false
-    ));
-    // A different variable inside the reducer is irrelevant.
-    assert!(!references_bare_source_inside_reducer(
-        &parse("SUM(matrix[D1, *] * other)"),
-        &frac,
-        false
-    ));
-}
-
-/// End-to-end through the chooser: a bare ARRAYED feeder inside an un-hoisted
-/// reducer is DECLINED loudly (`BareReducerFeeder`, whose diagnostic names
-/// the shape and the subscripted-spelling workaround) instead of given the
-/// silently-wrong changed-last per-element partial -- the GH #779 fix. The
-/// SUBSCRIPTED sibling (`frac[D1]`) keeps the changed-last score (pinned by
-/// `shaped_guard_form_falls_back_to_changed_last_for_unfreezable_co_source`).
-#[test]
-fn shaped_guard_form_declines_bare_arrayed_feeder_of_unhoisted_reducer() {
-    let deps = deps_set(&["matrix", "frac"]);
-    let live = Ident::<Canonical>::new("frac");
-    // `frac` arrayed over `d1` -> non-empty source dims.
-    let source_dims = vec![vec!["r1".to_string(), "r2".to_string()]];
-    let source_dim_names = vec!["d1".to_string()];
-    let target_iterated = vec!["d1".to_string()];
-    let iter_ctx = IteratedDimCtx {
-        source_dim_names: &source_dim_names,
-        target_iterated_dims: &target_iterated,
-        dep_dims: None,
-    };
-    let err = sgft(
-        "SUM(matrix[D1, *] * frac)",
-        &deps,
-        &live,
-        &RefShape::Bare,
-        &source_dims,
-        &source_dim_names,
-        Some(&iter_ctx),
-        None,
-        "growth",
-        None,
-    )
-    .unwrap_err();
-    assert_eq!(
-        err.kind,
-        PartialEquationErrorKind::BareReducerFeeder,
-        "the bare arrayed feeder of an un-hoisted reducer must decline loudly \
-         with the shape-specific diagnostic, not score the silent wrong number"
-    );
-}
-
-/// Precision control: a bare SCALAR source inside a reducer does NOT trigger
-/// the GH #779 decline -- the gate requires an ARRAYED source
-/// (`source_dim_names` non-empty), so it is inert here and the changed-last
-/// convention governs as before: the changed-first leg is doomed (the
-/// co-source's wildcard slice cannot be frozen), the gate is skipped (scalar
-/// source), and the changed-last leg freezes the scalar `scale` occurrence
+/// A bare SCALAR source inside a reducer takes the changed-last convention:
+/// the changed-first leg is doomed (the co-source's wildcard slice cannot be
+/// frozen), and the changed-last leg freezes the scalar `scale` occurrence
 /// (a plain `LoadPrev`) and scores. (Hoisted instances of this feeder are
 /// normally routed `ThroughAgg` to `generate_scalar_feeder_to_agg_equation`
 /// before this chooser is reached; the whole-RHS spelling's own emission
 /// defect is tracked separately as GH #790.)
 #[test]
-fn shaped_guard_form_scalar_feeder_inside_reducer_not_declined_by_gh779() {
+fn shaped_guard_form_scalar_feeder_inside_reducer_takes_changed_last() {
     let deps = deps_set(&["matrix", "scale"]);
     let live = Ident::<Canonical>::new("scale");
-    // `scale` SCALAR -> empty source dims, so the GH #779 gate is inert.
     let result = sgft(
         "SUM(matrix[D1, *] * scale)",
         &deps,
@@ -5557,8 +5375,7 @@ fn shaped_guard_form_scalar_feeder_inside_reducer_not_declined_by_gh779() {
     );
     assert!(
         result.is_ok(),
-        "a scalar feeder inside a reducer is not the GH #779 arrayed shape and \
-         must keep its changed-last score; got: {result:?}"
+        "a scalar feeder inside a reducer keeps its changed-last score; got: {result:?}"
     );
 }
 

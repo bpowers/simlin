@@ -213,9 +213,8 @@ pub fn resolve_axis_index_name(
 /// * a QUALIFIED `dimension·element` reference, which
 ///   [`DimensionsContext::lookup`] turns into that element's 1-based index
 ///   *within the dimension it names* and `Expr1::constify_dimensions` rewrites
-///   into an `Expr1::Const`. This is the form
-///   `builtins_visitor::substitute_dimension_refs` synthesizes for every
-///   per-element expansion.
+///   into an `Expr1::Const`. This is the form the LTM equation generator
+///   writes for an element it pins (`ltm_augment`).
 ///
 /// In both cases `compiler::subscript::normalize_subscripts3` lowers the
 /// constant to `IndexOp::Single(value - 1)` -- a raw offset into the
@@ -295,6 +294,19 @@ impl Dimension {
                 .ok()
                 .filter(|n| *n >= 1 && n <= size)
                 .map(|n| n.to_string()),
+        }
+    }
+
+    /// The element at 0-based `offset`, the inverse of [`Self::get_offset`].
+    ///
+    /// `None` past the end. An INDEXED dimension's elements are their 1-based
+    /// positions spelled as numerals, which is the spelling `get_offset` reads
+    /// back and the one `canonical_element` normalizes to.
+    pub fn element_name(&self, offset: usize) -> Option<CanonicalElementName> {
+        match self {
+            Dimension::Named(_, named) => named.elements.get(offset).cloned(),
+            Dimension::Indexed(_, size) => (offset < *size as usize)
+                .then(|| CanonicalElementName::from_raw(&(offset + 1).to_string())),
         }
     }
 
@@ -804,8 +816,10 @@ impl DimensionsContext {
     ///    that parent -- the active subdimension's elements are a subset of
     ///    the parent's, so the parent-directed map applies unchanged.
     ///
-    /// `None` means the reference does not resolve; all three executed callers
-    /// below turn that into a compile diagnostic.
+    /// `None` means this rule does not resolve the reference:
+    /// `get_implicit_subscript_off` turns that into a compile diagnostic, and
+    /// the two subscript arms below take one further step,
+    /// [`Self::resolve_dimension_subscript`].
     ///
     /// # The three executed call sites
     ///
@@ -817,25 +831,26 @@ impl DimensionsContext {
     ///   narrowing is a SEARCH over candidate axes, not part of the rule, so
     ///   it stays at the call site).
     /// * `compiler::subscript`'s `build_view_from_ops`, on the
-    ///   `IndexOp::ActiveDimRef` arm -- a subscript naming a dimension the
-    ///   equation does NOT iterate, typically the source's own
-    ///   (`target[COP] = x[Region]`). Its active dimension is already chosen
-    ///   by `normalize_subscripts3`, so it calls this exactly once.
+    ///   `IndexOp::ActiveDimRef` arm -- every dimension-named subscript whose
+    ///   sibling indices are all static: one naming a dimension the equation
+    ///   iterates (`target[State] = x[State]`, and the bare `target[State] = x`
+    ///   that `lower_pass0` rewrites into it) and one naming a dimension it
+    ///   does not, typically the source's own (`target[COP] = x[Region]`). Its
+    ///   active dimension is already chosen by `normalize_subscripts3`, so it
+    ///   resolves the element once, through
+    ///   [`Self::resolve_dimension_subscript`].
     /// * `compiler::context`'s `IndexExpr3::Dimension` arm, the dynamic-path
-    ///   twin of the previous one (reached when some OTHER index of the same
-    ///   subscript defeats static normalization). Instrumenting all three
-    ///   showed this one resolving zero references across the lib suite, but
-    ///   it is reachable by construction (`x[Region, i+1]` sends the whole
-    ///   subscript down the dynamic path), and before GH #997 it consulted the
-    ///   mapping WITHOUT trying the name first -- a latent divergence from the
-    ///   other two, now removed by routing it here.
+    ///   twin of the previous one, reached when some OTHER index of the same
+    ///   subscript needs runtime evaluation (`x[Region, i+1]`, `m[State, idx]`,
+    ///   an `@N` inside an apply-to-all body). It searches the active
+    ///   dimensions the subscript names or maps to and resolves the element
+    ///   through the same [`Self::resolve_dimension_subscript`], so the sibling
+    ///   a reference carries decides its ROUTE and never its rule.
     ///
-    /// Everything a reference does NOT get this rule is equally load-bearing
-    /// and is recorded on [`Self::positional_correspondence`]: a subscript
-    /// naming a dimension the equation ITERATES, and a bare reference inside
-    /// an equation body, are both resolved by ORDINAL and never reach here.
     /// The whole 4-spelling x 5-mapping x 2-direction matrix is measured
-    /// against the VM in `crate::mapped_reference_semantics_tests`.
+    /// against the VM in `crate::mapped_reference_semantics_tests`, and
+    /// [`Self::executed_read_correspondence`] is this rule projected over one
+    /// iterated dimension -- the form the LTM describers read.
     pub fn resolve_mapped_read(
         &self,
         source_axis: &Dimension,
@@ -865,125 +880,127 @@ impl DimensionsContext {
         self.translate_to_source_via_mapping(source_axis.canonical_name(), parent, active_element)
     }
 
-    /// Per element of `iterated_dim` in declared order, the `source_dim`
-    /// element a POSITIONALLY-resolved reference reads (GH #527, re-keyed by
-    /// GH #997).
+    /// The 0-based offset on `source_axis` that a subscript spelling the
+    /// dimension `spelled`, paired with the active dimension `active_dim`,
+    /// reads for `active_element`: [`Self::resolve_mapped_read`] where it
+    /// resolves, and otherwise the active element's ORDINAL within its own
+    /// dimension, indexing `source_axis` raw -- the last resort, taken only
+    /// when the subscript NAMES its active dimension (`spelled` is
+    /// `active_dim`) and `source_axis` declares no correspondence to it.
     ///
-    /// This is the describer for the two spellings the executed lowering
-    /// resolves by ORDINAL, measured cell by cell in
-    /// `crate::mapped_reference_semantics_tests`:
+    /// Both subscript paths take that last resort through this one function:
+    /// `compiler::subscript::build_view_from_ops`'s `IndexOp::ActiveDimRef` arm
+    /// (every sibling index static) and `compiler::context`'s
+    /// `IndexExpr3::Dimension` arm (a sibling evaluated at runtime). A
+    /// reference is therefore read by one rule whichever sibling it carries:
+    /// `target[State] = m[State, 1]` and `target[State] = m[State, idx]` read
+    /// the same cell (GH #1044;
+    /// `mapped_reference_semantics_tests::no_mapping_reads_by_ordinal_on_both_subscript_paths`
+    /// rows every sibling kind).
     ///
-    /// * a subscript naming a dimension the equation ITERATES
-    ///   (`target[State] = x[State]`, `x` over `Region`). `ast::expr3`'s
-    ///   Pass 1 folds the active dimension's name to that dimension's ordinal,
-    ///   which then indexes the source's storage raw.
-    /// * a BARE reference inside an equation body (`target[State] = x`).
-    ///   `compiler::context`'s `lower_pass0` rewrites it into the spelling
-    ///   above before anything resolves it, so the two are one rule.
+    /// The by-name gate is what keeps a pairing made THROUGH a mapping from
+    /// reading a row: `target[Foo] = m[State, ..]` with `Foo maps_to State`
+    /// pairs the subscript with `Foo`, and over an `m[Region, ..]` that relates
+    /// to neither dimension there is no correspondence to follow and no
+    /// ordinal to take -- `None`, a refusal
+    /// (`mapped_reference_semantics_tests::a_candidate_paired_through_a_mapping_never_takes_the_ordinal`).
+    /// A declared correspondence that fails to translate is authoritative and
+    /// stops short of the ordinal too: an element map that leaves this element
+    /// unpaired, or a mapped element `source_axis` does not declare, is `None`
+    /// rather than a read of a neighbouring element. An ordinal past the end
+    /// of `source_axis` is `None` as well
+    /// (`an_ordinal_past_the_sources_extent_is_refused_on_both_subscript_paths`).
     ///
-    /// Neither consults a declared element map, which is why this function
-    /// returns the positional diagonal for an element-mapped pair rather than
-    /// declining it. It declined before GH #997 because ONE function served
-    /// both this rule and [`Self::resolve_mapped_read`]'s, and could not see
-    /// which was being asked; a caller now picks the one its site's spelling
-    /// gets and the conservative decline is no longer needed for either.
-    ///
-    /// A mapping must be DECLARED (in either direction) for the pair to
-    /// correspond at all. That is narrower than execution -- the iterated
-    /// spelling compiles and reads positionally between two dimensions
-    /// declared to have nothing to do with each other, which
-    /// `mapped_reference_semantics_tests::no_mapping_equal_cardinality`
-    /// measures -- and deliberately so: an undeclared pair keeps the
-    /// conservative broadcast, which is a SUPERSET of that read, and GH #527's
-    /// rule is that the diagonal follows a correspondence the model declares.
-    ///
-    /// Equal cardinality is likewise required. A larger source is read only up
-    /// to the target's extent and a smaller one does not compile at all, so
-    /// declining is again a superset rather than a wrong answer.
-    ///
-    /// Returns `None` when no mapping is declared either way, when either
-    /// dimension is indexed, or when the cardinalities differ; callers keep
-    /// their conservative broadcast.
-    ///
-    /// GH #756 tracks the open question of whether VENSIM resolves the
-    /// iterated spelling positionally at all -- its own Example 3 cannot say,
-    /// because there the three candidate rules coincide. If that is ever
-    /// settled the other way, this function moves with execution; it describes
-    /// what the engine runs today.
-    pub fn positional_correspondence(
+    /// The ordinal is the engine's reading of a pair XMILE 1.0 section 3.7.1
+    /// leaves open (it defines no mapping, and exemplifies the dimension-name
+    /// placeholder only over the equation's own dimensions) and Vensim
+    /// refuses (its subscript-mapping reference: a right-hand subscript absent
+    /// from the left "would generate an error" without a mapping). GH #1044
+    /// holds the decision on the single long-term rule.
+    /// `compiler::context::Context::resolve_iteration_element`'s `target_offset`
+    /// fallback is the same last resort for a positionally read axis one
+    /// axis-collapse later, and the LTM describers deliberately leave the read
+    /// undescribed ([`Self::executed_read_correspondence`], GH #527).
+    pub fn resolve_dimension_subscript(
         &self,
-        iterated_dim: &CanonicalDimensionName,
-        source_dim: &CanonicalDimensionName,
-    ) -> Option<Vec<CanonicalElementName>> {
-        if !self.has_mapping_to(iterated_dim, source_dim)
-            && !self.has_mapping_to(source_dim, iterated_dim)
-        {
+        source_axis: &Dimension,
+        spelled: &CanonicalDimensionName,
+        active_dim: &Dimension,
+        active_element: &CanonicalElementName,
+    ) -> Option<usize> {
+        if let Some(resolved) = self.resolve_mapped_read(source_axis, active_dim, active_element) {
+            return source_axis.get_offset(&resolved);
+        }
+        let source = source_axis.canonical_name();
+        let active = active_dim.canonical_name();
+        let declared = self.has_mapping_to(source, active)
+            || self.has_mapping_to(active, source)
+            || self.has_mapping_to_parent_of(source, active);
+        if declared || spelled != active {
             return None;
         }
-        let iterated_named = match self.dimensions.get(iterated_dim)? {
-            Dimension::Named(_, named) => named,
-            Dimension::Indexed(_, _) => return None,
-        };
-        let source_named = match self.dimensions.get(source_dim)? {
-            Dimension::Named(_, named) => named,
-            Dimension::Indexed(_, _) => return None,
-        };
-        if iterated_named.elements.len() != source_named.elements.len() {
-            return None;
-        }
-        // The positional diagonal: the target's i-th element reads the
-        // source's i-th, so the answer IS the source's element list.
-        Some(source_named.elements.clone())
+        active_dim
+            .get_offset(active_element)
+            .filter(|offset| *offset < source_axis.len())
     }
 
     /// Per element of `iterated_dim` in declared order, the `source_dim`
-    /// element a MAP-FOLLOWING reference reads -- [`Self::resolve_mapped_read`]
-    /// applied per element (GH #997).
+    /// element a dimension-named subscript reads: [`Self::resolve_mapped_read`]
+    /// applied element by element -- the per-dimension projection of the
+    /// compiler's one resolution rule, and the describer every LTM surface
+    /// reads for a read across two dimensions (the element graph's `Bare`
+    /// projection, the per-element row derivations, the aggregate slot remap,
+    /// the dependency pins).
     ///
-    /// This is the describer for the two spellings that resolve name-first and
-    /// then through the declared element map:
+    /// One rule serves every spelling because execution resolves them all
+    /// through it (`crate::mapped_reference_semantics_tests` measures the
+    /// 4-spelling x 5-mapping x 2-direction matrix against the VM):
     ///
+    /// * a subscript naming a dimension the equation ITERATES
+    ///   (`target[State] = x[State]`, `x` over `Region`), which is also what
+    ///   `compiler::context`'s `lower_pass0` writes for a BARE reference in an
+    ///   equation body (`target[State] = x`);
     /// * a subscript naming a NON-ACTIVE dimension, typically the source's own
-    ///   (`target[COP] = x[Aggregated Regions]`) -- C-LEARN's shape, and the
-    ///   one Vensim's own reference page is written around;
-    /// * a stock's FLOW reference (`level[State] = INTEG(x, 0)` with `x` over
-    ///   `Region`), which never passes through pass 0 and so keeps its
-    ///   subscript-less form all the way to `get_implicit_subscript_off`.
+    ///   (`target[COP] = x[Aggregated Regions]`, C-LEARN's shape);
+    /// * a stock's FLOW reference (`level[State] = INTEG(x, 0)`), which
+    ///   `get_implicit_subscript_off` resolves without passing through pass 0.
     ///
-    /// Unlike [`Self::positional_correspondence`] this works at every
-    /// cardinality, many-to-one included: C-LEARN maps a 3-element
-    /// `Aggregated Regions` onto a 7-element `COP`, and the checked-in
-    /// `Ref.vdf` identifies which source region each COP element read -- the
-    /// declared element map every time. `simulates_clearn` gates it.
+    /// Name first, then the declared element map, then a mapped parent: two
+    /// dimensions sharing element names correspond by name whether or not a
+    /// mapping is declared between them (Vensim's subrange-copy idiom), an
+    /// explicit element map is followed at any cardinality (C-LEARN maps three
+    /// `Aggregated Regions` elements onto seven `COP` ones, and the checked-in
+    /// `Ref.vdf` identifies which source region each read; `simulates_clearn`
+    /// gates it), and a positional `maps_to` reads the diagonal.
     ///
-    /// A mapping must be declared in one direction or the other, matching
-    /// execution: `compiler::subscript`'s `normalize_subscripts3` pairs a
-    /// non-active subscript dimension with an active one only through a
-    /// declared mapping, and refuses the reference otherwise
-    /// (`mapped_reference_semantics_tests::no_mapping_equal_cardinality`
-    /// measures the refusal).
+    /// What it deliberately does NOT describe: the ORDINAL a dimension-named
+    /// subscript falls back to when the two dimensions declare no
+    /// correspondence and share no element name (the last resort of
+    /// [`Self::resolve_dimension_subscript`], taken on both subscript paths;
+    /// `mapped_reference_semantics_tests::no_mapping_equal_cardinality` and
+    /// `no_mapping_reads_by_ordinal_on_both_subscript_paths` measure it).
+    /// Vensim rejects such a reference outright (its subscript
+    /// mapping page: a right-hand subscript absent from the left "would
+    /// generate an error" without a mapping), so a described diagonal follows
+    /// a correspondence the model declares or spells by name (GH #527), and a
+    /// declining caller keeps its broadcast, a superset of the ordinal read.
     ///
-    /// Returns `None` when no mapping is declared, when either dimension is
-    /// indexed, or when any iterated element fails to resolve.
+    /// `None` when either dimension is undeclared or any iterated element
+    /// fails to resolve: an undeclared pair with disjoint element names, a
+    /// positional mapping between dimensions of different sizes, an element
+    /// map that leaves an iterated element unpaired.
     pub fn executed_read_correspondence(
         &self,
         iterated_dim: &CanonicalDimensionName,
         source_dim: &CanonicalDimensionName,
     ) -> Option<Vec<CanonicalElementName>> {
-        if !self.has_mapping_to(iterated_dim, source_dim)
-            && !self.has_mapping_to(source_dim, iterated_dim)
-        {
-            return None;
-        }
         let iterated = self.dimensions.get(iterated_dim)?;
         let source = self.dimensions.get(source_dim)?;
-        let Dimension::Named(_, iterated_named) = iterated else {
-            return None;
-        };
-        iterated_named
-            .elements
-            .iter()
-            .map(|elem| self.resolve_mapped_read(source, iterated, elem))
+        (0..iterated.len())
+            .map(|offset| {
+                let elem = iterated.element_name(offset)?;
+                self.resolve_mapped_read(source, iterated, &elem)
+            })
             .collect()
     }
 
@@ -1228,8 +1245,9 @@ pub trait AxisRelations {
     /// `make_dimension_subscripts`, which can only emit a dimension-name
     /// subscript, and `ast::Expr2`'s bounds unification, which resolves no
     /// element at all. A DIRECT mapping is safe for those callers because the
-    /// ordinal read IS the documented bare-reference rule (GH #527 / #997, see
-    /// [`DimensionsContext::positional_correspondence`]); the parent one is
+    /// dimension-name subscript it emits resolves through
+    /// [`DimensionsContext::resolve_mapped_read`] against the paired axis
+    /// (GH #527 / #997); the parent one is
     /// not, and pairing through it makes `dst[SubA] = src` over `src[DimB]`
     /// with `DimB -> DimA` and `SubA` a subdimension of `DimA` read `DimB`'s
     /// first element instead of the mapped one.
@@ -1247,33 +1265,37 @@ pub trait AxisRelations {
     /// A subdimension relation is a PARTIAL correspondence -- only the
     /// subdimension's own elements exist on both axes -- so admitting it is a
     /// statement that the caller can act on a pairing that does not cover
-    /// every element. [`DimensionsContext`] does NOT admit it, because the
-    /// callers that resolve an ELEMENT through the pairing would each read a
-    /// row the subdimension does not declare. Both directions break, in
-    /// different arms, and `Parent{A,B,C,D}` with `Sub{A,C}` spells them:
+    /// every element. [`DimensionsContext`] does NOT admit it, because a
+    /// caller that resolves an ELEMENT through the pairing reads a row the
+    /// subdimension does not declare in the SUPERSET direction.
+    /// `Parent{A,B,C,D}` with `Sub{A,C}` spells both directions:
     ///
-    /// * `out[Sub] = src` over `src[Parent]` breaks in
-    ///   `compiler::context::make_dimension_subscripts`, which is the only arm
-    ///   that would be affected and which withholds the rung through
-    ///   [`DirectMappingsOnly`]. What that arm can emit for a paired axis is a
-    ///   dimension-name subscript, so admitting the rung there rewrites the
-    ///   reference to `src[Sub]` -- and that spelling resolves to the ACTIVE
-    ///   dimension's ordinal, reading `src`'s SECOND element for `Sub`'s `C`
-    ///   rather than its third (GH #1029). The whole reference is refused with
+    /// * `out[Sub] = src` over `src[Parent]` would be correct. The only arm
+    ///   affected is `compiler::context::make_dimension_subscripts`, which
+    ///   withholds the rung through [`DirectMappingsOnly`]; what it can emit
+    ///   for a paired axis is a dimension-name subscript, so admitting the
+    ///   rung there rewrites the reference to `src[Sub]`, and that spelling
+    ///   reads each element by NAME on the parent axis
+    ///   ([`DimensionsContext::resolve_mapped_read`]'s first step: `src[C]`
+    ///   for `Sub`'s `C`), the read GH #1029 asks for and
+    ///   `simulate::a_subrange_dimension_reference_reads_by_name_in_every_spelling`
+    ///   pins. The bare reference is refused with `MismatchedDimensions`
+    ///   today because the rung is withheld for the other direction.
+    /// * `out[Parent] = src` over `src[Sub]` is why it is withheld. Pairing
+    ///   the axes rewrites the reference to `src[Parent]` and skips the
+    ///   positional length check; the element step
+    ///   ([`DimensionsContext::resolve_dimension_subscript`]) then finds no
+    ///   `Sub` element named `B`, no mapping, and nothing declared between the
+    ///   two dimensions, so it takes its ordinal last resort: `Parent`'s `B`
+    ///   at ordinal 1 reads `Sub`'s `C`, a neighbouring row, silently. (`D` at
+    ///   ordinal 3 is past a two-element `src` and refused, so this fixture
+    ///   fails loudly at `D`; a three-element parent has no such element and
+    ///   runs on the wrong number.) The bare reference is refused with
     ///   `MismatchedDimensions` today.
-    /// * `out[Parent] = src` over `src[Sub]` breaks in the Subscript arm's
-    ///   element step (`compiler::context::resolve_iteration_element`), which
-    ///   runs under the full [`DimensionsContext`]. Pairing the axes skips the
-    ///   positional length check, and the element step then finds no `Sub`
-    ///   element named `B` and no mapping, so it falls back on the TARGET
-    ///   axis's ordinal: `Parent.get_offset(B)` is 1 and `Parent.get_offset(D)`
-    ///   is 3, indexing a two-element `src` -- a neighbouring row and then a
-    ///   read past its end. This too is refused today.
     ///
-    /// So the rung trades two loud refusals for two silent wrong numbers, and
-    /// GH #1029 is why there is no correct element for it to resolve to yet:
-    /// even the explicit spelling `out[Sub] = src[Sub]` reads positionally into
-    /// `Parent` rather than by element name.
+    /// The rung therefore stays opt-in until the superset direction has a
+    /// rule of its own: an element the subdimension does not declare has no
+    /// correct row to read, and the ordinal is a wrong one.
     ///
     /// [`SubdimensionRelations`] admits it, for the one caller that needs only
     /// to know WHICH axis to compare positions against and never resolves an
@@ -2034,63 +2056,37 @@ mod tests {
         d
     }
 
-    fn state_region(
-        ctx: &DimensionsContext,
-    ) -> (
-        Option<Vec<CanonicalElementName>>,
-        Option<Vec<CanonicalElementName>>,
-    ) {
+    fn state_region(ctx: &DimensionsContext) -> Option<Vec<CanonicalElementName>> {
         use crate::common::CanonicalDimensionName;
         let s = CanonicalDimensionName::from_raw("State");
         let r = CanonicalDimensionName::from_raw("Region");
-        (
-            ctx.positional_correspondence(&s, &r),
-            ctx.executed_read_correspondence(&s, &r),
-        )
+        ctx.executed_read_correspondence(&s, &r)
     }
 
-    /// A positional (`maps_to`) mapping: BOTH spellings read the same
-    /// diagonal, which is why the fork went unnoticed for so long. Declared on
-    /// the iterated dimension.
+    /// A positional (`maps_to`) mapping reads the diagonal, whichever dimension
+    /// declares it -- declaration direction changes nothing, measured across all
+    /// 40 mapped cells of `mapped_reference_semantics_tests`.
     #[test]
-    fn positional_mapping_makes_both_spellings_agree_forward() {
+    fn a_positional_mapping_reads_the_diagonal_in_both_declaration_directions() {
         let mut state = dim("State", &["s1", "s2"]);
         state.set_maps_to("Region".to_string());
         let ctx = DimensionsContext::from(&[state, dim("Region", &["a", "b"])]);
+        assert_eq!(state_region(&ctx), Some(canon_elems(&["a", "b"])));
 
-        let (positional, executed) = state_region(&ctx);
-        assert_eq!(positional, Some(canon_elems(&["a", "b"])));
-        assert_eq!(executed, positional);
-    }
-
-    /// The same pair with the mapping declared on the SOURCE dimension.
-    /// Declaration direction changes nothing -- measured across all 40 mapped
-    /// cells of `mapped_reference_semantics_tests`.
-    #[test]
-    fn positional_mapping_makes_both_spellings_agree_reverse_declared() {
         let mut region = dim("Region", &["a", "b"]);
         region.set_maps_to("State".to_string());
         let ctx = DimensionsContext::from(&[dim("State", &["s1", "s2"]), region]);
-
-        let (positional, executed) = state_region(&ctx);
-        assert_eq!(positional, Some(canon_elems(&["a", "b"])));
-        assert_eq!(executed, positional);
+        assert_eq!(state_region(&ctx), Some(canon_elems(&["a", "b"])));
     }
 
-    /// A PERMUTED explicit element map is where the two spellings part.
-    ///
-    /// This test used to assert `None` for both, under the name
-    /// `test_mapped_correspondence_permuted_element_map_is_none_both_directions`.
-    /// The decline was not a claim about execution: one function served both
-    /// spellings and could not tell which it was being asked about, so it
-    /// answered neither. `mapped_reference_semantics_tests`' `Permuted` row
-    /// measures both answers against the VM -- the iterated and bare-in-equation
-    /// spellings read `[10, 20, 30]` (positional) while the source-own-dim and
-    /// stock-flow spellings read `[30, 10, 20]` (the map) -- so each describer
-    /// now returns its own spelling's answer. Both declaration directions are
-    /// covered, since the pair is queried both ways round.
+    /// A PERMUTED explicit element map is followed, and it is followed by
+    /// EVERY spelling: `mapped_reference_semantics_tests`' `Permuted` row
+    /// measures the iterated, bare, source-own-dim and stock-flow references
+    /// all reading `[30, 10, 20]` -- the map's order -- against the VM. Both
+    /// declaration directions are covered, since the pair is queried both ways
+    /// round.
     #[test]
-    fn a_permuted_element_map_splits_the_two_spellings() {
+    fn a_permuted_element_map_is_followed() {
         use crate::common::CanonicalDimensionName;
         let state = with_element_map(
             dim("State", &["s1", "s2"]),
@@ -2098,138 +2094,110 @@ mod tests {
             &[("s1", "b"), ("s2", "a")],
         );
         let ctx = DimensionsContext::from(&[state, dim("Region", &["a", "b"])]);
-
-        let (positional, executed) = state_region(&ctx);
-        assert_eq!(
-            positional,
-            Some(canon_elems(&["a", "b"])),
-            "the iterated spelling folds the active dim to an ordinal and never \
-             consults the map"
-        );
-        assert_eq!(
-            executed,
-            Some(canon_elems(&["b", "a"])),
-            "the source-own-dim spelling follows the declared map"
-        );
+        assert_eq!(state_region(&ctx), Some(canon_elems(&["b", "a"])));
 
         // The same pair with the roles swapped: the element map now sits on the
         // SOURCE side, which `translate_via_mapping` reads in reverse.
         let s = CanonicalDimensionName::from_raw("State");
         let r = CanonicalDimensionName::from_raw("Region");
         assert_eq!(
-            ctx.positional_correspondence(&r, &s),
-            Some(canon_elems(&["s1", "s2"]))
-        );
-        assert_eq!(
             ctx.executed_read_correspondence(&r, &s),
             Some(canon_elems(&["s2", "s1"]))
         );
     }
 
-    /// A MANY-TO-ONE element map (C-LEARN's shape): the executed rule resolves
-    /// every target element, while the positional one declines -- there is no
-    /// third source element for the third target ordinal to read, and the
-    /// iterated spelling does not compile at all on such a pair
-    /// (`mapped_reference_semantics_tests`' `(ManyToOne, IteratedDim)` cell is
-    /// a refusal).
+    /// A MANY-TO-ONE element map (C-LEARN's shape) resolves every target
+    /// element: there is no third source element for a third ordinal to read,
+    /// and the map is what every spelling follows
+    /// (`mapped_reference_semantics_tests`' `ManyToOne` row).
     ///
-    /// The executed half is what closes GH #997: it is the correspondence
-    /// C-LEARN's `FF stop growth year[COP] = FF stop growth year
-    /// Aggregated[Aggregated Regions]` needs, and the checked-in `Ref.vdf`
-    /// identifies the map as the rule Vensim applies there.
+    /// This is the correspondence C-LEARN's `FF stop growth year[COP] = FF stop
+    /// growth year Aggregated[Aggregated Regions]` needs, and the checked-in
+    /// `Ref.vdf` identifies the map as the rule Vensim applies there.
     #[test]
-    fn a_many_to_one_element_map_resolves_only_on_the_executed_rule() {
+    fn a_many_to_one_element_map_resolves_every_target_element() {
         let state = with_element_map(
             dim("State", &["s1", "s2", "s3"]),
             "Region",
             &[("s1", "a"), ("s2", "a"), ("s3", "b")],
         );
         let ctx = DimensionsContext::from(&[state, dim("Region", &["a", "b"])]);
-
-        let (positional, executed) = state_region(&ctx);
-        assert_eq!(positional, None);
-        assert_eq!(executed, Some(canon_elems(&["a", "a", "b"])));
+        assert_eq!(state_region(&ctx), Some(canon_elems(&["a", "a", "b"])));
     }
 
-    /// Two dimensions declaring the SAME element names, related by a positional
-    /// mapping: the executed rule stops at NAME IDENTITY, the positional one
-    /// reads by ordinal, and the two disagree because the names are declared in
-    /// a different order. `mapped_reference_semantics_tests`'
-    /// `SharedElementNames` row is the VM oracle -- it is the row that shows
-    /// map-following is really name-FIRST.
-    ///
-    /// Vensim's own Example 3 (`PTASKS <-> TASKS`, a subrange copy) makes
-    /// shared element names an ordinary idiom rather than an oddity, so this is
-    /// not a corner the describers may leave to the other one's answer.
+    /// Two dimensions declaring the SAME element names in a different order,
+    /// related by a positional mapping: NAME identity wins over the ordinal.
+    /// `mapped_reference_semantics_tests`' `SharedElementNames` row is the VM
+    /// oracle -- it is the row that shows map-following is really name-FIRST --
+    /// and Vensim's own Example 3 (`PTASKS <-> TASKS`, a subrange copy) makes
+    /// shared element names an ordinary idiom rather than an oddity.
     #[test]
-    fn shared_element_names_split_the_two_spellings() {
+    fn shared_element_names_resolve_by_name_under_a_positional_mapping() {
         let mut state = dim("State", &["cal", "ann", "bob"]);
         state.set_maps_to("Region".to_string());
         let ctx = DimensionsContext::from(&[state, dim("Region", &["ann", "bob", "cal"])]);
-
-        let (positional, executed) = state_region(&ctx);
         assert_eq!(
-            positional,
-            Some(canon_elems(&["ann", "bob", "cal"])),
-            "by ordinal: State's first element reads Region's first"
-        );
-        assert_eq!(
-            executed,
+            state_region(&ctx),
             Some(canon_elems(&["cal", "ann", "bob"])),
             "by name: each State element reads the Region element it shares a \
-             name with"
+             name with, not Region's element at its own ordinal"
         );
+    }
+
+    /// Shared element names need NO declared mapping to correspond: the
+    /// compiler looks the active element's own name up on the source axis
+    /// before consulting anything (`build_view_from_ops`, and the VM oracle
+    /// `db::ltm_element_instance_tests::qualified_index_edge_follows_the_plain_equations_name_first_read`).
+    #[test]
+    fn shared_element_names_resolve_by_name_without_a_mapping() {
+        let ctx = DimensionsContext::from(&[
+            dim("State", &["north", "south"]),
+            dim("Region", &["south", "north"]),
+        ]);
+        assert_eq!(state_region(&ctx), Some(canon_elems(&["north", "south"])));
     }
 
     /// A positional mapping between different-size dimensions has no
-    /// element-level map to disambiguate, so NEITHER rule can translate.
+    /// element-level map to disambiguate, so nothing translates.
     #[test]
-    fn a_positional_size_mismatch_declines_on_both_rules() {
+    fn a_positional_size_mismatch_declines() {
         let mut state = dim("State", &["s1", "s2", "s3"]);
         state.set_maps_to("Region".to_string());
         let ctx = DimensionsContext::from(&[state, dim("Region", &["a", "b"])]);
-
-        let (positional, executed) = state_region(&ctx);
-        assert_eq!(positional, None);
-        assert_eq!(executed, None);
+        assert_eq!(state_region(&ctx), None);
     }
 
-    /// A PARTIAL element map (an iterated element with no pair) declines on the
-    /// executed rule -- there is no source element to name for `s2` -- while
-    /// the positional rule, which never reads the map, answers by ordinal.
+    /// A PARTIAL element map (an iterated element with no pair) declines:
+    /// there is no source element to name for `s2`, and a describer that
+    /// answered for the paired half would name rows for a reference the
+    /// compiler refuses.
     #[test]
-    fn a_partial_element_map_declines_only_on_the_executed_rule() {
+    fn a_partial_element_map_declines() {
         let state = with_element_map(dim("State", &["s1", "s2"]), "Region", &[("s1", "a")]);
         let ctx = DimensionsContext::from(&[state, dim("Region", &["a", "b"])]);
-
-        let (positional, executed) = state_region(&ctx);
-        assert_eq!(positional, Some(canon_elems(&["a", "b"])));
-        assert_eq!(executed, None);
+        assert_eq!(state_region(&ctx), None);
     }
 
-    /// With NO mapping declared in either direction both rules decline, so an
-    /// unrelated pair keeps the caller's conservative broadcast (GH #527's
-    /// rule: the diagonal follows a correspondence the MODEL declares).
+    /// With NO mapping declared and NO shared element name the rule declines,
+    /// so an unrelated pair keeps the caller's conservative broadcast.
     ///
-    /// The iterated spelling does in fact compile and read positionally between
+    /// The iterated spelling does in fact compile and read the ORDINAL between
     /// two such dimensions -- `mapped_reference_semantics_tests::
-    /// no_mapping_equal_cardinality` measures it -- so the positional decline
-    /// here is a deliberate superset rather than a description of execution;
-    /// see `positional_correspondence`'s rustdoc.
+    /// no_mapping_equal_cardinality` measures it -- so the decline is a
+    /// deliberate superset rather than a description of execution (GH #527:
+    /// the described diagonal follows a correspondence the model declares or
+    /// spells by name; see `executed_read_correspondence`'s rustdoc).
     #[test]
-    fn an_undeclared_pair_declines_on_both_rules() {
+    fn an_undeclared_pair_with_disjoint_names_declines() {
         let ctx =
             DimensionsContext::from(&[dim("State", &["s1", "s2"]), dim("Region", &["a", "b"])]);
-
-        let (positional, executed) = state_region(&ctx);
-        assert_eq!(positional, None);
-        assert_eq!(executed, None);
+        assert_eq!(state_region(&ctx), None);
     }
 
     /// Single-hop only, matching `has_mapping_to` (and the LTM classifier): a
-    /// chained `A→B→C` mapping yields None for `(A, C)` on both rules.
+    /// chained `A→B→C` mapping yields `None` for `(A, C)`.
     #[test]
-    fn a_transitive_chain_declines_on_both_rules() {
+    fn a_transitive_chain_declines() {
         use crate::common::CanonicalDimensionName;
 
         let mut dim_a = dim("DimA", &["a1", "a2"]);
@@ -2240,7 +2208,6 @@ mod tests {
 
         let a = CanonicalDimensionName::from_raw("DimA");
         let c = CanonicalDimensionName::from_raw("DimC");
-        assert_eq!(ctx.positional_correspondence(&a, &c), None);
         assert_eq!(ctx.executed_read_correspondence(&a, &c), None);
     }
 

@@ -38,7 +38,7 @@ mod collect_reference_sites_tests {
         let source_model = sync.models["main"].source;
         let source_project = sync.project;
 
-        let variables = crate::db::reconstruct_model_variables(&db, source_model, source_project);
+        let variables = crate::db::model_lowered_variables(&db, source_model, source_project);
         let target_var = variables
             .get(&Ident::<Canonical>::new(target_name))
             .cloned()
@@ -88,27 +88,63 @@ mod collect_reference_sites_tests {
         assert!(sites[0].in_reducer, "SUM's wildcard arg is in a reducer");
     }
 
+    /// A reducer's bare arrayed argument is shaped by what pass 0 spells for
+    /// it: the axes the equation's pairing (`db::bare_axis_pairing`,
+    /// `BareSpelling::Equation`) relates to the enclosing iteration read the
+    /// active element, and when NO axis pairs the read is the whole array --
+    /// `Wildcard`, the shape `SUM(pop[*])` has. The three arms of the pairing:
+    /// a scalar owner (nothing to pair with), an iterated owner over the
+    /// argument's own dimension (pairs by name), and an iterated owner related
+    /// to the argument only through a mapping declared on a PARENT dimension,
+    /// which pass 0 withholds (`DirectMappingsOnly`) -- `y[suba] = SUM(src)`
+    /// over `src[dimb]` with `dimb -> dima` sums all of `src` (measured against
+    /// the VM in `ltm_array_agg::a_parent_mapped_bare_argument_reads_the_whole_array`).
+    /// Every arm is flagged `in_reducer`.
     #[test]
-    fn ref_site_bare_arrayed_arg_is_in_reducer() {
-        // total = SUM(pop)   (pop is arrayed)
-        // A bare arrayed argument to a reducer is the whole-array full
-        // reduce that `enumerate_agg_nodes` hoists. The AST reference is a
-        // bare `Var`, so its site shape is `Bare` -- but it must still be
-        // flagged `in_reducer` so the element-graph reroute treats it as
-        // the reducer's input (consistent with `SUM(pop[*])`, which differs
-        // only in the explicit wildcard subscript).
-        let project = TestProject::new("bare_arrayed_arg")
+    fn ref_site_bare_arrayed_arg_shape_follows_the_equation_pairing() {
+        let scalar_owner = TestProject::new("bare_arrayed_arg")
             .named_dimension("Region", &["NYC", "Boston"])
             .array_aux("pop[Region]", "100")
             .scalar_aux("total", "SUM(pop)");
-
-        let sites = collect(&project, "total", "pop");
+        let sites = collect(&scalar_owner, "total", "pop");
         assert_eq!(sites.len(), 1, "sites: {sites:?}");
-        assert_eq!(sites[0].shape, RefShape::Bare);
+        assert_eq!(
+            sites[0].shape,
+            RefShape::Wildcard,
+            "a scalar owner: the whole array"
+        );
         assert!(
             sites[0].in_reducer,
             "SUM's bare arrayed arg is the reducer's input"
         );
+
+        let iterated_owner = TestProject::new("bare_arrayed_arg_iterated")
+            .named_dimension("Region", &["NYC", "Boston"])
+            .array_aux("pop[Region]", "100")
+            .array_aux("y[Region]", "SUM(pop) * 2");
+        let sites = collect(&iterated_owner, "y", "pop");
+        assert_eq!(sites.len(), 1, "sites: {sites:?}");
+        assert_eq!(
+            sites[0].shape,
+            RefShape::Bare,
+            "the owner's own dimension: pairs by name"
+        );
+        assert!(sites[0].in_reducer);
+
+        let parent_mapped_owner = TestProject::new("bare_arrayed_arg_parent")
+            .named_dimension("dima", &["a1", "a2", "a3"])
+            .named_dimension("suba", &["a1", "a3"])
+            .named_dimension_with_mapping("dimb", &["b1", "b2", "b3"], "dima")
+            .array_aux("src[dimb]", "100")
+            .array_aux("y[suba]", "SUM(src) * 2");
+        let sites = collect(&parent_mapped_owner, "y", "src");
+        assert_eq!(sites.len(), 1, "sites: {sites:?}");
+        assert_eq!(
+            sites[0].shape,
+            RefShape::Wildcard,
+            "a mapping onto the parent is withheld from the equation's pairing: the whole array"
+        );
+        assert!(sites[0].in_reducer);
     }
 
     #[test]
@@ -654,11 +690,10 @@ mod model_ltm_reference_sites_tests {
 
     /// GH #757 (T6 flip): a mapped iterated-dim subscript whose POSITIONAL
     /// mapping is declared only in the REVERSE direction (on the source's
-    /// `Region` toward `State`) now classifies `Bare` too -- the mapped arm
-    /// gates on `positional_correspondence` (both declaration
-    /// directions, via `classify_axis_access`'s
-    /// `iterated_axis_slot_elements`), matching the compiler's
-    /// `translate_via_mapping`.
+    /// `Region` toward `State`) classifies `Bare` too -- the mapped arm
+    /// gates on `executed_read_correspondence` (both declaration
+    /// directions, via `classify_axis_access`), matching the compiler's
+    /// `resolve_mapped_read`.
     #[test]
     fn ir_reverse_declared_mapped_iterated_dim_subscript_is_bare() {
         let project = TestProject::new("reverse_mapped_iterated_dim_ir")
@@ -925,6 +960,39 @@ mod occurrence_ir_tests {
         occs.iter()
             .filter(|o| matches!(&o.reference, OccurrenceRef::Variable(v) if v == name))
             .collect()
+    }
+
+    /// GH #527 / GH #997: an iterated subscript over a source declared on a
+    /// dimension that shares element NAMES with the target's -- `plain[Region]
+    /// = stock[Region]` over `stock[Other]`, `Other = [south, north]` against
+    /// `Region = [north, south]`, no mapping -- is read name-first
+    /// (`ltm_element_instance_tests::qualified_index_edge_follows_the_plain_equations_name_first_read`
+    /// measures it against the VM), and the two declared lists reproduce no
+    /// such pairing (`db::bare_axis_pairing` relates them by nothing), so the
+    /// site is `PerElement` carrying the executed correspondence on its one
+    /// axis -- never `Bare`, whose consumers re-derive the pairing from the
+    /// lists and would broadcast the read.
+    #[test]
+    fn ir_undeclared_shared_names_iterated_subscript_is_per_element() {
+        let project = TestProject::new("main")
+            .named_dimension("Region", &["north", "south"])
+            .named_dimension("Other", &["south", "north"])
+            .array_aux_direct("stock", vec!["Other".to_string()], "1", None)
+            .array_aux_direct("plain", vec!["Region".to_string()], "stock[Region]", None);
+        with_ir_and_occ(&project, "plain", |_ir, occs| {
+            let stock = var_occs(occs, "stock");
+            assert_eq!(stock.len(), 1, "occs: {occs:?}");
+            assert_eq!(
+                stock[0].shape,
+                RefShape::PerElement {
+                    axes: vec![crate::ltm_agg::AxisRead::Iterated {
+                        dim: "region".to_string(),
+                        source_dim: "other".to_string(),
+                    }]
+                },
+                "the shared-name read is per element through the executed correspondence"
+            );
+        });
     }
 
     #[test]
@@ -1284,7 +1352,7 @@ mod occurrence_ir_tests {
         // Dep arity is `None` (a `module·port` composite is not a variable key),
         // so the verdict permissively collapses -- byte-parity with HEAD.
         assert_eq!(
-            derive_other_dep_verdict(&mod_occ.axes, None, 1),
+            derive_other_dep_verdict(&mod_occ.shape, &mod_occ.axes, None, 1),
             OtherDepVerdict::Collapse,
             "an iterated-dim subscript on an unthreadable module output collapses"
         );
@@ -1297,7 +1365,7 @@ mod occurrence_ir_tests {
     /// `module_output_occurrences_recorded_in_document_order` pins an EXPLICIT
     /// author-written multi-output module, this pins the implicit path -- and it
     /// needs its own pin because it ADDITIONALLY depends on
-    /// `reconstruct_model_variables`' implicit-var loop reconstructing that
+    /// `model_lowered_variables`' helper loop holding that
     /// SMOOTH-expanded `Variable::Module`. `module_output_parts` only enumerates
     /// a `·`-composite whose head resolves to a module-kind variable in the
     /// reconstructed map; if a future change to that loop stopped rebuilding the
@@ -1458,33 +1526,72 @@ mod occurrence_ir_tests {
         // Natural equal-arity iterated subscript (`arr[D1,D2]` for arr [D1,D2],
         // target [D1,D2]): all `Iterated`, arity matches ⇒ Collapse.
         assert_eq!(
-            derive_other_dep_verdict(&[iterated("d1"), iterated("d2")], Some(2), 2),
+            derive_other_dep_verdict(
+                &RefShape::Bare,
+                &[iterated("d1"), iterated("d2")],
+                Some(2),
+                2
+            ),
             OtherDepVerdict::Collapse,
+        );
+        // The same all-`Iterated` axes on a `PerElement` occurrence
+        // (`energy[nonrenewable]` over an `energy[source]`: the declared lists
+        // do not reproduce the pairing) => NotIterated -- the subscript is kept
+        // and frozen as written, because the bare spelling is a different read
+        // (one that does not even lower under the target's iteration).
+        let subrange_axis = crate::ltm_agg::AxisRead::Iterated {
+            dim: "nonrenewable".to_string(),
+            source_dim: "source".to_string(),
+        };
+        assert_eq!(
+            derive_other_dep_verdict(
+                &RefShape::PerElement {
+                    axes: vec![subrange_axis]
+                },
+                &[OccurrenceAxis::Iterated {
+                    dim: "nonrenewable".to_string(),
+                    source_dim: "source".to_string(),
+                }],
+                Some(1),
+                1
+            ),
+            OtherDepVerdict::NotIterated,
         );
         // Transposed equal-arity (`arr[D2,D1]`): a `MismatchedIterated` axis
         // with matching arity ⇒ Mismatch (the GH #526 wrong-element freeze).
         assert_eq!(
-            derive_other_dep_verdict(&[mismatched("d2"), mismatched("d1")], Some(2), 2),
+            derive_other_dep_verdict(
+                &RefShape::DynamicIndex,
+                &[mismatched("d2"), mismatched("d1")],
+                Some(2),
+                2
+            ),
             OtherDepVerdict::Mismatch,
         );
         // Under-arity (corner a): all `Iterated` but fewer indices than the
         // dep's declared arity ⇒ Mismatch, NOT the Collapse the all-`Iterated`
         // arms alone would give.
         assert_eq!(
-            derive_other_dep_verdict(&[iterated("d1")], Some(2), 2),
+            derive_other_dep_verdict(&RefShape::DynamicIndex, &[iterated("d1")], Some(2), 2),
             OtherDepVerdict::Mismatch,
         );
         // Over-target-arity (corner b): more indices than the target has
         // iterated dims ⇒ NotIterated, NOT the Mismatch the `MismatchedIterated`
         // arm alone would give.
         assert_eq!(
-            derive_other_dep_verdict(&[iterated("d1"), mismatched("d1")], Some(2), 1),
+            derive_other_dep_verdict(
+                &RefShape::DynamicIndex,
+                &[iterated("d1"), mismatched("d1")],
+                Some(2),
+                1
+            ),
             OtherDepVerdict::NotIterated,
         );
         // A non-iterated axis (a `Pinned` literal / `Dynamic` index) anywhere ⇒
         // NotIterated: not an iterated-dim subscript at all.
         assert_eq!(
             derive_other_dep_verdict(
+                &RefShape::DynamicIndex,
                 &[iterated("d1"), OccurrenceAxis::Pinned("young".to_string())],
                 Some(2),
                 2,
@@ -1492,13 +1599,23 @@ mod occurrence_ir_tests {
             OtherDepVerdict::NotIterated,
         );
         assert_eq!(
-            derive_other_dep_verdict(&[OccurrenceAxis::Dynamic], Some(1), 1),
+            derive_other_dep_verdict(
+                &RefShape::DynamicIndex,
+                &[OccurrenceAxis::Dynamic],
+                Some(1),
+                1
+            ),
             OtherDepVerdict::NotIterated,
         );
         // Un-threadable dep (declared dims unknown) keeps the permissive
         // collapse regardless of the per-axis arms.
         assert_eq!(
-            derive_other_dep_verdict(&[iterated("d1"), mismatched("d2")], None, 2),
+            derive_other_dep_verdict(
+                &RefShape::DynamicIndex,
+                &[iterated("d1"), mismatched("d2")],
+                None,
+                2
+            ),
             OtherDepVerdict::Collapse,
         );
     }
@@ -1538,7 +1655,7 @@ mod occurrence_ir_tests {
             );
             // dep arity 2, target iterated-dim count 2.
             assert_eq!(
-                derive_other_dep_verdict(&arr[0].axes, Some(2), 2),
+                derive_other_dep_verdict(&arr[0].shape, &arr[0].axes, Some(2), 2),
                 OtherDepVerdict::Mismatch,
                 "under-arity must derive Mismatch, not Collapse"
             );
@@ -1574,7 +1691,7 @@ mod occurrence_ir_tests {
             );
             // dep arity 2, target iterated-dim count 1.
             assert_eq!(
-                derive_other_dep_verdict(&arr[0].axes, Some(2), 1),
+                derive_other_dep_verdict(&arr[0].shape, &arr[0].axes, Some(2), 1),
                 OtherDepVerdict::NotIterated,
                 "an over-target-arity subscript must derive NotIterated, not Mismatch"
             );
@@ -1615,12 +1732,12 @@ mod occurrence_ir_tests {
             "the two families label the over-arity index differently"
         );
         assert_eq!(
-            derive_other_dep_verdict(&mirror, Some(2), 3),
-            derive_other_dep_verdict(&ir, Some(2), 3),
+            derive_other_dep_verdict(&RefShape::DynamicIndex, &mirror, Some(2), 3),
+            derive_other_dep_verdict(&RefShape::DynamicIndex, &ir, Some(2), 3),
             "the arity guard dominates the labeling difference: same verdict either way"
         );
         assert_eq!(
-            derive_other_dep_verdict(&ir, Some(2), 3),
+            derive_other_dep_verdict(&RefShape::DynamicIndex, &ir, Some(2), 3),
             OtherDepVerdict::Mismatch,
             "axes.len() (3) != dep arity (2) => Mismatch"
         );

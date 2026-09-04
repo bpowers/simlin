@@ -27,8 +27,8 @@ use crate::builtins::UntypedBuiltinFn;
 /// subscript INDEX: subscripts are 1-based, so `0` is out of range for every
 /// dimension, and the read yields NaN. The NaN is not confined to the first DT.
 /// A frozen dynamic index sits inside an outer freeze (`PREVIOUS(pop[r,
-/// PREVIOUS(idx)])`), whose argument `builtins_visitor::make_temp_arg` hoists
-/// into a capture-helper aux -- so the helper evaluates to NaN at t=0 and the
+/// PREVIOUS(idx)])`), whose argument `builtins_visitor::hoist_capture` hoists
+/// into a `capture::Capture` -- so the capture evaluates to NaN at t=0 and the
 /// outer `PREVIOUS` serves that NaN as the score's FIRST LIVE step (GH #975,
 /// observed as `0, NaN, 0.4974...`). A NaN the engine manufactures is
 /// indistinguishable on a graph from the modeller's own division by zero, which
@@ -47,8 +47,8 @@ use crate::builtins::UntypedBuiltinFn;
 /// Value positions keep the bare unary spelling, and deliberately -- but the
 /// reason is that `0` is a VALID value, not that it is unobservable. The guard
 /// form's `if (TIME = INITIAL_TIME) then 0` arm does own the score's own first
-/// step, but a value-position freeze that lands inside a `make_temp_arg` helper
-/// is read at step 1 by exactly the route this issue is about. What makes it
+/// step, but a value-position freeze that lands inside a capture is read at
+/// step 1 by exactly the route this issue is about. What makes it
 /// benign there is that `0` is in range for a value where it is out of range for
 /// a 1-based subscript, and that it is the spec's own answer for the
 /// doubly-lagged read such a helper performs.

@@ -24,14 +24,17 @@
 //!   bare whole-array `PREVIOUS` that codegen rejects -- a constant-0 score.
 //!
 //! These tests pin the contract for both. The load-bearing one is
-//! [`qualified_index_edge_is_positional_not_by_name`]: the per-element expansion
-//! spells its captured subscript as the QUALIFIED `dim·element` form, which the
-//! simulation resolves POSITIONALLY (`compiler::subscript` lowers the constified
-//! index to `IndexOp::Single(value - 1)`, a raw offset into the subscripted
-//! variable's own axis). A describer that resolves it by NAME names rows the
-//! simulation never reads -- so that test uses two dimensions carrying the same
-//! element names in opposite orders, where the two readings disagree, and checks
-//! the graph against the VM rather than against an assumption.
+//! [`qualified_index_edge_follows_the_plain_equations_name_first_read`]: the
+//! per-element expansion hoists its subscripted argument into a helper scoped
+//! to one element of the body, which the compiler resolves by the rule it
+//! applies to the plain equation -- the active element's own NAME on the
+//! source axis first (`DimensionsContext::resolve_mapped_read`, GH #1035) --
+//! and the describers see that helper with its reads pinned to the element
+//! the compiler resolved (`FragmentInput::element_pinned_target`). A describer
+//! that resolved the read by ORDINAL would name rows the simulation never
+//! reads, so that test uses two dimensions carrying the same element names in
+//! opposite orders, where the two readings disagree, and checks the graph
+//! against the VM rather than against an assumption.
 //!
 //! ARMS NOT COVERED HERE, deliberately. The walker records a module-output
 //! reference at three sites, and these fixtures exercise one: the bare
@@ -134,18 +137,28 @@ fn arrayed_source_feeds_only_the_helper_that_captured_it() {
     assert_no_edge(&edges, "stock[south]", "$⁚growth⁚0⁚arg0⁚north");
 }
 
-/// THE test that separates a positional reading from a name-based one.
+/// THE test that separates a name-based reading from a positional one.
 ///
 /// `Other` declares the same two element NAMES as `Region` in the opposite
-/// ORDER. The per-element expansion of `out[Region]` captures
-/// `stock[region·north]`, and `compiler::subscript` resolves that constified
-/// index as a raw position into `stock`'s own axis (`Other`), so it reads
-/// `Other`'s FIRST element -- `stock[south]`. The VM assertion below is the
-/// oracle: it fixes which element is read without appealing to the graph, so a
-/// name-based "fix" to the element graph fails this test rather than passing it.
+/// ORDER, with no mapping between them. Execution resolves `stock[Region]`
+/// name-first (`DimensionsContext::resolve_mapped_read`): the north slot of
+/// `plain[Region] = stock[Region]` reads the element NAMED north, 20, and so
+/// does the north helper of `out[Region] = SMTH1(stock[Region], 1)`. The VM
+/// assertions are the oracle for both spellings, and the element graph must
+/// name the element each fragment reads: `stock[north]` feeds the north
+/// helper and the north slot of `plain`, and nothing else does. The two
+/// spellings are described by one rule -- the helper through its
+/// element-pinned fragment (`FragmentInput::element_pinned_target`), the
+/// plain read through the IR's `PerElement` site resolving the same
+/// `executed_read_correspondence` -- so they cannot disagree. A describer
+/// that folded the read to `north`'s ORDINAL in `Region` (the qualified
+/// `region·north` spelling on `stock`'s own axis) would name `stock[south]`
+/// here, and one that paired the two declared lists by nothing would
+/// broadcast every `stock` element into every `plain` slot; the negative
+/// assertions refuse both.
 #[test]
-fn qualified_index_edge_is_positional_not_by_name() {
-    let project = TestProject::new("qualified_positional")
+fn qualified_index_edge_follows_the_plain_equations_name_first_read() {
+    let project = TestProject::new("qualified_name_first")
         .named_dimension("Region", &["north", "south"])
         .named_dimension("Other", &["south", "north"])
         .array_with_ranges_direct(
@@ -154,28 +167,40 @@ fn qualified_index_edge_is_positional_not_by_name() {
             vec![("south", "10"), ("north", "20")],
             None,
         )
+        .array_aux("plain[Region]", "stock[Region]")
         .array_aux("out[Region]", "SMTH1(stock[Region], 1)");
 
     // Oracle first: what does the simulation actually read?
     let run = project.run_vm_expecting_success();
-    let north_helper = run
-        .get("$⁚out⁚0⁚arg0⁚north")
-        .expect("the north slot's capture helper should exist");
-    assert_eq!(
-        north_helper.last().copied(),
-        Some(10.0),
-        "`stock[region·north]` must read stock's FIRST positional element \
-         (south == 10), not the element NAMED north (20)"
-    );
+    for (element, by_name) in [("north", 20.0), ("south", 10.0)] {
+        let helper = run
+            .get(&format!("$⁚out⁚0⁚arg0⁚{element}"))
+            .unwrap_or_else(|| panic!("the {element} slot's helper should exist"));
+        assert_eq!(
+            helper.last().copied(),
+            Some(by_name),
+            "the {element} helper reads the element NAMED {element} on stock's own axis"
+        );
+        assert_eq!(
+            helper.last(),
+            run[&format!("plain[{element}]")].last(),
+            "the helper reads what the plain equation reads"
+        );
+    }
 
-    // The graph must describe that same read. The paired positive assertion on
-    // `stock[north]` is what keeps the negative one from passing vacuously if a
-    // node-naming change ever made `stock[north]` an unknown key.
+    // The graph describes the executed read. The paired negative assertion
+    // on the other element is what keeps the positive one from being
+    // satisfied by a broadcast.
     let edges = element_edges(&project);
-    assert_edge(&edges, "stock[south]", "$⁚out⁚0⁚arg0⁚north");
-    assert_no_edge(&edges, "stock[north]", "$⁚out⁚0⁚arg0⁚north");
-    assert_edge(&edges, "stock[north]", "$⁚out⁚0⁚arg0⁚south");
-    assert_no_edge(&edges, "stock[south]", "$⁚out⁚0⁚arg0⁚south");
+    assert_edge(&edges, "stock[north]", "$⁚out⁚0⁚arg0⁚north");
+    assert_no_edge(&edges, "stock[south]", "$⁚out⁚0⁚arg0⁚north");
+    assert_edge(&edges, "stock[south]", "$⁚out⁚0⁚arg0⁚south");
+    assert_no_edge(&edges, "stock[north]", "$⁚out⁚0⁚arg0⁚south");
+    // The plain spelling: the same read, the same edges.
+    assert_edge(&edges, "stock[north]", "plain[north]");
+    assert_no_edge(&edges, "stock[south]", "plain[north]");
+    assert_edge(&edges, "stock[south]", "plain[south]");
+    assert_no_edge(&edges, "stock[north]", "plain[south]");
 }
 
 /// The phantom circuits are gone: two independent per-element loops, not the
@@ -214,7 +239,7 @@ fn per_element_module_loops_do_not_cross_elements() {
 /// per-element narrowing must leave it exactly as it is.
 ///
 /// Note the scalar fixture synthesizes NO capture helper: `SMTH1(stock, 1)`
-/// passes a bare `Var`, so `make_temp_arg` is never reached and the stock wires
+/// passes a bare `Var`, so `hoist_capture` is never reached and the stock wires
 /// straight into the instance. (In the arrayed fixture the same call becomes
 /// `SMTH1(stock[region·north], 1)` -- a `Subscript`, which IS hoisted.) This
 /// test passes at HEAD; it is here to fail if the fix over-reaches.
@@ -491,38 +516,19 @@ fn a_module_instance_scores_no_element_but_its_own() {
     }
 }
 
-/// The GH #541 ARRAYED capture helper is not element-bound, and the emitter's
-/// `dimensions.is_empty()` guard must keep it out.
-///
-/// That helper is synthesized for a bare arrayed reference under an
-/// apply-to-all expansion; it is a real `Equation::ApplyToAll` array, carries no
-/// element suffix, and is referenced as `helper[<elem>]` -- so the per-element
-/// pin belongs on the REFERENCE, not on a per-element score of the helper. It
-/// reaches this emitter through the same "absent from `source_vars`" door every
-/// implicit variable does, so only the guard tells them apart.
-///
-/// PRE-EXISTING DEFECT this fixture also exposes, deliberately left alone: the
-/// arrayed helper's own link scores do not compile (`expected array variable
-/// '$⁚growth⁚1⁚arg0' to have dimensions`), so its edges read constant 0 and both
-/// loop scores here are dropped. Measured at `main` with this exact fixture: 5
-/// such failures, identical. It belongs to the arrayed-implicit-helper emitter
-/// -- the same residual family as the mirror-direction edges the branch
-/// discloses -- not to the per-element instance work, and folding it in would
-/// mean a second emitter with its own dimension handling. The assertions here
-/// are scoped so they hold regardless of whether that is fixed.
+/// A structural (apply-to-all) capture helper is an ARRAYED source, not an
+/// element-bound scalar, and the emitters read that off its shape
+/// (`endpoint_dimensions`): its edge into its parent is the same-dimensions
+/// Bare edge any `x[Region] -> y[Region]` read is, scored once over `Region`
+/// -- not per target element (the element-bound instance treatment) and not
+/// per source element (a FixedIndex read). It reaches the emitters through the
+/// same "not an explicit variable" door every implicit variable does, so only
+/// the shape tells it apart from a per-element instance.
 #[test]
 fn an_arrayed_capture_helper_is_not_treated_as_element_bound() {
     // A real feedback loop, so LTM actually emits link scores here -- without a
     // stock this fixture emits none at all and every assertion below is vacuous.
-    let project = TestProject::new("arrayed_capture_helper")
-        .with_sim_time(0.0, 10.0, 0.25)
-        .named_dimension("Region", &["north", "south"])
-        .array_stock("stock[Region]", "10", &["growth"], &[], None)
-        .array_flow(
-            "growth[Region]",
-            "SMTH1(stock[Region], 1) * 0.1 + PREVIOUS(PREVIOUS(stock)) * 0.001",
-            None,
-        );
+    let project = arrayed_capture_fixture("arrayed_capture_helper");
     let datamodel = project.build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
@@ -544,59 +550,65 @@ fn an_arrayed_capture_helper_is_not_treated_as_element_bound() {
 
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
     for helper in &arrayed_helpers {
-        let per_element_prefix = format!("$⁚ltm⁚link_score⁚{helper}→");
-        // Positive half, and the discriminator: an ARRAYED source is scored with
-        // the element on the FROM side (`{helper}[north]→growth`), which is the
-        // arrayed-source treatment. The per-element emitter's signature is the
-        // element on the TO side. Asserting the first exists is what keeps the
-        // second's absence from being vacuous -- and it is what fails if the
-        // guard is dropped, since this emitter runs before the one that produces
-        // the from-side form and would claim the edge instead.
-        let from_side = format!("$⁚ltm⁚link_score⁚{helper}[");
-        assert!(
-            ltm.vars
-                .iter()
-                .any(|v| v.name.starts_with(&from_side) && v.name.ends_with("→growth")),
-            "{helper} must keep the ARRAYED-source treatment (element on the from \
-             side).\nemitted: {:#?}",
-            ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+        // Positive half, and the discriminator: the same-dimensions Bare edge
+        // is ONE arrayed score over `Region`. Asserting it exists is what keeps
+        // the absence below from being vacuous.
+        let bare = format!("$⁚ltm⁚link_score⁚{helper}→growth");
+        let score = ltm.vars.iter().find(|v| v.name == bare).unwrap_or_else(|| {
+            panic!(
+                "{helper} must get the arrayed-source Bare score {bare}.\nemitted: {:#?}",
+                ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(
+            score.dimensions,
+            ["Region"],
+            "{bare} is the helper's own shape, one score per element"
         );
-        let bracketed: Vec<&str> = ltm
+        // Neither an element-bound instance's per-target-element form
+        // (`{helper}→growth[north]`) nor a FixedIndex read's per-source-element
+        // form (`{helper}[north]→growth`).
+        let element_bound: Vec<&str> = ltm
             .vars
             .iter()
             .map(|v| v.name.as_str())
-            .filter(|n| n.starts_with(&per_element_prefix) && n.ends_with(']'))
+            .filter(|n| n.starts_with(&format!("$⁚ltm⁚link_score⁚{helper}")) && *n != bare)
             .collect();
         assert!(
-            bracketed.is_empty(),
-            "{helper} is a genuine array, not an element-bound scalar, so it must \
-             not get per-target-element scores; got {bracketed:?}"
+            element_bound.is_empty(),
+            "{helper} is a genuine array, not an element-bound scalar, so it gets no \
+             per-element scores; got {element_bound:?}"
         );
     }
 }
 
-/// An ARRAYED capture helper's own link scores must compile.
-///
-/// `ImplicitVarMeta::dimensions` exists so the fragment compiler's dep-stub
-/// builder can give an arrayed implicit helper its real array shape -- its own
-/// rustdoc says so, naming the GH #541 helper as the reason. The LTM fragment
-/// compiler consulted it for LTM-side parse helpers and NOT for the model's own
-/// implicit vars, which got a scalar `VarKind::Aux` stub with `ast: None`. A
-/// consuming `helper[dim·elem]` subscript then failed lowering with "expected
-/// array variable ... to have dimensions", so every score touching the helper
-/// read a constant 0 and took the loop scores with it.
-#[test]
-fn an_arrayed_capture_helpers_scores_compile() {
-    let project = TestProject::new("arrayed_capture_helper_compiles")
+/// An arrayed stock whose inflow reads a two-step lag of the stock: the
+/// nested `PREVIOUS` under an apply-to-all body with no module call is
+/// captured ONCE, structurally, as an apply-to-all capture over `Region`
+/// (`$⁚growth⁚0⁚arg0[Region] = PREVIOUS(stock, 0)`), whose body the compiler
+/// lowers per element as it lowers the parent's.
+fn arrayed_capture_fixture(name: &str) -> TestProject {
+    TestProject::new(name)
         .with_sim_time(0.0, 10.0, 0.25)
         .named_dimension("Region", &["north", "south"])
         .array_stock("stock[Region]", "10", &["growth"], &[], None)
         .array_flow(
             "growth[Region]",
-            "SMTH1(stock[Region], 1) * 0.1 + PREVIOUS(PREVIOUS(stock)) * 0.001",
+            "stock * 0.1 + PREVIOUS(PREVIOUS(stock)) * 0.001",
             None,
-        );
-    let datamodel = project.build_datamodel();
+        )
+}
+
+/// An ARRAYED capture helper's own link scores compile and score.
+///
+/// The helper is an apply-to-all variable with declared dimensions
+/// (`ImplicitVarMeta::dimensions`), so a consumer's `helper[elem]` subscript
+/// resolves against its real shape, and its body is one element's
+/// `PREVIOUS(stock, 0)` under the element context, so no score is left
+/// holding a whole-array view in a scalar position.
+#[test]
+fn an_arrayed_capture_helpers_scores_compile() {
+    let datamodel = arrayed_capture_fixture("arrayed_capture_helper_compiles").build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
@@ -610,50 +622,24 @@ fn an_arrayed_capture_helpers_scores_compile() {
             _ => None,
         })
         .collect();
-
-    // What this fix establishes: no fragment fails because the HELPER ITSELF
-    // has no shape. Before it, `$⁚growth⁚1⁚arg0` was stubbed as a size-1 scalar
-    // and every consumer's `helper[dim·elem]` subscript failed lowering.
-    let helper_shape_failures: Vec<&String> = failures
-        .iter()
-        .filter(|m| m.contains("expected array variable '$⁚growth⁚1⁚arg0'"))
-        .collect();
     assert!(
-        helper_shape_failures.is_empty(),
-        "an arrayed implicit helper must get a dimension-aware dep stub; {} \
-         fragment(s) still fail on the HELPER's shape:\n{}",
-        helper_shape_failures.len(),
+        failures.is_empty(),
+        "every fragment that scores through the arrayed capture must compile:\n{}",
         failures.join("\n")
     );
 
-    // SCOPE, stated rather than implied. This fixture still has failures, and
-    // they are two OTHER root causes, both left for separate work:
-    //
-    //  * an array-valued `PREVIOUS` in a SCALAR operand position. GH #995's
-    //    Phase C3 gave `PREVIOUS` an array form, but only where an array is
-    //    expected: this fixture's capture helper is `h[Region] = PREVIOUS(stock)`
-    //    over a bare arrayed `stock`, whose right-hand side lowers to a
-    //    whole-array view being assigned element by element. Making that work is
-    //    a LOWERING question -- a bare arrayed name in an apply-to-all body
-    //    should resolve per element -- not a view question, so C3 changed the
-    //    message here and not the outcome.
-    //  * the loop builder subscripts `{helper}[elem]→growth` as though it were
-    //    dimensioned, while the emitter gives it none -- an emitter/consumer
-    //    shape disagreement that survives independently of the above.
-    //
-    // Asserting zero failures here would make this test a hostage to both.
-    // Enumerating the classes it DOES tolerate is what keeps it from silently
-    // absorbing a new one.
-    for msg in &failures {
-        assert!(
-            msg.contains(
-                "an array-valued PREVIOUS/INIT is only meaningful where an array is expected"
-            ) || msg.contains("expected array variable '$⁚ltm⁚link_score⁚"),
-            "unexpected residual failure class -- this test tolerates only the \
-             scalar-position array-PREVIOUS class and the loop-builder shape \
-             disagreement:\n{msg}"
-        );
-    }
+    let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
+    let helper_scores: Vec<&str> = ltm
+        .vars
+        .iter()
+        .map(|v| v.name.as_str())
+        .filter(|n| n.starts_with("$⁚ltm⁚link_score⁚$⁚growth⁚0⁚arg0"))
+        .collect();
+    assert!(
+        !helper_scores.is_empty(),
+        "the capture's own edges are scored, else the compile assertion is vacuous; emitted: {:?}",
+        ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
+    );
 }
 
 /// A pathway link that cannot be resolved warns ONCE per edge, not once per

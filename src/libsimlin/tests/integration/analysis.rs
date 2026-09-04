@@ -245,6 +245,197 @@ fn test_get_incoming_links() {
     }
 }
 
+/// The surface lists the variables of THIS model a variable reads, itself
+/// and through its private helpers. A module-output read (`child.output`
+/// resolved through an instance `child`) is a read of another model's
+/// variable and lists nothing -- neither the composite nor the instance;
+/// the diagram draws that link to the module box, this surface lists
+/// variables. A flat aux literally named `child.output` (a Stella flat
+/// export, opened as XMILE) with no module `child` is a variable of the
+/// model and is listed. A module instance lists its input sources, the
+/// parent-scope spelling `.driver` (resolved to `driver`) as the bare `k`.
+#[test]
+fn test_get_incoming_links_lists_variables_of_the_model_not_module_reads() {
+    use simlin_engine::datamodel;
+
+    let incoming = |project: &datamodel::Project, var: &str| -> Vec<String> {
+        let xmile = simlin_engine::to_xmile(project).unwrap();
+        unsafe {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let proj = simlin_project_open_xmile(xmile.as_ptr(), xmile.len(), &mut err);
+            expect_no_error(err, "project open");
+            let model = simlin_project_get_model(proj, ptr::null(), &mut err);
+            expect_no_error(err, "get model");
+
+            let name = CString::new(var).unwrap();
+            let mut count = 0;
+            simlin_model_get_incoming_links(
+                model,
+                name.as_ptr(),
+                ptr::null_mut(),
+                0,
+                &mut count,
+                &mut err,
+            );
+            expect_no_error(err, "count incoming links");
+            let mut links = vec![ptr::null_mut::<c_char>(); count];
+            let mut written = 0;
+            simlin_model_get_incoming_links(
+                model,
+                name.as_ptr(),
+                links.as_mut_ptr(),
+                count,
+                &mut written,
+                &mut err,
+            );
+            expect_no_error(err, "read incoming links");
+            let names: Vec<String> = links
+                .iter()
+                .take(written)
+                .map(|link| {
+                    let name = CStr::from_ptr(*link).to_string_lossy().into_owned();
+                    simlin_free_string(*link);
+                    name
+                })
+                .collect();
+
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+            names
+        }
+    };
+
+    let module = |ident: &str| {
+        datamodel::Variable::Module(datamodel::Module {
+            ident: ident.to_string(),
+            model_name: "child_model".to_string(),
+            documentation: String::new(),
+            units: None,
+            references: vec![],
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        })
+    };
+    let child_model = datamodel::Model {
+        name: "child_model".to_string(),
+        sim_specs: None,
+        variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+            ident: "output".to_string(),
+            equation: datamodel::Equation::Scalar("42".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        })],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    };
+
+    // A flat `child.output` aux and no module `child`: a local read, listed
+    // (by its canonical name) beside the other local read.
+    let flat = TestProject::new("flat")
+        .aux("child.output", "99", None)
+        .aux("k", "1", None)
+        .aux("reader", "child.output + k", None)
+        .build_datamodel();
+    assert_eq!(
+        incoming(&flat, "reader"),
+        vec!["child\u{00B7}output".to_string(), "k".to_string()]
+    );
+
+    // The same spelling with a module `child`: a module-output read, listed
+    // as nothing, whether or not a flat aux spelled the same exists.
+    let mut module_read = TestProject::new("module_read")
+        .aux("child.output", "99", None)
+        .aux("k", "1", None)
+        .aux("reader", "child.output + k", None)
+        .build_datamodel();
+    module_read.models[0].variables.push(module("child"));
+    module_read.models.push(child_model.clone());
+    assert_eq!(incoming(&module_read, "reader"), vec!["k".to_string()]);
+
+    let mut only_module = TestProject::new("only_module")
+        .aux("reader", "child.output", None)
+        .build_datamodel();
+    only_module.models[0].variables.push(module("child"));
+    only_module.models.push(child_model);
+    assert_eq!(incoming(&only_module, "reader"), Vec::<String>::new());
+
+    // A module instance: its input sources, under either spelling XMILE
+    // gives a `<connect from=..>`.
+    let mut wired = TestProject::new("wired")
+        .aux("driver", "2", None)
+        .aux("k", "3", None)
+        .build_datamodel();
+    wired.models[0]
+        .variables
+        .push(datamodel::Variable::Module(datamodel::Module {
+            ident: "m".to_string(),
+            model_name: "sub".to_string(),
+            documentation: String::new(),
+            units: None,
+            references: vec![
+                datamodel::ModuleReference {
+                    src: ".driver".to_string(),
+                    dst: "m.inp".to_string(),
+                },
+                datamodel::ModuleReference {
+                    src: "k".to_string(),
+                    dst: "m.inp2".to_string(),
+                },
+            ],
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat::default(),
+        }));
+    let port = |ident: &str| {
+        datamodel::Variable::Aux(datamodel::Aux {
+            ident: ident.to_string(),
+            equation: datamodel::Equation::Scalar("1".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            ai_state: None,
+            uid: None,
+            compat: datamodel::Compat {
+                can_be_module_input: true,
+                ..datamodel::Compat::default()
+            },
+        })
+    };
+    wired.models.push(datamodel::Model {
+        name: "sub".to_string(),
+        sim_specs: None,
+        variables: vec![
+            port("inp"),
+            port("inp2"),
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "out".to_string(),
+                equation: datamodel::Equation::Scalar("inp + inp2".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            }),
+        ],
+        views: vec![],
+        loop_metadata: vec![],
+        groups: vec![],
+        macro_spec: None,
+    });
+    assert_eq!(
+        incoming(&wired, "m"),
+        vec!["driver".to_string(), "k".to_string()]
+    );
+}
+
 #[test]
 fn test_get_incoming_links_with_private_variables() {
     // Test that private variables (starting with $⁚) are not exposed in incoming links

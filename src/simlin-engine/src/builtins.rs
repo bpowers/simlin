@@ -153,12 +153,10 @@ pub enum BuiltinFn<Expr> {
 pub enum ArgKind {
     /// A scalar value, evaluated once per element of the enclosing equation.
     Scalar,
-    /// An array the builtin consumes as one operand: Pass 1
-    /// (`ast::expr3::Pass1Context`) materializes a computed expression in this
-    /// position into a temp, the post-lowering materializer
-    /// (`compiler::array_operand`) does the same for what Pass 1 could not
-    /// see, codegen reads the position as a view, and `Expr2` lowering lets
-    /// sub-expressions inside it union disjoint named dimensions
+    /// An array the builtin consumes as one operand: the materializer
+    /// (`compiler::array_operand`) moves a computed expression in this position
+    /// into a temp, codegen reads the position as a view, and `Expr2` lowering
+    /// lets sub-expressions inside it union disjoint named dimensions
     /// (`SUM(a[*] + h[*])` over `a[DimA]` and `h[DimC]` is a cross-product
     /// sum).
     ///
@@ -166,10 +164,11 @@ pub enum ArgKind {
     /// resolves. `true`: the builtin reads the argument's entire storage
     /// regardless of the enclosing element, so `vals[D]` in an equation over
     /// `D` is promoted back to the full axis (`VECTOR SORT ORDER`, `RANK`,
-    /// `VECTOR ELM MAP`, `VECTOR SELECT`, `ALLOCATE *`). `false`: the
-    /// enclosing element pins the axes it names and the builtin iterates the
-    /// rest, so `SUM(matrix[D, *])` in an equation over `D` sums one row per
-    /// element (the reducers).
+    /// `VECTOR ELM MAP`, `ALLOCATE *`). `false`: the enclosing element pins the
+    /// axes it names and the builtin iterates the rest, so
+    /// `SUM(matrix[D, *])` in an equation over `D` sums one row per element
+    /// (the reducers, and `VECTOR SELECT`, which reduces the `*`-marked axis
+    /// the same way).
     Array { whole: bool },
     /// The graphical-function identity of a `LOOKUP` family call: a reference
     /// to the gf-bearing variable, laid out at compile time, not a runtime
@@ -183,10 +182,12 @@ pub enum ArgKind {
     ///   `out[COP] = LOOKUP(g, t)` over `g[COP]` applies each element's table
     ///   and `out[COP] = SUM(LOOKUP(g, t))` over `g[COP, ROW]` sums the
     ///   element's row (pinned in `per_element_gf_tests`);
-    /// - Pass 1 (`ast::expr3::Pass1Context`) neither rewrites the position nor
-    ///   reads an apply-to-all reference out of it; its one table-aware step is
-    ///   the arrayed-GF apply decomposition, which reads the table's bounds;
-    /// - `Context::lower_builtin_expr3` lowers it in the enclosing context;
+    /// - `compiler::array_operand` reads the LOWERED table's shape to decide
+    ///   whether the call is a per-element arrayed-GF apply (a multi-element
+    ///   table array) or the ordinary scalar lookup (one table);
+    /// - `Context::lower_builtin_expr3` lowers it like a reducer's operand: the
+    ///   enclosing element pins the axes it names and a free axis survives as a
+    ///   view, which is what makes the apply array-valued;
     /// - `compiler::array_operand::materialize_view_operands` leaves it alone
     ///   (a temp carries no graphical functions);
     /// - codegen reads the table's base off the lowered reference
@@ -218,8 +219,9 @@ pub enum ResultKind {
 }
 
 /// How a builtin's value relates to simulation time, read by the
-/// run-invariance classifier (`compiler::invariance`) and by the dt-time
-/// dependency walk that feeds it (`db::assemble::collect_expr_refs`).
+/// run-invariance classifier (`compiler::invariance`); `Snapshot` and
+/// `Lagged` are the two forms whose arguments the dependency walk records
+/// under a lag (`variable::DepLag`).
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Invariance {
@@ -496,11 +498,21 @@ static RANK: BuiltinSig = sig(
 static SIZE: BuiltinSig = reducer("size");
 static STDDEV: BuiltinSig = reducer("stddev");
 static SUM: BuiltinSig = reducer("sum");
+/// `VECTOR SELECT` reduces the range its operands mark to one number, so its two
+/// array positions are REDUCED, not WHOLE: the enclosing element pins the axes
+/// it names and the builtin iterates the rest. Vensim spells the iterated range
+/// with `!` and leaves every other subscript an element -- genuine Vensim output
+/// in `test/sdeverywhere/models/vector/` runs
+/// `q[DimB] = VECTOR SELECT(e[DimA!,DimB], c[DimA!], 0, VSSUM, VSERRNONE)` and
+/// `r[DimA] = VECTOR SELECT(e[DimA,DimB!], d[DimA,DimB!], :NA:, VSMAX, VSERRNONE)`,
+/// where the LHS's own dimension is an element of the operand and only the
+/// `!`-marked axis is summed. Simlin spells the range `*`, and `q`'s `DimB`
+/// resolving to the active element is what makes the two spellings agree.
 static VECTOR_SELECT: BuiltinSig = sig(
     "vector_select",
     5,
     Some(5),
-    &[WHOLE, WHOLE, SCALAR, SCALAR, SCALAR],
+    &[REDUCED, REDUCED, SCALAR, SCALAR, SCALAR],
     ResultKind::Scalar,
     Invariance::Pure,
 );
@@ -1142,16 +1154,18 @@ pub fn is_0_arity_builtin_fn_ci(name: &str) -> bool {
 }
 
 /// Returns true if `func_name` (already lowercased) names a function that
-/// expands to a stdlib module: the canonical names in `MODEL_NAMES` plus
-/// the alias forms `delay`, `delayn`, and `smthn`.
+/// expands to a stdlib module: a name with a
+/// [`crate::module_functions::stdlib_descriptor`] plus the alias forms
+/// `delay`, `delayn`, and `smthn`, which `builtins_visitor` normalizes to one
+/// of those before the descriptor is looked up.
 ///
-/// This is the authoritative check shared by `equation_is_module_call()`
-/// (pre-scan name classification) and `contains_module_call()` (walk-time
-/// A2A expansion decision). Each caller adds its own structural logic on
-/// top (e.g., PREVIOUS arg-count check, INIT inclusion for A2A).
+/// Defined over the descriptor table rather than `stdlib::MODEL_NAMES` so the
+/// per-element expansion decision (`builtins_visitor::per_element_requirements`)
+/// and the expansion itself cannot disagree: a `stdlib⁚systems_*` model has no
+/// descriptor and is not a callable function.
 pub(crate) fn is_stdlib_module_function(func_name: &str) -> bool {
     matches!(func_name, "delay" | "delayn" | "smthn")
-        || crate::stdlib::MODEL_NAMES.contains(&func_name)
+        || crate::module_functions::stdlib_descriptor(func_name).is_some()
 }
 
 /// Whether a (lowercased) name or alias denotes a builtin function.

@@ -412,7 +412,7 @@ fn per_element_subset_dep_scores_are_live_not_silent_zero() {
 // projection (`post_transform::dep_element_pins`, enumerated by
 // `dep_element_pins_projection_enumeration`) but reach it through different
 // call paths: an other-dep's bare reference goes through
-// `subscript_idents_at_element`, and a bare reference to the LIVE SOURCE goes
+// `subscript_idents_in_expr0`, and a bare reference to the LIVE SOURCE goes
 // through the wrap's own `pin_bare_source_ref`.
 //
 // Both models below compile with ZERO diagnostics before the fix -- the defects
@@ -559,9 +559,9 @@ fn bare_arrayed_dep_is_pinned_over_its_own_declared_dims() {
         ],
     );
     for expected in [
-        "previous(same[region\u{B7}nyc, age\u{B7}old])",
-        "previous(flip[age\u{B7}old, region\u{B7}nyc])",
-        "previous(w[age\u{B7}old])",
+        "PREVIOUS(same[region\u{B7}nyc, age\u{B7}old])",
+        "PREVIOUS(flip[age\u{B7}old, region\u{B7}nyc])",
+        "PREVIOUS(w[age\u{B7}old])",
     ] {
         assert!(
             text.contains(expected),
@@ -1291,7 +1291,7 @@ fn per_element_dynamic_index_scores_preserve_head_lag() {
     };
 
     // (b) The capture helper: `pop[nyc, PREVIOUS(idx, idx)]`, hoisted out of the
-    // frozen occurrence by `builtins_visitor::make_temp_arg`. It is the slot
+    // frozen occurrence by `builtins_visitor::hoist_capture`. It is the slot
     // GH #975 was about -- the outer `PREVIOUS` serves its t=0 value as the
     // score's first live step -- so it is asserted directly rather than through
     // the score.
@@ -1678,7 +1678,7 @@ fn char_arrayed_target_slot_scores() {
 // `mp[la]` reads no `pop` at all, so for either `pop[e] -> mp` edge every
 // occurrence in the `la` arm is frozen by the ceteris-paribus wrap and the arm
 // is provably `PREVIOUS(mp)`. It is omitted from the element map, which
-// `compiler::expand_arrayed_with_hoisting` lowers to a single constant-zero
+// `compiler::expand_per_element` lowers to a single constant-zero
 // assign. What the golden shows is the slot being ABSENT -- deliberately
 // distinct from an arm that is present holding a `"0"` partial, which is what a
 // generator that gave up would emit.
@@ -1905,7 +1905,7 @@ fn char_already_lagged_other_dep() {
 // recursed into it -- changed-LAST. Stage 2b re-aligned the legacy query onto
 // the shaped derivation; Track A3 stage 3a then DELETED the legacy query
 // outright: assembly's sub-case (a) now sources from
-// `link_score_equation_text_shaped(.., Bare)` directly, so the compiled and
+// `shaped_link_score(.., Bare)` directly, so the compiled and
 // reported equations are one value and cannot drift. This golden pins the
 // emitted (changed-LAST) text -- the numerator subtracts
 // `PREVIOUS(scale) + sum(arr[*] * PREVIOUS(scale))` from the live `total`, i.e.
@@ -2226,9 +2226,9 @@ fn lookup_table_head_and_static_index_survive_the_wrap() {
 // one, and each is measured against the VM before its pin is asserted.
 //
 // This is the second time in this area a name-keyed table produced a wrong row
-// (GH #986 was the first), which is why the projection now asks
-// `compiler::dimensions::allocate_implicit_axes_partial` instead of restating
-// the rule.
+// (GH #986 was the first), which is why the projection asks
+// `db::bare_axis_pairing` -- the one pairing of two declared dimension lists
+// -- instead of restating the rule.
 // ---------------------------------------------------------------------------
 
 /// Read one variable's final-step value out of a compiled+run model.

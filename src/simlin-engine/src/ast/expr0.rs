@@ -73,8 +73,8 @@ impl BinaryOp {
 /// builtin functions have been checked/resolved.
 ///
 /// The `Eq` derive is load-bearing, not decoration: `Expr0` rides on
-/// salsa-cached values (`db::query::ParsedVariableResult`, `ModelStage0`,
-/// `db::ltm::LtmArm`) whose backdating is decided by comparing an old value
+/// salsa-cached values (`db::query::ParsedVariableResult`, `db::ltm::LtmArm`)
+/// whose backdating is decided by comparing an old value
 /// with a rebuilt one, so a variant that is not equal to ITSELF permanently
 /// defeats that comparison. A bare `f64` is exactly such a field (`NaN !=
 /// NaN`), and `Eq` rejects it at compile time -- which is why the literal is an
@@ -301,9 +301,13 @@ impl Expr0 {
     /// per element, and the dt and initial passes walk one equation twice, so
     /// that question is asked on every model with a capture in an arrayed
     /// equation. See [`crate::capture::Capture::same_definition`].
+    ///
+    /// A constant is the VALUE it denotes: `2` and `2.0` compute the same thing,
+    /// so a helper minted from each is one helper. Its spelling matters only to
+    /// the printer and the diagnostics, which `PartialEq` still covers.
     pub(crate) fn eq_ignoring_loc(&self, other: &Expr0) -> bool {
         match (self, other) {
-            (Expr0::Const(ls, ln, _), Expr0::Const(rs, rn, _)) => ls == rs && ln == rn,
+            (Expr0::Const(_, ln, _), Expr0::Const(_, rn, _)) => ln == rn,
             (Expr0::Var(l, _), Expr0::Var(r, _)) => l == r,
             (
                 Expr0::App(UntypedBuiltinFn(lf, largs), _),

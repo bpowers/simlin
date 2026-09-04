@@ -11,6 +11,16 @@
 use super::*;
 use crate::datamodel;
 
+/// Whether `d` was raised on one of the three unit surfaces.
+fn is_unit_diagnostic(d: &Diagnostic) -> bool {
+    matches!(
+        d.category(),
+        DiagnosticCategory::UnitDefinition
+            | DiagnosticCategory::UnitConsistency
+            | DiagnosticCategory::UnitInference
+    )
+}
+
 // ---- Task 5: model_all_diagnostics triggers all sources ----
 
 /// Task 5 verification: model_all_diagnostics triggers all accumulation
@@ -138,20 +148,11 @@ fn test_model_all_diagnostics_triggers_all_sources() {
         "should have a BadTable error for 'bad_table_var'; got: {diags:?}"
     );
 
-    // Check for unit-related warning. The unit inference failure surfaces
-    // as a DiagnosticError::Model with ErrorCode::UnitMismatch at Warning
-    // severity (model-level inference error). Per-variable unit checking
-    // errors would surface as DiagnosticError::Unit.
-    let has_unit_warning = diags.iter().any(|d| {
-        d.severity == DiagnosticSeverity::Warning
-            && matches!(
-                &d.error,
-                DiagnosticError::Model(crate::common::Error {
-                    code: crate::common::ErrorCode::UnitMismatch,
-                    ..
-                }) | DiagnosticError::Unit(_)
-            )
-    });
+    // Check for unit-related warning: the model-level inference umbrella or
+    // a per-variable consistency mismatch, both `Unit` at Warning severity.
+    let has_unit_warning = diags
+        .iter()
+        .any(|d| d.severity == DiagnosticSeverity::Warning && is_unit_diagnostic(d));
     assert!(
         has_unit_warning,
         "should have a unit warning for the unit mismatch; got: {diags:?}"
@@ -369,6 +370,38 @@ fn test_ac2_3_empty_equation() {
     );
 }
 
+/// Identical diagnostic rows collapse to one. The parse of an arrayed
+/// element's equation runs twice -- once for the dt phase and once for the
+/// initial phase, which re-parses the element's equation when it has no
+/// `init_eqn` of its own -- so an equation that does not parse records the
+/// same error twice on the variable, and each copy reached the accumulator.
+/// `collect_model_diagnostics` reports it once. (The same collapse is what
+/// keeps one apply-to-all parent's per-element helpers at one row in
+/// `db::implicit_diag_tests`.)
+#[test]
+fn identical_diagnostic_rows_collapse_to_one() {
+    let project = crate::test_common::TestProject::new("dup_rows")
+        .named_dimension("d", &["e1"])
+        .array_with_ranges("y[d]", vec![("e1", "1 +")])
+        .build_datamodel();
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &project);
+    let diags = collect_all_diagnostics(&db, sync.project);
+    let rows: Vec<&Diagnostic> = diags
+        .iter()
+        .filter(|d| d.variable.as_deref() == Some("y"))
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the element's parse error is one row, not one per phase: {rows:#?}"
+    );
+    assert!(
+        matches!(&rows[0].error, DiagnosticError::Equation(_)),
+        "it is the equation's own parse error: {rows:#?}"
+    );
+}
+
 /// AC2.4: MismatchedDimensions error for array variables with
 /// incompatible dimensions surfaces through the accumulator.
 #[test]
@@ -539,17 +572,7 @@ fn test_ac2_5_unit_warnings_severity() {
     // Unit issues should be present as warnings, not errors
     let unit_warnings: Vec<_> = diags
         .iter()
-        .filter(|d| {
-            d.severity == DiagnosticSeverity::Warning
-                && matches!(
-                    &d.error,
-                    DiagnosticError::Unit(_)
-                        | DiagnosticError::Model(crate::common::Error {
-                            code: crate::common::ErrorCode::UnitMismatch,
-                            ..
-                        })
-                )
-        })
+        .filter(|d| d.severity == DiagnosticSeverity::Warning && is_unit_diagnostic(d))
         .collect();
 
     assert!(
@@ -558,7 +581,7 @@ fn test_ac2_5_unit_warnings_severity() {
     );
 
     // Verify none of the unit diagnostics have Error severity
-    let unit_errors: Vec<_> = diags
+    let unit_diagnostics_at_error_severity: Vec<_> = diags
         .iter()
         .filter(|d| {
             d.severity == DiagnosticSeverity::Error && matches!(&d.error, DiagnosticError::Unit(_))
@@ -566,8 +589,9 @@ fn test_ac2_5_unit_warnings_severity() {
         .collect();
 
     assert!(
-        unit_errors.is_empty(),
-        "unit diagnostics should have Warning severity, not Error; got errors: {unit_errors:?}"
+        unit_diagnostics_at_error_severity.is_empty(),
+        "unit diagnostics should have Warning severity, not Error; got errors: \
+         {unit_diagnostics_at_error_severity:?}"
     );
 }
 
@@ -738,7 +762,7 @@ fn test_ac2_7_assembly_errors_accumulated() {
 
 /// A syntactically malformed unit string surfaces as a `Unit`
 /// diagnostic at Error severity. This is a *unit-string parse* failure
-/// (stored on the parsed variable's `unit_errors`), distinct from the
+/// (stored on the parsed variable's `diagnostics` as a `Unit` entry), distinct from the
 /// unit-*checking* dimensional mismatches in
 /// `test_ac2_5_unit_warnings_severity`, which are Warnings. The variable
 /// is otherwise well-formed, so this site accumulates without aborting
@@ -930,7 +954,7 @@ fn test_compile_var_fragment_per_phase_var_new_failure() {
 // ---- diagnostics stable across unrelated salsa input changes ----
 //
 // `collect_all_diagnostics` / `collect_model_diagnostics` drain the salsa
-// `CompilationDiagnostic` accumulator via
+// `Diagnostic` accumulator via
 // `model_all_diagnostics::accumulated::<_>(..)`. salsa 0.26's
 // `accumulated_by` does a DFS that prunes any subtree whose root memo's
 // `accumulated_inputs` flag is `Empty`. When `model_all_diagnostics` is
@@ -1012,17 +1036,7 @@ fn unit_warning_fixture() -> datamodel::Project {
 fn count_unit_warnings(diags: &[Diagnostic]) -> usize {
     diags
         .iter()
-        .filter(|d| {
-            d.severity == DiagnosticSeverity::Warning
-                && matches!(
-                    &d.error,
-                    DiagnosticError::Unit(_)
-                        | DiagnosticError::Model(crate::common::Error {
-                            code: crate::common::ErrorCode::UnitMismatch,
-                            ..
-                        })
-                )
-        })
+        .filter(|d| d.severity == DiagnosticSeverity::Warning && is_unit_diagnostic(d))
         .count()
 }
 
@@ -2690,7 +2704,7 @@ fn test_unknown_element_subscript_warns_on_conveyor_init_list() {
 // accumulated from inside `project_macro_registry`'s body and discovered only by
 // whatever accumulator DFS happened to reach that memo, which made it both
 // over-reported (once per model, since every model's `model_all_diagnostics`
-// subtree reaches the registry through `model_module_ident_context`) and
+// subtree reaches the registry through `parse_source_variable`) and
 // FRAGILE (see the pruning hazard documented above `unit_warning_fixture`: after
 // an unrelated revision bump the whole subtree is pruned and the diagnostic
 // silently vanishes). It is now emitted once, directly, by
@@ -2941,24 +2955,22 @@ fn unit_definition_errors_survive_an_unrelated_input_change() {
     );
 }
 
-/// `Variable::errors` and `Variable::unit_errors` are the CHANNEL by which
-/// parsing and lowering report a failure to the salsa path; they are not
-/// redundant with it (`docs/tech-debt.md` item 17 records why that matters).
-/// The salsa pipeline's diagnostics are DOWNSTREAM of them --
-/// `db::var_fragment::explicit_fragment_input` reads
-/// `parsed.variable.unit_errors()`, `parsed.variable.equation_errors()` and
-/// `lowered.equation_errors()` and turns each entry into a `Diagnostic`. Acting
-/// on the claim would silently drop those diagnostics, so it is pinned here
-/// rather than left as prose: each half asserts BOTH that the stage's value
-/// carries the error in the field AND that the matching diagnostic comes out of
-/// `collect_all_diagnostics`.
+/// `Variable::diagnostics` is the CHANNEL by which parsing and lowering report
+/// a failure to the salsa path; it is not redundant with it
+/// (`docs/tech-debt.md` item 17 records why that matters). The salsa
+/// pipeline's diagnostics are DOWNSTREAM of it --
+/// `db::var_fragment::explicit_fragment_input` reads the parsed variable's
+/// `Unit` entries, its fatal entries and the lowered variable's fatal entries
+/// and turns each into a `Diagnostic`. Acting on the claim would silently drop
+/// those diagnostics, so it is pinned here rather than left as prose: each half
+/// asserts BOTH that the stage's value carries the error in the field AND that
+/// the matching diagnostic comes out of `collect_all_diagnostics`.
 ///
-/// Emptying the `unit_errors()` read or the `lowered.equation_errors()` read
-/// reds THIS test. Emptying the `parsed.variable.equation_errors()` read does
-/// NOT -- `lower_variable` clones parse errors forward in all three arms, so the
-/// lowered read catches the same error and this test stays green. What that read
-/// uniquely carries is the conveyor/queue driven-flow `EmptyEquation`
-/// suppression, and dropping it reds
+/// Emptying the parsed `Unit` read or the lowered fatal read reds THIS test.
+/// Emptying the parsed fatal read does NOT -- `lower_variable` carries the
+/// parse entries forward, so the lowered read catches the same error and this
+/// test stays green. What that read uniquely carries is the conveyor/queue
+/// driven-flow `EmptyEquation` suppression, and dropping it reds
 /// `test_conveyor_driven_flow_empty_equation_suppressed`,
 /// `test_conveyor_marker_removal_reinstates_empty_equation` and
 /// `test_queue_driven_outflow_empty_equation_suppressed` instead. Measured, not
@@ -2974,18 +2986,24 @@ fn variable_error_fields_are_the_lowering_channel() {
         .build_datamodel();
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &dm);
-    let stage0 = crate::db::model_stage0(&db, sync.models["main"].source, sync.project);
+    let parsed = |name: &str| {
+        &crate::db::parse_source_variable(
+            &db,
+            sync.models["main"].variables[name].source,
+            sync.project,
+        )
+        .variable
+    };
 
     assert!(
-        stage0.variables[&crate::common::Ident::new("bad_unit_var")]
-            .unit_errors()
-            .is_some(),
+        parsed("bad_unit_var")
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d, DiagnosticError::Unit(_))),
         "parsing must record the malformed unit string on the variable"
     );
     assert!(
-        stage0.variables[&crate::common::Ident::new("bad_eqn_var")]
-            .equation_errors()
-            .is_some(),
+        parsed("bad_eqn_var").fatal_diagnostics().next().is_some(),
         "parsing must record the equation syntax error on the variable"
     );
 
@@ -3016,23 +3034,25 @@ fn variable_error_fields_are_the_lowering_channel() {
         .build_datamodel();
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &dm);
-    let bad = crate::common::Ident::new("bad");
+    let bad = sync.models["main"].variables["bad"].source;
 
     assert!(
-        crate::db::model_stage0(&db, sync.models["main"].source, sync.project).variables[&bad]
-            .equation_errors()
-            .is_none(),
+        crate::db::parse_source_variable(&db, bad, sync.project)
+            .variable
+            .diagnostics
+            .is_empty(),
         "the fixture must isolate a LOWERING error: parsing sees nothing wrong"
     );
-    let lowered_errors = crate::db::model_stage1(&db, sync.models["main"].source, sync.project)
-        .variables[&bad]
-        .equation_errors()
-        .expect("lowering must record the dimension mismatch on the variable");
+    let lowered_errors: Vec<_> =
+        crate::db::lowered_source_variable(&db, bad, sync.models["main"].source, sync.project)
+            .variable
+            .fatal_diagnostics()
+            .collect();
     assert!(
         lowered_errors
             .iter()
-            .any(|e| e.code == crate::common::ErrorCode::MismatchedDimensions),
-        "expected MismatchedDimensions, got: {lowered_errors:?}"
+            .any(|d| d.code() == crate::common::ErrorCode::MismatchedDimensions),
+        "lowering must record the dimension mismatch on the variable; got: {lowered_errors:?}"
     );
 
     let diags = collect_all_diagnostics(&db, sync.project);
@@ -3058,7 +3078,7 @@ fn variable_error_fields_are_the_lowering_channel() {
 /// deliberately declines to materialize -- its view is re-expanded by
 /// `context::expand_pp_view_for_allocate`, which only understands a direct
 /// variable reference -- so a computed profile lowers cleanly and is rejected by
-/// codegen with `Cannot push view for expression type`. Nothing about this
+/// codegen with `an array operand here must be a variable ...`. Nothing about this
 /// equation involves LTM; it is reached from a model a user can type.
 ///
 /// (The shape this test was originally written against,
@@ -3123,7 +3143,7 @@ fn codegen_rejection_of_an_ordinary_variable_names_the_variable_and_its_reason()
     // that is the difference between "something failed" and "this construct
     // was refused", and it is the whole point of the reporting form.
     let names_construct = attributed.iter().any(
-        |d| matches!(&d.error, DiagnosticError::Assembly(msg) if msg.contains("Cannot push view")),
+        |d| matches!(&d.error, DiagnosticError::Assembly(msg) if msg.contains("an array operand here must be")),
     );
     assert!(
         names_construct,
@@ -3302,7 +3322,7 @@ fn diagnostic_reason(d: &Diagnostic) -> Option<String> {
 ///     RESOLVE (`units::resolve_equation_unit`). Both name the unit and neither
 ///     shows the declaration anywhere else, so both must carry its text.
 ///  3. **unit string (variable)** -- a variable's own malformed `units`,
-///     carried on `Variable::unit_errors` and replayed as a NON-fatal
+///     carried on `Variable::diagnostics` and replayed as a NON-fatal
 ///     diagnostic by `compile_var_fragment`.
 ///  4. **AST lowering** -- `lower_ast` (`Expr1::from` / `Expr2::from`), whose
 ///     errors land on the LOWERED variable and are read by
