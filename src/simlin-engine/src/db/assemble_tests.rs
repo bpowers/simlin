@@ -743,3 +743,112 @@ fn each_program_emits_in_runlist_order_then_the_ltm_tail() {
         "stocks: runlist order, then the LTM implicit tail"
     );
 }
+
+/// Names listed in `assemble_module`'s batch fragment-refusal message, in the
+/// order they appear -- including duplicates, if any. That is the whole point:
+/// a test that only checks membership would pass the doubled listing GH #1047
+/// is about.
+fn fragment_refusal_names(err: &crate::common::Error) -> Vec<&str> {
+    const PREFIX: &str = "failed to compile fragments for variables: ";
+    let details = err.details.as_deref().unwrap_or_else(|| {
+        panic!("expected NotSimulatable details carrying the fragment list, got {err}")
+    });
+    let rest = details
+        .split_once(PREFIX)
+        .unwrap_or_else(|| panic!("expected `{PREFIX}…` in the compile error, got: {details}"))
+        .1;
+    rest.split(", ").collect()
+}
+
+/// The computed `allocate_available` priority-profile operand codegen refuses
+/// (`Cannot push view for expression type`; pinned by
+/// `diagnostic_tests::codegen_rejection_of_an_ordinary_variable_names_the_variable_and_its_reason`).
+/// Wrapping it in `equation` is how a test chooses which runlists the refused
+/// helper sits on: a stdlib-module argument is initials+flows, a `PREVIOUS`
+/// capture is flows-only, an `INIT` capture is initials-only.
+fn refused_allocate_available(equation: &str) -> crate::common::Error {
+    crate::test_common::TestProject::new("fragment_refusal")
+        .named_dimension("d", &["e1", "e2", "e3"])
+        .indexed_dimension("xp", 4)
+        .array_const("request[d]", 10.0)
+        .array_const("pp[d,xp]", 1.0)
+        .array_const("pp_bump[d,xp]", 0.0)
+        .scalar_const("supply", 35.0)
+        .array_aux("out[d]", equation)
+        .compile_incremental()
+        .expect_err("the computed allocate_available profile is refused by codegen")
+}
+
+fn assert_each_fragment_name_once(names: &[&str], what: &str) {
+    assert!(
+        !names.is_empty(),
+        "{what}: expected a non-empty fragment-refusal list"
+    );
+    let unique: HashSet<&str> = names.iter().copied().collect();
+    assert_eq!(
+        names.len(),
+        unique.len(),
+        "{what}: the fragment-refusal list must name each variable once \
+         (GH #1047); got {} names ({} unique): {names:?}",
+        names.len(),
+        unique.len(),
+    );
+    assert!(
+        names.iter().all(|n| n.contains("arg0")),
+        "{what}: the refused helpers are the hoisted argument expressions; got {names:?}"
+    );
+}
+
+/// `assemble_module` names a refused variable once in the batch fragment
+/// message, even when the variable is a member of more than one runlist.
+///
+/// `program_fragments` is called three times with the same `&mut missing`
+/// vector. A variable whose lowering was refused has no bytecode for any
+/// phase, so it was pushed once per runlist it is a member of and the join
+/// listed it that many times. A SMTH1 hoisted-argument helper is in the
+/// initials runlist (a module instance's inputs are among its initial
+/// dependencies) AND the flows runlist, so six failing per-element helpers
+/// were printed as twelve names.
+///
+/// The PREVIOUS/INIT row is the control: a PREVIOUS capture is flows-only
+/// and an INIT capture is initials-only, so those were already listed once.
+/// Keeping both arms in one test states which runlist-membership cases the
+/// uniqueness contract covers (GH #1047).
+#[test]
+fn fragments_refusal_names_each_variable_once() {
+    // Two SMTH1 calls in one apply-to-all equation: 2 helpers × 3 elements.
+    // Without the dedup this is twelve names, the same set twice.
+    let smth1 = refused_allocate_available(
+        "SMTH1(allocate_available(request[d], pp[d,1] + pp_bump[d,1], supply), 3) \
+         + SMTH1(allocate_available(request[d], pp[d,1] + pp_bump[d,1] + 1, supply), 3)",
+    );
+    let smth1_names = fragment_refusal_names(&smth1);
+    assert_each_fragment_name_once(&smth1_names, "SMTH1 argument helpers");
+    assert_eq!(
+        smth1_names.len(),
+        6,
+        "two SMTH1 calls × three elements is the initials+flows doubling case; \
+         got {smth1_names:?}"
+    );
+
+    // The same two argument expressions under PREVIOUS (flows-only) + INIT
+    // (initials-only): already listed once each, even before the dedup.
+    let prev_init = refused_allocate_available(
+        "PREVIOUS(allocate_available(request[d], pp[d,1] + pp_bump[d,1], supply), 0) \
+         + INIT(allocate_available(request[d], pp[d,1] + pp_bump[d,1] + 1, supply))",
+    );
+    let prev_init_names = fragment_refusal_names(&prev_init);
+    assert_each_fragment_name_once(&prev_init_names, "PREVIOUS/INIT captures");
+    assert!(
+        prev_init_names
+            .iter()
+            .any(|n| n.contains("\u{205A}0\u{205A}arg0")),
+        "the INIT/PREVIOUS pair must list helper 0; got {prev_init_names:?}"
+    );
+    assert!(
+        prev_init_names
+            .iter()
+            .any(|n| n.contains("\u{205A}1\u{205A}arg0")),
+        "the INIT/PREVIOUS pair must list helper 1; got {prev_init_names:?}"
+    );
+}

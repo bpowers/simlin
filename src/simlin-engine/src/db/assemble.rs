@@ -1364,9 +1364,19 @@ pub fn assemble_module<'db>(
         &mut missing,
     );
     if !missing.is_empty() {
+        // A refused variable has no bytecode for any phase, so the three
+        // `program_fragments` passes would otherwise list it once per runlist
+        // it is a member of (a SMTH1 argument helper: initials + flows).
+        // First-seen order is the runlist topological order (GH #1047).
+        let mut seen = HashSet::new();
+        let unique: Vec<&str> = missing
+            .iter()
+            .filter(|name| seen.insert(name.as_str()))
+            .map(|name| name.as_str())
+            .collect();
         return Err(format!(
             "failed to compile fragments for variables: {}",
-            missing.join(", ")
+            unique.join(", ")
         ));
     }
 
