@@ -816,8 +816,10 @@ impl DimensionsContext {
     ///    that parent -- the active subdimension's elements are a subset of
     ///    the parent's, so the parent-directed map applies unchanged.
     ///
-    /// `None` means the reference does not resolve; all three executed callers
-    /// below turn that into a compile diagnostic.
+    /// `None` means this rule does not resolve the reference:
+    /// `get_implicit_subscript_off` turns that into a compile diagnostic, and
+    /// the two subscript arms below take one further step,
+    /// [`Self::resolve_dimension_subscript`].
     ///
     /// # The three executed call sites
     ///
@@ -829,23 +831,21 @@ impl DimensionsContext {
     ///   narrowing is a SEARCH over candidate axes, not part of the rule, so
     ///   it stays at the call site).
     /// * `compiler::subscript`'s `build_view_from_ops`, on the
-    ///   `IndexOp::ActiveDimRef` arm -- every dimension-named subscript: one
-    ///   naming a dimension the equation iterates (`target[State] = x[State]`,
-    ///   and the bare `target[State] = x` that `lower_pass0` rewrites into it)
-    ///   and one naming a dimension it does not, typically the source's own
-    ///   (`target[COP] = x[Region]`). Its active dimension is already chosen
-    ///   by `normalize_subscripts3`, so it calls this exactly once, and only
-    ///   where nothing is declared between the two dimensions and no name
-    ///   matches does that arm fall back to the active element's ordinal --
-    ///   the one read this rule does not cover.
+    ///   `IndexOp::ActiveDimRef` arm -- every dimension-named subscript whose
+    ///   sibling indices are all static: one naming a dimension the equation
+    ///   iterates (`target[State] = x[State]`, and the bare `target[State] = x`
+    ///   that `lower_pass0` rewrites into it) and one naming a dimension it
+    ///   does not, typically the source's own (`target[COP] = x[Region]`). Its
+    ///   active dimension is already chosen by `normalize_subscripts3`, so it
+    ///   resolves the element once, through
+    ///   [`Self::resolve_dimension_subscript`].
     /// * `compiler::context`'s `IndexExpr3::Dimension` arm, the dynamic-path
-    ///   twin of the previous one (reached when some OTHER index of the same
-    ///   subscript defeats static normalization). Instrumenting all three
-    ///   showed this one resolving zero references across the lib suite, but
-    ///   it is reachable by construction (`x[Region, i+1]` sends the whole
-    ///   subscript down the dynamic path), and before GH #997 it consulted the
-    ///   mapping WITHOUT trying the name first -- a latent divergence from the
-    ///   other two, now removed by routing it here.
+    ///   twin of the previous one, reached when some OTHER index of the same
+    ///   subscript needs runtime evaluation (`x[Region, i+1]`, `m[State, idx]`,
+    ///   an `@N` inside an apply-to-all body). It searches the active
+    ///   dimensions the subscript names or maps to and resolves the element
+    ///   through the same [`Self::resolve_dimension_subscript`], so the sibling
+    ///   a reference carries decides its ROUTE and never its rule.
     ///
     /// The whole 4-spelling x 5-mapping x 2-direction matrix is measured
     /// against the VM in `crate::mapped_reference_semantics_tests`, and
@@ -880,6 +880,70 @@ impl DimensionsContext {
         self.translate_to_source_via_mapping(source_axis.canonical_name(), parent, active_element)
     }
 
+    /// The 0-based offset on `source_axis` that a subscript spelling the
+    /// dimension `spelled`, paired with the active dimension `active_dim`,
+    /// reads for `active_element`: [`Self::resolve_mapped_read`] where it
+    /// resolves, and otherwise the active element's ORDINAL within its own
+    /// dimension, indexing `source_axis` raw -- the last resort, taken only
+    /// when the subscript NAMES its active dimension (`spelled` is
+    /// `active_dim`) and `source_axis` declares no correspondence to it.
+    ///
+    /// Both subscript paths take that last resort through this one function:
+    /// `compiler::subscript::build_view_from_ops`'s `IndexOp::ActiveDimRef` arm
+    /// (every sibling index static) and `compiler::context`'s
+    /// `IndexExpr3::Dimension` arm (a sibling evaluated at runtime). A
+    /// reference is therefore read by one rule whichever sibling it carries:
+    /// `target[State] = m[State, 1]` and `target[State] = m[State, idx]` read
+    /// the same cell (GH #1044;
+    /// `mapped_reference_semantics_tests::no_mapping_reads_by_ordinal_on_both_subscript_paths`
+    /// rows every sibling kind).
+    ///
+    /// The by-name gate is what keeps a pairing made THROUGH a mapping from
+    /// reading a row: `target[Foo] = m[State, ..]` with `Foo maps_to State`
+    /// pairs the subscript with `Foo`, and over an `m[Region, ..]` that relates
+    /// to neither dimension there is no correspondence to follow and no
+    /// ordinal to take -- `None`, a refusal
+    /// (`mapped_reference_semantics_tests::a_candidate_paired_through_a_mapping_never_takes_the_ordinal`).
+    /// A declared correspondence that fails to translate is authoritative and
+    /// stops short of the ordinal too: an element map that leaves this element
+    /// unpaired, or a mapped element `source_axis` does not declare, is `None`
+    /// rather than a read of a neighbouring element. An ordinal past the end
+    /// of `source_axis` is `None` as well
+    /// (`an_ordinal_past_the_sources_extent_is_refused_on_both_subscript_paths`).
+    ///
+    /// The ordinal is the engine's reading of a pair XMILE 1.0 section 3.7.1
+    /// leaves open (it defines no mapping, and exemplifies the dimension-name
+    /// placeholder only over the equation's own dimensions) and Vensim
+    /// refuses (its subscript-mapping reference: a right-hand subscript absent
+    /// from the left "would generate an error" without a mapping). GH #1044
+    /// holds the decision on the single long-term rule.
+    /// `compiler::context::Context::resolve_iteration_element`'s `target_offset`
+    /// fallback is the same last resort for a positionally read axis one
+    /// axis-collapse later, and the LTM describers deliberately leave the read
+    /// undescribed ([`Self::executed_read_correspondence`], GH #527).
+    pub fn resolve_dimension_subscript(
+        &self,
+        source_axis: &Dimension,
+        spelled: &CanonicalDimensionName,
+        active_dim: &Dimension,
+        active_element: &CanonicalElementName,
+    ) -> Option<usize> {
+        if let Some(resolved) = self.resolve_mapped_read(source_axis, active_dim, active_element) {
+            return source_axis.get_offset(&resolved);
+        }
+        let source = source_axis.canonical_name();
+        let active = active_dim.canonical_name();
+        let declared = self.has_mapping_to(source, active)
+            || self.has_mapping_to(active, source)
+            || self.has_mapping_to_parent_of(source, active);
+        if declared || spelled != active {
+            return None;
+        }
+        active_dim
+            .get_offset(active_element)
+            .filter(|offset| *offset < source_axis.len())
+    }
+
     /// Per element of `iterated_dim` in declared order, the `source_dim`
     /// element a dimension-named subscript reads: [`Self::resolve_mapped_read`]
     /// applied element by element -- the per-dimension projection of the
@@ -911,10 +975,11 @@ impl DimensionsContext {
     ///
     /// What it deliberately does NOT describe: the ORDINAL a dimension-named
     /// subscript falls back to when the two dimensions declare no
-    /// correspondence and share no element name (the last arm of
-    /// `compiler::subscript::build_view_from_ops`;
-    /// `mapped_reference_semantics_tests::no_mapping_equal_cardinality`
-    /// measures it). Vensim rejects such a reference outright (its subscript
+    /// correspondence and share no element name (the last resort of
+    /// [`Self::resolve_dimension_subscript`], taken on both subscript paths;
+    /// `mapped_reference_semantics_tests::no_mapping_equal_cardinality` and
+    /// `no_mapping_reads_by_ordinal_on_both_subscript_paths` measure it).
+    /// Vensim rejects such a reference outright (its subscript
     /// mapping page: a right-hand subscript absent from the left "would
     /// generate an error" without a mapping), so a described diagonal follows
     /// a correspondence the model declares or spells by name (GH #527), and a
@@ -1200,33 +1265,37 @@ pub trait AxisRelations {
     /// A subdimension relation is a PARTIAL correspondence -- only the
     /// subdimension's own elements exist on both axes -- so admitting it is a
     /// statement that the caller can act on a pairing that does not cover
-    /// every element. [`DimensionsContext`] does NOT admit it, because the
-    /// callers that resolve an ELEMENT through the pairing would each read a
-    /// row the subdimension does not declare. Both directions break, in
-    /// different arms, and `Parent{A,B,C,D}` with `Sub{A,C}` spells them:
+    /// every element. [`DimensionsContext`] does NOT admit it, because a
+    /// caller that resolves an ELEMENT through the pairing reads a row the
+    /// subdimension does not declare in the SUPERSET direction.
+    /// `Parent{A,B,C,D}` with `Sub{A,C}` spells both directions:
     ///
-    /// * `out[Sub] = src` over `src[Parent]` breaks in
-    ///   `compiler::context::make_dimension_subscripts`, which is the only arm
-    ///   that would be affected and which withholds the rung through
-    ///   [`DirectMappingsOnly`]. What that arm can emit for a paired axis is a
-    ///   dimension-name subscript, so admitting the rung there rewrites the
-    ///   reference to `src[Sub]` -- and that spelling resolves to the ACTIVE
-    ///   dimension's ordinal, reading `src`'s SECOND element for `Sub`'s `C`
-    ///   rather than its third (GH #1029). The whole reference is refused with
+    /// * `out[Sub] = src` over `src[Parent]` would be correct. The only arm
+    ///   affected is `compiler::context::make_dimension_subscripts`, which
+    ///   withholds the rung through [`DirectMappingsOnly`]; what it can emit
+    ///   for a paired axis is a dimension-name subscript, so admitting the
+    ///   rung there rewrites the reference to `src[Sub]`, and that spelling
+    ///   reads each element by NAME on the parent axis
+    ///   ([`DimensionsContext::resolve_mapped_read`]'s first step: `src[C]`
+    ///   for `Sub`'s `C`), the read GH #1029 asks for and
+    ///   `simulate::a_subrange_dimension_reference_reads_by_name_in_every_spelling`
+    ///   pins. The bare reference is refused with `MismatchedDimensions`
+    ///   today because the rung is withheld for the other direction.
+    /// * `out[Parent] = src` over `src[Sub]` is why it is withheld. Pairing
+    ///   the axes rewrites the reference to `src[Parent]` and skips the
+    ///   positional length check; the element step
+    ///   ([`DimensionsContext::resolve_dimension_subscript`]) then finds no
+    ///   `Sub` element named `B`, no mapping, and nothing declared between the
+    ///   two dimensions, so it takes its ordinal last resort: `Parent`'s `B`
+    ///   at ordinal 1 reads `Sub`'s `C`, a neighbouring row, silently. (`D` at
+    ///   ordinal 3 is past a two-element `src` and refused, so this fixture
+    ///   fails loudly at `D`; a three-element parent has no such element and
+    ///   runs on the wrong number.) The bare reference is refused with
     ///   `MismatchedDimensions` today.
-    /// * `out[Parent] = src` over `src[Sub]` breaks in the Subscript arm's
-    ///   element step (`compiler::context::resolve_iteration_element`), which
-    ///   runs under the full [`DimensionsContext`]. Pairing the axes skips the
-    ///   positional length check, and the element step then finds no `Sub`
-    ///   element named `B` and no mapping, so it falls back on the TARGET
-    ///   axis's ordinal: `Parent.get_offset(B)` is 1 and `Parent.get_offset(D)`
-    ///   is 3, indexing a two-element `src` -- a neighbouring row and then a
-    ///   read past its end. This too is refused today.
     ///
-    /// So the rung trades two loud refusals for two silent wrong numbers, and
-    /// GH #1029 is why there is no correct element for it to resolve to yet:
-    /// even the explicit spelling `out[Sub] = src[Sub]` reads positionally into
-    /// `Parent` rather than by element name.
+    /// The rung therefore stays opt-in until the superset direction has a
+    /// rule of its own: an element the subdimension does not declare has no
+    /// correct row to read, and the ordinal is a wrong one.
     ///
     /// [`SubdimensionRelations`] admits it, for the one caller that needs only
     /// to know WHICH axis to compare positions against and never resolves an

@@ -617,7 +617,24 @@ A subscript naming a dimension is an `IndexOp::ActiveDimRef` all the way to
 a reference's subscripts and resolves the element through the one mapped read;
 `project_var_index_to_temp` pairs a temp's axes to the variable's by the same
 two rules, which is what makes `o[D,D] = square[D,D]` read the cell rather
-than the diagonal on every spelling.
+than the diagonal on every spelling. The mapped read has one last resort,
+`DimensionsContext::resolve_dimension_subscript`: a subscript that NAMES an
+active dimension of the target, over a source axis that declares no
+correspondence to it and shares no element name, reads at the active
+element's ordinal (`IndexOp::ActiveDimRef` carries the dimension the
+subscript spells beside the active position it pairs with, so a pairing made
+through a declared mapping never takes it), and the dynamic subscript path
+(`Context::lower_index_expr3`, reached when a SIBLING index needs runtime
+evaluation) resolves a dimension-named index through the same step, so
+`m[State, 1]` and `m[State, idx]` read one cell and a sibling decides a
+reference's route, never its rule. Within the source's extent that is
+`origin/main`'s reading of the undeclared pair -- it folded the ordinal of a
+NAMED active dimension in before either path ran -- so the pair compiles here
+exactly where it compiled there; past the extent the dynamic spelling is
+refused where `origin/main` ran with NaN in that cell ("Phase 6b semantic
+divergences" item 11). GH #1044 owns deciding the one rule (Vensim refuses
+the pair; XMILE 1.0 section 3.7.1 defines no mapping) for every spelling at
+once.
 
 A resolved recurrence SCC is the one place a shared temp meets reordering.
 `db::assemble::segment_member_by_element` is the single statement of where a
@@ -1843,9 +1860,9 @@ renames to `DELAY1` and nothing else. Two or five arguments, an order other
 than the literal 1 or 3, and a non-literal order refuse before any argument is
 hoisted.
 
-**Phase 7.5 semantic divergences.** Thirteen changes, each pinned: 7.5a and
+**Phase 7.5 semantic divergences.** Fourteen changes, each pinned: 7.5a and
 7.5b's six (four to the artifact and the results map, one to a value, one to
-the LTM causal graph), then 7.5c and 7.5d's seven.
+the LTM causal graph), then 7.5c and 7.5d's eight.
 
 1. A user equation's bare or qualified element snapshot reads the slot
    directly, and the capture the base minted for it is gone (26 on C-LEARN).
@@ -1985,6 +2002,24 @@ the LTM causal graph), then 7.5c and 7.5d's seven.
     as the plain `vals[*]` does. Pinned by `db::element_scope_tests` (the four
     rules) and
     `mapped_reference_semantics_tests::a_wildcard_argument_under_an_apply_to_all_body_reads_the_active_element`.
+14. A variable named like a dimension (`other[Other]` over `Other`, a
+    collision XMILE 1.0 section 3.7.1 forbids and nothing refuses at the
+    definition, GH #1050) read as a BARE snapshot argument -- `y[Other] =
+    PREVIOUS(other)`, `INIT(other)` -- is refused as `DoesNotExist` on `y`,
+    where the base refused it as codegen's `NotSimulatable` ("PREVIOUS
+    requires a variable reference after helper rewriting"). Both refuse; the
+    code moved because the base rewrote the argument into a helper before
+    codegen met it, while the capture rewrite reads a bare name as a direct
+    slot (`SnapshotArg::access`), the dependency walk drops the name as a
+    dimension (`variable::classify_dependencies`), and
+    `Context::snapshot_storage` finds no shape for it. The other three
+    spellings are unchanged: the bare plain read `y[Other] = other` compiles
+    and reads the element index `[1, 2]` (the silent wrong number GH #1050
+    owns), the subscripted plain read `other[Other]` compiles and reads the
+    variable, and the subscripted snapshot `PREVIOUS(other[Other])` is
+    codegen's `NotSimulatable` on both. The definition-time refusal that
+    makes every row moot is GH #1050's. Pinned by
+    `db::prev_init_tests::a_variable_named_like_a_dimension_is_resolved_per_spelling`.
 
 **Phase 7.1 probe.** `db::exec_probe::ProbedDb` is a `SimlinDb` built over
 salsa storage carrying an event callback; it records every
@@ -2202,8 +2237,8 @@ generator produces them:
 
 **Phase 6b semantic divergences.** Making `compiler/array_operand.rs` the one
 materialization pass, and deleting the `Expr3` decomposition it duplicated,
-changed how nine shapes compile. C-LEARN's artifacts move (ledger row 6b) and
-one corpus model moves; each is pinned:
+changed how eleven shapes compile. C-LEARN's artifacts move (ledger row 6b)
+and one corpus model moves; each is pinned:
 
 1. **Once per equation is decided on the lowered body, not on the equation.**
    An array value two or more elements of an apply-to-all or arrayed equation
@@ -2243,7 +2278,14 @@ one corpus model moves; each is pinned:
    the source axis, then the declared element map, then a mapped parent). With
    Pass 1 gone both take the second route, and reading by ORDINAL survives only
    as its last resort, where the two dimensions declare no correspondence at
-   all. This is the largest behaviour change in the phase and it is a
+   all and the subscript names its active dimension -- on the static and the
+   dynamic subscript path alike (`DimensionsContext::resolve_dimension_subscript`),
+   so an undeclared pair reads the cell the base read whichever sibling index
+   the reference carries, and a pairing made through a mapping never reads
+   positionally
+   (`mapped_reference_semantics_tests::no_mapping_reads_by_ordinal_on_both_subscript_paths`,
+   `a_candidate_paired_through_a_mapping_never_takes_the_ordinal`, GH #1044).
+   This is the largest behaviour change in the phase and it is a
    CORRECTION: `test/test-models/tests/subrange_merge/` ships genuine Vensim
    output beside its `.mdl` and nothing simulated it (the corpus list is built
    from `.xmile` files and that directory has none), and
@@ -2409,11 +2451,54 @@ one corpus model moves; each is pinned:
    WHOLE and refused as an array in a one-value position. The old projection
    read coordinate 0 on every such axis, so all three spellings gave `[1, 1,
    1]`: a plausible array that answered a question the model did not ask. The
-   refusal is the one new loud refusal of a base-compiling shape in this
-   phase, and it replaces a silent wrong number. Not in the corpus; pinned by
+   refusal is one of the phase's three new loud refusals of a base-compiling
+   shape (items 10 and 11 are the others), and it replaces a silent wrong
+   number. Not in the corpus; pinned by
    `simulate.rs::a_temp_axis_the_target_does_not_name_is_read_through_the_declared_correspondence`
    (the mapped and indexed rows through the VM plus `ensure_wasm_matches`,
    and the unrelated pair's `NotSimulatable`).
+
+10. **A reducer over a computed operand pinned to the enclosing element is
+    refused.** In an apply-to-all body a bare arrayed name inside a reducer
+    reads the enclosing element (the Phase 8.1 rule), so the operand of
+    `x[region] = SUM(pop * 2)` -- and of `SUM(pop * w[idx])`, `SUM(pop * w)`,
+    `SUM(pop + w)`, `SUM(-pop)`, `SUM(IF pop > 150 THEN pop ELSE 0)`,
+    `SIZE(pop * 2)` and `MIN`/`MAX`/`STDDEV(pop * 2)` -- is a 0-d expression.
+    `materialize_view_operand` declines a dimensionless view and codegen
+    refuses the argument as no view over storage: "an array operand here must
+    be a variable, a subscripted array or an array temp, but it is an
+    arithmetic or comparison expression" (`NotSimulatable`, an assembly row on
+    the variable). The base RAN every one of these to GH #789's number, the
+    per-element value times `|region|`: `SUM(pop * 2)` gave `600, 1200, 1800`
+    for `pop = 100, 200, 300` and `SIZE(pop * 2)` gave 3 beside `SIZE(pop)`'s
+    1, because `Expr3`'s decomposition deferred an operand holding an
+    apply-to-all reference to a per-element path that preserved the bare
+    reference's axis as an iteration while its load stayed pinned.
+    `SUM(pop) * 2` compiles to `200, 400, 600` on both, and the explicit
+    `SUM(pop[region] * 2)` and the scalar `x = SUM(s * 2)` were refused on
+    both. GH #1051 owns compiling the family to the degenerate reduce of one
+    value (`SUM(pop * 2)` = `SUM(pop) * 2`) and moving the Phase 8.1 refusal
+    row in lockstep. Not in the corpus; pinned by
+    `array_operand_materialization_tests::a_reducer_over_a_zero_d_operand_in_an_apply_to_all_body_is_refused_loudly`
+    (the refusal text beside the compiling control) and
+    `db::lowering_scope_tests::a_helper_is_refused_where_the_plain_spelling_is`
+    (the captured twin refused the same way).
+
+11. **An undeclared pair read past the source's extent is refused, not NaN.**
+    `target[State] = m[State, idx]` with three `State` elements over a
+    two-element `Region` (no correspondence, no shared name) resolves `s3`
+    to ordinal 2, past `Region`; with a RUNTIME sibling the base folded that
+    ordinal to a constant index and let the VM's bounds check turn the read
+    into NaN, so the model ran with `target[s3] = NaN` on every step (a
+    static sibling was refused on the base too, `Index out of bounds`).
+    `resolve_dimension_subscript` filters the ordinal by the source's extent,
+    so both routes refuse at compile time -- `MismatchedDimensions` from
+    `lower_index_expr3`, `Generic` from `build_view_from_ops` (an `@N`
+    sibling takes the static code, `lower_static_subscript` building the view
+    before it hands the `@N` on). Vensim refuses the pair outright, so the
+    NaN had no reading to be right about. Not in the corpus; pinned by
+    `mapped_reference_semantics_tests::an_ordinal_past_the_sources_extent_is_refused_on_both_subscript_paths`
+    (every sibling kind, the whole diagnostic vector).
 
 There is no LTM scoped re-lower. `lower_ltm_variable` lowers every LTM
 equation once, under the shapes of its reads (Phase 8, "Loops That Matter: the
@@ -2623,19 +2708,29 @@ over the same model.
    admitted only by `SubdimensionRelations`, whose one caller is the
    dynamic-range arm that picks which axis to compare positions against and
    never resolves an element through the answer). Admitting it everywhere --
-   the literal union the plan first described -- would break both directions,
-   in different arms. `out[Sub] = src` over `src[Parent]` would break in
-   `make_dimension_subscripts`, the only arm affected: what it can emit for a
-   paired axis is a dimension-name subscript, so the reference becomes
-   `src[Sub]`, which resolves to the ACTIVE dimension's ordinal and reads
-   `src`'s SECOND element for `Sub`'s `C` rather than its third (GH #1029,
-   pre-existing and filed). `out[Parent] = src` over `src[Sub]` would break in
-   the Subscript arm's element step: pairing the axes skips the positional
-   length check, and the element step then falls back on the target axis's
-   ordinal -- `Parent.get_offset(B)` is 1 and `Parent.get_offset(D)` is 3,
-   indexing a two-element `src`. Both are loud `MismatchedDimensions` refusals
-   today, and the rung trades them for silent wrong numbers, so it waits on
-   #1029. Pinned by `axis_match_tests`'s
+   the literal union the plan first described -- would be correct in one
+   direction and a silent wrong number in the other, and the only arm
+   affected is `make_dimension_subscripts`, which withholds it through
+   `DirectMappingsOnly`. `out[Sub] = src` over `src[Parent]` would be correct:
+   what the arm can emit for a paired axis is a dimension-name subscript, so
+   the reference becomes `src[Sub]`, which reads each element by NAME on the
+   parent axis (`resolve_mapped_read`'s first step: `src[C]` for `Sub`'s `C`)
+   -- the read GH #1029 asks for, established for the explicit spelling by
+   Phase 6b's item 2 and pinned on the issue's own model by
+   `simulate.rs::a_subrange_dimension_reference_reads_by_name_in_every_spelling`
+   (`q_dimref[C]` is 400 on the VM and on wasm, `SUM(src[*:Sub])` is 500, and
+   the bare `src` and `src[Parent]` are refused rather than read
+   positionally). `out[Parent] = src` over `src[Sub]` would break: pairing the
+   axes rewrites the reference to `src[Parent]` and skips the positional
+   length check, and the element step
+   (`DimensionsContext::resolve_dimension_subscript`) finds no `Sub` element
+   named `B`, no mapping and nothing declared between the two dimensions, so
+   its ordinal last resort reads `Sub`'s `C` for `Parent`'s `B` silently
+   (`Parent.get_offset(B)` is 1; `D` at ordinal 3 is past a two-element
+   `src` and refused, so a three-element parent is the fixture that runs on
+   the wrong number). That is a loud `MismatchedDimensions` refusal today,
+   and the rung would trade it for a wrong number, so it stays opt-in until
+   the superset direction has a rule of its own. Pinned by `axis_match_tests`'s
    `a_subdimension_does_not_pair_for_a_caller_that_does_not_admit_the_rung`
    and `a_subdimension_does_not_pair_for_an_ordinal_resolving_caller_either`,
    beside the two rows that do admit it.

@@ -49,7 +49,11 @@
 //!
 //! 4 x 5 x 2 = 40 mapped cells, all in `every_cell_of_the_matrix`; the two
 //! controls contribute 4 cells each in `no_mapping_equal_cardinality` and
-//! `no_mapping_unequal_cardinality`. The three axis enumerations are walked
+//! `no_mapping_unequal_cardinality`, and
+//! `no_mapping_reads_by_ordinal_on_both_subscript_paths` walks the undeclared
+//! pair over a fourth axis, the SIBLING index ([`SiblingIndex`], 6 variants),
+//! which decides whether the static or the dynamic subscript path resolves
+//! the reference. The four axis enumerations are walked
 //! through `Spelling::all` / `MappingKind::all` / `Direction::all`, each
 //! built from a successor `match` so that adding a variant fails to compile
 //! rather than silently escaping the matrix.
@@ -824,6 +828,213 @@ fn assert_no_mapping_cases(
                 assert_refused(&project, *code, &format!("no mapping / {label}"));
             }
         }
+    }
+}
+
+/// How the index BESIDE the dimension-named one is spelled. The sibling
+/// decides the ROUTE a reference takes -- every index static keeps it on
+/// `normalize_subscripts3` + `build_view_from_ops`, one index needing runtime
+/// evaluation sends the whole subscript to `Context::lower_index_expr3` -- and
+/// must never decide the rule.
+#[derive(Copy, Clone, Debug)]
+enum SiblingIndex {
+    /// `m[State, 1]`: static.
+    Literal,
+    /// `m[State, c]`: static, an element name of the sibling axis.
+    ElementName,
+    /// `m[State, idx]`: dynamic, a variable reference.
+    Aux,
+    /// `m[State, 1 + TIME]`: dynamic, and the column it selects moves between
+    /// steps, which shows the sibling really is evaluated at runtime.
+    Time,
+    /// `m[State, k + 1]`: dynamic, arithmetic over a variable.
+    Arithmetic,
+    /// `m[State, @1]`: dynamic -- a dimension position inside an apply-to-all
+    /// body is bound per element by `lower_index_expr3`
+    /// (`Context::lower_static_subscript` returns `None` for it).
+    DimPosition,
+}
+
+impl SiblingIndex {
+    fn all() -> Vec<Self> {
+        successors(SiblingIndex::Literal, |s| match s {
+            SiblingIndex::Literal => Some(SiblingIndex::ElementName),
+            SiblingIndex::ElementName => Some(SiblingIndex::Aux),
+            SiblingIndex::Aux => Some(SiblingIndex::Time),
+            SiblingIndex::Time => Some(SiblingIndex::Arithmetic),
+            SiblingIndex::Arithmetic => Some(SiblingIndex::DimPosition),
+            SiblingIndex::DimPosition => None,
+        })
+    }
+
+    fn spelling(self) -> &'static str {
+        match self {
+            SiblingIndex::Literal => "1",
+            SiblingIndex::ElementName => "c",
+            SiblingIndex::Aux => "idx",
+            SiblingIndex::Time => "1 + TIME",
+            SiblingIndex::Arithmetic => "k + 1",
+            SiblingIndex::DimPosition => "@1",
+        }
+    }
+
+    /// Whether every index of `m[State, <sibling>]` is static, which is what
+    /// keeps the reference on the static subscript path.
+    fn is_static(self) -> bool {
+        matches!(self, SiblingIndex::Literal | SiblingIndex::ElementName)
+    }
+
+    /// The code an unresolvable dimension-named subscript is refused with on
+    /// this sibling's route: `Generic` from `build_view_from_ops`,
+    /// `MismatchedDimensions` from `lower_index_expr3`. `@N` takes the static
+    /// code although its in-range read is the dynamic arm's, because
+    /// `Context::lower_static_subscript` builds the view first and hands the
+    /// subscript to the dynamic path only afterwards.
+    fn refusal_code(self) -> ErrorCode {
+        match self {
+            SiblingIndex::Literal | SiblingIndex::ElementName | SiblingIndex::DimPosition => {
+                ErrorCode::Generic
+            }
+            SiblingIndex::Aux | SiblingIndex::Time | SiblingIndex::Arithmetic => {
+                ErrorCode::MismatchedDimensions
+            }
+        }
+    }
+
+    /// The 0-based column each saved step reads: every sibling evaluates to 1
+    /// (`c`) at `t = 0`, and `Time` alone moves to 2 (`d`) at `t = 1`.
+    fn columns(self) -> [usize; 2] {
+        match self {
+            SiblingIndex::Time => [0, 1],
+            _ => [0, 0],
+        }
+    }
+}
+
+/// Control: NO mapping and NO shared element name, on BOTH subscript paths.
+///
+/// `target[State] = m[State, <sibling>]` over `m[Region, D2]`, with `Region`
+/// and `State` declaring nothing and sharing no element name. The
+/// dimension-named index is spelled identically in every row; only its
+/// sibling differs, and the sibling picks the route ([`SiblingIndex`]). Both
+/// routes end in `DimensionsContext::resolve_dimension_subscript`, so every
+/// row reads `Region` at `State`'s ordinal -- `target[s1]` is `m[a, ..]` and
+/// `target[s2]` is `m[b, ..]` -- with the numbers `origin/main` computes for
+/// the same six models (`100`/`200` at `t = 0` on every row, measured with
+/// the CLI built from `d04593e6`; GH #1044 holds the static and `idx` rows).
+/// A route that refused the dynamic rows would turn a running model into a
+/// refusal by the edit `1` -> `idx`.
+///
+/// The other arms of `resolve_dimension_subscript` -- name, the declared map,
+/// a mapped parent, a declared map that fails to translate -- are
+/// `every_cell_of_the_matrix` and the `no_mapping_*` controls above, all on
+/// the static route; its two refusals are the next two tests. Not rowed
+/// anywhere: the hoisted and captured twins of a reference with a dynamic
+/// sibling.
+#[test]
+fn no_mapping_reads_by_ordinal_on_both_subscript_paths() {
+    let cell = |row: usize, column: usize| 100.0 * (row + 1) as f64 + 10.0 * column as f64;
+    for sibling in SiblingIndex::all() {
+        let label = sibling.label("target[State]", &["s1", "s2"]);
+        let results = sibling_model("target[State]", sibling)
+            .named_dimension("State", &["s1", "s2"])
+            .run_vm()
+            .unwrap_or_else(|e| panic!("{label}: expected it to run: {e}"));
+        let [col0, col1] = sibling.columns();
+        assert_eq!(
+            results["target[s1]"],
+            vec![cell(0, col0), cell(0, col1)],
+            "{label}: s1 reads Region's first element"
+        );
+        assert_eq!(
+            results["target[s2]"],
+            vec![cell(1, col0), cell(1, col1)],
+            "{label}: s2 reads Region's second element"
+        );
+    }
+}
+
+/// Past the source's extent -- three `State` elements over two `Region` ones
+/// -- the ordinal is out of range and both routes refuse, each with its own
+/// code ([`SiblingIndex::refusal_code`]). `origin/main` refused the static
+/// spellings too (`Index out of bounds`) but RAN the dynamic ones, the folded
+/// ordinal reaching the runtime bounds check and writing NaN into
+/// `target[s3]`; the refusal in its place is "Phase 6b semantic divergences"
+/// item 11.
+#[test]
+fn an_ordinal_past_the_sources_extent_is_refused_on_both_subscript_paths() {
+    for sibling in SiblingIndex::all() {
+        let state = ["s1", "s2", "s3"];
+        assert_eq!(
+            sibling_model("target[State]", sibling)
+                .named_dimension("State", &state)
+                .error_diagnostics(),
+            vec![("main.target".to_string(), sibling.refusal_code())],
+            "{}: three State elements over two Region ones",
+            sibling.label("target[State]", &state)
+        );
+    }
+}
+
+/// A subscript paired with its active dimension THROUGH a mapping never takes
+/// the ordinal: `target[Foo] = m[State, <sibling>]` with `Foo maps_to State`
+/// pairs `State` with `Foo` on both routes, and over `m[Region, D2]` -- `Region`
+/// related to neither -- there is no correspondence to follow and no ordinal
+/// to take, so both routes refuse with the route's code
+/// ([`SiblingIndex::refusal_code`]), as `origin/main` does (`Invalid active
+/// subscript 'f1'` static, `mismatched_dimensions` dynamic). The ordinal is
+/// for a subscript that NAMES its active dimension, the rows above; a pairing
+/// the mapping made has no positional meaning on an unrelated axis.
+#[test]
+fn a_candidate_paired_through_a_mapping_never_takes_the_ordinal() {
+    for sibling in SiblingIndex::all() {
+        let foo = ["f1", "f2"];
+        let project = sibling_model("target[Foo]", sibling)
+            .named_dimension("State", &["s1", "s2"])
+            .named_dimension_with_mapping("Foo", &foo, "State");
+        assert_eq!(
+            project.error_diagnostics(),
+            vec![("main.target".to_string(), sibling.refusal_code())],
+            "{}, Foo maps_to State: paired through the mapping, no ordinal",
+            sibling.label("target[Foo]", &foo)
+        );
+    }
+}
+
+/// `<target> = m[State, <sibling>]` over `m[Region, D2]` with `m[a,c] = 100,
+/// m[a,d] = 110, m[b,c] = 200, m[b,d] = 210`: the hundreds identify the ROW
+/// (`Region`) and the tens the COLUMN (the sibling's value). `Region` declares
+/// nothing and shares no element name with any other dimension. The caller
+/// declares the target's dimension (and `State`, when the target is not it).
+fn sibling_model(target: &str, sibling: SiblingIndex) -> TestProject {
+    let m = [
+        ("a,c", "100"),
+        ("a,d", "110"),
+        ("b,c", "200"),
+        ("b,d", "210"),
+    ];
+    TestProject::new("no_mapping_sibling")
+        .with_sim_time(0.0, 1.0, 1.0)
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("D2", &["c", "d"])
+        .array_with_ranges("m[Region,D2]", m.to_vec())
+        .aux("idx", "1", None)
+        .aux("k", "0", None)
+        .array_aux(target, &format!("m[State, {}]", sibling.spelling()))
+}
+
+impl SiblingIndex {
+    fn label(self, target: &str, target_elements: &[&str]) -> String {
+        format!(
+            "no mapping / {target} = m[State, {}] ({}, {} target elements)",
+            self.spelling(),
+            if self.is_static() {
+                "static path"
+            } else {
+                "dynamic path"
+            },
+            target_elements.len()
+        )
     }
 }
 

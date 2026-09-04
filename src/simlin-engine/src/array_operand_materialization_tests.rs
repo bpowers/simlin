@@ -2965,3 +2965,58 @@ fn a_sort_order_over_the_iterated_axis_is_materialized_once_per_equation() {
         "vals + the sum of one sort order",
     );
 }
+
+/// A reducer over a computed operand whose every array reference is pinned to
+/// the enclosing element has a 0-d operand: in `x[region] = SUM(pop * 2)` the
+/// bare `pop` is pass 0's `pop[region]`, one slot under the `region`
+/// iteration, the `Op2` over it has no axis, and `materialize_view_operand`
+/// declines a dimensionless view, so codegen refuses the reducer's argument
+/// as no view over storage. `SUM(pop) * 2` -- the same value under the
+/// engine's bare-name rule
+/// (`db::lowering_scope_tests::a_helper_reads_what_the_plain_spelling_reads`)
+/// -- compiles, because a collapsed `StaticSubscript` IS a view.
+///
+/// GH #1051 owns compiling the former to the degenerate reduce of one value
+/// (`[200, 400, 600]`); until it lands, the refusal is the loud arm of "Phase
+/// 6b semantic divergences" item 10 and this row pins its text, so a change
+/// that compiles it moves a test rather than a silent number.
+#[test]
+fn a_reducer_over_a_zero_d_operand_in_an_apply_to_all_body_is_refused_loudly() {
+    let model = |eqn: &str| {
+        TestProject::new("zero_d_reducer")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .named_dimension("region", &["north", "south", "east"])
+            .array_with_ranges(
+                "pop[region]",
+                vec![("north", "100"), ("south", "200"), ("east", "300")],
+            )
+            .array_aux("x[region]", eqn)
+    };
+    let control = model("SUM(pop) * 2");
+    control.assert_compiles_incremental();
+    assert_eq!(control.vm_result("x"), vec![200.0, 400.0, 600.0]);
+
+    let refused: Vec<(Option<String>, ErrorCode, String)> = model("SUM(pop * 2)")
+        .diagnostics_incremental()
+        .into_iter()
+        .filter(|d| d.severity == crate::db::DiagnosticSeverity::Error)
+        .map(|d| {
+            (
+                d.variable.clone(),
+                d.code(),
+                d.reason().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(refused.len(), 1, "one refusal, on x: {refused:?}");
+    let (variable, code, reason) = &refused[0];
+    assert_eq!(variable.as_deref(), Some("x"));
+    assert_eq!(*code, ErrorCode::NotSimulatable);
+    assert!(
+        reason.contains(
+            "an array operand here must be a variable, a subscripted array or an array \
+             temp, but it is an arithmetic or comparison expression"
+        ),
+        "the materializer's decline surfaces as codegen's view refusal: {reason}"
+    );
+}

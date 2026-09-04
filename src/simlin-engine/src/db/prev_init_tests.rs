@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::capture::CaptureKind;
+use crate::common::ErrorCode;
 use crate::datamodel;
 use crate::db::dep_graph::{RunlistMembership, implicit_var_runlist_membership};
 use crate::test_common::TestProject;
@@ -1837,6 +1838,70 @@ fn module_snapshot_arguments_are_resolved_at_lowering() {
                 .any(|why| why.contains("bare module instance 'sub'")),
             "`{equation}`: a bare module instance has no snapshot storage and must be \
              refused on `probe`; got {refusals:?}"
+        );
+    }
+}
+
+/// A variable named like a dimension (`other[Other]` over `Other`) is a
+/// collision XMILE 1.0 section 3.7.1 forbids -- dimension names "must be
+/// distinct from model variables names" -- and nothing refuses at the
+/// definition (GH #1050). Every spelling that reads the name resolves the
+/// collision on its own, dimension-first, and this pins the verdict each one
+/// gets, rows from spelling {bare, subscripted} x wrapper {plain, `PREVIOUS`,
+/// `INIT`}:
+///
+/// * bare plain (`y[Other] = other`) compiles and reads the ELEMENT INDEX,
+///   `[1, 2]`, not the variable's `[1, 1]` -- the silent wrong number GH
+///   #1050 owns;
+/// * subscripted plain (`other[Other]`) compiles and reads the variable;
+/// * bare snapshot (`PREVIOUS(other)`, `INIT(other)`) is `DoesNotExist` on
+///   `y`: `SnapshotArg::access` reads a bare name as a direct slot, the
+///   dependency walk drops the name as a dimension
+///   (`variable::classify_dependencies`), and `Context::snapshot_storage`
+///   finds no shape for it (`Context::resolve`);
+/// * subscripted snapshot (`PREVIOUS(other[Other])`, `INIT(other[Other])`)
+///   is codegen's `NotSimulatable`: the parse classifies the argument as a
+///   direct slot read whose base `static_slot` cannot address.
+///
+/// "Phase 7.5 semantic divergences" item 14 records the bare snapshot's code.
+#[test]
+fn a_variable_named_like_a_dimension_is_resolved_per_spelling() {
+    let model = |eqn: &str| {
+        TestProject::new("dimension_named_variable")
+            .with_sim_time(0.0, 2.0, 1.0)
+            .named_dimension("Other", &["a", "b"])
+            .array_aux("other[Other]", "1")
+            .array_aux("y[Other]", eqn)
+    };
+    let reads = |eqn: &str| -> Vec<f64> {
+        let results = model(eqn)
+            .run_vm()
+            .unwrap_or_else(|e| panic!("{eqn}: expected it to run: {e}"));
+        ["y[a]", "y[b]"]
+            .iter()
+            .map(|key| *results[*key].last().expect("empty series"))
+            .collect()
+    };
+    assert_eq!(
+        reads("other"),
+        vec![1.0, 2.0],
+        "bare plain: the element index, GH #1050's wrong number"
+    );
+    assert_eq!(
+        reads("other[Other]"),
+        vec![1.0, 1.0],
+        "subscripted plain: the variable"
+    );
+    for (eqn, code) in [
+        ("PREVIOUS(other)", ErrorCode::DoesNotExist),
+        ("INIT(other)", ErrorCode::DoesNotExist),
+        ("PREVIOUS(other[Other])", ErrorCode::NotSimulatable),
+        ("INIT(other[Other])", ErrorCode::NotSimulatable),
+    ] {
+        assert_eq!(
+            model(eqn).error_diagnostics(),
+            vec![("main.y".to_string(), code)],
+            "{eqn}"
         );
     }
 }

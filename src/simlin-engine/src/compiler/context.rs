@@ -322,7 +322,7 @@ impl Context<'_> {
         Some(
             ops.iter()
                 .zip(&built.single_indices)
-                .map(|(op, single)| matches!(op, IndexOp::ActiveDimRef(_)).then_some(*single))
+                .map(|(op, single)| matches!(op, IndexOp::ActiveDimRef { .. }).then_some(*single))
                 .collect(),
         )
     }
@@ -1537,7 +1537,9 @@ impl Context<'_> {
             let preserved_ops: Vec<IndexOp> = operations
                 .iter()
                 .map(|op| match op {
-                    IndexOp::ActiveDimRef(_) if self.promote_active_dim_ref => IndexOp::Wildcard,
+                    IndexOp::ActiveDimRef { .. } if self.promote_active_dim_ref => {
+                        IndexOp::Wildcard
+                    }
                     other => other.clone(),
                 })
                 .collect();
@@ -1592,7 +1594,7 @@ impl Context<'_> {
         });
         let has_active_dim_ref = operations
             .iter()
-            .any(|op| matches!(op, IndexOp::ActiveDimRef(_)));
+            .any(|op| matches!(op, IndexOp::ActiveDimRef { .. }));
         has_axis_ops || (self.promote_active_dim_ref && has_active_dim_ref)
     }
 
@@ -1717,7 +1719,7 @@ impl Context<'_> {
             for op in operations {
                 match op {
                     // These collapse their axis and contribute no view axis.
-                    IndexOp::Single(_) | IndexOp::ActiveDimRef(_) => {}
+                    IndexOp::Single(_) | IndexOp::ActiveDimRef { .. } => {}
                     IndexOp::Range { .. } => {
                         set.insert(view_dim_idx);
                         view_dim_idx += 1;
@@ -2402,61 +2404,29 @@ impl Context<'_> {
                 let active_dims = self.active_dimension.as_ref().unwrap();
                 let active_subscripts = self.active_subscript.as_ref().unwrap();
 
-                // Find the active dimension this index names, then resolve the
-                // element it selects on THIS source axis. Which active
-                // dimension: by name first, then through a declared mapping in
-                // either direction -- the pairing
+                // Which active dimension this index names: by name first, then
+                // through a declared mapping in either direction -- the pairing
                 // `compiler::subscript::normalize_subscripts3` makes on the
-                // static path. Which element: the shared executed rule
-                // (`DimensionsContext::resolve_mapped_read`, GH #997).
-                //
-                // Both halves go through the shared rule, and the element is
-                // tried by the active element's own name on this axis BEFORE
-                // the mapping: a resolver that consulted the mapping first
-                // would read a different element than the two static sites
-                // for a mapped pair whose two dimensions share element names
-                // (reachable: 8 references in the integration corpus). Where a
-                // source axis's dimension maps to two active dimensions and
-                // the index names one of them, the candidate order below pairs
-                // it with the one the index spells, matching what
-                // `normalize_subscripts3` picks on the static path for the
-                // same reference: every active dimension the index NAMES, then
-                // every one it reaches through a declared mapping, and the
-                // first that resolves wins.
-                //
-                // Neither candidate may fall back to inventing an index. For an
-                // INDEXED active dimension whose numeral the source axis does
-                // not declare, emitting the raw 1-based index would diverge
-                // from the static twin `build_view_from_ops`, which has no such
-                // fallback -- GH #997's class of latent divergence. Both paths
-                // REFUSE an unresolvable subscript rather than one of them
-                // inventing an index; the codes differ (`MismatchedDimensions`
-                // here, `Generic` there), which is worth tidying but is not
-                // what the refusal is about. (The case is reachable in
-                // principle -- a NAMED dimension may declare a mapping toward
-                // an indexed one, which puts an indexed active dimension in
-                // the mapping candidates -- and measured dead across the lib
-                // and integration corpora, where the by-name candidate is
-                // reached 8 times and every one resolves by name identity.)
-                //
-                // The ORDER is a chained iterator rather than a documented
-                // property, because it costs nothing and mirrors
-                // `normalize_subscripts3`. No reference in either corpus has
-                // two candidates: this arm is entered 12 times, 8 with a single
-                // by-name candidate (every one resolving by name identity) and
-                // 4 with none at all (the `no_mapping_*` refusal cells of
-                // `crate::mapped_reference_semantics_tests`). The two-candidate
-                // shape -- a target iterating both a dimension and something
-                // mapped to it -- is nevertheless REACHABLE: a subscript naming
-                // an active dimension reaches the subscript path as an
-                // `IndexExpr3::Dimension` rather than as a folded ordinal,
-                // which is how all 8 corpus references (`LOOKUP` table
-                // arguments with an `@N` sibling) arrive here naming an ACTIVE
-                // dimension. A fixture of that shape reaches this loop with two
-                // candidates.
-                // What is unmeasured is whether the two ever resolve to
-                // DIFFERENT elements in a model that compiles; the order is
-                // chosen to match the static path either way.
+                // static path, as a chained iterator so that a target iterating
+                // both a dimension and one mapped to it pairs the index with
+                // the dimension it spells. Which element of THIS source axis
+                // the active element selects:
+                // `DimensionsContext::resolve_dimension_subscript`, the rule
+                // the static twin `build_view_from_ops` resolves its
+                // `IndexOp::ActiveDimRef` through -- the active element's own
+                // name, the declared mapping, a mapped parent (GH #997), and
+                // for a pair that declares nothing the active element's
+                // ordinal (GH #1044). The sibling that sent the whole subscript
+                // down this path (`m[State, idx]` beside `m[State, 1]`)
+                // therefore decides the route and never the rule. The shared
+                // step takes the ordinal only for a candidate the subscript
+                // NAMES, so a by-mapping candidate over an axis unrelated to
+                // both dimensions declines rather than reading a row. The first
+                // candidate that resolves wins, and one whose declared map
+                // cannot translate the element declines rather than inventing
+                // an index. An unresolvable subscript is refused on both paths;
+                // the codes differ (`MismatchedDimensions` here, `Generic` in
+                // `build_view_from_ops`).
                 let sub_dim_name = CanonicalDimensionName::from_raw(name.as_str());
                 let by_name = active_dims
                     .iter()
@@ -2472,11 +2442,12 @@ impl Context<'_> {
                             || self.dimensions_ctx.has_mapping_to(adn, &sub_dim_name)
                     });
                 for (active_dim, active_subscript) in by_name.chain(by_mapping) {
-                    if let Some(resolved) =
-                        self.dimensions_ctx
-                            .resolve_mapped_read(dim, active_dim, active_subscript)
-                        && let Some(offset) = dim.get_offset(&resolved)
-                    {
+                    if let Some(offset) = self.dimensions_ctx.resolve_dimension_subscript(
+                        dim,
+                        &sub_dim_name,
+                        active_dim,
+                        active_subscript,
+                    ) {
                         return Ok(SubscriptIndex::Single(Expr::Const(
                             (offset + 1) as f64,
                             *dim_loc,

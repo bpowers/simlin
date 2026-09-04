@@ -7440,6 +7440,99 @@ fn a_subrange_subscript_reads_the_element_it_names() {
     }
 }
 
+/// GH #1029's own model: an apply-to-all over a SUBRANGE reading the parent
+/// array by dimension name reads each element by NAME -- `q_dimref[C]` is
+/// `src[C]`, 400, not the `Sub`-relative position's `src[B]` -- and the four
+/// spellings of the intent agree: `src[Sub]` and `SUM(src[*:Sub])` compile to
+/// the named elements, the bare `src` and `src[Parent]` are refused
+/// (`MismatchedDimensions`, the whole diagnostic vector), and none reads
+/// positionally. Vensim's ground truth for the same read is
+/// `a_subrange_subscript_reads_the_element_it_names`; this is the issue's
+/// fixture through `open_xmile`, on the VM and on wasm.
+#[test]
+fn a_subrange_dimension_reference_reads_by_name_in_every_spelling() {
+    let xmile = |probe: &str| -> simlin_engine::datamodel::Project {
+        let text = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+<header><name>gh1029</name><vendor>simlin</vendor><product version="1.0">simlin</product></header>
+<sim_specs method="Euler"><start>0</start><stop>1</stop><dt>1</dt></sim_specs>
+<dimensions>
+    <dim name="Parent"><elem name="A"/><elem name="B"/><elem name="C"/><elem name="D"/></dim>
+    <dim name="Sub"><elem name="A"/><elem name="C"/></dim>
+</dimensions>
+<model><variables>
+    <aux name="src">
+        <element subscript="A"><eqn>100</eqn></element>
+        <element subscript="B"><eqn>200</eqn></element>
+        <element subscript="C"><eqn>400</eqn></element>
+        <element subscript="D"><eqn>800</eqn></element>
+        <dimensions><dim name="Parent"/></dimensions>
+    </aux>
+    {probe}
+</variables></model>
+</xmile>"#
+        );
+        simlin_engine::open_xmile(&mut BufReader::new(text.as_bytes()))
+            .unwrap_or_else(|e| panic!("open_xmile: {e}"))
+    };
+
+    let datamodel = xmile(
+        r#"<aux name="q_dimref"><eqn>src[Sub]</eqn><dimensions><dim name="Sub"/></dimensions></aux>
+    <aux name="ctl_a"><eqn>src[A]</eqn></aux>
+    <aux name="ctl_c"><eqn>src[C]</eqn></aux>
+    <aux name="q_star"><eqn>SUM(src[*:Sub])</eqn></aux>"#,
+    );
+    let results = {
+        let compiled = compile_vm(&datamodel);
+        let mut vm = Vm::new(compiled).unwrap();
+        vm.run_to_end().unwrap();
+        vm.into_results()
+    };
+    let last = results.iter().next_back().unwrap().to_vec();
+    let at = |name: &str| -> f64 {
+        let off = *results
+            .offsets
+            .get(&simlin_engine::common::Ident::new(name))
+            .unwrap_or_else(|| panic!("{name} missing from results"));
+        last[off]
+    };
+    for (cell, value) in [
+        ("q_dimref[A]", 100.0),
+        ("q_dimref[C]", 400.0),
+        ("q_star", 500.0),
+        ("ctl_a", 100.0),
+        ("ctl_c", 400.0),
+    ] {
+        assert_eq!(at(cell), value, "{cell}: the element it names");
+    }
+    assert!(
+        matches!(
+            ensure_wasm_matches(&datamodel, "main", &results, &[]),
+            WasmRunOutcome::Ran
+        ),
+        "the wasm backend reads the same elements"
+    );
+
+    for (probe, variable) in [
+        (
+            r#"<aux name="q_bare"><eqn>src</eqn><dimensions><dim name="Sub"/></dimensions></aux>"#,
+            "main.q_bare",
+        ),
+        (
+            r#"<aux name="q_parent"><eqn>src[Parent]</eqn><dimensions><dim name="Sub"/></dimensions></aux>"#,
+            "main.q_parent",
+        ),
+    ] {
+        let project = simlin_engine::test_common::TestProject::from_datamodel(xmile(probe));
+        assert_eq!(
+            project.error_diagnostics(),
+            vec![(variable.to_string(), ErrorCode::MismatchedDimensions)],
+            "{variable}: refused rather than read positionally"
+        );
+    }
+}
+
 /// A shared materialization inside a resolved recurrence SCC is evaluated
 /// before every element that reads it, whichever order the elements run in.
 ///

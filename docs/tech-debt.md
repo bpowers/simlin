@@ -163,6 +163,7 @@ Known debt items consolidated from CLAUDE.md files and codebase analysis. Each e
 - **Severity**: low
 - **Description**: The parse side is dimension-granular: `parse_source_variable` reads only the dimensions its equation names (`db::query::variable_relevant_dimensions`) and, for a qualified snapshot index, one element (`project_has_qualified_element`), so a dimension edit re-parses only the variables that read it (`db::dimension_invalidation_tests`). The fragment side is not: `lowered_source_variable`, `compile_var_fragment` and `explicit_fragment_input` read `project_dimensions_context` whole, so a dimension edit re-lowers and recompiles every fragment of the project. AC1.5 (dimension changes propagate correctly) holds through salsa's backdating -- this is a pure performance item, and it matters for projects with many dimensions and thousands of variables.
 - **Measure**: `rg -n 'project_dimensions_context\(db, project\)' src/simlin-engine/src/db/fragment_compile.rs src/simlin-engine/src/db/var_fragment.rs` (the whole-context reads a per-variable dimension projection would replace); `db::exec_probe::ProbedDb` over a dimension edit counts the fragments that recompile.
+- **Tracked**: GH #1045 (the work item; this entry holds the measure).
 - **Owner**: unassigned
 - **Last reviewed**: 2026-09-03
 

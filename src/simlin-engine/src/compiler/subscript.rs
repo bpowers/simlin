@@ -43,9 +43,16 @@ pub(crate) enum IndexOp {
         /// The subdimension the resulting axis ranges over.
         axis: CanonicalDimensionName,
     },
-    /// Reference to an active A2A dimension by index.
-    /// Used when a dimension name appears as a subscript in A2A context
-    ActiveDimRef(usize),
+    /// A dimension name inside an apply-to-all body: `active` is the position
+    /// of the active dimension the subscript pairs with (`active_dim_ref`),
+    /// `spelled` the dimension it names. The two differ when the pairing ran
+    /// through a declared mapping, and `build_view_from_ops` hands both to
+    /// `DimensionsContext::resolve_dimension_subscript`, whose ordinal last
+    /// resort is for a subscript that NAMES its active dimension only.
+    ActiveDimRef {
+        active: usize,
+        spelled: CanonicalDimensionName,
+    },
 }
 
 /// Result of building an ArrayView from IndexOp operations.
@@ -282,7 +289,10 @@ pub(crate) fn normalize_subscripts3(
                         } else if config.dimension_named(ident.as_str()).is_some() {
                             let active = config.active_dim_ref(ident.as_str(), &claimed)?;
                             claimed.push(active);
-                            IndexOp::ActiveDimRef(active)
+                            IndexOp::ActiveDimRef {
+                                active,
+                                spelled: CanonicalDimensionName::from_raw(ident.as_str()),
+                            }
                         } else {
                             // Not a known element or dimension - need dynamic handling
                             return None;
@@ -302,7 +312,10 @@ pub(crate) fn normalize_subscripts3(
                 } else {
                     let active = config.active_dim_ref(name.as_str(), &claimed)?;
                     claimed.push(active);
-                    IndexOp::ActiveDimRef(active)
+                    IndexOp::ActiveDimRef {
+                        active,
+                        spelled: name.clone(),
+                    }
                 }
             }
         };
@@ -410,7 +423,10 @@ pub(crate) fn build_view_from_ops(
                 dim_mapping.push(Some(i));
                 single_indices.push(0); // No static offset for sparse dimensions
             }
-            IndexOp::ActiveDimRef(active_idx) => {
+            IndexOp::ActiveDimRef {
+                active: active_idx,
+                spelled,
+            } => {
                 // Reference to active A2A dimension - resolve to concrete offset
                 let active_subscripts = config.active_subscript.ok_or_else(|| {
                     Error::new(
@@ -424,48 +440,21 @@ pub(crate) fn build_view_from_ops(
 
                 let offset = dim.get_offset(subscript).or_else(|| {
                     // The active element's own name is not declared on this
-                    // source axis, so the reference resolves through the
-                    // shared executed rule (GH #997): the declared mapping,
-                    // then a mapped parent of the active subdimension.
-                    // `normalize_subscripts3` already picked the active
-                    // dimension, so this is one call rather than a search.
-                    //
-                    // The mapped-parent step is new here (it was already in
-                    // `get_implicit_subscript_off`, the other executed site).
-                    // Unifying can only resolve a reference that previously
-                    // failed to compile: the shared rule tries name and then
-                    // mapping first, which is exactly what this arm did, and
-                    // reaches the parent step only where both missed.
-                    let dims_ctx = config.dimensions_ctx?;
-                    let active_dims = config.active_dimension?;
-                    let active_dim = &active_dims[*active_idx];
-                    if let Some(resolved) = dims_ctx.resolve_mapped_read(dim, active_dim, subscript)
-                    {
-                        // A declared correspondence is authoritative: an element
-                        // it names that this axis does not declare is an error,
-                        // not a reason to read some other element.
-                        return dim.get_offset(&resolved);
-                    }
-                    // Nothing is declared between the two dimensions, so the
-                    // reference is POSITIONAL: the active element's ordinal
-                    // within its own dimension, indexing this axis. That is
-                    // `Context::resolve_iteration_element`'s last resort for an
-                    // axis it could not pair by name or mapping, and this is the
-                    // same question one axis-collapse earlier; a declared
-                    // correspondence that fails to translate stops short of it
-                    // there too. Out of range is an error, exactly as it is for
+                    // source axis, so the element is the shared rule's
+                    // (`DimensionsContext::resolve_dimension_subscript`): the
+                    // declared mapping, then a mapped parent of the active
+                    // subdimension (GH #997), and -- for a subscript that NAMES
+                    // its active dimension over an axis declaring nothing --
+                    // the active element's ordinal, the one last resort the
+                    // dynamic subscript path (`Context::lower_index_expr3`)
+                    // takes too, so a sibling index never decides which rule
+                    // fires (GH #1044). `normalize_subscripts3` already picked
+                    // the active dimension, so this is one call rather than a
+                    // search. Out of range is an error, exactly as it is for
                     // the `IndexOp::Single` an explicit element produces.
-                    let source_name = dim.canonical_name();
-                    let active_name = active_dim.canonical_name();
-                    let declared = dims_ctx.has_mapping_to(source_name, active_name)
-                        || dims_ctx.has_mapping_to(active_name, source_name)
-                        || dims_ctx.has_mapping_to_parent_of(source_name, active_name);
-                    if declared {
-                        return None;
-                    }
-                    active_dim
-                        .get_offset(subscript)
-                        .filter(|offset| *offset < dim.len())
+                    let dims_ctx = config.dimensions_ctx?;
+                    let active_dim = &config.active_dimension?[*active_idx];
+                    dims_ctx.resolve_dimension_subscript(dim, spelled, active_dim, subscript)
                 });
 
                 if let Some(offset) = offset {
@@ -540,7 +529,7 @@ pub(crate) fn build_view_from_ops(
                 new_dim_names.push(axis_name(Some(axis), config, i));
                 output_dim_idx += 1;
             }
-            IndexOp::ActiveDimRef(_) => {
+            IndexOp::ActiveDimRef { .. } => {
                 // Dimension is consumed (resolved to active subscript), don't add to output
             }
         }
