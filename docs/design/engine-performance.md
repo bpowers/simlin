@@ -637,7 +637,7 @@ cycle-gate fragment probe (-14.3%), a parse demanded under a second context
 Unicode case tables over the engine's own idents (-1.8%, -2.4%). The
 compiler-unification ledger continues the cold-compile series from there:
 10.788 G at its baseline (a whole-process measurement with
-`CLEARN_COMPILE_ITERS=5`) to 6.9521 G at `10918894`.
+`CLEARN_COMPILE_ITERS=5`) to 6.9521 G at `engine: ltm describes the executed read`.
 
 Two constraints follow, and both are cheap to violate:
 
