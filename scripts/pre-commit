@@ -207,7 +207,7 @@ PIPELINE_PIDS+=($PID_A)
     #
     # DISABLE_WASM_OPT=1 skips the wasm-opt -O3 pass, mirroring
     # .github/workflows/ci.yaml's two build steps.  On an engine change that
-    # alters emitted code the pass is ~190s on top of the ~200s the two
+    # alters emitted code the pass is ~225s on top of the ~240s the two LTO,
     # codegen-units=1 cargo builds take, and the hook needs an artifact that
     # builds and passes the TypeScript tests, not an optimized one.  See GH
     # #1019 for the coverage this gives up.
@@ -222,8 +222,8 @@ PIPELINE_PIDS+=($PID_A)
     # src/pysimlin/scripts/stage_widget_assets.py --require-opt, refusing a
     # raw wasm), and wasm-opt.yml, whose whole point is that blob -- because
     # every byte of the browser bundle is downloaded by every user.  Flipping
-    # the default would route through all of them and ship a 12% larger
-    # bundle (8.03MB -> 8.99MB) to every user.
+    # the default would route through all of them and ship an 11% larger
+    # bundle (9.52MB -> 10.61MB) to every user.
     echo "[ts] Building..."
     DISABLE_WASM_OPT=1 pnpm build
 
