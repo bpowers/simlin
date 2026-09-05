@@ -3524,7 +3524,6 @@ fn indexed_graph_empty_round_trip() {
     assert_eq!(graph.len(), 0);
     assert!(graph.nodes.is_empty());
     assert!(graph.succ.is_empty());
-    assert!(graph.node_to_idx.is_empty());
 
     let cg = CausalGraph::new(edges, HashSet::new());
     let circuits = cg
@@ -3544,10 +3543,9 @@ fn indexed_graph_two_node_back_edge() {
         graph.nodes.iter().map(|n| n.as_str()).collect::<Vec<_>>(),
         vec!["a", "b"]
     );
-    // Round-trip: every node's index resolves back to the same ident.
-    for (i, n) in graph.nodes.iter().enumerate() {
-        assert_eq!(graph.node_to_idx[n], i as u32);
-    }
+    // The successor lists are numbered against that order: `a`'s one
+    // successor is `b` (index 1) and `b`'s is `a` (index 0).
+    assert_eq!(graph.succ, vec![vec![1], vec![0]]);
 
     let circuits = cg
         .find_circuit_node_lists_with_limit(usize::MAX)

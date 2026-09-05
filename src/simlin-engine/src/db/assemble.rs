@@ -1276,7 +1276,7 @@ struct SccFragments {
     /// `SymbolicCompiledInitial` may write every member's init slots.
     init_ident: Vec<String>,
     /// Member -> SCC index. A member is in at most one SCC (the SCCs are
-    /// pairwise disjoint -- see `scc_map_from_resolved`), so this is
+    /// pairwise disjoint -- see `dep_graph::phase_cycle_sccs`), so this is
     /// well-defined.
     of_member: HashMap<String, usize>,
 }
@@ -1833,7 +1833,11 @@ pub fn assemble_simulation(
     )))
 }
 
-type ModuleInstanceMap = HashMap<Ident<Canonical>, BTreeSet<BTreeSet<Ident<Canonical>>>>;
+/// Every model a root instantiates (the root itself included, under the
+/// empty set), with the distinct bound-port sets it is instantiated under:
+/// [`enumerate_module_instances`]'s result, the universe `assemble_simulation`
+/// compiles one `CompiledModule` per entry of.
+pub type ModuleInstanceMap = HashMap<Ident<Canonical>, BTreeSet<BTreeSet<Ident<Canonical>>>>;
 
 /// The input sets one model is instantiated with, as PRODUCTION enumerates
 /// them (`#[cfg(test)]` accessor only, mirroring `db::dep_graph`'s
@@ -1863,7 +1867,13 @@ pub(crate) fn module_input_sets_for(
 /// Enumerate all module instances in a project, starting from the main model.
 /// Returns a map from model name to the set of distinct input sets that model
 /// is instantiated with.
-fn enumerate_module_instances(
+///
+/// Public for the corpus sweep (`examples/depgraph_dump.rs`), which dumps
+/// every model under every wiring this enumeration produces; a caller must
+/// refuse a module cycle reachable from `main_model_name` first
+/// (`project_module_graph(..).cycle_error_from`), as `assemble_simulation`
+/// does, since the walk reads the recursive per-model queries.
+pub fn enumerate_module_instances(
     db: &dyn Db,
     project: SourceProject,
     main_model_name: &str,

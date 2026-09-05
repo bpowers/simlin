@@ -20,12 +20,18 @@
 //! Every `.xmile`, `.stmx` and `.mdl` under `test/` is opened; a model the
 //! importer refuses is recorded as such and skipped. Each model is dumped
 //! under the empty module-input set (the wiring the diagnostic pass and the
-//! root assembly use), with the maps sorted by key so the file is a function
-//! of the models alone.
+//! root assembly use), then under every distinct bound-port set an instance
+//! of it binds anywhere in the project -- the production enumeration
+//! (`enumerate_module_instances`) run from every model as a root -- so the
+//! sweep covers the wired arm, where a with-inputs relation meets the
+//! no-input recurrence resolution. The maps are sorted by key so the file is
+//! a function of the models alone.
+use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::db::{
-    ModuleInputSet, SimlinDb, model_dependency_graph, sync_from_datamodel_incremental,
+    ModuleInputSet, SimlinDb, SourceModel, SourceProject, enumerate_module_instances,
+    model_dependency_graph, project_module_graph, sync_from_datamodel_incremental,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -46,6 +52,55 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// One model's graph under one wiring. `wiring` is empty for the no-input
+/// set, so that section's header is exactly the model's name.
+fn dump_graph(
+    out: &mut impl Write,
+    db: &SimlinDb,
+    header: &str,
+    wiring: &str,
+    model: SourceModel,
+    project: SourceProject,
+    module_inputs: ModuleInputSet<'_>,
+) {
+    let g = model_dependency_graph(db, model, project, module_inputs);
+    writeln!(out, "== {header}{wiring}").unwrap();
+    writeln!(out, "cycle: {:?}", g.cycle_variables).unwrap();
+    writeln!(out, "initials: {:?}", g.runlist_initials).unwrap();
+    writeln!(out, "flows: {:?}", g.runlist_flows).unwrap();
+    writeln!(out, "stocks: {:?}", g.runlist_stocks).unwrap();
+    for scc in &g.resolved_sccs {
+        writeln!(
+            out,
+            "scc {:?}: {:?} order {:?}",
+            scc.phase, scc.members, scc.element_order
+        )
+        .unwrap();
+    }
+    let mut dt: Vec<_> = g.dt_dependencies.iter().collect();
+    dt.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+    for (k, v) in dt {
+        writeln!(
+            out,
+            "dt {} -> {:?}",
+            k.as_str(),
+            v.iter().map(|i| i.as_str()).collect::<Vec<_>>()
+        )
+        .unwrap();
+    }
+    let mut init: Vec<_> = g.initial_dependencies.iter().collect();
+    init.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+    for (k, v) in init {
+        writeln!(
+            out,
+            "init {} -> {:?}",
+            k.as_str(),
+            v.iter().map(|i| i.as_str()).collect::<Vec<_>>()
+        )
+        .unwrap();
+    }
+}
+
 fn main() {
     let root = format!("{}/../../test", env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
@@ -53,6 +108,7 @@ fn main() {
     let out_path = std::env::args().nth(1).expect("output path");
     let mut out = std::io::BufWriter::new(std::fs::File::create(&out_path).unwrap());
     let mut n = 0;
+    let mut n_wired = 0;
     for path in files {
         let rel = path.strip_prefix(&root).unwrap().display().to_string();
         let dm = match path.extension().and_then(|e| e.to_str()) {
@@ -80,45 +136,70 @@ fn main() {
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
+
+        // Every bound-port set each model is instantiated under, from every
+        // model as a root: the union over roots is every wiring the project
+        // can compile a model under. A root inside a module cycle is skipped
+        // exactly as assembly refuses it. Notes about a root go after the
+        // model sections, so the sections keep their position.
+        let mut wired: BTreeMap<Ident<Canonical>, BTreeSet<BTreeSet<Ident<Canonical>>>> =
+            BTreeMap::new();
+        let mut notes: Vec<String> = Vec::new();
+        for root_model in models.keys() {
+            if project_module_graph(&db, project)
+                .cycle_error_from(root_model)
+                .is_some()
+            {
+                notes.push(format!(
+                    "== {rel} :: {root_model}: module cycle, instances not enumerated"
+                ));
+                continue;
+            }
+            match enumerate_module_instances(&db, project, root_model) {
+                Ok(instances) => {
+                    for (target, sets) in instances {
+                        wired.entry(target).or_default().extend(sets);
+                    }
+                }
+                Err(e) => notes.push(format!(
+                    "== {rel} :: {root_model}: instance enumeration failed: {e}"
+                )),
+            }
+        }
+
         for (name, model) in models {
-            let g = model_dependency_graph(&db, model, project, ModuleInputSet::empty(&db));
-            writeln!(out, "== {rel} :: {name}").unwrap();
-            writeln!(out, "cycle: {:?}", g.cycle_variables).unwrap();
-            writeln!(out, "initials: {:?}", g.runlist_initials).unwrap();
-            writeln!(out, "flows: {:?}", g.runlist_flows).unwrap();
-            writeln!(out, "stocks: {:?}", g.runlist_stocks).unwrap();
-            for scc in &g.resolved_sccs {
-                writeln!(
-                    out,
-                    "scc {:?}: {:?} order {:?}",
-                    scc.phase, scc.members, scc.element_order
-                )
-                .unwrap();
-            }
-            let mut dt: Vec<_> = g.dt_dependencies.iter().collect();
-            dt.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
-            for (k, v) in dt {
-                writeln!(
-                    out,
-                    "dt {} -> {:?}",
-                    k.as_str(),
-                    v.iter().map(|i| i.as_str()).collect::<Vec<_>>()
-                )
-                .unwrap();
-            }
-            let mut init: Vec<_> = g.initial_dependencies.iter().collect();
-            init.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
-            for (k, v) in init {
-                writeln!(
-                    out,
-                    "init {} -> {:?}",
-                    k.as_str(),
-                    v.iter().map(|i| i.as_str()).collect::<Vec<_>>()
-                )
-                .unwrap();
-            }
+            let header = format!("{rel} :: {name}");
+            dump_graph(
+                &mut out,
+                &db,
+                &header,
+                "",
+                model,
+                project,
+                ModuleInputSet::empty(&db),
+            );
             n += 1;
+            let Some(sets) = wired.get(&Ident::<Canonical>::new(&name)) else {
+                continue;
+            };
+            for inputs in sets.iter().filter(|inputs| !inputs.is_empty()) {
+                let names: Vec<&str> = inputs.iter().map(|i| i.as_str()).collect();
+                let wiring = format!(" [inputs {}]", names.join(", "));
+                dump_graph(
+                    &mut out,
+                    &db,
+                    &header,
+                    &wiring,
+                    model,
+                    project,
+                    ModuleInputSet::from_canonical_set(&db, inputs),
+                );
+                n_wired += 1;
+            }
+        }
+        for note in notes {
+            writeln!(out, "{note}").unwrap();
         }
     }
-    eprintln!("dumped {n} models");
+    eprintln!("dumped {n} models, plus {n_wired} wired instances");
 }

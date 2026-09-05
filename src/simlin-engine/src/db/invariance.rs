@@ -51,7 +51,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::common::{Canonical, Ident};
-use crate::db::dep_graph::build_var_info;
+use crate::db::dep_graph::model_var_info;
 use crate::db::{
     Db, DepPhase, LtmOverlay, ModuleInputSet, SourceModel, SourceProject, compile_var_fragment,
     model_dependency_graph, variable_direct_dependencies,
@@ -91,7 +91,10 @@ pub(crate) fn model_flows_invariant<'db>(
         return Arc::new(BTreeSet::new());
     }
 
-    let (var_info, _init_referenced) = build_var_info(db, model, project, module_input_names);
+    // The root is the no-input wiring, so this is the memo the dependency
+    // graph above already read.
+    let info = model_var_info(db, model, project, module_input_names);
+    let var_info = &info.vars;
 
     // Members of a resolved recurrence SCC are conservatively variant.
     let scc_members: BTreeSet<&str> = dep_graph

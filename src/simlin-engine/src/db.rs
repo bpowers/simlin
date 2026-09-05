@@ -114,11 +114,13 @@ pub(crate) use fragment_compile::{
 };
 
 mod assemble;
+pub use assemble::{
+    ModuleInstanceMap, assemble_module, assemble_simulation, enumerate_module_instances,
+};
 pub(crate) use assemble::{
     VarFragmentResult, build_module_inputs, compile_phase_to_per_var_bytecodes,
     module_input_prefix, port_of, var_phase_symbolic_fragment_prod, variable_tables,
 };
-pub use assemble::{assemble_module, assemble_simulation};
 // `combine_scc_fragment` is consumed at runtime only WITHIN `assemble.rs`; the
 // root re-export exists solely so the `#[cfg(test)]` test modules
 // (`combined_fragment_tests` and its proptest) can reach it as
