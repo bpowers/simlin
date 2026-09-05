@@ -33,8 +33,6 @@ fn try_detect_ltm_loops_incremental(
     source_project: crate::db::SourceProject,
     actual_name: &str,
 ) -> Option<Vec<FeedbackLoop>> {
-    use salsa::Setter;
-
     let actual_name_owned = actual_name.to_string();
 
     // Phase 1: Model lookup and loop detection.
@@ -50,20 +48,24 @@ fn try_detect_ltm_loops_incremental(
     }
 
     // Phase 2: LTM compile and simulate.
-    source_project.set_ltm_enabled(db).to(true);
-    let vm_result = crate::db::compile_project_incremental(db, source_project, &actual_name_owned)
-        .ok()
-        .and_then(|compiled_sim| crate::vm::Vm::new(compiled_sim).ok())
-        .and_then(|mut vm| {
-            vm.run_to_end().ok()?;
-            Some(vm)
-        });
+    let vm_result = crate::db::compile_project_incremental(
+        db,
+        source_project,
+        &actual_name_owned,
+        crate::db::LtmOverlay::On,
+    )
+    .ok()
+    .and_then(|compiled_sim| crate::vm::Vm::new(compiled_sim).ok())
+    .and_then(|mut vm| {
+        vm.run_to_end().ok()?;
+        Some(vm)
+    });
 
-    // Capture the loop_partitions mapping AND per-loop slot counts while
-    // LTM is still enabled so the cached `model_ltm_variables` query sees
-    // the same flag value the VM ran under.  Per-element rel scores need
-    // both the partition map (which loops normalize together) and the
-    // per-loop slot count (how many elements each A2A loop occupies).
+    // Capture the loop_partitions mapping AND per-loop slot counts off the
+    // same `model_ltm_variables` derivation the VM's program was assembled
+    // from. Per-element rel scores need both the partition map (which loops
+    // normalize together) and the per-loop slot count (how many elements
+    // each A2A loop occupies).
     let (loop_partitions, n_slots_by_loop) = if vm_result.is_some() {
         let ltm_vars = crate::db::model_ltm_variables(db, source_model, source_project);
         let dm_dims = crate::db::project_datamodel_dims(db, source_project);
@@ -89,8 +91,6 @@ fn try_detect_ltm_loops_incremental(
     } else {
         (indexmap::IndexMap::new(), HashMap::new())
     };
-
-    source_project.set_ltm_enabled(db).to(false);
 
     let vm = vm_result?;
     let results = vm.into_results();

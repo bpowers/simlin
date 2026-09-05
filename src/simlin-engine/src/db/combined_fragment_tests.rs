@@ -726,7 +726,8 @@ fn assemble_module_resolved_scc_member_offsets_match_acyclic_layout() {
     // layout (the same one `assemble_module`'s root path resolves against):
     // `compute_layout` now returns the body layout (0-based) and the root
     // shift relocates every entry by `IMPLICIT_VAR_COUNT`.
-    let layout = crate::db::compute_layout(&db, model, project).root_shifted();
+    let layout =
+        crate::db::compute_layout(&db, model, project, crate::db::LtmOverlay::Off).root_shifted();
     let mut acyclic_ce = layout_slots(&layout, "ce");
     let mut acyclic_ecc = layout_slots(&layout, "ecc");
     acyclic_ce.sort_unstable();
@@ -743,6 +744,7 @@ fn assemble_module_resolved_scc_member_offsets_match_acyclic_layout() {
         project,
         true,
         crate::db::ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     )
     .expect("ref-shaped resolved SCC must assemble (no CircularDependency)");
 
@@ -966,6 +968,7 @@ fn fresh_resolved_scc_and_combined_fragment(
             project,
             member.as_str(),
             scc.phase.clone(),
+            crate::db::LtmOverlay::Off,
         )
         .unwrap_or_else(|| {
             panic!(

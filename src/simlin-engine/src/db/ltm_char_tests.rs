@@ -105,7 +105,6 @@ fn char_fixture_db(project: &datamodel::Project) -> (SimlinDb, SourceModel, Sour
         (sync.project, sync.models["main"].source)
     };
     source_project.set_ltm_discovery_mode(&mut db).to(true);
-    source_project.set_ltm_enabled(&mut db).to(true);
     (db, model, source_project)
 }
 
@@ -120,17 +119,18 @@ fn fragment_compile_failures(
     project: SourceProject,
 ) -> Vec<String> {
     use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
-    let mut failures: Vec<String> = collect_model_diagnostics(db, model, project)
-        .iter()
-        .filter(|d| {
-            d.severity == DiagnosticSeverity::Warning
-                && matches!(
-                    &d.error,
-                    DiagnosticError::Assembly(msg) if msg.contains("failed to compile")
-                )
-        })
-        .map(|d| d.variable.clone().unwrap_or_default())
-        .collect();
+    let mut failures: Vec<String> =
+        collect_model_diagnostics(db, model, project, crate::db::LtmOverlay::On)
+            .iter()
+            .filter(|d| {
+                d.severity == DiagnosticSeverity::Warning
+                    && matches!(
+                        &d.error,
+                        DiagnosticError::Assembly(msg) if msg.contains("failed to compile")
+                    )
+            })
+            .map(|d| d.variable.clone().unwrap_or_default())
+            .collect();
     failures.sort();
     failures
 }
@@ -345,19 +345,18 @@ fn per_element_subset_dep_feedback_model() -> datamodel::Project {
 #[test]
 fn per_element_subset_dep_scores_are_live_not_silent_zero() {
     use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
-    use salsa::Setter;
 
     let project = per_element_subset_dep_feedback_model();
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     // No LTM synthetic fragment may fail to compile: the pre-fix arity-2
     // `PREVIOUS(w[region·r, age·y])` over a 1-D `w` surfaced four of these.
-    let diags = collect_model_diagnostics(&db, source_model, source_project);
+    let diags =
+        collect_model_diagnostics(&db, source_model, source_project, crate::db::LtmOverlay::On);
     let frag_failures: Vec<_> = diags
         .iter()
         .filter(|d| {
@@ -378,8 +377,9 @@ fn per_element_subset_dep_scores_are_live_not_silent_zero() {
     // ...and the compiled scores must actually be non-zero: a fragment that
     // "compiles" to no bytecode reads a constant 0, so a series check is the
     // ground-truth guard the diagnostic check backstops.
-    let compiled = compile_project_incremental(&db, source_project, "main")
-        .expect("LTM incremental compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM incremental compilation should succeed");
     let score_offsets: Vec<usize> = compiled
         .offsets
         .iter()
@@ -513,8 +513,9 @@ fn bare_arrayed_dep_is_pinned_over_its_own_declared_dims() {
     //    it is checked against the engine rather than assumed.
     let plain_db = SimlinDb::default();
     let plain_project = sync_from_datamodel(&plain_db, &project).project;
-    let compiled = compile_project_incremental(&plain_db, plain_project, "main")
-        .expect("the model compiles with no LTM");
+    let compiled =
+        compile_project_incremental(&plain_db, plain_project, "main", crate::db::LtmOverlay::Off)
+            .expect("the model compiles with no LTM");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end().expect("simulation should run");
     let results = vm.into_results();
@@ -629,8 +630,9 @@ fn mapped_bare_live_source_ref_is_pinned_through_the_correspondence() {
     );
 
     // ...and the scores must be materially live, not a compiled constant 0.
-    let compiled = compile_project_incremental(&db, source_project, "main")
-        .expect("LTM incremental compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM incremental compilation should succeed");
     let score_offsets: Vec<usize> = compiled
         .offsets
         .iter()
@@ -787,7 +789,6 @@ fn per_element_mapped_occurrence_scores_are_live_not_silent_zero() {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
     // Discovery mode scores every causal edge, so the `pop -> growth`
     // per-element scores are emitted without needing a mapped flow->stock loop
     // (which the dimension checker would reject).
@@ -795,7 +796,8 @@ fn per_element_mapped_occurrence_scores_are_live_not_silent_zero() {
 
     // No LTM synthetic fragment may fail to compile: the pre-fix collapse
     // produced arity-2 `PREVIOUS(pop)` fragments that surfaced four of these.
-    let diags = collect_model_diagnostics(&db, source_model, source_project);
+    let diags =
+        collect_model_diagnostics(&db, source_model, source_project, crate::db::LtmOverlay::On);
     let frag_failures: Vec<_> = diags
         .iter()
         .filter(|d| {
@@ -816,8 +818,9 @@ fn per_element_mapped_occurrence_scores_are_live_not_silent_zero() {
     // ...and the per-element scores must actually be non-zero. Filter on the
     // `->growth[<elem>]` per-element targets so the Bare A2A `pop->growth` slots
     // and the `popinflow->pop` edge are excluded.
-    let compiled = compile_project_incremental(&db, source_project, "main")
-        .expect("LTM incremental compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM incremental compilation should succeed");
     let score_offsets: Vec<usize> = compiled
         .offsets
         .iter()
@@ -931,10 +934,10 @@ fn per_element_ambiguous_pin_scores_are_live_not_silent_zero() {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
-    let diags = collect_model_diagnostics(&db, source_model, source_project);
+    let diags =
+        collect_model_diagnostics(&db, source_model, source_project, crate::db::LtmOverlay::On);
     let frag_failures: Vec<_> = diags
         .iter()
         .filter(|d| {
@@ -952,8 +955,9 @@ fn per_element_ambiguous_pin_scores_are_live_not_silent_zero() {
          failed: {frag_failures:?}"
     );
 
-    let compiled = compile_project_incremental(&db, source_project, "main")
-        .expect("LTM incremental compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM incremental compilation should succeed");
     let score_offsets: Vec<usize> = compiled
         .offsets
         .iter()
@@ -1075,10 +1079,10 @@ fn per_element_index_nested_scores_are_live_not_silent_zero() {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
-    let diags = collect_model_diagnostics(&db, source_model, source_project);
+    let diags =
+        collect_model_diagnostics(&db, source_model, source_project, crate::db::LtmOverlay::On);
     let frag_failures: Vec<_> = diags
         .iter()
         .filter(|d| {
@@ -1096,8 +1100,9 @@ fn per_element_index_nested_scores_are_live_not_silent_zero() {
          failed: {frag_failures:?}"
     );
 
-    let compiled = compile_project_incremental(&db, source_project, "main")
-        .expect("LTM incremental compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM incremental compilation should succeed");
     let score_offsets: Vec<usize> = compiled
         .offsets
         .iter()
@@ -1239,10 +1244,10 @@ fn per_element_dynamic_index_scores_preserve_head_lag() {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
-    let diags = collect_model_diagnostics(&db, source_model, source_project);
+    let diags =
+        collect_model_diagnostics(&db, source_model, source_project, crate::db::LtmOverlay::On);
     let frag_failures: Vec<_> = diags
         .iter()
         .filter(|d| {
@@ -1260,8 +1265,9 @@ fn per_element_dynamic_index_scores_preserve_head_lag() {
          failed: {frag_failures:?}"
     );
 
-    let compiled = compile_project_incremental(&db, source_project, "main")
-        .expect("LTM incremental compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM incremental compilation should succeed");
     // The real per-element scores start with the single `$⁚ltm⁚link_score⁚`
     // prefix; the synthesized `PREVIOUS`-capture helper auxes carry a `$⁚$⁚`
     // double prefix, so `starts_with` excludes them.
@@ -1485,10 +1491,10 @@ fn agg_nested_reducer_partial_scores_full_attribution() {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
-    let diags = collect_model_diagnostics(&db, source_model, source_project);
+    let diags =
+        collect_model_diagnostics(&db, source_model, source_project, crate::db::LtmOverlay::On);
     let frag_failures: Vec<String> = diags
         .iter()
         .filter(|d| {
@@ -1542,8 +1548,13 @@ fn agg_nested_reducer_partial_scores_full_attribution() {
     // carries the row over rows two orders of magnitude apart -- but they are
     // covered THERE, over the view arithmetic, not here. What this fixture is
     // for is the attribution value, which is the thing the LTM wrap decides.
-    let compiled = crate::db::compile_project_incremental(&db, source_project, "main")
-        .expect("the LTM-enabled fixture should compile");
+    let compiled = crate::db::compile_project_incremental(
+        &db,
+        source_project,
+        "main",
+        crate::db::LtmOverlay::On,
+    )
+    .expect("the LTM-enabled fixture should compile");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end().expect("simulation should run");
     let results = vm.into_results();
@@ -1833,10 +1844,10 @@ fn reducer_index_nested_freeze_preserves_loud_failure_not_silent_compile() {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
-    let diags = collect_model_diagnostics(&db, source_model, source_project);
+    let diags =
+        collect_model_diagnostics(&db, source_model, source_project, crate::db::LtmOverlay::On);
     let from_to_failures: Vec<_> = diags
         .iter()
         .filter(|d| {
@@ -1982,22 +1993,20 @@ fn scalar_feeder_bare_in_arrayed_reducer_model() -> datamodel::Project {
 
 #[test]
 fn scalar_feeder_bare_in_arrayed_reducer_compiles_and_simulates() {
-    use salsa::Setter;
-
     let project = scalar_feeder_bare_in_arrayed_reducer_model();
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, _source_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     // The core regression: a scalar feeder read bare beside a hoisted reducer in
     // an arrayed A2A target must NOT turn LTM compilation into a hard failure.
     // Pre-fix this `.expect` panicked on `NotSimulatable` ("element_offset 1 out
     // of bounds for variable $⁚ltm⁚link_score⁚scale→share (size 1)").
-    let compiled = compile_project_incremental(&db, source_project, "main")
-        .expect("LTM incremental compilation should succeed for an arrayed target");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM incremental compilation should succeed for an arrayed target");
 
     // The dims-empty scalar `scale -> share` score exists in the layout with a
     // single slot -- the shape the emission loop reports.
@@ -2152,10 +2161,15 @@ fn lookup_table_runtime_index_is_frozen_through_the_production_path() {
     let plain_db = SimlinDb::default();
     let plain = sync_from_datamodel(&plain_db, &project);
     assert!(
-        collect_model_diagnostics(&plain_db, plain.models["main"].source, plain.project)
-            .iter()
-            .any(|d| d.variable.as_deref() == Some("y")
-                && matches!(&d.error, DiagnosticError::Equation(_))),
+        collect_model_diagnostics(
+            &plain_db,
+            plain.models["main"].source,
+            plain.project,
+            crate::db::LtmOverlay::Off
+        )
+        .iter()
+        .any(|d| d.variable.as_deref() == Some("y")
+            && matches!(&d.error, DiagnosticError::Equation(_))),
         "the fixture's whole point is that a runtime table index is refused \
          upstream; if `y` now compiles, replace this text assertion with a \
          numeric one"
@@ -2235,7 +2249,8 @@ fn lookup_table_head_and_static_index_survive_the_wrap() {
 fn final_value(project: &datamodel::Project, name: &str) -> f64 {
     let db = SimlinDb::default();
     let sp = sync_from_datamodel(&db, project).project;
-    let compiled = compile_project_incremental(&db, sp, "main").expect("the fixture compiles");
+    let compiled = compile_project_incremental(&db, sp, "main", crate::db::LtmOverlay::Off)
+        .expect("the fixture compiles");
     let off = *compiled
         .offsets
         .iter()
@@ -2448,11 +2463,11 @@ fn per_element_edge_declines_a_repeated_dimension_target() {
     // The model itself is fine -- the decline below is LTM's.
     let plain_db = SimlinDb::default();
     let plain = sync_from_datamodel(&plain_db, &project).project;
-    compile_project_incremental(&plain_db, plain, "main")
+    compile_project_incremental(&plain_db, plain, "main", crate::db::LtmOverlay::Off)
         .expect("the repeated-dimension model compiles");
 
     let (db, model, source_project) = char_fixture_db(&project);
-    let diags = collect_model_diagnostics(&db, model, source_project);
+    let diags = collect_model_diagnostics(&db, model, source_project, crate::db::LtmOverlay::On);
     assert!(
         diags
             .iter()
@@ -2614,7 +2629,7 @@ fn dim_name_dot_index_does_not_compile_so_the_resolver_gap_is_inert() {
     let db = SimlinDb::default();
     let sp = sync_from_datamodel(&db, &project).project;
     assert!(
-        compile_project_incremental(&db, sp, "main").is_err(),
+        compile_project_incremental(&db, sp, "main", crate::db::LtmOverlay::Off).is_err(),
         "`q[D.2]` is expected NOT to compile; if it now does, \
          `resolve_axis_index_name` must learn the `DimName.N` static position \
          or the wrap will freeze it and read the wrong row"

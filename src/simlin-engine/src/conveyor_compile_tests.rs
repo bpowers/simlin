@@ -417,8 +417,13 @@ fn directly_assembled_vm_rejects_pass_driven_overrides() {
     let (expanded, metas) = expand_conveyors(&project, &main).expect("expand");
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &expanded, None);
-    let compiled =
-        crate::db::compile_project_incremental(&db, sync.project, &main).expect("compile");
+    let compiled = crate::db::compile_project_incremental(
+        &db,
+        sync.project,
+        &main,
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("compile");
     let plans = resolve_plans(&metas, &compiled.offsets).expect("resolve");
     let mut vm = crate::vm::Vm::new(compiled).expect("vm");
     vm.set_conveyor_plans(plans);
@@ -534,8 +539,13 @@ fn unexpanded_conveyor_rejected_by_ordinary_compile() {
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
     let main = project.models[0].name.clone();
-    let err = crate::db::compile_project_incremental(&db, sync.project, &main)
-        .expect_err("un-expanded conveyor must be rejected");
+    let err = crate::db::compile_project_incremental(
+        &db,
+        sync.project,
+        &main,
+        crate::db::LtmOverlay::Off,
+    )
+    .expect_err("un-expanded conveyor must be rejected");
     assert_eq!(err.code, ErrorCode::ConveyorNotExpanded);
 }
 
@@ -3152,7 +3162,7 @@ fn arrayed_per_element_list_produces_no_error_diagnostics() {
     let project = parse(&xml);
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
-    let diags = crate::db::collect_all_diagnostics(&db, sync.project);
+    let diags = crate::db::collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let errors: Vec<_> = diags
         .iter()
         .filter(|d| d.severity == crate::db::DiagnosticSeverity::Error)
@@ -3259,7 +3269,7 @@ fn explicit_list_produces_no_error_diagnostics() {
     let project = parse(&xml);
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
-    let diags = crate::db::collect_all_diagnostics(&db, sync.project);
+    let diags = crate::db::collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let errors: Vec<_> = diags
         .iter()
         .filter(|d| d.severity == crate::db::DiagnosticSeverity::Error)

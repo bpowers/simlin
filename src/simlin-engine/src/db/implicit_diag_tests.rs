@@ -56,7 +56,7 @@ fn implicit_helper_codegen_failure_is_attributed() {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
 
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let attributed: Vec<&crate::db::Diagnostic> = diags
         .iter()
         .filter(|d| match &d.error {
@@ -146,7 +146,7 @@ fn implicit_helper_lowering_failure_is_an_equation_error_on_the_parent() {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
 
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let on_parent: Vec<&crate::db::Diagnostic> = diags
         .iter()
         .filter(|d| {
@@ -213,9 +213,9 @@ fn compiling_smooth_model_gains_no_implicit_diagnostics() {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
 
-    crate::db::compile_project_incremental(&db, sync.project, "main")
+    crate::db::compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
         .expect("the control fixture must compile");
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let implicit_rows: Vec<String> = diags
         .iter()
         .filter_map(|d| match &d.error {

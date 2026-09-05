@@ -575,7 +575,7 @@ fn the_decision_table_covers_every_cell() {
 fn diagnostics(project: &datamodel::Project) -> Vec<Diagnostic> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    collect_all_diagnostics(&db, sync.project)
+    collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off)
 }
 
 /// Every `UnfilledEquation` diagnostic the project reports, as
@@ -688,7 +688,7 @@ fn an_mdl_a_function_of_placeholder_warns_naming_the_variable() {
     // And the model still compiles: this is an advisory, not a rejection.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    compile_project_incremental(&db, sync.project, "main")
+    compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
         .expect("an unfilled equation must not block compilation");
 }
 

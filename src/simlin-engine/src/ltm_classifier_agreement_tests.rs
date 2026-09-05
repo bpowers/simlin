@@ -745,7 +745,7 @@ fn assert_occurrence_streams_align(tp: &TestProject) {
     // assertion below passes trivially (0 == 0). Catch that at the source: an
     // Error-severity diagnostic surfaces exactly a parse failure (the
     // grammar-rejected `IF`-as-operand shape was the concrete instance).
-    let errors: Vec<_> = collect_all_diagnostics(&db, project)
+    let errors: Vec<_> = collect_all_diagnostics(&db, project, crate::db::LtmOverlay::Off)
         .into_iter()
         .filter(|d| d.severity == DiagnosticSeverity::Error)
         .collect();
@@ -801,7 +801,7 @@ fn assert_lowering_matches_reparse_everywhere(tp: &TestProject) -> usize {
 
     // A fixture equation that fails to parse leaves its variable with NO AST, so
     // it contributes no slot and would silently shrink the sweep.
-    let errors: Vec<_> = collect_all_diagnostics(&db, project)
+    let errors: Vec<_> = collect_all_diagnostics(&db, project, crate::db::LtmOverlay::Off)
         .into_iter()
         .filter(|d| d.severity == DiagnosticSeverity::Error)
         .collect();

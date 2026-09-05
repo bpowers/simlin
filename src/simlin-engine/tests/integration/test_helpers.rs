@@ -273,8 +273,13 @@ pub fn wasm_results_for(
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
-    let sim = compile_project_incremental(&db, sync.project, model_name)
-        .map_err(|e| format!("incremental compile failed: {e:?}"))?;
+    let sim = compile_project_incremental(
+        &db,
+        sync.project,
+        model_name,
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .map_err(|e| format!("incremental compile failed: {e:?}"))?;
 
     let artifact = match compile_simulation(&sim) {
         Ok(artifact) => artifact,
@@ -308,8 +313,14 @@ pub fn vm_results_for_special(
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
-    let mut vm = simlin_engine::build_sim(&mut db, sync.project, datamodel, model_name)
-        .expect("build_sim should compile a special-stock fixture");
+    let mut vm = simlin_engine::build_sim(
+        &mut db,
+        sync.project,
+        datamodel,
+        model_name,
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .expect("build_sim should compile a special-stock fixture");
     vm.run_to_end()
         .expect("Vm::run_to_end should succeed on a special-stock fixture");
     vm.into_results()
@@ -356,15 +367,18 @@ pub fn vm_results_for_ltm(
     model_name: &str,
 ) -> Results {
     use simlin_engine::db::{
-        SimlinDb, compile_project_incremental, set_project_ltm_enabled,
-        sync_from_datamodel_incremental,
+        SimlinDb, compile_project_incremental, sync_from_datamodel_incremental,
     };
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, model_name)
-        .expect("LTM-enabled incremental compile should succeed for the LTM corpus");
+    let compiled = compile_project_incremental(
+        &db,
+        sync.project,
+        model_name,
+        simlin_engine::db::LtmOverlay::On,
+    )
+    .expect("LTM-enabled incremental compile should succeed for the LTM corpus");
     let mut vm = Vm::new(compiled).expect("Vm::new should succeed on a salsa-compiled model");
     vm.run_to_end()
         .expect("Vm::run_to_end should succeed on the LTM corpus");
@@ -392,15 +406,18 @@ pub fn wasm_results_for_ltm(
     model_name: &str,
 ) -> Result<Results, String> {
     use simlin_engine::db::{
-        SimlinDb, compile_project_incremental, set_project_ltm_enabled,
-        sync_from_datamodel_incremental,
+        SimlinDb, compile_project_incremental, sync_from_datamodel_incremental,
     };
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let sim = compile_project_incremental(&db, sync.project, model_name)
-        .map_err(|e| format!("incremental compile failed: {e:?}"))?;
+    let sim = compile_project_incremental(
+        &db,
+        sync.project,
+        model_name,
+        simlin_engine::db::LtmOverlay::On,
+    )
+    .map_err(|e| format!("incremental compile failed: {e:?}"))?;
 
     let artifact = match compile_simulation(&sim) {
         Ok(artifact) => artifact,
@@ -513,8 +530,13 @@ pub fn wasm_results_for_segmented(
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
-    let sim = compile_project_incremental(&db, sync.project, model_name)
-        .map_err(|e| format!("incremental compile failed: {e:?}"))?;
+    let sim = compile_project_incremental(
+        &db,
+        sync.project,
+        model_name,
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .map_err(|e| format!("incremental compile failed: {e:?}"))?;
 
     let artifact = match compile_simulation(&sim) {
         Ok(artifact) => artifact,
@@ -715,15 +737,19 @@ pub fn wasm_results_for_ltm_discovery(
 ) -> Result<Results, String> {
     use simlin_engine::db::{
         SimlinDb, compile_project_incremental, set_project_ltm_discovery_mode,
-        set_project_ltm_enabled, sync_from_datamodel_incremental,
+        sync_from_datamodel_incremental,
     };
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
-    let sim = compile_project_incremental(&db, sync.project, model_name)
-        .map_err(|e| format!("incremental compile failed: {e:?}"))?;
+    let sim = compile_project_incremental(
+        &db,
+        sync.project,
+        model_name,
+        simlin_engine::db::LtmOverlay::On,
+    )
+    .map_err(|e| format!("incremental compile failed: {e:?}"))?;
 
     let artifact = match compile_simulation(&sim) {
         Ok(artifact) => artifact,
@@ -795,15 +821,19 @@ pub fn ltm_discovery_inputs(
     use simlin_engine::db::{
         SimlinDb, causal_graph_from_element_edges_with_modules, compile_project_incremental,
         model_element_causal_edges, model_ltm_variables, project_datamodel_dims,
-        set_project_ltm_discovery_mode, set_project_ltm_enabled, sync_from_datamodel_incremental,
+        set_project_ltm_discovery_mode, sync_from_datamodel_incremental,
     };
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, model_name)
-        .expect("project should compile with LTM discovery enabled");
+    let compiled = compile_project_incremental(
+        &db,
+        sync.project,
+        model_name,
+        simlin_engine::db::LtmOverlay::On,
+    )
+    .expect("project should compile with LTM discovery enabled");
 
     let mut vm = Vm::new(compiled).expect("LTM VM construction should succeed");
     vm.run_to_end()

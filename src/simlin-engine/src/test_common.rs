@@ -757,12 +757,13 @@ impl TestProject {
 
     // ── Incremental compilation methods ────────────────────────────────
 
-    /// Compile the project via the incremental salsa pipeline.
+    /// Compile the project via the incremental salsa pipeline, without the
+    /// LTM overlay.
     pub fn compile_incremental(&self) -> crate::Result<std::sync::Arc<CompiledSimulation>> {
         let datamodel = self.build_datamodel();
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-        compile_project_incremental(&db, sync.project, "main")
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
     }
 
     /// [`TestProject::run_vm`], panicking instead of returning an error.
@@ -821,7 +822,7 @@ impl TestProject {
         let datamodel = self.build_datamodel();
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-        collect_all_diagnostics(&db, sync.project)
+        collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off)
     }
 
     /// The `Error`-severity salsa diagnostics of this project, as

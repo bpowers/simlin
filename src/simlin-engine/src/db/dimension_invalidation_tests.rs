@@ -54,7 +54,8 @@ fn a_qualified_snapshot_index_depends_on_its_own_element_only() {
     };
     let probe_value = |db: &ProbedDb, state: &PersistentSyncState| -> f64 {
         let compiled =
-            compile_project_incremental(db.db(), state.project, "main").expect("compiles");
+            compile_project_incremental(db.db(), state.project, "main", crate::db::LtmOverlay::Off)
+                .expect("compiles");
         let mut vm = crate::vm::Vm::new(compiled).expect("vm");
         vm.run_to_end().expect("runs");
         crate::test_common::collect_results(&vm.into_results())["probe"][1]
@@ -302,6 +303,7 @@ fn test_dimension_invalidation_different_dim_immune() {
         model1,
         sync1.project,
         ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     )
     .as_ref()
     .unwrap()
@@ -313,6 +315,7 @@ fn test_dimension_invalidation_different_dim_immune() {
         model2,
         sync2.project,
         ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     )
     .as_ref()
     .unwrap()

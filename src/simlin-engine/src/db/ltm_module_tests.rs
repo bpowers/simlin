@@ -17,8 +17,6 @@ use crate::testutils::{x_aux, x_flow, x_model, x_module, x_module_named, x_stock
 /// layout allocates extra slots for them.
 #[test]
 fn test_ltm_smooth_model_compiles_with_ltm() {
-    use salsa::Setter;
-
     let project = datamodel::Project {
         name: "smooth_feedback".to_string(),
         sim_specs: datamodel::SimSpecs {
@@ -45,12 +43,11 @@ fn test_ltm_smooth_model_compiles_with_ltm() {
         ai_information: None,
     };
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let ltm_vars = model_ltm_variables(&db, source_model, source_project);
     assert!(
@@ -64,9 +61,15 @@ fn test_ltm_smooth_model_compiles_with_ltm() {
         "LTM vars should include at least one link_score variable"
     );
 
-    let n_slots_ltm = compute_layout(&db, source_model, source_project).n_slots;
-    source_project.set_ltm_enabled(&mut db).to(false);
-    let n_slots_no_ltm = compute_layout(&db, source_model, source_project).n_slots;
+    let n_slots_ltm =
+        compute_layout(&db, source_model, source_project, crate::db::LtmOverlay::On).n_slots;
+    let n_slots_no_ltm = compute_layout(
+        &db,
+        source_model,
+        source_project,
+        crate::db::LtmOverlay::Off,
+    )
+    .n_slots;
     assert!(
         n_slots_ltm > n_slots_no_ltm,
         "LTM-enabled layout should have more slots: ltm={n_slots_ltm}, no_ltm={n_slots_no_ltm}"
@@ -77,8 +80,6 @@ fn test_ltm_smooth_model_compiles_with_ltm() {
 /// variables including link_score entries when LTM is enabled.
 #[test]
 fn test_ltm_delay_model_compiles() {
-    use salsa::Setter;
-
     let project = datamodel::Project {
         name: "delay_feedback".to_string(),
         sim_specs: datamodel::SimSpecs {
@@ -105,12 +106,11 @@ fn test_ltm_delay_model_compiles() {
         ai_information: None,
     };
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let ltm_vars = model_ltm_variables(&db, source_model, source_project);
     assert!(
@@ -124,9 +124,15 @@ fn test_ltm_delay_model_compiles() {
         "LTM vars should include at least one link_score variable"
     );
 
-    let n_slots_ltm = compute_layout(&db, source_model, source_project).n_slots;
-    source_project.set_ltm_enabled(&mut db).to(false);
-    let n_slots_no_ltm = compute_layout(&db, source_model, source_project).n_slots;
+    let n_slots_ltm =
+        compute_layout(&db, source_model, source_project, crate::db::LtmOverlay::On).n_slots;
+    let n_slots_no_ltm = compute_layout(
+        &db,
+        source_model,
+        source_project,
+        crate::db::LtmOverlay::Off,
+    )
+    .n_slots;
     assert!(
         n_slots_ltm > n_slots_no_ltm,
         "LTM-enabled layout should have more slots: ltm={n_slots_ltm}, no_ltm={n_slots_no_ltm}"
@@ -140,8 +146,6 @@ fn test_ltm_delay_model_compiles() {
 /// model gets LTM offsets for its feedback loop through the module.
 #[test]
 fn test_ltm_passthrough_module_compiles() {
-    use salsa::Setter;
-
     let project = datamodel::Project {
         name: "passthrough_module".to_string(),
         sim_specs: datamodel::SimSpecs {
@@ -185,15 +189,15 @@ fn test_ltm_passthrough_module_compiles() {
         ai_information: None,
     };
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let source_project = {
         let sync = sync_from_datamodel(&db, &project);
         sync.project
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
-    let compiled = compile_project_incremental(&db, source_project, "main")
-        .expect("passthrough module model should compile with LTM enabled");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("passthrough module model should compile with LTM enabled");
 
     // The main model has a feedback loop (level -> raw_input -> scaler -> inflow -> level)
     let has_ltm_offset = compiled.offsets.keys().any(|k| k.as_str().starts_with('$'));
@@ -284,16 +288,13 @@ fn custom_output_port_project() -> datamodel::Project {
 /// "result" instead of the stdlib convention "output".
 #[test]
 fn test_ltm_module_with_non_standard_output_name() {
-    use salsa::Setter;
-
     let project = custom_output_port_project();
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, sub_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["custom_smooth"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     // The sub-model should generate pathway/composite variables
     // despite its output stock being named "result" instead of "output".
@@ -431,7 +432,6 @@ fn test_discovery_dynamic_module_link_score_uses_composite() {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
     let ltm_vars = model_ltm_variables(&db, main_model, source_project);
@@ -528,7 +528,6 @@ fn test_passthrough_module_link_score_uses_composite_on_real_output_port() {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     for discovery in [false, true] {
         source_project.set_ltm_discovery_mode(&mut db).to(discovery);
@@ -630,7 +629,6 @@ fn test_pathless_module_link_score_uses_unit_transfer() {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     for discovery in [false, true] {
         source_project.set_ltm_discovery_mode(&mut db).to(discovery);
@@ -752,7 +750,6 @@ fn test_module_to_module_link_score_uses_target_composite() {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     for discovery in [false, true] {
         source_project.set_ltm_discovery_mode(&mut db).to(discovery);
@@ -832,8 +829,6 @@ fn test_module_loop_polarity_is_determined() {
 /// when LTM is enabled.
 #[test]
 fn test_ltm_multiple_smooth_instances_compile() {
-    use salsa::Setter;
-
     let project = datamodel::Project {
         name: "multi_smooth".to_string(),
         sim_specs: datamodel::SimSpecs {
@@ -863,12 +858,11 @@ fn test_ltm_multiple_smooth_instances_compile() {
         ai_information: None,
     };
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let ltm_vars = model_ltm_variables(&db, source_model, source_project);
     let link_score_count = ltm_vars
@@ -881,10 +875,16 @@ fn test_ltm_multiple_smooth_instances_compile() {
         "should have link_score vars for multiple feedback paths, got {link_score_count}"
     );
 
-    let n_slots_ltm = compute_layout(&db, source_model, source_project).n_slots;
+    let n_slots_ltm =
+        compute_layout(&db, source_model, source_project, crate::db::LtmOverlay::On).n_slots;
 
-    source_project.set_ltm_enabled(&mut db).to(false);
-    let n_slots_no_ltm = compute_layout(&db, source_model, source_project).n_slots;
+    let n_slots_no_ltm = compute_layout(
+        &db,
+        source_model,
+        source_project,
+        crate::db::LtmOverlay::Off,
+    )
+    .n_slots;
 
     assert!(
         n_slots_ltm > n_slots_no_ltm,
@@ -906,8 +906,6 @@ fn test_ltm_multiple_smooth_instances_compile() {
 /// helper variables instead.
 #[test]
 fn test_module_composite_equation_size_is_linear_in_pathways() {
-    use salsa::Setter;
-
     // A module body with PATHS parallel pathways:
     // input -> mid_i -> total_flow -> output. The output is a STOCK because
     // LTM generation skips stockless models entirely.
@@ -951,12 +949,11 @@ fn test_module_composite_equation_size_is_linear_in_pathways() {
         ai_information: None,
     };
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, sub_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["m"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let ltm_vars = model_ltm_variables(&db, sub_model, source_project);
 
@@ -1079,18 +1076,16 @@ fn parallel_pathways_module_project(paths: usize) -> datamodel::Project {
 #[test]
 fn module_pathway_enumeration_truncates_at_budget() {
     use crate::db::{DiagnosticError, DiagnosticSeverity};
-    use salsa::Setter;
 
     const PATHS: usize = 12;
     const TEST_BUDGET: usize = 4;
 
     let project = parallel_pathways_module_project(PATHS);
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, sub_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["m"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     // Hold the override for the whole test: `model_ltm_variables` is salsa-
     // memoized, so a later call on this db would otherwise return the cached
@@ -1152,18 +1147,15 @@ fn module_pathway_enumeration_truncates_at_budget() {
 /// pathway (the under-budget byte-identical-to-before guarantee).
 #[test]
 fn module_pathway_enumeration_under_budget_no_truncation() {
-    use salsa::Setter;
-
     const PATHS: usize = 4;
     const TEST_BUDGET: usize = 64;
 
     let project = parallel_pathways_module_project(PATHS);
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, sub_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["m"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let _guard = crate::ltm::ModulePathwayBudgetGuard::new(TEST_BUDGET);
     let ltm = model_ltm_variables(&db, sub_model, source_project);
@@ -1198,18 +1190,16 @@ fn module_pathway_enumeration_under_budget_no_truncation() {
 /// panic or a silent NaN). This is the "no fragment-compile failure" guarantee.
 #[test]
 fn module_pathway_truncation_still_compiles_and_simulates() {
-    use salsa::Setter;
-
     const PATHS: usize = 12;
     const TEST_BUDGET: usize = 4;
 
     let project = parallel_pathways_module_project(PATHS);
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let source_project = sync_from_datamodel(&db, &project).project;
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let _guard = crate::ltm::ModulePathwayBudgetGuard::new(TEST_BUDGET);
-    let compiled = compile_project_incremental(&db, source_project, "main");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On);
     assert!(
         compiled.is_ok(),
         "a pathway-truncated module must still compile: {:?}",
@@ -1234,7 +1224,6 @@ fn module_pathway_truncation_still_compiles_and_simulates() {
 #[test]
 fn test_results_offsets_agree_with_layout_under_ltm() {
     use crate::db::flattened_offsets;
-    use salsa::Setter;
 
     let project = datamodel::Project {
         name: "offsets_vs_layout".to_string(),
@@ -1266,15 +1255,15 @@ fn test_results_offsets_agree_with_layout_under_ltm() {
         ai_information: None,
     };
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
-    let offsets = flattened_offsets(&db, source_project, source_model);
-    let layout = compute_layout(&db, source_model, source_project).root_shifted();
+    let offsets = flattened_offsets(&db, source_project, source_model, crate::db::LtmOverlay::On);
+    let layout =
+        compute_layout(&db, source_model, source_project, crate::db::LtmOverlay::On).root_shifted();
 
     let mut mismatches: Vec<String> = Vec::new();
     for (name, off) in offsets.iter() {
@@ -1318,7 +1307,6 @@ fn test_clearn_results_offsets_agree_with_layout() {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let source_project = sync.project;
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
     let source_model = source_project
         .models(&db)
@@ -1326,8 +1314,9 @@ fn test_clearn_results_offsets_agree_with_layout() {
         .copied()
         .expect("main model");
 
-    let offsets = flattened_offsets(&db, source_project, source_model);
-    let layout = compute_layout(&db, source_model, source_project).root_shifted();
+    let offsets = flattened_offsets(&db, source_project, source_model, crate::db::LtmOverlay::On);
+    let layout =
+        compute_layout(&db, source_model, source_project, crate::db::LtmOverlay::On).root_shifted();
 
     let mut mismatches: Vec<(usize, String)> = Vec::new();
     let mut compared = 0usize;
@@ -1434,15 +1423,12 @@ fn multi_output_passthrough_project() -> datamodel::Project {
 /// the stock-free early return in `model_ltm_variables` dropped them all.
 #[test]
 fn test_passthrough_submodel_emits_pathway_and_composite_vars() {
-    use salsa::Setter;
-
     let project = multi_output_passthrough_project();
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, sub_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["passthrough"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let ltm_vars = model_ltm_variables(&db, sub_model, source_project);
     let has_path = ltm_vars
@@ -1471,8 +1457,6 @@ fn test_passthrough_submodel_emits_pathway_and_composite_vars() {
 /// are also no input-port pathways.
 #[test]
 fn test_stock_free_root_model_emits_no_ltm_vars() {
-    use salsa::Setter;
-
     let project = datamodel::Project {
         name: "stock_free_root".to_string(),
         sim_specs: datamodel::SimSpecs {
@@ -1493,12 +1477,11 @@ fn test_stock_free_root_model_emits_no_ltm_vars() {
         ai_information: None,
     };
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, main_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let ltm_vars = model_ltm_variables(&db, main_model, source_project);
     assert!(
@@ -1515,15 +1498,12 @@ fn test_stock_free_root_model_emits_no_ltm_vars() {
 /// var that ends at `pos`.
 #[test]
 fn test_multi_output_loop_link_uses_per_exit_port_alias() {
-    use salsa::Setter;
-
     let project = multi_output_passthrough_project();
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, main_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let ltm_vars = model_ltm_variables(&db, main_model, source_project);
 
@@ -1756,8 +1736,6 @@ fn test_pinned_loop_through_stockless_passthrough_still_rejected() {
 /// a `PREVIOUS(...)`.
 #[test]
 fn test_multi_output_module_link_score_holds_document_order_first_live() {
-    use salsa::Setter;
-
     let build_link_eqn = |combined_eqn: &str| -> String {
         let project = datamodel::Project {
             name: "multi_output".to_string(),
@@ -1806,12 +1784,11 @@ fn test_multi_output_module_link_score_holds_document_order_first_live() {
             ai_information: None,
         };
 
-        let mut db = SimlinDb::default();
+        let db = SimlinDb::default();
         let (source_project, main_model) = {
             let sync = sync_from_datamodel(&db, &project);
             (sync.project, sync.models["main"].source)
         };
-        source_project.set_ltm_enabled(&mut db).to(true);
 
         let ltm_vars = model_ltm_variables(&db, main_model, source_project);
         let link = ltm_vars
@@ -1877,9 +1854,8 @@ fn a_stdlib_instance_with_bare_arguments_reads_an_output_port() {
         )
     };
     let ltm_names = |project: &datamodel::Project, model: &str| -> BTreeSet<String> {
-        let mut db = SimlinDb::default();
+        let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, project);
-        set_project_ltm_enabled(&mut db, sync.project, true);
         model_ltm_variables(&db, sync.models[model].source, sync.project)
             .vars
             .iter()

@@ -33,7 +33,13 @@ fn compile_population(stop: f64) -> std::sync::Arc<CompiledSimulation> {
     let datamodel = tp.build_datamodel();
     let mut db = SimlinDb::default();
     let state = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    compile_project_incremental(&db, state.project, "main").unwrap()
+    compile_project_incremental(
+        &db,
+        state.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .unwrap()
 }
 
 fn bench_compile(c: &mut Criterion) {
@@ -44,7 +50,13 @@ fn bench_compile(c: &mut Criterion) {
         b.iter(|| {
             let mut db = SimlinDb::default();
             let state = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-            compile_project_incremental(&db, state.project, "main").unwrap()
+            compile_project_incremental(
+                &db,
+                state.project,
+                "main",
+                simlin_engine::db::LtmOverlay::Off,
+            )
+            .unwrap()
         })
     });
 }
@@ -116,7 +128,13 @@ fn bench_full_pipeline(c: &mut Criterion) {
         b.iter(|| {
             let mut db = SimlinDb::default();
             let state = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-            let compiled = compile_project_incremental(&db, state.project, "main").unwrap();
+            let compiled = compile_project_incremental(
+                &db,
+                state.project,
+                "main",
+                simlin_engine::db::LtmOverlay::Off,
+            )
+            .unwrap();
             let mut vm = Vm::new(compiled).unwrap();
             vm.run_to_end().unwrap();
         })

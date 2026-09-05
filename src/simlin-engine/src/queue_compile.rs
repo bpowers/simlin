@@ -994,7 +994,15 @@ pub fn build_compiled(
     // handle is re-derived here on every build, which is exactly what makes a
     // rolled-back staged patch unable to leave stale expanded inputs behind.
     let expanded_project = db.sync_expanded(&expanded);
-    let mut compiled = crate::db::compile_project_incremental(db, expanded_project, main_model)?;
+    // The expanded twin is always compiled without the LTM overlay: LTM over
+    // a conveyor/queue is a documented degradation (docs/design/conveyors.md
+    // s9.6, queues.md s10.5).
+    let mut compiled = crate::db::compile_project_incremental(
+        db,
+        expanded_project,
+        main_model,
+        crate::db::LtmOverlay::Off,
+    )?;
 
     let mut conveyor_plans = if conv_metas.is_empty() {
         Vec::new()
@@ -1633,6 +1641,7 @@ pub fn compile_sim(
     source_project: crate::db::SourceProject,
     datamodel: &datamodel::Project,
     main_model: &str,
+    overlay: crate::db::LtmOverlay,
 ) -> crate::common::Result<SimBuild> {
     if crate::conveyor_compile::project_has_conveyor(datamodel, main_model)
         || project_has_queue(datamodel, main_model)
@@ -1660,7 +1669,7 @@ pub fn compile_sim(
     // set. Keeping the handles means at most one expanded input set is ever created
     // per db, and a model that regains a conveyor re-syncs onto them. A stale slot
     // is unobservable: it is only ever read through `sync_expanded`'s return value.
-    let compiled = crate::db::compile_project_incremental(db, source_project, main_model)?;
+    let compiled = crate::db::compile_project_incremental(db, source_project, main_model, overlay)?;
     Ok(SimBuild {
         compiled,
         conveyor_plans: Vec::new(),
@@ -1681,8 +1690,9 @@ pub fn build_sim(
     source_project: crate::db::SourceProject,
     datamodel: &datamodel::Project,
     main_model: &str,
+    overlay: crate::db::LtmOverlay,
 ) -> crate::common::Result<crate::vm::Vm> {
-    let build = compile_sim(db, source_project, datamodel, main_model)?;
+    let build = compile_sim(db, source_project, datamodel, main_model, overlay)?;
     let mut vm = crate::vm::Vm::new(build.compiled)?;
     // Attaching empty plan sets is semantically a no-op, but the ordinary path
     // has never touched the plan setters; keep it that way so an ordinary VM is
@@ -1755,14 +1765,25 @@ mod tests {
 
         // The ordinary incremental compile path MUST still reject the un-expanded
         // queue -- the guard's whole purpose (docs/design/queues.md §10.3).
-        let guard_err = crate::db::compile_project_incremental(&db, sync.project, &main)
-            .expect_err("ordinary compile must reject an un-expanded queue");
+        let guard_err = crate::db::compile_project_incremental(
+            &db,
+            sync.project,
+            &main,
+            crate::db::LtmOverlay::Off,
+        )
+        .expect_err("ordinary compile must reject an un-expanded queue");
         assert_eq!(guard_err.code, crate::common::ErrorCode::QueueNotExpanded);
 
         // `build_sim` routes around it via the special build path and produces a
         // runnable VM whose queue stock simulates.
-        let mut vm = build_sim(&mut db, sync.project, &project, &main)
-            .expect("build_sim compiles a queue model");
+        let mut vm = build_sim(
+            &mut db,
+            sync.project,
+            &project,
+            &main,
+            crate::db::LtmOverlay::Off,
+        )
+        .expect("build_sim compiles a queue model");
         vm.run_to_end().expect("queue model runs");
         assert!(vm.get_series(&Ident::new("waiting")).is_some());
     }
@@ -1840,8 +1861,14 @@ mod tests {
         let main = project.models[0].name.clone();
         let mut db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
-        let mut vm =
-            build_sim(&mut db, sync.project, &project, &main).expect("ordinary model builds");
+        let mut vm = build_sim(
+            &mut db,
+            sync.project,
+            &project,
+            &main,
+            crate::db::LtmOverlay::Off,
+        )
+        .expect("ordinary model builds");
         vm.run_to_end().expect("ordinary model runs");
     }
 
@@ -1932,8 +1959,14 @@ mod tests {
             .clone();
         let mut db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, project, None);
-        build_sim(&mut db, sync.project, project, &main)
-            .expect_err("a special stock outside the main model must be rejected")
+        build_sim(
+            &mut db,
+            sync.project,
+            project,
+            &main,
+            crate::db::LtmOverlay::Off,
+        )
+        .expect_err("a special stock outside the main model must be rejected")
     }
 
     #[test]
@@ -2247,8 +2280,13 @@ mod tests {
         let main = project.models[0].name.clone();
         let mut db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
-        let err = crate::db::compile_project_incremental(&db, sync.project, &main)
-            .expect_err("un-expanded queue must be rejected");
+        let err = crate::db::compile_project_incremental(
+            &db,
+            sync.project,
+            &main,
+            crate::db::LtmOverlay::Off,
+        )
+        .expect_err("un-expanded queue must be rejected");
         assert_eq!(err.code, ErrorCode::QueueNotExpanded);
     }
 
@@ -2425,8 +2463,14 @@ mod tests {
         let main = project.models[0].name.clone();
         let mut db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
-        let err = build_sim(&mut db, sync.project, &project, &main)
-            .expect_err("build_sim must reject a both-marked stock");
+        let err = build_sim(
+            &mut db,
+            sync.project,
+            &project,
+            &main,
+            crate::db::LtmOverlay::Off,
+        )
+        .expect_err("build_sim must reject a both-marked stock");
         assert_eq!(err.code, ErrorCode::StockBothConveyorAndQueue);
     }
 
@@ -4298,8 +4342,14 @@ mod tests {
         let main = project.models[0].name.clone();
         let mut db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
-        let err = build_sim(&mut db, sync.project, &project, &main)
-            .expect_err("build_sim must reject the duplicate pair");
+        let err = build_sim(
+            &mut db,
+            sync.project,
+            &project,
+            &main,
+            crate::db::LtmOverlay::Off,
+        )
+        .expect_err("build_sim must reject the duplicate pair");
         assert_eq!(err.code, crate::common::ErrorCode::DuplicateVariable);
     }
 }

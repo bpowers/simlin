@@ -1784,9 +1784,7 @@ fn a_repeated_target_dimension_reads_each_axis_on_the_executed_path() {
 /// `grow` both repeat `D1`, and the reference `pop[D1,D1]` inside `cube` is the
 /// one whose `RefShape` the narrowing decides.
 fn square_owner_link_score_names() -> Vec<String> {
-    use crate::db::{
-        SimlinDb, model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel_incremental,
-    };
+    use crate::db::{SimlinDb, model_ltm_variables, sync_from_datamodel_incremental};
     let datamodel = TestProject::new("square_owner_scores")
         .named_dimension("D1", &["r1", "r2"])
         .array_stock("pop[D1,D1]", "10", &["grow"], &[], None)
@@ -1795,7 +1793,6 @@ fn square_owner_link_score_names() -> Vec<String> {
         .build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let mut names: Vec<String> =
         model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
             .vars
@@ -1878,9 +1875,7 @@ fn a_comma_bearing_element_name_survives_the_mapped_projection() {
 /// a link score that does not exist.
 #[test]
 fn a_loop_through_two_mapped_axes_is_described_once_per_executed_read() {
-    use crate::db::{
-        SimlinDb, model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel_incremental,
-    };
+    use crate::db::{SimlinDb, model_ltm_variables, sync_from_datamodel_incremental};
 
     // `lvl` breaks the algebraic loop: matrix -> target -> fb -> grow -> lvl ->
     // matrix. At t=0 `lvl` is 0, so `target` still reads the fixture's own
@@ -1911,7 +1906,6 @@ fn a_loop_through_two_mapped_axes_is_described_once_per_executed_read() {
     let datamodel = project.build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
     let mut scores: Vec<&str> = ltm
         .vars

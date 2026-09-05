@@ -830,12 +830,16 @@ fn symbolic_phase_element_order(
     // `members` is a BTreeSet, so this iterates in sorted member order;
     // combined with the sorted Kahn below the result is byte-stable.
     for member in members {
+        // The verdict reads the members' own element reads; a module read's
+        // offset never enters it, so the plain overlay serves both modes and
+        // keeps this graph overlay-independent.
         let frag = crate::db::var_phase_symbolic_fragment_prod(
             db,
             model,
             project,
             member.as_str(),
             phase.clone(),
+            crate::db::LtmOverlay::Off,
         )?;
         let member_name = member.as_str();
         let seg = crate::db::assemble::segment_member_by_element(
@@ -1364,7 +1368,7 @@ pub(crate) fn var_noninitial_lowered_exprs(
     };
 
     let ExplicitFragment { diagnostics, input } =
-        explicit_fragment_input(db, *sv, model, project, &[]);
+        explicit_fragment_input(db, *sv, model, project, &[], crate::db::LtmOverlay::Off);
     let Some(input) = input else {
         panic!(
             "var_noninitial_lowered_exprs: var {var_name:?} failed to lower \

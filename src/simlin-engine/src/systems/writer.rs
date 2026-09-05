@@ -955,7 +955,9 @@ mod tests {
         let project1 = crate::systems::translate::translate(&model1, 5).unwrap();
         let mut db1 = SimlinDb::default();
         let sync1 = sync_from_datamodel_incremental(&mut db1, &project1, None);
-        let compiled1 = compile_project_incremental(&db1, sync1.project, "main").unwrap();
+        let compiled1 =
+            compile_project_incremental(&db1, sync1.project, "main", crate::db::LtmOverlay::Off)
+                .unwrap();
         let mut vm1 = crate::Vm::new(compiled1).unwrap();
         vm1.run_to_end().unwrap();
         let results1 = vm1.into_results();
@@ -966,7 +968,9 @@ mod tests {
         let project2 = crate::systems::translate::translate(&model2, 5).unwrap();
         let mut db2 = SimlinDb::default();
         let sync2 = sync_from_datamodel_incremental(&mut db2, &project2, None);
-        let compiled2 = compile_project_incremental(&db2, sync2.project, "main").unwrap();
+        let compiled2 =
+            compile_project_incremental(&db2, sync2.project, "main", crate::db::LtmOverlay::Off)
+                .unwrap();
         let mut vm2 = crate::Vm::new(compiled2).unwrap();
         vm2.run_to_end().unwrap();
         let results2 = vm2.into_results();

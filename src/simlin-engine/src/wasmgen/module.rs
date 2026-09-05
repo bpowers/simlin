@@ -208,11 +208,11 @@ const RI_BELT_N_SLATS: u32 = 1;
 /// deeper in the same call.
 ///
 /// When `ltm_enabled` is true, the synthesized `$⁚ltm⁚*` link/loop score
-/// variables are included in the emitted layout and blob. `ltm_discovery_mode`
-/// flips the same flag `simlin_sim_new(.., enable_ltm=true)` sets on a project,
-/// but locally for this compile only. Neither flag reaches the special-stock
-/// branch: that path compiles a separate, always-`ltm_enabled == false`
-/// `SourceProject` (a documented degradation, `queues.md` §10).
+/// variables are included in the emitted layout and blob (the compile is
+/// keyed on the LTM overlay); `ltm_discovery_mode` sets the discovery flag on
+/// this compile's own `SourceProject`. Neither reaches the special-stock
+/// branch: that path compiles a separate `SourceProject` without the overlay
+/// (a documented degradation, `queues.md` §10).
 pub fn compile_datamodel_to_artifact(
     datamodel: &crate::datamodel::Project,
     model_name: &str,
@@ -221,20 +221,24 @@ pub fn compile_datamodel_to_artifact(
 ) -> Result<WasmArtifact, WasmGenError> {
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, datamodel, None);
-    // The flags ride on the freshly-synced `SourceProject`; no reset dance is
-    // needed (contrast `simlin_sim_new`, which mutates a *shared* persistent
-    // `SourceProject` and must restore prior LTM state). `db` is owned by this
-    // function and dropped at return, so flag changes can never leak.
-    crate::db::set_project_ltm_enabled(&mut db, sync.project, ltm_enabled);
+    // The discovery flag rides on the freshly-synced `SourceProject`; `db` is
+    // owned by this function and dropped at return, so it can never leak.
+    // Whether the overlay is assembled is an argument of the compile.
     crate::db::set_project_ltm_discovery_mode(&mut db, sync.project, ltm_discovery_mode);
     // The unified dispatch: an ordinary model goes to `compile_project_incremental`
-    // (with the LTM flags above), a special-stock model to the expansion build
+    // (under the requested overlay), a special-stock model to the expansion build
     // path. Going through it rather than reimplementing the dispatch is what
     // guarantees the wasm blob simulates the SAME expanded project the VM does.
-    let build = crate::queue_compile::compile_sim(&mut db, sync.project, datamodel, model_name)
-        .map_err(|e| {
-            WasmGenError::Unsupported(format!("wasmgen: incremental compile failed: {e:?}"))
-        })?;
+    let build = crate::queue_compile::compile_sim(
+        &mut db,
+        sync.project,
+        datamodel,
+        model_name,
+        crate::db::LtmOverlay::from(ltm_enabled),
+    )
+    .map_err(|e| {
+        WasmGenError::Unsupported(format!("wasmgen: incremental compile failed: {e:?}"))
+    })?;
     compile_simulation_with_plans(&build.compiled, &build.conveyor_plans, &build.queue_plans)
 }
 

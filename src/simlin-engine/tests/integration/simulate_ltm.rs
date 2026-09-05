@@ -22,8 +22,8 @@ use simlin_engine::db::{
     compile_project_incremental, model_causal_edges, model_cycle_partitions, model_detected_loops,
     model_element_causal_edges, model_element_cycle_partitions, model_loop_circuits,
     model_loop_circuits_tiered, model_ltm_variables, project_datamodel_dims,
-    reclassify_loops_from_results, set_project_ltm_discovery_mode, set_project_ltm_enabled,
-    sync_from_datamodel, sync_from_datamodel_incremental,
+    reclassify_loops_from_results, set_project_ltm_discovery_mode, sync_from_datamodel,
+    sync_from_datamodel_incremental,
 };
 use simlin_engine::indexmap::IndexMap;
 use simlin_engine::xmile;
@@ -53,8 +53,9 @@ fn compile_ltm_incremental_with_partitions(
 ) {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .unwrap();
     let source_model = sync.models["main"].source_model;
     let loop_partitions = model_ltm_variables(&db, source_model, sync.project)
         .loop_partitions
@@ -69,9 +70,9 @@ fn compile_ltm_discovery_incremental(
 ) -> std::sync::Arc<CompiledSimulation> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
-    compile_project_incremental(&db, sync.project, "main").unwrap()
+    compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+        .unwrap()
 }
 
 struct LtmResults {
@@ -4309,8 +4310,9 @@ fn test_2d_arrayed_loop_score_metadata() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .unwrap();
     let source_model = sync.models["main"].source_model;
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
 
@@ -4578,11 +4580,11 @@ fn run_discovery(
 ) -> (Results, Vec<ltm_finding::FoundLoop>) {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
 
     let compiled =
-        compile_project_incremental(&db, sync.project, "main").expect("compilation should succeed");
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("compilation should succeed");
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
@@ -5614,7 +5616,6 @@ fn test_cross_element_ltm_exhaustive() {
     // `test_cross_element_ltm_loop_score_*` tests below.)
     let mut db2 = SimlinDb::default();
     let sync2 = sync_from_datamodel_incremental(&mut db2, &datamodel_project, None);
-    set_project_ltm_enabled(&mut db2, sync2.project, true);
     let source_model2 = sync2.models["main"].source_model;
     let ltm_vars = model_ltm_variables(&db2, source_model2, sync2.project);
     let loop_score_eqs: Vec<String> = ltm_vars
@@ -5902,7 +5903,6 @@ fn test_cross_element_ltm_loop_score_uses_element_path() {
     let datamodel_project = load_xmile_model("../../test/cross_element_ltm/cross_element.stmx");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
 
@@ -5970,7 +5970,6 @@ fn test_cross_element_ltm_symmetric_loop_enumerated() {
     let datamodel_project = load_xmile_model("../../test/cross_element_ltm/cross_element.stmx");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
 
@@ -6015,7 +6014,6 @@ fn test_cross_element_ltm_loop_score_value_matches_hand_calc() {
     // contents) using the salsa path...
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
 
@@ -6135,7 +6133,6 @@ fn test_scalar_reducer_loop_score_value_matches_hand_calc() {
     // independent).
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
 
@@ -6552,11 +6549,12 @@ fn test_partial_reduce_cross_element_loop() {
     // equations below match the simulated variables exactly.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
 
-    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .unwrap();
 
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
@@ -6808,7 +6806,6 @@ fn test_iterated_dim_subscript_link_score_is_bare_and_simulates() {
     // Inspect the synthetic vars via the salsa path.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
 
@@ -6891,7 +6888,6 @@ fn test_iterated_dim_subscript_loop_score_matches_hand_calc() {
     // synthetic-var list from the same datamodel to read it.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
     let loop_eq_by_name: HashMap<String, String> = ltm
@@ -7264,7 +7260,6 @@ fn test_disjoint_dim_arrayed_target_per_source_element_link_scores() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
@@ -7400,7 +7395,6 @@ fn test_disjoint_dim_unscoreable_edge_warns_and_emits_no_link_score() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
@@ -7474,7 +7468,6 @@ fn test_disjoint_dynamic_index_loop_scores_dropped() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
 
@@ -7498,13 +7491,18 @@ fn test_disjoint_dynamic_index_loop_scores_dropped() {
         ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
     );
 
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     // Exactly ONE Assembly warning: the unscoreable-edge diagnostic, which
     // names the edge and announces the loop drop. (Before the unification:
     // the edge warning PLUS one fragment-failure warning per loop score.)
-    let diags = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
+    let diags = simlin_engine::db::collect_all_diagnostics(
+        &db,
+        sync.project,
+        simlin_engine::db::LtmOverlay::On,
+    );
     let assembly: Vec<_> = diags
         .iter()
         .filter(|d| {
@@ -7665,10 +7663,11 @@ fn test_sliced_agg_cross_element_loop_simulates() {
     // Compile (exhaustive LTM) and simulate.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
-    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .unwrap();
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().expect("should simulate");
     let results = vm.into_results();
@@ -7820,7 +7819,6 @@ fn test_arrayed_sliced_agg_cross_element_loop_simulates() {
     {
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-        set_project_ltm_enabled(&mut db, sync.project, true);
         let source_model = sync.models["main"].source_model;
         let agg_nodes =
             simlin_engine::ltm_agg::enumerate_agg_nodes(&db, source_model, sync.project);
@@ -7845,7 +7843,6 @@ fn test_arrayed_sliced_agg_cross_element_loop_simulates() {
     // Compile (exhaustive LTM) and simulate.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
 
@@ -7863,7 +7860,9 @@ fn test_arrayed_sliced_agg_cross_element_loop_simulates() {
         "the synthetic agg aux must be arrayed over D1"
     );
 
-    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .unwrap();
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end()
         .expect("arrayed-synthetic-agg model should simulate with LTM enabled");
@@ -8020,7 +8019,6 @@ fn test_no_duplicate_ltm_vars_with_agg_routed_and_direct_edge() {
     let project = build_heterogeneous_share_model(0.01);
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
 
@@ -8295,10 +8293,10 @@ fn test_discovery_loop_through_agg_scored_on_untrimmed_path() {
     // loops *and* the raw link-score series they were scored from.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
     let compiled =
-        compile_project_incremental(&db, sync.project, "main").expect("compilation should succeed");
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("compilation should succeed");
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
@@ -8782,7 +8780,6 @@ fn test_mixed_reducer_and_dynamic_index_keeps_direct_reference() {
     let project = build_mixed_reducer_and_dynamic_index_model();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
 
     let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
@@ -8866,7 +8863,9 @@ fn test_mixed_reducer_and_dynamic_index_keeps_direct_reference() {
     );
 
     // The model still compiles and simulates with LTM enabled.
-    let compiled = compile_project_incremental(&db, sync.project, "main").expect("should compile");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("should compile");
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().expect("should simulate");
 }
@@ -8973,7 +8972,6 @@ fn test_inline_reducer_gets_synthetic_agg_despite_var_backed_sibling() {
     let project = build_var_backed_and_inline_same_reducer_model();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
 
     let agg = "$\u{205A}ltm\u{205A}agg\u{205A}0";
@@ -9020,7 +9018,9 @@ fn test_inline_reducer_gets_synthetic_agg_despite_var_backed_sibling() {
     );
 
     // The model compiles and simulates with LTM enabled.
-    let compiled = compile_project_incremental(&db, sync.project, "main").expect("should compile");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("should compile");
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().expect("should simulate");
 }
@@ -9124,7 +9124,6 @@ fn test_four_petal_canonical_loop_score_is_link_score_product() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
     assert!(
@@ -9163,7 +9162,9 @@ fn test_four_petal_canonical_loop_score_is_link_score_product() {
             .collect::<Vec<_>>()
     );
 
-    let compiled = compile_project_incremental(&db, sync.project, "main").expect("should compile");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("should compile");
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().expect("should simulate");
     let results = vm.into_results();
@@ -9354,7 +9355,6 @@ fn discovery_recovers_cross_agg_loops_matches_exhaustive() {
     let (exhaustive_loop_count, exhaustive_score_set) = {
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-        set_project_ltm_enabled(&mut db, sync.project, true);
         let source_model = sync.models["main"].source_model;
         let ltm = model_ltm_variables(&db, source_model, sync.project);
         let loop_vars: Vec<&simlin_engine::db::LtmSyntheticVar> = ltm
@@ -9372,8 +9372,13 @@ fn discovery_recovers_cross_agg_loops_matches_exhaustive() {
                 .map(|v| v.name.as_str())
                 .collect::<Vec<_>>()
         );
-        let compiled =
-            compile_project_incremental(&db, sync.project, "main").expect("exhaustive compile");
+        let compiled = compile_project_incremental(
+            &db,
+            sync.project,
+            "main",
+            simlin_engine::db::LtmOverlay::On,
+        )
+        .expect("exhaustive compile");
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_to_end().expect("exhaustive simulate");
         let results = vm.into_results();
@@ -9458,10 +9463,15 @@ fn discovery_recovers_cross_agg_loops_matches_exhaustive() {
     let raw = {
         let mut db2 = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db2, &project, None);
-        set_project_ltm_enabled(&mut db2, sync.project, true);
         set_project_ltm_discovery_mode(&mut db2, sync.project, true);
         let source_model = sync.models["main"].source_model;
-        let compiled = compile_project_incremental(&db2, sync.project, "main").unwrap();
+        let compiled = compile_project_incremental(
+            &db2,
+            sync.project,
+            "main",
+            simlin_engine::db::LtmOverlay::On,
+        )
+        .unwrap();
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_to_end().unwrap();
         let results = vm.into_results();
@@ -9541,7 +9551,13 @@ fn clearn_with_ltm_simulates_model_vars_identically() {
     let plain = {
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-        let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+        let compiled = compile_project_incremental(
+            &db,
+            sync.project,
+            "main",
+            simlin_engine::db::LtmOverlay::Off,
+        )
+        .unwrap();
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_to_end().unwrap();
         vm.into_results()
@@ -9752,7 +9768,6 @@ fn test_lookup_table_link_score_is_nonzero() {
     // Discovery must find the loop through the lookup table.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let element_edges = model_element_causal_edges(&db, source_model, sync.project);
@@ -10328,7 +10343,6 @@ fn exhaustive_module_loop_polarity_reclassified_from_runtime() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
 
     let detected = model_detected_loops(&db, source_model, sync.project);
@@ -10394,7 +10408,6 @@ fn exhaustive_never_active_loop_keeps_structural_polarity() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
 
     let detected = model_detected_loops(&db, source_model, sync.project);
@@ -10510,7 +10523,6 @@ fn exhaustive_mixed_sign_dominant_loop_reclassifies_to_rux() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
 
     let detected = model_detected_loops(&db, source_model, sync.project);
@@ -10576,7 +10588,6 @@ fn exhaustive_mixed_sign_balanced_loop_stays_undetermined() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let detected = model_detected_loops(&db, source_model, sync.project);
     assert_eq!(detected.loops.len(), 1, "the fixture has exactly one loop");
@@ -10619,7 +10630,6 @@ fn discovery_rux_classification_matches_exhaustive() {
     // Exhaustive: reclassify the detected loop from the simulated series.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let detected = model_detected_loops(&db, source_model, sync.project);
     let (compiled, loop_partitions) = compile_ltm_incremental_with_partitions(&project);
@@ -10750,7 +10760,6 @@ fn test_mapped_sliced_agg_cross_element_loop_simulates() {
     {
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-        set_project_ltm_enabled(&mut db, sync.project, true);
         let source_model = sync.models["main"].source_model;
         let agg_nodes =
             simlin_engine::ltm_agg::enumerate_agg_nodes(&db, source_model, sync.project);
@@ -10774,7 +10783,6 @@ fn test_mapped_sliced_agg_cross_element_loop_simulates() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
 
@@ -10791,11 +10799,17 @@ fn test_mapped_sliced_agg_cross_element_loop_simulates() {
         "the synthetic agg aux must be arrayed over State"
     );
 
-    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .unwrap();
 
     // Every emitted LTM synthetic fragment compiles: no fragment-failure
     // warnings (the silent-stub path would zero the loop score).
-    let diags = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
+    let diags = simlin_engine::db::collect_all_diagnostics(
+        &db,
+        sync.project,
+        simlin_engine::db::LtmOverlay::On,
+    );
     let frag_failures: Vec<_> = diags
         .iter()
         .filter(|d| {
@@ -10957,7 +10971,6 @@ fn test_mapped_sliced_agg_with_scalar_cofeeder_simulates() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
 
@@ -10979,7 +10992,6 @@ fn test_mapped_sliced_agg_with_scalar_cofeeder_simulates() {
     {
         let mut ddb = SimlinDb::default();
         let dsync = sync_from_datamodel_incremental(&mut ddb, &project, None);
-        set_project_ltm_enabled(&mut ddb, dsync.project, true);
         set_project_ltm_discovery_mode(&mut ddb, dsync.project, true);
         let dmodel = dsync.models["main"].source_model;
         let dltm = model_ltm_variables(&ddb, dmodel, dsync.project);
@@ -10995,8 +11007,14 @@ fn test_mapped_sliced_agg_with_scalar_cofeeder_simulates() {
         );
     }
 
-    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
-    let diags = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .unwrap();
+    let diags = simlin_engine::db::collect_all_diagnostics(
+        &db,
+        sync.project,
+        simlin_engine::db::LtmOverlay::On,
+    );
     let frag_failures: Vec<_> = diags
         .iter()
         .filter(|d| {
@@ -11056,7 +11074,6 @@ fn test_whole_rhs_mapped_reducer_routes_through_synthetic_agg() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
 
@@ -11067,8 +11084,14 @@ fn test_whole_rhs_mapped_reducer_routes_through_synthetic_agg() {
         ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
     );
 
-    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
-    let diags = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .unwrap();
+    let diags = simlin_engine::db::collect_all_diagnostics(
+        &db,
+        sync.project,
+        simlin_engine::db::LtmOverlay::On,
+    );
     let frag_failures: Vec<_> = diags
         .iter()
         .filter(|d| {
@@ -11250,10 +11273,10 @@ fn clearn_ltm_slot_maxima_digest() {
     // would be a second derivation of the thing being pinned.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("C-LEARN must compile with LTM enabled");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("C-LEARN must compile with LTM enabled");
     let dim_ctx = project_dimensions_context(&db, sync.project);
 
     let mut vm = Vm::new(compiled).expect("vm");

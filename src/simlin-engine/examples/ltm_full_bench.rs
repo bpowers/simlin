@@ -53,7 +53,7 @@ use simlin_engine::db::model_element_loop_circuits;
 use simlin_engine::db::{
     SimlinDb, causal_graph_from_edges, causal_graph_from_element_edges,
     compile_project_incremental, model_causal_edges, model_element_causal_edges,
-    model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel_incremental,
+    model_ltm_variables, sync_from_datamodel_incremental,
 };
 use simlin_engine::{json, open_vensim, open_xmile};
 
@@ -251,7 +251,6 @@ fn main() {
     // Stage 3: enable LTM.  Just flips an input flag but bumps the
     // salsa generation, so downstream tracked fns will run fresh.
     let t0 = Instant::now();
-    set_project_ltm_enabled(&mut db, sync.project, true);
     tracker.record(
         "ltm_enabled",
         t0.elapsed().as_secs_f64() * 1000.0,
@@ -353,7 +352,12 @@ fn main() {
     // Stage 8: full compile (parsing LTM equations into ASTs, interning
     // salsa rows, bytecode emission).
     let t0 = Instant::now();
-    let compile_result = compile_project_incremental(&db, sync.project, root_name);
+    let compile_result = compile_project_incremental(
+        &db,
+        sync.project,
+        root_name,
+        simlin_engine::db::LtmOverlay::On,
+    );
     let compile_ok = compile_result.is_ok();
     tracker.record(
         "compile",

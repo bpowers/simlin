@@ -18,9 +18,7 @@
 //!
 //! That is how the MDL apply-to-all import fix was shown to be strictly
 //! additive (315 added, 0 removed) rather than a wash of gains and losses.
-use simlin_engine::db::{
-    SimlinDb, model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel_incremental,
-};
+use simlin_engine::db::{SimlinDb, model_ltm_variables, sync_from_datamodel_incremental};
 fn main() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -30,7 +28,6 @@ fn main() {
     let datamodel = simlin_engine::open_vensim(&contents).expect("import");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let mut names: Vec<String> = Vec::new();
     for (model_name, m) in sync.models.iter() {
         let ltm = model_ltm_variables(&db, m.source_model, sync.project);

@@ -94,6 +94,7 @@ fn test_compile_var_fragment_caching() {
             model,
             sync1.project,
             ModuleInputSet::empty(&db),
+            crate::db::LtmOverlay::Off,
         );
         let beta_result1 = compile_var_fragment(
             &db,
@@ -101,6 +102,7 @@ fn test_compile_var_fragment_caching() {
             model,
             sync1.project,
             ModuleInputSet::empty(&db),
+            crate::db::LtmOverlay::Off,
         );
         assert!(alpha_result1.is_some());
         assert!(beta_result1.is_some());
@@ -155,6 +157,7 @@ fn test_compile_var_fragment_caching() {
         model2,
         sync2.project,
         ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     );
     assert!(alpha_result2.is_some());
 
@@ -164,6 +167,7 @@ fn test_compile_var_fragment_caching() {
         model2,
         sync2.project,
         ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     );
     assert!(beta_result2.is_some());
     let beta_ptr_after = beta_result2 as *const _;
@@ -824,6 +828,7 @@ fn test_compile_fragment_init_expression_temp_arg_compiles() {
         model,
         sync.project,
         ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     );
     assert!(
         fragment.is_some(),
@@ -879,8 +884,14 @@ fn test_compile_fragment_init_dep_kept_for_active_initial_override() {
     let sync = sync_from_datamodel(&db, &project);
     let model = sync.models["main"].source;
     let x_var = sync.models["main"].variables["x"].source;
-    let fragment =
-        compile_var_fragment(&db, x_var, model, sync.project, ModuleInputSet::empty(&db));
+    let fragment = compile_var_fragment(
+        &db,
+        x_var,
+        model,
+        sync.project,
+        ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
+    );
     assert!(
         fragment.is_some(),
         "INIT(y) with active_initial override should still compile in fragment mode"
@@ -933,7 +944,7 @@ fn test_init_feedback_path_is_acyclic() {
 
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let errors: Vec<_> = diags
         .iter()
         .filter(|d| d.severity == DiagnosticSeverity::Error)
@@ -1207,15 +1218,25 @@ fn test_assemble_simulation_noop_recompile_is_cache_hit() {
     // First sync + assemble primes the cache.
     let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
     let project1 = state1.to_sync_result().project;
-    let sim1 = assemble_simulation(&db, project1, "main".to_string())
-        .expect("first assemble_simulation should succeed");
+    let sim1 = assemble_simulation(
+        &db,
+        project1,
+        "main".to_string(),
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("first assemble_simulation should succeed");
 
     // Re-sync the IDENTICAL datamodel: handles are reused, no input field
     // value changes, so every transitively-read input is bit-identical.
     let state2 = sync_from_datamodel_incremental(&mut db, &project, Some(&state1));
     let project2 = state2.to_sync_result().project;
-    let sim2 = assemble_simulation(&db, project2, "main".to_string())
-        .expect("second assemble_simulation should succeed");
+    let sim2 = assemble_simulation(
+        &db,
+        project2,
+        "main".to_string(),
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("second assemble_simulation should succeed");
 
     assert!(
         Arc::ptr_eq(&sim1, &sim2),
@@ -1225,7 +1246,7 @@ fn test_assemble_simulation_noop_recompile_is_cache_hit() {
 
     // The public entry point hands out the memo's own `Arc`: what a caller
     // runs is the cached program itself, not a copy of it.
-    let shared = compile_project_incremental(&db, project2, "main")
+    let shared = compile_project_incremental(&db, project2, "main", crate::db::LtmOverlay::Off)
         .expect("compile_project_incremental should succeed");
     assert!(
         Arc::ptr_eq(&shared, &sim2),
@@ -1268,15 +1289,25 @@ fn test_db_sync_noop_recompile_is_cache_hit() {
 
     // First sync primes the cache; the db retains the handles internally.
     let project1 = db.sync(&project);
-    let sim1 = assemble_simulation(&db, project1, "main".to_string())
-        .expect("first assemble_simulation should succeed");
+    let sim1 = assemble_simulation(
+        &db,
+        project1,
+        "main".to_string(),
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("first assemble_simulation should succeed");
 
     // Re-sync the IDENTICAL datamodel WITHOUT threading any prior state by
     // hand -- the db reuses its own `sync_state`, so no input field value
     // changes and the assemble is a cache hit.
     let project2 = db.sync(&project);
-    let sim2 = assemble_simulation(&db, project2, "main".to_string())
-        .expect("second assemble_simulation should succeed");
+    let sim2 = assemble_simulation(
+        &db,
+        project2,
+        "main".to_string(),
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("second assemble_simulation should succeed");
 
     assert!(
         Arc::ptr_eq(&sim1, &sim2),
@@ -1385,14 +1416,22 @@ fn test_assemble_module_unchanged_submodule_is_cache_hit() {
     // assemble_simulation builds the module-input set). The interned
     // `ModuleInputSet` borrows `db`, so it is built fresh at each use site
     // around the later `&mut db` sync; interning dedups it to the same id.
-    let root_main1 = assemble_module(&db, main1, project1, true, ModuleInputSet::empty(&db))
-        .expect("root assemble_module should succeed");
+    let root_main1 = assemble_module(
+        &db,
+        main1,
+        project1,
+        true,
+        ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("root assemble_module should succeed");
     let sub_producer1 = assemble_module(
         &db,
         producer1,
         project1,
         false,
         ModuleInputSet::from_names(&db, &["input".to_string()]),
+        crate::db::LtmOverlay::Off,
     )
     .expect("submodule assemble_module should succeed");
 
@@ -1409,14 +1448,22 @@ fn test_assemble_module_unchanged_submodule_is_cache_hit() {
         )
     };
 
-    let root_main2 = assemble_module(&db, main2, project2, true, ModuleInputSet::empty(&db))
-        .expect("root assemble_module should succeed after edit");
+    let root_main2 = assemble_module(
+        &db,
+        main2,
+        project2,
+        true,
+        ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("root assemble_module should succeed after edit");
     let sub_producer2 = assemble_module(
         &db,
         producer2,
         project2,
         false,
         ModuleInputSet::from_names(&db, &["input".to_string()]),
+        crate::db::LtmOverlay::Off,
     )
     .expect("submodule assemble_module should succeed after edit");
 
@@ -1540,7 +1587,8 @@ fn test_is_root_shift_machineries_in_lockstep() {
 
     // The final root layout the assembler resolves against (body layout +
     // the single shared root shift).
-    let root_layout = compute_layout(&db, main_model, sync.project).root_shifted();
+    let root_layout =
+        compute_layout(&db, main_model, sync.project, crate::db::LtmOverlay::Off).root_shifted();
 
     // Documented root layout invariant: implicit globals at fixed slots, the
     // first body variable at IMPLICIT_VAR_COUNT.
@@ -1563,7 +1611,8 @@ fn test_is_root_shift_machineries_in_lockstep() {
     );
 
     // The results-offset map, computed for the root.
-    let flat = crate::db::flattened_offsets(&db, sync.project, main_model);
+    let flat =
+        crate::db::flattened_offsets(&db, sync.project, main_model, crate::db::LtmOverlay::Off);
 
     // Lockstep: every name the flattened results map exposes at the top level
     // (the implicit globals + scalar body vars + SMOOTH/DELAY implicit vars;
@@ -1621,8 +1670,13 @@ fn test_is_root_shift_machineries_in_lockstep() {
 
     // End-to-end: the assembled simulation's offsets are this map, and its
     // n_slots is the root layout's n_slots.
-    let sim = assemble_simulation(&db, sync.project, "main".to_string())
-        .expect("assemble_simulation should succeed");
+    let sim = assemble_simulation(
+        &db,
+        sync.project,
+        "main".to_string(),
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("assemble_simulation should succeed");
     assert_eq!(
         sim.n_slots(),
         root_layout.n_slots,
@@ -1720,6 +1774,7 @@ fn test_stdlib_inputs_are_one_shot_and_stable_across_syncs() {
             smth3.source,
             sync1.project,
             ModuleInputSet::empty(&db),
+            crate::db::LtmOverlay::Off,
         );
         assert!(frag.is_some(), "stdlib variable fragment should compile");
 
@@ -1783,6 +1838,7 @@ fn test_stdlib_inputs_are_one_shot_and_stable_across_syncs() {
         smth3_after.source,
         sync2.project,
         ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     );
     assert!(frag2.is_some());
     assert_eq!(

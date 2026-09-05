@@ -2156,7 +2156,6 @@ mod front_door_tests {
         use crate::db::{
             DiagnosticError, DiagnosticSeverity, collect_model_diagnostics, model_ltm_variables,
         };
-        use salsa::Setter;
 
         // A stock/flow feedback loop whose flow equation is a 3-argument `MEAN`:
         // scoreable at the production limit, over-wide at limit 2.
@@ -2169,7 +2168,7 @@ mod front_door_tests {
         };
 
         let width_warnings = |db: &SimlinDb, model, project| -> Vec<String> {
-            collect_model_diagnostics(db, model, project)
+            collect_model_diagnostics(db, model, project, crate::db::LtmOverlay::On)
                 .into_iter()
                 .filter(|d| d.severity == DiagnosticSeverity::Warning)
                 .filter_map(|d| match d.error {
@@ -2186,12 +2185,11 @@ mod front_door_tests {
         // Control: at the production limit the model IS scored and no width
         // warning is emitted.
         {
-            let mut db = SimlinDb::default();
+            let db = SimlinDb::default();
             let (project, model) = {
                 let sync = sync_from_datamodel(&db, &fixture().build_datamodel());
                 (sync.project, sync.models["main"].source)
             };
-            project.set_ltm_enabled(&mut db).to(true);
             assert!(
                 !model_ltm_variables(&db, model, project).vars.is_empty(),
                 "the control fixture must be scoreable, or the refusal below proves nothing"
@@ -2205,12 +2203,11 @@ mod front_door_tests {
         // Refusal: no LTM variable at all, plus a Warning naming the variable.
         {
             let _guard = SiteChildrenLimitGuard::new(2);
-            let mut db = SimlinDb::default();
+            let db = SimlinDb::default();
             let (project, model) = {
                 let sync = sync_from_datamodel(&db, &fixture().build_datamodel());
                 (sync.project, sync.models["main"].source)
             };
-            project.set_ltm_enabled(&mut db).to(true);
             assert!(
                 model_ltm_variables(&db, model, project).vars.is_empty(),
                 "a refused model must emit no link, loop, or pathway score"

@@ -2234,15 +2234,15 @@ fn engine_reference_rel_per_element(
     std::collections::HashMap<String, usize>,
 ) {
     use simlin_engine::db::{
-        compile_project_incremental, model_ltm_variables, set_project_ltm_enabled,
-        sync_from_datamodel_incremental, SimlinDb,
+        compile_project_incremental, model_ltm_variables, sync_from_datamodel_incremental, SimlinDb,
     };
     use simlin_engine::Vm;
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .unwrap();
     let source_model = sync.models["main"].source_model;
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
     let loop_partitions = ltm_vars.loop_partitions.clone();

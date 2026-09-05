@@ -406,7 +406,8 @@ fn compile_sim(
 ) -> std::sync::Arc<CompiledSimulation> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
-    compile_project_incremental(&db, sync.project, model_name).expect("incremental compile")
+    compile_project_incremental(&db, sync.project, model_name, crate::db::LtmOverlay::Off)
+        .expect("incremental compile")
 }
 
 /// Run a `WasmArtifact` under the DLR-FT interpreter and return the

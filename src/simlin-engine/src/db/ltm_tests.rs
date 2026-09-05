@@ -81,8 +81,6 @@ fn a_bare_element_snapshot_captures_on_the_generated_path_only_when_shadowed() {
 /// equation the generator does not produce.
 #[test]
 fn ltm_capture_helpers_compile_exactly_the_phases_their_kind_demands() {
-    use salsa::Setter;
-
     use super::compile::{compile_ltm_implicit_var_fragment, ltm_helper_phases_present};
     use super::{LtmEquation, LtmImplicitVarMeta, ltm_model_var_names, parse_ltm_equation};
     use crate::capture::CaptureKind;
@@ -91,9 +89,8 @@ fn ltm_capture_helpers_compile_exactly_the_phases_their_kind_demands() {
     let project = TestProject::new("ltm_capture_phases")
         .aux("k", "1 + TIME", None)
         .build_datamodel();
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    sync.project.set_ltm_enabled(&mut db).to(true);
     let model = sync.models["main"].source;
 
     for (text, kind) in [
@@ -161,8 +158,6 @@ fn ltm_capture_helpers_compile_exactly_the_phases_their_kind_demands() {
 /// commits.
 #[test]
 fn generated_ltm_capture_helpers_are_flow_only() {
-    use salsa::Setter;
-
     use super::compile::{compile_ltm_implicit_var_fragment, ltm_helper_phases_present};
     use super::model_ltm_implicit_var_info;
     use crate::capture::CaptureKind;
@@ -172,9 +167,8 @@ fn generated_ltm_capture_helpers_are_flow_only() {
         .flow("growth", "level * rate", None)
         .aux("rate", "0.1", None)
         .build_datamodel();
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    sync.project.set_ltm_enabled(&mut db).to(true);
     let model = sync.models["main"].source;
     let info = model_ltm_implicit_var_info(&db, model, sync.project);
     let captures: Vec<_> = info
@@ -298,8 +292,6 @@ fn test_ltm_bare_module_snapshot_is_refused_at_lowering() {
 /// with explicit dimensions).
 #[test]
 fn test_a2a_ltm_layout_size() {
-    use salsa::Setter;
-
     let project = TestProject::new("a2a_ltm_layout")
         .with_sim_time(0.0, 10.0, 1.0)
         .named_dimension("Region", &["NYC", "Boston", "LA"])
@@ -307,17 +299,22 @@ fn test_a2a_ltm_layout_size() {
         .array_flow("births[Region]", "population * 0.1", None)
         .build_datamodel();
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
-    let n_slots_ltm = compute_layout(&db, source_model, source_project).n_slots;
+    let n_slots_ltm =
+        compute_layout(&db, source_model, source_project, crate::db::LtmOverlay::On).n_slots;
 
-    source_project.set_ltm_enabled(&mut db).to(false);
-    let n_slots_no_ltm = compute_layout(&db, source_model, source_project).n_slots;
+    let n_slots_no_ltm = compute_layout(
+        &db,
+        source_model,
+        source_project,
+        crate::db::LtmOverlay::Off,
+    )
+    .n_slots;
 
     // With LTM enabled, layout should have more slots for LTM variables
     assert!(
@@ -919,13 +916,11 @@ fn per_element_generation_scaling() {
             .array_stock("pop[Wide]", "10", &["growth"], &[], None)
             .build_datamodel();
 
-        let mut db = SimlinDb::default();
+        let db = SimlinDb::default();
         let (source_project, model) = {
             let sync = sync_from_datamodel(&db, &project);
             (sync.project, sync.models["main"].source)
         };
-        use salsa::Setter;
-        source_project.set_ltm_enabled(&mut db).to(true);
 
         // Sub-phase timings: which query actually scales quadratically.
         let t0 = Instant::now();
@@ -1456,7 +1451,7 @@ fn colliding_index_name_model(declare_bucket: bool, second_name: bool) -> datamo
 fn colliding_index_boston_arm(project: &datamodel::Project) -> (String, usize) {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, project);
-    let diags = crate::db::collect_all_diagnostics(&db, sync.project);
+    let diags = crate::db::collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let ltm = crate::db::model_ltm_variables(&db, sync.models["main"].source, sync.project);
     let arm = ltm
         .vars
@@ -1571,14 +1566,15 @@ fn a_colliding_index_name_is_resolved_against_the_axis_it_indexes() {
 /// below pins them as VALUES, so the next reader inherits the number rather than
 /// the framing.
 fn colliding_index_boston_series(project: &datamodel::Project) -> Vec<u64> {
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, project);
-    use salsa::Setter;
-    sync.project.set_ltm_enabled(&mut db).to(true);
-    let sync = sync_from_datamodel(&db, project);
-    sync.project.set_ltm_enabled(&mut db).to(true);
-    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
-        .expect("the fixture must compile");
+    let compiled = crate::db::compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        crate::db::LtmOverlay::On,
+    )
+    .expect("the fixture must compile");
     let offsets = compiled.offsets.clone();
     let mut vm = crate::vm::Vm::new(compiled).expect("vm");
     vm.run_to_end().expect("run");
@@ -1767,8 +1763,6 @@ fn an_index_naming_the_axis_own_element_stays_a_static_selector() {
 /// the twelve tests listed above.
 #[test]
 fn a_dimension_name_index_is_not_frozen_when_the_axis_is_known() {
-    use salsa::Setter;
-
     let project = TestProject::new("dim_name_index")
         .with_sim_time(0.0, 3.0, 1.0)
         .named_dimension("cop", &["c1", "c2"])
@@ -1783,12 +1777,11 @@ fn a_dimension_name_index_is_not_frozen_when_the_axis_is_known() {
         )
         .build_datamodel();
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let ltm = crate::db::model_ltm_variables(&db, source_model, source_project);
     let score = ltm
@@ -1820,7 +1813,7 @@ fn a_dimension_name_index_is_not_frozen_when_the_axis_is_known() {
     // The runtime consequence, which is what makes this a defect rather than a
     // spelling preference: the frozen index forced a capture helper whose
     // argument constant-folded, so the helper compiled to nothing.
-    let diags = crate::db::collect_all_diagnostics(&db, source_project);
+    let diags = crate::db::collect_all_diagnostics(&db, source_project, crate::db::LtmOverlay::On);
     assert!(
         diags.is_empty(),
         "every LTM fragment and helper must compile; got: {:?}",
@@ -1848,9 +1841,7 @@ fn a_dimension_name_index_is_not_frozen_when_the_axis_is_known() {
 /// model with thousands of links that is a full LTM rebuild per keystroke.
 #[test]
 fn an_unrelated_equation_edit_does_not_regenerate_every_link_score() {
-    use crate::db::{
-        compile_project_incremental, set_project_ltm_enabled, sync_from_datamodel_incremental,
-    };
+    use crate::db::{compile_project_incremental, sync_from_datamodel_incremental};
 
     // Two independent feedback loops sharing no variable, so an edit inside
     // one provably cannot change the other's scores. `untouched_*` is the
@@ -1866,8 +1857,8 @@ fn an_unrelated_equation_edit_does_not_regenerate_every_link_score() {
 
     let mut db = SimlinDb::default();
     let state = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, state.project, true);
-    compile_project_incremental(&db, state.project, "main").expect("first compile");
+    compile_project_incremental(&db, state.project, "main", crate::db::LtmOverlay::On)
+        .expect("first compile");
 
     // Count the whole cold build, so the edit's count has something to be a
     // fraction OF -- an assertion against a bare number would pass just as
@@ -1890,7 +1881,8 @@ fn an_unrelated_equation_edit_does_not_regenerate_every_link_score() {
 
     super::compile::reset_shaped_link_score_executions();
     let state2 = sync_from_datamodel_incremental(&mut db, &edited, Some(&state));
-    compile_project_incremental(&db, state2.project, "main").expect("recompile after edit");
+    compile_project_incremental(&db, state2.project, "main", crate::db::LtmOverlay::On)
+        .expect("recompile after edit");
     let after_edit = super::compile::shaped_link_score_executions();
 
     // The bound is "strictly fewer than the cold build", not an exact number:
@@ -1955,8 +1947,6 @@ fn an_unrelated_equation_edit_does_not_regenerate_every_link_score() {
 /// unfreezable partial already use.
 #[test]
 fn an_uncoverable_arrayed_dep_declines_the_edge_loudly() {
-    use salsa::Setter;
-
     let project = TestProject::new("unpinnable_dep")
         .with_sim_time(0.0, 3.0, 1.0)
         .named_dimension("cop", &["c1", "c2"])
@@ -1971,16 +1961,15 @@ fn an_uncoverable_arrayed_dep_declines_the_edge_loudly() {
         )
         .build_datamodel();
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let source_project = sync_from_datamodel(&db, &project).project;
-    source_project.set_ltm_enabled(&mut db).to(true);
     let source_model = sync_from_datamodel(&db, &project).models["main"].source;
 
     // Non-vacuity: the MODEL must compile, or "no score emitted" would be
     // satisfied by a project that never got as far as scoring anything. The
     // simulation reads `aggregated[cop]` POSITIONALLY (see the fixture note),
     // which is why an unmapped pair with unrelated element names is legal here.
-    let diags = crate::db::collect_all_diagnostics(&db, source_project);
+    let diags = crate::db::collect_all_diagnostics(&db, source_project, crate::db::LtmOverlay::On);
     let errors: Vec<_> = diags
         .iter()
         .filter(|d| d.severity == crate::db::DiagnosticSeverity::Error)
@@ -2059,8 +2048,6 @@ fn an_uncoverable_arrayed_dep_declines_the_edge_loudly() {
 /// the map says `agg\u{B7}a2`.
 #[test]
 fn an_element_mapped_arrayed_dep_is_scored_through_the_map() {
-    use salsa::Setter;
-
     let project = TestProject::new("element_mapped_dep")
         .with_sim_time(0.0, 3.0, 1.0)
         .named_dimension("cop", &["c1", "c2"])
@@ -2080,9 +2067,8 @@ fn an_element_mapped_arrayed_dep_is_scored_through_the_map() {
         )
         .build_datamodel();
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let source_project = sync_from_datamodel(&db, &project).project;
-    source_project.set_ltm_enabled(&mut db).to(true);
     let source_model = sync_from_datamodel(&db, &project).models["main"].source;
 
     let ltm = crate::db::model_ltm_variables(&db, source_model, source_project);
@@ -2115,7 +2101,7 @@ fn an_element_mapped_arrayed_dep_is_scored_through_the_map() {
     );
 
     // And the decline is gone: no unprojectable-dep warning for this edge.
-    let diags = crate::db::collect_all_diagnostics(&db, source_project);
+    let diags = crate::db::collect_all_diagnostics(&db, source_project, crate::db::LtmOverlay::On);
     let declines: Vec<_> = diags
         .iter()
         .filter(|d| match &d.error {
@@ -2141,8 +2127,6 @@ fn an_element_mapped_arrayed_dep_is_scored_through_the_map() {
 /// elements, which is exactly what a many-to-one read is.
 #[test]
 fn a_many_to_one_mapped_read_is_scored_per_row_and_element() {
-    use salsa::Setter;
-
     let project = TestProject::new("class_d_scores")
         .with_sim_time(0.0, 3.0, 1.0)
         .named_dimension("cop", &["c1", "c2", "c3", "c4"])
@@ -2161,12 +2145,11 @@ fn a_many_to_one_mapped_read_is_scored_per_row_and_element() {
         .array_aux("target[cop]", "aggregated[agg] * 2 + level[cop]")
         .build_datamodel();
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let source_project = sync_from_datamodel(&db, &project).project;
-    source_project.set_ltm_enabled(&mut db).to(true);
     let source_model = sync_from_datamodel(&db, &project).models["main"].source;
 
-    let diags = crate::db::collect_all_diagnostics(&db, source_project);
+    let diags = crate::db::collect_all_diagnostics(&db, source_project, crate::db::LtmOverlay::On);
     let errors: Vec<_> = diags
         .iter()
         .filter(|d| d.severity == crate::db::DiagnosticSeverity::Error)
@@ -2255,7 +2238,6 @@ fn a_lookup_table_index_is_element_pinned_in_a_per_element_partial() {
     use crate::datamodel::{
         Equation, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale, Variable,
     };
-    use salsa::Setter;
 
     // Per-element table: `a` doubles its input, `b` triples it. Distinct slopes
     // are what make a mis-pinned index visible in the value.
@@ -2304,12 +2286,11 @@ fn a_lookup_table_index_is_element_pinned_in_a_per_element_partial() {
         .build_datamodel();
     project.models[0].variables.push(tbl);
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let source_project = sync_from_datamodel(&db, &project).project;
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     // The model itself must be sound, or the score assertions below are moot.
-    let diags = crate::db::collect_all_diagnostics(&db, source_project);
+    let diags = crate::db::collect_all_diagnostics(&db, source_project, crate::db::LtmOverlay::On);
     assert!(
         diags.is_empty(),
         "the fixture must compile with no diagnostics; got: {:?}",
@@ -2322,8 +2303,13 @@ fn a_lookup_table_index_is_element_pinned_in_a_per_element_partial() {
     // The per-element score for the `factor -> out[b]` edge. `b`'s table has
     // slope 3, so a partial that pinned the index to `a` (slope 2) -- or left it
     // unpinned -- is a different number, not merely a different spelling.
-    let compiled = crate::db::compile_project_incremental(&db, source_project, "main")
-        .expect("the fixture must compile");
+    let compiled = crate::db::compile_project_incremental(
+        &db,
+        source_project,
+        "main",
+        crate::db::LtmOverlay::On,
+    )
+    .expect("the fixture must compile");
     let offsets = compiled.offsets.clone();
     let score_name = offsets
         .keys()
@@ -2412,8 +2398,6 @@ fn a_lookup_table_index_is_element_pinned_in_a_per_element_partial() {
 /// undeclared-mapping dep.
 #[test]
 fn the_completeness_guard_holds_on_the_per_element_emitter() {
-    use salsa::Setter;
-
     let project = TestProject::new("perelem_guard")
         .with_sim_time(0.0, 3.0, 1.0)
         .named_dimension("region", &["a", "b"])
@@ -2431,13 +2415,12 @@ fn the_completeness_guard_holds_on_the_per_element_emitter() {
         .array_aux("out[region]", "src[region, t1] * 0.5 + other[region]")
         .build_datamodel();
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let source_project = sync_from_datamodel(&db, &project).project;
-    source_project.set_ltm_enabled(&mut db).to(true);
     let source_model = sync_from_datamodel(&db, &project).models["main"].source;
 
     // Non-vacuity: the MODEL must compile (see the sibling guard's note).
-    let diags = crate::db::collect_all_diagnostics(&db, source_project);
+    let diags = crate::db::collect_all_diagnostics(&db, source_project, crate::db::LtmOverlay::On);
     let errors: Vec<_> = diags
         .iter()
         .filter(|d| d.severity == crate::db::DiagnosticSeverity::Error)
@@ -2534,18 +2517,21 @@ fn per_element_zero_slot_project(n: usize) -> datamodel::Project {
 #[test]
 fn the_ltm_diagnostic_pass_does_not_recompile_assembly_fragments() {
     let project = per_element_zero_slot_project(4);
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    use salsa::Setter;
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     // Assembly first: this is the walk that legitimately compiles every
     // fragment. Priming it here is what makes the measured region below a
     // second walk rather than a first one.
-    let compiled = crate::db::compile_project_incremental(&db, source_project, "main");
+    let compiled = crate::db::compile_project_incremental(
+        &db,
+        source_project,
+        "main",
+        crate::db::LtmOverlay::On,
+    );
     assert!(
         compiled.is_ok(),
         "the fixture must compile with LTM enabled: {:?}",
@@ -2577,16 +2563,19 @@ fn the_ltm_diagnostic_pass_does_not_recompile_assembly_fragments() {
 #[test]
 fn the_ltm_fragment_body_counter_observes_a_cold_compile() {
     let project = per_element_zero_slot_project(4);
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let source_project = {
         let sync = sync_from_datamodel(&db, &project);
         sync.project
     };
-    use salsa::Setter;
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     crate::db::reset_fragment_executions();
-    let _ = crate::db::compile_project_incremental(&db, source_project, "main");
+    let _ = crate::db::compile_project_incremental(
+        &db,
+        source_project,
+        "main",
+        crate::db::LtmOverlay::On,
+    );
     let execs = crate::db::fragment_executions();
     let n_ltm = execs
         .iter()
@@ -2629,13 +2618,11 @@ fn first_arm_expr(eq: &crate::db::LtmEquation) -> &std::sync::Arc<crate::ast::Ex
 #[test]
 fn an_emitted_link_score_shares_its_ast_with_the_shaped_memo() {
     let project = per_element_zero_slot_project(4);
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    use salsa::Setter;
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let ltm = crate::db::model_ltm_variables(&db, model, source_project);
     let emitted = ltm
@@ -2735,11 +2722,15 @@ fn delay3_ramp_project(in_submodel: bool) -> datamodel::Project {
 fn delay3_input_to_stock_link_score_uses_the_two_step_lag_of_the_bound_port() {
     for (in_submodel, prefix) in [(false, ""), (true, "sub\u{00B7}")] {
         let project = delay3_ramp_project(in_submodel);
-        let mut db = SimlinDb::default();
+        let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &project);
-        crate::db::set_project_ltm_enabled(&mut db, sync.project, true);
-        let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
-            .expect("the DELAY3 fixture compiles under LTM");
+        let compiled = crate::db::compile_project_incremental(
+            &db,
+            sync.project,
+            "main",
+            crate::db::LtmOverlay::On,
+        )
+        .expect("the DELAY3 fixture compiles under LTM");
         let mut vm = crate::vm::Vm::new(compiled).expect("vm");
         vm.run_to_end().expect("runs");
         let results = crate::test_common::collect_results(&vm.into_results());

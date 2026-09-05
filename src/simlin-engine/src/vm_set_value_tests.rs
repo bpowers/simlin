@@ -303,7 +303,13 @@ fn test_set_value_module_stock_returns_error() {
     let project_datamodel = crate::open_xmile(&mut cursor).unwrap();
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project_datamodel, None);
-    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main").unwrap();
+    let compiled = crate::db::compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        crate::db::LtmOverlay::Off,
+    )
+    .unwrap();
 
     let mut vm = Vm::new(compiled).unwrap();
     let hares_ident = Ident::new("hares.hares");

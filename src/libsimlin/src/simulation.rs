@@ -77,13 +77,13 @@ pub unsafe extern "C" fn simlin_sim_new(
     let datamodel_locked = project_ref.datamodel.lock().unwrap();
     let mut db_locked = project_ref.db.lock().unwrap();
 
-    // Salsa-based incremental compilation. Both LTM and non-LTM paths use the same
-    // pipeline; the only difference is the ltm_enabled flag on the SourceProject
-    // input. A conveyor/queue model additionally routes through the special-stock
-    // expansion inside `compile_sim`, which compiles the db's EXPANDED
-    // `SourceProject` (also incrementally). The DB is kept in sync by apply_patch
-    // and project constructors, so this is typically a cache hit when nothing
-    // changed since the last patch.
+    // Salsa-based incremental compilation. Both LTM and non-LTM paths use the
+    // same pipeline, keyed on the requested overlay, so the two variants stay
+    // memoized side by side. A conveyor/queue model additionally routes
+    // through the special-stock expansion inside `compile_sim`, which compiles
+    // the db's EXPANDED `SourceProject` (also incrementally). The DB is kept in
+    // sync by apply_patch and project constructors, so this is typically a
+    // cache hit when nothing changed since the last patch.
     type CompileSnapshot = (
         std::result::Result<engine::queue_compile::SimBuild, engine::Error>,
         // An `IndexMap` (not a `HashMap`): the engine emits `loop_partitions`
@@ -102,17 +102,16 @@ pub unsafe extern "C" fn simlin_sim_new(
         let db = &mut *db_locked;
         if let Some(source_project) = db.current_source_project() {
             // Latch that this project has requested LTM at least once. Done
-            // while holding the db lock (the same lock get_errors takes for
-            // its transient re-enable) so the latch is ordered against a
-            // concurrent get_errors. This is what lets get_errors surface the
-            // LTM diagnostic pipeline (auto-flip warning, etc.) even though we
-            // reset the salsa ltm_enabled input to false below (GH #466).
+            // while holding the db lock (the same lock get_errors takes) so
+            // the latch is ordered against a concurrent get_errors. This is
+            // what lets get_errors ask for the overlay's diagnostics
+            // (auto-flip warning, etc.) for a project that simulated with
+            // LTM (GH #466).
             if enable_ltm {
                 project_ref
                     .ltm_requested
                     .store(true, std::sync::atomic::Ordering::Release);
             }
-            engine::db::set_project_ltm_enabled(db, source_project, enable_ltm);
             // The unified dispatch: an ordinary model compiles `source_project`
             // incrementally; a conveyor/queue model is expanded and its expanded
             // twin compiled in the db's second input slot, also incrementally.
@@ -121,10 +120,11 @@ pub unsafe extern "C" fn simlin_sim_new(
                 source_project,
                 &datamodel_locked,
                 &model_ref.model_name,
+                engine::db::LtmOverlay::from(enable_ltm),
             );
             // A special-stock build never synthesizes LTM variables: it compiles a
-            // DIFFERENT `SourceProject` (the expanded one, whose `ltm_enabled` is
-            // always false), so the sim is created WITHOUT instrumentation and
+            // DIFFERENT `SourceProject` (the expanded one, always without the
+            // overlay), so the sim is created WITHOUT instrumentation and
             // `get_ltm_mode` reports Disabled. LTM over a conveyor/queue is a
             // documented degradation (docs/design/conveyors.md §9.6, queues.md
             // §10.5): the flow-to-stock link-score formula assumes plain INTEG
@@ -135,15 +135,14 @@ pub unsafe extern "C" fn simlin_sim_new(
             let special = result.as_ref().map(|b| b.special).unwrap_or(false);
 
             // Snapshot the LTM loop-partition mapping AND per-loop slot
-            // metadata *while* the ltm_enabled flag is still set and the
-            // db is still locked.  Post-sim relative-loop-score queries
-            // look up these snapshots instead of re-querying the db, so a
-            // subsequent `apply_patch` (rename/delete/restructure) does
-            // not invalidate scores against results that are still valid
-            // for the compilation-era loop structure.  The element index
-            // also lets the FFI accept subscripted IDs like `r1[Boston]`
-            // and resolve them against the loop_score's actual slot
-            // layout (issue #463).
+            // metadata while the db is still locked.  Post-sim
+            // relative-loop-score queries look up these snapshots instead of
+            // re-querying the db, so a subsequent `apply_patch`
+            // (rename/delete/restructure) does not invalidate scores against
+            // results that are still valid for the compilation-era loop
+            // structure.  The element index also lets the FFI accept
+            // subscripted IDs like `r1[Boston]` and resolve them against the
+            // loop_score's actual slot layout (issue #463).
             let (loop_partitions, loop_element_index, ltm_mode) = if enable_ltm
                 && !special
                 && result.is_ok()
@@ -201,12 +200,6 @@ pub unsafe extern "C" fn simlin_sim_new(
             } else {
                 (engine::indexmap::IndexMap::new(), HashMap::new(), None)
             };
-            // Always reset ltm_enabled to avoid leaking the flag to
-            // subsequent operations (e.g. patch validation) that share
-            // the same SourceProject.
-            if enable_ltm {
-                engine::db::set_project_ltm_enabled(db, source_project, false);
-            }
             // Free the memos this compile superseded rather than holding
             // them until the next edit (see `SimlinDb::release_replaced_memos`).
             db.release_replaced_memos();

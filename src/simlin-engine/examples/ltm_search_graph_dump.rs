@@ -119,10 +119,15 @@ fn main() {
         .unwrap_or("main");
     let canonical_name = canonicalize(root_name).into_owned();
 
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
-    let compiled = compile_project_incremental(&db, source_project, &canonical_name).unwrap();
+    let compiled = compile_project_incremental(
+        &db,
+        source_project,
+        &canonical_name,
+        simlin_engine::db::LtmOverlay::On,
+    )
+    .unwrap();
     let mut vm = simlin_engine::Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();

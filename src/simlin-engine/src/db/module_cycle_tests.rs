@@ -87,12 +87,12 @@ fn self_referential_module_errors_without_panicking() {
 
     // Compile must reject cleanly rather than panic.
     assert!(
-        compile_project_incremental(&db, sp, "main").is_err(),
+        compile_project_incremental(&db, sp, "main", crate::db::LtmOverlay::Off).is_err(),
         "a self-referential module must not compile"
     );
 
     // Diagnostic collection must surface the cycle, not panic.
-    let diags = collect_all_diagnostics(&db, sp);
+    let diags = collect_all_diagnostics(&db, sp, crate::db::LtmOverlay::Off);
     assert!(
         has_circular_diagnostic(&diags),
         "expected a CircularDependency diagnostic, got {diags:?}"
@@ -135,11 +135,11 @@ fn mutually_recursive_modules_error_without_panicking() {
     let sp = sync.project;
 
     assert!(
-        compile_project_incremental(&db, sp, "a").is_err(),
+        compile_project_incremental(&db, sp, "a", crate::db::LtmOverlay::Off).is_err(),
         "mutually recursive modules must not compile"
     );
 
-    let diags = collect_all_diagnostics(&db, sp);
+    let diags = collect_all_diagnostics(&db, sp, crate::db::LtmOverlay::Off);
     assert!(
         has_circular_diagnostic(&diags),
         "expected a CircularDependency diagnostic, got {diags:?}"
@@ -174,7 +174,12 @@ fn per_model_diagnostics_report_a_cycle_instead_of_panicking() {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
 
-    let diags = collect_model_diagnostics(&db, sync.models["a"].source, sync.project);
+    let diags = collect_model_diagnostics(
+        &db,
+        sync.models["a"].source,
+        sync.project,
+        crate::db::LtmOverlay::Off,
+    );
     assert!(
         has_circular_diagnostic(&diags),
         "expected a CircularDependency diagnostic, got {diags:?}"
@@ -199,7 +204,12 @@ fn per_model_diagnostics_survive_an_unrelated_draft_cycle() {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
 
-    let diags = collect_model_diagnostics(&db, sync.models["main"].source, sync.project);
+    let diags = collect_model_diagnostics(
+        &db,
+        sync.models["main"].source,
+        sync.project,
+        crate::db::LtmOverlay::Off,
+    );
     assert!(
         !has_circular_diagnostic(&diags),
         "a model that reaches no cycle must not be reported as cyclic: {diags:?}"
@@ -259,7 +269,12 @@ fn cycle_diagnostic_carries_the_display_name_not_the_canonical_key() {
     };
 
     // The per-model entry point (the one that gained the gate).
-    let per_model = collect_model_diagnostics(&db, sync.models["sub_a"].source, sync.project);
+    let per_model = collect_model_diagnostics(
+        &db,
+        sync.models["sub_a"].source,
+        sync.project,
+        crate::db::LtmOverlay::Off,
+    );
     assert_eq!(
         circular_models(&per_model),
         vec!["Sub A".to_string()],
@@ -267,7 +282,7 @@ fn cycle_diagnostic_carries_the_display_name_not_the_canonical_key() {
     );
 
     // ...and the whole-project one, which reaches the same helper by delegating.
-    let all = collect_all_diagnostics(&db, sync.project);
+    let all = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let mut names = circular_models(&all);
     names.sort();
     assert_eq!(
@@ -316,12 +331,12 @@ fn unused_draft_cycle_does_not_block_valid_main() {
 
     // `main` cannot reach the a<->b cycle, so it compiles cleanly.
     assert!(
-        compile_project_incremental(&db, sp, "main").is_ok(),
+        compile_project_incremental(&db, sp, "main", crate::db::LtmOverlay::Off).is_ok(),
         "a valid main must compile despite an unrelated draft cycle"
     );
 
     // Diagnostics still surface the draft cycle (for the affected models)...
-    let diags = collect_all_diagnostics(&db, sp);
+    let diags = collect_all_diagnostics(&db, sp, crate::db::LtmOverlay::Off);
     assert!(
         has_circular_diagnostic(&diags),
         "the unrelated draft cycle should still be reported: {diags:?}"
@@ -458,7 +473,7 @@ fn macro_holding_a_module_is_rejected_instead_of_aborting() {
     }
 
     // Diagnostics: returns, and names the offending macro actionably.
-    let diags = collect_all_diagnostics(&db, sp);
+    let diags = collect_all_diagnostics(&db, sp, crate::db::LtmOverlay::Off);
     let rejection = diags
         .iter()
         .find(|d| {
@@ -477,7 +492,7 @@ fn macro_holding_a_module_is_rejected_instead_of_aborting() {
     );
 
     // Compile: a clean `Err`, not an abort.
-    let err = compile_project_incremental(&db, sp, "u")
+    let err = compile_project_incremental(&db, sp, "u", crate::db::LtmOverlay::Off)
         .expect_err("a macro holding a module must not compile");
     assert!(
         err.get_details().unwrap_or_default().contains("mac"),
@@ -532,7 +547,7 @@ fn rejecting_a_macro_empties_the_registry_so_no_implicit_edge_is_synthesized() {
          module-backed and the implicit edge never exists",
     );
 
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     assert!(
         diags.iter().any(|d| d.model == "u"
             && d.variable.as_deref() == Some("out")
@@ -582,15 +597,16 @@ fn a_macro_without_a_module_still_builds_and_expands() {
             .is_none(),
         "a macro with no module variable must still build",
     );
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     assert!(
         diags.is_empty(),
         "a legitimate macro must produce no diagnostics: {diags:?}"
     );
 
     // ...and it actually expands: `out` reads the macro instance's `scaled`.
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("a legitimate macro must compile");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .expect("a legitimate macro must compile");
     let mut vm = crate::vm::Vm::new(compiled).expect("VM creation must succeed");
     vm.run_to_end().expect("VM run must succeed");
     let results = vm.into_results();
@@ -628,10 +644,10 @@ fn acyclic_nested_modules_compile_clean() {
     let sp = sync.project;
 
     assert!(
-        compile_project_incremental(&db, sp, "main").is_ok(),
+        compile_project_incremental(&db, sp, "main", crate::db::LtmOverlay::Off).is_ok(),
         "an acyclic nested-module project must compile"
     );
-    let diags = collect_all_diagnostics(&db, sp);
+    let diags = collect_all_diagnostics(&db, sp, crate::db::LtmOverlay::Off);
     assert!(
         !has_circular_diagnostic(&diags),
         "acyclic nesting must not report a module cycle: {diags:?}"
@@ -658,11 +674,11 @@ fn module_targeting_a_missing_model_errors_without_panicking() {
     let sp = sync.project;
 
     assert!(
-        compile_project_incremental(&db, sp, "main").is_err(),
+        compile_project_incremental(&db, sp, "main", crate::db::LtmOverlay::Off).is_err(),
         "a module targeting a missing model must not compile"
     );
 
-    let diags = collect_all_diagnostics(&db, sp);
+    let diags = collect_all_diagnostics(&db, sp, crate::db::LtmOverlay::Off);
     let dangling: Vec<&crate::db::Diagnostic> = diags
         .iter()
         .filter(
@@ -707,10 +723,10 @@ fn module_with_an_empty_model_name_is_not_reported_as_dangling() {
     let sp = sync.project;
 
     assert!(
-        compile_project_incremental(&db, sp, "main").is_err(),
+        compile_project_incremental(&db, sp, "main", crate::db::LtmOverlay::Off).is_err(),
         "a module with no target model must not compile"
     );
-    let diags = collect_all_diagnostics(&db, sp);
+    let diags = collect_all_diagnostics(&db, sp, crate::db::LtmOverlay::Off);
     assert!(
         !diags.iter().any(|d| {
             matches!(&d.error, DiagnosticError::Model(e) if e.code == ErrorCode::BadModelName)

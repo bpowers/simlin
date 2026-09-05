@@ -53,7 +53,7 @@ use std::sync::Arc;
 use crate::common::{Canonical, Ident};
 use crate::db::dep_graph::build_var_info;
 use crate::db::{
-    Db, DepPhase, ModuleInputSet, SourceModel, SourceProject, compile_var_fragment,
+    Db, DepPhase, LtmOverlay, ModuleInputSet, SourceModel, SourceProject, compile_var_fragment,
     model_dependency_graph, variable_direct_dependencies,
 };
 use crate::variable::DepLag;
@@ -73,6 +73,7 @@ pub(crate) fn model_flows_invariant<'db>(
     project: SourceProject,
     is_root: bool,
     module_inputs: ModuleInputSet<'db>,
+    overlay: LtmOverlay,
 ) -> Arc<BTreeSet<String>> {
     // Only the root module is hoisted (B1/B2 scope). A submodule's entire flow
     // program stays dynamic. This is the single authoritative guard; the
@@ -132,7 +133,8 @@ pub(crate) fn model_flows_invariant<'db>(
         // The compiler-local half comes off the already-cached fragment (a
         // salsa cache hit -- `assemble_module` triggers compilation before
         // this query runs), the reads off the dependency memo.
-        let Some(result) = compile_var_fragment(db, *svar, model, project, module_inputs) else {
+        let Some(result) = compile_var_fragment(db, *svar, model, project, module_inputs, overlay)
+        else {
             // Compilation failed; treat as variant by omission.
             continue;
         };
@@ -187,8 +189,14 @@ mod tests {
         let project_dm = tp.build_datamodel();
         let result = sync_from_datamodel(&db, &project_dm);
         let model = result.models["main"].source;
-        let inv =
-            model_flows_invariant(&db, model, result.project, true, ModuleInputSet::empty(&db));
+        let inv = model_flows_invariant(
+            &db,
+            model,
+            result.project,
+            true,
+            ModuleInputSet::empty(&db),
+            crate::db::LtmOverlay::Off,
+        );
         (*inv).clone()
     }
 
@@ -273,9 +281,16 @@ mod tests {
                     .map(|dep| dep.target.variable.as_str())
                     .collect();
             assert_eq!(current, ["dynamic", "k"].into_iter().collect());
-            let fragment = compile_var_fragment(&db, source, model, synced.project, no_inputs)
-                .as_ref()
-                .expect("production fragment");
+            let fragment = compile_var_fragment(
+                &db,
+                source,
+                model,
+                synced.project,
+                no_inputs,
+                crate::db::LtmOverlay::Off,
+            )
+            .as_ref()
+            .expect("production fragment");
             assert_eq!(
                 fragment.flow_locally_invariant,
                 Some(true),
@@ -283,7 +298,14 @@ mod tests {
             );
         }
 
-        let invariant = model_flows_invariant(&db, model, synced.project, true, no_inputs);
+        let invariant = model_flows_invariant(
+            &db,
+            model,
+            synced.project,
+            true,
+            no_inputs,
+            crate::db::LtmOverlay::Off,
+        );
         assert!(invariant.contains("k"));
         for name in ["dynamic", "select_true", "select_false"] {
             assert!(!invariant.contains(name), "{name} must stay dynamic");
@@ -322,8 +344,14 @@ mod tests {
         let db = SimlinDb::default();
         let synced = sync_from_datamodel(&db, &project);
         let model = synced.models["main"].source;
-        let invariant =
-            model_flows_invariant(&db, model, synced.project, true, ModuleInputSet::empty(&db));
+        let invariant = model_flows_invariant(
+            &db,
+            model,
+            synced.project,
+            true,
+            ModuleInputSet::empty(&db),
+            crate::db::LtmOverlay::Off,
+        );
         assert!(invariant.contains("k"));
         assert!(
             invariant.contains("own_table"),
@@ -351,6 +379,7 @@ mod tests {
             result.project,
             false,
             ModuleInputSet::empty(&db),
+            crate::db::LtmOverlay::Off,
         );
         assert!(inv.is_empty());
     }

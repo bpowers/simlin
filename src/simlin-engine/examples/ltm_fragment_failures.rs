@@ -26,8 +26,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use simlin_engine::db::{
-    LtmEquation, LtmSyntheticVar, SimlinDb, model_ltm_variables, set_project_ltm_enabled,
-    sync_from_datamodel_incremental,
+    LtmEquation, LtmSyntheticVar, SimlinDb, model_ltm_variables, sync_from_datamodel_incremental,
 };
 use simlin_engine::open_vensim;
 
@@ -205,7 +204,6 @@ fn main() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
 
     let main_name = datamodel
         .models
@@ -248,7 +246,11 @@ fn main() {
     // the implicit-helper bucket, which is the population the "no failing helper
     // under a compiling parent" invariant is read from. This filter is a
     // tripwire against that, not a correction to anything already reported.
-    let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
+    let diagnostics = simlin_engine::db::collect_all_diagnostics(
+        &db,
+        sync.project,
+        simlin_engine::db::LtmOverlay::On,
+    );
     let mut failed_names: Vec<String> = Vec::new();
     let mut reasons: BTreeMap<String, String> = BTreeMap::new();
     let mut other_model_failures: BTreeMap<String, usize> = BTreeMap::new();

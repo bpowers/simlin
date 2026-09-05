@@ -70,7 +70,9 @@ fn releasing_replaced_memos_drops_the_superseded_program() {
     let mut db = SimlinDb::default();
     let project = two_var_project();
     let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
-    let first = compile_project_incremental(&db, state1.project, "main").expect("first compile");
+    let first =
+        compile_project_incremental(&db, state1.project, "main", crate::db::LtmOverlay::Off)
+            .expect("first compile");
 
     let mut edited = project.clone();
     edited.models[0].variables[0] = datamodel::Variable::Aux(datamodel::Aux {
@@ -84,7 +86,9 @@ fn releasing_replaced_memos_drops_the_superseded_program() {
         compat: datamodel::Compat::default(),
     });
     let state2 = sync_from_datamodel_incremental(&mut db, &edited, Some(&state1));
-    let second = compile_project_incremental(&db, state2.project, "main").expect("second compile");
+    let second =
+        compile_project_incremental(&db, state2.project, "main", crate::db::LtmOverlay::Off)
+            .expect("second compile");
     assert!(
         !Arc::ptr_eq(&first, &second),
         "an equation edit must assemble a new program"
@@ -102,7 +106,9 @@ fn releasing_replaced_memos_drops_the_superseded_program() {
         "releasing the replaced memos frees the superseded program"
     );
     // The live memo is untouched: the current program is still served.
-    let again = compile_project_incremental(&db, state2.project, "main").expect("recompile");
+    let again =
+        compile_project_incremental(&db, state2.project, "main", crate::db::LtmOverlay::Off)
+            .expect("recompile");
     assert!(Arc::ptr_eq(&second, &again));
 }
 
@@ -136,7 +142,7 @@ fn test_compute_layout_simple() {
     let model = sync.models["main"].source;
     // `compute_layout` is now the role-independent *body* layout: no implicit
     // globals, body offsets start at 0.
-    let layout = compute_layout(&db, model, sync.project);
+    let layout = compute_layout(&db, model, sync.project, crate::db::LtmOverlay::Off);
 
     assert!(
         layout.get("time").is_none(),
@@ -175,7 +181,12 @@ fn test_assemble_simulation_simple() {
     let project = two_var_project();
     let sync = sync_from_datamodel(&db, &project);
 
-    let result = assemble_simulation(&db, sync.project, "main".to_string());
+    let result = assemble_simulation(
+        &db,
+        sync.project,
+        "main".to_string(),
+        crate::db::LtmOverlay::Off,
+    );
     assert!(
         result.is_ok(),
         "assemble_simulation failed: {:?}",
@@ -299,8 +310,13 @@ fn test_incremental_teacup_via_persistent_sync() {
     // Now reconstruct SyncResult from PersistentSyncState (like simlin_sim_new does)
     let sync = persistent_state.to_sync_result();
 
-    let incr_compiled = assemble_simulation(&db, sync.project, "main".to_string())
-        .expect("incremental compilation failed");
+    let incr_compiled = assemble_simulation(
+        &db,
+        sync.project,
+        "main".to_string(),
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("incremental compilation failed");
 
     // Verify constant detection
     let room_temp_ident = crate::common::Ident::new("room_temperature");
@@ -342,7 +358,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
     let model1 = sync1.models["main"].source;
 
     // Prime layout cache
-    let layout_ptr1 = compute_layout(&db, model1, sync1.project)
+    let layout_ptr1 = compute_layout(&db, model1, sync1.project, crate::db::LtmOverlay::Off)
         as *const crate::compiler::symbolic::VariableLayout;
 
     // Add a new variable "gamma"
@@ -371,6 +387,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         model1,
         sync1.project,
         ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     )
     .as_ref()
     .unwrap()
@@ -383,6 +400,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         model1,
         sync1.project,
         ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     )
     .as_ref()
     .unwrap()
@@ -397,6 +415,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         model2,
         sync2.project,
         ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     )
     .as_ref()
     .unwrap()
@@ -409,6 +428,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         model2,
         sync2.project,
         ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     )
     .as_ref()
     .unwrap()
@@ -425,7 +445,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
     );
 
     // Layout MUST change (gamma added)
-    let layout_ptr2 = compute_layout(&db, model2, sync2.project)
+    let layout_ptr2 = compute_layout(&db, model2, sync2.project, crate::db::LtmOverlay::Off)
         as *const crate::compiler::symbolic::VariableLayout;
     assert_ne!(
         layout_ptr1, layout_ptr2,
@@ -443,6 +463,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         model3,
         sync3.project,
         ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     )
     .as_ref()
     .unwrap()
@@ -455,6 +476,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
         model3,
         sync3.project,
         ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     )
     .as_ref()
     .unwrap()
@@ -471,7 +493,7 @@ fn test_ac1_3_ac1_4_fragment_reuse_on_add_remove() {
     );
 
     // Layout should change again (back to 2 variables)
-    let layout_ptr3 = compute_layout(&db, model3, sync3.project)
+    let layout_ptr3 = compute_layout(&db, model3, sync3.project, crate::db::LtmOverlay::Off)
         as *const crate::compiler::symbolic::VariableLayout;
     assert_ne!(
         layout_ptr2, layout_ptr3,
@@ -548,6 +570,7 @@ fn test_ac1_5_dimension_change_selective_recompile() {
         model1,
         sync1.project,
         ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     )
     .as_ref()
     .unwrap()
@@ -560,6 +583,7 @@ fn test_ac1_5_dimension_change_selective_recompile() {
         model1,
         sync1.project,
         ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     )
     .as_ref()
     .unwrap()
@@ -584,6 +608,7 @@ fn test_ac1_5_dimension_change_selective_recompile() {
         model2,
         sync2.project,
         ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     )
     .as_ref()
     .unwrap()
@@ -602,6 +627,7 @@ fn test_ac1_5_dimension_change_selective_recompile() {
         model2,
         sync2.project,
         ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     )
     .as_ref()
     .unwrap()
@@ -727,9 +753,8 @@ fn test_ac1_6_cross_model_isolation() {
 fn test_ac2_4_stdlib_composite_scores_cached() {
     use super::model_ltm_variables;
     use crate::testutils::{x_aux, x_flow, x_model, x_stock};
-    use salsa::Setter;
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let project = datamodel::Project {
         name: "smooth_cache_test".to_string(),
         sim_specs: datamodel::SimSpecs::default(),
@@ -751,7 +776,6 @@ fn test_ac2_4_stdlib_composite_scores_cached() {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     // First call: compute
     let result1 = model_ltm_variables(&db, model, source_project) as *const LtmVariablesResult;
@@ -789,8 +813,13 @@ fn test_incremental_teacup_xmile_file() {
 
     let sync = persistent_state.to_sync_result();
 
-    let incr_compiled = assemble_simulation(&db, sync.project, "main".to_string())
-        .expect("incremental compilation failed");
+    let incr_compiled = assemble_simulation(
+        &db,
+        sync.project,
+        "main".to_string(),
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("incremental compilation failed");
 
     // Constant detection must work for XMILE-loaded models
     let room_temp_ident = crate::common::Ident::new("room_temperature");
@@ -868,7 +897,8 @@ fn test_model_sim_specs_override() {
 
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &dm_project);
-    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off).unwrap();
     let specs = &compiled.specs;
 
     assert!(
@@ -927,7 +957,8 @@ fn test_model_sim_specs_defaults_to_project() {
 
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &dm_project);
-    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off).unwrap();
     let specs = &compiled.specs;
 
     assert!(
@@ -1001,7 +1032,12 @@ fn test_circular_dependency_blocks_incremental_compilation() {
     );
     assert!(dep_graph.has_cycle(), "should detect circular dependency");
 
-    let result = assemble_simulation(&db, sync.project, "main".to_string());
+    let result = assemble_simulation(
+        &db,
+        sync.project,
+        "main".to_string(),
+        crate::db::LtmOverlay::Off,
+    );
     assert!(
         result.is_err(),
         "incremental compilation should fail for circular dependencies"
@@ -1069,7 +1105,14 @@ fn test_malformed_graphical_function_fails_fragment() {
     let model = sync.models["main"].source;
     let var = sync.models["main"].variables["lookup_var"].source;
 
-    let result = compile_var_fragment(&db, var, model, sync.project, ModuleInputSet::empty(&db));
+    let result = compile_var_fragment(
+        &db,
+        var,
+        model,
+        sync.project,
+        ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
+    );
     assert!(
         result.is_none(),
         "compile_var_fragment should return None for malformed graphical function"
@@ -1201,7 +1244,7 @@ fn test_sparse_per_element_gfs_preserve_table_indices() {
     );
 
     // Ensure the model still compiles successfully through the incremental path.
-    let result = compile_project_incremental(&db, sync.project, "main");
+    let result = compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off);
     assert!(
         result.is_ok(),
         "model with sparse per-element GFs should compile: {:?}",
@@ -1293,8 +1336,9 @@ fn test_incremental_compile_smooth_over_module_output() {
 
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    let incremental = compile_project_incremental(&db, sync.project, "main")
-        .expect("incremental compile should handle SMTH1(module.output, ...)");
+    let incremental =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .expect("incremental compile should handle SMTH1(module.output, ...)");
 
     let mut incr_vm = Vm::new(incremental).expect("incremental VM should build");
     incr_vm
@@ -1458,8 +1502,9 @@ fn test_incremental_compile_distinguishes_module_input_sets() {
 
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("incremental compile should support per-instance module inputs");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .expect("incremental compile should support per-instance module inputs");
 
     let sub_input_sets: std::collections::HashSet<Vec<String>> = compiled
         .modules
@@ -1656,8 +1701,9 @@ fn test_incremental_compile_implicit_lookup_dep_tables_after_equation_update() {
 
     let before_lookup = pre_lookup_smth1_project();
     let state1 = sync_from_datamodel_incremental(&mut db, &before_lookup, None);
-    let before_lookup_compiled = compile_project_incremental(&db, state1.project, "main")
-        .expect("baseline incremental compile should succeed");
+    let before_lookup_compiled =
+        compile_project_incremental(&db, state1.project, "main", crate::db::LtmOverlay::Off)
+            .expect("baseline incremental compile should succeed");
     let before_lookup_series = run_smoothed_series(before_lookup_compiled);
     assert!(
         before_lookup_series.iter().all(|v| v.is_finite()),
@@ -1668,13 +1714,19 @@ fn test_incremental_compile_implicit_lookup_dep_tables_after_equation_update() {
     let project = implicit_lookup_smth1_project();
     let ref_db = SimlinDb::default();
     let ref_sync = sync_from_datamodel(&ref_db, &project);
-    let ref_compiled = assemble_simulation(&ref_db, ref_sync.project, "main".to_string())
-        .expect("reference incremental compile should succeed");
+    let ref_compiled = assemble_simulation(
+        &ref_db,
+        ref_sync.project,
+        "main".to_string(),
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("reference incremental compile should succeed");
     let ref_series = run_smoothed_series(ref_compiled.clone());
 
     let state2 = sync_from_datamodel_incremental(&mut db, &project, Some(&state1));
-    let incr_compiled = compile_project_incremental(&db, state2.project, "main")
-        .expect("incremental compile after equation rewrite should succeed");
+    let incr_compiled =
+        compile_project_incremental(&db, state2.project, "main", crate::db::LtmOverlay::Off)
+            .expect("incremental compile after equation rewrite should succeed");
     let incr_series = run_smoothed_series(incr_compiled);
 
     assert_eq!(
@@ -1706,8 +1758,13 @@ fn test_incremental_compile_implicit_lookup_dep_tables() {
     // Fresh incremental compile as reference
     let ref_db = SimlinDb::default();
     let ref_sync = sync_from_datamodel(&ref_db, &project);
-    let ref_compiled = assemble_simulation(&ref_db, ref_sync.project, "main".to_string())
-        .expect("reference incremental compile should succeed");
+    let ref_compiled = assemble_simulation(
+        &ref_db,
+        ref_sync.project,
+        "main".to_string(),
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("reference incremental compile should succeed");
     let ref_series = run_smoothed_series(ref_compiled.clone());
     assert!(
         !ref_series.is_empty(),
@@ -1717,13 +1774,15 @@ fn test_incremental_compile_implicit_lookup_dep_tables() {
     let mut db = SimlinDb::default();
 
     let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
-    let incr_compiled1 = compile_project_incremental(&db, state1.project, "main")
-        .expect("incremental compile should include lookup tables from implicit deps");
+    let incr_compiled1 =
+        compile_project_incremental(&db, state1.project, "main", crate::db::LtmOverlay::Off)
+            .expect("incremental compile should include lookup tables from implicit deps");
     let incr_series1 = run_smoothed_series(incr_compiled1);
 
     let state2 = sync_from_datamodel_incremental(&mut db, &project, Some(&state1));
-    let incr_compiled2 = compile_project_incremental(&db, state2.project, "main")
-        .expect("incremental compile after state reuse should succeed");
+    let incr_compiled2 =
+        compile_project_incremental(&db, state2.project, "main", crate::db::LtmOverlay::Off)
+            .expect("incremental compile after state reuse should succeed");
     let incr_series2 = run_smoothed_series(incr_compiled2);
 
     assert_eq!(
@@ -1842,15 +1901,27 @@ fn test_implicit_module_offsets_in_flattened_map() {
     let sync = sync_from_datamodel(&db, &project);
 
     // Compile through the incremental path.
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("SMOOTH model should compile incrementally");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .expect("SMOOTH model should compile incrementally");
 
     // The results-offset map is the root-shifted layout -- the SAME final
     // layout `assemble_module`'s root path resolves against -- so `trailing`,
     // laid out after the SMTH3 instance, must sit at its layout slot and every
     // key must address a real slot.
-    let layout = compute_layout(&db, sync.models["main"].source, sync.project).root_shifted();
-    let offsets = flattened_offsets(&db, sync.project, sync.models["main"].source);
+    let layout = compute_layout(
+        &db,
+        sync.models["main"].source,
+        sync.project,
+        crate::db::LtmOverlay::Off,
+    )
+    .root_shifted();
+    let offsets = flattened_offsets(
+        &db,
+        sync.project,
+        sync.models["main"].source,
+        crate::db::LtmOverlay::Off,
+    );
     assert_eq!(
         offsets.get(&crate::common::Ident::new("trailing")),
         Some(&layout.get("trailing").expect("trailing").offset),

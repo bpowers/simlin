@@ -180,9 +180,11 @@ pub(crate) fn endpoint_dimensions(
     project: SourceProject,
     name: &str,
 ) -> Option<Vec<crate::dimensions::Dimension>> {
-    use crate::compiler::fragment::DepKind;
-    let shape = crate::db::var_fragment::model_dep_shape(db, model, project, name)?;
-    matches!(shape.kind, DepKind::Var).then_some(shape.dims)
+    // The dimensions alone, never a module's layout: `dimensions_shape` is
+    // `None` for a module instance and overlay-independent otherwise.
+    crate::db::var_fragment::DeclaredName::resolve(db, model, project, name)?
+        .dimensions_shape(db, project)
+        .map(|shape| shape.dims)
 }
 
 /// The single integration method the assembled simulation actually runs, when
@@ -860,10 +862,6 @@ pub fn model_ltm_implicit_var_info(
     model: SourceModel,
     project: SourceProject,
 ) -> HashMap<String, LtmImplicitVarMeta> {
-    if !project.ltm_enabled(db) {
-        return HashMap::new();
-    }
-
     let ltm_vars = model_ltm_variables(db, model, project);
 
     let dim_ctx = project_dimensions_context(db, project);

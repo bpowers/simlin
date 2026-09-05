@@ -117,6 +117,7 @@ pub fn compile_var_fragment<'db>(
     model: SourceModel,
     project: SourceProject,
     module_inputs: ModuleInputSet<'db>,
+    overlay: LtmOverlay,
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
 
@@ -133,7 +134,7 @@ pub fn compile_var_fragment<'db>(
     // Every diagnostic the constructor raised is replayed in its order; a
     // fatal one leaves no input, and the variable compiles to nothing.
     let ExplicitFragment { diagnostics, input } =
-        explicit_fragment_input(db, var, model, project, module_input_names);
+        explicit_fragment_input(db, var, model, project, module_input_names, overlay);
     for diag in diagnostics {
         diag.accumulate(db);
     }
@@ -486,6 +487,7 @@ pub(crate) fn implicit_fragment_input<'db>(
     model: SourceModel,
     project: SourceProject,
     module_input_names: &[String],
+    overlay: LtmOverlay,
 ) -> Result<FragmentInput<'db>, ImplicitInputError> {
     let LoweredImplicit {
         variable: lowered,
@@ -506,7 +508,12 @@ pub(crate) fn implicit_fragment_input<'db>(
     // shape, an arrayed helper (a structural apply-to-all capture) occupies
     // one slot per element, and every other helper is scalar.
     let self_shape = if meta.is_module {
-        module_dep_shape(db, project, meta.model_name.as_deref().unwrap_or(""))
+        module_dep_shape(
+            db,
+            project,
+            meta.model_name.as_deref().unwrap_or(""),
+            overlay,
+        )
     } else {
         DepShape::var(
             lowered
@@ -518,7 +525,7 @@ pub(crate) fn implicit_fragment_input<'db>(
     let mut dep_shapes: IdentMap<Ident<Canonical>, DepShape> = Default::default();
     dep_shapes.insert(Ident::new(&meta.name), self_shape);
     for (ident, declared) in heads {
-        dep_shapes.insert(ident.clone(), declared.shape(db, project));
+        dep_shapes.insert(ident.clone(), declared.shape(db, project, overlay));
     }
 
     // A synthesized helper carries no graphical function of its own
@@ -579,6 +586,7 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
     project: SourceProject,
     implicit_var_name: String,
     module_inputs: ModuleInputSet<'db>,
+    overlay: LtmOverlay,
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
 
@@ -643,7 +651,8 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
             flow_locally_invariant: None,
         })
     };
-    let input = match implicit_fragment_input(db, meta, model, project, module_input_names) {
+    let input = match implicit_fragment_input(db, meta, model, project, module_input_names, overlay)
+    {
         Ok(input) => input,
         Err(ImplicitInputError::Absent) => return None,
         // A body's diagnostics are the PARENT's: their spans index the

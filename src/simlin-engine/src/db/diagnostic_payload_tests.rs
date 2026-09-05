@@ -209,13 +209,9 @@ fn assembly_reason_contains(d: &Diagnostic, needle: &str) -> bool {
 }
 
 fn all_diagnostics(project: &datamodel::Project, ltm: bool) -> Vec<Diagnostic> {
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, project);
-    if ltm {
-        use salsa::Setter;
-        sync.project.set_ltm_enabled(&mut db).to(true);
-    }
-    collect_all_diagnostics(&db, sync.project)
+    collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::from(ltm))
 }
 
 // ── the producer x category x severity matrix ──────────────────────────
@@ -1050,12 +1046,11 @@ fn every_warning_family_is_emitted_once_across_revisions() {
 
             let mut db = SimlinDb::default();
             let sync = sync_from_datamodel(&db, &project);
-            sync.project.set_ltm_enabled(&mut db).to(true);
             if family.discovery {
                 sync.project.set_ltm_discovery_mode(&mut db).to(true);
             }
             let emitted = |db: &SimlinDb| -> Vec<Diagnostic> {
-                collect_all_diagnostics(db, sync.project)
+                collect_all_diagnostics(db, sync.project, crate::db::LtmOverlay::On)
                     .into_iter()
                     .filter(|d| d.model == "child" && (family.matches)(d))
                     .collect()
@@ -1100,7 +1095,7 @@ fn an_equation_edit_recomputes_only_the_edited_variables_diagnostic() {
     };
     let mut probed = ProbedDb::new();
     let sync = sync_from_datamodel_incremental(probed.db_mut(), &project("2", "a + bogus"), None);
-    let before = collect_all_diagnostics(probed.db(), sync.project);
+    let before = collect_all_diagnostics(probed.db(), sync.project, crate::db::LtmOverlay::Off);
     assert_eq!(
         before.len(),
         1,
@@ -1111,7 +1106,7 @@ fn an_equation_edit_recomputes_only_the_edited_variables_diagnostic() {
     probed.reset();
     let sync =
         sync_from_datamodel_incremental(probed.db_mut(), &project("3", "a + bogus"), Some(&sync));
-    let after = collect_all_diagnostics(probed.db(), sync.project);
+    let after = collect_all_diagnostics(probed.db(), sync.project, crate::db::LtmOverlay::Off);
     assert_eq!(
         after, before,
         "an unrelated edit leaves `b`'s row byte-identical"
@@ -1133,7 +1128,7 @@ fn an_equation_edit_recomputes_only_the_edited_variables_diagnostic() {
     probed.reset();
     let sync =
         sync_from_datamodel_incremental(probed.db_mut(), &project("3", "a + 1"), Some(&sync));
-    let fixed = collect_all_diagnostics(probed.db(), sync.project);
+    let fixed = collect_all_diagnostics(probed.db(), sync.project, crate::db::LtmOverlay::Off);
     assert!(fixed.is_empty(), "fixing `b` clears its row: {fixed:?}");
     let counts = probed.counts();
     assert_eq!(

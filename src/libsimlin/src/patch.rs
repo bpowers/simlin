@@ -388,8 +388,9 @@ pub(crate) fn gather_error_details_with_db(
     project: engine::db::SourceProject,
     vm_error: Option<&engine::Error>,
     datamodel: &engine::datamodel::Project,
+    overlay: engine::db::LtmOverlay,
 ) -> Vec<ErrorDetailData> {
-    let diags = engine::db::collect_all_diagnostics(db, project);
+    let diags = engine::db::collect_all_diagnostics(db, project, overlay);
     let mut all_errors: Vec<ErrorDetailData> = diags
         .iter()
         .map(|d| {
@@ -511,7 +512,11 @@ pub(crate) unsafe fn apply_project_patch_internal(
     let models_with_existing_warnings = {
         let db_locked = project_ref.db.lock().unwrap();
         if let Some(source_project) = db_locked.current_source_project() {
-            let diags = engine::db::collect_all_diagnostics(&db_locked, source_project);
+            let diags = engine::db::collect_all_diagnostics(
+                &db_locked,
+                source_project,
+                engine::db::LtmOverlay::Off,
+            );
             collect_models_with_unit_warnings(&diags)
         } else {
             std::collections::HashSet::new()
@@ -543,18 +548,27 @@ pub(crate) unsafe fn apply_project_patch_internal(
     #[cfg(test)]
     invoke_patch_test_hook(PatchHookPoint::StagedSyncWhileDbLocked, project_ref);
 
-    // Collect diagnostics from the tracked accumulator path.
-    let staged_diags = engine::db::collect_all_diagnostics(&db, staged_sp);
+    // Collect diagnostics from the tracked accumulator path. A patch is
+    // validated against the model as written (no LTM overlay): the overlay's
+    // advisories belong to `simlin_project_get_errors`, and an LTM-only
+    // rejection must never veto an edit to a model that simulates fine.
+    let overlay = engine::db::LtmOverlay::Off;
+    let staged_diags = engine::db::collect_all_diagnostics(&db, staged_sp, overlay);
 
     // Attempt compilation + VM validation to detect assembly-level errors
     // that are not captured by per-variable diagnostics. `build_sim` routes a
     // staged conveyor/queue datamodel through its special expansion build path,
     // so a valid special-stock edit is not rejected (and rolled back) by the
     // ordinary compile path's NotExpanded guard.
-    let sim_error = engine::build_sim(&mut db, staged_sp, &staged_datamodel, "main").err();
+    let sim_error = engine::build_sim(&mut db, staged_sp, &staged_datamodel, "main", overlay).err();
 
-    let all_errors =
-        gather_error_details_with_db(&db, staged_sp, sim_error.as_ref(), &staged_datamodel);
+    let all_errors = gather_error_details_with_db(
+        &db,
+        staged_sp,
+        sim_error.as_ref(),
+        &staged_datamodel,
+        overlay,
+    );
 
     // Check for blocking errors (not including unit warnings, which are handled separately)
     let maybe_first_code = if !allow_errors {

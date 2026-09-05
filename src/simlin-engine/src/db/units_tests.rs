@@ -347,7 +347,7 @@ fn unit_warning_reaches_both_harvest_points() {
         "check_model_units::accumulated must carry the unit warning: {direct:?}"
     );
 
-    let all = collect_all_diagnostics(&db, sync.project);
+    let all = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     assert!(
         all.iter().any(|d| d.model == "main"
             && d.severity == DiagnosticSeverity::Warning
@@ -579,10 +579,11 @@ fn a_module_cycle_reached_through_a_per_element_helper_still_unit_checks() {
         "under the cycle every element-scoped helper holds its memo's handle: {entries:?}"
     );
     let cyclic_units = unit_rows(&db, &cyclic);
-    let main_diagnostics: Vec<Diagnostic> = collect_all_diagnostics(&db, cyclic.project)
-        .into_iter()
-        .filter(|d| d.model == "main")
-        .collect();
+    let main_diagnostics: Vec<Diagnostic> =
+        collect_all_diagnostics(&db, cyclic.project, crate::db::LtmOverlay::Off)
+            .into_iter()
+            .filter(|d| d.model == "main")
+            .collect();
     assert!(
         main_diagnostics.len() == 1 && is_cycle(&main_diagnostics[0]),
         "main reports the cycle and nothing else: {main_diagnostics:?}"
@@ -602,7 +603,7 @@ fn a_module_cycle_reached_through_a_per_element_helper_still_unit_checks() {
         "the unit pass reads the pinned and the unpinned entry identically"
     );
     assert!(
-        !collect_all_diagnostics(&db, acyclic.project)
+        !collect_all_diagnostics(&db, acyclic.project, crate::db::LtmOverlay::Off)
             .iter()
             .any(is_cycle)
     );
@@ -760,7 +761,8 @@ fn whole_project_diagnostics_lower_each_variable_once() {
     );
 
     probed.reset();
-    let diagnostics = collect_all_diagnostics(probed.db(), sync.project);
+    let diagnostics =
+        collect_all_diagnostics(probed.db(), sync.project, crate::db::LtmOverlay::Off);
     let counts = probed.counts();
     assert_eq!(
         counts.get("lowered_source_variable"),

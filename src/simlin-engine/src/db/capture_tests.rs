@@ -494,6 +494,7 @@ fn a_captures_fragment_is_its_argument_compiled() {
             sync.project,
             capture_ident.to_string(),
             ModuleInputSet::empty(&db),
+            crate::db::LtmOverlay::Off,
         )
         .as_ref()
         .map(|result| demanded(&result.fragment))
@@ -507,6 +508,7 @@ fn a_captures_fragment_is_its_argument_compiled() {
             model,
             sync.project,
             ModuleInputSet::empty(&db),
+            crate::db::LtmOverlay::Off,
         )
         .as_ref()
         .map(|result| demanded(&result.fragment))

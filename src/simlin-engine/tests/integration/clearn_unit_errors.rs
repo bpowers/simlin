@@ -71,7 +71,8 @@ fn clearn_unit_error_flood_is_cleared() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let diagnostics = collect_all_diagnostics(&db, sync.project);
+    let diagnostics =
+        collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::Off);
     let unit_diags: Vec<&Diagnostic> = diagnostics.iter().filter(|d| is_unit_diag(d)).collect();
 
     let render = |ds: &[&Diagnostic]| {

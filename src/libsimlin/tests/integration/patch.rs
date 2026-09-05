@@ -1724,7 +1724,11 @@ fn test_patch_with_preexisting_unit_warnings_succeeds() {
     {
         let db = unsafe { (*proj).db.lock().unwrap() };
         let source_project = db.current_source_project().unwrap();
-        let diags = engine::db::collect_all_diagnostics(&db, source_project);
+        let diags = engine::db::collect_all_diagnostics(
+            &db,
+            source_project,
+            simlin_engine::db::LtmOverlay::Off,
+        );
         let has_unit_diags = diags.iter().any(|d| {
             d.severity == engine::db::DiagnosticSeverity::Warning
                 && matches!(d.error, engine::db::DiagnosticError::Unit(_))
@@ -1824,7 +1828,11 @@ fn test_unrelated_patch_then_sim_specs_keeps_unit_warnings() {
     let unit_warning_count = |proj: *mut SimlinProject| -> usize {
         let db = unsafe { (*proj).db.lock().unwrap() };
         let source_project = db.current_source_project().unwrap();
-        let diags = engine::db::collect_all_diagnostics(&db, source_project);
+        let diags = engine::db::collect_all_diagnostics(
+            &db,
+            source_project,
+            simlin_engine::db::LtmOverlay::Off,
+        );
         diags
             .iter()
             .filter(|d| {
@@ -1976,7 +1984,11 @@ fn test_patch_introducing_new_unit_warning_rejected() {
     {
         let db = unsafe { (*proj).db.lock().unwrap() };
         let source_project = db.current_source_project().unwrap();
-        let diags = engine::db::collect_all_diagnostics(&db, source_project);
+        let diags = engine::db::collect_all_diagnostics(
+            &db,
+            source_project,
+            simlin_engine::db::LtmOverlay::Off,
+        );
         let has_unit_diags = diags.iter().any(|d| {
             matches!(d.error, engine::db::DiagnosticError::Unit(_))
                 && d.severity == engine::db::DiagnosticSeverity::Warning

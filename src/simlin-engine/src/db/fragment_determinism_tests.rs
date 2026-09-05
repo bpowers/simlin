@@ -51,6 +51,7 @@ fn compile_flow_fragment(dm: &datamodel::Project, var: &str) -> PerVarBytecodes 
         model,
         source_project,
         ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     )
     .as_ref()
     .unwrap_or_else(|| panic!("`{var}` must compile"))
@@ -179,8 +180,13 @@ fn assembled_simulation_is_stable_across_fresh_databases() {
     let render = || {
         let db = SimlinDb::default();
         let source_project = sync_from_datamodel(&db, &dm).project;
-        let sim = assemble_simulation(&db, source_project, "main".to_string())
-            .expect("fixture must assemble");
+        let sim = assemble_simulation(
+            &db,
+            source_project,
+            "main".to_string(),
+            crate::db::LtmOverlay::Off,
+        )
+        .expect("fixture must assemble");
         let root = &sim.modules[&sim.root];
         format!(
             "gf={:?}\nflows={:?}\nstocks={:?}",
@@ -221,8 +227,6 @@ fn assembled_simulation_is_stable_across_fresh_databases() {
 /// that call site has no reachable temps to order.
 #[test]
 fn ltm_fragment_with_temps_is_stable_across_fresh_databases() {
-    use salsa::Setter;
-
     let dm = TestProject::new("determinism_ltm_temps")
         .with_sim_time(0.0, 2.0, 1.0)
         .named_dimension("region", &["east", "west"])
@@ -236,9 +240,8 @@ fn ltm_fragment_with_temps_is_stable_across_fresh_databases() {
         .build_datamodel();
 
     let compile_score = || {
-        let mut db = SimlinDb::default();
+        let db = SimlinDb::default();
         let source_project = sync_from_datamodel(&db, &dm).project;
-        source_project.set_ltm_enabled(&mut db).to(true);
         let model = *source_project.models(&db).get("main").unwrap();
         // Reached through the selector `assemble_module` uses, not the
         // `(from, to)`-keyed salsa query: that query re-derives the score as a
@@ -674,7 +677,7 @@ fn an_active_initial_that_collides_a_helper_name_is_refused() {
     ] {
         let db = SimlinDb::default();
         let project = sync_from_datamodel(&db, &dm).project;
-        match compile_project_incremental(&db, project, "main") {
+        match compile_project_incremental(&db, project, "main", crate::db::LtmOverlay::Off) {
             Ok(_) => accepted.push(label),
             Err(err) => {
                 assert!(
@@ -794,14 +797,21 @@ fn check_helpers_resolve_to_their_own_names() {
          mis-resolution has nowhere to land; got {info:?}"
     );
     for name in info.keys() {
-        let fragment = compile_implicit_var_fragment(&db, sub, project, name.clone(), inputs)
-            .as_ref()
-            .unwrap_or_else(|| {
-                panic!(
-                    "implicit helper `{name}` failed to lower under its own \
+        let fragment = compile_implicit_var_fragment(
+            &db,
+            sub,
+            project,
+            name.clone(),
+            inputs,
+            crate::db::LtmOverlay::Off,
+        )
+        .as_ref()
+        .unwrap_or_else(|| {
+            panic!(
+                "implicit helper `{name}` failed to lower under its own \
                  instance's module-input set (GH #1002)"
-                )
-            });
+            )
+        });
         assert_eq!(
             &fragment.fragment.ident, name,
             "the fragment compiled for helper `{name}` is actually \
@@ -979,7 +989,7 @@ fn a_submodel_reading_a_bound_port_through_previous_parses_once_and_compiles() {
          the only source of helpers"
     );
 
-    let compiled = compile_project_incremental(&db, project, "main")
+    let compiled = compile_project_incremental(&db, project, "main", crate::db::LtmOverlay::Off)
         .expect("a sub-model whose bound port is read through PREVIOUS compiles");
     let mut vm = crate::vm::Vm::new(compiled).expect("vm");
     vm.run_to_end().expect("runs");
@@ -1003,13 +1013,14 @@ fn a_submodel_with_a_bound_input_compiles_on_every_fresh_database() {
     for i in 0..REPEATS {
         let db = SimlinDb::default();
         let project = sync_from_datamodel(&db, &dm).project;
-        compile_project_incremental(&db, project, "main").unwrap_or_else(|err| {
-            panic!(
-                "compile #{i} on a fresh database failed: {err}; whether a \
+        compile_project_incremental(&db, project, "main", crate::db::LtmOverlay::Off)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "compile #{i} on a fresh database failed: {err}; whether a \
                  sub-model with a bound input compiles must not depend on the \
                  process hash seed (GH #1002)"
-            )
-        });
+                )
+            });
     }
 }
 
@@ -1055,10 +1066,11 @@ fn a_phantom_module_input_does_not_randomize_implicit_helper_diagnostics() {
     let render = || {
         let db = SimlinDb::default();
         let project = sync_from_datamodel(&db, &dm).project;
-        let mut rows: Vec<String> = collect_all_diagnostics(&db, project)
-            .iter()
-            .map(|d| format!("{d:?}"))
-            .collect();
+        let mut rows: Vec<String> =
+            collect_all_diagnostics(&db, project, crate::db::LtmOverlay::Off)
+                .iter()
+                .map(|d| format!("{d:?}"))
+                .collect();
         rows.sort();
         rows
     };

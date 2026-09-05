@@ -49,7 +49,11 @@ fn main() {
         // Use the production incremental path: sync + collect diagnostics.
         let mut db = simlin_engine::db::SimlinDb::default();
         let sync = simlin_engine::db::sync_from_datamodel_incremental(&mut db, &dm, None);
-        let diags = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
+        let diags = simlin_engine::db::collect_all_diagnostics(
+            &db,
+            sync.project,
+            simlin_engine::db::LtmOverlay::Off,
+        );
         let mut msgs: Vec<String> = diags
             .iter()
             .filter(|d| d.severity == simlin_engine::db::DiagnosticSeverity::Error)

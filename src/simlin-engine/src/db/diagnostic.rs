@@ -108,7 +108,12 @@ use crate::common::{Error, UnitError};
 /// variables' rows -- the cycle facts, the LTM facts -- is a tracked child
 /// read after the fragment loop, like the unit pass and the wiring check.
 #[salsa::tracked]
-pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourceProject) {
+pub fn model_all_diagnostics(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    overlay: LtmOverlay,
+) {
     // Force this query to re-execute on every revision rather than being
     // validated-but-skipped.
     //
@@ -167,7 +172,8 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     let mut sorted_vars: Vec<_> = source_vars.iter().collect();
     sorted_vars.sort_unstable_by_key(|(name, _)| name.as_str());
     for (_var_name, source_var) in sorted_vars {
-        let _fragment = compile_var_fragment(db, *source_var, model, project, empty_inputs);
+        let _fragment =
+            compile_var_fragment(db, *source_var, model, project, empty_inputs, overlay);
     }
 
     // The cycle facts, a tracked child read after the loop so its rows
@@ -223,6 +229,7 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
                 project,
                 name.clone(),
                 empty_inputs,
+                overlay,
             );
         }
     }
@@ -270,13 +277,13 @@ pub fn model_all_diagnostics(db: &dyn Db, model: SourceModel, project: SourcePro
     // describes the simulation, not an analysis overlay.
     emit_unfilled_equation_warnings(db, model, project);
 
-    // When LTM is enabled, this model's LTM warning facts, through a child
+    // Under the overlay, this model's LTM warning facts, through a child
     // read last (`model_ltm_diagnostics`; the derivations never accumulate,
-    // since a parent's scores and layout reach the child's). Gated on
-    // `ltm_enabled` so projects that never requested LTM pay no synthesis
-    // cost; `simlin_project_get_errors` transiently re-enables it for
+    // since a parent's scores and layout reach the child's). Gated on the
+    // overlay so projects that never requested LTM pay no synthesis cost;
+    // `simlin_project_get_errors` asks for the overlay's diagnostics for
     // callers who created an LTM simulation (GH #466).
-    if project.ltm_enabled(db) {
+    if overlay == LtmOverlay::On {
         model_ltm_diagnostics(db, model, project);
         emit_conveyor_ltm_degraded_warnings(db, model);
         emit_queue_ltm_degraded_warnings(db, model);
@@ -1231,12 +1238,13 @@ pub fn collect_model_diagnostics(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
+    overlay: LtmOverlay,
 ) -> Vec<Diagnostic> {
     if let Some(diagnostic) = module_cycle_diagnostic(db, project, model.name(db)) {
         return vec![diagnostic];
     }
     let mut seen: std::collections::HashSet<&Diagnostic> = std::collections::HashSet::new();
-    model_all_diagnostics::accumulated::<Diagnostic>(db, model, project)
+    model_all_diagnostics::accumulated::<Diagnostic>(db, model, project, overlay)
         .into_iter()
         .filter(|diagnostic| seen.insert(diagnostic))
         .cloned()
@@ -1252,7 +1260,11 @@ pub fn collect_model_diagnostics(
 /// memo body silently disappears once salsa's accumulator DFS prunes the
 /// subtree it lives in (see `db::macro_registry`, and the module-level note
 /// above `unit_warning_fixture` in `db/diagnostic_tests.rs`).
-pub fn collect_all_diagnostics(db: &SimlinDb, project: SourceProject) -> Vec<Diagnostic> {
+pub fn collect_all_diagnostics(
+    db: &SimlinDb,
+    project: SourceProject,
+    overlay: LtmOverlay,
+) -> Vec<Diagnostic> {
     let mut all = Vec::new();
 
     // A unit declaration that failed to parse belongs to the project's `units`
@@ -1304,7 +1316,12 @@ pub fn collect_all_diagnostics(db: &SimlinDb, project: SourceProject) -> Vec<Dia
         // project does not hide a valid model's diagnostics (GH #806). This
         // loop carries no copy of that gate: two copies is how the per-model
         // entry point once came to be missing it.
-        all.extend(collect_model_diagnostics(db, *source_model, project));
+        all.extend(collect_model_diagnostics(
+            db,
+            *source_model,
+            project,
+            overlay,
+        ));
     }
     all
 }

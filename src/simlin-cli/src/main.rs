@@ -24,9 +24,9 @@ use simlin_engine::common::ErrorKind;
 use simlin_engine::data_provider::FilesystemDataProvider;
 use simlin_engine::datamodel::Project as DatamodelProject;
 use simlin_engine::db::{
-    PersistentSyncState, SimlinDb, SourceProject, collect_all_diagnostics,
-    compile_project_incremental, model_detected_loops, parse_source_variable,
-    set_project_ltm_enabled, sync_from_datamodel, sync_from_datamodel_incremental,
+    LtmOverlay, PersistentSyncState, SimlinDb, SourceProject, collect_all_diagnostics,
+    compile_project_incremental, model_detected_loops, parse_source_variable, sync_from_datamodel,
+    sync_from_datamodel_incremental,
 };
 use simlin_engine::errors::{
     FormattedError, FormattedErrorKind, FormattedErrors, collect_formatted_errors,
@@ -457,11 +457,12 @@ fn collect_diagnostics_as_formatted(
     source_project: SourceProject,
     sync_state: &PersistentSyncState,
     project: &DatamodelProject,
+    overlay: LtmOverlay,
 ) -> FormattedErrors {
     // Trigger compilation so that diagnostics are accumulated
-    let _ = compile_project_incremental(db, source_project, "main");
+    let _ = compile_project_incremental(db, source_project, "main", overlay);
     let sync = sync_state.to_sync_result();
-    let diagnostics = collect_all_diagnostics(db, sync.project);
+    let diagnostics = collect_all_diagnostics(db, sync.project, overlay);
     collect_formatted_errors(&diagnostics, project)
 }
 
@@ -470,11 +471,12 @@ fn run_simulation(
     source_project: SourceProject,
     project: &DatamodelProject,
     model_name: &str,
+    overlay: LtmOverlay,
 ) -> StdResult<Results, Error> {
     // `build_sim` routes conveyor/queue models through their special expansion
     // build path and ordinary models through the incremental compile, so the CLI
     // simulates the special stock types instead of tripping the NotExpanded guard.
-    let mut vm = build_sim(db, source_project, project, model_name)?;
+    let mut vm = build_sim(db, source_project, project, model_name, overlay)?;
     vm.run_to_end()?;
     Ok(vm.into_results())
 }
@@ -505,9 +507,21 @@ fn handle_simulation_error(err: &Error, formatted: &FormattedErrors) {
 fn run_datamodel_with_errors(project: &DatamodelProject) -> Results {
     let mut db = SimlinDb::default();
     let sync_state = sync_from_datamodel_incremental(&mut db, project, None);
-    let formatted = collect_diagnostics_as_formatted(&db, sync_state.project, &sync_state, project);
+    let formatted = collect_diagnostics_as_formatted(
+        &db,
+        sync_state.project,
+        &sync_state,
+        project,
+        LtmOverlay::Off,
+    );
     report_formatted_errors(&formatted);
-    match run_simulation(&mut db, sync_state.project, project, "main") {
+    match run_simulation(
+        &mut db,
+        sync_state.project,
+        project,
+        "main",
+        LtmOverlay::Off,
+    ) {
         Ok(results) => results,
         Err(err) => {
             handle_simulation_error(&err, &formatted);
@@ -552,18 +566,22 @@ fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
             eprintln!("{line}");
         }
 
-        // Enable LTM BEFORE harvesting diagnostics. `model_all_diagnostics` emits
-        // the `ConveyorLtmDegraded`/`QueueLtmDegraded` warnings only inside its
-        // `project.ltm_enabled(db)` gate (`db/diagnostic.rs:194`), so collecting
-        // first meant a conveyor/queue model silently returned results with no
-        // loop scores and no explanation of why. With `--ltm` requested, the
-        // LTM-enabled project is the one whose diagnostics the user wants.
-        set_project_ltm_enabled(&mut db, source_project, true);
-
-        let formatted = collect_diagnostics_as_formatted(&db, source_project, &sync_state, project);
+        // Harvest diagnostics under the overlay. `model_all_diagnostics` emits
+        // the `ConveyorLtmDegraded`/`QueueLtmDegraded` warnings only under it,
+        // so collecting the plain diagnostics meant a conveyor/queue model
+        // silently returned results with no loop scores and no explanation
+        // of why. With `--ltm` requested, the overlay's diagnostics are the
+        // ones the user wants.
+        let formatted = collect_diagnostics_as_formatted(
+            &db,
+            source_project,
+            &sync_state,
+            project,
+            LtmOverlay::On,
+        );
         report_formatted_errors(&formatted);
 
-        match run_simulation(&mut db, source_project, project, "main") {
+        match run_simulation(&mut db, source_project, project, "main", LtmOverlay::On) {
             Ok(results) => return results,
             Err(err) => {
                 handle_simulation_error(&err, &formatted);
@@ -573,8 +591,7 @@ fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
         }
 
         // LTM failed, fall back to non-LTM incremental simulation.
-        set_project_ltm_enabled(&mut db, source_project, false);
-        match run_simulation(&mut db, source_project, project, "main") {
+        match run_simulation(&mut db, source_project, project, "main", LtmOverlay::Off) {
             Ok(results) => return results,
             Err(err) => {
                 handle_simulation_error(&err, &formatted);
@@ -840,8 +857,14 @@ mod open_vensim_model_tests {
     fn run_to_first_row(project: &DatamodelProject) -> Results {
         let mut db = SimlinDb::default();
         let sync_state = sync_from_datamodel_incremental(&mut db, project, None);
-        run_simulation(&mut db, sync_state.project, project, "main")
-            .unwrap_or_else(|e| panic!("simulation failed: {e}"))
+        run_simulation(
+            &mut db,
+            sync_state.project,
+            project,
+            "main",
+            simlin_engine::db::LtmOverlay::Off,
+        )
+        .unwrap_or_else(|e| panic!("simulation failed: {e}"))
     }
 
     fn scalar_value(results: &Results, name: &str) -> f64 {
@@ -992,10 +1015,13 @@ mod diagnostic_reporting_tests {
         let mut db = SimlinDb::default();
         let sync_state = sync_from_datamodel_incremental(&mut db, project, None);
         let source_project = sync_state.project;
-        if enable_ltm {
-            set_project_ltm_enabled(&mut db, source_project, true);
-        }
-        collect_diagnostics_as_formatted(&db, source_project, &sync_state, project)
+        collect_diagnostics_as_formatted(
+            &db,
+            source_project,
+            &sync_state,
+            project,
+            simlin_engine::db::LtmOverlay::from(enable_ltm),
+        )
     }
 
     fn messages(formatted: &FormattedErrors) -> Vec<String> {
@@ -1103,8 +1129,14 @@ mod diagnostic_reporting_tests {
         // would kill the whole test binary instead of failing this test.
         let mut db = SimlinDb::default();
         let sync_state = sync_from_datamodel_incremental(&mut db, &project, None);
-        let results = run_simulation(&mut db, sync_state.project, &project, "main")
-            .expect("the LTM run must produce results");
+        let results = run_simulation(
+            &mut db,
+            sync_state.project,
+            &project,
+            "main",
+            simlin_engine::db::LtmOverlay::Off,
+        )
+        .expect("the LTM run must produce results");
         assert!(results.step_count > 0, "the LTM run must produce results");
     }
 

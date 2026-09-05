@@ -2041,6 +2041,7 @@ fn var_phase_symbolic_fragment_prod_none_for_absent_var_no_panic() {
             result.project,
             "definitely_not_a_var",
             SccPhase::Dt,
+            crate::db::LtmOverlay::Off,
         )
         .is_none(),
         "an absent variable must return None (loud-safe), never panic"
@@ -2055,6 +2056,7 @@ fn var_phase_symbolic_fragment_prod_none_for_absent_var_no_panic() {
             result.project,
             "arr",
             SccPhase::Dt,
+            crate::db::LtmOverlay::Off,
         )
         .is_some(),
         "a real arrayed SourceVariable must yield a symbolic fragment"
@@ -2169,7 +2171,7 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
         "the loud-safe fallback must record a CircularDependency \
          (model rejected, not silently miscompiled)"
     );
-    let diags = crate::db::collect_all_diagnostics(&db, result.project);
+    let diags = crate::db::collect_all_diagnostics(&db, result.project, crate::db::LtmOverlay::Off);
     assert!(
         diags.iter().any(|d| d.is(
             crate::db::DiagnosticCategory::Model,
@@ -2187,6 +2189,7 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
             result.project,
             "ecc",
             SccPhase::Dt,
+            crate::db::LtmOverlay::Off,
         )
         .is_none(),
         "the forced-unsourceable in-SCC node must yield None (loud-safe), \
@@ -2298,6 +2301,7 @@ fn synthetic_helper_symbolic_fragment_is_parent_sourced() {
         result.project,
         helper.as_str(),
         SccPhase::Initial,
+        crate::db::LtmOverlay::Off,
     );
     assert!(
         frag.is_some(),
@@ -3500,7 +3504,7 @@ fn an_init_view_is_an_init_phase_element_edge() {
     );
 
     // And the user-visible verdict, which is what the loud-safe posture buys.
-    let diags = crate::db::collect_all_diagnostics(&db, result.project);
+    let diags = crate::db::collect_all_diagnostics(&db, result.project, crate::db::LtmOverlay::Off);
     let circular = diags.iter().any(|d| {
         d.variable.as_deref() == Some("s")
             && matches!(
@@ -3553,7 +3557,13 @@ fn a_prologue_reading_an_scc_member_refuses_the_recurrence() {
         let datamodel = crate::open_vensim(&model(operand)).expect("the fixture MDL parses");
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
-        crate::db::compile_project_incremental(&db, sync.project, "main").is_ok()
+        crate::db::compile_project_incremental(
+            &db,
+            sync.project,
+            "main",
+            crate::db::LtmOverlay::Off,
+        )
+        .is_ok()
     };
 
     assert!(

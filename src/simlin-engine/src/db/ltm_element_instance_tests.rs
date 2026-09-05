@@ -52,8 +52,7 @@
 
 use crate::db::{
     DiagnosticError, SimlinDb, collect_all_diagnostics, model_element_causal_edges,
-    model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel,
-    sync_from_datamodel_incremental,
+    model_ltm_variables, sync_from_datamodel, sync_from_datamodel_incremental,
 };
 use crate::test_common::TestProject;
 
@@ -268,17 +267,17 @@ fn arrayed_module_loop_emits_no_failing_fragments() {
     let datamodel = smooth_loop_fixture().build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
 
-    let failures: Vec<String> = collect_all_diagnostics(&db, sync.project)
-        .iter()
-        .filter_map(|d| match &d.error {
-            DiagnosticError::Assembly(msg) if msg.contains("failed to compile") => {
-                Some(format!("{:?}: {msg}", d.variable))
-            }
-            _ => None,
-        })
-        .collect();
+    let failures: Vec<String> =
+        collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::On)
+            .iter()
+            .filter_map(|d| match &d.error {
+                DiagnosticError::Assembly(msg) if msg.contains("failed to compile") => {
+                    Some(format!("{:?}: {msg}", d.variable))
+                }
+                _ => None,
+            })
+            .collect();
 
     assert!(
         failures.is_empty(),
@@ -300,7 +299,6 @@ fn module_link_scores_are_per_target_element_and_hold_their_own_source_live() {
     let datamodel = smooth_loop_fixture().build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     for elem in ["north", "south"] {
@@ -337,7 +335,6 @@ fn both_per_element_module_loops_score_nonzero() {
     let datamodel = project.build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let loop_scores: Vec<String> = ltm
@@ -352,8 +349,13 @@ fn both_per_element_module_loops_score_nonzero() {
         "expected one loop score per element loop, got {loop_scores:?}"
     );
 
-    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
-        .expect("the LTM-enabled fixture should compile");
+    let compiled = crate::db::compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        crate::db::LtmOverlay::On,
+    )
+    .expect("the LTM-enabled fixture should compile");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end()
         .expect("simulation should run to completion");
@@ -502,7 +504,6 @@ fn a_module_instance_scores_no_element_but_its_own() {
     let datamodel = smooth_loop_fixture().build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let emitted: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
@@ -532,7 +533,6 @@ fn an_arrayed_capture_helper_is_not_treated_as_element_bound() {
     let datamodel = project.build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
 
     let implicit =
         crate::db::model_implicit_var_info(&db, sync.models["main"].source_model, sync.project);
@@ -611,17 +611,17 @@ fn an_arrayed_capture_helpers_scores_compile() {
     let datamodel = arrayed_capture_fixture("arrayed_capture_helper_compiles").build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
 
-    let failures: Vec<String> = collect_all_diagnostics(&db, sync.project)
-        .iter()
-        .filter_map(|d| match &d.error {
-            DiagnosticError::Assembly(msg) if msg.contains("failed to compile") => {
-                Some(format!("{:?}: {msg}", d.variable))
-            }
-            _ => None,
-        })
-        .collect();
+    let failures: Vec<String> =
+        collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::On)
+            .iter()
+            .filter_map(|d| match &d.error {
+                DiagnosticError::Assembly(msg) if msg.contains("failed to compile") => {
+                    Some(format!("{:?}: {msg}", d.variable))
+                }
+                _ => None,
+            })
+            .collect();
     assert!(
         failures.is_empty(),
         "every fragment that scores through the arrayed capture must compile:\n{}",
@@ -726,17 +726,17 @@ fn an_unresolved_pathway_link_warns_once_per_edge() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
 
-    let warnings: Vec<String> = collect_all_diagnostics(&db, sync.project)
-        .iter()
-        .filter_map(|d| match &d.error {
-            DiagnosticError::Assembly(msg) if msg.contains("LTM pathway score") => {
-                Some(msg.clone())
-            }
-            _ => None,
-        })
-        .collect();
+    let warnings: Vec<String> =
+        collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::On)
+            .iter()
+            .filter_map(|d| match &d.error {
+                DiagnosticError::Assembly(msg) if msg.contains("LTM pathway score") => {
+                    Some(msg.clone())
+                }
+                _ => None,
+            })
+            .collect();
 
     let count_for = |edge: &str| -> usize {
         warnings
@@ -877,7 +877,6 @@ fn each_element_scores_the_module_port_that_element_reads() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     for (element, own, foreign) in [("a", "m·pos", "m·neg"), ("b", "m·neg", "m·pos")] {

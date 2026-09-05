@@ -78,9 +78,15 @@ fn conveyor_plans(project: &crate::datamodel::Project) -> Vec<ConveyorPlan> {
     let main = project.models[0].name.clone();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    compile_sim(&mut db, sync.project, project, &main)
-        .expect("conveyor model must build")
-        .conveyor_plans
+    compile_sim(
+        &mut db,
+        sync.project,
+        project,
+        &main,
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("conveyor model must build")
+    .conveyor_plans
 }
 
 fn with_instance<R>(

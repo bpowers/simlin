@@ -45,10 +45,10 @@ use crate::canonicalize;
 use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::fragment::{DepShape, FragmentInput};
 use crate::db::{
-    Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ImplicitVarMeta, ModuleInputSet,
-    ParsedVariableResult, SourceModel, SourceProject, SourceVariable, SourceVariableKind,
-    VariableDeps, canonical_module_input_set, model_implicit_var_by_name, model_variable_by_name,
-    module_dep_shape, parse_source_variable, project_converted_dimensions,
+    Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ImplicitVarMeta, LtmOverlay,
+    ModuleInputSet, ParsedVariableResult, SourceModel, SourceProject, SourceVariable,
+    SourceVariableKind, VariableDeps, canonical_module_input_set, model_implicit_var_by_name,
+    model_variable_by_name, module_dep_shape, parse_source_variable, project_converted_dimensions,
     project_dimensions_context, variable_dimensions, variable_direct_dependencies, variable_tables,
 };
 use crate::dimensions::{Dimension, DimensionsContext};
@@ -94,9 +94,10 @@ pub(crate) fn source_dep_shape(
     db: &dyn Db,
     var: SourceVariable,
     project: SourceProject,
+    overlay: LtmOverlay,
 ) -> DepShape {
     if var.kind(db) == SourceVariableKind::Module {
-        module_dep_shape(db, project, var.model_name(db))
+        module_dep_shape(db, project, var.model_name(db), overlay)
     } else {
         DepShape::var(variable_dimensions(db, var, project).clone())
     }
@@ -109,9 +110,15 @@ pub(crate) fn implicit_dep_shape(
     db: &dyn Db,
     project: SourceProject,
     meta: &ImplicitVarMeta,
+    overlay: LtmOverlay,
 ) -> DepShape {
     if meta.is_module {
-        module_dep_shape(db, project, meta.model_name.as_deref().unwrap_or(""))
+        module_dep_shape(
+            db,
+            project,
+            meta.model_name.as_deref().unwrap_or(""),
+            overlay,
+        )
     } else {
         DepShape::var(dimensions_named(
             &meta.dimensions,
@@ -154,19 +161,22 @@ impl DeclaredName {
             .map(|meta| DeclaredName::Helper(Box::new(meta.clone())))
     }
 
-    fn is_module(&self, db: &dyn Db) -> bool {
-        match self {
-            DeclaredName::Source(var) => var.kind(db) == SourceVariableKind::Module,
-            DeclaredName::Helper(meta) => meta.is_module,
-        }
-    }
-
     /// The shape the compiler resolves the name through: a module instance's
     /// sub-model shape, or the declared dimensions.
-    pub(crate) fn shape(&self, db: &dyn Db, project: SourceProject) -> DepShape {
+    ///
+    /// A module instance's shape is its sub-model's layout, which depends on
+    /// the `overlay` (the sub-model carries its LTM section under it), so a
+    /// reader of this shape is keyed on the overlay too; a plain variable's
+    /// shape is its dimensions, the same under either.
+    pub(crate) fn shape(
+        &self,
+        db: &dyn Db,
+        project: SourceProject,
+        overlay: LtmOverlay,
+    ) -> DepShape {
         match self {
-            DeclaredName::Source(var) => source_dep_shape(db, *var, project),
-            DeclaredName::Helper(meta) => implicit_dep_shape(db, project, meta),
+            DeclaredName::Source(var) => source_dep_shape(db, *var, project, overlay),
+            DeclaredName::Helper(meta) => implicit_dep_shape(db, project, meta, overlay),
         }
     }
 
@@ -179,11 +189,20 @@ impl DeclaredName {
     /// on a module cycle -- which the unit pass reaches, its scope being an
     /// iterative worklist for exactly that reason -- turn the lowering into
     /// salsa's dependency-graph panic.
+    ///
+    /// Overlay-independent by construction: it never reads a sub-model's
+    /// layout, which is also what keeps the lowering memos that read it
+    /// keyed on the variable alone.
     pub(crate) fn dimensions_shape(&self, db: &dyn Db, project: SourceProject) -> Option<DepShape> {
-        if self.is_module(db) {
-            None
-        } else {
-            Some(self.shape(db, project))
+        match self {
+            DeclaredName::Source(var) => (var.kind(db) != SourceVariableKind::Module)
+                .then(|| DepShape::var(variable_dimensions(db, *var, project).clone())),
+            DeclaredName::Helper(meta) => (!meta.is_module).then(|| {
+                DepShape::var(dimensions_named(
+                    &meta.dimensions,
+                    project_dimensions_context(db, project),
+                ))
+            }),
         }
     }
 }
@@ -196,8 +215,10 @@ pub(crate) fn model_dep_shape(
     model: SourceModel,
     project: SourceProject,
     name: &str,
+    overlay: LtmOverlay,
 ) -> Option<DepShape> {
-    DeclaredName::resolve(db, model, project, name).map(|declared| declared.shape(db, project))
+    DeclaredName::resolve(db, model, project, name)
+        .map(|declared| declared.shape(db, project, overlay))
 }
 
 /// Whether `flow_ident` names a flow that is DRIVEN by a special-stock
@@ -283,9 +304,10 @@ fn source_self_shape(
     var: SourceVariable,
     project: SourceProject,
     parsed: &ParsedVariableResult,
+    overlay: LtmOverlay,
 ) -> DepShape {
     if var.kind(db) == SourceVariableKind::Module {
-        module_dep_shape(db, project, var.model_name(db))
+        module_dep_shape(db, project, var.model_name(db), overlay)
     } else {
         DepShape::var(
             parsed
@@ -347,17 +369,18 @@ fn compiler_shapes(
     self_shape: DepShape,
     heads: &[(Ident<Canonical>, DeclaredName)],
     parsed: &ParsedVariableResult,
+    overlay: LtmOverlay,
 ) -> IdentMap<Ident<Canonical>, DepShape> {
     let mut dep_shapes: IdentMap<Ident<Canonical>, DepShape> = Default::default();
     dep_shapes.insert(Ident::new(self_ident), self_shape);
     for (ident, declared) in heads {
-        dep_shapes.insert(ident.clone(), declared.shape(db, project));
+        dep_shapes.insert(ident.clone(), declared.shape(db, project, overlay));
     }
     for implicit_var in &parsed.implicit_vars {
         if let Some(dm_module) = implicit_var.module() {
             dep_shapes
                 .entry(Ident::new(&dm_module.ident))
-                .or_insert_with(|| module_dep_shape(db, project, &dm_module.model_name));
+                .or_insert_with(|| module_dep_shape(db, project, &dm_module.model_name, overlay));
         }
     }
     dep_shapes
@@ -478,6 +501,7 @@ pub(crate) fn explicit_fragment_input<'db>(
     model: SourceModel,
     project: SourceProject,
     module_input_names: &[String],
+    overlay: LtmOverlay,
 ) -> ExplicitFragment<'db> {
     let var_ident = var.ident(db).clone();
     let model_name = model.name(db);
@@ -587,8 +611,8 @@ pub(crate) fn explicit_fragment_input<'db>(
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
 
-    let self_shape = source_self_shape(db, var, project, parsed);
-    let dep_shapes = compiler_shapes(db, project, &var_ident, self_shape, heads, parsed);
+    let self_shape = source_self_shape(db, var, project, parsed, overlay);
+    let dep_shapes = compiler_shapes(db, project, &var_ident, self_shape, heads, parsed, overlay);
 
     // Errors introduced during AST lowering (e.g. `MismatchedDimensions` from
     // the Expr2 lowering) land on the lowered variable, not the parsed one, so

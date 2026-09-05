@@ -172,7 +172,7 @@ fn assert_declines_because(project: TestProject, variable: &str, reason: &str) {
     let datamodel = project.build_datamodel();
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &datamodel);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let matched = diags.iter().any(|d| {
         d.variable.as_deref() == Some(variable)
             && matches!(&d.error, DiagnosticError::Assembly(msg) if msg.contains(reason))
@@ -2655,7 +2655,8 @@ fn an_array_view_inside_a_module_instance_reads_that_instance() {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
     let compiled =
-        compile_project_incremental(&db, sync.project, "main").expect("two-instance compile");
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .expect("two-instance compile");
     let mut vm = Vm::new(compiled).expect("vm");
     vm.run_to_end().expect("run");
     let results = crate::test_common::collect_results(&vm.into_results());
@@ -2850,7 +2851,9 @@ fn an_array_view_inside_a_nested_module_instance_reads_that_instance() {
     let project = crate::test_common::nested_instance_arrayed_submodel_project();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let compiled = compile_project_incremental(&db, sync.project, "main").expect("nested compile");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .expect("nested compile");
     let mut vm = Vm::new(compiled).expect("vm");
     vm.run_to_end().expect("run");
     let results = crate::test_common::collect_results(&vm.into_results());

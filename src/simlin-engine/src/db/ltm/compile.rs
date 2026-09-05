@@ -607,7 +607,7 @@ fn lower_ltm_variable(
             tables.insert(table.clone(), table_data);
         }
         deps.entry(table.clone())
-            .or_insert_with(|| source_dep_shape(db, *table_sv, project));
+            .or_insert_with(|| source_dep_shape(db, *table_sv, project, crate::db::LtmOverlay::On));
     }
 
     let model_ident: Ident<Canonical> = Ident::new(model.name(db));
@@ -720,7 +720,9 @@ fn ltm_dep_shape(
     project: SourceProject,
     head: &str,
 ) -> Option<DepShape> {
-    if let Some(shape) = model_dep_shape(db, model, project, head) {
+    // An LTM fragment exists only under the overlay, so a module read in one
+    // resolves through the sub-model's LTM-augmented shape.
+    if let Some(shape) = model_dep_shape(db, model, project, head, crate::db::LtmOverlay::On) {
         return Some(shape);
     }
     let dim_context = project_dimensions_context(db, project);

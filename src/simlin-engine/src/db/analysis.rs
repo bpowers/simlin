@@ -3534,12 +3534,16 @@ pub(crate) fn model_lowered_variables(
         let memo = &memo.variable;
         let entry = if pinning_allowed
             && memo.element_scope().is_some()
+            // Only the lowered target is read off the input; the module
+            // shapes it also carries do not enter it, so the plain overlay
+            // keeps this memo overlay-independent.
             && let Ok(input) = crate::db::fragment_compile::implicit_fragment_input(
                 db,
                 &implicit_info[name],
                 model,
                 project,
                 &[],
+                crate::db::LtmOverlay::Off,
             ) {
             std::sync::Arc::new(input.element_pinned_target())
         } else {
@@ -4242,8 +4246,7 @@ mod polarity_confidence_tests {
     #[test]
     fn reclassify_changes_undetermined_loop_to_runtime_polarity() {
         use crate::db::{
-            compile_project_incremental, model_ltm_variables, set_project_ltm_enabled,
-            sync_from_datamodel_incremental,
+            compile_project_incremental, model_ltm_variables, sync_from_datamodel_incremental,
         };
         use crate::vm::Vm;
 
@@ -4294,8 +4297,9 @@ mod polarity_confidence_tests {
             "structural Undetermined loop must carry confidence 0.0, got {structural_tank_confidence}"
         );
 
-        set_project_ltm_enabled(&mut db, sync.project, true);
-        let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+        let compiled =
+            compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::On)
+                .unwrap();
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_to_end().unwrap();
         let results = vm.into_results();
@@ -5056,7 +5060,7 @@ mod classify_cycle_tests {
     fn partial_slot_arrayed_reference_takes_the_slow_path() {
         use crate::db::{
             DiagnosticError, SimlinDb, collect_all_diagnostics, model_ltm_variables,
-            set_project_ltm_enabled, sync_from_datamodel,
+            sync_from_datamodel,
         };
         use crate::test_common::TestProject;
 
@@ -5069,7 +5073,7 @@ mod classify_cycle_tests {
                 vec![("NYC", "population * 0.1"), ("Boston", "0"), ("LA", "0")],
             );
         let datamodel = project.build_datamodel();
-        let mut db = SimlinDb::default();
+        let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
         let (model, source_project) = (sync.models["main"].source, sync.project);
 
@@ -5100,7 +5104,6 @@ mod classify_cycle_tests {
             "the element graph holds the NYC circuit and no other"
         );
 
-        set_project_ltm_enabled(&mut db, source_project, true);
         let ltm = model_ltm_variables(&db, model, source_project);
         let loop_scores: Vec<&crate::db::LtmSyntheticVar> = ltm
             .vars
@@ -5119,22 +5122,28 @@ mod classify_cycle_tests {
             loop_scores[0]
         );
 
-        let failures: Vec<String> = collect_all_diagnostics(&db, source_project)
-            .iter()
-            .filter_map(|d| match &d.error {
-                DiagnosticError::Assembly(msg) if msg.contains("failed to compile") => {
-                    Some(format!("{:?}: {msg}", d.variable))
-                }
-                _ => None,
-            })
-            .collect();
+        let failures: Vec<String> =
+            collect_all_diagnostics(&db, source_project, crate::db::LtmOverlay::On)
+                .iter()
+                .filter_map(|d| match &d.error {
+                    DiagnosticError::Assembly(msg) if msg.contains("failed to compile") => {
+                        Some(format!("{:?}: {msg}", d.variable))
+                    }
+                    _ => None,
+                })
+                .collect();
         assert!(
             failures.is_empty(),
             "LTM fragments failed to compile:\n{failures:?}"
         );
 
-        let compiled = crate::db::compile_project_incremental(&db, source_project, "main")
-            .expect("the LTM-enabled fixture compiles");
+        let compiled = crate::db::compile_project_incremental(
+            &db,
+            source_project,
+            "main",
+            crate::db::LtmOverlay::On,
+        )
+        .expect("the LTM-enabled fixture compiles");
         let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation succeeds");
         vm.run_to_end().expect("the simulation runs to completion");
         let results = vm.into_results();

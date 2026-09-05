@@ -393,8 +393,14 @@ fn compile_and_diagnose(path: &str) -> (Vec<Diagnostic>, usize, bool) {
     let mut db = SimlinDb::default();
     let sync_state = sync_from_datamodel_incremental(&mut db, &dm, None);
     let sync = sync_state.to_sync_result();
-    let compiled_ok = compile_project_incremental(&db, sync.project, "main").is_ok();
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let compiled_ok = compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .is_ok();
+    let diags = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::Off);
     let total = diags.len();
 
     let macro_models: std::collections::BTreeSet<&str> = dm
@@ -552,8 +558,13 @@ fn macro_models_and_diags(source: &str) -> (Vec<String>, Vec<Diagnostic>) {
     let sync = sync_state.to_sync_result();
     // Drive the compile so the registry-build / macro-resolution
     // diagnostics are accumulated (same as `compile_and_diagnose`).
-    let _ = compile_project_incremental(&db, sync.project, "main");
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let _ = compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    );
+    let diags = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::Off);
     let macro_models: Vec<String> = dm
         .models
         .iter()
@@ -729,8 +740,13 @@ fn metasd_simulation_tier() {
                     .unwrap_or_else(|e| panic!("failed to parse {}: {e}", m.path));
                 let mut db = SimlinDb::default();
                 let sync = sync_from_datamodel_incremental(&mut db, &dm, None);
-                let compiled = compile_project_incremental(&db, sync.project, "main")
-                    .unwrap_or_else(|e| panic!("compile failed for {}: {e}", m.path));
+                let compiled = compile_project_incremental(
+                    &db,
+                    sync.project,
+                    "main",
+                    simlin_engine::db::LtmOverlay::Off,
+                )
+                .unwrap_or_else(|e| panic!("compile failed for {}: {e}", m.path));
                 let mut vm = Vm::new(compiled)
                     .unwrap_or_else(|e| panic!("VM creation failed for {}: {e}", m.path));
                 vm.run_to_end()

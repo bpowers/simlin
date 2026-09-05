@@ -832,6 +832,20 @@ LTM), and libsimlin calls it at the end of every edit and compile entry
 point, so the drop is paid inside the edit that caused it rather than one
 edit late.
 
+**The LTM overlay is an argument, not an input.** Whether a compile
+assembles the LTM overlay (`db::LtmOverlay`) keys the layout, the shape a
+cross-module read resolves through, the fragments, the assembly and the
+diagnostics. As a salsa input on the project it was a revision every time it
+flipped, which discarded the other variant's memos and re-verified every memo
+in the database: on C-LEARN a warm LTM simulation after a plain diagnostics
+pass re-executed 1,035 query bodies (2.9 G instructions, 32% of a cold LTM
+compile), the diagnostics pass after any LTM simulation 1,676 (2.5 G), and a
+plain simulation after either 181 (130 M). As an argument both variants stay
+memoized side by side (`db::ltm_overlay_tests`), at the price of one fragment
+memo per overlay a variable has been compiled under (about 5 MiB on C-LEARN
+when both have been used). The LTM derivations themselves are
+overlay-independent and derived once.
+
 **The edit path is O(model); ~1% of it is O(edit).** A structure-preserving
 literal edit costs 210 M instructions plain (23 ms) and 7.4 G under LTM
 (661 ms): the whole-model unit pass (28%), the assembly merge over every

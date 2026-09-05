@@ -84,7 +84,7 @@ fn overflow_marker_without_queue_is_rejected_by_build_sim() {
     let mut db = SimlinDb::default();
     let sp = db.sync(&project);
 
-    let err = build_sim(&mut db, sp, &project, &main)
+    let err = build_sim(&mut db, sp, &project, &main, crate::db::LtmOverlay::Off)
         .expect_err("a stray <overflow/> must be rejected on the ordinary dispatch branch");
     assert_eq!(err.code, ErrorCode::QueueOverflowNotOnQueue);
     assert!(
@@ -105,7 +105,7 @@ fn overflow_marker_without_queue_is_rejected_by_compile_sim() {
 
     // `SimBuild` is deliberately not `Debug` (a `CompiledSimulation`'s debug
     // formatting is feature-gated), so unwrap the error half explicitly.
-    let err = compile_sim(&mut db, sp, &project, &main)
+    let err = compile_sim(&mut db, sp, &project, &main, crate::db::LtmOverlay::Off)
         .err()
         .expect("stray <overflow/> rejected");
     assert_eq!(err.code, ErrorCode::QueueOverflowNotOnQueue);
@@ -158,7 +158,7 @@ fn overflow_marker_in_a_submodel_is_rejected() {
 
     let mut db = SimlinDb::default();
     let sp = db.sync(&project);
-    let err = build_sim(&mut db, sp, &project, &main)
+    let err = build_sim(&mut db, sp, &project, &main, crate::db::LtmOverlay::Off)
         .expect_err("a sub-model <overflow/> must be rejected");
     assert_eq!(err.code, ErrorCode::QueueOverflowNotOnQueue);
     assert!(err.details.as_deref().unwrap_or("").contains("drain"));
@@ -188,7 +188,7 @@ fn overflow_on_a_queues_first_outflow_is_rejected_through_the_dispatch() {
 
     let mut db = SimlinDb::default();
     let sp = db.sync(&project);
-    let err = build_sim(&mut db, sp, &project, &main)
+    let err = build_sim(&mut db, sp, &project, &main, crate::db::LtmOverlay::Off)
         .expect_err("an overflow on the first outflow must be rejected");
     assert_eq!(err.code, ErrorCode::QueueOverflowNotOnQueue);
     assert!(
@@ -219,7 +219,8 @@ fn unrelated_edit_reuses_expanded_inputs_and_fragments() {
 
     let mut db = SimlinDb::default();
     let sp = db.sync(&project);
-    let mut vm = build_sim(&mut db, sp, &project, &main).expect("first conveyor build");
+    let mut vm = build_sim(&mut db, sp, &project, &main, crate::db::LtmOverlay::Off)
+        .expect("first conveyor build");
     vm.run_to_end().expect("first run");
 
     let (expanded_id, model_id, unrelated_id, edited_id, unrelated_frag_ptr, edited_frag1) = {
@@ -230,10 +231,22 @@ fn unrelated_edit_reuses_expanded_inputs_and_fragments() {
         let unrelated = model.variables(&db)["unrelated"];
         let edited = model.variables(&db)["edited"];
 
-        let unrelated_frag =
-            compile_var_fragment(&db, unrelated, model, expanded, ModuleInputSet::empty(&db));
-        let edited_frag =
-            compile_var_fragment(&db, edited, model, expanded, ModuleInputSet::empty(&db));
+        let unrelated_frag = compile_var_fragment(
+            &db,
+            unrelated,
+            model,
+            expanded,
+            ModuleInputSet::empty(&db),
+            crate::db::LtmOverlay::Off,
+        );
+        let edited_frag = compile_var_fragment(
+            &db,
+            edited,
+            model,
+            expanded,
+            ModuleInputSet::empty(&db),
+            crate::db::LtmOverlay::Off,
+        );
         assert!(unrelated_frag.is_some() && edited_frag.is_some());
 
         (
@@ -251,7 +264,8 @@ fn unrelated_edit_reuses_expanded_inputs_and_fragments() {
     set_edited_equation(&mut project2, "42");
 
     let sp2 = db.sync(&project2);
-    let mut vm2 = build_sim(&mut db, sp2, &project2, &main).expect("second conveyor build");
+    let mut vm2 = build_sim(&mut db, sp2, &project2, &main, crate::db::LtmOverlay::Off)
+        .expect("second conveyor build");
     vm2.run_to_end().expect("second run");
 
     let expanded2 = db
@@ -287,6 +301,7 @@ fn unrelated_edit_reuses_expanded_inputs_and_fragments() {
         model2,
         expanded2,
         ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     );
     assert_eq!(
         unrelated_frag_ptr, unrelated_frag2 as *const _,
@@ -294,8 +309,14 @@ fn unrelated_edit_reuses_expanded_inputs_and_fragments() {
          after an edit to a different variable"
     );
 
-    let edited_frag2 =
-        compile_var_fragment(&db, edited2, model2, expanded2, ModuleInputSet::empty(&db));
+    let edited_frag2 = compile_var_fragment(
+        &db,
+        edited2,
+        model2,
+        expanded2,
+        ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
+    );
     assert_ne!(
         edited_frag1,
         edited_frag2.as_ref().unwrap().fragment,
@@ -321,7 +342,7 @@ fn repeated_builds_do_not_accumulate_expanded_inputs() {
 
     let mut db = SimlinDb::default();
     let sp = db.sync(&project);
-    build_sim(&mut db, sp, &project, &main).expect("build");
+    build_sim(&mut db, sp, &project, &main, crate::db::LtmOverlay::Off).expect("build");
 
     let (first_id, first_var_count) = {
         let expanded = db.expanded_source_project().expect("expanded slot");
@@ -345,7 +366,7 @@ fn repeated_builds_do_not_accumulate_expanded_inputs() {
         let mut p = project.clone();
         set_edited_equation(&mut p, &format!("{i}"));
         let sp = db.sync(&p);
-        build_sim(&mut db, sp, &p, &main).expect("rebuild");
+        build_sim(&mut db, sp, &p, &main, crate::db::LtmOverlay::Off).expect("rebuild");
 
         let expanded = db.expanded_source_project().expect("expanded slot");
         assert_eq!(
@@ -373,7 +394,7 @@ fn ordinary_model_has_no_expanded_slot() {
     let main = project.models[0].name.clone();
     let mut db = SimlinDb::default();
     let sp = db.sync(&project);
-    build_sim(&mut db, sp, &project, &main).expect("ordinary build");
+    build_sim(&mut db, sp, &project, &main, crate::db::LtmOverlay::Off).expect("ordinary build");
     assert!(
         db.expanded_source_project().is_none(),
         "an ordinary model must not pay for a second SourceProject"
@@ -416,7 +437,8 @@ fn conveyor_ordinary_toggles_reuse_one_expanded_input_set() {
     let mut db = SimlinDb::default();
 
     let sp = db.sync(&project);
-    let mut vm = build_sim(&mut db, sp, &project, &main).expect("conveyor build");
+    let mut vm = build_sim(&mut db, sp, &project, &main, crate::db::LtmOverlay::Off)
+        .expect("conveyor build");
     vm.run_to_end().expect("run");
     let baseline = vm
         .get_series(&Ident::new("students"))
@@ -427,7 +449,7 @@ fn conveyor_ordinary_toggles_reuse_one_expanded_input_set() {
     for round in 0..3 {
         // Ordinary build: the slot is retained (stale, unread), not released.
         let sp = db.sync(&plain);
-        build_sim(&mut db, sp, &plain, &main).expect("ordinary build");
+        build_sim(&mut db, sp, &plain, &main, crate::db::LtmOverlay::Off).expect("ordinary build");
         let retained = db
             .expanded_source_project()
             .unwrap_or_else(|| panic!("round {round}: the expanded slot must be retained"));
@@ -439,7 +461,8 @@ fn conveyor_ordinary_toggles_reuse_one_expanded_input_set() {
 
         // Back to the conveyor: re-syncs onto the SAME inputs.
         let sp = db.sync(&project);
-        let mut vm = build_sim(&mut db, sp, &project, &main).expect("conveyor rebuild");
+        let mut vm = build_sim(&mut db, sp, &project, &main, crate::db::LtmOverlay::Off)
+            .expect("conveyor rebuild");
         vm.run_to_end().expect("run");
         assert_eq!(
             first_id,
@@ -477,12 +500,13 @@ fn diagnostics_come_from_the_unexpanded_project() {
     let mut db = SimlinDb::default();
     let sp = db.sync(&project);
 
-    let before = collect_all_diagnostics(&db, sp);
+    let before = collect_all_diagnostics(&db, sp, crate::db::LtmOverlay::Off);
     // The expansion succeeds (an unknown reference is a compile-time, not an
     // expansion-time, failure), so the expanded inputs land in the db and the
     // expanded compile then fails.
-    build_sim(&mut db, sp, &project, &main).expect_err("unknown reference fails to compile");
-    let after = collect_all_diagnostics(&db, sp);
+    build_sim(&mut db, sp, &project, &main, crate::db::LtmOverlay::Off)
+        .expect_err("unknown reference fails to compile");
+    let after = collect_all_diagnostics(&db, sp, crate::db::LtmOverlay::Off);
 
     assert_eq!(
         before.len(),
@@ -534,7 +558,8 @@ fn rejected_staged_patch_does_not_poison_the_expanded_slot() {
     let mut db = SimlinDb::default();
     let sp = db.sync(&project);
     let baseline = {
-        let mut vm = build_sim(&mut db, sp, &project, &main).expect("baseline build");
+        let mut vm = build_sim(&mut db, sp, &project, &main, crate::db::LtmOverlay::Off)
+            .expect("baseline build");
         vm.run_to_end().expect("baseline run");
         vm.get_series(&Ident::new("students"))
             .expect("students")
@@ -552,7 +577,14 @@ fn rejected_staged_patch_does_not_poison_the_expanded_slot() {
         }
     }
     let (staged_sp, prev) = db.sync_staged(&staged);
-    let mut staged_vm = build_sim(&mut db, staged_sp, &staged, &main).expect("staged build");
+    let mut staged_vm = build_sim(
+        &mut db,
+        staged_sp,
+        &staged,
+        &main,
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("staged build");
     staged_vm.run_to_end().expect("staged run");
     let staged_students = staged_vm.get_series(&Ident::new("students")).expect("s");
     assert!(
@@ -563,7 +595,8 @@ fn rejected_staged_patch_does_not_poison_the_expanded_slot() {
     db.restore(&project, prev);
 
     let sp2 = db.current_source_project().expect("restored");
-    let mut vm = build_sim(&mut db, sp2, &project, &main).expect("post-rollback build");
+    let mut vm = build_sim(&mut db, sp2, &project, &main, crate::db::LtmOverlay::Off)
+        .expect("post-rollback build");
     vm.run_to_end().expect("post-rollback run");
     let after = vm.get_series(&Ident::new("students")).expect("students");
 
@@ -602,6 +635,7 @@ fn duplicate_variable_outranks_a_stray_overflow_marker() {
     let main = project.models[0].name.clone();
     let mut db = SimlinDb::default();
     let sp = db.sync(&project);
-    let err = build_sim(&mut db, sp, &project, &main).expect_err("rejected");
+    let err =
+        build_sim(&mut db, sp, &project, &main, crate::db::LtmOverlay::Off).expect_err("rejected");
     assert_eq!(err.code, ErrorCode::DuplicateVariable);
 }

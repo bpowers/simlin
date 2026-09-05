@@ -23,7 +23,7 @@ use std::time::Duration;
 use simlin_engine::canonicalize;
 use simlin_engine::db::{
     SimlinDb, causal_graph_from_element_edges, compile_project_incremental,
-    model_element_causal_edges, set_project_ltm_enabled, sync_from_datamodel_incremental,
+    model_element_causal_edges, sync_from_datamodel_incremental,
 };
 use simlin_engine::open_vensim;
 
@@ -50,13 +50,17 @@ fn wrld3_ltm_compilation_finishes_in_time() {
     let handle = thread::spawn(move || {
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-        set_project_ltm_enabled(&mut db, sync.project, true);
 
         // The key assertion: this call must not panic, not unreachable,
         // and must return within the budget below.  An `Err` is acceptable
         // -- the UI then falls back to a non-LTM simulation and still
         // renders sparklines.
-        let result = compile_project_incremental(&db, sync.project, "main");
+        let result = compile_project_incremental(
+            &db,
+            sync.project,
+            "main",
+            simlin_engine::db::LtmOverlay::On,
+        );
         let _ = tx.send(result.map(|_| ()));
     });
 

@@ -190,6 +190,7 @@ fn helper_fragments(
         sync.project,
         helper.to_string(),
         ModuleInputSet::empty(db),
+        crate::db::LtmOverlay::Off,
     )
     .as_ref()
     .unwrap_or_else(|| panic!("{helper} must compile"));
@@ -212,6 +213,7 @@ fn direct_reads(db: &SimlinDb, sync: &SyncResult, var: &str, of: &str) -> usize 
         model,
         sync.project,
         ModuleInputSet::empty(db),
+        crate::db::LtmOverlay::Off,
     )
     .as_ref()
     .unwrap_or_else(|| panic!("{var} must compile"))
@@ -427,9 +429,10 @@ fn user_element_snapshots_are_direct_for_both_intrinsics() {
          populated once and read from the frozen snapshot"
     );
 
-    let layout = compute_layout(&db, model, sync.project);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("the direct and captured rows compile together");
+    let layout = compute_layout(&db, model, sync.project, crate::db::LtmOverlay::Off);
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .expect("the direct and captured rows compile together");
     for capture in [prev_capture, init_capture] {
         assert!(
             layout.get(capture).is_some(),
@@ -594,7 +597,13 @@ fn snapshot_element_name_matrix_covers_both_intrinsics() {
 
             let Some(selected) = selected else {
                 assert!(
-                    compile_project_incremental(&db, sync.project, "main").is_err(),
+                    compile_project_incremental(
+                        &db,
+                        sync.project,
+                        "main",
+                        crate::db::LtmOverlay::Off
+                    )
+                    .is_err(),
                     "{what}: an index naming nothing on the axis must refuse"
                 );
                 // The capture's body is what fails to lower: for every
@@ -710,7 +719,6 @@ fn test_ltm_bare_element_subscripts_no_helpers() {
     let sync = crate::db::sync_from_datamodel(&db, &project);
     let source_model = sync.models["main"].source;
     let mut db = db;
-    sync.project.set_ltm_enabled(&mut db).to(true);
     sync.project.set_ltm_discovery_mode(&mut db).to(true);
 
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
@@ -775,7 +783,6 @@ fn ltm_snapshot_element_reads_preserve_score_topology_and_values() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    sync.project.set_ltm_enabled(&mut db).to(true);
     sync.project.set_ltm_discovery_mode(&mut db).to(true);
     let model = sync.models["main"].source;
 
@@ -824,7 +831,9 @@ fn ltm_snapshot_element_reads_preserve_score_topology_and_values() {
         "the capture's score has the capture's shape"
     );
 
-    let compiled = compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::On)
+            .expect("compiles");
     let offsets = compiled.offsets.clone();
     let mut vm = crate::vm::Vm::new(compiled).expect("vm");
     vm.run_to_end().expect("runs");
@@ -1099,7 +1108,9 @@ fn a_positional_capture_shared_by_init_and_previous_unions_its_phases() {
             (true, true, false)
         );
 
-        let compiled = compile_project_incremental(&db, sync.project, "main").expect("compiles");
+        let compiled =
+            compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+                .expect("compiles");
         let mut vm = crate::vm::Vm::new(compiled).expect("vm");
         let out_offset = vm.get_offset(&Ident::new("out")).expect("out");
         let observed_offset = vm
@@ -1146,7 +1157,9 @@ fn a_current_value_consumer_promotes_an_init_capture_into_flows() {
         helper_fragments(&db, &sync, "main", helper),
         (true, true, false)
     );
-    let compiled = compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .expect("compiles");
     assert!(compiled.get_offset(&Ident::new(helper)).is_none());
 
     let values = tp.run_vm().expect("runs");
@@ -1241,14 +1254,22 @@ fn a_bound_module_init_capture_is_initials_only() {
             stocks: false,
         }
     );
-    let fragment =
-        compile_implicit_var_fragment(&db, child_model, sync.project, helper.to_string(), inputs)
-            .as_ref()
-            .expect("the bound capture compiles");
+    let fragment = compile_implicit_var_fragment(
+        &db,
+        child_model,
+        sync.project,
+        helper.to_string(),
+        inputs,
+        crate::db::LtmOverlay::Off,
+    )
+    .as_ref()
+    .expect("the bound capture compiles");
     assert!(fragment.fragment.initial_bytecodes.is_some());
     assert!(fragment.fragment.flow_bytecodes.is_none());
 
-    let compiled = compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .expect("compiles");
     assert!(
         compiled
             .get_offset(&Ident::new(
@@ -1585,8 +1606,15 @@ fn every_prev_init_argument_shape_agrees_between_the_parse_and_codegen() {
             helpers
                 .iter()
                 .flat_map(|meta| {
-                    let input = implicit_fragment_input(&db, meta, model, sync.project, &[])
-                        .unwrap_or_else(|_| panic!("{what}: helper must build a fragment input"));
+                    let input = implicit_fragment_input(
+                        &db,
+                        meta,
+                        model,
+                        sync.project,
+                        &[],
+                        crate::db::LtmOverlay::Off,
+                    )
+                    .unwrap_or_else(|_| panic!("{what}: helper must build a fragment input"));
                     lower_fragment(&input, false)
                         .unwrap_or_else(|_| panic!("{what}: helper must lower"))
                         .ast
@@ -1745,7 +1773,8 @@ fn module_snapshot_series(
     db: &SimlinDb,
     project: SourceProject,
 ) -> std::collections::HashMap<String, Vec<f64>> {
-    let compiled = compile_project_incremental(db, project, "main").expect("compiles");
+    let compiled = compile_project_incremental(db, project, "main", crate::db::LtmOverlay::Off)
+        .expect("compiles");
     let mut vm = crate::vm::Vm::new(compiled).expect("vm");
     vm.run_to_end().expect("runs");
     let results = vm.into_results();
@@ -1820,18 +1849,19 @@ fn module_snapshot_arguments_are_resolved_at_lowering() {
     for equation in ["PREVIOUS(sub, 0)", "INIT(sub)"] {
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &module_snapshot_project(equation));
-        let refusals: Vec<String> = collect_all_diagnostics(&db, sync.project)
-            .into_iter()
-            .filter(|d| d.model == "main" && d.variable.as_deref() == Some("probe"))
-            .filter_map(|d| match d.error {
-                DiagnosticError::Equation(err)
-                    if err.code == crate::common::ErrorCode::NotSimulatable =>
-                {
-                    err.details
-                }
-                _ => None,
-            })
-            .collect();
+        let refusals: Vec<String> =
+            collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off)
+                .into_iter()
+                .filter(|d| d.model == "main" && d.variable.as_deref() == Some("probe"))
+                .filter_map(|d| match d.error {
+                    DiagnosticError::Equation(err)
+                        if err.code == crate::common::ErrorCode::NotSimulatable =>
+                    {
+                        err.details
+                    }
+                    _ => None,
+                })
+                .collect();
         assert!(
             refusals
                 .iter()

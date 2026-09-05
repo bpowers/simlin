@@ -813,32 +813,6 @@ fn test_constant_variable_has_no_deps_with_salsa() {
     );
 }
 
-/// Verify that ltm_enabled is reset to false after compute_metadata
-/// completes, even when the incremental LTM path encounters failures
-/// (e.g., compilation or simulation errors).
-#[test]
-fn test_ltm_enabled_reset_after_incremental_metadata() {
-    use simlin_engine::layout::compute_metadata;
-
-    let project = load_project("test/logistic_growth_ltm/logistic_growth.stmx");
-    let mut db = SimlinDb::default();
-    let state = sync_from_datamodel_incremental(&mut db, &project, None);
-    let source_project = state.to_sync_result().project;
-
-    // Call compute_metadata with the incremental salsa path.
-    let metadata = compute_metadata(&project, MAIN_MODEL, Some((&mut db, source_project)));
-    assert!(
-        metadata.is_some(),
-        "metadata should be returned for valid project"
-    );
-
-    // ltm_enabled should be reset to false after the call.
-    assert!(
-        !source_project.ltm_enabled(&db),
-        "ltm_enabled should be false after compute_metadata completes"
-    );
-}
-
 /// Codex review regression (PR #472): every detected loop's
 /// `importance_series` must have length exactly `results.step_count`,
 /// regardless of the partition stride that
@@ -872,7 +846,7 @@ fn test_ltm_enabled_reset_after_incremental_metadata() {
 #[test]
 fn test_compute_metadata_importance_series_length_matches_step_count() {
     use simlin_engine::Vm;
-    use simlin_engine::db::{compile_project_incremental, set_project_ltm_enabled};
+    use simlin_engine::db::compile_project_incremental;
     use simlin_engine::layout::compute_metadata;
     use simlin_engine::test_common::TestProject;
 
@@ -900,8 +874,13 @@ fn test_compute_metadata_importance_series_length_matches_step_count() {
     // honest even if compute_metadata's own bookkeeping drifts.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, MAIN_MODEL).unwrap();
+    let compiled = compile_project_incremental(
+        &db,
+        sync.project,
+        MAIN_MODEL,
+        simlin_engine::db::LtmOverlay::On,
+    )
+    .unwrap();
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let step_count = vm.into_results().step_count;
@@ -953,7 +932,6 @@ fn test_arrayed_loop_importance_matches_argmax_abs_aggregation() {
     use simlin_engine::Vm;
     use simlin_engine::db::{
         compile_project_incremental, model_ltm_variables, project_datamodel_dims,
-        set_project_ltm_enabled,
     };
     use simlin_engine::layout::compute_metadata;
     use simlin_engine::ltm_post;
@@ -972,8 +950,13 @@ fn test_arrayed_loop_importance_matches_argmax_abs_aggregation() {
     // aggregate via the same argmax-abs rule the layout is contracted to use.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, MAIN_MODEL).unwrap();
+    let compiled = compile_project_incremental(
+        &db,
+        sync.project,
+        MAIN_MODEL,
+        simlin_engine::db::LtmOverlay::On,
+    )
+    .unwrap();
     let source_model = sync.models[MAIN_MODEL].source_model;
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
     let loop_partitions = ltm_vars.loop_partitions.clone();

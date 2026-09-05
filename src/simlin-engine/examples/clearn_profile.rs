@@ -47,7 +47,7 @@ use std::time::Instant;
 
 use simlin_engine::db::{
     PersistentSyncState, SimlinDb, collect_all_diagnostics, compile_project_incremental,
-    set_project_ltm_enabled, sync_from_datamodel_incremental,
+    sync_from_datamodel_incremental,
 };
 use simlin_engine::{CompiledSimulation, Vm, open_vensim};
 
@@ -308,13 +308,20 @@ fn compile_retained(
 ) -> RetainedCompile {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
-    if ltm {
-        set_project_ltm_enabled(&mut db, sync.project, true);
-    }
     if diagnostics {
-        std::hint::black_box(collect_all_diagnostics(&db, sync.project));
+        std::hint::black_box(collect_all_diagnostics(
+            &db,
+            sync.project,
+            simlin_engine::db::LtmOverlay::from(ltm),
+        ));
     }
-    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let compiled = compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::from(ltm),
+    )
+    .unwrap();
     RetainedCompile { db, sync, compiled }
 }
 

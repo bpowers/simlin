@@ -34,7 +34,7 @@ use std::path::Path;
 
 use simlin_engine::datamodel;
 use simlin_engine::db::{
-    DiagnosticSeverity, SimlinDb, collect_all_diagnostics, sync_from_datamodel,
+    DiagnosticSeverity, LtmOverlay, SimlinDb, collect_all_diagnostics, sync_from_datamodel,
 };
 use simlin_engine::errors::{FormattedErrorKind, collect_formatted_errors};
 
@@ -69,7 +69,7 @@ pub fn compute_diagnostic_set(
 ) -> (BTreeSet<DiagnosticKey>, Vec<ValidationError>) {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, project);
-    let diagnostics = collect_all_diagnostics(&db, sync.project);
+    let diagnostics = collect_all_diagnostics(&db, sync.project, LtmOverlay::Off);
     let formatted = collect_formatted_errors(
         diagnostics
             .iter()

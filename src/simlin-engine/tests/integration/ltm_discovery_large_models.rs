@@ -108,7 +108,7 @@ use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::datamodel;
 use simlin_engine::db::{
     LtmSyntheticVar, SimlinDb, compile_project_incremental, set_project_ltm_discovery_mode,
-    set_project_ltm_enabled, sync_from_datamodel_incremental,
+    sync_from_datamodel_incremental,
 };
 use simlin_engine::ltm::CausalGraph;
 use simlin_engine::test_common::TestProject;
@@ -528,12 +528,12 @@ fn clearn_ltm_discovery_compiles() {
     // root-caused failure (the GH #363 symptom re-verified), never caught.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
 
-    compile_project_incremental(&db, sync.project, "main").unwrap_or_else(|e| {
-        panic!("C-LEARN should compile with LTM discovery enabled, got Err: {e:?}")
-    });
+    compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+        .unwrap_or_else(|e| {
+            panic!("C-LEARN should compile with LTM discovery enabled, got Err: {e:?}")
+        });
 }
 
 /// The union-graph enumeration path on a FULL World3 run: candidate

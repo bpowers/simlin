@@ -41,7 +41,8 @@ type Inst = Stored<ModuleAddr>;
 fn compile(datamodel: &crate::datamodel::Project) -> std::sync::Arc<CompiledSimulation> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
-    compile_project_incremental(&db, sync.project, "main").expect("incremental compile")
+    compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+        .expect("incremental compile")
 }
 
 fn with_instance<R>(
@@ -202,9 +203,15 @@ fn conveyor_plans(
 ) -> Vec<crate::conveyor_compile::ConveyorPlan> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    compile_sim(&mut db, sync.project, project, "main")
-        .expect("conveyor model must build")
-        .conveyor_plans
+    compile_sim(
+        &mut db,
+        sync.project,
+        project,
+        "main",
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("conveyor model must build")
+    .conveyor_plans
 }
 
 /// The packed `get_error` word for a `(code, belt)` pair, built the way the blob

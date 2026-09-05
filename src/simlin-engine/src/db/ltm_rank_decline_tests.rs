@@ -42,7 +42,7 @@
 
 use crate::db::{
     DiagnosticError, SimlinDb, collect_all_diagnostics, model_ltm_variables,
-    set_project_ltm_enabled, sync_from_datamodel_incremental,
+    sync_from_datamodel_incremental,
 };
 use crate::test_common::TestProject;
 
@@ -63,7 +63,7 @@ fn rank_target_fixture() -> TestProject {
 }
 
 fn fragment_failures(db: &SimlinDb, project: crate::db::SourceProject) -> Vec<String> {
-    collect_all_diagnostics(db, project)
+    collect_all_diagnostics(db, project, crate::db::LtmOverlay::Off)
         .iter()
         .filter_map(|d| match &d.error {
             DiagnosticError::Assembly(msg) if msg.contains("failed to compile") => {
@@ -81,7 +81,6 @@ fn per_element_partial_of_rank_like_target_declines_loudly() {
     let datamodel = rank_target_fixture().build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let emitted: Vec<&str> = ltm
@@ -96,21 +95,22 @@ fn per_element_partial_of_rank_like_target_declines_loudly() {
          emitted; got: {emitted:?}"
     );
 
-    let rank_warnings: Vec<String> = collect_all_diagnostics(&db, sync.project)
-        .iter()
-        .filter_map(|d| match &d.error {
-            DiagnosticError::Assembly(msg)
-                if msg.contains("order statistic") || msg.contains("ranks a whole array") =>
-            {
-                Some(msg.clone())
-            }
-            _ => None,
-        })
-        .collect();
+    let rank_warnings: Vec<String> =
+        collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::On)
+            .iter()
+            .filter_map(|d| match &d.error {
+                DiagnosticError::Assembly(msg)
+                    if msg.contains("order statistic") || msg.contains("ranks a whole array") =>
+                {
+                    Some(msg.clone())
+                }
+                _ => None,
+            })
+            .collect();
     assert!(
         !rank_warnings.is_empty(),
         "the decline must be loud, naming the rank-like shape; diagnostics: {:?}",
-        collect_all_diagnostics(&db, sync.project)
+        collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::On)
             .iter()
             .map(|d| format!("{:?}", d.error))
             .collect::<Vec<_>>()
@@ -133,7 +133,6 @@ fn loops_through_the_declined_rank_edge_are_dropped() {
     let datamodel = rank_target_fixture().build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     // The only feedback loop runs s -> asc -> order -> g -> s (and
@@ -162,7 +161,6 @@ fn whole_array_score_of_the_rank_target_still_compiles() {
     let datamodel = rank_target_fixture().build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let score = format!("{LINK_PREFIX}vals\u{2192}order");
@@ -197,7 +195,6 @@ fn per_element_partial_of_elm_map_target_declines_loudly() {
     let datamodel = project.build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let emitted: Vec<&str> = ltm
@@ -243,7 +240,6 @@ fn nested_rank_like_call_declines_too() {
     let datamodel = project.build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let emitted: Vec<&str> = ltm
@@ -283,7 +279,6 @@ fn allocate_target_per_element_partials_decline() {
     let datamodel = project.build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let emitted: Vec<&str> = ltm
@@ -321,7 +316,6 @@ fn rank_target_per_element_partials_decline() {
     let datamodel = project.build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let emitted: Vec<&str> = ltm
@@ -362,7 +356,6 @@ fn per_element_shaped_site_in_rank_target_declines() {
     let datamodel = project.build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let emitted: Vec<&str> = ltm

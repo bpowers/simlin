@@ -169,10 +169,10 @@ fn ltm_simulate(project: &crate::datamodel::Project) -> (Results, EnumTestCtx) {
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, project, None);
     let sp = sync.project;
-    sp.set_ltm_enabled(&mut db).to(true);
     sp.set_ltm_discovery_mode(&mut db).to(true);
     let source_model = *sp.models(&db).get("main").unwrap();
-    let compiled = crate::db::compile_project_incremental(&db, sp, "main").unwrap();
+    let compiled =
+        crate::db::compile_project_incremental(&db, sp, "main", crate::db::LtmOverlay::On).unwrap();
     let mut vm = crate::vm::Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();

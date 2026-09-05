@@ -424,6 +424,7 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
     project: SourceProject,
     var_name: &str,
     phase: SccPhase,
+    overlay: LtmOverlay,
 ) -> Option<crate::compiler::symbolic::PerVarBytecodes> {
     // `#[cfg(test)]` only: an active `UnsourceableVarsGuard` forces this
     // node to take the loud-safe `None` arm, so the AC3.2 regression test
@@ -446,7 +447,8 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
         return None;
     }
 
-    var_phase_symbolic_fragment_memo(db, model, project, var_name.to_string(), phase).clone()
+    var_phase_symbolic_fragment_memo(db, model, project, var_name.to_string(), phase, overlay)
+        .clone()
 }
 
 /// The memoized body of [`var_phase_symbolic_fragment_prod`].
@@ -475,6 +477,7 @@ fn var_phase_symbolic_fragment_memo(
     project: SourceProject,
     var_name: String,
     phase: SccPhase,
+    overlay: LtmOverlay,
 ) -> Option<crate::compiler::symbolic::PerVarBytecodes> {
     use crate::compiler::fragment::lower_fragment;
     use crate::db::fragment_compile::implicit_fragment_input;
@@ -510,7 +513,7 @@ fn var_phase_symbolic_fragment_memo(
         let canonical_name = canonicalize(var_name).into_owned();
         let info = model_implicit_var_info(db, model, project);
         let meta = info.get(&canonical_name)?;
-        let input = implicit_fragment_input(db, meta, model, project, &[]).ok()?;
+        let input = implicit_fragment_input(db, meta, model, project, &[], overlay).ok()?;
         let var = lower_fragment(&input, is_initial).ok()?;
         return compile_phase_to_per_var_bytecodes(&input.emit_ctx(), &var.ast);
     };
@@ -518,7 +521,7 @@ fn var_phase_symbolic_fragment_memo(
     // The variable did not lower at all => `None` (loud-safe).
     let ExplicitFragment {
         input: Some(input), ..
-    } = explicit_fragment_input(db, *sv, model, project, &[])
+    } = explicit_fragment_input(db, *sv, model, project, &[], overlay)
     else {
         return None;
     };
@@ -1173,25 +1176,28 @@ fn collect_fragments<'db>(
     project: SourceProject,
     module_inputs: ModuleInputSet<'db>,
     layout: &crate::compiler::symbolic::VariableLayout,
+    overlay: LtmOverlay,
 ) -> ModuleFragments<'db> {
     use crate::compiler::symbolic::fragment_vars_in_layout;
 
     let mut by_name: HashMap<String, Cow<'db, VarFragmentResult>> = HashMap::new();
     for (name, svar) in model.variables(db).iter() {
-        if let Some(result) = compile_var_fragment(db, *svar, model, project, module_inputs) {
+        if let Some(result) =
+            compile_var_fragment(db, *svar, model, project, module_inputs, overlay)
+        {
             by_name.insert(name.clone(), Cow::Borrowed(result));
         }
     }
     for name in model_implicit_var_info(db, model, project).keys() {
         if let Some(result) =
-            compile_implicit_var_fragment(db, model, project, name.clone(), module_inputs)
+            compile_implicit_var_fragment(db, model, project, name.clone(), module_inputs, overlay)
         {
             by_name.insert(name.clone(), Cow::Borrowed(result));
         }
     }
 
     let mut ltm_tail: Vec<String> = Vec::new();
-    if project.ltm_enabled(db) {
+    if overlay == LtmOverlay::On {
         // GH #486's non-Euler rejection is NOT enforced per module here: the
         // integration method that actually runs is a single, main-model-
         // governed property of the whole assembled simulation, so it is
@@ -1284,6 +1290,7 @@ fn combine_resolved_sccs(
     model: SourceModel,
     project: SourceProject,
     sccs: &[ResolvedScc],
+    overlay: LtmOverlay,
 ) -> Result<SccFragments, String> {
     let combine = |scc: &ResolvedScc, phase: SccPhase| {
         let mut member_fragments = HashMap::with_capacity(scc.members.len());
@@ -1294,6 +1301,7 @@ fn combine_resolved_sccs(
                 project,
                 member.as_str(),
                 phase.clone(),
+                overlay,
             )
             .ok_or_else(|| {
                 format!(
@@ -1493,6 +1501,7 @@ pub fn assemble_module<'db>(
     project: SourceProject,
     is_root: bool,
     module_inputs: ModuleInputSet<'db>,
+    overlay: LtmOverlay,
 ) -> Result<std::sync::Arc<crate::bytecode::CompiledModule>, String> {
     use crate::compiler::symbolic::{
         FragmentMerger, SymbolicCompiledInitial, SymbolicCompiledModule, TempStrategy,
@@ -1513,7 +1522,7 @@ pub fn assemble_module<'db>(
     // shift lands once here and the submodule path uses the body layout
     // verbatim (the parent relocates a submodule via its module-decl `off`,
     // which already comes from the parent's shifted layout).
-    let body_layout = compute_layout(db, model, project);
+    let body_layout = compute_layout(db, model, project, overlay);
     let root_layout;
     let layout: &crate::compiler::symbolic::VariableLayout = if is_root {
         root_layout = body_layout.root_shifted();
@@ -1529,8 +1538,8 @@ pub fn assemble_module<'db>(
     // corrupts every result.
     crate::compiler::symbolic::check_layout_addressable(layout.n_slots, model.name(db))?;
 
-    let fragments = collect_fragments(db, model, project, module_inputs, layout);
-    let sccs = combine_resolved_sccs(db, model, project, &dep_graph.resolved_sccs)?;
+    let fragments = collect_fragments(db, model, project, module_inputs, layout, overlay);
+    let sccs = combine_resolved_sccs(db, model, project, &dep_graph.resolved_sccs, overlay)?;
 
     // The `is_module_input` predicate, reconstructed from the interned set --
     // the exact inverse of the input set's key derivation.
@@ -1538,7 +1547,8 @@ pub fn assemble_module<'db>(
     let is_module_input = |name: &str| canonical_inputs.contains(&*canonicalize(name));
     // `model_flows_invariant` guards internally (empty for a non-root module);
     // call it unconditionally so the check lives in one place.
-    let flows_invariant = model_flows_invariant(db, model, project, is_root, module_inputs);
+    let flows_invariant =
+        model_flows_invariant(db, model, project, is_root, module_inputs, overlay);
 
     let mut missing: Vec<String> = Vec::new();
     let initials = program_fragments(
@@ -1671,6 +1681,7 @@ pub fn assemble_simulation(
     db: &dyn Db,
     project: SourceProject,
     main_model_name: String,
+    overlay: LtmOverlay,
 ) -> Result<std::sync::Arc<crate::vm::CompiledSimulation>, String> {
     use crate::common::{Canonical, Ident};
     use crate::vm::CompiledSimulation;
@@ -1741,7 +1752,7 @@ pub fn assemble_simulation(
     // `simlin_sim_new`, `simlin_project_get_errors` (the `vm_error` channel),
     // and the wasm backend -- the sim-compile path that, unlike
     // `collect_all_diagnostics`, is what every runnable consumer goes through.
-    if project.ltm_enabled(db)
+    if overlay == LtmOverlay::On
         && let Some(root_model) = project_models.get(main_model_canonical.as_ref())
         && let Some(method) = ltm::effective_non_euler_method(db, *root_model, project)
     {
@@ -1790,7 +1801,8 @@ pub fn assemble_simulation(
             // (the sorted canonical input names). `inputs` is already a
             // `BTreeSet<Ident<Canonical>>`, so this is the canonical round-trip.
             let module_inputs = ModuleInputSet::from_canonical_set(db, inputs);
-            let compiled = assemble_module(db, *source_model, project, is_root, module_inputs)?;
+            let compiled =
+                assemble_module(db, *source_model, project, is_root, module_inputs, overlay)?;
             let module_key: crate::vm::ModuleKey = ((*name).clone(), inputs.clone());
             // Clone the `CompiledModule` out of the salsa-owned `Arc`: the
             // `CompiledSimulation.modules` map stores it by value (its bytecode
@@ -1811,7 +1823,7 @@ pub fn assemble_simulation(
     // The results-offset map: the root layout, flattened through every module
     // instance, so a name reads the slot its fragment writes.
     let root_model = project_models[main_model_canonical.as_ref()];
-    let offsets = flattened_offsets(db, project, root_model);
+    let offsets = flattened_offsets(db, project, root_model, overlay);
 
     Ok(std::sync::Arc::new(CompiledSimulation::new(
         compiled_modules,

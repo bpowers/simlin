@@ -156,8 +156,9 @@ fn simulate_final_values(
 ) -> std::collections::HashMap<String, f64> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .unwrap_or_else(|e| panic!("arrayed-GF project should compile: {e:?}"));
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .unwrap_or_else(|e| panic!("arrayed-GF project should compile: {e:?}"));
     let mut vm = Vm::new(compiled).expect("VM creation should succeed");
     vm.run_to_end().expect("VM run should succeed");
     let results = vm.into_results();
@@ -342,8 +343,9 @@ fn per_element_gf_reorder_is_compile_time_with_nameless_opcode() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("arrayed-GF project should compile");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .expect("arrayed-GF project should compile");
 
     let root = compiled
         .modules
@@ -541,8 +543,9 @@ fn non_sorted_declared_order_lookup_array_selects_own_table() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("VECTOR SELECT over per-element GF should compile");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .expect("VECTOR SELECT over per-element GF should compile");
     let mut vm = Vm::new(compiled).expect("VM creation should succeed");
     vm.run_to_end().expect("VM run should succeed");
     let results = vm.into_results();
@@ -704,8 +707,9 @@ fn two_dim_non_sorted_axis_per_element_gf_row_major_flatten() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("2-D arrayed-GF project should compile");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .expect("2-D arrayed-GF project should compile");
     let mut vm = Vm::new(compiled).expect("VM creation should succeed");
     vm.run_to_end().expect("VM run should succeed");
     let results = vm.into_results();
@@ -768,8 +772,9 @@ fn gf_only_elements_form_a_lookup_only_table_holder() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .unwrap_or_else(|e| panic!("a gf-only table holder must compile: {e:?}"));
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .unwrap_or_else(|e| panic!("a gf-only table holder must compile: {e:?}"));
     let mut vm = Vm::new(compiled).expect("VM creation should succeed");
     vm.run_to_end().expect("VM run should succeed");
     let results = vm.into_results();
@@ -993,8 +998,9 @@ fn zero_point_gf_on_scalar_keeps_raw_input_equation() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .unwrap_or_else(|e| panic!("zero-point-gf project should compile: {e:?}"));
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .unwrap_or_else(|e| panic!("zero-point-gf project should compile: {e:?}"));
     let mut vm = Vm::new(compiled).expect("VM creation should succeed");
     vm.run_to_end().expect("VM run should succeed");
     let results = vm.into_results();
@@ -1331,10 +1337,11 @@ fn array_valued_table_apply_assigned_to_one_slot_is_refused_not_aborted() {
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &project, None);
         assert!(
-            compile_project_incremental(&db, sync.project, "main").is_err(),
+            compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+                .is_err(),
             "{var}: an array used as one value must not compile"
         );
-        let diagnostics = collect_all_diagnostics(&db, sync.project);
+        let diagnostics = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
         let attributed: Vec<String> = diagnostics
             .iter()
             .filter(|d| d.severity == DiagnosticSeverity::Error)
