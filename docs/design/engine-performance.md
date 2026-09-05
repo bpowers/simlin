@@ -231,11 +231,12 @@ redundant per-variable rebuild.
 ## Build-level levers (measured, near-free, the biggest wins) — IMPLEMENTED
 
 These need no engine-code changes and dwarf the code-level compile work. Lever A
-applies to every target; the WASM bundle additionally builds with fat LTO
+applies to every target; the shipped WASM bundle additionally builds with fat LTO
 (`src/engine/build.sh` builds it as a cdylib alone, which is what makes cargo
-pass `-C lto`) and `codegen-units=1` (`.cargo/config.toml`, which carries the
-measured trade-offs). Lever B is **native-only**: the WASM bundle never links
-mimalloc.
+pass `-C lto`) and `codegen-units=1` (the workspace Cargo.toml's
+`[profile.wasm-release]`, which carries the measured trade-offs; the pre-commit
+hook and CI PR lanes build the cheaper `wasm-gate` profile instead). Lever B is
+**native-only**: the WASM bundle never links mimalloc.
 
 ### A. `opt-level = 3` for native (compile −30%, run −41%)
 
@@ -780,8 +781,8 @@ short of it rather than taking a ~2-3%.
 1. ~~**Build levers A (opt=3 native) + B (mimalloc native)**~~ — DONE. Measured
    −59% compile / −41% run for ~no engine code and near-zero risk
    (`[profile.release] opt-level=3` on every target, plus LTO and
-   `codegen-units=1` for wasm via `src/engine/build.sh` and
-   `.cargo/config.toml`; `mimalloc` global allocator on the native binaries +
+   `codegen-units=1` for the shipped wasm via `src/engine/build.sh` and the
+   workspace's `[profile.wasm-release]`; `mimalloc` global allocator on the native binaries +
    libsimlin's opt-in feature). WASM links no mimalloc.
 2. ~~**R1 (bounds-check elimination)**~~ — INVESTIGATED, dropped: measured
    sub-noise (~0) ceiling; bounds checks are effectively free at opt-level=3.

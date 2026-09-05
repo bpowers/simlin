@@ -158,8 +158,9 @@ fi
 #    and its model-preview pipeline calls simlin_project_render_png; a
 #    slim WASM here would 500 every preview render. A missing or empty
 #    WASM means the Rust+WASM step was skipped or failed silently.
-#    ~1MB minimum is well under any real build (wasm-opt'd release WASM is
-#    ~11.5MB; DISABLE_WASM_OPT leaves the raw cargo output at ~12.7MB).
+#    ~1MB minimum is well under any real build (the wasm-opt'd shipping WASM
+#    is ~11.5MB; DISABLE_WASM_OPT leaves the gate profile's raw cargo output,
+#    ~11.5MB, unoptimized).
 #    This check deliberately passes either way -- it gates "the WASM step
 #    ran and produced the full artifact", not "wasm-opt ran"; that is
 #    .github/workflows/wasm-opt.yml's job.

@@ -1,17 +1,20 @@
 ---
-# The ONLY automated job that runs `wasm-opt` and then executes the resulting
-# blob under test.
+# The ONLY automated job that builds the bundle the way it ships -- the
+# `wasm-release` cargo profile (fat LTO, codegen-units 1) followed by
+# `wasm-opt` -- and then executes the resulting blob under test.
 #
 # `src/engine/build.sh` runs `wasm-opt -O3` IN PLACE over `core/*.wasm`, which
 # is the file the TypeScript tests load -- so "did wasm-opt run" and "was the
 # optimized bundle executed under test" are the same question. Everywhere else
-# deliberately answers no: all three of `ci.yaml`'s build steps (the deploy
-# assembly, the notebook-widget assets for pysimlin-e2e, the serve SPA) set
-# DISABLE_WASM_OPT=1 (the pass is multi-minute and a PR gate does not need
-# release-quality WASM), and `scripts/pre-commit` does the same. Only the
-# release workflows (`ts-release.yml`, `release.yml`'s widget-assets job)
-# install binaryen at all, and by then the artifact is being published. This
-# job is what keeps that gap from reaching a release. See GH #1019.
+# deliberately answers no: `ci.yaml`'s build steps (the deploy assembly, the
+# notebook-widget assets for pysimlin-e2e, the serve SPA) and
+# `scripts/pre-commit` set DISABLE_WASM_OPT=1, which makes build.sh skip the
+# pass AND compile with the `wasm-gate` profile (no LTO, parallel codegen):
+# a PR gate does not need release-quality WASM, and both are multi-minute on
+# a runner. Only the release workflows (`ts-release.yml`, `release.yml`'s
+# widget-assets job) install binaryen at all, and by then the artifact is
+# being published. This job is what keeps that gap from reaching a release.
+# See GH #1019.
 #
 # It is path-filtered to the sources that can change the emitted WASM, which is
 # why it lives in its own workflow rather than as a job in `ci.yaml`: GitHub
@@ -24,13 +27,15 @@
 # If it needs to be required, the standard workaround is an always-triggered
 # companion job that succeeds trivially when the filter does not match.
 #
-# IF THIS JOB FAILS AND `ci.yaml` PASSED, the difference is wasm-opt. The same
-# TypeScript tests run in `ci.yaml` against an UNOPTIMIZED blob; if they pass
-# there and fail here, the engine's WASM did not survive binaryen's -O3 pass --
-# a miscompilation, an unsupported feature, or a binaryen version
-# incompatibility -- not a defect in the TypeScript under test. Reproduce
-# locally with `bash src/engine/build.sh && pnpm -C src/engine test` (note the
-# absence of DISABLE_WASM_OPT), and compare against
+# IF THIS JOB FAILS AND `ci.yaml` PASSED, the difference is the shipping
+# codegen: the `wasm-release` profile's LTO and single codegen unit, or
+# binaryen's -O3 pass. The same TypeScript tests run in `ci.yaml` against a
+# gate-profile, unoptimized blob; if they pass there and fail here, the
+# engine's WASM did not survive one of those -- a miscompilation, an
+# unsupported feature, or a binaryen version incompatibility -- not a defect
+# in the TypeScript under test. Reproduce locally with
+# `bash src/engine/build.sh && pnpm -C src/engine test` (note the absence of
+# DISABLE_WASM_OPT), and compare against
 # `DISABLE_WASM_OPT=1 bash src/engine/build.sh && pnpm -C src/engine test`.
 name: WASM optimized-bundle check
 
@@ -44,7 +49,6 @@ name: WASM optimized-bundle check
       - 'src/engine/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
-      - '.cargo/config.toml'
       # The compiler selects what WASM gets emitted, and with it whether
       # binaryen can still read it -- and the ordinary frontend lane runs with
       # DISABLE_WASM_OPT=1, so a toolchain bump would otherwise reach a release
@@ -65,7 +69,6 @@ name: WASM optimized-bundle check
       - 'src/engine/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
-      - '.cargo/config.toml'
       # The compiler selects what WASM gets emitted, and with it whether
       # binaryen can still read it -- and the ordinary frontend lane runs with
       # DISABLE_WASM_OPT=1, so a toolchain bump would otherwise reach a release
@@ -87,8 +90,9 @@ jobs:
     name: Build with wasm-opt and run the engine tests against it
     runs-on: ubuntu-latest
     # wasm-opt -O3 is ~225s on our two blobs (120s + 105s on a fast desktop),
-    # on top of the ~240s the two LTO, codegen-units=1 wasm cargo builds take.
-    # Generous cap so a cold cargo cache does not trip it.
+    # on top of the ~120s the two wasm-release cargo builds take in parallel
+    # (each is single-threaded under LTO and codegen-units=1, so they overlap
+    # almost perfectly). Generous cap so a cold cargo cache does not trip it.
     timeout-minutes: 30
     steps:
       - name: Checkout

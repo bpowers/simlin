@@ -8,7 +8,7 @@ mkdir -p core
 
 # Build libsimlin as WASM and stage it into core/ under $out_name.
 #
-# Two artifacts are produced (see optimize_wasm calls below):
+# Two artifacts are produced (see the build_wasm calls below):
 #   - libsimlin.wasm          full build; loaded by Node (wasm.node.ts). The
 #                             server's PNG model previews need png_render.
 #   - libsimlin-browser.wasm  --no-default-features build; imported by
@@ -22,12 +22,12 @@ mkdir -p core
 # sets, and cargo gives a cdylib target no per-feature-set hash in its output
 # name or its fingerprint (dynamic libraries keep stable file names), so in a
 # shared directory each build evicts the other's and cargo relinks simlin on
-# every run of this script, changed tree or not. Under LTO that relink is the
-# whole-program optimization, ~50 s per artifact on a 16-core desktop; the
-# separate directories make an unchanged tree a no-op and cost one extra copy
-# of the browser build's dependency closure (bitcode only, under LTO) on a
-# clean build. Nesting them keeps both inside whatever `cargo clean` and the
-# CI caches cover.
+# every run of this script, changed tree or not. Under the shipping profile
+# that relink is the whole-program optimization, ~50 s per artifact on a
+# 16-core desktop; the separate directories make an unchanged tree a no-op
+# and cost one extra copy of the browser build's dependency closure (bitcode
+# only, under LTO) on a clean build. Nesting them keeps both inside whatever
+# `cargo clean` and the CI caches cover.
 #
 # The xmutil feature is always off here (C++ dependency, not wasm-buildable).
 #
@@ -37,26 +37,44 @@ mkdir -p core
 # broken wasm build rather than as a path mismatch.
 TARGET_DIR="$("$DIR/../../scripts/cargo-target-dir.sh")"
 
+# Gate builds and shipping builds. DISABLE_WASM_OPT=1 marks a gate build
+# (scripts/pre-commit and the PR lanes in .github/workflows/ci.yaml): it skips
+# the wasm-opt pass in build_wasm AND selects the `wasm-gate` cargo profile
+# (opt-level 3, no LTO, parallel codegen) over the shipping `wasm-release`
+# profile (fat LTO, codegen-units 1). The workspace Cargo.toml carries the
+# measured trade-off. One knob for both halves, because they answer the same
+# question -- is this artifact going to ship? -- and a gate that answered no
+# for wasm-opt but yes for the cargo profile would pay ~100 s per artifact for
+# a blob nobody runs for performance. A missing wasm-opt does NOT select the
+# gate profile: that only downgrades the staged blob's mode stamp, and the
+# profile decision stays an explicit one.
+if [ "1" = "${DISABLE_WASM_OPT-0}" ]; then
+  WASM_PROFILE=wasm-gate
+else
+  WASM_PROFILE=wasm-release
+fi
+
 build_wasm() {
   local out_name="$1"
   shift
   local target_dir="$TARGET_DIR/${out_name%.wasm}"
-  local wasm_src="$target_dir/wasm32-unknown-unknown/release/simlin.wasm"
-  echo "Building $out_name for wasm32-unknown-unknown..."
+  local wasm_src="$target_dir/wasm32-unknown-unknown/$WASM_PROFILE/simlin.wasm"
+  echo "Building $out_name for wasm32-unknown-unknown ($WASM_PROFILE profile)..."
   # `cargo rustc --crate-type cdylib`, deliberately not `cargo build`. The
   # simlin crate lists three crate types (staticlib, rlib, cdylib) for its
   # native consumers, and cargo passes `-C lto` to rustc only when every crate
   # type it is producing can be link-time optimized -- an rlib cannot -- so a
-  # plain `cargo build` silently drops the release profile's `lto = true` for
-  # this target: rustc then sees each crate on its own, and the
+  # plain `cargo build` silently drops the profile's `lto = true` for this
+  # target: rustc then sees each crate on its own, and the
   # `#[global_allocator]` shims stay out of line at every allocation site
   # instead of being inlined and specialized per call site. Restricting the
   # build to the one crate type the bundle needs is what makes cargo pass
-  # `-C lto` (`cargo rustc ... -v` shows it; .cargo/config.toml carries the
-  # measured effect). Cargo still uplifts the output to $wasm_src, so the
-  # staging and cache logic below is unaffected, and the invocation is
-  # idempotent: it no-ops when nothing has changed.
-  cargo rustc -p simlin --lib --release --target wasm32-unknown-unknown --crate-type cdylib \
+  # `-C lto` (`cargo rustc ... -v` shows it; the workspace Cargo.toml's
+  # `[profile.wasm-release]` carries the measured effect). Cargo still uplifts
+  # the output to $wasm_src, so the staging and cache logic below is
+  # unaffected, and the invocation is idempotent: it no-ops when nothing has
+  # changed.
+  cargo rustc -p simlin --lib --profile "$WASM_PROFILE" --target wasm32-unknown-unknown --crate-type cdylib \
     --target-dir "$target_dir" "$@"
 
   # Whether this invocation will optimize. Decided BEFORE the cache check
@@ -84,6 +102,10 @@ build_wasm() {
   # subsequent `pnpm build` on an unchanged tree kept the unoptimized blob and
   # never ran wasm-opt again. Both deploy scripts happen to `pnpm clean` first,
   # which deletes core/ and hid this; nothing about the cache made it safe.
+  #
+  # The profile is not a third input because (1) already covers it: the two
+  # profiles produce different cargo output, so switching between a gate and
+  # a shipping build always fails the `cmp` below.
   if [ ! -f "core/$out_name" ] \
       || [ "$have_mode" != "$want_mode" ] \
       || ! cmp -s "$wasm_src" "core/$out_name.raw"; then
@@ -130,8 +152,38 @@ build_wasm() {
   fi
 }
 
-build_wasm libsimlin.wasm
-build_wasm libsimlin-browser.wasm --no-default-features
+# Prefix every line of a build's output with the artifact it belongs to: the
+# two builds below run concurrently and would otherwise interleave their cargo
+# output indistinguishably. A read loop rather than `sed -u`, which macOS's
+# sed does not have.
+prefix_lines() {
+  local tag="$1"
+  local line
+  while IFS= read -r line; do
+    printf '[%s] %s\n' "$tag" "$line"
+  done
+}
+
+# The two artifacts build concurrently. They share nothing on disk (each has
+# its own target directory and its own core/<name>* files), and under the
+# shipping profile each build spends most of its time on one thread, so
+# running them one after the other left the machine mostly idle for the
+# length of a second build. Each pipeline runs in a subshell so that its exit
+# status is the pipeline's under pipefail, and BOTH are waited for before
+# failing: a broken build never leaves the other one running unnoticed, and
+# the failure names every artifact that did not build.
+( build_wasm libsimlin.wasm 2>&1 | prefix_lines libsimlin.wasm ) &
+PID_FULL=$!
+( build_wasm libsimlin-browser.wasm --no-default-features 2>&1 | prefix_lines libsimlin-browser.wasm ) &
+PID_BROWSER=$!
+
+FAILED=""
+wait "$PID_FULL" || FAILED="$FAILED libsimlin.wasm"
+wait "$PID_BROWSER" || FAILED="$FAILED libsimlin-browser.wasm"
+if [ -n "$FAILED" ]; then
+  echo "error: wasm build failed for:$FAILED" >&2
+  exit 1
+fi
 
 # Clean stale outputs (deleted/renamed sources leave orphan .js/.d.ts files).
 # tsbuildinfo must also be removed so tsc knows to recompile into the empty dirs.

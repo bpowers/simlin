@@ -11,24 +11,64 @@ members = [
     "src/xmutil",
 ]
 
-# Release builds optimize for speed (opt-level = 3) on every target, the wasm32
-# bundle included: size-optimized codegen there costs a 1.6x to 1.7x slower
-# open-compile-run pipeline for a 0.6 MB smaller compressed download (numbers
-# in .cargo/config.toml, which also carries the wasm-only codegen-units
-# setting, keyed on the target so every wasm build path gets it). Measured on
-# C-LEARN: opt-level 3 vs "z" is ~-30% compile and ~-41% simulate on native
-# (see docs/design/engine-performance.md).
+# Release builds optimize for speed (opt-level = 3) on every target. The wasm32
+# bundle builds through the two profiles below, which inherit this one; it is
+# never built with `release` directly. Measured on C-LEARN: opt-level 3 vs "z"
+# is ~-30% compile and ~-41% simulate on native (see
+# docs/design/engine-performance.md), and on the wasm bundle size-optimized
+# codegen costs a 1.6x to 1.7x slower open-compile-run pipeline for a 0.6 MB
+# smaller compressed download.
 #
-# `lto = true` applies to the binaries and to the wasm bundle, but only because
-# src/engine/build.sh builds the latter with `cargo rustc --crate-type cdylib`:
-# cargo passes `-C lto` only when every crate type of the target allows it, and
-# libsimlin's rlib does not, so a plain `cargo build -p simlin` on any target
-# is a non-LTO build whatever this line says.
+# `lto = true` applies to the native binaries and, through `wasm-release`, to
+# the wasm bundle -- but only because src/engine/build.sh builds the latter
+# with `cargo rustc --crate-type cdylib`: cargo passes `-C lto` only when every
+# crate type of the target allows it, and libsimlin's rlib does not, so a plain
+# `cargo build -p simlin` on any target is a non-LTO build whatever this line
+# says.
 [profile.release]
 opt-level = 3
 lto = true
 panic = "abort"
 strip = true
+
+# The wasm bundle's two profiles. src/engine/build.sh is the only wasm32 build
+# path and picks one of these with `--profile`.
+#
+# `wasm-release` is what ships: the npm packages, the GAE deploy, and the
+# notebook widget's wheel assets. On top of `release` it sets
+# `codegen-units = 1`, so LLVM sees each crate whole before fat LTO merges
+# them. Measured on C-LEARN v77 through src/engine/bench/clearn-alloc.mjs
+# (browser bundle after `wasm-opt -O3`, LTM on, node 22 / V8 12.4 and node 24
+# / V8 13.6): against thin LTO with parallel codegen, the cheapest alternative,
+# the compile stage is 1.05x to 1.07x slower there and the LTM run stage 1.21x
+# to 1.23x slower on V8 13.6 (within 2% either way on V8 12.4); fat LTO with
+# parallel codegen and thin LTO with one unit both land at 1.25x on that run
+# stage. The two settings only pay as a pair -- relaxing either one alone
+# forfeits the whole V8 13.6 run-stage gain for a modest build-time saving --
+# so change them together or not at all. The bundle is also 5% smaller raw
+# than with parallel codegen (9.36 MB to 9.92 MB after wasm-opt).
+#
+# Its price is build time. Under `codegen-units = 1` LLVM runs single-threaded
+# on the engine crate, and fat LTO is single-threaded again after it, so an
+# engine rebuild takes ~120 s on a 32-core desktop however many cores it has
+# (opt-level 3 alone: 21 s; plus fat LTO: 70 s; plus one codegen unit
+# instead: 95 s), and a 4-core CI runner pays several minutes per artifact.
+[profile.wasm-release]
+inherits = "release"
+codegen-units = 1
+
+# `wasm-gate` is what the pre-commit hook and CI's PR lanes build: build.sh
+# selects it under DISABLE_WASM_OPT=1, the same knob that skips wasm-opt,
+# because both halves answer the same question (is this artifact going to
+# ship?). It keeps opt-level 3 but drops LTO and the single codegen unit, so an
+# engine rebuild takes ~21 s instead of ~120 s. The gate's blob only has to
+# pass the TypeScript tests; a local change is not going to expose an LLVM
+# link-time or codegen-partitioning bug, and
+# .github/workflows/wasm-opt.yml is the lane that builds `wasm-release`, runs
+# wasm-opt, and executes the result under test.
+[profile.wasm-gate]
+inherits = "release"
+lto = false
 
 [profile.bench]
 debug = true
