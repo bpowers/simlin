@@ -1722,7 +1722,7 @@ fn test_patch_with_preexisting_unit_warnings_succeeds() {
     // mismatch surfaces as the per-variable consistency row and the
     // model-level inference umbrella, both `Unit` warnings.
     {
-        let db = unsafe { (*proj).db.lock().unwrap() };
+        let db = unsafe { (*proj).lock_db() };
         let source_project = db.current_source_project().unwrap();
         let diags = engine::db::collect_all_diagnostics(
             &db,
@@ -1826,7 +1826,7 @@ fn test_unrelated_patch_then_sim_specs_keeps_unit_warnings() {
 
     // Count the Warning-severity unit diagnostics the project reports.
     let unit_warning_count = |proj: *mut SimlinProject| -> usize {
-        let db = unsafe { (*proj).db.lock().unwrap() };
+        let db = unsafe { (*proj).lock_db() };
         let source_project = db.current_source_project().unwrap();
         let diags = engine::db::collect_all_diagnostics(
             &db,
@@ -1982,7 +1982,7 @@ fn test_patch_introducing_new_unit_warning_rejected() {
 
     // Verify no unit warnings initially via salsa diagnostics
     {
-        let db = unsafe { (*proj).db.lock().unwrap() };
+        let db = unsafe { (*proj).lock_db() };
         let source_project = db.current_source_project().unwrap();
         let diags = engine::db::collect_all_diagnostics(
             &db,

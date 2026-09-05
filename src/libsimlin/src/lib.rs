@@ -426,7 +426,12 @@ pub struct SimlinProject {
     /// use `db.sync`/`db.sync_staged`/`db.restore` and read the current
     /// `SourceProject` via `db.current_source_project()`. There is no
     /// separate `sync_state` mutex to keep in lockstep.
-    pub db: Mutex<engine::db::SimlinDb>,
+    ///
+    /// Crate-private so that [`SimlinProject::lock_db`] is the only way to
+    /// reach it: the [`DbLock`] it returns is what releases superseded memos,
+    /// and a raw `db.lock()` would run queries whose garbage no entry point
+    /// sweeps until an unrelated one happens to.
+    pub(crate) db: Mutex<engine::db::SimlinDb>,
     /// Latches true the first time any simulation is created on this project
     /// with `enable_ltm = true`. `simlin_project_get_errors` reads it to
     /// decide whether to collect diagnostics under the LTM overlay, so the
@@ -445,15 +450,44 @@ pub struct SimlinProject {
 /// The project's salsa database, locked.
 ///
 /// Every entry point that runs queries locks the database through
-/// [`SimlinProject::lock_db`], and dropping this lock frees the memos those
-/// queries superseded (`SimlinDb::release_replaced_memos`) -- so that policy
-/// has one owner and no entry point can forget it. The release is a walk over
-/// empty lists when nothing was superseded, and salsa opens one synthetic
-/// revision per 256 exclusive accesses without an input write, so a burst of
-/// that many calls between edits pays one verification walk. Lock the
-/// datamodel FIRST when both are needed: the project-wide order is
-/// datamodel-then-db.
-pub(crate) struct DbLock<'a>(MutexGuard<'a, engine::db::SimlinDb>);
+/// [`SimlinProject::lock_db`] -- the field is `pub(crate)` and this is its
+/// only guard -- and dropping the lock releases the memos those queries
+/// superseded (`SimlinDb::release_replaced_memos`, whose rustdoc holds the
+/// salsa mechanics), so the policy has one owner and no entry point can
+/// forget it. Lock the datamodel FIRST when both are needed: the
+/// project-wide order is datamodel-then-db.
+///
+/// The release runs on every drop, read-only entry points included. When
+/// nothing was superseded it costs one exclusive salsa access -- a
+/// `parking_lot` lock, a wait on database clones `SimlinDb` never has, an
+/// empty deferred-delete list per tracked function: microseconds. Its one
+/// side effect is that salsa counts exclusive accesses in a `u8` and opens a
+/// synthetic revision on the 256th without an input write, after which the
+/// next entry point deep-verifies the transitive cone of every memo it
+/// touches, once: for a compile or a diagnostics pass essentially the whole
+/// database, ~1,880 instructions per memo (~27 M instructions on C-LEARN
+/// plain, tens of milliseconds under LTM), re-executing nothing except the
+/// untracked-read `model_all_diagnostics`, which re-executes by design and
+/// backdates. A client fetching every variable's
+/// `simlin_model_get_latex_equation` on a 256-variable model between edits
+/// pays that once.
+///
+/// Never gate the release on a writer-set dirty flag: it is unsound, not
+/// merely imprecise. A memo an edit superseded is replaced in whichever
+/// LATER entry point first re-executes it, not in the first one after the
+/// edit -- `simlin_project_apply_patch` (the write) -> `simlin_project_get_errors`
+/// (overlay `Off`; releases and would clear the flag) -> `simlin_sim_new`
+/// (overlay `On`; replaces the 117 MiB LTM cone with the flag clear) leaves
+/// that cone resident until the next edit, which is the one-edit-late
+/// deferral the release exists to remove. An exact gate on salsa's
+/// `WillExecute` event (the event before every body execution, and a body
+/// execution is what replaces a memo) needs an event callback registered on
+/// the storage, and with one registered salsa constructs a
+/// `WillCheckCancellation` event -- `thread::current().id()` included -- on
+/// every memo fetch (salsa 0.28.1 `zalsa.rs` `unwind_if_revision_cancelled`,
+/// `function/fetch.rs`, `event.rs` `Event::new`): a cost on every hit to save
+/// a bounded walk.
+pub struct DbLock<'a>(MutexGuard<'a, engine::db::SimlinDb>);
 
 impl Deref for DbLock<'_> {
     type Target = engine::db::SimlinDb;
@@ -475,8 +509,10 @@ impl Drop for DbLock<'_> {
 }
 
 impl SimlinProject {
-    /// Lock the salsa database for a run of queries; see [`DbLock`].
-    pub(crate) fn lock_db(&self) -> DbLock<'_> {
+    /// Lock the salsa database for a run of queries; see [`DbLock`]. The only
+    /// accessor of the database, `pub` so the integration-test crate reads it
+    /// through the same guard as every entry point.
+    pub fn lock_db(&self) -> DbLock<'_> {
         DbLock(self.db.lock().unwrap())
     }
 }

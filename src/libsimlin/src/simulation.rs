@@ -134,72 +134,37 @@ pub unsafe extern "C" fn simlin_sim_new(
             // QueueLtmDegraded warning that explains why scores are absent.
             let special = result.as_ref().map(|b| b.special).unwrap_or(false);
 
-            // Snapshot the LTM loop-partition mapping AND per-loop slot
-            // metadata while the db is still locked.  Post-sim
-            // relative-loop-score queries look up these snapshots instead of
-            // re-querying the db, so a subsequent `apply_patch`
-            // (rename/delete/restructure) does not invalidate scores against
-            // results that are still valid for the compilation-era loop
-            // structure.  The element index also lets the FFI accept
-            // subscripted IDs like `r1[Boston]` and resolve them against the
-            // loop_score's actual slot layout (issue #463).
-            let (loop_partitions, loop_element_index, ltm_mode) = if enable_ltm
-                && !special
-                && result.is_ok()
-            {
-                let canonical = engine::canonicalize(&model_ref.model_name);
-                if let Some(sm) = source_project.models(&*db).get(canonical.as_ref()).copied() {
-                    let ltm_vars = engine::db::model_ltm_variables(&*db, sm, source_project);
-                    let project_dims = engine::db::project_datamodel_dims(&*db, source_project);
-                    let element_index =
-                        engine::ltm_post::build_loop_element_index(&ltm_vars.vars, project_dims);
-                    // Both snapshots are projected from the same
-                    // `LtmSyntheticVar` metadata: a loop's per-slot
-                    // partition vector has exactly one entry per
-                    // `loop_score` slot (1 for a scalar loop, the
-                    // dimension element-space size for an A2A loop).  The
-                    // FFI rel-loop-score path reads `loop_partitions[id][k]`
-                    // for the loop's queried slot `k`, so a mismatch here
-                    // would silently fall outside the partition grid.
-                    //
-                    // Only assert when *both* sides look genuinely arrayed
-                    // (`n_slots > 1` and `pv.len() > 1`): this mirrors the
-                    // escape hatch the engine's analogous `debug_assert!`
-                    // in `model_ltm_variables` takes when
-                    // `loop_dimension_element_tuples` returns empty (a
-                    // mid-edit state where the project dims don't yet cover
-                    // a loop's declared dimensions -- `partition_for_loop`
-                    // then falls back to whatever element suffixes are
-                    // present on the loop's stocks, and `build_loop_element_index`
-                    // products only the resolved dims, so the two counts
-                    // can transiently disagree).  `loop_dimension_element_tuples`
-                    // isn't visible across the FFI crate boundary, so the
-                    // "both > 1" guard is the closest expressible form; it
-                    // still catches a real slot-count mismatch between two
-                    // genuinely-arrayed views (which can't arise from valid
-                    // compilation) without firing on the can't-happen-in-prod
-                    // singleton-collapse transient.
-                    debug_assert!(
-                        ltm_vars.loop_partitions.iter().all(|(id, pv)| {
-                            element_index.get(id).is_none_or(|m| {
-                                let (n, plen) = (m.n_slots, pv.len());
-                                !(n > 1 && plen > 1) || n == plen
-                            })
-                        }),
-                        "loop_partitions slot counts must match loop_element_index n_slots \
-                         when both are genuinely arrayed (> 1 slot)"
-                    );
-                    (
-                        ltm_vars.loop_partitions.clone(),
-                        element_index,
-                        Some(ltm_vars.mode),
-                    )
+            // Snapshot the LTM loop-partition mapping, per-loop slot metadata
+            // and resolved mode while the db is still locked
+            // (`analysis::ltm_snapshots`, the one derivation of them).
+            // Post-sim relative-loop-score and runtime-classification queries
+            // look up these snapshots instead of re-querying the db, so a
+            // subsequent `apply_patch` (rename/delete/restructure) does not
+            // invalidate scores against results that are still valid for the
+            // compilation-era loop structure.  The element index also lets
+            // the FFI accept subscripted IDs like `r1[Boston]` and resolve
+            // them against the loop_score's actual slot layout (issue #463).
+            let (loop_partitions, loop_element_index, ltm_mode) =
+                if enable_ltm && !special && result.is_ok() {
+                    let canonical = engine::canonicalize(&model_ref.model_name);
+                    if let Some(sm) = source_project.models(&*db).get(canonical.as_ref()).copied() {
+                        let crate::analysis::LtmSnapshots {
+                            loop_partitions,
+                            loop_element_index,
+                            mode,
+                        } = crate::analysis::ltm_snapshots(
+                            &*db,
+                            source_project,
+                            sm,
+                            &model_ref.model_name,
+                        );
+                        (loop_partitions, loop_element_index, Some(mode))
+                    } else {
+                        (engine::indexmap::IndexMap::new(), HashMap::new(), None)
+                    }
                 } else {
                     (engine::indexmap::IndexMap::new(), HashMap::new(), None)
-                }
-            } else {
-                (engine::indexmap::IndexMap::new(), HashMap::new(), None)
-            };
+                };
             (result, loop_partitions, loop_element_index, ltm_mode)
         } else {
             (

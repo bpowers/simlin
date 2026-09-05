@@ -365,27 +365,54 @@ impl SimlinDb {
 
     /// Free the memos this revision's queries replaced.
     ///
-    /// Salsa does not drop a superseded memo when a query re-executes: it
-    /// queues the old one in the ingredient's deferred-delete list and frees
-    /// the list at the START of the next revision, i.e. inside the next input
+    /// Salsa does not drop a superseded memo when a query re-executes:
+    /// `insert_memo` (salsa 0.28.1 `function.rs`) pushes the old one onto the
+    /// ingredient's deferred-delete list, which `reset_for_new_revision`
+    /// clears at the START of the next revision, i.e. inside the next input
     /// write. A long-lived database that answers queries after a sync and
     /// then waits for the next edit therefore holds every value the edit
     /// replaced until that edit arrives -- on C-LEARN under LTM, 117 MiB
     /// after one rename of an unreferenced constant, and 5 MiB plain
-    /// (docs/design/engine-performance.md, C7). This runs the same reset
-    /// on demand, so an embedder calls it once the queries an edit provoked
-    /// have run (libsimlin does, at the end of every edit and compile entry
-    /// point): 10 ms under LTM when there is something to free, a walk over
-    /// empty lists otherwise.
+    /// (docs/design/engine-performance.md, C7). This runs the same reset on
+    /// demand, so an embedder calls it once the queries an entry point
+    /// provoked have run (libsimlin's `DbLock` does, when it drops): 10 ms
+    /// under LTM when there is something to free, a walk over empty lists
+    /// otherwise.
     ///
-    /// Salsa's own name for the primitive is `trigger_lru_eviction`; nothing
-    /// here declares an LRU, and the deferred-delete sweep is the part that
-    /// matters. Like any write it needs the db exclusively: a snapshot held
-    /// elsewhere would block it. It is not itself a revision, with one
-    /// bounded exception: salsa counts every exclusive access in a byte and
-    /// opens a fresh revision when it wraps, so the 256th consecutive call
-    /// without an input write costs the next queries one verification walk
-    /// over the memos they touch (values are unaffected).
+    /// Salsa's own name for the primitive is `trigger_lru_eviction`
+    /// (`database.rs`): `zalsa_mut()`, then `Zalsa::evict_lru` running
+    /// `reset_for_new_revision` over the tracked-function ingredients.
+    /// Nothing here declares an LRU; the deferred-delete sweep is the part
+    /// that matters. `zalsa_mut` is `Storage::cancel_others` (`storage.rs`):
+    /// like any write it needs the db exclusively (a snapshot held elsewhere
+    /// would block it), and it bumps `Runtime::cancellation_count`, an
+    /// `AtomicU8` (`runtime.rs`), opening a real `new_revision()` when the
+    /// count wraps. So this is not itself a revision, with one bounded
+    /// exception: the 256th consecutive call without an input write is one
+    /// (an input write opens a revision of its own, which zeroes the count).
+    /// A synthetic revision moves `revisions[0]`, which is both
+    /// `current_revision()` and `last_changed_revision(Durability::LOW)`, so
+    /// `shallow_verify_memo_cold` (`function/maybe_changed_after.rs`) fails
+    /// for every memo of LOW durability -- every memo that reads an input,
+    /// since this database declares no durability above the default -- and
+    /// the next queries deep-verify the transitive cone of whatever they
+    /// touch, once, at ~1,880 instructions per memo (~27 M for C-LEARN's
+    /// plain cone, tens of milliseconds under LTM). Values are unaffected:
+    /// the walk re-executes nothing but a `DerivedUntracked` memo, and the
+    /// only one here, `model_all_diagnostics`, re-executes by design and
+    /// backdates.
+    ///
+    /// Callers release unconditionally rather than behind a gate. A
+    /// writer-set dirty flag is unsound: a memo an edit superseded is replaced
+    /// in whichever LATER query first re-executes it, so a flag the first
+    /// release after the write clears leaves everything the next entry point
+    /// replaces resident until the following edit -- the deferral this exists
+    /// to remove. An exact gate on salsa's `WillExecute` event needs a
+    /// callback registered on the storage, and with one registered
+    /// `Zalsa::unwind_if_revision_cancelled` (`zalsa.rs`) constructs a
+    /// `WillCheckCancellation` `Event` -- `thread::current().id()` included
+    /// (`event.rs`) -- on every fetch (`function/fetch.rs`): a cost on every
+    /// memo hit to save a bounded walk.
     pub fn release_replaced_memos(&mut self) {
         salsa::Database::trigger_lru_eviction(self);
     }

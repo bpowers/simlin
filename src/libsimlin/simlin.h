@@ -529,6 +529,15 @@ SimlinLoops *simlin_analyze_get_loops(SimlinModel *model, SimlinError **out_erro
 // `out_error`.  When LTM was not enabled the `loop_score` series are absent,
 // so the result degenerates to the structural classification.
 //
+// The loop LIST is the project's current contents; the slot width each
+// loop's scores are read with is the sim's own compile-era snapshot
+// (`SimState::loop_partitions`), as `simlin_analyze_get_relative_loop_score`
+// resolves against.  After an edit that changed the loop structure
+// (`simlin_project_apply_patch`, `simlin_project_replace_contents`) the two
+// therefore mix: a loop added since the run has no column and keeps its
+// structural label, and a loop whose id was renumbered reads the column its
+// id had.  Re-run before analyzing.
+//
 // # Safety
 // - `sim` must be a valid pointer to a SimlinSim that has been run.
 // - The returned SimlinLoops must be freed with simlin_free_loops.
@@ -634,8 +643,8 @@ SimlinLtmMode simlin_sim_get_ltm_mode(SimlinSim *sim, SimlinError **out_error);
 // Because the links analysis is structure-driven (the unique `(from, to)`
 // edges come from `model_causal_edges`, which has no LTM dependency), this
 // function reads no LTM derivation -- it only needs the wasm-produced score
-// columns from the slab.  `recompute_ltm_snapshots` is read only by the
-// rel-loop-score counterpart.
+// columns from the slab.  `ltm_snapshots` is read only by the rel-loop-score
+// counterpart.
 //
 // # Safety
 // - `model` must be a valid pointer to a `SimlinModel`.
@@ -672,10 +681,11 @@ void simlin_free_links(SimlinLinks *links);
 // snapshots, so the per-loop time series they produce cannot diverge by
 // construction.
 //
-// Unlike the links twin (task 4), the rel-loop-score path needs the
-// snapshots `model_ltm_variables` derives (the per-loop partition map and
-// slot metadata).  This function reads them through
-// `recompute_ltm_snapshots`, at the current revision.
+// Unlike the links twin, the rel-loop-score path needs the snapshots
+// `model_ltm_variables` derives (the per-loop partition map and slot
+// metadata).  This function reads them through `ltm_snapshots`, at the
+// project db's current revision; see that function for when they match the
+// blob's layout.
 //
 // The `loop_id` is parsed in the FFI shell (the engine-side core takes
 // a base id + `(element_index, n_slots)` pair); a bare id on a scalar
@@ -1131,6 +1141,19 @@ void simlin_clear_panic_message(void);
 // - When `dry_run` is true, the project remains unchanged and no modifications are committed.
 // - The `project` pointer remains valid and usable after this function returns.
 // - The project is not consumed or moved by this operation.
+//
+// # Effect on live simulations
+// - A `SimlinSim` created BEFORE a committed patch is a stale snapshot for
+//   the `simlin_sim_*` entry points: it was compiled from the old contents
+//   and keeps its results and its ability to `reset`/re-run against that
+//   program.
+// - The sim-bearing ANALYSIS entry points (`simlin_analyze_get_loops_runtime`,
+//   `simlin_analyze_get_links`, ...) enumerate loops and links from the
+//   project's CURRENT contents and read scores out of the stale sim's
+//   results by loop id (the slot widths come from the sim's own snapshot),
+//   so after a patch that changed the loop structure they mix old results
+//   with the new model. Create and run a new sim after a patch before
+//   analyzing -- the posture `simlin_project_replace_contents` documents.
 void simlin_project_apply_patch(SimlinProject *project,
                                 const uint8_t *patch_data,
                                 uintptr_t patch_len,

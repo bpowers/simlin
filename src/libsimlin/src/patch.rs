@@ -660,6 +660,19 @@ pub(crate) unsafe fn apply_project_patch_internal(
 /// - When `dry_run` is true, the project remains unchanged and no modifications are committed.
 /// - The `project` pointer remains valid and usable after this function returns.
 /// - The project is not consumed or moved by this operation.
+///
+/// # Effect on live simulations
+/// - A `SimlinSim` created BEFORE a committed patch is a stale snapshot for
+///   the `simlin_sim_*` entry points: it was compiled from the old contents
+///   and keeps its results and its ability to `reset`/re-run against that
+///   program.
+/// - The sim-bearing ANALYSIS entry points (`simlin_analyze_get_loops_runtime`,
+///   `simlin_analyze_get_links`, ...) enumerate loops and links from the
+///   project's CURRENT contents and read scores out of the stale sim's
+///   results by loop id (the slot widths come from the sim's own snapshot),
+///   so after a patch that changed the loop structure they mix old results
+///   with the new model. Create and run a new sim after a patch before
+///   analyzing -- the posture `simlin_project_replace_contents` documents.
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_apply_patch(
     project: *mut SimlinProject,
