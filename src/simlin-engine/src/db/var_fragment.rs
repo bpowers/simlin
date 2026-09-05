@@ -150,7 +150,8 @@ impl DeclaredName {
             return Some(DeclaredName::Source(var));
         }
         model_implicit_var_by_name(db, model, project, name.to_string())
-            .map(|meta| DeclaredName::Helper(Box::new(meta)))
+            .as_ref()
+            .map(|meta| DeclaredName::Helper(Box::new(meta.clone())))
     }
 
     fn is_module(&self, db: &dyn Db) -> bool {

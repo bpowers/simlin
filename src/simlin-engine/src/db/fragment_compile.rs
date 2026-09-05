@@ -418,7 +418,7 @@ pub(crate) fn lowered_implicit_variable(
     project: SourceProject,
     implicit_var_name: String,
 ) -> Option<LoweredImplicit> {
-    let meta = model_implicit_var_by_name(db, model, project, implicit_var_name)?;
+    let meta = model_implicit_var_by_name(db, model, project, implicit_var_name).as_ref()?;
     let parsed = parse_source_variable(db, meta.parent_source_var, project);
     let implicit_var = meta.find_in(parsed)?;
     let dim_context = project_dimensions_context(db, project);
@@ -432,7 +432,7 @@ pub(crate) fn lowered_implicit_variable(
     // (`DeclaredName::dimensions_shape`): an arrayed helper (a structural
     // apply-to-all capture) has its declared dimensions, every other helper
     // is scalar.
-    let names = implicit_referenced_names(db, &meta, project, &helper);
+    let names = implicit_referenced_names(db, meta, project, &helper);
     let heads = implicit_referenced_heads(db, model, project, &meta.name, &names);
     let mut shapes: IdentMap<Ident<Canonical>, DepShape> = Default::default();
     if !meta.is_module {
@@ -582,7 +582,8 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
 
-    let meta = &model_implicit_var_by_name(db, model, project, implicit_var_name.clone())?;
+    let meta =
+        model_implicit_var_by_name(db, model, project, implicit_var_name.clone()).as_ref()?;
     let module_input_names = module_inputs.names(db);
 
     // Recorded at body entry (before the helper is even resolved), keyed by the

@@ -449,10 +449,12 @@ impl DepScope<'_> {
             return Some(canonicalize(&module.model_name).into_owned());
         }
         self.model
-            .and_then(|model| model_implicit_var_by_name(db, model, self.project, head.to_string()))
+            .and_then(|model| {
+                model_implicit_var_by_name(db, model, self.project, head.to_string()).as_ref()
+            })
             .filter(|meta| meta.is_module)
-            .and_then(|meta| meta.model_name)
-            .map(|name| canonicalize(&name).into_owned())
+            .and_then(|meta| meta.model_name.as_deref())
+            .map(|name| canonicalize(name).into_owned())
     }
 
     /// What one read names.
@@ -844,7 +846,11 @@ pub fn model_implicit_var_info(
 /// `db::fragment_char_tests::implicit_helper_add_is_tight_for_plain_and_module_helpers`
 /// and `module_helper_add_reparses_only_the_added_variable`, which count
 /// every tracked query's executions rather than the fragment compilers alone.
-#[salsa::tracked(returns(clone))]
+///
+/// Returned by reference: the three fragment-path readers only inspect the
+/// metadata (its parent, its kind, its shape), and cloning the `String`s and
+/// `Vec`s inside it on every hit was an allocation per lookup for nothing.
+#[salsa::tracked(returns(ref))]
 pub(crate) fn model_implicit_var_by_name(
     db: &dyn Db,
     model: SourceModel,
