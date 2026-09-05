@@ -2244,7 +2244,8 @@ fn lookup_table_head_and_static_index_survive_the_wrap() {
 // -- instead of restating the rule.
 // ---------------------------------------------------------------------------
 
-/// Read one variable's final-step value out of a compiled+run model.
+/// Read one variable's final-step value out of the plain (overlay `Off`)
+/// compiled+run model: the numeric oracle each pin below is checked against.
 fn final_value(project: &datamodel::Project, name: &str) -> f64 {
     let db = SimlinDb::default();
     let sp = sync_from_datamodel(&db, project).project;

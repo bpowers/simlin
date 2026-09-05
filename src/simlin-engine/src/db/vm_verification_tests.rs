@@ -377,6 +377,8 @@ fn test_ltm_no_loops_zero_overhead() {
             .expect("LTM compilation should succeed for no-loop model");
     let ltm_root_slots = compiled_ltm.modules[&compiled_ltm.root].n_slots;
 
+    // The plain compile: with no loop there is nothing for the overlay to
+    // add, so the two programs must agree.
     let compiled_no_ltm =
         compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::Off)
             .expect("non-LTM compilation should succeed for no-loop model");
@@ -388,52 +390,59 @@ fn test_ltm_no_loops_zero_overhead() {
     );
 }
 
-/// AC1.5: `LtmOverlay::Off` skips all LTM layout and assembly work;
-/// compilation produces identical bytecode to a compilation that never
-/// had LTM enabled.
+/// AC1.5: an `On` assembly leaks nothing into the plain program. The plain
+/// program of a db that has assembled the overlay is the plain program of a
+/// db that never has -- the same `CompiledSimulation`, bytecode included.
+///
+/// The two arms are two DERIVATIONS: the "never" arm lives in its own db, so
+/// it is not the `assemble_simulation(.., Off)` memo read back (with the
+/// overlay an argument, a repeat compile on one db is a salsa hit, which would
+/// compare the memo with itself). What the second db pins is that the
+/// per-model memos an `On` assembly populates -- layouts, fragments, the LTM
+/// derivation -- are keyed so the plain assembly never reads one of them.
 #[test]
 fn test_ltm_disabled_identical_bytecode() {
-    let db = SimlinDb::default();
     let project = feedback_loop_project();
-    let source_project = {
-        let sync = sync_from_datamodel(&db, &project);
-        sync.project
+
+    // The "never" arm: a db that only ever assembles the plain program.
+    let compiled_never_ltm = {
+        let db = SimlinDb::default();
+        let source_project = sync_from_datamodel(&db, &project).project;
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::Off)
+            .expect("compilation without LTM should succeed")
     };
 
-    // Compile with LTM disabled (the default)
-    let compiled_never_ltm =
-        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::Off)
-            .expect("compilation without LTM should succeed");
-
-    // Enable then disable LTM -- should return to the same state.
-    // compile_project_incremental returns an owned CompiledSimulation,
-    // so it does not borrow db.
-    let _compiled_ltm =
+    // The "after" arm: the overlay is assembled first, then the plain program
+    // is derived beside it in the same db.
+    let db = SimlinDb::default();
+    let source_project = sync_from_datamodel(&db, &project).project;
+    let compiled_ltm =
         compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
             .expect("compilation with LTM should succeed");
-
-    // Disable LTM again
     let compiled_after_disable =
         compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::Off)
-            .expect("compilation after disabling LTM should succeed");
+            .expect("compilation beside the overlay should succeed");
 
-    // The root module's slot count should be identical
+    // Non-vacuity: the overlay did add something that could leak.
+    assert!(
+        compiled_ltm.offsets.len() > compiled_never_ltm.offsets.len(),
+        "the feedback-loop fixture must gain LTM offsets under `On`: on={}, off={}",
+        compiled_ltm.offsets.len(),
+        compiled_never_ltm.offsets.len()
+    );
+
+    // The granular checks first, so a regression names what moved...
     let root_never = &compiled_never_ltm.modules[&compiled_never_ltm.root];
     let root_after = &compiled_after_disable.modules[&compiled_after_disable.root];
-
     assert_eq!(
         root_never.n_slots, root_after.n_slots,
         "slot count should be identical when LTM is disabled"
     );
-
-    // The module count should be identical (no extra LTM modules)
     assert_eq!(
         compiled_never_ltm.modules.len(),
         compiled_after_disable.modules.len(),
         "module count should be identical when LTM is disabled"
     );
-
-    // The offset map should be identical (no extra LTM variables)
     assert_eq!(
         compiled_never_ltm.offsets.len(),
         compiled_after_disable.offsets.len(),
@@ -447,6 +456,12 @@ fn test_ltm_disabled_identical_bytecode() {
             name.as_str()
         );
     }
+    // ...and then the whole program: every module's bytecode, contexts, specs.
+    assert!(
+        *compiled_never_ltm == *compiled_after_disable,
+        "the plain program derived beside an `On` assembly must be the plain \
+         program of a db that never assembled the overlay"
+    );
 }
 
 /// AC1.1: LTM synthetic variables appear in compiled output with correct

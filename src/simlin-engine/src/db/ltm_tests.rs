@@ -308,6 +308,7 @@ fn test_a2a_ltm_layout_size() {
     let n_slots_ltm =
         compute_layout(&db, source_model, source_project, crate::db::LtmOverlay::On).n_slots;
 
+    // The plain layout: the baseline the overlay's extra slots are measured against.
     let n_slots_no_ltm = compute_layout(
         &db,
         source_model,
@@ -1448,6 +1449,10 @@ fn colliding_index_name_model(declare_bucket: bool, second_name: bool) -> datamo
 /// The `boston` arm of the `pop[nyc] -> share` link score, plus the model's
 /// diagnostics -- so a "the two agree" assertion can never be two compile
 /// failures agreeing.
+///
+/// The diagnostics are the model's own (the overlay `Off`): the guard is that
+/// both MODELS compile, and the arm compared is generated text, which exists
+/// whether or not its fragment compiles.
 fn colliding_index_boston_arm(project: &datamodel::Project) -> (String, usize) {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, project);

@@ -490,15 +490,20 @@ fn assert_offsets_are_the_layouts(
 /// Each module variable's layout slot is the `off` of a module declaration
 /// in the assembled module -- the layouts the offsets map composes are the
 /// ones the bytecode relocates sub-model instances by.
+///
+/// `overlay` is the one `sim` was assembled under: a module's slot count is
+/// its sub-model's `n_slots` under that overlay, so every module slot laid
+/// out after an LTM-bearing instance moves with it.
 fn assert_module_decls_sit_at_layout_slots(
     db: &SimlinDb,
     sync: &SyncResult,
     sim: &crate::vm::CompiledSimulation,
+    overlay: crate::db::LtmOverlay,
     model_name: &str,
     is_root: bool,
 ) {
     let model = sync.models[model_name].source;
-    let body = compute_layout(db, model, sync.project, crate::db::LtmOverlay::Off);
+    let body = compute_layout(db, model, sync.project, overlay);
     let layout = if is_root {
         body.root_shifted()
     } else {
@@ -617,8 +622,22 @@ fn results_offsets_are_the_assembled_layouts_offsets_on_a_module_bearing_model()
     .expect("the module-bearing model assembles");
 
     assert_offsets_are_the_layouts(&db, &sync, &sim, crate::db::LtmOverlay::Off);
-    assert_module_decls_sit_at_layout_slots(&db, &sync, &sim, "main", true);
-    assert_module_decls_sit_at_layout_slots(&db, &sync, &sim, "sub", false);
+    assert_module_decls_sit_at_layout_slots(
+        &db,
+        &sync,
+        &sim,
+        crate::db::LtmOverlay::Off,
+        "main",
+        true,
+    );
+    assert_module_decls_sit_at_layout_slots(
+        &db,
+        &sync,
+        &sim,
+        crate::db::LtmOverlay::Off,
+        "sub",
+        false,
+    );
 
     let has = |k: &str| sim.offsets.contains_key(&key(k));
     for present in [
@@ -753,7 +772,14 @@ fn results_offsets_are_the_assembled_layouts_offsets_under_ltm() {
     .expect("the LTM-instrumented model assembles");
 
     assert_offsets_are_the_layouts(&db, &sync, &sim, crate::db::LtmOverlay::On);
-    assert_module_decls_sit_at_layout_slots(&db, &sync, &sim, "main", true);
+    assert_module_decls_sit_at_layout_slots(
+        &db,
+        &sync,
+        &sim,
+        crate::db::LtmOverlay::On,
+        "main",
+        true,
+    );
 
     let keys: Vec<&str> = sim.offsets.keys().map(|k| k.as_str()).collect();
     let any_with = |needle: &str| keys.iter().any(|k| k.contains(needle));

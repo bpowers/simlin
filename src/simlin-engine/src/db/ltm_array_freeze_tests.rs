@@ -78,8 +78,13 @@ fn select_slice_fixture() -> TestProject {
 }
 
 /// Every LTM fragment-compile failure message in the project's diagnostics.
+///
+/// Collected under `On`: a link score's or a freeze helper's "failed to
+/// compile" warning is a fact of the overlay's derivation, which
+/// `model_all_diagnostics` emits only when the overlay is assembled. Under
+/// `Off` this list is empty whatever the LTM fragments did.
 fn fragment_failures(db: &SimlinDb, project: crate::db::SourceProject) -> Vec<String> {
-    collect_all_diagnostics(db, project, crate::db::LtmOverlay::Off)
+    collect_all_diagnostics(db, project, crate::db::LtmOverlay::On)
         .iter()
         .filter_map(|d| match &d.error {
             DiagnosticError::Assembly(msg) if msg.contains("failed to compile") => {

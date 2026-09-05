@@ -63,6 +63,7 @@ fn test_ltm_smooth_model_compiles_with_ltm() {
 
     let n_slots_ltm =
         compute_layout(&db, source_model, source_project, crate::db::LtmOverlay::On).n_slots;
+    // The plain layout: the baseline the overlay's extra slots are measured against.
     let n_slots_no_ltm = compute_layout(
         &db,
         source_model,
@@ -126,6 +127,7 @@ fn test_ltm_delay_model_compiles() {
 
     let n_slots_ltm =
         compute_layout(&db, source_model, source_project, crate::db::LtmOverlay::On).n_slots;
+    // The plain layout: the baseline the overlay's extra slots are measured against.
     let n_slots_no_ltm = compute_layout(
         &db,
         source_model,
@@ -878,6 +880,7 @@ fn test_ltm_multiple_smooth_instances_compile() {
     let n_slots_ltm =
         compute_layout(&db, source_model, source_project, crate::db::LtmOverlay::On).n_slots;
 
+    // The plain layout: the baseline the overlay's extra slots are measured against.
     let n_slots_no_ltm = compute_layout(
         &db,
         source_model,

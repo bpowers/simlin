@@ -778,7 +778,7 @@ fn assert_fragment_fixture(golden: &str, project: datamodel::Project, expect: Fi
     }
 
     if expect.expect_one_resolved_scc {
-        rendered.push_str(&render_resolved_scc(&db, source_project));
+        rendered.push_str(&render_resolved_scc(&db, source_project, overlay));
     }
 
     // The declared phase map: exhaustive, hand-written, never regenerated.
@@ -832,10 +832,15 @@ fn assert_fragment_fixture(golden: &str, project: datamodel::Project, expect: Fi
 
 /// Assert the fixture resolves exactly one recurrence SCC and render its
 /// combined fragment -- built through the EXACT production path
-/// `assemble_module` uses (`var_phase_symbolic_fragment_prod` per member ->
-/// `combine_scc_fragment`), so the golden pins the bytecode that is actually
-/// injected into the runlist rather than a re-derivation.
-fn render_resolved_scc(db: &SimlinDb, project: SourceProject) -> String {
+/// `assemble_module` uses (`var_phase_symbolic_fragment_prod` per member
+/// under the fixture's overlay -> `combine_scc_fragment`), so the golden pins
+/// the bytecode that is actually injected into the runlist rather than a
+/// re-derivation.
+fn render_resolved_scc(
+    db: &SimlinDb,
+    project: SourceProject,
+    overlay: crate::db::LtmOverlay,
+) -> String {
     let model = *project.models(db).get("main").unwrap();
     let dep_graph = model_dependency_graph(db, model, project, ModuleInputSet::empty(db));
     assert!(
@@ -857,7 +862,7 @@ fn render_resolved_scc(db: &SimlinDb, project: SourceProject) -> String {
             project,
             member.as_str(),
             scc.phase,
-            crate::db::LtmOverlay::Off,
+            overlay,
         )
         .unwrap_or_else(|| {
             panic!(
@@ -2510,6 +2515,8 @@ fn implicit_and_ltm_fragment_cache_granularity() {
             .build_datamodel()
     };
 
+    // The implicit-helper half is measured on the plain program; the LTM half
+    // below runs in its own db under `On`.
     let mut db = SimlinDb::default();
     let base = project_with("3", "1", "2");
     let state1 = sync_from_datamodel_incremental(&mut db, &base, None);

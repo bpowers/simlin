@@ -76,7 +76,8 @@ fn load_model(fixture: &ModelFixture) -> String {
 }
 
 /// Check whether a datamodel project can be compiled to bytecode via the
-/// incremental path.
+/// incremental path. Assessed with the overlay `Off`: compilability is the
+/// model's own, and both the plain and the `ltm_compile` groups gate on it.
 fn is_simulatable(datamodel: &datamodel::Project) -> bool {
     let mut db = SimlinDb::default();
     let state = sync_from_datamodel_incremental(&mut db, datamodel, None);

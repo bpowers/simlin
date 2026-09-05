@@ -817,7 +817,9 @@ impl TestProject {
         );
     }
 
-    /// Sync the datamodel into a salsa DB and collect all diagnostics.
+    /// Sync the datamodel into a salsa DB and collect all diagnostics of the
+    /// model as written (the overlay `Off`); an LTM test collects its
+    /// overlay's rows on its own db.
     pub(crate) fn diagnostics_incremental(&self) -> Vec<crate::db::Diagnostic> {
         let datamodel = self.build_datamodel();
         let mut db = SimlinDb::default();
