@@ -125,7 +125,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: cargo-wasmopt-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-wasmopt-${{ hashFiles('**/Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
             cargo-wasmopt-
 

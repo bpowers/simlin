@@ -8,11 +8,11 @@
 //!
 //! Spawns the actual `simlin-serve` binary in a tempdir seeded with the
 //! three supported on-disk formats (XMILE, Vensim MDL, SD-AI JSON) plus
-//! a nested-subdirectory fixture, then exercises both the browser HTTP
-//! path (list/read/save) and the MCP tool path (ReadModel/CreateModel)
-//! end-to-end. Verifies the canonical disk state after each mutation
-//! to catch any regression where the API path returns success without
-//! actually persisting bytes.
+//! a nested-subdirectory fixture, then exercises the embedded SPA's
+//! entry point, the browser HTTP path (list/read/save) and the MCP tool
+//! path (ReadModel/CreateModel) end-to-end. Verifies the canonical disk
+//! state after each mutation to catch any regression where the API path
+//! returns success without actually persisting bytes.
 //!
 //! Marked `#[ignore]` so the default `cargo test` workflow doesn't pay
 //! the seconds-scale spawn cost on every invocation; the CI matrix job
@@ -30,10 +30,10 @@
 //! `ReadDirectoryChangesW` directory handle. Linux and macOS exercise
 //! the same end-to-end code path, so the gate scopes the gap to the
 //! Windows-specific atomic-replace semantics rather than the broader
-//! save pipeline. Tracked as tech-debt item #38; the Windows smoke
-//! job continues to validate that the binary compiles and links end
-//! to end, so a regression that breaks the Windows build (rather than
-//! runtime) still trips CI.
+//! save pipeline. Tracked as tech-debt item #38; CI type-checks every
+//! target of this crate on Windows instead (ci.yaml's
+//! serve-windows-check job), so a regression that breaks the Windows
+//! build (rather than runtime) still trips CI.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
@@ -408,6 +408,33 @@ async fn smoke_end_to_end_browser_and_mcp_paths() {
     assert_eq!(
         resp.body, "ok",
         "/healthz body must be the literal string 'ok'"
+    );
+
+    // ---- 3b. GET /: the embedded SPA's entry point ----
+    // The one place CI checks that the shipped binary embeds its frontend.
+    // rust-embed compiles in whatever web/dist/ holds at build time, and an
+    // empty directory builds without complaint (build.rs creates it), so a
+    // skipped or misplaced frontend build would pass every other check here
+    // and ship a server whose UI is a 404.
+    let resp = http.get(&format!("{origin}/")).await;
+    assert_eq!(
+        resp.status, 200,
+        "GET / must serve the embedded SPA, got {}: {}",
+        resp.status, resp.body
+    );
+    let content_type = resp
+        .headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        content_type.starts_with("text/html"),
+        "GET / must be served as HTML, got content-type {content_type:?}"
+    );
+    assert!(
+        resp.body.contains("<html"),
+        "GET / must be the SPA's index.html, got: {}",
+        resp.body.chars().take(200).collect::<String>()
     );
 
     // ---- 4. GET /api/projects: registry lists all four entries ----

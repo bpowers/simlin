@@ -46,6 +46,15 @@ fn main() -> anyhow::Result<()> {
     println!("cargo:rerun-if-changed={}", web_src.display());
     println!("cargo:rerun-if-changed={}", web_index.display());
     println!("cargo:rerun-if-changed={}", web_package.display());
+    // The embed's inputs, not just the sources that produce them. rust-embed
+    // expands to one `include_bytes!` per file present at compile time, and
+    // that is all cargo tracks: a crate compiled against an empty `dist/`
+    // records no inputs at all, so populating the directory afterwards (CI
+    // restores it from an artifact; a developer runs the frontend build
+    // after a first `cargo build`) never triggered a recompile, and the
+    // binary kept serving 404 for its own UI. Watching the directory makes
+    // any change to its contents rerun this script and rebuild the crate.
+    println!("cargo:rerun-if-changed={}", web_dist.display());
     println!("cargo:rerun-if-env-changed=SIMLIN_SERVE_BUILD_WEB");
 
     // `rust-embed` errors if its `#[folder = ...]` target doesn't exist on

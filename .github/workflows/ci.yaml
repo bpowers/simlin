@@ -8,6 +8,12 @@ name: CI
     branches:
       - main
 
+# Every cargo cache below is keyed on Cargo.lock AND the workspace Cargo.toml.
+# actions/cache only saves on a primary-key miss, so a key that ignored
+# Cargo.toml froze the cache across a profile change (the cache kept serving
+# artifacts of the old profile, and every run recompiled the new one from
+# scratch until the next Cargo.lock bump); the restore-keys prefix still
+# warms a rotated key from the previous cache.
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
@@ -46,7 +52,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: cargo-build-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-build-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
             cargo-build-${{ matrix.os }}-
 
@@ -91,7 +97,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-lint-${{ hashFiles('**/Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
             cargo-lint-
 
@@ -130,7 +136,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: cargo-llvm-cov-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-llvm-cov-${{ hashFiles('**/Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
             cargo-llvm-cov-
 
@@ -197,7 +203,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-wasm-${{ hashFiles('**/Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
             cargo-wasm-
 
@@ -267,7 +273,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: cargo-pysimlin-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-pysimlin-${{ hashFiles('**/Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
             cargo-pysimlin-
 
@@ -336,7 +342,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: cargo-pysimlin-e2e-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-pysimlin-e2e-${{ hashFiles('**/Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
             cargo-pysimlin-e2e-
 
@@ -355,8 +361,10 @@ jobs:
       # wasm32 engine, @simlin/core, @simlin/diagram) in topological order;
       # the widget's build ends by staging widget.js and the wasm into
       # src/pysimlin/simlin/_widget/ (scripts/stage_widget_assets.py).
-      # DISABLE_WASM_OPT=1 skips the multi-minute wasm-opt pass: the journey
-      # exercises the widget's behaviour, not the release blob's size.
+      # DISABLE_WASM_OPT=1 marks a gate build: no multi-minute wasm-opt pass,
+      # and the `wasm-gate` cargo profile (no LTO, parallel codegen) for the
+      # engine. The journey exercises the widget's behaviour, not the
+      # shipped blob's size or speed.
       - name: Build the notebook widget and stage its assets into pysimlin
         env:
           DISABLE_WASM_OPT: "1"
@@ -418,34 +426,15 @@ jobs:
       - name: Run project lint rules
         run: bash scripts/lint-project.sh
 
-  serve-smoke:
-    name: simlin-serve smoke (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    # 30-minute cap. Once the cargo cache is warm a serve-smoke run
-    # completes in under 10 minutes on every platform (macos-latest is
-    # the slowest at ~8 min, ubuntu and windows ~5 min). The cold-cache
-    # path on Windows is the binding constraint: actions/cache@v4 only
-    # saves on job success by default, so a series of failing Windows
-    # runs leaves the cache unwarmed indefinitely, and a from-scratch
-    # MSVC build of simlin-engine + simlin-serve + their transitive deps
-    # takes 18-22 minutes. The previous 15-minute cap was tight for
-    # warm-cache macOS and impossible for cold-cache Windows. Once the
-    # Windows cache warms (after the first green run), a 15-minute cap
-    # would be reasonable again — the headroom here is for the
-    # bootstrapping case and to absorb the macos-latest p99.
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        # Mirrors the @simlin/serve npm matrix shipped from
-        # serve-release.yml (darwin-arm64, linux-x64, win32-x64) so
-        # CI proves end-to-end behaviour on every platform we publish
-        # binaries for. linux-arm64 isn't a GitHub-hosted runner
-        # option; we cover that target via cross-compilation and
-        # rely on linux-x64 for runtime smoke coverage.
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    env:
-      RUST_BACKTRACE: 1
+  # The embedded SPA is built ONCE, on ubuntu, and handed to the smoke legs
+  # as an artifact. web/dist/ is platform-independent (wasm, JS, CSS), and
+  # building it per leg cost every leg two wasm engine builds, which on the
+  # 4-core macOS and Windows runners was 8 to 16 minutes by itself and pushed
+  # the Windows leg past its cap (GH #1054).
+  serve-web:
+    name: simlin-serve embedded SPA
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -462,6 +451,8 @@ jobs:
           node-version: '24'
           cache: 'pnpm'
 
+      # Same key family as the frontend job: both build the same gate-profile
+      # wasm engine into the same target directories, so they share one cache.
       - name: Cache cargo registry and target
         uses: actions/cache@v4
         with:
@@ -470,9 +461,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: cargo-serve-smoke-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-wasm-${{ hashFiles('**/Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
-            cargo-serve-smoke-${{ matrix.os }}-
+            cargo-wasm-
 
       - name: Install workspace dependencies
         run: pnpm install --frozen-lockfile
@@ -482,29 +473,118 @@ jobs:
       # selects serve-web AND its transitive deps (@simlin/core,
       # @simlin/engine, @simlin/diagram) in topological order so each
       # one's `lib/`/`lib.browser/`/`dist/` output exists before rsbuild
-      # tries to resolve them. DISABLE_WASM_OPT=1 skips the
-      # multi-minute wasm-opt pass on the engine package — release-
-      # quality WASM is irrelevant for a smoke test of the serve
-      # binary.
+      # tries to resolve them. DISABLE_WASM_OPT=1 marks a gate build of
+      # the engine package: no wasm-opt pass, and the `wasm-gate` cargo
+      # profile (no LTO, parallel codegen; see the workspace Cargo.toml)
+      # -- release-quality WASM is irrelevant for a smoke test of the
+      # serve binary.
       - name: Build embedded SPA (with workspace deps)
         env:
           DISABLE_WASM_OPT: "1"
         run: pnpm --filter "@simlin/serve-web..." run build
 
-      # SIMLIN_SERVE_BUILD_WEB=1 is set as defense-in-depth: the
-      # "Build embedded SPA" step above already populates web/dist/,
-      # so build.rs has nothing new to do, but the explicit env var
-      # guards against a future refactor that drops the explicit
-      # frontend step without noticing the embed went stale.
-      - name: Build simlin-serve binary
-        env:
-          SIMLIN_SERVE_BUILD_WEB: "1"
-        run: cargo build -p simlin-serve --release
+      - name: Upload the SPA for the smoke legs
+        uses: actions/upload-artifact@v4
+        with:
+          name: serve-web-dist
+          path: src/simlin-serve/web/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  serve-smoke:
+    name: simlin-serve smoke (${{ matrix.os }})
+    needs: serve-web
+    runs-on: ${{ matrix.os }}
+    # One release compile of simlin-engine, simlin-mcp-core and simlin-serve
+    # (fat LTO, the profile that ships) and then the smoke test itself, which
+    # runs in well under a second. Warm-cache runs are 5 to 9 minutes; the
+    # headroom is for a cold cache, which rebuilds the whole dependency
+    # closure under LTO on a 4-core runner.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The platforms whose runtime behaviour the smoke test can exercise.
+        # Windows is covered by serve-windows-check below: the smoke module
+        # is compiled out there (tech-debt #38), so a Windows leg here would
+        # spend a release LTO build on running zero tests. The @simlin/serve
+        # npm matrix (serve-release.yml) additionally ships linux-arm64 and
+        # win32-x64, both cross-compiled; neither is a GitHub-hosted runner
+        # option, and linux-x64 covers the Linux runtime path.
+        os: [ubuntu-latest, macos-latest]
+    env:
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-serve-smoke-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock', 'Cargo.toml') }}
+          restore-keys: |
+            cargo-serve-smoke-${{ matrix.os }}-
+
+      # Restored to the path build.rs and rust-embed read, so the binary the
+      # test spawns embeds this SPA. The smoke test asserts the entry point is
+      # actually served, which is what catches a missing or empty embed.
+      - name: Download the embedded SPA
+        uses: actions/download-artifact@v4
+        with:
+          name: serve-web-dist
+          path: src/simlin-serve/web/dist
 
       # The smoke test lives in the consolidated `integration` harness;
       # `smoke::` filters to just its tests (all `#[ignore]`d, hence
-      # `--ignored`). The run command is quoted because a plain YAML scalar
-      # ending in `:` parses as a mapping key, which made the whole workflow
-      # file invalid (every CI run since failed at startup with zero jobs).
+      # `--ignored`). Cargo builds the `simlin-serve` binary the test spawns
+      # (`CARGO_BIN_EXE_simlin-serve`) as part of this invocation, so there
+      # is no separate build step. The run command is quoted because a plain
+      # YAML scalar ending in `:` parses as a mapping key, which made the
+      # whole workflow file invalid (every CI run since failed at startup
+      # with zero jobs).
       - name: Run smoke test
         run: 'cargo test -p simlin-serve --release --test integration -- --ignored --nocapture smoke::'
+
+  # simlin-serve's Windows-only code (the path resolution and watcher
+  # branches under cfg(windows)) compiles nowhere else, and the smoke test is
+  # compiled out on Windows (tech-debt #38), so this is a type-check of every
+  # target rather than a release build that would run nothing. The shipped
+  # win32-x64 binary is cross-compiled for the GNU target by
+  # serve-release.yml; this job is what tells a PR that the crate no longer
+  # builds on Windows at all.
+  serve-windows-check:
+    name: simlin-serve check (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      RUSTFLAGS: -D warnings
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-serve-check-windows-latest-${{ hashFiles('**/Cargo.lock', 'Cargo.toml') }}
+          restore-keys: |
+            cargo-serve-check-windows-latest-
+
+      - name: Type-check every simlin-serve target
+        run: cargo check -p simlin-serve --all-targets
