@@ -1357,9 +1357,11 @@ fn contains_unfreezable_previous(expr: &Expr0) -> bool {
 /// link-score variables.
 ///
 /// Boundary: unlike its changed-first dual, this walker never recurses
-/// into subscript INDEX expressions -- a `live_source` occurrence in an
-/// index position of another reference (`other_arr[live_source]`) stays
-/// live (current) in the changed-last partial. That matches the dual's
+/// into subscript INDEX expressions -- so every wrap it emits is the
+/// value-position form of [`freeze_at_previous`] -- and a `live_source`
+/// occurrence in an index position of another reference
+/// (`other_arr[live_source]`) stays live (current) in the changed-last
+/// partial. That matches the dual's
 /// convention that an index-nested occurrence is never the captured live
 /// ref, but means such an occurrence is not frozen here either; no
 /// reachable shape exercises this today (the fallback only fires when the
@@ -1382,10 +1384,7 @@ fn wrap_live_shaped_in_previous(
                 if frozen_ref.is_none() {
                     *frozen_ref = Some(expr.clone());
                 }
-                Expr0::App(
-                    UntypedBuiltinFn("PREVIOUS".to_string(), Box::new([expr])),
-                    loc,
-                )
+                freeze_at_previous(expr, loc, false)
             } else {
                 expr
             }
@@ -1404,10 +1403,7 @@ fn wrap_live_shaped_in_previous(
                     if frozen_ref.is_none() {
                         *frozen_ref = Some(bare.clone());
                     }
-                    return Expr0::App(
-                        UntypedBuiltinFn("PREVIOUS".to_string(), Box::new([bare])),
-                        loc,
-                    );
+                    return freeze_at_previous(bare, loc, false);
                 }
                 if occ
                     .get(path)
@@ -1417,10 +1413,7 @@ fn wrap_live_shaped_in_previous(
                     if frozen_ref.is_none() {
                         *frozen_ref = Some(subscript.clone());
                     }
-                    return Expr0::App(
-                        UntypedBuiltinFn("PREVIOUS".to_string(), Box::new([subscript])),
-                        loc,
-                    );
+                    return freeze_at_previous(subscript, loc, false);
                 }
                 return Expr0::Subscript(ident, indices, loc);
             }
@@ -4924,7 +4917,8 @@ fn pin_body_to_row(expr: Expr0, ctx: &ReducerBodyCtx<'_>, row_parts: &[String]) 
 }
 
 /// Wrap every model-variable reference of a row-pinned body in
-/// `PREVIOUS()`, except occurrences of `keep_live` (when given). Subscript
+/// `PREVIOUS()` (the value-position form of [`freeze_at_previous`]), except
+/// occurrences of `keep_live` (when given). Subscript
 /// indices are never recursed into: on an arrayed MODEL dep's subscript,
 /// pinning has already replaced them with literal qualified elements (not
 /// causal references); on a non-model head (whose expression indices
@@ -4941,20 +4935,14 @@ fn freeze_pinned_body(expr: Expr0, freeze: &HashSet<String>, keep_live: Option<&
         Expr0::Const(..) => expr,
         Expr0::Var(ref ident, loc) => {
             if should_freeze(ident.as_str()) {
-                Expr0::App(
-                    UntypedBuiltinFn("PREVIOUS".to_string(), Box::new([expr])),
-                    loc,
-                )
+                freeze_at_previous(expr, loc, false)
             } else {
                 expr
             }
         }
         Expr0::Subscript(ref ident, _, loc) => {
             if should_freeze(ident.as_str()) {
-                Expr0::App(
-                    UntypedBuiltinFn("PREVIOUS".to_string(), Box::new([expr])),
-                    loc,
-                )
+                freeze_at_previous(expr, loc, false)
             } else {
                 expr
             }

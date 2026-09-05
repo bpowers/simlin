@@ -1217,39 +1217,39 @@ mod tests {
         );
     }
 
-    // ---- LTM flags must be reset after analyze_model ----
+    // ---- the discovery-mode input is restored after analyze_model ----
+
+    /// `analyze_model` runs the LTM pipeline in discovery mode and hands the
+    /// input back to the caller at the value it had. Both arms of that
+    /// restore are pinned -- a caller outside discovery mode and one already
+    /// in it -- because a restore that wrote `false` unconditionally passes
+    /// the first arm alone (a fresh sync starts with the flag off).
+    fn discovery_mode_is_restored(project: &datamodel::Project) {
+        for prior in [false, true] {
+            let (mut db, sp) = synced_db(project);
+            crate::db::set_project_ltm_discovery_mode(&mut db, sp, prior);
+            let _analysis = analyze_model(project, &mut db, sp, "main", None)
+                .expect("analyze_model should not return Err");
+            assert_eq!(
+                sp.ltm_discovery_mode(&db),
+                prior,
+                "ltm_discovery_mode must be restored to the caller's value after analyze_model"
+            );
+        }
+    }
 
     #[test]
-    fn ltm_discovery_mode_reset_after_analyze() {
+    fn ltm_discovery_mode_restored_after_analyze() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../test/logistic_growth_ltm/logistic_growth.stmx"
         );
-        let project = load_project(path);
-        let (mut db, sp) = synced_db(&project);
-        let _analysis =
-            analyze_model(&project, &mut db, sp, "main", None).expect("analyze_model failed");
-
-        // After analyze_model returns, the discovery-mode input must be
-        // restored so subsequent compilations don't unexpectedly run in LTM
-        // discovery mode.
-        assert!(
-            !sp.ltm_discovery_mode(&db),
-            "ltm_discovery_mode must be false after analyze_model returns"
-        );
+        discovery_mode_is_restored(&load_project(path));
     }
 
     #[test]
-    fn ltm_discovery_mode_reset_after_failed_analysis() {
-        let project = broken_project();
-        let (mut db, sp) = synced_db(&project);
-        let _analysis = analyze_model(&project, &mut db, sp, "main", None)
-            .expect("analyze_model should not return Err");
-
-        assert!(
-            !sp.ltm_discovery_mode(&db),
-            "ltm_discovery_mode must be false after failed analyze_model"
-        );
+    fn ltm_discovery_mode_restored_after_failed_analysis() {
+        discovery_mode_is_restored(&broken_project());
     }
 
     // ---- GH #660: a compile failure surfaces an actionable analysis_error ----

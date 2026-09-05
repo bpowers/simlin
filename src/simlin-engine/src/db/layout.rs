@@ -6,7 +6,7 @@
 //!
 //! `compute_layout` is the per-model body layout query: the salsa-tracked,
 //! role-independent slot assignment for explicit variables, implicit
-//! (SMOOTH/DELAY/TREND) helpers, and -- when LTM is enabled -- the LTM
+//! (SMOOTH/DELAY/TREND) helpers, and -- under the `On` overlay -- the LTM
 //! synthetic variables and their implicit helpers. Offsets start at 0; the
 //! root module's `IMPLICIT_VAR_COUNT` shift is applied at assembly via
 //! `VariableLayout::root_shifted`. `flattened_offsets` is that layout read
@@ -326,7 +326,7 @@ fn flatten_model(
 /// constructors clone into `DepKind::Module`, so a shape is derived once per
 /// revision and shared by every fragment that reads the sub-model.
 ///
-/// When LTM is enabled the sub-model is itself LTM-augmented: its layout
+/// Under the `On` overlay the sub-model is itself LTM-augmented: its layout
 /// carries the synthetic LTM variables, most importantly the per-input-port
 /// composite score `$⁚ltm⁚composite⁚{port}`, which a parent equation
 /// references across the module boundary (the exhaustive-mode input->macro
@@ -377,15 +377,7 @@ pub(crate) fn model_shape(
             // A2A link/loop scores carry dimensions, so a subscripted
             // cross-module read resolves an element offset rather than
             // collapsing to slot 0.
-            let dims = ltm_var
-                .dimensions
-                .iter()
-                .filter_map(|name| {
-                    dim_context
-                        .get(&crate::common::CanonicalDimensionName::from_raw(name))
-                        .cloned()
-                })
-                .collect();
+            let dims = super::var_fragment::dimensions_named(&ltm_var.dimensions, dim_context);
             vars.entry(Ident::new(&ltm_var.name)).or_insert(ShapeEntry {
                 offset: entry.offset,
                 shape: DepShape::var(dims),

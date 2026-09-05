@@ -20,7 +20,7 @@ use crate::ltm_dominance::{FeedbackLoop, LoopPolarity};
 /// series. Returns `None` if any step fails, signaling the caller to fall
 /// back to persisted loop_metadata.
 pub(super) fn try_detect_ltm_loops(
-    db: &mut crate::db::SimlinDb,
+    db: &crate::db::SimlinDb,
     source_project: crate::db::SourceProject,
     model_name: &str,
 ) -> Option<Vec<FeedbackLoop>> {
@@ -29,7 +29,7 @@ pub(super) fn try_detect_ltm_loops(
 
 /// Incremental salsa path for LTM loop detection.
 fn try_detect_ltm_loops_incremental(
-    db: &mut crate::db::SimlinDb,
+    db: &crate::db::SimlinDb,
     source_project: crate::db::SourceProject,
     actual_name: &str,
 ) -> Option<Vec<FeedbackLoop>> {
@@ -252,7 +252,7 @@ mod tests {
         let mut db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, &datamodel, None);
 
-        let loops = try_detect_ltm_loops(&mut db, sync.project, "main")
+        let loops = try_detect_ltm_loops(&db, sync.project, "main")
             .expect("LTM loop detection must succeed on this fixture");
 
         let a2a = loops

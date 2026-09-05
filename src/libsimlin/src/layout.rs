@@ -158,7 +158,7 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
 
     // Layout generation requires the salsa db for dependency extraction
     // and LTM analysis. The project must have been synced first.
-    let mut db_locked = proj.lock_db();
+    let db_locked = proj.lock_db();
     let source_project = match db_locked.current_source_project() {
         Some(sp) => sp,
         None => {
@@ -171,7 +171,7 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
         }
     };
 
-    let db_state = Some((&mut *db_locked, source_project));
+    let db_state = Some((&*db_locked, source_project));
 
     // Use incremental layout when a patch and existing non-empty view are available.
     // When a patch was provided but has no ops for this model, preserve the existing

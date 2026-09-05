@@ -501,10 +501,10 @@ fn datamodel_with_generated_layout(
         return Ok(None);
     }
 
-    let mut db_locked = proj.lock_db();
+    let db_locked = proj.lock_db();
     let db_state = db_locked
         .current_source_project()
-        .map(|sp| (&mut *db_locked, sp));
+        .map(|sp| (&*db_locked, sp));
     let layout = engine::layout::generate_best_layout(datamodel, model_name, db_state)?;
 
     let mut with_layout = datamodel.clone();

@@ -788,7 +788,7 @@ fn test_constant_variable_has_no_deps_with_salsa() {
     let source_project = state.to_sync_result().project;
 
     let metadata =
-        compute_layout_metadata(&project, MAIN_MODEL, Some((&mut db, source_project))).unwrap();
+        compute_layout_metadata(&project, MAIN_MODEL, Some((&db, source_project))).unwrap();
 
     // Constants should have no equation deps (structural edges may still exist).
     let capacity_deps = metadata

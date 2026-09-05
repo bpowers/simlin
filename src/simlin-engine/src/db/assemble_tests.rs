@@ -30,7 +30,9 @@ use crate::db::{
     assemble_simulation, compute_layout, model_dependency_graph, model_flows_invariant,
     model_implicit_var_info, model_ltm_implicit_var_info, model_ltm_variables, sync_from_datamodel,
 };
-use crate::testutils::{x_aux, x_flow, x_model, x_module, x_module_named, x_project, x_stock};
+use crate::testutils::{
+    x_arrayed, x_aux, x_flow, x_model, x_module, x_module_named, x_project, x_stock,
+};
 use crate::vm::Vm;
 
 fn sim_specs() -> datamodel::SimSpecs {
@@ -60,28 +62,6 @@ fn x_table(ident: &str) -> datamodel::Variable {
             x_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
             y_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
         }),
-        ai_state: None,
-        uid: None,
-        compat: datamodel::Compat::default(),
-    })
-}
-
-/// A per-element arrayed aux over one dimension.
-fn x_arrayed(ident: &str, dim: &str, elements: &[(&str, &str)]) -> datamodel::Variable {
-    datamodel::Variable::Aux(datamodel::Aux {
-        ident: ident.to_string(),
-        equation: datamodel::Equation::Arrayed(
-            vec![dim.to_string()],
-            elements
-                .iter()
-                .map(|(e, eq)| (e.to_string(), eq.to_string(), None, None))
-                .collect(),
-            None,
-            false,
-        ),
-        documentation: String::new(),
-        units: None,
-        gf: None,
         ai_state: None,
         uid: None,
         compat: datamodel::Compat::default(),

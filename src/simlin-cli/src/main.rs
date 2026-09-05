@@ -1123,10 +1123,12 @@ mod diagnostic_reporting_tests {
             "an advisory warning must not raise the error flags"
         );
 
-        // ...and the model still simulates, so the process exits 0. Route
-        // through `run_simulation` (which returns a Result) rather than
-        // `simulate`, whose failure paths call `die!` -> process::exit and
-        // would kill the whole test binary instead of failing this test.
+        // ...and the model still simulates under the overlay `simulate`
+        // requests for `--ltm` (the special-stock build takes the
+        // degradation, not a refusal), so the process exits 0. Route through
+        // `run_simulation` (which returns a Result) rather than `simulate`,
+        // whose failure paths call `die!` -> process::exit and would kill the
+        // whole test binary instead of failing this test.
         let mut db = SimlinDb::default();
         let sync_state = sync_from_datamodel_incremental(&mut db, &project, None);
         let results = run_simulation(
@@ -1134,7 +1136,7 @@ mod diagnostic_reporting_tests {
             sync_state.project,
             &project,
             "main",
-            simlin_engine::db::LtmOverlay::Off,
+            simlin_engine::db::LtmOverlay::On,
         )
         .expect("the LTM run must produce results");
         assert!(results.step_count > 0, "the LTM run must produce results");

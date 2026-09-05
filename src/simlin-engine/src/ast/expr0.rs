@@ -781,11 +781,15 @@ fn test_parse_failures() {
 /// LTM parse trees), and a `Range` carrying its two bounds inline makes every
 /// index as wide as two expressions (`docs/design/engine-performance.md`, C7).
 ///
-/// Pinned as two properties, on every target:
-/// an index is no wider than an expression (the `Range` bounds are boxed),
-/// and a call's argument list is a slice, not a `Vec`. The upper bound on
-/// `Expr0` is what a field added without thought trips; raising it is a
-/// decision, made here.
+/// Pinned as two relations that hold on every target -- an index is no
+/// wider than an expression (the `Range` bounds are boxed), and a call's
+/// argument list is a slice, not a `Vec` -- plus one upper bound on `Expr0`
+/// per pointer width, because the width is not a multiple of the pointer
+/// size: measured with the repo toolchain, 48 bytes with 8-byte pointers
+/// and 32 with 4-byte ones (wasm32), so a bound spelled in `usize`s holds on
+/// one and not the other. The bound is what a field added without thought
+/// trips; raising it, or pinning a new pointer width, is a decision, made
+/// here.
 #[test]
 fn node_widths_are_pinned() {
     use std::mem::size_of;
@@ -794,5 +798,16 @@ fn node_widths_are_pinned() {
         size_of::<UntypedBuiltinFn<Expr0>>(),
         size_of::<String>() + size_of::<Box<[Expr0]>>()
     );
-    assert!(size_of::<Expr0>() <= 6 * size_of::<usize>());
+    let pinned = if cfg!(target_pointer_width = "64") {
+        48
+    } else if cfg!(target_pointer_width = "32") {
+        32
+    } else {
+        panic!("Expr0's width is not pinned for this pointer width: measure it and pin it here");
+    };
+    assert!(
+        size_of::<Expr0>() <= pinned,
+        "Expr0 is {} bytes, over the {pinned} pinned for this pointer width",
+        size_of::<Expr0>()
+    );
 }
