@@ -3823,3 +3823,28 @@ mod exprs_contain_array_producing_builtin_tests {
         assert!(!exprs_contain_array_producing_builtin(&[]));
     }
 }
+
+// ── NodeSet (the closure's dense node set) ─────────────────────────
+
+#[test]
+fn iterates_members_in_ascending_order_across_words() {
+    let mut set = NodeSet::empty(130);
+    for node in [129, 0, 64, 63, 65, 1] {
+        set.insert(node);
+    }
+    assert_eq!(set.iter().collect::<Vec<_>>(), vec![0, 1, 63, 64, 65, 129]);
+}
+
+#[test]
+fn union_is_the_set_union_and_leaves_the_other_alone() {
+    let mut a = NodeSet::empty(70);
+    a.insert(3);
+    a.insert(66);
+    let mut b = NodeSet::empty(70);
+    b.insert(3);
+    b.insert(5);
+    a.union_with(&b);
+    assert_eq!(a.iter().collect::<Vec<_>>(), vec![3, 5, 66]);
+    assert_eq!(b.iter().collect::<Vec<_>>(), vec![3, 5]);
+    assert!(NodeSet::empty(0).iter().next().is_none());
+}

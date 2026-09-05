@@ -165,18 +165,6 @@ pub(crate) fn walk_successors<'a>(
         .collect()
 }
 
-/// Map `compute_transitive`'s `is_initial: bool` (the gate threads the
-/// phase as a bool) to the `SccPhase` `walk_successors` consumes. Keeps
-/// the gate's existing bool plumbing while it calls the one shared
-/// phase-parameterized relation.
-fn phase_for(is_initial: bool) -> SccPhase {
-    if is_initial {
-        SccPhase::Initial
-    } else {
-        SccPhase::Dt
-    }
-}
-
 /// Build the per-variable `VarInfo` map (plus the set of variables
 /// referenced by `INIT()`) for `model` under the given module-input
 /// wiring.
@@ -1177,7 +1165,7 @@ pub(crate) struct DtSccResolution {
 /// the resolved verdict only ever causes the caller's `compute_transitive`
 /// to break an *intra-SCC* back-edge -- one whose two endpoints are
 /// members of the SAME resolved, element-acyclic SCC (the SCC-aware
-/// `same_resolved_scc` rule; the N=1 self-edge and every N>=2 cross-edge
+/// `same_resolved_scc_at` rule; the N=1 self-edge and every N>=2 cross-edge
 /// are the same rule, not a flat "suppress any resolved member's edge"
 /// set) -- and treat that SCC as one collapsed node. `compute_transitive`
 /// re-runs over the real *with-inputs* `var_info`, and its
@@ -1223,7 +1211,19 @@ pub(crate) fn resolve_recurrence_sccs(
     phase: crate::db::SccPhase,
 ) -> DtSccResolution {
     let (var_info, _all_init_referenced) = build_var_info(db, model, project, &[]);
+    resolve_recurrence_sccs_over(db, model, project, phase, &var_info)
+}
 
+/// [`resolve_recurrence_sccs`] over an already-built no-input `var_info`:
+/// the dependency graph of the no-input wiring hands its own in, since
+/// building it again would be the identical work.
+pub(crate) fn resolve_recurrence_sccs_over(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    phase: crate::db::SccPhase,
+    var_info: &FxHashMap<Ident<Canonical>, VarInfo>,
+) -> DtSccResolution {
     // Whole-variable adjacency = exactly the phase's shared cycle
     // relation for every node (the same construction `dt_cycle_sccs`
     // performs for dt; the init-phase analogue for init).
@@ -1231,7 +1231,7 @@ pub(crate) fn resolve_recurrence_sccs(
         HashMap::with_capacity(var_info.len());
     let mut self_loops: BTreeSet<Ident<Canonical>> = BTreeSet::new();
     for name in var_info.keys() {
-        let succ = walk_successors(&var_info, name.as_str(), phase.clone());
+        let succ = walk_successors(var_info, name.as_str(), phase.clone());
         // `succ` is `Vec<&Ident<Canonical>>`; `Ident` `==` is pointer
         // equality on the interned handle, so this self-edge check is exact.
         if succ.contains(&name) {
@@ -1258,7 +1258,7 @@ pub(crate) fn resolve_recurrence_sccs(
     // `ResolvedScc` would (a) double-resolve it and (b) break the
     // pairwise-disjoint invariant `scc_map_from_resolved` documents and
     // relies on (its last-write-wins `map.insert` would remap the node to
-    // the 1-member SCC's id, so `same_resolved_scc` would no longer
+    // the 1-member SCC's id, so `same_resolved_scc_at` would no longer
     // suppress the genuine intra-cluster back-edges incident to it -> a
     // false residual `CircularDependency`; the C-LEARN blocker's true
     // root cause, unmasked once Part A let the >= 2 SCC resolve). So a
@@ -1643,7 +1643,7 @@ fn membership_in(dep_graph: &ModelDepGraphResult, name: &str) -> RunlistMembersh
 /// gate excludes init-only SCCs whose members the dt path already
 /// resolved, so no member is ever assigned two ids within one phase's
 /// map. The id is the SCC's index (deterministic, byte-stable), used only
-/// as an opaque same-SCC discriminator by `same_resolved_scc`.
+/// as an opaque same-SCC discriminator by `same_resolved_scc_at`.
 pub(crate) fn scc_map_from_resolved(
     resolved: &[ResolvedScc],
     base_id: usize,
@@ -1659,29 +1659,270 @@ pub(crate) fn scc_map_from_resolved(
     }
 }
 
-/// A back-edge `dep -> name` (where `dep` is already on the dependency
-/// DFS stack) is suppressed -- it is NOT a real variable-granularity
-/// ordering constraint and NOT a fatal cycle -- **iff `dep` and `name`
-/// are members of the SAME resolved recurrence SCC**. A resolved SCC's
-/// members are evaluated in the verified `element_order` *inside* the
-/// combined per-element fragment (Phase 2 Task 5/6), so their intra-SCC
-/// edges (the N=1 self-edge and every N>=2 cross-edge alike) impose no
-/// whole-variable ordering. Every OTHER back-edge -- a genuine cycle, a
-/// partially-resolved SCC, or a cross-SCC edge between two distinct
-/// resolved SCCs -- is still a fatal `CircularDependency` (loud-safe: a
-/// back-edge is suppressed only with positive proof both endpoints share
-/// one resolved, element-acyclic SCC).
-pub(crate) fn same_resolved_scc(
-    scc_map: &BTreeMap<Ident<Canonical>, usize>,
-    a: &str,
-    b: &str,
-) -> bool {
-    // `BTreeMap<Ident<Canonical>, _>` probes by `&str` via `Borrow<str>`, so
-    // callers can keep passing the bare canonical names they already hold.
+/// A set of dependency-graph nodes over the dense index
+/// `model_dependency_graph_impl` numbers them in: one bit per node.
+///
+/// The transitive closure unions these (a word-wise OR per edge) where it
+/// used to union `BTreeSet<Ident>`s, an interned-string comparison per
+/// element per edge. A C-LEARN-sized model closes over a thousand nodes into
+/// sets of hundreds of names each, and those unions were a third of the
+/// dependency graph's cost.
+#[derive(Clone, PartialEq, Eq)]
+struct NodeSet {
+    words: Box<[u64]>,
+}
+
+impl NodeSet {
+    fn empty(n_nodes: usize) -> Self {
+        NodeSet {
+            words: vec![0; n_nodes.div_ceil(64)].into_boxed_slice(),
+        }
+    }
+
+    fn insert(&mut self, node: u32) {
+        self.words[(node / 64) as usize] |= 1u64 << (node % 64);
+    }
+
+    fn union_with(&mut self, other: &NodeSet) {
+        for (word, more) in self.words.iter_mut().zip(other.words.iter()) {
+            *word |= *more;
+        }
+    }
+
+    /// The members in ascending index order.
+    fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        self.words.iter().enumerate().flat_map(|(i, &word)| {
+            let mut bits = word;
+            std::iter::from_fn(move || {
+                if bits == 0 {
+                    return None;
+                }
+                let low = bits.trailing_zeros();
+                bits &= bits - 1;
+                Some(i as u32 * 64 + low)
+            })
+        })
+    }
+}
+
+/// One node's closed dependency set, once the walk has settled it.
+enum Closed {
+    /// Every node the walk reached from it, in the dense index.
+    Reached(NodeSet),
+    /// A module instance's direct dependencies, verbatim. Cross-model
+    /// dependencies are the orchestrator's, so a module stores exactly what
+    /// it reads -- including names this model does not declare, which the
+    /// dense index cannot hold -- and no reader absorbs it.
+    Direct(BTreeSet<Ident<Canonical>>),
+}
+
+/// The state of one transitive-closure walk (`closure_of`).
+struct ClosureWalk<'a> {
+    /// Node index to name.
+    ordered: &'a [&'a Ident<Canonical>],
+    var_info: &'a FxHashMap<Ident<Canonical>, VarInfo>,
+    /// Per node, whether it is a module instance (a walk never absorbs a
+    /// module's set).
+    is_module: &'a [bool],
+    /// Per node, its successors in this phase's cycle relation
+    /// (`walk_successors`), in the dense index.
+    succ: &'a [Vec<u32>],
+    /// Per node, the resolved recurrence SCC it belongs to, if any.
+    scc_of: &'a [Option<usize>],
+    is_initial: bool,
+    closed: Vec<Option<Closed>>,
+    /// The DFS stack as a membership vector: a successor that is still
+    /// being closed is a back-edge.
+    processing: Vec<bool>,
+}
+
+/// Whether two nodes are members of the SAME resolved recurrence SCC.
+///
+/// A back-edge `dep -> node` (where `dep` is already on the closure's DFS
+/// stack) is suppressed -- it is NOT a real variable-granularity ordering
+/// constraint and NOT a fatal cycle -- iff this holds: a resolved SCC's
+/// members are evaluated in the verified `element_order` inside the
+/// combined per-element fragment, so their intra-SCC edges order nothing at
+/// variable granularity. Every other back-edge (a genuine cycle, a
+/// partially-resolved SCC, an edge between two distinct resolved SCCs) is
+/// still fatal. Both unmapped is `false`: two ordinary nodes share no SCC.
+fn same_resolved_scc_at(scc_of: &[Option<usize>], a: u32, b: u32) -> bool {
     matches!(
-        (scc_map.get(a), scc_map.get(b)),
+        (scc_of[a as usize], scc_of[b as usize]),
         (Some(x), Some(y)) if x == y
     )
+}
+
+/// Close `node`'s dependency set (see `compute_transitive` in
+/// `model_dependency_graph_impl` for the two SCC-aware behaviors). `Err`
+/// carries the name of the node whose successor was a genuine back-edge.
+fn closure_of(w: &mut ClosureWalk<'_>, node: u32) -> Result<(), String> {
+    let at = node as usize;
+    if w.closed[at].is_some() {
+        return Ok(());
+    }
+    let name = w.ordered[at];
+    let info = &w.var_info[name];
+
+    // Stocks break the dependency chain in dt phase
+    if info.is_stock && !w.is_initial {
+        w.closed[at] = Some(Closed::Reached(NodeSet::empty(w.ordered.len())));
+        return Ok(());
+    }
+
+    // Skip modules -- cross-model deps handled at the orchestrator level
+    if info.is_module {
+        let direct = if w.is_initial {
+            &info.initial_deps
+        } else {
+            &info.dt_deps
+        };
+        w.closed[at] = Some(Closed::Direct(direct.clone()));
+        return Ok(());
+    }
+
+    // ── SCC-as-collapsed-node transitive accumulation ──────────
+    //
+    // If `node` is a member of a resolved recurrence SCC, treat the WHOLE
+    // SCC as one condensed node: compute its collapsed EXTERNAL transitive
+    // set once and assign the identical set to every member. Every member
+    // therefore ends with the SAME member-free transitive set = the union,
+    // over every member's successors that are NOT in this SCC, of `{dep} U
+    // transitive(dep)`. Intra-SCC successors are skipped entirely (not
+    // inserted, not recursed, not absorbed): their order is resolved inside
+    // the combined per-element fragment, so they impose no whole-variable
+    // ordering and -- crucially -- must not leak into any member's
+    // transitive set (else the topological sort would re-see the cycle).
+    // This unifies N=1 (1-member SCC: the lone member's self-edge is the
+    // only intra-SCC successor, skipped -- runlist byte-identical to the
+    // Phase 1 self-edge mechanism, since a set containing only `node`
+    // itself vs. empty produces the identical `topo_sort_str` output) and
+    // N>=2.
+    //
+    // Soundness: a resolved SCC is a *maximal* SCC of the whole-variable
+    // relation (`scc_components`) AND its induced element graph was proven
+    // acyclic. By maximality no external successor can transitively reach
+    // back into the SCC, so the external recursion never re-enters the SCC
+    // and the collapsed set is well-defined and member-free. A genuine
+    // cycle is absent from `scc_of` (loud-safe verdict), so its back-edge
+    // is still caught by the normal `processing` check below.
+    if let Some(scc_id) = w.scc_of[at] {
+        // Already being collapsed (re-entered via an external recursion).
+        // This cannot happen for a correctly identified maximal SCC (no
+        // external successor reaches a member); guarding it makes a
+        // mis-identified SCC loud-safe (no infinite recursion, conservative
+        // empty contribution) rather than a panic.
+        if w.processing[at] {
+            return Ok(());
+        }
+        // The members in index (lexicographic) order, so the collapsed set
+        // is walked byte-stably; the set itself is order-independent.
+        let members: Vec<u32> = (0..w.ordered.len() as u32)
+            .filter(|m| w.scc_of[*m as usize] == Some(scc_id))
+            .collect();
+        // Mark every member processing so a (maximality-impossible)
+        // external dep that referenced a member is a loud-safe condition,
+        // never a silent miss.
+        for &m in &members {
+            w.processing[m as usize] = true;
+        }
+        let mut external = NodeSet::empty(w.ordered.len());
+        let succ = w.succ;
+        for &m in &members {
+            for &dep in &succ[m as usize] {
+                // Intra-SCC successor: resolved inside the combined
+                // fragment, contributes no whole-variable ordering and must
+                // not enter any member's set.
+                if w.scc_of[dep as usize] == Some(scc_id) {
+                    continue;
+                }
+                external.insert(dep);
+                if w.processing[dep as usize] {
+                    // `dep` is external (not a member) yet on the DFS stack:
+                    // a genuine cycle through an external var. It cannot
+                    // share this SCC (`members` is the entire SCC), and two
+                    // distinct resolved SCCs cannot form a cycle (they would
+                    // be one SCC), so the same-SCC test is necessarily false
+                    // here -- still fatal (loud-safe).
+                    if same_resolved_scc_at(w.scc_of, dep, m) {
+                        continue;
+                    }
+                    return Err(w.ordered[m as usize].as_str().to_string());
+                }
+                if w.closed[dep as usize].is_none() {
+                    closure_of(w, dep)?;
+                }
+                // Same `!is_module` non-absorption guard as the normal path:
+                // a module's transitive set is not absorbed (cross-model
+                // deps handled upstream).
+                if !w.is_module[dep as usize]
+                    && let Some(Closed::Reached(set)) = &w.closed[dep as usize]
+                {
+                    external.union_with(set);
+                }
+            }
+        }
+        for &m in &members {
+            w.processing[m as usize] = false;
+        }
+        // Assign the identical member-free set to EVERY member so the SCC
+        // is one condensed node in the topological sort.
+        for &m in &members {
+            w.closed[m as usize] = Some(Closed::Reached(external.clone()));
+        }
+        return Ok(());
+    }
+
+    w.processing[at] = true;
+
+    // The successor set this normal node contributes to cycle detection AND
+    // the transitive/ordering map, sourced from the SINGLE shared cycle
+    // relation (`walk_successors`, precomputed per phase). In the init phase
+    // stocks do NOT break the chain (that filter is dt-only -- the
+    // `info.is_stock && !is_initial` sink above does not fire here), so the
+    // init relation is the init deps filtered only to known vars.
+    let succ = w.succ;
+    let mut transitive = NodeSet::empty(w.ordered.len());
+    for &dep in &succ[at] {
+        transitive.insert(dep);
+
+        if w.processing[dep as usize] {
+            // An intra-SCC back-edge of a resolved recurrence SCC (`dep` and
+            // `node` share a resolved SCC) is resolved internally via the
+            // SCC's verified per-element order and is NOT a fatal cycle.
+            // This uniformly covers the N=1 self-edge (`dep == node`,
+            // 1-member SCC) and the N>=2 cross-edge (`dep != node`, same
+            // SCC). Resolved SCC members are normally handled by the
+            // collapsed-node block above and never reach this loop, so for a
+            // resolved SCC this is defense-in-depth; every OTHER back-edge --
+            // a genuine cycle, a partially-resolved SCC, or a cross-SCC edge
+            // between two distinct resolved SCCs -- still returns the
+            // circular-dependency error (loud-safe).
+            if same_resolved_scc_at(w.scc_of, dep, node) {
+                continue;
+            }
+            return Err(name.as_str().to_string()); // circular dependency
+        }
+
+        if w.closed[dep as usize].is_none() {
+            closure_of(w, dep)?;
+        }
+
+        // `succ` only holds known vars (`walk_successors` filters to
+        // `var_info` targets in both phases), so this lookup never misses.
+        // The `!is_module` transitive non-absorption guard is preserved
+        // exactly -- it governs only whether `dep`'s set is absorbed, never
+        // iteration.
+        if !w.is_module[dep as usize]
+            && let Some(Closed::Reached(set)) = &w.closed[dep as usize]
+        {
+            transitive.union_with(set);
+        }
+    }
+
+    w.processing[at] = false;
+    w.closed[at] = Some(Closed::Reached(transitive));
+    Ok(())
 }
 
 pub(crate) fn model_dependency_graph_impl(
@@ -1692,6 +1933,53 @@ pub(crate) fn model_dependency_graph_impl(
 ) -> ModelDepGraphResult {
     let module_input_names = module_input_names.to_vec();
     let (var_info, all_init_referenced) = build_var_info(db, model, project, &module_input_names);
+
+    // The recurrence resolution is defined over the no-input wiring (see
+    // `resolve_recurrence_sccs`); when this graph IS the no-input one, its
+    // `var_info` is that wiring and is reused rather than rebuilt.
+    let resolve = |phase: SccPhase| -> DtSccResolution {
+        if module_input_names.is_empty() {
+            resolve_recurrence_sccs_over(db, model, project, phase, &var_info)
+        } else {
+            resolve_recurrence_sccs(db, model, project, phase)
+        }
+    };
+
+    // The dense index the closure works in. Nodes are numbered in
+    // lexicographic order of their names, so a set's ascending indices are
+    // its names in `BTreeSet` order and each closed set materializes into
+    // the `BTreeSet<Ident>` its readers iterate from an already-sorted
+    // sequence. The traversal order below stays `var_info`'s key order,
+    // exactly as before, because it decides which member of a genuine cycle
+    // is the one reported.
+    let mut ordered: Vec<&Ident<Canonical>> = var_info.keys().collect();
+    ordered.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+    let index_of: FxHashMap<&Ident<Canonical>, u32> = ordered
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (*name, i as u32))
+        .collect();
+    let visit_order: Vec<u32> = var_info.keys().map(|name| index_of[name]).collect();
+    let is_module: Vec<bool> = ordered
+        .iter()
+        .map(|name| var_info[*name].is_module)
+        .collect();
+    // Each phase's successor lists in the dense index, computed once: the dt
+    // gate may walk its relation twice and the init gate twice, and only the
+    // SCC map changes between walks, never the relation.
+    let successors = |phase: SccPhase| -> Vec<Vec<u32>> {
+        ordered
+            .iter()
+            .map(|name| {
+                walk_successors(&var_info, name.as_str(), phase.clone())
+                    .into_iter()
+                    .map(|dep| index_of[dep])
+                    .collect()
+            })
+            .collect()
+    };
+    let succ_dt = successors(SccPhase::Dt);
+    let succ_init = successors(SccPhase::Initial);
 
     // Compute transitive dependencies (simplified all_deps without
     // cross-model support).
@@ -1712,275 +2000,71 @@ pub(crate) fn model_dependency_graph_impl(
     // before (zero extra work).
     //
     // Two SCC-aware behaviors, both keyed off `scc_map`:
-    //  1. *Collapsed-node transitive accumulation* (the
-    //     `scc_map.get(name)` block below): every member of an SCC ends
-    //     with the SAME transitive set = the union of all members'
-    //     EXTERNAL (non-SCC) successors and their transitive deps, and NO
-    //     SCC member appears in any member's set. The SCC is thus one
-    //     condensed node, positioned after its external deps and before
-    //     its external consumers, so the topological runlist never re-sees
-    //     the intra-SCC cycle.
-    //  2. *SCC-aware back-edge break* (the `processing.contains(dep)` site
-    //     via `same_resolved_scc`): an intra-SCC back-edge is suppressed
-    //     (no error) instead of fatal. Members are handled by (1) at
-    //     `compute_inner` entry and never reach the normal loop, so for a
-    //     resolved SCC this site is defense-in-depth; every back-edge NOT
-    //     within one resolved SCC (a genuine cycle, a partially-resolved
-    //     SCC, a cross-SCC edge) is still a fatal `CircularDependency`
-    //     (loud-safe).
+    //  1. *Collapsed-node transitive accumulation* (the `scc_of[node]`
+    //     block below): every member of an SCC ends with the SAME
+    //     transitive set = the union of all members' EXTERNAL (non-SCC)
+    //     successors and their transitive deps, and NO SCC member appears
+    //     in any member's set. The SCC is thus one condensed node,
+    //     positioned after its external deps and before its external
+    //     consumers, so the topological runlist never re-sees the intra-SCC
+    //     cycle.
+    //  2. *SCC-aware back-edge break* (the `processing[dep]` site via the
+    //     same-SCC check): an intra-SCC back-edge is suppressed (no error)
+    //     instead of fatal. Members are handled by (1) at `compute_inner`
+    //     entry and never reach the normal loop, so for a resolved SCC this
+    //     site is defense-in-depth; every back-edge NOT within one resolved
+    //     SCC (a genuine cycle, a partially-resolved SCC, a cross-SCC edge)
+    //     is still a fatal `CircularDependency` (loud-safe).
+    //
+    // The sets are `NodeSet`s over the dense index, so absorbing a
+    // dependency's closure is a word-wise OR rather than one interned-string
+    // comparison per element; on C-LEARN the closure's `BTreeSet` unions were
+    // a third of the dependency graph's cost, itself a quarter of a cold
+    // compile. Every set is materialized to a `BTreeSet<Ident>` on the way
+    // out, so nothing downstream sees the representation.
     let compute_transitive =
         |is_initial: bool,
          scc_map: &BTreeMap<Ident<Canonical>, usize>|
          -> Result<HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>, String> {
-            // Hot working maps use FxHash (fixed-seed, deterministic) and
-            // interned `Ident<Canonical>` keys: the O(V^2) transitive-closure
-            // clones are Arc-refcount bumps and map ops stop paying SipHash.
-            // `all_deps` insertion/lookup order does not leak into output --
-            // every dependency *set* is a `BTreeSet` (lexicographic), and the
-            // runlist sort tie-breaks by `topo_sort_str`'s visit order over a
-            // pre-sorted `names` list -- so the FxHash iteration order is never
-            // observable. `processing` is membership-only (DFS-stack back-edge
-            // detection); its order is irrelevant.
-            let mut all_deps: FxHashMap<Ident<Canonical>, Option<BTreeSet<Ident<Canonical>>>> =
-                var_info.keys().map(|k| (k.clone(), None)).collect();
-            let mut processing: FxHashSet<Ident<Canonical>> = FxHashSet::default();
+            let scc_of: Vec<Option<usize>> = ordered
+                .iter()
+                .map(|name| scc_map.get(*name).copied())
+                .collect();
+            let n = ordered.len();
+            let mut walk = ClosureWalk {
+                ordered: &ordered,
+                var_info: &var_info,
+                is_module: &is_module,
+                succ: if is_initial { &succ_init } else { &succ_dt },
+                scc_of: &scc_of,
+                is_initial,
+                closed: (0..n).map(|_| None).collect(),
+                processing: vec![false; n],
+            };
 
-            fn compute_inner(
-                var_info: &FxHashMap<Ident<Canonical>, VarInfo>,
-                all_deps: &mut FxHashMap<Ident<Canonical>, Option<BTreeSet<Ident<Canonical>>>>,
-                processing: &mut FxHashSet<Ident<Canonical>>,
-                name: &Ident<Canonical>,
-                is_initial: bool,
-                scc_map: &BTreeMap<Ident<Canonical>, usize>,
-            ) -> Result<(), String> {
-                if all_deps.get(name).and_then(|d| d.as_ref()).is_some() {
-                    return Ok(());
-                }
-
-                let info = match var_info.get(name) {
-                    Some(info) => info,
-                    None => return Ok(()), // unknown variable handled at model level
-                };
-
-                // Stocks break the dependency chain in dt phase
-                if info.is_stock && !is_initial {
-                    all_deps.insert(name.clone(), Some(BTreeSet::new()));
-                    return Ok(());
-                }
-
-                // Skip modules -- cross-model deps handled at the orchestrator level
-                if info.is_module {
-                    let direct = if is_initial {
-                        &info.initial_deps
-                    } else {
-                        &info.dt_deps
-                    };
-                    all_deps.insert(name.clone(), Some(direct.clone()));
-                    return Ok(());
-                }
-
-                // ── SCC-as-collapsed-node transitive accumulation ──────────
-                //
-                // If `name` is a member of a resolved recurrence SCC, treat
-                // the WHOLE SCC as one condensed node: compute its collapsed
-                // EXTERNAL transitive set once and assign the identical set to
-                // every member. Every member therefore ends with the SAME
-                // member-free transitive set = the union, over every member's
-                // successors that are NOT in this SCC, of `{dep} U
-                // transitive(dep)`. Intra-SCC successors are skipped entirely
-                // (not inserted, not recursed, not absorbed): their order is
-                // resolved inside the combined per-element fragment, so they
-                // impose no whole-variable ordering and -- crucially -- must
-                // not leak into any member's transitive set (else the
-                // topological sort would re-see the cycle). This unifies N=1
-                // (1-member SCC: the lone member's self-edge is the only
-                // intra-SCC successor, skipped -- runlist byte-identical to
-                // the Phase 1 self-edge mechanism, since a set containing only
-                // `name` itself vs. empty produces the identical
-                // `topo_sort_str` output) and N>=2.
-                //
-                // Soundness: a resolved SCC is a *maximal* SCC of the
-                // whole-variable relation (`scc_components`) AND its induced
-                // element graph was proven acyclic. By maximality no external
-                // successor can transitively reach back into the SCC, so the
-                // external recursion never re-enters the SCC and the collapsed
-                // set is well-defined and member-free. A genuine cycle is
-                // absent from `scc_map` (loud-safe verdict), so its back-edge
-                // is still caught by the normal `processing` check below.
-                if let Some(&scc_id) = scc_map.get(name) {
-                    // Already being collapsed (re-entered via an external
-                    // recursion). This cannot happen for a correctly
-                    // identified maximal SCC (no external successor reaches a
-                    // member); guarding it makes a mis-identified SCC
-                    // loud-safe (no infinite recursion, conservative empty
-                    // contribution) rather than a panic.
-                    if processing.contains(name) {
-                        return Ok(());
-                    }
-                    // Borrow the SCC's interned member idents from `scc_map`
-                    // (no clone). `scc_map` is a `BTreeMap`, so this iterates in
-                    // lexicographic order.
-                    let members: BTreeSet<&Ident<Canonical>> = scc_map
-                        .iter()
-                        .filter(|&(_, &id)| id == scc_id)
-                        .map(|(m, _)| m)
-                        .collect();
-                    // Mark every member processing so a (maximality-
-                    // impossible) external dep that referenced a member is a
-                    // loud-safe condition, never a silent miss.
-                    for m in &members {
-                        processing.insert((*m).clone());
-                    }
-                    let mut external: BTreeSet<Ident<Canonical>> = BTreeSet::new();
-                    // `members` is a BTreeSet => sorted iteration; the
-                    // external set is order-independent (a BTreeSet), so the
-                    // collapsed result is byte-stable.
-                    for m in &members {
-                        let succ: Vec<&Ident<Canonical>> =
-                            walk_successors(var_info, m.as_str(), phase_for(is_initial));
-                        for dep in succ {
-                            // Intra-SCC successor: resolved inside the
-                            // combined fragment, contributes no whole-variable
-                            // ordering and must not enter any member's set.
-                            if members.contains(&dep) {
-                                continue;
-                            }
-                            external.insert(dep.clone());
-                            if processing.contains(dep) {
-                                // `dep` is external (not in `members`) yet on
-                                // the DFS stack: a genuine cycle through an
-                                // external var. It cannot share this SCC
-                                // (`members` is the entire SCC), and two
-                                // distinct resolved SCCs cannot form a cycle
-                                // (they would be one SCC), so
-                                // `same_resolved_scc` is necessarily false
-                                // here -- still fatal (loud-safe).
-                                if same_resolved_scc(scc_map, dep.as_str(), m.as_str()) {
-                                    continue;
-                                }
-                                return Err(m.as_str().to_string());
-                            }
-                            if all_deps.get(dep).and_then(|d| d.as_ref()).is_none() {
-                                compute_inner(
-                                    var_info, all_deps, processing, dep, is_initial, scc_map,
-                                )?;
-                            }
-                            // Same `!is_module` non-absorption guard as the
-                            // normal path: a module's transitive set is not
-                            // absorbed (cross-model deps handled upstream).
-                            if var_info.get(dep).map(|d| !d.is_module).unwrap_or(false)
-                                && let Some(Some(dep_deps)) = all_deps.get(dep)
-                            {
-                                external.extend(dep_deps.iter().cloned());
-                            }
-                        }
-                    }
-                    for m in &members {
-                        processing.remove(*m);
-                    }
-                    // Assign the identical member-free set to EVERY member so
-                    // the SCC is one condensed node in the topological sort.
-                    for m in &members {
-                        all_deps.insert((*m).clone(), Some(external.clone()));
-                    }
-                    return Ok(());
-                }
-
-                processing.insert(name.clone());
-
-                // The successor set this normal node contributes to cycle
-                // detection AND the `all_deps` transitive/ordering map. It
-                // is sourced from the SINGLE shared cycle relation
-                // (`walk_successors`), selected for this phase by
-                // `phase_for(is_initial)`. In the init phase stocks do NOT
-                // break the chain (that filter is dt-only -- `compute_inner`'s
-                // `info.is_stock && !is_initial` sink does not fire here), so
-                // the init relation is the init deps filtered only to known
-                // vars. Either way this is exactly the effective set the
-                // original `for dep in direct { if !var_info.contains_key
-                // {continue} if !is_initial && dep_info.is_stock {continue}
-                // ... }` loop iterated, in the same `BTreeSet`-sorted order,
-                // so cycle detection (first back-edge) and the `all_deps`
-                // transitive map are byte-identical. `walk_successors`'s
-                // defensive absent/module guards never fire here -- the
-                // stock/module early-returns above already handled those
-                // before this point. Sharing one relation by construction
-                // means the init-phase per-element recurrence resolution
-                // observes the engine's actual init relation, not a
-                // re-derivation. Only the iteration set is factored out; the
-                // stock/module early-returns above and the `transitive`
-                // accumulation below are untouched.
-                let successors: Vec<&Ident<Canonical>> =
-                    walk_successors(var_info, name.as_str(), phase_for(is_initial));
-
-                let mut transitive: BTreeSet<Ident<Canonical>> = BTreeSet::new();
-                for dep in successors {
-                    transitive.insert(dep.clone());
-
-                    if processing.contains(dep) {
-                        // An intra-SCC back-edge of a resolved recurrence SCC
-                        // (`dep` and `name` share a resolved SCC) is resolved
-                        // internally via the SCC's verified per-element order
-                        // and is NOT a fatal cycle. This uniformly covers the
-                        // N=1 self-edge (`dep == name`, 1-member SCC) and the
-                        // N>=2 cross-edge (`dep != name`, same SCC). Resolved
-                        // SCC members are normally handled by the collapsed-
-                        // node block above and never reach this loop, so for a
-                        // resolved SCC this is defense-in-depth; every OTHER
-                        // back-edge -- a genuine cycle, a partially-resolved
-                        // SCC, or a cross-SCC edge between two distinct
-                        // resolved SCCs -- still returns the
-                        // circular-dependency error (loud-safe).
-                        if same_resolved_scc(scc_map, dep.as_str(), name.as_str()) {
-                            continue;
-                        }
-                        return Err(name.as_str().to_string()); // circular dependency
-                    }
-
-                    if all_deps.get(dep).and_then(|d| d.as_ref()).is_none() {
-                        compute_inner(var_info, all_deps, processing, dep, is_initial, scc_map)?;
-                    }
-
-                    // `successors` only contains known vars (`walk_successors`
-                    // filters to `var_info.contains_key` targets in both
-                    // phases), so this lookup never misses. The
-                    // `!dep_info.is_module` transitive non-absorption guard
-                    // is preserved exactly -- it governs only whether
-                    // `dep`'s transitive set is absorbed, never iteration.
-                    if var_info.get(dep).map(|d| !d.is_module).unwrap_or(false)
-                        && let Some(Some(dep_deps)) = all_deps.get(dep)
-                    {
-                        transitive.extend(dep_deps.iter().cloned());
-                    }
-                }
-
-                processing.remove(name);
-                all_deps.insert(name.clone(), Some(transitive));
-                Ok(())
-            }
-
-            // Iterate every node once. The keys (interned idents) are cloned
-            // (Arc bumps) so the borrow of `var_info` is released before the
-            // mutable `all_deps`/`processing` recursion.
-            let names: Vec<Ident<Canonical>> = var_info.keys().cloned().collect();
-            for name in &names {
-                compute_inner(
-                    &var_info,
-                    &mut all_deps,
-                    &mut processing,
-                    name,
-                    is_initial,
-                    scc_map,
-                )?;
+            // Iterate every node once, in `var_info`'s key order.
+            for &node in &visit_order {
+                closure_of(&mut walk, node)?;
             }
 
             // Materialize the std `HashMap` (default hasher) the salsa return
-            // type uses; the FxHash working map's iteration order is irrelevant
-            // (each value is a `BTreeSet`, and downstream consumers either probe
-            // by key or re-sort).
-            Ok(all_deps
+            // type uses; its iteration order is irrelevant (each value is a
+            // `BTreeSet`, and downstream consumers either probe by key or
+            // re-sort).
+            Ok(walk
+                .closed
                 .into_iter()
-                .map(|(k, v)| (k, v.unwrap_or_default()))
+                .enumerate()
+                .map(|(i, closed)| {
+                    let set = match closed {
+                        Some(Closed::Reached(set)) => {
+                            set.iter().map(|j| ordered[j as usize].clone()).collect()
+                        }
+                        Some(Closed::Direct(direct)) => direct,
+                        None => BTreeSet::new(),
+                    };
+                    (ordered[i].clone(), set)
+                })
                 .collect())
         };
 
@@ -2009,8 +2093,7 @@ pub(crate) fn model_dependency_graph_impl(
     // actually found a fully-resolvable back-edge (acyclic happy path /
     // loud-safe fallback => zero extra work).
     let dt_scc_map: BTreeMap<Ident<Canonical>, usize> = if dt_first.is_err() {
-        let resolution =
-            crate::db::dep_graph::resolve_recurrence_sccs(db, model, project, SccPhase::Dt);
+        let resolution = resolve(SccPhase::Dt);
         if !resolution.has_unresolved && !resolution.resolved.is_empty() {
             let mut map = BTreeMap::new();
             scc_map_from_resolved(&resolution.resolved, 0, &mut map);
@@ -2069,12 +2152,7 @@ pub(crate) fn model_dependency_graph_impl(
             // this never appeared as a dt SCC). Run the init-phase
             // recurrence resolution (Phase 2 Task 3), reusing the
             // phase-parameterized builder.
-            let init_resolution = crate::db::dep_graph::resolve_recurrence_sccs(
-                db,
-                model,
-                project,
-                SccPhase::Initial,
-            );
+            let init_resolution = resolve(SccPhase::Initial);
 
             // Exclude init SCCs whose members the dt path already
             // resolved: a both-relations aux self-recurrence is
@@ -2112,7 +2190,7 @@ pub(crate) fn model_dependency_graph_impl(
                 // ADDITION to the dt-resolved SCCs'), then re-run. Init-
                 // only SCC ids are offset past the dt SCC ids
                 // (`resolved_sccs.len()` dt SCCs are recorded so far) so
-                // each SCC keeps a distinct id and `same_resolved_scc`
+                // each SCC keeps a distinct id and `same_resolved_scc_at`
                 // never conflates a dt SCC with an init-only one. A
                 // residual genuine cycle is still loud-safe (clear every
                 // resolved SCC and flag -- mirrors the dt re-run's

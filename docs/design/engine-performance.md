@@ -87,7 +87,9 @@ sweep cannot see a changed runlist order that happens to produce the same
 numbers, so the per-model runlists, cycle verdict, resolved SCCs,
 dependency-graph edge multiset, run-invariant prefix length and (LTM on, both
 modes) LTM variable set and detected loops are dumped on both trees and
-diffed.
+diffed (`examples/depgraph_dump.rs` dumps the runlists, cycle verdict,
+resolved SCCs and both dependency maps for every corpus model; the rest is
+still ad hoc).
 
 So a few-percent effect is resolved by one build pair on the instruction
 channel and is **not** resolvable on the cycles channel without a deliberate
@@ -797,6 +799,28 @@ Three facts about the LTM rows decide what can be done about them:
   `Expr2`, symbolic, resolved: 17.2 MiB plain). One retained representation
   per tier is what incrementality needs; the parse trees and the dependency
   graph's transitive closures are the evictable ones.
+
+**The dependency graph is a quarter of a cold plain compile** (7 executions
+of `model_dependency_graph` at ~31 M instructions each, 25% of 866 M), and a
+`perf` profile with inlined frames splits it three ways: the transitive
+closure 32%, `resolve_recurrence_sccs` 29% (C-LEARN carries a 22-member
+recurrence cluster, so the dt gate errs on its first pass, resolves the SCCs
+and walks again), `build_var_info` 16%. The closure's cost was its
+representation -- `BTreeSet<Ident>` unions, one interned-string `memcmp` per
+element per edge -- so it now closes over a dense node index with one bit
+per node (`NodeSet` in `db/dep_graph.rs`): a word-wise OR per edge, the
+traversal order untouched, and every set materialized back into the
+`BTreeSet<Ident>` its readers iterate from an already-sorted sequence. The
+resolution also reuses the graph's own `var_info` on the no-input wiring
+instead of rebuilding it. Whole-process cold plain compile
+(`CLEARN_COMPILE_ITERS=5`): 6.937 G -> 6.449 G retired instructions
+(-7.0%, three interleaved pairs, spread 0.05%); under LTM -0.15%, the graph
+being a small share there. The dependency graphs of every model under
+`test/` are byte-identical before and after (`examples/depgraph_dump.rs`,
+which is the sweep "Measuring a change" asks for when a change touches
+runlists or the dependency relation). What remains in the graph is
+`resolve_recurrence_sccs`' per-SCC symbolic refinement and the per-variable
+canonicalization in `build_var_info`.
 
 **The edit path is O(model); ~1% of it is O(edit).** A structure-preserving
 literal edit costs 210 M instructions plain (23 ms) and 7.4 G under LTM
