@@ -361,6 +361,29 @@ impl SimlinDb {
         self.sync_state.as_ref().map(|s| s.project)
     }
 
+    /// Free the memos this revision's queries replaced.
+    ///
+    /// Salsa does not drop a superseded memo when a query re-executes: it
+    /// queues the old one in the ingredient's deferred-delete list and frees
+    /// the list at the START of the next revision, i.e. inside the next input
+    /// write. A long-lived database that answers queries after a sync and
+    /// then waits for the next edit therefore holds every value the edit
+    /// replaced until that edit arrives -- on C-LEARN under LTM, 117 MiB
+    /// after one rename of an unreferenced constant, and 5 MiB plain
+    /// (docs/design/engine-performance.md, C7). This runs the same reset
+    /// on demand, so an embedder calls it once the queries an edit provoked
+    /// have run (libsimlin does, at the end of every edit and compile entry
+    /// point): 10 ms under LTM when there is something to free, a walk over
+    /// empty lists otherwise.
+    ///
+    /// Salsa's own name for the primitive is `trigger_lru_eviction`; nothing
+    /// here declares an LRU, and the deferred-delete sweep is the part that
+    /// matters. Like any write it needs the db exclusively: a snapshot held
+    /// elsewhere would block it.
+    pub fn release_replaced_memos(&mut self) {
+        salsa::Database::trigger_lru_eviction(self);
+    }
+
     /// Sync the conveyor/queue-EXPANDED twin of the project into the db's second
     /// input slot, returning its `SourceProject` handle.
     ///

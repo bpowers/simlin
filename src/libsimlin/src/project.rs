@@ -833,17 +833,18 @@ pub unsafe extern "C" fn simlin_project_is_simulatable(
     // the `Conveyor/QueueNotExpanded` guard on the ordinary compile path.
     let datamodel_locked = proj.datamodel.lock().unwrap();
     let mut db_locked = proj.db.lock().unwrap();
-    if let Some(source_project) = db_locked.current_source_project() {
-        engine::build_sim(
-            &mut db_locked,
-            source_project,
-            &datamodel_locked,
-            model_name,
-        )
-        .is_ok()
-    } else {
-        false
-    }
+    let Some(source_project) = db_locked.current_source_project() else {
+        return false;
+    };
+    let simulatable = engine::build_sim(
+        &mut db_locked,
+        source_project,
+        &datamodel_locked,
+        model_name,
+    )
+    .is_ok();
+    db_locked.release_replaced_memos();
+    simulatable
 }
 
 /// Get all errors in a project including static analysis and compilation errors
@@ -925,6 +926,10 @@ pub unsafe extern "C" fn simlin_project_get_errors(
             &datamodel_locked,
         )
     };
+
+    // Whatever the compile and diagnostics above re-derived, the superseded
+    // memos are freed now (see `SimlinDb::release_replaced_memos`).
+    db_locked.release_replaced_memos();
 
     if all_errors.is_empty() {
         return ptr::null_mut();

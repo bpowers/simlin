@@ -60,6 +60,52 @@ fn two_var_project() -> datamodel::Project {
     }
 }
 
+/// A re-executed query's superseded memo -- and everything it holds -- is
+/// freed by `release_replaced_memos`, not deferred to the next edit. Pinned
+/// on the refcount of the program the first compile handed out: the second
+/// compile assembles a different program, so the first is alive only
+/// through the superseded memo until the release.
+#[test]
+fn releasing_replaced_memos_drops_the_superseded_program() {
+    let mut db = SimlinDb::default();
+    let project = two_var_project();
+    let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
+    let first = compile_project_incremental(&db, state1.project, "main").expect("first compile");
+
+    let mut edited = project.clone();
+    edited.models[0].variables[0] = datamodel::Variable::Aux(datamodel::Aux {
+        ident: "alpha".to_string(),
+        equation: datamodel::Equation::Scalar("11".to_string()),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    });
+    let state2 = sync_from_datamodel_incremental(&mut db, &edited, Some(&state1));
+    let second = compile_project_incremental(&db, state2.project, "main").expect("second compile");
+    assert!(
+        !Arc::ptr_eq(&first, &second),
+        "an equation edit must assemble a new program"
+    );
+    assert_eq!(
+        Arc::strong_count(&first),
+        2,
+        "salsa keeps the superseded memo (and its program) until the next revision"
+    );
+
+    db.release_replaced_memos();
+    assert_eq!(
+        Arc::strong_count(&first),
+        1,
+        "releasing the replaced memos frees the superseded program"
+    );
+    // The live memo is untouched: the current program is still served.
+    let again = compile_project_incremental(&db, state2.project, "main").expect("recompile");
+    assert!(Arc::ptr_eq(&second, &again));
+}
+
 #[test]
 fn test_variable_dimensions_scalar() {
     let db = SimlinDb::default();

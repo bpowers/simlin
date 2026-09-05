@@ -822,6 +822,16 @@ runlists or the dependency relation). What remains in the graph is
 `resolve_recurrence_sccs`' per-SCC symbolic refinement and the per-variable
 canonicalization in `build_var_info`.
 
+**Salsa holds every replaced memo until the next revision.** A memo replaced
+by re-execution is queued in its ingredient's deferred-delete list and freed
+by `reset_for_new_revision`, which runs inside the NEXT input write. For an
+editor idling between submits that is indefinitely: one rename of an
+unreferenced constant leaves 5.4 MiB (plain) or 116.9 MiB (LTM) waiting.
+`SimlinDb::release_replaced_memos` runs the same reset on demand (10 ms under
+LTM), and libsimlin calls it at the end of every edit and compile entry
+point, so the drop is paid inside the edit that caused it rather than one
+edit late.
+
 **The edit path is O(model); ~1% of it is O(edit).** A structure-preserving
 literal edit costs 210 M instructions plain (23 ms) and 7.4 G under LTM
 (661 ms): the whole-model unit pass (28%), the assembly merge over every

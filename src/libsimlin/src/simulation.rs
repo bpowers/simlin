@@ -207,6 +207,9 @@ pub unsafe extern "C" fn simlin_sim_new(
             if enable_ltm {
                 engine::db::set_project_ltm_enabled(db, source_project, false);
             }
+            // Free the memos this compile superseded rather than holding
+            // them until the next edit (see `SimlinDb::release_replaced_memos`).
+            db.release_replaced_memos();
             (result, loop_partitions, loop_element_index, ltm_mode)
         } else {
             (

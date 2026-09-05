@@ -610,12 +610,16 @@ pub(crate) unsafe fn apply_project_patch_internal(
         // dropping variables added during staging -- still under the db lock,
         // so no concurrent reader can observe staged state.
         db.restore(&original_datamodel, prev);
-        return;
+    } else {
+        // Commit: the staged state is already the db's current sync state
+        // from `sync_staged`, so only the canonical datamodel needs to be
+        // written.
+        *datamodel_locked = staged_datamodel;
     }
-
-    // Commit: the staged state is already the db's current sync state from
-    // `sync_staged`, so only the canonical datamodel needs to be written.
-    *datamodel_locked = staged_datamodel;
+    // The diagnostics and compile above replaced every memo the edit
+    // invalidated; free the superseded ones now rather than holding them
+    // until the next edit (see `SimlinDb::release_replaced_memos`).
+    db.release_replaced_memos();
 }
 
 // ── FFI entry point ────────────────────────────────────────────────────
