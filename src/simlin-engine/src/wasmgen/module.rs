@@ -542,10 +542,15 @@ struct PerInstance<'a> {
 /// unrolling past the per-function budget -- returns [`WasmGenError::Unsupported`]
 /// rather than emitting a wrong module.
 ///
-/// This is the ORDINARY-model entry point: it asserts (in debug) that `sim` has
-/// not had its overridable-constant set retracted, i.e. that it did not come from
-/// the special conveyor/queue build path. A conveyor or queue model must use
-/// [`compile_simulation_with_plans`], which carries the plans the pass needs.
+/// This is the ORDINARY-model entry point: no conveyor or queue pass is
+/// lowered. Nothing here can tell a special-stock program from an ordinary
+/// one -- a pass-driven flow's placeholder `0` compiles to the same flows
+/// `AssignConstCurr` as a user's constant `0`, and the shared program carries
+/// no marker -- so a conveyor or queue program handed in without its plans is
+/// emitted with no pass and every pass-written slot overridable, with nothing
+/// to detect it. A special-stock model goes through
+/// [`compile_simulation_with_plans`] with the plans `queue_compile::compile_sim`
+/// resolved (what [`compile_datamodel_to_artifact`], the production path, does).
 pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, WasmGenError> {
     compile_simulation_with_plans(sim, &[], &[])
 }
@@ -906,40 +911,35 @@ fn compile_with_passes(
     total_bytes = heap_base;
 
     let mut overridable_defaults = collect_overridable_defaults(&sim.modules, &sim.root, 0);
-    // Pass-written slots (driven outflow rates, published container values) are NOT
-    // overridable: their placeholder `0` equation compiles to an `AssignConstCurr`
-    // the scan above sees, but the pass overwrites the slot every step, so an
-    // accepted override would be silently ineffective (GH #871). The VM retracts
-    // exactly this set when the plans are attached (`Vm::set_conveyor_plans` /
-    // `set_queue_plans`); mirroring it here is what makes the blob's `set_value`
-    // (which validates against the validity region seeded from this list) reject
-    // the same offsets the VM does.
-    let pass_written: std::collections::HashSet<usize> = queue_plans
-        .iter()
-        .flat_map(|p| p.pass_written_offsets())
-        .chain(conveyor_plans.iter().flat_map(|p| p.pass_written_offsets()))
-        .collect();
-    overridable_defaults.retain(|(off, _)| !pass_written.contains(off));
-    // Defense in depth: the offsets `collect_overridable_defaults` reports must be
-    // exactly the program's constants (`constant_offsets`, the keys of
-    // `cached_constant_info`, which the shared program never edits) minus the
-    // same pass-written set. Both walk the same flows-`AssignConstCurr` rule, so
-    // any divergence is a bug: a blob's `set_value` would accept/reject a
-    // different set than the VM. Checked only in debug.
+    // Defense in depth: `collect_overridable_defaults` and the VM's
+    // `collect_constant_info` are two walks of the same flows-`AssignConstCurr`
+    // rule (this one also needs each constant's default), so the offsets they
+    // find must agree exactly; a divergence would make the blob's `set_value`
+    // accept or reject a different set than the VM. Compared BEFORE the
+    // pass-written subtraction below, so what is checked is the two walks and
+    // nothing derived from this function's own arguments. Checked only in debug.
     debug_assert!(
         {
             let mut ours: Vec<usize> = overridable_defaults.iter().map(|(off, _)| *off).collect();
             ours.sort_unstable();
             ours.dedup();
-            let mut theirs: Vec<usize> = sim
-                .constant_offsets()
-                .filter(|off| !pass_written.contains(off))
-                .collect();
+            let mut theirs: Vec<usize> = sim.constant_offsets().collect();
             theirs.sort_unstable();
             ours == theirs
         },
         "wasmgen overridable-constant offsets diverged from CompiledSimulation::constant_offsets"
     );
+    // Pass-written slots (driven outflow rates, published container values) are NOT
+    // overridable: their placeholder `0` equation compiles to an `AssignConstCurr`
+    // the scan above sees, but the pass overwrites the slot every step, so an
+    // accepted override would be silently ineffective (GH #871). The subtraction
+    // is applied once, here, through the same predicate the VM's override gate
+    // reads (`queue_compile::is_pass_written`, under
+    // `CompiledSimulation::is_overridable_offset`), so the validity region this
+    // list seeds rejects exactly the offsets the VM does.
+    overridable_defaults.retain(|(off, _)| {
+        !crate::queue_compile::is_pass_written(conveyor_plans, queue_plans, *off)
+    });
 
     let pages = total_bytes.div_ceil(WASM_PAGE_SIZE).max(1);
 

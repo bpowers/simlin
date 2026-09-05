@@ -10,7 +10,7 @@
 
 use simlin_engine::common::Ident;
 use simlin_engine::{self as engine, Vm};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double};
 use std::ptr;
@@ -218,48 +218,32 @@ pub unsafe extern "C" fn simlin_sim_new(
     // The plan sets are cached on the SimState (only for a special-stock model, so
     // an ordinary sim's reset stays untouched) because reset() recreates the VM --
     // it consumes itself via into_results on run -- and must re-attach the passes.
-    let (compiled, vm, vm_error, conveyor_plans, queue_plans, retracted_constants) =
-        match incremental_result {
-            Ok(build) => {
-                let retracted_constants = build.retracted_constant_offsets();
-                let engine::queue_compile::SimBuild {
-                    compiled,
-                    conveyor_plans,
-                    queue_plans,
-                    special,
-                } = build;
-                let (cached_conv, cached_queue) = if special {
-                    (Some(conveyor_plans.clone()), Some(queue_plans.clone()))
-                } else {
-                    (None, None)
-                };
-                match Vm::new(compiled.clone()) {
-                    Ok(mut vm) => {
-                        if special {
-                            vm.set_conveyor_plans(conveyor_plans);
-                            vm.set_queue_plans(queue_plans);
-                        }
-                        (
-                            Some(compiled),
-                            Some(vm),
-                            None,
-                            cached_conv,
-                            cached_queue,
-                            retracted_constants,
-                        )
+    let (compiled, vm, vm_error, conveyor_plans, queue_plans) = match incremental_result {
+        Ok(build) => {
+            let engine::queue_compile::SimBuild {
+                compiled,
+                conveyor_plans,
+                queue_plans,
+                special,
+            } = build;
+            let (cached_conv, cached_queue) = if special {
+                (Some(conveyor_plans.clone()), Some(queue_plans.clone()))
+            } else {
+                (None, None)
+            };
+            match Vm::new(compiled.clone()) {
+                Ok(mut vm) => {
+                    if special {
+                        vm.set_conveyor_plans(conveyor_plans);
+                        vm.set_queue_plans(queue_plans);
                     }
-                    Err(err) => (
-                        Some(compiled),
-                        None,
-                        Some(err),
-                        cached_conv,
-                        cached_queue,
-                        retracted_constants,
-                    ),
+                    (Some(compiled), Some(vm), None, cached_conv, cached_queue)
                 }
+                Err(err) => (Some(compiled), None, Some(err), cached_conv, cached_queue),
             }
-            Err(err) => (None, None, Some(err), None, None, HashSet::new()),
-        };
+        }
+        Err(err) => (None, None, Some(err), None, None),
+    };
 
     // Release both locks before the (lock-free) handle construction below.
     drop(db_locked);
@@ -281,7 +265,6 @@ pub unsafe extern "C" fn simlin_sim_new(
             cached_partition_denominators: HashMap::new(),
             conveyor_plans,
             queue_plans,
-            retracted_constants,
         }),
         ref_count: AtomicUsize::new(1),
     });
@@ -625,7 +608,7 @@ pub unsafe extern "C" fn simlin_sim_set_value(
         }
     } else if let Some(ref compiled) = state.compiled {
         if let Some(off) = compiled.get_offset(&canon_name) {
-            if !state.is_constant_offset(off) {
+            if !state.is_overridable_offset(off) {
                 let err = engine::Error {
                     code: engine::ErrorCode::BadOverride,
                     kind: engine::ErrorKind::Simulation,
@@ -683,8 +666,8 @@ pub unsafe extern "C" fn simlin_sim_clear_values(
 /// `simlin_sim_set_value` for the persistent-override contract).
 ///
 /// The offset is validated the same way `simlin_sim_set_value` validates a
-/// name: only a simple-constant offset (per the compiled simulation's
-/// overridable-constant set, which excludes conveyor/queue pass-driven flows)
+/// name: only an overridable constant -- a constant of the compiled program
+/// that no conveyor/queue pass writes, `SimState::is_overridable_offset` --
 /// is writable; any computed variable's offset rejects with `BadOverride` so
 /// saved simulation output cannot be silently rewritten.
 ///
@@ -703,7 +686,7 @@ pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
     // Results only exist after a successful run, which requires a successful
     // compile, so `compiled` is always Some alongside `results`; treating a
     // missing CompiledSimulation as "not a constant" keeps the gate fail-safe.
-    let is_constant_offset = state.is_constant_offset(offset);
+    let is_overridable = state.is_overridable_offset(offset);
     if let Some(ref mut results) = state.results {
         if results.step_count == 0 || offset >= results.step_size {
             store_error(
@@ -715,7 +698,7 @@ pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
             );
             return;
         }
-        if !is_constant_offset {
+        if !is_overridable {
             // Same gate as simlin_sim_set_value / Vm::set_value_by_offset:
             // computed columns (flows, stocks, LTM scores, conveyor/queue
             // pass-driven flows) are simulation output, not inputs, and must

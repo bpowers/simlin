@@ -201,6 +201,42 @@ impl QueuePlan {
     }
 }
 
+/// Whether `off` is a slot the conveyor or queue pass writes every step under
+/// these plan sets: the union of [`ConveyorPlan::pass_written_offsets`] over
+/// `conveyor_plans` and [`QueuePlan::pass_written_offsets`] over `queue_plans`.
+///
+/// This is the one statement of "pass-written" across both plan kinds. The
+/// program cannot answer it by itself -- a pass-driven flow's placeholder `0`
+/// compiles to the same flows `AssignConstCurr` as a user's constant `0`, and
+/// the memoized program carries no marker -- so every consumer that must not
+/// treat such a slot as an overridable constant asks the plans through this
+/// predicate: [`CompiledSimulation::is_overridable_offset`] (the gate behind
+/// `Vm::set_value` and libsimlin's no-Vm twin) and the wasm backend's
+/// constants-validity region. A second spelling of the union would be exactly
+/// the drift GH #871 was: one consumer accepting an override another rejects.
+///
+/// A linear scan over the plans' slots: the override gates are cold paths and
+/// the wasm backend asks once per constant at compile time. Empty plan sets
+/// (an ordinary model) match nothing.
+///
+/// [`ConveyorPlan::pass_written_offsets`]: crate::conveyor_compile::ConveyorPlan::pass_written_offsets
+/// [`CompiledSimulation::is_overridable_offset`]: crate::vm::CompiledSimulation::is_overridable_offset
+pub fn is_pass_written(
+    conveyor_plans: &[crate::conveyor_compile::ConveyorPlan],
+    queue_plans: &[QueuePlan],
+    off: usize,
+) -> bool {
+    conveyor_plans
+        .iter()
+        .flat_map(|plan| plan.pass_written_offsets())
+        .chain(
+            queue_plans
+                .iter()
+                .flat_map(|plan| plan.pass_written_offsets()),
+        )
+        .any(|written| written == off)
+}
+
 /// Does the named model in `project` contain any queue stock? The cheap predicate
 /// [`compile_sim`] uses to decide whether to route through the special stock-type
 /// build path instead of the ordinary incremental compile. Mirrors
@@ -1056,12 +1092,13 @@ pub fn build_compiled(
     // Pass-written slots (driven outflows, leaks, containers) must not be
     // overridable constants: their placeholder `0` equations compile to
     // AssignConstCurr, but the passes overwrite the slots every step, so an
-    // accepted override would be silently ineffective (GH #871). The
-    // retraction rides with the plans rather than being edited into the
-    // memoized program: `Vm::set_conveyor_plans`/`set_queue_plans` take it
-    // for a live Vm, and `SimBuild::retracted_constant_offsets` for a caller
-    // validating an override without one (libsimlin, after `run_to_end`
-    // consumed the Vm). The program stays the memo's own `Arc`.
+    // accepted override would be silently ineffective (GH #871). Nothing is
+    // edited into the memoized program for that, and no per-build set is
+    // derived here: the retraction is a function of the plans, asked at every
+    // override gate through `CompiledSimulation::is_overridable_offset` (over
+    // `is_pass_written`), whether the plans are attached to a live Vm or cached
+    // beside the program by a caller whose Vm was consumed (libsimlin after
+    // `run_to_end`). The program stays the memo's own `Arc`.
     Ok((compiled, conveyor_plans, queue_plans))
 }
 
@@ -1580,7 +1617,9 @@ pub(crate) fn build_compiled_fresh(
 pub struct SimBuild {
     /// The salsa memo's own `Arc`, on both paths: the `Vm` takes the same one,
     /// so nothing is deep-copied on the way to execution, and the program's
-    /// constant index is never edited (see `retracted_constant_offsets`).
+    /// constant index is never edited -- the slots the plans below write are
+    /// subtracted at the override gate (`CompiledSimulation::is_overridable_offset`),
+    /// so a caller that keeps `compiled` must keep the plans beside it.
     pub compiled: std::sync::Arc<crate::vm::CompiledSimulation>,
     /// One plan per conveyor belt (per array element for an arrayed conveyor).
     /// Empty unless `special`.
@@ -1591,27 +1630,6 @@ pub struct SimBuild {
     /// True when the main model carried a conveyor or a queue marker and took the
     /// expansion path.
     pub special: bool,
-}
-
-impl SimBuild {
-    /// The slots the conveyor and queue passes write every step, which
-    /// `compiled` still lists as constants (their placeholder `0` equations
-    /// compile to `AssignConstCurr`) but which no override may claim: the pass
-    /// would overwrite the value on the next step (GH #871). A caller that
-    /// validates an override without a `Vm` subtracts this set from
-    /// `CompiledSimulation::is_constant_offset`; a `Vm` takes the same
-    /// retraction when the plans are attached. Empty for an ordinary model.
-    pub fn retracted_constant_offsets(&self) -> std::collections::HashSet<usize> {
-        self.conveyor_plans
-            .iter()
-            .flat_map(|plan| plan.pass_written_offsets())
-            .chain(
-                self.queue_plans
-                    .iter()
-                    .flat_map(|plan| plan.pass_written_offsets()),
-            )
-            .collect()
-    }
 }
 
 /// Compile `main_model`, transparently routing a model that contains a conveyor
@@ -2176,6 +2194,85 @@ mod tests {
                 "step {i}: into_service={o} (want 4)"
             );
         }
+    }
+
+    #[test]
+    fn reattached_queue_plans_redefine_the_overridable_set() {
+        // The queue-setter twin of `conveyor_compile_tests::
+        // reattached_conveyor_plans_redefine_the_overridable_set`: the Vm's
+        // override gate reads the plans attached NOW. `set_queue_plans`
+        // REPLACES the plan set, so a driven outflow only a no-longer-attached
+        // plan wrote is an ordinary constant again and the newly attached
+        // plan's outflow is retracted. Two independent queues give two
+        // production plans (`resolve_plans` over the expanded program, what
+        // `build_compiled` hands the Vm); attaching one and then the other is
+        // the production call with a different production-built argument.
+        let project = parse(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>two queues</name><vendor>test</vendor><product version="1.0">test</product></header>
+  <sim_specs method="Euler" time_units="Months">
+    <start>0</start><stop>4</stop><dt>0.25</dt>
+  </sim_specs>
+  <model><variables>
+    <stock name="waiting_a"><eqn>0</eqn><inflow>arrivals_a</inflow><outflow>into_service_a</outflow><queue/></stock>
+    <flow name="arrivals_a"><eqn>10</eqn><non_negative/></flow>
+    <flow name="into_service_a"><eqn>0</eqn></flow>
+    <stock name="served_a"><eqn>0</eqn><inflow>into_service_a</inflow></stock>
+    <stock name="waiting_b"><eqn>0</eqn><inflow>arrivals_b</inflow><outflow>into_service_b</outflow><queue/></stock>
+    <flow name="arrivals_b"><eqn>5</eqn><non_negative/></flow>
+    <flow name="into_service_b"><eqn>0</eqn></flow>
+    <stock name="served_b"><eqn>0</eqn><inflow>into_service_b</inflow></stock>
+  </variables></model>
+</xmile>"#,
+        );
+        let main = project.models[0].name.clone();
+        let (expanded, metas) = expand_queues(&project, &main).expect("expand");
+        let mut db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel_incremental(&mut db, &expanded, None);
+        let compiled = crate::db::compile_project_incremental(
+            &db,
+            sync.project,
+            &main,
+            crate::db::LtmOverlay::Off,
+        )
+        .expect("compile");
+        let plans = resolve_plans(&metas, &compiled.offsets).expect("resolve");
+        assert_eq!(plans.len(), 2, "one plan per queue");
+        let plan_for = |stock: &str| {
+            let off = compiled.offsets[&Ident::new(stock)];
+            plans
+                .iter()
+                .find(|p| p.stock_off == off)
+                .cloned()
+                .expect("a plan for the queue")
+        };
+        let (plan_a, plan_b) = (plan_for("waiting_a"), plan_for("waiting_b"));
+        let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+        let verdict = |vm: &mut crate::vm::Vm, name: &str| {
+            vm.set_value(&Ident::new(name), 1.0)
+                .map(|_| ())
+                .map_err(|e| e.code)
+        };
+
+        vm.set_queue_plans(vec![plan_a]);
+        assert_eq!(
+            verdict(&mut vm, "into_service_a"),
+            Err(ErrorCode::BadOverride)
+        );
+        assert_eq!(verdict(&mut vm, "into_service_b"), Ok(()));
+
+        vm.set_queue_plans(vec![plan_b]);
+        assert_eq!(
+            verdict(&mut vm, "into_service_b"),
+            Err(ErrorCode::BadOverride),
+            "the newly attached plan's driven outflow is retracted"
+        );
+        assert_eq!(
+            verdict(&mut vm, "into_service_a"),
+            Ok(()),
+            "a slot only the replaced plan wrote is an ordinary constant again"
+        );
     }
 
     #[test]

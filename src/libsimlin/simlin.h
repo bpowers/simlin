@@ -1730,8 +1730,8 @@ void simlin_sim_clear_values(SimlinSim *sim, SimlinError **out_error);
 // `simlin_sim_set_value` for the persistent-override contract).
 //
 // The offset is validated the same way `simlin_sim_set_value` validates a
-// name: only a simple-constant offset (per the compiled simulation's
-// overridable-constant set, which excludes conveyor/queue pass-driven flows)
+// name: only an overridable constant -- a constant of the compiled program
+// that no conveyor/queue pass writes, `SimState::is_overridable_offset` --
 // is writable; any computed variable's offset rejects with `BadOverride` so
 // saved simulation output cannot be silently rewritten.
 //

@@ -1581,8 +1581,12 @@ fn test_set_value_on_conveyor_driven_flow_rejected() {
 }
 
 /// GH #871 (queue side): `simlin_sim_set_value` on a queue-driven outflow must
-/// be rejected with `BadOverride`, and the run stays queue-driven (the fixture
-/// is a pass-through queue, `into_service` == the constant inflow 10).
+/// be rejected with `BadOverride` on BOTH validation paths -- the live-VM path
+/// and the post-`run_to_end` path, which reads the cached queue plans -- and
+/// the run stays queue-driven (the fixture is a pass-through queue,
+/// `into_service` == the constant inflow 10). The conveyor twin is
+/// `test_set_value_on_conveyor_driven_flow_rejected`; this one is what pins
+/// that the no-VM gate consults the QUEUE plans, not only the conveyor ones.
 #[test]
 fn test_set_value_on_queue_driven_outflow_rejected() {
     let xml = include_str!("../../../../test/queues/queue_drain.xmile");
@@ -1614,6 +1618,22 @@ fn test_set_value_on_queue_driven_outflow_rejected() {
                 "step {i}: into_service={o} (want 10)"
             );
         }
+
+        // No-VM path: run_to_end consumed the VM, so set_value now validates
+        // against the cached program and plans -- it must reject identically.
+        err = ptr::null_mut();
+        simlin_sim_set_value(
+            sim,
+            c_name.as_ptr(),
+            999.0,
+            &mut err as *mut *mut SimlinError,
+        );
+        assert!(
+            !err.is_null(),
+            "post-run override of a queue-driven outflow must be rejected"
+        );
+        assert_eq!(simlin_error_get_code(err), SimlinErrorCode::BadOverride);
+        simlin_error_free(err);
 
         simlin_sim_unref(sim);
         simlin_model_unref(model);

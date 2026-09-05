@@ -64,7 +64,6 @@ static GLOBAL: wasmalloc::WasmAlloc = wasmalloc::WasmAlloc::new();
 use anyhow::{Error as AnyError, Result};
 use simlin_engine::{self as engine};
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::ffi::CString;
 use std::ops::{Deref, DerefMut};
 use std::os::raw::c_char;
@@ -559,30 +558,36 @@ pub(crate) struct SimState {
     /// Resolved conveyor plans for a conveyor model (`None`/empty otherwise).
     /// `run_to_end` consumes the VM (`into_results`) and `reset` recreates it
     /// from `compiled`; a plain `Vm::new(compiled)` would drop the conveyor
-    /// pass, so reset re-attaches these plans to the recreated VM.
+    /// pass, so reset re-attaches these plans to the recreated VM. They are
+    /// also what [`is_overridable_offset`](Self::is_overridable_offset) reads
+    /// while no Vm exists, so the cache is load-bearing for the override gate,
+    /// not only for reset.
     pub(crate) conveyor_plans: Option<Vec<engine::conveyor_compile::ConveyorPlan>>,
     /// Resolved queue plans for a queue model (`None`/empty otherwise). Cached
-    /// alongside `conveyor_plans` for the same reason: `reset` recreates the VM
-    /// from `compiled`, and a plain `Vm::new(compiled)` would drop the queue
-    /// pass, so reset re-attaches these plans. A model with both conveyors and
-    /// queues carries both plan sets.
+    /// alongside `conveyor_plans` for the same two reasons: `reset` recreates
+    /// the VM from `compiled`, and a plain `Vm::new(compiled)` would drop the
+    /// queue pass, so reset re-attaches these plans; and the no-Vm override
+    /// gate reads them. A model with both conveyors and queues carries both
+    /// plan sets.
     pub(crate) queue_plans: Option<Vec<engine::queue_compile::QueuePlan>>,
-    /// The slots the plans write every step, which `compiled` lists as
-    /// constants but no override may claim (GH #871):
-    /// `SimBuild::retracted_constant_offsets`, kept so the no-Vm override
-    /// check below agrees with the live Vm's. Empty for an ordinary model.
-    pub(crate) retracted_constants: HashSet<usize>,
 }
 
 impl SimState {
-    /// Whether `off` is an overridable constant: a constant of the program
-    /// that no conveyor/queue pass writes. The no-Vm twin of
-    /// `Vm::set_value`'s check, for a sim whose `run_to_end` consumed its Vm.
-    pub(crate) fn is_constant_offset(&self, off: usize) -> bool {
-        self.compiled
-            .as_ref()
-            .is_some_and(|compiled| compiled.is_constant_offset(off))
-            && !self.retracted_constants.contains(&off)
+    /// Whether an override may claim `off`: a constant of the program that no
+    /// conveyor/queue pass writes under the cached plans
+    /// (`CompiledSimulation::is_overridable_offset`). The no-Vm twin of
+    /// `Vm::set_value`'s gate, for a sim whose `run_to_end` consumed its Vm;
+    /// the two agree by construction because both read the plans -- the same
+    /// plans `reset` re-attaches -- rather than a copy of what they write.
+    /// `false` with no compiled program, which keeps the gate fail-safe.
+    pub(crate) fn is_overridable_offset(&self, off: usize) -> bool {
+        self.compiled.as_ref().is_some_and(|compiled| {
+            compiled.is_overridable_offset(
+                self.conveyor_plans.as_deref().unwrap_or(&[]),
+                self.queue_plans.as_deref().unwrap_or(&[]),
+                off,
+            )
+        })
     }
 }
 
