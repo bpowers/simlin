@@ -249,7 +249,7 @@ fn main() {
 
     // Stage 3: variable-level causal edges.  We report the
     // variable-level largest SCC alongside the element-level
-    // counterpart in stage 5 so Phase-5 measurements can show how
+    // counterpart in stage 4 so Phase-5 measurements can show how
     // per-element expansion influences SCC density.
     let t0 = Instant::now();
     let edges = model_causal_edges(&db, root_source_model, sync.project);
@@ -266,7 +266,7 @@ fn main() {
         ),
     );
 
-    // Stage 5: element-level causal edges (A2A / cross-element expansion).
+    // Stage 4: element-level causal edges (A2A / cross-element expansion).
     // Element-level largest SCC drives the auto-flip gate
     // (`MAX_LTM_SCC_NODES`) in `model_ltm_variables`; reporting it here
     // makes Phase-5 measurements directly comparable to the gate threshold.
@@ -285,7 +285,7 @@ fn main() {
         ),
     );
 
-    // Stage 6: element-level circuit enumeration (Johnson's w/ SCC).
+    // Stage 5: element-level circuit enumeration (Johnson's w/ SCC).
     // Enumeration runs with max_circuits = usize::MAX; the downstream
     // synthetic-variable pipeline is gated by MAX_LTM_SCC_NODES in
     // `model_ltm_variables`, not by a circuit-count cap.
@@ -299,10 +299,10 @@ fn main() {
         format!("circuits={n_circuits} unique_names={n_circuit_names}"),
     );
 
-    // Stage 7: LTM synthetic variables (link scores, loop scores,
+    // Stage 6: LTM synthetic variables (link scores, loop scores,
     // pathways, composites).  Relative loop scores are computed
     // post-simulation via `ltm_post::compute_rel_loop_scores`, so they
-    // no longer contribute to this stage's equation-text footprint.
+    // take no part in this stage's equation-text footprint.
     let t0 = Instant::now();
     let ltm_vars = model_ltm_variables(&db, root_source_model, sync.project);
     let n_ltm = ltm_vars.vars.len();
@@ -339,7 +339,7 @@ fn main() {
         ),
     );
 
-    // Stage 8: full compile (parsing LTM equations into ASTs, interning
+    // Stage 7: full compile (parsing LTM equations into ASTs, interning
     // salsa rows, bytecode emission).
     let t0 = Instant::now();
     let compile_result = compile_project_incremental(

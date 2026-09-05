@@ -784,12 +784,14 @@ return, not by salsa.
 
 Three facts about the LTM rows decide what can be done about them:
 
-- **Parse-tree width is a memory number.** 45.5 MiB of the generated trees was
-  unused `Vec` capacity: a call's argument list and a subscript's index list
-  were built by `push`, `Vec`'s first growth allocates four slots, and
-  `IndexExpr0` was 120 bytes wide because `Range` carried both bounds inline.
-  Both lists are exact-size `Box<[T]>` and `Range` boxes its bounds; `Expr0`
-  and `IndexExpr0` are 48 bytes, pinned by `ast::expr0::node_widths_are_pinned`.
+- **Parse-tree width is a memory number.** A call's argument list and a
+  subscript's index list are exact-size `Box<[T]>` and `Range` boxes its
+  bounds, so `Expr0` and `IndexExpr0` are 48 bytes on a 64-bit target (32 on
+  wasm32), pinned per pointer width by `ast::expr0::node_widths_are_pinned`.
+  The same lists held as `Vec`s carry `Vec`'s minimum capacity per node
+  (45.5 MiB of empty capacity across C-LEARN's LTM parse trees), and a
+  `Range` carrying both bounds inline makes every index as wide as two
+  expressions (120 bytes).
 - **The trees are co-owned.** The per-link `shaped_link_score` memos hold them
   as `Arc<Expr0>` and the whole-model `model_ltm_variables` vector holds
   refcounts on the same trees, so evicting either memo alone frees only its
@@ -807,20 +809,26 @@ of `model_dependency_graph` at ~31 M instructions each, 25% of 866 M), and a
 `perf` profile with inlined frames splits it three ways: the transitive
 closure 32%, `resolve_recurrence_sccs` 29% (C-LEARN carries a 22-member
 recurrence cluster, so the dt gate errs on its first pass, resolves the SCCs
-and walks again), `build_var_info` 16%. The closure's cost was its
-representation -- `BTreeSet<Ident>` unions, one interned-string `memcmp` per
-element per edge -- so it now closes over a dense node index with one bit
-per node (`NodeSet` in `db/dep_graph.rs`): a word-wise OR per edge, the
-traversal order untouched, and every set materialized back into the
+and walks again), `build_var_info` 16%; that profile is of a closure over
+`BTreeSet<Ident>` unions, one interned-string `memcmp` per element per edge.
+The closure works over a dense node index with one bit per node (`NodeSet`
+in `db/dep_graph.rs`): a word-wise OR per edge, the traversal order the same
+as the set-based walk's, and every set materialized back into the
 `BTreeSet<Ident>` its readers iterate from an already-sorted sequence. The
-resolution also reuses the graph's own `var_info` on the no-input wiring
-instead of rebuilding it. Whole-process cold plain compile
-(`CLEARN_COMPILE_ITERS=5`): 6.937 G -> 6.449 G retired instructions
-(-7.0%, three interleaved pairs, spread 0.05%); under LTM -0.15%, the graph
-being a small share there. The dependency graphs of every model under
-`test/` are byte-identical before and after (`examples/depgraph_dump.rs`,
-which is the sweep "Measuring a change" asks for when a change touches
-runlists or the dependency relation). What remains in the graph is
+no-input `var_info` is its own memo (`no_input_var_info`), read by the
+no-input dependency graph, the recurrence resolution
+(`resolve_recurrence_sccs`, tracked on `(model, project, phase)`) and the
+root's invariance pass alike, so the resolution never rebuilds what the
+graph built; only a wired instance's graph builds a map of its own, and it
+is not retained. Whole-process cold plain compile
+(`CLEARN_COMPILE_ITERS=5`), set-based closure against dense: 6.937 G ->
+6.449 G retired instructions (-7.0%, three interleaved pairs, spread
+0.05%); under LTM -0.15%, the graph being a small share there. The
+dependency graphs of every model under `test/`, under the empty wiring and
+under every bound-port set an instance of it binds, are byte-identical
+across that change (`examples/depgraph_dump.rs`, which is the sweep
+"Measuring a change" asks for when a change touches runlists or the
+dependency relation). What remains in the graph is
 `resolve_recurrence_sccs`' per-SCC symbolic refinement and the per-variable
 canonicalization in `build_var_info`.
 
@@ -832,24 +840,47 @@ unreferenced constant leaves 5.4 MiB (plain) or 116.9 MiB (LTM) waiting.
 `SimlinDb::release_replaced_memos` runs the same reset on demand (10 ms under
 LTM), and libsimlin's database lock (`DbLock`) runs it when it drops, at the
 end of every entry point, so the drop is paid inside the edit that caused it
-rather than one edit late.
+rather than one edit late. The release is an exclusive salsa access
+(`trigger_lru_eviction` -> `zalsa_mut` -> `cancel_others`, salsa 0.28.1
+`storage.rs`), which salsa counts in a `u8` and answers with a synthetic
+revision on the 256th without an input write (`runtime.rs`). `Durability::LOW`'s
+last-changed revision is the current revision itself, so after that bump
+every memo fails the shallow check and the next entry point deep-verifies
+the memo cone it touches, once: ~1,880 instructions per memo, ~27 M on
+C-LEARN plain and tens of milliseconds under LTM, with no body re-executed
+except the untracked-read diagnostics owner, which re-executes by design and
+backdates. That cost is bounded and accepted rather than gated, and both
+gates are known to be wrong: a dirty flag set by the engine's writers is
+unsound, because a stale memo re-executes in whichever LATER entry point
+first touches it (an edit, then a plain diagnostics pass whose release
+clears the flag, then an LTM simulation that re-executes the 117 MiB cone
+with no release until the next edit), and an exact gate on salsa's
+`WillExecute` event needs an event callback, which salsa invokes on every
+query fetch (`unwind_if_revision_cancelled` emits `WillCheckCancellation`
+and each event captures the current thread id), taxing every memo hit to
+save this one walk.
 
 **The LTM overlay is an argument, not an input.** Whether a compile
 assembles the LTM overlay (`db::LtmOverlay`) keys the layout, the shape a
 cross-module read resolves through, the fragments, the assembly and the
-diagnostics. As a salsa input on the project it was a revision every time it
-flipped, which discarded the other variant's memos and re-verified every memo
-in the database: on C-LEARN a warm LTM simulation after a plain diagnostics
-pass re-executed 1,035 query bodies (2.9 G instructions, 32% of a cold LTM
-compile), the diagnostics pass after any LTM simulation 1,676 (2.5 G), and a
-plain simulation after either 181 (130 M). As an argument both variants stay
-memoized side by side (`db::ltm_overlay_tests`), at the price of one fragment
-memo per overlay a variable has been compiled under (about 5 MiB on C-LEARN
-when both have been used). The LTM derivations themselves are
-overlay-independent and derived once. `ltm_discovery_mode` is still an
-input: it keys that derivation itself, so an exhaustive-mode LTM simulation
-alternated with `simlin_analyze_discover_loops` on one database opens a
-revision per flip and discards the other mode's LTM memos (GH #1056).
+diagnostics, so both variants stay memoized side by side
+(`db::ltm_overlay_tests`) and a caller names the one it wants. Never make it
+a salsa input on the project: flipping an input is a revision, which discards
+the other variant's memos and re-verifies every memo in the database, and
+measured against exactly that design on C-LEARN a warm LTM simulation after
+a plain diagnostics pass re-executed 1,035 query bodies (2.9 G instructions,
+32% of a cold LTM compile), the diagnostics pass after any LTM simulation
+1,676 (2.5 G), and a plain simulation after either 181 (130 M). The price of
+the argument is one fragment memo per overlay a variable has been compiled
+under (about 5 MiB on C-LEARN when both have been used) and, the first time
+the second overlay is used, one emission pass over every fragment (~1,600
+explicit and 651 implicit on C-LEARN): the overlay reaches a fragment only
+through module shapes, but keys every fragment. The LTM derivations
+themselves are overlay-independent and derived once. `ltm_discovery_mode`
+remains an input of the same shape: it keys that derivation itself, so an
+exhaustive-mode LTM simulation alternated with `simlin_analyze_discover_loops`
+on one database opens a revision per flip and discards the other mode's LTM
+memos (GH #1056).
 
 **The edit path is O(model); ~1% of it is O(edit).** A structure-preserving
 literal edit costs 210 M instructions plain (23 ms) and 7.4 G under LTM

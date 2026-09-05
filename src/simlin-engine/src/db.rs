@@ -516,17 +516,18 @@ pub enum LtmMode {
 ///
 /// An explicit ARGUMENT to every query whose value depends on it (the
 /// layout, the shape a cross-module read resolves through, the fragments
-/// that resolve one, the assembly, the diagnostics) rather than a salsa
-/// input on the project: flipping an input is a revision, which discards the
-/// other variant's memos and re-verifies every memo in the database, so a
-/// simulation after a diagnostics pass and a diagnostics pass after a
-/// simulation each re-did the work the other had just done -- 2.9 G
-/// instructions per warm LTM simulation on C-LEARN, 2.5 G per diagnostics
-/// pass (docs/design/engine-performance.md, C7). As an argument, both
-/// variants stay memoized side by side. The price is that a fragment whose
-/// value does not depend on the overlay (any variable that reads no module
-/// instance) is memoized once per overlay it has been compiled under: on
-/// C-LEARN about 5 MiB when both have been used.
+/// that resolve one, the assembly, the diagnostics), so both variants stay
+/// memoized side by side and a caller names the one it wants. Never make it
+/// a salsa input on the project: flipping an input is a revision, which
+/// discards the other variant's memos and re-verifies every memo in the
+/// database, so every simulation after a diagnostics pass and every
+/// diagnostics pass after a simulation redoes the work the other just did
+/// -- on C-LEARN 2.9 G instructions per warm LTM simulation and 2.5 G per
+/// diagnostics pass, measured against exactly that design
+/// (docs/design/engine-performance.md, C7). The price of the argument is
+/// that a fragment whose value does not depend on the overlay (any variable
+/// that reads no module instance) is memoized once per overlay it has been
+/// compiled under: on C-LEARN about 5 MiB when both have been used.
 ///
 /// The LTM derivations themselves (`model_ltm_variables` and everything
 /// under it) are overlay-independent: they describe the overlay, and are
