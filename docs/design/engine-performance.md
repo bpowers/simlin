@@ -759,6 +759,71 @@ What a structural edit costs in retired instructions under that key is not
 profiled; the execution-count tests say what recompiles, and no instruction
 count does.
 
+### C7. What the database retains, and what an edit re-verifies
+
+A residency census of the salsa database after one C-LEARN compile (a vendored
+salsa reporting exact edge counts plus a deep heap walker over all 64 tracked
+functions; the attribution closes 88% of the plain residency and 94% of the
+LTM one, and every residual walked so far was `Vec` or `String` capacity over
+length). Salsa's own bookkeeping is 2.4 MiB (plain) and 6.3 MiB (LTM); the
+rest is memoized VALUES, so residency is decided by what the engine's queries
+return, not by salsa.
+
+| retained after one compile | plain, 29 MiB | LTM, 222 MiB |
+|---|---:|---:|
+| generated LTM equations: shared `Arc<Expr0>` trees, plus each arm's diagnostic text | — | 117.2 MiB (53%) |
+| LTM compiled fragments (`compile_ltm_fragment_at`, 6,155 memos) | — | 47.9 MiB (22%) |
+| `Expr2` lowered trees | 5.6 MiB (19%) | (as plain) |
+| symbolic fragments, `Vec<SymbolicOpcode>` at 24 B per opcode | 5.3 MiB (18%) | (as plain) |
+| `Expr0` parse trees | 5.0 MiB (17%) | (as plain) |
+| dependency results (`model_dependency_graph` 2.45) | 4.8 MiB (16%) | (as plain) |
+| unattributed `Vec` capacity slack | 3.6 MiB (12%) | 13.1 MiB (6%) |
+| assembled artifact | 1.6 MiB | 9.2 MiB |
+
+Three facts about the LTM rows decide what can be done about them:
+
+- **Parse-tree width is a memory number.** 45.5 MiB of the generated trees was
+  unused `Vec` capacity: a call's argument list and a subscript's index list
+  were built by `push`, `Vec`'s first growth allocates four slots, and
+  `IndexExpr0` was 120 bytes wide because `Range` carried both bounds inline.
+  Both lists are exact-size `Box<[T]>` and `Range` boxes its bounds; `Expr0`
+  and `IndexExpr0` are 48 bytes, pinned by `ast::expr0::node_widths_are_pinned`.
+- **The trees are co-owned.** The per-link `shaped_link_score` memos hold them
+  as `Arc<Expr0>` and the whole-model `model_ltm_variables` vector holds
+  refcounts on the same trees, so evicting either memo alone frees only its
+  own bytes. They cannot be freed by policy until the whole-model result
+  stops holding them.
+- **A user equation is alive in four representations at once** (`Expr0`,
+  `Expr2`, symbolic, resolved: 17.2 MiB plain). One retained representation
+  per tier is what incrementality needs; the parse trees and the dependency
+  graph's transitive closures are the evictable ones.
+
+**The edit path is O(model); ~1% of it is O(edit).** A structure-preserving
+literal edit costs 210 M instructions plain (23 ms) and 7.4 G under LTM
+(661 ms): the whole-model unit pass (28%), the assembly merge over every
+fragment (24%), salsa's verification walk over every memo (~13%, 1,880
+instructions per verified memo), `assemble_simulation` (9%). The edited
+variable's own parse, lowering and fragment are ~1%. Salsa's durability
+levels cannot remove the verification share: a memo's durability is the
+minimum over everything it read, and nearly every memo reads a `LOW`
+`SourceVariable` field, so a prototype with stdlib inputs at `HIGH` and
+project inputs at `MEDIUM` fired the shortcut 1,719 times per edit for
+-0.46%. Under LTM the same edit recompiles 3,015 of the 6,155 link fragments
+because `model_ltm_variables` is one whole-model value that changes whenever
+any target equation does; a structural edit re-does 96% of a cold LTM
+compile for the same reason.
+
+**The allocator holds more than the database (native only).** mimalloc's
+unreturned arena is 75 MiB on a plain compile whose live peak is 46.5 MiB;
+at rest with 216 MiB live the RSS was 494 MB, and stayed 494 MB after
+dropping the database. `MIMALLOC_PURGE_DELAY=0` with
+`MIMALLOC_ARENA_EAGER_COMMIT=0` brought that to 356 MB peak, 269 MB at rest
+and 29 MB after the drop, but was measured on RSS alone: purging every freed
+page immediately costs syscalls and page faults inside the compile's churn,
+so the wall-clock price is unmeasured and the settings are not adopted. The
+wasm bundle never returns pages, so there peak live is the permanent cost
+and allocation count is what to cut.
+
 ### C5. `Compiler::intern_name` — the top allocation site, blocked on artifact identity
 
 320,650 allocations per cold C-LEARN compile, ~10% of all 3.24M, from two

@@ -337,7 +337,7 @@ mod tests {
 
     fn call(name: &str, args: Vec<Expr0>) -> EquationResult<Expr1> {
         Expr1::from(&Expr0::App(
-            UntypedBuiltinFn(name.to_string(), args),
+            UntypedBuiltinFn(name.to_string(), args.into()),
             Loc::default(),
         ))
     }

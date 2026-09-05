@@ -357,8 +357,20 @@ pub(super) fn wrap_index_non_matching_in_previous(
             frozen,
         )),
         IndexExpr0::Range(l, r, loc) => IndexExpr0::Range(
-            wrap_non_matching_in_previous(l, ctx, &mut idx_out, &child_path(path, 0), frozen),
-            wrap_non_matching_in_previous(r, ctx, &mut idx_out, &child_path(path, 1), frozen),
+            Box::new(wrap_non_matching_in_previous(
+                *l,
+                ctx,
+                &mut idx_out,
+                &child_path(path, 0),
+                frozen,
+            )),
+            Box::new(wrap_non_matching_in_previous(
+                *r,
+                ctx,
+                &mut idx_out,
+                &child_path(path, 1),
+                frozen,
+            )),
             loc,
         ),
         other => other,

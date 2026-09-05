@@ -57,10 +57,10 @@ pub(super) fn freeze_at_previous(
     loc: crate::builtins::Loc,
     in_subscript_index: bool,
 ) -> Expr0 {
-    let args = if in_subscript_index {
-        vec![expr.clone(), expr]
+    let args: Box<[Expr0]> = if in_subscript_index {
+        Box::new([expr.clone(), expr])
     } else {
-        vec![expr]
+        Box::new([expr])
     };
     Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), args), loc)
 }

@@ -764,10 +764,10 @@ fn test_print_eqn() {
         print_eqn(&Expr0::App(
             UntypedBuiltinFn(
                 "lookup".to_string(),
-                vec![
+                Box::new([
                     Expr0::Var(RawIdent::new_from_str("a"), Loc::new(7, 8)),
                     Expr0::Const("1.0".to_string(), Literal::new(1.0), Loc::new(10, 13))
-                ]
+                ])
             ),
             Loc::new(0, 14),
         ))
@@ -853,7 +853,7 @@ fn test_print_eqn_parenthesizes_if_under_an_operator() {
     assert_print_reparse_roundtrip(&t_if(), "if (a) then (1) else (0)");
     assert_print_reparse_roundtrip(
         &Expr0::App(
-            UntypedBuiltinFn("abs".to_string(), vec![t_if()]),
+            UntypedBuiltinFn("abs".to_string(), Box::new([t_if()])),
             Loc::default(),
         ),
         "abs(if (a) then (1) else (0))",
@@ -990,7 +990,7 @@ fn test_print_eqn_parenthesizes_transpose_operand() {
         &t_op1(
             UnaryOp::Transpose,
             Expr0::App(
-                UntypedBuiltinFn("abs".to_string(), vec![t_var("a")]),
+                UntypedBuiltinFn("abs".to_string(), Box::new([t_var("a")])),
                 Loc::default(),
             ),
         ),
@@ -1113,8 +1113,8 @@ impl LatexTier for Expr0 {
                         }
                         IndexExpr0::Range(l, r, _) => format!(
                             "{}:{}",
-                            render_latex(l, annotate),
-                            render_latex(r, annotate)
+                            render_latex(l.as_ref(), annotate),
+                            render_latex(r.as_ref(), annotate)
                         ),
                         IndexExpr0::DimPosition(n, _) => format!("@{n}"),
                         IndexExpr0::Expr(e) => render_latex(e, annotate),
@@ -1712,9 +1712,11 @@ mod print_eqn_proptest {
             IndexExpr0::StarRange(dim, loc) => {
                 IndexExpr0::StarRange(RawIdent::new(canonicalize(dim.as_str()).into_owned()), loc)
             }
-            IndexExpr0::Range(l, r, loc) => {
-                IndexExpr0::Range(canonicalize_idents(l), canonicalize_idents(r), loc)
-            }
+            IndexExpr0::Range(l, r, loc) => IndexExpr0::Range(
+                Box::new(canonicalize_idents(*l)),
+                Box::new(canonicalize_idents(*r)),
+                loc,
+            ),
             IndexExpr0::DimPosition(n, loc) => IndexExpr0::DimPosition(n, loc),
             IndexExpr0::Expr(e) => IndexExpr0::Expr(canonicalize_idents(e)),
         }
@@ -1772,7 +1774,7 @@ mod print_eqn_proptest {
                     inner.clone()
                 )
                     .prop_map(|(f, e)| Expr0::App(
-                        UntypedBuiltinFn(f.to_owned(), vec![e]),
+                        UntypedBuiltinFn(f.to_owned(), Box::new([e])),
                         Loc::default()
                     )),
                 (inner.clone(), inner.clone(), inner.clone()).prop_map(|(c, t, f)| Expr0::If(

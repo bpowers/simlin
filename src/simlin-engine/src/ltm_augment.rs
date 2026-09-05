@@ -441,7 +441,7 @@ fn wrap_non_matching_in_previous(
                 // qualified element subscript is the direct LoadPrev the scalar
                 // fragment needs.
                 let expr = match ctx.pin.and_then(post_transform::pin_bare_source_ref) {
-                    Some(indices) => Expr0::Subscript(ident.clone(), indices, loc),
+                    Some(indices) => Expr0::Subscript(ident.clone(), indices.into(), loc),
                     None => expr,
                 };
                 // The bare-Var occurrence matches `Bare`. Any other live
@@ -585,7 +585,7 @@ fn wrap_non_matching_in_previous(
                 // leaving this occurrence live. That bare-vs-qualified choice is
                 // the one thing only the wrap can decide, and it is why the
                 // pinning lives here rather than in a pass over the wrapped tree.
-                let indices: Vec<IndexExpr0> = match ctx.pin {
+                let indices: Box<[IndexExpr0]> = match ctx.pin {
                     Some(pin_ctx) => post_transform::pin_source_subscript_indices(
                         indices,
                         node_occ,
@@ -670,7 +670,7 @@ fn wrap_non_matching_in_previous(
                     axis_dim_at(ctx, &canonical, i),
                 )
             };
-            let indices: Vec<IndexExpr0> = match ctx.pin.filter(|_| &canonical == live_source) {
+            let indices: Box<[IndexExpr0]> = match ctx.pin.filter(|_| &canonical == live_source) {
                 Some(pin_ctx) => post_transform::pin_source_subscript_indices(
                     indices,
                     node_occ,
@@ -1382,7 +1382,10 @@ fn wrap_live_shaped_in_previous(
                 if frozen_ref.is_none() {
                     *frozen_ref = Some(expr.clone());
                 }
-                Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![expr]), loc)
+                Expr0::App(
+                    UntypedBuiltinFn("PREVIOUS".to_string(), Box::new([expr])),
+                    loc,
+                )
             } else {
                 expr
             }
@@ -1401,7 +1404,10 @@ fn wrap_live_shaped_in_previous(
                     if frozen_ref.is_none() {
                         *frozen_ref = Some(bare.clone());
                     }
-                    return Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![bare]), loc);
+                    return Expr0::App(
+                        UntypedBuiltinFn("PREVIOUS".to_string(), Box::new([bare])),
+                        loc,
+                    );
                 }
                 if occ
                     .get(path)
@@ -1412,7 +1418,7 @@ fn wrap_live_shaped_in_previous(
                         *frozen_ref = Some(subscript.clone());
                     }
                     return Expr0::App(
-                        UntypedBuiltinFn("PREVIOUS".to_string(), vec![subscript]),
+                        UntypedBuiltinFn("PREVIOUS".to_string(), Box::new([subscript])),
                         loc,
                     );
                 }
@@ -1748,7 +1754,7 @@ fn wrap_matching_in_previous(
             }
         }
         Expr0::Subscript(ident, indices, loc) => {
-            let indices: Vec<IndexExpr0> = indices
+            let indices: Box<[IndexExpr0]> = indices
                 .into_iter()
                 .map(|idx| match idx {
                     IndexExpr0::Expr(e) => {
@@ -1999,7 +2005,7 @@ fn pin_iterated_dim_indices(expr: Expr0, dims: &[String], parts: &[String]) -> O
                     }
                     other => Some(other),
                 })
-                .collect::<Option<Vec<_>>>()?;
+                .collect::<Option<Box<[_]>>>()?;
             Expr0::Subscript(ident, indices, loc)
         }
         Expr0::App(UntypedBuiltinFn(name, args), loc) => Expr0::App(
@@ -2007,7 +2013,7 @@ fn pin_iterated_dim_indices(expr: Expr0, dims: &[String], parts: &[String]) -> O
                 name,
                 args.into_iter()
                     .map(|a| pin_iterated_dim_indices(a, dims, parts))
-                    .collect::<Option<Vec<_>>>()?,
+                    .collect::<Option<Box<[_]>>>()?,
             ),
             loc,
         ),
@@ -4834,7 +4840,7 @@ fn pin_body_to_row(expr: Expr0, ctx: &ReducerBodyCtx<'_>, row_parts: &[String]) 
                     // dep can never be the live source (the live source's
                     // axis count equals the row's by construction), so the
                     // `any_moving` live-bail below is not relevant here.
-                    let pinned: Vec<IndexExpr0> = indices
+                    let pinned: Box<[IndexExpr0]> = indices
                         .iter()
                         .map(|idx| match idx {
                             IndexExpr0::Expr(Expr0::Var(name, _)) => {
@@ -4847,11 +4853,11 @@ fn pin_body_to_row(expr: Expr0, ctx: &ReducerBodyCtx<'_>, row_parts: &[String]) 
                             }
                             _ => None,
                         })
-                        .collect::<Option<Vec<_>>>()?;
+                        .collect::<Option<Box<[_]>>>()?;
                     return Some(Expr0::Subscript(ident, pinned, loc));
                 }
                 let mut any_moving = false;
-                let pinned: Vec<IndexExpr0> = indices
+                let pinned: Box<[IndexExpr0]> = indices
                     .iter()
                     .enumerate()
                     .map(|(j, idx)| {
@@ -4860,7 +4866,7 @@ fn pin_body_to_row(expr: Expr0, ctx: &ReducerBodyCtx<'_>, row_parts: &[String]) 
                             p
                         })
                     })
-                    .collect::<Option<Vec<_>>>()?;
+                    .collect::<Option<Box<[_]>>>()?;
                 // A live-source reference that does NOT move with the row
                 // (all indices fixed literals) breaks the other-rows
                 // cancellation invariant -- bail (review I1, GH #744).
@@ -4872,7 +4878,7 @@ fn pin_body_to_row(expr: Expr0, ctx: &ReducerBodyCtx<'_>, row_parts: &[String]) 
                 // Not an arrayed model variable (e.g. a graphical-function
                 // holder); recurse into expression indices so nested
                 // references are still pinned, leave other index forms.
-                let pinned: Vec<IndexExpr0> = indices
+                let pinned: Box<[IndexExpr0]> = indices
                     .into_iter()
                     .map(|idx| match idx {
                         IndexExpr0::Expr(e) => {
@@ -4880,7 +4886,7 @@ fn pin_body_to_row(expr: Expr0, ctx: &ReducerBodyCtx<'_>, row_parts: &[String]) 
                         }
                         other => Some(other),
                     })
-                    .collect::<Option<Vec<_>>>()?;
+                    .collect::<Option<Box<[_]>>>()?;
                 Some(Expr0::Subscript(ident, pinned, loc))
             }
         }
@@ -4894,7 +4900,7 @@ fn pin_body_to_row(expr: Expr0, ctx: &ReducerBodyCtx<'_>, row_parts: &[String]) 
             let args = args
                 .into_iter()
                 .map(|a| pin_body_to_row(a, ctx, row_parts))
-                .collect::<Option<Vec<_>>>()?;
+                .collect::<Option<Box<[_]>>>()?;
             Some(Expr0::App(UntypedBuiltinFn(name, args), loc))
         }
         Expr0::Op1(op, arg, loc) => Some(Expr0::Op1(
@@ -4935,14 +4941,20 @@ fn freeze_pinned_body(expr: Expr0, freeze: &HashSet<String>, keep_live: Option<&
         Expr0::Const(..) => expr,
         Expr0::Var(ref ident, loc) => {
             if should_freeze(ident.as_str()) {
-                Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![expr]), loc)
+                Expr0::App(
+                    UntypedBuiltinFn("PREVIOUS".to_string(), Box::new([expr])),
+                    loc,
+                )
             } else {
                 expr
             }
         }
         Expr0::Subscript(ref ident, _, loc) => {
             if should_freeze(ident.as_str()) {
-                Expr0::App(UntypedBuiltinFn("PREVIOUS".to_string(), vec![expr]), loc)
+                Expr0::App(
+                    UntypedBuiltinFn("PREVIOUS".to_string(), Box::new([expr])),
+                    loc,
+                )
             } else {
                 expr
             }

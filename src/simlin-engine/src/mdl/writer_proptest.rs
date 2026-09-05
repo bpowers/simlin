@@ -239,7 +239,10 @@ fn var_leaf() -> impl Strategy<Value = Expr0> {
 }
 
 fn app0(name: &str) -> Expr0 {
-    Expr0::App(UntypedBuiltinFn(name.to_owned(), vec![]), Loc::default())
+    Expr0::App(
+        UntypedBuiltinFn(name.to_owned(), Box::new([])),
+        Loc::default(),
+    )
 }
 
 /// A bounded recursive `Expr0` generator aimed at the writer's printer fixes:
@@ -257,11 +260,11 @@ fn expr0_strategy() -> BoxedStrategy<Expr0> {
         Just(Expr0::App(
             UntypedBuiltinFn(
                 "sum".to_owned(),
-                vec![Expr0::Subscript(
+                Box::new([Expr0::Subscript(
                     RawIdent::new_from_str("arr"),
-                    vec![IndexExpr0::Wildcard(Loc::default())],
+                    Box::new([IndexExpr0::Wildcard(Loc::default())]),
                     Loc::default(),
-                )],
+                )]),
             ),
             Loc::default(),
         )),
@@ -305,7 +308,7 @@ fn expr0_strategy() -> BoxedStrategy<Expr0> {
                 inner.clone()
             )
                 .prop_map(|(f, e)| Expr0::App(
-                    UntypedBuiltinFn(f.to_owned(), vec![e]),
+                    UntypedBuiltinFn(f.to_owned(), Box::new([e])),
                     Loc::default()
                 )),
             // INITIAL arity DISPATCH (#852): 1-arg `init` -> INITIAL, 2-arg
@@ -313,11 +316,11 @@ fn expr0_strategy() -> BoxedStrategy<Expr0> {
             // branch the writer uses; the fixpoint then pins that each survives
             // a full re-import (ACTIVE INITIAL re-imports back to a 2-arg init).
             inner.clone().prop_map(|e| Expr0::App(
-                UntypedBuiltinFn("init".to_owned(), vec![e]),
+                UntypedBuiltinFn("init".to_owned(), Box::new([e])),
                 Loc::default()
             )),
             (inner.clone(), inner.clone()).prop_map(|(e, ai)| Expr0::App(
-                UntypedBuiltinFn("init".to_owned(), vec![e, ai]),
+                UntypedBuiltinFn("init".to_owned(), Box::new([e, ai])),
                 Loc::default()
             )),
             // two-argument builtins
@@ -327,7 +330,7 @@ fn expr0_strategy() -> BoxedStrategy<Expr0> {
                 inner.clone()
             )
                 .prop_map(|(f, l, r)| Expr0::App(
-                    UntypedBuiltinFn(f.to_owned(), vec![l, r]),
+                    UntypedBuiltinFn(f.to_owned(), Box::new([l, r])),
                     Loc::default()
                 )),
             (inner.clone(), inner.clone(), inner.clone()).prop_map(|(c, t, f)| Expr0::If(

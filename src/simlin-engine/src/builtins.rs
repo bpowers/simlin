@@ -71,7 +71,13 @@ fn test_loc_basics() {
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(PartialEq, Eq, Clone)]
-pub struct UntypedBuiltinFn<Expr>(pub String, pub Vec<Expr>);
+/// An unresolved builtin call: the function's lowercased name and its
+/// arguments. The arguments are a `Box<[Expr]>` rather than a `Vec` so a
+/// node holds exactly the arguments it has: an argument list is fixed once
+/// parsed, and a `Vec` grown by `push` keeps `Vec`'s minimum capacity of four
+/// slots -- on C-LEARN under LTM, 45 MiB of retained parse-tree capacity was
+/// empty (`docs/design/engine-performance.md`, C7).
+pub struct UntypedBuiltinFn<Expr>(pub String, pub Box<[Expr]>);
 
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(PartialEq, Eq, Clone)]
