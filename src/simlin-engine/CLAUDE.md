@@ -142,7 +142,7 @@ LTM instruments a model with synthetic variables (link scores, loop scores, aggr
 
 Rules:
 
-- LTM is an analysis overlay, so an LTM-only failure must never masquerade as a project compile error (`LtmEnabledGuard` flips the flag only for the diagnostic harvest).
+- LTM is an analysis overlay, so an LTM-only failure must never masquerade as a project compile error (the overlay is an argument of every query, `db::LtmOverlay`; libsimlin's `get_errors` assesses compilability with it `Off` and harvests LTM diagnostics with it `On` only for a project that requested LTM).
 - The describers see an element-scoped helper with every read its element pins spelled as the static index the COMPILER resolves it to (`FragmentInput::element_pinned_target`, `Context::pin_element_reads`: the helper's own fragment context running `normalize_subscript_ops` and `build_view_from_ops`), so the element graph and the scores name the slot the helper's fragment reads -- a proper subdimension, a shared-name axis or an element map included. Never substitute a spelling for that index: a qualified `dimension·element` of a foreign axis folds to an ordinal the compiler does not read.
 - One correspondence describes every dimension-named read, plain or helper, subscripted or bare (`DimensionsContext::executed_read_correspondence`; `db::bare_axis_pairing` pairs the declared lists for a bare one, under the relations the spelling's own lowering consults -- `BareSpelling::Equation`, pass 0's `DirectMappingsOnly`, for a read in an equation body, `StockFlow`, the full context, for a stock's flows).
   - A frozen occurrence of a `PerElement` dependency keeps its subscript (`OtherDepVerdict`), since the bare spelling is a different read.

@@ -288,8 +288,8 @@ mod model_ltm_reference_sites_tests {
 
     /// Sync `project`, run `model_ltm_reference_sites` and `enumerate_agg_nodes`,
     /// and hand both (plus the db) to `body`. The IR doesn't depend on
-    /// `ltm_enabled` -- it is a structural classification -- so callers don't
-    /// need to flip the LTM flag.
+    /// the LTM overlay -- it is a structural classification -- so callers
+    /// don't pass one.
     fn with_ir<R>(
         project: &TestProject,
         body: impl FnOnce(&SimlinDb, &LtmReferenceSitesResult, &crate::ltm_agg::AggNodesResult) -> R,

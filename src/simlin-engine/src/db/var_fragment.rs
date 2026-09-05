@@ -88,6 +88,33 @@ pub(crate) fn dimensions_named(
         .collect()
 }
 
+/// The shape of a plain (non-module) source variable: its declared
+/// dimensions. The one owner of that rule; every arm that resolves a source
+/// variable's shape calls it, so the declared-dimensions-to-shape step
+/// cannot be stated differently in two places.
+pub(crate) fn source_dimensions(
+    db: &dyn Db,
+    var: SourceVariable,
+    project: SourceProject,
+) -> DepShape {
+    DepShape::var(variable_dimensions(db, var, project).clone())
+}
+
+/// The shape of a plain (non-module) implicit helper: its declared
+/// dimensions (a structural apply-to-all capture; every other helper is
+/// scalar). The one owner of that rule, as `source_dimensions` is for a
+/// source variable.
+pub(crate) fn helper_dimensions(
+    db: &dyn Db,
+    project: SourceProject,
+    meta: &ImplicitVarMeta,
+) -> DepShape {
+    DepShape::var(dimensions_named(
+        &meta.dimensions,
+        project_dimensions_context(db, project),
+    ))
+}
+
 /// The shape of a source variable: a module instance's sub-model shape, or the
 /// variable's declared dimensions.
 pub(crate) fn source_dep_shape(
@@ -99,7 +126,7 @@ pub(crate) fn source_dep_shape(
     if var.kind(db) == SourceVariableKind::Module {
         module_dep_shape(db, project, var.model_name(db), overlay)
     } else {
-        DepShape::var(variable_dimensions(db, var, project).clone())
+        source_dimensions(db, var, project)
     }
 }
 
@@ -120,10 +147,7 @@ pub(crate) fn implicit_dep_shape(
             overlay,
         )
     } else {
-        DepShape::var(dimensions_named(
-            &meta.dimensions,
-            project_dimensions_context(db, project),
-        ))
+        helper_dimensions(db, project, meta)
     }
 }
 
@@ -196,13 +220,10 @@ impl DeclaredName {
     pub(crate) fn dimensions_shape(&self, db: &dyn Db, project: SourceProject) -> Option<DepShape> {
         match self {
             DeclaredName::Source(var) => (var.kind(db) != SourceVariableKind::Module)
-                .then(|| DepShape::var(variable_dimensions(db, *var, project).clone())),
-            DeclaredName::Helper(meta) => (!meta.is_module).then(|| {
-                DepShape::var(dimensions_named(
-                    &meta.dimensions,
-                    project_dimensions_context(db, project),
-                ))
-            }),
+                .then(|| source_dimensions(db, *var, project)),
+            DeclaredName::Helper(meta) => {
+                (!meta.is_module).then(|| helper_dimensions(db, project, meta))
+            }
         }
     }
 }

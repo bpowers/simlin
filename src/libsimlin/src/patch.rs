@@ -510,7 +510,7 @@ pub(crate) unsafe fn apply_project_patch_internal(
 
     // Snapshot the pre-patch warning baseline while holding the db lock.
     let models_with_existing_warnings = {
-        let db_locked = project_ref.db.lock().unwrap();
+        let db_locked = project_ref.lock_db();
         if let Some(source_project) = db_locked.current_source_project() {
             let diags = engine::db::collect_all_diagnostics(
                 &db_locked,
@@ -543,7 +543,7 @@ pub(crate) unsafe fn apply_project_patch_internal(
     // are dry runs. `sync_staged` stages the patched datamodel into the db's
     // own sync state and hands back the PRE-staging handles (`prev`) so a
     // rejected/dry-run patch can be rolled back exactly.
-    let mut db = project_ref.db.lock().unwrap();
+    let mut db = project_ref.lock_db();
     let (staged_sp, prev) = db.sync_staged(&staged_datamodel);
     #[cfg(test)]
     invoke_patch_test_hook(PatchHookPoint::StagedSyncWhileDbLocked, project_ref);
@@ -622,18 +622,20 @@ pub(crate) unsafe fn apply_project_patch_internal(
         // Roll back: re-sync the ORIGINAL datamodel with the PRE-staging
         // handles (`prev`), restoring every input's prior field values and
         // dropping variables added during staging -- still under the db lock,
-        // so no concurrent reader can observe staged state.
+        // so no concurrent reader can observe staged state. The restore is an
+        // input write, so it sweeps what the staging replaced; the memos the
+        // staged diagnostics and compile produced stay resident until the next
+        // entry point re-derives them for the restored state, and are freed
+        // then (the lock's drop releases whatever that entry point supersedes).
         db.restore(&original_datamodel, prev);
-    } else {
-        // Commit: the staged state is already the db's current sync state
-        // from `sync_staged`, so only the canonical datamodel needs to be
-        // written.
-        *datamodel_locked = staged_datamodel;
+        return;
     }
-    // The diagnostics and compile above replaced every memo the edit
-    // invalidated; free the superseded ones now rather than holding them
-    // until the next edit (see `SimlinDb::release_replaced_memos`).
-    db.release_replaced_memos();
+
+    // Commit: the staged state is already the db's current sync state from
+    // `sync_staged`, so only the canonical datamodel needs to be written. The
+    // memos the staged diagnostics and compile superseded are freed when the
+    // db lock drops (`DbLock`), inside this edit rather than the next.
+    *datamodel_locked = staged_datamodel;
 }
 
 // ── FFI entry point ────────────────────────────────────────────────────

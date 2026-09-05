@@ -967,7 +967,7 @@ fn fresh_resolved_scc_and_combined_fragment(
             model,
             project,
             member.as_str(),
-            scc.phase.clone(),
+            scc.phase,
             crate::db::LtmOverlay::Off,
         )
         .unwrap_or_else(|| {

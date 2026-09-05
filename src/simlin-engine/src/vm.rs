@@ -197,34 +197,17 @@ impl CompiledSimulation {
         self.cached_constant_info.contains_key(&off)
     }
 
-    /// Retract `offsets` from the overridable-constant set (GH #871).
-    ///
-    /// The conveyor/queue build path calls this with every pass-written slot:
-    /// the expansion compiles each pass-driven flow to a placeholder
-    /// `AssignConstCurr 0`, which the flows-phase classification above would
-    /// otherwise treat as an overridable constant -- but the conveyor/queue
-    /// pass overwrites those slots every step, so an accepted override could
-    /// never affect the simulation. Retracting them makes `set_value` /
-    /// `is_constant_offset` reject them with `BadOverride`, exactly like any
-    /// other computed flow.
-    pub(crate) fn exclude_overridable_offsets(&mut self, offsets: impl IntoIterator<Item = usize>) {
-        for off in offsets {
-            self.cached_constant_info.remove(&off);
-        }
-    }
-
-    /// The full set of overridable constant offsets (absolute data-buffer
-    /// offsets), i.e. every offset for which [`is_constant_offset`] is true.
-    /// These are the offsets with an `AssignConstCurr` in some module's flows
-    /// phase (see `collect_constant_info`), minus any the special conveyor/
-    /// queue build path retracted via [`exclude_overridable_offsets`] (a
-    /// conveyor/queue model never reaches the wasm backend, so the wasmgen
-    /// parity assertion only ever sees the un-retracted set);
-    /// `set_value`/`set_value_by_offset` accept exactly these. The wasm
-    /// backend reads this to size and initialize its constants-override region
-    /// so a blob's `set_value` accepts the same set the VM does.
-    ///
-    /// [`exclude_overridable_offsets`]: Self::exclude_overridable_offsets
+    /// The full set of constant offsets (absolute data-buffer offsets), i.e.
+    /// every offset for which [`is_constant_offset`] is true: the offsets with
+    /// an `AssignConstCurr` in some module's flows phase (see
+    /// `collect_constant_info`). The program is shared and this index never
+    /// changes; the slots a conveyor/queue pass writes every step are
+    /// retracted from the OVERRIDABLE set by whoever attaches the plans
+    /// (`Vm::set_conveyor_plans`/`set_queue_plans` for the Vm,
+    /// `queue_compile::SimBuild::retracted_constant_offsets` for a caller
+    /// validating an override without one, the wasm backend for its blob),
+    /// so `set_value`/`set_value_by_offset` accept exactly these minus that
+    /// set.
     ///
     /// [`is_constant_offset`]: Self::is_constant_offset
     pub(crate) fn constant_offsets(&self) -> impl Iterator<Item = usize> + '_ {
@@ -314,10 +297,9 @@ pub struct Vm {
     view_stack: Vec<RuntimeView>,
     iter_stack: Vec<IterState>,
     // Offsets the attached conveyor/queue plans write every step, retracted
-    // from the overridable-constant set `sim` carries (GH #871). The build
-    // path already retracts them from the `CompiledSimulation` itself; this
-    // overlay is what makes a Vm assembled from an unscrubbed one reject too,
-    // without copying the shared constant index to edit it.
+    // from the overridable-constant set `sim` carries (GH #871). The shared
+    // program's constant index is never edited; this set is the Vm's own
+    // view of what the plans took back.
     retracted_constants: HashSet<usize>,
     // Tracks original literal values before override, keyed by absolute offset.
     // Each entry stores the locations and their original values so clear_values can restore them.
@@ -625,9 +607,9 @@ impl CompiledSlicedSimulation {
 /// ALL bytecode locations across flows, stocks, and initials are collected so
 /// that a single `set_value` call mutates every literal that feeds that offset.
 ///
-/// The special conveyor/queue build path subsequently RETRACTS the pass-written
-/// slots from this set (`CompiledSimulation::exclude_overridable_offsets` /
-/// `Vm::set_conveyor_plans` / `Vm::set_queue_plans`): a pass-driven flow's
+/// A conveyor/queue model's pass-written slots are RETRACTED from this set by
+/// whoever attaches the plans (`Vm::set_conveyor_plans` / `Vm::set_queue_plans`,
+/// `SimBuild::retracted_constant_offsets`): a pass-driven flow's
 /// placeholder `0` matches the AssignConstCurr rule here, but the per-step pass
 /// overwrites its slot, so an override on it must reject rather than silently
 /// do nothing (GH #871).
@@ -855,11 +837,10 @@ impl Vm {
         // Pass-written slots (driven outflows, leaks, containers) must not be
         // overridable: their placeholder `0` compiles to AssignConstCurr, but
         // the conveyor pass overwrites them every step, so an accepted
-        // override would be silently ineffective (GH #871). The build path
-        // already retracts them from the compiled sim's constant info (so the
-        // no-VM `is_constant_offset` check agrees); repeating the retraction
-        // here makes a Vm assembled directly from an unscrubbed
-        // CompiledSimulation reject too.
+        // override would be silently ineffective (GH #871). The shared program
+        // keeps its constant index as compiled; the retraction rides with the
+        // plans, here for the Vm and on `SimBuild::retracted_constant_offsets`
+        // for a caller validating an override with no Vm.
         for plan in &plans {
             self.retracted_constants.extend(plan.pass_written_offsets());
         }

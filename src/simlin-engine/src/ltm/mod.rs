@@ -57,7 +57,7 @@ pub(crate) use types::{is_synthetic_node_name, normalize_module_ref};
 // the whole-variable phase adjacency and each SCC's induced element
 // graph), plus the `#[cfg(test)]` dt-phase cycle accessor
 // (`crate::db::dep_graph::dt_cycle_sccs`).
-pub(crate) use indexed::scc_components;
+pub(crate) use indexed::{IndexedGraph, scc_components, scc_components_of};
 
 /// Maximum number of nodes in any single strongly-connected component
 /// before [`crate::db::model_ltm_variables`] auto-flips from exhaustive

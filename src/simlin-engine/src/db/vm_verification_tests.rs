@@ -326,8 +326,8 @@ fn no_loop_project() -> datamodel::Project {
     }
 }
 
-/// AC1.4: Models with no feedback loops incur zero LTM overhead when
-/// ltm_enabled=true. The layout should have no LTM variable slots and
+/// AC1.4: Models with no feedback loops incur zero LTM overhead under
+/// `LtmOverlay::On`. The layout should have no LTM variable slots and
 /// no LTM fragments should be compiled.
 #[test]
 fn test_ltm_no_loops_zero_overhead() {
@@ -388,7 +388,7 @@ fn test_ltm_no_loops_zero_overhead() {
     );
 }
 
-/// AC1.5: ltm_enabled=false skips all LTM layout and assembly work;
+/// AC1.5: `LtmOverlay::Off` skips all LTM layout and assembly work;
 /// compilation produces identical bytecode to a compilation that never
 /// had LTM enabled.
 #[test]
@@ -472,9 +472,8 @@ fn test_ltm_incremental_produces_synthetic_variables() {
         "compiled output should contain LTM variable offsets (starting with '$')"
     );
 
-    // Verify LTM increases the layout slot count. Extract n_slots
-    // before toggling ltm_enabled to avoid holding a salsa ref across
-    // a &mut db call.
+    // Verify LTM increases the layout slot count: the two overlays' layouts
+    // are separate memos, so both are read from the same db.
     let n_slots_ltm =
         compute_layout(&db, source_model, source_project, crate::db::LtmOverlay::On).n_slots;
 

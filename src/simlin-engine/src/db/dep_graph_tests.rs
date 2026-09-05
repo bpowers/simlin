@@ -16,11 +16,11 @@ use crate::test_common::TestProject;
 //
 // `walk_successors(.., SccPhase::Dt)` is the single shared dt-phase
 // cycle-successor relation consumed by both the production cycle detector
-// (`compute_inner` inside `model_dependency_graph_impl`) and the
+// (`closure_of` inside `model_dependency_graph_impl`) and the
 // `#[cfg(test)]` SCC accessor (`dt_cycle_sccs`). Because there is exactly
 // one definition of the relation, used twice, the introspection accessor
 // is the engine's relation by construction -- no re-derivation can drift.
-// These tests pin its invariant: the successor set `compute_inner`
+// These tests pin its invariant: the successor set `closure_of`
 // iterates for every node kind --
 //   Stock  => empty (dt-phase sink; db.rs stock early-return),
 //   Module => empty (returns before `processing.insert`, so a module is
@@ -28,7 +28,7 @@ use crate::test_common::TestProject;
 //   Aux    => dt_deps filtered to known, non-stock targets
 //             (module targets KEPT -- a module has no successors so
 //             Tarjan cannot route a cycle through it; unknown and
-//             stock-targeted deps dropped, matching `compute_inner`),
+//             stock-targeted deps dropped, matching `closure_of`),
 //   absent => empty (no panic).
 
 /// Build a bare `VarInfo` for the pure-unit dt-phase `walk_successors`
@@ -98,7 +98,7 @@ fn dt_walk_successors_aux_filters_stock_and_unknown_keeps_module() {
     // Stock-targeted dep dropped (a stock breaks the dt chain), unknown
     // dep dropped, module-targeted dep KEPT (a module node has no
     // successors so Tarjan cannot route a cycle through it -- this
-    // matches `compute_inner`, whose `!dep_info.is_module` guard only
+    // matches `closure_of`, whose `!dep_info.is_module` guard only
     // controls transitive absorption, not iteration).
     assert_eq!(succ_strs(&succ), vec!["aux2", "the_mod"]);
 }
@@ -136,10 +136,10 @@ fn dt_walk_successors_order_is_btreeset_sorted() {
 // `walk_successors(.., SccPhase::Initial)` is the single shared init-phase
 // cycle-successor relation, the exact analogue of the dt phase for the init
 // phase. It is consumed by both the production cycle detector
-// (`compute_inner` inside `model_dependency_graph_impl`, init branch)
+// (`closure_of` inside `model_dependency_graph_impl`, init branch)
 // and the init-phase per-element recurrence resolution. These tests pin
 // its invariant per node kind:
-//   Module => empty (the module early-return in `compute_inner` applies
+//   Module => empty (the module early-return in `closure_of` applies
 //             to BOTH phases -- a module is never on the DFS stack so it
 //             can never carry a cycle in either phase),
 //   Stock  => initial_deps filtered to known vars -- a stock is NOT an
@@ -147,7 +147,7 @@ fn dt_walk_successors_order_is_btreeset_sorted() {
 //             stock is a valid init-relation node, so its init deps and
 //             stock-targeted init deps are KEPT),
 //   Aux    => initial_deps filtered to known vars (unknown deps dropped,
-//             matching the inlined `compute_inner` init logic),
+//             matching the inlined `closure_of` init logic),
 //   absent => empty (no panic).
 
 /// Build a bare `VarInfo` carrying `initial_deps` for the pure-unit
@@ -172,7 +172,7 @@ fn init_walk_successors_module_has_no_cycle_successors() {
     let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
     vi_insert(&mut vinfo, "m", vi_init_for_test(false, true, &["a"]));
     vi_insert(&mut vinfo, "a", vi_init_for_test(false, false, &[]));
-    // The module early-return in `compute_inner` fires before
+    // The module early-return in `closure_of` fires before
     // `processing.insert` in BOTH phases, so a module is never on the
     // DFS stack and can never carry a cycle in the init phase either:
     // empty cycle-successor set (mirrors the dt phase).
@@ -185,7 +185,7 @@ fn init_walk_successors_stock_is_not_an_init_sink() {
     vi_insert(&mut vinfo, "s", vi_init_for_test(true, false, &["s", "a"]));
     vi_insert(&mut vinfo, "a", vi_init_for_test(false, false, &[]));
     // A Stock is NOT an init-phase sink: the dt stock sink in
-    // `compute_inner` is `!is_initial`-gated, so in the init phase a
+    // `closure_of` is `!is_initial`-gated, so in the init phase a
     // stock's `initial_deps` ARE its cycle successors. A stock whose
     // init equation references itself (`s` in its own init deps) is a
     // genuine init self-loop, so `s` MUST appear in its own successor
@@ -227,7 +227,7 @@ fn init_walk_successors_filters_unknown_deps() {
     );
     vi_insert(&mut vinfo, "known", vi_init_for_test(false, false, &[]));
     // "ghost" is intentionally absent from var_info.
-    // This is exactly the inlined `compute_inner` init semantics
+    // This is exactly the inlined `closure_of` init semantics
     // (`info.initial_deps.iter().filter(|dep|
     // var_info.contains_key(dep))`): unknown deps dropped, no other
     // filter.
@@ -241,7 +241,7 @@ fn init_walk_successors_filters_unknown_deps() {
 fn init_walk_successors_absent_name_is_empty() {
     let vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
     // A malformed/absent var_info entry must not panic; it yields no
-    // successors (mirrors the dt phase; `compute_inner` likewise
+    // successors (mirrors the dt phase; `closure_of` likewise
     // early-returns `Ok(())` for an unknown name).
     assert!(walk_successors(&vinfo, "nope", SccPhase::Initial).is_empty());
 }
@@ -930,7 +930,9 @@ fn resolve_dt_recurrence_sccs_is_byte_stable_across_runs() {
         let db = SimlinDb::default();
         let result = sync_from_datamodel(&db, &dm);
         let model = result.models["main"].source;
-        resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt).resolved
+        resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt)
+            .resolved
+            .clone()
     };
     assert_eq!(
         build(),

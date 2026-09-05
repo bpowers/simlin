@@ -43,7 +43,7 @@ use salsa::Accumulator;
 
 use crate::common::{Canonical, Ident};
 use crate::datamodel;
-use crate::db::var_fragment::{implicit_dep_shape, source_dep_shape};
+use crate::db::var_fragment::{helper_dimensions, source_dimensions};
 use crate::db::{
     Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceModel, SourceProject,
     SourceVariable, SourceVariableKind, model_implicit_var_info, model_lowered_variables,
@@ -728,15 +728,9 @@ fn check_conveyor_param_units(
     let dim_ctx = project_dimensions_context(db, project);
     let mut shapes: crate::common::IdentMap<Ident<Canonical>, crate::compiler::fragment::DepShape> =
         Default::default();
-    // A non-module shape is its dimensions under either overlay, so the plain
-    // one is named here and the unit pass stays overlay-independent.
-    let overlay = crate::db::LtmOverlay::Off;
     for (name, sv) in model.variables(db) {
         if sv.kind(db) != SourceVariableKind::Module {
-            shapes.insert(
-                Ident::new(name),
-                source_dep_shape(db, *sv, project, overlay),
-            );
+            shapes.insert(Ident::new(name), source_dimensions(db, *sv, project));
         }
     }
     // An explicit variable wins a name collision with a helper, as
@@ -746,7 +740,7 @@ fn check_conveyor_param_units(
         if !meta.is_module {
             shapes
                 .entry(Ident::new(name))
-                .or_insert_with(|| implicit_dep_shape(db, project, meta, overlay));
+                .or_insert_with(|| helper_dimensions(db, project, meta));
         }
     }
     let scope = crate::ast::LoweringScope {

@@ -399,7 +399,7 @@ fn test_multi_output_port_module_ports_are_sorted() {
         (sync.project, sync.models["multi_out"].source)
     };
 
-    // `find_model_output_ports` reads structural deps (no `ltm_enabled` needed):
+    // `find_model_output_ports` reads structural deps (no LTM overlay needed):
     // it scans parent models for `multi_out·{port}` references.
     let ports = sub_model_output_ports(&db, sub_model, source_project);
     let port_names: Vec<&str> = ports.iter().map(|p| p.as_str()).collect();

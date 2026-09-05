@@ -80,7 +80,7 @@ pub(crate) struct VarInfo {
 }
 
 /// The cycle-successor set of `name` for the given `phase`: exactly the
-/// deps `compute_inner`'s normal-node loop iterates for cycle detection in
+/// deps `closure_of`'s normal-node loop iterates for cycle detection in
 /// that phase.
 ///
 /// This is the single shared definition of BOTH phase relations,
@@ -88,7 +88,7 @@ pub(crate) struct VarInfo {
 /// `ResolvedScc.phase` and drives `combine_scc_for_phase`, so the dt/init
 /// distinction is exactly the dt/init distinction this relation makes; a
 /// parallel enum would be redundant). It is consumed by the production
-/// cycle detector (`compute_inner`, both phase branches), the
+/// cycle detector (`closure_of`, both phase branches), the
 /// SCC-as-collapsed-node accumulation in `model_dependency_graph_impl`,
 /// the recurrence-SCC resolution (`resolve_recurrence_sccs`), and the
 /// `#[cfg(test)]` SCC introspection accessor (`dt_cycle_sccs`). Defining
@@ -98,17 +98,17 @@ pub(crate) struct VarInfo {
 ///
 /// Returns `[]` when `name`:
 /// * is absent from `var_info` (a malformed/unknown entry -- no panic;
-///   `compute_inner` likewise early-returns `Ok(())` for an unknown name,
+///   `closure_of` likewise early-returns `Ok(())` for an unknown name,
 ///   and the dep loop skips unknown deps before recursing),
-/// * is a Module (`compute_inner` returns for a module *before*
-///   `processing.insert` in BOTH phases, so a module is never on the DFS
+/// * is a Module (`closure_of` returns for a module *before*
+///   marking it processing in BOTH phases, so a module is never on the DFS
 ///   stack and can never carry a cycle in either phase),
 /// * is a Stock **and `phase == Dt`** (a stock is a dt-phase sink -- the
-///   `info.is_stock && !is_initial` early-return in `compute_inner` --
+///   `info.is_stock && !is_initial` early-return in `closure_of` --
 ///   read from the prior timestep, so it breaks the dt chain).
 ///
 /// **The one per-phase difference.** A `Stock` is a dt-phase SINK but
-/// **NOT** an init-phase sink: `compute_inner`'s stock sink is
+/// **NOT** an init-phase sink: `closure_of`'s stock sink is
 /// `info.is_stock && !is_initial`, so it does not fire in the init phase.
 /// A stock's initial value is a genuine init-relation node, so a stock
 /// whose init equation references itself is a real init self-loop and its
@@ -125,18 +125,18 @@ pub(crate) struct VarInfo {
 /// * `Initial`: `var_info[name].initial_deps` filtered ONLY to deps `d`
 ///   with `var_info.contains_key(d)` -- unknown deps dropped, **no stock
 ///   filter** (a stock-targeted init dep is a real init dependency, kept).
-///   This exactly reproduces the inlined init logic `compute_inner` ran
+///   This exactly reproduces the inlined init logic `closure_of` ran
 ///   (`info.initial_deps.iter().filter(|dep| var_info.contains_key(dep))`).
 ///
 /// In both phases module-targeted deps are KEPT -- a module node has no
 /// successors so Tarjan cannot route a cycle through it, matching
-/// `compute_inner` exactly (its `!dep_info.is_module` guard governs only
+/// `closure_of` exactly (its `!dep_info.is_module` guard governs only
 /// transitive *absorption*, not which deps the loop iterates). Lagged and
 /// snapshot reads are already absent: `ordering_edges` keeps only the reads
 /// that order a phase. The returned references borrow `var_info`'s interned
 /// dep keys and iterate in `BTreeSet` (lexicographic) order, so the relation
 /// is byte-stable across runs. Returning `&Ident<Canonical>` (not `&str`)
-/// lets `compute_inner` Arc-clone a successor into the transitive set
+/// lets `closure_of` Arc-clone a successor into the transitive set
 /// instead of allocating a fresh `String`.
 pub(crate) fn walk_successors<'a>(
     var_info: &'a FxHashMap<Ident<Canonical>, VarInfo>,
@@ -306,7 +306,7 @@ pub(crate) struct DtCycleSccs {
 /// uses (`build_var_info` -- never a reconstruction) and runs the
 /// uncapped iterative Tarjan (`crate::ltm::scc_components`) over the
 /// adjacency defined by `walk_successors(.., SccPhase::Dt)` for every
-/// node. Because this accessor and `compute_inner` consume the same
+/// node. Because this accessor and `closure_of` consume the same
 /// `walk_successors` relation, the reported SCC set is the engine's
 /// dt-phase cycle relation by construction -- nothing is re-derived. The
 /// accompanying tests cross-check `multi` against the engine actually
@@ -323,23 +323,19 @@ pub(crate) fn dt_cycle_sccs(
 ) -> DtCycleSccs {
     let (var_info, _all_init_referenced) = build_var_info(db, model, project, &[]);
 
-    // Adjacency = exactly the dt-phase `walk_successors` for every node.
-    // var_info keys are canonical (canonicalized at sync time), so wrapping
-    // them unchecked is sound.
-    let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> =
-        HashMap::with_capacity(var_info.len());
-    let mut self_loops: BTreeSet<Ident<Canonical>> = BTreeSet::new();
-    for name in var_info.keys() {
-        let succ = walk_successors(&var_info, name.as_str(), SccPhase::Dt);
-        // `succ` is now `Vec<&Ident<Canonical>>`; an `Ident` `==` is pointer
-        // equality on the interned handle, so this self-edge check is exact.
-        if succ.contains(&name) {
-            self_loops.insert(name.clone());
-        }
-        edges.insert(name.clone(), succ.iter().map(|s| (*s).clone()).collect());
-    }
+    // Adjacency = exactly the dt-phase `walk_successors` for every node, in
+    // the dense form the production gate uses.
+    let index = DenseIndex::new(&var_info);
+    let succ = index.successors(&var_info, SccPhase::Dt);
+    let self_loops: BTreeSet<Ident<Canonical>> = succ
+        .iter()
+        .enumerate()
+        .filter(|(i, successors)| successors.contains(&(*i as u32)))
+        .map(|(i, _)| index.ordered[i].clone())
+        .collect();
+    let graph = crate::ltm::IndexedGraph::from_dense(index.nodes(), succ);
 
-    let multi: Vec<BTreeSet<Ident<Canonical>>> = crate::ltm::scc_components(&edges)
+    let multi: Vec<BTreeSet<Ident<Canonical>>> = crate::ltm::scc_components_of(&graph)
         .into_iter()
         .filter(|component| component.len() >= 2)
         .map(|component| component.into_iter().collect())
@@ -830,15 +826,22 @@ fn symbolic_phase_element_order(
     // `members` is a BTreeSet, so this iterates in sorted member order;
     // combined with the sorted Kahn below the result is byte-stable.
     for member in members {
-        // The verdict reads the members' own element reads; a module read's
-        // offset never enters it, so the plain overlay serves both modes and
-        // keeps this graph overlay-independent.
+        // The plain overlay serves both modes, which keeps this graph
+        // overlay-independent. It can, because the element graph is built
+        // from member writes (`segment_member_by_element` keys on the
+        // member's own `AssignCurr`s) and reads OF MEMBERS by members
+        // (`element_node_key` edges): a read of a non-member -- the one
+        // place the two overlays' fragments can differ, a sub-model
+        // variable whose slot moved under the LTM section -- contributes no
+        // edge, so the offset it carries never enters the verdict. Should
+        // the segmentation ever disagree with the overlay the combined
+        // fragment is assembled under, `combine_scc_fragment` refuses loudly.
         let frag = crate::db::var_phase_symbolic_fragment_prod(
             db,
             model,
             project,
             member.as_str(),
-            phase.clone(),
+            phase,
             crate::db::LtmOverlay::Off,
         )?;
         let member_name = member.as_str();
@@ -1100,7 +1103,9 @@ fn refine_scc_to_element_verdict(
 }
 
 /// The outcome of refining every offending SCC (for one phase) into its
-/// induced element graph.
+/// induced element graph. A salsa value (`resolve_recurrence_sccs`), so it
+/// carries the equality its backdating compares by.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DtSccResolution {
     /// SCCs whose induced element graph the cycle gate proved acyclic and
     /// element-sourceable -- single-variable self-recurrence OR a
@@ -1133,7 +1138,7 @@ pub(crate) struct DtSccResolution {
 /// promoted `crate::ltm::scc_components` filtered to `len() >= 2`,
 /// single-variable self-loops detected directly from adjacency (Tarjan
 /// reports a self-loop as a size-1 component). Defining each relation
-/// once and consuming it here AND in `compute_inner` makes this the
+/// once and consuming it here AND in `closure_of` makes this the
 /// engine's real cycle relation for the phase by construction.
 ///
 /// *Steps B/C -- per-SCC refinement + verdict* are delegated to
@@ -1208,6 +1213,15 @@ pub(crate) struct DtSccResolution {
 /// it is *not* required for soundness given the backstop, so the `&[]`
 /// argument is loud-safe (not neutral, but never unsound) and there is no
 /// outstanding MUST on Task 6.
+///
+/// Salsa-tracked on `(model, project, phase)`: the result is a function of
+/// those alone (the no-input wiring is fixed above), while the dependency
+/// graph that reads it is keyed per module-input set, so a sub-model
+/// instantiated under several wirings resolves its recurrences once rather
+/// than once per wiring. The `#[cfg(test)]` `UnsourceableVarsGuard` caveat on
+/// `model_dependency_graph` covers this memo too, since it is reached only
+/// through that graph.
+#[salsa::tracked(returns(ref))]
 pub(crate) fn resolve_recurrence_sccs(
     db: &dyn Db,
     model: SourceModel,
@@ -1215,34 +1229,19 @@ pub(crate) fn resolve_recurrence_sccs(
     phase: crate::db::SccPhase,
 ) -> DtSccResolution {
     let (var_info, _all_init_referenced) = build_var_info(db, model, project, &[]);
-    resolve_recurrence_sccs_over(db, model, project, phase, &var_info)
-}
 
-/// [`resolve_recurrence_sccs`] over an already-built no-input `var_info`:
-/// the dependency graph of the no-input wiring hands its own in, since
-/// building it again would be the identical work.
-pub(crate) fn resolve_recurrence_sccs_over(
-    db: &dyn Db,
-    model: SourceModel,
-    project: SourceProject,
-    phase: crate::db::SccPhase,
-    var_info: &FxHashMap<Ident<Canonical>, VarInfo>,
-) -> DtSccResolution {
-    // Whole-variable adjacency = exactly the phase's shared cycle
-    // relation for every node (the same construction `dt_cycle_sccs`
-    // performs for dt; the init-phase analogue for init).
-    let mut edges: HashMap<Ident<Canonical>, Vec<Ident<Canonical>>> =
-        HashMap::with_capacity(var_info.len());
-    let mut self_loops: BTreeSet<Ident<Canonical>> = BTreeSet::new();
-    for name in var_info.keys() {
-        let succ = walk_successors(var_info, name.as_str(), phase.clone());
-        // `succ` is `Vec<&Ident<Canonical>>`; `Ident` `==` is pointer
-        // equality on the interned handle, so this self-edge check is exact.
-        if succ.contains(&name) {
-            self_loops.insert(name.clone());
-        }
-        edges.insert(name.clone(), succ.iter().map(|s| (*s).clone()).collect());
-    }
+    // Whole-variable adjacency = exactly the phase's shared cycle relation
+    // for every node, in the dense form the closure also walks
+    // (`DenseIndex`); `IndexedGraph::from_dense` takes it as is.
+    let index = DenseIndex::new(&var_info);
+    let succ = index.successors(&var_info, phase);
+    let mut self_loops: BTreeSet<Ident<Canonical>> = succ
+        .iter()
+        .enumerate()
+        .filter(|(i, successors)| successors.contains(&(*i as u32)))
+        .map(|(i, _)| index.ordered[i].clone())
+        .collect();
+    let graph = crate::ltm::IndexedGraph::from_dense(index.nodes(), succ);
 
     // The offending SCCs, in sorted/byte-stable order: every multi-var
     // SCC (size >= 2), then every single-variable self-loop.
@@ -1268,7 +1267,7 @@ pub(crate) fn resolve_recurrence_sccs_over(
     // root cause, unmasked once Part A let the >= 2 SCC resolve). So a
     // `self_loops` entry that is already a `multi` member is filtered out
     // here: the >= 2 SCC subsumes it.
-    let multi: Vec<BTreeSet<Ident<Canonical>>> = crate::ltm::scc_components(&edges)
+    let multi: Vec<BTreeSet<Ident<Canonical>>> = crate::ltm::scc_components_of(&graph)
         .into_iter()
         .filter(|c| c.len() >= 2)
         .map(|c| c.into_iter().collect())
@@ -1293,7 +1292,7 @@ pub(crate) fn resolve_recurrence_sccs_over(
     // mini-slot builder built ZERO cross-member edges and would have
     // resolved a real cycle as acyclic).
     for members in &multi {
-        match refine_scc_to_element_verdict(db, model, project, members, phase.clone()) {
+        match refine_scc_to_element_verdict(db, model, project, members, phase) {
             SccVerdict::Resolved(scc) => resolved.push(scc),
             SccVerdict::Unresolved => has_unresolved = true,
         }
@@ -1303,7 +1302,7 @@ pub(crate) fn resolve_recurrence_sccs_over(
     // induced element graph for `phase` and record the verdict.
     for v in &self_loops {
         let members: BTreeSet<Ident<Canonical>> = std::iter::once(v.clone()).collect();
-        match refine_scc_to_element_verdict(db, model, project, &members, phase.clone()) {
+        match refine_scc_to_element_verdict(db, model, project, &members, phase) {
             SccVerdict::Resolved(scc) => resolved.push(scc),
             SccVerdict::Unresolved => has_unresolved = true,
         }
@@ -1468,8 +1467,9 @@ mod dep_graph_tests;
 /// reserved for the Phase 2 init-cycle resolution.
 ///
 /// Derives the same trait set as `ModelDepGraphResult` (it is reachable
-/// from a salsa return value, so it must participate in salsa equality).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// from a salsa return value, so it must participate in salsa equality) and
+/// is `Copy`, being a key of `resolve_recurrence_sccs`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SccPhase {
     Dt,
     Initial,
@@ -1634,7 +1634,7 @@ fn membership_in(dep_graph: &ModelDepGraphResult, name: &str) -> RunlistMembersh
 // cap.
 
 /// Build the SCC-aware back-edge map consumed by
-/// `compute_transitive`/`compute_inner`: every member of `resolved[i]`
+/// `compute_transitive`/`closure_of`: every member of `resolved[i]`
 /// (offset by `base_id`) maps to the stable SCC id `base_id + i`.
 ///
 /// This generalizes (and *replaces*) the Phase 1 `resolvable_self_loops:
@@ -1663,14 +1663,67 @@ pub(crate) fn scc_map_from_resolved(
     }
 }
 
+/// The dependency graph's node index: every node of `var_info` numbered in
+/// lexicographic order of its name, with each phase's cycle relation
+/// (`walk_successors`) available as successor indices.
+///
+/// The one owner of the dense form both consumers of the relation work in:
+/// the transitive closure (`closure_of`, whose `NodeSet`s are one bit per
+/// node over this index, so a set's ascending bits are its names in
+/// `BTreeSet` order) and the recurrence resolution's Tarjan
+/// (`IndexedGraph::from_dense`, which takes these nodes and successor lists
+/// as they are). Numbering by sorted name is what makes the closure's
+/// materialized sets and `scc_components_of`'s output byte-stable, and one
+/// builder is what keeps the two from drifting.
+pub(crate) struct DenseIndex<'a> {
+    /// Node index to name.
+    pub(crate) ordered: Vec<&'a Ident<Canonical>>,
+    pub(crate) index_of: FxHashMap<&'a Ident<Canonical>, u32>,
+}
+
+impl<'a> DenseIndex<'a> {
+    pub(crate) fn new(var_info: &'a FxHashMap<Ident<Canonical>, VarInfo>) -> Self {
+        let mut ordered: Vec<&'a Ident<Canonical>> = var_info.keys().collect();
+        ordered.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+        let index_of = ordered
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (*name, i as u32))
+            .collect();
+        DenseIndex { ordered, index_of }
+    }
+
+    /// Every node's successors in `phase`'s cycle relation, as indices, in
+    /// `walk_successors`' (lexicographic) order.
+    pub(crate) fn successors(
+        &self,
+        var_info: &FxHashMap<Ident<Canonical>, VarInfo>,
+        phase: SccPhase,
+    ) -> Vec<Vec<u32>> {
+        self.ordered
+            .iter()
+            .map(|name| {
+                walk_successors(var_info, name.as_str(), phase)
+                    .into_iter()
+                    .map(|dep| self.index_of[dep])
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The nodes as an owned list, for `IndexedGraph::from_dense`.
+    pub(crate) fn nodes(&self) -> Vec<Ident<Canonical>> {
+        self.ordered.iter().map(|name| (*name).clone()).collect()
+    }
+}
+
 /// A set of dependency-graph nodes over the dense index
 /// `model_dependency_graph_impl` numbers them in: one bit per node.
 ///
-/// The transitive closure unions these (a word-wise OR per edge) where it
-/// used to union `BTreeSet<Ident>`s, an interned-string comparison per
-/// element per edge. A C-LEARN-sized model closes over a thousand nodes into
-/// sets of hundreds of names each, and those unions were a third of the
-/// dependency graph's cost.
+/// The transitive closure unions these, a word-wise OR per edge. Unioning
+/// `BTreeSet<Ident>`s instead costs an interned-string comparison per element
+/// per edge, and a C-LEARN-sized model closes over a thousand nodes into sets
+/// of hundreds of names each: a third of the dependency graph's cost.
 #[derive(Clone, PartialEq, Eq)]
 struct NodeSet {
     words: Box<[u64]>,
@@ -1725,9 +1778,6 @@ struct ClosureWalk<'a> {
     /// Node index to name.
     ordered: &'a [&'a Ident<Canonical>],
     var_info: &'a FxHashMap<Ident<Canonical>, VarInfo>,
-    /// Per node, whether it is a module instance (a walk never absorbs a
-    /// module's set).
-    is_module: &'a [bool],
     /// Per node, its successors in this phase's cycle relation
     /// (`walk_successors`), in the dense index.
     succ: &'a [Vec<u32>],
@@ -1846,22 +1896,17 @@ fn closure_of(w: &mut ClosureWalk<'_>, node: u32) -> Result<(), String> {
                     // a genuine cycle through an external var. It cannot
                     // share this SCC (`members` is the entire SCC), and two
                     // distinct resolved SCCs cannot form a cycle (they would
-                    // be one SCC), so the same-SCC test is necessarily false
-                    // here -- still fatal (loud-safe).
-                    if same_resolved_scc_at(w.scc_of, dep, m) {
-                        continue;
-                    }
+                    // be one SCC), so no same-SCC exemption applies here --
+                    // fatal (loud-safe).
                     return Err(w.ordered[m as usize].as_str().to_string());
                 }
                 if w.closed[dep as usize].is_none() {
                     closure_of(w, dep)?;
                 }
-                // Same `!is_module` non-absorption guard as the normal path:
-                // a module's transitive set is not absorbed (cross-model
-                // deps handled upstream).
-                if !w.is_module[dep as usize]
-                    && let Some(Closed::Reached(set)) = &w.closed[dep as usize]
-                {
+                // Only a `Reached` set is absorbed: a module's set is
+                // `Direct` (its cross-model deps are handled upstream), so the
+                // representation is the guard.
+                if let Some(Closed::Reached(set)) = &w.closed[dep as usize] {
                     external.union_with(set);
                 }
             }
@@ -1912,14 +1957,10 @@ fn closure_of(w: &mut ClosureWalk<'_>, node: u32) -> Result<(), String> {
             closure_of(w, dep)?;
         }
 
-        // `succ` only holds known vars (`walk_successors` filters to
-        // `var_info` targets in both phases), so this lookup never misses.
-        // The `!is_module` transitive non-absorption guard is preserved
-        // exactly -- it governs only whether `dep`'s set is absorbed, never
-        // iteration.
-        if !w.is_module[dep as usize]
-            && let Some(Closed::Reached(set)) = &w.closed[dep as usize]
-        {
+        // Only a `Reached` set is absorbed: a module's set is `Direct`, so
+        // the representation is the non-absorption guard -- it governs only
+        // whether `dep`'s set is absorbed, never iteration.
+        if let Some(Closed::Reached(set)) = &w.closed[dep as usize] {
             transitive.union_with(set);
         }
     }
@@ -1938,52 +1979,19 @@ pub(crate) fn model_dependency_graph_impl(
     let module_input_names = module_input_names.to_vec();
     let (var_info, all_init_referenced) = build_var_info(db, model, project, &module_input_names);
 
-    // The recurrence resolution is defined over the no-input wiring (see
-    // `resolve_recurrence_sccs`); when this graph IS the no-input one, its
-    // `var_info` is that wiring and is reused rather than rebuilt.
-    let resolve = |phase: SccPhase| -> DtSccResolution {
-        if module_input_names.is_empty() {
-            resolve_recurrence_sccs_over(db, model, project, phase, &var_info)
-        } else {
-            resolve_recurrence_sccs(db, model, project, phase)
-        }
-    };
-
-    // The dense index the closure works in. Nodes are numbered in
-    // lexicographic order of their names, so a set's ascending indices are
-    // its names in `BTreeSet` order and each closed set materializes into
-    // the `BTreeSet<Ident>` its readers iterate from an already-sorted
+    // The dense index the closure works in (`DenseIndex`): nodes numbered
+    // in lexicographic order of their names, so a set's ascending indices
+    // are its names in `BTreeSet` order and each closed set materializes
+    // into the `BTreeSet<Ident>` its readers iterate from an already-sorted
     // sequence. The traversal order below stays `var_info`'s key order,
     // exactly as before, because it decides which member of a genuine cycle
-    // is the one reported.
-    let mut ordered: Vec<&Ident<Canonical>> = var_info.keys().collect();
-    ordered.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
-    let index_of: FxHashMap<&Ident<Canonical>, u32> = ordered
-        .iter()
-        .enumerate()
-        .map(|(i, name)| (*name, i as u32))
-        .collect();
-    let visit_order: Vec<u32> = var_info.keys().map(|name| index_of[name]).collect();
-    let is_module: Vec<bool> = ordered
-        .iter()
-        .map(|name| var_info[*name].is_module)
-        .collect();
-    // Each phase's successor lists in the dense index, computed once: the dt
-    // gate may walk its relation twice and the init gate twice, and only the
-    // SCC map changes between walks, never the relation.
-    let successors = |phase: SccPhase| -> Vec<Vec<u32>> {
-        ordered
-            .iter()
-            .map(|name| {
-                walk_successors(&var_info, name.as_str(), phase.clone())
-                    .into_iter()
-                    .map(|dep| index_of[dep])
-                    .collect()
-            })
-            .collect()
-    };
-    let succ_dt = successors(SccPhase::Dt);
-    let succ_init = successors(SccPhase::Initial);
+    // is the one reported. Each phase's successor lists are computed once:
+    // the dt gate may walk its relation twice and the init gate twice, and
+    // only the SCC map changes between walks, never the relation.
+    let index = DenseIndex::new(&var_info);
+    let visit_order: Vec<u32> = var_info.keys().map(|name| index.index_of[name]).collect();
+    let succ_dt = index.successors(&var_info, SccPhase::Dt);
+    let succ_init = index.successors(&var_info, SccPhase::Initial);
 
     // Compute transitive dependencies (simplified all_deps without
     // cross-model support).
@@ -2014,7 +2022,7 @@ pub(crate) fn model_dependency_graph_impl(
     //     cycle.
     //  2. *SCC-aware back-edge break* (the `processing[dep]` site via the
     //     same-SCC check): an intra-SCC back-edge is suppressed (no error)
-    //     instead of fatal. Members are handled by (1) at `compute_inner`
+    //     instead of fatal. Members are handled by (1) at `closure_of`
     //     entry and never reach the normal loop, so for a resolved SCC this
     //     site is defense-in-depth; every back-edge NOT within one resolved
     //     SCC (a genuine cycle, a partially-resolved SCC, a cross-SCC edge)
@@ -2030,15 +2038,15 @@ pub(crate) fn model_dependency_graph_impl(
         |is_initial: bool,
          scc_map: &BTreeMap<Ident<Canonical>, usize>|
          -> Result<HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>, String> {
-            let scc_of: Vec<Option<usize>> = ordered
+            let scc_of: Vec<Option<usize>> = index
+                .ordered
                 .iter()
                 .map(|name| scc_map.get(*name).copied())
                 .collect();
-            let n = ordered.len();
+            let n = index.ordered.len();
             let mut walk = ClosureWalk {
-                ordered: &ordered,
+                ordered: &index.ordered,
                 var_info: &var_info,
-                is_module: &is_module,
                 succ: if is_initial { &succ_init } else { &succ_dt },
                 scc_of: &scc_of,
                 is_initial,
@@ -2061,13 +2069,14 @@ pub(crate) fn model_dependency_graph_impl(
                 .enumerate()
                 .map(|(i, closed)| {
                     let set = match closed {
-                        Some(Closed::Reached(set)) => {
-                            set.iter().map(|j| ordered[j as usize].clone()).collect()
-                        }
+                        Some(Closed::Reached(set)) => set
+                            .iter()
+                            .map(|j| index.ordered[j as usize].clone())
+                            .collect(),
                         Some(Closed::Direct(direct)) => direct,
                         None => BTreeSet::new(),
                     };
-                    (ordered[i].clone(), set)
+                    (index.ordered[i].clone(), set)
                 })
                 .collect())
         };
@@ -2097,11 +2106,11 @@ pub(crate) fn model_dependency_graph_impl(
     // actually found a fully-resolvable back-edge (acyclic happy path /
     // loud-safe fallback => zero extra work).
     let dt_scc_map: BTreeMap<Ident<Canonical>, usize> = if dt_first.is_err() {
-        let resolution = resolve(SccPhase::Dt);
+        let resolution = resolve_recurrence_sccs(db, model, project, SccPhase::Dt);
         if !resolution.has_unresolved && !resolution.resolved.is_empty() {
             let mut map = BTreeMap::new();
             scc_map_from_resolved(&resolution.resolved, 0, &mut map);
-            resolved_sccs = resolution.resolved;
+            resolved_sccs = resolution.resolved.clone();
             map
         } else {
             // A genuine cycle remains (element-cyclic, not element-
@@ -2156,7 +2165,7 @@ pub(crate) fn model_dependency_graph_impl(
             // this never appeared as a dt SCC). Run the init-phase
             // recurrence resolution (Phase 2 Task 3), reusing the
             // phase-parameterized builder.
-            let init_resolution = resolve(SccPhase::Initial);
+            let init_resolution = resolve_recurrence_sccs(db, model, project, SccPhase::Initial);
 
             // Exclude init SCCs whose members the dt path already
             // resolved: a both-relations aux self-recurrence is
@@ -2172,12 +2181,13 @@ pub(crate) fn model_dependency_graph_impl(
             } else {
                 init_resolution
                     .resolved
-                    .into_iter()
+                    .iter()
                     .filter(|s| {
                         !s.members
                             .iter()
                             .any(|m| dt_scc_map.contains_key(m.as_str()))
                     })
+                    .cloned()
                     .collect()
             };
 

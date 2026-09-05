@@ -882,9 +882,9 @@ fn reject_conveyor_queue_conflict(
 ///
 /// The expanded project is a SEPARATE `SourceProject` from the user's, so
 /// diagnostics -- which `collect_all_diagnostics` gathers from the user's handle
-/// -- never see a synthetic `$conv$`/`$queue$` ident. It carries `ltm_enabled ==
-/// false` (the sync path never sets the flag), so the expanded compile does not
-/// participate in LTM: conveyor/queue plus LTM is a documented degradation.
+/// -- never see a synthetic `$conv$`/`$queue$` ident. It is compiled with the
+/// LTM overlay `Off` (`build_compiled` fixes that), so the expanded compile does
+/// not participate in LTM: conveyor/queue plus LTM is a documented degradation.
 ///
 /// Enforces the Euler-only rule for both stock types (§10.3): a conveyor present
 /// under non-Euler yields [`ErrorCode::ConveyorNonEulerMethod`] (behavior-
@@ -997,7 +997,7 @@ pub fn build_compiled(
     // The expanded twin is always compiled without the LTM overlay: LTM over
     // a conveyor/queue is a documented degradation (docs/design/conveyors.md
     // s9.6, queues.md s10.5).
-    let mut compiled = crate::db::compile_project_incremental(
+    let compiled = crate::db::compile_project_incremental(
         db,
         expanded_project,
         main_model,
@@ -1056,25 +1056,12 @@ pub fn build_compiled(
     // Pass-written slots (driven outflows, leaks, containers) must not be
     // overridable constants: their placeholder `0` equations compile to
     // AssignConstCurr, but the passes overwrite the slots every step, so an
-    // accepted override would be silently ineffective (GH #871). Retracting
-    // them HERE -- on the CompiledSimulation callers cache -- is what makes
-    // libsimlin's no-VM `is_constant_offset` validation (after run_to_end
-    // consumed the VM) reject exactly like the live VM does; the Vm repeats
-    // the retraction when plans are attached, as defense for a directly
-    // assembled Vm.
-    //
-    // The retraction edits the program, so this path takes a private copy of
-    // the memoized artifact (`make_mut` clones while the salsa memo shares
-    // it). That copy is the special-stock path's cost alone: an ordinary
-    // model hands the memo's `Arc` straight to the Vm.
-    let scrubbed = std::sync::Arc::make_mut(&mut compiled);
-    for plan in &conveyor_plans {
-        scrubbed.exclude_overridable_offsets(plan.pass_written_offsets());
-    }
-    for plan in &queue_plans {
-        scrubbed.exclude_overridable_offsets(plan.pass_written_offsets());
-    }
-
+    // accepted override would be silently ineffective (GH #871). The
+    // retraction rides with the plans rather than being edited into the
+    // memoized program: `Vm::set_conveyor_plans`/`set_queue_plans` take it
+    // for a live Vm, and `SimBuild::retracted_constant_offsets` for a caller
+    // validating an override without one (libsimlin, after `run_to_end`
+    // consumed the Vm). The program stays the memo's own `Arc`.
     Ok((compiled, conveyor_plans, queue_plans))
 }
 
@@ -1586,14 +1573,14 @@ pub(crate) fn build_compiled_fresh(
 /// simulation, both special-stock plan sets, and which branch was taken.
 ///
 /// `special` is what a caller needs in order to reason about LTM: the expansion
-/// path compiles a different `SourceProject` (with `ltm_enabled == false`), so a
+/// path compiles a different `SourceProject` (with the LTM overlay `Off`), so a
 /// special-stock model carries no LTM instrumentation. libsimlin's
 /// `simlin_sim_new` reads it to decide whether to snapshot the LTM
 /// loop-partition metadata.
 pub struct SimBuild {
-    /// Shared with the salsa memo that assembled it (the ordinary path) or
-    /// freshly built (the special-stock path); either way the `Vm` takes the
-    /// same `Arc`, so nothing here is deep-copied on the way to execution.
+    /// The salsa memo's own `Arc`, on both paths: the `Vm` takes the same one,
+    /// so nothing is deep-copied on the way to execution, and the program's
+    /// constant index is never edited (see `retracted_constant_offsets`).
     pub compiled: std::sync::Arc<crate::vm::CompiledSimulation>,
     /// One plan per conveyor belt (per array element for an arrayed conveyor).
     /// Empty unless `special`.
@@ -1604,6 +1591,27 @@ pub struct SimBuild {
     /// True when the main model carried a conveyor or a queue marker and took the
     /// expansion path.
     pub special: bool,
+}
+
+impl SimBuild {
+    /// The slots the conveyor and queue passes write every step, which
+    /// `compiled` still lists as constants (their placeholder `0` equations
+    /// compile to `AssignConstCurr`) but which no override may claim: the pass
+    /// would overwrite the value on the next step (GH #871). A caller that
+    /// validates an override without a `Vm` subtracts this set from
+    /// `CompiledSimulation::is_constant_offset`; a `Vm` takes the same
+    /// retraction when the plans are attached. Empty for an ordinary model.
+    pub fn retracted_constant_offsets(&self) -> std::collections::HashSet<usize> {
+        self.conveyor_plans
+            .iter()
+            .flat_map(|plan| plan.pass_written_offsets())
+            .chain(
+                self.queue_plans
+                    .iter()
+                    .flat_map(|plan| plan.pass_written_offsets()),
+            )
+            .collect()
+    }
 }
 
 /// Compile `main_model`, transparently routing a model that contains a conveyor
@@ -1623,9 +1631,9 @@ pub struct SimBuild {
 /// funnel through. (The "never the FIRST outflow" half additionally runs
 /// pre-expansion in [`expand_queues`], the only place that evidence still exists.)
 ///
-/// The `db`/`source_project` pair drives the ordinary branch, preserving both
-/// incremental caching and whatever `ltm_enabled` the caller set on
-/// `source_project`. `datamodel` -- the synced representation of the SAME project
+/// The `db`/`source_project` pair drives the ordinary branch, preserving
+/// incremental caching; `overlay` says whether that branch assembles the LTM
+/// overlay. `datamodel` -- the synced representation of the SAME project
 /// -- drives the marker scan and, on the special branch, the expansion. BOTH
 /// branches now compile inside `db`; the special branch simply compiles `db`'s
 /// expanded `SourceProject` instead of the user's.

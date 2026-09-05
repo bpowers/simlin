@@ -350,8 +350,8 @@ pub fn wasm_results_for_special(
     Ok(wasm_results_from_slab(&artifact.layout, slab, specs))
 }
 
-/// LTM-enabled VM oracle: compile `model_name` of `datamodel` with
-/// `ltm_enabled = true` on its freshly-synced salsa `SourceProject`, run it
+/// LTM-enabled VM oracle: compile `model_name` of `datamodel` with the LTM
+/// overlay on, over its freshly-synced salsa `SourceProject`, run it
 /// to completion in the bytecode VM, and return the resulting [`Results`].
 ///
 /// Mirrors `simulate_ltm.rs::compile_ltm_incremental_with_partitions` but
@@ -386,15 +386,15 @@ pub fn vm_results_for_ltm(
 }
 
 /// LTM-enabled wasm peer of [`vm_results_for_ltm`]: compile `model_name` of
-/// `datamodel` with `ltm_enabled = true`, lower to wasm, run under the DLR-FT
+/// `datamodel` with the LTM overlay on, lower to wasm, run under the DLR-FT
 /// interpreter, and reshape the slab into a [`Results`]. Returns
 /// `Err(message)` on wasm-codegen `Unsupported` or an incremental-compile
 /// failure, so the caller (the ratcheting floor gate) can classify a model
 /// as "did not lower" vs. "lowered but wrong" -- the latter would have
 /// produced an `Ok` and then panicked in [`assert_ltm_slabs_match`].
 ///
-/// Mirrors the body of [`wasm_results_for`] with `set_project_ltm_enabled`
-/// inserted before `compile_project_incremental`; the reshape goes through
+/// Mirrors the body of [`wasm_results_for`] with `LtmOverlay::On` handed to
+/// `compile_project_incremental`; the reshape goes through
 /// the private `wasm_results_from_slab` (reachable from this sibling `pub fn`
 /// in the same module).
 ///
@@ -714,7 +714,7 @@ pub fn run_wasm_results_segmented(wasm: &[u8], layout: &WasmLayout, targets: &[f
 }
 
 /// Discovery-mode peer of [`wasm_results_for_ltm`]: compile `model_name`
-/// of `datamodel` with **both** `ltm_enabled = true` and
+/// of `datamodel` with **both** the LTM overlay on and
 /// `ltm_discovery_mode = true`, lower to wasm, run under the DLR-FT
 /// interpreter, and reshape the slab into a [`Results`]. Returns
 /// `Err(message)` on wasm-codegen `Unsupported` or an incremental-compile

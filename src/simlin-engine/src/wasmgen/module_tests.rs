@@ -326,9 +326,9 @@ fn compile_simulation_gf_lookup_modes_match_vm() {
 /// GH #924, the inverse of the GH #884 reject this test used to pin: a CONVEYOR
 /// model lowers through the PUBLIC wasm datamodel entry points, with no up-front
 /// marker scan and no silent VM fallback. Both LTM flag settings take the same
-/// special-stock dispatch (which compiles an always-`ltm_enabled == false`
-/// expanded project -- the documented conveyors.md §9 degradation), so an
-/// `ltm_enabled` compile must succeed rather than trip a reject.
+/// special-stock dispatch (which compiles the expanded project with the LTM
+/// overlay `Off` -- the documented conveyors.md §9 degradation), so an
+/// `ltm_enabled = true` compile must succeed rather than trip a reject.
 ///
 /// The `build_vm` companion is kept as the oracle-of-record: both backends build
 /// the same fixture, which is the whole point of removing the gate. Slab-level

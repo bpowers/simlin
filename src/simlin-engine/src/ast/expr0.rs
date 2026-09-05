@@ -776,37 +776,23 @@ fn test_parse_failures() {
 
 /// The parse tree is retained per variable for the life of the database and,
 /// under LTM, once per generated link-score equation, so a node's width is a
-/// memory number, not a detail: on C-LEARN the LTM parse trees held 45 MiB of
-/// empty `Vec` capacity before the argument and index lists became exact-size
-/// slices, and `IndexExpr0` was 120 bytes wide because `Range` carried two
-/// `Expr0`s inline (`docs/design/engine-performance.md`, C7). The exact widths are
-/// pinned on 64-bit targets so a field added without thought is a visible
-/// decision rather than a silent regression.
-#[cfg(target_pointer_width = "64")]
+/// memory number, not a detail: argument and index lists held as `Vec`s carry
+/// `Vec`'s minimum capacity per node (45 MiB of empty capacity in C-LEARN's
+/// LTM parse trees), and a `Range` carrying its two bounds inline makes every
+/// index as wide as two expressions (`docs/design/engine-performance.md`, C7).
+///
+/// Pinned as two properties, on every target:
+/// an index is no wider than an expression (the `Range` bounds are boxed),
+/// and a call's argument list is a slice, not a `Vec`. The upper bound on
+/// `Expr0` is what a field added without thought trips; raising it is a
+/// decision, made here.
 #[test]
 fn node_widths_are_pinned() {
     use std::mem::size_of;
-    assert_eq!(size_of::<Expr0>(), 48);
-    assert_eq!(size_of::<IndexExpr0>(), 48);
-    assert_eq!(size_of::<UntypedBuiltinFn<Expr0>>(), 40);
-}
-
-/// A parsed list holds exactly its elements: the parser builds it by `push`
-/// and would otherwise hand every node `Vec`'s minimum capacity.
-#[test]
-fn parsed_lists_have_exact_length() {
-    let ast = Expr0::new("a[1] + f(x, y)", LexerType::Equation)
-        .unwrap()
-        .unwrap();
-    let Expr0::Op2(_, l, r, _) = ast else {
-        panic!("expected a binary op");
-    };
-    let Expr0::Subscript(_, indices, _) = *l else {
-        panic!("expected a subscript");
-    };
-    assert_eq!(indices.len(), 1);
-    let Expr0::App(UntypedBuiltinFn(_, args), _) = *r else {
-        panic!("expected a call");
-    };
-    assert_eq!(args.len(), 2);
+    assert!(size_of::<IndexExpr0>() <= size_of::<Expr0>());
+    assert_eq!(
+        size_of::<UntypedBuiltinFn<Expr0>>(),
+        size_of::<String>() + size_of::<Box<[Expr0]>>()
+    );
+    assert!(size_of::<Expr0>() <= 6 * size_of::<usize>());
 }

@@ -501,7 +501,7 @@ fn datamodel_with_generated_layout(
         return Ok(None);
     }
 
-    let mut db_locked = proj.db.lock().unwrap();
+    let mut db_locked = proj.lock_db();
     let db_state = db_locked
         .current_source_project()
         .map(|sp| (&mut *db_locked, sp));

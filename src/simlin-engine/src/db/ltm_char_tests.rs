@@ -91,12 +91,11 @@ enum FragmentExpectation {
 }
 
 /// Build the fixture's db in the configuration the whole char suite uses:
-/// discovery mode ON (every fixture exercises the discovery emitters) and
-/// `ltm_enabled` ON so `model_ltm_fragment_diagnostics` actually runs.
-///
-/// `ltm_enabled` does not affect the dumped text -- `model_ltm_variables` is
-/// called directly and does not read the flag -- it only un-gates the diagnostic
-/// pass inside `model_all_diagnostics`.
+/// discovery mode ON (every fixture exercises the discovery emitters). The
+/// LTM overlay is an argument, not db state: the dumps call
+/// `model_ltm_variables` directly, and `fragment_compile_failures` passes
+/// `LtmOverlay::On` so the diagnostic pass inside `model_all_diagnostics`
+/// actually runs.
 fn char_fixture_db(project: &datamodel::Project) -> (SimlinDb, SourceModel, SourceProject) {
     use salsa::Setter;
     let mut db = SimlinDb::default();

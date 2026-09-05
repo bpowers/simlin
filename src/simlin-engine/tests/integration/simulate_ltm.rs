@@ -603,7 +603,7 @@ fn hero_culture_loop_sign_continuity() {
 // --- Module composite link score integration tests ---
 //
 // Tests involving stdlib modules (SMOOTH/DELAY) use the salsa/VM path
-// (compile_project_incremental with ltm_enabled/ltm_discovery_mode).
+// (compile_project_incremental with `LtmOverlay::On`, plus `ltm_discovery_mode`).
 //
 // The layout resolution bug that caused "variable 'smth1' not found in layout
 // during resolution" is fixed: LTM fragments whose SymVarRef names don't
@@ -9527,7 +9527,7 @@ fn discovery_recovers_cross_agg_loops_matches_exhaustive() {
 }
 
 /// Enabling LTM must not change (or break) the model's own simulation:
-/// C-LEARN compiled with `ltm_enabled` + discovery mode (the production
+/// C-LEARN compiled with the LTM overlay on + discovery mode (the production
 /// `analyze_model` configuration) must produce the SAME values for every
 /// model variable as the plain (LTM-disabled) compile. LTM synthetic
 /// variables are appended to the end of the flows runlist and never feed

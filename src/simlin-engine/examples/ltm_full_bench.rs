@@ -32,12 +32,11 @@
 //!
 //!   1. parsed              -- XMILE/MDL -> datamodel::Project
 //!   2. synced              -- sync_from_datamodel_incremental
-//!   3. ltm_enabled         -- set_project_ltm_enabled
-//!   4. causal_edges        -- model_causal_edges (variable-level)
-//!   5. element_edges       -- model_element_causal_edges
-//!   6. loop_circuits       -- model_element_loop_circuits (Johnson's)
-//!   7. ltm_variables       -- model_ltm_variables (synth var gen)
-//!   8. compile             -- compile_project_incremental (full assembly)
+//!   3. causal_edges        -- model_causal_edges (variable-level)
+//!   4. element_edges       -- model_element_causal_edges
+//!   5. loop_circuits       -- model_element_loop_circuits (Johnson's)
+//!   6. ltm_variables       -- model_ltm_variables (synth var gen)
+//!   7. compile             -- compile_project_incremental (full assembly, LTM overlay on)
 
 use std::fs;
 use std::time::Instant;
@@ -248,16 +247,7 @@ fn main() {
         format!("root='{root_name}'"),
     );
 
-    // Stage 3: enable LTM.  Just flips an input flag but bumps the
-    // salsa generation, so downstream tracked fns will run fresh.
-    let t0 = Instant::now();
-    tracker.record(
-        "ltm_enabled",
-        t0.elapsed().as_secs_f64() * 1000.0,
-        "flag=true".into(),
-    );
-
-    // Stage 4: variable-level causal edges.  We report the
+    // Stage 3: variable-level causal edges.  We report the
     // variable-level largest SCC alongside the element-level
     // counterpart in stage 5 so Phase-5 measurements can show how
     // per-element expansion influences SCC density.

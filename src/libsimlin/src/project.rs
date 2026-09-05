@@ -357,7 +357,7 @@ pub unsafe extern "C" fn simlin_project_add_model(
     // state, so `db.sync` reuses the prior handles automatically; holding the
     // db lock across the call keeps concurrent readers (simlin_sim_new) from
     // observing a half-synced db.
-    let mut db = proj.db.lock().unwrap();
+    let mut db = proj.lock_db();
     db.sync(&datamodel_locked);
     drop(db);
 
@@ -516,7 +516,7 @@ pub unsafe extern "C" fn simlin_project_replace_contents(
     let new_datamodel = src_ref.datamodel.lock().unwrap().clone();
 
     let mut datamodel_locked = dst_ref.datamodel.lock().unwrap();
-    let mut db_locked = dst_ref.db.lock().unwrap();
+    let mut db_locked = dst_ref.lock_db();
     db_locked.sync(&new_datamodel);
     *datamodel_locked = new_datamodel;
 }
@@ -832,20 +832,18 @@ pub unsafe extern "C" fn simlin_project_is_simulatable(
     // expansion build path -- which needs the datamodel -- rather than tripping
     // the `Conveyor/QueueNotExpanded` guard on the ordinary compile path.
     let datamodel_locked = proj.datamodel.lock().unwrap();
-    let mut db_locked = proj.db.lock().unwrap();
+    let mut db_locked = proj.lock_db();
     let Some(source_project) = db_locked.current_source_project() else {
         return false;
     };
-    let simulatable = engine::build_sim(
+    engine::build_sim(
         &mut db_locked,
         source_project,
         &datamodel_locked,
         model_name,
         engine::db::LtmOverlay::Off,
     )
-    .is_ok();
-    db_locked.release_replaced_memos();
-    simulatable
+    .is_ok()
 }
 
 /// Get all errors in a project including static analysis and compilation errors
@@ -874,7 +872,7 @@ pub unsafe extern "C" fn simlin_project_get_errors(
     };
 
     let datamodel_locked = proj.datamodel.lock().unwrap();
-    let mut db_locked = proj.db.lock().unwrap();
+    let mut db_locked = proj.lock_db();
     let source_project = match db_locked.current_source_project() {
         Some(sp) => sp,
         None => return ptr::null_mut(),
@@ -917,10 +915,6 @@ pub unsafe extern "C" fn simlin_project_get_errors(
         &datamodel_locked,
         engine::db::LtmOverlay::from(ltm_requested),
     );
-
-    // Whatever the compile and diagnostics above re-derived, the superseded
-    // memos are freed now (see `SimlinDb::release_replaced_memos`).
-    db_locked.release_replaced_memos();
 
     if all_errors.is_empty() {
         return ptr::null_mut();

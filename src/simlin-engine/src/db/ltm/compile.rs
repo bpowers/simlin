@@ -1120,15 +1120,14 @@ impl Drop for LtmFragmentFailureGuard {
 ///
 /// Severity is `Warning`, not `Error`: LTM is opt-in, the rest of the
 /// model still simulates, and a hard error would break compilation of
-/// every `ltm_enabled` model that hits a single bad fragment. This
+/// every LTM-overlay model that hits a single bad fragment. This
 /// mirrors the auto-flip-to-discovery warning in `model_ltm_variables`.
 ///
-/// `model_all_diagnostics` drives this when `ltm_enabled` and emits what it
-/// returns, so the warning reaches `collect_all_diagnostics` exactly when the
-/// auto-flip warning does. (GH #466 tracks the separate plumbing gap: the
-/// diagnostic-collection FFI paths leave `ltm_enabled` false by default,
-/// so neither this warning nor the auto-flip warning reaches
-/// `simlin_project_get_errors` today.)
+/// `model_all_diagnostics` drives this under `LtmOverlay::On` and emits what
+/// it returns, so the warning reaches `collect_all_diagnostics` exactly when
+/// the auto-flip warning does; libsimlin's `simlin_project_get_errors`
+/// harvests under `On` for a project that has requested LTM, so both reach it
+/// (GH #466).
 ///
 /// Only the layout-independent compile failure is reported here. A
 /// fragment that compiles but whose variable references do not resolve

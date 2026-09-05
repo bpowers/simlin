@@ -910,29 +910,31 @@ fn compile_with_passes(
     // overridable: their placeholder `0` equation compiles to an `AssignConstCurr`
     // the scan above sees, but the pass overwrites the slot every step, so an
     // accepted override would be silently ineffective (GH #871). The VM retracts
-    // exactly this set in `queue_compile::build_compiled`; mirroring it here is
-    // what makes the blob's `set_value` (which validates against the validity
-    // region seeded from this list) reject the same offsets the VM does.
-    if !queue_plans.is_empty() || !conveyor_plans.is_empty() {
-        let pass_written: std::collections::HashSet<usize> = queue_plans
-            .iter()
-            .flat_map(|p| p.pass_written_offsets())
-            .chain(conveyor_plans.iter().flat_map(|p| p.pass_written_offsets()))
-            .collect();
-        overridable_defaults.retain(|(off, _)| !pass_written.contains(off));
-    }
-    // Defense in depth: the offsets `collect_overridable_defaults` reports -- after
-    // the retraction above -- must be exactly the set the VM considers overridable
-    // (`constant_offsets`, the keys of `cached_constant_info`). Both walk the same
-    // flows-`AssignConstCurr` rule and then subtract the same pass-written set, so
-    // any divergence is a bug: a blob's `set_value` would accept/reject a different
-    // set than the VM. Checked only in debug.
+    // exactly this set when the plans are attached (`Vm::set_conveyor_plans` /
+    // `set_queue_plans`); mirroring it here is what makes the blob's `set_value`
+    // (which validates against the validity region seeded from this list) reject
+    // the same offsets the VM does.
+    let pass_written: std::collections::HashSet<usize> = queue_plans
+        .iter()
+        .flat_map(|p| p.pass_written_offsets())
+        .chain(conveyor_plans.iter().flat_map(|p| p.pass_written_offsets()))
+        .collect();
+    overridable_defaults.retain(|(off, _)| !pass_written.contains(off));
+    // Defense in depth: the offsets `collect_overridable_defaults` reports must be
+    // exactly the program's constants (`constant_offsets`, the keys of
+    // `cached_constant_info`, which the shared program never edits) minus the
+    // same pass-written set. Both walk the same flows-`AssignConstCurr` rule, so
+    // any divergence is a bug: a blob's `set_value` would accept/reject a
+    // different set than the VM. Checked only in debug.
     debug_assert!(
         {
             let mut ours: Vec<usize> = overridable_defaults.iter().map(|(off, _)| *off).collect();
             ours.sort_unstable();
             ours.dedup();
-            let mut theirs: Vec<usize> = sim.constant_offsets().collect();
+            let mut theirs: Vec<usize> = sim
+                .constant_offsets()
+                .filter(|off| !pass_written.contains(off))
+                .collect();
             theirs.sort_unstable();
             ours == theirs
         },

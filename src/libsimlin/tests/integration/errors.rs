@@ -494,9 +494,9 @@ fn test_submodel_conveyor_surfaces_clear_error() {
 
 /// After creating an LTM-enabled simulation on a model that auto-flips to
 /// discovery mode, `simlin_project_get_errors` must surface the auto-flip
-/// Warning. Before GH #466 the warning was unreachable: `simlin_sim_new`
-/// resets `ltm_enabled` to false right after compile, so `get_errors`
-/// collected diagnostics with LTM synthesis gated off.
+/// Warning: `get_errors` harvests with the LTM overlay on once any sim on
+/// the project has requested LTM (GH #466), rather than with LTM synthesis
+/// gated off.
 #[test]
 fn test_get_errors_surfaces_ltm_auto_flip_warning_after_ltm_sim() {
     let datamodel = build_chain_scc_datamodel("get_errors_auto_flip", 51);
@@ -590,7 +590,7 @@ fn test_get_errors_no_ltm_diagnostics_when_ltm_never_requested() {
 }
 
 /// GH #741: an LTM *fragment-compile-failure* warning must flow through the
-/// same `LtmEnabledGuard` harvest as the auto-flip warning above -- it rides
+/// same overlay-on harvest as the auto-flip warning above -- it rides
 /// the identical `model_all_diagnostics` -> `model_ltm_fragment_diagnostics`
 /// accumulator, so `simlin_project_get_errors` surfaces it after an
 /// LTM-enabled sim was created.
@@ -844,7 +844,7 @@ fn test_get_errors_auto_flip_warning_has_warning_severity() {
 // ltm_requested latch, so enable_ltm=true was silently honored-as-disabled:
 // the caller asked for analysis, got a sim with no LTM data, AND the degraded
 // warning that exists precisely for these models never reached get_errors
-// (ltm_requested stayed false, so the LtmEnabledGuard harvest never ran).
+// (ltm_requested stayed false, so the overlay-on harvest never ran).
 // ---------------------------------------------------------------------------
 
 /// After an LTM-enabled sim is created on a conveyor model, `get_errors` must

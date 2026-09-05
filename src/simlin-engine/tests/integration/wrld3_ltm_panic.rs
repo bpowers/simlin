@@ -5,8 +5,8 @@
 //! Reproducer for the LTM compilation blow-up that prevents World3 from
 //! simulating in the Simlin UI.  The failure path is:
 //! `model.run()` -> `simulate(enableLtm=true)` ->
-//! `simlin_sim_new(enable_ltm=true)` -> `set_project_ltm_enabled` then
-//! `compile_project_incremental`.  Without the fix, LTM compilation enters
+//! `simlin_sim_new(enable_ltm=true)` -> `compile_project_incremental` with
+//! the LTM overlay on.  Without the fix, LTM compilation enters
 //! a pathological state (exponential DFS over every circuit in a dense
 //! causal graph, producing gigabytes of intermediate state).  In WASM the
 //! engine runs out of linear-memory headroom and rustc's panic=abort surfaces

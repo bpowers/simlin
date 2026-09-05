@@ -163,8 +163,6 @@ pub fn analyze_model(
     model_name: &str,
     budget: Option<std::time::Duration>,
 ) -> Result<ModelAnalysis, String> {
-    use salsa::Setter;
-
     let json_model = model_snapshot(project, model_name)
         .ok_or_else(|| format!("model '{model_name}' not found in project"))?;
 
@@ -193,14 +191,17 @@ pub fn analyze_model(
     }
 
     // This analysis runs LTM in discovery mode; the mode is a salsa input on
-    // the project, restored before returning so the caller's db state stays
-    // clean. (Whether the overlay is assembled is an argument of the compile,
-    // `LtmOverlay::On` inside `run_ltm_pipeline`, not an input.)
-    source_project.set_ltm_discovery_mode(db).to(true);
+    // the project, so it is set here and the caller's value restored before
+    // returning (a no-op write when they agree, so a caller already in
+    // discovery mode pays no revision). Whether the overlay is assembled is
+    // an argument of the compile, `LtmOverlay::On` inside `run_ltm_pipeline`,
+    // not an input.
+    let prior_discovery_mode = source_project.ltm_discovery_mode(db);
+    crate::db::set_project_ltm_discovery_mode(db, source_project, true);
 
     let loop_result = run_ltm_pipeline(project, db, source_project, model_name, budget);
 
-    source_project.set_ltm_discovery_mode(db).to(false);
+    crate::db::set_project_ltm_discovery_mode(db, source_project, prior_discovery_mode);
 
     // `run_ltm_pipeline` distinguishes three outcomes:
     //   Ok(Some(result)) -- the pipeline ran; report the loops it found.

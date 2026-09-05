@@ -64,11 +64,13 @@ static GLOBAL: wasmalloc::WasmAlloc = wasmalloc::WasmAlloc::new();
 use anyhow::{Error as AnyError, Result};
 use simlin_engine::{self as engine};
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::ffi::CString;
+use std::ops::{Deref, DerefMut};
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 #[cfg(test)]
 use prost::Message;
@@ -441,6 +443,45 @@ pub struct SimlinProject {
     pub ref_count: AtomicUsize,
 }
 
+/// The project's salsa database, locked.
+///
+/// Every entry point that runs queries locks the database through
+/// [`SimlinProject::lock_db`], and dropping this lock frees the memos those
+/// queries superseded (`SimlinDb::release_replaced_memos`) -- so that policy
+/// has one owner and no entry point can forget it. The release is a walk over
+/// empty lists when nothing was superseded, and salsa opens one synthetic
+/// revision per 256 exclusive accesses without an input write, so a burst of
+/// that many calls between edits pays one verification walk. Lock the
+/// datamodel FIRST when both are needed: the project-wide order is
+/// datamodel-then-db.
+pub(crate) struct DbLock<'a>(MutexGuard<'a, engine::db::SimlinDb>);
+
+impl Deref for DbLock<'_> {
+    type Target = engine::db::SimlinDb;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for DbLock<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for DbLock<'_> {
+    fn drop(&mut self) {
+        self.0.release_replaced_memos();
+    }
+}
+
+impl SimlinProject {
+    /// Lock the salsa database for a run of queries; see [`DbLock`].
+    pub(crate) fn lock_db(&self) -> DbLock<'_> {
+        DbLock(self.db.lock().unwrap())
+    }
+}
+
 /// Opaque model structure
 pub struct SimlinModel {
     pub(crate) project: *const SimlinProject,
@@ -463,8 +504,7 @@ pub(crate) struct SimState {
     /// Re-applied to new VMs created on reset.
     pub(crate) overrides: HashMap<usize, f64>,
     /// Snapshot of `model_ltm_variables().loop_partitions` taken at
-    /// `simlin_sim_new` time, while the db is locked and the
-    /// `ltm_enabled` flag is still set.  The value is the loop's
+    /// `simlin_sim_new` time, while the db is locked.  The value is the loop's
     /// **per-slot** cycle-partition vector (length 1 for a
     /// scalar/cross-element/mixed loop, one entry per element for an
     /// A2A loop).  Binds post-sim relative-loop-score queries to the
@@ -493,8 +533,8 @@ pub(crate) struct SimState {
     /// "loop unknown" error.
     pub(crate) loop_element_index: HashMap<String, engine::ltm_post::LoopElementIndex>,
     /// The loop-enumeration mode the LTM pipeline resolved at
-    /// `simlin_sim_new` time (captured while `ltm_enabled` was set and the
-    /// db locked, like `loop_partitions`).  `None` when the sim was created
+    /// `simlin_sim_new` time (captured while the db was locked, like
+    /// `loop_partitions`).  `None` when the sim was created
     /// with `enable_ltm = false` or compilation failed; `Some(mode)`
     /// otherwise.  Surfaced through `simlin_sim_get_ltm_mode` so a caller can
     /// tell exhaustive Johnson enumeration apart from the auto-flipped
@@ -527,6 +567,23 @@ pub(crate) struct SimState {
     /// pass, so reset re-attaches these plans. A model with both conveyors and
     /// queues carries both plan sets.
     pub(crate) queue_plans: Option<Vec<engine::queue_compile::QueuePlan>>,
+    /// The slots the plans write every step, which `compiled` lists as
+    /// constants but no override may claim (GH #871):
+    /// `SimBuild::retracted_constant_offsets`, kept so the no-Vm override
+    /// check below agrees with the live Vm's. Empty for an ordinary model.
+    pub(crate) retracted_constants: HashSet<usize>,
+}
+
+impl SimState {
+    /// Whether `off` is an overridable constant: a constant of the program
+    /// that no conveyor/queue pass writes. The no-Vm twin of
+    /// `Vm::set_value`'s check, for a sim whose `run_to_end` consumed its Vm.
+    pub(crate) fn is_constant_offset(&self, off: usize) -> bool {
+        self.compiled
+            .as_ref()
+            .is_some_and(|compiled| compiled.is_constant_offset(off))
+            && !self.retracted_constants.contains(&off)
+    }
 }
 
 /// Opaque simulation structure

@@ -1568,7 +1568,7 @@ fn test_diagnostics_stable_across_incremental_loop_metadata_change() {
 // the per-model `model_all_diagnostics` trigger, which sees the UN-expanded
 // conveyor via `compat.conveyor`, and reach `collect_all_diagnostics` /
 // `simlin_project_get_errors`. Unlike the LTM twins they are NOT gated on
-// `ltm_enabled`: they describe the simulation itself (GH #873).
+// the LTM overlay: they describe the simulation itself (GH #873).
 
 /// A one-model project with a conveyor stock `belt` (transit expression
 /// `transit`, linear or exponential leakage per `exponential_leak`) and one

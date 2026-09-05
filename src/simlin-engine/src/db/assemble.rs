@@ -1300,7 +1300,7 @@ fn combine_resolved_sccs(
                 model,
                 project,
                 member.as_str(),
-                phase.clone(),
+                phase,
                 overlay,
             )
             .ok_or_else(|| {

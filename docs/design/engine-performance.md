@@ -830,9 +830,9 @@ by `reset_for_new_revision`, which runs inside the NEXT input write. For an
 editor idling between submits that is indefinitely: one rename of an
 unreferenced constant leaves 5.4 MiB (plain) or 116.9 MiB (LTM) waiting.
 `SimlinDb::release_replaced_memos` runs the same reset on demand (10 ms under
-LTM), and libsimlin calls it at the end of every edit and compile entry
-point, so the drop is paid inside the edit that caused it rather than one
-edit late.
+LTM), and libsimlin's database lock (`DbLock`) runs it when it drops, at the
+end of every entry point, so the drop is paid inside the edit that caused it
+rather than one edit late.
 
 **The LTM overlay is an argument, not an input.** Whether a compile
 assembles the LTM overlay (`db::LtmOverlay`) keys the layout, the shape a
@@ -846,7 +846,10 @@ plain simulation after either 181 (130 M). As an argument both variants stay
 memoized side by side (`db::ltm_overlay_tests`), at the price of one fragment
 memo per overlay a variable has been compiled under (about 5 MiB on C-LEARN
 when both have been used). The LTM derivations themselves are
-overlay-independent and derived once.
+overlay-independent and derived once. `ltm_discovery_mode` is still an
+input: it keys that derivation itself, so an exhaustive-mode LTM simulation
+alternated with `simlin_analyze_discover_loops` on one database opens a
+revision per flip and discards the other mode's LTM memos (GH #1056).
 
 **The edit path is O(model); ~1% of it is O(edit).** A structure-preserving
 literal edit costs 210 M instructions plain (23 ms) and 7.4 G under LTM

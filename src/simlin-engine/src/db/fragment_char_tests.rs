@@ -856,7 +856,7 @@ fn render_resolved_scc(db: &SimlinDb, project: SourceProject) -> String {
             model,
             project,
             member.as_str(),
-            scc.phase.clone(),
+            scc.phase,
             crate::db::LtmOverlay::Off,
         )
         .unwrap_or_else(|| {

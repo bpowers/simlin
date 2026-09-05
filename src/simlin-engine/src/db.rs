@@ -379,7 +379,11 @@ impl SimlinDb {
     /// Salsa's own name for the primitive is `trigger_lru_eviction`; nothing
     /// here declares an LRU, and the deferred-delete sweep is the part that
     /// matters. Like any write it needs the db exclusively: a snapshot held
-    /// elsewhere would block it.
+    /// elsewhere would block it. It is not itself a revision, with one
+    /// bounded exception: salsa counts every exclusive access in a byte and
+    /// opens a fresh revision when it wraps, so the 256th consecutive call
+    /// without an input write costs the next queries one verification walk
+    /// over the memos they touch (values are unaffected).
     pub fn release_replaced_memos(&mut self) {
         salsa::Database::trigger_lru_eviction(self);
     }
@@ -852,7 +856,7 @@ pub(crate) fn module_output_ref_in_document_order(
 ///    ref (a readable scalar `module·port`), never the bare module name.
 ///    The composite resolves in BOTH exhaustive and discovery mode (since
 ///    GH #548 the sub-model's composite var is laid out in the parent's
-///    flattened offset map whenever `ltm_enabled`), so the two modes share
+///    flattened offset map whenever the LTM overlay is on), so the two modes share
 ///    one branch.
 ///
 /// 2. `module -> variable`: the dependent's equation references the
@@ -903,7 +907,7 @@ pub(crate) fn module_link_score_equation(
     // This resolves in BOTH exhaustive and discovery mode: since GH #548,
     // `model_shape` registers a sub-model's LTM synthetic vars
     // (composites included) in the parent's flattened offset map whenever
-    // `ltm_enabled`, which holds in both modes. (The pre-#675 code gated
+    // the LTM overlay is on, which holds in both modes. (The pre-#675 code gated
     // composites to exhaustive mode on a now-stale "cross-module refs don't
     // resolve in discovery" assumption; an empirical probe showed the SMOOTH
     // composite resolving to a nonzero value in a discovery-mode run.) A

@@ -76,8 +76,8 @@ use crate::common::{Error, UnitError};
 ///    edge, an invalid pin, ...) and of `model_ltm_fragment_diagnostics` (an
 ///    LTM synthetic variable or helper whose fragment fails to compile),
 ///    each returned as data by its recursive derivation and emitted here
-///    exactly once. Gated on `ltm_enabled` so we don't run LTM synthesis on
-///    projects that never requested it.
+///    exactly once. Gated on the overlay so we don't run LTM synthesis for a
+///    caller that never requested it.
 /// 4. `emit_conveyor_spec_warnings` -- the unconditional compile-time
 ///    conveyor advisories: `ConveyorTransitNotDtMultiple` (a constant transit
 ///    time that is not an integer multiple of dt) and
@@ -254,7 +254,7 @@ pub fn model_all_diagnostics(
 
     // Conveyor compile-time spec advisories (docs/design/conveyors.md §4.1 /
     // §5.1): the DT-quantized-transit and constant-leak-fractions-sum
-    // Warnings. Unconditional -- NOT inside the `ltm_enabled` gate below --
+    // Warnings. Unconditional -- NOT inside the overlay gate below --
     // because they describe the simulation itself, not an analysis overlay.
     // Emitted from this per-model trigger for the same exactly-once reason as
     // the LTM-degraded twins, and because the special conveyor/queue build
@@ -403,7 +403,7 @@ fn emit_duplicate_variable_diagnostics(db: &dyn Db, model: SourceModel) {
 /// per stock regardless of module nesting.
 ///
 /// Only under LTM: the sole callers sit in `model_all_diagnostics`'s existing
-/// `ltm_enabled` branch. Carried as a `Model` error with the owner's specific
+/// `LtmOverlay::On` branch. Carried as a `Model` error with the owner's specific
 /// `code` rather than `Assembly` (which `errors::format_diagnostic` surfaces
 /// as the misleading `NotSimulatable` code) so this analysis-only advisory
 /// never makes the project look non-simulatable. Names are sorted so multiple

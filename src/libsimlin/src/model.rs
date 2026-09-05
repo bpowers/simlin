@@ -77,10 +77,11 @@ unsafe fn parse_filter(filter: *const c_char) -> Result<Option<String>, SimlinEr
 /// compile or codegen failure stores a `SimlinError` (never panics across the
 /// boundary) and leaves both output buffers NULL.
 ///
-/// `ltm_enabled` and `ltm_discovery_mode` flip the same salsa flags
-/// `simlin_sim_new(.., enable_ltm=true)` sets transiently on the project's
-/// `SourceProject`, but locally for this compile: the produced blob's layout includes the `$\u{205A}ltm\u{205A}*`
-/// synthetic series iff `ltm_enabled` is true.
+/// `ltm_enabled` selects the LTM overlay for this compile (the same choice
+/// `simlin_sim_new(.., enable_ltm)` makes) and `ltm_discovery_mode` sets the
+/// discovery flag on this compile's own `SourceProject`: the produced blob's
+/// layout includes the `$\u{205A}ltm\u{205A}*` synthetic series iff
+/// `ltm_enabled` is true.
 ///
 /// # Safety
 /// - `model` must be a valid pointer to a SimlinModel
@@ -469,7 +470,7 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
     };
 
     // Use salsa db for dependency lookup
-    let db_locked = (*model_ref.project).db.lock().unwrap();
+    let db_locked = (*model_ref.project).lock_db();
     let source_project = match db_locked.current_source_project() {
         Some(sp) => sp,
         None => {
@@ -621,7 +622,7 @@ pub unsafe extern "C" fn simlin_model_get_links(
         }
     };
     // Use salsa db for causal edge extraction
-    let db_locked = (*model_ref.project).db.lock().unwrap();
+    let db_locked = (*model_ref.project).lock_db();
     let source_project = match db_locked.current_source_project() {
         Some(sp) => sp,
         None => {
@@ -704,7 +705,7 @@ pub unsafe extern "C" fn simlin_model_get_latex_equation(
     };
 
     // Use salsa db for LaTeX rendering from parsed AST
-    let db_locked = (*model_ref.project).db.lock().unwrap();
+    let db_locked = (*model_ref.project).lock_db();
     let source_project = match db_locked.current_source_project() {
         Some(sp) => sp,
         None => return ptr::null_mut(),

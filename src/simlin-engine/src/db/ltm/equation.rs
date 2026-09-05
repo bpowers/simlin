@@ -58,10 +58,10 @@ pub struct LtmArm {
     ///
     /// Shared (`Arc<str>`) for the same reason `expr` is: the arm is cloned
     /// out of the per-link `shaped_link_score` memo into `model_ltm_variables`'
-    /// list, and as an owned `String` the text was deep-copied on that clone
-    /// -- 9 MiB of the per-link memos' own footprint on C-LEARN, on top of the
-    /// copy the whole-model vector holds (`docs/design/engine-performance.md`,
-    /// C7). The clone is a refcount bump and one copy is retained.
+    /// list, so the clone must be a refcount bump with one copy retained. An
+    /// owned `String` here duplicates every generated equation's text between
+    /// the per-link memos and the whole-model vector (9 MiB on C-LEARN,
+    /// `docs/design/engine-performance.md` C7).
     pub text: Arc<str>,
     /// The authoritative compiled AST (`Expr0::new(text)`).
     ///

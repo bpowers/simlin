@@ -933,7 +933,7 @@ fn test_model_ltm_variables_auto_flip_emits_warning_diagnostic() {
 /// collector that both `libsimlin` and `simlin-mcp` use to hand
 /// diagnostics to end users.  Accumulation on `model_ltm_variables`
 /// alone is not enough -- `model_all_diagnostics` must drive LTM
-/// synthesis when `ltm_enabled` so salsa's accumulator propagates the
+/// synthesis under `LtmOverlay::On` so salsa's accumulator propagates the
 /// warning to the collector.  Without this guarantee, the auto-flip is
 /// silent from the user's perspective.
 ///
@@ -1060,7 +1060,7 @@ fn is_ltm_fragment_failure(d: &crate::db::Diagnostic) -> bool {
 
 /// An LTM synthetic fragment that fails to compile must surface as a
 /// `Warning` through `collect_model_diagnostics` -- the collector both
-/// `libsimlin` and `simlin-mcp` hand to end users -- when `ltm_enabled`.
+/// `libsimlin` and `simlin-mcp` hand to end users -- under `LtmOverlay::On`.
 /// Without this the failure is silent: the variable keeps a layout slot,
 /// reads a constant 0, and the model still simulates, so the degraded
 /// loop/link score masquerades as a correct result.
@@ -1124,7 +1124,7 @@ fn test_model_ltm_fragment_diagnostics_emits_warning() {
         (sync.project, sync.models["main"].source)
     };
     // Mirror the production reachability of this pass (`model_all_diagnostics`
-    // only runs it when `ltm_enabled`).
+    // only runs it under `LtmOverlay::On`).
 
     let _force_failure = LtmFragmentFailureGuard::new("loop_score");
     model_ltm_fragment_diagnostics(&db, model, source_project);
@@ -3990,7 +3990,7 @@ fn test_rk4_without_ltm_compiles_clean() {
     let db = SimlinDb::default();
     let project = feedback_loop_project_with_method(datamodel::SimMethod::RungeKutta4);
     let source_project = sync_from_datamodel(&db, &project).project;
-    // ltm_enabled defaults to false on a freshly-synced project.
+    // A plain compile: the LTM overlay stays off.
 
     assert!(
         compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::Off)
@@ -5208,7 +5208,7 @@ fn is_conveyor_ltm_degraded(d: &crate::db::Diagnostic, conveyor_name: &str) -> b
 /// With LTM enabled, a model containing a conveyor stock must emit exactly
 /// one `ConveyorLtmDegraded` `Warning` naming the conveyor, reaching
 /// `collect_model_diagnostics` (the exact entry point libsimlin/simlin-mcp
-/// drive, and -- via the transient `ltm_enabled` re-enable --
+/// drive, and -- via the `On` harvest for a project that requested LTM --
 /// `simlin_project_get_errors`). §9.6.
 #[test]
 fn test_conveyor_ltm_degraded_warning_surfaces_under_ltm() {
@@ -5233,7 +5233,7 @@ fn test_conveyor_ltm_degraded_warning_surfaces_under_ltm() {
     );
 }
 
-/// The `ltm_enabled` gate scopes the warning to LTM callers: a project that
+/// The overlay gate scopes the warning to LTM callers: a project that
 /// never requested LTM must NOT pay LTM synthesis cost, so the conveyor
 /// degradation warning is absent. Mirrors
 /// `test_ltm_disabled_gate_suppresses_auto_flip_warning`.
@@ -5331,7 +5331,7 @@ fn test_queue_ltm_degraded_warning_surfaces_under_ltm() {
     );
 }
 
-/// The `ltm_enabled` gate scopes the queue warning to LTM callers: a project
+/// The overlay gate scopes the queue warning to LTM callers: a project
 /// that never requested LTM must not emit it.
 #[test]
 fn test_queue_ltm_degraded_warning_absent_without_ltm() {

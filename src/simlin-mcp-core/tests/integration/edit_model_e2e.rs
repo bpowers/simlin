@@ -785,11 +785,10 @@ async fn upsert_stock_is_full_replacement() {
     );
 }
 
-/// GH #662: edit_model collected its post-edit diagnostics with
-/// `ltm_enabled = false`, so the LTM auto-flip advisory never reached MCP
-/// callers even though edit_model always runs LTM analysis. The
-/// diagnostic-collection passes now transiently enable LTM, and the advisory
-/// surfaces in the success response's `warnings` field. A dry-run edit that
+/// edit_model's post-edit diagnostic-collection pass harvests with the LTM
+/// overlay on (GH #662), since edit_model always runs LTM analysis: the LTM
+/// auto-flip advisory surfaces in the success response's `warnings` field
+/// rather than never reaching MCP callers. A dry-run edit that
 /// adds one unrelated aux keeps the 51-node SCC intact and introduces no new
 /// error, so the edit succeeds and carries the warning.
 #[tokio::test]

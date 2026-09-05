@@ -633,10 +633,9 @@ SimlinLtmMode simlin_sim_get_ltm_mode(SimlinSim *sim, SimlinError **out_error);
 //
 // Because the links analysis is structure-driven (the unique `(from, to)`
 // edges come from `model_causal_edges`, which has no LTM dependency), this
-// function does not need to toggle `ltm_enabled` on the salsa db -- it
-// only needs the wasm-produced score columns from the slab.  The
-// `recompute_ltm_snapshots` dance happens only in the rel-loop-score
-// counterpart.
+// function reads no LTM derivation -- it only needs the wasm-produced score
+// columns from the slab.  `recompute_ltm_snapshots` is read only by the
+// rel-loop-score counterpart.
 //
 // # Safety
 // - `model` must be a valid pointer to a `SimlinModel`.
@@ -674,14 +673,9 @@ void simlin_free_links(SimlinLinks *links);
 // construction.
 //
 // Unlike the links twin (task 4), the rel-loop-score path needs the
-// snapshots that only `model_ltm_variables` produces when the
-// `SourceProject` salsa input has `ltm_enabled = true`.  This function
-// runs the salsa queries through `recompute_ltm_snapshots`, which uses
-// an `LtmEnabledGuard` to set the flag for the duration of the queries
-// and unconditionally restore it on guard drop.  The reset is mandatory:
-// the flag lives on a shared `SourceProject` input consumed by every
-// other operation on the project, and leaking it would silently change
-// the next consumer's analysis.
+// snapshots `model_ltm_variables` derives (the per-loop partition map and
+// slot metadata).  This function reads them through
+// `recompute_ltm_snapshots`, at the current revision.
 //
 // The `loop_id` is parsed in the FFI shell (the engine-side core takes
 // a base id + `(element_index, n_slots)` pair); a bare id on a scalar
@@ -942,10 +936,11 @@ void simlin_free_string(char *s);
 // compile or codegen failure stores a `SimlinError` (never panics across the
 // boundary) and leaves both output buffers NULL.
 //
-// `ltm_enabled` and `ltm_discovery_mode` flip the same salsa flags
-// `simlin_sim_new(.., enable_ltm=true)` sets transiently on the project's
-// `SourceProject`, but locally for this compile: the produced blob's layout includes the `$\u{205A}ltm\u{205A}*`
-// synthetic series iff `ltm_enabled` is true.
+// `ltm_enabled` selects the LTM overlay for this compile (the same choice
+// `simlin_sim_new(.., enable_ltm)` makes) and `ltm_discovery_mode` sets the
+// discovery flag on this compile's own `SourceProject`: the produced blob's
+// layout includes the `$\u{205A}ltm\u{205A}*` synthetic series iff
+// `ltm_enabled` is true.
 //
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel

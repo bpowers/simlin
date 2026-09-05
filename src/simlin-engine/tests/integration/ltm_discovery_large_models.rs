@@ -493,7 +493,7 @@ fn discovery_contract_holds_on_tractable_arrayed_model() {
 /// path.
 ///
 /// It parses C-LEARN, then compiles it via the incremental salsa path
-/// with **LTM discovery enabled** (`set_project_ltm_enabled(true)` +
+/// with **LTM discovery enabled** (`LtmOverlay::On` +
 /// `set_project_ltm_discovery_mode(true)` -- a heavier path than a plain
 /// compile, exercising loop discovery/analysis) and asserts the compile
 /// returns `Ok`. The compile is NOT wrapped in `catch_unwind`: per AC7.5

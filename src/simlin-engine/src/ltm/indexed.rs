@@ -26,7 +26,7 @@ use crate::common::{Canonical, Ident};
 /// start.as_str()" is equivalent to "neighbor_idx >= start_idx", preserving
 /// the small-start invariant that makes each elementary circuit emerge
 /// exactly once from its lex-smallest node.
-pub(super) struct IndexedGraph {
+pub(crate) struct IndexedGraph {
     /// Sorted node identities; index into this vec is a `NodeIdx` (u32).
     pub(super) nodes: Vec<Ident<Canonical>>,
     /// Successor indices per node, each inner Vec sorted ascending.
@@ -212,7 +212,15 @@ fn hash_u32_slice(vals: &[u32]) -> u64 {
 pub(crate) fn scc_components(
     edges: &HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
 ) -> Vec<Vec<Ident<Canonical>>> {
-    let graph = IndexedGraph::from_edges(edges);
+    scc_components_of(&IndexedGraph::from_edges(edges))
+}
+
+/// [`scc_components`] over an already-indexed graph: the dependency graph's
+/// recurrence resolution builds its relation dense once
+/// (`db::dep_graph::DenseIndex`) and hands it in through
+/// [`IndexedGraph::from_dense`] rather than round-tripping it through a
+/// name-keyed edge map.
+pub(crate) fn scc_components_of(graph: &IndexedGraph) -> Vec<Vec<Ident<Canonical>>> {
     let mut components: Vec<Vec<Ident<Canonical>>> = graph
         .tarjan_scc()
         .into_iter()
@@ -283,6 +291,26 @@ impl IndexedGraph {
             }
         }
 
+        IndexedGraph {
+            nodes,
+            succ,
+            node_to_idx,
+        }
+    }
+
+    /// Build an IndexedGraph from nodes that are already numbered: `succ[i]`
+    /// are the successor indices of `nodes[i]`, de-duplicated, in the order
+    /// the caller wants them visited. The dependency graph's `DenseIndex`
+    /// numbers nodes by sorted canonical name, the same order `from_edges`
+    /// assigns, so the two constructors produce the same graph for the same
+    /// relation and every consumer of the components sees one ordering.
+    pub(crate) fn from_dense(nodes: Vec<Ident<Canonical>>, succ: Vec<Vec<u32>>) -> Self {
+        debug_assert_eq!(nodes.len(), succ.len());
+        let node_to_idx: HashMap<Ident<Canonical>, u32> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.clone(), i as u32))
+            .collect();
         IndexedGraph {
             nodes,
             succ,

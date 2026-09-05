@@ -496,7 +496,7 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
         }
     };
     // Use salsa db for loop detection with polarity and deterministic IDs
-    let db_locked = (*model_ref.project).db.lock().unwrap();
+    let db_locked = (*model_ref.project).lock_db();
     let source_project = match db_locked.current_source_project() {
         Some(sp) => sp,
         None => {
@@ -580,13 +580,10 @@ pub unsafe extern "C" fn simlin_analyze_get_loops_runtime(
     };
     let model_ref = &*sim_ref.model;
 
-    // The LTM-snapshot recompute flips `ltm_enabled` on the shared salsa input
-    // (it must be true for `model_ltm_variables` to emit non-empty
-    // `loop_partitions`), so a mutable db lock is required.  `recompute_ltm_snapshots`
-    // wraps that flip in an `LtmEnabledGuard` that unconditionally restores the
-    // flag on drop -- the same pattern `simlin_analyze_rel_loop_score_from_wasm_results`
-    // uses.
-    let db_locked = (*model_ref.project).db.lock().unwrap();
+    // The LTM-snapshot recompute reads the LTM derivation at the current
+    // revision -- the same read `simlin_analyze_rel_loop_score_from_wasm_results`
+    // makes.
+    let db_locked = (*model_ref.project).lock_db();
     let source_project = match db_locked.current_source_project() {
         Some(sp) => sp,
         None => {
@@ -614,9 +611,8 @@ pub unsafe extern "C" fn simlin_analyze_get_loops_runtime(
     };
 
     // Build the exhaustive structural loop set, identical to
-    // `simlin_analyze_get_loops`, BEFORE recomputing the LTM snapshots so the
-    // detected-loop query runs with `ltm_enabled` in whatever state it already
-    // was (it has no LTM dependency).
+    // `simlin_analyze_get_loops` (the detected-loop query has no LTM
+    // dependency).
     let detected = engine::db::model_detected_loops(&*db_locked, source_model, source_project);
     // Partition metadata is structural (independent of the runtime
     // reclassification below), so capture it before the loops are moved out.
@@ -625,7 +621,10 @@ pub unsafe extern "C" fn simlin_analyze_get_loops_runtime(
 
     // `loop_partitions` drives the per-loop slot count the primitive uses to
     // concatenate an arrayed loop's element slots.  Recompute it the same way
-    // the rel-loop-score-from-wasm FFI does, under the ltm-enabled guard.
+    // the rel-loop-score-from-wasm FFI does, from the current derivation: an
+    // edit that changed the loop structure after the sim was created makes
+    // this map describe the edited model, not the program the results came
+    // from (`simlin_project_replace_contents` documents the same caveat).
     let (loop_partitions, _loop_element_index) = recompute_ltm_snapshots(
         &db_locked,
         source_project,
@@ -793,8 +792,8 @@ pub unsafe extern "C" fn simlin_analyze_discover_loops(
     // `analyze_model` needs the datamodel project (for the model snapshot and
     // UID resolution) plus a `&mut SimlinDb` and the current `SourceProject`.
     // Lock both: the datamodel guard outlives the call, and `analyze_model`
-    // toggles `ltm_enabled`/`ltm_discovery_mode` on the shared `SourceProject`
-    // and restores them before returning, so the db state stays clean.
+    // sets `ltm_discovery_mode` on the shared `SourceProject` and restores it
+    // before returning, so the db state stays clean.
     let datamodel_guard = match (*model_ref.project).datamodel.lock() {
         Ok(g) => g,
         Err(_) => {
@@ -806,7 +805,7 @@ pub unsafe extern "C" fn simlin_analyze_discover_loops(
             return ptr::null_mut();
         }
     };
-    let mut db_locked = (*model_ref.project).db.lock().unwrap();
+    let mut db_locked = (*model_ref.project).lock_db();
     let source_project = match db_locked.current_source_project() {
         Some(sp) => sp,
         None => {
@@ -1076,7 +1075,7 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
     };
     let model_ref = &*sim_ref.model;
 
-    let db_locked = (*model_ref.project).db.lock().unwrap();
+    let db_locked = (*model_ref.project).lock_db();
     let source_project = match db_locked.current_source_project() {
         Some(sp) => sp,
         None => {
@@ -1229,10 +1228,9 @@ unsafe fn slab_from_bytes(slab_ptr: *const u8, slab_len: usize) -> Result<Vec<f6
 ///
 /// Because the links analysis is structure-driven (the unique `(from, to)`
 /// edges come from `model_causal_edges`, which has no LTM dependency), this
-/// function does not need to toggle `ltm_enabled` on the salsa db -- it
-/// only needs the wasm-produced score columns from the slab.  The
-/// `recompute_ltm_snapshots` dance happens only in the rel-loop-score
-/// counterpart.
+/// function reads no LTM derivation -- it only needs the wasm-produced score
+/// columns from the slab.  `recompute_ltm_snapshots` is read only by the
+/// rel-loop-score counterpart.
 ///
 /// # Safety
 /// - `model` must be a valid pointer to a `SimlinModel`.
@@ -1296,7 +1294,7 @@ pub unsafe extern "C" fn simlin_analyze_links_from_wasm_results(
         }
     };
 
-    let db_locked = (*model_ref.project).db.lock().unwrap();
+    let db_locked = (*model_ref.project).lock_db();
     let source_project = match db_locked.current_source_project() {
         Some(sp) => sp,
         None => {
@@ -1649,10 +1647,13 @@ pub(crate) type LtmSnapshots = (
 /// Recompute the per-loop `(loop_partitions, loop_element_index)` snapshots
 /// the rel-loop-score core needs.
 ///
-/// Mirrors the snapshot capture in `simlin_sim_new`: `model_ltm_variables`
-/// is the LTM derivation itself, independent of whether any assembly has
-/// been asked for the overlay, so this reads the same memo the instrumented
-/// compile used (or derives it once, if none has run).
+/// Mirrors the snapshot capture in `simlin_sim_new`, but at the CURRENT
+/// revision: `model_ltm_variables` is the LTM derivation itself, independent
+/// of whether any assembly has been asked for the overlay, so with no edit
+/// since the sim was created this is the memo its program was assembled
+/// from; after an edit that changed the loop structure it describes the
+/// edited model, and the compile-era snapshot a `SimlinSim` keeps
+/// (`SimState::loop_partitions`) is the one that matches its results.
 ///
 /// Returns empty maps when the model isn't present in the sync result; the
 /// caller's downstream `rel_loop_score_series` then naturally fails the
@@ -1804,14 +1805,9 @@ pub(crate) fn resolve_loop_query<'a>(
 /// construction.
 ///
 /// Unlike the links twin (task 4), the rel-loop-score path needs the
-/// snapshots that only `model_ltm_variables` produces when the
-/// `SourceProject` salsa input has `ltm_enabled = true`.  This function
-/// runs the salsa queries through `recompute_ltm_snapshots`, which uses
-/// an `LtmEnabledGuard` to set the flag for the duration of the queries
-/// and unconditionally restore it on guard drop.  The reset is mandatory:
-/// the flag lives on a shared `SourceProject` input consumed by every
-/// other operation on the project, and leaking it would silently change
-/// the next consumer's analysis.
+/// snapshots `model_ltm_variables` derives (the per-loop partition map and
+/// slot metadata).  This function reads them through
+/// `recompute_ltm_snapshots`, at the current revision.
 ///
 /// The `loop_id` is parsed in the FFI shell (the engine-side core takes
 /// a base id + `(element_index, n_slots)` pair); a bare id on a scalar
@@ -1918,11 +1914,7 @@ pub unsafe extern "C" fn simlin_analyze_rel_loop_score_from_wasm_results(
         }
     };
 
-    // The mutable db lock is required because the LTM-snapshot recompute
-    // flips `ltm_enabled` on the salsa input (it must be true for the
-    // queries to emit non-empty snapshots).  An RAII guard in
-    // `recompute_ltm_snapshots` resets the flag before returning.
-    let db_locked = (*model_ref.project).db.lock().unwrap();
+    let db_locked = (*model_ref.project).lock_db();
     let source_project = match db_locked.current_source_project() {
         Some(sp) => sp,
         None => {

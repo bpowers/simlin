@@ -357,7 +357,7 @@ pub(crate) fn model_shape(
         let shape = if svar.kind(db) == SourceVariableKind::Module {
             module_dep_shape(db, project, svar.model_name(db), overlay)
         } else {
-            DepShape::var(variable_dimensions(db, *svar, project).clone())
+            super::var_fragment::source_dimensions(db, *svar, project)
         };
         vars.insert(
             Ident::new(name.as_str()),

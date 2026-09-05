@@ -306,12 +306,11 @@ async fn read_model_rk4_loop_surfaces_euler_analysis_error() {
     );
 }
 
-/// GH #662: read_model collected diagnostics with `ltm_enabled = false`, so the
-/// LTM auto-flip-to-discovery advisory (a Warning that only accumulates when
-/// LTM is enabled) never reached MCP callers, even though read_model always
-/// runs LTM loop analysis via `analyze_model`. Now the diagnostic-collection
-/// pass transiently enables LTM, and LTM warnings surface in the output's
-/// `warnings` field.
+/// read_model's diagnostic-collection pass harvests with the LTM overlay on
+/// (GH #662), since read_model always runs LTM loop analysis via
+/// `analyze_model`: the LTM auto-flip-to-discovery advisory (a Warning that
+/// only accumulates under the overlay) surfaces in the output's `warnings`
+/// field rather than never reaching MCP callers.
 #[tokio::test]
 async fn read_model_surfaces_ltm_auto_flip_warning() {
     // A 51-node SCC trips the engine's MAX_LTM_SCC_NODES = 50 auto-flip gate.
