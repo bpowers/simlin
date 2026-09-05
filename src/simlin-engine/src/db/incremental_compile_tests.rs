@@ -1595,7 +1595,7 @@ fn pre_lookup_smth1_project() -> datamodel::Project {
     }
 }
 
-fn run_smoothed_series(compiled: crate::vm::CompiledSimulation) -> Vec<f64> {
+fn run_smoothed_series(compiled: std::sync::Arc<crate::vm::CompiledSimulation>) -> Vec<f64> {
     let mut vm = crate::vm::Vm::new(compiled).expect("VM should build");
     vm.run_to_end().expect("simulation should run");
     let smoothed = crate::common::Ident::new("smoothed");
@@ -1624,7 +1624,7 @@ fn test_incremental_compile_implicit_lookup_dep_tables_after_equation_update() {
     let ref_sync = sync_from_datamodel(&ref_db, &project);
     let ref_compiled = assemble_simulation(&ref_db, ref_sync.project, "main".to_string())
         .expect("reference incremental compile should succeed");
-    let ref_series = run_smoothed_series((*ref_compiled).clone());
+    let ref_series = run_smoothed_series(ref_compiled.clone());
 
     let state2 = sync_from_datamodel_incremental(&mut db, &project, Some(&state1));
     let incr_compiled = compile_project_incremental(&db, state2.project, "main")
@@ -1662,7 +1662,7 @@ fn test_incremental_compile_implicit_lookup_dep_tables() {
     let ref_sync = sync_from_datamodel(&ref_db, &project);
     let ref_compiled = assemble_simulation(&ref_db, ref_sync.project, "main".to_string())
         .expect("reference incremental compile should succeed");
-    let ref_series = run_smoothed_series((*ref_compiled).clone());
+    let ref_series = run_smoothed_series(ref_compiled.clone());
     assert!(
         !ref_series.is_empty(),
         "reference smoothed series should not be empty"

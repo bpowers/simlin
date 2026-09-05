@@ -400,7 +400,10 @@ fn compile_datamodel_to_wasm_validates() {
 
 /// Build a `CompiledSimulation` for the named model of `datamodel` via the
 /// production incremental pipeline (the same path the VM corpus uses).
-fn compile_sim(datamodel: &crate::datamodel::Project, model_name: &str) -> CompiledSimulation {
+fn compile_sim(
+    datamodel: &crate::datamodel::Project,
+    model_name: &str,
+) -> std::sync::Arc<CompiledSimulation> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
     compile_project_incremental(&db, sync.project, model_name).expect("incremental compile")
@@ -442,7 +445,7 @@ fn run_artifact_results(artifact: &WasmArtifact) -> Vec<f64> {
 
 /// Assert every variable in `artifact.layout` matches the VM's series for
 /// the same `CompiledSimulation`. Returns the number of variables checked.
-fn assert_matches_vm(sim: CompiledSimulation, artifact: &WasmArtifact) -> usize {
+fn assert_matches_vm(sim: std::sync::Arc<CompiledSimulation>, artifact: &WasmArtifact) -> usize {
     let n_slots = artifact.layout.n_slots;
     let n_chunks = artifact.layout.n_chunks;
     let wasm_data = run_artifact_results(artifact);
@@ -1964,7 +1967,11 @@ fn compile_simulation_exports_self_describing_geometry() {
 /// Assert a single scalar variable's wasm series matches the VM, allowing a
 /// NaN-vs-NaN match (`assert_matches_vm` rejects NaN via its abs-diff
 /// tolerance, so the empty-view / OOB reducers need this NaN-aware variant).
-fn assert_scalar_matches_vm(sim: CompiledSimulation, artifact: &WasmArtifact, name: &str) {
+fn assert_scalar_matches_vm(
+    sim: std::sync::Arc<CompiledSimulation>,
+    artifact: &WasmArtifact,
+    name: &str,
+) {
     let n_slots = artifact.layout.n_slots;
     let n_chunks = artifact.layout.n_chunks;
     let wasm_data = run_artifact_results(artifact);
@@ -2158,7 +2165,10 @@ fn compile_simulation_transpose_reducer_matches_vm() {
 /// Assert every layout variable matches the VM, treating a NaN on both sides
 /// as equal (the OOB-subscript result). The plain `assert_matches_vm` uses a
 /// finite-difference compare that a NaN would fail, so the OOB tests use this.
-fn assert_matches_vm_nan_aware(sim: CompiledSimulation, artifact: &WasmArtifact) -> usize {
+fn assert_matches_vm_nan_aware(
+    sim: std::sync::Arc<CompiledSimulation>,
+    artifact: &WasmArtifact,
+) -> usize {
     let n_slots = artifact.layout.n_slots;
     let n_chunks = artifact.layout.n_chunks;
     let wasm_data = run_artifact_results(artifact);
@@ -2420,7 +2430,7 @@ fn instance_k_offsets(artifact: &WasmArtifact) -> (usize, usize) {
 /// `set_value_by_offset`), returning that variable's slab so wasm overrides
 /// can be compared cell-for-cell against the VM oracle.
 fn vm_results_with_override(
-    sim: CompiledSimulation,
+    sim: std::sync::Arc<CompiledSimulation>,
     off: usize,
     val: f64,
 ) -> (Vec<f64>, usize, usize) {
@@ -2941,7 +2951,10 @@ fn read_curr_slot(
 /// The VM's saved slab after driving it through `run_to(t)` for each `t` in
 /// `targets` (mirrors `run_artifact_segmented`). `run_to` calls `run_initials`
 /// internally, so the VM advances exactly as the blob does.
-fn vm_slab_segmented(sim: CompiledSimulation, targets: &[f64]) -> (Vec<f64>, usize, usize) {
+fn vm_slab_segmented(
+    sim: std::sync::Arc<CompiledSimulation>,
+    targets: &[f64],
+) -> (Vec<f64>, usize, usize) {
     let mut vm = Vm::new(sim).expect("vm creation");
     for &t in targets {
         vm.run_to(t).expect("vm run_to");

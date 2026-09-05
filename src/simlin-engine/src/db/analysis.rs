@@ -4241,7 +4241,6 @@ mod polarity_confidence_tests {
     /// and fail the assertion.
     #[test]
     fn reclassify_changes_undetermined_loop_to_runtime_polarity() {
-        use crate::CompiledSimulation;
         use crate::db::{
             compile_project_incremental, model_ltm_variables, set_project_ltm_enabled,
             sync_from_datamodel_incremental,
@@ -4296,8 +4295,7 @@ mod polarity_confidence_tests {
         );
 
         set_project_ltm_enabled(&mut db, sync.project, true);
-        let compiled: CompiledSimulation =
-            compile_project_incremental(&db, sync.project, "main").unwrap();
+        let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
         let mut vm = Vm::new(compiled).unwrap();
         vm.run_to_end().unwrap();
         let results = vm.into_results();

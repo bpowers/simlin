@@ -1216,7 +1216,7 @@ pub fn compile_project_incremental(
     db: &SimlinDb,
     project: SourceProject,
     main_model_name: &str,
-) -> crate::Result<crate::vm::CompiledSimulation> {
+) -> crate::Result<std::sync::Arc<crate::vm::CompiledSimulation>> {
     // An invalid macro set (AC5.2 cycle / AC5.3 duplicate / collision) fails
     // the project-level compile before per-model processing, uniformly as
     // `NotSimulatable`. The build error's own typed code reaches the diagnostic
@@ -1398,13 +1398,13 @@ pub fn compile_project_incremental(
             validate_model_overflow_markers(db, models[name])?;
         }
     }
-    // `assemble_simulation` is salsa-tracked and returns an `Arc`; clone the
-    // `CompiledSimulation` out of the salsa-owned `Arc` to preserve this
-    // entry point's owned return type byte-for-byte. The error half stays a
-    // `String` mapped to `NotSimulatable`, identical to the prior
-    // plain-function behavior.
+    // `assemble_simulation` is salsa-tracked and returns the memo's `Arc`;
+    // it is handed on as-is, so the caller shares the memoized program with
+    // the database rather than deep-copying its modules and offsets map
+    // (62 M instructions per LTM edit on C-LEARN). The error half is a
+    // `String` mapped to `NotSimulatable`.
     match assemble_simulation(db, project, main_model_name.to_string()) {
-        Ok(compiled) => Ok((*compiled).clone()),
+        Ok(compiled) => Ok(compiled),
         Err(msg) => crate::sim_err!(NotSimulatable, msg.clone()),
     }
 }

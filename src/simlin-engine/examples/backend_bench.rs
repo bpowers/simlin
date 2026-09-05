@@ -287,7 +287,7 @@ fn load_datamodel(spec: &ModelSpec) -> datamodel::Project {
 
 /// The front-end compile, identical for both backends: datamodel -> salsa db ->
 /// `CompiledSimulation` (the value `Vm::new` and `compile_simulation` consume).
-fn front_end_compile(datamodel: &datamodel::Project) -> CompiledSimulation {
+fn front_end_compile(datamodel: &datamodel::Project) -> std::sync::Arc<CompiledSimulation> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
     compile_project_incremental(&db, sync.project, "main").expect("incremental compile")

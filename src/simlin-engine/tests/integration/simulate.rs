@@ -174,7 +174,7 @@ corpus_tests! {
 /// salsa-backed path.
 fn compile_vm(
     datamodel_project: &simlin_engine::datamodel::Project,
-) -> simlin_engine::CompiledSimulation {
+) -> std::sync::Arc<simlin_engine::CompiledSimulation> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel_project, None);
     compile_project_incremental(&db, sync.project, "main").unwrap()
@@ -1829,7 +1829,8 @@ fn two_arg_ramp_in_submodule_reads_root_final_time() {
     );
 }
 
-type CompileFn = fn(&simlin_engine::datamodel::Project) -> simlin_engine::CompiledSimulation;
+type CompileFn =
+    fn(&simlin_engine::datamodel::Project) -> std::sync::Arc<simlin_engine::CompiledSimulation>;
 
 fn simulate_path(xmile_path: &str) {
     simulate_path_with(xmile_path, compile_vm);

@@ -28,7 +28,7 @@ fn build_population_project(stop: f64) -> TestProject {
         .flow("deaths", "population / lifespan", None)
 }
 
-fn compile_population(stop: f64) -> CompiledSimulation {
+fn compile_population(stop: f64) -> std::sync::Arc<CompiledSimulation> {
     let tp = build_population_project(stop);
     let datamodel = tp.build_datamodel();
     let mut db = SimlinDb::default();

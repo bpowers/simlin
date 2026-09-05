@@ -38,7 +38,7 @@ type Inst = Stored<ModuleAddr>;
 
 // ── drivers ──────────────────────────────────────────────────────────────────
 
-fn compile(datamodel: &crate::datamodel::Project) -> CompiledSimulation {
+fn compile(datamodel: &crate::datamodel::Project) -> std::sync::Arc<CompiledSimulation> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
     compile_project_incremental(&db, sync.project, "main").expect("incremental compile")

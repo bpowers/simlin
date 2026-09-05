@@ -758,7 +758,7 @@ impl TestProject {
     // ── Incremental compilation methods ────────────────────────────────
 
     /// Compile the project via the incremental salsa pipeline.
-    pub fn compile_incremental(&self) -> crate::Result<CompiledSimulation> {
+    pub fn compile_incremental(&self) -> crate::Result<std::sync::Arc<CompiledSimulation>> {
         let datamodel = self.build_datamodel();
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);

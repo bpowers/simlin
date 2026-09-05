@@ -2085,7 +2085,9 @@ fn dup_sim_specs() -> datamodel::SimSpecs {
 
 /// Compile `project`'s `main` model through the production incremental
 /// pipeline, returning the result.
-fn compile_main(project: &datamodel::Project) -> crate::Result<crate::vm::CompiledSimulation> {
+fn compile_main(
+    project: &datamodel::Project,
+) -> crate::Result<std::sync::Arc<crate::vm::CompiledSimulation>> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
     compile_project_incremental(&db, sync.project, "main")

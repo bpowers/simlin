@@ -33,7 +33,9 @@ const LTM_TOLERANCE: f64 = 0.05;
 
 /// Compile a datamodel project to a VM simulation using the incremental
 /// salsa path with LTM enabled (exhaustive mode).
-fn compile_ltm_incremental(project: &simlin_engine::datamodel::Project) -> CompiledSimulation {
+fn compile_ltm_incremental(
+    project: &simlin_engine::datamodel::Project,
+) -> std::sync::Arc<CompiledSimulation> {
     compile_ltm_incremental_with_partitions(project).0
 }
 
@@ -45,7 +47,10 @@ fn compile_ltm_incremental(project: &simlin_engine::datamodel::Project) -> Compi
 /// must now invoke `ltm_post::compute_rel_loop_scores(results, loop_partitions)`.
 fn compile_ltm_incremental_with_partitions(
     project: &simlin_engine::datamodel::Project,
-) -> (CompiledSimulation, IndexMap<String, Vec<Option<usize>>>) {
+) -> (
+    std::sync::Arc<CompiledSimulation>,
+    IndexMap<String, Vec<Option<usize>>>,
+) {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
     set_project_ltm_enabled(&mut db, sync.project, true);
@@ -61,7 +66,7 @@ fn compile_ltm_incremental_with_partitions(
 /// salsa path with LTM in discovery mode (scores for every causal edge).
 fn compile_ltm_discovery_incremental(
     project: &simlin_engine::datamodel::Project,
-) -> CompiledSimulation {
+) -> std::sync::Arc<CompiledSimulation> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
     set_project_ltm_enabled(&mut db, sync.project, true);

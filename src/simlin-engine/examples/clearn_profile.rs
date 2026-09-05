@@ -298,7 +298,7 @@ fn model_path() -> String {
 struct RetainedCompile {
     db: SimlinDb,
     sync: PersistentSyncState,
-    compiled: CompiledSimulation,
+    compiled: std::sync::Arc<CompiledSimulation>,
 }
 
 fn compile_retained(
@@ -322,7 +322,7 @@ fn compile_once(
     datamodel: &simlin_engine::datamodel::Project,
     ltm: bool,
     diagnostics: bool,
-) -> CompiledSimulation {
+) -> std::sync::Arc<CompiledSimulation> {
     compile_retained(datamodel, ltm, diagnostics).compiled
 }
 

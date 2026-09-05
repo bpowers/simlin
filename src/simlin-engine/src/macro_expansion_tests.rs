@@ -75,7 +75,7 @@ fn mdl(body: &str) -> String {
 
 /// Compile a `.mdl` source through the production incremental path and
 /// return the compile `Result`.
-fn compile_mdl(source: &str) -> crate::Result<crate::vm::CompiledSimulation> {
+fn compile_mdl(source: &str) -> crate::Result<std::sync::Arc<crate::vm::CompiledSimulation>> {
     let project = open_vensim(source).expect("MDL must parse into a datamodel project");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);

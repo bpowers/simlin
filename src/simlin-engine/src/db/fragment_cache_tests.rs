@@ -1223,13 +1223,13 @@ fn test_assemble_simulation_noop_recompile_is_cache_hit() {
          (the Arc payload must be pointer-equal); assembly re-ran instead"
     );
 
-    // Structural equality sanity check: the cached simulation is byte-for-byte
-    // what `compile_project_incremental` returns (its public owned form).
-    let owned = compile_project_incremental(&db, project2, "main")
+    // The public entry point hands out the memo's own `Arc`: what a caller
+    // runs is the cached program itself, not a copy of it.
+    let shared = compile_project_incremental(&db, project2, "main")
         .expect("compile_project_incremental should succeed");
-    assert_eq!(
-        owned, *sim2,
-        "compile_project_incremental's CompiledSimulation must equal the cached one"
+    assert!(
+        Arc::ptr_eq(&shared, &sim2),
+        "compile_project_incremental must return the cached assemble_simulation Arc"
     );
 }
 

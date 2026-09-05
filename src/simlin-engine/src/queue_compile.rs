@@ -905,7 +905,7 @@ pub fn build_compiled(
     project: &datamodel::Project,
     main_model: &str,
 ) -> crate::common::Result<(
-    crate::vm::CompiledSimulation,
+    std::sync::Arc<crate::vm::CompiledSimulation>,
     Vec<crate::conveyor_compile::ConveyorPlan>,
     Vec<QueuePlan>,
 )> {
@@ -1054,11 +1054,17 @@ pub fn build_compiled(
     // consumed the VM) reject exactly like the live VM does; the Vm repeats
     // the retraction when plans are attached, as defense for a directly
     // assembled Vm.
+    //
+    // The retraction edits the program, so this path takes a private copy of
+    // the memoized artifact (`make_mut` clones while the salsa memo shares
+    // it). That copy is the special-stock path's cost alone: an ordinary
+    // model hands the memo's `Arc` straight to the Vm.
+    let scrubbed = std::sync::Arc::make_mut(&mut compiled);
     for plan in &conveyor_plans {
-        compiled.exclude_overridable_offsets(plan.pass_written_offsets());
+        scrubbed.exclude_overridable_offsets(plan.pass_written_offsets());
     }
     for plan in &queue_plans {
-        compiled.exclude_overridable_offsets(plan.pass_written_offsets());
+        scrubbed.exclude_overridable_offsets(plan.pass_written_offsets());
     }
 
     Ok((compiled, conveyor_plans, queue_plans))
@@ -1560,7 +1566,7 @@ pub(crate) fn build_compiled_fresh(
     project: &datamodel::Project,
     main_model: &str,
 ) -> crate::common::Result<(
-    crate::vm::CompiledSimulation,
+    std::sync::Arc<crate::vm::CompiledSimulation>,
     Vec<crate::conveyor_compile::ConveyorPlan>,
     Vec<QueuePlan>,
 )> {
@@ -1577,7 +1583,10 @@ pub(crate) fn build_compiled_fresh(
 /// `simlin_sim_new` reads it to decide whether to snapshot the LTM
 /// loop-partition metadata.
 pub struct SimBuild {
-    pub compiled: crate::vm::CompiledSimulation,
+    /// Shared with the salsa memo that assembled it (the ordinary path) or
+    /// freshly built (the special-stock path); either way the `Vm` takes the
+    /// same `Arc`, so nothing here is deep-copied on the way to execution.
+    pub compiled: std::sync::Arc<crate::vm::CompiledSimulation>,
     /// One plan per conveyor belt (per array element for an arrayed conveyor).
     /// Empty unless `special`.
     pub conveyor_plans: Vec<crate::conveyor_compile::ConveyorPlan>,

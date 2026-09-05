@@ -262,7 +262,7 @@ fn create_broadcast_project(dim1_size: u32, dim2_size: u32) -> Project {
 }
 
 /// Compile a datamodel project to bytecode via the incremental path.
-fn compile_project(datamodel: &Project) -> Result<CompiledSimulation, String> {
+fn compile_project(datamodel: &Project) -> Result<std::sync::Arc<CompiledSimulation>, String> {
     let mut db = SimlinDb::default();
     let state = sync_from_datamodel_incremental(&mut db, datamodel, None);
     compile_project_incremental(&db, state.project, "main").map_err(|e| e.to_string())

@@ -455,7 +455,9 @@ pub struct SimlinModel {
 
 /// Internal state for SimlinSim
 pub(crate) struct SimState {
-    pub(crate) compiled: Option<engine::CompiledSimulation>,
+    /// The compiled program, shared with the `Vm` (and with the salsa memo
+    /// that assembled it): `reset` recreates the `Vm` from this same `Arc`.
+    pub(crate) compiled: Option<Arc<engine::CompiledSimulation>>,
     pub(crate) vm: Option<engine::Vm>,
     /// Stores the error from VM creation if it failed.
     /// This allows us to surface the actual error when users try to run
