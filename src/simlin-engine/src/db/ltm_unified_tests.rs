@@ -2864,7 +2864,7 @@ fn agg_aux_emitted_for_hoisted_reducer() {
         agg.dimensions
     );
     assert!(
-        matches!(&agg.equation, crate::db::LtmEquation::Scalar(arm) if arm.text == "sum(pop[*])"),
+        matches!(&agg.equation, crate::db::LtmEquation::Scalar(arm) if &*arm.text == "sum(pop[*])"),
         "agg equation should be the reducer subexpr text; got: {:?}",
         agg.equation
     );
@@ -3197,7 +3197,7 @@ fn sliced_agg_link_scores_cover_only_the_read_rows() {
         .unwrap_or_else(|| panic!("expected synthetic agg {agg}; got: {names:?}"));
     assert!(agg_var.dimensions.is_empty());
     assert!(
-        matches!(&agg_var.equation, crate::db::LtmEquation::Scalar(arm) if arm.text == "sum(pop[nyc, *])"),
+        matches!(&agg_var.equation, crate::db::LtmEquation::Scalar(arm) if &*arm.text == "sum(pop[nyc, *])"),
         "agg equation should be the sliced reducer text; got: {:?}",
         agg_var.equation
     );

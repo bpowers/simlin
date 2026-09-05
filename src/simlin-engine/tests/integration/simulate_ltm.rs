@@ -7307,7 +7307,7 @@ fn test_disjoint_dim_arrayed_target_per_source_element_link_scores() {
                 elements
                     .iter()
                     .find(|(e, _)| e == elem)
-                    .map(|(_, arm)| arm.text.as_str())
+                    .map(|(_, arm)| &*arm.text)
                     .unwrap_or_else(|| panic!("slot {elem:?} not found in {elements:?}"))
             };
             let ax = slot("a,x");

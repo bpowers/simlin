@@ -55,7 +55,14 @@ use crate::lexer::LexerType;
 pub struct LtmArm {
     /// The generator's exact source-form spelling. Retained ONLY for
     /// diagnostics; never re-parsed to compile.
-    pub text: String,
+    ///
+    /// Shared (`Arc<str>`) for the same reason `expr` is: the arm is cloned
+    /// out of the per-link `shaped_link_score` memo into `model_ltm_variables`'
+    /// list, and as an owned `String` the text was deep-copied on that clone
+    /// -- 9 MiB of the per-link memos' own footprint on C-LEARN, on top of the
+    /// copy the whole-model vector holds (`docs/design/engine-performance.md`,
+    /// C7). The clone is a refcount bump and one copy is retained.
+    pub text: Arc<str>,
     /// The authoritative compiled AST (`Expr0::new(text)`).
     ///
     /// Behind an `Arc` because every emitted link score is cloned out of the
@@ -113,7 +120,7 @@ impl LtmArm {
             Err(errs) => (None, errs.into_iter().next()),
         };
         Self {
-            text,
+            text: text.into(),
             expr,
             parse_error,
         }
@@ -126,7 +133,7 @@ impl LtmArm {
     /// whichever way an arm was made. Nothing is parsed.
     pub(crate) fn from_typed(expr: Expr0) -> Self {
         Self {
-            text: print_eqn(&expr),
+            text: print_eqn(&expr).into(),
             expr: Some(Arc::new(expr)),
             parse_error: None,
         }
@@ -197,14 +204,13 @@ impl LtmEquation {
     /// tests that inspect an equation as text without matching its variant.
     pub fn source_text(&self) -> String {
         match self {
-            LtmEquation::Scalar(arm) | LtmEquation::ApplyToAll(_, arm) => arm.text.clone(),
+            LtmEquation::Scalar(arm) | LtmEquation::ApplyToAll(_, arm) => arm.text.to_string(),
             LtmEquation::Arrayed {
                 elements, default, ..
             } => {
-                let mut parts: Vec<&str> =
-                    elements.iter().map(|(_, arm)| arm.text.as_str()).collect();
+                let mut parts: Vec<&str> = elements.iter().map(|(_, arm)| &*arm.text).collect();
                 if let Some(default_arm) = default {
-                    parts.push(default_arm.text.as_str());
+                    parts.push(&default_arm.text);
                 }
                 parts.join("\n")
             }
@@ -404,6 +410,20 @@ impl LtmEquation {
 #[cfg(test)]
 mod tests {
     use super::{LtmArm, LtmEquation};
+
+    /// An arm's text and tree are shared by every clone, not copied: the
+    /// per-link memo's arm is cloned into the whole-model list, and a copy
+    /// there would be retained twice for the life of the database.
+    #[test]
+    fn a_cloned_arm_shares_its_text_and_tree() {
+        let arm = LtmArm::new("a + b".to_string());
+        let clone = arm.clone();
+        assert!(std::sync::Arc::ptr_eq(&arm.text, &clone.text));
+        let (Some(expr), Some(expr_clone)) = (&arm.expr, &clone.expr) else {
+            panic!("the fixture text must parse");
+        };
+        assert!(std::sync::Arc::ptr_eq(expr, expr_clone));
+    }
 
     /// Salsa backdates a re-executed query's memo by `PartialEq`, and the
     /// literal on `Expr0::Const` is an `ast::Literal` compared by bit pattern,

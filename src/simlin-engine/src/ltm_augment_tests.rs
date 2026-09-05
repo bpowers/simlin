@@ -3239,7 +3239,7 @@ fn arrayed_slot<'a>(equation: &'a crate::db::LtmEquation, element: &str) -> &'a 
         LtmEquation::Arrayed { elements, .. } => elements
             .iter()
             .find(|(e, _)| e == element)
-            .map(|(_, arm)| arm.text.as_str())
+            .map(|(_, arm)| &*arm.text)
             .unwrap_or_else(|| {
                 panic!("no slot for element {element:?} in arrayed equation: {equation:?}")
             }),
@@ -4160,7 +4160,7 @@ fn loop_score_variables_scalar_loop_yields_scalar_equation() {
     match equation {
         LtmEquation::Scalar(arm) => {
             assert_eq!(
-                &arm.text,
+                &*arm.text,
                 &format!(
                     "\"{}\" * \"{}\"",
                     ls_name("pop", "births"),
@@ -4240,7 +4240,7 @@ fn loop_score_variables_a2a_without_slot_links_yields_apply_to_all() {
         LtmEquation::ApplyToAll(eq_dims, arm) => {
             assert_eq!(eq_dims, &vec!["region".to_string()]);
             assert_eq!(
-                &arm.text,
+                &*arm.text,
                 &format!(
                     "\"{}\" * \"{}\"",
                     ls_name("pop", "births"),
@@ -4389,7 +4389,7 @@ fn loop_score_variables_missing_slot_scores_zero() {
             assert_eq!(elements.len(), 3, "every declared element gets a slot");
             let by_elem: std::collections::HashMap<&str, &str> = elements
                 .iter()
-                .map(|(e, arm)| (e.as_str(), arm.text.as_str()))
+                .map(|(e, arm)| (e.as_str(), &*arm.text))
                 .collect();
             assert!(by_elem["det"].contains("link_score"));
             assert_eq!(
@@ -4460,7 +4460,7 @@ fn loop_score_variables_multi_dim_slot_tuples() {
             );
             let by_elem: std::collections::HashMap<&str, &str> = elements
                 .iter()
-                .map(|(e, arm)| (e.as_str(), arm.text.as_str()))
+                .map(|(e, arm)| (e.as_str(), &*arm.text))
                 .collect();
             assert!(by_elem["nyc,young"].contains("link_score"));
             assert_eq!(by_elem["nyc,old"], "0");
@@ -4521,7 +4521,7 @@ fn loop_score_variables_prefer_apply_to_all_when_all_links_bare() {
         LtmEquation::ApplyToAll(eq_dims, arm) => {
             assert_eq!(eq_dims, &vec!["region".to_string()]);
             assert_eq!(
-                &arm.text,
+                &*arm.text,
                 &format!(
                     "\"{}\" * \"{}\"",
                     ls_name("pop", "births"),

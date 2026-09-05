@@ -35,8 +35,8 @@ use simlin_engine::open_vensim;
 /// (a scalar equation has exactly one).
 fn arm_texts(equation: &LtmEquation) -> Vec<String> {
     match equation {
-        LtmEquation::Scalar(arm) => vec![arm.text.clone()],
-        LtmEquation::ApplyToAll(_, arm) => vec![arm.text.clone()],
+        LtmEquation::Scalar(arm) => vec![arm.text.to_string()],
+        LtmEquation::ApplyToAll(_, arm) => vec![arm.text.to_string()],
         LtmEquation::Arrayed {
             elements, default, ..
         } => elements

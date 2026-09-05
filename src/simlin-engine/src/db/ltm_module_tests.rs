@@ -441,7 +441,7 @@ fn test_discovery_dynamic_module_link_score_uses_composite() {
         .find(|v| v.name.contains("level\u{2192}custom_smooth"))
         .expect("discovery mode must emit the level→custom_smooth link score");
     let eqn_text = match &link.equation {
-        crate::db::LtmEquation::Scalar(arm) => arm.text.clone(),
+        crate::db::LtmEquation::Scalar(arm) => arm.text.to_string(),
         other => panic!("module link score should be scalar, got {other:?}"),
     };
     assert!(
@@ -541,7 +541,7 @@ fn test_passthrough_module_link_score_uses_composite_on_real_output_port() {
             .find(|v| v.name == base_name)
             .expect("must emit the base level→custom_pt link score");
         let eqn_text = match &link.equation {
-            crate::db::LtmEquation::Scalar(arm) => arm.text.clone(),
+            crate::db::LtmEquation::Scalar(arm) => arm.text.to_string(),
             other => panic!("module link score should be scalar, got {other:?}"),
         };
         assert!(
@@ -645,7 +645,7 @@ fn test_pathless_module_link_score_uses_unit_transfer() {
             continue;
         };
         let eqn_text = match &link.equation {
-            crate::db::LtmEquation::Scalar(arm) => arm.text.clone(),
+            crate::db::LtmEquation::Scalar(arm) => arm.text.to_string(),
             other => panic!("module link score should be scalar, got {other:?}"),
         };
         assert!(
@@ -763,7 +763,7 @@ fn test_module_to_module_link_score_uses_target_composite() {
             .find(|v| v.name.contains("mod_a\u{2192}mod_b"))
             .expect("must emit the mod_a→mod_b link score");
         let eqn_text = match &link.equation {
-            crate::db::LtmEquation::Scalar(arm) => arm.text.clone(),
+            crate::db::LtmEquation::Scalar(arm) => arm.text.to_string(),
             other => panic!("module link score should be scalar, got {other:?}"),
         };
         assert_eq!(
@@ -1540,7 +1540,7 @@ fn test_multi_output_loop_link_uses_per_exit_port_alias() {
             )
         });
     let alias_eqn = match &alias.equation {
-        crate::db::LtmEquation::Scalar(arm) => arm.text.clone(),
+        crate::db::LtmEquation::Scalar(arm) => arm.text.to_string(),
         other => panic!("alias should be scalar, got {other:?}"),
     };
     // The alias must reference one of m's pathway vars (the pos-terminal
@@ -1565,7 +1565,7 @@ fn test_multi_output_loop_link_uses_per_exit_port_alias() {
         .find(|v| v.name.contains("\u{205A}loop_score\u{205A}"))
         .expect("must emit a loop_score var");
     let loop_eqn = match &loop_score.equation {
-        crate::db::LtmEquation::Scalar(arm) => arm.text.clone(),
+        crate::db::LtmEquation::Scalar(arm) => arm.text.to_string(),
         other => panic!("loop score should be scalar, got {other:?}"),
     };
     assert!(
@@ -1825,7 +1825,7 @@ fn test_multi_output_module_link_score_holds_document_order_first_live() {
                 )
             });
         match &link.equation {
-            crate::db::LtmEquation::Scalar(arm) => arm.text.clone(),
+            crate::db::LtmEquation::Scalar(arm) => arm.text.to_string(),
             other => panic!("module link score should be scalar, got {other:?}"),
         }
     };

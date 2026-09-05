@@ -626,7 +626,7 @@ fn test_scalarize_ltm_equation_arrayed_collapse() {
         false,
     );
     assert!(
-        matches!(scalarize_ltm_equation(multi), LtmEquation::Scalar(arm) if arm.text == "first_slot")
+        matches!(scalarize_ltm_equation(multi), LtmEquation::Scalar(arm) if &*arm.text == "first_slot")
     );
 
     // Arrayed with no slots but a Some(default) falls back to the default text.
@@ -637,20 +637,20 @@ fn test_scalarize_ltm_equation_arrayed_collapse() {
         false,
     );
     assert!(
-        matches!(scalarize_ltm_equation(default_only), LtmEquation::Scalar(arm) if arm.text == "default_eqn")
+        matches!(scalarize_ltm_equation(default_only), LtmEquation::Scalar(arm) if &*arm.text == "default_eqn")
     );
 
     // Arrayed with neither slots nor a default falls back to "0".
     let empty = LtmEquation::arrayed(vec!["region".to_string()], vec![], None, false);
-    assert!(matches!(scalarize_ltm_equation(empty), LtmEquation::Scalar(arm) if arm.text == "0"));
+    assert!(matches!(scalarize_ltm_equation(empty), LtmEquation::Scalar(arm) if &*arm.text == "0"));
 
     // ApplyToAll and Scalar inputs are preserved (text kept, dims dropped).
     assert!(matches!(
         scalarize_ltm_equation(LtmEquation::apply_to_all(vec!["region".to_string()], "a2a_eqn".to_string())),
-        LtmEquation::Scalar(arm) if arm.text == "a2a_eqn"
+        LtmEquation::Scalar(arm) if &*arm.text == "a2a_eqn"
     ));
     assert!(
-        matches!(scalarize_ltm_equation(LtmEquation::scalar("scalar_eqn".to_string())), LtmEquation::Scalar(arm) if arm.text == "scalar_eqn")
+        matches!(scalarize_ltm_equation(LtmEquation::scalar("scalar_eqn".to_string())), LtmEquation::Scalar(arm) if &*arm.text == "scalar_eqn")
     );
 }
 
@@ -1470,7 +1470,7 @@ fn colliding_index_boston_arm(project: &datamodel::Project) -> (String, usize) {
             crate::db::LtmEquation::Arrayed { elements, .. } => elements
                 .iter()
                 .find(|(e, _)| e == "boston")
-                .map(|(_, arm)| arm.text.clone())
+                .map(|(_, arm)| arm.text.to_string())
                 // A missing arm here means the GH #977 omission claimed the
                 // slot, which would gut every assertion downstream rather than
                 // fail it -- see `colliding_index_name_model`'s note on the

@@ -6630,7 +6630,7 @@ fn rank_frozen_subtree_link_score_scores_correctly() {
         .iter()
         .find(|v| match &v.equation {
             LtmEquation::ApplyToAll(dims, arm) => {
-                dims.len() == 1 && dims[0] == "Region" && arm.text == "rank(pop, 1)"
+                dims.len() == 1 && dims[0] == "Region" && &*arm.text == "rank(pop, 1)"
             }
             LtmEquation::Scalar(_) | LtmEquation::Arrayed { .. } => false,
         })
@@ -6771,8 +6771,8 @@ fn gh525_two_reference_partially_iterated_row_sum_scores() {
     // per-(row, element) names, with real non-zero post-startup values.
     let eqn_text = |v: &LtmSyntheticVar| -> String {
         match &v.equation {
-            LtmEquation::Scalar(arm) => arm.text.clone(),
-            LtmEquation::ApplyToAll(_, arm) => arm.text.clone(),
+            LtmEquation::Scalar(arm) => arm.text.to_string(),
+            LtmEquation::ApplyToAll(_, arm) => arm.text.to_string(),
             other => format!("{other:?}"),
         }
     };
@@ -6838,14 +6838,14 @@ fn gh525_two_reference_partially_iterated_row_sum_scores() {
         .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
     {
         let text = match &lv.equation {
-            LtmEquation::Scalar(arm) => arm.text.clone(),
-            LtmEquation::ApplyToAll(_, arm) => arm.text.clone(),
+            LtmEquation::Scalar(arm) => arm.text.to_string(),
+            LtmEquation::ApplyToAll(_, arm) => arm.text.to_string(),
             LtmEquation::Arrayed {
                 elements: slots,
                 default,
                 ..
             } => {
-                let mut t: String = slots.iter().map(|(_, arm)| arm.text.clone()).collect();
+                let mut t: String = slots.iter().map(|(_, arm)| &*arm.text).collect();
                 if let Some(d) = default {
                     t.push_str(&d.text);
                 }
@@ -7036,7 +7036,7 @@ fn per_element_source_also_read_as_a_lookup_table_keeps_its_scores() {
             )
         });
         let text = match &var.equation {
-            LtmEquation::Scalar(arm) => arm.text.clone(),
+            LtmEquation::Scalar(arm) => arm.text.to_string(),
             other => panic!("{name} must be a scalar score; got {other:?}"),
         };
         assert!(
@@ -7158,7 +7158,7 @@ fn assert_static_table_index_keeps_its_scores(
             )
         });
         let text = match &var.equation {
-            LtmEquation::Scalar(arm) => arm.text.clone(),
+            LtmEquation::Scalar(arm) => arm.text.to_string(),
             other => panic!("{name} must be a scalar score; got {other:?}"),
         };
         assert!(
@@ -7284,7 +7284,7 @@ fn mapped_per_element_source_read_as_a_lookup_table_keeps_its_scores() {
             )
         });
         let text = match &var.equation {
-            LtmEquation::Scalar(arm) => arm.text.clone(),
+            LtmEquation::Scalar(arm) => arm.text.to_string(),
             other => panic!("{name} must be a scalar score; got {other:?}"),
         };
         assert!(
@@ -7539,7 +7539,7 @@ fn mixed_bare_and_per_element_edge_resolver_precedence() {
     );
     let eqn_text = |v: &LtmSyntheticVar| -> String {
         match &v.equation {
-            LtmEquation::Scalar(arm) => arm.text.clone(),
+            LtmEquation::Scalar(arm) => arm.text.to_string(),
             other => format!("{other:?}"),
         }
     };
@@ -7652,7 +7652,7 @@ fn per_element_hop_in_mixed_scalar_cycle_scores() {
     let mut saw_per_element_ref = 0usize;
     for lv in &loop_vars {
         let text = match &lv.equation {
-            LtmEquation::Scalar(arm) => arm.text.clone(),
+            LtmEquation::Scalar(arm) => arm.text.to_string(),
             other => format!("{other:?}"),
         };
         assert!(
@@ -8055,7 +8055,7 @@ fn per_element_body_with_iterated_other_dep_scores() {
         // unresolvable bare dimension index.
         let var = ltm_var(&ltm.vars, &name);
         let eqn = match &var.equation {
-            LtmEquation::Scalar(arm) => arm.text.clone(),
+            LtmEquation::Scalar(arm) => arm.text.to_string(),
             other => format!("{other:?}"),
         };
         assert!(
@@ -9502,7 +9502,7 @@ fn aligned_partial_reduce_emissions_stay_byte_identical() {
                   SIGN((matrix[d1\u{B7}a,d2\u{B7}x] - PREVIOUS(matrix[d1\u{B7}a,d2\u{B7}x])))";
     match &emitted[0].equation {
         LtmEquation::Scalar(arm) => assert_eq!(
-            &arm.text, golden,
+            &*arm.text, golden,
             "the aligned per-(row, slot) equation text must stay byte-identical"
         ),
         other => panic!("aligned per-(row, slot) score must be scalar; got {other:?}"),
