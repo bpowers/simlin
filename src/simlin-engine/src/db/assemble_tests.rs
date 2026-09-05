@@ -4,10 +4,10 @@
 
 //! Assembly pins.
 //!
-//! Two contracts `assemble_simulation` / `assemble_module` owe their consumers
-//! are stated here against production values only -- the layouts the modules
-//! are resolved against, the module declarations the assembled bytecode
-//! carries, and the runlists the dependency graph schedules:
+//! Three contracts `assemble_simulation` / `assemble_module` owe their
+//! consumers are stated here against production values only -- the layouts
+//! the modules are resolved against, the module declarations the assembled
+//! bytecode carries, and the runlists the dependency graph schedules:
 //!
 //! * the results-offset map is the assembled layout, flattened: every key's
 //!   slot is the composition of the layouts along its module path, a lookup-
@@ -17,7 +17,9 @@
 //!   with a resolved recurrence SCC's members replaced by the SCC's combined
 //!   fragment at the first member, the run-invariant flow prefix hoisted, and
 //!   the LTM tail (synthetic variables, then implicit helpers) after the
-//!   runlist.
+//!   runlist;
+//! * the batch refusal for fragments that could not be compiled names each
+//!   variable once, however many programs schedule it.
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -1048,4 +1050,70 @@ fn each_program_emits_in_runlist_order_then_the_ltm_tail() {
         observed, expected,
         "stocks: runlist order, then the LTM implicit tail"
     );
+}
+
+/// `assemble_module`'s batch refusal names a variable once, however many
+/// programs it is scheduled in.
+///
+/// `program_fragments` reports a fragment missing per (variable, program), so
+/// a variable scheduled in several programs would otherwise be listed once
+/// per program (GH #1047). The rows are the runlist memberships a refused
+/// helper can have: a stdlib module's hoisted argument is in initials and
+/// flows, an `INIT` capture in initials only, a `PREVIOUS` capture in flows
+/// only. The other shapes are not reachable from a refusal: a stock's update
+/// and a module instance's fragment have no construct codegen refuses.
+#[test]
+fn batch_refusal_names_each_variable_once() {
+    // A computed ALLOCATE AVAILABLE priority profile lowers cleanly and is
+    // refused by codegen ("an array operand here must be a variable, ..."),
+    // which `diagnostic_tests::
+    // codegen_rejection_of_an_ordinary_variable_names_the_variable_and_its_reason`
+    // pins. Each wrapper hoists it into helper 0 of `out` and decides that
+    // helper's runlists.
+    const REFUSED: &str = "allocate_available(request[d], pp[d,1] + pp_bump[d,1], supply)";
+    const HELPER: &str = "$\u{205A}out\u{205A}0\u{205A}arg0";
+    let per_element: Vec<String> = ["e1", "e2", "e3"]
+        .iter()
+        .map(|e| format!("{HELPER}\u{205A}{e}"))
+        .collect();
+    let rows = [
+        (
+            "initials + flows",
+            format!("SMTH1({REFUSED}, 3)"),
+            per_element,
+        ),
+        (
+            "initials only",
+            format!("INIT({REFUSED})"),
+            vec![HELPER.to_string()],
+        ),
+        (
+            "flows only",
+            format!("PREVIOUS({REFUSED}, 0)"),
+            vec![HELPER.to_string()],
+        ),
+    ];
+    for (membership, equation, expected) in rows {
+        let err = crate::test_common::TestProject::new("batch_refusal")
+            .named_dimension("d", &["e1", "e2", "e3"])
+            .indexed_dimension("xp", 4)
+            .array_const("request[d]", 10.0)
+            .array_const("pp[d,xp]", 1.0)
+            .array_const("pp_bump[d,xp]", 0.0)
+            .scalar_const("supply", 35.0)
+            .array_aux("out[d]", &equation)
+            .compile_incremental()
+            .expect_err(membership);
+        let details = err.details.as_deref().unwrap_or_default();
+        let mut names: Vec<&str> = details
+            .strip_prefix("failed to compile fragments for variables: ")
+            .unwrap_or_else(|| panic!("{membership}: expected the batch refusal, got: {err}"))
+            .split(", ")
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names, expected,
+            "{membership}: the batch refusal names each refused variable exactly once"
+        );
+    }
 }

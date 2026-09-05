@@ -22,6 +22,8 @@
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use indexmap::IndexSet;
+
 use super::*;
 use crate::common::{Canonical, Ident};
 use crate::compiler::symbolic::Phase;
@@ -1354,9 +1356,10 @@ struct Emitted<'a> {
 /// (`EvalModule`/`LoadModuleInput`): in the initials and flows its copy
 /// fragment (`LoadModuleInput -> AssignCurr`) is emitted when it has one and
 /// nothing is missed when it does not, and in the stocks it is never emitted.
-/// Any other scheduled variable without bytecode for the phase is reported in
-/// `missing`. Then the LTM tail, each fragment contributing the phases it has
-/// bytecode for.
+/// Any other scheduled variable without bytecode for the phase is added to
+/// `missing`, a set: a variable is reported once however many programs
+/// schedule it. Then the LTM tail, each fragment contributing the phases it
+/// has bytecode for.
 fn program_fragments<'a>(
     phase: Phase,
     runlist: &'a [String],
@@ -1364,7 +1367,7 @@ fn program_fragments<'a>(
     sccs: &'a SccFragments,
     is_module_input: impl Fn(&str) -> bool,
     flows_invariant: &BTreeSet<String>,
-    missing: &mut Vec<String>,
+    missing: &mut IndexSet<&'a str>,
 ) -> Vec<Emitted<'a>> {
     let mut out: Vec<Emitted<'a>> = Vec::new();
     let mut injected: HashSet<usize> = HashSet::new();
@@ -1402,7 +1405,9 @@ fn program_fragments<'a>(
                 bc,
             }),
             None if is_module_input(name) => {}
-            None => missing.push(name.clone()),
+            None => {
+                missing.insert(name.as_str());
+            }
         }
     }
     for name in &fragments.ltm_tail {
@@ -1540,7 +1545,9 @@ pub fn assemble_module<'db>(
     // call it unconditionally so the check lives in one place.
     let flows_invariant = model_flows_invariant(db, model, project, is_root, module_inputs);
 
-    let mut missing: Vec<String> = Vec::new();
+    // Insertion-ordered, so the refusal lists variables in the order the
+    // programs evaluate them, initials first.
+    let mut missing: IndexSet<&str> = IndexSet::new();
     let initials = program_fragments(
         Phase::Initials,
         &dep_graph.runlist_initials,
@@ -1571,7 +1578,7 @@ pub fn assemble_module<'db>(
     if !missing.is_empty() {
         return Err(format!(
             "failed to compile fragments for variables: {}",
-            missing.join(", ")
+            missing.iter().copied().collect::<Vec<_>>().join(", ")
         ));
     }
 
