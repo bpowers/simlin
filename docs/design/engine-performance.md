@@ -794,7 +794,9 @@ Three facts about the LTM rows decide what can be done about them:
   as `Arc<Expr0>` and the whole-model `model_ltm_variables` vector holds
   refcounts on the same trees, so evicting either memo alone frees only its
   own bytes. They cannot be freed by policy until the whole-model result
-  stops holding them.
+  stops holding them -- which is what synthesizing a link score from the
+  target's compiled fragment achieves, by never generating a tree at all
+  (`docs/design-plans/2026-09-04-link-scores-from-fragments.md`).
 - **A user equation is alive in four representations at once** (`Expr0`,
   `Expr2`, symbolic, resolved: 17.2 MiB plain). One retained representation
   per tier is what incrementality needs; the parse trees and the dependency
@@ -860,6 +862,17 @@ project inputs at `MEDIUM` fired the shortcut 1,719 times per edit for
 because `model_ltm_variables` is one whole-model value that changes whenever
 any target equation does; a structural edit re-does 96% of a cold LTM
 compile for the same reason.
+
+**`SymbolicOpcode` is 24 bytes, and 16 is not a field change.** The width
+is set by `SymVarRef` (`compiler::expr::VarRef`: an 8-byte interned `Ident`
+plus a `usize` element offset), a 16-byte struct nested in the variants that
+carry one more operand (`AssignConstCurr`, `PushVarViewDirect`,
+`BinOpAssignCurr`), and Rust does not fold a nested struct's padding into the
+enclosing enum, so narrowing the offset to `u32` leaves the struct at 16 and
+the opcode at 24. Reaching 16 (about 16 MiB of the LTM database, 1.8 MiB
+plain) needs either a 4-byte `Ident` (an index into the global interner
+rather than an `Arc`) or the reference flattened into the opcode rows; both
+are their own change.
 
 **The allocator holds more than the database (native only).** mimalloc's
 unreturned arena is 75 MiB on a plain compile whose live peak is 46.5 MiB;
