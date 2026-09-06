@@ -53,10 +53,13 @@ use crate::db::var_fragment::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum FragmentExecKind {
     /// `compile_var_fragment` -- salsa-tracked, one cache entry per
-    /// `(variable, model, project, module inputs)`.
+    /// `(variable, model, project, module inputs, overlay)`, the overlay
+    /// being the one `var_fragment::fragment_overlay` resolved for the
+    /// variable (`Off` unless its fragment resolves a module shape).
     Explicit,
     /// `compile_implicit_var_fragment` -- salsa-tracked, one cache entry per
-    /// `(model, project, helper name, module inputs)`.
+    /// `(model, project, helper name, module inputs, overlay)`, keyed on the
+    /// overlay by the same rule.
     Implicit,
     /// `compile_ltm_var_fragment` -- salsa-tracked, keyed by `(from, to)` link.
     Ltm,
@@ -110,6 +113,15 @@ pub(crate) fn note_fragment_execution(kind: FragmentExecKind, name: &str) {
     });
 }
 
+/// Compile one explicit variable's fragment to symbolic bytecodes.
+///
+/// **Salsa-tracked**, and `overlay` is part of the key, so a caller passes
+/// the overlay the fragment is KEYED on rather than the one the compile
+/// asked for: `var_fragment::fragment_overlay` resolves it, and it is `Off`
+/// for every variable whose fragment resolves no module instance's shape --
+/// the only shape the overlay reaches. Passing the requested overlay
+/// unconditionally is not wrong, only wasteful: it mints a second identical
+/// memo for a variable whose value cannot differ.
 #[salsa::tracked(returns(ref))]
 pub fn compile_var_fragment<'db>(
     db: &'db dyn Db,
@@ -528,6 +540,17 @@ pub(crate) fn implicit_fragment_input<'db>(
         dep_shapes.insert(ident.clone(), declared.shape(db, project, overlay));
     }
 
+    // The twin of `explicit_fragment_input`'s assertion -- see it for what
+    // each direction of a disagreement costs. A helper mints no helpers of
+    // its own (its parse is its parent's), so its instances are all among
+    // its heads.
+    debug_assert_eq!(
+        dep_shapes.values().any(DepShape::is_module),
+        crate::db::var_fragment::resolves_a_module_shape(db, meta.is_module, heads, &[]),
+        "'{}': `implicit_fragment_reads_module` disagrees with the shapes its fragment resolves",
+        meta.name
+    );
+
     // A synthesized helper carries no graphical function of its own
     // (`ImplicitVar::parsed_variable` builds it with no tables); only the
     // tables of the dependencies it reads through `LOOKUP(dep, x)` are needed.
@@ -579,6 +602,10 @@ pub(crate) fn implicit_fragment_input<'db>(
 /// reads `var_runlist_membership`: a three-bit projection backdates when this
 /// helper's membership is unchanged, where the whole result re-executes every
 /// helper's fragment whenever any variable's dependencies move.
+///
+/// `overlay` is part of the key and is the one the helper's fragment is
+/// KEYED on, resolved by `var_fragment::implicit_fragment_overlay`, exactly
+/// as for `compile_var_fragment`.
 #[salsa::tracked(returns(ref))]
 pub(crate) fn compile_implicit_var_fragment<'db>(
     db: &'db dyn Db,

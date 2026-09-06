@@ -551,10 +551,14 @@ pub enum LtmMode {
 /// diagnostics pass after a simulation redoes the work the other just did
 /// -- on C-LEARN 2.9 G instructions per warm LTM simulation and 2.5 G per
 /// diagnostics pass, measured against exactly that design
-/// (docs/design/engine-performance.md, C7). The price of the argument is
-/// that a fragment whose value does not depend on the overlay (any variable
-/// that reads no module instance) is memoized once per overlay it has been
-/// compiled under: on C-LEARN about 5 MiB when both have been used.
+/// (docs/design/engine-performance.md, C7). The overlay reaches a fragment
+/// through one shape only, a module instance's (the sub-model's layout,
+/// which carries its LTM section under `On`), so a fragment is keyed on it
+/// only where it resolves one (`db::var_fragment::fragment_reads_module`,
+/// asserted by the constructors against the shapes they build). The price of
+/// the argument is therefore one fragment memo per overlay for the
+/// module-reading fragments alone; every other variable has one fragment
+/// that serves both.
 ///
 /// The LTM derivations themselves (`model_ltm_variables` and everything
 /// under it) are overlay-independent: they describe the overlay, and are

@@ -870,13 +870,19 @@ the other variant's memos and re-verifies every memo in the database, and
 measured against exactly that design on C-LEARN a warm LTM simulation after
 a plain diagnostics pass re-executed 1,035 query bodies (2.9 G instructions,
 32% of a cold LTM compile), the diagnostics pass after any LTM simulation
-1,676 (2.5 G), and a plain simulation after either 181 (130 M). The price of
-the argument is one fragment memo per overlay a variable has been compiled
-under (about 5 MiB on C-LEARN when both have been used) and, the first time
-the second overlay is used, one emission pass over every fragment (~1,600
-explicit and 651 implicit on C-LEARN): the overlay reaches a fragment only
-through module shapes, but keys every fragment. The LTM derivations
-themselves are overlay-independent and derived once. `ltm_discovery_mode`
+1,676 (2.5 G), and a plain simulation after either 181 (130 M). The overlay
+reaches a fragment through one shape only, a module instance's (the
+sub-model's layout, which carries its LTM section under `On`), so a fragment
+is keyed on the overlay only where it resolves one
+(`db::var_fragment::fragment_reads_module`, over the variable's own kind, the
+heads its equation resolves through and the instances its parse minted; each
+fragment constructor asserts the predicate against the shapes it actually
+built, since an under-approximation would let an `On` assembly read module
+offsets resolved under `Off`). The price of the argument is therefore one
+fragment memo per overlay, and one re-emission when the second overlay is
+first used, for the module-reading fragments alone; every other variable has
+one fragment that serves both. The LTM derivations themselves are
+overlay-independent and derived once. `ltm_discovery_mode`
 remains an input of the same shape: it keys that derivation itself, so an
 exhaustive-mode LTM simulation alternated with `simlin_analyze_discover_loops`
 on one database opens a revision per flip and discards the other mode's LTM

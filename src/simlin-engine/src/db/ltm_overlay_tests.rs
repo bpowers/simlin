@@ -13,6 +13,10 @@ use std::sync::Arc;
 use super::*;
 use crate::common::{Canonical, Ident};
 use crate::db::exec_probe::ProbedDb;
+use crate::db::var_fragment::{
+    DeclaredName, fragment_overlay, fragment_reads_module, implicit_fragment_overlay,
+    implicit_fragment_reads_module,
+};
 use crate::test_common::TestProject;
 
 /// The overlay keys two kinds of memo: a model's own layout, assembly and
@@ -109,6 +113,361 @@ fn both_overlays_stay_memoized_side_by_side() {
             re_executed(&probed),
             Vec::<String>::new(),
             "{fixture}: interleaving the two overlays must re-execute nothing: each is its own key"
+        );
+    }
+}
+
+/// Which arm of the module-reach rule a fragment takes, read off the
+/// production memos the predicate itself is derived from
+/// (`lowered_source_variable`, `lowered_implicit_variable`,
+/// `parse_source_variable`). `fragment_reads_module` answers only "any arm",
+/// so a row that named no arm could pin the wrong one; this is what lets each
+/// row say which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ModuleReach {
+    /// The variable or helper is itself a module instance, so its OWN shape
+    /// is the sub-model's layout.
+    IsInstance,
+    /// A head it resolves through is an explicit `Module` variable.
+    SourceHead,
+    /// A head it resolves through is a helper the parse expanded a
+    /// module-function call into.
+    HelperHead,
+    /// The parse minted an instance the equation itself does not read (its
+    /// output is read by a capture), so the instance is a key of the
+    /// fragment's shapes but no head of the equation.
+    UnreadInstance,
+    /// No module shape anywhere: the fragment is the same under either
+    /// overlay.
+    None,
+}
+
+fn reach_of_heads(db: &SimlinDb, heads: &[(Ident<Canonical>, DeclaredName)]) -> ModuleReach {
+    let is_source_module = |declared: &DeclaredName| matches!(declared, DeclaredName::Source(sv) if sv.kind(db) == SourceVariableKind::Module);
+    if heads.iter().any(|(_, declared)| is_source_module(declared)) {
+        ModuleReach::SourceHead
+    } else if heads
+        .iter()
+        .any(|(_, declared)| matches!(declared, DeclaredName::Helper(meta) if meta.is_module))
+    {
+        ModuleReach::HelperHead
+    } else {
+        ModuleReach::None
+    }
+}
+
+fn source_reach(
+    db: &SimlinDb,
+    var: SourceVariable,
+    model: SourceModel,
+    project: SourceProject,
+) -> ModuleReach {
+    if var.kind(db) == SourceVariableKind::Module {
+        return ModuleReach::IsInstance;
+    }
+    match reach_of_heads(db, &lowered_source_variable(db, var, model, project).heads) {
+        ModuleReach::None
+            if parse_source_variable(db, var, project)
+                .implicit_vars
+                .iter()
+                .any(crate::capture::ImplicitVar::is_module) =>
+        {
+            ModuleReach::UnreadInstance
+        }
+        reach => reach,
+    }
+}
+
+fn helper_reach(
+    db: &SimlinDb,
+    model: SourceModel,
+    project: SourceProject,
+    name: &str,
+) -> ModuleReach {
+    let meta = model_implicit_var_by_name(db, model, project, name.to_string())
+        .as_ref()
+        .unwrap_or_else(|| panic!("{name}: a helper of the fixture's main model"));
+    if meta.is_module {
+        return ModuleReach::IsInstance;
+    }
+    let lowered = lowered_implicit_variable(db, model, project, name.to_string())
+        .as_ref()
+        .unwrap_or_else(|| panic!("{name}: lowers"));
+    reach_of_heads(db, &lowered.heads)
+}
+
+/// Every variable and helper of `project` whose fragment resolves a module
+/// instance's shape, by the production predicate, over every model the
+/// diagnostics pass walks (the spliced stdlib templates included). Helpers
+/// are named `{parent}#{helper}`, the identity the fragment compilers' body
+/// log records them under.
+fn module_reading_names(db: &SimlinDb, project: SourceProject) -> (Vec<String>, Vec<String>) {
+    let mut vars: Vec<String> = Vec::new();
+    let mut helpers: Vec<String> = Vec::new();
+    for model in project.models(db).values() {
+        for (name, var) in model.variables(db) {
+            if fragment_reads_module(db, *var, *model, project) {
+                vars.push(name.clone());
+            }
+        }
+        for (name, meta) in model_implicit_var_info(db, *model, project) {
+            if implicit_fragment_reads_module(db, *model, project, name.clone()) {
+                helpers.push(format!("{}#{name}", meta.parent_source_var.ident(db)));
+            }
+        }
+    }
+    vars.sort_unstable();
+    helpers.sort_unstable();
+    (vars, helpers)
+}
+
+/// One variable per arm of the module-reach rule: a module instance; a read
+/// of an explicit module's output; a read of an implicit instance's output;
+/// an instance minted for a `PREVIOUS` argument, whose output the capture
+/// reads and the equation does not; and a hoisted argument reading an
+/// explicit module's output, which gives the HELPER rows their source-module
+/// arm. `population`, `births`, `rate` and a capture of a plain expression
+/// reach nothing.
+fn module_reach_fixture() -> datamodel::Project {
+    let mut project = TestProject::new("main")
+        .with_sim_time(0.0, 2.0, 1.0)
+        .stock("population", "10", &["births"], &[], None)
+        .flow("births", "population * rate", None)
+        .aux("rate", "0.1", None)
+        .aux("from_sub", "sub.out", None)
+        .aux("smoothed", "SMTH1(population, 3)", None)
+        .aux("lagged", "PREVIOUS(SMTH1(rate, 3), 0)", None)
+        .aux("hoisted", "SMTH1(sub.out + 1, 3)", None)
+        .aux("plain_capture", "PREVIOUS(rate + 1, 0)", None)
+        .build_datamodel();
+    project.models[0]
+        .variables
+        .push(crate::testutils::x_module_named("sub", "child", &[], None));
+    project.models.push(crate::testutils::x_model(
+        "child",
+        vec![crate::testutils::x_aux("out", "1", None)],
+    ));
+    project
+}
+
+/// `fragment_reads_module` and its helper twin are true through each arm of
+/// the rule and false where none holds, and the overlay a fragment is keyed
+/// on follows exactly that. Every variable and every helper of the fixture is
+/// a row, so an arm cannot go uncovered by a fixture variable quietly
+/// drifting onto another one, and each row asserts the arm it reaches off the
+/// same memos the predicate reads.
+#[test]
+fn a_fragment_reads_a_module_through_each_arm_of_the_rule() {
+    let db = SimlinDb::default();
+    let sync = sync_from_datamodel(&db, &module_reach_fixture());
+    let (model, project) = (sync.models["main"].source, sync.project);
+
+    let explicit_rows = [
+        ("births", ModuleReach::None),
+        ("from_sub", ModuleReach::SourceHead),
+        ("hoisted", ModuleReach::HelperHead),
+        ("lagged", ModuleReach::UnreadInstance),
+        ("plain_capture", ModuleReach::None),
+        ("population", ModuleReach::None),
+        ("rate", ModuleReach::None),
+        ("smoothed", ModuleReach::HelperHead),
+        ("sub", ModuleReach::IsInstance),
+    ];
+    let mut all_explicit: Vec<&str> = sync.models["main"]
+        .variables
+        .keys()
+        .map(String::as_str)
+        .collect();
+    all_explicit.sort_unstable();
+    assert_eq!(
+        all_explicit,
+        explicit_rows
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>(),
+        "every explicit variable of the fixture is a row"
+    );
+    for (name, reach) in explicit_rows {
+        let var = sync.models["main"].variables[name].source;
+        assert_eq!(
+            source_reach(&db, var, model, project),
+            reach,
+            "{name}: the fixture reaches the arm its row names"
+        );
+        let reads_module = fragment_reads_module(&db, var, model, project);
+        assert_eq!(
+            reads_module,
+            reach != ModuleReach::None,
+            "{name}: the predicate is exactly 'some arm holds'"
+        );
+        assert_eq!(
+            fragment_overlay(&db, var, model, project, LtmOverlay::On),
+            if reads_module {
+                LtmOverlay::On
+            } else {
+                LtmOverlay::Off
+            },
+            "{name}: keyed on the requested overlay exactly when it reads a module"
+        );
+        assert_eq!(
+            fragment_overlay(&db, var, model, project, LtmOverlay::Off),
+            LtmOverlay::Off,
+            "{name}: a plain compile always asks for the plain key"
+        );
+    }
+
+    let helper_rows = [
+        ("$⁚hoisted⁚0⁚arg0", ModuleReach::SourceHead),
+        ("$⁚hoisted⁚0⁚arg1", ModuleReach::None),
+        ("$⁚hoisted⁚0⁚smth1", ModuleReach::IsInstance),
+        ("$⁚lagged⁚0⁚arg1", ModuleReach::None),
+        ("$⁚lagged⁚0⁚smth1", ModuleReach::IsInstance),
+        ("$⁚lagged⁚1⁚arg0", ModuleReach::HelperHead),
+        ("$⁚plain_capture⁚0⁚arg0", ModuleReach::None),
+        ("$⁚smoothed⁚0⁚arg1", ModuleReach::None),
+        ("$⁚smoothed⁚0⁚smth1", ModuleReach::IsInstance),
+    ];
+    let mut helpers: Vec<(String, ModuleReach, bool)> =
+        model_implicit_var_info(&db, model, project)
+            .keys()
+            .map(|name| {
+                (
+                    name.clone(),
+                    helper_reach(&db, model, project, name),
+                    implicit_fragment_reads_module(&db, model, project, name.clone()),
+                )
+            })
+            .collect();
+    helpers.sort();
+    assert_eq!(
+        helpers,
+        helper_rows
+            .iter()
+            .map(|(name, reach)| ((*name).to_string(), *reach, *reach != ModuleReach::None))
+            .collect::<Vec<_>>(),
+        "every helper of the fixture is a row, reaches the arm its row names, \
+         and reads a module exactly when an arm holds"
+    );
+    for (name, reach) in helper_rows {
+        assert_eq!(
+            implicit_fragment_overlay(&db, model, project, name.to_string(), LtmOverlay::On),
+            if reach == ModuleReach::None {
+                LtmOverlay::Off
+            } else {
+                LtmOverlay::On
+            },
+            "{name}: keyed on the requested overlay exactly when it reads a module"
+        );
+    }
+    // A name the model synthesizes no helper of gets the plain key, which is
+    // the key of the `None` fragment its compiler returns.
+    let absent = "$\u{205A}nobody\u{205A}0\u{205A}arg0".to_string();
+    assert!(!implicit_fragment_reads_module(
+        &db,
+        model,
+        project,
+        absent.clone()
+    ));
+    assert_eq!(
+        implicit_fragment_overlay(&db, model, project, absent, LtmOverlay::On),
+        LtmOverlay::Off
+    );
+}
+
+/// The overlay reaches a fragment through one shape only, a module
+/// instance's (the sub-model's layout, which carries its LTM section under
+/// `On`), so a fragment memo is keyed on the overlay only where the fragment
+/// resolves one. A first pass under the second overlay therefore re-emits
+/// exactly the module-reading fragments and no others: none at all on the
+/// plain loop; on the loop through a module, `smoothed` -- whose head is the
+/// SMOOTH instance -- and the instance helper itself, whose own shape is the
+/// sub-model's, while `births` (which reads `smoothed` by its dimensions),
+/// `population`, `rate`, the hoisted delay-time argument and every variable
+/// of the `stdlib⁚smth1` sub-model reuse the memo the plain pass left.
+///
+/// Names come from the fragment compilers' own body log and distinct keys
+/// from salsa's execution events: a memo's value and address are equal
+/// either way, so only an execution event separates "reused" from
+/// "recompiled and found equal".
+#[test]
+fn a_second_overlay_re_emits_only_the_module_reading_fragments() {
+    for (fixture, datamodel) in fixtures() {
+        let mut probed = ProbedDb::new();
+        let project = sync_from_datamodel_incremental(probed.db_mut(), &datamodel, None).project;
+        let pass = |probed: &ProbedDb, overlay: LtmOverlay| {
+            assemble_simulation(probed.db(), project, "main".to_string(), overlay)
+                .unwrap_or_else(|e| panic!("{fixture}: assembles under {overlay:?}: {e:?}"));
+            collect_all_diagnostics(probed.db(), project, overlay);
+        };
+        pass(&probed, LtmOverlay::Off);
+
+        let (expected_explicit, expected_implicit): (Vec<&str>, Vec<&str>) =
+            if fixture == "plain loop" {
+                (vec![], vec![])
+            } else {
+                (
+                    vec!["smoothed"],
+                    vec!["smoothed#$\u{205A}smoothed\u{205A}0\u{205A}smth1"],
+                )
+            };
+        // The same expectation, derived by running the predicate over every
+        // variable and helper of every model the two passes walk (the stdlib
+        // templates the sync splices in included), so what re-emits is
+        // measured against the rule and not only against a hand-written list.
+        // Demanded BEFORE the measured region so the predicate's own memos
+        // are not what the region counts.
+        assert_eq!(
+            module_reading_names(probed.db(), project),
+            (
+                expected_explicit
+                    .iter()
+                    .map(|n| (*n).to_string())
+                    .collect::<Vec<_>>(),
+                expected_implicit
+                    .iter()
+                    .map(|n| (*n).to_string())
+                    .collect::<Vec<_>>()
+            ),
+            "{fixture}: the predicate names exactly the fragments expected to re-emit"
+        );
+
+        probed.reset();
+        reset_fragment_executions();
+        pass(&probed, LtmOverlay::On);
+        let execs = fragment_executions();
+        let of_kind = |kind: FragmentExecKind| -> Vec<&str> {
+            execs
+                .iter()
+                .filter(|(k, _)| *k == kind)
+                .map(|(_, name)| name.as_str())
+                .collect()
+        };
+        assert_eq!(
+            of_kind(FragmentExecKind::Explicit),
+            expected_explicit,
+            "{fixture}: the second overlay must re-emit the explicit fragments \
+             that resolve a module shape and no others"
+        );
+        assert_eq!(
+            of_kind(FragmentExecKind::Implicit),
+            expected_implicit,
+            "{fixture}: the second overlay must re-emit the helper fragments \
+             that resolve a module shape and no others"
+        );
+
+        let counts = probed.counts();
+        let distinct_keys = |query: &str| counts.get(query).map(|(_, keys)| *keys).unwrap_or(0);
+        assert_eq!(
+            distinct_keys("compile_var_fragment"),
+            expected_explicit.len(),
+            "{fixture}: one new explicit fragment memo per module-reading \
+             variable; got {counts:?}"
+        );
+        assert_eq!(
+            distinct_keys("compile_implicit_var_fragment"),
+            expected_implicit.len(),
+            "{fixture}: one new helper fragment memo per module-reading \
+             helper; got {counts:?}"
         );
     }
 }

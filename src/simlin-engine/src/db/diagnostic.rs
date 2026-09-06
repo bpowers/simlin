@@ -172,8 +172,15 @@ pub fn model_all_diagnostics(
     let mut sorted_vars: Vec<_> = source_vars.iter().collect();
     sorted_vars.sort_unstable_by_key(|(name, _)| name.as_str());
     for (_var_name, source_var) in sorted_vars {
+        // Under the overlay the fragment is keyed on -- the requested one
+        // only where the fragment resolves a module instance's shape
+        // (`var_fragment::fragment_overlay`) -- so this pass and assembly
+        // still share one entry per variable, now across both overlays for
+        // every variable that reads no module.
+        let var_overlay =
+            crate::db::var_fragment::fragment_overlay(db, *source_var, model, project, overlay);
         let _fragment =
-            compile_var_fragment(db, *source_var, model, project, empty_inputs, overlay);
+            compile_var_fragment(db, *source_var, model, project, empty_inputs, var_overlay);
     }
 
     // The cycle facts, a tracked child read after the loop so its rows
@@ -223,13 +230,20 @@ pub fn model_all_diagnostics(
         let mut sorted_implicit: Vec<&String> = implicit_info.keys().collect();
         sorted_implicit.sort_unstable_by_key(|name| name.as_str());
         for name in sorted_implicit {
+            let helper_overlay = crate::db::var_fragment::implicit_fragment_overlay(
+                db,
+                model,
+                project,
+                name.clone(),
+                overlay,
+            );
             let _ = crate::db::compile_implicit_var_fragment(
                 db,
                 model,
                 project,
                 name.clone(),
                 empty_inputs,
-                overlay,
+                helper_overlay,
             );
         }
     }

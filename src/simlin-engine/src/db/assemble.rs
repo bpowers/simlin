@@ -25,6 +25,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use super::*;
 use crate::common::{Canonical, Ident};
 use crate::compiler::symbolic::Phase;
+use crate::db::var_fragment::{fragment_overlay, implicit_fragment_overlay};
 
 /// The `compiler::Table`s a source variable's graphical function declares,
 /// for the tables map of every fragment that calls it through `LOOKUP`.
@@ -447,8 +448,32 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
         return None;
     }
 
-    var_phase_symbolic_fragment_memo(db, model, project, var_name.to_string(), phase, overlay)
-        .clone()
+    // Keyed on the overlay by the rule the two production fragment compilers
+    // key by (`var_fragment::fragment_overlay`), resolved here rather than at
+    // the two call sites so the cycle gate's plain probe
+    // (`dep_graph::symbolic_phase_element_order`) and an `On` assembly's
+    // combiner (`combine_resolved_sccs`) share one memo for every member that
+    // resolves no module shape.
+    //
+    // Which of the two predicates a member takes is decided by the same
+    // lookup the memo's body makes, through the FIREWALL query rather than
+    // the map itself: this wrapper is untracked, so a direct
+    // `model.variables(db)` here would charge the whole variable map to the
+    // cycle gate, which is exactly the whole-map dependency the fragment
+    // path spent GH #964 removing.
+    let owned_name = var_name.to_string();
+    let overlay = match model_variable_by_name(db, model, owned_name.clone()) {
+        Some(svar) => fragment_overlay(db, svar, model, project, overlay),
+        None => implicit_fragment_overlay(
+            db,
+            model,
+            project,
+            canonicalize(var_name).into_owned(),
+            overlay,
+        ),
+    };
+
+    var_phase_symbolic_fragment_memo(db, model, project, owned_name, phase, overlay).clone()
 }
 
 /// The memoized body of [`var_phase_symbolic_fragment_prod`].
@@ -464,12 +489,13 @@ pub(crate) fn var_phase_symbolic_fragment_prod(
 /// cold compile, and the whole of it recurs on every recompile of the same
 /// unchanged model.
 ///
-/// The key is `(model, project, var_name, phase)` -- the arguments the body
-/// already varied over. `var_name` is a `String` rather than a `&str` because
-/// a salsa key must be owned; the wrapper above does that one allocation on
-/// the caller's behalf and clones the memo out, which is what keeps every
-/// existing call site's ownership unchanged. Both are trivial next to the
-/// lowering they replace.
+/// The key is `(model, project, var_name, phase, overlay)` -- the arguments
+/// the body already varied over, the overlay being the one the wrapper
+/// resolved (`Off` unless this variable's fragment resolves a module shape).
+/// `var_name` is a `String` rather than a `&str` because a salsa key must be
+/// owned; the wrapper above does that one allocation on the caller's behalf
+/// and clones the memo out, which is what keeps every existing call site's
+/// ownership unchanged. Both are trivial next to the lowering they replace.
 #[salsa::tracked(returns(ref))]
 fn var_phase_symbolic_fragment_memo(
     db: &dyn Db,
@@ -1180,18 +1206,30 @@ fn collect_fragments<'db>(
 ) -> ModuleFragments<'db> {
     use crate::compiler::symbolic::fragment_vars_in_layout;
 
+    // Each fragment is asked for under the overlay it is keyed on -- the
+    // requested one only where the fragment resolves a module instance's
+    // shape (`var_fragment::fragment_overlay`) -- so an assembly under the
+    // second overlay re-emits the module-reading fragments alone and reuses
+    // every other variable's single memo.
     let mut by_name: HashMap<String, Cow<'db, VarFragmentResult>> = HashMap::new();
     for (name, svar) in model.variables(db).iter() {
+        let var_overlay = fragment_overlay(db, *svar, model, project, overlay);
         if let Some(result) =
-            compile_var_fragment(db, *svar, model, project, module_inputs, overlay)
+            compile_var_fragment(db, *svar, model, project, module_inputs, var_overlay)
         {
             by_name.insert(name.clone(), Cow::Borrowed(result));
         }
     }
     for name in model_implicit_var_info(db, model, project).keys() {
-        if let Some(result) =
-            compile_implicit_var_fragment(db, model, project, name.clone(), module_inputs, overlay)
-        {
+        let helper_overlay = implicit_fragment_overlay(db, model, project, name.clone(), overlay);
+        if let Some(result) = compile_implicit_var_fragment(
+            db,
+            model,
+            project,
+            name.clone(),
+            module_inputs,
+            helper_overlay,
+        ) {
             by_name.insert(name.clone(), Cow::Borrowed(result));
         }
     }
