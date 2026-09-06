@@ -1186,8 +1186,9 @@ mod tests {
             translate(&model, 5).unwrap_or_else(|e| panic!("{name}: translate failed: {e:?}"));
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-        let _compiled = compile_project_incremental(&db, sync.project, "main")
-            .unwrap_or_else(|e| panic!("{name}: compilation failed: {e:?}"));
+        let _compiled =
+            compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+                .unwrap_or_else(|e| panic!("{name}: compilation failed: {e:?}"));
         project
     }
 
@@ -1580,8 +1581,9 @@ mod tests {
 
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-        let compiled = compile_project_incremental(&db, sync.project, "main")
-            .expect("duplicate parallel flows should compile");
+        let compiled =
+            compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+                .expect("duplicate parallel flows should compile");
         let mut vm = crate::Vm::new(compiled).unwrap();
         vm.run_to_end().unwrap();
         let results = vm.into_results();
@@ -1727,7 +1729,8 @@ mod tests {
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &project, None);
         let compiled =
-            compile_project_incremental(&db, sync.project, "main").expect("should compile");
+            compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+                .expect("should compile");
         let mut vm = crate::Vm::new(compiled).unwrap();
         vm.run_to_end().unwrap();
         let results = vm.into_results();

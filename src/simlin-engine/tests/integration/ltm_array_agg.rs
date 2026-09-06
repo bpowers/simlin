@@ -67,7 +67,7 @@ use simlin_engine::db::{
     DetectedLoopPolarity, DiagnosticError, DiagnosticSeverity, LtmEquation, LtmSyntheticVar,
     SimlinDb, collect_all_diagnostics, compile_project_incremental, model_detected_loops,
     model_element_causal_edges, model_ltm_variables, reclassify_loops_from_results,
-    set_project_ltm_discovery_mode, set_project_ltm_enabled, sync_from_datamodel_incremental,
+    set_project_ltm_discovery_mode, sync_from_datamodel_incremental,
 };
 use simlin_engine::open_vensim;
 use simlin_engine::test_common::TestProject;
@@ -97,9 +97,9 @@ const STARTUP_STEPS: usize = 2;
 fn run_ltm(project: &datamodel::Project) -> (Results, Vec<LtmSyntheticVar>) {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
     let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
         .vars
         .clone();
@@ -195,7 +195,13 @@ fn ltm_var<'a>(ltm_vars: &'a [LtmSyntheticVar], name: &str) -> &'a LtmSyntheticV
 fn compiles(project: &datamodel::Project) -> bool {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    compile_project_incremental(&db, sync.project, "main").is_ok()
+    compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .is_ok()
 }
 
 /// Arrayed-vs-scalar link-score parity (LTM review, Finding 2's per-link
@@ -573,8 +579,7 @@ fn variable_backed_partial_reduce_loop_scores_finite_and_sustained() {
     // fixture before the fix.)
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On);
     let frag_failures: Vec<_> = diags
         .iter()
         .filter(|d| {
@@ -1021,8 +1026,13 @@ fn bare_arrayed_nested_previous_matches_subscripted() {
     let run_plain = |project: &datamodel::Project| -> Results {
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, project, None);
-        let compiled = compile_project_incremental(&db, sync.project, "main")
-            .expect("GH #541: a bare arrayed name in a nested PREVIOUS must now compile");
+        let compiled = compile_project_incremental(
+            &db,
+            sync.project,
+            "main",
+            simlin_engine::db::LtmOverlay::Off,
+        )
+        .expect("GH #541: a bare arrayed name in a nested PREVIOUS must now compile");
         let mut vm = Vm::new(compiled).expect("VM construction should succeed");
         vm.run_to_end()
             .expect("plain simulation should run to completion");
@@ -1108,8 +1118,13 @@ fn subscripted_arrayed_nested_previous_matches_scalar() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("the subscripted nested-PREVIOUS model must compile");
+    let compiled = compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .expect("the subscripted nested-PREVIOUS model must compile");
     let mut vm = Vm::new(compiled).expect("VM construction should succeed");
     vm.run_to_end()
         .expect("plain simulation should run to completion");
@@ -1169,8 +1184,13 @@ fn bare_arrayed_nested_previous_multidim_matches_subscripted() {
             .build_datamodel();
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-        let compiled = compile_project_incremental(&db, sync.project, "main")
-            .expect("multi-dim bare nested PREVIOUS must compile");
+        let compiled = compile_project_incremental(
+            &db,
+            sync.project,
+            "main",
+            simlin_engine::db::LtmOverlay::Off,
+        )
+        .expect("multi-dim bare nested PREVIOUS must compile");
         let mut vm = Vm::new(compiled).expect("VM construction should succeed");
         vm.run_to_end()
             .expect("simulation should run to completion");
@@ -1269,8 +1289,13 @@ fn bare_arrayed_nested_previous_transposed_matches_subscripted() {
     let run_plain = |project: &datamodel::Project| -> Results {
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, project, None);
-        let compiled = compile_project_incremental(&db, sync.project, "main")
-            .expect("transposed bare nested PREVIOUS must compile");
+        let compiled = compile_project_incremental(
+            &db,
+            sync.project,
+            "main",
+            simlin_engine::db::LtmOverlay::Off,
+        )
+        .expect("transposed bare nested PREVIOUS must compile");
         let mut vm = Vm::new(compiled).expect("VM construction should succeed");
         vm.run_to_end()
             .expect("simulation should run to completion");
@@ -1369,7 +1394,13 @@ SAVEPER  = 1 ~	~	|
     let project = open_vensim(MDL).expect("C-LEARN-shaped MDL must parse");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let compiled = compile_project_incremental(&db, sync.project, "main").expect(
+    let compiled = compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .expect(
         "GH #541 regression: an A2A INITIAL whose arg subscripts by a mapped \
          dimension must compile (the per-element scalar helper translates the \
          mapped subscript)",
@@ -1415,7 +1446,13 @@ fn arrayed_helper_resolves_capitalized_dimension() {
         .build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    compile_project_incremental(&db, sync.project, "main").expect(
+    compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .expect(
         "a bare-arrayed nested PREVIOUS over a capitalized dimension must compile: \
          the arrayed helper's canonical ApplyToAll dims must resolve against the \
          capitalized dimension name",
@@ -1426,8 +1463,13 @@ fn arrayed_helper_resolves_capitalized_dimension() {
 fn run_plain_sim(project: &datamodel::Project) -> Results {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("model must compile via the incremental path");
+    let compiled = compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .expect("model must compile via the incremental path");
     let mut vm = Vm::new(compiled).expect("VM construction should succeed");
     vm.run_to_end()
         .expect("plain simulation should run to completion");
@@ -1676,10 +1718,10 @@ fn partially_iterated_subscript_link_score_compiles_and_scores() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
 
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("the GH #525 shape must compile with LTM enabled");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("the GH #525 shape must compile with LTM enabled");
 
     // Every fragment (capture helpers included) compiles: no degradation
     // warnings anywhere.
@@ -1869,7 +1911,6 @@ fn arrayed_agg_feeder_loops_classify_concretely() {
 
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-        set_project_ltm_enabled(&mut db, sync.project, true);
         let source_model = sync.models["main"].source_model;
         let ltm = model_ltm_variables(&db, source_model, sync.project);
 
@@ -1956,7 +1997,6 @@ fn opposing_arrayed_multi_agg_loops_keep_agg_identity() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
 
@@ -2065,9 +2105,13 @@ fn scalar_feeder_loop_cross_surface_ids_and_polarity_agree() {
 
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-        set_project_ltm_enabled(&mut db, sync.project, true);
-        let compiled = compile_project_incremental(&db, sync.project, "main")
-            .expect("LTM-enabled compilation should succeed");
+        let compiled = compile_project_incremental(
+            &db,
+            sync.project,
+            "main",
+            simlin_engine::db::LtmOverlay::On,
+        )
+        .expect("LTM-enabled compilation should succeed");
         let source_model = sync.models["main"].source_model;
         let ltm = model_ltm_variables(&db, source_model, sync.project);
 
@@ -2171,9 +2215,9 @@ fn multi_agg_feeder_edge_cross_surface_ids_agree() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
 
@@ -2276,9 +2320,9 @@ fn opposing_multi_agg_feeder_does_not_misjoin_undetermined_loop() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
 
@@ -2404,8 +2448,7 @@ fn arrayed_co_source_feeder_loop_is_balancing() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    compile_project_incremental(&db, sync.project, "main")
+    compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
         .expect("LTM-enabled compilation should succeed");
     let source_model = sync.models["main"].source_model;
 
@@ -2510,26 +2553,27 @@ fn broadcast_agg_loop_scores_are_finite_and_sustained() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project)
         .vars
         .clone();
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     // No LTM synthetic fragment may fail to compile: the pre-fix failure
     // mode was each over-subscripted agg→growth fragment stubbing to a
     // constant 0 with an Assembly "failed to compile" Warning.
-    let fragment_failures: Vec<String> = collect_all_diagnostics(&db, sync.project)
-        .into_iter()
-        .filter(|d| {
-            d.severity == DiagnosticSeverity::Warning
-                && matches!(&d.error,
+    let fragment_failures: Vec<String> =
+        collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On)
+            .into_iter()
+            .filter(|d| {
+                d.severity == DiagnosticSeverity::Warning
+                    && matches!(&d.error,
                     DiagnosticError::Assembly(msg) if msg.contains("failed to compile"))
-        })
-        .map(|d| d.variable.unwrap_or_default())
-        .collect();
+            })
+            .map(|d| d.variable.unwrap_or_default())
+            .collect();
     assert!(
         fragment_failures.is_empty(),
         "no LTM synthetic fragment may fail to compile (GH #528: the broadcast agg→target \
@@ -3242,12 +3286,12 @@ fn iterated_dim_feeder_closure_scores_via_hoist() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
         .vars
         .clone();
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     // The whole-RHS form is VARIABLE-BACKED: no synthetic agg node.
     assert!(
@@ -3259,7 +3303,7 @@ fn iterated_dim_feeder_closure_scores_via_hoist() {
     );
 
     // Everything compiles cleanly: zero assembly warnings.
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On);
     let assembly: Vec<_> = diags
         .iter()
         .filter(|d| matches!(d.error, DiagnosticError::Assembly(_)))
@@ -3385,15 +3429,15 @@ fn iterated_dim_feeder_co_source_closure_scores_real_values() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
         .vars
         .clone();
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     // The warned zero-stubs are GONE: every LTM fragment compiles.
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On);
     let assembly: Vec<_> = diags
         .iter()
         .filter(|d| matches!(d.error, DiagnosticError::Assembly(_)))
@@ -3617,14 +3661,14 @@ fn repeated_dim_co_source_pins_feeder_at_iterated_axis() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
         .vars
         .clone();
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On);
     let assembly: Vec<_> = diags
         .iter()
         .filter(|d| matches!(d.error, DiagnosticError::Assembly(_)))
@@ -3749,14 +3793,14 @@ fn pinned_canonical_with_feeder_scores_additively() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
         .vars
         .clone();
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On);
     let assembly: Vec<_> = diags
         .iter()
         .filter(|d| matches!(d.error, DiagnosticError::Assembly(_)))
@@ -3872,12 +3916,12 @@ fn inline_feeder_reducer_synthetic_agg_closure_scores() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
         .vars
         .clone();
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     // The inline form mints the synthetic agg, with the feeder half's
     // per-(row, slot) names.
@@ -3896,7 +3940,7 @@ fn inline_feeder_reducer_synthetic_agg_closure_scores() {
         );
     }
 
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On);
     let assembly: Vec<_> = diags
         .iter()
         .filter(|d| matches!(d.error, DiagnosticError::Assembly(_)))
@@ -3968,12 +4012,12 @@ fn non_projection_feeder_co_source_closure_stays_loud() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
         .vars
         .clone();
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     // The Pinned-axis mix must NOT be hoisted: no agg, so growth is not an
     // agg target and the per-row feeder names don't exist.
@@ -3987,7 +4031,7 @@ fn non_projection_feeder_co_source_closure_stays_loud() {
 
     // Every cross-row loop score through the un-hoisted matrix→growth edge
     // is WARNED and not emitted -- the loud conservative floor.
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On);
     let warned_loop_scores: Vec<&str> = diags
         .iter()
         .filter(|d| {
@@ -4105,7 +4149,6 @@ fn ltm_names(ltm_vars: &[LtmSyntheticVar]) -> Vec<String> {
 fn ltm_warning_texts(project: &datamodel::Project) -> Vec<String> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let _ = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
     assembly_warnings(&db, sync.project)
         .iter()
@@ -4207,7 +4250,6 @@ fn a_bare_reducer_feeder_is_hoisted_like_its_iterated_spelling() {
     // Discovery mode reaches the same aggregate and mints the same rows.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &bare, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
     let disc = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
     let row = format!("{LINK_SCORE_PREFIX}frac[a]\u{2192}growth[a]");
@@ -4371,7 +4413,6 @@ fn a_bare_reducer_argument_in_a_product_scores_per_element() {
     // causal edge, so it adds the variable-level `other -> growth`).
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
     let disc =
         ltm_names(&model_ltm_variables(&db, sync.models["main"].source_model, sync.project).vars);
@@ -4870,7 +4911,6 @@ fn a_parent_mapped_bare_argument_reads_the_whole_array() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let _ = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
     let edges = model_element_causal_edges(&db, sync.models["main"].source_model, sync.project);
     for b in ["b1", "b2", "b3"] {
@@ -4900,8 +4940,9 @@ fn a_parent_mapped_bare_argument_reads_the_whole_array() {
         );
     }
 
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
     let mut vm = Vm::new(compiled).expect("VM construction should succeed");
     vm.run_to_end().expect("VM simulation should run");
     let results = vm.into_results();
@@ -5217,7 +5258,6 @@ fn a_flow_feeding_its_stock_through_a_parent_mapping_scores_per_slot() {
 
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-        set_project_ltm_enabled(&mut db, sync.project, true);
         let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
         let score_name = format!("{LINK_SCORE_PREFIX}inflow\u{2192}level");
         assert_eq!(
@@ -5250,8 +5290,13 @@ fn a_flow_feeding_its_stock_through_a_parent_mapping_scores_per_slot() {
             );
         }
 
-        let compiled = compile_project_incremental(&db, sync.project, "main")
-            .expect("LTM-enabled compilation should succeed");
+        let compiled = compile_project_incremental(
+            &db,
+            sync.project,
+            "main",
+            simlin_engine::db::LtmOverlay::On,
+        )
+        .expect("LTM-enabled compilation should succeed");
         let mut vm = Vm::new(compiled).expect("VM construction should succeed");
         vm.run_to_end().expect("VM simulation should run");
         let results = vm.into_results();
@@ -5304,12 +5349,12 @@ fn whole_rhs_bare_reducer_stays_scored() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
         .vars
         .clone();
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
     assert!(
         assembly_warnings(&db, sync.project).is_empty(),
         "the whole-RHS bare reducer must stay warning-free"
@@ -5413,7 +5458,7 @@ fn assembly_warnings(
     db: &SimlinDb,
     project: simlin_engine::db::SourceProject,
 ) -> Vec<simlin_engine::db::Diagnostic> {
-    collect_all_diagnostics(db, project)
+    collect_all_diagnostics(db, project, simlin_engine::db::LtmOverlay::On)
         .into_iter()
         .filter(|d| {
             d.severity == DiagnosticSeverity::Warning
@@ -5435,7 +5480,6 @@ fn declined_sliced_reducer_edge_skips_loudly() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     // The declined edge must not mint the uncompilable scalar link score.
@@ -5462,8 +5506,9 @@ fn declined_sliced_reducer_edge_skips_loudly() {
         ltm.loop_partitions.keys().collect::<Vec<_>>()
     );
 
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     // Exactly ONE Assembly warning: the unscoreable-edge diagnostic naming
     // both endpoints. (Before the fix: 17 -- the link score's
@@ -5546,7 +5591,6 @@ fn element_mapped_sliced_reducer_hoists_and_scores_its_loops() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
     let names: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
 
@@ -5574,8 +5618,9 @@ fn element_mapped_sliced_reducer_hoists_and_scores_its_loops() {
     );
 
     // The executed read is the map's: `growth[ca]` sums `matrix[east,*]`.
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
     let mut vm = Vm::new(compiled).expect("VM construction should succeed");
     vm.run_to_end().expect("VM simulation should run");
     let results = vm.into_results();
@@ -5665,7 +5710,6 @@ fn a_permuted_mapped_pair_scores_the_maps_diagonal() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
     let names = ltm_names(&ltm.vars);
 
@@ -5702,8 +5746,9 @@ fn a_permuted_mapped_pair_scores_the_maps_diagonal() {
     }
 
     // The executed read and the score it implies.
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
     let mut vm = Vm::new(compiled).expect("VM construction should succeed");
     vm.run_to_end().expect("VM simulation should run");
     let results = vm.into_results();
@@ -5801,7 +5846,6 @@ fn a_subrange_named_read_of_a_superset_variable_is_read_by_element_name() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
     let names = ltm_names(&ltm.vars);
 
@@ -5837,8 +5881,9 @@ fn a_subrange_named_read_of_a_superset_variable_is_read_by_element_name() {
         assert!(names.contains(&name), "expected {name:?}; got: {names:?}");
     }
     // Every emitted fragment compiles: no score silently reads a constant 0.
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
         !warnings.iter().any(|d| match &d.error {
@@ -5898,7 +5943,6 @@ fn an_agreeing_mapped_pair_keeps_the_arrayed_score() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let score = ltm
@@ -5941,10 +5985,10 @@ fn declined_sliced_reducer_keeps_unaffected_loops() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     // Still exactly one warning: the unscoreable edge.
     let warnings = assembly_warnings(&db, sync.project);
@@ -6022,10 +6066,10 @@ fn positional_mapped_twin_of_declined_edge_scores_cleanly() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     // The positionally-mapped sliced reducer is hoisted: no conservative
     // matrix->growth score and no unscoreable-edge warning.
@@ -6126,9 +6170,9 @@ fn pinned_index_partial_compiles_and_scores_correctly() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     // Every LTM fragment (helpers included) compiles: no degradation warnings.
     let warnings = assembly_warnings(&db, sync.project);
@@ -6240,9 +6284,9 @@ fn module_only_root_with_pinned_index_sub_scores_cleanly() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     // #748 leg: the module-only root runs the pass and scores its loop.
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
@@ -6349,9 +6393,9 @@ fn rank_context_axis_link_scores_stay_pinned_per_row() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
     assert!(
         assembly_warnings(&db, sync.project).is_empty(),
         "mixed-context RANK helper scores must compile without warnings"
@@ -6419,9 +6463,9 @@ fn rank_mapped_helper_slots_score_mapped_targets() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
     assert!(
         assembly_warnings(&db, sync.project).is_empty(),
         "mapped RANK helper target scores must compile without warnings: {:?}",
@@ -6534,9 +6578,9 @@ fn rank_frozen_subtree_link_score_scores_correctly() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     // RANK uses an array-valued helper, so no ill-shaped scalar agg exists and
     // NOTHING warns -- the capture helpers and every link/loop score compile.
@@ -6630,7 +6674,7 @@ fn rank_frozen_subtree_link_score_scores_correctly() {
         .iter()
         .find(|v| match &v.equation {
             LtmEquation::ApplyToAll(dims, arm) => {
-                dims.len() == 1 && dims[0] == "Region" && arm.text == "rank(pop, 1)"
+                dims.len() == 1 && dims[0] == "Region" && &*arm.text == "rank(pop, 1)"
             }
             LtmEquation::Scalar(_) | LtmEquation::Arrayed { .. } => false,
         })
@@ -6723,9 +6767,9 @@ fn gh525_two_reference_partially_iterated_row_sum_scores() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("the GH #525 repro must compile with LTM enabled");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("the GH #525 repro must compile with LTM enabled");
 
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
@@ -6771,8 +6815,8 @@ fn gh525_two_reference_partially_iterated_row_sum_scores() {
     // per-(row, element) names, with real non-zero post-startup values.
     let eqn_text = |v: &LtmSyntheticVar| -> String {
         match &v.equation {
-            LtmEquation::Scalar(arm) => arm.text.clone(),
-            LtmEquation::ApplyToAll(_, arm) => arm.text.clone(),
+            LtmEquation::Scalar(arm) => arm.text.to_string(),
+            LtmEquation::ApplyToAll(_, arm) => arm.text.to_string(),
             other => format!("{other:?}"),
         }
     };
@@ -6838,14 +6882,14 @@ fn gh525_two_reference_partially_iterated_row_sum_scores() {
         .filter(|v| v.name.starts_with(LOOP_SCORE_PREFIX))
     {
         let text = match &lv.equation {
-            LtmEquation::Scalar(arm) => arm.text.clone(),
-            LtmEquation::ApplyToAll(_, arm) => arm.text.clone(),
+            LtmEquation::Scalar(arm) => arm.text.to_string(),
+            LtmEquation::ApplyToAll(_, arm) => arm.text.to_string(),
             LtmEquation::Arrayed {
                 elements: slots,
                 default,
                 ..
             } => {
-                let mut t: String = slots.iter().map(|(_, arm)| arm.text.clone()).collect();
+                let mut t: String = slots.iter().map(|(_, arm)| &*arm.text).collect();
                 if let Some(d) = default {
                     t.push_str(&d.text);
                 }
@@ -7005,9 +7049,9 @@ fn per_element_source_also_read_as_a_lookup_table_keeps_its_scores() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("a per-element-table source read in a LOOKUP must compile with LTM");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("a per-element-table source read in a LOOKUP must compile with LTM");
 
     // The direct silent-zero guard: a fragment that fails to compile is dropped
     // and its variable reads a constant 0.
@@ -7036,7 +7080,7 @@ fn per_element_source_also_read_as_a_lookup_table_keeps_its_scores() {
             )
         });
         let text = match &var.equation {
-            LtmEquation::Scalar(arm) => arm.text.clone(),
+            LtmEquation::Scalar(arm) => arm.text.to_string(),
             other => panic!("{name} must be a scalar score; got {other:?}"),
         };
         assert!(
@@ -7128,10 +7172,11 @@ fn assert_static_table_index_keeps_its_scores(
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap_or_else(|e| {
-        panic!("a `{table_index}`-indexed table argument must compile with LTM: {e:?}")
-    });
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .unwrap_or_else(|e| {
+                panic!("a `{table_index}`-indexed table argument must compile with LTM: {e:?}")
+            });
 
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
@@ -7158,7 +7203,7 @@ fn assert_static_table_index_keeps_its_scores(
             )
         });
         let text = match &var.equation {
-            LtmEquation::Scalar(arm) => arm.text.clone(),
+            LtmEquation::Scalar(arm) => arm.text.to_string(),
             other => panic!("{name} must be a scalar score; got {other:?}"),
         };
         assert!(
@@ -7253,9 +7298,9 @@ fn mapped_per_element_source_read_as_a_lookup_table_keeps_its_scores() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("a mapped per-element-table source read in a LOOKUP must compile with LTM");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("a mapped per-element-table source read in a LOOKUP must compile with LTM");
 
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
@@ -7284,7 +7329,7 @@ fn mapped_per_element_source_read_as_a_lookup_table_keeps_its_scores() {
             )
         });
         let text = match &var.equation {
-            LtmEquation::Scalar(arm) => arm.text.clone(),
+            LtmEquation::Scalar(arm) => arm.text.to_string(),
             other => panic!("{name} must be a scalar score; got {other:?}"),
         };
         assert!(
@@ -7345,9 +7390,9 @@ fn per_element_broadcast_mixed_subscript_scores() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("the broadcast PerElement fixture must compile with LTM enabled");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("the broadcast PerElement fixture must compile with LTM enabled");
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
         warnings.is_empty(),
@@ -7474,9 +7519,9 @@ fn mixed_bare_and_per_element_edge_resolver_precedence() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("the mixed Bare+PerElement fixture must compile with LTM enabled");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("the mixed Bare+PerElement fixture must compile with LTM enabled");
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
         warnings.is_empty(),
@@ -7539,7 +7584,7 @@ fn mixed_bare_and_per_element_edge_resolver_precedence() {
     );
     let eqn_text = |v: &LtmSyntheticVar| -> String {
         match &v.equation {
-            LtmEquation::Scalar(arm) => arm.text.clone(),
+            LtmEquation::Scalar(arm) => arm.text.to_string(),
             other => format!("{other:?}"),
         }
     };
@@ -7619,9 +7664,9 @@ fn per_element_hop_in_mixed_scalar_cycle_scores() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("the mixed-branch fixture must compile with LTM enabled");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("the mixed-branch fixture must compile with LTM enabled");
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
         warnings.is_empty(),
@@ -7652,7 +7697,7 @@ fn per_element_hop_in_mixed_scalar_cycle_scores() {
     let mut saw_per_element_ref = 0usize;
     for lv in &loop_vars {
         let text = match &lv.equation {
-            LtmEquation::Scalar(arm) => arm.text.clone(),
+            LtmEquation::Scalar(arm) => arm.text.to_string(),
             other => format!("{other:?}"),
         };
         assert!(
@@ -7708,9 +7753,9 @@ fn gh769_fixed_index_into_disjoint_a2a_target_scores() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("the GH #769 fixture must compile with LTM enabled");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("the GH #769 fixture must compile with LTM enabled");
 
     // Zero warnings: the edge is no longer loud-skipped.
     let warnings = assembly_warnings(&db, sync.project);
@@ -7974,8 +8019,7 @@ fn aliased_through_agg_residual_strict_site_declines_edge() {
     let project = fixture();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    compile_project_incremental(&db, sync.project, "main")
+    compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
         .expect("the aliased-routing fixture must compile with LTM enabled");
     let warnings = assembly_warnings(&db, sync.project);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
@@ -7987,9 +8031,8 @@ fn aliased_through_agg_residual_strict_site_declines_edge() {
     let project = fixture();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
-    compile_project_incremental(&db, sync.project, "main")
+    compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
         .expect("the aliased-routing fixture must compile in discovery mode");
     let warnings = assembly_warnings(&db, sync.project);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
@@ -8026,9 +8069,9 @@ fn per_element_body_with_iterated_other_dep_scores() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("the other-dep fixture must compile with LTM enabled");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("the other-dep fixture must compile with LTM enabled");
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
         warnings.is_empty(),
@@ -8055,7 +8098,7 @@ fn per_element_body_with_iterated_other_dep_scores() {
         // unresolvable bare dimension index.
         let var = ltm_var(&ltm.vars, &name);
         let eqn = match &var.equation {
-            LtmEquation::Scalar(arm) => arm.text.clone(),
+            LtmEquation::Scalar(arm) => arm.text.to_string(),
             other => format!("{other:?}"),
         };
         assert!(
@@ -8130,9 +8173,9 @@ fn mapped_per_element_subscript_scores_positional_diagonal() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("the mapped PerElement fixture must compile with LTM enabled");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("the mapped PerElement fixture must compile with LTM enabled");
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
         warnings.is_empty(),
@@ -8222,9 +8265,9 @@ fn gh746_arrayed_cycle_detected_and_scored_ids_biject() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
 
@@ -8352,9 +8395,9 @@ fn inline_subset_reducer_mean_divisor_and_scores() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
@@ -8498,9 +8541,9 @@ fn iterated_subset_reducer_loop_scores_end_to_end() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
@@ -8630,9 +8673,9 @@ fn pinned_mixed_reduce_divisor_and_scores() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
@@ -8746,9 +8789,9 @@ fn variable_backed_subset_reduce_divisor_and_scores() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
@@ -8836,9 +8879,9 @@ fn scalar_owner_pinned_slice_reduce_scores_read_rows_only() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
@@ -8933,9 +8976,9 @@ fn scalar_owner_subset_slice_reduce_scores_read_rows_only() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
@@ -9027,9 +9070,9 @@ fn arrayed_owner_broadcast_pinned_slice_reduce_scores_read_rows_broadcast() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     // Zero warnings: the broadcast is fully scored, no loud skip.
     let warnings = assembly_warnings(&db, sync.project);
@@ -9159,9 +9202,9 @@ fn arrayed_owner_broadcast_disjoint_dim_slice_reduce_scores_read_rows() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
@@ -9265,9 +9308,9 @@ fn arrayed_owner_broadcast_subset_slice_reduce_scores_read_rows_broadcast() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
@@ -9466,7 +9509,6 @@ fn aligned_partial_reduce_emissions_stay_byte_identical() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     // All four read rows, in row-major order, each a scalar var.
@@ -9502,7 +9544,7 @@ fn aligned_partial_reduce_emissions_stay_byte_identical() {
                   SIGN((matrix[d1\u{B7}a,d2\u{B7}x] - PREVIOUS(matrix[d1\u{B7}a,d2\u{B7}x])))";
     match &emitted[0].equation {
         LtmEquation::Scalar(arm) => assert_eq!(
-            &arm.text, golden,
+            &*arm.text, golden,
             "the aligned per-(row, slot) equation text must stay byte-identical"
         ),
         other => panic!("aligned per-(row, slot) score must be scalar; got {other:?}"),
@@ -9550,9 +9592,9 @@ fn own_dim_star_range_mixed_reduce_scores_read_slice() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
@@ -9706,9 +9748,9 @@ fn scalar_owner_all_pinned_slice_reduce_scores_single_row() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
@@ -9838,9 +9880,9 @@ fn whole_rhs_broadcast_reduce_loop_scores_finite_and_sustained() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     // Zero warnings: pre-T4 this fixture surfaced exactly one GH #758
     // "dimensions do not correspond" Warning on matrix -> out and dropped
@@ -9991,9 +10033,9 @@ fn whole_rhs_permuted_reduce_loop_scores_finite_and_sustained() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
@@ -10130,9 +10172,9 @@ fn whole_rhs_broadcast_pinned_mix_scores_read_rows_only() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
@@ -10267,7 +10309,6 @@ fn whole_rhs_mapped_reduce_emissions_stay_byte_identical() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
         warnings.is_empty(),
@@ -10352,9 +10393,9 @@ fn whole_rhs_mapped_broadcast_intersection_scores_cleanly() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
@@ -10507,10 +10548,10 @@ fn gh751_two_arrayed_co_aggs_pin_frozen_agg_to_slot() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     // Every fragment compiles: no Assembly warnings at all (pre-fix: 4,
     // one per failed agg[{r}]→two_sums[{r}] fragment).
@@ -10614,10 +10655,10 @@ fn gh751_scalar_co_aggs_keep_bare_previous_freeze() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
@@ -10684,10 +10725,10 @@ fn gh526_transposed_dep_partial_takes_changed_last() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     let warnings = assembly_warnings(&db, sync.project);
     assert!(
@@ -10770,9 +10811,9 @@ fn gh526_natural_and_mapped_deps_keep_changed_first_collapse() {
         .build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &natural, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
-    compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+        .expect("compiles");
     assert!(
         assembly_warnings(&db, sync.project).is_empty(),
         "natural-position fixture stays warning-free"
@@ -10807,9 +10848,9 @@ fn gh526_natural_and_mapped_deps_keep_changed_first_collapse() {
         .build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &mapped, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
-    compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+        .expect("compiles");
     assert!(
         assembly_warnings(&db, sync.project).is_empty(),
         "mapped fixture stays warning-free"
@@ -10861,7 +10902,6 @@ fn assert_square_source_loudly_skipped(
     let mode = if discovery { "discovery" } else { "exhaustive" };
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     if discovery {
         set_project_ltm_discovery_mode(&mut db, sync.project, true);
     }
@@ -10907,8 +10947,9 @@ fn assert_square_source_loudly_skipped(
             .collect::<Vec<_>>()
     );
 
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("the declined-square model must still compile with LTM enabled");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("the declined-square model must still compile with LTM enabled");
 
     // The skip is loud and warn-once: exactly one Assembly warning per
     // duplicated-dim source edge, each naming the square-source decline.
@@ -11107,10 +11148,10 @@ fn gh791_arrayed_owner_mismatched_cosource_strict_slice_skips_loudly() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     // No `pop[*]→share[*]` link score of ANY row (read or unread) is emitted:
     // the cartesian-garbage rows are gone.
@@ -11214,10 +11255,10 @@ fn gh791_scalar_owner_mismatched_cosource_strict_slice_skips_loudly() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     for region in ["nyc", "boston"] {
         for d2 in ["p", "q"] {
@@ -11291,7 +11332,6 @@ fn gh791_strict_slice_decline_holds_in_discovery_mode() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
@@ -11307,7 +11347,7 @@ fn gh791_strict_slice_decline_holds_in_discovery_mode() {
         }
     }
     // The model still compiles cleanly in discovery mode.
-    compile_project_incremental(&db, sync.project, "main")
+    compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
         .expect("discovery-mode LTM compilation should succeed");
 }
 
@@ -11323,7 +11363,6 @@ fn gh791_full_extent_multisource_read_stays_scored() {
     let project = gh779_bare_feeder_fixture("SUM", "frac");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     for row in ["a", "b"] {
@@ -11363,10 +11402,10 @@ fn gh792_per_element_owner_strict_slice_skips_loudly() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     // The silent Bare stand-in (`$⁚ltm⁚link_score⁚pop→share`, arrayed over
     // Region, ~-0.0 every step) must be GONE -- in EITHER its bare-edge or any
@@ -11467,7 +11506,6 @@ fn gh792_per_element_owner_strict_slice_holds_in_discovery_mode() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
@@ -11476,7 +11514,7 @@ fn gh792_per_element_owner_strict_slice_holds_in_discovery_mode() {
         ltm.vars.iter().all(|v| v.name != bare),
         "discovery mode must also decline the strict-slice per-element edge; found {bare:?}"
     );
-    compile_project_incremental(&db, sync.project, "main")
+    compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
         .expect("discovery-mode LTM compilation should succeed");
 }
 
@@ -11513,9 +11551,8 @@ fn gh792_mixed_slot_reducer_read_declines_whole_edge() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
-    compile_project_incremental(&db, sync.project, "main")
+    compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
         .expect("LTM-enabled compilation should succeed");
 
     let bare = format!("{LINK_SCORE_PREFIX}pop\u{2192}share");
@@ -11580,10 +11617,10 @@ fn assert_gh792_per_element_decline(slots: Vec<(&str, &str)>, expected_share_nyc
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     let bare = format!("{LINK_SCORE_PREFIX}pop\u{2192}share");
     assert!(
@@ -11750,10 +11787,10 @@ fn assert_gh793_strict_sibling_declines(strict_first: bool) {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     assert!(
         ltm.vars
@@ -11910,12 +11947,12 @@ fn scalar_feeder_of_whole_rhs_reduce_scores_via_agg_arm() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
         .vars
         .clone();
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     // The `growth` reduce is VARIABLE-BACKED: growth IS the agg, so the feeder
     // edge targets `growth` directly, not a synthetic `$⁚ltm⁚agg⁚N` minted for
@@ -12017,11 +12054,10 @@ fn scalar_feeder_of_whole_rhs_reduce_covers_reducer_class() {
         let project = gh790_whole_rhs_fixture(reducer);
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-        set_project_ltm_enabled(&mut db, sync.project, true);
         let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
             .vars
             .clone();
-        compile_project_incremental(&db, sync.project, "main")
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
             .unwrap_or_else(|e| panic!("{reducer}: LTM-enabled compilation should succeed: {e:?}"));
 
         let feeder_name = format!("{LINK_SCORE_PREFIX}scale\u{2192}growth");
@@ -12209,12 +12245,11 @@ fn scalar_feeder_of_whole_rhs_reduce_emits_cleanly_in_discovery_mode() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
     let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
         .vars
         .clone();
-    compile_project_incremental(&db, sync.project, "main")
+    compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
         .expect("discovery-mode LTM compilation should succeed");
 
     let feeder_name = format!("{LINK_SCORE_PREFIX}scale\u{2192}growth");
@@ -12352,9 +12387,9 @@ fn gh754_scalar_feeder_discovery_matches_exhaustive_scores() {
     // Exhaustive surface: the compiler's per-element loop_score series.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("exhaustive LTM compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("exhaustive LTM compilation should succeed");
     let mut vm = Vm::new(compiled).expect("VM construction should succeed");
     vm.run_to_end().expect("VM run should complete");
     let exhaustive_results = vm.into_results();
@@ -12830,11 +12865,10 @@ fn scalar_and_iterated_feeders_coexist_cleanly() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
         .vars
         .clone();
-    compile_project_incremental(&db, sync.project, "main")
+    compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
         .expect("LTM-enabled compilation should succeed");
 
     // The scalar feeder gets the A2A score.
@@ -12910,12 +12944,12 @@ fn scalar_feeder_of_broadcast_reduce_scores_via_agg_arm() {
     let project = broadcast_fixture("SUM(matrix[a, *] * scale)");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm_vars = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
         .vars
         .clone();
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
 
     // The feeder score is A2A over the OWNER's dims (result_dims is empty
     // for the broadcast slice), with the changed-last equation.

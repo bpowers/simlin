@@ -163,8 +163,6 @@ pub fn analyze_model(
     model_name: &str,
     budget: Option<std::time::Duration>,
 ) -> Result<ModelAnalysis, String> {
-    use salsa::Setter;
-
     let json_model = model_snapshot(project, model_name)
         .ok_or_else(|| format!("model '{model_name}' not found in project"))?;
 
@@ -192,15 +190,18 @@ pub fn analyze_model(
         });
     }
 
-    // Enable LTM discovery for this analysis; restore flags before returning
-    // so the caller's db state stays clean.
-    source_project.set_ltm_enabled(db).to(true);
-    source_project.set_ltm_discovery_mode(db).to(true);
+    // This analysis runs LTM in discovery mode; the mode is a salsa input on
+    // the project, so it is set here and the caller's value restored before
+    // returning (a no-op write when they agree, so a caller already in
+    // discovery mode pays no revision). Whether the overlay is assembled is
+    // an argument of the compile, `LtmOverlay::On` inside `run_ltm_pipeline`,
+    // not an input.
+    let prior_discovery_mode = source_project.ltm_discovery_mode(db);
+    crate::db::set_project_ltm_discovery_mode(db, source_project, true);
 
     let loop_result = run_ltm_pipeline(project, db, source_project, model_name, budget);
 
-    source_project.set_ltm_enabled(db).to(false);
-    source_project.set_ltm_discovery_mode(db).to(false);
+    crate::db::set_project_ltm_discovery_mode(db, source_project, prior_discovery_mode);
 
     // `run_ltm_pipeline` distinguishes three outcomes:
     //   Ok(Some(result)) -- the pipeline ran; report the loops it found.
@@ -384,17 +385,17 @@ fn run_ltm_pipeline(
 
     let uid_to_loop_name = build_uid_to_loop_name(project, original_name);
 
-    // LTM flags are set by the caller (analyze_model) before this function
-    // is called, and restored after it returns.
+    // The discovery-mode flag is set by the caller (analyze_model) before this
+    // function is called, and restored after it returns.
 
     // `build_sim` routes a conveyor/queue model through its special expansion
     // build path -- so the model compiles and runs correctly rather than tripping
     // the ordinary path's NotExpanded guard (which would otherwise surface here
-    // as a spurious `analysis_error`) -- while an ordinary model still compiles through
-    // the incremental path with the caller's `ltm_enabled` intact. The special
-    // path compiles the db's EXPANDED `SourceProject`, whose `ltm_enabled` is
-    // always false, so it synthesizes no LTM variables: a conveyor/queue model's
-    // loop analysis degrades to empty loops (conveyor/queue + LTM is a documented
+    // as a spurious `analysis_error`) -- while an ordinary model still compiles
+    // through the incremental path under the LTM overlay. The special path
+    // compiles the db's EXPANDED `SourceProject` without the overlay, so it
+    // synthesizes no LTM variables: a conveyor/queue model's loop analysis
+    // degrades to empty loops (conveyor/queue + LTM is a documented
     // degradation) and reports no false error.
     //
     // A compile failure here is still the actionable GH #660 case: the GH #486
@@ -403,8 +404,14 @@ fn run_ltm_pipeline(
     // than collapsing into an empty "no loops" result. Format it the same way
     // regardless of origin: prefer the rich `details` (e.g. the Euler guidance),
     // fall back to the code's Display when a bare error carries none.
-    let mut vm = crate::build_sim(db, source_project, project, &canonical_name)
-        .map_err(|e| e.details.unwrap_or_else(|| e.code.to_string()))?;
+    let mut vm = crate::build_sim(
+        db,
+        source_project,
+        project,
+        &canonical_name,
+        crate::db::LtmOverlay::On,
+    )
+    .map_err(|e| e.details.unwrap_or_else(|| e.code.to_string()))?;
     vm.run_to_end()
         .map_err(|e| e.details.unwrap_or_else(|| e.code.to_string()))?;
     let results = vm.into_results();
@@ -1210,46 +1217,39 @@ mod tests {
         );
     }
 
-    // ---- LTM flags must be reset after analyze_model ----
+    // ---- the discovery-mode input is restored after analyze_model ----
+
+    /// `analyze_model` runs the LTM pipeline in discovery mode and hands the
+    /// input back to the caller at the value it had. Both arms of that
+    /// restore are pinned -- a caller outside discovery mode and one already
+    /// in it -- because a restore that wrote `false` unconditionally passes
+    /// the first arm alone (a fresh sync starts with the flag off).
+    fn discovery_mode_is_restored(project: &datamodel::Project) {
+        for prior in [false, true] {
+            let (mut db, sp) = synced_db(project);
+            crate::db::set_project_ltm_discovery_mode(&mut db, sp, prior);
+            let _analysis = analyze_model(project, &mut db, sp, "main", None)
+                .expect("analyze_model should not return Err");
+            assert_eq!(
+                sp.ltm_discovery_mode(&db),
+                prior,
+                "ltm_discovery_mode must be restored to the caller's value after analyze_model"
+            );
+        }
+    }
 
     #[test]
-    fn ltm_flags_reset_after_analyze() {
+    fn ltm_discovery_mode_restored_after_analyze() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../test/logistic_growth_ltm/logistic_growth.stmx"
         );
-        let project = load_project(path);
-        let (mut db, sp) = synced_db(&project);
-        let _analysis =
-            analyze_model(&project, &mut db, sp, "main", None).expect("analyze_model failed");
-
-        // After analyze_model returns, LTM flags must be restored to false
-        // so subsequent compilations don't unexpectedly run in LTM discovery mode.
-        assert!(
-            !sp.ltm_enabled(&db),
-            "ltm_enabled must be false after analyze_model returns"
-        );
-        assert!(
-            !sp.ltm_discovery_mode(&db),
-            "ltm_discovery_mode must be false after analyze_model returns"
-        );
+        discovery_mode_is_restored(&load_project(path));
     }
 
     #[test]
-    fn ltm_flags_reset_after_failed_analysis() {
-        let project = broken_project();
-        let (mut db, sp) = synced_db(&project);
-        let _analysis = analyze_model(&project, &mut db, sp, "main", None)
-            .expect("analyze_model should not return Err");
-
-        assert!(
-            !sp.ltm_enabled(&db),
-            "ltm_enabled must be false after failed analyze_model"
-        );
-        assert!(
-            !sp.ltm_discovery_mode(&db),
-            "ltm_discovery_mode must be false after failed analyze_model"
-        );
+    fn ltm_discovery_mode_restored_after_failed_analysis() {
+        discovery_mode_is_restored(&broken_project());
     }
 
     // ---- GH #660: a compile failure surfaces an actionable analysis_error ----
@@ -1768,12 +1768,16 @@ mod tests {
     fn settled_link_score(project: &datamodel::Project, discovery: bool, name: &str) -> f64 {
         let mut db = SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, project, None);
-        crate::db::set_project_ltm_enabled(&mut db, sync.project, true);
         if discovery {
             crate::db::set_project_ltm_discovery_mode(&mut db, sync.project, true);
         }
-        let compiled =
-            crate::db::compile_project_incremental(&db, sync.project, "main").expect("compile");
+        let compiled = crate::db::compile_project_incremental(
+            &db,
+            sync.project,
+            "main",
+            crate::db::LtmOverlay::On,
+        )
+        .expect("compile");
         let mut vm = crate::vm::Vm::new(compiled).expect("vm");
         vm.run_to_end().expect("run");
         let results = vm.into_results();
@@ -1832,9 +1836,13 @@ mod tests {
         let exhaustive_loop = {
             let mut db = SimlinDb::default();
             let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
-            crate::db::set_project_ltm_enabled(&mut db, sync.project, true);
-            let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
-                .expect("exhaustive compile");
+            let compiled = crate::db::compile_project_incremental(
+                &db,
+                sync.project,
+                "main",
+                crate::db::LtmOverlay::On,
+            )
+            .expect("exhaustive compile");
             let mut vm = crate::vm::Vm::new(compiled).expect("vm");
             vm.run_to_end().expect("run");
             let results = vm.into_results();
@@ -1987,9 +1995,13 @@ mod tests {
         let exhaustive_loop = {
             let mut db = SimlinDb::default();
             let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
-            crate::db::set_project_ltm_enabled(&mut db, sync.project, true);
-            let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
-                .expect("exhaustive compile");
+            let compiled = crate::db::compile_project_incremental(
+                &db,
+                sync.project,
+                "main",
+                crate::db::LtmOverlay::On,
+            )
+            .expect("exhaustive compile");
             let mut vm = crate::vm::Vm::new(compiled).expect("vm");
             vm.run_to_end().expect("run");
             let results = vm.into_results();

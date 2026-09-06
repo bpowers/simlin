@@ -47,8 +47,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use simlin_engine::db::{
-    SimlinDb, model_element_causal_edges, model_ltm_variables, set_project_ltm_enabled,
-    sync_from_datamodel_incremental,
+    SimlinDb, model_element_causal_edges, model_ltm_variables, sync_from_datamodel_incremental,
 };
 use simlin_engine::{open_vensim, open_xmile};
 
@@ -219,7 +218,6 @@ fn main() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
 
     // `sync.models` is keyed by CANONICAL name, and a model's stored spelling
     // need not be canonical -- an imported `MAIN` or `Main Model` would miss the
@@ -268,7 +266,13 @@ fn main() {
         // silent gap; one with a warning is a decision, and the message says
         // which.
         println!("\n=== LTM diagnostics naming {needle:?} ===");
-        for d in simlin_engine::db::collect_all_diagnostics(&db, sync.project).iter() {
+        for d in simlin_engine::db::collect_all_diagnostics(
+            &db,
+            sync.project,
+            simlin_engine::db::LtmOverlay::On,
+        )
+        .iter()
+        {
             if let simlin_engine::db::DiagnosticError::Assembly(msg) = &d.error
                 && msg.contains(&needle)
             {
@@ -320,7 +324,11 @@ fn main() {
     }
 
     // --- which edges have scores, and are they alive? -----------------------
-    let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
+    let diagnostics = simlin_engine::db::collect_all_diagnostics(
+        &db,
+        sync.project,
+        simlin_engine::db::LtmOverlay::On,
+    );
     let mut failed: BTreeSet<String> = BTreeSet::new();
     let mut reasons: HashMap<String, String> = HashMap::new();
     for d in &diagnostics {
@@ -373,12 +381,14 @@ fn main() {
     }
 
     let runtime: Option<Runtime> = (|| {
-        let compiled =
-            simlin_engine::db::compile_project_incremental(&db, sync.project, &main_name)
-                .map_err(|e| {
-                    eprintln!("note: LTM compile failed, runtime liveness unavailable: {e:?}")
-                })
-                .ok()?;
+        let compiled = simlin_engine::db::compile_project_incremental(
+            &db,
+            sync.project,
+            &main_name,
+            simlin_engine::db::LtmOverlay::On,
+        )
+        .map_err(|e| eprintln!("note: LTM compile failed, runtime liveness unavailable: {e:?}"))
+        .ok()?;
         let mut vm = simlin_engine::Vm::new(compiled)
             .map_err(|e| eprintln!("note: VM creation failed: {e:?}"))
             .ok()?;

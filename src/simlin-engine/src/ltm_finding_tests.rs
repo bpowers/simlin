@@ -2647,11 +2647,11 @@ fn discover_reducer_feedback(elems: &[&str], candidate_gen: CandidateGen) -> Dis
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
     let sp = sync.project;
-    sp.set_ltm_enabled(&mut db).to(true);
     sp.set_ltm_discovery_mode(&mut db).to(true);
     let source_model = *sp.models(&db).get("main").unwrap();
 
-    let compiled = crate::db::compile_project_incremental(&db, sp, "main").unwrap();
+    let compiled =
+        crate::db::compile_project_incremental(&db, sp, "main", crate::db::LtmOverlay::On).unwrap();
     let mut vm = crate::vm::Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
@@ -2841,10 +2841,10 @@ fn discovery_no_agg_model_unaffected_by_stitching() {
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
     let sp = sync.project;
-    sp.set_ltm_enabled(&mut db).to(true);
     sp.set_ltm_discovery_mode(&mut db).to(true);
     let source_model = *sp.models(&db).get("main").unwrap();
-    let compiled = crate::db::compile_project_incremental(&db, sp, "main").unwrap();
+    let compiled =
+        crate::db::compile_project_incremental(&db, sp, "main", crate::db::LtmOverlay::On).unwrap();
     let mut vm = crate::vm::Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
@@ -3034,11 +3034,11 @@ fn recompute_strips_element_subscripts_before_port_match() {
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
     let sp = sync.project;
-    sp.set_ltm_enabled(&mut db).to(true);
     sp.set_ltm_discovery_mode(&mut db).to(true);
     let source_model = *sp.models(&db).get("main").unwrap();
 
-    let compiled = crate::db::compile_project_incremental(&db, sp, "main").unwrap();
+    let compiled =
+        crate::db::compile_project_incremental(&db, sp, "main", crate::db::LtmOverlay::On).unwrap();
     let mut vm = crate::vm::Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
@@ -3404,11 +3404,11 @@ fn multi_output_module_feedback_inputs() -> ModuleFixtureInputs {
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
     let sp = sync.project;
-    sp.set_ltm_enabled(&mut db).to(true);
     sp.set_ltm_discovery_mode(&mut db).to(true);
     let source_model = *sp.models(&db).get("main").unwrap();
 
-    let compiled = crate::db::compile_project_incremental(&db, sp, "main").unwrap();
+    let compiled =
+        crate::db::compile_project_incremental(&db, sp, "main", crate::db::LtmOverlay::On).unwrap();
     let mut vm = crate::vm::Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
@@ -4103,11 +4103,11 @@ fn discover_share_of_total_feedback(elems: &[&str]) -> DiscoveryResult {
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
     let sp = sync.project;
-    sp.set_ltm_enabled(&mut db).to(true);
     sp.set_ltm_discovery_mode(&mut db).to(true);
     let source_model = *sp.models(&db).get("main").unwrap();
 
-    let compiled = crate::db::compile_project_incremental(&db, sp, "main").unwrap();
+    let compiled =
+        crate::db::compile_project_incremental(&db, sp, "main", crate::db::LtmOverlay::On).unwrap();
     let mut vm = crate::vm::Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
@@ -4272,11 +4272,11 @@ fn discover_module_loop_with_a_trimmed_duplicate() -> DiscoveryResult {
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
     let sp = sync.project;
-    sp.set_ltm_enabled(&mut db).to(true);
     sp.set_ltm_discovery_mode(&mut db).to(true);
     let source_model = *sp.models(&db).get("main").unwrap();
 
-    let compiled = crate::db::compile_project_incremental(&db, sp, "main").unwrap();
+    let compiled =
+        crate::db::compile_project_incremental(&db, sp, "main", crate::db::LtmOverlay::On).unwrap();
     let mut vm = crate::vm::Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();

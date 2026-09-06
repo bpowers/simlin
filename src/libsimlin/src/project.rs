@@ -357,7 +357,7 @@ pub unsafe extern "C" fn simlin_project_add_model(
     // state, so `db.sync` reuses the prior handles automatically; holding the
     // db lock across the call keeps concurrent readers (simlin_sim_new) from
     // observing a half-synced db.
-    let mut db = proj.db.lock().unwrap();
+    let mut db = proj.lock_db();
     db.sync(&datamodel_locked);
     drop(db);
 
@@ -516,7 +516,7 @@ pub unsafe extern "C" fn simlin_project_replace_contents(
     let new_datamodel = src_ref.datamodel.lock().unwrap().clone();
 
     let mut datamodel_locked = dst_ref.datamodel.lock().unwrap();
-    let mut db_locked = dst_ref.db.lock().unwrap();
+    let mut db_locked = dst_ref.lock_db();
     db_locked.sync(&new_datamodel);
     *datamodel_locked = new_datamodel;
 }
@@ -832,18 +832,18 @@ pub unsafe extern "C" fn simlin_project_is_simulatable(
     // expansion build path -- which needs the datamodel -- rather than tripping
     // the `Conveyor/QueueNotExpanded` guard on the ordinary compile path.
     let datamodel_locked = proj.datamodel.lock().unwrap();
-    let mut db_locked = proj.db.lock().unwrap();
-    if let Some(source_project) = db_locked.current_source_project() {
-        engine::build_sim(
-            &mut db_locked,
-            source_project,
-            &datamodel_locked,
-            model_name,
-        )
-        .is_ok()
-    } else {
-        false
-    }
+    let mut db_locked = proj.lock_db();
+    let Some(source_project) = db_locked.current_source_project() else {
+        return false;
+    };
+    engine::build_sim(
+        &mut db_locked,
+        source_project,
+        &datamodel_locked,
+        model_name,
+        engine::db::LtmOverlay::Off,
+    )
+    .is_ok()
 }
 
 /// Get all errors in a project including static analysis and compilation errors
@@ -872,7 +872,7 @@ pub unsafe extern "C" fn simlin_project_get_errors(
     };
 
     let datamodel_locked = proj.datamodel.lock().unwrap();
-    let mut db_locked = proj.db.lock().unwrap();
+    let mut db_locked = proj.lock_db();
     let source_project = match db_locked.current_source_project() {
         Some(sp) => sp,
         None => return ptr::null_mut(),
@@ -882,49 +882,39 @@ pub unsafe extern "C" fn simlin_project_get_errors(
     // OFF. LTM is an analysis overlay (the flow-to-stock link-score formula
     // assumes Euler integration, etc.), not part of whether the model is a
     // valid, runnable simulation -- so the compile/VM-validation channel must
-    // never be computed with LTM enabled, or an LTM-only rejection (the GH #486
-    // non-Euler hard `Err` from `assemble_simulation`) would masquerade as a
-    // project error on a model that simulates fine. `simlin_sim_new` already
-    // leaves the salsa `ltm_enabled` input false, so this compile is LTM-off.
-    // `build_sim` additionally routes a conveyor/queue model through its special
-    // expansion build path (also LTM-off), so a valid special-stock model is not
+    // never be computed under the overlay, or an LTM-only rejection (the GH
+    // #486 non-Euler hard `Err` from `assemble_simulation`) would masquerade
+    // as a project error on a model that simulates fine. `build_sim`
+    // additionally routes a conveyor/queue model through its special expansion
+    // build path (also LTM-off), so a valid special-stock model is not
     // mis-reported as a project error by the ordinary path's NotExpanded guard.
-    let vm_error =
-        engine::build_sim(&mut db_locked, source_project, &datamodel_locked, "main").err();
+    let vm_error = engine::build_sim(
+        &mut db_locked,
+        source_project,
+        &datamodel_locked,
+        "main",
+        engine::db::LtmOverlay::Off,
+    )
+    .err();
 
     // The LTM *diagnostics* (auto-flip-to-discovery advisory, synthetic-fragment
     // compile failures, GH #311 partial-equation warnings) accumulate via
     // `model_all_diagnostics` -> `model_ltm_variables`, independent of whether
     // the LTM-enabled assembly would succeed -- so harvesting them only needs
-    // the `ltm_enabled` gate flipped on for the `collect_all_diagnostics` pass,
-    // NOT a recompile that feeds `vm_error`. If any simulation on this project
-    // requested LTM, transiently re-enable LTM just for that diagnostic harvest
-    // (GH #466). The `LtmEnabledGuard` restores the flag unconditionally on drop
-    // (even on a panic), and the toggle happens under the db lock -- the same
-    // lock `simlin_sim_new` holds for its own flag dance -- so a concurrent sim
-    // creation can never observe a partial LTM state. Salsa memoizes the LTM
-    // synthesis for this unchanged input from the earlier `simlin_sim_new`
-    // compile, so the re-enable revalidates rather than recomputes (cheap). A
-    // project that never requested LTM skips the toggle entirely and pays no LTM
-    // synthesis cost.
+    // the `collect_all_diagnostics` pass asked for under the overlay, NOT a
+    // recompile that feeds `vm_error`. If any simulation on this project
+    // requested LTM, collect the overlay's diagnostics (GH #466); the overlay
+    // is an argument, so this neither disturbs the plain variant nor
+    // re-verifies the database. A project that never requested LTM pays no
+    // LTM synthesis cost.
     let ltm_requested = proj.ltm_requested.load(Ordering::Acquire);
-
-    let all_errors = if ltm_requested {
-        let guard = crate::analysis::LtmEnabledGuard::enable(&mut db_locked, source_project, true);
-        gather_error_details_with_db(
-            guard.db(),
-            source_project,
-            vm_error.as_ref(),
-            &datamodel_locked,
-        )
-    } else {
-        gather_error_details_with_db(
-            &db_locked,
-            source_project,
-            vm_error.as_ref(),
-            &datamodel_locked,
-        )
-    };
+    let all_errors = gather_error_details_with_db(
+        &db_locked,
+        source_project,
+        vm_error.as_ref(),
+        &datamodel_locked,
+        engine::db::LtmOverlay::from(ltm_requested),
+    );
 
     if all_errors.is_empty() {
         return ptr::null_mut();

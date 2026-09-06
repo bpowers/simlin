@@ -45,7 +45,13 @@ fn roundtrip_systems_file(txt_path: &str, csv_path: &str, rounds: u64) {
         .unwrap_or_else(|e| panic!("failed to load {csv_path}: {e}"));
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project2, None);
-    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap_or_else(|e| {
+    let compiled = compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .unwrap_or_else(|e| {
         panic!("VM compilation failed for round-tripped {txt_path}: {e:?}\nwritten:\n{written}")
     });
     let mut vm = Vm::new(compiled).unwrap_or_else(|e| {
@@ -115,7 +121,13 @@ fn compat_open_and_write_systems() {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project2, None);
     assert!(
-        compile_project_incremental(&db, sync.project, "main").is_ok(),
+        compile_project_incremental(
+            &db,
+            sync.project,
+            "main",
+            simlin_engine::db::LtmOverlay::Off
+        )
+        .is_ok(),
         "round-tripped project should compile"
     );
 }

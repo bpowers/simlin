@@ -408,17 +408,31 @@ fn mid_run_resting_values_reflect_inflow_override() {
 
 #[test]
 fn directly_assembled_vm_rejects_pass_driven_overrides() {
-    // Defense-in-depth for GH #871: a Vm assembled by hand from an
-    // UNSCRUBBED CompiledSimulation (bypassing build_compiled's exclusion)
-    // must still reject pass-driven slots, because set_conveyor_plans
-    // itself retracts them from the overridable-constant set.
+    // The Vm arm of the GH #871 gate. The memoized program lists a
+    // pass-driven flow's placeholder `0` as a constant like any other and is
+    // never edited; what retracts those slots is the plans attached through
+    // `set_conveyor_plans`, which the Vm's override gate reads
+    // (`CompiledSimulation::is_overridable_offset`). This test attaches the
+    // plans to a Vm built straight from the memo -- the same program and the
+    // same `resolve_plans` output `build_compiled` produces -- so it pins that
+    // arm alone. The no-Vm twin (libsimlin validating after `run_to_end`
+    // consumed its Vm) is pinned by
+    // `test_set_value_on_conveyor_driven_flow_rejected`, the wasm twin by
+    // `wasmgen::belt_tests::set_value_rejects_the_driven_outflow`, and
+    // re-attachment with a different plan set by
+    // `reattached_conveyor_plans_redefine_the_overridable_set` below.
     let project = parse(&override_leak_model());
     let main = project.models[0].name.clone();
     let (expanded, metas) = expand_conveyors(&project, &main).expect("expand");
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &expanded, None);
-    let compiled =
-        crate::db::compile_project_incremental(&db, sync.project, &main).expect("compile");
+    let compiled = crate::db::compile_project_incremental(
+        &db,
+        sync.project,
+        &main,
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("compile");
     let plans = resolve_plans(&metas, &compiled.offsets).expect("resolve");
     let mut vm = crate::vm::Vm::new(compiled).expect("vm");
     vm.set_conveyor_plans(plans);
@@ -426,6 +440,75 @@ fn directly_assembled_vm_rejects_pass_driven_overrides() {
     assert_eq!(err.code, ErrorCode::BadOverride);
     let err = vm.set_value(&Ident::new("attriting"), 999.0).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadOverride);
+}
+
+#[test]
+fn reattached_conveyor_plans_redefine_the_overridable_set() {
+    // The Vm's override gate is a function of the plans attached NOW, not of
+    // every plan ever attached: `set_conveyor_plans` REPLACES the plan set,
+    // so a slot written only by a plan that is no longer attached is an
+    // ordinary constant again, and a slot the newly attached plan writes is
+    // retracted. Two independent belts give two production plans -- what
+    // `resolve_plans` resolves over the expanded program is exactly what
+    // `build_compiled` hands the Vm -- so attaching one and then the other
+    // is the production call with a different production-built argument.
+    // The queue setter's twin is `queue_compile::tests::
+    // reattached_queue_plans_redefine_the_overridable_set`.
+    let project = parse(&wrap_model(
+        r#"
+    <stock name="belt_a"><eqn>0</eqn><inflow>in_a</inflow><outflow>out_a</outflow>
+      <conveyor><len>4</len></conveyor></stock>
+    <flow name="in_a"><eqn>250</eqn></flow>
+    <flow name="out_a"><eqn>0</eqn></flow>
+    <stock name="belt_b"><eqn>0</eqn><inflow>in_b</inflow><outflow>out_b</outflow>
+      <conveyor><len>4</len></conveyor></stock>
+    <flow name="in_b"><eqn>100</eqn></flow>
+    <flow name="out_b"><eqn>0</eqn></flow>"#,
+    ));
+    let main = project.models[0].name.clone();
+    let (expanded, metas) = expand_conveyors(&project, &main).expect("expand");
+    let mut db = crate::db::SimlinDb::default();
+    let sync = crate::db::sync_from_datamodel_incremental(&mut db, &expanded, None);
+    let compiled = crate::db::compile_project_incremental(
+        &db,
+        sync.project,
+        &main,
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("compile");
+    let plans = resolve_plans(&metas, &compiled.offsets).expect("resolve");
+    assert_eq!(plans.len(), 2, "one plan per belt");
+    let plan_for = |stock: &str| {
+        let off = compiled.offsets[&Ident::new(stock)];
+        plans
+            .iter()
+            .find(|p| p.stock_off == off)
+            .cloned()
+            .expect("a plan for the belt")
+    };
+    let (plan_a, plan_b) = (plan_for("belt_a"), plan_for("belt_b"));
+    let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+    let verdict = |vm: &mut crate::vm::Vm, name: &str| {
+        vm.set_value(&Ident::new(name), 1.0)
+            .map(|_| ())
+            .map_err(|e| e.code)
+    };
+
+    vm.set_conveyor_plans(vec![plan_a]);
+    assert_eq!(verdict(&mut vm, "out_a"), Err(ErrorCode::BadOverride));
+    assert_eq!(verdict(&mut vm, "out_b"), Ok(()));
+
+    vm.set_conveyor_plans(vec![plan_b]);
+    assert_eq!(
+        verdict(&mut vm, "out_b"),
+        Err(ErrorCode::BadOverride),
+        "the newly attached plan's driven outflow is retracted"
+    );
+    assert_eq!(
+        verdict(&mut vm, "out_a"),
+        Ok(()),
+        "a slot only the replaced plan wrote is an ordinary constant again"
+    );
 }
 
 #[test]
@@ -534,8 +617,13 @@ fn unexpanded_conveyor_rejected_by_ordinary_compile() {
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
     let main = project.models[0].name.clone();
-    let err = crate::db::compile_project_incremental(&db, sync.project, &main)
-        .expect_err("un-expanded conveyor must be rejected");
+    let err = crate::db::compile_project_incremental(
+        &db,
+        sync.project,
+        &main,
+        crate::db::LtmOverlay::Off,
+    )
+    .expect_err("un-expanded conveyor must be rejected");
     assert_eq!(err.code, ErrorCode::ConveyorNotExpanded);
 }
 
@@ -3152,7 +3240,7 @@ fn arrayed_per_element_list_produces_no_error_diagnostics() {
     let project = parse(&xml);
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
-    let diags = crate::db::collect_all_diagnostics(&db, sync.project);
+    let diags = crate::db::collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let errors: Vec<_> = diags
         .iter()
         .filter(|d| d.severity == crate::db::DiagnosticSeverity::Error)
@@ -3259,7 +3347,7 @@ fn explicit_list_produces_no_error_diagnostics() {
     let project = parse(&xml);
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
-    let diags = crate::db::collect_all_diagnostics(&db, sync.project);
+    let diags = crate::db::collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let errors: Vec<_> = diags
         .iter()
         .filter(|d| d.severity == crate::db::DiagnosticSeverity::Error)

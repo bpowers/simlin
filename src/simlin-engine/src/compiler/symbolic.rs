@@ -2663,15 +2663,22 @@ mod tests {
     fn compile_and_check_resolution(dm_project: &crate::datamodel::Project, model_name: &str) {
         let mut db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, dm_project, None);
-        let sim = crate::db::compile_project_incremental(&db, sync.project, model_name)
-            .expect("incremental compile should succeed");
+        let sim = crate::db::compile_project_incremental(
+            &db,
+            sync.project,
+            model_name,
+            crate::db::LtmOverlay::Off,
+        )
+        .expect("incremental compile should succeed");
 
         let compiled = &sim.modules[&sim.root];
 
         let source_model = sync.models[model_name].source_model;
         // The root module is assembled against the root-shifted layout
         // (implicit globals at fixed slots 0..3, body at +IMPLICIT_VAR_COUNT).
-        let layout = crate::db::compute_layout(&db, source_model, sync.project).root_shifted();
+        let layout =
+            crate::db::compute_layout(&db, source_model, sync.project, crate::db::LtmOverlay::Off)
+                .root_shifted();
 
         assert_eq!(compiled.n_slots, layout.n_slots);
 

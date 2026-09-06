@@ -854,7 +854,8 @@ mod tests {
         let sync_result = sync.to_sync_result();
 
         // Compilation should succeed (unit errors are non-blocking)
-        let compiled = compile_project_incremental(&db, sync.project, "main");
+        let compiled =
+            compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off);
         assert!(
             compiled.is_ok(),
             "Compilation should succeed despite unit mismatch"
@@ -862,7 +863,8 @@ mod tests {
 
         // Diagnostics should surface the unit mismatch (as Unit diagnostic
         // or as a Model-level UnitMismatch error from inference failure)
-        let diagnostics = collect_all_diagnostics(&db, sync_result.project);
+        let diagnostics =
+            collect_all_diagnostics(&db, sync_result.project, crate::db::LtmOverlay::Off);
         let has_unit_issues = diagnostics
             .iter()
             .any(|d| matches!(d.error, DiagnosticError::Unit(_)));
@@ -923,14 +925,16 @@ mod tests {
         let sync_result = sync.to_sync_result();
 
         // Compilation should succeed (unit errors are non-blocking)
-        let compiled = compile_project_incremental(&db, sync.project, "main");
+        let compiled =
+            compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off);
         assert!(
             compiled.is_ok(),
             "Compilation should succeed despite unit mismatch"
         );
 
         // Diagnostics should surface the unit mismatch
-        let diagnostics = collect_all_diagnostics(&db, sync_result.project);
+        let diagnostics =
+            collect_all_diagnostics(&db, sync_result.project, crate::db::LtmOverlay::Off);
         let has_unit_issues = diagnostics
             .iter()
             .any(|d| matches!(d.error, DiagnosticError::Unit(_)));
@@ -979,7 +983,7 @@ mod tests {
             .build_datamodel();
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
-        let diagnostics = collect_all_diagnostics(&db, sync.project);
+        let diagnostics = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
         let umbrella =
             diagnostics.iter().find_map(|d| match &d.error {
                 DiagnosticError::Unit(crate::common::UnitError::InferenceError {

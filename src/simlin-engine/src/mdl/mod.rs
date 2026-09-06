@@ -286,8 +286,9 @@ outflow = 5
         let mut db = crate::db::SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &project, None);
         let model_name = project.models[0].name.clone();
-        let compiled = compile_project_incremental(&db, sync.project, &model_name)
-            .expect("the imported project must compile");
+        let compiled =
+            compile_project_incremental(&db, sync.project, &model_name, crate::db::LtmOverlay::Off)
+                .expect("the imported project must compile");
         let mut vm = Vm::new(compiled).expect("VM creation");
         vm.run_to_end().expect("VM run");
         let series = crate::test_common::collect_results(&vm.into_results());
@@ -330,8 +331,9 @@ z = 0 :OR: 1 :AND: 0
         let mut db = crate::db::SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &project, None);
         let model_name = project.models[0].name.clone();
-        let compiled = compile_project_incremental(&db, sync.project, &model_name)
-            .expect("the imported project must compile");
+        let compiled =
+            compile_project_incremental(&db, sync.project, &model_name, crate::db::LtmOverlay::Off)
+                .expect("the imported project must compile");
         let mut vm = Vm::new(compiled).expect("VM creation");
         vm.run_to_end().expect("VM run");
         let series = crate::test_common::collect_results(&vm.into_results());

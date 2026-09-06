@@ -1181,7 +1181,7 @@ fn test_model_dependency_graph_circular_emits_diagnostic() {
         _graph.has_cycle(),
         "circular dependency between a and b must be recorded on the graph"
     );
-    let diags = collect_all_diagnostics(&db, result.project);
+    let diags = collect_all_diagnostics(&db, result.project, crate::db::LtmOverlay::Off);
     assert!(
         diags.iter().any(|d| d.is(
             DiagnosticCategory::Model,
@@ -1759,15 +1759,13 @@ fn test_model_cycle_partitions_single_stock() {
 #[test]
 fn test_model_ltm_synthetic_variables_generates_scores() {
     use super::model_ltm_variables;
-    use salsa::Setter;
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let project = feedback_loop_project();
     let (source_project, model) = {
         let result = sync_from_datamodel(&db, &project);
         (result.project, result.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let ltm = model_ltm_variables(&db, model, source_project);
 
@@ -1801,7 +1799,6 @@ fn test_model_ltm_all_link_synthetic_variables_discovery_mode() {
         let result = sync_from_datamodel(&db, &project);
         (result.project, result.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
     let ltm = model_ltm_variables(&db, model, source_project);
@@ -1822,16 +1819,14 @@ fn test_model_ltm_all_link_synthetic_variables_discovery_mode() {
 #[test]
 fn test_model_ltm_no_loops_empty() {
     use super::model_ltm_variables;
-    use salsa::Setter;
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     // Simple project has just a constant -- no loops
     let project = simple_project();
     let (source_project, model) = {
         let result = sync_from_datamodel(&db, &project);
         (result.project, result.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let ltm = model_ltm_variables(&db, model, source_project);
     assert!(ltm.vars.is_empty(), "no loops should produce no LTM vars");
@@ -2091,7 +2086,6 @@ fn test_ltm_per_link_caching_model_level() {
     };
 
     // Prime the model-level LTM function
-    source_project.set_ltm_enabled(&mut db).to(true);
     let ltm_before = model_ltm_variables(&db, source_model, source_project);
     assert!(!ltm_before.vars.is_empty(), "should generate LTM variables");
 
@@ -2142,7 +2136,7 @@ fn test_accumulator_no_errors_for_valid_project() {
     let project = simple_project();
     let sync = sync_from_datamodel(&db, &project);
 
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     assert!(
         diags.is_empty(),
         "valid project should produce no diagnostics"
@@ -2193,7 +2187,7 @@ fn test_accumulator_parse_error_bad_equation() {
         "struct fields should show equation errors for 'if then'"
     );
 
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     assert!(!diags.is_empty(), "bad equation should produce diagnostics");
 
     let d = &diags[0];
@@ -2263,7 +2257,7 @@ fn test_accumulator_parity_with_struct_fields() {
     let sync = sync_from_datamodel(&db, &project);
 
     // Collect from accumulator
-    let accum_diags = collect_all_diagnostics(&db, sync.project);
+    let accum_diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     // Collect from struct fields (parse results)
     let mut field_equation_errors: HashSet<(String, crate::common::EquationError)> = HashSet::new();
@@ -2343,7 +2337,7 @@ fn test_accumulator_multiple_models() {
     };
 
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let models_with_errors: std::collections::HashSet<&str> =
         diags.iter().map(|d| d.model.as_str()).collect();
@@ -2409,7 +2403,7 @@ fn test_accumulator_incrementality() {
         let source_project = sync.project;
 
         // Initially: alpha has errors, beta does not
-        let diags1 = collect_all_diagnostics(&db, sync.project);
+        let diags1 = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
         assert_eq!(
             diags1
                 .iter()
@@ -2435,7 +2429,12 @@ fn test_accumulator_incrementality() {
         .set_equation(&mut db)
         .to(datamodel::Equation::Scalar("42".to_string()));
 
-    let diags2 = collect_model_diagnostics(&db, source_model, source_project);
+    let diags2 = collect_model_diagnostics(
+        &db,
+        source_model,
+        source_project,
+        crate::db::LtmOverlay::Off,
+    );
     assert!(
         diags2.is_empty(),
         "after fixing alpha, no diagnostics expected"
@@ -2688,7 +2687,7 @@ fn test_persistent_state_to_sync_result() {
     }
 
     // Verify the reconstituted SyncResult works for diagnostic collection
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     assert!(
         diags.is_empty(),
         "simple project should have no diagnostics"

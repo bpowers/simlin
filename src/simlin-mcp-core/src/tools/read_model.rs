@@ -150,18 +150,17 @@ pub async fn read_model<A: ProjectAccess>(
     let source_project = sync.project;
 
     // ReadModel always runs LTM loop analysis (via `analyze_model` below), so
-    // the diagnostic-collection pass must run with LTM enabled too -- otherwise
-    // the LTM-only advisories (the auto-flip-to-discovery warning, the
-    // synthetic-fragment compile-failure warnings) silently never reach the
-    // caller (GH #662). The `LtmEnabledGuard` transiently flips `ltm_enabled`
-    // on the shared `SourceProject` and unconditionally restores it on drop, so
-    // the subsequent `analyze_model` (which does its own flag dance) sees clean
-    // state. This mirrors the GH #466 latch fix in libsimlin's
-    // `simlin_project_get_errors`, reusing the same engine guard.
-    let diagnostics = {
-        let guard = simlin_engine::db::LtmEnabledGuard::enable(&mut db, source_project, true);
-        simlin_engine::db::collect_all_diagnostics(guard.db(), source_project)
-    };
+    // the diagnostic-collection pass runs under the LTM overlay too --
+    // otherwise the LTM-only advisories (the auto-flip-to-discovery warning,
+    // the synthetic-fragment compile-failure warnings) silently never reach
+    // the caller (GH #662). This mirrors libsimlin's
+    // `simlin_project_get_errors` for a project that simulated with LTM
+    // (GH #466).
+    let diagnostics = simlin_engine::db::collect_all_diagnostics(
+        &db,
+        source_project,
+        simlin_engine::db::LtmOverlay::On,
+    );
 
     let (errors, warnings) = format_model_diagnostics(&diagnostics, &project, model_name);
 

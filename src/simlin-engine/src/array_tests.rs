@@ -4358,7 +4358,7 @@ mod rank_tests {
         let datamodel = project.build_datamodel();
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
-        let diags = collect_all_diagnostics(&db, sync.project);
+        let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
         let has_bad_builtin_args = diags.iter().any(|d| {
             d.variable.as_deref() == Some(var_name)
@@ -4616,7 +4616,7 @@ TIME STEP = 1 ~~|
         let datamodel = open_vensim(mdl).expect("MDL should parse to a datamodel project");
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
-        let diags = collect_all_diagnostics(&db, sync.project);
+        let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
         let has_bad_builtin_args = diags.iter().any(|d| {
             d.variable.as_deref() == Some("result")
@@ -4672,7 +4672,8 @@ TIME STEP = 1 ~~|
             open_vensim(GROUP_MAPPED_INITIAL_A2A).expect("MDL should parse to a datamodel project");
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-        let compiled = compile_project_incremental(&db, sync.project, "main");
+        let compiled =
+            compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off);
 
         let compiled = compiled.unwrap_or_else(|e| {
             panic!(
@@ -4741,7 +4742,8 @@ TIME STEP = 1 ~~|
         let datamodel = open_vensim(mdl).expect("MDL should parse to a datamodel project");
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-        let compile_result = compile_project_incremental(&db, sync.project, "main");
+        let compile_result =
+            compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off);
 
         let err =
             compile_result.expect_err("an unmappable cross-dimension helper must not compile");
@@ -4754,14 +4756,15 @@ TIME STEP = 1 ~~|
             "the compile Err must name the offending `$⁚out⁚0⁚arg0` capture \
              (loud, actionable -- AC7.5); got: {msg}"
         );
-        let on_parent: Vec<ErrorCode> = collect_all_diagnostics(&db, sync.project)
-            .iter()
-            .filter(|d| d.variable.as_deref() == Some("out"))
-            .filter_map(|d| match &d.error {
-                DiagnosticError::Equation(e) => Some(e.code),
-                _ => None,
-            })
-            .collect();
+        let on_parent: Vec<ErrorCode> =
+            collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off)
+                .iter()
+                .filter(|d| d.variable.as_deref() == Some("out"))
+                .filter_map(|d| match &d.error {
+                    DiagnosticError::Equation(e) => Some(e.code),
+                    _ => None,
+                })
+                .collect();
         assert_eq!(
             on_parent,
             [ErrorCode::MismatchedDimensions],
@@ -4821,12 +4824,14 @@ TIME STEP = 1 ~~|
             open_vensim(SUM_OF_ARRAYED_GF).expect("MDL should parse to a datamodel project");
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-        let compiled = compile_project_incremental(&db, sync.project, "main").unwrap_or_else(|e| {
-            panic!(
-                "SUM over an applied per-element arrayed GF should compile \
+        let compiled =
+            compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "SUM over an applied per-element arrayed GF should compile \
                  (GH #580 Bug B); got Err: {e:?}"
-            )
-        });
+                    )
+                });
 
         let mut vm = crate::vm::Vm::new(compiled).expect("VM creation should succeed");
         vm.run_to_end().expect("VM run should succeed");
@@ -4879,12 +4884,14 @@ TIME STEP = 1 ~~|
             .expect("MDL should parse to a datamodel project");
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-        let compiled = compile_project_incremental(&db, sync.project, "main").unwrap_or_else(|e| {
-            panic!(
-                "VECTOR SELECT over an applied per-element arrayed GF should \
+        let compiled =
+            compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "VECTOR SELECT over an applied per-element arrayed GF should \
                  compile (GH #580 Bug B); got Err: {e:?}"
-            )
-        });
+                    )
+                });
 
         let mut vm = crate::vm::Vm::new(compiled).expect("VM creation should succeed");
         vm.run_to_end().expect("VM run should succeed");

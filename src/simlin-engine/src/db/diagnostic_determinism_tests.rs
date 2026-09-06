@@ -48,10 +48,11 @@ fn unit_diagnostics_are_reproducible_across_runs() {
     for run in 0..16 {
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-        let rendered: Vec<String> = collect_all_diagnostics(&db, sync.project)
-            .iter()
-            .map(|d| format!("{:?} [{:?}] {:?}", d.variable, d.severity, d.error))
-            .collect();
+        let rendered: Vec<String> =
+            collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off)
+                .iter()
+                .map(|d| format!("{:?} [{:?}] {:?}", d.variable, d.severity, d.error))
+                .collect();
         assert!(
             !rendered.is_empty(),
             "the fixture must produce unit diagnostics for the test to constrain anything"
@@ -154,15 +155,16 @@ fn arrayed_and_multi_model_diagnostics_are_reproducible() {
 
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-        let rendered: Vec<String> = collect_all_diagnostics(&db, sync.project)
-            .iter()
-            .map(|d| {
-                format!(
-                    "{}: {:?} [{:?}] {:?}",
-                    d.model, d.variable, d.severity, d.error
-                )
-            })
-            .collect();
+        let rendered: Vec<String> =
+            collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off)
+                .iter()
+                .map(|d| {
+                    format!(
+                        "{}: {:?} [{:?}] {:?}",
+                        d.model, d.variable, d.severity, d.error
+                    )
+                })
+                .collect();
         // Each fixture class must actually surface rows -- a class that
         // produces nothing constrains nothing (the first version of the
         // arrayed fixture was exactly that kind of vacuous).
@@ -242,10 +244,11 @@ fn conveyor_param_unit_diagnostics_are_reproducible() {
 
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-        let rendered: Vec<String> = collect_all_diagnostics(&db, sync.project)
-            .iter()
-            .map(|d| format!("{:?} [{:?}] {:?}", d.variable, d.severity, d.error))
-            .collect();
+        let rendered: Vec<String> =
+            collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off)
+                .iter()
+                .map(|d| format!("{:?} [{:?}] {:?}", d.variable, d.severity, d.error))
+                .collect();
         for needle in ["belt_a", "belt_b"] {
             assert!(
                 rendered.iter().any(|r| r.contains(needle)),
@@ -282,10 +285,11 @@ fn implicit_helper_diagnostics_are_reproducible() {
     for run in 0..16 {
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-        let rendered: Vec<String> = collect_all_diagnostics(&db, sync.project)
-            .iter()
-            .map(|d| format!("{:?} [{:?}] {:?}", d.variable, d.severity, d.error))
-            .collect();
+        let rendered: Vec<String> =
+            collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off)
+                .iter()
+                .map(|d| format!("{:?} [{:?}] {:?}", d.variable, d.severity, d.error))
+                .collect();
         for needle in ["out_a", "out_b"] {
             assert!(
                 rendered.iter().any(|r| r.contains(needle)),

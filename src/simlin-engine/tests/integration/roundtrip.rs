@@ -70,7 +70,8 @@ fn roundtrips_model() {
         let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel_project);
-        let diagnostics = collect_all_diagnostics(&db, sync.project);
+        let diagnostics =
+            collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::Off);
 
         for diag in &diagnostics {
             if diag.severity == DiagnosticSeverity::Error {

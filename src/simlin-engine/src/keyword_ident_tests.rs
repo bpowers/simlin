@@ -62,7 +62,7 @@ fn read_xmile(vars: &str) -> datamodel::Project {
 fn diagnostics(project: &datamodel::Project) -> Vec<crate::db::Diagnostic> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    collect_all_diagnostics(&db, sync.project)
+    collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off)
 }
 
 fn assert_compiles_clean(project: &datamodel::Project, what: &str) {
@@ -74,7 +74,7 @@ fn assert_compiles_clean(project: &datamodel::Project, what: &str) {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    compile_project_incremental(&db, sync.project, "main")
+    compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
         .unwrap_or_else(|e| panic!("{what} must compile: {e:?}"));
 }
 
@@ -300,7 +300,8 @@ fn a_keyword_named_variable_compiles_clean() {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
     let compiled =
-        compile_project_incremental(&db, sync.project, "main").expect("model must compile");
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .expect("model must compile");
     assert!(
         compiled.offsets.contains_key(&Ident::new("if")),
         "the keyword-named variable must reach the compiled model"

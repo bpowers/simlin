@@ -365,7 +365,6 @@ pub fn sync_from_datamodel(db: &SimlinDb, project: &datamodel::Project) -> SyncR
         source_model_map,
         macro_declarations_from_datamodel(project),
         false,
-        false,
     );
 
     SyncResult {

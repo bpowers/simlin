@@ -607,7 +607,7 @@ fn lower_ltm_variable(
             tables.insert(table.clone(), table_data);
         }
         deps.entry(table.clone())
-            .or_insert_with(|| source_dep_shape(db, *table_sv, project));
+            .or_insert_with(|| source_dep_shape(db, *table_sv, project, crate::db::LtmOverlay::On));
     }
 
     let model_ident: Ident<Canonical> = Ident::new(model.name(db));
@@ -720,7 +720,9 @@ fn ltm_dep_shape(
     project: SourceProject,
     head: &str,
 ) -> Option<DepShape> {
-    if let Some(shape) = model_dep_shape(db, model, project, head) {
+    // An LTM fragment exists only under the overlay, so a module read in one
+    // resolves through the sub-model's LTM-augmented shape.
+    if let Some(shape) = model_dep_shape(db, model, project, head, crate::db::LtmOverlay::On) {
         return Some(shape);
     }
     let dim_context = project_dimensions_context(db, project);
@@ -1118,15 +1120,14 @@ impl Drop for LtmFragmentFailureGuard {
 ///
 /// Severity is `Warning`, not `Error`: LTM is opt-in, the rest of the
 /// model still simulates, and a hard error would break compilation of
-/// every `ltm_enabled` model that hits a single bad fragment. This
+/// every LTM-overlay model that hits a single bad fragment. This
 /// mirrors the auto-flip-to-discovery warning in `model_ltm_variables`.
 ///
-/// `model_all_diagnostics` drives this when `ltm_enabled` and emits what it
-/// returns, so the warning reaches `collect_all_diagnostics` exactly when the
-/// auto-flip warning does. (GH #466 tracks the separate plumbing gap: the
-/// diagnostic-collection FFI paths leave `ltm_enabled` false by default,
-/// so neither this warning nor the auto-flip warning reaches
-/// `simlin_project_get_errors` today.)
+/// `model_all_diagnostics` drives this under `LtmOverlay::On` and emits what
+/// it returns, so the warning reaches `collect_all_diagnostics` exactly when
+/// the auto-flip warning does; libsimlin's `simlin_project_get_errors`
+/// harvests under `On` for a project that has requested LTM, so both reach it
+/// (GH #466).
 ///
 /// Only the layout-independent compile failure is reported here. A
 /// fragment that compiles but whose variable references do not resolve

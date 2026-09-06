@@ -366,7 +366,7 @@ fn test_issue_297_patch_staging_keeps_sync_state_present() {
     let (reader_done_tx, reader_done_rx) = mpsc::channel::<bool>();
     let reader = thread::spawn(move || {
         let proj_ref = unsafe { &*(proj_addr as *const SimlinProject) };
-        let db = proj_ref.db.lock().unwrap();
+        let db = proj_ref.lock_db();
         let observed_some = db.current_source_project().is_some();
         drop(db);
         reader_done_tx

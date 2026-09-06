@@ -263,7 +263,7 @@ fn collect_expr0_occurrences(
             if variables.contains_key(&canonical) {
                 out.push(Expr0Occurrence {
                     source: canonical.as_str().to_string(),
-                    indices: Some(indices.clone()),
+                    indices: Some(indices.to_vec()),
                     in_reducer,
                     path: path.clone(),
                 });
@@ -536,7 +536,9 @@ fn strip_index_locs(index: &IndexExpr0) -> IndexExpr0 {
     match index {
         IndexExpr0::Wildcard(_) => IndexExpr0::Wildcard(d),
         IndexExpr0::StarRange(id, _) => IndexExpr0::StarRange(canonical_raw(id), d),
-        IndexExpr0::Range(l, r, _) => IndexExpr0::Range(strip_locs(l), strip_locs(r), d),
+        IndexExpr0::Range(l, r, _) => {
+            IndexExpr0::Range(Box::new(strip_locs(l)), Box::new(strip_locs(r)), d)
+        }
         IndexExpr0::DimPosition(n, _) => IndexExpr0::DimPosition(*n, d),
         IndexExpr0::Expr(e) => IndexExpr0::Expr(strip_locs(e)),
     }
@@ -743,7 +745,7 @@ fn assert_occurrence_streams_align(tp: &TestProject) {
     // assertion below passes trivially (0 == 0). Catch that at the source: an
     // Error-severity diagnostic surfaces exactly a parse failure (the
     // grammar-rejected `IF`-as-operand shape was the concrete instance).
-    let errors: Vec<_> = collect_all_diagnostics(&db, project)
+    let errors: Vec<_> = collect_all_diagnostics(&db, project, crate::db::LtmOverlay::Off)
         .into_iter()
         .filter(|d| d.severity == DiagnosticSeverity::Error)
         .collect();
@@ -799,7 +801,7 @@ fn assert_lowering_matches_reparse_everywhere(tp: &TestProject) -> usize {
 
     // A fixture equation that fails to parse leaves its variable with NO AST, so
     // it contributes no slot and would silently shrink the sweep.
-    let errors: Vec<_> = collect_all_diagnostics(&db, project)
+    let errors: Vec<_> = collect_all_diagnostics(&db, project, crate::db::LtmOverlay::Off)
         .into_iter()
         .filter(|d| d.severity == DiagnosticSeverity::Error)
         .collect();

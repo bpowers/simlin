@@ -296,21 +296,22 @@ pub async fn edit_model<A: ProjectAccess>(
     // the count stayed the same.
     //
     // EditModel always runs LTM loop analysis (via `analyze_model`), so both
-    // diagnostic passes collect with LTM transiently enabled (GH #662) -- the
-    // same shared `LtmEnabledGuard` libsimlin uses (GH #466). Enabling LTM on
-    // the pre- AND post-edit passes keeps the new-error delta symmetric: the
-    // LTM-only diagnostics (advisory Warnings; the GH #486 non-Euler rejection
-    // rides the assemble path, not this accumulator) are computed the same way
-    // on both sides, so they can never spuriously read as a "new error".
+    // diagnostic passes collect under the LTM overlay (GH #662), as libsimlin
+    // does for a project that simulated with LTM (GH #466). Collecting under
+    // the overlay on the pre- AND post-edit passes keeps the new-error delta
+    // symmetric: the LTM-only diagnostics (advisory Warnings; the GH #486
+    // non-Euler rejection rides the assemble path, not this accumulator) are
+    // computed the same way on both sides, so they can never spuriously read
+    // as a "new error".
     let pre_edit_error_keys: std::collections::HashSet<_> = {
-        let mut pre_db = simlin_engine::db::SimlinDb::default();
+        let pre_db = simlin_engine::db::SimlinDb::default();
         let pre_sync = simlin_engine::db::sync_from_datamodel(&pre_db, &project);
         let pre_source_project = pre_sync.project;
-        let all_diags = {
-            let guard =
-                simlin_engine::db::LtmEnabledGuard::enable(&mut pre_db, pre_source_project, true);
-            simlin_engine::db::collect_all_diagnostics(guard.db(), pre_source_project)
-        };
+        let all_diags = simlin_engine::db::collect_all_diagnostics(
+            &pre_db,
+            pre_source_project,
+            simlin_engine::db::LtmOverlay::On,
+        );
         simlin_engine::errors::collect_formatted_errors(
             all_diags
                 .iter()
@@ -339,14 +340,13 @@ pub async fn edit_model<A: ProjectAccess>(
     let sync = simlin_engine::db::sync_from_datamodel(&db, &project);
     let source_project = sync.project;
 
-    // Collect post-edit diagnostics with LTM transiently enabled (GH #662), so
-    // LTM advisory Warnings reach the caller. The guard restores `ltm_enabled`
-    // to false on drop -- before the `analyze_model` call below, which runs its
-    // own flag dance -- so the two passes don't interfere.
-    let all_diagnostics = {
-        let guard = simlin_engine::db::LtmEnabledGuard::enable(&mut db, source_project, true);
-        simlin_engine::db::collect_all_diagnostics(guard.db(), source_project)
-    };
+    // Collect post-edit diagnostics under the LTM overlay (GH #662), so LTM
+    // advisory Warnings reach the caller.
+    let all_diagnostics = simlin_engine::db::collect_all_diagnostics(
+        &db,
+        source_project,
+        simlin_engine::db::LtmOverlay::On,
+    );
     let post_formatted = simlin_engine::errors::collect_formatted_errors(
         all_diagnostics
             .iter()

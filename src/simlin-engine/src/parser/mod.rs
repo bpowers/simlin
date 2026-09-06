@@ -331,7 +331,7 @@ impl<'input> Parser<'input> {
                     let right = self.parse_unary()?;
                     let loc = Loc::new(left.get_loc().start as usize, right.get_loc().end as usize);
                     left = Expr0::App(
-                        UntypedBuiltinFn("safediv".to_string(), vec![left, right]),
+                        UntypedBuiltinFn("safediv".to_string(), Box::new([left, right])),
                         loc,
                     );
                 }
@@ -618,12 +618,12 @@ impl<'input> Parser<'input> {
     }
 
     /// Parse comma-separated expressions (for function arguments)
-    fn parse_comma_separated_exprs(&mut self) -> Result<Vec<Expr0>, EquationError> {
+    fn parse_comma_separated_exprs(&mut self) -> Result<Box<[Expr0]>, EquationError> {
         let mut exprs = Vec::new();
 
         // Handle empty list
         if self.peek_kind() == Some(TokenKind::RParen) {
-            return Ok(exprs);
+            return Ok(exprs.into_boxed_slice());
         }
 
         // Parse first expression
@@ -641,16 +641,18 @@ impl<'input> Parser<'input> {
             exprs.push(self.parse_expr()?);
         }
 
-        Ok(exprs)
+        // The list is complete: shrink to exactly what it holds (see
+        // `UntypedBuiltinFn`).
+        Ok(exprs.into_boxed_slice())
     }
 
     /// Parse comma-separated index expressions (for subscripts)
-    fn parse_index_exprs(&mut self) -> Result<Vec<IndexExpr0>, EquationError> {
+    fn parse_index_exprs(&mut self) -> Result<Box<[IndexExpr0]>, EquationError> {
         let mut indices = Vec::new();
 
         // Handle empty list
         if self.peek_kind() == Some(TokenKind::RBracket) {
-            return Ok(indices);
+            return Ok(indices.into_boxed_slice());
         }
 
         // Parse first index expression
@@ -668,7 +670,7 @@ impl<'input> Parser<'input> {
             indices.push(self.parse_index_expr()?);
         }
 
-        Ok(indices)
+        Ok(indices.into_boxed_slice())
     }
 
     /// Parse a single index expression
@@ -782,7 +784,11 @@ impl<'input> Parser<'input> {
                     let lpos = left.get_loc().start as usize;
                     let rpos = right.get_loc().end as usize;
 
-                    Ok(IndexExpr0::Range(left, right, Loc::new(lpos, rpos)))
+                    Ok(IndexExpr0::Range(
+                        Box::new(left),
+                        Box::new(right),
+                        Loc::new(lpos, rpos),
+                    ))
                 } else {
                     Ok(IndexExpr0::Expr(left))
                 }

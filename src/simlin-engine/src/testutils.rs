@@ -121,6 +121,30 @@ pub(crate) fn x_module_named(
     })
 }
 
+/// A per-element arrayed aux over one dimension: `elements` pairs each
+/// element name with that element's equation.
+#[cfg(test)]
+pub(crate) fn x_arrayed(ident: &str, dim: &str, elements: &[(&str, &str)]) -> datamodel::Variable {
+    datamodel::Variable::Aux(datamodel::Aux {
+        ident: ident.to_string(),
+        equation: datamodel::Equation::Arrayed(
+            vec![dim.to_string()],
+            elements
+                .iter()
+                .map(|(e, eq)| (e.to_string(), eq.to_string(), None, None))
+                .collect(),
+            None,
+            false,
+        ),
+        documentation: String::new(),
+        units: None,
+        gf: None,
+        ai_state: None,
+        uid: None,
+        compat: datamodel::Compat::default(),
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn x_flow(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::Variable {
     use datamodel::{Equation, Flow, Variable};

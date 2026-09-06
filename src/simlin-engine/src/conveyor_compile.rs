@@ -1789,7 +1789,7 @@ fn direct_belt_reference(
                 Some(&ndims)
                     if ndims > 0 && indices.len() == ndims && all_single_element(indices) =>
                 {
-                    Some((name, indices.clone()))
+                    Some((name, indices.to_vec()))
                 }
                 _ => None,
             }
@@ -2024,7 +2024,7 @@ fn rewrite_container_in_expr(
             if elem_indices.is_empty() {
                 Expr0::Var(RawIdent::new(name), loc)
             } else {
-                Expr0::Subscript(RawIdent::new(name), elem_indices, loc)
+                Expr0::Subscript(RawIdent::new(name), elem_indices.into(), loc)
             }
         };
 
@@ -2081,14 +2081,26 @@ fn rewrite_container_in_expr(
                         changed,
                     )?),
                     IndexExpr0::Range(l, r, iloc) => IndexExpr0::Range(
-                        rewrite_container_in_expr(l, conveyor_dims, naming, specs, changed)?,
-                        rewrite_container_in_expr(r, conveyor_dims, naming, specs, changed)?,
+                        Box::new(rewrite_container_in_expr(
+                            l,
+                            conveyor_dims,
+                            naming,
+                            specs,
+                            changed,
+                        )?),
+                        Box::new(rewrite_container_in_expr(
+                            r,
+                            conveyor_dims,
+                            naming,
+                            specs,
+                            changed,
+                        )?),
                         *iloc,
                     ),
                     other => other.clone(),
                 });
             }
-            Ok(Expr0::Subscript(raw.clone(), new_indices, *loc))
+            Ok(Expr0::Subscript(raw.clone(), new_indices.into(), *loc))
         }
         Expr0::App(UntypedBuiltinFn(fname, args), loc) => {
             // A single-argument container reducer over ONE container is supported.
@@ -2143,7 +2155,10 @@ fn rewrite_container_in_expr(
                     changed,
                 )?);
             }
-            Ok(Expr0::App(UntypedBuiltinFn(fname.clone(), new_args), *loc))
+            Ok(Expr0::App(
+                UntypedBuiltinFn(fname.clone(), new_args.into()),
+                *loc,
+            ))
         }
         Expr0::Op1(op, inner, loc) => Ok(Expr0::Op1(
             *op,

@@ -69,11 +69,16 @@ fn main() {
     // the LTM *simulation* (which the wasm backend could accelerate) or in
     // *discovery* (pure Rust graph search over the recorded scores,
     // wasm-agnostic).
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
     let compiled = phase("compile (salsa, +LTM)", || {
-        compile_project_incremental(&db, source_project, &canonical_name).unwrap()
+        compile_project_incremental(
+            &db,
+            source_project,
+            &canonical_name,
+            simlin_engine::db::LtmOverlay::On,
+        )
+        .unwrap()
     });
 
     let mut vm = phase("Vm::new", || simlin_engine::Vm::new(compiled).unwrap());
@@ -388,7 +393,6 @@ fn main() {
         found.truncated
     );
 
-    source_project.set_ltm_enabled(&mut db).to(false);
     source_project.set_ltm_discovery_mode(&mut db).to(false);
 
     println!("discovered loops: {}", found.loops.len());

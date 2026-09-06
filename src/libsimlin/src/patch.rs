@@ -388,8 +388,9 @@ pub(crate) fn gather_error_details_with_db(
     project: engine::db::SourceProject,
     vm_error: Option<&engine::Error>,
     datamodel: &engine::datamodel::Project,
+    overlay: engine::db::LtmOverlay,
 ) -> Vec<ErrorDetailData> {
-    let diags = engine::db::collect_all_diagnostics(db, project);
+    let diags = engine::db::collect_all_diagnostics(db, project, overlay);
     let mut all_errors: Vec<ErrorDetailData> = diags
         .iter()
         .map(|d| {
@@ -509,9 +510,13 @@ pub(crate) unsafe fn apply_project_patch_internal(
 
     // Snapshot the pre-patch warning baseline while holding the db lock.
     let models_with_existing_warnings = {
-        let db_locked = project_ref.db.lock().unwrap();
+        let db_locked = project_ref.lock_db();
         if let Some(source_project) = db_locked.current_source_project() {
-            let diags = engine::db::collect_all_diagnostics(&db_locked, source_project);
+            let diags = engine::db::collect_all_diagnostics(
+                &db_locked,
+                source_project,
+                engine::db::LtmOverlay::Off,
+            );
             collect_models_with_unit_warnings(&diags)
         } else {
             std::collections::HashSet::new()
@@ -538,23 +543,32 @@ pub(crate) unsafe fn apply_project_patch_internal(
     // are dry runs. `sync_staged` stages the patched datamodel into the db's
     // own sync state and hands back the PRE-staging handles (`prev`) so a
     // rejected/dry-run patch can be rolled back exactly.
-    let mut db = project_ref.db.lock().unwrap();
+    let mut db = project_ref.lock_db();
     let (staged_sp, prev) = db.sync_staged(&staged_datamodel);
     #[cfg(test)]
     invoke_patch_test_hook(PatchHookPoint::StagedSyncWhileDbLocked, project_ref);
 
-    // Collect diagnostics from the tracked accumulator path.
-    let staged_diags = engine::db::collect_all_diagnostics(&db, staged_sp);
+    // Collect diagnostics from the tracked accumulator path. A patch is
+    // validated against the model as written (no LTM overlay): the overlay's
+    // advisories belong to `simlin_project_get_errors`, and an LTM-only
+    // rejection must never veto an edit to a model that simulates fine.
+    let overlay = engine::db::LtmOverlay::Off;
+    let staged_diags = engine::db::collect_all_diagnostics(&db, staged_sp, overlay);
 
     // Attempt compilation + VM validation to detect assembly-level errors
     // that are not captured by per-variable diagnostics. `build_sim` routes a
     // staged conveyor/queue datamodel through its special expansion build path,
     // so a valid special-stock edit is not rejected (and rolled back) by the
     // ordinary compile path's NotExpanded guard.
-    let sim_error = engine::build_sim(&mut db, staged_sp, &staged_datamodel, "main").err();
+    let sim_error = engine::build_sim(&mut db, staged_sp, &staged_datamodel, "main", overlay).err();
 
-    let all_errors =
-        gather_error_details_with_db(&db, staged_sp, sim_error.as_ref(), &staged_datamodel);
+    let all_errors = gather_error_details_with_db(
+        &db,
+        staged_sp,
+        sim_error.as_ref(),
+        &staged_datamodel,
+        overlay,
+    );
 
     // Check for blocking errors (not including unit warnings, which are handled separately)
     let maybe_first_code = if !allow_errors {
@@ -608,13 +622,19 @@ pub(crate) unsafe fn apply_project_patch_internal(
         // Roll back: re-sync the ORIGINAL datamodel with the PRE-staging
         // handles (`prev`), restoring every input's prior field values and
         // dropping variables added during staging -- still under the db lock,
-        // so no concurrent reader can observe staged state.
+        // so no concurrent reader can observe staged state. The restore is an
+        // input write, so it sweeps what the staging replaced; the memos the
+        // staged diagnostics and compile produced stay resident until the next
+        // entry point re-derives them for the restored state, and are freed
+        // then (the lock's drop releases whatever that entry point supersedes).
         db.restore(&original_datamodel, prev);
         return;
     }
 
     // Commit: the staged state is already the db's current sync state from
-    // `sync_staged`, so only the canonical datamodel needs to be written.
+    // `sync_staged`, so only the canonical datamodel needs to be written. The
+    // memos the staged diagnostics and compile superseded are freed when the
+    // db lock drops (`DbLock`), inside this edit rather than the next.
     *datamodel_locked = staged_datamodel;
 }
 
@@ -640,6 +660,19 @@ pub(crate) unsafe fn apply_project_patch_internal(
 /// - When `dry_run` is true, the project remains unchanged and no modifications are committed.
 /// - The `project` pointer remains valid and usable after this function returns.
 /// - The project is not consumed or moved by this operation.
+///
+/// # Effect on live simulations
+/// - A `SimlinSim` created BEFORE a committed patch is a stale snapshot for
+///   the `simlin_sim_*` entry points: it was compiled from the old contents
+///   and keeps its results and its ability to `reset`/re-run against that
+///   program.
+/// - The sim-bearing ANALYSIS entry points (`simlin_analyze_get_loops_runtime`,
+///   `simlin_analyze_get_links`, ...) enumerate loops and links from the
+///   project's CURRENT contents and read scores out of the stale sim's
+///   results by loop id (the slot widths come from the sim's own snapshot),
+///   so after a patch that changed the loop structure they mix old results
+///   with the new model. Create and run a new sim after a patch before
+///   analyzing -- the posture `simlin_project_replace_contents` documents.
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_apply_patch(
     project: *mut SimlinProject,

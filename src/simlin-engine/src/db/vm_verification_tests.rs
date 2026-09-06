@@ -326,14 +326,12 @@ fn no_loop_project() -> datamodel::Project {
     }
 }
 
-/// AC1.4: Models with no feedback loops incur zero LTM overhead when
-/// ltm_enabled=true. The layout should have no LTM variable slots and
+/// AC1.4: Models with no feedback loops incur zero LTM overhead under
+/// `LtmOverlay::On`. The layout should have no LTM variable slots and
 /// no LTM fragments should be compiled.
 #[test]
 fn test_ltm_no_loops_zero_overhead() {
-    use salsa::Setter;
-
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let project = no_loop_project();
     // Extract Copy types from sync before needing &mut db.
     // Salsa tracked return values borrow &db, so we extract scalar
@@ -344,12 +342,17 @@ fn test_ltm_no_loops_zero_overhead() {
     };
 
     // Layout slot count with LTM enabled
-    source_project.set_ltm_enabled(&mut db).to(true);
-    let n_slots_with_ltm = compute_layout(&db, source_model, source_project).n_slots;
+    let n_slots_with_ltm =
+        compute_layout(&db, source_model, source_project, crate::db::LtmOverlay::On).n_slots;
 
     // Layout slot count without LTM
-    source_project.set_ltm_enabled(&mut db).to(false);
-    let n_slots_without_ltm = compute_layout(&db, source_model, source_project).n_slots;
+    let n_slots_without_ltm = compute_layout(
+        &db,
+        source_model,
+        source_project,
+        crate::db::LtmOverlay::Off,
+    )
+    .n_slots;
 
     // Both layouts should have the same number of slots because there
     // are no feedback loops and thus no LTM synthetic variables
@@ -360,7 +363,6 @@ fn test_ltm_no_loops_zero_overhead() {
     );
 
     // Verify LTM synthetic variables are empty for this model
-    source_project.set_ltm_enabled(&mut db).to(true);
     let ltm_var_count = model_ltm_variables(&db, source_model, source_project)
         .vars
         .len();
@@ -370,13 +372,16 @@ fn test_ltm_no_loops_zero_overhead() {
     );
 
     // Compilation should succeed with identical results
-    let compiled_ltm = compile_project_incremental(&db, source_project, "main")
-        .expect("LTM compilation should succeed for no-loop model");
+    let compiled_ltm =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM compilation should succeed for no-loop model");
     let ltm_root_slots = compiled_ltm.modules[&compiled_ltm.root].n_slots;
 
-    source_project.set_ltm_enabled(&mut db).to(false);
-    let compiled_no_ltm = compile_project_incremental(&db, source_project, "main")
-        .expect("non-LTM compilation should succeed for no-loop model");
+    // The plain compile: with no loop there is nothing for the overlay to
+    // add, so the two programs must agree.
+    let compiled_no_ltm =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::Off)
+            .expect("non-LTM compilation should succeed for no-loop model");
     let no_ltm_root_slots = compiled_no_ltm.modules[&compiled_no_ltm.root].n_slots;
 
     assert_eq!(
@@ -385,53 +390,59 @@ fn test_ltm_no_loops_zero_overhead() {
     );
 }
 
-/// AC1.5: ltm_enabled=false skips all LTM layout and assembly work;
-/// compilation produces identical bytecode to a compilation that never
-/// had LTM enabled.
+/// AC1.5: an `On` assembly leaks nothing into the plain program. The plain
+/// program of a db that has assembled the overlay is the plain program of a
+/// db that never has -- the same `CompiledSimulation`, bytecode included.
+///
+/// The two arms are two DERIVATIONS: the "never" arm lives in its own db, so
+/// it is not the `assemble_simulation(.., Off)` memo read back (with the
+/// overlay an argument, a repeat compile on one db is a salsa hit, which would
+/// compare the memo with itself). What the second db pins is that the
+/// per-model memos an `On` assembly populates -- layouts, fragments, the LTM
+/// derivation -- are keyed so the plain assembly never reads one of them.
 #[test]
 fn test_ltm_disabled_identical_bytecode() {
-    use salsa::Setter;
-
-    let mut db = SimlinDb::default();
     let project = feedback_loop_project();
-    let source_project = {
-        let sync = sync_from_datamodel(&db, &project);
-        sync.project
+
+    // The "never" arm: a db that only ever assembles the plain program.
+    let compiled_never_ltm = {
+        let db = SimlinDb::default();
+        let source_project = sync_from_datamodel(&db, &project).project;
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::Off)
+            .expect("compilation without LTM should succeed")
     };
 
-    // Compile with LTM disabled (the default)
-    let compiled_never_ltm = compile_project_incremental(&db, source_project, "main")
-        .expect("compilation without LTM should succeed");
+    // The "after" arm: the overlay is assembled first, then the plain program
+    // is derived beside it in the same db.
+    let db = SimlinDb::default();
+    let source_project = sync_from_datamodel(&db, &project).project;
+    let compiled_ltm =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("compilation with LTM should succeed");
+    let compiled_after_disable =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::Off)
+            .expect("compilation beside the overlay should succeed");
 
-    // Enable then disable LTM -- should return to the same state.
-    // compile_project_incremental returns an owned CompiledSimulation,
-    // so it does not borrow db.
-    source_project.set_ltm_enabled(&mut db).to(true);
-    let _compiled_ltm = compile_project_incremental(&db, source_project, "main")
-        .expect("compilation with LTM should succeed");
+    // Non-vacuity: the overlay did add something that could leak.
+    assert!(
+        compiled_ltm.offsets.len() > compiled_never_ltm.offsets.len(),
+        "the feedback-loop fixture must gain LTM offsets under `On`: on={}, off={}",
+        compiled_ltm.offsets.len(),
+        compiled_never_ltm.offsets.len()
+    );
 
-    // Disable LTM again
-    source_project.set_ltm_enabled(&mut db).to(false);
-    let compiled_after_disable = compile_project_incremental(&db, source_project, "main")
-        .expect("compilation after disabling LTM should succeed");
-
-    // The root module's slot count should be identical
+    // The granular checks first, so a regression names what moved...
     let root_never = &compiled_never_ltm.modules[&compiled_never_ltm.root];
     let root_after = &compiled_after_disable.modules[&compiled_after_disable.root];
-
     assert_eq!(
         root_never.n_slots, root_after.n_slots,
         "slot count should be identical when LTM is disabled"
     );
-
-    // The module count should be identical (no extra LTM modules)
     assert_eq!(
         compiled_never_ltm.modules.len(),
         compiled_after_disable.modules.len(),
         "module count should be identical when LTM is disabled"
     );
-
-    // The offset map should be identical (no extra LTM variables)
     assert_eq!(
         compiled_never_ltm.offsets.len(),
         compiled_after_disable.offsets.len(),
@@ -445,25 +456,28 @@ fn test_ltm_disabled_identical_bytecode() {
             name.as_str()
         );
     }
+    // ...and then the whole program: every module's bytecode, contexts, specs.
+    assert!(
+        *compiled_never_ltm == *compiled_after_disable,
+        "the plain program derived beside an `On` assembly must be the plain \
+         program of a db that never assembled the overlay"
+    );
 }
 
 /// AC1.1: LTM synthetic variables appear in compiled output with correct
 /// offsets when compiling through the incremental path.
 #[test]
 fn test_ltm_incremental_produces_synthetic_variables() {
-    use salsa::Setter;
-
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let project = feedback_loop_project();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
 
-    source_project.set_ltm_enabled(&mut db).to(true);
-
-    let compiled = compile_project_incremental(&db, source_project, "main")
-        .expect("LTM incremental compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM incremental compilation should succeed");
 
     // The feedback loop project has: population -> births -> population
     // LTM should produce at least one loop score and one relative loop score
@@ -473,13 +487,18 @@ fn test_ltm_incremental_produces_synthetic_variables() {
         "compiled output should contain LTM variable offsets (starting with '$')"
     );
 
-    // Verify LTM increases the layout slot count. Extract n_slots
-    // before toggling ltm_enabled to avoid holding a salsa ref across
-    // a &mut db call.
-    let n_slots_ltm = compute_layout(&db, source_model, source_project).n_slots;
+    // Verify LTM increases the layout slot count: the two overlays' layouts
+    // are separate memos, so both are read from the same db.
+    let n_slots_ltm =
+        compute_layout(&db, source_model, source_project, crate::db::LtmOverlay::On).n_slots;
 
-    source_project.set_ltm_enabled(&mut db).to(false);
-    let n_slots_no_ltm = compute_layout(&db, source_model, source_project).n_slots;
+    let n_slots_no_ltm = compute_layout(
+        &db,
+        source_model,
+        source_project,
+        crate::db::LtmOverlay::Off,
+    )
+    .n_slots;
 
     assert!(
         n_slots_ltm > n_slots_no_ltm,
@@ -504,7 +523,6 @@ fn test_ltm_discovery_mode_all_links() {
         (sync.project, sync.models["main"].source)
     };
 
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
     // Discovery mode produces per-link score variables for ALL causal
@@ -531,8 +549,9 @@ fn test_ltm_discovery_mode_all_links() {
 
     // Compilation should succeed in discovery mode
     source_project.set_ltm_discovery_mode(&mut db).to(true);
-    let compiled = compile_project_incremental(&db, source_project, "main")
-        .expect("LTM discovery mode compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM discovery mode compilation should succeed");
 
     // Verify the compiled output has LTM offsets
     let has_ltm_offset = compiled.offsets.keys().any(|k| k.as_str().starts_with('$'));
@@ -546,19 +565,16 @@ fn test_ltm_discovery_mode_all_links() {
 /// LTM path and verify loop scores are non-trivial (not all zero).
 #[test]
 fn test_ltm_incremental_simulation_produces_scores() {
-    use salsa::Setter;
-
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let project = feedback_loop_project();
     let source_project = {
         let sync = sync_from_datamodel(&db, &project);
         sync.project
     };
 
-    source_project.set_ltm_enabled(&mut db).to(true);
-
-    let compiled = compile_project_incremental(&db, source_project, "main")
-        .expect("LTM incremental compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM incremental compilation should succeed");
 
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end()
@@ -611,7 +627,6 @@ fn test_ltm_incremental_simulation_produces_scores() {
 #[test]
 fn test_ltm_mapped_dimension_loop_scores_diagonal_and_nonzero() {
     use crate::test_common::TestProject;
-    use salsa::Setter;
 
     let tp = TestProject::new("mapped_loop_e2e")
         .with_sim_time(0.0, 10.0, 1.0)
@@ -622,11 +637,10 @@ fn test_ltm_mapped_dimension_loop_scores_diagonal_and_nonzero() {
         .array_aux_direct("x", vec!["Region".into()], "stock[Region] * 2", None);
     let project = tp.build_datamodel();
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let source_project = sync.project;
     let source_model = sync.models["main"].source;
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     // The mapped Bare edges' link scores carry the TARGET's dimensions
     // (the mapped pair counts as corresponding -- `link_score_dimensions`
@@ -670,14 +684,20 @@ fn test_ltm_mapped_dimension_loop_scores_diagonal_and_nonzero() {
     // genuinely compile (their references resolve through the same
     // dimension mapping the model's own equations use). Before #527 the
     // scalar forms failed to compile and were silently stubbed to 0.
-    let diags = crate::db::collect_model_diagnostics(&db, source_model, source_project);
+    let diags = crate::db::collect_model_diagnostics(
+        &db,
+        source_model,
+        source_project,
+        crate::db::LtmOverlay::On,
+    );
     assert!(
         diags.is_empty(),
         "expected no diagnostics for the mapped-loop fixture, got {diags:?}"
     );
 
-    let compiled = compile_project_incremental(&db, source_project, "main")
-        .expect("LTM compile of the mapped-dim loop model should succeed");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM compile of the mapped-dim loop model should succeed");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end()
         .expect("simulation should run to completion");
@@ -721,7 +741,6 @@ fn test_ltm_mapped_dimension_loop_scores_diagonal_and_nonzero() {
 #[test]
 fn test_ltm_reverse_declared_subscripted_link_score_is_diagonal() {
     use crate::test_common::TestProject;
-    use salsa::Setter;
 
     let tp = TestProject::new("reverse_mapped_subscripted_e2e")
         .with_sim_time(0.0, 10.0, 1.0)
@@ -732,11 +751,10 @@ fn test_ltm_reverse_declared_subscripted_link_score_is_diagonal() {
         .array_aux_direct("x", vec!["Region".into()], "stock[Region] * 2", None);
     let project = tp.build_datamodel();
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let source_project = sync.project;
     let source_model = sync.models["main"].source;
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let ltm_vars = crate::db::model_ltm_variables(&db, source_model, source_project);
     // The reverse-declared subscripted edge now classifies Bare: the score
@@ -779,7 +797,7 @@ fn test_ltm_reverse_declared_subscripted_link_score_is_diagonal() {
     );
 
     // No unscoreable-edge Warning fires for the edge anymore.
-    let diags = crate::db::collect_all_diagnostics(&db, source_project);
+    let diags = crate::db::collect_all_diagnostics(&db, source_project, crate::db::LtmOverlay::On);
     assert!(
         !diags.iter().any(|d| {
             d.severity == crate::db::DiagnosticSeverity::Warning
@@ -791,8 +809,9 @@ fn test_ltm_reverse_declared_subscripted_link_score_is_diagonal() {
 
     // The model compiles and simulates with LTM enabled, and the loop score
     // carries real non-zero values past the startup guard.
-    let compiled = compile_project_incremental(&db, source_project, "main")
-        .expect("LTM compile of the reverse-declared mapped model should succeed");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM compile of the reverse-declared mapped model should succeed");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end()
         .expect("simulation should run to completion");
@@ -1035,11 +1054,11 @@ fn test_with_lookup_link_polarity_and_score_gf_aware() {
 
     // (b) Runtime link score: discovery mode scores every causal edge
     // (this two-variable model has no loops).
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
-    let compiled = compile_project_incremental(&db, source_project, "main")
-        .expect("LTM compile of the with-lookup model should succeed");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM compile of the with-lookup model should succeed");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end()
         .expect("simulation should run to completion");
@@ -1160,11 +1179,11 @@ fn test_with_lookup_arrayed_link_scores_gf_aware() {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let source_project = sync.project;
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
-    let compiled = compile_project_incremental(&db, source_project, "main")
-        .expect("LTM compile of the arrayed with-lookup model should succeed");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM compile of the arrayed with-lookup model should succeed");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end()
         .expect("simulation should run to completion");
@@ -1309,10 +1328,10 @@ fn test_with_lookup_scalar_to_arrayed_link_score_sign_matches_polarity() {
         "a decreasing with-lookup gf flips the drive -> effect polarity"
     );
 
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
-    let compiled = compile_project_incremental(&db, source_project, "main")
-        .expect("LTM compile of the scalar->arrayed with-lookup model should succeed");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM compile of the scalar->arrayed with-lookup model should succeed");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end().expect("simulation should run");
     let results = vm.into_results();
@@ -1389,10 +1408,10 @@ fn test_with_lookup_variable_backed_reducer_link_score_sign_matches_polarity() {
         "a decreasing with-lookup gf flips the pop -> total polarity"
     );
 
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
-    let compiled = compile_project_incremental(&db, source_project, "main")
-        .expect("LTM compile of the with-lookup reducer model should succeed");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM compile of the with-lookup reducer model should succeed");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end().expect("simulation should run");
     let results = vm.into_results();
@@ -1487,18 +1506,23 @@ fn test_with_lookup_per_element_gf_reducer_owner_scores_per_slot() {
     let sync = sync_from_datamodel(&db, &project);
     let source_project = sync.project;
     let source_model = sync.models["main"].source;
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
     // Nothing is declined: the synthetic-agg split makes every half wrappable.
-    let diags = crate::db::collect_model_diagnostics(&db, source_model, source_project);
+    let diags = crate::db::collect_model_diagnostics(
+        &db,
+        source_model,
+        source_project,
+        crate::db::LtmOverlay::On,
+    );
     assert!(
         diags.is_empty(),
         "the per-element-gf agg split must score cleanly; got {diags:?}"
     );
 
-    let compiled = compile_project_incremental(&db, source_project, "main")
-        .expect("LTM compile of the per-element-gf reducer owner should succeed");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM compile of the per-element-gf reducer owner should succeed");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end().expect("simulation should run");
     let results = vm.into_results();
@@ -1572,10 +1596,10 @@ fn test_with_lookup_agg_to_scalar_target_link_score_sign_matches_polarity() {
         "a decreasing with-lookup gf flips the pop -> total polarity"
     );
 
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
-    let compiled = compile_project_incremental(&db, source_project, "main")
-        .expect("LTM compile of the agg->scalar with-lookup model should succeed");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM compile of the agg->scalar with-lookup model should succeed");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end().expect("simulation should run");
     let results = vm.into_results();
@@ -1650,10 +1674,10 @@ fn test_with_lookup_per_element_source_read_link_score_sign_matches_polarity() {
         "a decreasing with-lookup gf flips the pop -> effect polarity"
     );
 
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
-    let compiled = compile_project_incremental(&db, source_project, "main")
-        .expect("LTM compile of the per-element with-lookup model should succeed");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM compile of the per-element with-lookup model should succeed");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end().expect("simulation should run");
     let results = vm.into_results();
@@ -1728,10 +1752,14 @@ fn test_with_lookup_per_element_owner_declines_naming_the_unhoisted_reducer() {
     let sync = sync_from_datamodel(&db, &project);
     let source_project = sync.project;
     let source_model = sync.models["main"].source;
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
-    let diags = crate::db::collect_model_diagnostics(&db, source_model, source_project);
+    let diags = crate::db::collect_model_diagnostics(
+        &db,
+        source_model,
+        source_project,
+        crate::db::LtmOverlay::On,
+    );
     let messages: Vec<String> = diags
         .iter()
         .map(|d| match &d.error {
@@ -1824,7 +1852,8 @@ fn test_previous_self_initial_value() {
          are initialized after switch is computed"
     );
 
-    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off).unwrap();
     let mut vm = crate::vm::Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     let results = vm.into_results();
@@ -1932,8 +1961,9 @@ fn test_smooth3_stock_input_initialization() {
 
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("incremental compile should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .expect("incremental compile should succeed");
     let mut vm = Vm::new(compiled).expect("VM should build");
     vm.run_to_end().expect("VM should run");
     let vm_results = vm.into_results();
@@ -2081,8 +2111,9 @@ fn test_previous_of_module_backed_variable_compiles_correctly() {
 
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("PREVIOUS(SMTH1_var) should compile via incremental path");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .expect("PREVIOUS(SMTH1_var) should compile via incremental path");
     let mut vm = Vm::new(compiled).expect("VM should build");
     vm.run_to_end().expect("simulation should run");
 

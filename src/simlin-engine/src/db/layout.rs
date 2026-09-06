@@ -6,7 +6,7 @@
 //!
 //! `compute_layout` is the per-model body layout query: the salsa-tracked,
 //! role-independent slot assignment for explicit variables, implicit
-//! (SMOOTH/DELAY/TREND) helpers, and -- when LTM is enabled -- the LTM
+//! (SMOOTH/DELAY/TREND) helpers, and -- under the `On` overlay -- the LTM
 //! synthetic variables and their implicit helpers. Offsets start at 0; the
 //! root module's `IMPLICIT_VAR_COUNT` shift is applied at assembly via
 //! `VariableLayout::root_shifted`. `flattened_offsets` is that layout read
@@ -24,6 +24,7 @@ pub fn compute_layout(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
+    overlay: LtmOverlay,
 ) -> crate::compiler::symbolic::VariableLayout {
     use crate::compiler::symbolic::{LayoutEntry, VariableLayout};
 
@@ -51,7 +52,7 @@ pub fn compute_layout(
                 // Module variables occupy the sub-model's total n_slots
                 let sub_model_name = canonicalize(svar.model_name(db));
                 if let Some(sub_model) = project_models.get(sub_model_name.as_ref()) {
-                    let sub_layout = compute_layout(db, *sub_model, project);
+                    let sub_layout = compute_layout(db, *sub_model, project, overlay);
                     sub_layout.n_slots
                 } else {
                     1
@@ -79,7 +80,7 @@ pub fn compute_layout(
                 let sub_canonical = canonicalize(sub_model_name);
                 project_models
                     .get(sub_canonical.as_ref())
-                    .map(|sm| compute_layout(db, *sm, project).n_slots)
+                    .map(|sm| compute_layout(db, *sm, project, overlay).n_slots)
                     .unwrap_or(info.size)
             } else {
                 info.size
@@ -91,10 +92,10 @@ pub fn compute_layout(
         offset += size;
     }
 
-    // Section 3: LTM synthetic variables (only when ltm_enabled).
+    // Section 3: LTM synthetic variables (only under the overlay).
     // Scalar LTM vars occupy 1 slot; A2A LTM vars occupy
     // product(dim_lengths) slots, computed from the variable's
-    // `dimensions` field. When ltm_enabled is false, this section is
+    // `dimensions` field. With the overlay off this section is
     // skipped entirely (zero overhead). Models without feedback loops
     // (e.g. passthrough modules) get an empty LTM var list from
     // model_ltm_variables (also zero overhead).
@@ -102,7 +103,7 @@ pub fn compute_layout(
     // No salsa dependency cycle: model_ltm_variables calls only analysis
     // functions (model_causal_edges, model_loop_circuits) that don't
     // depend on compute_layout.
-    if project.ltm_enabled(db) {
+    if overlay == LtmOverlay::On {
         let ltm_vars = model_ltm_variables(db, model, project);
         let dim_context = project_dimensions_context(db, project);
 
@@ -181,10 +182,11 @@ pub(crate) fn flattened_offsets(
     db: &dyn Db,
     project: SourceProject,
     root: SourceModel,
+    overlay: LtmOverlay,
 ) -> HashMap<Ident<Canonical>, usize> {
     let mut offsets = HashMap::new();
-    let layout = compute_layout(db, root, project).root_shifted();
-    flatten_model(db, project, root, &layout, 0, None, &mut offsets);
+    let layout = compute_layout(db, root, project, overlay).root_shifted();
+    flatten_model(db, project, root, &layout, 0, None, overlay, &mut offsets);
     offsets
 }
 
@@ -207,6 +209,7 @@ enum Flatten {
 /// Insert one model's layout into `offsets`: every entry at `base +
 /// entry.offset`, keyed under `prefix·name`. A module variable recurses into
 /// its sub-model's body layout with the module's slot as the new base.
+#[allow(clippy::too_many_arguments)] // one recursion, threading the overlay and the prefix
 fn flatten_model(
     db: &dyn Db,
     project: SourceProject,
@@ -214,12 +217,20 @@ fn flatten_model(
     layout: &crate::compiler::symbolic::VariableLayout,
     base: usize,
     prefix: Option<&Ident<Canonical>>,
+    overlay: LtmOverlay,
     offsets: &mut HashMap<Ident<Canonical>, usize>,
 ) {
     let project_models = project.models(db);
     let source_vars = model.variables(db);
     let implicit_info = model_implicit_var_info(db, model, project);
-    let ltm_implicit = model_ltm_implicit_var_info(db, model, project);
+    // The LTM helpers exist only under the overlay; reading them otherwise
+    // would run the whole LTM derivation for a plain compile.
+    let no_ltm_implicit = HashMap::new();
+    let ltm_implicit = if overlay == LtmOverlay::On {
+        model_ltm_implicit_var_info(db, model, project)
+    } else {
+        &no_ltm_implicit
+    };
     let dim_context = project_dimensions_context(db, project);
     let sub_model = |name: &str| project_models.get(canonicalize(name).as_ref()).copied();
     let helper_elements = |dims: &[String]| {
@@ -270,7 +281,7 @@ fn flatten_model(
         };
         match kind {
             Flatten::Module(Some(sub)) => {
-                let sub_layout = compute_layout(db, sub, project);
+                let sub_layout = compute_layout(db, sub, project, overlay);
                 let module_ident = qualified(Ident::<Canonical>::new(name));
                 flatten_model(
                     db,
@@ -279,6 +290,7 @@ fn flatten_model(
                     sub_layout,
                     slot,
                     Some(&module_ident),
+                    overlay,
                     offsets,
                 );
             }
@@ -314,7 +326,7 @@ fn flatten_model(
 /// constructors clone into `DepKind::Module`, so a shape is derived once per
 /// revision and shared by every fragment that reads the sub-model.
 ///
-/// When LTM is enabled the sub-model is itself LTM-augmented: its layout
+/// Under the `On` overlay the sub-model is itself LTM-augmented: its layout
 /// carries the synthetic LTM variables, most importantly the per-input-port
 /// composite score `$⁚ltm⁚composite⁚{port}`, which a parent equation
 /// references across the module boundary (the exhaustive-mode input->macro
@@ -330,10 +342,11 @@ pub(crate) fn model_shape(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
+    overlay: LtmOverlay,
 ) -> std::sync::Arc<crate::compiler::fragment::ModelShape> {
     use crate::compiler::fragment::{DepShape, ModelShape, ShapeEntry};
 
-    let layout = compute_layout(db, model, project);
+    let layout = compute_layout(db, model, project, overlay);
     let source_vars = model.variables(db);
     let mut vars: crate::common::IdentMap<Ident<Canonical>, ShapeEntry> = Default::default();
 
@@ -342,9 +355,9 @@ pub(crate) fn model_shape(
             continue;
         };
         let shape = if svar.kind(db) == SourceVariableKind::Module {
-            module_dep_shape(db, project, svar.model_name(db))
+            module_dep_shape(db, project, svar.model_name(db), overlay)
         } else {
-            DepShape::var(variable_dimensions(db, *svar, project).clone())
+            super::var_fragment::source_dimensions(db, *svar, project)
         };
         vars.insert(
             Ident::new(name.as_str()),
@@ -355,7 +368,7 @@ pub(crate) fn model_shape(
         );
     }
 
-    if project.ltm_enabled(db) {
+    if overlay == LtmOverlay::On {
         let dim_context = project_dimensions_context(db, project);
         for ltm_var in &model_ltm_variables(db, model, project).vars {
             let Some(entry) = layout.get(&ltm_var.name) else {
@@ -364,15 +377,7 @@ pub(crate) fn model_shape(
             // A2A link/loop scores carry dimensions, so a subscripted
             // cross-module read resolves an element offset rather than
             // collapsing to slot 0.
-            let dims = ltm_var
-                .dimensions
-                .iter()
-                .filter_map(|name| {
-                    dim_context
-                        .get(&crate::common::CanonicalDimensionName::from_raw(name))
-                        .cloned()
-                })
-                .collect();
+            let dims = super::var_fragment::dimensions_named(&ltm_var.dimensions, dim_context);
             vars.entry(Ident::new(&ltm_var.name)).or_insert(ShapeEntry {
                 offset: entry.offset,
                 shape: DepShape::var(dims),
@@ -414,12 +419,13 @@ pub(crate) fn module_dep_shape(
     db: &dyn Db,
     project: SourceProject,
     model_name: &str,
+    overlay: LtmOverlay,
 ) -> crate::compiler::fragment::DepShape {
     use crate::compiler::fragment::{DepShape, ModelShape};
 
     let sub_canonical = canonicalize(model_name);
     let shape = match project.models(db).get(sub_canonical.as_ref()) {
-        Some(sub_model) => model_shape(db, *sub_model, project).clone(),
+        Some(sub_model) => model_shape(db, *sub_model, project, overlay).clone(),
         None => std::sync::Arc::new(ModelShape::default()),
     };
     DepShape::module(shape)

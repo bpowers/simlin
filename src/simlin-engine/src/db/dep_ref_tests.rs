@@ -348,7 +348,7 @@ fn an_initial_read_does_not_cancel_a_previous_only_lag() {
     assert_eq!(y.ident, "y");
     y.compat.active_initial = Some("5".to_string());
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
     let previous_only = |name: &str| -> Vec<String> {
         deps(&db, &sync, name)
@@ -364,9 +364,9 @@ fn an_initial_read_does_not_cancel_a_previous_only_lag() {
 
     // The lagged cycle `x -> y -> x` is state: LTM scores it, and the
     // scores read 1 from the first step the lag carries a value.
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .unwrap_or_else(|e| panic!("the lagged cycle compiles: {e:?}"));
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::On)
+            .unwrap_or_else(|e| panic!("the lagged cycle compiles: {e:?}"));
     let mut vm = crate::vm::Vm::new(compiled).expect("vm");
     vm.run_to_end().expect("run");
     let series = crate::test_common::collect_results(&vm.into_results());

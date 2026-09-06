@@ -86,7 +86,9 @@ pub enum Expr0 {
     Const(String, Literal, Loc),
     Var(RawIdent, Loc),
     App(UntypedBuiltinFn<Expr0>, Loc),
-    Subscript(RawIdent, Vec<IndexExpr0>, Loc),
+    /// The index list is a `Box<[_]>` for the reason `UntypedBuiltinFn`'s
+    /// argument list is: exact capacity, fixed at parse time.
+    Subscript(RawIdent, Box<[IndexExpr0]>, Loc),
     Op1(UnaryOp, Box<Expr0>, Loc),
     Op2(BinaryOp, Box<Expr0>, Box<Expr0>, Loc),
     If(Box<Expr0>, Box<Expr0>, Box<Expr0>, Loc),
@@ -97,7 +99,10 @@ pub enum Expr0 {
 pub enum IndexExpr0 {
     Wildcard(Loc),
     StarRange(RawIdent, Loc),
-    Range(Expr0, Expr0, Loc),
+    /// The bounds are boxed so that this one variant does not make every
+    /// `IndexExpr0` two `Expr0`s wide: a range is the rare index form, and
+    /// every subscript pays the enum's width per index.
+    Range(Box<Expr0>, Box<Expr0>, Loc),
     DimPosition(u32, Loc),
     Expr(Expr0),
 }
@@ -133,7 +138,9 @@ impl IndexExpr0 {
         match self {
             IndexExpr0::Wildcard(_loc) => IndexExpr0::Wildcard(loc),
             IndexExpr0::StarRange(d, _loc) => IndexExpr0::StarRange(d, loc),
-            IndexExpr0::Range(l, r, _loc) => IndexExpr0::Range(l.strip_loc(), r.strip_loc(), loc),
+            IndexExpr0::Range(l, r, _loc) => {
+                IndexExpr0::Range(Box::new(l.strip_loc()), Box::new(r.strip_loc()), loc)
+            }
             IndexExpr0::DimPosition(n, _loc) => IndexExpr0::DimPosition(n, loc),
             IndexExpr0::Expr(e) => IndexExpr0::Expr(e.strip_loc()),
         }
@@ -218,7 +225,7 @@ impl Expr0 {
                 // a genuine `pi`/`time`/etc. reference must be reified.
                 if is_0_arity_builtin_fn_ci(id.as_str()) {
                     let lowercase_id = id.as_str().to_lowercase();
-                    Expr0::App(UntypedBuiltinFn(lowercase_id, vec![]), loc)
+                    Expr0::App(UntypedBuiltinFn(lowercase_id, Box::new([])), loc)
                 } else {
                     self
                 }
@@ -228,14 +235,14 @@ impl Expr0 {
                 let args = args
                     .into_iter()
                     .map(|arg| arg.reify_0_arity_builtins())
-                    .collect::<Vec<_>>();
+                    .collect();
                 Expr0::App(UntypedBuiltinFn(func, args), loc)
             }
             Expr0::Subscript(id, args, loc) => {
                 let args = args
                     .into_iter()
                     .map(|arg| arg.reify_0_arity_builtins())
-                    .collect::<Vec<_>>();
+                    .collect();
                 Expr0::Subscript(id, args, loc)
             }
             Expr0::Op1(op, mut r, loc) => {
@@ -413,109 +420,109 @@ fn test_parse() {
 
     let subscript1 = Box::new(Subscript(
         RawIdent::new_from_str("a"),
-        vec![IndexExpr0::Expr(Const(
+        Box::new([IndexExpr0::Expr(Const(
             "1".to_owned(),
             Literal::new(1.0),
             Loc::default(),
-        ))],
+        ))]),
         Loc::default(),
     ));
     let subscript2 = Box::new(Subscript(
         RawIdent::new_from_str("a"),
-        vec![
+        Box::new([
             IndexExpr0::Expr(Const("2".to_owned(), Literal::new(2.0), Loc::default())),
             IndexExpr0::Expr(App(
                 UntypedBuiltinFn(
                     "int".to_owned(),
-                    vec![Var(RawIdent::new_from_str("b"), Loc::default())],
+                    Box::new([Var(RawIdent::new_from_str("b"), Loc::default())]),
                 ),
                 Loc::default(),
             )),
-        ],
+        ]),
         Loc::default(),
     ));
 
     let subscript3 = Box::new(Subscript(
         RawIdent::new_from_str("a"),
-        vec![
+        Box::new([
             IndexExpr0::Wildcard(Loc::default()),
             IndexExpr0::Wildcard(Loc::default()),
-        ],
+        ]),
         Loc::default(),
     ));
 
     let subscript4 = Box::new(Subscript(
         RawIdent::new_from_str("a"),
-        vec![IndexExpr0::StarRange(
+        Box::new([IndexExpr0::StarRange(
             RawIdent::new_from_str("d"),
             Loc::default(),
-        )],
+        )]),
         Loc::default(),
     ));
 
     let subscript5 = Box::new(Subscript(
         RawIdent::new_from_str("a"),
-        vec![IndexExpr0::Range(
-            Const("1".to_owned(), Literal::new(1.0), Loc::default()),
-            Const("2".to_owned(), Literal::new(2.0), Loc::default()),
+        Box::new([IndexExpr0::Range(
+            Box::new(Const("1".to_owned(), Literal::new(1.0), Loc::default())),
+            Box::new(Const("2".to_owned(), Literal::new(2.0), Loc::default())),
             Loc::default(),
-        )],
+        )]),
         Loc::default(),
     ));
 
     let subscript6 = Box::new(Subscript(
         RawIdent::new_from_str("a"),
-        vec![IndexExpr0::Range(
-            Var(RawIdent::new_from_str("l"), Loc::default()),
-            Var(RawIdent::new_from_str("r"), Loc::default()),
+        Box::new([IndexExpr0::Range(
+            Box::new(Var(RawIdent::new_from_str("l"), Loc::default())),
+            Box::new(Var(RawIdent::new_from_str("r"), Loc::default())),
             Loc::default(),
-        )],
+        )]),
         Loc::default(),
     ));
 
     let dimension_pos1 = Box::new(Subscript(
         RawIdent::new_from_str("a"),
-        vec![IndexExpr0::DimPosition(1, Loc::default())],
+        Box::new([IndexExpr0::DimPosition(1, Loc::default())]),
         Loc::default(),
     ));
 
     let dimension_pos2 = Box::new(Subscript(
         RawIdent::new_from_str("a"),
-        vec![
+        Box::new([
             IndexExpr0::Expr(Var(RawIdent::new_from_str("DimM"), Loc::default())),
             IndexExpr0::DimPosition(1, Loc::default()),
             IndexExpr0::DimPosition(2, Loc::default()),
-        ],
+        ]),
         Loc::default(),
     ));
 
     let time1 = Box::new(App(
-        UntypedBuiltinFn("time".to_owned(), vec![]),
+        UntypedBuiltinFn("time".to_owned(), Box::new([])),
         Loc::default(),
     ));
 
     let time2 = Box::new(Subscript(
         RawIdent::new_from_str("aux"),
-        vec![IndexExpr0::Expr(Op2(
+        Box::new([IndexExpr0::Expr(Op2(
             BinaryOp::Add,
             Box::new(App(
                 UntypedBuiltinFn(
                     "int".to_owned(),
-                    vec![Op2(
+                    Box::new([Op2(
                         BinaryOp::Mod,
                         Box::new(App(
-                            UntypedBuiltinFn("time".to_owned(), vec![]),
+                            UntypedBuiltinFn("time".to_owned(), Box::new([])),
                             Loc::default(),
                         )),
                         Box::new(Const("5".to_owned(), Literal::new(5.0), Loc::default())),
                         Loc::default(),
-                    )],
+                    )]),
                 ),
                 Loc::default(),
             )),
             Box::new(Const("1".to_owned(), Literal::new(1.0), Loc::default())),
             Loc::default(),
-        ))],
+        ))]),
         Loc::default(),
     ));
 
@@ -530,10 +537,10 @@ fn test_parse() {
         UnaryOp::Transpose,
         Box::new(Subscript(
             RawIdent::new_from_str("matrix"),
-            vec![
+            Box::new([
                 IndexExpr0::Wildcard(Loc::default()),
                 IndexExpr0::Expr(Const("1".to_owned(), Literal::new(1.0), Loc::default())),
-            ],
+            ]),
             Loc::default(),
         )),
         Loc::default(),
@@ -668,10 +675,10 @@ fn test_safediv_operator() {
     let safediv1 = Box::new(App(
         UntypedBuiltinFn(
             "safediv".to_owned(),
-            vec![
+            Box::new([
                 Var(RawIdent::new_from_str("a"), Loc::default()),
                 Var(RawIdent::new_from_str("b"), Loc::default()),
-            ],
+            ]),
         ),
         Loc::default(),
     ));
@@ -680,10 +687,10 @@ fn test_safediv_operator() {
     let safediv2 = Box::new(App(
         UntypedBuiltinFn(
             "safediv".to_owned(),
-            vec![
+            Box::new([
                 Const("1".to_owned(), Literal::new(1.0), Loc::default()),
                 Const("2".to_owned(), Literal::new(2.0), Loc::default()),
-            ],
+            ]),
         ),
         Loc::default(),
     ));
@@ -692,7 +699,7 @@ fn test_safediv_operator() {
     let safediv3 = Box::new(App(
         UntypedBuiltinFn(
             "safediv".to_owned(),
-            vec![
+            Box::new([
                 Op2(
                     BinaryOp::Mul,
                     Box::new(Var(RawIdent::new_from_str("a"), Loc::default())),
@@ -700,7 +707,7 @@ fn test_safediv_operator() {
                     Loc::default(),
                 ),
                 Var(RawIdent::new_from_str("c"), Loc::default()),
-            ],
+            ]),
         ),
         Loc::default(),
     ));
@@ -712,10 +719,10 @@ fn test_safediv_operator() {
         Box::new(App(
             UntypedBuiltinFn(
                 "safediv".to_owned(),
-                vec![
+                Box::new([
                     Var(RawIdent::new_from_str("b"), Loc::default()),
                     Var(RawIdent::new_from_str("c"), Loc::default()),
-                ],
+                ]),
             ),
             Loc::default(),
         )),
@@ -765,4 +772,42 @@ fn test_parse_failures() {
         let err = Expr0::new(case, LexerType::Equation).unwrap_err();
         assert!(!err.is_empty());
     }
+}
+
+/// The parse tree is retained per variable for the life of the database and,
+/// under LTM, once per generated link-score equation, so a node's width is a
+/// memory number, not a detail: argument and index lists held as `Vec`s carry
+/// `Vec`'s minimum capacity per node (45 MiB of empty capacity in C-LEARN's
+/// LTM parse trees), and a `Range` carrying its two bounds inline makes every
+/// index as wide as two expressions (`docs/design/engine-performance.md`, C7).
+///
+/// Pinned as two relations that hold on every target -- an index is no
+/// wider than an expression (the `Range` bounds are boxed), and a call's
+/// argument list is a slice, not a `Vec` -- plus one upper bound on `Expr0`
+/// per pointer width, because the width is not a multiple of the pointer
+/// size: measured with the repo toolchain, 48 bytes with 8-byte pointers
+/// and 32 with 4-byte ones (wasm32), so a bound spelled in `usize`s holds on
+/// one and not the other. The bound is what a field added without thought
+/// trips; raising it, or pinning a new pointer width, is a decision, made
+/// here.
+#[test]
+fn node_widths_are_pinned() {
+    use std::mem::size_of;
+    assert!(size_of::<IndexExpr0>() <= size_of::<Expr0>());
+    assert_eq!(
+        size_of::<UntypedBuiltinFn<Expr0>>(),
+        size_of::<String>() + size_of::<Box<[Expr0]>>()
+    );
+    let pinned = if cfg!(target_pointer_width = "64") {
+        48
+    } else if cfg!(target_pointer_width = "32") {
+        32
+    } else {
+        panic!("Expr0's width is not pinned for this pointer width: measure it and pin it here");
+    };
+    assert!(
+        size_of::<Expr0>() <= pinned,
+        "Expr0 is {} bytes, over the {pinned} pinned for this pointer width",
+        size_of::<Expr0>()
+    );
 }

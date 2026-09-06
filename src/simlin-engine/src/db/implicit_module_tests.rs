@@ -763,6 +763,7 @@ fn a_hoisted_arguments_fragment_is_the_argument_compiled() {
         sync.project,
         helper_ident.to_string(),
         ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     )
     .as_ref()
     .expect("the hoisted argument must compile")
@@ -778,6 +779,7 @@ fn a_hoisted_arguments_fragment_is_the_argument_compiled() {
         model,
         sync.project,
         ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
     )
     .as_ref()
     .expect("the sibling must compile")

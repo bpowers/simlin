@@ -21,7 +21,7 @@ fn pop_model() -> TestProject {
         .stock("population", "100", &["births"], &["deaths"], None)
 }
 
-fn build_compiled(tp: &TestProject) -> CompiledSimulation {
+fn build_compiled(tp: &TestProject) -> std::sync::Arc<CompiledSimulation> {
     tp.compile_incremental()
         .expect("incremental compile should succeed")
 }

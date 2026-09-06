@@ -3277,8 +3277,9 @@ fn a_colliding_index_name_reads_the_axis_element_in_the_simulation() {
 
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("the colliding-name model compiles");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .expect("the colliding-name model compiles");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end().expect("simulation should run");
     let results = vm.into_results();

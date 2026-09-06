@@ -65,10 +65,11 @@ use anyhow::{Error as AnyError, Result};
 use simlin_engine::{self as engine};
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::ops::{Deref, DerefMut};
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 #[cfg(test)]
 use prost::Message;
@@ -425,25 +426,95 @@ pub struct SimlinProject {
     /// use `db.sync`/`db.sync_staged`/`db.restore` and read the current
     /// `SourceProject` via `db.current_source_project()`. There is no
     /// separate `sync_state` mutex to keep in lockstep.
-    pub db: Mutex<engine::db::SimlinDb>,
+    ///
+    /// Crate-private so that [`SimlinProject::lock_db`] is the only way to
+    /// reach it: the [`DbLock`] it returns is what releases superseded memos,
+    /// and a raw `db.lock()` would run queries whose garbage no entry point
+    /// sweeps until an unrelated one happens to.
+    pub(crate) db: Mutex<engine::db::SimlinDb>,
     /// Latches true the first time any simulation is created on this project
     /// with `enable_ltm = true`. `simlin_project_get_errors` reads it to
-    /// decide whether to transiently re-enable LTM during diagnostic
-    /// collection so the LTM diagnostic pipeline (the auto-flip-to-discovery
-    /// warning, synthetic-fragment compile failures, the GH #311 partial-
-    /// equation warnings, and the GH #486 non-Euler Error) reaches the
-    /// caller. `simlin_sim_new` resets the salsa `ltm_enabled` input to false
-    /// right after compile to avoid leaking the flag into patch validation,
-    /// which left every LTM diagnostic invisible to `get_errors` (GH #466);
-    /// this latch scopes the transient re-enable to callers who asked for LTM
-    /// at least once, so a project that never requested LTM still pays no LTM
-    /// synthesis cost in `get_errors`. An `AtomicBool` (not a mutex) because
-    /// the value is set-once-and-monotone and read without needing to be in
-    /// lockstep with the db lock; the actual flag toggle in `get_errors`
-    /// happens under the db lock, same as `simlin_sim_new`'s toggle, so the
-    /// two serialize and never interleave a partial LTM state.
+    /// decide whether to collect diagnostics under the LTM overlay, so the
+    /// LTM diagnostic pipeline (the auto-flip-to-discovery warning,
+    /// synthetic-fragment compile failures, the GH #311 partial-equation
+    /// warnings, and the GH #486 non-Euler Error) reaches the caller of a
+    /// project that simulated with LTM (GH #466), while a project that never
+    /// requested LTM pays no LTM synthesis cost in `get_errors`. The overlay
+    /// is an argument of the queries, not a flag on the project, so no
+    /// toggle or restore is involved. An `AtomicBool` (not a mutex) because
+    /// the value is set-once-and-monotone.
     pub(crate) ltm_requested: AtomicBool,
     pub ref_count: AtomicUsize,
+}
+
+/// The project's salsa database, locked.
+///
+/// Every entry point that runs queries locks the database through
+/// [`SimlinProject::lock_db`] -- the field is `pub(crate)` and this is its
+/// only guard -- and dropping the lock releases the memos those queries
+/// superseded (`SimlinDb::release_replaced_memos`, whose rustdoc holds the
+/// salsa mechanics), so the policy has one owner and no entry point can
+/// forget it. Lock the datamodel FIRST when both are needed: the
+/// project-wide order is datamodel-then-db.
+///
+/// The release runs on every drop, read-only entry points included. When
+/// nothing was superseded it costs one exclusive salsa access -- a
+/// `parking_lot` lock, a wait on database clones `SimlinDb` never has, an
+/// empty deferred-delete list per tracked function: microseconds. Its one
+/// side effect is that salsa counts exclusive accesses in a `u8` and opens a
+/// synthetic revision on the 256th without an input write, after which the
+/// next entry point deep-verifies the transitive cone of every memo it
+/// touches, once: for a compile or a diagnostics pass essentially the whole
+/// database, ~1,880 instructions per memo (~27 M instructions on C-LEARN
+/// plain, tens of milliseconds under LTM), re-executing nothing except the
+/// untracked-read `model_all_diagnostics`, which re-executes by design and
+/// backdates. A client fetching every variable's
+/// `simlin_model_get_latex_equation` on a 256-variable model between edits
+/// pays that once.
+///
+/// Never gate the release on a writer-set dirty flag: it is unsound, not
+/// merely imprecise. A memo an edit superseded is replaced in whichever
+/// LATER entry point first re-executes it, not in the first one after the
+/// edit -- `simlin_project_apply_patch` (the write) -> `simlin_project_get_errors`
+/// (overlay `Off`; releases and would clear the flag) -> `simlin_sim_new`
+/// (overlay `On`; replaces the 117 MiB LTM cone with the flag clear) leaves
+/// that cone resident until the next edit, which is the one-edit-late
+/// deferral the release exists to remove. An exact gate on salsa's
+/// `WillExecute` event (the event before every body execution, and a body
+/// execution is what replaces a memo) needs an event callback registered on
+/// the storage, and with one registered salsa constructs a
+/// `WillCheckCancellation` event -- `thread::current().id()` included -- on
+/// every memo fetch (salsa 0.28.1 `zalsa.rs` `unwind_if_revision_cancelled`,
+/// `function/fetch.rs`, `event.rs` `Event::new`): a cost on every hit to save
+/// a bounded walk.
+pub struct DbLock<'a>(MutexGuard<'a, engine::db::SimlinDb>);
+
+impl Deref for DbLock<'_> {
+    type Target = engine::db::SimlinDb;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for DbLock<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for DbLock<'_> {
+    fn drop(&mut self) {
+        self.0.release_replaced_memos();
+    }
+}
+
+impl SimlinProject {
+    /// Lock the salsa database for a run of queries; see [`DbLock`]. The only
+    /// accessor of the database, `pub` so the integration-test crate reads it
+    /// through the same guard as every entry point.
+    pub fn lock_db(&self) -> DbLock<'_> {
+        DbLock(self.db.lock().unwrap())
+    }
 }
 
 /// Opaque model structure
@@ -455,7 +526,9 @@ pub struct SimlinModel {
 
 /// Internal state for SimlinSim
 pub(crate) struct SimState {
-    pub(crate) compiled: Option<engine::CompiledSimulation>,
+    /// The compiled program, shared with the `Vm` (and with the salsa memo
+    /// that assembled it): `reset` recreates the `Vm` from this same `Arc`.
+    pub(crate) compiled: Option<Arc<engine::CompiledSimulation>>,
     pub(crate) vm: Option<engine::Vm>,
     /// Stores the error from VM creation if it failed.
     /// This allows us to surface the actual error when users try to run
@@ -466,8 +539,7 @@ pub(crate) struct SimState {
     /// Re-applied to new VMs created on reset.
     pub(crate) overrides: HashMap<usize, f64>,
     /// Snapshot of `model_ltm_variables().loop_partitions` taken at
-    /// `simlin_sim_new` time, while the db is locked and the
-    /// `ltm_enabled` flag is still set.  The value is the loop's
+    /// `simlin_sim_new` time, while the db is locked.  The value is the loop's
     /// **per-slot** cycle-partition vector (length 1 for a
     /// scalar/cross-element/mixed loop, one entry per element for an
     /// A2A loop).  Binds post-sim relative-loop-score queries to the
@@ -496,8 +568,8 @@ pub(crate) struct SimState {
     /// "loop unknown" error.
     pub(crate) loop_element_index: HashMap<String, engine::ltm_post::LoopElementIndex>,
     /// The loop-enumeration mode the LTM pipeline resolved at
-    /// `simlin_sim_new` time (captured while `ltm_enabled` was set and the
-    /// db locked, like `loop_partitions`).  `None` when the sim was created
+    /// `simlin_sim_new` time (captured while the db was locked, like
+    /// `loop_partitions`).  `None` when the sim was created
     /// with `enable_ltm = false` or compilation failed; `Some(mode)`
     /// otherwise.  Surfaced through `simlin_sim_get_ltm_mode` so a caller can
     /// tell exhaustive Johnson enumeration apart from the auto-flipped
@@ -522,14 +594,37 @@ pub(crate) struct SimState {
     /// Resolved conveyor plans for a conveyor model (`None`/empty otherwise).
     /// `run_to_end` consumes the VM (`into_results`) and `reset` recreates it
     /// from `compiled`; a plain `Vm::new(compiled)` would drop the conveyor
-    /// pass, so reset re-attaches these plans to the recreated VM.
+    /// pass, so reset re-attaches these plans to the recreated VM. They are
+    /// also what [`is_overridable_offset`](Self::is_overridable_offset) reads
+    /// while no Vm exists, so the cache is load-bearing for the override gate,
+    /// not only for reset.
     pub(crate) conveyor_plans: Option<Vec<engine::conveyor_compile::ConveyorPlan>>,
     /// Resolved queue plans for a queue model (`None`/empty otherwise). Cached
-    /// alongside `conveyor_plans` for the same reason: `reset` recreates the VM
-    /// from `compiled`, and a plain `Vm::new(compiled)` would drop the queue
-    /// pass, so reset re-attaches these plans. A model with both conveyors and
-    /// queues carries both plan sets.
+    /// alongside `conveyor_plans` for the same two reasons: `reset` recreates
+    /// the VM from `compiled`, and a plain `Vm::new(compiled)` would drop the
+    /// queue pass, so reset re-attaches these plans; and the no-Vm override
+    /// gate reads them. A model with both conveyors and queues carries both
+    /// plan sets.
     pub(crate) queue_plans: Option<Vec<engine::queue_compile::QueuePlan>>,
+}
+
+impl SimState {
+    /// Whether an override may claim `off`: a constant of the program that no
+    /// conveyor/queue pass writes under the cached plans
+    /// (`CompiledSimulation::is_overridable_offset`). The no-Vm twin of
+    /// `Vm::set_value`'s gate, for a sim whose `run_to_end` consumed its Vm;
+    /// the two agree by construction because both read the plans -- the same
+    /// plans `reset` re-attaches -- rather than a copy of what they write.
+    /// `false` with no compiled program, which keeps the gate fail-safe.
+    pub(crate) fn is_overridable_offset(&self, off: usize) -> bool {
+        self.compiled.as_ref().is_some_and(|compiled| {
+            compiled.is_overridable_offset(
+                self.conveyor_plans.as_deref().unwrap_or(&[]),
+                self.queue_plans.as_deref().unwrap_or(&[]),
+                off,
+            )
+        })
+    }
 }
 
 /// Opaque simulation structure

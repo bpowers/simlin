@@ -201,6 +201,42 @@ impl QueuePlan {
     }
 }
 
+/// Whether `off` is a slot the conveyor or queue pass writes every step under
+/// these plan sets: the union of [`ConveyorPlan::pass_written_offsets`] over
+/// `conveyor_plans` and [`QueuePlan::pass_written_offsets`] over `queue_plans`.
+///
+/// This is the one statement of "pass-written" across both plan kinds. The
+/// program cannot answer it by itself -- a pass-driven flow's placeholder `0`
+/// compiles to the same flows `AssignConstCurr` as a user's constant `0`, and
+/// the memoized program carries no marker -- so every consumer that must not
+/// treat such a slot as an overridable constant asks the plans through this
+/// predicate: [`CompiledSimulation::is_overridable_offset`] (the gate behind
+/// `Vm::set_value` and libsimlin's no-Vm twin) and the wasm backend's
+/// constants-validity region. A second spelling of the union would be exactly
+/// the drift GH #871 was: one consumer accepting an override another rejects.
+///
+/// A linear scan over the plans' slots: the override gates are cold paths and
+/// the wasm backend asks once per constant at compile time. Empty plan sets
+/// (an ordinary model) match nothing.
+///
+/// [`ConveyorPlan::pass_written_offsets`]: crate::conveyor_compile::ConveyorPlan::pass_written_offsets
+/// [`CompiledSimulation::is_overridable_offset`]: crate::vm::CompiledSimulation::is_overridable_offset
+pub fn is_pass_written(
+    conveyor_plans: &[crate::conveyor_compile::ConveyorPlan],
+    queue_plans: &[QueuePlan],
+    off: usize,
+) -> bool {
+    conveyor_plans
+        .iter()
+        .flat_map(|plan| plan.pass_written_offsets())
+        .chain(
+            queue_plans
+                .iter()
+                .flat_map(|plan| plan.pass_written_offsets()),
+        )
+        .any(|written| written == off)
+}
+
 /// Does the named model in `project` contain any queue stock? The cheap predicate
 /// [`compile_sim`] uses to decide whether to route through the special stock-type
 /// build path instead of the ordinary incremental compile. Mirrors
@@ -882,9 +918,9 @@ fn reject_conveyor_queue_conflict(
 ///
 /// The expanded project is a SEPARATE `SourceProject` from the user's, so
 /// diagnostics -- which `collect_all_diagnostics` gathers from the user's handle
-/// -- never see a synthetic `$conv$`/`$queue$` ident. It carries `ltm_enabled ==
-/// false` (the sync path never sets the flag), so the expanded compile does not
-/// participate in LTM: conveyor/queue plus LTM is a documented degradation.
+/// -- never see a synthetic `$conv$`/`$queue$` ident. It is compiled with the
+/// LTM overlay `Off` (`build_compiled` fixes that), so the expanded compile does
+/// not participate in LTM: conveyor/queue plus LTM is a documented degradation.
 ///
 /// Enforces the Euler-only rule for both stock types (§10.3): a conveyor present
 /// under non-Euler yields [`ErrorCode::ConveyorNonEulerMethod`] (behavior-
@@ -905,7 +941,7 @@ pub fn build_compiled(
     project: &datamodel::Project,
     main_model: &str,
 ) -> crate::common::Result<(
-    crate::vm::CompiledSimulation,
+    std::sync::Arc<crate::vm::CompiledSimulation>,
     Vec<crate::conveyor_compile::ConveyorPlan>,
     Vec<QueuePlan>,
 )> {
@@ -994,7 +1030,15 @@ pub fn build_compiled(
     // handle is re-derived here on every build, which is exactly what makes a
     // rolled-back staged patch unable to leave stale expanded inputs behind.
     let expanded_project = db.sync_expanded(&expanded);
-    let mut compiled = crate::db::compile_project_incremental(db, expanded_project, main_model)?;
+    // The expanded twin is always compiled without the LTM overlay: LTM over
+    // a conveyor/queue is a documented degradation (docs/design/conveyors.md
+    // s9.6, queues.md s10.5).
+    let compiled = crate::db::compile_project_incremental(
+        db,
+        expanded_project,
+        main_model,
+        crate::db::LtmOverlay::Off,
+    )?;
 
     let mut conveyor_plans = if conv_metas.is_empty() {
         Vec::new()
@@ -1048,19 +1092,13 @@ pub fn build_compiled(
     // Pass-written slots (driven outflows, leaks, containers) must not be
     // overridable constants: their placeholder `0` equations compile to
     // AssignConstCurr, but the passes overwrite the slots every step, so an
-    // accepted override would be silently ineffective (GH #871). Retracting
-    // them HERE -- on the CompiledSimulation callers cache -- is what makes
-    // libsimlin's no-VM `is_constant_offset` validation (after run_to_end
-    // consumed the VM) reject exactly like the live VM does; the Vm repeats
-    // the retraction when plans are attached, as defense for a directly
-    // assembled Vm.
-    for plan in &conveyor_plans {
-        compiled.exclude_overridable_offsets(plan.pass_written_offsets());
-    }
-    for plan in &queue_plans {
-        compiled.exclude_overridable_offsets(plan.pass_written_offsets());
-    }
-
+    // accepted override would be silently ineffective (GH #871). Nothing is
+    // edited into the memoized program for that, and no per-build set is
+    // derived here: the retraction is a function of the plans, asked at every
+    // override gate through `CompiledSimulation::is_overridable_offset` (over
+    // `is_pass_written`), whether the plans are attached to a live Vm or cached
+    // beside the program by a caller whose Vm was consumed (libsimlin after
+    // `run_to_end`). The program stays the memo's own `Arc`.
     Ok((compiled, conveyor_plans, queue_plans))
 }
 
@@ -1560,7 +1598,7 @@ pub(crate) fn build_compiled_fresh(
     project: &datamodel::Project,
     main_model: &str,
 ) -> crate::common::Result<(
-    crate::vm::CompiledSimulation,
+    std::sync::Arc<crate::vm::CompiledSimulation>,
     Vec<crate::conveyor_compile::ConveyorPlan>,
     Vec<QueuePlan>,
 )> {
@@ -1572,12 +1610,17 @@ pub(crate) fn build_compiled_fresh(
 /// simulation, both special-stock plan sets, and which branch was taken.
 ///
 /// `special` is what a caller needs in order to reason about LTM: the expansion
-/// path compiles a different `SourceProject` (with `ltm_enabled == false`), so a
+/// path compiles a different `SourceProject` (with the LTM overlay `Off`), so a
 /// special-stock model carries no LTM instrumentation. libsimlin's
 /// `simlin_sim_new` reads it to decide whether to snapshot the LTM
 /// loop-partition metadata.
 pub struct SimBuild {
-    pub compiled: crate::vm::CompiledSimulation,
+    /// The salsa memo's own `Arc`, on both paths: the `Vm` takes the same one,
+    /// so nothing is deep-copied on the way to execution, and the program's
+    /// constant index is never edited -- the slots the plans below write are
+    /// subtracted at the override gate (`CompiledSimulation::is_overridable_offset`),
+    /// so a caller that keeps `compiled` must keep the plans beside it.
+    pub compiled: std::sync::Arc<crate::vm::CompiledSimulation>,
     /// One plan per conveyor belt (per array element for an arrayed conveyor).
     /// Empty unless `special`.
     pub conveyor_plans: Vec<crate::conveyor_compile::ConveyorPlan>,
@@ -1606,9 +1649,9 @@ pub struct SimBuild {
 /// funnel through. (The "never the FIRST outflow" half additionally runs
 /// pre-expansion in [`expand_queues`], the only place that evidence still exists.)
 ///
-/// The `db`/`source_project` pair drives the ordinary branch, preserving both
-/// incremental caching and whatever `ltm_enabled` the caller set on
-/// `source_project`. `datamodel` -- the synced representation of the SAME project
+/// The `db`/`source_project` pair drives the ordinary branch, preserving
+/// incremental caching; `overlay` says whether that branch assembles the LTM
+/// overlay. `datamodel` -- the synced representation of the SAME project
 /// -- drives the marker scan and, on the special branch, the expansion. BOTH
 /// branches now compile inside `db`; the special branch simply compiles `db`'s
 /// expanded `SourceProject` instead of the user's.
@@ -1624,6 +1667,7 @@ pub fn compile_sim(
     source_project: crate::db::SourceProject,
     datamodel: &datamodel::Project,
     main_model: &str,
+    overlay: crate::db::LtmOverlay,
 ) -> crate::common::Result<SimBuild> {
     if crate::conveyor_compile::project_has_conveyor(datamodel, main_model)
         || project_has_queue(datamodel, main_model)
@@ -1651,7 +1695,7 @@ pub fn compile_sim(
     // set. Keeping the handles means at most one expanded input set is ever created
     // per db, and a model that regains a conveyor re-syncs onto them. A stale slot
     // is unobservable: it is only ever read through `sync_expanded`'s return value.
-    let compiled = crate::db::compile_project_incremental(db, source_project, main_model)?;
+    let compiled = crate::db::compile_project_incremental(db, source_project, main_model, overlay)?;
     Ok(SimBuild {
         compiled,
         conveyor_plans: Vec::new(),
@@ -1672,8 +1716,9 @@ pub fn build_sim(
     source_project: crate::db::SourceProject,
     datamodel: &datamodel::Project,
     main_model: &str,
+    overlay: crate::db::LtmOverlay,
 ) -> crate::common::Result<crate::vm::Vm> {
-    let build = compile_sim(db, source_project, datamodel, main_model)?;
+    let build = compile_sim(db, source_project, datamodel, main_model, overlay)?;
     let mut vm = crate::vm::Vm::new(build.compiled)?;
     // Attaching empty plan sets is semantically a no-op, but the ordinary path
     // has never touched the plan setters; keep it that way so an ordinary VM is
@@ -1746,14 +1791,25 @@ mod tests {
 
         // The ordinary incremental compile path MUST still reject the un-expanded
         // queue -- the guard's whole purpose (docs/design/queues.md §10.3).
-        let guard_err = crate::db::compile_project_incremental(&db, sync.project, &main)
-            .expect_err("ordinary compile must reject an un-expanded queue");
+        let guard_err = crate::db::compile_project_incremental(
+            &db,
+            sync.project,
+            &main,
+            crate::db::LtmOverlay::Off,
+        )
+        .expect_err("ordinary compile must reject an un-expanded queue");
         assert_eq!(guard_err.code, crate::common::ErrorCode::QueueNotExpanded);
 
         // `build_sim` routes around it via the special build path and produces a
         // runnable VM whose queue stock simulates.
-        let mut vm = build_sim(&mut db, sync.project, &project, &main)
-            .expect("build_sim compiles a queue model");
+        let mut vm = build_sim(
+            &mut db,
+            sync.project,
+            &project,
+            &main,
+            crate::db::LtmOverlay::Off,
+        )
+        .expect("build_sim compiles a queue model");
         vm.run_to_end().expect("queue model runs");
         assert!(vm.get_series(&Ident::new("waiting")).is_some());
     }
@@ -1831,8 +1887,14 @@ mod tests {
         let main = project.models[0].name.clone();
         let mut db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
-        let mut vm =
-            build_sim(&mut db, sync.project, &project, &main).expect("ordinary model builds");
+        let mut vm = build_sim(
+            &mut db,
+            sync.project,
+            &project,
+            &main,
+            crate::db::LtmOverlay::Off,
+        )
+        .expect("ordinary model builds");
         vm.run_to_end().expect("ordinary model runs");
     }
 
@@ -1923,8 +1985,14 @@ mod tests {
             .clone();
         let mut db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, project, None);
-        build_sim(&mut db, sync.project, project, &main)
-            .expect_err("a special stock outside the main model must be rejected")
+        build_sim(
+            &mut db,
+            sync.project,
+            project,
+            &main,
+            crate::db::LtmOverlay::Off,
+        )
+        .expect_err("a special stock outside the main model must be rejected")
     }
 
     #[test]
@@ -2129,6 +2197,85 @@ mod tests {
     }
 
     #[test]
+    fn reattached_queue_plans_redefine_the_overridable_set() {
+        // The queue-setter twin of `conveyor_compile_tests::
+        // reattached_conveyor_plans_redefine_the_overridable_set`: the Vm's
+        // override gate reads the plans attached NOW. `set_queue_plans`
+        // REPLACES the plan set, so a driven outflow only a no-longer-attached
+        // plan wrote is an ordinary constant again and the newly attached
+        // plan's outflow is retracted. Two independent queues give two
+        // production plans (`resolve_plans` over the expanded program, what
+        // `build_compiled` hands the Vm); attaching one and then the other is
+        // the production call with a different production-built argument.
+        let project = parse(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>two queues</name><vendor>test</vendor><product version="1.0">test</product></header>
+  <sim_specs method="Euler" time_units="Months">
+    <start>0</start><stop>4</stop><dt>0.25</dt>
+  </sim_specs>
+  <model><variables>
+    <stock name="waiting_a"><eqn>0</eqn><inflow>arrivals_a</inflow><outflow>into_service_a</outflow><queue/></stock>
+    <flow name="arrivals_a"><eqn>10</eqn><non_negative/></flow>
+    <flow name="into_service_a"><eqn>0</eqn></flow>
+    <stock name="served_a"><eqn>0</eqn><inflow>into_service_a</inflow></stock>
+    <stock name="waiting_b"><eqn>0</eqn><inflow>arrivals_b</inflow><outflow>into_service_b</outflow><queue/></stock>
+    <flow name="arrivals_b"><eqn>5</eqn><non_negative/></flow>
+    <flow name="into_service_b"><eqn>0</eqn></flow>
+    <stock name="served_b"><eqn>0</eqn><inflow>into_service_b</inflow></stock>
+  </variables></model>
+</xmile>"#,
+        );
+        let main = project.models[0].name.clone();
+        let (expanded, metas) = expand_queues(&project, &main).expect("expand");
+        let mut db = crate::db::SimlinDb::default();
+        let sync = crate::db::sync_from_datamodel_incremental(&mut db, &expanded, None);
+        let compiled = crate::db::compile_project_incremental(
+            &db,
+            sync.project,
+            &main,
+            crate::db::LtmOverlay::Off,
+        )
+        .expect("compile");
+        let plans = resolve_plans(&metas, &compiled.offsets).expect("resolve");
+        assert_eq!(plans.len(), 2, "one plan per queue");
+        let plan_for = |stock: &str| {
+            let off = compiled.offsets[&Ident::new(stock)];
+            plans
+                .iter()
+                .find(|p| p.stock_off == off)
+                .cloned()
+                .expect("a plan for the queue")
+        };
+        let (plan_a, plan_b) = (plan_for("waiting_a"), plan_for("waiting_b"));
+        let mut vm = crate::vm::Vm::new(compiled).expect("vm");
+        let verdict = |vm: &mut crate::vm::Vm, name: &str| {
+            vm.set_value(&Ident::new(name), 1.0)
+                .map(|_| ())
+                .map_err(|e| e.code)
+        };
+
+        vm.set_queue_plans(vec![plan_a]);
+        assert_eq!(
+            verdict(&mut vm, "into_service_a"),
+            Err(ErrorCode::BadOverride)
+        );
+        assert_eq!(verdict(&mut vm, "into_service_b"), Ok(()));
+
+        vm.set_queue_plans(vec![plan_b]);
+        assert_eq!(
+            verdict(&mut vm, "into_service_b"),
+            Err(ErrorCode::BadOverride),
+            "the newly attached plan's driven outflow is retracted"
+        );
+        assert_eq!(
+            verdict(&mut vm, "into_service_a"),
+            Ok(()),
+            "a slot only the replaced plan wrote is an ordinary constant again"
+        );
+    }
+
+    #[test]
     fn scalar_queue_passes_material_through_at_steady_state() {
         // No initial batch: the queue is a faithful pass-through. Admit-then-
         // serve (§4.2/§4.3) drains the just-arrived batch every step, so the
@@ -2238,8 +2385,13 @@ mod tests {
         let main = project.models[0].name.clone();
         let mut db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
-        let err = crate::db::compile_project_incremental(&db, sync.project, &main)
-            .expect_err("un-expanded queue must be rejected");
+        let err = crate::db::compile_project_incremental(
+            &db,
+            sync.project,
+            &main,
+            crate::db::LtmOverlay::Off,
+        )
+        .expect_err("un-expanded queue must be rejected");
         assert_eq!(err.code, ErrorCode::QueueNotExpanded);
     }
 
@@ -2416,8 +2568,14 @@ mod tests {
         let main = project.models[0].name.clone();
         let mut db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
-        let err = build_sim(&mut db, sync.project, &project, &main)
-            .expect_err("build_sim must reject a both-marked stock");
+        let err = build_sim(
+            &mut db,
+            sync.project,
+            &project,
+            &main,
+            crate::db::LtmOverlay::Off,
+        )
+        .expect_err("build_sim must reject a both-marked stock");
         assert_eq!(err.code, ErrorCode::StockBothConveyorAndQueue);
     }
 
@@ -4289,8 +4447,14 @@ mod tests {
         let main = project.models[0].name.clone();
         let mut db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
-        let err = build_sim(&mut db, sync.project, &project, &main)
-            .expect_err("build_sim must reject the duplicate pair");
+        let err = build_sim(
+            &mut db,
+            sync.project,
+            &project,
+            &main,
+            crate::db::LtmOverlay::Off,
+        )
+        .expect_err("build_sim must reject the duplicate pair");
         assert_eq!(err.code, crate::common::ErrorCode::DuplicateVariable);
     }
 }

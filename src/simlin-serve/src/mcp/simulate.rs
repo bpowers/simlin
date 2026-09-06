@@ -191,8 +191,14 @@ fn simulate_sync(
     // build path and ordinary models through the incremental compile, so the MCP
     // simulate tool handles the special stock types instead of tripping the
     // NotExpanded guard.
-    let mut vm = build_sim(&mut db, sync.project, &project, model_name)
-        .map_err(|e| SimulateError::Engine(format!("compile error: {e}")))?;
+    let mut vm = build_sim(
+        &mut db,
+        sync.project,
+        &project,
+        model_name,
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .map_err(|e| SimulateError::Engine(format!("compile error: {e}")))?;
     vm.run_to_end()
         .map_err(|e| SimulateError::Engine(format!("sim error: {e}")))?;
     let results = vm.into_results();

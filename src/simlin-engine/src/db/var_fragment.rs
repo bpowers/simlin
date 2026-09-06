@@ -18,6 +18,14 @@
 //! `Expr2` form: the fragment borrows it, and unit checking and the LTM
 //! describers hold its `Arc` (`db::model_lowered_variables`).
 //!
+//! The LTM overlay (`db::LtmOverlay`) reaches a fragment through exactly one
+//! of those shapes, a module instance's (`module_dep_shape`: the sub-model's
+//! layout, which carries its LTM section under `On`). So a fragment is keyed
+//! on the overlay only where it resolves one: [`fragment_reads_module`] is
+//! that question, [`fragment_overlay`] turns it into the key a caller asks
+//! for, and each constructor asserts the two agree with the shapes it built,
+//! since an under-approximation would be a silent miscompile.
+//!
 //! Because a plain function cannot accumulate salsa diagnostics, the
 //! diagnostics the constructor would emit are returned **as data**
 //! (`ExplicitFragment::diagnostics`) and replayed by the tracked caller
@@ -45,10 +53,10 @@ use crate::canonicalize;
 use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::fragment::{DepShape, FragmentInput};
 use crate::db::{
-    Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ImplicitVarMeta, ModuleInputSet,
-    ParsedVariableResult, SourceModel, SourceProject, SourceVariable, SourceVariableKind,
-    VariableDeps, canonical_module_input_set, model_implicit_var_by_name, model_variable_by_name,
-    module_dep_shape, parse_source_variable, project_converted_dimensions,
+    Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ImplicitVarMeta, LtmOverlay,
+    ModuleInputSet, ParsedVariableResult, SourceModel, SourceProject, SourceVariable,
+    SourceVariableKind, VariableDeps, canonical_module_input_set, model_implicit_var_by_name,
+    model_variable_by_name, module_dep_shape, parse_source_variable, project_converted_dimensions,
     project_dimensions_context, variable_dimensions, variable_direct_dependencies, variable_tables,
 };
 use crate::dimensions::{Dimension, DimensionsContext};
@@ -88,17 +96,45 @@ pub(crate) fn dimensions_named(
         .collect()
 }
 
+/// The shape of a plain (non-module) source variable: its declared
+/// dimensions. The one owner of that rule; every arm that resolves a source
+/// variable's shape calls it, so the declared-dimensions-to-shape step
+/// cannot be stated differently in two places.
+pub(crate) fn source_dimensions(
+    db: &dyn Db,
+    var: SourceVariable,
+    project: SourceProject,
+) -> DepShape {
+    DepShape::var(variable_dimensions(db, var, project).clone())
+}
+
+/// The shape of a plain (non-module) implicit helper: its declared
+/// dimensions (a structural apply-to-all capture; every other helper is
+/// scalar). The one owner of that rule, as `source_dimensions` is for a
+/// source variable.
+pub(crate) fn helper_dimensions(
+    db: &dyn Db,
+    project: SourceProject,
+    meta: &ImplicitVarMeta,
+) -> DepShape {
+    DepShape::var(dimensions_named(
+        &meta.dimensions,
+        project_dimensions_context(db, project),
+    ))
+}
+
 /// The shape of a source variable: a module instance's sub-model shape, or the
 /// variable's declared dimensions.
 pub(crate) fn source_dep_shape(
     db: &dyn Db,
     var: SourceVariable,
     project: SourceProject,
+    overlay: LtmOverlay,
 ) -> DepShape {
     if var.kind(db) == SourceVariableKind::Module {
-        module_dep_shape(db, project, var.model_name(db))
+        module_dep_shape(db, project, var.model_name(db), overlay)
     } else {
-        DepShape::var(variable_dimensions(db, var, project).clone())
+        source_dimensions(db, var, project)
     }
 }
 
@@ -109,14 +145,17 @@ pub(crate) fn implicit_dep_shape(
     db: &dyn Db,
     project: SourceProject,
     meta: &ImplicitVarMeta,
+    overlay: LtmOverlay,
 ) -> DepShape {
     if meta.is_module {
-        module_dep_shape(db, project, meta.model_name.as_deref().unwrap_or(""))
+        module_dep_shape(
+            db,
+            project,
+            meta.model_name.as_deref().unwrap_or(""),
+            overlay,
+        )
     } else {
-        DepShape::var(dimensions_named(
-            &meta.dimensions,
-            project_dimensions_context(db, project),
-        ))
+        helper_dimensions(db, project, meta)
     }
 }
 
@@ -150,10 +189,15 @@ impl DeclaredName {
             return Some(DeclaredName::Source(var));
         }
         model_implicit_var_by_name(db, model, project, name.to_string())
-            .map(|meta| DeclaredName::Helper(Box::new(meta)))
+            .as_ref()
+            .map(|meta| DeclaredName::Helper(Box::new(meta.clone())))
     }
 
-    fn is_module(&self, db: &dyn Db) -> bool {
+    /// Whether the name is a module instance: an explicit `Module` variable,
+    /// or a helper the parse expanded a module-function call into. The one
+    /// name-level question [`shape`](Self::shape) branches on, and hence the
+    /// one that decides whether the reader's shape depends on the overlay.
+    pub(crate) fn is_module(&self, db: &dyn Db) -> bool {
         match self {
             DeclaredName::Source(var) => var.kind(db) == SourceVariableKind::Module,
             DeclaredName::Helper(meta) => meta.is_module,
@@ -162,10 +206,20 @@ impl DeclaredName {
 
     /// The shape the compiler resolves the name through: a module instance's
     /// sub-model shape, or the declared dimensions.
-    pub(crate) fn shape(&self, db: &dyn Db, project: SourceProject) -> DepShape {
+    ///
+    /// A module instance's shape is its sub-model's layout, which depends on
+    /// the `overlay` (the sub-model carries its LTM section under it), so a
+    /// reader of this shape is keyed on the overlay too; a plain variable's
+    /// shape is its dimensions, the same under either.
+    pub(crate) fn shape(
+        &self,
+        db: &dyn Db,
+        project: SourceProject,
+        overlay: LtmOverlay,
+    ) -> DepShape {
         match self {
-            DeclaredName::Source(var) => source_dep_shape(db, *var, project),
-            DeclaredName::Helper(meta) => implicit_dep_shape(db, project, meta),
+            DeclaredName::Source(var) => source_dep_shape(db, *var, project, overlay),
+            DeclaredName::Helper(meta) => implicit_dep_shape(db, project, meta, overlay),
         }
     }
 
@@ -178,12 +232,148 @@ impl DeclaredName {
     /// on a module cycle -- which the unit pass reaches, its scope being an
     /// iterative worklist for exactly that reason -- turn the lowering into
     /// salsa's dependency-graph panic.
+    ///
+    /// Overlay-independent by construction: it never reads a sub-model's
+    /// layout, which is also what keeps the lowering memos that read it
+    /// keyed on the variable alone.
     pub(crate) fn dimensions_shape(&self, db: &dyn Db, project: SourceProject) -> Option<DepShape> {
-        if self.is_module(db) {
-            None
-        } else {
-            Some(self.shape(db, project))
+        match self {
+            DeclaredName::Source(var) => (var.kind(db) != SourceVariableKind::Module)
+                .then(|| source_dimensions(db, *var, project)),
+            DeclaredName::Helper(meta) => {
+                (!meta.is_module).then(|| helper_dimensions(db, project, meta))
+            }
         }
+    }
+}
+
+/// Whether a fragment assembled from these pieces resolves a module
+/// instance's shape: the variable is itself an instance, one of the `heads`
+/// its equation resolves through is one, or its parse minted one
+/// (`implicit_vars`, whose instances are keys of the fragment's shapes
+/// whether or not the equation reads their output -- see `compiler_shapes`).
+///
+/// The pure form of [`fragment_reads_module`], so the tracked predicate and
+/// the constructors' assertions state the rule once. It reads only what its
+/// callers have already read: the variable's and each source head's `kind`
+/// (which `source_dep_shape` reads for every head), a helper head's
+/// `is_module` field, and the parse memo's `implicit_vars`.
+pub(crate) fn resolves_a_module_shape(
+    db: &dyn Db,
+    self_is_module: bool,
+    heads: &[(Ident<Canonical>, DeclaredName)],
+    implicit_vars: &[crate::capture::ImplicitVar],
+) -> bool {
+    self_is_module
+        || heads.iter().any(|(_, declared)| declared.is_module(db))
+        || implicit_vars
+            .iter()
+            .any(crate::capture::ImplicitVar::is_module)
+}
+
+/// Whether `var`'s fragment resolves a module instance's shape
+/// ([`resolves_a_module_shape`]) -- equivalently, whether its value depends
+/// on the LTM overlay, since a module instance's shape is the sub-model's
+/// layout (`module_dep_shape`, which carries that model's LTM section under
+/// `On`) and every other shape is a dimension list, the same under either.
+/// [`fragment_overlay`] turns it into the overlay a fragment is keyed on.
+///
+/// Tracked, and reading only memos the fragment itself depends on (the
+/// parse, the lowering, the heads' kinds), for the reason every projection
+/// query in `db/` is tracked: the answer is a `bool` that backdates across
+/// every edit leaving it unchanged, where the lowering memo it is derived
+/// from moves with the equation's text. A caller resolving a fragment's key
+/// through it therefore gains a dependency that an ordinary equation edit
+/// does not invalidate.
+///
+/// The one place it demands more than the fragment does is a variable whose
+/// equation did not PARSE: the constructor bails before lowering it, where
+/// this still asks for the (total, and then trivial) lowering memo. Such a
+/// fragment is `None` under either overlay, so the key it lands on does not
+/// matter -- only that the answer stays correct.
+#[salsa::tracked(returns(copy))]
+pub(crate) fn fragment_reads_module(
+    db: &dyn Db,
+    var: SourceVariable,
+    model: SourceModel,
+    project: SourceProject,
+) -> bool {
+    // An instance's OWN shape is its sub-model's layout, whatever it reads.
+    if var.kind(db) == SourceVariableKind::Module {
+        return true;
+    }
+    let parsed = parse_source_variable(db, var, project);
+    let lowered = lowered_source_variable(db, var, model, project);
+    resolves_a_module_shape(db, false, &lowered.heads, &parsed.implicit_vars)
+}
+
+/// [`fragment_reads_module`] for one of the implicit helpers a parse
+/// synthesized, keyed on the helper's canonical name -- the only identity a
+/// helper has, and the key `model_implicit_var_info`,
+/// `lowered_implicit_variable` and `compile_implicit_var_fragment` all file
+/// it under. `false` for a name the model synthesizes no helper of, which is
+/// also the fragment those callers get (`ImplicitInputError::Absent`).
+///
+/// A helper mints no helpers of its own -- its parse is its parent's -- so
+/// the instances it can resolve through are all among its heads.
+#[salsa::tracked(returns(copy))]
+pub(crate) fn implicit_fragment_reads_module(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    implicit_var_name: String,
+) -> bool {
+    let Some(meta) =
+        model_implicit_var_by_name(db, model, project, implicit_var_name.clone()).as_ref()
+    else {
+        return false;
+    };
+    let Some(lowered) = crate::db::lowered_implicit_variable(db, model, project, implicit_var_name)
+    else {
+        return false;
+    };
+    resolves_a_module_shape(db, meta.is_module, &lowered.heads, &[])
+}
+
+/// The overlay `var`'s fragment is compiled and memoized under when a caller
+/// asks for `requested`: `requested` where the fragment resolves a module
+/// instance's shape ([`fragment_reads_module`]), `Off` otherwise, since the
+/// fragment's value is then the same under either overlay and one memo
+/// serves both.
+///
+/// Every production caller of the fragment queries resolves its key through
+/// this, so no pass keys a fragment on an overlay the fragment does not
+/// read. A plain (`Off`) compile short-circuits: it asks for the key it
+/// would get anyway, so it never even demands the predicate.
+pub(crate) fn fragment_overlay(
+    db: &dyn Db,
+    var: SourceVariable,
+    model: SourceModel,
+    project: SourceProject,
+    requested: LtmOverlay,
+) -> LtmOverlay {
+    if requested == LtmOverlay::Off || fragment_reads_module(db, var, model, project) {
+        requested
+    } else {
+        LtmOverlay::Off
+    }
+}
+
+/// [`fragment_overlay`] for one of the implicit helpers a parse synthesized,
+/// over [`implicit_fragment_reads_module`].
+pub(crate) fn implicit_fragment_overlay(
+    db: &dyn Db,
+    model: SourceModel,
+    project: SourceProject,
+    implicit_var_name: String,
+    requested: LtmOverlay,
+) -> LtmOverlay {
+    if requested == LtmOverlay::Off
+        || implicit_fragment_reads_module(db, model, project, implicit_var_name)
+    {
+        requested
+    } else {
+        LtmOverlay::Off
     }
 }
 
@@ -195,8 +385,10 @@ pub(crate) fn model_dep_shape(
     model: SourceModel,
     project: SourceProject,
     name: &str,
+    overlay: LtmOverlay,
 ) -> Option<DepShape> {
-    DeclaredName::resolve(db, model, project, name).map(|declared| declared.shape(db, project))
+    DeclaredName::resolve(db, model, project, name)
+        .map(|declared| declared.shape(db, project, overlay))
 }
 
 /// Whether `flow_ident` names a flow that is DRIVEN by a special-stock
@@ -282,9 +474,10 @@ fn source_self_shape(
     var: SourceVariable,
     project: SourceProject,
     parsed: &ParsedVariableResult,
+    overlay: LtmOverlay,
 ) -> DepShape {
     if var.kind(db) == SourceVariableKind::Module {
-        module_dep_shape(db, project, var.model_name(db))
+        module_dep_shape(db, project, var.model_name(db), overlay)
     } else {
         DepShape::var(
             parsed
@@ -346,17 +539,18 @@ fn compiler_shapes(
     self_shape: DepShape,
     heads: &[(Ident<Canonical>, DeclaredName)],
     parsed: &ParsedVariableResult,
+    overlay: LtmOverlay,
 ) -> IdentMap<Ident<Canonical>, DepShape> {
     let mut dep_shapes: IdentMap<Ident<Canonical>, DepShape> = Default::default();
     dep_shapes.insert(Ident::new(self_ident), self_shape);
     for (ident, declared) in heads {
-        dep_shapes.insert(ident.clone(), declared.shape(db, project));
+        dep_shapes.insert(ident.clone(), declared.shape(db, project, overlay));
     }
     for implicit_var in &parsed.implicit_vars {
         if let Some(dm_module) = implicit_var.module() {
             dep_shapes
                 .entry(Ident::new(&dm_module.ident))
-                .or_insert_with(|| module_dep_shape(db, project, &dm_module.model_name));
+                .or_insert_with(|| module_dep_shape(db, project, &dm_module.model_name, overlay));
         }
     }
     dep_shapes
@@ -477,6 +671,7 @@ pub(crate) fn explicit_fragment_input<'db>(
     model: SourceModel,
     project: SourceProject,
     module_input_names: &[String],
+    overlay: LtmOverlay,
 ) -> ExplicitFragment<'db> {
     let var_ident = var.ident(db).clone();
     let model_name = model.name(db);
@@ -586,8 +781,32 @@ pub(crate) fn explicit_fragment_input<'db>(
     let dim_context = project_dimensions_context(db, project);
     let converted_dims = project_converted_dimensions(db, project);
 
-    let self_shape = source_self_shape(db, var, project, parsed);
-    let dep_shapes = compiler_shapes(db, project, &var_ident, self_shape, heads, parsed);
+    let self_shape = source_self_shape(db, var, project, parsed, overlay);
+    let dep_shapes = compiler_shapes(db, project, &var_ident, self_shape, heads, parsed, overlay);
+
+    // The overlay reaches this fragment only through a module shape in
+    // `dep_shapes` -- every `module_dep_shape` call above put one there --
+    // and `fragment_reads_module` is what the memo's key is resolved from
+    // (`fragment_overlay`), so the two must agree exactly. An
+    // UNDER-approximation is a silent miscompile: an `On` assembly would read
+    // a plain-keyed fragment whose module offsets were resolved against the
+    // sub-model's `Off` layout, with no bad id and no bad reference to
+    // notice. An over-approximation only costs a second memo. Asserted rather
+    // than trusted, and asserted over the shapes themselves rather than
+    // re-deriving them, because the two statements sit in different
+    // functions and nothing else would notice them drifting apart. The
+    // assertion reads only what this constructor has already read, so the
+    // salsa dependency set is the same in debug and release builds.
+    debug_assert_eq!(
+        dep_shapes.values().any(DepShape::is_module),
+        resolves_a_module_shape(
+            db,
+            var.kind(db) == SourceVariableKind::Module,
+            heads,
+            &parsed.implicit_vars
+        ),
+        "'{var_ident}': `fragment_reads_module` disagrees with the shapes its fragment resolves"
+    );
 
     // Errors introduced during AST lowering (e.g. `MismatchedDimensions` from
     // the Expr2 lowering) land on the lowered variable, not the parsed one, so

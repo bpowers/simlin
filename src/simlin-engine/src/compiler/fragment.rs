@@ -76,6 +76,15 @@ impl DepShape {
         }
     }
 
+    /// Whether the name is a module instance. This is the one shape whose
+    /// value depends on the LTM overlay -- it carries the sub-model's layout,
+    /// which holds that model's LTM section under `On` -- so it is also what
+    /// decides whether a fragment's memo is keyed on the overlay
+    /// (`db::var_fragment::fragment_reads_module`).
+    pub(crate) fn is_module(&self) -> bool {
+        matches!(self.kind, DepKind::Module { .. })
+    }
+
     /// The dimensions, or `None` for a scalar -- the form every arrayed-lowering
     /// decision in `compiler::context` branches on.
     pub(crate) fn dimensions(&self) -> Option<&[Dimension]> {

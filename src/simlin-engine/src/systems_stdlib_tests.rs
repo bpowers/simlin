@@ -65,8 +65,9 @@ fn sim_specs() -> datamodel::SimSpecs {
 fn run_and_get(project: &datamodel::Project, var_name: &str) -> f64 {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .unwrap_or_else(|e| panic!("compilation failed: {e:?}"));
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .unwrap_or_else(|e| panic!("compilation failed: {e:?}"));
     let mut vm = Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed: {e:?}"));
     vm.run_to_end()
         .unwrap_or_else(|e| panic!("VM run failed: {e:?}"));

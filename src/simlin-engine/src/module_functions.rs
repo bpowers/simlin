@@ -176,7 +176,7 @@ pub(crate) fn classify_passthrough(
     let Expr0::App(UntypedBuiltinFn(call, args), _) = primary_output_body_ast else {
         return false;
     };
-    let [Expr0::Var(arg_ident, _)] = args.as_slice() else {
+    let [Expr0::Var(arg_ident, _)] = &args[..] else {
         return false;
     };
     if canonicalize(arg_ident.as_str()) != canonicalize(sole_param) {

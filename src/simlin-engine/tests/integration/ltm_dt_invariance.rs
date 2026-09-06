@@ -44,8 +44,7 @@
 use std::collections::HashMap;
 
 use simlin_engine::db::{
-    SimlinDb, compile_project_incremental, model_ltm_variables, set_project_ltm_enabled,
-    sync_from_datamodel_incremental,
+    SimlinDb, compile_project_incremental, model_ltm_variables, sync_from_datamodel_incremental,
 };
 use simlin_engine::indexmap::IndexMap;
 use simlin_engine::test_common::TestProject;
@@ -65,9 +64,9 @@ fn run_ltm(
 ) -> (Results, IndexMap<String, Vec<Option<usize>>>) {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
     let loop_partitions = model_ltm_variables(&db, sync.models["main"].source_model, sync.project)
         .loop_partitions
         .clone();

@@ -895,18 +895,18 @@ impl<'a> BuiltinVisitor<'a> {
                     } else {
                         arg0
                     };
-                    let new_args = if is_prev_routing {
+                    let new_args: Box<[Expr0]> = if is_prev_routing {
                         let fallback = args.next().expect("previous arity checked");
-                        vec![arg0, fallback]
+                        Box::new([arg0, fallback])
                     } else {
-                        vec![arg0]
+                        Box::new([arg0])
                     };
                     return Ok(App(UntypedBuiltinFn(func, new_args), loc));
                 }
                 if is_builtin_fn(&func) {
                     // Builtins that survive routing stay as builtins (e.g.
                     // PREVIOUS(var, init) and INIT(var)) and compile to opcodes.
-                    return Ok(App(UntypedBuiltinFn(func, args), loc));
+                    return Ok(App(UntypedBuiltinFn(func, args.into()), loc));
                 }
 
                 // `stdlib_descriptor` is the authoritative per-name lookup:
@@ -926,7 +926,7 @@ impl<'a> BuiltinVisitor<'a> {
                 return self.expand_module_function(&descriptor, &func, args, loc);
             }
             Subscript(id, args, loc) => {
-                let args: Result<Vec<IndexExpr0>, EquationError> =
+                let args: Result<Box<[IndexExpr0]>, EquationError> =
                     args.into_iter().map(|e| self.walk_index(e)).collect();
                 let args = args?;
                 Subscript(id, args, loc)

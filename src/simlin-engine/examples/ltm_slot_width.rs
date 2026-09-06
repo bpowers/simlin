@@ -17,9 +17,7 @@
 
 use std::path::PathBuf;
 
-use simlin_engine::db::{
-    SimlinDb, model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel_incremental,
-};
+use simlin_engine::db::{SimlinDb, model_ltm_variables, sync_from_datamodel_incremental};
 use simlin_engine::queue_compile::compile_sim;
 use simlin_engine::{open_vensim, open_xmile};
 
@@ -41,7 +39,6 @@ fn main() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
 
     let total: usize = sync
         .models
@@ -60,7 +57,14 @@ fn main() {
         .find(|m| m.name == "main")
         .map(|m| m.name.clone())
         .unwrap_or_else(|| datamodel.models[0].name.clone());
-    let build = compile_sim(&mut db, sync.project, &datamodel, &main_name).expect("compile");
+    let build = compile_sim(
+        &mut db,
+        sync.project,
+        &datamodel,
+        &main_name,
+        simlin_engine::db::LtmOverlay::On,
+    )
+    .expect("compile");
     let width = build.compiled.n_slots();
     println!("per-step result-row width: {width} slots");
     println!("free against the 65,536-slot ceiling: {}", 65536 - width);

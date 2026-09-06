@@ -104,20 +104,19 @@ struct LtmSlotSeries {
 /// dimension context rather than from a hand-written table, so a variable that
 /// changes shape is read at its real width instead of being silently truncated.
 fn ltm_slot_series(project: &datamodel::Project) -> Vec<LtmSlotSeries> {
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, project);
-    use salsa::Setter;
-    sync.project.set_ltm_enabled(&mut db).to(true);
-    // Re-sync so every downstream query sees the flag (mirrors the other
-    // db-level LTM fixtures in this crate).
-    let sync = sync_from_datamodel(&db, project);
-    sync.project.set_ltm_enabled(&mut db).to(true);
 
     let ltm = crate::db::model_ltm_variables(&db, sync.models["main"].source, sync.project);
     let dim_ctx = crate::db::project_dimensions_context(&db, sync.project);
 
-    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
-        .expect("the value-gate fixture must compile with LTM enabled");
+    let compiled = crate::db::compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        crate::db::LtmOverlay::On,
+    )
+    .expect("the value-gate fixture must compile with LTM enabled");
     let offsets = compiled.offsets.clone();
     let mut vm = crate::vm::Vm::new(compiled).expect("vm");
     vm.run_to_end().expect("run");

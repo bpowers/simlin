@@ -195,17 +195,30 @@ fn flow_fragment(project: &TestProject, var: &str) -> (Vec<Expr>, Vec<(u32, usiz
         .get(var)
         .unwrap_or_else(|| panic!("fixture declares `{var}`"));
 
-    let ExplicitFragment { diagnostics, input } =
-        explicit_fragment_input(&db, source_var, model, source_project, &[]);
+    let ExplicitFragment { diagnostics, input } = explicit_fragment_input(
+        &db,
+        source_var,
+        model,
+        source_project,
+        &[],
+        crate::db::LtmOverlay::Off,
+    );
     let input = input.unwrap_or_else(|| panic!("`{var}` must lower, got {diagnostics:?}"));
     let exprs = lower_fragment(&input, false)
         .unwrap_or_else(|e| panic!("`{var}` must lower: {e:?}"))
         .ast;
 
     let input_set = ModuleInputSet::from_names(&db, &[]);
-    let fragment = compile_var_fragment(&db, source_var, model, source_project, input_set)
-        .as_ref()
-        .unwrap_or_else(|| panic!("`{var}` must emit a fragment"));
+    let fragment = compile_var_fragment(
+        &db,
+        source_var,
+        model,
+        source_project,
+        input_set,
+        crate::db::LtmOverlay::Off,
+    )
+    .as_ref()
+    .unwrap_or_else(|| panic!("`{var}` must emit a fragment"));
     let temp_sizes = fragment
         .fragment
         .flow_bytecodes

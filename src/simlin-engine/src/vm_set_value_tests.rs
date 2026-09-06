@@ -23,7 +23,7 @@ fn rate_model() -> TestProject {
         .stock("population", "scaled_rate", &["inflow"], &["outflow"], None)
 }
 
-fn build_compiled(tp: &TestProject) -> CompiledSimulation {
+fn build_compiled(tp: &TestProject) -> std::sync::Arc<CompiledSimulation> {
     tp.compile_incremental()
         .expect("incremental compile should succeed")
 }
@@ -303,7 +303,13 @@ fn test_set_value_module_stock_returns_error() {
     let project_datamodel = crate::open_xmile(&mut cursor).unwrap();
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project_datamodel, None);
-    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main").unwrap();
+    let compiled = crate::db::compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        crate::db::LtmOverlay::Off,
+    )
+    .unwrap();
 
     let mut vm = Vm::new(compiled).unwrap();
     let hares_ident = Ident::new("hares.hares");

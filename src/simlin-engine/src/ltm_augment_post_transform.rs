@@ -413,12 +413,12 @@ fn qualified_row_indices(row: &[String], ctx: &PerElementRefCtx<'_>) -> Vec<Inde
 /// name, because a `LOOKUP` table argument legitimately has no occurrence and
 /// still has to compile; see [`pin_dimension_name_indices`].)
 pub(super) fn pin_source_subscript_indices(
-    indices: Vec<IndexExpr0>,
+    indices: Box<[IndexExpr0]>,
     node_occ: Option<&OccurrenceSite>,
     ctx: &PerElementRefCtx<'_>,
     live: bool,
     mut recurse_index: impl FnMut(usize, IndexExpr0) -> IndexExpr0,
-) -> Vec<IndexExpr0> {
+) -> Box<[IndexExpr0]> {
     let describable = node_occ.and_then(|o| axes_as_read_slice(o, ctx.from_dims.len()));
     if let Some(occ_axes) = describable {
         if live && occ_axes == ctx.site_axes {
@@ -436,7 +436,7 @@ pub(super) fn pin_source_subscript_indices(
         if let Some(row) =
             per_element_row_for_target(&occ_axes, ctx.target_elem_by_dim, ctx.dim_ctx)
         {
-            return qualified_row_indices(&row, ctx);
+            return qualified_row_indices(&row, ctx).into();
         }
         return indices;
     }
@@ -675,9 +675,9 @@ fn mapped_read_axis(
 /// The caller turns `discharged == false` into `WrapOutcome::missing_occurrence`,
 /// i.e. a warned skip.
 fn pin_dimension_name_indices(
-    indices: Vec<IndexExpr0>,
+    indices: Box<[IndexExpr0]>,
     ctx: &PerElementRefCtx<'_>,
-) -> (Vec<IndexExpr0>, bool) {
+) -> (Box<[IndexExpr0]>, bool) {
     let mut discharged = true;
     let indices = indices
         .into_iter()
@@ -835,7 +835,7 @@ pub(super) fn pin_only_source_refs(
                 return expr;
             }
             match pin_bare_source_ref(ctx) {
-                Some(indices) => Expr0::Subscript(ident.clone(), indices, loc),
+                Some(indices) => Expr0::Subscript(ident.clone(), indices.into(), loc),
                 None => expr,
             }
         }
@@ -862,20 +862,20 @@ pub(super) fn pin_only_source_refs(
                                 unlowerable,
                             )),
                             IndexExpr0::Range(l, r, rloc) => IndexExpr0::Range(
-                                pin_only_source_refs(
-                                    l,
+                                Box::new(pin_only_source_refs(
+                                    *l,
                                     ctx,
                                     occ,
                                     &super::child_path(&idx_path, 0),
                                     unlowerable,
-                                ),
-                                pin_only_source_refs(
-                                    r,
+                                )),
+                                Box::new(pin_only_source_refs(
+                                    *r,
                                     ctx,
                                     occ,
                                     &super::child_path(&idx_path, 1),
                                     unlowerable,
-                                ),
+                                )),
                                 rloc,
                             ),
                             // Wildcard / star-range / `@N` carry no `Expr0`.
@@ -925,20 +925,20 @@ pub(super) fn pin_only_source_refs(
                             unlowerable,
                         )),
                         IndexExpr0::Range(l, r, rloc) => IndexExpr0::Range(
-                            pin_only_source_refs(
-                                l,
+                            Box::new(pin_only_source_refs(
+                                *l,
                                 ctx,
                                 occ,
                                 &super::child_path(&idx_path, 0),
                                 unlowerable,
-                            ),
-                            pin_only_source_refs(
-                                r,
+                            )),
+                            Box::new(pin_only_source_refs(
+                                *r,
                                 ctx,
                                 occ,
                                 &super::child_path(&idx_path, 1),
                                 unlowerable,
-                            ),
+                            )),
                             rloc,
                         ),
                         // Wildcard / star-range / `@N` carry no `Expr0`.
@@ -1102,8 +1102,8 @@ pub(super) fn substitute_reducers_in_expr0(
                         IndexExpr0::Expr(substitute_reducers_in_expr0(e, reducers))
                     }
                     IndexExpr0::Range(l, r, loc) => IndexExpr0::Range(
-                        substitute_reducers_in_expr0(l, reducers),
-                        substitute_reducers_in_expr0(r, reducers),
+                        Box::new(substitute_reducers_in_expr0(*l, reducers)),
+                        Box::new(substitute_reducers_in_expr0(*r, reducers)),
                         loc,
                     ),
                     IndexExpr0::Wildcard(_)

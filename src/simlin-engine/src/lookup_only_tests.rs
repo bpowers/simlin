@@ -146,8 +146,9 @@ fn project_with(
 fn run_series(project: &datamodel::Project) -> std::collections::HashMap<String, Vec<f64>> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .unwrap_or_else(|e| panic!("lookup-only project should compile: {e:?}"));
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .unwrap_or_else(|e| panic!("lookup-only project should compile: {e:?}"));
     let mut vm = Vm::new(compiled).expect("VM creation should succeed");
     vm.run_to_end().expect("VM run should succeed");
     let results = vm.into_results();
@@ -159,7 +160,7 @@ fn run_series(project: &datamodel::Project) -> std::collections::HashMap<String,
 fn diagnostics_of(project: &datamodel::Project) -> Vec<crate::db::Diagnostic> {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, project);
-    collect_all_diagnostics(&db, sync.project)
+    collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off)
 }
 
 fn series_of<'a>(series: &'a std::collections::HashMap<String, Vec<f64>>, key: &str) -> &'a [f64] {

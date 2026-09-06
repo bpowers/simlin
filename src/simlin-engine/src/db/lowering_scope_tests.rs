@@ -25,7 +25,14 @@ fn lowered_body(db: &SimlinDb, sync: &SyncResult, var: &str) -> Expr2 {
     let source = model.variables(db)[var];
     let ExplicitFragment {
         input: Some(input), ..
-    } = explicit_fragment_input(db, source, model, sync.project, &[])
+    } = explicit_fragment_input(
+        db,
+        source,
+        model,
+        sync.project,
+        &[],
+        crate::db::LtmOverlay::Off,
+    )
     else {
         panic!("{var} must lower");
     };
@@ -718,8 +725,8 @@ fn a_module_output_read_the_compiler_refuses_is_still_unit_checked() {
         }));
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    let _ = compile_project_incremental(&db, sync.project, "main");
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let _ = compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let on_mism: Vec<&Diagnostic> = diags
         .iter()

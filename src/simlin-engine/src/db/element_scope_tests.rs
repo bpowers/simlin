@@ -26,8 +26,8 @@ use std::collections::BTreeSet;
 use crate::ast::print_eqn;
 use crate::capture::ImplicitVar;
 use crate::db::{
-    SimlinDb, model_element_causal_edges, model_ltm_variables, set_project_ltm_enabled,
-    sync_from_datamodel, sync_from_datamodel_incremental,
+    SimlinDb, model_element_causal_edges, model_ltm_variables, sync_from_datamodel,
+    sync_from_datamodel_incremental,
 };
 use crate::test_common::{TestProject, implicit_vars_of};
 
@@ -56,7 +56,6 @@ fn a_per_element_capture_scores_its_own_element_only() {
     let datamodel = project.build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let model = sync.models["main"].source_model;
 
     let helper = "$\u{205A}growth\u{205A}1\u{205A}arg0";
@@ -97,8 +96,13 @@ fn a_per_element_capture_scores_its_own_element_only() {
     // The values, from the run: the north helper's score is north's, the
     // south helper's south's (the base tree's numbers, which the asymmetric
     // stocks keep apart).
-    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
-        .expect("the LTM-enabled fixture compiles");
+    let compiled = crate::db::compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        crate::db::LtmOverlay::On,
+    )
+    .expect("the LTM-enabled fixture compiles");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("vm");
     vm.run_to_end().expect("runs");
     let results = vm.into_results();
@@ -282,7 +286,6 @@ fn a_hoisted_read_of_a_proper_subdimension_is_scored_at_its_own_element() {
     let datamodel = project.build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let model = sync.models["main"].source_model;
 
     // The helper's fragment reads stock[a2]: 20 at t0, stock[a2]'s series after.
@@ -322,8 +325,13 @@ fn a_hoisted_read_of_a_proper_subdimension_is_scored_at_its_own_element() {
 
     // The score itself: the helper is the read, so the link scores 1 once the
     // initial-step guard clears.
-    let compiled =
-        crate::db::compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    let compiled = crate::db::compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        crate::db::LtmOverlay::On,
+    )
+    .expect("compiles");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("vm");
     vm.run_to_end().expect("runs");
     let results = vm.into_results();

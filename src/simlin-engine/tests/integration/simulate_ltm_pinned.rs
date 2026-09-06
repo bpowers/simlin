@@ -15,7 +15,7 @@ use simlin_engine::datamodel;
 use simlin_engine::db::{
     DetectedLoopPolarity, LtmMode, LtmSyntheticVar, SimlinDb, collect_all_diagnostics,
     compile_project_incremental, model_detected_loops, model_ltm_mode, model_ltm_variables,
-    set_project_ltm_discovery_mode, set_project_ltm_enabled, sync_from_datamodel_incremental,
+    set_project_ltm_discovery_mode, sync_from_datamodel_incremental,
 };
 use simlin_engine::test_common::TestProject;
 use simlin_engine::{Vm, canonicalize};
@@ -98,8 +98,9 @@ fn run_ltm(
 ) {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .unwrap();
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
     let loop_partitions = ltm.loop_partitions.clone();
@@ -195,7 +196,6 @@ fn pinned_loop_emits_loop_score_for_distinct_cycle() {
     let detected = {
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-        set_project_ltm_enabled(&mut db, sync.project, true);
         let source_model = sync.models["main"].source_model;
         model_detected_loops(&db, source_model, sync.project).clone()
     };
@@ -222,9 +222,8 @@ fn invalid_pin_surfaces_diagnostic_not_silent_zero() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     // Force diagnostic collection (which triggers model_ltm_variables).
-    let diagnostics = collect_all_diagnostics(&db, sync.project);
+    let diagnostics = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On);
 
     let has_pin_warning = diagnostics.iter().any(|d| {
         let msg = format!("{:?}", d.error);
@@ -327,7 +326,6 @@ fn pinned_loop_scored_in_discovery_mode() {
     let detected = {
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-        set_project_ltm_enabled(&mut db, sync.project, true);
         let source_model = sync.models["main"].source_model;
         model_detected_loops(&db, source_model, sync.project).clone()
     };
@@ -354,7 +352,6 @@ fn exhaustive_dedup_survivor_inherits_pin_name() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     assert_eq!(
         model_ltm_mode(&db, source_model, sync.project),
@@ -441,9 +438,10 @@ fn run_ltm_discovery(
 ) {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .unwrap();
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
     let loop_partitions = ltm.loop_partitions.clone();
@@ -704,9 +702,10 @@ fn pinned_mixed_scalar_arrayed_loop_scored_per_instance_in_discovery_mode() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .unwrap();
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
 
@@ -737,9 +736,10 @@ fn pinned_mixed_scalar_arrayed_loop_scored_per_instance_in_discovery_mode() {
     // Both instances register partitions and produce finite, eventually
     // non-zero scores (the pre-fix behavior was a compile failure -> silent
     // constant 0 backed by a fragment-diagnostics Warning).
-    let no_pin_warnings = collect_all_diagnostics(&db, sync.project)
-        .iter()
-        .all(|d| !format!("{:?}", d.error).contains("loop_score\u{205A}pin"));
+    let no_pin_warnings =
+        collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On)
+            .iter()
+            .all(|d| !format!("{:?}", d.error).contains("loop_score\u{205A}pin"));
     assert!(
         no_pin_warnings,
         "no pinned loop-score fragment may fail to compile"
@@ -864,9 +864,8 @@ fn pin_without_element_level_instantiation_is_invalid() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
-    let diagnostics = collect_all_diagnostics(&db, sync.project);
+    let diagnostics = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On);
 
     let has_warning = diagnostics.iter().any(|d| {
         let msg = format!("{:?}", d.error);
@@ -909,9 +908,8 @@ fn pin_with_oversized_element_expansion_is_invalid() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
-    let diagnostics = collect_all_diagnostics(&db, sync.project);
+    let diagnostics = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On);
 
     let has_warning = diagnostics.iter().any(|d| {
         let msg = format!("{:?}", d.error);
@@ -941,7 +939,6 @@ fn user_forced_discovery_on_small_model_surfaces_pin() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     // Force discovery mode even though the model is tiny.
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
@@ -1026,10 +1023,10 @@ fn pinned_scalar_feeder_agg_loop_scored_in_discovery_mode() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("LTM-enabled compilation should succeed");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM-enabled compilation should succeed");
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
 
@@ -1146,7 +1143,6 @@ fn pinned_scalar_feeder_agg_loop_dedups_in_exhaustive_mode() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
 
     // The synthetic-var surface: exactly one loop score for the scalar
@@ -1331,7 +1327,6 @@ fn pinned_loop_carries_cycle_partition_in_discovery_mode() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     assert_eq!(
@@ -1664,8 +1659,7 @@ fn pinned_loop_through_stockless_passthrough_rejected() {
     // must surface its own clear diagnostic alongside the compile error.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let diagnostics = collect_all_diagnostics(&db, sync.project);
+    let diagnostics = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On);
 
     let has_no_stock_warning = diagnostics.iter().any(|d| {
         let msg = format!("{:?}", d.error);
@@ -1742,9 +1736,8 @@ fn previous_lagged_module_output_pin_scored_in_discovery_mode() {
     // The accepted pin must not surface the "contains no stock" rejection.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
-    let diagnostics = collect_all_diagnostics(&db, sync.project);
+    let diagnostics = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On);
     assert!(
         !diagnostics
             .iter()
@@ -1882,9 +1875,8 @@ fn stockless_previous_lagged_pin_scored_in_discovery_mode() {
     // rejection.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
-    let diagnostics = collect_all_diagnostics(&db, sync.project);
+    let diagnostics = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On);
     assert!(
         !diagnostics
             .iter()
@@ -1939,7 +1931,6 @@ fn stockless_previous_lagged_pin_dedups_onto_enumerated_loop() {
     // The detected surface reports the same loop, carrying the pin's name.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let detected = model_detected_loops(&db, source_model, sync.project).clone();
     assert_eq!(
@@ -1979,7 +1970,6 @@ fn stateless_passthrough_module_root_bails_early() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
@@ -1998,7 +1988,8 @@ fn stateless_passthrough_module_root_bails_early() {
     // The model itself compiles and runs fine (it is acyclic) -- the early
     // bail is about LTM synthesis only.
     let compiled =
-        compile_project_incremental(&db, sync.project, "main").expect("acyclic model compiles");
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("acyclic model compiles");
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().expect("simulation runs");
 }
@@ -2042,7 +2033,6 @@ fn pinned_loop_through_unscoreable_edge_skipped_with_single_warnings() {
     // possible loop score.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     set_project_ltm_discovery_mode(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm = model_ltm_variables(&db, source_model, sync.project);
@@ -2056,7 +2046,7 @@ fn pinned_loop_through_unscoreable_edge_skipped_with_single_warnings() {
         ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
     );
 
-    let diagnostics = collect_all_diagnostics(&db, sync.project);
+    let diagnostics = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On);
     let assembly_msgs: Vec<&str> = diagnostics
         .iter()
         .filter_map(|d| match &d.error {
@@ -2099,7 +2089,8 @@ fn pinned_loop_through_unscoreable_edge_skipped_with_single_warnings() {
 
     // The model still compiles and simulates.
     let compiled =
-        compile_project_incremental(&db, sync.project, "main").expect("LTM compile should succeed");
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect("LTM compile should succeed");
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end()
         .expect("simulation should run to completion");

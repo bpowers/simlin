@@ -75,15 +75,15 @@ pub unsafe extern "C" fn simlin_sim_new(
     // that datamodel readers block for the length of a compile; the db lock was
     // already held that long, and a compile is exactly what it exists to serialize.
     let datamodel_locked = project_ref.datamodel.lock().unwrap();
-    let mut db_locked = project_ref.db.lock().unwrap();
+    let mut db_locked = project_ref.lock_db();
 
-    // Salsa-based incremental compilation. Both LTM and non-LTM paths use the same
-    // pipeline; the only difference is the ltm_enabled flag on the SourceProject
-    // input. A conveyor/queue model additionally routes through the special-stock
-    // expansion inside `compile_sim`, which compiles the db's EXPANDED
-    // `SourceProject` (also incrementally). The DB is kept in sync by apply_patch
-    // and project constructors, so this is typically a cache hit when nothing
-    // changed since the last patch.
+    // Salsa-based incremental compilation. Both LTM and non-LTM paths use the
+    // same pipeline, keyed on the requested overlay, so the two variants stay
+    // memoized side by side. A conveyor/queue model additionally routes
+    // through the special-stock expansion inside `compile_sim`, which compiles
+    // the db's EXPANDED `SourceProject` (also incrementally). The DB is kept in
+    // sync by apply_patch and project constructors, so this is typically a
+    // cache hit when nothing changed since the last patch.
     type CompileSnapshot = (
         std::result::Result<engine::queue_compile::SimBuild, engine::Error>,
         // An `IndexMap` (not a `HashMap`): the engine emits `loop_partitions`
@@ -102,17 +102,16 @@ pub unsafe extern "C" fn simlin_sim_new(
         let db = &mut *db_locked;
         if let Some(source_project) = db.current_source_project() {
             // Latch that this project has requested LTM at least once. Done
-            // while holding the db lock (the same lock get_errors takes for
-            // its transient re-enable) so the latch is ordered against a
-            // concurrent get_errors. This is what lets get_errors surface the
-            // LTM diagnostic pipeline (auto-flip warning, etc.) even though we
-            // reset the salsa ltm_enabled input to false below (GH #466).
+            // while holding the db lock (the same lock get_errors takes) so
+            // the latch is ordered against a concurrent get_errors. This is
+            // what lets get_errors ask for the overlay's diagnostics
+            // (auto-flip warning, etc.) for a project that simulated with
+            // LTM (GH #466).
             if enable_ltm {
                 project_ref
                     .ltm_requested
                     .store(true, std::sync::atomic::Ordering::Release);
             }
-            engine::db::set_project_ltm_enabled(db, source_project, enable_ltm);
             // The unified dispatch: an ordinary model compiles `source_project`
             // incrementally; a conveyor/queue model is expanded and its expanded
             // twin compiled in the db's second input slot, also incrementally.
@@ -121,10 +120,11 @@ pub unsafe extern "C" fn simlin_sim_new(
                 source_project,
                 &datamodel_locked,
                 &model_ref.model_name,
+                engine::db::LtmOverlay::from(enable_ltm),
             );
             // A special-stock build never synthesizes LTM variables: it compiles a
-            // DIFFERENT `SourceProject` (the expanded one, whose `ltm_enabled` is
-            // always false), so the sim is created WITHOUT instrumentation and
+            // DIFFERENT `SourceProject` (the expanded one, always without the
+            // overlay), so the sim is created WITHOUT instrumentation and
             // `get_ltm_mode` reports Disabled. LTM over a conveyor/queue is a
             // documented degradation (docs/design/conveyors.md §9.6, queues.md
             // §10.5): the flow-to-stock link-score formula assumes plain INTEG
@@ -134,79 +134,37 @@ pub unsafe extern "C" fn simlin_sim_new(
             // QueueLtmDegraded warning that explains why scores are absent.
             let special = result.as_ref().map(|b| b.special).unwrap_or(false);
 
-            // Snapshot the LTM loop-partition mapping AND per-loop slot
-            // metadata *while* the ltm_enabled flag is still set and the
-            // db is still locked.  Post-sim relative-loop-score queries
+            // Snapshot the LTM loop-partition mapping, per-loop slot metadata
+            // and resolved mode while the db is still locked
+            // (`analysis::ltm_snapshots`, the one derivation of them).
+            // Post-sim relative-loop-score and runtime-classification queries
             // look up these snapshots instead of re-querying the db, so a
-            // subsequent `apply_patch` (rename/delete/restructure) does
-            // not invalidate scores against results that are still valid
-            // for the compilation-era loop structure.  The element index
-            // also lets the FFI accept subscripted IDs like `r1[Boston]`
-            // and resolve them against the loop_score's actual slot
-            // layout (issue #463).
-            let (loop_partitions, loop_element_index, ltm_mode) = if enable_ltm
-                && !special
-                && result.is_ok()
-            {
-                let canonical = engine::canonicalize(&model_ref.model_name);
-                if let Some(sm) = source_project.models(&*db).get(canonical.as_ref()).copied() {
-                    let ltm_vars = engine::db::model_ltm_variables(&*db, sm, source_project);
-                    let project_dims = engine::db::project_datamodel_dims(&*db, source_project);
-                    let element_index =
-                        engine::ltm_post::build_loop_element_index(&ltm_vars.vars, project_dims);
-                    // Both snapshots are projected from the same
-                    // `LtmSyntheticVar` metadata: a loop's per-slot
-                    // partition vector has exactly one entry per
-                    // `loop_score` slot (1 for a scalar loop, the
-                    // dimension element-space size for an A2A loop).  The
-                    // FFI rel-loop-score path reads `loop_partitions[id][k]`
-                    // for the loop's queried slot `k`, so a mismatch here
-                    // would silently fall outside the partition grid.
-                    //
-                    // Only assert when *both* sides look genuinely arrayed
-                    // (`n_slots > 1` and `pv.len() > 1`): this mirrors the
-                    // escape hatch the engine's analogous `debug_assert!`
-                    // in `model_ltm_variables` takes when
-                    // `loop_dimension_element_tuples` returns empty (a
-                    // mid-edit state where the project dims don't yet cover
-                    // a loop's declared dimensions -- `partition_for_loop`
-                    // then falls back to whatever element suffixes are
-                    // present on the loop's stocks, and `build_loop_element_index`
-                    // products only the resolved dims, so the two counts
-                    // can transiently disagree).  `loop_dimension_element_tuples`
-                    // isn't visible across the FFI crate boundary, so the
-                    // "both > 1" guard is the closest expressible form; it
-                    // still catches a real slot-count mismatch between two
-                    // genuinely-arrayed views (which can't arise from valid
-                    // compilation) without firing on the can't-happen-in-prod
-                    // singleton-collapse transient.
-                    debug_assert!(
-                        ltm_vars.loop_partitions.iter().all(|(id, pv)| {
-                            element_index.get(id).is_none_or(|m| {
-                                let (n, plen) = (m.n_slots, pv.len());
-                                !(n > 1 && plen > 1) || n == plen
-                            })
-                        }),
-                        "loop_partitions slot counts must match loop_element_index n_slots \
-                         when both are genuinely arrayed (> 1 slot)"
-                    );
-                    (
-                        ltm_vars.loop_partitions.clone(),
-                        element_index,
-                        Some(ltm_vars.mode),
-                    )
+            // subsequent `apply_patch` (rename/delete/restructure) does not
+            // invalidate scores against results that are still valid for the
+            // compilation-era loop structure.  The element index also lets
+            // the FFI accept subscripted IDs like `r1[Boston]` and resolve
+            // them against the loop_score's actual slot layout (issue #463).
+            let (loop_partitions, loop_element_index, ltm_mode) =
+                if enable_ltm && !special && result.is_ok() {
+                    let canonical = engine::canonicalize(&model_ref.model_name);
+                    if let Some(sm) = source_project.models(&*db).get(canonical.as_ref()).copied() {
+                        let crate::analysis::LtmSnapshots {
+                            loop_partitions,
+                            loop_element_index,
+                            mode,
+                        } = crate::analysis::ltm_snapshots(
+                            &*db,
+                            source_project,
+                            sm,
+                            &model_ref.model_name,
+                        );
+                        (loop_partitions, loop_element_index, Some(mode))
+                    } else {
+                        (engine::indexmap::IndexMap::new(), HashMap::new(), None)
+                    }
                 } else {
                     (engine::indexmap::IndexMap::new(), HashMap::new(), None)
-                }
-            } else {
-                (engine::indexmap::IndexMap::new(), HashMap::new(), None)
-            };
-            // Always reset ltm_enabled to avoid leaking the flag to
-            // subsequent operations (e.g. patch validation) that share
-            // the same SourceProject.
-            if enable_ltm {
-                engine::db::set_project_ltm_enabled(db, source_project, false);
-            }
+                };
             (result, loop_partitions, loop_element_index, ltm_mode)
         } else {
             (
@@ -615,7 +573,7 @@ pub unsafe extern "C" fn simlin_sim_set_value(
         }
     } else if let Some(ref compiled) = state.compiled {
         if let Some(off) = compiled.get_offset(&canon_name) {
-            if !compiled.is_constant_offset(off) {
+            if !state.is_overridable_offset(off) {
                 let err = engine::Error {
                     code: engine::ErrorCode::BadOverride,
                     kind: engine::ErrorKind::Simulation,
@@ -673,8 +631,8 @@ pub unsafe extern "C" fn simlin_sim_clear_values(
 /// `simlin_sim_set_value` for the persistent-override contract).
 ///
 /// The offset is validated the same way `simlin_sim_set_value` validates a
-/// name: only a simple-constant offset (per the compiled simulation's
-/// overridable-constant set, which excludes conveyor/queue pass-driven flows)
+/// name: only an overridable constant -- a constant of the compiled program
+/// that no conveyor/queue pass writes, `SimState::is_overridable_offset` --
 /// is writable; any computed variable's offset rejects with `BadOverride` so
 /// saved simulation output cannot be silently rewritten.
 ///
@@ -693,10 +651,7 @@ pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
     // Results only exist after a successful run, which requires a successful
     // compile, so `compiled` is always Some alongside `results`; treating a
     // missing CompiledSimulation as "not a constant" keeps the gate fail-safe.
-    let is_constant_offset = state
-        .compiled
-        .as_ref()
-        .is_some_and(|compiled| compiled.is_constant_offset(offset));
+    let is_overridable = state.is_overridable_offset(offset);
     if let Some(ref mut results) = state.results {
         if results.step_count == 0 || offset >= results.step_size {
             store_error(
@@ -708,7 +663,7 @@ pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
             );
             return;
         }
-        if !is_constant_offset {
+        if !is_overridable {
             // Same gate as simlin_sim_set_value / Vm::set_value_by_offset:
             // computed columns (flows, stocks, LTM scores, conveyor/queue
             // pass-driven flows) are simulation output, not inputs, and must

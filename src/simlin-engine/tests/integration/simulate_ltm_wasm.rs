@@ -17,9 +17,7 @@ use std::fs::File;
 use std::io::BufReader;
 
 use simlin_engine::datamodel;
-use simlin_engine::db::{
-    SimlinDb, model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel_incremental,
-};
+use simlin_engine::db::{SimlinDb, model_ltm_variables, sync_from_datamodel_incremental};
 use simlin_engine::ltm_finding::{self, FoundLoop};
 use simlin_engine::wasmgen::{WasmGenError, WasmLayout, compile_datamodel_to_artifact};
 use simlin_engine::xmile;
@@ -314,7 +312,6 @@ fn assert_ltm_series_match_arrayed(model_rel_path: &str) {
     // a Phase-5 polish (small fixtures so cost is negligible).
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let source_model = sync.models["main"].source_model;
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
     let multi_slot_count = ltm_vars

@@ -18,9 +18,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use simlin_engine::db::{
-    SimlinDb, collect_all_diagnostics, set_project_ltm_enabled, sync_from_datamodel_incremental,
-};
+use simlin_engine::db::{SimlinDb, collect_all_diagnostics, sync_from_datamodel_incremental};
 use simlin_engine::{open_vensim, open_xmile};
 
 /// Which decline this diagnostic reports, keyed off the message's own wording
@@ -65,9 +63,8 @@ fn main() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
 
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On);
     let mut by_bucket: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
     for d in &diags {
         let msg = format!("{:?}", d.error);

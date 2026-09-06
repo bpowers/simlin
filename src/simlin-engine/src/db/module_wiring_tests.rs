@@ -76,7 +76,7 @@ fn project_with_reference(src: &str, dst: &str) -> datamodel::Project {
 fn diagnostics(project: &datamodel::Project) -> Vec<Diagnostic> {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, project);
-    collect_all_diagnostics(&db, sync.project)
+    collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off)
 }
 
 fn has_warning(diags: &[Diagnostic], code: ErrorCode) -> bool {

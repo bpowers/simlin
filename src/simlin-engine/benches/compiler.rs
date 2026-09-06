@@ -32,9 +32,7 @@ use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use simlin_engine::datamodel::{self, Aux, Compat, Dt, Equation, SimMethod, SimSpecs, Variable};
-use simlin_engine::db::{
-    SimlinDb, compile_project_incremental, set_project_ltm_enabled, sync_from_datamodel_incremental,
-};
+use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use simlin_engine::open_vensim;
 
 // Back this harness with mimalloc, the allocator every native binary that
@@ -78,11 +76,18 @@ fn load_model(fixture: &ModelFixture) -> String {
 }
 
 /// Check whether a datamodel project can be compiled to bytecode via the
-/// incremental path.
+/// incremental path. Assessed with the overlay `Off`: compilability is the
+/// model's own, and both the plain and the `ltm_compile` groups gate on it.
 fn is_simulatable(datamodel: &datamodel::Project) -> bool {
     let mut db = SimlinDb::default();
     let state = sync_from_datamodel_incremental(&mut db, datamodel, None);
-    compile_project_incremental(&db, state.project, "main").is_ok()
+    compile_project_incremental(
+        &db,
+        state.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .is_ok()
 }
 
 /// Benchmark: MDL text -> datamodel::Project.
@@ -135,7 +140,15 @@ fn bench_bytecode_compile(c: &mut Criterion) {
                 b.iter(|| {
                     let mut db = SimlinDb::default();
                     let state = sync_from_datamodel_incremental(&mut db, datamodel, None);
-                    black_box(compile_project_incremental(&db, state.project, "main").unwrap())
+                    black_box(
+                        compile_project_incremental(
+                            &db,
+                            state.project,
+                            "main",
+                            simlin_engine::db::LtmOverlay::Off,
+                        )
+                        .unwrap(),
+                    )
                 });
             },
         );
@@ -185,8 +198,15 @@ fn bench_ltm_compile(c: &mut Criterion) {
                     let state = sync_from_datamodel_incremental(&mut db, datamodel, None);
                     // The flag rides on the project input, so it must be set
                     // before the first compile; every LTM query reads it.
-                    set_project_ltm_enabled(&mut db, state.project, true);
-                    black_box(compile_project_incremental(&db, state.project, "main").unwrap())
+                    black_box(
+                        compile_project_incremental(
+                            &db,
+                            state.project,
+                            "main",
+                            simlin_engine::db::LtmOverlay::On,
+                        )
+                        .unwrap(),
+                    )
                 });
             },
         );
@@ -227,7 +247,15 @@ fn bench_full_pipeline(c: &mut Criterion) {
                     let datamodel = open_vensim(contents).unwrap();
                     let mut db = SimlinDb::default();
                     let state = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-                    black_box(compile_project_incremental(&db, state.project, "main").unwrap())
+                    black_box(
+                        compile_project_incremental(
+                            &db,
+                            state.project,
+                            "main",
+                            simlin_engine::db::LtmOverlay::Off,
+                        )
+                        .unwrap(),
+                    )
                 });
             },
         );
@@ -313,7 +341,13 @@ fn bench_incremental_equation_edit(c: &mut Criterion) {
         let mut db = SimlinDb::default();
         let state = sync_from_datamodel_incremental(&mut db, &original, None);
         let sync = state.to_sync_result();
-        compile_project_incremental(&db, sync.project, "main").unwrap();
+        compile_project_incremental(
+            &db,
+            sync.project,
+            "main",
+            simlin_engine::db::LtmOverlay::Off,
+        )
+        .unwrap();
 
         b.iter(|| {
             // Incrementally sync the mutated project and recompile.
@@ -321,7 +355,15 @@ fn bench_incremental_equation_edit(c: &mut Criterion) {
             // only v50 and its dependents should be re-evaluated.
             let state2 = sync_from_datamodel_incremental(&mut db, &mutated, Some(&state));
             let sync2 = state2.to_sync_result();
-            black_box(compile_project_incremental(&db, sync2.project, "main").unwrap())
+            black_box(
+                compile_project_incremental(
+                    &db,
+                    sync2.project,
+                    "main",
+                    simlin_engine::db::LtmOverlay::Off,
+                )
+                .unwrap(),
+            )
         });
     });
 
@@ -350,12 +392,26 @@ fn bench_incremental_add_remove(c: &mut Criterion) {
         let mut db = SimlinDb::default();
         let state = sync_from_datamodel_incremental(&mut db, &original, None);
         let sync = state.to_sync_result();
-        compile_project_incremental(&db, sync.project, "main").unwrap();
+        compile_project_incremental(
+            &db,
+            sync.project,
+            "main",
+            simlin_engine::db::LtmOverlay::Off,
+        )
+        .unwrap();
 
         b.iter(|| {
             let state2 = sync_from_datamodel_incremental(&mut db, &extended, Some(&state));
             let sync2 = state2.to_sync_result();
-            black_box(compile_project_incremental(&db, sync2.project, "main").unwrap())
+            black_box(
+                compile_project_incremental(
+                    &db,
+                    sync2.project,
+                    "main",
+                    simlin_engine::db::LtmOverlay::Off,
+                )
+                .unwrap(),
+            )
         });
     });
 
@@ -364,12 +420,26 @@ fn bench_incremental_add_remove(c: &mut Criterion) {
         let mut db = SimlinDb::default();
         let state = sync_from_datamodel_incremental(&mut db, &original, None);
         let sync = state.to_sync_result();
-        compile_project_incremental(&db, sync.project, "main").unwrap();
+        compile_project_incremental(
+            &db,
+            sync.project,
+            "main",
+            simlin_engine::db::LtmOverlay::Off,
+        )
+        .unwrap();
 
         b.iter(|| {
             let state2 = sync_from_datamodel_incremental(&mut db, &reduced, Some(&state));
             let sync2 = state2.to_sync_result();
-            black_box(compile_project_incremental(&db, sync2.project, "main").unwrap())
+            black_box(
+                compile_project_incremental(
+                    &db,
+                    sync2.project,
+                    "main",
+                    simlin_engine::db::LtmOverlay::Off,
+                )
+                .unwrap(),
+            )
         });
     });
 

@@ -159,11 +159,6 @@ pub struct SourceProject {
     /// See `crate::db::macro_registry`.
     #[returns(ref)]
     pub macro_declarations: Vec<(String, Option<datamodel::MacroSpec>)>,
-    /// Whether LTM (Loops That Matter) synthetic variable compilation is
-    /// enabled. When true, `compute_layout` allocates slots and
-    /// `assemble_module` compiles fragments for LTM variables.
-    #[returns(clone)]
-    pub ltm_enabled: bool,
     /// When true, use discovery mode (`model_ltm_variables` with all links)
     /// which generates scores for every causal edge, not just edges in detected
     /// loops.

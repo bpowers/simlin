@@ -82,8 +82,7 @@ fn test_model_ltm_variables_stdlib_module() {
 /// edge degrades LOUDLY (the repo's standard) instead.
 #[test]
 fn scalar_to_arrayed_reducer_source_recurses_and_degrades_loudly() {
-    use salsa::Setter;
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let project = TestProject::new("scalar_to_arrayed_reducer")
         .with_sim_time(0.0, 10.0, 1.0)
         .named_dimension("D1", &["a", "b"])
@@ -99,7 +98,6 @@ fn scalar_to_arrayed_reducer_source_recurses_and_degrades_loudly() {
         .stock("pop", "1", &["growth"], &[], None)
         .build_datamodel();
     let sync = sync_from_datamodel(&db, &project);
-    sync.project.set_ltm_enabled(&mut db).to(true);
     let model = sync.models["main"].source;
 
     let ltm = model_ltm_variables(&db, model, sync.project);
@@ -123,7 +121,7 @@ fn scalar_to_arrayed_reducer_source_recurses_and_degrades_loudly() {
     // The recursed partial is an uncompilable `PREVIOUS`-of-wildcard-slice, so
     // assembly surfaces a LOUD fragment-diagnostics Warning rather than a silent
     // clean-compiling zero.
-    let diags = collect_model_diagnostics(&db, model, sync.project);
+    let diags = collect_model_diagnostics(&db, model, sync.project, crate::db::LtmOverlay::On);
     assert!(
         diags.iter().any(|d| matches!(
             &d.error,
@@ -146,8 +144,7 @@ fn scalar_to_arrayed_reducer_source_recurses_and_degrades_loudly() {
 /// and freezes only the (scalar) module output, so the score is real.
 #[test]
 fn module_output_bare_in_reducer_recurses() {
-    use salsa::Setter;
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let project = TestProject::new("mod_output_in_reducer")
         .with_sim_time(0.0, 10.0, 1.0)
         .named_dimension("D1", &["a", "b"])
@@ -158,7 +155,6 @@ fn module_output_bare_in_reducer_recurses() {
         .stock("pop", "1", &["growth"], &[], None)
         .build_datamodel();
     let sync = sync_from_datamodel(&db, &project);
-    sync.project.set_ltm_enabled(&mut db).to(true);
     let model = sync.models["main"].source;
 
     let ltm = model_ltm_variables(&db, model, sync.project);
@@ -774,7 +770,6 @@ fn test_ltm_mode_and_variables_agree_on_stateless_gate() {
                 let sync = sync_from_datamodel(&db, &project);
                 (sync.project, sync.models["main"].source)
             };
-            source_project.set_ltm_enabled(&mut db).to(true);
             source_project.set_ltm_discovery_mode(&mut db).to(discovery);
 
             let mode = model_ltm_mode(&db, model, source_project);
@@ -837,7 +832,6 @@ fn test_stockless_previous_lagged_cycle_is_not_stateless() {
             let sync = sync_from_datamodel(&db, &project);
             (sync.project, sync.models["main"].source)
         };
-        source_project.set_ltm_enabled(&mut db).to(true);
         source_project.set_ltm_discovery_mode(&mut db).to(discovery);
 
         let mode = model_ltm_mode(&db, model, source_project);
@@ -888,7 +882,6 @@ fn test_stockless_previous_free_model_still_bails() {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
     assert_eq!(
@@ -940,7 +933,7 @@ fn test_model_ltm_variables_auto_flip_emits_warning_diagnostic() {
 /// collector that both `libsimlin` and `simlin-mcp` use to hand
 /// diagnostics to end users.  Accumulation on `model_ltm_variables`
 /// alone is not enough -- `model_all_diagnostics` must drive LTM
-/// synthesis when `ltm_enabled` so salsa's accumulator propagates the
+/// synthesis under `LtmOverlay::On` so salsa's accumulator propagates the
 /// warning to the collector.  Without this guarantee, the auto-flip is
 /// silent from the user's perspective.
 ///
@@ -951,17 +944,16 @@ fn test_model_ltm_variables_auto_flip_emits_warning_diagnostic() {
 #[test]
 fn test_auto_flip_warning_surfaces_via_collect_model_diagnostics() {
     use crate::db::{DiagnosticError, DiagnosticSeverity, collect_model_diagnostics};
-    use salsa::Setter;
 
     let project = build_chain_scc_project("auto_flip_surface", 51);
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
-    let diags = collect_model_diagnostics(&db, source_model, source_project);
+    let diags =
+        collect_model_diagnostics(&db, source_model, source_project, crate::db::LtmOverlay::On);
 
     let has_auto_flip_warning = diags.iter().any(|d| {
         d.severity == DiagnosticSeverity::Warning
@@ -977,18 +969,17 @@ fn test_auto_flip_warning_surfaces_via_collect_model_diagnostics() {
     );
 }
 
-/// The `ltm_enabled` gate in `model_all_diagnostics` is what scopes LTM
-/// diagnostic cost to callers who asked for LTM: when the flag is false,
+/// The overlay gate in `model_all_diagnostics` is what scopes LTM diagnostic
+/// cost to callers who asked for LTM: without the overlay,
 /// `collect_model_diagnostics` must not run LTM synthesis, so a silently
 /// auto-flipping model whose caller never requested LTM emits no LTM
 /// diagnostics and pays no LTM synthesis cost.
 ///
 /// This is the *mechanism* the GH #466 fix relies on, not a statement that
 /// the auto-flip warning is permanently invisible. The FFI's
-/// `simlin_project_get_errors` transiently re-enables `ltm_enabled` (under
-/// the db lock, via `LtmEnabledGuard`) before collecting diagnostics *iff*
-/// some simulation on the project was created with `enable_ltm = true` -- so
-/// the warning IS reachable for those callers (covered end to end by
+/// `simlin_project_get_errors` collects under the overlay *iff* some
+/// simulation on the project was created with `enable_ltm = true` -- so the
+/// warning IS reachable for those callers (covered end to end by
 /// `simlin/tests/integration/errors.rs::test_get_errors_surfaces_ltm_auto_flip_warning_after_ltm_sim`).
 /// What this test pins is the gate's "off by default" half: keep the original
 /// intent -- never pay LTM cost when nobody asked for LTM -- machine-checkable
@@ -1002,12 +993,8 @@ fn test_ltm_disabled_gate_suppresses_auto_flip_warning() {
     let sync = sync_from_datamodel(&db, &project);
     let source_model = sync.models["main"].source;
 
-    assert!(
-        !sync.project.ltm_enabled(&db),
-        "baseline: ltm_enabled must default to false"
-    );
-
-    let diags = collect_model_diagnostics(&db, source_model, sync.project);
+    let diags =
+        collect_model_diagnostics(&db, source_model, sync.project, crate::db::LtmOverlay::Off);
 
     let has_auto_flip_warning = diags.iter().any(|d| {
         d.severity == DiagnosticSeverity::Warning
@@ -1073,7 +1060,7 @@ fn is_ltm_fragment_failure(d: &crate::db::Diagnostic) -> bool {
 
 /// An LTM synthetic fragment that fails to compile must surface as a
 /// `Warning` through `collect_model_diagnostics` -- the collector both
-/// `libsimlin` and `simlin-mcp` hand to end users -- when `ltm_enabled`.
+/// `libsimlin` and `simlin-mcp` hand to end users -- under `LtmOverlay::On`.
 /// Without this the failure is silent: the variable keeps a layout slot,
 /// reads a constant 0, and the model still simulates, so the degraded
 /// loop/link score masquerades as a correct result.
@@ -1085,20 +1072,19 @@ fn is_ltm_fragment_failure(d: &crate::db::Diagnostic) -> bool {
 #[test]
 fn test_ltm_fragment_compile_failure_surfaces_warning() {
     use crate::db::{LtmFragmentFailureGuard, collect_model_diagnostics};
-    use salsa::Setter;
 
     // A plain scalar feedback loop whose fragments all genuinely compile;
     // the guard then deterministically fails its loop-score fragment.
     let project = build_chain_scc_project("frag_fail_surface", 5);
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let _force_failure = LtmFragmentFailureGuard::new("loop_score");
-    let diags = collect_model_diagnostics(&db, source_model, source_project);
+    let diags =
+        collect_model_diagnostics(&db, source_model, source_project, crate::db::LtmOverlay::On);
 
     let frag_failures: Vec<_> = diags
         .iter()
@@ -1130,17 +1116,15 @@ fn test_ltm_fragment_compile_failure_surfaces_warning() {
 #[test]
 fn test_model_ltm_fragment_diagnostics_emits_warning() {
     use crate::db::LtmFragmentFailureGuard;
-    use salsa::Setter;
 
     let project = build_chain_scc_project("frag_fail_direct", 5);
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
     // Mirror the production reachability of this pass (`model_all_diagnostics`
-    // only runs it when `ltm_enabled`).
-    source_project.set_ltm_enabled(&mut db).to(true);
+    // only runs it under `LtmOverlay::On`).
 
     let _force_failure = LtmFragmentFailureGuard::new("loop_score");
     model_ltm_fragment_diagnostics(&db, model, source_project);
@@ -1171,15 +1155,13 @@ fn test_model_ltm_fragment_diagnostics_emits_warning() {
 #[test]
 fn test_model_ltm_fragment_diagnostics_covers_implicit_helpers() {
     use crate::db::{LtmFragmentFailureGuard, model_ltm_implicit_var_info};
-    use salsa::Setter;
 
     let project = build_chain_scc_project("implicit_frag_fail", 5);
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     // Vacuity guard: the fixture must genuinely synthesize implicit
     // helpers, or the forced-failure pattern below matches nothing.
@@ -1232,20 +1214,19 @@ fn test_model_ltm_fragment_diagnostics_covers_implicit_helpers() {
 #[test]
 fn test_clean_ltm_model_emits_no_fragment_warning() {
     use crate::db::collect_model_diagnostics;
-    use salsa::Setter;
 
     // A 5-node scalar cycle: every link score is scalar Bare and every
     // loop score is scalar -- the bread-and-butter LTM path, all of
     // which compiles.
     let project = build_chain_scc_project("clean_ltm_frag", 5);
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
-    let diags = collect_model_diagnostics(&db, source_model, source_project);
+    let diags =
+        collect_model_diagnostics(&db, source_model, source_project, crate::db::LtmOverlay::On);
 
     let frag_failures: Vec<_> = diags
         .iter()
@@ -1266,17 +1247,16 @@ fn test_clean_ltm_model_emits_no_fragment_warning() {
 #[test]
 fn test_variable_backed_partial_reduce_emits_no_fragment_warning() {
     use crate::db::collect_model_diagnostics;
-    use salsa::Setter;
 
     let project = build_variable_backed_partial_reduce_project("vb_partial_reduce_clean");
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
-    let diags = collect_model_diagnostics(&db, source_model, source_project);
+    let diags =
+        collect_model_diagnostics(&db, source_model, source_project, crate::db::LtmOverlay::On);
 
     let frag_failures: Vec<_> = diags
         .iter()
@@ -1301,7 +1281,6 @@ fn test_variable_backed_partial_reduce_emits_no_fragment_warning() {
 #[test]
 fn test_variable_backed_pinned_mixed_reduce_compiles_cleanly() {
     use crate::db::collect_model_diagnostics;
-    use salsa::Setter;
 
     let project = TestProject::new("vb_pinned_mixed_warned")
         .with_sim_time(0.0, 5.0, 1.0)
@@ -1317,14 +1296,14 @@ fn test_variable_backed_pinned_mixed_reduce_compiles_cleanly() {
         .array_stock("stock[D1]", "10", &["inflow"], &[], None)
         .array_flow("inflow[D1]", "MEAN(cube[D1,x,*])", None)
         .build_datamodel();
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
-    let diags = collect_model_diagnostics(&db, source_model, source_project);
+    let diags =
+        collect_model_diagnostics(&db, source_model, source_project, crate::db::LtmOverlay::On);
 
     let frag_failures: Vec<_> = diags
         .iter()
@@ -1355,12 +1334,8 @@ fn test_ltm_disabled_does_not_surface_fragment_failure_warning() {
     let source_model = sync.models["main"].source;
     let _force_failure = LtmFragmentFailureGuard::new("loop_score");
 
-    assert!(
-        !sync.project.ltm_enabled(&db),
-        "baseline: ltm_enabled must default to false"
-    );
-
-    let diags = collect_model_diagnostics(&db, source_model, sync.project);
+    let diags =
+        collect_model_diagnostics(&db, source_model, sync.project, crate::db::LtmOverlay::Off);
 
     let frag_failures: Vec<_> = diags
         .iter()
@@ -2864,7 +2839,7 @@ fn agg_aux_emitted_for_hoisted_reducer() {
         agg.dimensions
     );
     assert!(
-        matches!(&agg.equation, crate::db::LtmEquation::Scalar(arm) if arm.text == "sum(pop[*])"),
+        matches!(&agg.equation, crate::db::LtmEquation::Scalar(arm) if &*arm.text == "sum(pop[*])"),
         "agg equation should be the reducer subexpr text; got: {:?}",
         agg.equation
     );
@@ -3197,7 +3172,7 @@ fn sliced_agg_link_scores_cover_only_the_read_rows() {
         .unwrap_or_else(|| panic!("expected synthetic agg {agg}; got: {names:?}"));
     assert!(agg_var.dimensions.is_empty());
     assert!(
-        matches!(&agg_var.equation, crate::db::LtmEquation::Scalar(arm) if arm.text == "sum(pop[nyc, *])"),
+        matches!(&agg_var.equation, crate::db::LtmEquation::Scalar(arm) if &*arm.text == "sum(pop[nyc, *])"),
         "agg equation should be the sliced reducer text; got: {:?}",
         agg_var.equation
     );
@@ -3875,15 +3850,12 @@ fn broadcast_agg_to_target_equation_projects_agg_subscript() {
 /// vars), so the index is built once and salsa-cached.
 #[test]
 fn test_ltm_var_name_index_matches_vars() {
-    use salsa::Setter;
-
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let project = feedback_loop_project();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let ltm = model_ltm_variables(&db, source_model, source_project);
     assert!(
@@ -3953,7 +3925,7 @@ const LTM_EULER_DIAGNOSTIC_MARKER: &str = "Euler";
 /// `None` when the compile succeeds (so the same probe pins both directions).
 #[cfg(test)]
 fn ltm_euler_rejection(db: &SimlinDb, source_project: SourceProject) -> Option<String> {
-    match compile_project_incremental(db, source_project, "main") {
+    match compile_project_incremental(db, source_project, "main", crate::db::LtmOverlay::On) {
         Ok(_) => None,
         Err(err) => {
             let details = err.details.unwrap_or_default();
@@ -3974,12 +3946,10 @@ fn test_ltm_with_rk4_fails_sim_compilation() {
     // surface. (The per-model accumulator path can't carry this diagnostic
     // correctly: `model_all_diagnostics` has no main-model concept, and the
     // method is main-governed.)
-    use salsa::Setter;
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let project = feedback_loop_project_with_method(datamodel::SimMethod::RungeKutta4);
     let source_project = sync_from_datamodel(&db, &project).project;
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let details =
         ltm_euler_rejection(&db, source_project).expect("LTM + RK4 must fail sim compilation");
@@ -3991,12 +3961,9 @@ fn test_ltm_with_rk4_fails_sim_compilation() {
 
 #[test]
 fn test_ltm_with_rk2_fails_sim_compilation() {
-    use salsa::Setter;
-
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let project = feedback_loop_project_with_method(datamodel::SimMethod::RungeKutta2);
     let source_project = sync_from_datamodel(&db, &project).project;
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     assert!(
         ltm_euler_rejection(&db, source_project).is_some(),
@@ -4006,12 +3973,9 @@ fn test_ltm_with_rk2_fails_sim_compilation() {
 
 #[test]
 fn test_ltm_with_euler_compiles_clean() {
-    use salsa::Setter;
-
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let project = feedback_loop_project_with_method(datamodel::SimMethod::Euler);
     let source_project = sync_from_datamodel(&db, &project).project;
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     assert!(
         ltm_euler_rejection(&db, source_project).is_none(),
@@ -4026,10 +3990,11 @@ fn test_rk4_without_ltm_compiles_clean() {
     let db = SimlinDb::default();
     let project = feedback_loop_project_with_method(datamodel::SimMethod::RungeKutta4);
     let source_project = sync_from_datamodel(&db, &project).project;
-    // ltm_enabled defaults to false on a freshly-synced project.
+    // A plain compile: the LTM overlay stays off.
 
     assert!(
-        compile_project_incremental(&db, source_project, "main").is_ok(),
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::Off)
+            .is_ok(),
         "RK4 model without LTM should compile"
     );
 }
@@ -4061,8 +4026,6 @@ fn feedback_submodel(sim_specs: Option<datamodel::SimSpecs>) -> datamodel::Model
 /// project's Euler.
 #[test]
 fn test_ltm_main_rk4_submodel_stock_is_rejected() {
-    use salsa::Setter;
-
     let mut main = x_model(
         "main",
         vec![
@@ -4084,9 +4047,8 @@ fn test_ltm_main_rk4_submodel_stock_is_rejected() {
     // falls into.
     project.sim_specs.sim_method = datamodel::SimMethod::Euler;
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let source_project = sync_from_datamodel(&db, &project).project;
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let details = ltm_euler_rejection(&db, source_project)
         .expect("main-RK4 + submodel-stock LTM must be rejected (the #486 hazard)");
@@ -4102,8 +4064,6 @@ fn test_ltm_main_rk4_submodel_stock_is_rejected() {
 /// compile must SUCCEED. A per-submodel check (the bug) would wrongly reject.
 #[test]
 fn test_ltm_submodel_rk4_override_main_euler_is_accepted() {
-    use salsa::Setter;
-
     // Main holds its own stock+flow feedback loop (so LTM produces scores) and
     // also instantiates the RK4-overriding submodel.
     let main = x_model(
@@ -4126,11 +4086,11 @@ fn test_ltm_submodel_rk4_override_main_euler_is_accepted() {
     project.models = vec![main, feedback_submodel(Some(sub_specs))];
     project.sim_specs.sim_method = datamodel::SimMethod::Euler;
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let source_project = sync_from_datamodel(&db, &project).project;
-    source_project.set_ltm_enabled(&mut db).to(true);
 
-    let compiled = compile_project_incremental(&db, source_project, "main");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On);
     assert!(
         compiled.is_ok(),
         "main-Euler + submodel-RK4-override must compile (VM runs Euler): {:?}",
@@ -4176,14 +4136,13 @@ fn open_loop_project_with_method(method: datamodel::SimMethod) -> datamodel::Pro
 fn test_ltm_rk4_open_loop_stock_compiles() {
     // The RED case for GH #663: a stock with no feedback loop under RK4 + LTM
     // emits no flow-to-stock scores, so the non-Euler guard must NOT reject it.
-    use salsa::Setter;
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let project = open_loop_project_with_method(datamodel::SimMethod::RungeKutta4);
     let source_project = sync_from_datamodel(&db, &project).project;
-    source_project.set_ltm_enabled(&mut db).to(true);
 
-    let compiled = compile_project_incremental(&db, source_project, "main");
+    let compiled =
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On);
     assert!(
         compiled.is_ok(),
         "RK4 + LTM on a loop-free (open-loop accumulation) model must compile: {:?}",
@@ -4196,15 +4155,12 @@ fn test_ltm_rk4_open_loop_stock_compiles() {
 
 #[test]
 fn test_ltm_rk2_open_loop_stock_compiles() {
-    use salsa::Setter;
-
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let project = open_loop_project_with_method(datamodel::SimMethod::RungeKutta2);
     let source_project = sync_from_datamodel(&db, &project).project;
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     assert!(
-        compile_project_incremental(&db, source_project, "main").is_ok(),
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On).is_ok(),
         "RK2 + LTM on a loop-free model must compile"
     );
 }
@@ -4214,15 +4170,13 @@ fn test_ltm_euler_open_loop_stock_compiles() {
     // The Euler control: a loop-free model under Euler always compiled and
     // still must -- this pins that the refined guard didn't change the Euler
     // path or break loop-free models generally.
-    use salsa::Setter;
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let project = open_loop_project_with_method(datamodel::SimMethod::Euler);
     let source_project = sync_from_datamodel(&db, &project).project;
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     assert!(
-        compile_project_incremental(&db, source_project, "main").is_ok(),
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On).is_ok(),
         "Euler + LTM on a loop-free model must compile"
     );
 }
@@ -4241,7 +4195,6 @@ fn test_ltm_rk4_open_loop_stock_in_discovery_mode_is_rejected() {
     let mut db = SimlinDb::default();
     let project = open_loop_project_with_method(datamodel::SimMethod::RungeKutta4);
     let source_project = sync_from_datamodel(&db, &project).project;
-    source_project.set_ltm_enabled(&mut db).to(true);
     // Force discovery mode: now ALL edges get link scores, so the open-loop
     // stock's flow-to-stock edge IS scored.
     source_project.set_ltm_discovery_mode(&mut db).to(true);
@@ -4267,7 +4220,6 @@ fn test_ltm_euler_open_loop_stock_in_discovery_mode_compiles() {
     let mut db = SimlinDb::default();
     let project = open_loop_project_with_method(datamodel::SimMethod::Euler);
     let source_project = sync_from_datamodel(&db, &project).project;
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
     assert!(
@@ -4308,7 +4260,6 @@ fn test_ltm_rk4_arrayed_open_loop_stock_in_discovery_mode_is_rejected() {
 
     let mut db = SimlinDb::default();
     let source_project = sync_from_datamodel(&db, &project).project;
-    source_project.set_ltm_enabled(&mut db).to(true);
     // Force discovery mode: ALL edges get link scores, so the arrayed open-loop
     // stock's `rate → tank[d]` flow-to-stock edges ARE scored (per element).
     source_project.set_ltm_discovery_mode(&mut db).to(true);
@@ -4334,8 +4285,6 @@ fn test_ltm_rk4_arrayed_open_loop_stock_in_discovery_mode_is_rejected() {
 /// no loop).
 #[test]
 fn test_ltm_main_rk4_input_port_submodel_stock_is_rejected() {
-    use salsa::Setter;
-
     let mut main = x_model(
         "main",
         vec![
@@ -4367,9 +4316,8 @@ fn test_ltm_main_rk4_input_port_submodel_stock_is_rejected() {
     project.models = vec![main, sub];
     project.sim_specs.sim_method = datamodel::SimMethod::Euler;
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let source_project = sync_from_datamodel(&db, &project).project;
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let details = ltm_euler_rejection(&db, source_project).expect(
         "main-RK4 + input-port submodel-stock LTM must be rejected: an input-port submodel \
@@ -4417,14 +4365,12 @@ fn build_scalar_target_array_expr_reducer_project(
 /// this helper can never pass vacuously because no agg node existed).
 fn ltm_fragment_failures_with_agg_present(project: &datamodel::Project) -> Vec<String> {
     use crate::db::collect_model_diagnostics;
-    use salsa::Setter;
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let ltm = model_ltm_variables(&db, source_model, source_project);
     assert!(
@@ -4436,7 +4382,7 @@ fn ltm_fragment_failures_with_agg_present(project: &datamodel::Project) -> Vec<S
         ltm.vars.iter().map(|v| &v.name).collect::<Vec<_>>()
     );
 
-    collect_model_diagnostics(&db, source_model, source_project)
+    collect_model_diagnostics(&db, source_model, source_project, crate::db::LtmOverlay::On)
         .iter()
         .filter(|d| is_ltm_fragment_failure(d))
         .map(|d| format!("{:?}: {:?}", d.variable, d.error))
@@ -4614,16 +4560,14 @@ fn square_source_duplicate_dim_reducer_is_loudly_skipped() {
 
     // The model compiles with NO fragment-failure cascade: the only Assembly
     // warnings anywhere are the two loud square-source skips themselves.
-    use salsa::Setter;
-    let mut db2 = SimlinDb::default();
+    let db2 = SimlinDb::default();
     let (sp, m2) = {
         let sync2 = sync_from_datamodel(&db2, &datamodel);
         (sync2.project, sync2.models["main"].source)
     };
-    sp.set_ltm_enabled(&mut db2).to(true);
-    compile_project_incremental(&db2, sp, "main")
+    compile_project_incremental(&db2, sp, "main", crate::db::LtmOverlay::On)
         .expect("the declined-square model still compiles");
-    let all = crate::db::collect_model_diagnostics(&db2, m2, sp);
+    let all = crate::db::collect_model_diagnostics(&db2, m2, sp, crate::db::LtmOverlay::On);
     let unexpected: Vec<_> = all
         .iter()
         .filter(|d| {
@@ -4686,15 +4630,13 @@ fn gh780_two_loop_project() -> datamodel::Project {
 #[test]
 fn gh780_forced_partial_equation_drops_dependent_loops_not_others() {
     use crate::db::{DiagnosticError, DiagnosticSeverity, ForcePartialEquationErrorGuard};
-    use salsa::Setter;
 
     let project = gh780_two_loop_project();
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     // The guard must outlive every LTM query below (salsa memoizes them and
     // the override is not a salsa input), so it is bound for the whole test.
@@ -4773,7 +4715,8 @@ fn gh780_forced_partial_equation_drops_dependent_loops_not_others() {
     // warned-garbage NaN/constant-stub anywhere) -- and crucially, NO
     // loop_score series for the dropped circuits exists at all.
     let compiled =
-        compile_project_incremental(&db, source_project, "main").expect("LTM model compiles");
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("LTM model compiles");
     let mut vm = crate::vm::Vm::new(compiled).expect("VM creation should succeed");
     vm.run_to_end().expect("sim runs to completion");
     let results = vm.into_results();
@@ -4824,7 +4767,6 @@ fn gh780_forced_partial_equation_discovery_mode_still_warns() {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
     let _force = ForcePartialEquationErrorGuard::new("pop", "growth");
@@ -4864,7 +4806,8 @@ fn gh780_forced_partial_equation_discovery_mode_still_warns() {
 
     // And the model compiles with only finite series (no NaN/garbage).
     let compiled =
-        compile_project_incremental(&db, source_project, "main").expect("discovery model compiles");
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .expect("discovery model compiles");
     let mut vm = crate::vm::Vm::new(compiled).expect("VM creation should succeed");
     vm.run_to_end().expect("discovery sim runs to completion");
     let results = vm.into_results();
@@ -4939,7 +4882,6 @@ fn gh780_forced_partial_equation_discovery_pinned_loop_dropped() {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
     let _force = ForcePartialEquationErrorGuard::new("pop", "growth");
@@ -5001,7 +4943,6 @@ fn gh780_forced_partial_equation_discovery_pinned_loop_dropped() {
 #[test]
 fn gh780_forced_partial_equation_disjoint_dim_edge_drops_loop() {
     use crate::db::{DiagnosticError, DiagnosticSeverity, ForcePartialEquationErrorGuard};
-    use salsa::Setter;
 
     let project = crate::test_common::TestProject::new("gh780_disjoint")
         .with_sim_time(0.0, 6.0, 1.0)
@@ -5013,12 +4954,11 @@ fn gh780_forced_partial_equation_disjoint_dim_edge_drops_loop() {
         .array_flow("inflow[D1]", "refill * 0.01", None)
         .build_datamodel();
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let _force = ForcePartialEquationErrorGuard::new("pop", "hub");
 
@@ -5044,7 +4984,7 @@ fn gh780_forced_partial_equation_disjoint_dim_edge_drops_loop() {
     );
 
     // The model still compiles -- no fragment-failure cascade.
-    compile_project_incremental(&db, source_project, "main")
+    compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
         .expect("the disjoint doomed-edge model still compiles");
     let diags = &model_ltm_variables(&db, model, source_project).diagnostics;
     let assembly: Vec<_> = diags
@@ -5070,7 +5010,6 @@ fn gh780_forced_partial_equation_disjoint_dim_edge_drops_loop() {
 #[test]
 fn gh780_forced_partial_equation_scalar_to_arrayed_drops_loop() {
     use crate::db::{DiagnosticError, DiagnosticSeverity, ForcePartialEquationErrorGuard};
-    use salsa::Setter;
 
     // driver (scalar stock) -> grid[d1] (arrayed) -> feedback (scalar) -> driver.
     let project = crate::test_common::TestProject::new("gh780_scalar_to_arrayed")
@@ -5082,12 +5021,11 @@ fn gh780_forced_partial_equation_scalar_to_arrayed_drops_loop() {
         .aux("feedback", "grid[a] * 0.01", None)
         .build_datamodel();
 
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
     let _force = ForcePartialEquationErrorGuard::new("driver", "grid");
 
@@ -5110,7 +5048,7 @@ fn gh780_forced_partial_equation_scalar_to_arrayed_drops_loop() {
         ltm.vars.iter().map(|v| v.name.as_str()).collect::<Vec<_>>()
     );
 
-    compile_project_incremental(&db, source_project, "main")
+    compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
         .expect("the scalar->arrayed doomed-edge model still compiles");
     let diags = &model_ltm_variables(&db, model, source_project).diagnostics;
     let assembly: Vec<_> = diags
@@ -5192,7 +5130,6 @@ fn gh780_doomed_edge_pinned_revisit_warns_once() {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
     let _force = ForcePartialEquationErrorGuard::new("driver", "grid");
@@ -5271,21 +5208,19 @@ fn is_conveyor_ltm_degraded(d: &crate::db::Diagnostic, conveyor_name: &str) -> b
 /// With LTM enabled, a model containing a conveyor stock must emit exactly
 /// one `ConveyorLtmDegraded` `Warning` naming the conveyor, reaching
 /// `collect_model_diagnostics` (the exact entry point libsimlin/simlin-mcp
-/// drive, and -- via the transient `ltm_enabled` re-enable --
+/// drive, and -- via the `On` harvest for a project that requested LTM --
 /// `simlin_project_get_errors`). §9.6.
 #[test]
 fn test_conveyor_ltm_degraded_warning_surfaces_under_ltm() {
-    use salsa::Setter;
-
     let project = minimal_conveyor_datamodel();
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
-    let diags = collect_model_diagnostics(&db, source_model, source_project);
+    let diags =
+        collect_model_diagnostics(&db, source_model, source_project, crate::db::LtmOverlay::On);
 
     let degraded: Vec<_> = diags
         .iter()
@@ -5298,7 +5233,7 @@ fn test_conveyor_ltm_degraded_warning_surfaces_under_ltm() {
     );
 }
 
-/// The `ltm_enabled` gate scopes the warning to LTM callers: a project that
+/// The overlay gate scopes the warning to LTM callers: a project that
 /// never requested LTM must NOT pay LTM synthesis cost, so the conveyor
 /// degradation warning is absent. Mirrors
 /// `test_ltm_disabled_gate_suppresses_auto_flip_warning`.
@@ -5309,12 +5244,8 @@ fn test_conveyor_ltm_degraded_warning_absent_without_ltm() {
     let sync = sync_from_datamodel(&db, &project);
     let source_model = sync.models["main"].source;
 
-    assert!(
-        !sync.project.ltm_enabled(&db),
-        "baseline: ltm_enabled must default to false"
-    );
-
-    let diags = collect_model_diagnostics(&db, source_model, sync.project);
+    let diags =
+        collect_model_diagnostics(&db, source_model, sync.project, crate::db::LtmOverlay::Off);
 
     let has_degraded = diags
         .iter()
@@ -5379,17 +5310,15 @@ fn is_queue_ltm_degraded(d: &crate::db::Diagnostic, queue_name: &str) -> bool {
 /// conveyor twin.
 #[test]
 fn test_queue_ltm_degraded_warning_surfaces_under_ltm() {
-    use salsa::Setter;
-
     let project = queue_drain_datamodel();
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, source_model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    source_project.set_ltm_enabled(&mut db).to(true);
 
-    let diags = collect_model_diagnostics(&db, source_model, source_project);
+    let diags =
+        collect_model_diagnostics(&db, source_model, source_project, crate::db::LtmOverlay::On);
 
     let degraded: Vec<_> = diags
         .iter()
@@ -5402,7 +5331,7 @@ fn test_queue_ltm_degraded_warning_surfaces_under_ltm() {
     );
 }
 
-/// The `ltm_enabled` gate scopes the queue warning to LTM callers: a project
+/// The overlay gate scopes the queue warning to LTM callers: a project
 /// that never requested LTM must not emit it.
 #[test]
 fn test_queue_ltm_degraded_warning_absent_without_ltm() {
@@ -5411,7 +5340,8 @@ fn test_queue_ltm_degraded_warning_absent_without_ltm() {
     let sync = sync_from_datamodel(&db, &project);
     let source_model = sync.models["main"].source;
 
-    let diags = collect_model_diagnostics(&db, source_model, sync.project);
+    let diags =
+        collect_model_diagnostics(&db, source_model, sync.project, crate::db::LtmOverlay::Off);
 
     assert!(
         !diags.iter().any(|d| is_queue_ltm_degraded(d, "waiting")),
@@ -5470,7 +5400,6 @@ fn a_target_whose_lowering_failed_is_declined_not_scored() {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    set_project_ltm_enabled(&mut db, source_project, true);
     set_project_ltm_discovery_mode(&mut db, source_project, true);
 
     let ltm = model_ltm_variables(&db, model, source_project);
@@ -5510,7 +5439,8 @@ fn a_target_whose_lowering_failed_is_declined_not_scored() {
         "the level -> sales edge keeps its score: {names:?}"
     );
     assert!(
-        compile_project_incremental(&db, source_project, "main").is_err(),
+        compile_project_incremental(&db, source_project, "main", crate::db::LtmOverlay::On)
+            .is_err(),
         "a project with a refused target does not compile"
     );
 }
@@ -5543,12 +5473,16 @@ fn a_frozen_whole_reducer_over_a_bare_arrayed_argument_lowers_per_element() {
         .array_aux("other[region]", "1 + pop[region] / 10000")
         .array_with_ranges("w[region]", vec![("north", "1"), ("south", "1")])
         .build_datamodel();
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &datamodel);
-    set_project_ltm_enabled(&mut db, sync.project, true);
 
-    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
-        .expect("the LTM-enabled fixture compiles");
+    let compiled = crate::db::compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        crate::db::LtmOverlay::On,
+    )
+    .expect("the LTM-enabled fixture compiles");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("vm");
     vm.run_to_end().expect("runs");
     let results = vm.into_results();
@@ -5623,12 +5557,11 @@ fn a_structural_capture_target_scores_over_its_declared_axis() {
         .array_stock("pop[Region]", "10", &["growth"], &[], None)
         .array_flow("growth[Region]", "PREVIOUS(pop[Region] * 0.1, 1)", None)
         .build_datamodel();
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let (source_project, model) = {
         let sync = sync_from_datamodel(&db, &project);
         (sync.project, sync.models["main"].source)
     };
-    set_project_ltm_enabled(&mut db, source_project, true);
 
     let capture = "$\u{205A}growth\u{205A}0\u{205A}arg0";
     let lowered = lowered_variable_by_name(&db, model, source_project, capture)

@@ -529,6 +529,15 @@ SimlinLoops *simlin_analyze_get_loops(SimlinModel *model, SimlinError **out_erro
 // `out_error`.  When LTM was not enabled the `loop_score` series are absent,
 // so the result degenerates to the structural classification.
 //
+// The loop LIST is the project's current contents; the slot width each
+// loop's scores are read with is the sim's own compile-era snapshot
+// (`SimState::loop_partitions`), as `simlin_analyze_get_relative_loop_score`
+// resolves against.  After an edit that changed the loop structure
+// (`simlin_project_apply_patch`, `simlin_project_replace_contents`) the two
+// therefore mix: a loop added since the run has no column and keeps its
+// structural label, and a loop whose id was renumbered reads the column its
+// id had.  Re-run before analyzing.
+//
 // # Safety
 // - `sim` must be a valid pointer to a SimlinSim that has been run.
 // - The returned SimlinLoops must be freed with simlin_free_loops.
@@ -633,9 +642,8 @@ SimlinLtmMode simlin_sim_get_ltm_mode(SimlinSim *sim, SimlinError **out_error);
 //
 // Because the links analysis is structure-driven (the unique `(from, to)`
 // edges come from `model_causal_edges`, which has no LTM dependency), this
-// function does not need to toggle `ltm_enabled` on the salsa db -- it
-// only needs the wasm-produced score columns from the slab.  The
-// `recompute_ltm_snapshots` dance happens only in the rel-loop-score
+// function reads no LTM derivation -- it only needs the wasm-produced score
+// columns from the slab.  `ltm_snapshots` is read only by the rel-loop-score
 // counterpart.
 //
 // # Safety
@@ -673,15 +681,11 @@ void simlin_free_links(SimlinLinks *links);
 // snapshots, so the per-loop time series they produce cannot diverge by
 // construction.
 //
-// Unlike the links twin (task 4), the rel-loop-score path needs the
-// snapshots that only `model_ltm_variables` produces when the
-// `SourceProject` salsa input has `ltm_enabled = true`.  This function
-// runs the salsa queries through `recompute_ltm_snapshots`, which uses
-// an `LtmEnabledGuard` to set the flag for the duration of the queries
-// and unconditionally restore it on guard drop.  The reset is mandatory:
-// the flag lives on a shared `SourceProject` input consumed by every
-// other operation on the project, and leaking it would silently change
-// the next consumer's analysis.
+// Unlike the links twin, the rel-loop-score path needs the snapshots
+// `model_ltm_variables` derives (the per-loop partition map and slot
+// metadata).  This function reads them through `ltm_snapshots`, at the
+// project db's current revision; see that function for when they match the
+// blob's layout.
 //
 // The `loop_id` is parsed in the FFI shell (the engine-side core takes
 // a base id + `(element_index, n_slots)` pair); a bare id on a scalar
@@ -942,10 +946,11 @@ void simlin_free_string(char *s);
 // compile or codegen failure stores a `SimlinError` (never panics across the
 // boundary) and leaves both output buffers NULL.
 //
-// `ltm_enabled` and `ltm_discovery_mode` flip the same salsa flags
-// `simlin_sim_new(.., enable_ltm=true)` sets transiently on the project's
-// `SourceProject`, but locally for this compile: the produced blob's layout includes the `$\u{205A}ltm\u{205A}*`
-// synthetic series iff `ltm_enabled` is true.
+// `ltm_enabled` selects the LTM overlay for this compile (the same choice
+// `simlin_sim_new(.., enable_ltm)` makes) and `ltm_discovery_mode` sets the
+// discovery flag on this compile's own `SourceProject`: the produced blob's
+// layout includes the `$\u{205A}ltm\u{205A}*` synthetic series iff
+// `ltm_enabled` is true.
 //
 // # Safety
 // - `model` must be a valid pointer to a SimlinModel
@@ -1136,6 +1141,19 @@ void simlin_clear_panic_message(void);
 // - When `dry_run` is true, the project remains unchanged and no modifications are committed.
 // - The `project` pointer remains valid and usable after this function returns.
 // - The project is not consumed or moved by this operation.
+//
+// # Effect on live simulations
+// - A `SimlinSim` created BEFORE a committed patch is a stale snapshot for
+//   the `simlin_sim_*` entry points: it was compiled from the old contents
+//   and keeps its results and its ability to `reset`/re-run against that
+//   program.
+// - The sim-bearing ANALYSIS entry points (`simlin_analyze_get_loops_runtime`,
+//   `simlin_analyze_get_links`, ...) enumerate loops and links from the
+//   project's CURRENT contents and read scores out of the stale sim's
+//   results by loop id (the slot widths come from the sim's own snapshot),
+//   so after a patch that changed the loop structure they mix old results
+//   with the new model. Create and run a new sim after a patch before
+//   analyzing -- the posture `simlin_project_replace_contents` documents.
 void simlin_project_apply_patch(SimlinProject *project,
                                 const uint8_t *patch_data,
                                 uintptr_t patch_len,
@@ -1735,8 +1753,8 @@ void simlin_sim_clear_values(SimlinSim *sim, SimlinError **out_error);
 // `simlin_sim_set_value` for the persistent-override contract).
 //
 // The offset is validated the same way `simlin_sim_set_value` validates a
-// name: only a simple-constant offset (per the compiled simulation's
-// overridable-constant set, which excludes conveyor/queue pass-driven flows)
+// name: only an overridable constant -- a constant of the compiled program
+// that no conveyor/queue pass writes, `SimState::is_overridable_offset` --
 // is writable; any computed variable's offset rejects with `BadOverride` so
 // saved simulation output cannot be silently rewritten.
 //

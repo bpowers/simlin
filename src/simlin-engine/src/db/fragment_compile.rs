@@ -53,10 +53,13 @@ use crate::db::var_fragment::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum FragmentExecKind {
     /// `compile_var_fragment` -- salsa-tracked, one cache entry per
-    /// `(variable, model, project, module inputs)`.
+    /// `(variable, model, project, module inputs, overlay)`, the overlay
+    /// being the one `var_fragment::fragment_overlay` resolved for the
+    /// variable (`Off` unless its fragment resolves a module shape).
     Explicit,
     /// `compile_implicit_var_fragment` -- salsa-tracked, one cache entry per
-    /// `(model, project, helper name, module inputs)`.
+    /// `(model, project, helper name, module inputs, overlay)`, keyed on the
+    /// overlay by the same rule.
     Implicit,
     /// `compile_ltm_var_fragment` -- salsa-tracked, keyed by `(from, to)` link.
     Ltm,
@@ -110,6 +113,15 @@ pub(crate) fn note_fragment_execution(kind: FragmentExecKind, name: &str) {
     });
 }
 
+/// Compile one explicit variable's fragment to symbolic bytecodes.
+///
+/// **Salsa-tracked**, and `overlay` is part of the key, so a caller passes
+/// the overlay the fragment is KEYED on rather than the one the compile
+/// asked for: `var_fragment::fragment_overlay` resolves it, and it is `Off`
+/// for every variable whose fragment resolves no module instance's shape --
+/// the only shape the overlay reaches. Passing the requested overlay
+/// unconditionally is not wrong, only wasteful: it mints a second identical
+/// memo for a variable whose value cannot differ.
 #[salsa::tracked(returns(ref))]
 pub fn compile_var_fragment<'db>(
     db: &'db dyn Db,
@@ -117,6 +129,7 @@ pub fn compile_var_fragment<'db>(
     model: SourceModel,
     project: SourceProject,
     module_inputs: ModuleInputSet<'db>,
+    overlay: LtmOverlay,
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
 
@@ -133,7 +146,7 @@ pub fn compile_var_fragment<'db>(
     // Every diagnostic the constructor raised is replayed in its order; a
     // fatal one leaves no input, and the variable compiles to nothing.
     let ExplicitFragment { diagnostics, input } =
-        explicit_fragment_input(db, var, model, project, module_input_names);
+        explicit_fragment_input(db, var, model, project, module_input_names, overlay);
     for diag in diagnostics {
         diag.accumulate(db);
     }
@@ -418,7 +431,7 @@ pub(crate) fn lowered_implicit_variable(
     project: SourceProject,
     implicit_var_name: String,
 ) -> Option<LoweredImplicit> {
-    let meta = model_implicit_var_by_name(db, model, project, implicit_var_name)?;
+    let meta = model_implicit_var_by_name(db, model, project, implicit_var_name).as_ref()?;
     let parsed = parse_source_variable(db, meta.parent_source_var, project);
     let implicit_var = meta.find_in(parsed)?;
     let dim_context = project_dimensions_context(db, project);
@@ -432,7 +445,7 @@ pub(crate) fn lowered_implicit_variable(
     // (`DeclaredName::dimensions_shape`): an arrayed helper (a structural
     // apply-to-all capture) has its declared dimensions, every other helper
     // is scalar.
-    let names = implicit_referenced_names(db, &meta, project, &helper);
+    let names = implicit_referenced_names(db, meta, project, &helper);
     let heads = implicit_referenced_heads(db, model, project, &meta.name, &names);
     let mut shapes: IdentMap<Ident<Canonical>, DepShape> = Default::default();
     if !meta.is_module {
@@ -486,6 +499,7 @@ pub(crate) fn implicit_fragment_input<'db>(
     model: SourceModel,
     project: SourceProject,
     module_input_names: &[String],
+    overlay: LtmOverlay,
 ) -> Result<FragmentInput<'db>, ImplicitInputError> {
     let LoweredImplicit {
         variable: lowered,
@@ -506,7 +520,12 @@ pub(crate) fn implicit_fragment_input<'db>(
     // shape, an arrayed helper (a structural apply-to-all capture) occupies
     // one slot per element, and every other helper is scalar.
     let self_shape = if meta.is_module {
-        module_dep_shape(db, project, meta.model_name.as_deref().unwrap_or(""))
+        module_dep_shape(
+            db,
+            project,
+            meta.model_name.as_deref().unwrap_or(""),
+            overlay,
+        )
     } else {
         DepShape::var(
             lowered
@@ -518,8 +537,19 @@ pub(crate) fn implicit_fragment_input<'db>(
     let mut dep_shapes: IdentMap<Ident<Canonical>, DepShape> = Default::default();
     dep_shapes.insert(Ident::new(&meta.name), self_shape);
     for (ident, declared) in heads {
-        dep_shapes.insert(ident.clone(), declared.shape(db, project));
+        dep_shapes.insert(ident.clone(), declared.shape(db, project, overlay));
     }
+
+    // The twin of `explicit_fragment_input`'s assertion -- see it for what
+    // each direction of a disagreement costs. A helper mints no helpers of
+    // its own (its parse is its parent's), so its instances are all among
+    // its heads.
+    debug_assert_eq!(
+        dep_shapes.values().any(DepShape::is_module),
+        crate::db::var_fragment::resolves_a_module_shape(db, meta.is_module, heads, &[]),
+        "'{}': `implicit_fragment_reads_module` disagrees with the shapes its fragment resolves",
+        meta.name
+    );
 
     // A synthesized helper carries no graphical function of its own
     // (`ImplicitVar::parsed_variable` builds it with no tables); only the
@@ -572,6 +602,10 @@ pub(crate) fn implicit_fragment_input<'db>(
 /// reads `var_runlist_membership`: a three-bit projection backdates when this
 /// helper's membership is unchanged, where the whole result re-executes every
 /// helper's fragment whenever any variable's dependencies move.
+///
+/// `overlay` is part of the key and is the one the helper's fragment is
+/// KEYED on, resolved by `var_fragment::implicit_fragment_overlay`, exactly
+/// as for `compile_var_fragment`.
 #[salsa::tracked(returns(ref))]
 pub(crate) fn compile_implicit_var_fragment<'db>(
     db: &'db dyn Db,
@@ -579,10 +613,12 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
     project: SourceProject,
     implicit_var_name: String,
     module_inputs: ModuleInputSet<'db>,
+    overlay: LtmOverlay,
 ) -> Option<VarFragmentResult> {
     use crate::compiler::symbolic::{CompiledVarFragment, PerVarBytecodes};
 
-    let meta = &model_implicit_var_by_name(db, model, project, implicit_var_name.clone())?;
+    let meta =
+        model_implicit_var_by_name(db, model, project, implicit_var_name.clone()).as_ref()?;
     let module_input_names = module_inputs.names(db);
 
     // Recorded at body entry (before the helper is even resolved), keyed by the
@@ -642,7 +678,8 @@ pub(crate) fn compile_implicit_var_fragment<'db>(
             flow_locally_invariant: None,
         })
     };
-    let input = match implicit_fragment_input(db, meta, model, project, module_input_names) {
+    let input = match implicit_fragment_input(db, meta, model, project, module_input_names, overlay)
+    {
         Ok(input) => input,
         Err(ImplicitInputError::Absent) => return None,
         // A body's diagnostics are the PARENT's: their spans index the

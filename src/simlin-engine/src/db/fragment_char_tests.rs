@@ -490,6 +490,7 @@ fn collect_model_fragments(
     project: SourceProject,
     model_name: &str,
     module_input_names: &[&str],
+    overlay: crate::db::LtmOverlay,
 ) -> Vec<RenderedVar> {
     let model = *project
         .models(db)
@@ -513,7 +514,9 @@ fn collect_model_fragments(
     let mut explicit_names: Vec<&String> = source_vars.keys().collect();
     explicit_names.sort();
     for name in explicit_names {
-        if let Some(result) = compile_var_fragment(db, source_vars[name], model, project, inputs) {
+        if let Some(result) =
+            compile_var_fragment(db, source_vars[name], model, project, inputs, overlay)
+        {
             push(&mut out, FragmentKind::Explicit, result);
         }
     }
@@ -523,13 +526,13 @@ fn collect_model_fragments(
     implicit_names.sort();
     for name in implicit_names {
         if let Some(result) =
-            compile_implicit_var_fragment(db, model, project, name.clone(), inputs)
+            compile_implicit_var_fragment(db, model, project, name.clone(), inputs, overlay)
         {
             push(&mut out, FragmentKind::Implicit, result);
         }
     }
 
-    if project.ltm_enabled(db) {
+    if overlay == crate::db::LtmOverlay::On {
         let ltm_vars = model_ltm_variables(db, model, project);
         let mut sorted: Vec<&LtmSyntheticVar> = ltm_vars.vars.iter().collect();
         sorted.sort_by(|a, b| a.name.cmp(&b.name));
@@ -566,12 +569,17 @@ fn collect_model_fragments(
 /// when a fragment does -- which is precisely why it is worth pinning
 /// separately: a layout renumbering is a distinct failure class from a
 /// fragment shape change, and only this section can see it.
-fn render_layout(db: &SimlinDb, project: SourceProject, model_name: &str) -> String {
+fn render_layout(
+    db: &SimlinDb,
+    project: SourceProject,
+    model_name: &str,
+    overlay: crate::db::LtmOverlay,
+) -> String {
     let model = *project.models(db).get(model_name).unwrap();
-    let layout = compute_layout(db, model, project);
+    let layout = compute_layout(db, model, project, overlay);
     let mut names: Vec<String> = model.variables(db).keys().cloned().collect();
     names.extend(model_implicit_var_info(db, model, project).keys().cloned());
-    if project.ltm_enabled(db) {
+    if overlay == crate::db::LtmOverlay::On {
         names.extend(
             model_ltm_variables(db, model, project)
                 .vars
@@ -610,8 +618,9 @@ fn run_and_sample(
     db: &SimlinDb,
     project: SourceProject,
     steps: &BTreeSet<usize>,
+    overlay: crate::db::LtmOverlay,
 ) -> BTreeMap<usize, BTreeMap<String, f64>> {
-    let compiled = compile_project_incremental(db, project, "main")
+    let compiled = compile_project_incremental(db, project, "main", overlay)
         .expect("fixture must compile through the production incremental path");
     let mut vm = crate::vm::Vm::new(compiled).expect("fixture must build a VM");
     vm.run_to_end().expect("fixture must run to completion");
@@ -676,21 +685,26 @@ fn assert_golden(name: &str, actual: &str) {
 
 /// Build the fixture's db exactly as production does, plus the LTM flags when
 /// the fixture asks for them.
-fn fixture_db(project: &datamodel::Project, ltm: FixtureLtm) -> (SimlinDb, SourceProject) {
+/// The fixture's db, project handle and the overlay its goldens are rendered
+/// under: discovery mode is a salsa input on the project, whether the LTM
+/// overlay is assembled is an argument of every query below.
+fn fixture_db(
+    project: &datamodel::Project,
+    ltm: FixtureLtm,
+) -> (SimlinDb, SourceProject, crate::db::LtmOverlay) {
+    use crate::db::LtmOverlay;
     use salsa::Setter;
     let mut db = SimlinDb::default();
     let source_project = sync_from_datamodel(&db, project).project;
-    match ltm {
-        FixtureLtm::Off => {}
-        FixtureLtm::Exhaustive => {
-            source_project.set_ltm_enabled(&mut db).to(true);
-        }
+    let overlay = match ltm {
+        FixtureLtm::Off => LtmOverlay::Off,
+        FixtureLtm::Exhaustive => LtmOverlay::On,
         FixtureLtm::Discovery => {
             source_project.set_ltm_discovery_mode(&mut db).to(true);
-            source_project.set_ltm_enabled(&mut db).to(true);
+            LtmOverlay::On
         }
-    }
-    (db, source_project)
+    };
+    (db, source_project, overlay)
 }
 
 /// `temp_sizes` must be strictly increasing in temp id.
@@ -728,7 +742,7 @@ fn assert_fragment_fixture(golden: &str, project: datamodel::Project, expect: Fi
          behavior change"
     );
 
-    let (db, source_project) = fixture_db(&project, expect.ltm);
+    let (db, source_project, overlay) = fixture_db(&project, expect.ltm);
 
     let mut rendered = String::new();
     let mut actual_phases: Vec<(String, String)> = Vec::new();
@@ -739,9 +753,10 @@ fn assert_fragment_fixture(golden: &str, project: datamodel::Project, expect: Fi
             module_inputs.join(", ")
         ));
         rendered.push_str("== layout ==\n");
-        rendered.push_str(&render_layout(&db, source_project, model_name));
+        rendered.push_str(&render_layout(&db, source_project, model_name, overlay));
 
-        for var in collect_model_fragments(&db, source_project, model_name, module_inputs) {
+        for var in collect_model_fragments(&db, source_project, model_name, module_inputs, overlay)
+        {
             rendered.push_str(&format!(
                 "== {} [{}] : {} ==\n",
                 var.key,
@@ -763,7 +778,7 @@ fn assert_fragment_fixture(golden: &str, project: datamodel::Project, expect: Fi
     }
 
     if expect.expect_one_resolved_scc {
-        rendered.push_str(&render_resolved_scc(&db, source_project));
+        rendered.push_str(&render_resolved_scc(&db, source_project, overlay));
     }
 
     // The declared phase map: exhaustive, hand-written, never regenerated.
@@ -791,7 +806,7 @@ fn assert_fragment_fixture(golden: &str, project: datamodel::Project, expect: Fi
     );
 
     let steps: BTreeSet<usize> = expect.spot_checks.iter().map(|(s, _, _)| *s).collect();
-    let sampled = run_and_sample(&db, source_project, &steps);
+    let sampled = run_and_sample(&db, source_project, &steps, overlay);
     rendered.push_str("########## runtime ##########\n");
     rendered.push_str(&render_runtime(&sampled));
 
@@ -817,10 +832,15 @@ fn assert_fragment_fixture(golden: &str, project: datamodel::Project, expect: Fi
 
 /// Assert the fixture resolves exactly one recurrence SCC and render its
 /// combined fragment -- built through the EXACT production path
-/// `assemble_module` uses (`var_phase_symbolic_fragment_prod` per member ->
-/// `combine_scc_fragment`), so the golden pins the bytecode that is actually
-/// injected into the runlist rather than a re-derivation.
-fn render_resolved_scc(db: &SimlinDb, project: SourceProject) -> String {
+/// `assemble_module` uses (`var_phase_symbolic_fragment_prod` per member
+/// under the fixture's overlay -> `combine_scc_fragment`), so the golden pins
+/// the bytecode that is actually injected into the runlist rather than a
+/// re-derivation.
+fn render_resolved_scc(
+    db: &SimlinDb,
+    project: SourceProject,
+    overlay: crate::db::LtmOverlay,
+) -> String {
     let model = *project.models(db).get("main").unwrap();
     let dep_graph = model_dependency_graph(db, model, project, ModuleInputSet::empty(db));
     assert!(
@@ -841,7 +861,8 @@ fn render_resolved_scc(db: &SimlinDb, project: SourceProject) -> String {
             model,
             project,
             member.as_str(),
-            scc.phase.clone(),
+            scc.phase,
+            overlay,
         )
         .unwrap_or_else(|| {
             panic!(
@@ -1799,11 +1820,12 @@ fn resync_and_assemble(
     db: &mut SimlinDb,
     project: &datamodel::Project,
     prev: Option<&PersistentSyncState>,
+    overlay: crate::db::LtmOverlay,
 ) -> (PersistentSyncState, Vec<(FragmentExecKind, String)>) {
     let state = sync_from_datamodel_incremental(db, project, prev);
     let source_project = state.to_sync_result().project;
     reset_fragment_executions();
-    assemble_simulation(db, source_project, "main".to_string())
+    assemble_simulation(db, source_project, "main".to_string(), overlay)
         .expect("the cache-probe fixture must assemble");
     (state, fragment_executions())
 }
@@ -1825,6 +1847,7 @@ fn probe_fragment(
         model,
         sync.project,
         ModuleInputSet::empty(db),
+        crate::db::LtmOverlay::Off,
     )
     .as_ref()
     .unwrap_or_else(|| panic!("`{var}` must compile"))
@@ -1846,14 +1869,20 @@ fn layout_only_edits_and_fragment_cache_reuse() {
 
     let base = cache_probe_project(&[], true);
     let state1 = sync_from_datamodel_incremental(&mut db, &base, None);
-    assemble_simulation(&db, state1.to_sync_result().project, "main".to_string())
-        .expect("priming assemble");
+    assemble_simulation(
+        &db,
+        state1.to_sync_result().project,
+        "main".to_string(),
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("priming assemble");
     let probe_before = probe_fragment(&db, &state1, "main", "probe");
 
     // Control: an identical re-sync changes no input field, so nothing at all
     // may re-execute. Without this, any count below could be measuring the
     // re-sync rather than the edit.
-    let (state2, control) = resync_and_assemble(&mut db, &base, Some(&state1));
+    let (state2, control) =
+        resync_and_assemble(&mut db, &base, Some(&state1), crate::db::LtmOverlay::Off);
     assert_eq!(
         control,
         Vec::new(),
@@ -1907,7 +1936,8 @@ fn layout_only_edits_and_fragment_cache_reuse() {
     // Edit 1: ADD an unrelated variable. This is the only one of the three
     // that changes the model's variable COUNT relative to the baseline.
     let added = cache_probe_project(&[("added", "5")], true);
-    let (state3, add_execs) = resync_and_assemble(&mut db, &added, Some(&state2));
+    let (state3, add_execs) =
+        resync_and_assemble(&mut db, &added, Some(&state2), crate::db::LtmOverlay::Off);
     assert_eq!(
         explicit_execs(&add_execs),
         vec!["added"],
@@ -1920,7 +1950,8 @@ fn layout_only_edits_and_fragment_cache_reuse() {
     // no surviving fragment has a changed input -- not even a re-execution that
     // would backdate.
     let deleted = cache_probe_project(&[("added", "5")], false);
-    let (state4, del_execs) = resync_and_assemble(&mut db, &deleted, Some(&state3));
+    let (state4, del_execs) =
+        resync_and_assemble(&mut db, &deleted, Some(&state3), crate::db::LtmOverlay::Off);
     assert_eq!(
         explicit_execs(&del_execs),
         Vec::<&str>::new(),
@@ -1931,7 +1962,8 @@ fn layout_only_edits_and_fragment_cache_reuse() {
     // Edit 3: RENAME an unrelated variable (`added` -> `renamed`). A rename is
     // a delete plus an add, so exactly the new name compiles.
     let renamed = cache_probe_project(&[("renamed", "5")], false);
-    let (state5, rename_execs) = resync_and_assemble(&mut db, &renamed, Some(&state4));
+    let (state5, rename_execs) =
+        resync_and_assemble(&mut db, &renamed, Some(&state4), crate::db::LtmOverlay::Off);
     assert_eq!(
         explicit_execs(&rename_execs),
         vec!["renamed"],
@@ -2274,8 +2306,13 @@ fn parent_fragment_tracks_the_sub_models_layout_and_nothing_else() {
 
     let mut db = SimlinDb::default();
     let state1 = sync_from_datamodel_incremental(&mut db, &base, None);
-    assemble_simulation(&db, state1.to_sync_result().project, "main".to_string())
-        .expect("the sub-model layout fixture must assemble");
+    assemble_simulation(
+        &db,
+        state1.to_sync_result().project,
+        "main".to_string(),
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("the sub-model layout fixture must assemble");
     let before = probe_fragment(&db, &state1, "main", "usesub");
 
     // Precondition: the fixture really does carry a cross-module reference, so
@@ -2289,7 +2326,12 @@ fn parent_fragment_tracks_the_sub_models_layout_and_nothing_else() {
     );
 
     // Direction 1: the sub-model's layout shifts under the parent.
-    let (state2, execs) = resync_and_assemble(&mut db, &grown_submodel, Some(&state1));
+    let (state2, execs) = resync_and_assemble(
+        &mut db,
+        &grown_submodel,
+        Some(&state1),
+        crate::db::LtmOverlay::Off,
+    );
     let after_submodel = probe_fragment(&db, &state2, "main", "usesub");
     assert_eq!(
         cross_module_element_offsets(&after_submodel, "sub"),
@@ -2340,7 +2382,12 @@ fn parent_fragment_tracks_the_sub_models_layout_and_nothing_else() {
     // Value equality alone could not make that claim. It cannot distinguish
     // "correctly cached" from "recompiled and happened to agree", which is
     // precisely the distinction direction 1 turns on.
-    let (state4, unrelated_execs) = resync_and_assemble(&mut db, &grown_unrelated, Some(&state3));
+    let (state4, unrelated_execs) = resync_and_assemble(
+        &mut db,
+        &grown_unrelated,
+        Some(&state3),
+        crate::db::LtmOverlay::Off,
+    );
     assert_eq!(
         explicit_execs(&unrelated_execs),
         vec!["sub"],
@@ -2372,10 +2419,16 @@ fn equation_only_edit_recompiles_only_the_edited_fragment() {
 
     let base = cache_probe_project(&[("independent", "9")], true);
     let state1 = sync_from_datamodel_incremental(&mut db, &base, None);
-    assemble_simulation(&db, state1.to_sync_result().project, "main".to_string())
-        .expect("priming assemble");
+    assemble_simulation(
+        &db,
+        state1.to_sync_result().project,
+        "main".to_string(),
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("priming assemble");
 
-    let (state2, control) = resync_and_assemble(&mut db, &base, Some(&state1));
+    let (state2, control) =
+        resync_and_assemble(&mut db, &base, Some(&state1), crate::db::LtmOverlay::Off);
     assert_eq!(
         control,
         Vec::new(),
@@ -2385,7 +2438,8 @@ fn equation_only_edit_recompiles_only_the_edited_fragment() {
     // Same variable set, same dependency set for every variable -- only
     // `independent`'s constant moves, and nothing reads `independent`.
     let edited = cache_probe_project(&[("independent", "11")], true);
-    let (state3, execs) = resync_and_assemble(&mut db, &edited, Some(&state2));
+    let (state3, execs) =
+        resync_and_assemble(&mut db, &edited, Some(&state2), crate::db::LtmOverlay::Off);
     assert_eq!(
         explicit_execs(&execs),
         vec!["independent"],
@@ -2415,7 +2469,12 @@ fn equation_only_edit_recompiles_only_the_edited_fragment() {
         uid: None,
         compat: datamodel::Compat::default(),
     });
-    let (_state4, k_execs) = resync_and_assemble(&mut db, &k_edited, Some(&state3));
+    let (_state4, k_execs) = resync_and_assemble(
+        &mut db,
+        &k_edited,
+        Some(&state3),
+        crate::db::LtmOverlay::Off,
+    );
     assert_eq!(
         explicit_execs(&k_execs),
         vec!["k"],
@@ -2447,8 +2506,6 @@ fn equation_only_edit_recompiles_only_the_edited_fragment() {
 /// path's granularity, or vice versa.
 #[test]
 fn implicit_and_ltm_fragment_cache_granularity() {
-    use salsa::Setter;
-
     let project_with = |smoothed_input: &str, unrelated: &str, delay: &str| {
         TestProject::new("frag_cache_implicit")
             .with_sim_time(0.0, 1.0, 1.0)
@@ -2458,13 +2515,21 @@ fn implicit_and_ltm_fragment_cache_granularity() {
             .build_datamodel()
     };
 
+    // The implicit-helper half is measured on the plain program; the LTM half
+    // below runs in its own db under `On`.
     let mut db = SimlinDb::default();
     let base = project_with("3", "1", "2");
     let state1 = sync_from_datamodel_incremental(&mut db, &base, None);
-    assemble_simulation(&db, state1.to_sync_result().project, "main".to_string())
-        .expect("priming assemble");
+    assemble_simulation(
+        &db,
+        state1.to_sync_result().project,
+        "main".to_string(),
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("priming assemble");
 
-    let (state2, control) = resync_and_assemble(&mut db, &base, Some(&state1));
+    let (state2, control) =
+        resync_and_assemble(&mut db, &base, Some(&state1), crate::db::LtmOverlay::Off);
     assert_eq!(
         control,
         Vec::new(),
@@ -2473,7 +2538,8 @@ fn implicit_and_ltm_fragment_cache_granularity() {
 
     // Edit a variable the SMTH1 helper does not read.
     let edited = project_with("3", "2", "2");
-    let (state3, execs) = resync_and_assemble(&mut db, &edited, Some(&state2));
+    let (state3, execs) =
+        resync_and_assemble(&mut db, &edited, Some(&state2), crate::db::LtmOverlay::Off);
     assert_eq!(
         explicit_execs(&execs),
         vec!["unrelated"],
@@ -2498,7 +2564,12 @@ fn implicit_and_ltm_fragment_cache_granularity() {
     // wires `src` into its input port names it by `VarRef` and emits the same
     // bytecode whatever `src` evaluates to.
     let src_edited = project_with("5", "2", "2");
-    let (state4, src_execs) = resync_and_assemble(&mut db, &src_edited, Some(&state3));
+    let (state4, src_execs) = resync_and_assemble(
+        &mut db,
+        &src_edited,
+        Some(&state3),
+        crate::db::LtmOverlay::Off,
+    );
     assert_eq!(
         explicit_execs(&src_execs),
         vec!["src"],
@@ -2528,7 +2599,12 @@ fn implicit_and_ltm_fragment_cache_granularity() {
     // its fragment stays cached. The granularity is therefore per HELPER, not
     // per parent variable.
     let delay_edited = project_with("5", "2", "3");
-    let (_state5, delay_execs) = resync_and_assemble(&mut db, &delay_edited, Some(&state4));
+    let (_state5, delay_execs) = resync_and_assemble(
+        &mut db,
+        &delay_edited,
+        Some(&state4),
+        crate::db::LtmOverlay::Off,
+    );
     let implicit_after_delay: Vec<&str> = delay_execs
         .iter()
         .filter(|(kind, _)| *kind == FragmentExecKind::Implicit)
@@ -2547,10 +2623,20 @@ fn implicit_and_ltm_fragment_cache_granularity() {
     let ltm_base = ltm_loop_model();
     let ltm_state1 = sync_from_datamodel_incremental(&mut ltm_db, &ltm_base, None);
     let ltm_project = ltm_state1.to_sync_result().project;
-    ltm_project.set_ltm_enabled(&mut ltm_db).to(true);
-    assemble_simulation(&ltm_db, ltm_project, "main".to_string()).expect("priming LTM assemble");
+    assemble_simulation(
+        &ltm_db,
+        ltm_project,
+        "main".to_string(),
+        crate::db::LtmOverlay::On,
+    )
+    .expect("priming LTM assemble");
 
-    let (ltm_state2, ltm_control) = resync_and_assemble(&mut ltm_db, &ltm_base, Some(&ltm_state1));
+    let (ltm_state2, ltm_control) = resync_and_assemble(
+        &mut ltm_db,
+        &ltm_base,
+        Some(&ltm_state1),
+        crate::db::LtmOverlay::On,
+    );
     assert_eq!(
         ltm_control,
         Vec::new(),
@@ -2566,8 +2652,12 @@ fn implicit_and_ltm_fragment_cache_granularity() {
         .flow("growth", "level * rate", None)
         .stock("level", "10", &["growth"], &[], None)
         .build_datamodel();
-    let (ltm_state3, rate_execs) =
-        resync_and_assemble(&mut ltm_db, &rate_edited, Some(&ltm_state2));
+    let (ltm_state3, rate_execs) = resync_and_assemble(
+        &mut ltm_db,
+        &rate_edited,
+        Some(&ltm_state2),
+        crate::db::LtmOverlay::On,
+    );
     assert_eq!(
         ltm_execs_of(&rate_execs),
         Vec::<&str>::new(),
@@ -2607,8 +2697,12 @@ fn implicit_and_ltm_fragment_cache_granularity() {
         .flow("growth", "level * rate * 1", None)
         .stock("level", "10", &["growth"], &[], None)
         .build_datamodel();
-    let (_ltm_state4, growth_execs) =
-        resync_and_assemble(&mut ltm_db, &growth_edited, Some(&ltm_state3));
+    let (_ltm_state4, growth_execs) = resync_and_assemble(
+        &mut ltm_db,
+        &growth_edited,
+        Some(&ltm_state3),
+        crate::db::LtmOverlay::On,
+    );
     let recompiled = ltm_execs_of(&growth_execs);
     assert!(
         recompiled.contains(&"level\u{2192}growth"),
@@ -2663,10 +2757,16 @@ fn implicit_helper_add_is_tight_for_plain_and_module_helpers() {
     let mut db = SimlinDb::default();
     let base = project_with(None);
     let state1 = sync_from_datamodel_incremental(&mut db, &base, None);
-    assemble_simulation(&db, state1.to_sync_result().project, "main".to_string())
-        .expect("priming assemble");
+    assemble_simulation(
+        &db,
+        state1.to_sync_result().project,
+        "main".to_string(),
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("priming assemble");
 
-    let (state2, control) = resync_and_assemble(&mut db, &base, Some(&state1));
+    let (state2, control) =
+        resync_and_assemble(&mut db, &base, Some(&state1), crate::db::LtmOverlay::Off);
     assert_eq!(
         control,
         Vec::new(),
@@ -2683,7 +2783,12 @@ fn implicit_helper_add_is_tight_for_plain_and_module_helpers() {
     // scalar helper aux, which is the shape that changes
     // `model_implicit_var_info` without instantiating any module.
     let with_prev = project_with(Some(("lagged", "PREVIOUS(k * 2, 0)")));
-    let (_state3, prev_execs) = resync_and_assemble(&mut db, &with_prev, Some(&state2));
+    let (_state3, prev_execs) = resync_and_assemble(
+        &mut db,
+        &with_prev,
+        Some(&state2),
+        crate::db::LtmOverlay::Off,
+    );
     assert_eq!(
         explicit_execs(&prev_execs),
         vec!["lagged"],
@@ -2697,11 +2802,21 @@ fn implicit_helper_add_is_tight_for_plain_and_module_helpers() {
     let mut probed = ProbedDb::new();
     let base2 = project_with(None);
     let s1 = sync_from_datamodel_incremental(probed.db_mut(), &base2, None);
-    assemble_simulation(probed.db(), s1.to_sync_result().project, "main".to_string())
-        .expect("priming assemble");
+    assemble_simulation(
+        probed.db(),
+        s1.to_sync_result().project,
+        "main".to_string(),
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("priming assemble");
 
     probed.reset();
-    let (s2, control2) = resync_and_assemble(probed.db_mut(), &base2, Some(&s1));
+    let (s2, control2) = resync_and_assemble(
+        probed.db_mut(),
+        &base2,
+        Some(&s1),
+        crate::db::LtmOverlay::Off,
+    );
     assert_eq!(
         control2,
         Vec::new(),
@@ -2716,7 +2831,12 @@ fn implicit_helper_add_is_tight_for_plain_and_module_helpers() {
 
     let with_smth = project_with(Some(("smoothed", "SMTH1(k, 2)")));
     probed.reset();
-    let (_s3, smth_execs) = resync_and_assemble(probed.db_mut(), &with_smth, Some(&s2));
+    let (_s3, smth_execs) = resync_and_assemble(
+        probed.db_mut(),
+        &with_smth,
+        Some(&s2),
+        crate::db::LtmOverlay::Off,
+    );
     // `delay_time`/`flow`/`initial_value`/`input`/`output` are the spliced
     // `stdlib⁚smth1` template's own variables, compiling for the first time.
     // `k` is the new instance's input source: the instance is an initials
@@ -2806,6 +2926,7 @@ fn multi_temp_fragment_is_byte_identical_across_fresh_databases() {
             model,
             source_project,
             ModuleInputSet::empty(&db),
+            crate::db::LtmOverlay::Off,
         )
         .as_ref()
         .expect("`combo` must compile")
@@ -2897,6 +3018,7 @@ fn module_helper_add_reparses_only_the_added_variable() {
             probed.db(),
             state1.to_sync_result().project,
             "main".to_string(),
+            crate::db::LtmOverlay::Off,
         )
         .expect("priming assemble");
 
@@ -2904,7 +3026,12 @@ fn module_helper_add_reparses_only_the_added_variable() {
         // re-execute. Without it, any count below could be measuring the
         // re-sync rather than the edit.
         probed.reset();
-        let (state2, control) = resync_and_assemble(probed.db_mut(), &base, Some(&state1));
+        let (state2, control) = resync_and_assemble(
+            probed.db_mut(),
+            &base,
+            Some(&state1),
+            crate::db::LtmOverlay::Off,
+        );
         assert_eq!(
             control,
             Vec::new(),
@@ -2926,8 +3053,12 @@ fn module_helper_add_reparses_only_the_added_variable() {
         );
 
         probed.reset();
-        let (state3, execs) =
-            resync_and_assemble(probed.db_mut(), &project_with(extra), Some(&state2));
+        let (state3, execs) = resync_and_assemble(
+            probed.db_mut(),
+            &project_with(extra),
+            Some(&state2),
+            crate::db::LtmOverlay::Off,
+        );
         let models_after = state3.to_sync_result().project.models(probed.db()).clone();
         (
             explicit_execs(&execs)

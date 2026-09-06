@@ -118,7 +118,7 @@ fn test_model_all_diagnostics_triggers_all_sources() {
     };
 
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     // Check for equation error from syntax error
     let has_equation_error = diags.iter().any(|d| {
@@ -229,7 +229,7 @@ fn test_ac2_1_accumulator_parity_with_old_path() {
 
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let mut error_codes: HashSet<ErrorCode> = HashSet::new();
     for d in &diags {
         if d.severity == DiagnosticSeverity::Error {
@@ -297,7 +297,7 @@ fn test_ac2_2_bad_table_specific_error() {
     };
 
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let has_bad_table = diags.iter().any(|d| {
         d.variable.as_deref() == Some("lookup_var")
@@ -351,7 +351,7 @@ fn test_ac2_3_empty_equation() {
     };
 
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let has_empty_equation = diags.iter().any(|d| {
         d.variable.as_deref() == Some("my_stock")
@@ -386,7 +386,7 @@ fn identical_diagnostic_rows_collapse_to_one() {
         .build_datamodel();
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let rows: Vec<&Diagnostic> = diags
         .iter()
         .filter(|d| d.variable.as_deref() == Some("y"))
@@ -478,7 +478,7 @@ fn test_ac2_4_mismatched_dimensions() {
     };
 
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     // MismatchedDimensions can surface as either an EquationError
     // (from AST lowering in compile_var_fragment) or a Model error
@@ -567,7 +567,7 @@ fn test_ac2_5_unit_warnings_severity() {
     };
 
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     // Unit issues should be present as warnings, not errors
     let unit_warnings: Vec<_> = diags
@@ -641,7 +641,8 @@ fn test_ac2_7_vm_validation_errors() {
     let sync = sync_from_datamodel(&db, &project);
 
     // compile_project_incremental should produce valid compiled output
-    let compiled = compile_project_incremental(&db, sync.project, "main");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off);
     assert!(
         compiled.is_ok(),
         "compilation should succeed even with bad sim specs; \
@@ -716,7 +717,7 @@ fn test_ac2_7_assembly_errors_accumulated() {
     let sync = sync_from_datamodel(&db, &project);
 
     // compile_project_incremental should fail due to circular deps
-    let result = compile_project_incremental(&db, sync.project, "main");
+    let result = compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off);
     assert!(
         result.is_err(),
         "compilation should fail for circular dependencies"
@@ -727,7 +728,7 @@ fn test_ac2_7_assembly_errors_accumulated() {
     // The per-variable/model diagnostics from `model_all_diagnostics` DO capture
     // the circular dependency detected by `model_dependency_graph`, so that is
     // what `collect_all_diagnostics` returns here.
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let has_circular = diags.iter().any(|d| {
         matches!(
             &d.error,
@@ -798,7 +799,7 @@ fn test_compile_var_fragment_malformed_unit_string() {
     };
 
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let has_unit_error = diags.iter().any(|d| {
         d.variable.as_deref() == Some("bad_unit_var")
@@ -846,7 +847,7 @@ fn test_compile_var_fragment_unknown_dependency() {
     };
 
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let has_unknown_dep = diags.iter().any(|d| {
         d.variable.as_deref() == Some("x")
@@ -926,13 +927,20 @@ fn test_compile_var_fragment_per_phase_var_new_failure() {
     // failure drops only the failing phase's bytecode, it does not abort
     // the whole variable (unlike the parse / lowering / unknown-dependency
     // / table-build sites, which return `None`).
-    let frag = compile_var_fragment(&db, y_var, model, sync.project, ModuleInputSet::empty(&db));
+    let frag = compile_var_fragment(
+        &db,
+        y_var,
+        model,
+        sync.project,
+        ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
+    );
     assert!(
         frag.is_some(),
         "per-phase Var::new failure must still return a fragment (not whole-variable None)"
     );
 
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let has_per_phase_failure = diags.iter().any(|d| {
         d.variable.as_deref() == Some("y")
             && d.severity == DiagnosticSeverity::Error
@@ -1053,7 +1061,7 @@ fn test_diagnostics_stable_across_unrelated_input_change() {
     let project = unit_warning_fixture();
     let sync = sync_from_datamodel(&db, &project);
 
-    let before = collect_all_diagnostics(&db, sync.project);
+    let before = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let n_before = count_unit_warnings(&before);
     assert!(
         n_before > 0,
@@ -1072,7 +1080,7 @@ fn test_diagnostics_stable_across_unrelated_input_change() {
             description: String::new(),
         }]);
 
-    let after = collect_all_diagnostics(&db, sync.project);
+    let after = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let n_after = count_unit_warnings(&after);
     assert_eq!(
         n_after, n_before,
@@ -1259,7 +1267,7 @@ fn test_conveyor_driven_flow_empty_equation_suppressed() {
     let project = f15_conveyor_project();
 
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     assert!(
         !has_empty_equation(&diags, "out_f"),
@@ -1344,7 +1352,7 @@ fn test_conveyor_driven_flow_malformed_equation_still_errors() {
     };
 
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     // The malformed equation must NOT be mislabeled as -- or swallowed like --
     // an empty equation: it surfaces as a non-EmptyEquation parse error.
@@ -1455,7 +1463,7 @@ fn test_queue_driven_outflow_empty_equation_suppressed() {
     };
 
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     assert!(
         !has_empty_equation(&diags, "into_service"),
@@ -1482,7 +1490,7 @@ fn test_conveyor_marker_removal_reinstates_empty_equation() {
     let project = f15_conveyor_project();
 
     let state = sync_from_datamodel_incremental(&mut db, &project, None);
-    let before = collect_all_diagnostics(&db, state.project);
+    let before = collect_all_diagnostics(&db, state.project, crate::db::LtmOverlay::Off);
     assert!(
         !has_empty_equation(&before, "out_f"),
         "with the <conveyor> marker present, the driven outflow has no empty_equation; \
@@ -1496,7 +1504,7 @@ fn test_conveyor_marker_removal_reinstates_empty_equation() {
         panic!("fixture's first variable must be the conveyor stock");
     }
     let state = sync_from_datamodel_incremental(&mut db, &changed, Some(&state));
-    let after = collect_all_diagnostics(&db, state.project);
+    let after = collect_all_diagnostics(&db, state.project, crate::db::LtmOverlay::Off);
     assert!(
         has_empty_equation(&after, "out_f"),
         "removing the <conveyor> marker must reinstate the empty_equation error on out_f; \
@@ -1518,7 +1526,7 @@ fn test_diagnostics_stable_across_incremental_loop_metadata_change() {
     let project = unit_warning_fixture();
     let state = sync_from_datamodel_incremental(&mut db, &project, None);
 
-    let before = collect_all_diagnostics(&db, state.project);
+    let before = collect_all_diagnostics(&db, state.project, crate::db::LtmOverlay::Off);
     let n_before = count_unit_warnings(&before);
     assert!(
         n_before > 0,
@@ -1541,7 +1549,7 @@ fn test_diagnostics_stable_across_incremental_loop_metadata_change() {
         });
     let state = sync_from_datamodel_incremental(&mut db, &changed, Some(&state));
 
-    let after = collect_all_diagnostics(&db, state.project);
+    let after = collect_all_diagnostics(&db, state.project, crate::db::LtmOverlay::Off);
     let n_after = count_unit_warnings(&after);
     assert_eq!(
         n_after, n_before,
@@ -1560,7 +1568,7 @@ fn test_diagnostics_stable_across_incremental_loop_metadata_change() {
 // the per-model `model_all_diagnostics` trigger, which sees the UN-expanded
 // conveyor via `compat.conveyor`, and reach `collect_all_diagnostics` /
 // `simlin_project_get_errors`. Unlike the LTM twins they are NOT gated on
-// `ltm_enabled`: they describe the simulation itself (GH #873).
+// the LTM overlay: they describe the simulation itself (GH #873).
 
 /// A one-model project with a conveyor stock `belt` (transit expression
 /// `transit`, linear or exponential leakage per `exponential_leak`) and one
@@ -1707,7 +1715,7 @@ fn test_conveyor_transit_not_dt_multiple_warns() {
     let db = SimlinDb::default();
     let project = conveyor_spec_project("1.3", datamodel::Dt::Dt(0.25), false, &[], None);
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let warnings = conveyor_spec_warnings(&diags, ErrorCode::ConveyorTransitNotDtMultiple);
     assert_eq!(
@@ -1740,7 +1748,7 @@ fn test_conveyor_transit_dt_multiple_no_warning() {
     let db = SimlinDb::default();
     let project = conveyor_spec_project("4", datamodel::Dt::Dt(0.25), false, &[], None);
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     assert!(
         conveyor_spec_warnings(&diags, ErrorCode::ConveyorTransitNotDtMultiple).is_empty(),
@@ -1763,7 +1771,7 @@ fn test_conveyor_transit_non_constant_no_warning() {
         Some(("t_len", "1.3")),
     );
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     assert!(
         conveyor_spec_warnings(&diags, ErrorCode::ConveyorTransitNotDtMultiple).is_empty(),
@@ -1790,7 +1798,7 @@ fn test_conveyor_transit_warning_uses_model_sim_specs_override() {
         time_units: None,
     });
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let warnings = conveyor_spec_warnings(&diags, ErrorCode::ConveyorTransitNotDtMultiple);
     assert_eq!(
@@ -1813,7 +1821,7 @@ fn test_conveyor_leak_fractions_exceed_one_warns() {
     let db = SimlinDb::default();
     let project = conveyor_spec_project("4", datamodel::Dt::Dt(0.25), false, &["0.7", "0.5"], None);
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let warnings = conveyor_spec_warnings(&diags, ErrorCode::ConveyorLeakFractionsExceedOne);
     assert_eq!(
@@ -1857,7 +1865,7 @@ fn test_conveyor_leak_marker_eqn_form_warns() {
         }
     }
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let warnings = conveyor_spec_warnings(&diags, ErrorCode::ConveyorLeakFractionsExceedOne);
     assert_eq!(
@@ -1890,7 +1898,7 @@ fn test_conveyor_leak_negative_fraction_clamped_like_runtime() {
         None,
     );
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let warnings = conveyor_spec_warnings(&diags, ErrorCode::ConveyorLeakFractionsExceedOne);
     assert_eq!(
@@ -1924,7 +1932,7 @@ fn test_conveyor_leak_nan_fraction_contributes_zero() {
         None,
     );
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let warnings = conveyor_spec_warnings(&diags, ErrorCode::ConveyorLeakFractionsExceedOne);
     assert_eq!(
@@ -1954,7 +1962,7 @@ fn test_conveyor_transit_warning_display_disambiguates_near_dt() {
     let project =
         conveyor_spec_project("0.33333", datamodel::Dt::Reciprocal(3.0), false, &[], None);
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let warnings = conveyor_spec_warnings(&diags, ErrorCode::ConveyorTransitNotDtMultiple);
     assert_eq!(
@@ -1989,7 +1997,7 @@ fn test_conveyor_leak_fraction_sum_display_is_trimmed() {
         None,
     );
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let warnings = conveyor_spec_warnings(&diags, ErrorCode::ConveyorLeakFractionsExceedOne);
     assert_eq!(
@@ -2012,7 +2020,7 @@ fn test_conveyor_leak_fractions_at_most_one_no_warning() {
     let db = SimlinDb::default();
     let project = conveyor_spec_project("4", datamodel::Dt::Dt(0.25), false, &["0.5", "0.5"], None);
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     assert!(
         conveyor_spec_warnings(&diags, ErrorCode::ConveyorLeakFractionsExceedOne).is_empty(),
@@ -2029,7 +2037,7 @@ fn test_conveyor_leak_fractions_exponential_no_warning() {
     let db = SimlinDb::default();
     let project = conveyor_spec_project("4", datamodel::Dt::Dt(0.25), true, &["0.7", "0.5"], None);
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     assert!(
         conveyor_spec_warnings(&diags, ErrorCode::ConveyorLeakFractionsExceedOne).is_empty(),
@@ -2053,7 +2061,7 @@ fn test_conveyor_leak_fraction_non_constant_excluded() {
         Some(("frac_x", "0.6")),
     );
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     assert!(
         conveyor_spec_warnings(&diags, ErrorCode::ConveyorLeakFractionsExceedOne).is_empty(),
@@ -2085,10 +2093,12 @@ fn dup_sim_specs() -> datamodel::SimSpecs {
 
 /// Compile `project`'s `main` model through the production incremental
 /// pipeline, returning the result.
-fn compile_main(project: &datamodel::Project) -> crate::Result<crate::vm::CompiledSimulation> {
+fn compile_main(
+    project: &datamodel::Project,
+) -> crate::Result<std::sync::Arc<crate::vm::CompiledSimulation>> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    compile_project_incremental(&db, sync.project, "main")
+    compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
 }
 
 /// All `DuplicateVariable` diagnostics in `diags`.
@@ -2162,7 +2172,7 @@ fn test_duplicate_idents_surface_error_diagnostic() {
     );
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let dups = duplicate_var_diags(&diags);
     assert_eq!(
         dups.len(),
@@ -2206,7 +2216,7 @@ fn test_clean_model_unaffected_by_duplicate_check() {
 
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     assert!(
         duplicate_var_diags(&diags).is_empty(),
         "no DuplicateVariable diagnostics for distinct idents; got: {diags:?}"
@@ -2243,7 +2253,7 @@ fn test_incremental_sync_detects_newly_added_duplicate() {
     );
     let mut db = SimlinDb::default();
     let state1 = sync_from_datamodel_incremental(&mut db, &clean, None);
-    compile_project_incremental(&db, state1.project, "main")
+    compile_project_incremental(&db, state1.project, "main", crate::db::LtmOverlay::Off)
         .expect("the clean project must compile");
 
     let dup = x_project(
@@ -2254,7 +2264,7 @@ fn test_incremental_sync_detects_newly_added_duplicate() {
         )],
     );
     let state2 = sync_from_datamodel_incremental(&mut db, &dup, Some(&state1));
-    let err = compile_project_incremental(&db, state2.project, "main")
+    let err = compile_project_incremental(&db, state2.project, "main", crate::db::LtmOverlay::Off)
         .expect_err("the re-synced duplicate must fail compile");
     assert_eq!(err.code, ErrorCode::DuplicateVariable);
 }
@@ -2282,7 +2292,7 @@ fn test_xmile_duplicate_pair_rejected_end_to_end() {
     let main = project.models[0].name.clone();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let err = compile_project_incremental(&db, sync.project, &main)
+    let err = compile_project_incremental(&db, sync.project, &main, crate::db::LtmOverlay::Off)
         .expect_err("XMILE duplicate pair must fail compile");
     assert_eq!(err.code, ErrorCode::DuplicateVariable);
     let details = err.details.expect("the error must carry a message");
@@ -2365,7 +2375,7 @@ fn test_unknown_element_subscript_warns() {
         &[("a", "30"), ("c", "45")],
     );
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let warnings = unknown_element_warnings(&diags);
     assert_eq!(
@@ -2402,7 +2412,7 @@ fn test_unknown_element_subscript_no_warning_for_canonical_variants() {
         &[("Alpha", "1"), (" beta ", "2")],
     );
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     assert!(
         unknown_element_warnings(&diags).is_empty(),
@@ -2429,7 +2439,7 @@ fn test_unknown_element_subscript_comma_element_name_not_flagged() {
         &[("a,b", "7"), ("c", "1")],
     );
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     assert!(
         unknown_element_warnings(&diags).is_empty(),
@@ -2463,7 +2473,7 @@ fn test_unknown_element_subscript_quoted_whole_subscript_not_flagged() {
         &[("\"a1,b1\"", "5"), ("a2, b2", "6")],
     );
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     assert!(
         unknown_element_warnings(&diags).is_empty(),
@@ -2493,7 +2503,7 @@ fn test_unknown_element_subscript_multi_dim() {
         &[("a1, b1", "1"), ("a1, zz", "2"), ("a2", "3")],
     );
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let warnings = unknown_element_warnings(&diags);
     assert_eq!(
@@ -2523,7 +2533,7 @@ fn test_unknown_element_subscript_indexed_dimension() {
         &[("1", "10"), ("2", "20"), ("3", "30")],
     );
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let warnings = unknown_element_warnings(&diags);
     assert_eq!(
@@ -2552,7 +2562,7 @@ fn test_unknown_element_subscript_skips_unresolved_dimension() {
         &[("a", "1"), ("zz", "2")],
     );
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     assert!(
         unknown_element_warnings(&diags).is_empty(),
@@ -2574,7 +2584,7 @@ fn test_unknown_element_subscript_deduplicates() {
         &[("a", "1"), ("c", "2"), ("c", "3")],
     );
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     assert_eq!(
         unknown_element_warnings(&diags).len(),
@@ -2680,7 +2690,7 @@ fn test_unknown_element_subscript_warns_on_conveyor_init_list() {
         ai_information: None,
     };
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let warnings = unknown_element_warnings(&diags);
     assert_eq!(
@@ -2753,7 +2763,7 @@ fn macro_registry_build_error_is_reported_exactly_once() {
     let project = duplicate_macro_project(4);
     let sync = sync_from_datamodel(&db, &project);
 
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let found = macro_build_diagnostics(&diags);
     assert_eq!(
         found.len(),
@@ -2773,7 +2783,8 @@ fn macro_registry_build_error_is_reported_exactly_once() {
     // accumulator: no model's per-model drain carries it. That is what makes it
     // exactly-once AND immune to the accumulator-DFS pruning below.
     for (name, source_model) in sync.project.models(&db) {
-        let per_model = collect_model_diagnostics(&db, *source_model, sync.project);
+        let per_model =
+            collect_model_diagnostics(&db, *source_model, sync.project, crate::db::LtmOverlay::Off);
         assert!(
             macro_build_diagnostics(&per_model).is_empty(),
             "the project-level registry error must not ride any model's accumulator \
@@ -2799,7 +2810,7 @@ fn macro_registry_build_error_survives_an_unrelated_input_change() {
     let project = duplicate_macro_project(2);
     let sync = sync_from_datamodel(&db, &project);
 
-    let before = collect_all_diagnostics(&db, sync.project);
+    let before = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     assert_eq!(
         macro_build_diagnostics(&before).len(),
         1,
@@ -2815,7 +2826,7 @@ fn macro_registry_build_error_survives_an_unrelated_input_change() {
             description: String::new(),
         }]);
 
-    let after = collect_all_diagnostics(&db, sync.project);
+    let after = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     assert_eq!(
         macro_build_diagnostics(&after).len(),
         1,
@@ -2882,7 +2893,7 @@ fn unit_definition_errors_are_reported_exactly_once() {
     let project = conflicting_unit_alias_project();
     let sync = sync_from_datamodel(&db, &project);
 
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let found = unit_definition_diagnostics(&diags);
     assert_eq!(
         found.len(),
@@ -2908,7 +2919,8 @@ fn unit_definition_errors_are_reported_exactly_once() {
     );
 
     for (name, source_model) in sync.project.models(&db) {
-        let per_model = collect_model_diagnostics(&db, *source_model, sync.project);
+        let per_model =
+            collect_model_diagnostics(&db, *source_model, sync.project, crate::db::LtmOverlay::Off);
         assert!(
             unit_definition_diagnostics(&per_model).is_empty(),
             "the project-level unit error must not ride model '{name}''s accumulator: \
@@ -2927,7 +2939,7 @@ fn unit_definition_errors_survive_an_unrelated_input_change() {
     let project = conflicting_unit_alias_project();
     let sync = sync_from_datamodel(&db, &project);
 
-    let before = collect_all_diagnostics(&db, sync.project);
+    let before = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     assert_eq!(
         unit_definition_diagnostics(&before).len(),
         1,
@@ -2943,7 +2955,7 @@ fn unit_definition_errors_survive_an_unrelated_input_change() {
             description: String::new(),
         }]);
 
-    let after = collect_all_diagnostics(&db, sync.project);
+    let after = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     assert_eq!(
         unit_definition_diagnostics(&after).len(),
         1,
@@ -3007,7 +3019,7 @@ fn variable_error_fields_are_the_lowering_channel() {
         "parsing must record the equation syntax error on the variable"
     );
 
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     assert!(
         diags.iter().any(|d| {
             d.variable.as_deref() == Some("bad_unit_var")
@@ -3055,7 +3067,7 @@ fn variable_error_fields_are_the_lowering_channel() {
         "lowering must record the dimension mismatch on the variable; got: {lowered_errors:?}"
     );
 
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     assert!(
         diags.iter().any(|d| {
             d.variable.as_deref() == Some("bad")
@@ -3118,7 +3130,7 @@ fn codegen_rejection_of_an_ordinary_variable_names_the_variable_and_its_reason()
 
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let attributed: Vec<&Diagnostic> = diags
         .iter()
@@ -3187,7 +3199,7 @@ fn a_model_that_compiles_gains_no_codegen_diagnostic() {
 
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let assembly: Vec<&Diagnostic> = diags
         .iter()
@@ -3253,7 +3265,7 @@ fn codegen_rejection_in_the_initials_phase_is_attributable_too() {
 
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let carries_reason = diags.iter().any(|d| {
         d.variable.as_deref() == Some("lvl")
@@ -3455,7 +3467,7 @@ fn every_diagnostic_stage_keeps_its_message() {
     for row in rows {
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &row.project);
-        let diags = collect_all_diagnostics(&db, sync.project);
+        let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
         let matching: Vec<&Diagnostic> = diags
             .iter()
             .filter(|d| diagnostic_code(d) == row.code)
@@ -3542,7 +3554,7 @@ fn a_lowering_rejection_never_renders_its_span_as_prose() {
             .build_datamodel();
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
-        let diags = collect_all_diagnostics(&db, sync.project);
+        let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
         let formatted = crate::errors::collect_formatted_errors(&diags, &datamodel);
 
         let err = formatted
@@ -3634,7 +3646,7 @@ fn a_duplicate_unit_diagnostic_names_the_declaration_that_conflicts() {
         let datamodel = tp.aux("a", "1", None).build_datamodel();
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
-        let diags = collect_all_diagnostics(&db, sync.project);
+        let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
         let reasons: Vec<Option<String>> = diags
             .iter()
@@ -3662,7 +3674,7 @@ fn a_diagnostics_reason_reaches_the_formatted_error() {
         .build_datamodel();
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &datamodel);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     let formatted = crate::errors::collect_formatted_errors(&diags, &datamodel);
 
     let err = formatted

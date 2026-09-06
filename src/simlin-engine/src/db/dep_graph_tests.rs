@@ -15,20 +15,23 @@ use crate::test_common::TestProject;
 // ── dt-phase cycle introspection ────────────────────────────────────────
 //
 // `walk_successors(.., SccPhase::Dt)` is the single shared dt-phase
-// cycle-successor relation consumed by both the production cycle detector
-// (`compute_inner` inside `model_dependency_graph_impl`) and the
-// `#[cfg(test)]` SCC accessor (`dt_cycle_sccs`). Because there is exactly
-// one definition of the relation, used twice, the introspection accessor
-// is the engine's relation by construction -- no re-derivation can drift.
-// These tests pin its invariant: the successor set `compute_inner`
-// iterates for every node kind --
-//   Stock  => empty (dt-phase sink; db.rs stock early-return),
-//   Module => empty (returns before `processing.insert`, so a module is
-//             never on the DFS stack and can never carry a cycle),
+// cycle-successor relation, mapped to indices once per phase by
+// `DenseIndex::successors` and read from there by both the production
+// cycle detector (`closure_of` inside `model_dependency_graph_impl`) and
+// the offending-SCC derivation (`phase_cycle_sccs`, behind the
+// `#[cfg(test)]` SCC accessor `dt_cycle_sccs`). Because there is exactly
+// one definition of the relation, the introspection accessor is the
+// engine's relation by construction -- no re-derivation can drift. These
+// tests pin its invariant: the successor set `closure_of` iterates for
+// every node kind --
+//   Stock  => empty (dt-phase sink; the stock early-return in `closure_of`),
+//   Module => empty (`closure_of` returns before marking a module
+//             processing, so a module is never on the DFS stack and can
+//             never carry a cycle),
 //   Aux    => dt_deps filtered to known, non-stock targets
 //             (module targets KEPT -- a module has no successors so
 //             Tarjan cannot route a cycle through it; unknown and
-//             stock-targeted deps dropped, matching `compute_inner`),
+//             stock-targeted deps dropped),
 //   absent => empty (no panic).
 
 /// Build a bare `VarInfo` for the pure-unit dt-phase `walk_successors`
@@ -77,8 +80,9 @@ fn dt_walk_successors_module_has_no_cycle_successors() {
     let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
     vi_insert(&mut vinfo, "m", vi_for_test(false, true, &["a"]));
     vi_insert(&mut vinfo, "a", vi_for_test(false, false, &[]));
-    // A Module returns before `processing.insert`, so it is never on the
-    // DFS stack and can never carry a cycle: empty cycle-successor set.
+    // `closure_of` returns for a Module before marking it processing, so it
+    // is never on the DFS stack and can never carry a cycle: empty
+    // cycle-successor set.
     assert!(walk_successors(&vinfo, "m", SccPhase::Dt).is_empty());
 }
 
@@ -97,9 +101,10 @@ fn dt_walk_successors_aux_filters_stock_and_unknown_keeps_module() {
     let succ = walk_successors(&vinfo, "x", SccPhase::Dt);
     // Stock-targeted dep dropped (a stock breaks the dt chain), unknown
     // dep dropped, module-targeted dep KEPT (a module node has no
-    // successors so Tarjan cannot route a cycle through it -- this
-    // matches `compute_inner`, whose `!dep_info.is_module` guard only
-    // controls transitive absorption, not iteration).
+    // successors so Tarjan cannot route a cycle through it -- and
+    // `closure_of` iterates it like any other dep, absorbing nothing from
+    // it because a module's closed set is `Closed::Direct`, never
+    // `Reached`).
     assert_eq!(succ_strs(&succ), vec!["aux2", "the_mod"]);
 }
 
@@ -136,10 +141,10 @@ fn dt_walk_successors_order_is_btreeset_sorted() {
 // `walk_successors(.., SccPhase::Initial)` is the single shared init-phase
 // cycle-successor relation, the exact analogue of the dt phase for the init
 // phase. It is consumed by both the production cycle detector
-// (`compute_inner` inside `model_dependency_graph_impl`, init branch)
+// (`closure_of` inside `model_dependency_graph_impl`, init branch)
 // and the init-phase per-element recurrence resolution. These tests pin
 // its invariant per node kind:
-//   Module => empty (the module early-return in `compute_inner` applies
+//   Module => empty (the module early-return in `closure_of` applies
 //             to BOTH phases -- a module is never on the DFS stack so it
 //             can never carry a cycle in either phase),
 //   Stock  => initial_deps filtered to known vars -- a stock is NOT an
@@ -147,7 +152,7 @@ fn dt_walk_successors_order_is_btreeset_sorted() {
 //             stock is a valid init-relation node, so its init deps and
 //             stock-targeted init deps are KEPT),
 //   Aux    => initial_deps filtered to known vars (unknown deps dropped,
-//             matching the inlined `compute_inner` init logic),
+//             no other filter),
 //   absent => empty (no panic).
 
 /// Build a bare `VarInfo` carrying `initial_deps` for the pure-unit
@@ -172,10 +177,10 @@ fn init_walk_successors_module_has_no_cycle_successors() {
     let mut vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
     vi_insert(&mut vinfo, "m", vi_init_for_test(false, true, &["a"]));
     vi_insert(&mut vinfo, "a", vi_init_for_test(false, false, &[]));
-    // The module early-return in `compute_inner` fires before
-    // `processing.insert` in BOTH phases, so a module is never on the
-    // DFS stack and can never carry a cycle in the init phase either:
-    // empty cycle-successor set (mirrors the dt phase).
+    // The module early-return in `closure_of` fires before the node is
+    // marked processing in BOTH phases, so a module is never on the DFS
+    // stack and can never carry a cycle in the init phase either: empty
+    // cycle-successor set (mirrors the dt phase).
     assert!(walk_successors(&vinfo, "m", SccPhase::Initial).is_empty());
 }
 
@@ -185,7 +190,7 @@ fn init_walk_successors_stock_is_not_an_init_sink() {
     vi_insert(&mut vinfo, "s", vi_init_for_test(true, false, &["s", "a"]));
     vi_insert(&mut vinfo, "a", vi_init_for_test(false, false, &[]));
     // A Stock is NOT an init-phase sink: the dt stock sink in
-    // `compute_inner` is `!is_initial`-gated, so in the init phase a
+    // `closure_of` is `!is_initial`-gated, so in the init phase a
     // stock's `initial_deps` ARE its cycle successors. A stock whose
     // init equation references itself (`s` in its own init deps) is a
     // genuine init self-loop, so `s` MUST appear in its own successor
@@ -226,11 +231,10 @@ fn init_walk_successors_filters_unknown_deps() {
         vi_init_for_test(false, false, &["known", "ghost"]),
     );
     vi_insert(&mut vinfo, "known", vi_init_for_test(false, false, &[]));
-    // "ghost" is intentionally absent from var_info.
-    // This is exactly the inlined `compute_inner` init semantics
-    // (`info.initial_deps.iter().filter(|dep|
-    // var_info.contains_key(dep))`): unknown deps dropped, no other
-    // filter.
+    // "ghost" is intentionally absent from var_info. The init relation is
+    // the init deps filtered only to known vars: unknown deps dropped, no
+    // other filter (the closure reads this relation through
+    // `DenseIndex::successors`, never a second filter of its own).
     assert_eq!(
         succ_strs(&walk_successors(&vinfo, "x", SccPhase::Initial)),
         vec!["known"]
@@ -241,8 +245,8 @@ fn init_walk_successors_filters_unknown_deps() {
 fn init_walk_successors_absent_name_is_empty() {
     let vinfo: FxHashMap<Ident<Canonical>, VarInfo> = FxHashMap::default();
     // A malformed/absent var_info entry must not panic; it yields no
-    // successors (mirrors the dt phase; `compute_inner` likewise
-    // early-returns `Ok(())` for an unknown name).
+    // successors (mirrors the dt phase; the dense index numbers exactly
+    // `var_info`'s keys, so `closure_of` never meets an unknown name).
     assert!(walk_successors(&vinfo, "nope", SccPhase::Initial).is_empty());
 }
 
@@ -524,7 +528,7 @@ fn resolved_a() -> Vec<crate::db::ResolvedScc> {
 #[test]
 fn consistency_violation_none_when_both_clean() {
     // No instrumented SCC, nothing resolved, no diagnostic: consistent.
-    let sccs = DtCycleSccs {
+    let sccs = PhaseCycleSccs {
         multi: vec![],
         self_loops: BTreeSet::new(),
     };
@@ -536,7 +540,7 @@ fn consistency_violation_none_when_multi_and_circular() {
     // A multi-variable SCC is not resolved in Phase 1: absent from
     // `resolved_sccs` AND the engine raises `CircularDependency` =>
     // consistent (element-cyclic/unresolved => diagnostic).
-    let sccs = DtCycleSccs {
+    let sccs = PhaseCycleSccs {
         multi: multi_ab(),
         self_loops: BTreeSet::new(),
     };
@@ -548,7 +552,7 @@ fn consistency_violation_none_when_unresolved_self_loop_and_circular() {
     // An instrumented self-loop NOT in `resolved_sccs` (genuine
     // same-element self-cycle or not element-sourceable) + the engine
     // raises `CircularDependency` => consistent.
-    let sccs = DtCycleSccs {
+    let sccs = PhaseCycleSccs {
         multi: vec![],
         self_loops: self_loop_a(),
     };
@@ -562,7 +566,7 @@ fn consistency_violation_none_when_resolved_self_loop_and_no_circular() {
     // self-recurrence) AND the engine does NOT raise
     // `CircularDependency` => consistent (this is exactly the case the
     // OLD XNOR invariant wrongly rejected).
-    let sccs = DtCycleSccs {
+    let sccs = PhaseCycleSccs {
         multi: vec![],
         self_loops: self_loop_a(),
     };
@@ -573,7 +577,7 @@ fn consistency_violation_none_when_resolved_self_loop_and_no_circular() {
 fn consistency_violation_some_when_invented_cycle_not_flagged() {
     // Instrumentation reports a multi-SCC the engine does NOT flag and
     // did NOT resolve => the relation is mis-derived => STOP.
-    let sccs = DtCycleSccs {
+    let sccs = PhaseCycleSccs {
         multi: multi_ab(),
         self_loops: BTreeSet::new(),
     };
@@ -584,7 +588,7 @@ fn consistency_violation_some_when_invented_cycle_not_flagged() {
 fn consistency_violation_some_when_missed_cycle_flagged() {
     // Engine raises CircularDependency but the instrumentation reports
     // NO cycle => a missed cycle => STOP.
-    let sccs = DtCycleSccs {
+    let sccs = PhaseCycleSccs {
         multi: vec![],
         self_loops: BTreeSet::new(),
     };
@@ -596,7 +600,7 @@ fn consistency_violation_some_when_unresolved_self_loop_not_flagged() {
     // An instrumented self-loop that is NOT resolved AND the engine does
     // NOT raise `CircularDependency` => the instrumented cycle went
     // neither resolved nor flagged => a missed cycle => STOP.
-    let sccs = DtCycleSccs {
+    let sccs = PhaseCycleSccs {
         multi: vec![],
         self_loops: self_loop_a(),
     };
@@ -608,7 +612,7 @@ fn consistency_violation_some_when_resolved_self_loop_still_flagged() {
     // The instrumented self-loop IS in `resolved_sccs`, yet the engine
     // ALSO raised `CircularDependency` for it => the resolution verdict
     // and the diagnostic disagree on the SAME compiled model => STOP.
-    let sccs = DtCycleSccs {
+    let sccs = PhaseCycleSccs {
         multi: vec![],
         self_loops: self_loop_a(),
     };
@@ -623,7 +627,7 @@ fn consistency_violation_some_when_resolved_dt_scc_not_instrumented() {
     // => STOP (the whole point of the cross-check). This must stay
     // flagged even after Task 3 -- the dt cross-check is unweakened for
     // the dt path.
-    let sccs = DtCycleSccs {
+    let sccs = PhaseCycleSccs {
         multi: vec![],
         self_loops: BTreeSet::new(),
     };
@@ -645,7 +649,7 @@ fn consistency_violation_none_for_init_only_resolved_scc_not_dt_instrumented() {
     // is exactly the phase: a non-dt-instrumented `phase: Dt` SCC is a
     // genuine drift; a non-dt-instrumented `phase: Initial` SCC is
     // correct.
-    let sccs = DtCycleSccs {
+    let sccs = PhaseCycleSccs {
         multi: vec![],
         self_loops: BTreeSet::new(),
     };
@@ -930,7 +934,9 @@ fn resolve_dt_recurrence_sccs_is_byte_stable_across_runs() {
         let db = SimlinDb::default();
         let result = sync_from_datamodel(&db, &dm);
         let model = result.models["main"].source;
-        resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt).resolved
+        resolve_recurrence_sccs(&db, model, result.project, SccPhase::Dt)
+            .resolved
+            .clone()
     };
     assert_eq!(
         build(),
@@ -2041,6 +2047,7 @@ fn var_phase_symbolic_fragment_prod_none_for_absent_var_no_panic() {
             result.project,
             "definitely_not_a_var",
             SccPhase::Dt,
+            crate::db::LtmOverlay::Off,
         )
         .is_none(),
         "an absent variable must return None (loud-safe), never panic"
@@ -2055,6 +2062,7 @@ fn var_phase_symbolic_fragment_prod_none_for_absent_var_no_panic() {
             result.project,
             "arr",
             SccPhase::Dt,
+            crate::db::LtmOverlay::Off,
         )
         .is_some(),
         "a real arrayed SourceVariable must yield a symbolic fragment"
@@ -2169,7 +2177,7 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
         "the loud-safe fallback must record a CircularDependency \
          (model rejected, not silently miscompiled)"
     );
-    let diags = crate::db::collect_all_diagnostics(&db, result.project);
+    let diags = crate::db::collect_all_diagnostics(&db, result.project, crate::db::LtmOverlay::Off);
     assert!(
         diags.iter().any(|d| d.is(
             crate::db::DiagnosticCategory::Model,
@@ -2187,6 +2195,7 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
             result.project,
             "ecc",
             SccPhase::Dt,
+            crate::db::LtmOverlay::Off,
         )
         .is_none(),
         "the forced-unsourceable in-SCC node must yield None (loud-safe), \
@@ -2298,6 +2307,7 @@ fn synthetic_helper_symbolic_fragment_is_parent_sourced() {
         result.project,
         helper.as_str(),
         SccPhase::Initial,
+        crate::db::LtmOverlay::Off,
     );
     assert!(
         frag.is_some(),
@@ -3054,20 +3064,19 @@ fn resolve_dt_sample_if_true_shaped_scc_resolves_despite_previous_self_read() {
 
 // ── Self-loop subsumed by a multi-member SCC (the true C-LEARN blocker) ─
 //
-// `resolve_recurrence_sccs` builds `self_loops` from a *direct* whole-
-// variable self-edge `v -> v` INDEPENDENTLY of the `scc_components`
-// partition. A variable that BOTH self-references on a current path AND
-// participates in a >= 2 SCC via cross-member edges lands in `multi` (its
-// >= 2 component) *and* in `self_loops`. Tarjan does NOT make it a
-// standalone size-1 SCC -- its self-edge is an intra-SCC edge of the
-// larger SCC, already evaluated in that SCC's verified per-element
-// `element_order`. Before the disjointness filter, `resolve_recurrence_sccs`
-// emitted TWO overlapping `ResolvedScc`s (the >= 2 SCC and the bogus
-// 1-member self-loop SCC). `scc_map_from_resolved`'s last-write-wins
-// `map.insert` then remapped the shared member to the 1-member SCC's id,
-// so `same_resolved_scc` no longer suppressed the genuine intra-cluster
-// back-edges incident to it, and `model_dependency_graph` reported a
-// false residual `CircularDependency` with `resolved_sccs` cleared. This
+// `phase_cycle_sccs` reads `self_loops` off a *direct* whole-variable
+// self-edge `v -> v` INDEPENDENTLY of the `scc_components_of` partition. A
+// variable that BOTH self-references on a current path AND participates in
+// a >= 2 SCC via cross-member edges is a `multi` member (its >= 2
+// component) with a self-edge. Tarjan does NOT make it a standalone size-1
+// SCC -- its self-edge is an intra-SCC edge of the larger SCC, already
+// evaluated in that SCC's verified per-element `element_order`. Without
+// the subsumption, `resolve_recurrence_sccs` emits TWO overlapping
+// `ResolvedScc`s (the >= 2 SCC and a bogus 1-member self-loop SCC), the
+// shared member takes the 1-member SCC's id in the `SccIndex`,
+// `same_resolved_scc_at` no longer suppresses the genuine intra-cluster
+// back-edges incident to it, and `model_dependency_graph` reports a false
+// residual `CircularDependency` with `resolved_sccs` cleared. This
 // is C-LEARN's actual compile blocker (`emissions_with_cumulative_constraints`
 // is exactly this shape), unmasked once the element-level lagged-read
 // strip let the 22-member SCC's element graph resolve. This fixture is
@@ -3090,8 +3099,8 @@ fn resolve_dt_sample_if_true_shaped_scc_resolves_despite_previous_self_read() {
 /// entry. The current-value induced element graph
 ///   (a,0)->(a,1); (b,0)->(a,1); (a,0)->(b,0); (a,1)->(b,1)
 /// is acyclic, so the `{a,b}` SCC resolves. The bug is purely the
-/// double-emission of `a` as a separate 1-member self-loop SCC corrupting
-/// `scc_map_from_resolved`.
+/// double-emission of `a` as a separate 1-member self-loop SCC, which
+/// breaks the pairwise-disjoint invariant the `SccIndex` relies on.
 fn self_loop_inside_multi_scc_project() -> TestProject {
     TestProject::new("self_loop_inside_multi_scc")
         .named_dimension("t", &["t1", "t2"])
@@ -3106,7 +3115,7 @@ fn resolve_dt_self_loop_subsumed_by_multi_scc_resolves_no_duplicate() {
     // RED before the disjointness filter: `a` is emitted as BOTH a member
     // of the resolved 2-member `{a,b}` SCC and a separate resolved
     // 1-member `{a}` self-loop SCC, so `res.resolved.len() == 2` with a
-    // shared member, `scc_map_from_resolved` corrupts, and
+    // shared member, the `SccIndex` assigns it two ids, and
     // `model_dependency_graph` reports `has_cycle == true` with
     // `resolved_sccs` cleared (the false C-LEARN residual
     // `CircularDependency`). GREEN after: `a` is filtered out of
@@ -3130,8 +3139,7 @@ fn resolve_dt_self_loop_subsumed_by_multi_scc_resolves_no_duplicate() {
         "EXACTLY ONE resolved SCC: the 2-member {{a,b}} cluster. `a`'s \
          direct self-edge is an intra-SCC edge of {{a,b}}, NOT a separate \
          1-member self-loop SCC -- emitting both double-resolves `a` and \
-         corrupts the pairwise-disjoint invariant `scc_map_from_resolved` \
-         relies on"
+         corrupts the pairwise-disjoint invariant the `SccIndex` relies on"
     );
     let scc = &res.resolved[0];
     assert_eq!(scc.phase, SccPhase::Dt);
@@ -3166,6 +3174,40 @@ fn resolve_dt_self_loop_subsumed_by_multi_scc_resolves_no_duplicate() {
         1,
         "exactly one ResolvedScc survives the gate (no duplicate, no \
          scc_map corruption)"
+    );
+}
+
+#[test]
+fn dt_cycle_sccs_subsumes_a_self_loop_inside_a_multi_scc() {
+    // The accessor and the resolution derive the offending SCCs through one
+    // function (`phase_cycle_sccs`), so the accessor reports exactly the
+    // set the engine resolves: `a`'s self-edge is an intra-SCC edge of
+    // `{a, b}`, not a second instrumented SCC. A separate derivation that
+    // skipped the subsumption would report `self_loops == {a}` beside
+    // `multi == [{a, b}]`, and the cross-check inside
+    // `dt_cycle_sccs_engine_consistent` would panic ("some instrumented
+    // SCC is absent from resolved_sccs") on a model the engine resolves.
+    let project = self_loop_inside_multi_scc_project();
+    let dm = project.build_datamodel();
+    let db = SimlinDb::default();
+    let result = sync_from_datamodel(&db, &dm);
+    let model = result.models["main"].source;
+
+    let sccs = dt_cycle_sccs_engine_consistent(&db, model, result.project);
+    let expected: Vec<BTreeSet<crate::common::Ident<crate::common::Canonical>>> = vec![
+        [
+            crate::common::Ident::new("a"),
+            crate::common::Ident::new("b"),
+        ]
+        .into_iter()
+        .collect(),
+    ];
+    assert_eq!(sccs.multi, expected, "the cluster is the one >= 2 SCC");
+    assert!(
+        sccs.self_loops.is_empty(),
+        "a self-edge on a member of a >= 2 SCC is that SCC's intra edge, \
+         not a separate self-loop: {:?}",
+        sccs.self_loops
     );
 }
 
@@ -3500,7 +3542,7 @@ fn an_init_view_is_an_init_phase_element_edge() {
     );
 
     // And the user-visible verdict, which is what the loud-safe posture buys.
-    let diags = crate::db::collect_all_diagnostics(&db, result.project);
+    let diags = crate::db::collect_all_diagnostics(&db, result.project, crate::db::LtmOverlay::Off);
     let circular = diags.iter().any(|d| {
         d.variable.as_deref() == Some("s")
             && matches!(
@@ -3553,7 +3595,13 @@ fn a_prologue_reading_an_scc_member_refuses_the_recurrence() {
         let datamodel = crate::open_vensim(&model(operand)).expect("the fixture MDL parses");
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
-        crate::db::compile_project_incremental(&db, sync.project, "main").is_ok()
+        crate::db::compile_project_incremental(
+            &db,
+            sync.project,
+            "main",
+            crate::db::LtmOverlay::Off,
+        )
+        .is_ok()
     };
 
     assert!(
@@ -3725,8 +3773,9 @@ fn exprs_contain_array_producing_builtin(exprs: &[Expr]) -> bool {
 /// array-producing builtin
 /// (VectorElmMap/VectorSortOrder/Rank/AllocateAvailable/AllocateByPriority).
 ///
-/// The universe is the identical `build_var_info(.., &[])` keyset
-/// `dt_cycle_sccs` iterates, on the same `(db, model, project)` triple,
+/// The universe is the identical no-input `var_info` memo
+/// (`no_input_var_info`) `dt_cycle_sccs` reads, on the same `(db, model,
+/// project)` triple,
 /// so a caller can intersect `{multi ∪ self_loops}` with this set over
 /// one shared universe. Each variable's lowered `Vec<Expr>` is sourced
 /// from the engine's own per-variable production lowering via
@@ -3743,11 +3792,11 @@ fn array_producing_vars(
     model: SourceModel,
     project: SourceProject,
 ) -> BTreeSet<Ident<Canonical>> {
-    // The identical universe `dt_cycle_sccs` uses -- the same
-    // `build_var_info(.., &[])` keyset on the same `(db, model, project)`
-    // triple -- so a caller intersects `{multi ∪ self_loops}` and this
-    // set over one universe.
-    let (var_info, _all_init_referenced) = build_var_info(db, model, project, &[]);
+    // The identical universe `dt_cycle_sccs` uses -- the same no-input
+    // `var_info` memo on the same `(db, model, project)` triple -- so a
+    // caller intersects `{multi ∪ self_loops}` and this set over one
+    // universe.
+    let var_info = &no_input_var_info(db, model, project).vars;
 
     let mut out: BTreeSet<Ident<Canonical>> = BTreeSet::new();
     for name in var_info.keys() {
@@ -3822,4 +3871,29 @@ mod exprs_contain_array_producing_builtin_tests {
     fn does_not_flag_empty_list() {
         assert!(!exprs_contain_array_producing_builtin(&[]));
     }
+}
+
+// ── NodeSet (the closure's dense node set) ─────────────────────────
+
+#[test]
+fn iterates_members_in_ascending_order_across_words() {
+    let mut set = NodeSet::empty(130);
+    for node in [129, 0, 64, 63, 65, 1] {
+        set.insert(node);
+    }
+    assert_eq!(set.iter().collect::<Vec<_>>(), vec![0, 1, 63, 64, 65, 129]);
+}
+
+#[test]
+fn union_is_the_set_union_and_leaves_the_other_alone() {
+    let mut a = NodeSet::empty(70);
+    a.insert(3);
+    a.insert(66);
+    let mut b = NodeSet::empty(70);
+    b.insert(3);
+    b.insert(5);
+    a.union_with(&b);
+    assert_eq!(a.iter().collect::<Vec<_>>(), vec![3, 5, 66]);
+    assert_eq!(b.iter().collect::<Vec<_>>(), vec![3, 5]);
+    assert!(NodeSet::empty(0).iter().next().is_none());
 }

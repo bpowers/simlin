@@ -453,15 +453,15 @@ fn lookup_non_var_first_arg_falls_through() {
     // reference), the generic LOOKUP(...) path is used as a fallback.
     let table_sub = Expr0::Subscript(
         RawIdent::new_from_str("tbl"),
-        vec![IndexExpr0::Expr(Expr0::Var(
+        Box::new([IndexExpr0::Expr(Expr0::Var(
             RawIdent::new_from_str("i"),
             Loc::default(),
-        ))],
+        ))]),
         Loc::default(),
     );
     let input = Expr0::Var(RawIdent::new_from_str("x"), Loc::default());
     let expr = Expr0::App(
-        UntypedBuiltinFn("lookup".to_owned(), vec![table_sub, input]),
+        UntypedBuiltinFn("lookup".to_owned(), Box::new([table_sub, input])),
         Loc::default(),
     );
     let mdl = expr0_to_mdl(&expr);
@@ -5024,10 +5024,10 @@ fn star_range_subscript_renders_as_bang() {
     // `StarRange` on one pass and `Wildcard` on another (#847).
     let expr = Expr0::Subscript(
         RawIdent::new_from_str("input"),
-        vec![IndexExpr0::StarRange(
+        Box::new([IndexExpr0::StarRange(
             RawIdent::new_from_str("sector"),
             Loc::default(),
-        )],
+        )]),
         Loc::default(),
     );
     assert_eq!(expr0_to_mdl(&expr), "input[sector!]");

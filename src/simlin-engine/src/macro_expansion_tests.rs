@@ -75,11 +75,11 @@ fn mdl(body: &str) -> String {
 
 /// Compile a `.mdl` source through the production incremental path and
 /// return the compile `Result`.
-fn compile_mdl(source: &str) -> crate::Result<crate::vm::CompiledSimulation> {
+fn compile_mdl(source: &str) -> crate::Result<std::sync::Arc<crate::vm::CompiledSimulation>> {
     let project = open_vensim(source).expect("MDL must parse into a datamodel project");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    compile_project_incremental(&db, sync.project, "main")
+    compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
 }
 
 /// Run a `.mdl` source end-to-end and return the named variable's series.
@@ -102,7 +102,7 @@ fn diagnostics_for(source: &str) -> Vec<crate::db::Diagnostic> {
     let project = open_vensim(source).expect("MDL must parse into a datamodel project");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    collect_all_diagnostics(&db, sync.project)
+    collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off)
 }
 
 /// True iff some Error-severity diagnostic carries a `Model` error with the
@@ -926,8 +926,8 @@ fn a_passthrough_macro_keeps_its_declared_arity_at_an_external_call_site() {
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, project, None);
         (
-            compile_project_incremental(&db, sync.project, "main"),
-            collect_all_diagnostics(&db, sync.project),
+            compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off),
+            collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off),
         )
     };
 
@@ -1484,7 +1484,7 @@ sibling=
     let project = open_vensim(&source).expect("MDL must parse");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let diags = collect_all_diagnostics(&db, sync.project);
+    let diags = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
 
     let macro_models: std::collections::BTreeSet<&str> = project
         .models

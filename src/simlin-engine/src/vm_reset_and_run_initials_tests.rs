@@ -20,7 +20,7 @@ fn pop_model() -> TestProject {
         .stock("population", "100", &["births"], &["deaths"], None)
 }
 
-fn build_compiled(tp: &TestProject) -> CompiledSimulation {
+fn build_compiled(tp: &TestProject) -> std::sync::Arc<CompiledSimulation> {
     tp.compile_incremental()
         .expect("incremental compile should succeed")
 }
@@ -243,8 +243,9 @@ fn test_global_operand_binop_reads_global_not_module_relative() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("two-model project should compile");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .expect("two-model project should compile");
 
     // Confirm the fused global ops were actually emitted (inside the
     // submodule), so the dispatch path under test is exercised.

@@ -32,12 +32,11 @@
 //!
 //!   1. parsed              -- XMILE/MDL -> datamodel::Project
 //!   2. synced              -- sync_from_datamodel_incremental
-//!   3. ltm_enabled         -- set_project_ltm_enabled
-//!   4. causal_edges        -- model_causal_edges (variable-level)
-//!   5. element_edges       -- model_element_causal_edges
-//!   6. loop_circuits       -- model_element_loop_circuits (Johnson's)
-//!   7. ltm_variables       -- model_ltm_variables (synth var gen)
-//!   8. compile             -- compile_project_incremental (full assembly)
+//!   3. causal_edges        -- model_causal_edges (variable-level)
+//!   4. element_edges       -- model_element_causal_edges
+//!   5. loop_circuits       -- model_element_loop_circuits (Johnson's)
+//!   6. ltm_variables       -- model_ltm_variables (synth var gen)
+//!   7. compile             -- compile_project_incremental (full assembly, LTM overlay on)
 
 use std::fs;
 use std::time::Instant;
@@ -53,7 +52,7 @@ use simlin_engine::db::model_element_loop_circuits;
 use simlin_engine::db::{
     SimlinDb, causal_graph_from_edges, causal_graph_from_element_edges,
     compile_project_incremental, model_causal_edges, model_element_causal_edges,
-    model_ltm_variables, set_project_ltm_enabled, sync_from_datamodel_incremental,
+    model_ltm_variables, sync_from_datamodel_incremental,
 };
 use simlin_engine::{json, open_vensim, open_xmile};
 
@@ -248,19 +247,9 @@ fn main() {
         format!("root='{root_name}'"),
     );
 
-    // Stage 3: enable LTM.  Just flips an input flag but bumps the
-    // salsa generation, so downstream tracked fns will run fresh.
-    let t0 = Instant::now();
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    tracker.record(
-        "ltm_enabled",
-        t0.elapsed().as_secs_f64() * 1000.0,
-        "flag=true".into(),
-    );
-
-    // Stage 4: variable-level causal edges.  We report the
+    // Stage 3: variable-level causal edges.  We report the
     // variable-level largest SCC alongside the element-level
-    // counterpart in stage 5 so Phase-5 measurements can show how
+    // counterpart in stage 4 so Phase-5 measurements can show how
     // per-element expansion influences SCC density.
     let t0 = Instant::now();
     let edges = model_causal_edges(&db, root_source_model, sync.project);
@@ -277,7 +266,7 @@ fn main() {
         ),
     );
 
-    // Stage 5: element-level causal edges (A2A / cross-element expansion).
+    // Stage 4: element-level causal edges (A2A / cross-element expansion).
     // Element-level largest SCC drives the auto-flip gate
     // (`MAX_LTM_SCC_NODES`) in `model_ltm_variables`; reporting it here
     // makes Phase-5 measurements directly comparable to the gate threshold.
@@ -296,7 +285,7 @@ fn main() {
         ),
     );
 
-    // Stage 6: element-level circuit enumeration (Johnson's w/ SCC).
+    // Stage 5: element-level circuit enumeration (Johnson's w/ SCC).
     // Enumeration runs with max_circuits = usize::MAX; the downstream
     // synthetic-variable pipeline is gated by MAX_LTM_SCC_NODES in
     // `model_ltm_variables`, not by a circuit-count cap.
@@ -310,10 +299,10 @@ fn main() {
         format!("circuits={n_circuits} unique_names={n_circuit_names}"),
     );
 
-    // Stage 7: LTM synthetic variables (link scores, loop scores,
+    // Stage 6: LTM synthetic variables (link scores, loop scores,
     // pathways, composites).  Relative loop scores are computed
     // post-simulation via `ltm_post::compute_rel_loop_scores`, so they
-    // no longer contribute to this stage's equation-text footprint.
+    // take no part in this stage's equation-text footprint.
     let t0 = Instant::now();
     let ltm_vars = model_ltm_variables(&db, root_source_model, sync.project);
     let n_ltm = ltm_vars.vars.len();
@@ -350,10 +339,15 @@ fn main() {
         ),
     );
 
-    // Stage 8: full compile (parsing LTM equations into ASTs, interning
+    // Stage 7: full compile (parsing LTM equations into ASTs, interning
     // salsa rows, bytecode emission).
     let t0 = Instant::now();
-    let compile_result = compile_project_incremental(&db, sync.project, root_name);
+    let compile_result = compile_project_incremental(
+        &db,
+        sync.project,
+        root_name,
+        simlin_engine::db::LtmOverlay::On,
+    );
     let compile_ok = compile_result.is_ok();
     tracker.record(
         "compile",

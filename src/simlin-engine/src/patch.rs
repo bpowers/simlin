@@ -754,8 +754,8 @@ fn rename_index_expr(
             index.clone()
         }
         IndexExpr0::Range(lhs, rhs, loc) => IndexExpr0::Range(
-            rename_expr(lhs, old_ident, new_ident),
-            rename_expr(rhs, old_ident, new_ident),
+            Box::new(rename_expr(lhs, old_ident, new_ident)),
+            Box::new(rename_expr(rhs, old_ident, new_ident)),
             *loc,
         ),
         IndexExpr0::Expr(expr) => IndexExpr0::Expr(rename_expr(expr, old_ident, new_ident)),
@@ -820,9 +820,11 @@ pub(crate) fn index_expr2_to_index_expr0(index: &IndexExpr2) -> crate::ast::Inde
         IndexExpr2::StarRange(dim, loc) => {
             IndexExpr0::StarRange(RawIdent::new(dim.as_str().to_string()), *loc)
         }
-        IndexExpr2::Range(lhs, rhs, loc) => {
-            IndexExpr0::Range(expr2_to_expr0(lhs), expr2_to_expr0(rhs), *loc)
-        }
+        IndexExpr2::Range(lhs, rhs, loc) => IndexExpr0::Range(
+            Box::new(expr2_to_expr0(lhs)),
+            Box::new(expr2_to_expr0(rhs)),
+            *loc,
+        ),
         IndexExpr2::DimPosition(pos, loc) => IndexExpr0::DimPosition(*pos, *loc),
         IndexExpr2::Expr(expr) => IndexExpr0::Expr(expr2_to_expr0(expr)),
     }
@@ -830,11 +832,11 @@ pub(crate) fn index_expr2_to_index_expr0(index: &IndexExpr2) -> crate::ast::Inde
 
 pub(crate) fn builtin_to_untyped(builtin: &BuiltinFn<Expr2>) -> UntypedBuiltinFn<Expr0> {
     use crate::builtins::BuiltinFn;
-    let args = match builtin {
+    let args: Box<[Expr0]> = match builtin {
         // The identifier payload prints as the bare variable reference it was
         // parsed from.
         BuiltinFn::IsModuleInput(ident, _) => {
-            vec![Expr0::Var(RawIdent::new(ident.clone()), Default::default())]
+            Box::new([Expr0::Var(RawIdent::new(ident.clone()), Default::default())])
         }
         other => other.args().into_iter().map(expr2_to_expr0).collect(),
     };

@@ -23,12 +23,15 @@ The implementation is split across these modules in `src/simlin-engine/src/`:
 
 The production entry point is the `model_ltm_variables` tracked function in
 `db/ltm/mod.rs`, invoked as part of `compile_project_incremental`. LTM compilation
-is controlled by two flags on `SourceProject`:
+is controlled by one query argument and one flag on `SourceProject`:
 
-- **`ltm_enabled`** -- When true, LTM synthetic variables are generated for every
-  model (root and sub-models) during incremental compilation.
+- **`db::LtmOverlay`** -- An argument of every compile query, `On` or `Off`.
+  When `On`, LTM synthetic variables are generated for every model (root and
+  sub-models) during incremental compilation. Both variants stay memoized
+  side by side, so a caller switching between them (a plain diagnostics pass
+  after an LTM simulation) recomputes nothing.
 
-- **`ltm_discovery_mode`** -- Controls which edges get link scores. When false
+- **`ltm_discovery_mode`** (the `SourceProject` flag) -- Controls which edges get link scores. When false
   (exhaustive mode), link scores are generated only for edges participating in
   detected loops, plus one `loop_score` variable per loop. When true (discovery
   mode), link scores are generated for all causal edges.  Relative loop scores
@@ -387,7 +390,7 @@ signed unit transfer when nothing better exists:
 **Composites resolve in both modes (GH #548 / #675).** Since GH #548,
 `db::model_shape` registers a sub-model's LTM synthetic vars (composites
 included) at their layout slots in the shape every parent fragment resolves a
-cross-module read through, whenever `ltm_enabled`, which holds in *both*
+cross-module read through, whenever the LTM overlay is on, which holds in *both*
 exhaustive and discovery mode. An empirical probe confirmed a
 SMOOTH composite resolving to a nonzero value in a discovery run. Discovery
 mode therefore uses the *same* composite reference exhaustive mode does -- the
@@ -1996,7 +1999,7 @@ cases remain deliberate carve-outs:
 3. **Auto-flip on large SCCs, no composite-network pre-reduction**: The papers
    describe a two-tier strategy in which models with fewer than ~1000 loops use
    exhaustive enumeration on a composite (max-score) network. The implementation
-   does not build that composite pre-reduction: `ltm_enabled` runs exhaustive
+   does not build that composite pre-reduction: the LTM overlay runs exhaustive
    enumeration and `ltm_discovery_mode` runs `discover_loops()`. However,
    `model_ltm_variables` in `src/simlin-engine/src/db/ltm/mod.rs` does automatically
    switch from exhaustive to discovery in two phases. The early gate fires on

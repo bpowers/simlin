@@ -262,7 +262,13 @@ fn an_empty_a2a_equation_reports_no_dimensions_on_both_paths() {
     }
     // The layout is the thing the divergence was observable in, so pin it too.
     assert_eq!(
-        crate::db::compute_layout(&db, sync.models["main"].source, sync.project).n_slots,
+        crate::db::compute_layout(
+            &db,
+            sync.models["main"].source,
+            sync.project,
+            crate::db::LtmOverlay::Off
+        )
+        .n_slots,
         2,
         "two size-1 variables occupy two slots; the pre-gate derivation made this 6"
     );
@@ -351,7 +357,7 @@ fn an_unparseable_a2a_equation_still_fails_to_compile() {
         ai_information: None,
     };
     let state = sync_from_datamodel_incremental(&mut db, &project, None);
-    let diagnostics = collect_all_diagnostics(&db, state.project);
+    let diagnostics = collect_all_diagnostics(&db, state.project, crate::db::LtmOverlay::Off);
     assert!(
         diagnostics
             .iter()

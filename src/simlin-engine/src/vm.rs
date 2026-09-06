@@ -193,40 +193,48 @@ impl CompiledSimulation {
             .map_or(0, |m| m.flows_invariant_opcode_len)
     }
 
+    /// Whether `off` is a constant of the program: a slot some module assigns
+    /// with a flows-phase `AssignConstCurr` (see `collect_constant_info`).
+    /// This is the program's own index and says nothing about the passes; the
+    /// override gate is [`is_overridable_offset`].
+    ///
+    /// [`is_overridable_offset`]: Self::is_overridable_offset
     pub fn is_constant_offset(&self, off: usize) -> bool {
         self.cached_constant_info.contains_key(&off)
     }
 
-    /// Retract `offsets` from the overridable-constant set (GH #871).
-    ///
-    /// The conveyor/queue build path calls this with every pass-written slot:
-    /// the expansion compiles each pass-driven flow to a placeholder
-    /// `AssignConstCurr 0`, which the flows-phase classification above would
-    /// otherwise treat as an overridable constant -- but the conveyor/queue
-    /// pass overwrites those slots every step, so an accepted override could
-    /// never affect the simulation. Retracting them makes `set_value` /
-    /// `is_constant_offset` reject them with `BadOverride`, exactly like any
-    /// other computed flow.
-    pub(crate) fn exclude_overridable_offsets(&mut self, offsets: impl IntoIterator<Item = usize>) {
-        for off in offsets {
-            self.cached_constant_info.remove(&off);
-        }
-    }
-
-    /// The full set of overridable constant offsets (absolute data-buffer
-    /// offsets), i.e. every offset for which [`is_constant_offset`] is true.
-    /// These are the offsets with an `AssignConstCurr` in some module's flows
-    /// phase (see `collect_constant_info`), minus any the special conveyor/
-    /// queue build path retracted via [`exclude_overridable_offsets`] (a
-    /// conveyor/queue model never reaches the wasm backend, so the wasmgen
-    /// parity assertion only ever sees the un-retracted set);
-    /// `set_value`/`set_value_by_offset` accept exactly these. The wasm
-    /// backend reads this to size and initialize its constants-override region
-    /// so a blob's `set_value` accepts the same set the VM does.
-    ///
-    /// [`exclude_overridable_offsets`]: Self::exclude_overridable_offsets
+    /// Whether an override may claim `off`: a constant of the program
+    /// ([`is_constant_offset`]) that no conveyor or queue pass writes under
+    /// the given plans (`queue_compile::is_pass_written`). A pass-driven
+    /// flow's placeholder `0` is a constant of the program exactly like a
+    /// user's `0`, but the pass overwrites its slot every step, so an accepted
+    /// override there would be silently ineffective (GH #871); the plans are
+    /// what tell the two apart, which is why they are an argument and the
+    /// shared program's index is never edited. The one gate behind
+    /// `Vm::set_value`/`set_value_by_offset` and libsimlin's no-Vm twin; the
+    /// wasm backend seeds its validity region from the same two facts.
     ///
     /// [`is_constant_offset`]: Self::is_constant_offset
+    pub fn is_overridable_offset(
+        &self,
+        conveyor_plans: &[crate::conveyor_compile::ConveyorPlan],
+        queue_plans: &[crate::queue_compile::QueuePlan],
+        off: usize,
+    ) -> bool {
+        self.is_constant_offset(off)
+            && !crate::queue_compile::is_pass_written(conveyor_plans, queue_plans, off)
+    }
+
+    /// The full set of constant offsets (absolute data-buffer offsets), i.e.
+    /// every offset for which [`is_constant_offset`] is true: the offsets with
+    /// an `AssignConstCurr` in some module's flows phase (see
+    /// `collect_constant_info`). The program is shared and this index never
+    /// changes; which of these an override may claim is
+    /// [`is_overridable_offset`]'s question, under the attached plans. The
+    /// wasm backend cross-checks its own constant walk against this set.
+    ///
+    /// [`is_constant_offset`]: Self::is_constant_offset
+    /// [`is_overridable_offset`]: Self::is_overridable_offset
     pub(crate) fn constant_offsets(&self) -> impl Iterator<Item = usize> + '_ {
         self.cached_constant_info.keys().copied()
     }
@@ -287,8 +295,13 @@ fn borrow_two(buf: &mut [f64], n_slots: usize, a: usize, b: usize) -> (&mut [f64
 #[cfg_attr(feature = "debug-derive", derive(Debug))]
 #[derive(Clone)]
 pub struct Vm {
+    /// The program this Vm runs, shared with whoever compiled it: the FFI
+    /// keeps the same `Arc` to rebuild the Vm on reset, and the salsa memo
+    /// that assembled it holds one too. Constructing a Vm therefore copies
+    /// neither the name-to-slot map nor the constant index; the per-Vm state
+    /// below is what execution mutates.
+    sim: Arc<CompiledSimulation>,
     specs: Specs,
-    offsets: HashMap<Ident<Canonical>, usize>,
     sliced_sim: CompiledSlicedSimulation,
     n_slots: usize,
     n_chunks: usize,
@@ -308,9 +321,6 @@ pub struct Vm {
     stack: Stack,
     view_stack: Vec<RuntimeView>,
     iter_stack: Vec<IterState>,
-    // Maps absolute offset -> all bytecode locations containing that constant's literal.
-    // Used by set_value to find and mutate the right literals, and for validation.
-    constant_info: HashMap<usize, Vec<BytecodeLocation>>,
     // Tracks original literal values before override, keyed by absolute offset.
     // Each entry stores the locations and their original values so clear_values can restore them.
     original_literals: HashMap<usize, Vec<(BytecodeLocation, f64)>>,
@@ -617,12 +627,12 @@ impl CompiledSlicedSimulation {
 /// ALL bytecode locations across flows, stocks, and initials are collected so
 /// that a single `set_value` call mutates every literal that feeds that offset.
 ///
-/// The special conveyor/queue build path subsequently RETRACTS the pass-written
-/// slots from this set (`CompiledSimulation::exclude_overridable_offsets` /
-/// `Vm::set_conveyor_plans` / `Vm::set_queue_plans`): a pass-driven flow's
-/// placeholder `0` matches the AssignConstCurr rule here, but the per-step pass
-/// overwrites its slot, so an override on it must reject rather than silently
-/// do nothing (GH #871).
+/// This index is the program's and never learns which of its constants a
+/// conveyor/queue pass writes each step: a pass-driven flow's placeholder `0`
+/// matches the AssignConstCurr rule here exactly as a user's constant does.
+/// `CompiledSimulation::is_overridable_offset` subtracts those under the
+/// attached plans, so an override on one rejects rather than silently doing
+/// nothing (GH #871).
 fn collect_constant_info(
     modules: &HashMap<ModuleKey, CompiledModule>,
     module_key: &ModuleKey,
@@ -763,7 +773,8 @@ pub(crate) fn increment_indices(indices: &mut [u16], dims: &[u16]) {
 pub const POISON_SENTINEL: f64 = -1.234567e123;
 
 impl Vm {
-    pub fn new(sim: CompiledSimulation) -> Result<Vm> {
+    pub fn new(sim: impl Into<Arc<CompiledSimulation>>) -> Result<Vm> {
+        let sim: Arc<CompiledSimulation> = sim.into();
         if sim.specs.stop < sim.specs.start {
             return sim_err!(
                 BadSimSpecs,
@@ -804,8 +815,7 @@ impl Vm {
         let sliced_sim = CompiledSlicedSimulation::build(&sim.modules, &sim.root);
 
         Ok(Vm {
-            specs: sim.specs,
-            offsets: sim.offsets,
+            specs: sim.specs.clone(),
             sliced_sim,
             n_slots,
             n_chunks,
@@ -818,7 +828,6 @@ impl Vm {
             stack: Stack::new(),
             view_stack: Vec::with_capacity(4),
             iter_stack: Vec::with_capacity(2),
-            constant_info: sim.cached_constant_info,
             original_literals: HashMap::new(),
             initial_values: vec![0.0; n_slots].into_boxed_slice(),
             prev_values: vec![0.0; n_slots].into_boxed_slice(),
@@ -833,6 +842,7 @@ impl Vm {
             queue_plans: Vec::new(),
             queues: Vec::new(),
             coupling: crate::queue_compile::CouplingTable::default(),
+            sim,
         })
     }
 
@@ -843,19 +853,10 @@ impl Vm {
     /// unaffected.
     pub fn set_conveyor_plans(&mut self, plans: Vec<crate::conveyor_compile::ConveyorPlan>) {
         self.conveyor_last_unit = self.specs.start.floor() as i64;
-        // Pass-written slots (driven outflows, leaks, containers) must not be
-        // overridable: their placeholder `0` compiles to AssignConstCurr, but
-        // the conveyor pass overwrites them every step, so an accepted
-        // override would be silently ineffective (GH #871). The build path
-        // already retracts them from the compiled sim's constant info (so the
-        // no-VM `is_constant_offset` check agrees); repeating the retraction
-        // here makes a Vm assembled directly from an unscrubbed
-        // CompiledSimulation reject too.
-        for plan in &plans {
-            for off in plan.pass_written_offsets() {
-                self.constant_info.remove(&off);
-            }
-        }
+        // The override gate (`is_overridable`) reads the attached plans, so
+        // replacing them here is what retracts the slots the conveyor pass
+        // writes (GH #871) and releases the slots a replaced plan wrote --
+        // no per-Vm copy of that set exists to go stale.
         self.conveyor_plans = plans;
         // Re-derive the coupling table from the (possibly updated) plan pair:
         // the coupling is compile-time constant, so it is computed here once
@@ -870,13 +871,8 @@ impl Vm {
     /// the plan list empty, so ordinary models are unaffected. The FIFO side
     /// table is (re)built in `run_initials`, so nothing else is set here.
     pub fn set_queue_plans(&mut self, plans: Vec<crate::queue_compile::QueuePlan>) {
-        // Same pass-written override retraction as set_conveyor_plans (GH
-        // #871): the queue pass owns the driven outflow + container slots.
-        for plan in &plans {
-            for off in plan.pass_written_offsets() {
-                self.constant_info.remove(&off);
-            }
-        }
+        // As in set_conveyor_plans: the override gate reads the attached
+        // plans, so this replacement is the retraction (GH #871).
         self.queue_plans = plans;
         // Same attach-time coupling-table derivation as set_conveyor_plans:
         // both setters rebuild it so the result is independent of the order
@@ -1322,7 +1318,7 @@ impl Vm {
 
     pub fn into_results(self) -> Results {
         Results {
-            offsets: self.offsets.clone(),
+            offsets: self.sim.offsets.clone(),
             data: self.data.unwrap(),
             step_size: self.n_slots,
             step_count: self.n_chunks,
@@ -1352,14 +1348,15 @@ impl Vm {
     }
 
     pub fn names_as_strs(&self) -> Vec<String> {
-        self.offsets
+        self.sim
+            .offsets
             .keys()
             .map(|k| k.as_str().to_string())
             .collect()
     }
 
     pub fn get_offset(&self, ident: &Ident<Canonical>) -> Option<usize> {
-        self.offsets.get(ident).copied()
+        self.sim.offsets.get(ident).copied()
     }
 
     #[cfg(test)]
@@ -1367,10 +1364,11 @@ impl Vm {
         &self.stock_offsets
     }
 
-    /// Returns whether a given absolute data-buffer offset corresponds to a
-    /// simple constant (AssignConstCurr opcode), O(1) lookup against precomputed map.
-    fn is_constant(&self, off: usize) -> bool {
-        self.constant_info.contains_key(&off)
+    /// Whether an override may claim `off`: the program's gate under the plans
+    /// attached to this Vm (`CompiledSimulation::is_overridable_offset`).
+    fn is_overridable(&self, off: usize) -> bool {
+        self.sim
+            .is_overridable_offset(&self.conveyor_plans, &self.queue_plans, off)
     }
 
     /// Resolve a `ModuleKey` (carried by a `BytecodeLocation` from the
@@ -1470,7 +1468,7 @@ impl Vm {
     /// push_named_literal), so no de-interning is needed at runtime.
     fn apply_override(&mut self, off: usize, value: f64) {
         // Clone locations once; we need ownership because write_literal borrows &mut self.
-        let locations = self.constant_info[&off].clone();
+        let locations = self.sim.cached_constant_info[&off].clone();
         if !self.original_literals.contains_key(&off) {
             let originals: Vec<_> = locations
                 .iter()
@@ -1488,7 +1486,7 @@ impl Vm {
     /// Mutates the bytecode literals directly so AssignConstCurr needs no branching.
     /// Returns the data-buffer offset of the variable on success.
     pub fn set_value(&mut self, ident: &Ident<Canonical>, value: f64) -> Result<usize> {
-        let off = match self.offsets.get(ident) {
+        let off = match self.sim.offsets.get(ident) {
             Some(&off) => off,
             None => {
                 return sim_err!(
@@ -1497,7 +1495,7 @@ impl Vm {
                 );
             }
         };
-        if !self.is_constant(off) {
+        if !self.is_overridable(off) {
             return sim_err!(
                 BadOverride,
                 format!(
@@ -1518,7 +1516,7 @@ impl Vm {
                 format!("offset {} out of bounds (n_slots={})", off, self.n_slots)
             );
         }
-        if !self.is_constant(off) {
+        if !self.is_overridable(off) {
             return sim_err!(
                 BadOverride,
                 format!("cannot set value of offset {}: not a simple constant", off)
@@ -1761,7 +1759,7 @@ impl Vm {
     /// Returns None if the ident is not found.
     /// The returned vector has one element per saved step (including t=0).
     pub fn get_series(&self, ident: &Ident<Canonical>) -> Option<Vec<f64>> {
-        let &off = self.offsets.get(ident)?;
+        let &off = self.sim.offsets.get(ident)?;
         let data = self.data.as_ref()?;
         if !self.did_initials {
             return Some(vec![]);
@@ -4114,6 +4112,23 @@ mod superinstruction_tests {
     fn build_vm(tp: &TestProject) -> Vm {
         let compiled = tp.compile_incremental().unwrap();
         Vm::new(compiled).unwrap()
+    }
+
+    /// The Vm shares the compiled program it was built from rather than
+    /// copying it: libsimlin keeps the same `Arc` to rebuild the Vm on reset
+    /// and the salsa memo holds another, so constructing a Vm copies neither
+    /// the offsets map nor the constant index.
+    #[test]
+    fn vm_shares_the_compiled_program() {
+        let tp = TestProject::new("shared_program")
+            .with_sim_time(0.0, 1.0, 1.0)
+            .aux("rate", "0.1", None);
+        let compiled = tp.compile_incremental().unwrap();
+        let before = Arc::strong_count(&compiled);
+        let vm = Vm::new(compiled.clone()).unwrap();
+        assert_eq!(Arc::strong_count(&compiled), before + 1);
+        drop(vm);
+        assert_eq!(Arc::strong_count(&compiled), before);
     }
 
     /// Helper: collect all opcodes from the flow bytecode of the root module.

@@ -64,8 +64,14 @@ fn ready_input<'db>(
     var: &str,
 ) -> Box<crate::compiler::fragment::FragmentInput<'db>> {
     let source = sync.models[model].variables[var].source;
-    let ExplicitFragment { diagnostics, input } =
-        explicit_fragment_input(db, source, sync.models[model].source, sync.project, &[]);
+    let ExplicitFragment { diagnostics, input } = explicit_fragment_input(
+        db,
+        source,
+        sync.models[model].source,
+        sync.project,
+        &[],
+        crate::db::LtmOverlay::Off,
+    );
     input.unwrap_or_else(|| panic!("{model}.{var} must lower for this fixture: {diagnostics:?}"))
 }
 
@@ -125,8 +131,15 @@ fn fragments_and_the_ltm_map_share_one_lowered_implicit_variable() {
             .as_ref()
             .unwrap_or_else(|| panic!("{name}: the parse synthesized this helper"))
             .variable;
-        let input = implicit_fragment_input(&db, meta, main, sync.project, &[])
-            .unwrap_or_else(|_| panic!("{name}: the helper must lower for this fixture"));
+        let input = implicit_fragment_input(
+            &db,
+            meta,
+            main,
+            sync.project,
+            &[],
+            crate::db::LtmOverlay::Off,
+        )
+        .unwrap_or_else(|_| panic!("{name}: the helper must lower for this fixture"));
         assert!(
             matches!(input.target, Cow::Borrowed(_))
                 && std::ptr::eq(input.target.as_ref(), &**memo),
@@ -179,7 +192,6 @@ fn fragments_and_the_ltm_map_share_one_lowered_implicit_variable() {
 fn every_consumer_lowers_each_variable_once() {
     let mut probed = ProbedDb::new();
     let state = sync_from_datamodel_incremental(probed.db_mut(), &shared_fixture(), None);
-    set_project_ltm_enabled(probed.db_mut(), state.project, true);
     let sync = state.to_sync_result();
     let db = probed.db();
 
@@ -202,14 +214,15 @@ fn every_consumer_lowers_each_variable_once() {
 
     probed.reset();
     let db = probed.db();
-    let diagnostics = collect_all_diagnostics(db, sync.project);
+    let diagnostics = collect_all_diagnostics(db, sync.project, crate::db::LtmOverlay::On);
     assert!(
         !diagnostics
             .iter()
             .any(|d| d.severity == DiagnosticSeverity::Error),
         "the fixture compiles: {diagnostics:?}"
     );
-    compile_project_incremental(db, sync.project, "main").expect("assembly");
+    compile_project_incremental(db, sync.project, "main", crate::db::LtmOverlay::On)
+        .expect("assembly");
     let main = sync.models["main"].source;
     let _ = model_lowered_variables(db, main, sync.project);
     let _ = crate::db::ltm_ir::model_ltm_reference_sites(db, main, sync.project);
@@ -251,16 +264,28 @@ fn an_equation_edit_relowers_only_the_edited_variable() {
     let mut probed = ProbedDb::new();
     let state1 = sync_from_datamodel_incremental(probed.db_mut(), &with_rate("level / 2"), None);
     let sync1 = state1.to_sync_result();
-    compile_project_incremental(probed.db(), sync1.project, "main").expect("first compile");
-    let _ = collect_all_diagnostics(probed.db(), sync1.project);
+    compile_project_incremental(
+        probed.db(),
+        sync1.project,
+        "main",
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("first compile");
+    let _ = collect_all_diagnostics(probed.db(), sync1.project, crate::db::LtmOverlay::Off);
 
     // Control: an identical re-sync re-lowers nothing.
     probed.reset();
     let state2 =
         sync_from_datamodel_incremental(probed.db_mut(), &with_rate("level / 2"), Some(&state1));
     let sync2 = state2.to_sync_result();
-    compile_project_incremental(probed.db(), sync2.project, "main").expect("re-sync compile");
-    let _ = collect_all_diagnostics(probed.db(), sync2.project);
+    compile_project_incremental(
+        probed.db(),
+        sync2.project,
+        "main",
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("re-sync compile");
+    let _ = collect_all_diagnostics(probed.db(), sync2.project, crate::db::LtmOverlay::Off);
     let counts = probed.counts();
     assert_eq!(counts.get("lowered_source_variable"), None, "{counts:?}");
     assert_eq!(counts.get("lowered_implicit_variable"), None, "{counts:?}");
@@ -269,8 +294,14 @@ fn an_equation_edit_relowers_only_the_edited_variable() {
     let state3 =
         sync_from_datamodel_incremental(probed.db_mut(), &with_rate("level / 3"), Some(&state2));
     let sync3 = state3.to_sync_result();
-    compile_project_incremental(probed.db(), sync3.project, "main").expect("edited compile");
-    let _ = collect_all_diagnostics(probed.db(), sync3.project);
+    compile_project_incremental(
+        probed.db(),
+        sync3.project,
+        "main",
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("edited compile");
+    let _ = collect_all_diagnostics(probed.db(), sync3.project, crate::db::LtmOverlay::Off);
     let counts = probed.counts();
     assert_eq!(
         counts.get("lowered_source_variable"),
@@ -327,8 +358,9 @@ fn module_wiring_strips_the_parent_scope_prefix_under_a_display_cased_main() {
             "{root}: the `·` prefix is stripped"
         );
 
-        let compiled = compile_project_incremental(&db, sync.project, "main")
-            .unwrap_or_else(|e| panic!("{root}: the wired project compiles: {e}"));
+        let compiled =
+            compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+                .unwrap_or_else(|e| panic!("{root}: the wired project compiles: {e}"));
         let mut vm = crate::Vm::new(compiled).expect("vm");
         vm.run_to_end().expect("run");
         let results = crate::test_common::collect_results(&vm.into_results());
@@ -372,8 +404,13 @@ fn a_dependency_tables_projection_backdates_on_an_equation_edit() {
         &with_k("3", gf(vec![0.0, 5.0], 10.0)),
         None,
     );
-    compile_project_incremental(probed.db(), state.to_sync_result().project, "main")
-        .expect("first compile");
+    compile_project_incremental(
+        probed.db(),
+        state.to_sync_result().project,
+        "main",
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("first compile");
 
     // (edit, the project after it, fragments recompiled)
     let rows = [
@@ -392,8 +429,13 @@ fn a_dependency_tables_projection_backdates_on_an_equation_edit() {
     for (edit, project, recompiled) in rows {
         probed.reset();
         state = sync_from_datamodel_incremental(probed.db_mut(), &project, Some(&state));
-        compile_project_incremental(probed.db(), state.to_sync_result().project, "main")
-            .expect(edit);
+        compile_project_incremental(
+            probed.db(),
+            state.to_sync_result().project,
+            "main",
+            crate::db::LtmOverlay::Off,
+        )
+        .expect(edit);
         let counts = probed.counts();
         assert_eq!(
             counts.get("variable_tables"),

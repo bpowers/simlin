@@ -1276,9 +1276,10 @@ fn test_apply_patch_xmile_empty_equation_reject() {
     }
 }
 
-/// Regression test: simlin_sim_new with enable_ltm=true must not leave
-/// the SourceProject's ltm_enabled flag set, otherwise subsequent patch
-/// validation compiles in stale LTM mode.
+/// An LTM simulation must not change how later patch validation compiles:
+/// validation assesses the project with the LTM overlay `Off`, whatever
+/// `enable_ltm` earlier sims on the project passed, so an LTM-only rejection
+/// never blocks a patch.
 #[test]
 fn test_ltm_sim_then_patch_does_not_inherit_ltm_mode() {
     let datamodel = TestProject::new("ltm_sim_patch_ordering")
@@ -1293,7 +1294,7 @@ fn test_ltm_sim_then_patch_does_not_inherit_ltm_mode() {
     unsafe {
         let mut out_error: *mut SimlinError = ptr::null_mut();
 
-        // First, create an LTM simulation (sets ltm_enabled=true internally)
+        // First, create an LTM simulation.
         let model = simlin_project_get_model(proj, ptr::null(), &mut out_error);
         assert!(!model.is_null());
 
@@ -1305,9 +1306,8 @@ fn test_ltm_sim_then_patch_does_not_inherit_ltm_mode() {
         simlin_sim_unref(sim);
         simlin_model_unref(model);
 
-        // Now apply a patch. If ltm_enabled leaked from simlin_sim_new,
-        // the patch validation compilation would run in LTM mode, which
-        // could cause spurious failures or different error behavior.
+        // Now apply a patch. Validation compiles with the overlay Off, so the
+        // LTM sim above must not change its outcome.
         let patch_json = r#"{
             "models": [{ "name": "main", "ops": [
                 { "type": "upsertAux", "payload": { "aux": { "name": "birth_rate", "equation": "0.03" } } }
@@ -1722,9 +1722,13 @@ fn test_patch_with_preexisting_unit_warnings_succeeds() {
     // mismatch surfaces as the per-variable consistency row and the
     // model-level inference umbrella, both `Unit` warnings.
     {
-        let db = unsafe { (*proj).db.lock().unwrap() };
+        let db = unsafe { (*proj).lock_db() };
         let source_project = db.current_source_project().unwrap();
-        let diags = engine::db::collect_all_diagnostics(&db, source_project);
+        let diags = engine::db::collect_all_diagnostics(
+            &db,
+            source_project,
+            simlin_engine::db::LtmOverlay::Off,
+        );
         let has_unit_diags = diags.iter().any(|d| {
             d.severity == engine::db::DiagnosticSeverity::Warning
                 && matches!(d.error, engine::db::DiagnosticError::Unit(_))
@@ -1822,9 +1826,13 @@ fn test_unrelated_patch_then_sim_specs_keeps_unit_warnings() {
 
     // Count the Warning-severity unit diagnostics the project reports.
     let unit_warning_count = |proj: *mut SimlinProject| -> usize {
-        let db = unsafe { (*proj).db.lock().unwrap() };
+        let db = unsafe { (*proj).lock_db() };
         let source_project = db.current_source_project().unwrap();
-        let diags = engine::db::collect_all_diagnostics(&db, source_project);
+        let diags = engine::db::collect_all_diagnostics(
+            &db,
+            source_project,
+            simlin_engine::db::LtmOverlay::Off,
+        );
         diags
             .iter()
             .filter(|d| {
@@ -1974,9 +1982,13 @@ fn test_patch_introducing_new_unit_warning_rejected() {
 
     // Verify no unit warnings initially via salsa diagnostics
     {
-        let db = unsafe { (*proj).db.lock().unwrap() };
+        let db = unsafe { (*proj).lock_db() };
         let source_project = db.current_source_project().unwrap();
-        let diags = engine::db::collect_all_diagnostics(&db, source_project);
+        let diags = engine::db::collect_all_diagnostics(
+            &db,
+            source_project,
+            simlin_engine::db::LtmOverlay::Off,
+        );
         let has_unit_diags = diags.iter().any(|d| {
             matches!(d.error, engine::db::DiagnosticError::Unit(_))
                 && d.severity == engine::db::DiagnosticSeverity::Warning

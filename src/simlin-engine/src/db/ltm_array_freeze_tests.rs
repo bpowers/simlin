@@ -42,7 +42,7 @@ use std::collections::HashSet;
 
 use crate::db::{
     DiagnosticError, SimlinDb, collect_all_diagnostics, model_ltm_variables,
-    set_project_ltm_enabled, sync_from_datamodel_incremental,
+    sync_from_datamodel_incremental,
 };
 use crate::test_common::TestProject;
 
@@ -78,8 +78,13 @@ fn select_slice_fixture() -> TestProject {
 }
 
 /// Every LTM fragment-compile failure message in the project's diagnostics.
+///
+/// Collected under `On`: a link score's or a freeze helper's "failed to
+/// compile" warning is a fact of the overlay's derivation, which
+/// `model_all_diagnostics` emits only when the overlay is assembled. Under
+/// `Off` this list is empty whatever the LTM fragments did.
 fn fragment_failures(db: &SimlinDb, project: crate::db::SourceProject) -> Vec<String> {
-    collect_all_diagnostics(db, project)
+    collect_all_diagnostics(db, project, crate::db::LtmOverlay::On)
         .iter()
         .filter_map(|d| match &d.error {
             DiagnosticError::Assembly(msg) if msg.contains("failed to compile") => {
@@ -93,7 +98,7 @@ fn fragment_failures(db: &SimlinDb, project: crate::db::SourceProject) -> Vec<St
 /// Every `UnfreezablePartial`-style decline warning (the "would freeze an
 /// array slice inside PREVIOUS()" wording).
 fn unfreezable_declines(db: &SimlinDb, project: crate::db::SourceProject) -> Vec<String> {
-    collect_all_diagnostics(db, project)
+    collect_all_diagnostics(db, project, crate::db::LtmOverlay::On)
         .iter()
         .filter_map(|d| match &d.error {
             DiagnosticError::Assembly(msg) if msg.contains("freeze an array slice") => {
@@ -111,7 +116,6 @@ fn unfreezable_select_slice_edges_now_score() {
     let datamodel = select_slice_fixture().build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let names: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
@@ -177,10 +181,14 @@ fn select_slice_loop_scores_nonzero() {
     let datamodel = select_slice_fixture().build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
 
-    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
-        .expect("the LTM-enabled fixture should compile");
+    let compiled = crate::db::compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        crate::db::LtmOverlay::On,
+    )
+    .expect("the LTM-enabled fixture should compile");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end()
         .expect("simulation should run to completion");
@@ -245,7 +253,6 @@ fn freeze_helper_reads_name_correct_rows_for_scattered_subdim() {
     let datamodel = project.build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     // The loop edge is `year -> sel`, whose changed-first partial freezes
@@ -264,8 +271,13 @@ fn freeze_helper_reads_name_correct_rows_for_scattered_subdim() {
         );
     }
 
-    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
-        .expect("the LTM-enabled fixture should compile");
+    let compiled = crate::db::compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        crate::db::LtmOverlay::On,
+    )
+    .expect("the LTM-enabled fixture should compile");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end()
         .expect("simulation should run to completion");
@@ -326,7 +338,6 @@ fn scalar_to_arrayed_frozen_wildcard_slice_scores() {
     let datamodel = scalar_to_arrayed_fixture().build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let names: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
@@ -348,8 +359,13 @@ fn scalar_to_arrayed_frozen_wildcard_slice_scores() {
 
     // End to end: the k->agg[r1] score participates in the loop and scores
     // nonzero once the loop turns.
-    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
-        .expect("the LTM-enabled fixture should compile");
+    let compiled = crate::db::compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        crate::db::LtmOverlay::On,
+    )
+    .expect("the LTM-enabled fixture should compile");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end()
         .expect("simulation should run to completion");
@@ -376,7 +392,6 @@ fn freeze_helpers_are_ordered_before_link_scores() {
     let datamodel = select_slice_fixture().build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let first_link = ltm
@@ -414,7 +429,6 @@ fn identical_freezes_share_one_helper() {
     let datamodel = scalar_to_arrayed_fixture().build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let vals_helpers: Vec<&str> = ltm
@@ -470,7 +484,6 @@ fn dynamic_pin_slice_keeps_loud_decline() {
     let datamodel = project.build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let names: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
@@ -512,7 +525,6 @@ fn a2a_score_over_its_own_dimension_reads_the_whole_frozen_row() {
     let datamodel = project.build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let score = format!("{LINK_PREFIX}year\u{2192}sel");
@@ -523,8 +535,13 @@ fn a2a_score_over_its_own_dimension_reads_the_whole_frozen_row() {
     let failures = fragment_failures(&db, sync.project);
     assert!(failures.is_empty(), "failures:\n{}", failures.join("\n"));
 
-    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
-        .expect("the LTM-enabled fixture should compile");
+    let compiled = crate::db::compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        crate::db::LtmOverlay::On,
+    )
+    .expect("the LTM-enabled fixture should compile");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end()
         .expect("simulation should run to completion");
@@ -600,7 +617,6 @@ fn a2a_body_dimension_name_pin_resolves_before_materialization() {
     let datamodel = project.build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let names: Vec<&str> = ltm.vars.iter().map(|v| v.name.as_str()).collect();
@@ -655,7 +671,6 @@ fn abandoned_leg_helpers_are_not_emitted() {
     let datamodel = project.build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let helpers: Vec<&str> = ltm
@@ -717,7 +732,6 @@ fn frozen_view_position_slice_keeps_full_storage_reads() {
     let datamodel = project.build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     // The frozen dep in the A2A partial must be the WHOLE-DEP mirror read
@@ -755,8 +769,13 @@ fn frozen_view_position_slice_keeps_full_storage_reads() {
         failures.join("\n")
     );
 
-    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
-        .expect("the LTM-enabled fixture should compile");
+    let compiled = crate::db::compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        crate::db::LtmOverlay::On,
+    )
+    .expect("the LTM-enabled fixture should compile");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end()
         .expect("simulation should run to completion");
@@ -861,7 +880,6 @@ fn frozen_view_position_subscript_materializes() {
     let datamodel = project.build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let score = format!("{LINK_PREFIX}offs\u{2192}mapped");
@@ -908,8 +926,13 @@ fn frozen_view_position_subscript_materializes() {
 
     // VM oracle: partial_c = elm_map(base_prev, offs_now)[c]
     //                      = base_prev[base(c2)=1 + offs_now[c]].
-    let compiled = crate::db::compile_project_incremental(&db, sync.project, "main")
-        .expect("the LTM-enabled fixture should compile");
+    let compiled = crate::db::compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        crate::db::LtmOverlay::On,
+    )
+    .expect("the LTM-enabled fixture should compile");
     let mut vm = crate::vm::Vm::new(compiled.clone()).expect("VM creation should succeed");
     vm.run_to_end()
         .expect("simulation should run to completion");
@@ -975,7 +998,6 @@ fn frozen_view_position_scalar_materializes() {
     let datamodel = project.build_datamodel();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let ltm = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
 
     let score = format!("{LINK_PREFIX}vals[c1]\u{2192}mapped");

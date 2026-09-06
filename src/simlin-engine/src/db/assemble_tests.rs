@@ -30,10 +30,11 @@ use crate::datamodel;
 use crate::db::{
     ModuleInputSet, SccPhase, SimlinDb, SourceProject, SyncResult, assemble_module,
     assemble_simulation, compute_layout, model_dependency_graph, model_flows_invariant,
-    model_implicit_var_info, model_ltm_implicit_var_info, model_ltm_variables,
-    set_project_ltm_enabled, sync_from_datamodel,
+    model_implicit_var_info, model_ltm_implicit_var_info, model_ltm_variables, sync_from_datamodel,
 };
-use crate::testutils::{x_aux, x_flow, x_model, x_module, x_module_named, x_project, x_stock};
+use crate::testutils::{
+    x_arrayed, x_aux, x_flow, x_model, x_module, x_module_named, x_project, x_stock,
+};
 use crate::vm::Vm;
 
 fn sim_specs() -> datamodel::SimSpecs {
@@ -63,28 +64,6 @@ fn x_table(ident: &str) -> datamodel::Variable {
             x_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
             y_scale: datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
         }),
-        ai_state: None,
-        uid: None,
-        compat: datamodel::Compat::default(),
-    })
-}
-
-/// A per-element arrayed aux over one dimension.
-fn x_arrayed(ident: &str, dim: &str, elements: &[(&str, &str)]) -> datamodel::Variable {
-    datamodel::Variable::Aux(datamodel::Aux {
-        ident: ident.to_string(),
-        equation: datamodel::Equation::Arrayed(
-            vec![dim.to_string()],
-            elements
-                .iter()
-                .map(|(e, eq)| (e.to_string(), eq.to_string(), None, None))
-                .collect(),
-            None,
-            false,
-        ),
-        documentation: String::new(),
-        units: None,
-        gf: None,
         ai_state: None,
         uid: None,
         compat: datamodel::Compat::default(),
@@ -227,8 +206,13 @@ fn internal_module_reference_is_not_a_bound_input() {
         "an own-namespace source is internal and binds no port"
     );
 
-    let sim = assemble_simulation(&db, sync.project, "main".to_string())
-        .expect("the internal reference compiles");
+    let sim = assemble_simulation(
+        &db,
+        sync.project,
+        "main".to_string(),
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("the internal reference compiles");
     let root = sim.modules.get(&sim.root).expect("root compiled module");
     let declarations: Vec<&ModuleDeclaration> = root
         .compiled_flows
@@ -279,8 +263,13 @@ fn an_xmile_internal_module_reference_compiles_and_binds_nothing() {
         vec![Vec::<String>::new()],
         "the instance-qualified source binds no port"
     );
-    let sim = assemble_simulation(&db, sync.project, "main".to_string())
-        .expect("the internal reference compiles");
+    let sim = assemble_simulation(
+        &db,
+        sync.project,
+        "main".to_string(),
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("the internal reference compiles");
     let mut vm = Vm::new((*sim).clone()).expect("the child is compiled under the same identity");
     vm.run_to_end().expect("runs");
     assert_constant_series(&vm, "bridge\u{00B7}output", 3.0);
@@ -321,8 +310,13 @@ fn a_missing_module_target_is_refused_in_name_order_per_namespace() {
         models.remove("stdlib\u{205A}smth1");
         sync.project.set_models(&mut db).to(models);
 
-        let error = assemble_simulation(&db, sync.project, "main".to_string())
-            .expect_err("a missing explicit target is refused");
+        let error = assemble_simulation(
+            &db,
+            sync.project,
+            "main".to_string(),
+            crate::db::LtmOverlay::Off,
+        )
+        .expect_err("a missing explicit target is refused");
         assert_eq!(
             error, "model 'missing_alpha' referenced as module but not found",
             "reverse={reverse}: explicit candidates first, in name order"
@@ -349,8 +343,13 @@ fn a_missing_module_target_is_refused_in_name_order_per_namespace() {
         models.remove("stdlib\u{205A}smth1");
         sync.project.set_models(&mut db).to(models);
 
-        let error = assemble_simulation(&db, sync.project, "main".to_string())
-            .expect_err("a missing implicit target is refused");
+        let error = assemble_simulation(
+            &db,
+            sync.project,
+            "main".to_string(),
+            crate::db::LtmOverlay::Off,
+        )
+        .expect_err("a missing implicit target is refused");
         assert_eq!(
             error,
             "implicit module '$\u{205A}alpha_delayed\u{205A}0\u{205A}delay1' references model \
@@ -367,9 +366,8 @@ fn a_missing_module_target_is_refused_in_name_order_per_namespace() {
 #[test]
 fn generated_ltm_helpers_are_captures_only() {
     let project = ltm_project();
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let model = sync.models["main"].source;
 
     assert!(
@@ -425,11 +423,16 @@ fn module_target(
 /// A per-element key `name[e]` resolves to its variable's whole range. This is
 /// the layout `resolve_module` addresses each module against, so it is what the
 /// offsets map owes its consumers.
-fn layout_range(db: &SimlinDb, sync: &SyncResult, key: &str) -> (usize, usize) {
+fn layout_range(
+    db: &SimlinDb,
+    sync: &SyncResult,
+    key: &str,
+    overlay: crate::db::LtmOverlay,
+) -> (usize, usize) {
     let project = sync.project;
     let project_models = project.models(db);
     let mut model = sync.models["main"].source;
-    let mut layout = compute_layout(db, model, project).root_shifted();
+    let mut layout = compute_layout(db, model, project, overlay).root_shifted();
     let mut base = 0usize;
     let mut segments: Vec<&str> = key.split('\u{00B7}').collect();
     let leaf = segments.pop().expect("a key has at least one segment");
@@ -442,7 +445,7 @@ fn layout_range(db: &SimlinDb, sync: &SyncResult, key: &str) -> (usize, usize) {
         model = *project_models
             .get(canonicalize(&target).as_ref())
             .unwrap_or_else(|| panic!("module `{seg}` targets the unknown model `{target}`"));
-        layout = compute_layout(db, model, project).clone();
+        layout = compute_layout(db, model, project, overlay).clone();
     }
     let name = leaf.split('[').next().expect("a leaf has a name");
     let entry = layout
@@ -457,8 +460,10 @@ fn assert_offsets_are_the_layouts(
     db: &SimlinDb,
     sync: &SyncResult,
     sim: &crate::vm::CompiledSimulation,
+    overlay: crate::db::LtmOverlay,
 ) {
-    let root_layout = compute_layout(db, sync.models["main"].source, sync.project).root_shifted();
+    let root_layout =
+        compute_layout(db, sync.models["main"].source, sync.project, overlay).root_shifted();
     assert_eq!(
         sim.n_slots(),
         root_layout.n_slots,
@@ -467,7 +472,7 @@ fn assert_offsets_are_the_layouts(
     assert_eq!(sim.get_offset(&key("time")), Some(0));
     assert_eq!(sim.get_offset(&key("dt")), Some(1));
     for (name, off) in &sim.offsets {
-        let (start, size) = layout_range(db, sync, name.as_str());
+        let (start, size) = layout_range(db, sync, name.as_str(), overlay);
         if name.as_str().contains('[') {
             assert!(
                 start <= *off && *off < start + size,
@@ -487,15 +492,20 @@ fn assert_offsets_are_the_layouts(
 /// Each module variable's layout slot is the `off` of a module declaration
 /// in the assembled module -- the layouts the offsets map composes are the
 /// ones the bytecode relocates sub-model instances by.
+///
+/// `overlay` is the one `sim` was assembled under: a module's slot count is
+/// its sub-model's `n_slots` under that overlay, so every module slot laid
+/// out after an LTM-bearing instance moves with it.
 fn assert_module_decls_sit_at_layout_slots(
     db: &SimlinDb,
     sync: &SyncResult,
     sim: &crate::vm::CompiledSimulation,
+    overlay: crate::db::LtmOverlay,
     model_name: &str,
     is_root: bool,
 ) {
     let model = sync.models[model_name].source;
-    let body = compute_layout(db, model, sync.project);
+    let body = compute_layout(db, model, sync.project, overlay);
     let layout = if is_root {
         body.root_shifted()
     } else {
@@ -605,12 +615,31 @@ fn results_offsets_are_the_assembled_layouts_offsets_on_a_module_bearing_model()
     let project = module_bearing_project();
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    let sim = assemble_simulation(&db, sync.project, "main".to_string())
-        .expect("the module-bearing model assembles");
+    let sim = assemble_simulation(
+        &db,
+        sync.project,
+        "main".to_string(),
+        crate::db::LtmOverlay::Off,
+    )
+    .expect("the module-bearing model assembles");
 
-    assert_offsets_are_the_layouts(&db, &sync, &sim);
-    assert_module_decls_sit_at_layout_slots(&db, &sync, &sim, "main", true);
-    assert_module_decls_sit_at_layout_slots(&db, &sync, &sim, "sub", false);
+    assert_offsets_are_the_layouts(&db, &sync, &sim, crate::db::LtmOverlay::Off);
+    assert_module_decls_sit_at_layout_slots(
+        &db,
+        &sync,
+        &sim,
+        crate::db::LtmOverlay::Off,
+        "main",
+        true,
+    );
+    assert_module_decls_sit_at_layout_slots(
+        &db,
+        &sync,
+        &sim,
+        crate::db::LtmOverlay::Off,
+        "sub",
+        false,
+    );
 
     let has = |k: &str| sim.offsets.contains_key(&key(k));
     for present in [
@@ -651,7 +680,13 @@ fn results_offsets_are_the_assembled_layouts_offsets_on_a_module_bearing_model()
         sim.get_offset(&key("sub\u{00B7}arr[d2]")),
         sim.get_offset(&key("sub\u{00B7}arr[d1]")).map(|o| o + 1)
     );
-    let root_layout = compute_layout(&db, sync.models["main"].source, sync.project).root_shifted();
+    let root_layout = compute_layout(
+        &db,
+        sync.models["main"].source,
+        sync.project,
+        crate::db::LtmOverlay::Off,
+    )
+    .root_shifted();
     assert_eq!(
         sim.get_offset(&key("trailing")),
         Some(root_layout.get("trailing").expect("trailing").offset),
@@ -728,14 +763,25 @@ fn ltm_project() -> datamodel::Project {
 #[test]
 fn results_offsets_are_the_assembled_layouts_offsets_under_ltm() {
     let project = ltm_project();
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let sim = assemble_simulation(&db, sync.project, "main".to_string())
-        .expect("the LTM-instrumented model assembles");
+    let sim = assemble_simulation(
+        &db,
+        sync.project,
+        "main".to_string(),
+        crate::db::LtmOverlay::On,
+    )
+    .expect("the LTM-instrumented model assembles");
 
-    assert_offsets_are_the_layouts(&db, &sync, &sim);
-    assert_module_decls_sit_at_layout_slots(&db, &sync, &sim, "main", true);
+    assert_offsets_are_the_layouts(&db, &sync, &sim, crate::db::LtmOverlay::On);
+    assert_module_decls_sit_at_layout_slots(
+        &db,
+        &sync,
+        &sim,
+        crate::db::LtmOverlay::On,
+        "main",
+        true,
+    );
 
     let keys: Vec<&str> = sim.offsets.keys().map(|k| k.as_str()).collect();
     let any_with = |needle: &str| keys.iter().any(|k| k.contains(needle));
@@ -753,7 +799,13 @@ fn results_offsets_are_the_assembled_layouts_offsets_under_ltm() {
     );
 
     // The arrayed `grow -> pop` link score occupies two slots and is keyed once.
-    let root_layout = compute_layout(&db, sync.models["main"].source, sync.project).root_shifted();
+    let root_layout = compute_layout(
+        &db,
+        sync.models["main"].source,
+        sync.project,
+        crate::db::LtmOverlay::On,
+    )
+    .root_shifted();
     let arrayed = "$\u{205A}ltm\u{205A}link_score\u{205A}grow\u{2192}pop";
     let entry = root_layout
         .get(arrayed)
@@ -888,9 +940,8 @@ fn scc_stdlib_ltm_project() -> datamodel::Project {
 #[test]
 fn each_program_emits_in_runlist_order_then_the_ltm_tail() {
     let project = scc_stdlib_ltm_project();
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let model = sync.models["main"].source;
     let project = sync.project;
     let inputs = ModuleInputSet::empty(&db);
@@ -911,7 +962,8 @@ fn each_program_emits_in_runlist_order_then_the_ltm_tail() {
         sccs.iter()
             .position(|scc| scc.members.contains(&Ident::<Canonical>::new(name)))
     };
-    let invariant = model_flows_invariant(&db, model, project, true, inputs);
+    let invariant =
+        model_flows_invariant(&db, model, project, true, inputs, crate::db::LtmOverlay::On);
     let ltm_vars = model_ltm_variables(&db, model, project);
     let ltm_implicit = model_ltm_implicit_var_info(&db, model, project);
     assert!(
@@ -932,8 +984,9 @@ fn each_program_emits_in_runlist_order_then_the_ltm_tail() {
     let is_ltm =
         |name: &str| synthetic_tail.iter().any(|n| n == name) || ltm_implicit.contains_key(name);
 
-    let module = assemble_module(&db, model, project, true, inputs).expect("assembles");
-    let layout = compute_layout(&db, model, project).root_shifted();
+    let module = assemble_module(&db, model, project, true, inputs, crate::db::LtmOverlay::On)
+        .expect("assembles");
+    let layout = compute_layout(&db, model, project, crate::db::LtmOverlay::On).root_shifted();
     let owners = slot_owners(&layout);
     let decls: &[ModuleDeclaration] = &module.context.modules;
 

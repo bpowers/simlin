@@ -51,9 +51,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::common::{Canonical, Ident};
-use crate::db::dep_graph::build_var_info;
+use crate::db::dep_graph::model_var_info;
+use crate::db::var_fragment::fragment_overlay;
 use crate::db::{
-    Db, DepPhase, ModuleInputSet, SourceModel, SourceProject, compile_var_fragment,
+    Db, DepPhase, LtmOverlay, ModuleInputSet, SourceModel, SourceProject, compile_var_fragment,
     model_dependency_graph, variable_direct_dependencies,
 };
 use crate::variable::DepLag;
@@ -62,10 +63,19 @@ use crate::variable::DepLag;
 /// canonical name. Empty for submodules and for any model with no invariant
 /// flow variable.
 ///
-/// Salsa-tracked, keyed identically to `assemble_module` / `compile_var_fragment`
-/// (`model` + `project` + `module_inputs`), so the partition `assemble_module`
-/// applies reads the same verdict that was computed for this exact module
-/// instance.
+/// Salsa-tracked, keyed identically to `assemble_module` (`model` +
+/// `project` + `is_root` + `module_inputs` + `overlay`), so the partition
+/// `assemble_module` applies reads the same verdict that was computed for
+/// this exact module instance.
+///
+/// The overlay stays in the key because the body reads fragments that are
+/// keyed on it: `fragment_overlay` resolves each variable's key, which is the
+/// requested overlay for a variable that resolves a module instance's shape,
+/// and such a variable can be classified invariant rather than skipped
+/// (`a_module_reading_flow_variable_can_be_invariant`). Dropping the argument
+/// would make the walk read the plain memos while assembly built the overlaid
+/// ones -- a verdict about a different set of fragments than the one being
+/// partitioned.
 #[salsa::tracked(returns(clone))]
 pub(crate) fn model_flows_invariant<'db>(
     db: &'db dyn Db,
@@ -73,6 +83,7 @@ pub(crate) fn model_flows_invariant<'db>(
     project: SourceProject,
     is_root: bool,
     module_inputs: ModuleInputSet<'db>,
+    overlay: LtmOverlay,
 ) -> Arc<BTreeSet<String>> {
     // Only the root module is hoisted (B1/B2 scope). A submodule's entire flow
     // program stays dynamic. This is the single authoritative guard; the
@@ -90,7 +101,10 @@ pub(crate) fn model_flows_invariant<'db>(
         return Arc::new(BTreeSet::new());
     }
 
-    let (var_info, _init_referenced) = build_var_info(db, model, project, module_input_names);
+    // The root is the no-input wiring, so this is the memo the dependency
+    // graph above already read.
+    let info = model_var_info(db, model, project, module_input_names);
+    let var_info = &info.vars;
 
     // Members of a resolved recurrence SCC are conservatively variant.
     let scc_members: BTreeSet<&str> = dep_graph
@@ -131,8 +145,13 @@ pub(crate) fn model_flows_invariant<'db>(
 
         // The compiler-local half comes off the already-cached fragment (a
         // salsa cache hit -- `assemble_module` triggers compilation before
-        // this query runs), the reads off the dependency memo.
-        let Some(result) = compile_var_fragment(db, *svar, model, project, module_inputs) else {
+        // this query runs), the reads off the dependency memo. Asked for
+        // under the overlay the fragment is keyed on, which is what makes it
+        // the same entry assembly built.
+        let var_overlay = fragment_overlay(db, *svar, model, project, overlay);
+        let Some(result) =
+            compile_var_fragment(db, *svar, model, project, module_inputs, var_overlay)
+        else {
             // Compilation failed; treat as variant by omission.
             continue;
         };
@@ -187,8 +206,14 @@ mod tests {
         let project_dm = tp.build_datamodel();
         let result = sync_from_datamodel(&db, &project_dm);
         let model = result.models["main"].source;
-        let inv =
-            model_flows_invariant(&db, model, result.project, true, ModuleInputSet::empty(&db));
+        let inv = model_flows_invariant(
+            &db,
+            model,
+            result.project,
+            true,
+            ModuleInputSet::empty(&db),
+            crate::db::LtmOverlay::Off,
+        );
         (*inv).clone()
     }
 
@@ -273,9 +298,16 @@ mod tests {
                     .map(|dep| dep.target.variable.as_str())
                     .collect();
             assert_eq!(current, ["dynamic", "k"].into_iter().collect());
-            let fragment = compile_var_fragment(&db, source, model, synced.project, no_inputs)
-                .as_ref()
-                .expect("production fragment");
+            let fragment = compile_var_fragment(
+                &db,
+                source,
+                model,
+                synced.project,
+                no_inputs,
+                crate::db::LtmOverlay::Off,
+            )
+            .as_ref()
+            .expect("production fragment");
             assert_eq!(
                 fragment.flow_locally_invariant,
                 Some(true),
@@ -283,7 +315,14 @@ mod tests {
             );
         }
 
-        let invariant = model_flows_invariant(&db, model, synced.project, true, no_inputs);
+        let invariant = model_flows_invariant(
+            &db,
+            model,
+            synced.project,
+            true,
+            no_inputs,
+            crate::db::LtmOverlay::Off,
+        );
         assert!(invariant.contains("k"));
         for name in ["dynamic", "select_true", "select_false"] {
             assert!(!invariant.contains(name), "{name} must stay dynamic");
@@ -322,8 +361,14 @@ mod tests {
         let db = SimlinDb::default();
         let synced = sync_from_datamodel(&db, &project);
         let model = synced.models["main"].source;
-        let invariant =
-            model_flows_invariant(&db, model, synced.project, true, ModuleInputSet::empty(&db));
+        let invariant = model_flows_invariant(
+            &db,
+            model,
+            synced.project,
+            true,
+            ModuleInputSet::empty(&db),
+            crate::db::LtmOverlay::Off,
+        );
         assert!(invariant.contains("k"));
         assert!(
             invariant.contains("own_table"),
@@ -331,6 +376,48 @@ mod tests {
         );
         for name in ["table", "lookup_const", "module_out", "sub"] {
             assert!(!invariant.contains(name), "{name} must stay dynamic");
+        }
+    }
+
+    /// A flow variable whose own fragment is keyed on the overlay can be
+    /// classified INVARIANT, which is why this query keeps the overlay in its
+    /// key. `INIT(SMTH1(rate, 3))` mints a module instance -- so
+    /// `fragment_reads_module` is true and the variable has one fragment memo
+    /// per overlay -- while the read of that instance is the frozen initial
+    /// buffer, which is invariant whatever it holds: the classifier neither
+    /// skips such a variable nor makes it variant, so the walk genuinely
+    /// reads overlay-keyed memos rather than the plain ones alone.
+    #[test]
+    fn a_module_reading_flow_variable_can_be_invariant() {
+        let db = SimlinDb::default();
+        let project_dm = TestProject::new("main")
+            .with_sim_time(0.0, 5.0, 1.0)
+            .aux("rate", "0.1", None)
+            .aux("snap", "INIT(SMTH1(rate, 3))", None)
+            .aux("reads_snap", "snap * 2", None)
+            .build_datamodel();
+        let synced = sync_from_datamodel(&db, &project_dm);
+        let model = synced.models["main"].source;
+        let snap = synced.models["main"].variables["snap"].source;
+        assert!(
+            crate::db::var_fragment::fragment_reads_module(&db, snap, model, synced.project),
+            "the fixture reaches the arm: `snap`'s parse minted a module instance"
+        );
+        for overlay in [crate::db::LtmOverlay::Off, crate::db::LtmOverlay::On] {
+            let invariant = model_flows_invariant(
+                &db,
+                model,
+                synced.project,
+                true,
+                ModuleInputSet::empty(&db),
+                overlay,
+            );
+            for name in ["rate", "snap", "reads_snap"] {
+                assert!(
+                    invariant.contains(name),
+                    "{overlay:?}: {name} must be run-invariant; got {invariant:?}"
+                );
+            }
         }
     }
 
@@ -351,6 +438,7 @@ mod tests {
             result.project,
             false,
             ModuleInputSet::empty(&db),
+            crate::db::LtmOverlay::Off,
         );
         assert!(inv.is_empty());
     }

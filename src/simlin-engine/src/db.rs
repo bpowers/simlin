@@ -114,11 +114,13 @@ pub(crate) use fragment_compile::{
 };
 
 mod assemble;
+pub use assemble::{
+    ModuleInstanceMap, assemble_module, assemble_simulation, enumerate_module_instances,
+};
 pub(crate) use assemble::{
     VarFragmentResult, build_module_inputs, compile_phase_to_per_var_bytecodes,
     module_input_prefix, port_of, var_phase_symbolic_fragment_prod, variable_tables,
 };
-pub use assemble::{assemble_module, assemble_simulation};
 // `combine_scc_fragment` is consumed at runtime only WITHIN `assemble.rs`; the
 // root re-export exists solely so the `#[cfg(test)]` test modules
 // (`combined_fragment_tests` and its proptest) can reach it as
@@ -361,6 +363,60 @@ impl SimlinDb {
         self.sync_state.as_ref().map(|s| s.project)
     }
 
+    /// Free the memos this revision's queries replaced.
+    ///
+    /// Salsa does not drop a superseded memo when a query re-executes:
+    /// `insert_memo` (salsa 0.28.1 `function.rs`) pushes the old one onto the
+    /// ingredient's deferred-delete list, which `reset_for_new_revision`
+    /// clears at the START of the next revision, i.e. inside the next input
+    /// write. A long-lived database that answers queries after a sync and
+    /// then waits for the next edit therefore holds every value the edit
+    /// replaced until that edit arrives -- on C-LEARN under LTM, 117 MiB
+    /// after one rename of an unreferenced constant, and 5 MiB plain
+    /// (docs/design/engine-performance.md, C7). This runs the same reset on
+    /// demand, so an embedder calls it once the queries an entry point
+    /// provoked have run (libsimlin's `DbLock` does, when it drops): 10 ms
+    /// under LTM when there is something to free, a walk over empty lists
+    /// otherwise.
+    ///
+    /// Salsa's own name for the primitive is `trigger_lru_eviction`
+    /// (`database.rs`): `zalsa_mut()`, then `Zalsa::evict_lru` running
+    /// `reset_for_new_revision` over the tracked-function ingredients.
+    /// Nothing here declares an LRU; the deferred-delete sweep is the part
+    /// that matters. `zalsa_mut` is `Storage::cancel_others` (`storage.rs`):
+    /// like any write it needs the db exclusively (a snapshot held elsewhere
+    /// would block it), and it bumps `Runtime::cancellation_count`, an
+    /// `AtomicU8` (`runtime.rs`), opening a real `new_revision()` when the
+    /// count wraps. So this is not itself a revision, with one bounded
+    /// exception: the 256th consecutive call without an input write is one
+    /// (an input write opens a revision of its own, which zeroes the count).
+    /// A synthetic revision moves `revisions[0]`, which is both
+    /// `current_revision()` and `last_changed_revision(Durability::LOW)`, so
+    /// `shallow_verify_memo_cold` (`function/maybe_changed_after.rs`) fails
+    /// for every memo of LOW durability -- every memo that reads an input,
+    /// since this database declares no durability above the default -- and
+    /// the next queries deep-verify the transitive cone of whatever they
+    /// touch, once, at ~1,880 instructions per memo (~27 M for C-LEARN's
+    /// plain cone, tens of milliseconds under LTM). Values are unaffected:
+    /// the walk re-executes nothing but a `DerivedUntracked` memo, and the
+    /// only one here, `model_all_diagnostics`, re-executes by design and
+    /// backdates.
+    ///
+    /// Callers release unconditionally rather than behind a gate. A
+    /// writer-set dirty flag is unsound: a memo an edit superseded is replaced
+    /// in whichever LATER query first re-executes it, so a flag the first
+    /// release after the write clears leaves everything the next entry point
+    /// replaces resident until the following edit -- the deferral this exists
+    /// to remove. An exact gate on salsa's `WillExecute` event needs a
+    /// callback registered on the storage, and with one registered
+    /// `Zalsa::unwind_if_revision_cancelled` (`zalsa.rs`) constructs a
+    /// `WillCheckCancellation` `Event` -- `thread::current().id()` included
+    /// (`event.rs`) -- on every fetch (`function/fetch.rs`): a cost on every
+    /// memo hit to save a bounded walk.
+    pub fn release_replaced_memos(&mut self) {
+        salsa::Database::trigger_lru_eviction(self);
+    }
+
     /// Sync the conveyor/queue-EXPANDED twin of the project into the db's second
     /// input slot, returning its `SourceProject` handle.
     ///
@@ -479,6 +535,53 @@ pub enum LtmMode {
     /// Post-simulation discovery over the recorded link scores (the model
     /// tripped the SCC gate or the caller explicitly requested discovery).
     Discovery,
+}
+
+/// Whether a compile assembles the model alone or the model with the Loops
+/// That Matter overlay -- the synthetic link and loop scores and their
+/// helpers -- laid out and compiled into it.
+///
+/// An explicit ARGUMENT to every query whose value depends on it (the
+/// layout, the shape a cross-module read resolves through, the fragments
+/// that resolve one, the assembly, the diagnostics), so both variants stay
+/// memoized side by side and a caller names the one it wants. Never make it
+/// a salsa input on the project: flipping an input is a revision, which
+/// discards the other variant's memos and re-verifies every memo in the
+/// database, so every simulation after a diagnostics pass and every
+/// diagnostics pass after a simulation redoes the work the other just did
+/// -- on C-LEARN 2.9 G instructions per warm LTM simulation and 2.5 G per
+/// diagnostics pass, measured against exactly that design
+/// (docs/design/engine-performance.md, C7). The overlay reaches a fragment
+/// through one shape only, a module instance's (the sub-model's layout,
+/// which carries its LTM section under `On`), so a fragment is keyed on it
+/// only where it resolves one (`db::var_fragment::fragment_reads_module`,
+/// asserted by the constructors against the shapes they build). The price of
+/// the argument is therefore one fragment memo per overlay for the
+/// module-reading fragments alone; every other variable has one fragment
+/// that serves both.
+///
+/// The LTM derivations themselves (`model_ltm_variables` and everything
+/// under it) are overlay-independent: they describe the overlay, and are
+/// computed once whichever assemblies read them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LtmOverlay {
+    /// The model alone: the plain simulation, and the diagnostics of the
+    /// model as written.
+    Off,
+    /// The model with the LTM overlay: the instrumented simulation, and the
+    /// diagnostics including the overlay's own advisories.
+    On,
+}
+
+impl From<bool> for LtmOverlay {
+    /// The FFI and wasm entry points take `enable_ltm: bool`.
+    fn from(enabled: bool) -> Self {
+        if enabled {
+            LtmOverlay::On
+        } else {
+            LtmOverlay::Off
+        }
+    }
 }
 
 /// Result of LTM variable generation for a model.
@@ -787,7 +890,7 @@ pub(crate) fn module_output_ref_in_document_order(
 ///    ref (a readable scalar `module·port`), never the bare module name.
 ///    The composite resolves in BOTH exhaustive and discovery mode (since
 ///    GH #548 the sub-model's composite var is laid out in the parent's
-///    flattened offset map whenever `ltm_enabled`), so the two modes share
+///    flattened offset map whenever the LTM overlay is on), so the two modes share
 ///    one branch.
 ///
 /// 2. `module -> variable`: the dependent's equation references the
@@ -838,7 +941,7 @@ pub(crate) fn module_link_score_equation(
     // This resolves in BOTH exhaustive and discovery mode: since GH #548,
     // `model_shape` registers a sub-model's LTM synthetic vars
     // (composites included) in the parent's flattened offset map whenever
-    // `ltm_enabled`, which holds in both modes. (The pre-#675 code gated
+    // the LTM overlay is on, which holds in both modes. (The pre-#675 code gated
     // composites to exhaustive mode on a now-stale "cross-module refs don't
     // resolve in discovery" assumption; an empirical probe showed the SMOOTH
     // composite resolving to a nonzero value in a discovery-mode run.) A
@@ -1077,18 +1180,6 @@ fn generate_max_abs_selection(
     }
 }
 
-/// Set the `ltm_enabled` flag on a `SourceProject` salsa input.
-///
-/// This is a thin wrapper around the salsa-generated setter so that
-/// downstream crates (e.g. libsimlin) can toggle LTM without taking
-/// a direct dependency on the salsa crate.
-pub fn set_project_ltm_enabled(db: &mut SimlinDb, project: SourceProject, enabled: bool) {
-    use salsa::Setter;
-    if project.ltm_enabled(db) != enabled {
-        project.set_ltm_enabled(db).to(enabled);
-    }
-}
-
 /// Set the `ltm_discovery_mode` flag on a `SourceProject` salsa input.
 ///
 /// When true, LTM generates link scores for every causal edge rather
@@ -1097,65 +1188,6 @@ pub fn set_project_ltm_discovery_mode(db: &mut SimlinDb, project: SourceProject,
     use salsa::Setter;
     if project.ltm_discovery_mode(db) != enabled {
         project.set_ltm_discovery_mode(db).to(enabled);
-    }
-}
-
-/// Scope guard: flip a `SourceProject`'s `ltm_enabled` salsa input to a chosen
-/// value on construction and unconditionally restore the prior value on drop.
-///
-/// LTM-specific diagnostics (the auto-flip-to-discovery advisory, the
-/// synthetic-fragment compile-failure warnings) only accumulate through
-/// `model_all_diagnostics` -> `model_ltm_variables` when `ltm_enabled` is true.
-/// A caller that wants to harvest those diagnostics on a db synced with LTM
-/// off must transiently re-enable the flag for the
-/// [`collect_all_diagnostics`] pass and then restore it -- the `SourceProject`
-/// salsa input is shared across every other consumer of the project (patch
-/// validation, the analyze surfaces, subsequent compiles), so leaking
-/// `ltm_enabled = true` past the harvest would silently change the next
-/// consumer's output. Using an RAII guard (rather than an explicit reset line
-/// somewhere down the function) makes the restore structurally unmissable, even
-/// on an early return or a panic in the middle of the queries.
-///
-/// Shared by libsimlin's `simlin_project_get_errors` / from-wasm rel-loop FFIs
-/// (GH #466) and `simlin-mcp-core`'s `read_model` / `edit_model` diagnostic
-/// passes (GH #662), so the transient-enable behaves identically across every
-/// diagnostic-collection surface instead of being re-implemented per consumer.
-pub struct LtmEnabledGuard<'a> {
-    db: &'a mut SimlinDb,
-    project: SourceProject,
-    restore_to: bool,
-}
-
-impl<'a> LtmEnabledGuard<'a> {
-    /// Set `project.ltm_enabled` to `desired`, capturing the prior value so
-    /// `drop` can restore it.
-    pub fn enable(
-        db: &'a mut SimlinDb,
-        project: SourceProject,
-        desired: bool,
-    ) -> LtmEnabledGuard<'a> {
-        let restore_to = project.ltm_enabled(db);
-        set_project_ltm_enabled(db, project, desired);
-        LtmEnabledGuard {
-            db,
-            project,
-            restore_to,
-        }
-    }
-
-    /// Borrow the guarded db for read-only salsa queries during the scope.
-    pub fn db(&self) -> &SimlinDb {
-        self.db
-    }
-}
-
-impl<'a> Drop for LtmEnabledGuard<'a> {
-    fn drop(&mut self) {
-        // Panic-safe: `set_project_ltm_enabled` only mutates the salsa input when
-        // the flag actually changed (its inner `if ltm_enabled(db) != value`
-        // guard), so a no-op restore (flag already matched) never touches salsa
-        // at all. On a valid db handle the setter does not panic.
-        set_project_ltm_enabled(self.db, self.project, self.restore_to);
     }
 }
 
@@ -1216,7 +1248,8 @@ pub fn compile_project_incremental(
     db: &SimlinDb,
     project: SourceProject,
     main_model_name: &str,
-) -> crate::Result<crate::vm::CompiledSimulation> {
+    overlay: LtmOverlay,
+) -> crate::Result<std::sync::Arc<crate::vm::CompiledSimulation>> {
     // An invalid macro set (AC5.2 cycle / AC5.3 duplicate / collision) fails
     // the project-level compile before per-model processing, uniformly as
     // `NotSimulatable`. The build error's own typed code reaches the diagnostic
@@ -1398,13 +1431,13 @@ pub fn compile_project_incremental(
             validate_model_overflow_markers(db, models[name])?;
         }
     }
-    // `assemble_simulation` is salsa-tracked and returns an `Arc`; clone the
-    // `CompiledSimulation` out of the salsa-owned `Arc` to preserve this
-    // entry point's owned return type byte-for-byte. The error half stays a
-    // `String` mapped to `NotSimulatable`, identical to the prior
-    // plain-function behavior.
-    match assemble_simulation(db, project, main_model_name.to_string()) {
-        Ok(compiled) => Ok((*compiled).clone()),
+    // `assemble_simulation` is salsa-tracked and returns the memo's `Arc`;
+    // it is handed on as-is, so the caller shares the memoized program with
+    // the database rather than deep-copying its modules and offsets map
+    // (62 M instructions per LTM edit on C-LEARN). The error half is a
+    // `String` mapped to `NotSimulatable`.
+    match assemble_simulation(db, project, main_model_name.to_string(), overlay) {
+        Ok(compiled) => Ok(compiled),
         Err(msg) => crate::sim_err!(NotSimulatable, msg.clone()),
     }
 }
@@ -1457,6 +1490,8 @@ mod ltm_char_tests;
 mod ltm_element_instance_tests;
 #[cfg(test)]
 mod ltm_module_tests;
+#[cfg(test)]
+mod ltm_overlay_tests;
 #[cfg(test)]
 mod ltm_rank_decline_tests;
 #[cfg(test)]

@@ -51,8 +51,13 @@ fn simulate_systems_file(txt_path: &str, csv_path: &str, rounds: u64) {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .unwrap_or_else(|e| panic!("VM compilation failed for {txt_path}: {e:?}"));
+    let compiled = compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .unwrap_or_else(|e| panic!("VM compilation failed for {txt_path}: {e:?}"));
     let mut vm =
         Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {txt_path}: {e}"));
     vm.run_to_end()
@@ -98,7 +103,12 @@ fn wasm_systems_outcome_for_path(path: &str, rounds: u64) -> WasmRunOutcome {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
-    let compiled = match compile_project_incremental(&db, sync.project, "main") {
+    let compiled = match compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    ) {
         Ok(c) => c,
         Err(e) => return WasmRunOutcome::Skipped(format!("VM compile failed: {e:?}")),
     };
@@ -263,7 +273,11 @@ fn assert_systems_model_compiles(txt_path: &str, rounds: u64) {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &datamodel_project);
 
-    let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
+    let diagnostics = simlin_engine::db::collect_all_diagnostics(
+        &db,
+        sync.project,
+        simlin_engine::db::LtmOverlay::Off,
+    );
     if !diagnostics.is_empty() {
         for diag in &diagnostics {
             eprintln!("  diagnostic: {:?}", diag);
@@ -274,8 +288,13 @@ fn assert_systems_model_compiles(txt_path: &str, rounds: u64) {
         );
     }
 
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .unwrap_or_else(|e| panic!("VM compilation failed for {txt_path}: {e:?}"));
+    let compiled = compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .unwrap_or_else(|e| panic!("VM compilation failed for {txt_path}: {e:?}"));
     let mut vm =
         Vm::new(compiled).unwrap_or_else(|e| panic!("VM creation failed for {txt_path}: {e}"));
     vm.run_to_end()
@@ -393,7 +412,11 @@ fn open_systems_entry_point_works() {
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &project);
 
-        let diagnostics = simlin_engine::db::collect_all_diagnostics(&db, sync.project);
+        let diagnostics = simlin_engine::db::collect_all_diagnostics(
+            &db,
+            sync.project,
+            simlin_engine::db::LtmOverlay::Off,
+        );
         let errors: Vec<_> = diagnostics
             .iter()
             .filter(|d| matches!(d.severity, simlin_engine::db::DiagnosticSeverity::Error))

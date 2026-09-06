@@ -2234,15 +2234,15 @@ fn engine_reference_rel_per_element(
     std::collections::HashMap<String, usize>,
 ) {
     use simlin_engine::db::{
-        compile_project_incremental, model_ltm_variables, set_project_ltm_enabled,
-        sync_from_datamodel_incremental, SimlinDb,
+        compile_project_incremental, model_ltm_variables, sync_from_datamodel_incremental, SimlinDb,
     };
     use simlin_engine::Vm;
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let compiled = compile_project_incremental(&db, sync.project, "main").unwrap();
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .unwrap();
     let source_model = sync.models["main"].source_model;
     let ltm_vars = model_ltm_variables(&db, source_model, sync.project);
     let loop_partitions = ltm_vars.loop_partitions.clone();
@@ -3642,5 +3642,191 @@ fn gh746_arrayed_cycle_runtime_join_is_sound() {
         simlin_sim_unref(sim);
         simlin_model_unref(model);
         simlin_project_unref(proj);
+    }
+}
+
+/// The runtime classifier reads the loop-score slot width off the SIM's own
+/// compile-era snapshot (`SimState::loop_partitions`), never off the current
+/// revision: after an edit that widens an A2A loop's dimension, the current
+/// derivation's width would make `reclassify_loops_from_results` read the
+/// column after the loop's last slot as one of its scores.
+///
+/// The fixture makes that column's content deterministic. The layout lays the
+/// LTM section out in name order, so `$⁚ltm⁚loop_score⁚b1` (the balancing
+/// `pop`/`deaths` loop, two slots of `-1`) is immediately followed by
+/// `$⁚ltm⁚loop_score⁚r1` (the reinforcing `cash`/`interest` loop, two slots of
+/// `+1`); the test pins that adjacency before patching so it cannot pass by
+/// the neighbour happening to agree. Moving `pop`/`deaths` onto the unused
+/// 3-element `Big` dimension makes the CURRENT derivation report `b1` three
+/// slots wide (pinned through a fresh sim) while the old sim's results carry
+/// two: a width taken from the current revision concatenates `r1[x]`'s
+/// positive scores into `b1`'s sample set and downgrades it from `Balancing`
+/// at confidence 1.0 to `Undetermined`; a width taken from the snapshot keeps
+/// the pre-patch classification.
+#[test]
+fn runtime_loops_read_slot_width_from_the_sims_own_snapshot() {
+    let test_project = TestProject::new("stale_partition_width")
+        .with_sim_time(0.0, 5.0, 1.0)
+        .named_dimension("Region", &["a", "b"])
+        .named_dimension("Big", &["x", "y", "z"])
+        .array_stock("pop[Region]", "100", &[], &["deaths"], None)
+        .array_flow("deaths[Region]", "pop * 0.1", None)
+        .array_stock("cash[Region]", "100", &["interest"], &[], None)
+        .array_flow("interest[Region]", "cash * 0.1", None);
+    let datamodel_project = test_project.build_datamodel();
+    let project = engine_serde::serialize(&datamodel_project).unwrap();
+    let mut buf = Vec::new();
+    project.encode(&mut buf).unwrap();
+
+    unsafe {
+        let (proj, model, sim) = open_arrayed_sim_with_ltm(&buf);
+        let mut err: *mut SimlinError = ptr::null_mut();
+
+        // Identify the two loops by their member variables rather than by
+        // hard-coded ids.
+        let structural = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        assert!(!structural.is_null());
+        assert_eq!(
+            (*structural).count,
+            2,
+            "one balancing and one reinforcing loop"
+        );
+        let loop_id_containing = |var: &str| -> String {
+            let slice = std::slice::from_raw_parts((*structural).loops, (*structural).count);
+            let l = slice
+                .iter()
+                .find(|l| {
+                    c_string_array(l.variables, l.var_count)
+                        .iter()
+                        .any(|v| v == var)
+                })
+                .unwrap_or_else(|| panic!("a loop through {var} must be detected"));
+            CStr::from_ptr(l.id).to_str().unwrap().to_string()
+        };
+        let balancing_id = loop_id_containing("pop");
+        let reinforcing_id = loop_id_containing("cash");
+        simlin_free_loops(structural);
+
+        // Precondition: the reinforcing loop's slots directly follow the
+        // balancing loop's, so a width one too wide reads a `+1` column.
+        let loop_score_offset = |id: &str| -> usize {
+            let name = CString::new(format!("$\u{205A}ltm\u{205A}loop_score\u{205A}{id}")).unwrap();
+            let mut off: usize = 0;
+            let mut err: *mut SimlinError = ptr::null_mut();
+            simlin_sim_get_offset(sim, name.as_ptr(), &mut off, &mut err);
+            expect_no_error(err, "loop_score offset lookup");
+            off
+        };
+        assert_eq!(
+            loop_score_offset(&reinforcing_id),
+            loop_score_offset(&balancing_id) + 2,
+            "the LTM layout is name-ordered, so `{reinforcing_id}`'s slots must \
+             immediately follow `{balancing_id}`'s two slots"
+        );
+
+        let runtime_polarity_of = |id: &str| -> (SimlinLoopPolarity, f64) {
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let runtime = simlin_analyze_get_loops_runtime(sim, &mut err);
+            expect_no_error(err, "get_loops_runtime");
+            assert!(!runtime.is_null());
+            let slice = std::slice::from_raw_parts((*runtime).loops, (*runtime).count);
+            let l = slice
+                .iter()
+                .find(|l| CStr::from_ptr(l.id).to_str().unwrap() == id)
+                .unwrap_or_else(|| panic!("loop {id} must be on the runtime surface"));
+            let out = (l.polarity, l.polarity_confidence);
+            simlin_free_loops(runtime);
+            out
+        };
+        let before = runtime_polarity_of(&balancing_id);
+        assert!(
+            before.0 == SimlinLoopPolarity::Balancing && before.1 == 1.0,
+            "before the edit the outflow loop classifies Balancing at 1.0, got {}",
+            before.1
+        );
+
+        // Widen the balancing loop: `pop`/`deaths` move from the 2-element
+        // `Region` onto the 3-element `Big`.
+        let patch_json = r#"{
+            "models": [{
+                "name": "main",
+                "ops": [
+                    {
+                        "type": "upsertStock",
+                        "payload": { "stock": {
+                            "name": "pop",
+                            "inflows": [],
+                            "outflows": ["deaths"],
+                            "arrayedEquation": { "dimensions": ["Big"], "equation": "100" }
+                        } }
+                    },
+                    {
+                        "type": "upsertFlow",
+                        "payload": { "flow": {
+                            "name": "deaths",
+                            "arrayedEquation": { "dimensions": ["Big"], "equation": "pop * 0.1" }
+                        } }
+                    }
+                ]
+            }]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
+        let mut collected: *mut SimlinError = ptr::null_mut();
+        simlin_project_apply_patch(
+            proj,
+            patch_bytes.as_ptr(),
+            patch_bytes.len(),
+            false,
+            true,
+            &mut collected,
+            &mut err,
+        );
+        if !collected.is_null() {
+            simlin_error_free(collected);
+        }
+        expect_no_error(err, "widening patch");
+
+        // Premise: the current derivation now carries the balancing loop three
+        // slots wide under the same id, while the old sim's snapshot keeps two.
+        let element_count = |sim: *mut SimlinSim| -> usize {
+            let id = CString::new(balancing_id.as_str()).unwrap();
+            let mut n: usize = 0;
+            let mut err: *mut SimlinError = ptr::null_mut();
+            simlin_analyze_get_loop_element_count(sim, id.as_ptr(), &mut n, &mut err);
+            expect_no_error(err, "loop element count");
+            n
+        };
+        let fresh = simlin_sim_new(model, true, &mut err);
+        expect_no_error(err, "sim_new on the widened model");
+        assert_eq!(element_count(fresh), 3, "the edited model's loop is 3 wide");
+        simlin_sim_unref(fresh);
+        assert_eq!(element_count(sim), 2, "the old sim's snapshot stays 2 wide");
+
+        // The old sim's classification is unchanged by an edit it never ran.
+        let after = runtime_polarity_of(&balancing_id);
+        assert!(
+            after == before,
+            "the runtime classification must come from the sim's own results \
+             and slot widths: before {:?}, after the widening edit {:?}",
+            (polarity_label(before.0), before.1),
+            (polarity_label(after.0), after.1)
+        );
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
+    }
+}
+
+/// The FFI polarity enum is a cbindgen ABI type without `Debug`; render it
+/// for assertion messages.
+fn polarity_label(p: SimlinLoopPolarity) -> &'static str {
+    match p {
+        SimlinLoopPolarity::Reinforcing => "R",
+        SimlinLoopPolarity::Balancing => "B",
+        SimlinLoopPolarity::MostlyReinforcing => "Rux",
+        SimlinLoopPolarity::MostlyBalancing => "Bux",
+        SimlinLoopPolarity::Undetermined => "U",
     }
 }

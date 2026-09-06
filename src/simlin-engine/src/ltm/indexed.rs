@@ -26,17 +26,11 @@ use crate::common::{Canonical, Ident};
 /// start.as_str()" is equivalent to "neighbor_idx >= start_idx", preserving
 /// the small-start invariant that makes each elementary circuit emerge
 /// exactly once from its lex-smallest node.
-pub(super) struct IndexedGraph {
+pub(crate) struct IndexedGraph {
     /// Sorted node identities; index into this vec is a `NodeIdx` (u32).
     pub(super) nodes: Vec<Ident<Canonical>>,
     /// Successor indices per node, each inner Vec sorted ascending.
     pub(super) succ: Vec<Vec<u32>>,
-    /// Reverse map for translating external `Ident<Canonical>`s to indices.
-    /// Retained on the struct so callers that hold an IndexedGraph can map
-    /// caller-supplied idents to indices without rebuilding the map; in the
-    /// current call sites it is only exercised via tests.
-    #[allow(dead_code)]
-    pub(super) node_to_idx: HashMap<Ident<Canonical>, u32>,
 }
 
 /// Marker that DFS exceeded the shared circuit budget.  Used internally by
@@ -200,19 +194,24 @@ fn hash_u32_slice(vals: &[u32]) -> u64 {
 /// callers that care about self-loops must detect them from the adjacency
 /// directly rather than from component size.
 ///
-/// Production `pub(crate)` primitive: the `db/dep_graph.rs` element-cycle
-/// refinement (`resolve_recurrence_sccs` /
-/// `refine_scc_to_element_verdict` -- single-variable self-recurrence
-/// resolution in the dt AND init cycle gates) calls it from production
-/// code, in addition to the `#[cfg(test)]` dt-phase cycle accessor
-/// `crate::db::dep_graph::dt_cycle_sccs`. It is consumed twice per phase:
-/// once over the whole-variable phase adjacency to find the offending
-/// SCCs, and once over each SCC's induced `(member, element)` graph to
-/// render the element-acyclicity verdict.
+/// Production `pub(crate)` primitive of the `db/dep_graph.rs` element-cycle
+/// refinement: `symbolic_phase_element_order` runs it over each offending
+/// SCC's induced `(member, element)` graph to render the element-acyclicity
+/// verdict. The whole-variable phase adjacency that finds the offending
+/// SCCs in the first place is already dense and goes through
+/// [`scc_components_of`].
 pub(crate) fn scc_components(
     edges: &HashMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
 ) -> Vec<Vec<Ident<Canonical>>> {
-    let graph = IndexedGraph::from_edges(edges);
+    scc_components_of(&IndexedGraph::from_edges(edges))
+}
+
+/// [`scc_components`] over an already-indexed graph: the dependency graph's
+/// offending-SCC derivation (`db::dep_graph::phase_cycle_sccs`) builds its
+/// relation dense once (`DenseIndex`) and hands it in through
+/// [`IndexedGraph::from_dense`] rather than round-tripping it through a
+/// name-keyed edge map.
+pub(crate) fn scc_components_of(graph: &IndexedGraph) -> Vec<Vec<Ident<Canonical>>> {
     let mut components: Vec<Vec<Ident<Canonical>>> = graph
         .tarjan_scc()
         .into_iter()
@@ -248,10 +247,13 @@ impl IndexedGraph {
         let mut nodes: Vec<Ident<Canonical>> = node_set.into_iter().cloned().collect();
         nodes.sort_by(|a, b| a.as_str().cmp(b.as_str()));
 
-        let mut node_to_idx: HashMap<Ident<Canonical>, u32> = HashMap::with_capacity(nodes.len());
-        for (i, n) in nodes.iter().enumerate() {
-            node_to_idx.insert(n.clone(), i as u32);
-        }
+        // The name-to-index map lives only as long as the edge translation:
+        // nothing reads a graph by name once it is built.
+        let node_to_idx: HashMap<&Ident<Canonical>, u32> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n, i as u32))
+            .collect();
 
         let mut succ: Vec<Vec<u32>> = vec![Vec::new(); nodes.len()];
         // Successor lists use first-seen insertion order to dedup
@@ -283,11 +285,29 @@ impl IndexedGraph {
             }
         }
 
-        IndexedGraph {
-            nodes,
-            succ,
-            node_to_idx,
-        }
+        IndexedGraph { nodes, succ }
+    }
+
+    /// Build an IndexedGraph from nodes that are already numbered: `succ[i]`
+    /// are the successor indices of `nodes[i]`, de-duplicated, in the order
+    /// the caller wants them visited.
+    ///
+    /// The one statement of the numbering contract between the two
+    /// constructors: `nodes` is sorted by canonical name, the order
+    /// `from_edges` assigns (the dependency graph's `DenseIndex` numbers by
+    /// sorted name for that reason), so the two produce the same graph for
+    /// the same relation and every consumer of the components sees one
+    /// ordering. The assertion is what makes handing in an unsorted list a
+    /// failure rather than a silently reordered component list.
+    pub(crate) fn from_dense(nodes: Vec<Ident<Canonical>>, succ: Vec<Vec<u32>>) -> Self {
+        debug_assert_eq!(nodes.len(), succ.len());
+        debug_assert!(
+            nodes
+                .windows(2)
+                .all(|pair| pair[0].as_str() < pair[1].as_str()),
+            "from_dense nodes must be strictly sorted by canonical name"
+        );
+        IndexedGraph { nodes, succ }
     }
 
     #[allow(dead_code)]

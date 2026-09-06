@@ -93,11 +93,11 @@ fn test_parse_subscript_simple() {
     let ast = parse_eq("a[1]").unwrap().unwrap().strip_loc();
     let expected = Expr0::Subscript(
         RawIdent::new_from_str("a"),
-        vec![IndexExpr0::Expr(Expr0::Const(
+        Box::new([IndexExpr0::Expr(Expr0::Const(
             "1".to_string(),
             Literal::new(1.0),
             Loc::default(),
-        ))],
+        ))]),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -108,7 +108,7 @@ fn test_parse_subscript_multiple() {
     let ast = parse_eq("a[1, 2]").unwrap().unwrap().strip_loc();
     let expected = Expr0::Subscript(
         RawIdent::new_from_str("a"),
-        vec![
+        Box::new([
             IndexExpr0::Expr(Expr0::Const(
                 "1".to_string(),
                 Literal::new(1.0),
@@ -119,7 +119,7 @@ fn test_parse_subscript_multiple() {
                 Literal::new(2.0),
                 Loc::default(),
             )),
-        ],
+        ]),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -130,7 +130,7 @@ fn test_parse_subscript_wildcard() {
     let ast = parse_eq("a[*]").unwrap().unwrap().strip_loc();
     let expected = Expr0::Subscript(
         RawIdent::new_from_str("a"),
-        vec![IndexExpr0::Wildcard(Loc::default())],
+        Box::new([IndexExpr0::Wildcard(Loc::default())]),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -141,10 +141,10 @@ fn test_parse_subscript_multiple_wildcards() {
     let ast = parse_eq("a[*, *]").unwrap().unwrap().strip_loc();
     let expected = Expr0::Subscript(
         RawIdent::new_from_str("a"),
-        vec![
+        Box::new([
             IndexExpr0::Wildcard(Loc::default()),
             IndexExpr0::Wildcard(Loc::default()),
-        ],
+        ]),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -155,10 +155,10 @@ fn test_parse_subscript_star_range() {
     let ast = parse_eq("a[*:dim]").unwrap().unwrap().strip_loc();
     let expected = Expr0::Subscript(
         RawIdent::new_from_str("a"),
-        vec![IndexExpr0::StarRange(
+        Box::new([IndexExpr0::StarRange(
             RawIdent::new_from_str("dim"),
             Loc::default(),
-        )],
+        )]),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -169,10 +169,10 @@ fn test_parse_subscript_dot_star_range() {
     let ast = parse_eq("a[*, adult_age.*]").unwrap().unwrap().strip_loc();
     let expected = Expr0::Subscript(
         RawIdent::new_from_str("a"),
-        vec![
+        Box::new([
             IndexExpr0::Wildcard(Loc::default()),
             IndexExpr0::StarRange(RawIdent::new_from_str("adult_age"), Loc::default()),
-        ],
+        ]),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -183,11 +183,19 @@ fn test_parse_subscript_range() {
     let ast = parse_eq("a[1:2]").unwrap().unwrap().strip_loc();
     let expected = Expr0::Subscript(
         RawIdent::new_from_str("a"),
-        vec![IndexExpr0::Range(
-            Expr0::Const("1".to_string(), Literal::new(1.0), Loc::default()),
-            Expr0::Const("2".to_string(), Literal::new(2.0), Loc::default()),
+        Box::new([IndexExpr0::Range(
+            Box::new(Expr0::Const(
+                "1".to_string(),
+                Literal::new(1.0),
+                Loc::default(),
+            )),
+            Box::new(Expr0::Const(
+                "2".to_string(),
+                Literal::new(2.0),
+                Loc::default(),
+            )),
             Loc::default(),
-        )],
+        )]),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -198,11 +206,11 @@ fn test_parse_subscript_var_range() {
     let ast = parse_eq("a[l:r]").unwrap().unwrap().strip_loc();
     let expected = Expr0::Subscript(
         RawIdent::new_from_str("a"),
-        vec![IndexExpr0::Range(
-            Expr0::Var(RawIdent::new_from_str("l"), Loc::default()),
-            Expr0::Var(RawIdent::new_from_str("r"), Loc::default()),
+        Box::new([IndexExpr0::Range(
+            Box::new(Expr0::Var(RawIdent::new_from_str("l"), Loc::default())),
+            Box::new(Expr0::Var(RawIdent::new_from_str("r"), Loc::default())),
             Loc::default(),
-        )],
+        )]),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -213,7 +221,7 @@ fn test_parse_subscript_dimension_position() {
     let ast = parse_eq("a[@1]").unwrap().unwrap().strip_loc();
     let expected = Expr0::Subscript(
         RawIdent::new_from_str("a"),
-        vec![IndexExpr0::DimPosition(1, Loc::default())],
+        Box::new([IndexExpr0::DimPosition(1, Loc::default())]),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -224,11 +232,11 @@ fn test_parse_subscript_mixed_dim_positions() {
     let ast = parse_eq("a[DimM, @1, @2]").unwrap().unwrap().strip_loc();
     let expected = Expr0::Subscript(
         RawIdent::new_from_str("a"),
-        vec![
+        Box::new([
             IndexExpr0::Expr(Expr0::Var(RawIdent::new_from_str("DimM"), Loc::default())),
             IndexExpr0::DimPosition(1, Loc::default()),
             IndexExpr0::DimPosition(2, Loc::default()),
-        ],
+        ]),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -239,11 +247,11 @@ fn test_parse_subscript_trailing_comma() {
     let ast = parse_eq("a[1,]").unwrap().unwrap().strip_loc();
     let expected = Expr0::Subscript(
         RawIdent::new_from_str("a"),
-        vec![IndexExpr0::Expr(Expr0::Const(
+        Box::new([IndexExpr0::Expr(Expr0::Const(
             "1".to_string(),
             Literal::new(1.0),
             Loc::default(),
-        ))],
+        ))]),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -252,7 +260,7 @@ fn test_parse_subscript_trailing_comma() {
 #[test]
 fn test_parse_subscript_empty() {
     let ast = parse_eq("a[]").unwrap().unwrap().strip_loc();
-    let expected = Expr0::Subscript(RawIdent::new_from_str("a"), vec![], Loc::default());
+    let expected = Expr0::Subscript(RawIdent::new_from_str("a"), Box::new([]), Loc::default());
     assert_eq!(ast, expected);
 }
 
@@ -293,14 +301,14 @@ fn test_parse_subscript_transpose() {
         UnaryOp::Transpose,
         Box::new(Expr0::Subscript(
             RawIdent::new_from_str("matrix"),
-            vec![
+            Box::new([
                 IndexExpr0::Wildcard(Loc::default()),
                 IndexExpr0::Expr(Expr0::Const(
                     "1".to_string(),
                     Literal::new(1.0),
                     Loc::default(),
                 )),
-            ],
+            ]),
             Loc::default(),
         )),
         Loc::default(),
@@ -315,7 +323,10 @@ fn test_parse_subscript_transpose() {
 #[test]
 fn test_parse_function_call_no_args() {
     let ast = parse_eq("func()").unwrap().unwrap().strip_loc();
-    let expected = Expr0::App(UntypedBuiltinFn("func".to_string(), vec![]), Loc::default());
+    let expected = Expr0::App(
+        UntypedBuiltinFn("func".to_string(), Box::new([])),
+        Loc::default(),
+    );
     assert_eq!(ast, expected);
 }
 
@@ -325,7 +336,7 @@ fn test_parse_function_call_one_arg() {
     let expected = Expr0::App(
         UntypedBuiltinFn(
             "abs".to_string(),
-            vec![Expr0::Var(RawIdent::new_from_str("x"), Loc::default())],
+            Box::new([Expr0::Var(RawIdent::new_from_str("x"), Loc::default())]),
         ),
         Loc::default(),
     );
@@ -338,10 +349,10 @@ fn test_parse_function_call_multiple_args() {
     let expected = Expr0::App(
         UntypedBuiltinFn(
             "max".to_string(),
-            vec![
+            Box::new([
                 Expr0::Var(RawIdent::new_from_str("a"), Loc::default()),
                 Expr0::Var(RawIdent::new_from_str("b"), Loc::default()),
-            ],
+            ]),
         ),
         Loc::default(),
     );
@@ -354,7 +365,7 @@ fn test_parse_function_call_trailing_comma() {
     let expected = Expr0::App(
         UntypedBuiltinFn(
             "func".to_string(),
-            vec![Expr0::Var(RawIdent::new_from_str("a"), Loc::default())],
+            Box::new([Expr0::Var(RawIdent::new_from_str("a"), Loc::default())]),
         ),
         Loc::default(),
     );
@@ -367,19 +378,19 @@ fn test_parse_nested_function_calls() {
     let expected = Expr0::App(
         UntypedBuiltinFn(
             "max".to_string(),
-            vec![
+            Box::new([
                 Expr0::App(
                     UntypedBuiltinFn(
                         "min".to_string(),
-                        vec![
+                        Box::new([
                             Expr0::Var(RawIdent::new_from_str("a"), Loc::default()),
                             Expr0::Var(RawIdent::new_from_str("b"), Loc::default()),
-                        ],
+                        ]),
                     ),
                     Loc::default(),
                 ),
                 Expr0::Var(RawIdent::new_from_str("c"), Loc::default()),
-            ],
+            ]),
         ),
         Loc::default(),
     );
@@ -444,10 +455,10 @@ fn test_parse_safe_division() {
     let expected = Expr0::App(
         UntypedBuiltinFn(
             "safediv".to_string(),
-            vec![
+            Box::new([
                 Expr0::Var(RawIdent::new_from_str("a"), Loc::default()),
                 Expr0::Var(RawIdent::new_from_str("b"), Loc::default()),
-            ],
+            ]),
         ),
         Loc::default(),
     );
@@ -1126,7 +1137,7 @@ fn test_precedence_safediv() {
     let expected = Expr0::App(
         UntypedBuiltinFn(
             "safediv".to_string(),
-            vec![
+            Box::new([
                 Expr0::Op2(
                     BinaryOp::Mul,
                     Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::default())),
@@ -1134,7 +1145,7 @@ fn test_precedence_safediv() {
                     Loc::default(),
                 ),
                 Expr0::Var(RawIdent::new_from_str("c"), Loc::default()),
-            ],
+            ]),
         ),
         Loc::default(),
     );
@@ -1151,10 +1162,10 @@ fn test_precedence_safediv_with_add() {
         Box::new(Expr0::App(
             UntypedBuiltinFn(
                 "safediv".to_string(),
-                vec![
+                Box::new([
                     Expr0::Var(RawIdent::new_from_str("b"), Loc::default()),
                     Expr0::Var(RawIdent::new_from_str("c"), Loc::default()),
-                ],
+                ]),
             ),
             Loc::default(),
         )),
@@ -1216,12 +1227,12 @@ fn test_complex_time_subscript() {
     // This would typically be reified, but we're testing raw parsing
     let expected = Expr0::Subscript(
         RawIdent::new_from_str("aux"),
-        vec![IndexExpr0::Expr(Expr0::Op2(
+        Box::new([IndexExpr0::Expr(Expr0::Op2(
             BinaryOp::Add,
             Box::new(Expr0::App(
                 UntypedBuiltinFn(
                     "int".to_string(),
-                    vec![Expr0::Op2(
+                    Box::new([Expr0::Op2(
                         BinaryOp::Mod,
                         Box::new(Expr0::Var(RawIdent::new_from_str("TIME"), Loc::default())),
                         Box::new(Expr0::Const(
@@ -1230,7 +1241,7 @@ fn test_complex_time_subscript() {
                             Loc::default(),
                         )),
                         Loc::default(),
-                    )],
+                    )]),
                 ),
                 Loc::default(),
             )),
@@ -1240,7 +1251,7 @@ fn test_complex_time_subscript() {
                 Loc::default(),
             )),
             Loc::default(),
-        ))],
+        ))]),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -1676,11 +1687,11 @@ fn test_function_three_args() {
     let expected = Expr0::App(
         UntypedBuiltinFn(
             "clamp".to_string(),
-            vec![
+            Box::new([
                 Expr0::Var(RawIdent::new_from_str("a"), Loc::default()),
                 Expr0::Var(RawIdent::new_from_str("b"), Loc::default()),
                 Expr0::Var(RawIdent::new_from_str("c"), Loc::default()),
-            ],
+            ]),
         ),
         Loc::default(),
     );
@@ -1692,7 +1703,7 @@ fn test_subscript_with_expression() {
     let ast = parse_eq("a[b + 1]").unwrap().unwrap().strip_loc();
     let expected = Expr0::Subscript(
         RawIdent::new_from_str("a"),
-        vec![IndexExpr0::Expr(Expr0::Op2(
+        Box::new([IndexExpr0::Expr(Expr0::Op2(
             BinaryOp::Add,
             Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
             Box::new(Expr0::Const(
@@ -1701,7 +1712,7 @@ fn test_subscript_with_expression() {
                 Loc::default(),
             )),
             Loc::default(),
-        ))],
+        ))]),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -1767,11 +1778,11 @@ fn test_subscript_multiple_dim_positions() {
     let ast = parse_eq("a[@1, @2, @3]").unwrap().unwrap().strip_loc();
     let expected = Expr0::Subscript(
         RawIdent::new_from_str("a"),
-        vec![
+        Box::new([
             IndexExpr0::DimPosition(1, Loc::default()),
             IndexExpr0::DimPosition(2, Loc::default()),
             IndexExpr0::DimPosition(3, Loc::default()),
-        ],
+        ]),
         Loc::default(),
     );
     assert_eq!(ast, expected);
@@ -1802,19 +1813,19 @@ fn test_safe_div_chain() {
     let expected = Expr0::App(
         UntypedBuiltinFn(
             "safediv".to_string(),
-            vec![
+            Box::new([
                 Expr0::App(
                     UntypedBuiltinFn(
                         "safediv".to_string(),
-                        vec![
+                        Box::new([
                             Expr0::Var(RawIdent::new_from_str("a"), Loc::default()),
                             Expr0::Var(RawIdent::new_from_str("b"), Loc::default()),
-                        ],
+                        ]),
                     ),
                     Loc::default(),
                 ),
                 Expr0::Var(RawIdent::new_from_str("c"), Loc::default()),
-            ],
+            ]),
         ),
         Loc::default(),
     );
@@ -1969,18 +1980,34 @@ fn test_multiple_subscripts_with_ranges() {
     let ast = parse_eq("a[1:2, 3:4]").unwrap().unwrap().strip_loc();
     let expected = Expr0::Subscript(
         RawIdent::new_from_str("a"),
-        vec![
+        Box::new([
             IndexExpr0::Range(
-                Expr0::Const("1".to_string(), Literal::new(1.0), Loc::default()),
-                Expr0::Const("2".to_string(), Literal::new(2.0), Loc::default()),
+                Box::new(Expr0::Const(
+                    "1".to_string(),
+                    Literal::new(1.0),
+                    Loc::default(),
+                )),
+                Box::new(Expr0::Const(
+                    "2".to_string(),
+                    Literal::new(2.0),
+                    Loc::default(),
+                )),
                 Loc::default(),
             ),
             IndexExpr0::Range(
-                Expr0::Const("3".to_string(), Literal::new(3.0), Loc::default()),
-                Expr0::Const("4".to_string(), Literal::new(4.0), Loc::default()),
+                Box::new(Expr0::Const(
+                    "3".to_string(),
+                    Literal::new(3.0),
+                    Loc::default(),
+                )),
+                Box::new(Expr0::Const(
+                    "4".to_string(),
+                    Literal::new(4.0),
+                    Loc::default(),
+                )),
                 Loc::default(),
             ),
-        ],
+        ]),
         Loc::default(),
     );
     assert_eq!(ast, expected);

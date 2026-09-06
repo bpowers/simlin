@@ -4287,18 +4287,21 @@ fn resolve_model_name<'a>(project: &'a datamodel::Project, model_name: &'a str) 
         .unwrap_or(model_name)
 }
 
-/// Ensure we have a mutable salsa db + source project, creating a
-/// temporary one if the caller didn't provide one.
-fn ensure_db_state_mut<'a>(
+/// The salsa db the layout reads and the project synced into it: the
+/// caller's, or a temporary one synced from `project` into `local_db`.
+/// Everything the layout asks of the db is a shared query (dependencies,
+/// parses, the LTM compile and simulation under the `On` overlay), so the
+/// db is borrowed, never written: a caller holding a lock on it needs no
+/// exclusive access for a layout.
+fn ensure_db_state<'a>(
     project: &datamodel::Project,
-    db_state: Option<(&'a mut crate::db::SimlinDb, crate::db::SourceProject)>,
+    db_state: Option<(&'a crate::db::SimlinDb, crate::db::SourceProject)>,
     local_db: &'a mut Option<crate::db::SimlinDb>,
-) -> (&'a mut crate::db::SimlinDb, crate::db::SourceProject) {
+) -> (&'a crate::db::SimlinDb, crate::db::SourceProject) {
     match db_state {
         Some((db, sp)) => (db, sp),
         None => {
-            let db = local_db.insert(crate::db::SimlinDb::default());
-            // Extract the Copy SourceProject handle before reborrowing db.
+            let db: &crate::db::SimlinDb = local_db.insert(crate::db::SimlinDb::default());
             let source_project = crate::db::sync_from_datamodel(db, project).project;
             (db, source_project)
         }
@@ -4454,7 +4457,7 @@ fn build_feedback_loops_from_metadata(
 pub fn compute_metadata(
     project: &datamodel::Project,
     model_name: &str,
-    db_state: Option<(&mut crate::db::SimlinDb, crate::db::SourceProject)>,
+    db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
 ) -> Option<ComputedMetadata> {
     let model = project.get_model(model_name)?;
     let mut dep_graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -4526,7 +4529,7 @@ pub fn compute_metadata(
     // Use a salsa db for dependency extraction and LTM detection, creating
     // a temporary one if the caller didn't provide one.
     let mut local_db: Option<crate::db::SimlinDb> = None;
-    let (db, source_project) = ensure_db_state_mut(project, db_state, &mut local_db);
+    let (db, source_project) = ensure_db_state(project, db_state, &mut local_db);
 
     let actual_model_name = resolve_model_name(project, model_name);
     let canonical_model_name = canonicalize(actual_model_name);
@@ -5122,7 +5125,7 @@ pub fn incremental_layout(
     project: &datamodel::Project,
     model_name: &str,
     patch: &crate::patch::ModelPatch,
-    db_state: Option<(&mut crate::db::SimlinDb, crate::db::SourceProject)>,
+    db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
 ) -> Result<datamodel::StockFlow, String> {
     if old_view.elements.is_empty() {
         return generate_best_layout(project, model_name, db_state);
@@ -5760,7 +5763,7 @@ pub fn incremental_layout(
 pub fn generate_layout(
     project: &datamodel::Project,
     model_name: &str,
-    db_state: Option<(&mut crate::db::SimlinDb, crate::db::SourceProject)>,
+    db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
 ) -> Result<datamodel::StockFlow, String> {
     let config = LayoutConfig::default();
     let not_found = || format!("model '{}' not found in project", model_name);
@@ -5774,7 +5777,7 @@ pub fn generate_layout_with_config(
     project: &datamodel::Project,
     model_name: &str,
     mut config: LayoutConfig,
-    db_state: Option<(&mut crate::db::SimlinDb, crate::db::SourceProject)>,
+    db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
 ) -> Result<datamodel::StockFlow, String> {
     config.validate();
     let not_found = || format!("model '{}' not found in project", model_name);
@@ -5790,7 +5793,7 @@ pub fn generate_layout_with_config(
 pub fn generate_best_layout(
     project: &datamodel::Project,
     model_name: &str,
-    db_state: Option<(&mut crate::db::SimlinDb, crate::db::SourceProject)>,
+    db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
 ) -> Result<datamodel::StockFlow, String> {
     let config = LayoutConfig::default();
     let seeds = LAYOUT_SEEDS;
@@ -5834,7 +5837,7 @@ pub fn generate_best_layout(
 pub fn compute_layout_metadata(
     project: &datamodel::Project,
     model_name: &str,
-    db_state: Option<(&mut crate::db::SimlinDb, crate::db::SourceProject)>,
+    db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
 ) -> Option<ComputedMetadata> {
     compute_metadata(project, model_name, db_state)
 }

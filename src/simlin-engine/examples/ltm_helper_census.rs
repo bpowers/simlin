@@ -111,7 +111,6 @@ fn main() {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
     let source_project = sync.project;
-    source_project.set_ltm_enabled(&mut db).to(true);
     source_project.set_ltm_discovery_mode(&mut db).to(true);
 
     let root_name = datamodel
@@ -143,10 +142,10 @@ fn main() {
     let mut total_sites = 0usize;
     for v in &ltm_vars.vars {
         let texts: Vec<&str> = match &v.equation {
-            LtmEquation::Scalar(arm) => vec![arm.text.as_str()],
-            LtmEquation::ApplyToAll(_, arm) => vec![arm.text.as_str()],
+            LtmEquation::Scalar(arm) => vec![&*arm.text],
+            LtmEquation::ApplyToAll(_, arm) => vec![&*arm.text],
             LtmEquation::Arrayed { elements, .. } => {
-                elements.iter().map(|(_, arm)| arm.text.as_str()).collect()
+                elements.iter().map(|(_, arm)| &*arm.text).collect()
             }
         };
         for text in texts {
@@ -174,11 +173,11 @@ fn main() {
         let mut shown = 0;
         for v in &ltm_vars.vars {
             let (variant, texts): (&str, Vec<&str>) = match &v.equation {
-                LtmEquation::Scalar(arm) => ("Scalar", vec![arm.text.as_str()]),
-                LtmEquation::ApplyToAll(_, arm) => ("ApplyToAll", vec![arm.text.as_str()]),
+                LtmEquation::Scalar(arm) => ("Scalar", vec![&*arm.text]),
+                LtmEquation::ApplyToAll(_, arm) => ("ApplyToAll", vec![&*arm.text]),
                 LtmEquation::Arrayed { elements, .. } => (
                     "Arrayed",
-                    elements.iter().map(|(_, arm)| arm.text.as_str()).collect(),
+                    elements.iter().map(|(_, arm)| &*arm.text).collect(),
                 ),
             };
             for text in &texts {

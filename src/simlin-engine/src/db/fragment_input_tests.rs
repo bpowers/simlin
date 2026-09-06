@@ -183,14 +183,27 @@ fn explicit_constructor_is_compile_var_fragments_input() {
     let model = main_model(&db, sync.project);
     let var = model.variables(&db)["usesub"];
 
-    let production =
-        compile_var_fragment(&db, var, model, sync.project, ModuleInputSet::empty(&db))
-            .as_ref()
-            .expect("usesub compiles");
+    let production = compile_var_fragment(
+        &db,
+        var,
+        model,
+        sync.project,
+        ModuleInputSet::empty(&db),
+        crate::db::LtmOverlay::Off,
+    )
+    .as_ref()
+    .expect("usesub compiles");
 
     let crate::db::var_fragment::ExplicitFragment {
         input: Some(input), ..
-    } = crate::db::var_fragment::explicit_fragment_input(&db, var, model, sync.project, &[])
+    } = crate::db::var_fragment::explicit_fragment_input(
+        &db,
+        var,
+        model,
+        sync.project,
+        &[],
+        crate::db::LtmOverlay::Off,
+    )
     else {
         panic!("usesub must lower");
     };
@@ -206,7 +219,7 @@ fn explicit_constructor_is_compile_var_fragments_input() {
     };
     assert_eq!(
         **shape,
-        **crate::db::layout::model_shape(&db, producer, sync.project),
+        **crate::db::layout::model_shape(&db, producer, sync.project, crate::db::LtmOverlay::Off),
         "a module dependency carries the sub-model's shape"
     );
 
@@ -245,16 +258,23 @@ fn implicit_constructor_is_compile_implicit_var_fragments_input() {
     );
 
     for name in names {
-        let production =
-            compile_implicit_var_fragment(&db, model, sync.project, name.clone(), inputs)
-                .as_ref()
-                .unwrap_or_else(|| panic!("{name} compiles"));
+        let production = compile_implicit_var_fragment(
+            &db,
+            model,
+            sync.project,
+            name.clone(),
+            inputs,
+            crate::db::LtmOverlay::Off,
+        )
+        .as_ref()
+        .unwrap_or_else(|| panic!("{name} compiles"));
         let input = crate::db::fragment_compile::implicit_fragment_input(
             &db,
             &helpers[name],
             model,
             sync.project,
             &[],
+            crate::db::LtmOverlay::Off,
         )
         .unwrap_or_else(|_| panic!("{name} has a fragment input"));
         // Every phase the emitter's runlist gate admitted is the constructor's
@@ -285,9 +305,8 @@ fn implicit_constructor_is_compile_implicit_var_fragments_input() {
 /// Row 3 of 4: the LTM synthetic-variable constructor.
 #[test]
 fn ltm_constructor_is_compile_ltm_equation_fragments_input() {
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &ltm_loop_project());
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let model = main_model(&db, sync.project);
 
     let ltm_vars = model_ltm_variables(&db, model, sync.project);
@@ -330,9 +349,8 @@ fn ltm_constructor_is_compile_ltm_equation_fragments_input() {
 /// `PREVIOUS` captures, so flow only.
 #[test]
 fn ltm_implicit_constructor_is_compile_ltm_implicit_var_fragments_input() {
-    let mut db = SimlinDb::default();
+    let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &ltm_loop_project());
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let model = main_model(&db, sync.project);
 
     let helpers = model_ltm_implicit_var_info(&db, model, sync.project);
@@ -391,7 +409,7 @@ fn cross_module_read_offsets_through_the_sub_models_shape() {
     let sync = sync_from_datamodel(&db, &module_and_array_project());
     let model = main_model(&db, sync.project);
     let producer = *sync.project.models(&db).get("producer").unwrap();
-    let arr_slot = compute_layout(&db, producer, sync.project)
+    let arr_slot = compute_layout(&db, producer, sync.project, crate::db::LtmOverlay::Off)
         .get("arr")
         .expect("producer lays out arr")
         .offset;
@@ -399,7 +417,14 @@ fn cross_module_read_offsets_through_the_sub_models_shape() {
     let var = model.variables(&db)["pick"];
     let crate::db::var_fragment::ExplicitFragment {
         input: Some(input), ..
-    } = crate::db::var_fragment::explicit_fragment_input(&db, var, model, sync.project, &[])
+    } = crate::db::var_fragment::explicit_fragment_input(
+        &db,
+        var,
+        model,
+        sync.project,
+        &[],
+        crate::db::LtmOverlay::Off,
+    )
     else {
         panic!("pick must lower");
     };
@@ -428,7 +453,9 @@ fn cross_module_read_offsets_through_the_sub_models_shape() {
     );
 
     // End to end: producer.input = 3, so arr = [3, 6, 9] and pick = arr[2] = 6.
-    let compiled = compile_project_incremental(&db, sync.project, "main").expect("compiles");
+    let compiled =
+        compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
+            .expect("compiles");
     let mut vm = crate::vm::Vm::new(compiled).expect("vm");
     vm.run_to_end().expect("runs");
     let results = vm.into_results();
@@ -441,7 +468,8 @@ fn run_series(
     db: &SimlinDb,
     project: SourceProject,
 ) -> std::collections::HashMap<String, Vec<f64>> {
-    let compiled = compile_project_incremental(db, project, "main").expect("compiles");
+    let compiled = compile_project_incremental(db, project, "main", crate::db::LtmOverlay::Off)
+        .expect("compiles");
     let mut vm = crate::vm::Vm::new(compiled).expect("vm");
     vm.run_to_end().expect("runs");
     let results = vm.into_results();
@@ -474,7 +502,7 @@ fn run_series(
 fn smooth_argument_reading_a_module_output_compiles() {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &smooth_of_module_output_project());
-    let diagnostics = collect_all_diagnostics(&db, sync.project);
+    let diagnostics = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off);
     assert!(
         diagnostics.is_empty(),
         "no diagnostics expected, got {diagnostics:?}"

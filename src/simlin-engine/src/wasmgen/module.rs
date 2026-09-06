@@ -208,11 +208,11 @@ const RI_BELT_N_SLATS: u32 = 1;
 /// deeper in the same call.
 ///
 /// When `ltm_enabled` is true, the synthesized `$⁚ltm⁚*` link/loop score
-/// variables are included in the emitted layout and blob. `ltm_discovery_mode`
-/// flips the same flag `simlin_sim_new(.., enable_ltm=true)` sets on a project,
-/// but locally for this compile only. Neither flag reaches the special-stock
-/// branch: that path compiles a separate, always-`ltm_enabled == false`
-/// `SourceProject` (a documented degradation, `queues.md` §10).
+/// variables are included in the emitted layout and blob (the compile is
+/// keyed on the LTM overlay); `ltm_discovery_mode` sets the discovery flag on
+/// this compile's own `SourceProject`. Neither reaches the special-stock
+/// branch: that path compiles a separate `SourceProject` without the overlay
+/// (a documented degradation, `queues.md` §10).
 pub fn compile_datamodel_to_artifact(
     datamodel: &crate::datamodel::Project,
     model_name: &str,
@@ -221,20 +221,24 @@ pub fn compile_datamodel_to_artifact(
 ) -> Result<WasmArtifact, WasmGenError> {
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, datamodel, None);
-    // The flags ride on the freshly-synced `SourceProject`; no reset dance is
-    // needed (contrast `simlin_sim_new`, which mutates a *shared* persistent
-    // `SourceProject` and must restore prior LTM state). `db` is owned by this
-    // function and dropped at return, so flag changes can never leak.
-    crate::db::set_project_ltm_enabled(&mut db, sync.project, ltm_enabled);
+    // The discovery flag rides on the freshly-synced `SourceProject`; `db` is
+    // owned by this function and dropped at return, so it can never leak.
+    // Whether the overlay is assembled is an argument of the compile.
     crate::db::set_project_ltm_discovery_mode(&mut db, sync.project, ltm_discovery_mode);
     // The unified dispatch: an ordinary model goes to `compile_project_incremental`
-    // (with the LTM flags above), a special-stock model to the expansion build
+    // (under the requested overlay), a special-stock model to the expansion build
     // path. Going through it rather than reimplementing the dispatch is what
     // guarantees the wasm blob simulates the SAME expanded project the VM does.
-    let build = crate::queue_compile::compile_sim(&mut db, sync.project, datamodel, model_name)
-        .map_err(|e| {
-            WasmGenError::Unsupported(format!("wasmgen: incremental compile failed: {e:?}"))
-        })?;
+    let build = crate::queue_compile::compile_sim(
+        &mut db,
+        sync.project,
+        datamodel,
+        model_name,
+        crate::db::LtmOverlay::from(ltm_enabled),
+    )
+    .map_err(|e| {
+        WasmGenError::Unsupported(format!("wasmgen: incremental compile failed: {e:?}"))
+    })?;
     compile_simulation_with_plans(&build.compiled, &build.conveyor_plans, &build.queue_plans)
 }
 
@@ -538,10 +542,15 @@ struct PerInstance<'a> {
 /// unrolling past the per-function budget -- returns [`WasmGenError::Unsupported`]
 /// rather than emitting a wrong module.
 ///
-/// This is the ORDINARY-model entry point: it asserts (in debug) that `sim` has
-/// not had its overridable-constant set retracted, i.e. that it did not come from
-/// the special conveyor/queue build path. A conveyor or queue model must use
-/// [`compile_simulation_with_plans`], which carries the plans the pass needs.
+/// This is the ORDINARY-model entry point: no conveyor or queue pass is
+/// lowered. Nothing here can tell a special-stock program from an ordinary
+/// one -- a pass-driven flow's placeholder `0` compiles to the same flows
+/// `AssignConstCurr` as a user's constant `0`, and the shared program carries
+/// no marker -- so a conveyor or queue program handed in without its plans is
+/// emitted with no pass and every pass-written slot overridable, with nothing
+/// to detect it. A special-stock model goes through
+/// [`compile_simulation_with_plans`] with the plans `queue_compile::compile_sim`
+/// resolved (what [`compile_datamodel_to_artifact`], the production path, does).
 pub fn compile_simulation(sim: &CompiledSimulation) -> Result<WasmArtifact, WasmGenError> {
     compile_simulation_with_plans(sim, &[], &[])
 }
@@ -902,27 +911,13 @@ fn compile_with_passes(
     total_bytes = heap_base;
 
     let mut overridable_defaults = collect_overridable_defaults(&sim.modules, &sim.root, 0);
-    // Pass-written slots (driven outflow rates, published container values) are NOT
-    // overridable: their placeholder `0` equation compiles to an `AssignConstCurr`
-    // the scan above sees, but the pass overwrites the slot every step, so an
-    // accepted override would be silently ineffective (GH #871). The VM retracts
-    // exactly this set in `queue_compile::build_compiled`; mirroring it here is
-    // what makes the blob's `set_value` (which validates against the validity
-    // region seeded from this list) reject the same offsets the VM does.
-    if !queue_plans.is_empty() || !conveyor_plans.is_empty() {
-        let pass_written: std::collections::HashSet<usize> = queue_plans
-            .iter()
-            .flat_map(|p| p.pass_written_offsets())
-            .chain(conveyor_plans.iter().flat_map(|p| p.pass_written_offsets()))
-            .collect();
-        overridable_defaults.retain(|(off, _)| !pass_written.contains(off));
-    }
-    // Defense in depth: the offsets `collect_overridable_defaults` reports -- after
-    // the retraction above -- must be exactly the set the VM considers overridable
-    // (`constant_offsets`, the keys of `cached_constant_info`). Both walk the same
-    // flows-`AssignConstCurr` rule and then subtract the same pass-written set, so
-    // any divergence is a bug: a blob's `set_value` would accept/reject a different
-    // set than the VM. Checked only in debug.
+    // Defense in depth: `collect_overridable_defaults` and the VM's
+    // `collect_constant_info` are two walks of the same flows-`AssignConstCurr`
+    // rule (this one also needs each constant's default), so the offsets they
+    // find must agree exactly; a divergence would make the blob's `set_value`
+    // accept or reject a different set than the VM. Compared BEFORE the
+    // pass-written subtraction below, so what is checked is the two walks and
+    // nothing derived from this function's own arguments. Checked only in debug.
     debug_assert!(
         {
             let mut ours: Vec<usize> = overridable_defaults.iter().map(|(off, _)| *off).collect();
@@ -934,6 +929,17 @@ fn compile_with_passes(
         },
         "wasmgen overridable-constant offsets diverged from CompiledSimulation::constant_offsets"
     );
+    // Pass-written slots (driven outflow rates, published container values) are NOT
+    // overridable: their placeholder `0` equation compiles to an `AssignConstCurr`
+    // the scan above sees, but the pass overwrites the slot every step, so an
+    // accepted override would be silently ineffective (GH #871). The subtraction
+    // is applied once, here, through the same predicate the VM's override gate
+    // reads (`queue_compile::is_pass_written`, under
+    // `CompiledSimulation::is_overridable_offset`), so the validity region this
+    // list seeds rejects exactly the offsets the VM does.
+    overridable_defaults.retain(|(off, _)| {
+        !crate::queue_compile::is_pass_written(conveyor_plans, queue_plans, *off)
+    });
 
     let pages = total_bytes.div_ceil(WASM_PAGE_SIZE).max(1);
 

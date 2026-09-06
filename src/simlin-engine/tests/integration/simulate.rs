@@ -174,10 +174,16 @@ corpus_tests! {
 /// salsa-backed path.
 fn compile_vm(
     datamodel_project: &simlin_engine::datamodel::Project,
-) -> simlin_engine::CompiledSimulation {
+) -> std::sync::Arc<simlin_engine::CompiledSimulation> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel_project, None);
-    compile_project_incremental(&db, sync.project, "main").unwrap()
+    compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .unwrap()
 }
 
 fn load_expected_results(xmile_path: &str) -> Option<Results> {
@@ -1829,7 +1835,8 @@ fn two_arg_ramp_in_submodule_reads_root_final_time() {
     );
 }
 
-type CompileFn = fn(&simlin_engine::datamodel::Project) -> simlin_engine::CompiledSimulation;
+type CompileFn =
+    fn(&simlin_engine::datamodel::Project) -> std::sync::Arc<simlin_engine::CompiledSimulation>;
 
 fn simulate_path(xmile_path: &str) {
     simulate_path_with(xmile_path, compile_vm);
@@ -2976,8 +2983,13 @@ fn opens_and_simulates_non_a2a_gf() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let compiled =
-        compile_project_incremental(&db, sync.project, "main").expect("non-a2a-gf must compile");
+    let compiled = compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .expect("non-a2a-gf must compile");
     let mut vm = Vm::new(compiled).expect("VM creation");
     vm.run_to_end().expect("simulation must not panic or error");
     let results = vm.into_results();
@@ -3043,7 +3055,15 @@ fn bad_model_name() {
     let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
-    assert!(compile_project_incremental(&db, sync.project, "blerg").is_err());
+    assert!(
+        compile_project_incremental(
+            &db,
+            sync.project,
+            "blerg",
+            simlin_engine::db::LtmOverlay::Off
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -4021,7 +4041,13 @@ fn compile_diags(mdl: &str) -> (bool, Vec<simlin_engine::db::Diagnostic>) {
     let dm = open_vensim(mdl).unwrap_or_else(|e| panic!("failed to parse mdl: {e}"));
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &dm, None);
-    let is_err = compile_project_incremental(&db, sync.project, "main").is_err();
+    let is_err = compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .is_err();
     (is_err, collect_project_diagnostics(&dm))
 }
 
@@ -5028,7 +5054,12 @@ fn incremental_compilation_covers_all_models() {
 
         let mut salsa_db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut salsa_db, &datamodel_project, None);
-        let result = compile_project_incremental(&salsa_db, sync.project, "main");
+        let result = compile_project_incremental(
+            &salsa_db,
+            sync.project,
+            "main",
+            simlin_engine::db::LtmOverlay::Off,
+        );
 
         if let Err(e) = result {
             failures.push((model_path.to_string(), format!("{e}")));
@@ -5231,8 +5262,13 @@ fn mark2_mdl_compiles_incrementally() {
     let project = open_vensim(&contents).expect("parse mark2.mdl");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("mark2.mdl should compile incrementally");
+    let compiled = compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .expect("mark2.mdl should compile incrementally");
     let mut vm = Vm::new(compiled).expect("VM creation should succeed");
     vm.run_to_end().expect("VM should run to completion");
 }
@@ -5260,8 +5296,13 @@ fn mark2_mdl_compiles_after_protobuf_roundtrip() {
     // Compile the round-tripped project
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project2, None);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("mark2.mdl should compile after protobuf round-trip");
+    let compiled = compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .expect("mark2.mdl should compile after protobuf round-trip");
     let mut vm = Vm::new(compiled).expect("VM creation should succeed");
     vm.run_to_end().expect("VM should run to completion");
 }
@@ -5276,29 +5317,31 @@ fn mark2_mdl_compiles_after_protobuf_roundtrip() {
 /// `db::ltm_module_tests`.)
 #[test]
 fn mark2_mdl_rejects_ltm_under_rk4() {
-    use simlin_engine::db::set_project_ltm_enabled;
-
     let contents =
         std::fs::read_to_string("../../test/bobby/vdf/econ/mark2.mdl").expect("read mark2.mdl");
     let project = open_vensim(&contents).expect("parse mark2.mdl");
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
 
-    // LTM enabled on an RK4 model: the compile is rejected with the Euler
+    // The LTM overlay on an RK4 model: the compile is rejected with the Euler
     // assumption explained.
-    set_project_ltm_enabled(&mut db, sync.project, true);
-    let err = compile_project_incremental(&db, sync.project, "main")
-        .expect_err("LTM + RK4 must be rejected");
+    let err =
+        compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)
+            .expect_err("LTM + RK4 must be rejected");
     let details = err.details.unwrap_or_default();
     assert!(
         details.contains("Euler"),
         "the rejection must reference the Euler assumption: {details}"
     );
 
-    // With LTM disabled, the same RK4 model compiles and simulates as before.
-    set_project_ltm_enabled(&mut db, sync.project, false);
-    let compiled = compile_project_incremental(&db, sync.project, "main")
-        .expect("mark2.mdl should compile without LTM");
+    // Without the overlay, the same RK4 model compiles and simulates as before.
+    let compiled = compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .expect("mark2.mdl should compile without LTM");
     let mut vm = Vm::new(compiled).expect("VM creation should succeed");
     vm.run_to_end().expect("VM should run to completion");
 }
@@ -6058,8 +6101,13 @@ fn collect_project_diagnostics(
     let sync = sync_state.to_sync_result();
     // Drive compilation so the diagnostic accumulators are populated; the
     // Result is intentionally ignored here (callers inspect diagnostics).
-    let _ = compile_project_incremental(&db, sync.project, "main");
-    collect_all_diagnostics(&db, sync.project)
+    let _ = compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    );
+    collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::Off)
 }
 
 /// Pure predicate: is `equation` EXACTLY the `{module_ident}.{output}`
@@ -6854,7 +6902,7 @@ fn corpus_clearn_macros_import() {
 /// it means re-measuring BOTH numbers, not just the count.
 #[test]
 fn clearn_ltm_var_count_guardrail() {
-    use simlin_engine::db::{model_ltm_variables, set_project_ltm_enabled};
+    use simlin_engine::db::model_ltm_variables;
 
     let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
     let contents = std::fs::read_to_string(mdl_path)
@@ -6864,7 +6912,6 @@ fn clearn_ltm_var_count_guardrail() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
     let total: usize = sync
         .models
         .values()
@@ -6900,7 +6947,7 @@ fn clearn_ltm_var_count_guardrail() {
 #[test]
 #[ignore]
 fn clearn_ltm_partials_all_parse() {
-    use simlin_engine::db::{collect_all_diagnostics, set_project_ltm_enabled};
+    use simlin_engine::db::collect_all_diagnostics;
 
     let mdl_path = "../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl";
     let contents = std::fs::read_to_string(mdl_path)
@@ -6910,13 +6957,13 @@ fn clearn_ltm_partials_all_parse() {
 
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
-    set_project_ltm_enabled(&mut db, sync.project, true);
 
-    let unparseable: Vec<String> = collect_all_diagnostics(&db, sync.project)
-        .iter()
-        .map(|d| format!("{:?}", d.error))
-        .filter(|msg| msg.contains("did not parse"))
-        .collect();
+    let unparseable: Vec<String> =
+        collect_all_diagnostics(&db, sync.project, simlin_engine::db::LtmOverlay::On)
+            .iter()
+            .map(|d| format!("{:?}", d.error))
+            .filter(|msg| msg.contains("did not parse"))
+            .collect();
 
     assert!(
         unparseable.is_empty(),
@@ -6958,7 +7005,12 @@ fn compiles_and_runs_clearn_structural() {
     // `corpus_clearn_macros_import` inspection idiom) to make it legible.
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, &datamodel_project, None);
-    let compile_result = compile_project_incremental(&db, sync.project, "main");
+    let compile_result = compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    );
 
     if compile_result.is_err() {
         let diags = collect_project_diagnostics(&datamodel_project);
