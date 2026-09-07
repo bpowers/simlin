@@ -40,11 +40,9 @@ fn compile_ltm_incremental(
 }
 
 /// Compile with LTM enabled and capture the per-slot loop_partitions
-/// mapping `compute_rel_loop_scores*` need to derive relative scores
-/// post-sim.  Since rel_loop_score is no longer emitted as a VM variable
-/// (see docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md), tests
-/// that used to filter `results.offsets` for `$⁚ltm⁚rel_loop_score⁚{id}`
-/// must now invoke `ltm_post::compute_rel_loop_scores(results, loop_partitions)`.
+/// mapping `ltm_post::compute_rel_loop_scores` needs to derive relative
+/// scores post-sim (relative scores are not VM variables; see
+/// docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md).
 fn compile_ltm_incremental_with_partitions(
     project: &simlin_engine::datamodel::Project,
 ) -> (
@@ -3926,18 +3924,6 @@ fn find_loop_score_offsets(results: &Results) -> Vec<(String, usize)> {
     entries
 }
 
-/// Test helper: thin forwarder to the production per-element helper.
-/// Retained so the existing A2A integration tests keep calling the
-/// same name; they now pin the production code rather than a parallel
-/// implementation.  The per-slot `loop_partitions` carries each loop's
-/// slot count (its `len()`), so no separate slot-count map is threaded.
-fn compute_rel_loop_scores_per_element(
-    results: &Results,
-    loop_partitions: &IndexMap<String, Vec<Option<usize>>>,
-) -> HashMap<String, Vec<f64>> {
-    ltm_post::compute_rel_loop_scores_per_element(results, loop_partitions)
-}
-
 /// AC6.1 + AC6.4 + AC6.5: Pure A2A loop scores for an arrayed feedback model.
 ///
 /// Model: population[Region] (3 regions) with a reinforcing birth loop:
@@ -4109,14 +4095,11 @@ fn test_a2a_two_loop_relative_scores_sum_to_100() {
         "Number of loop partitions should equal number of loop score vars"
     );
 
-    // For each element, the absolute values of the per-element relative
-    // loop scores across all loops should sum to approximately 1.0.  We
-    // use the per-element helper because the A2A case requires per-element
-    // normalization, while the scalar view (`ltm_post::compute_rel_loop_scores`)
-    // collapses to element 0.  Both A2A loops pass through `population[r]`,
-    // so at each element their slots land in the same `(partition, slot)`
-    // bucket and self-normalize together.
-    let rel_per_element = compute_rel_loop_scores_per_element(&results, &loop_partitions);
+    // Both A2A loops pass through `population[r]` and the elements are
+    // uncoupled, so each element is its own partition holding exactly the
+    // two loops' slots for that element: the magnitudes of the two
+    // per-element relative scores sum to 1.0 there.
+    let rel_per_element = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
 
     for elem in 0..n_elements {
         // Pick a timestep late enough to have meaningful values (skip
@@ -4228,7 +4211,7 @@ fn test_disconnected_a2a_loops_normalize_per_partition() {
     // Both subsystems are purely reinforcing, so every nonzero relative score is
     // exactly +1.0 -- NOT the pre-fix pooled value the two loops would share if
     // they cross-normalized.
-    let rel_per_element = compute_rel_loop_scores_per_element(&results, &loop_partitions);
+    let rel_per_element = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
     assert_eq!(
         rel_per_element.len(),
         2,
@@ -5291,7 +5274,7 @@ fn test_arrayed_population_ltm_exhaustive() {
     );
     // This is a pure-A2A model over `Region`, so every loop has
     // `n_elements` slots and its rel-score series strides by `n_elements`.
-    let rel_per_element = compute_rel_loop_scores_per_element(&results, &loop_partitions);
+    let rel_per_element = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
 
     // Check that relative loop scores per element sum to ~1.0 at some
     // timestep after initialization.

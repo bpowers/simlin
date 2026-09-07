@@ -450,6 +450,10 @@ class Sim:
         The relative loop score normalizes a loop's raw ``loop_score`` by the
         magnitudes of all loops that share its cycle-partition, so it reads as
         the loop's fractional contribution to model behavior at each step.
+        Every element of an arrayed loop is one member of its element's
+        partition, alongside the loop's other elements, other arrayed loops'
+        elements and scalar loops, so the magnitudes over a partition's
+        members sum to 1 at every active step.
 
         This requires the simulation to have been run with enable_ltm=True.
 

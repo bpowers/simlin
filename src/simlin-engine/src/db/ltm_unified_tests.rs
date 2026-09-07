@@ -2356,8 +2356,8 @@ fn a2a_loop_partitions_have_one_entry_per_element() {
     // indices.  Pre-#487 the A2A loop carried variable-level stocks
     // (`"pop"`) so `partition_for_loop` returned a single `None`; now it
     // returns `[Some(p0), Some(p1), Some(p2)]` in the runtime's row-major
-    // slot order -- so the rel-loop-score normalizer can keep the three
-    // per-element subsystems in separate `(partition, slot)` buckets.
+    // slot order -- so the rel-loop-score normalizer keeps each of the three
+    // per-element subsystems in its own partition's group.
     let project = TestProject::new("a2a_partition")
         .named_dimension("Region", &["NYC", "Boston", "LA"])
         .array_stock("pop[Region]", "100", &["births"], &[], None)

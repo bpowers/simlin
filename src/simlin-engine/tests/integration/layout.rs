@@ -815,12 +815,10 @@ fn test_constant_variable_has_no_deps_with_salsa() {
 
 /// Codex review regression (PR #472): every detected loop's
 /// `importance_series` must have length exactly `results.step_count`,
-/// regardless of the partition stride that
-/// `compute_rel_loop_scores_per_element` happens to write its output
-/// at.  Pre-fix, the layout divided `series.len()` by the loop's own
-/// `n_slots` to derive `n_steps`, which silently produced
-/// `step_count * stride`-long importance_series whenever the
-/// helper's stride exceeded the loop's own slot count.
+/// whatever slot count `compute_rel_loop_scores` lays the loop out with:
+/// an arrayed loop's per-slot series is `step_count * n_slots` long and
+/// the argmax-abs collapse must reduce it to one value per step, never
+/// pass the per-slot layout through as an importance series.
 ///
 /// Note on coverage: at the time of writing, the engine's partition
 /// logic uses *element-level* stock SCCs in `model_element_cycle_partitions`
@@ -988,11 +986,11 @@ fn test_arrayed_loop_importance_matches_argmax_abs_aggregation() {
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
-    // `compute_rel_loop_scores_per_element` derives each loop's slot count
-    // from `loop_partitions[id].len()`; `n_slots_by_loop` is still used below
-    // (and by `aggregate_per_element_argmax_abs` inside `compute_metadata`).
-    let per_elem = ltm_post::compute_rel_loop_scores_per_element(&results, &loop_partitions);
-    let slot0_only = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
+    // `compute_rel_loop_scores` lays each loop out with its own slot count
+    // (`loop_partitions[id].len()`); `n_slots_by_loop` recomputes it from
+    // the dimensions independently so the stride the test indexes with is
+    // not the owner's own.
+    let per_elem = ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
 
     // (1) Contract: for every detected loop, importance_series must equal
     //     the argmax-abs aggregation of the per-element series.
@@ -1058,10 +1056,12 @@ fn test_arrayed_loop_importance_matches_argmax_abs_aggregation() {
         if n_slots_by_loop.get(&fl.name).copied().unwrap_or(1) <= 1 {
             return false;
         }
-        let slot0 = slot0_only.get(&fl.name).cloned().unwrap_or_default();
+        let n = n_slots_by_loop.get(&fl.name).copied().unwrap_or(1).max(1);
+        let series = per_elem.get(&fl.name).cloned().unwrap_or_default();
+        let slot0 = series.iter().copied().step_by(n);
         fl.importance_series
             .iter()
-            .zip(&slot0)
+            .zip(slot0)
             .any(|(a, s)| (a - s).abs() > 1e-9)
     });
     assert!(

@@ -550,13 +550,12 @@ pub(crate) struct SimState {
     /// `loop_partitions` intentionally), or when compilation itself
     /// failed.
     ///
-    /// `simlin_analyze_get_relative_loop_score` keys the rel-loop-score
-    /// denominator on the *queried slot's* partition (`loop_partitions[id][k]`)
-    /// -- so an element-wise-uncoupled A2A loop normalizes per element, exactly
-    /// as `ltm_post::compute_rel_loop_scores_per_element` does for the engine's
-    /// own consumers.  When populated alongside `loop_element_index`, the two
-    /// agree on slot count for every loop (see the `debug_assert!` in
-    /// `simlin_sim_new`).
+    /// `simlin_analyze_get_relative_loop_score` normalizes every `(loop, slot)`
+    /// within *that slot's* partition (`loop_partitions[id][k]`) through the
+    /// engine's one owner, `ltm_post::compute_rel_loop_scores`, so the FFI
+    /// reads exactly the numbers the engine's own consumers see.  When
+    /// populated alongside `loop_element_index`, the two agree on slot count
+    /// for every loop (see the `debug_assert!` in `simlin_sim_new`).
     pub(crate) loop_partitions: engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
     /// Snapshot of per-loop dimension metadata taken at
     /// `simlin_sim_new` time.  Used by the FFI subscript resolver to
@@ -575,22 +574,15 @@ pub(crate) struct SimState {
     /// tell exhaustive Johnson enumeration apart from the auto-flipped
     /// post-simulation discovery.
     pub(crate) ltm_mode: Option<engine::db::LtmMode>,
-    /// Per-(partition, slot) denominator series cached across FFI calls to
-    /// `simlin_analyze_get_relative_loop_score`.  The rel-loop-score
-    /// definition is `loop_score / Σ|loop_score|` *within a cycle
-    /// partition*, evaluated at a specific element slot for arrayed
-    /// loops.  The key is `(partition-of-slot-k, k)` -- the partition
-    /// component is the cycle partition of *that slot* (so an uncoupled
-    /// A2A loop's slots key into different partitions), matching
-    /// `ltm_post::compute_rel_loop_scores_per_element`'s bucket grid.
-    /// Keying this way lets repeated FFI queries against the same
-    /// bucket reuse the expensive sum.  pysimlin's `_populate_loop_behavior`
-    /// walks every loop in a project; with this cache the per-partition
-    /// sum is computed once per slot and reused across all member loops.
-    /// Invalidated in lockstep with `results`: cleared on
+    /// The per-`(loop, slot)` relative loop scores of `results`
+    /// (`ltm_post::compute_rel_loop_scores` over `loop_partitions`), computed
+    /// on the first `simlin_analyze_get_relative_loop_score` query and reused
+    /// by every later one.  pysimlin's `_populate_loop_behavior` walks every
+    /// loop in a project; with this cache the partition sums are accumulated
+    /// once.  Invalidated in lockstep with `results`: reset to `None` on
     /// `simlin_sim_run_to_end`, `simlin_sim_reset`, and
     /// `simlin_sim_set_value_by_offset`.
-    pub(crate) cached_partition_denominators: HashMap<(Option<usize>, usize), Vec<f64>>,
+    pub(crate) cached_rel_loop_scores: Option<HashMap<String, Vec<f64>>>,
     /// Resolved conveyor plans for a conveyor model (`None`/empty otherwise).
     /// `run_to_end` consumes the VM (`into_results`) and `reset` recreates it
     /// from `compiled`; a plain `Vm::new(compiled)` would drop the conveyor

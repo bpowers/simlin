@@ -101,9 +101,9 @@ pub struct Link {
 /// `partition_for_loop` looks up stocks in `model_element_cycle_partitions`,
 /// whose `stock_partition` map is element-keyed.  Variable-level names here
 /// would cause `partition_for_loop` to return `None`, silently corrupting
-/// per-loop / per-slot normalization in `ltm_post::compute_rel_loop_scores*`
-/// (the loop would bucket into the catch-all `None` group instead of its
-/// actual SCC).
+/// the per-slot normalization in `ltm_post::compute_rel_loop_scores` (the
+/// loop would become a Solo member instead of joining its actual SCC's
+/// group).
 ///
 /// `assign_loop_ids` derives loop IDs from `links` (sorted distinct
 /// variable names), not `stocks`, so the element-level `stocks` granularity

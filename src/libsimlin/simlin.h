@@ -676,10 +676,10 @@ void simlin_free_links(SimlinLinks *links);
 // slab.
 //
 // The wasm-backend twin of `simlin_analyze_get_relative_loop_score`.  Both
-// FFIs funnel through `rel_loop_score_series` (extracted in Subcomponent A)
-// over an `engine::Results` and the `(loop_partitions, loop_element_index)`
-// snapshots, so the per-loop time series they produce cannot diverge by
-// construction.
+// FFIs resolve the loop id against the `loop_element_index` snapshot and
+// funnel through `rel_loop_score_series` over an `engine::Results` and the
+// `loop_partitions` snapshot, so the per-loop time series they produce
+// cannot diverge by construction.
 //
 // Unlike the links twin, the rel-loop-score path needs the snapshots
 // `model_ltm_variables` derives (the per-loop partition map and slot

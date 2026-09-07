@@ -2876,8 +2876,8 @@ pub fn reclassify_loops_from_results(
 
         // An A2A loop's loop_score occupies `n_slots` consecutive offsets;
         // a scalar/cross-element/mixed loop has exactly one. The slot count
-        // comes from the loop's partition vector (1 when absent), matching
-        // `ltm_post`'s `loop_n_slots`.
+        // comes from the loop's partition vector (1 when absent), the slot
+        // count `ltm_post::compute_rel_loop_scores` lays the loop out with.
         let n_slots = loop_partitions
             .get(&loop_item.id)
             .map(|p| p.len().max(1))

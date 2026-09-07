@@ -19,7 +19,7 @@ The implementation is split across these modules in `src/simlin-engine/src/`:
 | `ltm_finding.rs` | Post-simulation loop discovery for models too large for exhaustive enumeration: scoring, retention, ranking, and the cap |
 | `ltm_finding_enum.rs` | Discovery's exact candidate generator: union-graph elementary-circuit enumeration and its retention pass |
 | `ltm_finding_fallback.rs` | Discovery's shortest-path candidate generator, used when the enumeration cannot finish within its budgets or the caller's deadline |
-| `ltm_post.rs` | Post-simulation computation: normalizes loop scores into relative loop scores using the cycle-partition mapping produced during LTM compilation |
+| `ltm_post.rs` | Post-simulation computation: the one owner of relative loop-score normalization (`compute_rel_loop_scores`, every `(loop, slot)` a member of its slot's cycle partition) plus the `group_totals` / `relative_series` pair discovery normalizes through |
 
 The production entry point is the `model_ltm_variables` tracked function in
 `db/ltm/mod.rs`, invoked as part of `compile_project_incremental`. LTM compilation
@@ -177,16 +177,26 @@ disconnected stock groups, each subcomponent has a separate loop dominance profi
 
 ### How Partitions Are Used
 
-- **Exhaustive mode**: `generate_loop_score_variables()` records each loop's
-  partition on the emitted `loop_score` `LtmSyntheticVar`. Post-simulation,
-  `compute_rel_loop_scores()` (`ltm_post.rs`) groups loops by partition and
-  normalizes each loop score against the sum of absolute scores within its own
-  partition, ensuring structurally independent stock groups don't dilute each
-  other's scores.
+- **Exhaustive mode**: `model_ltm_variables` records each loop's per-slot
+  partition vector (`LtmVariablesResult::loop_partitions`). Post-simulation,
+  `compute_rel_loop_scores()` (`ltm_post.rs`) makes every `(loop, slot)` a
+  member of its slot's partition -- a scalar loop one member, an arrayed loop
+  one per element -- and normalizes each member against the sum of absolute
+  scores over all members of that partition, so structurally independent
+  stock groups don't dilute each other's scores and an arrayed loop's element
+  competes with its siblings and with scalar loops exactly as the
+  de-subscripted model's N scalar loops would. The group is the partition and
+  nothing finer: a slot index is a position in one loop's own dimension space,
+  so keying on it too splits a partition into denominators that miss most of
+  its members.
 - **Discovery mode**: `rank_and_filter()` computes per-partition, per-timestep
-  score totals. A loop is retained if at any single timestep its absolute score
-  is >= `MIN_CONTRIBUTION` of its partition's total. This prevents globally tiny
-  but partition-dominant loops from being filtered out.
+  score totals with the same accumulator (`ltm_post::add_to_total`, through
+  `group_totals` for the discovered set and `retain_circuits` for the
+  enumerated universe) and divides through the same
+  `ltm_post::relative_series`. A loop is retained if at any single
+  timestep its absolute score is >= `MIN_CONTRIBUTION` of its partition's
+  total. This prevents globally tiny but partition-dominant loops from being
+  filtered out.
 
 ### Module-Internal Stocks and Partitions
 
@@ -1131,8 +1141,8 @@ Over the materialized loops:
    non-survivor's mass is still in the denominator, matching exhaustive mode,
    where the enumerated set IS the universe. On the fallback path there is no
    universe to measure against, so the discovered set supplies its own totals.
-   `NaN` summands are excluded and `Inf` kept, mirroring
-   `ltm_post::denom_summand`.
+   `NaN` summands are excluded and `Inf` kept, the one accumulator
+   `ltm_post::add_to_total` applies on every path.
 3. **Retention filter**, peak semantics: keep a loop if at ANY single step its
    |score| is >= `MIN_CONTRIBUTION` (0.1%) of its group's total there. This runs
    BEFORE any cap (GH #310), so a loop dominant in a small partition but
@@ -1706,11 +1716,14 @@ dominance profiles. The loop-id → cycle-partition mapping is cached as
 `LtmVariablesResult::loop_partitions: HashMap<String, Vec<Option<usize>>>` --
 *per slot* of an A2A loop, since two elements of the same A2A loop can land in
 different cycle partitions (the slot's stocks differ). Relative loop scores are
-derived post-simulation by `compute_rel_loop_scores` consumers (e.g.
-`libsimlin::analysis`), normalizing each `(partition, slot)` loop score against
-the sum of absolute scores in that partition at that slot -- so an independent
-A2A loop's normalization does not cross-pollute a sibling A2A loop that
-happens to share a loop ID but lives in a different partition.
+derived post-simulation by `ltm_post::compute_rel_loop_scores` -- the one
+owner every reader (`libsimlin::analysis`, the layout's importance series)
+goes through -- which normalizes each slot against the sum of absolute scores
+over every member of the slot's partition: the loop's sibling slots, other
+arrayed loops' slots and scalar loops alike. Two slots of one A2A loop that
+live in different partitions therefore never normalize against each other,
+while two coupled slots do, and a scalar loop in the partition is one member
+with one series.
 
 **Cross-element / mixed loops**: Circuits containing scalar nodes or with
 inconsistent variable-level structures. Each circuit becomes its own scalar
@@ -2098,9 +2111,11 @@ cases remain deliberate carve-outs:
   IF-THEN-ELSE, loop score equations, generated variable structure
 
 - **`ltm_post.rs`**: Post-simulation relative loop score computation --
-  partition grouping, SAFEDIV-0 semantics on empty-denominator timesteps,
-  property-based equivalence with the reference compile-time formula on
-  synthetic loop-score matrices
+  per-partition grouping of every `(loop, slot)`, Solo groups for unresolved
+  slots, NaN exclusion / Inf retention / saturating totals, SAFEDIV-0 on
+  empty-denominator timesteps, and a property test against a naive
+  per-member reference on generated per-slot partition vectors that also
+  checks the partition identity (each partition's magnitudes sum to 1)
 
 - **`ltm_finding_tests.rs`** (the `#[cfg(test)]` sibling of `ltm_finding.rs`),
   by family:

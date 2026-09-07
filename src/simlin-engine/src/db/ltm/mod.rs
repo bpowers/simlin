@@ -1604,15 +1604,15 @@ pub fn model_ltm_variables(
         };
 
         // Capture each loop's per-slot partition vector before consuming
-        // `partitions` so post-sim `compute_rel_loop_scores*` can group slots
-        // into the same `(partition, slot)` denominator bins.  The vector's
+        // `partitions` so post-sim `compute_rel_loop_scores` can put each slot
+        // in its own partition's normalization group.  The vector's
         // length must match the loop_score series' slot count -- 1 for a
         // scalar/cross-element/mixed loop, the dimension-element-space size
         // for an A2A loop -- which is the same `n_slots` that
         // `ltm_post::build_loop_element_index` derives from
         // `LtmSyntheticVar.dimensions` + the project dims; both feed
-        // `compute_rel_loop_scores_per_element`, so a length mismatch would
-        // desync the per-element normalization.
+        // `compute_rel_loop_scores`, so a length mismatch would desync the
+        // per-slot normalization.
         for l in detected_loops.iter() {
             let parts = partitions.partition_for_loop(l, dm_dims);
             debug_assert!(
@@ -1632,7 +1632,7 @@ pub fn model_ltm_variables(
                 },
                 "loop {:?}: per-slot partition vector length {} disagrees with the loop's slot \
                  count; it must equal `build_loop_element_index`'s n_slots (both feed \
-                 `compute_rel_loop_scores_per_element`)",
+                 `compute_rel_loop_scores`)",
                 l.id,
                 parts.len(),
             );

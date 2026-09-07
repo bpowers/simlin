@@ -61,7 +61,7 @@ pub(crate) enum ZeroSlotPolicy {
     /// noise in a channel practitioners debug by hand, and this NaN is
     /// engine-made -- the guard form's own subtraction -- on an arm with no
     /// causal dependence on its source, so `0` is the structurally known answer.
-    /// GH #542 points the other way: `ltm_post::denom_summand` excludes a `NaN`
+    /// GH #542 points the other way: `ltm_post::group_totals` excludes a `NaN`
     /// score from its partition denominator precisely so the bad entry's own
     /// numerator can stay `NaN` as "the honest per-loop 'undefined here'
     /// signal". Replacing some of those with `0` partially undoes that.

@@ -612,7 +612,19 @@ The **relative loop score** normalizes by the sum of absolute loop scores:
 RelativeLoopScore(L) = LoopScore(L) / sum_Y(|LoopScore(Y)|)
 ```
 
-where the sum runs over all loops Y in the same cycle partition.
+where the sum runs over all loops Y in the same cycle partition. In an arrayed model
+the members of a partition are the loops of the de-subscripted model: each element of
+an apply-to-all loop is one member, as is each scalar or cross-element loop, and every
+member divides by the same partition sum (Section 15.4).
+
+> **Simlin implementation note.** `ltm_post::compute_rel_loop_scores` is the single
+> owner of this normalization: every `(loop, slot)` with a `loop_score` column is one
+> member of its slot's partition, and the libsimlin accessors and the layout's importance
+> series read it rather than dividing on their own; discovery's ranking accumulates its
+> partition totals with the same `add_to_total` (through `group_totals` for the
+> discovered set, `retain_circuits` for the enumerated universe) and divides with the
+> same `relative_series`. The group is the partition and nothing finer --
+> a slot index names an element only within one loop's own dimension space.
 
 Properties:
 - Normalized to range [-1, 1]

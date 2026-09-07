@@ -595,8 +595,8 @@ impl From<bool> for LtmOverlay {
 /// its cycle-partition index **per slot**: length 1 for scalar/cross-element/
 /// mixed loops, one entry per element (in the runtime's row-major slot order)
 /// for A2A loops, matching `ltm_post::build_loop_element_index`'s `n_slots`.
-/// Slots sharing a `(partition, slot)` key form the denominator when
-/// `ltm_post::compute_rel_loop_scores*` normalizes; an element-wise-uncoupled
+/// Every slot is one member of its partition's denominator when
+/// `ltm_post::compute_rel_loop_scores` normalizes; an element-wise-uncoupled
 /// A2A loop's entries are N distinct partitions (the per-slot fix, GH #487),
 /// a coupled one's coincide, a `None` entry is a slot below the parent graph
 /// (e.g. a pure module-internal loop).  Populated only in exhaustive LTM
@@ -605,7 +605,7 @@ impl From<bool> for LtmOverlay {
 /// It is an `IndexMap` (not a `HashMap`) so iteration order is the loops'
 /// **emission order** -- the content-derived order `assign_loop_ids` produces
 /// and `model_ltm_variables` inserts in (enumerated loops first, then pinned).
-/// The post-sim rel-loop-score denominator (`ltm_post::compute_rel_loop_scores*`)
+/// The post-sim rel-loop-score denominator (`ltm_post::compute_rel_loop_scores`)
 /// sums `|loop_score|` in this order, so preserving emission order keeps that
 /// IEEE-754 (non-associative) sum bit-for-bit identical to the pre-#461
 /// compile-time emitter, which accumulated in the same `detected_loops` order

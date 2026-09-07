@@ -2207,7 +2207,7 @@ fn test_get_loop_element_count_arrayed_vs_scalar() {
 // `None` cohort and cross-normalized to a pooled value (each ~0.5); the per-slot
 // `loop_partitions` keep them separate.  This test confirms the FFI exposes the
 // per-slot data correctly (the subscripted-loop-id accessor) and that what it
-// returns matches the engine's `compute_rel_loop_scores_per_element` exactly --
+// returns matches the engine's `compute_rel_loop_scores` exactly --
 // i.e. a round trip through the C API preserves the per-slot partitions.
 
 /// Build the two-A2A-subsystem datamodel project.
@@ -2255,8 +2255,7 @@ fn engine_reference_rel_per_element(
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
-    let rel =
-        simlin_engine::ltm_post::compute_rel_loop_scores_per_element(&results, &loop_partitions);
+    let rel = simlin_engine::ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
     (rel, n_slots_by_loop)
 }
 
@@ -2352,7 +2351,7 @@ fn test_two_a2a_subsystems_per_slot_rel_score_round_trips() {
                     assert_eq!(
                         ffi_v, engine_v,
                         "FFI rel-loop-score for {loop_id}[{elem_name}] at step {s} must match \
-                         compute_rel_loop_scores_per_element ({ffi_v} vs {engine_v})"
+                         compute_rel_loop_scores ({ffi_v} vs {engine_v})"
                     );
                     // AC2.1: each loop is alone in its (per-element) partition,
                     // so the score is +1 once dynamics are nonzero -- NOT the
@@ -3828,5 +3827,110 @@ fn polarity_label(p: SimlinLoopPolarity) -> &'static str {
         SimlinLoopPolarity::MostlyReinforcing => "Rux",
         SimlinLoopPolarity::MostlyBalancing => "Bux",
         SimlinLoopPolarity::Undetermined => "U",
+    }
+}
+
+// The FFI relative-loop-score accessor reads the engine's one normalization
+// owner (`ltm_post::compute_rel_loop_scores`), so on a COUPLED arrayed model
+// every `(loop, slot)` of a partition divides by the same partition sum.
+// `test/cross_element_ltm` is the hand-computed case (the engine-side twin is
+// `ltm_relative_scores::cross_element_loops_normalize_over_the_whole_partition`):
+// one partition holds both regions; the births loop scores +1 at both slots,
+// the NYC migration_out loop -0.5, the cross-element migration_in loop +0.5,
+// every other loop 0; so the shares are 1/3, 1/3, -1/6 and +1/6 and their
+// magnitudes sum to 1.
+
+/// The FFI loop whose variable set is exactly `vars`; returns its id.
+unsafe fn ffi_loop_id_with_variables(loops: *mut SimlinLoops, vars: &[&str]) -> String {
+    let want: std::collections::HashSet<&str> = vars.iter().copied().collect();
+    let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+    let mut seen = Vec::new();
+    for l in loop_slice {
+        let names: Vec<String> = std::slice::from_raw_parts(l.variables, l.var_count)
+            .iter()
+            .map(|v| CStr::from_ptr(*v).to_str().unwrap().to_string())
+            .collect();
+        let id = CStr::from_ptr(l.id).to_str().unwrap().to_string();
+        if names
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>()
+            == want
+        {
+            return id;
+        }
+        seen.push((id, names));
+    }
+    panic!("no loop over {vars:?}; loops: {seen:?}");
+}
+
+#[test]
+fn test_cross_element_rel_scores_share_one_partition_denominator_via_ffi() {
+    let xml = std::fs::read_to_string("../../test/cross_element_ltm/cross_element.stmx").unwrap();
+    let project = simlin_engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        .expect("the cross_element fixture parses");
+    let pb = engine_serde::serialize(&project).unwrap();
+    let mut buf = Vec::new();
+    pb.encode(&mut buf).unwrap();
+
+    unsafe {
+        let (proj, model, sim) = open_arrayed_sim_with_ltm(&buf);
+
+        let mut err: *mut SimlinError = ptr::null_mut();
+        let loops = simlin_analyze_get_loops(model, &mut err);
+        assert!(err.is_null());
+        let births = ffi_loop_id_with_variables(loops, &["population", "births"]);
+        let out_loop = ffi_loop_id_with_variables(
+            loops,
+            &["population", "migration_pressure", "migration_out"],
+        );
+        let cross = ffi_loop_id_with_variables(
+            loops,
+            &[
+                "population[nyc]",
+                "migration_pressure[boston]",
+                "migration_in[nyc]",
+            ],
+        );
+        simlin_free_loops(loops);
+
+        let read = |id: &str| {
+            read_relative_loop_series(sim, id)
+                .unwrap_or_else(|(c, m)| panic!("reading {id} failed: {c:?} {m}"))
+        };
+        let births_nyc = read(&format!("{births}[NYC]"));
+        let births_boston = read(&format!("{births}[Boston]"));
+        let births_bare = read(&births);
+        let out_nyc = read(&format!("{out_loop}[NYC]"));
+        let out_boston = read(&format!("{out_loop}[Boston]"));
+        let out_bare = read(&out_loop);
+        let cross_series = read(&cross);
+
+        // The ratios are time-invariant on this fixture (both populations
+        // grow at exactly 2% per step), so every step from the first active
+        // one reads the same shares.
+        for step in [2usize, 10, 30] {
+            let close = |got: f64, want: f64, what: &str| {
+                assert!(
+                    (got - want).abs() < 1e-9,
+                    "step {step}: {what} = {got}, expected {want}"
+                );
+            };
+            close(births_nyc[step], 1.0 / 3.0, "births[NYC]");
+            close(births_boston[step], 1.0 / 3.0, "births[Boston]");
+            close(births_bare[step], 1.0 / 3.0, "births (bare id, argmax-abs)");
+            close(out_nyc[step], -1.0 / 6.0, "migration_out loop[NYC]");
+            close(out_boston[step], 0.0, "migration_out loop[Boston]");
+            close(out_bare[step], -1.0 / 6.0, "migration_out loop (bare id)");
+            close(
+                cross_series[step],
+                1.0 / 6.0,
+                "cross-element migration_in loop",
+            );
+        }
+
+        simlin_sim_unref(sim);
+        simlin_model_unref(model);
+        simlin_project_unref(proj);
     }
 }

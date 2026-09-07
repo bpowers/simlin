@@ -1009,8 +1009,8 @@ short of it rather than taking a ~2-3%.
     `db::ltm_value_gate_tests::a_nonfinite_target_arm_is_omitted_to_zero_not_nan`.
     Whether `0` is the better answer is **open** and tracked as #1022:
     `src/float.rs` argues an
-    engine-manufactured NaN is noise, while GH #542 built the `denom_summand`
-    exclusion specifically to preserve a `NaN` score as a per-loop "undefined
+    engine-manufactured NaN is noise, while GH #542 built the `ltm_post::group_totals`
+    NaN exclusion specifically to preserve a `NaN` score as a per-loop "undefined
     here" signal. The signal survives on the target's own series and on every
     live arm, so what changes is confined to arms with no causal dependence on
     their source.

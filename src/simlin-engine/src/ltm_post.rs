@@ -2,96 +2,172 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Post-simulation computation of LTM relative loop scores.
+//! Post-simulation relative loop scores: the one owner of the cycle-partition
+//! normalization every surface reads.
 //!
-//! Historical context: exhaustive LTM used to emit a synthetic
-//! `$⁚ltm⁚rel_loop_score⁚{id}` variable for every loop whose equation
-//! normalized that loop's `loop_score` against the partition sum of
-//! `|loop_score_j|`.  Emission was O(P²) text per partition (see
-//! `docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`) and
-//! dominated compile memory for dense models.  Option B of the cap-lift
-//! design plan moves the normalization here, executed post-simulation
-//! against the O(P × save_steps) `loop_score` timeseries that the VM
-//! already writes to `Results`.
+//! A loop's raw `loop_score` is the product of its link scores; its
+//! *relative* score at a step is that score divided by the sum of `|score|`
+//! over every loop of the same cycle partition (reference section 4.4).
+//! Exhaustive mode records the raw series in [`Results`] (one column per
+//! slot of the `$⁚ltm⁚loop_score⁚{id}` synthetic); discovery holds them on
+//! its `FoundLoop`s.  Both feed [`group_totals`] and [`relative_series`], so
+//! the two surfaces cannot disagree on what "relative" means, and every
+//! reader of the exhaustive series -- the libsimlin FFI, the layout's
+//! importance series, the tests -- goes through [`compute_rel_loop_scores`]
+//! rather than dividing on its own.
+//!
+//! Normalization is per partition and nothing finer.  Every `(loop, slot)`
+//! whose stocks resolve to partition `p` is a member of `p`'s group: a scalar
+//! loop is one member, an arrayed loop one member per element slot.  This is
+//! the de-subscripted reading the reference's section 15.4 promises -- an
+//! arrayed loop's element `k` competes with its sibling elements and with
+//! every scalar loop of the partition exactly as the N scalar loops of the
+//! hand-expanded model would.  Never key the group on the slot index as
+//! well: a slot index is a position in one loop's own dimension space, so
+//! two arrayed loops over different dimension lists (or a scalar loop, which
+//! has no elements) attach no shared meaning to "slot k", and grouping by it
+//! splits one partition into denominators that each miss most of its
+//! members: on `test/cross_element_ltm` a per-slot key reads the births
+//! loop's share as 1/2 at one element and 2/3 at the other, where the
+//! partition holds four active members and the share is 1/3 at both.
+//!
+//! The relative scores are computed here rather than emitted as synthetic
+//! VM variables: a `rel_loop_score` equation names every sibling's
+//! `loop_score`, O(P²) text per partition, which dominated compile memory on
+//! dense models (`docs/design-plans/2026-04-18-ltm-cap-lift-diagnosis.md`).
+//! Post-simulation the cost is O(P × save_steps) over series the VM writes
+//! anyway.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::HashMap;
+use std::hash::Hash;
 
 use indexmap::IndexMap;
 
 use crate::common::{Canonical, Ident};
 use crate::results::Results;
 
-/// A `(group, slot)` bucket key for the per-element normalization grid.
-type BucketKey = (NormGroup, usize);
-/// A `(loop_index, read_slot)` pair: which loop contributes to a bucket and
-/// which of its own `loop_score` slots is read (0 for a broadcast scalar
-/// loop, the bucket's slot for an arrayed loop).
-type BucketMember = (usize, usize);
-
-/// The normalization group a loop's slot belongs to (GH #750).
+/// The normalization group one member of a relative-score computation
+/// belongs to (GH #750).
 ///
-/// Loops whose cycle partition resolves share a [`NormGroup::Partition`]
-/// group and normalize against each other.  A slot whose partition is
-/// unresolved (`None` -- a loop genuinely below the parent stock graph:
-/// module-internal-stock loops, PREVIOUS-lagged stockless loops) gets a
-/// [`NormGroup::Solo`] group keyed by the loop's emission-order index, so
-/// two UNRELATED unpartitioned loops can never share a denominator -- the
-/// GH #487-class cross-pollution the old shared default `None` bucket
-/// reintroduced.  A solo loop's relative score collapses to the documented
-/// lone-pin degeneracy: sign-preserving `+/-1` when active, `0` via
-/// SAFEDIV-0 when not.  (Loops genuinely coupled through module-internal
-/// state are under-merged by this rule -- each normalizes alone instead of
-/// against its true siblings; resolving partitions for state-carrying
-/// module instances is the tracked refinement that would move those loops
-/// out of the `None` bucket entirely.)
+/// A member whose cycle partition resolves is in that
+/// [`NormGroup::Partition`] and normalizes against every other member of
+/// it.  A member whose partition is unresolved (`None` -- a loop genuinely
+/// below the parent stock graph: module-internal-stock loops,
+/// PREVIOUS-lagged stockless loops) gets a [`NormGroup::Solo`] group of its
+/// own, so two UNRELATED unpartitioned members can never share a
+/// denominator -- the GH #487-class cross-pollution a shared default `None`
+/// bucket reintroduces.  A solo member's relative score collapses to the
+/// lone-pin degeneracy documented on [`compute_rel_loop_scores`]:
+/// sign-preserving `+/-1` when active, `0` via SAFEDIV-0 when not.  Loops
+/// genuinely coupled through module-internal state are under-merged by this
+/// rule -- each normalizes alone instead of against its true siblings;
+/// resolving partitions for state-carrying module instances is the
+/// refinement that would move those loops out of the `None` bucket.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub(crate) enum NormGroup {
     /// A resolved cycle partition (the engine-internal partition index).
     Partition(usize),
-    /// An unresolved-partition loop, alone in its own group.  The payload is
-    /// the loop's index in the caller's emission-order loop list, which is
-    /// unique per loop -- the value itself is never interpreted.
+    /// An unresolved-partition member, alone in its own group.  The payload
+    /// is the member's index in the caller's member list -- a `(loop, slot)`
+    /// in exhaustive mode, a discovered loop in discovery -- which is unique
+    /// per member; the value itself is never interpreted.
     Solo(usize),
 }
 
 impl NormGroup {
-    /// Build the group for loop `loop_idx`'s partition value.
-    pub(crate) fn for_loop(partition: Option<usize>, loop_idx: usize) -> NormGroup {
+    /// The group of the member at `member_idx` whose cycle partition is
+    /// `partition`.
+    pub(crate) fn for_member(partition: Option<usize>, member_idx: usize) -> NormGroup {
         match partition {
             Some(p) => NormGroup::Partition(p),
-            None => NormGroup::Solo(loop_idx),
+            None => NormGroup::Solo(member_idx),
         }
     }
 }
 
-/// One loop's `|loop_score|` contribution to a partition-sum denominator,
-/// with `NaN` summands excluded.
+/// Add one member's `|score|` at a step to its group's running total.
 ///
-/// A `NaN` loop_score at a step means that one loop's score is *undefined*
-/// there; it is not signal, so it must not flow into the partition sum --
-/// otherwise a single bad loop turns the whole partition's denominator into
-/// `NaN` (the `denom == 0.0` SAFEDIV guard does not fire on `NaN`, since
-/// `NaN == 0.0` is false), poisoning every sibling's relative score (GH
-/// #542).  Dropping the `NaN` summand lets healthy siblings normalize
-/// against the healthy denominator; the bad loop's *own* numerator stays
-/// `NaN`, so as long as a healthy sibling keeps the denominator non-zero
-/// its own relative score stays `NaN` -- the honest per-loop "undefined
-/// here" signal.  (When the `NaN` loop is the partition's only contributor,
-/// or every member is `NaN` at a step, excluding it collapses the
-/// denominator to `0.0` and the SAFEDIV-0 guard yields `0.0` instead -- the
-/// lone-pin degeneracy documented on `compute_rel_loop_scores`.)  This
-/// matches the discovery path, where a `NaN` link score marks its edge
-/// inactive and contributes nothing.
+/// A `NaN` score means that member's score is *undefined* at the step; it
+/// is not signal, so it contributes nothing -- otherwise a single bad member
+/// turns the whole group's denominator into `NaN` (the `total == 0.0`
+/// SAFEDIV guard does not fire on `NaN`), poisoning every sibling's relative
+/// score (GH #542).  The bad member's own numerator stays `NaN`, so as long
+/// as a healthy sibling keeps the total non-zero its own relative score
+/// stays `NaN` -- the honest per-member "undefined here" signal.  (When the
+/// `NaN` member is the group's only contributor the total stays `0.0` and
+/// SAFEDIV-0 yields `0.0` instead.)  This is also the discovery rule: a
+/// `NaN` link score marks its edge inactive and contributes nothing.
 ///
-/// `+/-Inf` is deliberately NOT excluded: a raw loop score legitimately
-/// diverges at a dominance inflection (the link-score denominators go to
-/// zero there), so an `Inf` summand is real signal that the loop dominates.
-/// Keeping it in the sum sends the dominated siblings to `0` (`finite/Inf`)
-/// and the dominant loop to `NaN` (`Inf/Inf`) -- the same inflection-point
-/// behaviour the removed SAFEDIV equation produced, preserved bug-for-bug.
+/// `+/-Inf` is deliberately kept: a raw loop score legitimately diverges at
+/// a dominance inflection (the link-score denominators go to zero there),
+/// so an `Inf` summand is real signal that the member dominates.  Keeping
+/// it sends the dominated siblings to `0` (`finite/Inf`) and the dominant
+/// member to `NaN` (`Inf/Inf`).  A FINITE sum that overflows saturates to
+/// `f64::MAX` instead of becoming `Inf`: every summand was finite, so an
+/// infinite total would zero every finite share for no member's benefit.
 #[inline]
-fn denom_summand(v: f64) -> f64 {
-    if v.is_nan() { 0.0 } else { v.abs() }
+pub(crate) fn add_to_total(total: &mut f64, score: f64) {
+    if score.is_nan() {
+        return;
+    }
+    let mass = score.abs();
+    let sum = *total + mass;
+    *total = if sum.is_infinite() && mass.is_finite() && total.is_finite() {
+        f64::MAX
+    } else {
+        sum
+    };
+}
+
+/// Per-group, per-step `Σ|score|` over `members`: the denominator of every
+/// relative score.
+///
+/// `members` yields `(group, scores)` pairs; each member's `|score|` is
+/// added to its group's total at every step through `add_to_total` (`NaN`
+/// excluded, `Inf` kept, finite overflow saturating).  Members are
+/// accumulated in the order given, and IEEE-754 addition is not
+/// associative, so callers pass them in a deterministic order -- the
+/// exhaustive path's loop emission order (GH #468), the discovery path's
+/// candidate order.  A series shorter than `step_count` contributes nothing
+/// past its end.
+///
+/// The key type is generic so the loop-level normalization (keyed by
+/// [`NormGroup`]) and the link-level one (keyed by the link's target) share
+/// this single accumulator rather than each restating the summand rule.
+pub fn group_totals<K, I, S>(members: I, step_count: usize) -> HashMap<K, Vec<f64>>
+where
+    K: Hash + Eq,
+    I: IntoIterator<Item = (K, S)>,
+    S: IntoIterator<Item = f64>,
+{
+    let mut totals: HashMap<K, Vec<f64>> = HashMap::new();
+    for (group, scores) in members {
+        let total = totals
+            .entry(group)
+            .or_insert_with(|| vec![0.0_f64; step_count]);
+        for (t, score) in scores.into_iter().take(step_count).enumerate() {
+            add_to_total(&mut total[t], score);
+        }
+    }
+    totals
+}
+
+/// `score[t] / totals[t]` at every step, with SAFEDIV-0 semantics: a `0`
+/// total yields `0` rather than `NaN`.  A `NaN` numerator propagates (the
+/// member is undefined at that step); `Inf/Inf` is `NaN` at a dominance
+/// inflection.  A step past the end of `totals` reads a `0` total.
+pub fn relative_series<S>(scores: S, totals: &[f64]) -> Vec<f64>
+where
+    S: IntoIterator<Item = f64>,
+{
+    scores
+        .into_iter()
+        .enumerate()
+        .map(|(t, score)| {
+            let total = totals.get(t).copied().unwrap_or(0.0);
+            if total == 0.0 { 0.0 } else { score / total }
+        })
+        .collect()
 }
 
 /// Build the canonical identifier of a loop's `loop_score` synthetic variable.
@@ -105,368 +181,166 @@ pub(crate) fn loop_score_ident(loop_id: &str) -> Ident<Canonical> {
     Ident::new(&name)
 }
 
-/// Slot count of a loop's `loop_score` series from its per-slot partition
-/// vector: 1 for a scalar / cross-element / mixed loop, the dimension
-/// element-space size for an A2A loop.  Mirrors
-/// `ltm_post::build_loop_element_index`'s `n_slots`, since both are derived
-/// from the same `LtmSyntheticVar` metadata in `model_ltm_variables`.
-fn loop_n_slots(loop_partitions: &IndexMap<String, Vec<Option<usize>>>, id: &str) -> usize {
-    loop_partitions.get(id).map(|v| v.len()).unwrap_or(1).max(1)
-}
-
-/// The partition (`Option<usize>`) of loop `id` at slot `k`.
+/// Per-loop, per-slot, per-step relative loop scores from an exhaustive-mode
+/// [`Results`] -- the owner every reader of those scores goes through.
 ///
-/// For an arrayed loop this is `loop_partitions[id][k]`; for a scalar loop
-/// (`n_slots == 1`) it is `loop_partitions[id][0]` broadcast across every
-/// `k` -- a scalar loop has no elements, so it carries its single partition
-/// into every slot it is compared in (the same broadcast the pre-PR
-/// compile-time emitter applied when a scalar `loop_score` was referenced
-/// from an arrayed `rel_loop_score` equation).  `None` (out-of-range `k` on
-/// an arrayed loop, or a genuinely-`None` partition) means "no contribution
-/// at this slot for the purpose of *that loop's own* series", though it
-/// still buckets into the `None` cohort.
-fn slot_partition(
-    loop_partitions: &IndexMap<String, Vec<Option<usize>>>,
-    id: &str,
-    k: usize,
-) -> Option<usize> {
-    let v = loop_partitions.get(id)?;
-    if v.len() <= 1 {
-        v.first().copied().flatten()
-    } else {
-        v.get(k).copied().flatten()
-    }
-}
-
-/// Compute per-loop, per-timestep relative loop scores from simulated
-/// `loop_score` data -- the **slot-0 convenience view**.
+/// `loop_partitions` maps each loop id to its **per-slot** cycle-partition
+/// vector as `model_ltm_variables` produces it: length 1 for a scalar,
+/// cross-element or mixed loop, one entry per element for an A2A loop, in
+/// the row-major slot order the `loop_score` columns use.  Every `(loop,
+/// slot)` with a `loop_score` column is one member of the group
+/// [`NormGroup::for_member`] assigns to its slot's partition, and its
+/// relative score is [`relative_series`] against that group's
+/// [`group_totals`].  A scalar loop therefore has exactly one series and an
+/// arrayed loop one per slot, each normalized against every member of the
+/// slot's own partition -- sibling slots of the same loop, other arrayed
+/// loops' slots, and scalar loops alike.
 ///
-/// For each loop whose `loop_score` series is present in `results`, the
-/// returned value is:
+/// The returned series for loop `id` is flat and step-major: the value at
+/// step `s`, slot `k` is `series[s * n_slots + k]` with `n_slots ==
+/// loop_partitions[id].len()` (1 for a scalar loop, so the series is just
+/// `step_count` long).  Loops whose `loop_score` is absent from `results`
+/// (LTM disabled for that loop, or a discovery-mode compilation) are
+/// omitted.
 ///
-/// ```text
-/// rel_loop_score[i, t] = loop_score[i, t, 0] / Σ_{j : slot-0 partition of j == slot-0 partition of i} |loop_score[j, t, 0]|
-/// ```
-///
-/// `loop_partitions` maps each loop ID to its **per-slot** cycle-partition
-/// vector (as produced by `model_ltm_variables`; length 1 for a
-/// scalar/cross-element/mixed loop, one entry per element for an A2A loop).
-/// This function reports only slot 0 for every loop and groups loops by
-/// their *slot-0* partition (`loop_partitions[id][0]`).  A loop whose
-/// partition is unresolved (`None` -- genuinely below the parent stock
-/// graph: module-internal-stock loops, PREVIOUS-lagged stockless loops)
-/// normalizes ALONE (GH #750, [`NormGroup::Solo`]): unrelated subsystems
-/// must not cross-normalize, so its relative score collapses to the lone-pin
-/// degeneracy below.  This preserves the pre-Phase-2 scalar contract (one
-/// series per loop), so existing libsimlin/pysimlin/TS callers see no shape
-/// change; callers that want genuine per-element normalization use
-/// [`compute_rel_loop_scores_per_element`].
-///
-/// The denominator uses SAFEDIV-0 semantics: when the partition sum at
-/// slot 0 is `0` the result is `0` rather than `NaN`.
-///
-/// Non-finite `loop_score` handling (GH #542): a `NaN` summand is
-/// *excluded* from the partition sum via [`denom_summand`], so one loop
-/// whose score is undefined at a step no longer poisons every sibling's
-/// relative score in that partition.  The bad loop's own numerator is
-/// still `NaN`, so when a healthy sibling keeps the denominator non-zero
-/// its own relative score stays `NaN` -- the honest per-loop "undefined
-/// here" signal -- while the healthy siblings normalize against the
-/// healthy denominator.  (When the `NaN` loop is the partition's only
-/// contributor, or every member is `NaN` at the step, excluding it leaves
-/// a `0.0` denominator and the SAFEDIV-0 guard yields `0.0` instead -- see
-/// the lone-pin degeneracy section below.)  This matches the discovery
-/// path's "a `NaN` link contributes nothing" rule (a `NaN` score marks its
-/// edge inactive there).  `+/-Inf` is deliberately
-/// *kept* in the sum: a raw loop score legitimately diverges at a
-/// dominance inflection, so `Inf` is real signal -- it sends the
-/// dominated siblings to `0` and the dominant loop to `NaN` (`Inf/Inf`),
-/// the same inflection-point behaviour the removed SAFEDIV equation
-/// produced.  Earlier this whole module propagated `NaN` through normal
-/// IEEE-754 arithmetic only because the post-simulation refactor
-/// preserved the removed synthetic equation's semantics bug-for-bug; the
-/// removed SAFEDIV never promised `NaN`-resilience either.
-///
-/// Loops whose `loop_score` is absent from `results` (e.g. LTM disabled
-/// for that loop, or discovery-mode compilation) are omitted from the
-/// returned map.
+/// Members are accumulated in `loop_partitions`' insertion order -- loop
+/// emission order, slots ascending within a loop -- NOT a re-sort.  The
+/// per-partition sum is bit-significant (IEEE-754 addition is
+/// non-associative) and emission order is the content-derived order
+/// `assign_loop_ids` produces, deterministic across salsa cache
+/// invalidations and processes (GH #468); a bare lex sort would order a
+/// partition as `b1, b10, b2, ...` and perturb the sum at the ULP.
 ///
 /// # Lone-pin degeneracy
 ///
-/// A modeler-pinned loop (`pin{n}` id) is registered in its own single-slot
-/// `loop_partitions` entry.  When a pin is the *only* loop in its partition --
-/// always the case in discovery mode (no enumerated loop scores exist there)
-/// and in exhaustive mode whenever the pin is the lone loop through its stock
-/// -- the partition sum equals `|loop_score[pin]|`, so the relative score
-/// collapses to exactly `+1` (or `-1`, carrying the raw score's sign) whenever
-/// the loop is active and `0` (via SAFEDIV-0) when its raw score is `0`.  This
-/// is intentional: a fraction-of-all-known-loops normalization is undefined
-/// for a partition of one.  Callers that want a pinned loop's actual magnitude
-/// should read its **raw** `loop_score` series directly.  Two or more pins (or
-/// a pin plus enumerated loops) on stocks in the *same* SCC partition normalize
+/// A modeler-pinned loop (`pin{n}` id) that is the *only* member of its
+/// group -- always the case in discovery mode (no enumerated loop scores
+/// exist there) and in exhaustive mode whenever the pin is the lone loop
+/// through its stock -- has a total equal to its own `|loop_score|`, so its
+/// relative score collapses to exactly `+1` (or `-1`, carrying the raw
+/// score's sign) whenever the loop is active and `0` (via SAFEDIV-0) when
+/// its raw score is `0`.  This is intentional: a fraction-of-all-known-loops
+/// normalization is undefined for a group of one.  Callers that want a
+/// pinned loop's actual magnitude read its **raw** `loop_score` series
+/// ([`compute_raw_loop_score_for_element`]).  Two or more pins (or a pin
+/// plus enumerated loops) on stocks in the *same* partition normalize
 /// against each other normally.
 pub fn compute_rel_loop_scores(
     results: &Results,
     loop_partitions: &IndexMap<String, Vec<Option<usize>>>,
 ) -> HashMap<String, Vec<f64>> {
-    // Iterate in `loop_partitions`' *emission* order (its `IndexMap` insertion
-    // order), NOT a re-sort.  The partition-sum denominator below accumulates
-    // `|loop_score|` over the loops in a partition in exactly this order, and
-    // IEEE-754 addition is non-associative, so the order is bit-significant.
-    // Emission order is the content-derived order `assign_loop_ids` produced
-    // (see `ltm::graph::loop_id_sort_key`), which the pre-#461 compile-time
-    // emitter also accumulated in -- so iterating it here restores bit-for-bit
-    // parity with that removed emitter (GH #468).  A bare lex sort would order
-    // the same partition as `b1, b10, b2, ...`, perturbing the sum at the ULP.
-    // Emission order is itself deterministic across salsa cache invalidations
-    // and across processes (`assign_loop_ids` is a pure function of loop
-    // content, not of `HashMap` enumeration), so this is just as deterministic
-    // as the old lex sort while also being bit-parity-correct.
-    let loop_ids: Vec<&String> = loop_partitions.keys().collect();
-
-    let offsets: Vec<Option<usize>> = loop_ids
-        .iter()
-        .map(|id| results.offsets.get(&loop_score_ident(id)).copied())
-        .collect();
-
-    // Group loops by their slot-0 partition (the convenience-view key).  An
-    // unresolved (`None`) partition gets a per-loop Solo group (GH #750):
-    // unpartitioned loops have no provable coupling, so they never share a
-    // denominator.
-    let mut partition_groups: HashMap<NormGroup, Vec<usize>> = HashMap::new();
-    for (i, id) in loop_ids.iter().enumerate() {
-        partition_groups
-            .entry(NormGroup::for_loop(
-                slot_partition(loop_partitions, id, 0),
-                i,
-            ))
-            .or_default()
-            .push(i);
+    /// One `(loop, slot)` member: its group and its `Results` column.
+    struct Member {
+        group: NormGroup,
+        column: usize,
     }
-
-    // One output series per loop, parallel to `loop_ids`.  Loops without
-    // a known offset get an empty Vec so we can skip them when
-    // assembling the final map.
-    let mut series: Vec<Vec<f64>> = offsets
-        .iter()
-        .map(|o| {
-            if o.is_some() {
-                Vec::with_capacity(results.step_count)
-            } else {
-                Vec::new()
-            }
-        })
-        .collect();
-
-    for row in results.iter() {
-        for indices in partition_groups.values() {
-            let denom: f64 = indices
-                .iter()
-                .filter_map(|&i| offsets[i].map(|off| denom_summand(row[off])))
-                .sum();
-
-            for &i in indices {
-                let Some(off) = offsets[i] else { continue };
-                let num = row[off];
-                let val = if denom == 0.0 { 0.0 } else { num / denom };
-                series[i].push(val);
-            }
+    // Loops with a `loop_score` column, in emission order, as
+    // `(id, n_slots)`; their members are contiguous in `members`, in the
+    // same order.
+    let mut loops: Vec<(&String, usize)> = Vec::with_capacity(loop_partitions.len());
+    let mut members: Vec<Member> = Vec::new();
+    for (id, partitions) in loop_partitions {
+        let Some(&base) = results.offsets.get(&loop_score_ident(id)) else {
+            continue;
+        };
+        let n_slots = partitions.len().max(1);
+        debug_assert!(
+            base + n_slots <= results.step_size,
+            "loop {id}: {n_slots} slots at column {base} exceed the {} columns per step",
+            results.step_size
+        );
+        loops.push((id, n_slots));
+        for k in 0..n_slots {
+            let partition = partitions.get(k).copied().flatten();
+            members.push(Member {
+                group: NormGroup::for_member(partition, members.len()),
+                column: base + k,
+            });
         }
     }
 
-    let mut out: HashMap<String, Vec<f64>> = HashMap::with_capacity(loop_ids.len());
-    for (i, id) in loop_ids.iter().enumerate() {
-        if offsets[i].is_some() {
-            out.insert((*id).clone(), std::mem::take(&mut series[i]));
+    let column = |c: usize| results.iter().map(move |row| row[c]);
+    let totals = group_totals(
+        members.iter().map(|m| (m.group, column(m.column))),
+        results.step_count,
+    );
+
+    let mut out: HashMap<String, Vec<f64>> = HashMap::with_capacity(loops.len());
+    let mut first_member = 0usize;
+    for (id, n_slots) in loops {
+        let mut series = vec![0.0_f64; results.step_count * n_slots];
+        for (k, member) in members[first_member..first_member + n_slots]
+            .iter()
+            .enumerate()
+        {
+            let rel = relative_series(column(member.column), &totals[&member.group]);
+            for (t, v) in rel.into_iter().enumerate() {
+                series[t * n_slots + k] = v;
+            }
         }
+        first_member += n_slots;
+        out.insert(id.clone(), series);
     }
     out
 }
 
-/// Per-timestep, per-slot relative loop scores, grouped by
-/// `(partition, slot)`.
-///
-/// [`compute_rel_loop_scores`] collapses every loop's `loop_score` to
-/// slot 0.  This function keeps every slot, and -- crucially -- groups
-/// slots by `(NormGroup, k)` (the slot's partition, or the loop's own
-/// [`NormGroup::Solo`] group when unresolved -- GH #750) rather than by a
-/// single per-loop partition.  So an A2A loop over an element-wise-coupled
-/// dimension (every slot in partition `p`) lands in buckets `(p, 0)`,
-/// `(p, 1)`, ...; an A2A loop over an element-wise-uncoupled dimension
-/// spreads across `(p0, 0)`, `(p1, 1)`, ... -- which is precisely why two
-/// disconnected per-element feedback subsystems over the same dimension
-/// stop cross-normalizing (GH #487); and an unresolved (`None`) slot
-/// normalizes against that loop alone, so unrelated
-/// module-internal-stock / lagged-stockless loops do not cross-normalize
-/// either (the same #487-class pollution, in the old shared `None`
-/// bucket).
-///
-/// `loop_partitions` is the per-slot partition map from
-/// `model_ltm_variables`; the loop's slot count is `loop_partitions[id].len()`
-/// (no separate slot-count map is threaded).  Returns a flat `Vec<f64>` per
-/// loop id; the value at step `s`, slot `k` is at index `s * stride + k`,
-/// where `stride` is the loop's own slot count for an arrayed loop, and for
-/// a scalar loop the largest slot index its (slot-0) partition covers + 1
-/// (1 if no arrayed loop shares that partition).  A scalar loop broadcasts
-/// its single value into every slot of its partition's buckets -- the same
-/// broadcast the pre-PR compile-time emitter applied when a scalar
-/// `loop_score` was referenced from an arrayed `rel_loop_score` equation.
-///
-/// Denominator at bucket `(p, k)` at step `s` is `Σ |loop_score[j, s, rs_j]|`
-/// over the members of that bucket, where `rs_j` is `0` for a scalar member
-/// (broadcast) and `k` for an arrayed member with `k < n_slots[j]` (an
-/// arrayed loop with `k >= n_slots[j]` is not a member of slot-`k` buckets).
-/// SAFEDIV-0 semantics, per-bucket `NaN` exclusion, and `Inf` retention
-/// all match [`compute_rel_loop_scores`] (via [`denom_summand`]): a `NaN`
-/// at one `(loop, slot)` does not poison the rest of its `(partition,
-/// slot)` bucket (GH #542), while an `Inf` at one slot stays in that
-/// bucket's denominator.  Within each bucket the members are pushed in
-/// `loop_partitions`' emission order, so the per-bucket `Σ|loop_score|`
-/// accumulates in that order (bit-parity with the pre-#461 emitter, GH #468);
-/// the `BTreeMap` over the bucket *grid* keeps the order the buckets
-/// themselves are visited deterministic across runs.
-pub fn compute_rel_loop_scores_per_element(
-    results: &Results,
-    loop_partitions: &IndexMap<String, Vec<Option<usize>>>,
-) -> HashMap<String, Vec<f64>> {
-    // Emission order, not a re-sort: the per-bucket denominator (built over the
-    // `members` grid below) sums `|loop_score|` in this order, and IEEE-754
-    // addition is non-associative.  See `compute_rel_loop_scores` for the full
-    // bit-parity rationale (GH #468).
-    let loop_ids: Vec<&String> = loop_partitions.keys().collect();
-
-    let offsets: Vec<Option<usize>> = loop_ids
-        .iter()
-        .map(|id| results.offsets.get(&loop_score_ident(id)).copied())
-        .collect();
-    let n_slots: Vec<usize> = loop_ids
-        .iter()
-        .map(|id| loop_n_slots(loop_partitions, id))
-        .collect();
-
-    // For each normalization group, the set of slot indices where some loop
-    // is in it.  A scalar loop contributes its single slot 0; an arrayed
-    // loop contributes its per-slot partitions.  This drives the broadcast
-    // stride for scalar loops (a scalar loop in partition `p` is "compared
-    // in" every slot of `p`'s buckets) and lets us pre-build the bucket
-    // membership.  An unresolved (`None`) slot maps to the loop's own Solo
-    // group (GH #750), so a scalar `None` loop never broadcasts into an
-    // unrelated arrayed `None` loop's slots -- and never stretches its own
-    // stride to that loop's slot count.
-    let mut partition_slots: BTreeMap<NormGroup, BTreeSet<usize>> = BTreeMap::new();
-    for (i, id) in loop_ids.iter().enumerate() {
-        for k in 0..n_slots[i] {
-            partition_slots
-                .entry(NormGroup::for_loop(
-                    slot_partition(loop_partitions, id, k),
-                    i,
-                ))
-                .or_default()
-                .insert(k);
-        }
+/// Collapse a per-slot series laid out as [`compute_rel_loop_scores`]
+/// returns it (`series[t * n_slots + k]`, `n_slots = series.len() /
+/// step_count`) to one signed value per step: the slot with the largest
+/// `|value|`, its sign preserved, the lowest slot index on ties.  A step
+/// whose winner is non-finite (every slot `NaN`, or an `Inf`) reports `0.0`,
+/// the "inactive" reading the layout and FFI consumers of an importance
+/// series want; a `NaN` slot never displaces a finite candidate (the
+/// comparison is false).  A scalar loop (`n_slots == 1`) is returned
+/// unchanged apart from that non-finite mapping.  An empty series yields an
+/// empty result.
+pub fn argmax_abs_by_step(series: &[f64], step_count: usize) -> Vec<f64> {
+    if series.is_empty() || step_count == 0 {
+        return Vec::new();
     }
-
-    // Per-loop output stride: an arrayed loop's own slot count; a scalar
-    // loop's (slot-0) partition's largest covered slot index + 1.
-    let strides: Vec<usize> = loop_ids
-        .iter()
-        .enumerate()
-        .map(|(i, id)| {
-            if n_slots[i] > 1 {
-                n_slots[i]
-            } else {
-                let p = NormGroup::for_loop(slot_partition(loop_partitions, id, 0), i);
-                partition_slots
-                    .get(&p)
-                    .and_then(|ks| ks.iter().max().copied())
-                    .map(|m| m + 1)
-                    .unwrap_or(1)
-                    .max(1)
-            }
-        })
-        .collect();
-
-    // Pre-build the `(partition, slot)` -> [(loop_idx, read_slot)] grid.
-    // `read_slot` is 0 for a scalar member (broadcast) and `k` for an arrayed
-    // member; arrayed members past their own `n_slots` are not in any
-    // slot-`k` bucket (no OOB read past their own `loop_score` slots).
-    let mut members: BTreeMap<BucketKey, Vec<BucketMember>> = BTreeMap::new();
-    for (i, id) in loop_ids.iter().enumerate() {
-        if offsets[i].is_none() {
-            continue;
-        }
-        if n_slots[i] <= 1 {
-            // Scalar loop: appears in every slot of its (slot-0) group,
-            // always reading slot 0.  A Solo group covers only slot 0, so a
-            // `None`-partition scalar loop is its own single bucket.
-            let p = NormGroup::for_loop(slot_partition(loop_partitions, id, 0), i);
-            if let Some(ks) = partition_slots.get(&p) {
-                for &k in ks {
-                    members.entry((p, k)).or_default().push((i, 0));
+    let n_slots = (series.len() / step_count).max(1);
+    (0..step_count)
+        .map(|t| {
+            let mut best = 0.0_f64;
+            let mut best_abs = -1.0_f64;
+            for &v in &series[t * n_slots..(t + 1) * n_slots] {
+                // `>` (not `>=`) keeps the lowest-index slot on ties; a NaN
+                // compares false and never becomes the winner.
+                if v.abs() > best_abs {
+                    best_abs = v.abs();
+                    best = v;
                 }
             }
-        } else {
-            for k in 0..n_slots[i] {
-                let p = NormGroup::for_loop(slot_partition(loop_partitions, id, k), i);
-                members.entry((p, k)).or_default().push((i, k));
-            }
-        }
-    }
-
-    let mut series: Vec<Vec<f64>> = offsets
-        .iter()
-        .enumerate()
-        .map(|(i, o)| {
-            if o.is_some() {
-                vec![0.0_f64; results.step_count * strides[i]]
-            } else {
-                Vec::new()
-            }
+            if best.is_finite() { best } else { 0.0 }
         })
-        .collect();
-
-    for (step, row) in results.iter().enumerate() {
-        for (&(_p, k), member_list) in &members {
-            let denom: f64 = member_list
-                .iter()
-                .filter_map(|&(i, rs)| offsets[i].map(|off| denom_summand(row[off + rs])))
-                .sum();
-            for &(i, rs) in member_list {
-                let Some(off) = offsets[i] else { continue };
-                let num = row[off + rs];
-                let val = if denom == 0.0 { 0.0 } else { num / denom };
-                series[i][step * strides[i] + k] = val;
-            }
-        }
-    }
-
-    let mut out: HashMap<String, Vec<f64>> = HashMap::with_capacity(loop_ids.len());
-    for (i, id) in loop_ids.iter().enumerate() {
-        if offsets[i].is_some() {
-            out.insert((*id).clone(), std::mem::take(&mut series[i]));
-        }
-    }
-    out
+        .collect()
 }
 
-/// Resolve the slot offset to read for a loop with `n_slots` slots when
-/// the partition is being queried at `element_index`.
+/// [`argmax_abs_by_step`] over every loop of a [`compute_rel_loop_scores`]
+/// map: one signed importance series per loop, `step_count` long.  This is
+/// what a bare (unsubscripted) arrayed loop id means on every surface -- the
+/// layout's `FeedbackLoop::importance_series` and the FFI's
+/// `simlin_analyze_get_relative_loop_score("r1")` -- so the two cannot pick
+/// different slots.
+pub fn aggregate_per_element_argmax_abs(
+    per_element_rel_scores: &HashMap<String, Vec<f64>>,
+    step_count: usize,
+) -> HashMap<String, Vec<f64>> {
+    per_element_rel_scores
+        .iter()
+        .map(|(id, series)| (id.clone(), argmax_abs_by_step(series, step_count)))
+        .collect()
+}
+
+/// The slot a raw per-element read of a loop with `n_slots` slots resolves
+/// `element_index` to.
 ///
-/// - Scalar loops (`n_slots <= 1`) → `Some(0)` -- slot 0 broadcasts
-///   across every partition element.
-/// - Arrayed loops with `element_index < n_slots` → `Some(element_index)`.
-/// - Arrayed loops with `element_index >= n_slots` → `None` -- the loop
-///   has no own element at this partition index and must not contribute
-///   (matches the gating that [`compute_rel_loop_scores_per_element`]
-///   applies in the full-sweep path).
-///
-/// Returning `None` rather than clamping to `n_slots - 1` matters for
-/// mixed-stride partitions where two arrayed loops have different
-/// dimensionalities: the loop that runs out of slots first does NOT
-/// stand in for the larger loop's later elements.  Callers (the
-/// streaming partition denominator and per-loop helpers) skip
-/// `None`-returning members so the FFI's amortised path stays
-/// bit-for-bit consistent with the full-sweep helper.
+/// - Scalar loops (`n_slots <= 1`) -> `Some(0)`: their single slot answers
+///   every element index.
+/// - Arrayed loops with `element_index < n_slots` -> `Some(element_index)`.
+/// - Arrayed loops with `element_index >= n_slots` -> `None`: the loop has
+///   no such element, and the caller must not read past its own columns
+///   into a neighboring loop's data.
 fn effective_slot(n_slots: usize, element_index: usize) -> Option<usize> {
     if n_slots <= 1 {
         Some(0)
@@ -475,105 +349,6 @@ fn effective_slot(n_slots: usize, element_index: usize) -> Option<usize> {
     } else {
         None
     }
-}
-
-/// Streaming per-element partition denominator: the amortized path the
-/// libsimlin FFI's per-partition cache uses.
-///
-/// For each `(loop_id, n_slots)` in the iterator whose `loop_score`
-/// variable is present in `results`, contributes
-/// `|row[off + slot]|` to the partition sum at every step, where
-/// `slot` is determined by [`effective_slot`]:
-///   - Scalar loops (`n_slots <= 1`) contribute slot 0 (broadcast).
-///   - Arrayed loops with `element_index < n_slots` contribute their
-///     own slot at `element_index`.
-///   - Arrayed loops with `element_index >= n_slots` do NOT contribute
-///     -- the loop has no own element at this partition index.
-///
-/// A contributing slot's value goes through [`denom_summand`], so a
-/// `NaN` slot is excluded from the sum and an `Inf` slot retained (GH
-/// #542) -- the same per-bucket `NaN`-isolation the full-sweep
-/// [`compute_rel_loop_scores_per_element`] applies.
-///
-/// This skip-vs-clamp distinction matters for mixed-stride partitions
-/// (two arrayed loops with different dimensionalities sharing a
-/// partition).  Producing the same partition sums as the full-sweep
-/// [`compute_rel_loop_scores_per_element`] is the contract the
-/// libsimlin FFI per-partition cache relies on; the streaming pair
-/// must be a strictly cheaper path to the same numbers, not an
-/// approximation.
-///
-/// It exists so the libsimlin FFI per-partition cache can amortize across
-/// element-aware queries (cache key `(partition, element_index)`) without
-/// falling back to the non-streaming
-/// [`compute_rel_loop_scores_per_element`]. This element-aware form is the
-/// ONLY streaming entry point: `libsimlin::analysis` reaches for it even in
-/// the scalar case, passing `n_slots = 1`, so a scalar-specialized twin
-/// would have no caller.
-pub fn compute_partition_denominator_for_element<'a, I>(
-    results: &Results,
-    loop_id_slots: I,
-    element_index: usize,
-) -> Vec<f64>
-where
-    I: IntoIterator<Item = (&'a str, usize)>,
-{
-    let entries: Vec<(usize, usize)> = loop_id_slots
-        .into_iter()
-        .filter_map(|(id, n_slots)| {
-            let off = results.offsets.get(&loop_score_ident(id)).copied()?;
-            let slot = effective_slot(n_slots, element_index)?;
-            Some((off, slot))
-        })
-        .collect();
-
-    let mut denom = vec![0.0_f64; results.step_count];
-    for (t, row) in results.iter().enumerate() {
-        denom[t] = entries
-            .iter()
-            .map(|&(off, slot)| denom_summand(row[off + slot]))
-            .sum();
-    }
-    denom
-}
-
-/// One loop's relative-score series at element `k`, given a pre-computed
-/// per-element partition denominator.
-///
-/// Reads `row[off + slot]` as the numerator at each step, where `slot`
-/// is determined by [`effective_slot`]:
-///   - Scalar loops (`n_slots <= 1`) read slot 0 (broadcast).
-///   - Arrayed loops with `element_index < n_slots` read their own slot.
-///   - Arrayed loops with `element_index >= n_slots` return all zeros
-///     -- the loop has no own element at this partition index, matching
-///     the zero-fill that [`compute_rel_loop_scores_per_element`]
-///     applies in the full-sweep path.
-///
-/// Paired with [`compute_partition_denominator_for_element`] for SAFEDIV
-/// normalisation.  Returns `None` only when the loop's `loop_score`
-/// variable is entirely absent from `results` (matching the scalar
-/// streaming helper's "absent loop" contract); a present-but-no-element
-/// query yields all-zeros, not `None`.
-pub fn compute_rel_loop_score_for_element(
-    results: &Results,
-    loop_id: &str,
-    n_slots: usize,
-    element_index: usize,
-    denominator: &[f64],
-) -> Option<Vec<f64>> {
-    let off = results.offsets.get(&loop_score_ident(loop_id)).copied()?;
-    let Some(slot) = effective_slot(n_slots, element_index) else {
-        // This loop has no own element at the queried partition index.
-        // Return zero-fill rather than reading another loop's slot.
-        return Some(vec![0.0; results.step_count]);
-    };
-    let mut out = Vec::with_capacity(results.step_count);
-    for (t, row) in results.iter().enumerate() {
-        let num = row[off + slot];
-        let denom = denominator[t];
-        out.push(if denom == 0.0 { 0.0 } else { num / denom });
-    }
-    Some(out)
 }
 
 /// Per-loop dimension metadata used by the FFI subscript resolver to
@@ -775,164 +550,16 @@ pub fn build_loop_element_index(
     out
 }
 
-/// Aggregate the per-element rel-score map produced by
-/// [`compute_rel_loop_scores_per_element`] into a single signed series
-/// per loop, via signed argmax-abs across each loop's own slots.
+/// Element `element_index` of `loop_id`'s RAW `loop_score` series, with NO
+/// normalization (GH #998).  This is the accessor the lone-pin workaround
+/// needs -- a modeler-pinned loop alone in its cycle partition has a
+/// relative score of exactly `±1` by construction, so its RAW series is the
+/// informative one, and a plain `get_series` on the synthetic name resolves
+/// to element 0 only.
 ///
-/// Used by the layout's `compute_metadata` to populate
-/// `FeedbackLoop::importance_series` with one value per saved step.
-///
-/// ## Stride handling
-///
-/// [`compute_rel_loop_scores_per_element`] lays each loop's series out
-/// row-major as `series[t * stride + k]`, where:
-///
-/// - for an **arrayed** loop, `stride == n_slots` -- the loop's own
-///   slot count.  Every slot index in `0..n_slots` is a real element,
-///   so there are no padding positions and `n == stride`.
-/// - for a **scalar** loop, `stride` is the largest slot index its
-///   (slot-0) partition covers + 1 (1 if no arrayed loop shares that
-///   partition); the loop's own `n_slots` is 1, so `stride >= n` with
-///   positions `1..stride` being broadcast padding the scalar loop's
-///   own value never occupies.
-///
-/// This helper recovers `stride` from `series.len() / step_count` so
-/// consumers don't need to track partition stride independently.
-///
-/// The inner argmax-abs iterates only the loop's *own* `n_slots`
-/// (`n_slots_by_loop[loop_id]`, default 1), reading `series[t * stride + k]`
-/// for `k` in `0..n_slots`.  For a scalar loop that is slot 0 only --
-/// the canonical scalar view, matching the pre-PR `compute_rel_loop_scores`
-/// behaviour; the partition's broadcast-padding positions `1..stride`
-/// are skipped.  For an arrayed loop `stride == n_slots`, so the loop
-/// over `0..n_slots` covers exactly the loop's own elements with no
-/// out-of-bounds read.  (Pre-Phase-2, arrayed loops were padded to the
-/// partition's max stride and had to skip `n_slots..stride`; that
-/// padding no longer exists.)
-///
-/// ## Output
-///
-/// Per loop: a `Vec<f64>` of length `step_count` (or empty if the
-/// input series is empty).  Non-finite picks are mapped to `0.0`,
-/// matching the existing layout filter.
-///
-/// Loops present in `per_element_rel_scores` but absent from
-/// `n_slots_by_loop` default to `n_slots = 1` (scalar) -- legacy
-/// callers that haven't snapshotted dim metadata still get a
-/// well-formed result.
-pub fn aggregate_per_element_argmax_abs(
-    per_element_rel_scores: &HashMap<String, Vec<f64>>,
-    n_slots_by_loop: &HashMap<String, usize>,
-    step_count: usize,
-) -> HashMap<String, Vec<f64>> {
-    let mut out = HashMap::with_capacity(per_element_rel_scores.len());
-    for (loop_id, series) in per_element_rel_scores {
-        if series.is_empty() {
-            out.insert(loop_id.clone(), Vec::new());
-            continue;
-        }
-        let n = n_slots_by_loop.get(loop_id).copied().unwrap_or(1).max(1);
-        // Recover the helper's actual stride from the input length.
-        // For a scalar loop in a mixed partition stride > n == 1
-        // (broadcast padding); for an arrayed loop and for a scalar
-        // loop alone in its partition stride == n.
-        let stride = (series.len() / step_count.max(1)).max(1);
-        let mut agg = Vec::with_capacity(step_count);
-        for t in 0..step_count {
-            let mut best = 0.0_f64;
-            let mut best_abs = -1.0_f64;
-            // Iterate this loop's own slots only.  `n <= stride` always
-            // by construction (an arrayed loop has stride == n_slots; a
-            // scalar loop has n == 1 and stride >= 1), so the index
-            // never exceeds the series bounds.
-            for k in 0..n {
-                let v = series[t * stride + k];
-                // `>` (not `>=`) keeps lowest-index slot on ties; NaN
-                // comparisons are always false so a NaN never displaces
-                // a finite candidate.
-                if v.abs() > best_abs {
-                    best_abs = v.abs();
-                    best = v;
-                }
-            }
-            agg.push(if best.is_finite() { best } else { 0.0 });
-        }
-        out.insert(loop_id.clone(), agg);
-    }
-    out
-}
-
-/// Aggregate a multi-slot loop's relative-score series down to a single
-/// signed series by picking the element with the largest `|rel[k, t]|`
-/// at each step and emitting that element's *signed* value.
-///
-/// Sign is preserved across steps even when the dominant element flips
-/// (e.g. argmax may be slot 0 at one step and slot 1 at the next).
-/// Ties on `|rel|` are broken by lowest slot index, matching the
-/// stable-first-wins convention `max_by_key` provides.
-///
-/// `denominators_per_element` must have length `n_slots`, with each
-/// entry's length equal to `results.step_count`.  The element-`k`
-/// denominator is the partition sum at element `k` (e.g. produced by
-/// [`compute_partition_denominator_for_element`] called with the
-/// member loops and `element_index = k`).
-///
-/// Scalar (`n_slots == 1`) reduces to identity: the aggregator returns
-/// the single slot's series unchanged.  Used
-/// by both the layout single-line importance metric and the FFI
-/// dispatch when callers pass a bare arrayed loop ID without a
-/// subscript.
-pub fn compute_rel_loop_score_argmax_abs(
-    results: &Results,
-    loop_id: &str,
-    n_slots: usize,
-    denominators_per_element: &[&[f64]],
-) -> Option<Vec<f64>> {
-    let off = results.offsets.get(&loop_score_ident(loop_id)).copied()?;
-    let slots = n_slots.max(1);
-    debug_assert_eq!(
-        denominators_per_element.len(),
-        slots,
-        "argmax-abs needs one denominator series per element slot"
-    );
-    let mut out = Vec::with_capacity(results.step_count);
-    for (t, row) in results.iter().enumerate() {
-        let mut best: f64 = 0.0;
-        let mut best_abs: f64 = -1.0;
-        for (k, denom_series) in denominators_per_element.iter().take(slots).enumerate() {
-            // `k` is iterated 0..slots and slots == max(n_slots, 1), so
-            // `effective_slot` always returns `Some`.  We pass it through
-            // anyway for consistency with the streaming helpers and to
-            // catch any future caller that constructs `denominators_per_element`
-            // longer than the loop's own `n_slots`.
-            let Some(slot) = effective_slot(n_slots, k) else {
-                continue;
-            };
-            let num = row[off + slot];
-            let denom = denom_series[t];
-            let rel = if denom == 0.0 { 0.0 } else { num / denom };
-            // `>` (not `>=`) keeps the lowest-index slot when ties occur.
-            if rel.abs() > best_abs {
-                best_abs = rel.abs();
-                best = rel;
-            }
-        }
-        out.push(best);
-    }
-    Some(out)
-}
-
-/// The RAW sibling of [`compute_rel_loop_score_for_element`] (GH #998):
-/// reads element `element_index` of `loop_id`'s raw `loop_score` series with
-/// NO normalization.  This is the accessor the lone-pin workaround needs --
-/// a modeler-pinned loop alone in its cycle partition has a relative score
-/// of exactly `±1` by construction, so its RAW series is the informative
-/// one, and before this the raw read (`get_series` on the synthetic name)
-/// silently resolved to element 0 only.
-///
-/// Conventions match the relative sibling: scalar loops (`n_slots <= 1`)
-/// read slot 0; an `element_index` past `n_slots` yields zero-fill rather
-/// than reading a neighboring column; `None` only when the loop's
+/// Scalar loops (`n_slots <= 1`) read slot 0 whatever the element index; an
+/// `element_index` past `n_slots` yields zero-fill rather than reading a
+/// neighboring column ([`effective_slot`]); `None` only when the loop's
 /// `loop_score` variable is absent from `results`.
 pub fn compute_raw_loop_score_for_element(
     results: &Results,
@@ -947,18 +574,17 @@ pub fn compute_raw_loop_score_for_element(
     Some(results.iter().map(|row| row[off + slot]).collect())
 }
 
-/// The RAW sibling of [`compute_rel_loop_score_argmax_abs`] (GH #998): the
-/// bare-id aggregate over an arrayed loop's raw `loop_score` slots -- each
-/// step emits the SIGNED value of the slot with the largest magnitude, ties
-/// broken to the lowest slot index.  Scalar (`n_slots <= 1`) reduces to
-/// identity, so a bare id means the same thing on the raw and relative
-/// accessors (the dominant element's contribution, sign preserved).  Two
-/// deliberate divergences from the relative sibling: the dominant slot is
-/// picked by |raw| here and by |relative| there (the two aggregates can
-/// select different slots at a step where slots sit in different partitions
-/// with different denominators), and a step where EVERY slot is NaN stays
-/// NaN here (honest raw data) while the relative aggregate reports 0.0
-/// (its SAFEDIV "inactive" convention).
+/// The bare-id aggregate over an arrayed loop's RAW `loop_score` slots (GH
+/// #998): each step emits the SIGNED value of the slot with the largest
+/// magnitude, ties broken to the lowest slot index.  Scalar (`n_slots <= 1`)
+/// reduces to identity, so a bare id means the same thing on the raw and
+/// relative accessors (the dominant element's contribution, sign preserved).
+/// Two deliberate divergences from the relative aggregate
+/// ([`argmax_abs_by_step`]): the dominant slot is picked by |raw| here and by
+/// |relative| there (the two can select different slots at a step where
+/// slots sit in different partitions with different denominators), and a
+/// step where EVERY slot is NaN stays NaN here (honest raw data) while the
+/// relative aggregate reports 0.0 (its SAFEDIV "inactive" convention).
 pub fn compute_raw_loop_score_argmax_abs(
     results: &Results,
     loop_id: &str,
@@ -970,12 +596,9 @@ pub fn compute_raw_loop_score_argmax_abs(
     for row in results.iter() {
         // A step where EVERY slot is NaN stays NaN: the raw accessor's
         // contract is honest data, and a fabricated finite 0.0 would hide
-        // undefined values the per-element accessors report. This is a
-        // DELIBERATE divergence from `compute_rel_loop_score_argmax_abs`,
-        // whose 0.0-on-undefined matches the relative score's SAFEDIV
-        // "inactive" convention (and whose consumers coerce non-finite to 0
-        // anyway). A step with any finite slot picks the finite argmax --
-        // NaN slots are skipped by the comparison below.
+        // undefined values the per-element accessors report.  A step with
+        // any finite slot picks the finite argmax -- NaN slots are skipped
+        // by the comparison below.
         let mut best: Option<f64> = None;
         let mut best_abs: f64 = -1.0;
         for k in 0..slots {
@@ -1027,10 +650,11 @@ pub struct RelLinkInput<'a> {
 /// ```
 ///
 /// This is the link-level analogue of [`compute_rel_loop_scores`]'s
-/// per-partition normalization and yields a value in `[-1, 1]` that *is*
-/// comparable across the whole model -- the fraction of the target's change
-/// attributable to that input.  (LTM ref 13.3 / 13.12, Schoenberg 2020
-/// section 4.)
+/// per-partition normalization -- the same [`group_totals`] and
+/// [`relative_series`], keyed by target instead of by partition -- and
+/// yields a value in `[-1, 1]` that *is* comparable across the whole model:
+/// the fraction of the target's change attributable to that input.  (LTM
+/// ref 13.3 / 13.12, Schoenberg 2020 section 4.)
 ///
 /// **Signed, not absolute.** The literature phrases the relative magnitude
 /// as a `[0, 1]` fraction, but we keep the link's sign (so the result is in
@@ -1039,14 +663,14 @@ pub struct RelLinkInput<'a> {
 /// or down, and dropping it would discard information the raw series
 /// carries.  Callers that want the pure magnitude take `.abs()`.
 ///
-/// **NaN/Inf semantics** match the loop-level denominator
-/// ([`denom_summand`], GH #542): a `NaN` summand is excluded from the
-/// per-target sum (one input being undefined at a step must not poison its
-/// siblings' relative scores), while `Inf` is retained (a genuinely
-/// diverging input dominates its target, so the finite siblings normalize
-/// to `0` and the diverging one to `NaN` via `Inf/Inf`).  A `0.0`
-/// denominator yields `0.0` (SAFEDIV-0), and a link's own `NaN` numerator
-/// stays `NaN` -- the honest "undefined here" per-link signal.
+/// **NaN/Inf semantics** are the shared accumulator's (GH #542): a `NaN`
+/// summand is excluded from the per-target sum (one input being undefined
+/// at a step must not poison its siblings' relative scores), while `Inf` is
+/// retained (a genuinely diverging input dominates its target, so the
+/// finite siblings normalize to `0` and the diverging one to `NaN` via
+/// `Inf/Inf`).  A `0.0` denominator yields `0.0` (SAFEDIV-0), and a link's
+/// own `NaN` numerator stays `NaN` -- the honest "undefined here" per-link
+/// signal.
 ///
 /// **Denominator scope.** The sum runs over the input links that *have* a
 /// score series; `None`-score links (constants/parameters; out-of-loop
@@ -1064,58 +688,27 @@ pub struct RelLinkInput<'a> {
 ///
 /// The return value is parallel to `links`: `Some(series)` of length
 /// `step_count` for each link that had a score, `None` for each link that
-/// did not (mirroring the input's `score: None`).
+/// did not (mirroring the input's `score: None`).  Within a target the
+/// denominator accumulates in the caller's link order.
 pub fn compute_rel_link_scores(
     links: &[RelLinkInput<'_>],
     step_count: usize,
 ) -> Vec<Option<Vec<f64>>> {
-    // Group the indices of scored links by their `to` target.  A
-    // `BTreeMap` keeps the float-summation order of each denominator
-    // deterministic across runs (the link order within a target is the
-    // caller's stable input order, preserved by pushing in iteration order).
-    let mut groups: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
-    for (i, link) in links.iter().enumerate() {
-        if link.score.is_some() {
-            groups.entry(link.to).or_default().push(i);
-        }
-    }
-
-    // Per-target denominator series: Σ |score| over the target's scored
-    // links, with NaN excluded / Inf kept (denom_summand), one entry per
-    // saved step.
-    let mut denom_by_target: HashMap<&str, Vec<f64>> = HashMap::with_capacity(groups.len());
-    for (target, indices) in &groups {
-        let mut denom = vec![0.0_f64; step_count];
-        for &i in indices {
-            let series = links[i].score.expect("grouped links always have a score");
-            // A score series shorter than step_count contributes 0 past its
-            // end (zip stops at the shorter); this never happens in production
-            // (every column is results.step_count long) but keeps the helper
-            // total.
-            for (d, &v) in denom.iter_mut().zip(series.iter()) {
-                *d += denom_summand(v);
-            }
-        }
-        denom_by_target.insert(target, denom);
-    }
-
+    let totals = group_totals(
+        links
+            .iter()
+            .filter_map(|link| link.score.map(|s| (link.to, s.iter().copied()))),
+        step_count,
+    );
     links
         .iter()
         .map(|link| {
             let series = link.score?;
-            let denom = &denom_by_target[link.to];
-            // `denom` has length `step_count`; a `series` shorter than that
-            // (never in production -- every column is results.step_count long)
-            // is read as 0 past its end via `series.get(t)`.
-            let out: Vec<f64> = denom
-                .iter()
-                .enumerate()
-                .map(|(t, &d)| {
-                    let num = series.get(t).copied().unwrap_or(0.0);
-                    if d == 0.0 { 0.0 } else { num / d }
-                })
-                .collect();
-            Some(out)
+            // Pad a short series with zeros so the output is always
+            // `step_count` long (never in production -- every column is
+            // `results.step_count` long -- but it keeps the helper total).
+            let padded = (0..step_count).map(|t| series.get(t).copied().unwrap_or(0.0));
+            Some(relative_series(padded, &totals[link.to]))
         })
         .collect()
 }
@@ -1137,7 +730,7 @@ pub fn compute_rel_link_scores(
 pub fn rel_link_group_sizes(links: &[RelLinkInput<'_>]) -> Vec<usize> {
     // A link CONTRIBUTES when its series adds at least one summand to its
     // target's denominator -- i.e. it has at least one non-NaN entry
-    // (`denom_summand` excludes NaN and keeps Inf, and Inf is not NaN). An
+    // (`add_to_total` excludes NaN and keeps Inf, and Inf is not NaN). An
     // all-NaN series never contributes, so counting it would over-report
     // competition: its finite sibling normalizes against itself alone and
     // reads +/-1 by construction, which is exactly the degeneracy this
@@ -1200,7 +793,6 @@ mod tests {
                 row[i + 1] = ser[step];
             }
         }
-
         let sim_specs = SimSpecs {
             start: 0.0,
             stop: (step_count.saturating_sub(1)) as f64,
@@ -1209,7 +801,6 @@ mod tests {
             sim_method: SimMethod::Euler,
             time_units: None,
         };
-
         Results {
             offsets,
             data: data.into_boxed_slice(),
@@ -1241,88 +832,82 @@ mod tests {
             .collect()
     }
 
-    /// Inlined reference implementation of `compute_rel_loop_scores`'s
-    /// slot-0-convenience SAFEDIV formula: each loop normalizes its slot-0
-    /// value against the sum of slot-0 values over loops sharing its slot-0
-    /// partition.  The proptest compares against this to catch any numeric
-    /// divergence.
-    ///
-    /// `NaN` summands are excluded from the partition sum here too (GH
-    /// #542), independently re-deriving the production `denom_summand`
-    /// rule, so the oracle stays correct if a future generator introduces
-    /// non-finite samples (the current generators are finite-only, so this
-    /// branch is latent but kept honest).  `+/-Inf` is kept in the sum,
-    /// matching the production semantics.
-    fn reference_rel_loop_scores(
-        loop_ids: &[String],
-        loop_partitions: &IndexMap<String, Vec<Option<usize>>>,
-        series: &[Vec<f64>],
-    ) -> Vec<Vec<f64>> {
-        let step_count = series.first().map(|s| s.len()).unwrap_or(0);
-        let mut groups: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
-        for (i, id) in loop_ids.iter().enumerate() {
-            let key = loop_partitions
-                .get(id)
-                .and_then(|v| v.first().copied().flatten());
-            groups.entry(key).or_default().push(i);
+    /// Build a `Results` with each loop occupying a configurable number of
+    /// slots.  Layout: `time | loop0 slot 0..n0 | loop1 slot 0..n1 | ...`.
+    /// `loop_data[i][step][slot]` is the value at (step, slot) for loop i.
+    fn make_arrayed_results(
+        loop_ids: &[&str],
+        slots_per_loop: &[usize],
+        loop_data: &[Vec<Vec<f64>>],
+    ) -> Results {
+        assert_eq!(loop_ids.len(), slots_per_loop.len());
+        assert_eq!(loop_ids.len(), loop_data.len());
+        let step_count = loop_data[0].len();
+        for d in loop_data.iter() {
+            assert_eq!(d.len(), step_count);
         }
-        let mut out: Vec<Vec<f64>> = (0..loop_ids.len())
-            .map(|_| Vec::with_capacity(step_count))
-            .collect();
-        // `t` is an index into every per-loop series simultaneously, so
-        // the range-based form is clearer than an iterator over one series.
-        #[allow(clippy::needless_range_loop)]
-        for t in 0..step_count {
-            for indices in groups.values() {
-                let denom: f64 = indices
-                    .iter()
-                    .map(|&i| {
-                        let v = series[i][t];
-                        if v.is_nan() { 0.0 } else { v.abs() }
-                    })
-                    .sum();
-                for &i in indices {
-                    let num = series[i][t];
-                    let val = if denom == 0.0 { 0.0 } else { num / denom };
-                    out[i].push(val);
+        let total_slots: usize = slots_per_loop.iter().sum();
+        let step_size = 1 + total_slots;
+        let mut data = vec![0.0_f64; step_count * step_size];
+        let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
+        offsets.insert(Ident::new("time"), 0);
+        let mut cursor = 1;
+        let mut loop_offsets = Vec::with_capacity(loop_ids.len());
+        for (i, id) in loop_ids.iter().enumerate() {
+            offsets.insert(loop_score_ident(id), cursor);
+            loop_offsets.push(cursor);
+            cursor += slots_per_loop[i];
+        }
+        for step in 0..step_count {
+            let row = &mut data[step * step_size..(step + 1) * step_size];
+            row[0] = step as f64;
+            for (i, &off) in loop_offsets.iter().enumerate() {
+                let slots = &loop_data[i][step];
+                assert_eq!(slots.len(), slots_per_loop[i]);
+                for (slot, &v) in slots.iter().enumerate() {
+                    row[off + slot] = v;
                 }
             }
         }
-        out
+        let sim_specs = SimSpecs {
+            start: 0.0,
+            stop: (step_count.saturating_sub(1)) as f64,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: None,
+        };
+        Results {
+            offsets,
+            data: data.into_boxed_slice(),
+            step_size,
+            step_count,
+            specs: Specs::from(&sim_specs),
+            is_vensim: false,
+        }
     }
 
     /// Naive, from-first-principles reference for
-    /// `compute_rel_loop_scores_per_element`.  Where the engine pre-builds
-    /// a `(partition, slot)` BTreeMap grid, this loops directly over each
-    /// `(loop, output-slot, step)` and re-derives the SAFEDIV denominator
-    /// by scanning *every* loop and asking "is it a member of this bucket?"
-    /// -- a structurally different computation, so the proptest is a real
+    /// [`compute_rel_loop_scores`].  Where the engine accumulates group
+    /// totals in one pass, this loops directly over each `(loop, slot,
+    /// step)` and re-derives the SAFEDIV denominator by scanning *every*
+    /// other `(loop, slot)` and asking "is it in my partition?" -- a
+    /// structurally different computation, so the proptest is a real
     /// oracle, not a paraphrase of the implementation.
     ///
-    /// Member rule (mirrors the engine's `slot_partition` broadcast and
-    /// `effective_slot` gating, spelled out inline rather than via the
-    /// engine helpers): for a bucket at partition `p`, output slot `k`,
-    /// loop `j` is a member iff
-    ///   - `j` is **scalar** (`n_slots == 1`): `slots[j][0] == p` -- it
-    ///     broadcasts its single value into every slot of partition `p`;
-    ///     it reads slot 0; OR
-    ///   - `j` is **arrayed** (`n_slots > 1`) and `k < n_slots[j]` and
-    ///     `slots[j][k] == p` -- it reads its own slot `k`; an arrayed
-    ///     loop past its own slot count is not a member of slot-`k`
-    ///     buckets (no out-of-bounds read into another loop's data).
-    ///
-    /// Output stride per loop: an arrayed loop's own slot count; a scalar
-    /// loop's (slot-0) partition's largest covered slot index + 1 (so a
-    /// scalar loop alone in its partition has stride 1).  Slots a scalar
-    /// loop's partition does not cover stay 0.0 (gaps in the covered set).
+    /// Member rule, spelled out inline rather than via the engine helpers:
+    /// `(j, k')` is in `(i, k)`'s group iff both resolve to the same
+    /// `Some(p)`; an unresolved (`None`) slot is in a group of its own
+    /// (GH #750), so it normalizes against itself only.  `NaN` summands are
+    /// excluded (GH #542) and `Inf` kept, re-derived inline too.
     ///
     /// `slots[i]` is loop `i`'s per-slot partition vector (length 1 for a
     /// scalar loop); `series[i][step][slot]` its `loop_score`.  Returns one
-    /// flat `Vec<f64>` per loop in `loop_ids` order; element `step *
-    /// stride_i + k`.  Float summation walks loops in ascending index --
-    /// the same order the engine's sorted-`loop_id` member lists produce
-    /// when the ids are `L{i}` with `i < 10` -- so the comparison is exact.
-    fn reference_rel_loop_scores_per_element(
+    /// flat `Vec<f64>` per loop in `loop_ids` order, `step * n_slots_i + k`
+    /// indexed.  The denominator walks members in ascending `(loop, slot)`
+    /// order -- the production accumulation order -- so the comparison is
+    /// bit-exact, not merely close.
+    fn reference_rel_loop_scores(
         loop_ids: &[String],
         slots: &[Vec<Option<usize>>],
         series: &[Vec<Vec<f64>>],
@@ -1330,108 +915,33 @@ mod tests {
     ) -> Vec<Vec<f64>> {
         let n = loop_ids.len();
         let n_slots: Vec<usize> = slots.iter().map(|v| v.len().max(1)).collect();
-        // The partition loop `i` carries into slot `k`: an arrayed loop's
-        // own per-slot entry; a scalar loop broadcasts slot 0's partition.
-        let slot_part = |i: usize, k: usize| -> Option<usize> {
-            if n_slots[i] <= 1 {
-                slots[i].first().copied().flatten()
-            } else {
-                slots[i].get(k).copied().flatten()
-            }
-        };
-        // The normalization group of loop `i`'s slot `k`: the resolved
-        // partition, or the loop's own Solo group when unresolved (GH #750
-        // -- unrelated unpartitioned loops never share a bucket).
-        // Re-derived inline so the oracle stays structurally independent of
-        // the production grouping.
-        let slot_group = |i: usize, k: usize| -> NormGroup {
-            match slot_part(i, k) {
-                Some(p) => NormGroup::Partition(p),
-                None => NormGroup::Solo(i),
-            }
-        };
-        // For each group, the set of slot indices some loop occupies in it
-        // (a scalar loop occupies only slot 0): used for the scalar
-        // broadcast stride and to know whether a scalar loop "appears" at a
-        // given output slot.
-        let mut partition_slots: BTreeMap<NormGroup, BTreeSet<usize>> = BTreeMap::new();
-        for (i, &ns) in n_slots.iter().enumerate() {
-            for k in 0..ns {
-                partition_slots
-                    .entry(slot_group(i, k))
-                    .or_default()
-                    .insert(k);
-            }
-        }
-        let strides: Vec<usize> = (0..n)
-            .map(|i| {
-                if n_slots[i] > 1 {
-                    n_slots[i]
-                } else {
-                    let p = slot_group(i, 0);
-                    partition_slots
-                        .get(&p)
-                        .and_then(|ks| ks.iter().max().copied())
-                        .map(|m| m + 1)
-                        .unwrap_or(1)
-                        .max(1)
-                }
-            })
-            .collect();
-        // Is loop `j` a member of the bucket (group `p`, output slot
-        // `k`)?  If so, which of its own slots does it read?
-        //
-        // A scalar loop is in `(p, k)` iff its (slot-0) group is `p`
-        // AND `k` is a slot index *some* loop occupies in `p`
-        // (`partition_slots[p]`) -- the engine only pushes a scalar member
-        // into the slots its partition actually spans, so a stride that
-        // overshoots a gap leaves that output position at 0.0.
-        let read_slot_in_bucket = |j: usize, p: NormGroup, k: usize| -> Option<usize> {
-            if n_slots[j] <= 1 {
-                let covers_k = partition_slots.get(&p).is_some_and(|ks| ks.contains(&k));
-                if slot_group(j, 0) == p && covers_k {
-                    Some(0)
-                } else {
-                    None
-                }
-            } else if k < n_slots[j] && slot_group(j, k) == p {
-                Some(k)
-            } else {
-                None
-            }
-        };
+        let partition =
+            |i: usize, k: usize| -> Option<usize> { slots[i].get(k).copied().flatten() };
         let mut out: Vec<Vec<f64>> = (0..n)
-            .map(|i| vec![0.0_f64; step_count * strides[i]])
+            .map(|i| vec![0.0_f64; step_count * n_slots[i]])
             .collect();
         for i in 0..n {
-            for k in 0..strides[i] {
-                // Which bucket is loop `i`'s output slot `k` in, and does
-                // `i` actually occupy it?  An arrayed loop occupies every
-                // `k < n_slots` (and stride == n_slots, so no overshoot);
-                // a scalar loop occupies only the slots its partition
-                // covers (its stride may overshoot a gap).
-                let p = slot_group(i, k);
-                let Some(read_i) = read_slot_in_bucket(i, p, k) else {
-                    continue;
+            for k in 0..n_slots[i] {
+                // The members of (i, k)'s group, in ascending (loop, slot)
+                // order: every slot sharing its resolved partition, or just
+                // itself when unresolved.
+                let members: Vec<(usize, usize)> = match partition(i, k) {
+                    Some(p) => (0..n)
+                        .flat_map(|j| (0..n_slots[j]).map(move |kk| (j, kk)))
+                        .filter(|&(j, kk)| partition(j, kk) == Some(p))
+                        .collect(),
+                    None => vec![(i, k)],
                 };
-                // Bucket members, scanned over every loop.
-                let bucket: Vec<(usize, usize)> = (0..n)
-                    .filter_map(|j| read_slot_in_bucket(j, p, k).map(|rs| (j, rs)))
-                    .collect();
                 for step in 0..step_count {
-                    // `NaN` summands excluded (GH #542), re-derived inline
-                    // so this oracle stays structurally independent of the
-                    // production `denom_summand`; `Inf` kept in the sum.
-                    let denom: f64 = bucket
+                    let denom: f64 = members
                         .iter()
-                        .map(|&(j, rs)| {
-                            let v = series[j][step][rs];
+                        .map(|&(j, kk)| {
+                            let v = series[j][step][kk];
                             if v.is_nan() { 0.0 } else { v.abs() }
                         })
                         .sum();
-                    let num = series[i][step][read_i];
-                    let val = if denom == 0.0 { 0.0 } else { num / denom };
-                    out[i][step * strides[i] + k] = val;
+                    let num = series[i][step][k];
+                    out[i][step * n_slots[i] + k] = if denom == 0.0 { 0.0 } else { num / denom };
                 }
             }
         }
@@ -1467,8 +977,7 @@ mod tests {
     /// its per-partition `Σ|loop_score|` denominator in the `loop_partitions`
     /// IndexMap's *emission* (insertion) order, NOT a re-sort of the loop ids.
     /// IEEE-754 addition is non-associative, so a lex re-sort would perturb the
-    /// denominator at the ULP and break bit-for-bit parity with the pre-#461
-    /// compile-time emitter.
+    /// denominator at the ULP and break the bit-for-bit stability of the sum.
     ///
     /// The fixture puts 12 same-prefix loops (`r1..r12`) in one partition with
     /// scores chosen so the emission-order abs-sum and the lex-order abs-sum are
@@ -1636,14 +1145,15 @@ mod tests {
     }
 
     #[test]
-    fn nan_loop_score_isolated_in_per_element_bucket() {
-        // Per-element twin of `nan_loop_score_isolated_to_its_own_loop`:
-        // a NaN at one (loop, slot) must not poison the sibling sharing
-        // that `(partition, slot)` bucket.  Two coupled A2A loops, 2
-        // slots each; plant a NaN at A's slot 0 at step 0.
+    fn nan_slot_isolated_to_its_own_member() {
+        // Arrayed twin of `nan_loop_score_isolated_to_its_own_loop`: a NaN
+        // at one (loop, slot) is dropped from the partition's total, so
+        // every other member of the partition -- the loop's own sibling
+        // slot included -- normalizes against the healthy total.  Two
+        // coupled A2A loops, 2 slots each, all four slots in partition 0;
+        // plant a NaN at A's slot 0 at step 0.
         let n_slots: usize = 2;
-        // A slot0 = [NaN, 9], A slot1 = [4, 4]
-        // B slot0 = [3,   3], B slot1 = [6, 6]
+        // A = [NaN, 4] then [9, 4]; B = [3, 6] then [3, 6].
         let loop_data = vec![
             vec![vec![f64::NAN, 4.0], vec![9.0, 4.0]],
             vec![vec![3.0, 6.0], vec![3.0, 6.0]],
@@ -1652,26 +1162,35 @@ mod tests {
         let partitions =
             mapping_per_slot(&[("A", vec![Some(0); n_slots]), ("B", vec![Some(0); n_slots])]);
 
-        let rel = compute_rel_loop_scores_per_element(&results, &partitions);
+        let rel = compute_rel_loop_scores(&results, &partitions);
         let a = rel.get("A").unwrap();
         let b = rel.get("B").unwrap();
-
-        // step 0, slot 0: bucket {A, B}; A is NaN, so it is dropped from
-        // the denom (denom = |3| = 3).  A's own rel score = NaN/3 = NaN;
-        // B's = 3/3 = 1 (healthy, NOT poisoned).
         let at = |step: usize, k: usize| step * n_slots + k;
-        assert!(a[at(0, 0)].is_nan(), "NaN loop keeps its own NaN rel score");
+
+        // step 0: total over the partition = |4| + |3| + |6| = 13 (the NaN
+        // slot dropped).  A[0] = NaN/13 = NaN; the other three members
+        // share the healthy 13.
+        assert!(a[at(0, 0)].is_nan(), "the NaN slot keeps its own NaN");
         assert!(
-            (b[at(0, 0)] - 1.0).abs() < 1e-12,
-            "healthy slot-0 sibling normalizes against the healthy denom: got {}",
+            (a[at(0, 1)] - 4.0 / 13.0).abs() < 1e-12,
+            "got {}",
+            a[at(0, 1)]
+        );
+        assert!(
+            (b[at(0, 0)] - 3.0 / 13.0).abs() < 1e-12,
+            "got {}",
             b[at(0, 0)]
         );
-        // step 0, slot 1: both finite; denom = |4| + |6| = 10.
-        assert!((a[at(0, 1)] - 0.4).abs() < 1e-12);
-        assert!((b[at(0, 1)] - 0.6).abs() < 1e-12);
-        // step 1: all finite; slot 0 denom = |9| + |3| = 12, slot 1 = 10.
-        assert!((a[at(1, 0)] - (9.0 / 12.0)).abs() < 1e-12);
-        assert!((b[at(1, 0)] - (3.0 / 12.0)).abs() < 1e-12);
+        assert!(
+            (b[at(0, 1)] - 6.0 / 13.0).abs() < 1e-12,
+            "got {}",
+            b[at(0, 1)]
+        );
+        // step 1: all finite; total = 9 + 4 + 3 + 6 = 22.
+        assert!((a[at(1, 0)] - 9.0 / 22.0).abs() < 1e-12);
+        assert!((a[at(1, 1)] - 4.0 / 22.0).abs() < 1e-12);
+        assert!((b[at(1, 0)] - 3.0 / 22.0).abs() < 1e-12);
+        assert!((b[at(1, 1)] - 6.0 / 22.0).abs() < 1e-12);
     }
 
     #[test]
@@ -1681,9 +1200,7 @@ mod tests {
         // denominators go to zero there).  Unlike a NaN, an Inf is NOT
         // filtered from the partition sum -- it stays, so the dominated
         // siblings correctly go to 0 (finite/Inf) and the dominant loop
-        // momentarily reads NaN (Inf/Inf).  This preserves the legitimate
-        // inflection-point behaviour of the removed SAFEDIV equation
-        // bug-for-bug; only the NaN-poisoning case (GH #542) changed.
+        // momentarily reads NaN (Inf/Inf).
         let inf = f64::INFINITY;
         let series_a = &[inf, 2.0][..];
         let series_b = &[5.0, 3.0][..];
@@ -1708,23 +1225,22 @@ mod tests {
         assert!((rel_b[1] - 0.6).abs() < 1e-12);
     }
 
+    /// A finite partition total that overflows saturates to `f64::MAX`
+    /// rather than becoming `Inf`: every summand was finite, so the
+    /// members keep finite (tiny) shares instead of all reading `0`.  A
+    /// genuine `Inf` summand still makes the total `Inf`.
     #[test]
-    fn inf_loop_score_kept_in_per_element_bucket() {
-        // Per-element twin of `inf_loop_score_kept_in_denominator`: an
-        // +Inf at one (loop, slot) stays in that bucket's denominator,
-        // so the dominated sibling -> 0 and the dominant loop -> NaN.
-        let n_slots: usize = 1;
-        // A slot0 = [Inf], B slot0 = [5].
-        let loop_data = vec![vec![vec![f64::INFINITY]], vec![vec![5.0]]];
-        let results = make_arrayed_results(&["A", "B"], &[n_slots, n_slots], &loop_data);
-        let partitions =
-            mapping_per_slot(&[("A", vec![Some(0); n_slots]), ("B", vec![Some(0); n_slots])]);
-
-        let rel = compute_rel_loop_scores_per_element(&results, &partitions);
-        let a = rel.get("A").unwrap();
-        let b = rel.get("B").unwrap();
-        assert!(a[0].is_nan(), "dominant +Inf loop -> NaN in its bucket");
-        assert_eq!(b[0], 0.0, "dominated sibling -> 0 in the same bucket");
+    fn group_totals_saturate_on_finite_overflow_but_keep_inf() {
+        let totals = group_totals(
+            [
+                (0usize, vec![f64::MAX, 1.0]),
+                (0usize, vec![f64::MAX, f64::INFINITY]),
+            ],
+            2,
+        );
+        let total = &totals[&0];
+        assert_eq!(total[0], f64::MAX, "finite overflow saturates");
+        assert_eq!(total[1], f64::INFINITY, "a real Inf summand is kept");
     }
 
     #[test]
@@ -1734,9 +1250,9 @@ mod tests {
         // loops), so two `None`-partition loops must NOT cross-normalize --
         // they may be entirely unrelated subsystems.  Each gets its own
         // singleton group, collapsing to the documented lone-pin degeneracy
-        // (sign-preserving +/-1, or 0 via SAFEDIV-0).  The old behavior
-        // pooled them into one default bucket (rel = 0.75 / 0.25 here), the
-        // GH #487-class cross-pollution.
+        // (sign-preserving +/-1, or 0 via SAFEDIV-0).  A shared default
+        // bucket would pool them (rel = 0.75 / 0.25 here), the GH #487-class
+        // cross-pollution.
         let series_a = &[3.0, 0.0][..];
         let series_b = &[-1.0, 2.0][..];
         let results = make_results_for_loops(&[("A", series_a), ("B", series_b)]);
@@ -1770,171 +1286,119 @@ mod tests {
     }
 
     #[test]
-    fn unpartitioned_loops_do_not_pool_per_element() {
-        // Per-element twin of `unpartitioned_loops_normalize_independently`
-        // (GH #750): a scalar `None`-partition loop must not broadcast into
-        // an unrelated arrayed `None`-partition loop's slot buckets (which
-        // would both dilute the arrayed loop's slots and stretch the scalar
-        // loop's stride to the arrayed loop's slot count).
+    fn unpartitioned_arrayed_slots_are_each_solo() {
+        // Arrayed twin of `unpartitioned_loops_normalize_independently`: an
+        // unresolved slot is a Solo member on its own, so the two `None`
+        // slots of one arrayed loop do not normalize against each other,
+        // and a `None` scalar loop does not join either of them.
         let n_slots: usize = 2;
-        // One step: A is scalar (one slot, score 3); B is arrayed over 2
-        // slots (scores 4 and 6).  Data shape is `loop_data[i][step][slot]`.
+        // One step: A is scalar (score 3); B is arrayed over 2 slots (4, 6).
         let loop_data = vec![vec![vec![3.0]], vec![vec![4.0, 6.0]]];
         let results = make_arrayed_results(&["A", "B"], &[1, n_slots], &loop_data);
         let partitions = mapping_per_slot(&[("A", vec![None]), ("B", vec![None, None])]);
 
-        let rel = compute_rel_loop_scores_per_element(&results, &partitions);
+        let rel = compute_rel_loop_scores(&results, &partitions);
         let a = rel.get("A").unwrap();
         let b = rel.get("B").unwrap();
-        // A stays a single-slot series normalized against itself only.
-        assert_eq!(
-            a.len(),
-            1,
-            "a None-partition scalar loop keeps stride 1 (no broadcast into \
-             unrelated None loops' slots); got {a:?}"
-        );
+        assert_eq!(a.len(), 1, "a scalar loop has exactly one series");
         assert!((a[0] - 1.0).abs() < 1e-12, "got {}", a[0]);
-        // B's slots normalize against B alone (each slot its own bucket).
         assert_eq!(b.len(), n_slots);
         assert!((b[0] - 1.0).abs() < 1e-12, "got {}", b[0]);
         assert!((b[1] - 1.0).abs() < 1e-12, "got {}", b[1]);
     }
 
-    /// Per-element variant: two A2A loops over an element-wise-coupled
-    /// dimension (every slot in partition 0), each with 3 element slots.
-    /// At every element k both loops' slot k lands in bucket `(0, k)`, so
-    /// the sum of absolute rel-scores at element k must equal 1.0 (non-zero
-    /// elements) or 0.0 (zero-denominator elements) independently -- the
-    /// scalar path collapses to slot 0 and would sum to 1.0 only for
-    /// element 0.
+    /// The headline rule: every `(loop, slot)` of a partition shares ONE
+    /// denominator.  A coupled A2A loop (both slots in partition 0) and a
+    /// scalar loop in the same partition: at each step the total is
+    /// `|A[0]| + |A[1]| + |S|`, the scalar loop has exactly one series, and
+    /// the three shares sum to 1.  Grouping by `(partition, slot)` instead
+    /// would give A[0] a denominator of `|A[0]| + |S|` and A[1] one of
+    /// `|A[1]| + |S|`, each missing a member, and would hand the scalar loop
+    /// two different series.
     #[test]
-    fn per_element_helper_normalizes_within_each_slot() {
-        let n_slots: usize = 3;
-        let step_count: usize = 4;
-        // Two A2A loops with distinct per-element magnitudes so each
-        // element has a meaningful partition split.
-        //   A: [1, 3,  5, 2, ...] per element 0, 1, 2, ...
-        //   B: [3, 1, 15, 6, ...] per element 0, 1, 2, ...
-        // Constructing by steps * elements and writing directly into
-        // a Results layout avoids coupling to the rest of the engine.
-        let mut data = vec![0.0_f64; step_count * (2 * n_slots + 1)];
-        let step_size = 2 * n_slots + 1;
-        let a_off = 1;
-        let b_off = 1 + n_slots;
-        for step in 0..step_count {
-            let row = &mut data[step * step_size..(step + 1) * step_size];
-            row[0] = step as f64; // time
-            for k in 0..n_slots {
-                row[a_off + k] = ((step + 1) * (k + 1)) as f64;
-                row[b_off + k] = ((step + 1) * (k + 2)) as f64;
-            }
+    fn arrayed_slots_and_scalar_loops_share_one_partition_denominator() {
+        let n_slots: usize = 2;
+        // step 0: A = [3, 6], S = 1  -> total 10
+        // step 1: A = [1, 4], S = -5 -> total 10
+        let loop_data = vec![
+            vec![vec![3.0, 6.0], vec![1.0, 4.0]],
+            vec![vec![1.0], vec![-5.0]],
+        ];
+        let results = make_arrayed_results(&["A", "S"], &[n_slots, 1], &loop_data);
+        let partitions = mapping_per_slot(&[("A", vec![Some(0); n_slots]), ("S", vec![Some(0)])]);
+
+        let rel = compute_rel_loop_scores(&results, &partitions);
+        let a = rel.get("A").unwrap();
+        let s = rel.get("S").unwrap();
+        assert_eq!(a.len(), 2 * n_slots);
+        assert_eq!(s.len(), 2, "a scalar loop has one series, step_count long");
+
+        let at = |step: usize, k: usize| step * n_slots + k;
+        assert!((a[at(0, 0)] - 0.3).abs() < 1e-12, "got {}", a[at(0, 0)]);
+        assert!((a[at(0, 1)] - 0.6).abs() < 1e-12, "got {}", a[at(0, 1)]);
+        assert!((s[0] - 0.1).abs() < 1e-12, "got {}", s[0]);
+        assert!((a[at(1, 0)] - 0.1).abs() < 1e-12, "got {}", a[at(1, 0)]);
+        assert!((a[at(1, 1)] - 0.4).abs() < 1e-12, "got {}", a[at(1, 1)]);
+        assert!((s[1] - (-0.5)).abs() < 1e-12, "got {}", s[1]);
+    }
+
+    /// Two arrayed loops of different widths in one partition: all five
+    /// slots share the denominator.  A slot index means nothing across
+    /// loops here -- A's slot 2 has no counterpart in B and still competes
+    /// with every member.
+    #[test]
+    fn arrayed_loops_of_different_widths_share_a_partition() {
+        // One step: A = [1, 2, 3] (3 slots), B = [4, 10] (2 slots); total 20.
+        let loop_data = vec![vec![vec![1.0, 2.0, 3.0]], vec![vec![4.0, 10.0]]];
+        let results = make_arrayed_results(&["A", "B"], &[3, 2], &loop_data);
+        let partitions = mapping_per_slot(&[("A", vec![Some(0); 3]), ("B", vec![Some(0); 2])]);
+
+        let rel = compute_rel_loop_scores(&results, &partitions);
+        let a = rel.get("A").unwrap();
+        let b = rel.get("B").unwrap();
+        assert_eq!(a.len(), 3);
+        assert_eq!(b.len(), 2);
+        for (got, expected) in a.iter().zip([0.05, 0.10, 0.15]) {
+            assert!(
+                (got - expected).abs() < 1e-12,
+                "got {got}, expected {expected}"
+            );
         }
-        let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
-        offsets.insert(Ident::new("time"), 0);
-        offsets.insert(loop_score_ident("A"), a_off);
-        offsets.insert(loop_score_ident("B"), b_off);
-
-        let sim_specs = crate::datamodel::SimSpecs {
-            start: 0.0,
-            stop: (step_count - 1) as f64,
-            dt: crate::datamodel::Dt::Dt(1.0),
-            save_step: None,
-            sim_method: crate::datamodel::SimMethod::Euler,
-            time_units: None,
-        };
-        let results = Results {
-            offsets,
-            data: data.into_boxed_slice(),
-            step_size,
-            step_count,
-            specs: crate::results::Specs::from(&sim_specs),
-            is_vensim: false,
-        };
-
-        // Both loops coupled: every slot in partition 0.
-        let partitions =
-            mapping_per_slot(&[("A", vec![Some(0); n_slots]), ("B", vec![Some(0); n_slots])]);
-
-        let rel = compute_rel_loop_scores_per_element(&results, &partitions);
-        let a = rel.get("A").expect("A must have a series");
-        let b = rel.get("B").expect("B must have a series");
-        assert_eq!(a.len(), step_count * n_slots);
-        assert_eq!(b.len(), step_count * n_slots);
-
-        for step in 0..step_count {
-            for k in 0..n_slots {
-                let idx = step * n_slots + k;
-                let sum = a[idx].abs() + b[idx].abs();
-                // Magnitudes per element are finite and non-zero here,
-                // so the sum of absolute rel-scores must be 1.0 with
-                // full float precision.
-                assert!(
-                    (sum - 1.0).abs() < 1e-12,
-                    "step {step} elem {k}: |a|+|b| = {sum}, not 1.0"
-                );
-            }
+        for (got, expected) in b.iter().zip([0.20, 0.50]) {
+            assert!(
+                (got - expected).abs() < 1e-12,
+                "got {got}, expected {expected}"
+            );
         }
     }
 
-    /// Per-element variant, the headline GH #487 case: two A2A loops over
-    /// element-wise-*uncoupled* dimensions -- each slot of each loop is in
-    /// its own partition, and no slot of A shares a partition with any slot
-    /// of B.  Each loop's slot k therefore normalizes against itself only,
-    /// so every rel score is ±1.0 -- the two loops do NOT cross-normalize
-    /// even though `compute_rel_loop_scores`'s slot-0-pooled view used to
-    /// (pre-fix) lump them when both had `None` partitions.
+    /// The GH #487 case: two A2A loops over element-wise-*uncoupled*
+    /// dimensions -- each slot of each loop is in its own partition, and no
+    /// slot of A shares a partition with any slot of B.  Each slot
+    /// therefore normalizes against itself only, so every rel score is
+    /// ±1.0 -- the two loops do NOT cross-normalize.
     #[test]
-    fn per_element_uncoupled_a2a_loops_do_not_cross_normalize() {
+    fn uncoupled_a2a_slots_self_normalize() {
         let step_count: usize = 3;
-        // A has 2 slots, B has 3 slots; A's slots are partitions 0,1 and
-        // B's slots are partitions 2,3,4 -- all distinct, none shared.
-        // Layout: time | A slot0 | A slot1 | B slot0..2
-        let step_size = 1 + 2 + 3;
-        let a_off = 1;
-        let b_off = 3;
-        let mut data = vec![0.0_f64; step_count * step_size];
-        for step in 0..step_count {
-            let row = &mut data[step * step_size..(step + 1) * step_size];
-            row[0] = step as f64;
-            // Distinct, non-zero, per-step-varying magnitudes.
-            for k in 0..2 {
-                row[a_off + k] = ((step + 2) * (k + 1)) as f64;
-            }
-            for k in 0..3 {
-                row[b_off + k] = -(((step + 3) * (k + 1)) as f64);
-            }
-        }
-        let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
-        offsets.insert(Ident::new("time"), 0);
-        offsets.insert(loop_score_ident("A"), a_off);
-        offsets.insert(loop_score_ident("B"), b_off);
-        let sim_specs = crate::datamodel::SimSpecs {
-            start: 0.0,
-            stop: (step_count - 1) as f64,
-            dt: crate::datamodel::Dt::Dt(1.0),
-            save_step: None,
-            sim_method: crate::datamodel::SimMethod::Euler,
-            time_units: None,
-        };
-        let results = Results {
-            offsets,
-            data: data.into_boxed_slice(),
-            step_size,
-            step_count,
-            specs: crate::results::Specs::from(&sim_specs),
-            is_vensim: false,
-        };
-
+        // A has 2 slots (partitions 0, 1), B has 3 slots (partitions 2, 3,
+        // 4); distinct, non-zero, per-step-varying magnitudes.
+        let a_data: Vec<Vec<f64>> = (0..step_count)
+            .map(|step| (0..2).map(|k| ((step + 2) * (k + 1)) as f64).collect())
+            .collect();
+        let b_data: Vec<Vec<f64>> = (0..step_count)
+            .map(|step| (0..3).map(|k| -(((step + 3) * (k + 1)) as f64)).collect())
+            .collect();
+        let results = make_arrayed_results(&["A", "B"], &[2, 3], &[a_data, b_data]);
         let partitions = mapping_per_slot(&[
             ("A", vec![Some(0), Some(1)]),
             ("B", vec![Some(2), Some(3), Some(4)]),
         ]);
-        let rel = compute_rel_loop_scores_per_element(&results, &partitions);
+
+        let rel = compute_rel_loop_scores(&results, &partitions);
         let a = rel.get("A").expect("A must have a series");
         let b = rel.get("B").expect("B must have a series");
         assert_eq!(a.len(), step_count * 2);
         assert_eq!(b.len(), step_count * 3);
-        // Every slot of every loop normalizes against itself only -> ±1.0.
         for &v in a.iter().chain(b.iter()) {
             assert!(
                 (v.abs() - 1.0).abs() < 1e-12,
@@ -1943,83 +1407,41 @@ mod tests {
         }
     }
 
-    /// Mixed partition: one scalar loop and one A2A loop.  The scalar
-    /// loop's single slot broadcasts into every element of the
-    /// partition's max-slots denominator -- this matches the pre-PR
-    /// compile-time emitter, which expanded a scalar loop_score
-    /// reference across the arrayed rel_loop_score target.
+    /// The discovery path's inputs -- `(time, score)` pairs per loop with a
+    /// per-loop group -- normalize through the same two functions the
+    /// exhaustive owner uses, so feeding the same numbers to both yields the
+    /// same relative series.  This is the parity the two surfaces rely on.
     #[test]
-    fn per_element_helper_broadcasts_scalar_across_elements() {
-        let n_slots: usize = 2;
-        let step_count: usize = 2;
-        // Layout: time | A (scalar, 1 slot) | B (A2A, 2 slots)
-        let step_size = 1 + 1 + n_slots;
-        let a_off = 1;
-        let b_off = 2;
-        let mut data = vec![0.0_f64; step_count * step_size];
-        // A[t=0] = 2, B[t=0] = [3, 6];   denominators = [5, 8]
-        // A[t=1] = 1, B[t=1] = [1, 4];   denominators = [2, 5]
-        let a_vals = [2.0_f64, 1.0];
-        let b_vals = [[3.0_f64, 6.0], [1.0, 4.0]];
-        for step in 0..step_count {
-            let row = &mut data[step * step_size..(step + 1) * step_size];
-            row[0] = step as f64;
-            row[a_off] = a_vals[step];
-            row[b_off..b_off + n_slots].copy_from_slice(&b_vals[step][..n_slots]);
+    fn discovery_style_series_normalize_through_the_same_functions() {
+        let scores_a: Vec<(f64, f64)> = vec![(0.0, 1.0), (1.0, -4.0), (2.0, 0.0)];
+        let scores_b: Vec<(f64, f64)> = vec![(0.0, 3.0), (1.0, 4.0), (2.0, 0.0)];
+        let groups = [
+            NormGroup::for_member(Some(0), 0),
+            NormGroup::for_member(Some(0), 1),
+        ];
+        fn score(pair: &(f64, f64)) -> f64 {
+            pair.1
         }
-        let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
-        offsets.insert(Ident::new("time"), 0);
-        offsets.insert(loop_score_ident("A"), a_off);
-        offsets.insert(loop_score_ident("B"), b_off);
+        let totals = group_totals(
+            [
+                (groups[0], scores_a.iter().map(score)),
+                (groups[1], scores_b.iter().map(score)),
+            ],
+            3,
+        );
+        let rel_a = relative_series(scores_a.iter().map(score), &totals[&groups[0]]);
+        let rel_b = relative_series(scores_b.iter().map(score), &totals[&groups[1]]);
 
-        let sim_specs = crate::datamodel::SimSpecs {
-            start: 0.0,
-            stop: (step_count - 1) as f64,
-            dt: crate::datamodel::Dt::Dt(1.0),
-            save_step: None,
-            sim_method: crate::datamodel::SimMethod::Euler,
-            time_units: None,
-        };
-        let results = Results {
-            offsets,
-            data: data.into_boxed_slice(),
-            step_size,
-            step_count,
-            specs: crate::results::Specs::from(&sim_specs),
-            is_vensim: false,
-        };
-
-        // A is scalar (one slot in partition 0); B is A2A coupled (both
-        // slots in partition 0).  A broadcasts its single value into both
-        // of B's slots, so A's series is padded to B's stride.
-        let partitions = mapping_per_slot(&[("A", vec![Some(0)]), ("B", vec![Some(0), Some(0)])]);
-
-        let rel = compute_rel_loop_scores_per_element(&results, &partitions);
-        let a = rel.get("A").unwrap();
-        let b = rel.get("B").unwrap();
-        assert_eq!(a.len(), step_count * n_slots);
-        assert_eq!(b.len(), step_count * n_slots);
-
-        let at = |step: usize, k: usize| step * n_slots + k;
-
-        // Element 0: denom t0 = |2| + |3| = 5; denom t1 = |1| + |1| = 2.
-        assert!((a[at(0, 0)] - (2.0 / 5.0)).abs() < 1e-12);
-        assert!((b[at(0, 0)] - (3.0 / 5.0)).abs() < 1e-12);
-        assert!((a[at(1, 0)] - (1.0 / 2.0)).abs() < 1e-12);
-        assert!((b[at(1, 0)] - (1.0 / 2.0)).abs() < 1e-12);
-
-        // Element 1: scalar A broadcasts its slot-0 value.  denom t0 =
-        // |2| + |6| = 8; denom t1 = |1| + |4| = 5.  This is the
-        // property that the scalar-only helpers cannot express.
-        assert!((a[at(0, 1)] - (2.0 / 8.0)).abs() < 1e-12);
-        assert!((b[at(0, 1)] - (6.0 / 8.0)).abs() < 1e-12);
-        assert!((a[at(1, 1)] - (1.0 / 5.0)).abs() < 1e-12);
-        assert!((b[at(1, 1)] - (4.0 / 5.0)).abs() < 1e-12);
+        let results = make_results_for_loops(&[("A", &[1.0, -4.0, 0.0]), ("B", &[3.0, 4.0, 0.0])]);
+        let owner = compute_rel_loop_scores(&results, &mapping(&[("A", Some(0)), ("B", Some(0))]));
+        assert_eq!(&rel_a, owner.get("A").unwrap());
+        assert_eq!(&rel_b, owner.get("B").unwrap());
+        assert_eq!(rel_a, vec![0.25, -0.5, 0.0]);
+        assert_eq!(rel_b, vec![0.75, 0.5, 0.0]);
     }
 
-    /// `aggregate_per_element_argmax_abs`: pure-arrayed sanity check.
-    /// Single arrayed loop with 3 elements, stride==n; output should
-    /// be argmax-abs across the 3 elements at each step.
+    /// `argmax_abs_by_step` on a 3-slot series: the slot with the largest
+    /// magnitude wins each step, sign preserved.
     #[test]
     fn aggregate_pure_arrayed_argmax_abs() {
         let mut per_elem = HashMap::new();
@@ -2027,87 +1449,30 @@ mod tests {
         //   step 0: [0.1,  0.5, -0.2]  -> argmax-abs picks 0.5
         //   step 1: [0.3, -0.4, 0.0]   -> argmax-abs picks -0.4
         per_elem.insert("L".to_string(), vec![0.1, 0.5, -0.2, 0.3, -0.4, 0.0]);
-        let mut n_slots = HashMap::new();
-        n_slots.insert("L".to_string(), 3);
 
-        let out = aggregate_per_element_argmax_abs(&per_elem, &n_slots, 2);
+        let out = aggregate_per_element_argmax_abs(&per_elem, 2);
         let agg = out.get("L").expect("L must have aggregate");
         assert_eq!(agg, &vec![0.5, -0.4]);
     }
 
-    /// `aggregate_per_element_argmax_abs`: scalar in mixed partition.
-    /// The helper input has stride=3 (partition max) but n=1 for the
-    /// scalar loop.  Output should have length step_count, with each
-    /// value taken from the loop's own slot 0 (canonical scalar view).
-    /// Pre-fix the layout used the wrong stride and produced a series
-    /// of length step_count*3 with misaligned values.
+    /// A scalar loop's series (stride 1) passes through unchanged.
     #[test]
-    fn aggregate_scalar_in_mixed_partition_returns_step_count_values() {
+    fn aggregate_scalar_series_is_identity() {
         let mut per_elem = HashMap::new();
-        // Scalar A in mixed partition (stride=3); 4 steps × 3 elements.
-        // Each step has the same value at index 0 (slot 0 broadcast),
-        // but indices 1,2 carry the per-element rel-scores from
-        // distinct partition denominators.
-        //   step 0: [0.10, 0.20, 0.30]
-        //   step 1: [0.15, 0.25, 0.35]
-        //   step 2: [0.12, 0.22, 0.32]
-        //   step 3: [0.18, 0.28, 0.38]
-        per_elem.insert(
-            "A".to_string(),
-            vec![
-                0.10, 0.20, 0.30, // step 0
-                0.15, 0.25, 0.35, // step 1
-                0.12, 0.22, 0.32, // step 2
-                0.18, 0.28, 0.38, // step 3
-            ],
-        );
-        let mut n_slots = HashMap::new();
-        n_slots.insert("A".to_string(), 1);
-
-        let out = aggregate_per_element_argmax_abs(&per_elem, &n_slots, 4);
-        let agg = out.get("A").expect("A must have aggregate");
-        // Length must match step_count, NOT step_count*stride.  Each
-        // value is the scalar's own slot 0 at that step.
-        assert_eq!(agg.len(), 4);
-        assert_eq!(agg, &vec![0.10, 0.15, 0.12, 0.18]);
+        per_elem.insert("A".to_string(), vec![0.10, 0.15, -0.12, 0.18]);
+        let out = aggregate_per_element_argmax_abs(&per_elem, 4);
+        assert_eq!(out.get("A").unwrap(), &vec![0.10, 0.15, -0.12, 0.18]);
     }
 
-    /// `aggregate_per_element_argmax_abs`: the recovered stride and the
-    /// mapped `n_slots` need not agree.  Post-Phase-2
-    /// `compute_rel_loop_scores_per_element` lays an arrayed loop out at
-    /// `stride == n_slots`, but the aggregator is defensive: if a caller
-    /// supplies a series whose recovered stride (5 here) exceeds the
-    /// loop's mapped `n_slots` (2) -- e.g. a partially-snapshotted
-    /// `n_slots_by_loop` -- the argmax-abs iterates only the mapped 2
-    /// slots, never the trailing padding.
+    /// Ties (two elements with equal |rel|) are broken deterministically:
+    /// the lowest slot index wins.
     #[test]
-    fn aggregate_arrayed_in_mixed_partition_iterates_own_slots_only() {
-        let mut per_elem = HashMap::new();
-        // 2 steps × 5-stride.  Loop is mapped to n=2 own slots.
-        // Positions 2..5 are stale/padding and must NOT be included in
-        // argmax-abs.  To prove the iterator stops at n=2, place a trap
-        // value (1e6) at position 4 -- if the helper ever iterates
-        // 0..stride it would pick this and we'd notice.
-        per_elem.insert(
-            "B".to_string(),
-            vec![
-                0.1, -0.3, 0.0, 0.0, 1.0e6, // step 0; trap at index 4
-                0.4, 0.2, 0.0, 0.0, 1.0e6, // step 1; trap at index 4
-            ],
-        );
-        let mut n_slots = HashMap::new();
-        n_slots.insert("B".to_string(), 2);
-
-        let out = aggregate_per_element_argmax_abs(&per_elem, &n_slots, 2);
-        let agg = out.get("B").expect("B must have aggregate");
-        assert_eq!(agg.len(), 2);
-        // step 0: argmax-abs over [0.1, -0.3] = -0.3 (sign preserved).
-        // step 1: argmax-abs over [0.4,  0.2] = 0.4.
-        assert_eq!(agg, &vec![-0.3, 0.4]);
+    fn argmax_abs_ties_broken_by_lowest_index() {
+        assert_eq!(argmax_abs_by_step(&[0.4, -0.4], 1), vec![0.4]);
     }
 
-    /// Non-finite values (NaN, ±Inf) get mapped to 0.0 in the output,
-    /// matching the existing layout filter behavior.
+    /// Non-finite values (NaN, ±Inf) map to 0.0 in the output; a NaN never
+    /// displaces a finite candidate.
     #[test]
     fn aggregate_filters_non_finite() {
         let mut per_elem = HashMap::new();
@@ -2115,567 +1480,179 @@ mod tests {
             "L".to_string(),
             vec![f64::NAN, 0.5, f64::INFINITY, -f64::INFINITY],
         );
-        let mut n_slots = HashMap::new();
-        n_slots.insert("L".to_string(), 2);
 
-        let out = aggregate_per_element_argmax_abs(&per_elem, &n_slots, 2);
+        let out = aggregate_per_element_argmax_abs(&per_elem, 2);
         let agg = out.get("L").expect("L must have aggregate");
-        // step 0: [NaN, 0.5].  argmax-abs comparison with NaN is false,
-        //   so 0.5 wins.  Output is finite (0.5).
-        // step 1: [Inf, -Inf].  Both non-finite; output 0.0.
-        assert_eq!(agg.len(), 2);
-        assert_eq!(agg[0], 0.5);
-        assert_eq!(agg[1], 0.0);
+        // step 0: [NaN, 0.5] -> 0.5 (NaN compares false).
+        // step 1: [Inf, -Inf] -> both non-finite -> 0.0.
+        assert_eq!(agg, &vec![0.5, 0.0]);
     }
 
-    /// An empty per-loop series yields an empty aggregate (matches
-    /// the existing layout's "no series" branch).
+    /// An empty per-loop series yields an empty aggregate (the layout's
+    /// "no series" branch).
     #[test]
     fn aggregate_empty_series_yields_empty_output() {
         let mut per_elem = HashMap::new();
         per_elem.insert("L".to_string(), Vec::new());
-        let mut n_slots = HashMap::new();
-        n_slots.insert("L".to_string(), 1);
-
-        let out = aggregate_per_element_argmax_abs(&per_elem, &n_slots, 5);
-        let agg = out.get("L").expect("L must have aggregate (even if empty)");
-        assert!(agg.is_empty());
+        let out = aggregate_per_element_argmax_abs(&per_elem, 5);
+        assert!(out.get("L").unwrap().is_empty());
     }
 
-    /// Mismatched-dim arrayed partition: loop A has n=2 and loop B has
-    /// n=3 in the same partition.  At partition element k=2, A has no
-    /// own element; the helper must NOT OOB-read past A's allocated
-    /// slots into B's data, and A's series stays its own length (n=2)
-    /// rather than being padded to B's.
-    ///
-    /// We pick B's slot 0 as a sentinel (999.0) so that an OOB read of
-    /// `row[off_A + 2]` (which equals `row[off_B + 0]` in our layout)
-    /// pulls this clearly-wrong value -- the test fails loudly rather
-    /// than passing by accident on whatever uninitialised data the
-    /// allocator happens to return.
-    #[test]
-    fn per_element_helper_handles_arrayed_with_smaller_n() {
-        // Layout: time | A slots 0..2 | B slots 0..3
-        // step 0:        | 1.0  2.0   | 999.0  20.0  30.0
-        let loop_data = vec![vec![vec![1.0, 2.0]], vec![vec![999.0, 20.0, 30.0]]];
-        let results = make_arrayed_results(&["A", "B"], &[2, 3], &loop_data);
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
 
-        // Both coupled: A's two slots and B's three slots all in partition 0.
-        let partitions = mapping_per_slot(&[
-            ("A", vec![Some(0), Some(0)]),
-            ("B", vec![Some(0), Some(0), Some(0)]),
-        ]);
+        /// `compute_rel_loop_scores` must match the naive per-member
+        /// reference for arbitrary per-slot partition vectors -- coupled
+        /// (all entries the same `Some(p)`), uncoupled (distinct `Some(p)`
+        /// per slot), `None`-laced, and scalar -- mixed across loops of
+        /// different widths so slots of different loops really do share
+        /// partitions.  The one-pass accumulation and the scan-every-member
+        /// reference are computed independently, so any divergence in the
+        /// grouping, the Solo rule, or the SAFEDIV-0 handling shows up here.
+        ///
+        /// Per-loop `spec[i] = (kind, len, base, vals)` builds the
+        /// partition vector:
+        ///   - kind 0: scalar `[Some(base)]`.
+        ///   - kind 1: scalar `[None]`.
+        ///   - kind 2: coupled arrayed `[Some(base); len]`.
+        ///   - kind 3: uncoupled arrayed `[Some(base), Some(base+1), ...]`
+        ///     (distinct consecutive partitions).
+        ///   - kind 4: `None`-laced arrayed -- `vals[k]` chooses
+        ///     `Some(vals[k])` or `None` per slot: the vector
+        ///     `partition_for_loop` returns for an A2A loop some of whose
+        ///     slots resolve to no parent-level stock partition (a slot
+        ///     whose only state is module-internal), the rest to
+        ///     arbitrary partitions.
+        /// Partition indices stay in a small pool (so coupling across
+        /// *different* loops actually happens); lengths stay tiny so 128
+        /// cases run in well under a second on a debug build.
+        #[test]
+        fn rel_loop_scores_match_naive_reference(
+            specs in prop::collection::vec(
+                (
+                    0usize..=4,                            // kind
+                    1usize..=3,                            // arrayed length
+                    0usize..=3,                            // base partition
+                    prop::collection::vec(0usize..=4, 3), // per-slot None/Some chooser (>=4 => None)
+                ),
+                1..=4,
+            ),
+            num_steps in 1usize..=4,
+            // Flat pool of loop_score samples; sliced per (loop, slot, step).
+            raw_vals in prop::collection::vec(-50.0_f64..=50.0_f64, 1..=300),
+        ) {
+            let n = specs.len();
+            let loop_ids: Vec<String> = (0..n).map(|i| format!("L{i}")).collect();
 
-        let rel = compute_rel_loop_scores_per_element(&results, &partitions);
-        let a = rel.get("A").expect("A must have a series");
-        let b = rel.get("B").expect("B must have a series");
-        // Each loop's series has its own slot count -- A's is 2, not B's 3.
-        assert_eq!(a.len(), 2);
-        assert_eq!(b.len(), 3);
+            // Materialize each loop's per-slot partition vector.
+            let slots: Vec<Vec<Option<usize>>> = specs
+                .iter()
+                .map(|(kind, len, base, vals)| match kind {
+                    0 => vec![Some(*base)],
+                    1 => vec![None],
+                    2 => vec![Some(*base); *len],
+                    3 => (0..*len).map(|k| Some(*base + k)).collect(),
+                    _ => (0..*len)
+                        .map(|k| {
+                            let v = vals[k % vals.len()];
+                            if v >= 4 { None } else { Some(v) }
+                        })
+                        .collect(),
+                })
+                .collect();
+            let n_slots: Vec<usize> = slots.iter().map(|v| v.len().max(1)).collect();
 
-        // k=0,1: bucket (0, k) = {A.slotk, B.slotk}.
-        //   denom_0 = |1| + |999| = 1000;  a[0] = 1/1000, b[0] = 999/1000.
-        //   denom_1 = |2| + |20|  = 22;    a[1] = 2/22,   b[1] = 20/22.
-        assert!((a[0] - 1.0 / 1000.0).abs() < 1e-12);
-        assert!((b[0] - 999.0 / 1000.0).abs() < 1e-12);
-        assert!((a[1] - 2.0 / 22.0).abs() < 1e-12);
-        assert!((b[1] - 20.0 / 22.0).abs() < 1e-12);
-
-        // k=2: bucket (0, 2) = {B.slot2} only -- A has no slot 2, so it's
-        // not in any slot-2 bucket and doesn't OOB-read into B's data.
-        //   denom_2 = |B[2]| = 30 -> b[2] = 30/30 = 1.0.
-        assert!(
-            (b[2] - 1.0).abs() < 1e-12,
-            "B's slot 2 should normalise against itself only (A has no slot 2); got {}",
-            b[2]
-        );
-    }
-
-    /// Build a `Results` with each loop occupying a configurable number of
-    /// slots.  Layout: `time | loop0 slot 0..n0 | loop1 slot 0..n1 | ...`.
-    /// `loop_data[i][step][slot]` is the value at (step, slot) for loop i.
-    fn make_arrayed_results(
-        loop_ids: &[&str],
-        slots_per_loop: &[usize],
-        loop_data: &[Vec<Vec<f64>>],
-    ) -> Results {
-        assert_eq!(loop_ids.len(), slots_per_loop.len());
-        assert_eq!(loop_ids.len(), loop_data.len());
-        let step_count = loop_data[0].len();
-        for d in loop_data.iter() {
-            assert_eq!(d.len(), step_count);
-        }
-        let total_slots: usize = slots_per_loop.iter().sum();
-        let step_size = 1 + total_slots;
-        let mut data = vec![0.0_f64; step_count * step_size];
-        let mut offsets: HashMap<Ident<Canonical>, usize> = HashMap::new();
-        offsets.insert(Ident::new("time"), 0);
-        let mut cursor = 1;
-        let mut loop_offsets = Vec::with_capacity(loop_ids.len());
-        for (i, id) in loop_ids.iter().enumerate() {
-            offsets.insert(loop_score_ident(id), cursor);
-            loop_offsets.push(cursor);
-            cursor += slots_per_loop[i];
-        }
-        for step in 0..step_count {
-            let row = &mut data[step * step_size..(step + 1) * step_size];
-            row[0] = step as f64;
-            for (i, &off) in loop_offsets.iter().enumerate() {
-                let slots = &loop_data[i][step];
-                assert_eq!(slots.len(), slots_per_loop[i]);
-                for (slot, &v) in slots.iter().enumerate() {
-                    row[off + slot] = v;
+            // Build per-(loop, step, slot) loop_score data from the flat
+            // pool, advancing a single cursor so successive slots get
+            // distinct samples.  `series[i][step][slot]`.
+            let mut cursor = 0usize;
+            let mut series: Vec<Vec<Vec<f64>>> = Vec::with_capacity(n);
+            for &ns in &n_slots {
+                let mut per_step = Vec::with_capacity(num_steps);
+                for _ in 0..num_steps {
+                    let mut per_slot = Vec::with_capacity(ns);
+                    for _ in 0..ns {
+                        per_slot.push(raw_vals[cursor % raw_vals.len()]);
+                        cursor += 1;
+                    }
+                    per_step.push(per_slot);
                 }
+                series.push(per_step);
             }
-        }
-        let sim_specs = SimSpecs {
-            start: 0.0,
-            stop: (step_count.saturating_sub(1)) as f64,
-            dt: Dt::Dt(1.0),
-            save_step: None,
-            sim_method: SimMethod::Euler,
-            time_units: None,
-        };
-        Results {
-            offsets,
-            data: data.into_boxed_slice(),
-            step_size,
-            step_count,
-            specs: Specs::from(&sim_specs),
-            is_vensim: false,
-        }
-    }
 
-    /// Per-element streaming partition denominator must read the queried
-    /// element from each member loop, NOT slot 0.  Two A2A loops with
-    /// distinct per-slot values: the denominator at element 1 must equal
-    /// `|loop0[t, 1]| + |loop1[t, 1]|`, which differs from element 0's.
-    #[test]
-    fn per_element_partition_denominator_reads_queried_slot() {
-        // 2 loops, 3 slots each, 2 timesteps.
-        // loop0[step][slot] and loop1[step][slot] chosen so element-1 values
-        // differ visibly from element-0 values.
-        let loop_data = vec![
-            // loop0: [step][slot]
-            vec![
-                vec![1.0, 7.0, 2.0], // step 0: slots 0,1,2
-                vec![2.0, 9.0, 3.0], // step 1
-            ],
-            // loop1
-            vec![vec![4.0, 5.0, 6.0], vec![8.0, 11.0, 12.0]],
-        ];
-        let results = make_arrayed_results(&["A", "B"], &[3, 3], &loop_data);
-
-        let denom_e0 = compute_partition_denominator_for_element(
-            &results,
-            [("A", 3_usize), ("B", 3_usize)],
-            0,
-        );
-        let denom_e1 = compute_partition_denominator_for_element(
-            &results,
-            [("A", 3_usize), ("B", 3_usize)],
-            1,
-        );
-
-        // Element 0: |1|+|4|=5, |2|+|8|=10.
-        assert_eq!(denom_e0, vec![5.0, 10.0]);
-        // Element 1: |7|+|5|=12, |9|+|11|=20.
-        assert_eq!(denom_e1, vec![12.0, 20.0]);
-        // Sanity: element 1 is genuinely different from element 0.
-        assert_ne!(denom_e0, denom_e1);
-    }
-
-    /// Scalar loops in mixed partitions must broadcast slot 0 regardless
-    /// of the queried element_index.  This matches the pre-PR compile-time
-    /// emitter that expanded a scalar loop_score reference across an
-    /// arrayed rel_loop_score target.
-    #[test]
-    fn per_element_partition_denominator_broadcasts_scalar() {
-        // Loop A is scalar (1 slot); loop B is A2A (3 slots).
-        let loop_data = vec![
-            vec![vec![3.0], vec![5.0]],                     // A scalar
-            vec![vec![1.0, 7.0, 2.0], vec![2.0, 9.0, 3.0]], // B arrayed
-        ];
-        let results = make_arrayed_results(&["A", "B"], &[1, 3], &loop_data);
-
-        // Element 0 query: A contributes |3|=3 (its only slot), B contributes |1|=1.
-        let denom_e0 = compute_partition_denominator_for_element(
-            &results,
-            [("A", 1_usize), ("B", 3_usize)],
-            0,
-        );
-        assert_eq!(denom_e0, vec![3.0 + 1.0, 5.0 + 2.0]);
-
-        // Element 1 query: A still contributes |3|=3 (broadcast), B contributes |7|=7.
-        let denom_e1 = compute_partition_denominator_for_element(
-            &results,
-            [("A", 1_usize), ("B", 3_usize)],
-            1,
-        );
-        assert_eq!(denom_e1, vec![3.0 + 7.0, 5.0 + 9.0]);
-    }
-
-    /// `compute_rel_loop_score_for_element` paired with
-    /// `compute_partition_denominator_for_element` must reproduce the
-    /// per-element view that the full-sweep
-    /// `compute_rel_loop_scores_per_element` produces.  Bit-for-bit
-    /// agreement is the contract the libsimlin per-partition cache
-    /// relies on -- the streaming pair is meant to be a strictly cheaper
-    /// path to the same numbers, not an approximation.
-    #[test]
-    fn per_element_streaming_matches_full_sweep() {
-        let n_slots: usize = 3;
-        let step_count: usize = 4;
-        // Reuse the fixture from `per_element_helper_normalizes_within_each_slot`:
-        //   A: row[a_off + k] = (step+1) * (k+1)
-        //   B: row[b_off + k] = (step+1) * (k+2)
-        let mut a_data = Vec::with_capacity(step_count);
-        let mut b_data = Vec::with_capacity(step_count);
-        for step in 0..step_count {
-            let a_row: Vec<f64> = (0..n_slots)
-                .map(|k| ((step + 1) * (k + 1)) as f64)
-                .collect();
-            let b_row: Vec<f64> = (0..n_slots)
-                .map(|k| ((step + 1) * (k + 2)) as f64)
-                .collect();
-            a_data.push(a_row);
-            b_data.push(b_row);
-        }
-        let results = make_arrayed_results(&["A", "B"], &[n_slots, n_slots], &[a_data, b_data]);
-
-        // Both A2A loops coupled (every slot in partition 0), so slot k of
-        // each lands in bucket (0, k) -- the streaming helper, called with
-        // both loops as members at element k, sums the same two slot-k
-        // values into the denominator.
-        let partitions =
-            mapping_per_slot(&[("A", vec![Some(0); n_slots]), ("B", vec![Some(0); n_slots])]);
-
-        let full = compute_rel_loop_scores_per_element(&results, &partitions);
-
-        for k in 0..n_slots {
-            let denom = compute_partition_denominator_for_element(
-                &results,
-                [("A", n_slots), ("B", n_slots)],
-                k,
+            let results = make_arrayed_results(
+                &loop_ids.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                &n_slots,
+                &series,
             );
-            let rel_a = compute_rel_loop_score_for_element(&results, "A", n_slots, k, &denom)
-                .expect("A must have a series");
-            let rel_b = compute_rel_loop_score_for_element(&results, "B", n_slots, k, &denom)
-                .expect("B must have a series");
+            let loop_partitions: IndexMap<String, Vec<Option<usize>>> = loop_ids
+                .iter()
+                .zip(slots.iter())
+                .map(|(id, v)| (id.clone(), v.clone()))
+                .collect();
 
-            for step in 0..step_count {
-                let full_idx = step * n_slots + k;
-                let full_a = full.get("A").unwrap()[full_idx];
-                let full_b = full.get("B").unwrap()[full_idx];
-                // Bit-for-bit: same arithmetic order, same rounding.
-                assert_eq!(
-                    rel_a[step], full_a,
-                    "loop A step {step} elem {k}: streaming {} vs full {}",
-                    rel_a[step], full_a
+            let actual = compute_rel_loop_scores(&results, &loop_partitions);
+            let expected = reference_rel_loop_scores(&loop_ids, &slots, &series, num_steps);
+
+            for (i, id) in loop_ids.iter().enumerate() {
+                let a = actual.get(id).expect("every loop has a series");
+                let e = &expected[i];
+                prop_assert_eq!(
+                    a.len(),
+                    e.len(),
+                    "loop {}: series length {} vs reference {}",
+                    id,
+                    a.len(),
+                    e.len()
                 );
-                assert_eq!(
-                    rel_b[step], full_b,
-                    "loop B step {step} elem {k}: streaming {} vs full {}",
-                    rel_b[step], full_b
-                );
-            }
-        }
-    }
-
-    /// Mixed-stride parity: for two coupled A2A loops with different
-    /// `n_slots` sharing the same per-slot partition, the streaming pair
-    /// (`compute_partition_denominator_for_element` +
-    /// `compute_rel_loop_score_for_element`) must produce the same
-    /// per-element rel-scores as the full-sweep
-    /// `compute_rel_loop_scores_per_element`.  This is the contract the
-    /// libsimlin FFI per-partition cache relies on -- the streaming
-    /// pair must be a strictly cheaper path to the same numbers.
-    ///
-    /// Each loop's full-sweep series has its own slot count (A: 3, B: 2);
-    /// at slot 2 only A is a member of bucket (0, 2), so the streaming
-    /// helper -- called with both loops as members at element 2 but B
-    /// gated out by `effective_slot(2, 2) == None` -- agrees.
-    #[test]
-    fn streaming_helpers_match_full_sweep_in_mixed_stride_partition() {
-        // A has n=3, B has n=2, both coupled (every slot in partition 0).
-        // Multi-step so we exercise more than one row; distinct-per-step
-        // values so any wrong-stride bug shows up loudly.
-        //   step 0: A = [1.0, 2.0, 5.0],   B = [10.0, 7.0]
-        //   step 1: A = [1.5, 2.5, 6.0],   B = [11.0, 8.0]
-        //   step 2: A = [2.0, 3.0, 7.0],   B = [12.0, 9.0]
-        let loop_data = vec![
-            vec![
-                vec![1.0, 2.0, 5.0],
-                vec![1.5, 2.5, 6.0],
-                vec![2.0, 3.0, 7.0],
-            ],
-            vec![vec![10.0, 7.0], vec![11.0, 8.0], vec![12.0, 9.0]],
-        ];
-        let results = make_arrayed_results(&["A", "B"], &[3, 2], &loop_data);
-
-        let partitions = mapping_per_slot(&[
-            ("A", vec![Some(0), Some(0), Some(0)]),
-            ("B", vec![Some(0), Some(0)]),
-        ]);
-
-        let full = compute_rel_loop_scores_per_element(&results, &partitions);
-        let full_a = full.get("A").unwrap();
-        let full_b = full.get("B").unwrap();
-        // A's series is 3-strided, B's is 2-strided.
-        assert_eq!(full_a.len(), results.step_count * 3);
-        assert_eq!(full_b.len(), results.step_count * 2);
-
-        // The members of bucket (0, k) for k in 0..3 are {A, B} for k<2,
-        // {A} for k==2; the streaming helper expresses this via
-        // `effective_slot(n_b, k)` returning None for B at k>=n_b.
-        for k in 0..3 {
-            let denom = compute_partition_denominator_for_element(
-                &results,
-                [("A", 3_usize), ("B", 2_usize)],
-                k,
-            );
-            let rel_a = compute_rel_loop_score_for_element(&results, "A", 3, k, &denom)
-                .expect("A must have a series");
-            for step in 0..results.step_count {
-                let full_v = full_a[step * 3 + k];
-                assert_eq!(
-                    rel_a[step], full_v,
-                    "loop A step {step} elem {k}: streaming {} vs full {}",
-                    rel_a[step], full_v
-                );
-            }
-            if k < 2 {
-                let rel_b = compute_rel_loop_score_for_element(&results, "B", 2, k, &denom)
-                    .expect("B must have a series");
-                for step in 0..results.step_count {
-                    let full_v = full_b[step * 2 + k];
-                    assert_eq!(
-                        rel_b[step], full_v,
-                        "loop B step {step} elem {k}: streaming {} vs full {}",
-                        rel_b[step], full_v
+                for (idx, (&av, &ev)) in a.iter().zip(e.iter()).enumerate() {
+                    if av.is_nan() && ev.is_nan() {
+                        continue;
+                    }
+                    // Both walk the members in ascending (loop, slot) order,
+                    // so the result is bit-identical, not merely close.
+                    prop_assert_eq!(
+                        av, ev,
+                        "loop {} flat-index {}: actual {} vs reference {}", id, idx, av, ev
                     );
                 }
-            } else {
-                // B has no slot k>=2; the streaming helper returns all-zeros
-                // for it and the full-sweep series doesn't have that index.
-                let rel_b = compute_rel_loop_score_for_element(&results, "B", 2, k, &denom)
-                    .expect("B must have a series");
-                assert!(rel_b.iter().all(|&v| v == 0.0));
+            }
+
+            // The partition identity: at every step where a group's total
+            // is finite and non-zero, the magnitudes of its members' shares
+            // sum to exactly 1.  Groups are re-derived here from the
+            // partition vectors (a Solo member is its own group).
+            let mut group_of: Vec<(NormGroup, usize, usize)> = Vec::new();
+            for (i, v) in slots.iter().enumerate() {
+                for k in 0..n_slots[i] {
+                    let g = NormGroup::for_member(v.get(k).copied().flatten(), group_of.len());
+                    group_of.push((g, i, k));
+                }
+            }
+            let mut groups: HashMap<NormGroup, Vec<(usize, usize)>> = HashMap::new();
+            for &(g, i, k) in &group_of {
+                groups.entry(g).or_default().push((i, k));
+            }
+            for members in groups.values() {
+                for step in 0..num_steps {
+                    let total: f64 = members
+                        .iter()
+                        .map(|&(i, k)| series[i][step][k].abs())
+                        .sum();
+                    if total == 0.0 {
+                        continue;
+                    }
+                    let share: f64 = members
+                        .iter()
+                        .map(|&(i, k)| actual[&loop_ids[i]][step * n_slots[i] + k].abs())
+                        .sum();
+                    prop_assert!(
+                        (share - 1.0).abs() < 1e-9,
+                        "step {}: partition shares sum to {} not 1", step, share
+                    );
+                }
             }
         }
-    }
-
-    /// Streaming `compute_partition_denominator_for_element` must skip
-    /// arrayed members at partition indices past their own n_slots,
-    /// matching the gating now applied by the full-sweep
-    /// `compute_rel_loop_scores_per_element`.  Pre-fix the streaming
-    /// helper clamped to the loop's last slot via `effective_slot`,
-    /// which silently disagreed with the full-sweep helper for any
-    /// mixed-stride partition (one arrayed loop with `n_a` slots
-    /// sharing a partition with another arrayed loop with `n_b < n_a`).
-    /// We plant a sentinel at B's last slot so a clamp would pull
-    /// it loudly into the denom; the principled "skip" semantic
-    /// excludes B entirely at element 2.
-    #[test]
-    fn streaming_partition_denominator_skips_arrayed_loops_past_own_slots() {
-        // step_count = 1.  A has n=3 with values [1, 2, 5]; B has n=2
-        // with values [10, 999.0] (sentinel at slot 1).  At partition
-        // element k=2, B has no slot -- the principled denom is
-        // |A[2]| = 5, NOT |A[2]| + |B[1]| = 5 + 999 = 1004.
-        let loop_data = vec![vec![vec![1.0, 2.0, 5.0]], vec![vec![10.0, 999.0]]];
-        let results = make_arrayed_results(&["A", "B"], &[3, 2], &loop_data);
-
-        let denom_at_2 = compute_partition_denominator_for_element(
-            &results,
-            [("A", 3_usize), ("B", 2_usize)],
-            2,
-        );
-        assert_eq!(
-            denom_at_2,
-            vec![5.0],
-            "B has no slot at partition index 2; its sentinel must NOT \
-             pollute the denominator (skip, not clamp)"
-        );
-
-        // For sanity, k=0 and k=1 should include both members.
-        let denom_at_0 = compute_partition_denominator_for_element(
-            &results,
-            [("A", 3_usize), ("B", 2_usize)],
-            0,
-        );
-        assert_eq!(denom_at_0, vec![1.0 + 10.0]);
-        let denom_at_1 = compute_partition_denominator_for_element(
-            &results,
-            [("A", 3_usize), ("B", 2_usize)],
-            1,
-        );
-        assert_eq!(denom_at_1, vec![2.0 + 999.0]);
-    }
-
-    /// `compute_rel_loop_score_for_element` queried at an element this
-    /// loop doesn't have (n=2, queried at k=2) must return all-zeros
-    /// rather than clamping to the loop's last slot.  This matches the
-    /// full-sweep helper's "zero-fill at positions n..max_slots" rule
-    /// so any future caller that directly queries past a loop's range
-    /// gets the right answer.
-    #[test]
-    fn streaming_rel_score_returns_zeros_when_loop_has_no_own_element() {
-        // B is arrayed with n=2 and a sentinel value at slot 1.  When
-        // queried at element_index=2 it has no own element; the
-        // result must be all-zeros, not the slot-1 sentinel rel-score.
-        let loop_data = vec![vec![vec![10.0, 999.0]]];
-        let results = make_arrayed_results(&["B"], &[2], &loop_data);
-
-        // Use a denom that would produce a clearly-wrong rel-score if
-        // the helper clamped: |sentinel|/|denom| would be ~999, but
-        // the principled answer is 0.0.
-        let denom = vec![1.0_f64];
-        let rel = compute_rel_loop_score_for_element(&results, "B", 2, 2, &denom)
-            .expect("B has a series");
-        assert_eq!(
-            rel,
-            vec![0.0],
-            "queried at index 2 (past B's n=2), result must be 0 not clamped"
-        );
-    }
-
-    /// SAFEDIV-0 semantics propagate per element: a partition where every
-    /// member's queried slot is identically zero must yield 0 (not NaN)
-    /// for the rel-score, matching the scalar-helper contract.
-    #[test]
-    fn per_element_streaming_safediv_zero() {
-        // Both loops have slot 0 = 0 across all steps but slot 1 != 0;
-        // querying element 0 must yield 0 (no panic, no NaN).
-        let loop_data = vec![
-            vec![vec![0.0, 5.0], vec![0.0, 4.0]],
-            vec![vec![0.0, 3.0], vec![0.0, 2.0]],
-        ];
-        let results = make_arrayed_results(&["A", "B"], &[2, 2], &loop_data);
-
-        let denom = compute_partition_denominator_for_element(
-            &results,
-            [("A", 2_usize), ("B", 2_usize)],
-            0,
-        );
-        assert_eq!(denom, vec![0.0, 0.0]);
-
-        let rel = compute_rel_loop_score_for_element(&results, "A", 2, 0, &denom).unwrap();
-        for v in rel {
-            assert_eq!(v, 0.0, "SAFEDIV-0 must yield 0, got {v}");
-        }
-    }
-
-    /// The streaming FFI denominator (`compute_partition_denominator_for_element`)
-    /// must exclude a `NaN` summand and keep an `Inf` one, exactly like the
-    /// full-sweep helper -- this is the path libsimlin's
-    /// `simlin_analyze_get_relative_loop_score` cache drives, so the
-    /// GH #542 fix must hold there too.
-    #[test]
-    fn per_element_streaming_denominator_excludes_nan_keeps_inf() {
-        // step 0: A slot0 = NaN, B slot0 = 3  -> denom = 3 (NaN dropped).
-        // step 1: A slot0 = Inf, B slot0 = 3  -> denom = Inf (Inf kept).
-        let loop_data = vec![
-            vec![vec![f64::NAN, 7.0], vec![f64::INFINITY, 7.0]],
-            vec![vec![3.0, 1.0], vec![3.0, 1.0]],
-        ];
-        let results = make_arrayed_results(&["A", "B"], &[2, 2], &loop_data);
-
-        let denom = compute_partition_denominator_for_element(
-            &results,
-            [("A", 2_usize), ("B", 2_usize)],
-            0,
-        );
-        assert_eq!(denom[0], 3.0, "NaN summand excluded from streaming denom");
-        assert_eq!(
-            denom[1],
-            f64::INFINITY,
-            "Inf summand retained in streaming denom"
-        );
-
-        // The healthy sibling B normalizes against the NaN-free denom at
-        // step 0 (3/3 = 1) and goes to 0 against the +Inf denom at step 1.
-        let rel_b = compute_rel_loop_score_for_element(&results, "B", 2, 0, &denom).unwrap();
-        assert!(
-            (rel_b[0] - 1.0).abs() < 1e-12,
-            "healthy B not poisoned: {}",
-            rel_b[0]
-        );
-        assert_eq!(rel_b[1], 0.0, "B dominated by +Inf sibling -> 0");
-    }
-
-    /// An absent loop_score variable returns `None`, matching the
-    /// "omit absent loops" contract of the full-sweep API.
-    #[test]
-    fn per_element_streaming_absent_loop_returns_none() {
-        let results = make_arrayed_results(&["A"], &[2], &[vec![vec![1.0, 2.0], vec![3.0, 4.0]]]);
-        let denom = compute_partition_denominator_for_element(&results, [("A", 2_usize)], 0);
-        assert!(compute_rel_loop_score_for_element(&results, "missing", 2, 0, &denom).is_none());
-    }
-
-    /// Signed argmax-abs aggregator: at each step, return the signed
-    /// rel-score of the element with the largest `|rel[k, t]|`.  The
-    /// dominant element can switch between steps; the sign is preserved
-    /// from whichever element won that step.
-    #[test]
-    fn argmax_abs_picks_dominant_element_with_sign() {
-        // 2 elements, 2 steps.  loop_score chosen so element 0 dominates
-        // at step 0 and element 1 dominates at step 1, with opposite signs.
-        //   step 0: slot 0 =  5,  slot 1 = -1   -> rel = 0.5, -0.1
-        //   step 1: slot 0 =  1,  slot 1 = -8   -> rel = 0.1, -0.8
-        let loop_data = vec![vec![vec![5.0, -1.0], vec![1.0, -8.0]]];
-        let results = make_arrayed_results(&["L"], &[2], &loop_data);
-
-        // Constant denom of 10 per step per element.
-        let denoms = vec![vec![10.0_f64; 2]; 2];
-        let denom_refs: Vec<&[f64]> = denoms.iter().map(|d| d.as_slice()).collect();
-
-        let agg = compute_rel_loop_score_argmax_abs(&results, "L", 2, &denom_refs)
-            .expect("L must have a series");
-
-        // step 0: argmax-abs is slot 0 (|0.5| > |-0.1|), signed value = +0.5.
-        // step 1: argmax-abs is slot 1 (|-0.8| > |0.1|), signed value = -0.8.
-        assert_eq!(agg, vec![0.5, -0.8]);
-    }
-
-    /// Scalar (n_slots == 1) reduces to identity: the aggregator returns
-    /// the single slot's series unchanged.
-    #[test]
-    fn argmax_abs_scalar_reduces_to_identity() {
-        let loop_data = vec![vec![vec![3.0], vec![-7.0]]];
-        let results = make_arrayed_results(&["L"], &[1], &loop_data);
-        let denoms = [vec![10.0_f64, 10.0]];
-        let denom_refs: Vec<&[f64]> = denoms.iter().map(|d| d.as_slice()).collect();
-
-        let agg = compute_rel_loop_score_argmax_abs(&results, "L", 1, &denom_refs)
-            .expect("L must have a series");
-        assert_eq!(agg, vec![0.3, -0.7]);
-    }
-
-    /// Ties (two elements with equal |rel|) are broken deterministically:
-    /// the lowest slot index wins.  This matches Rust's stable
-    /// `Ord`/`max_by_key` convention for "first hit on equal".
-    #[test]
-    fn argmax_abs_ties_broken_by_lowest_index() {
-        // Both slots have equal magnitude at step 0; slot 0 has positive
-        // sign and slot 1 has negative sign.  The output must be slot 0's
-        // value (+0.4), not slot 1's.
-        let loop_data = vec![vec![vec![4.0, -4.0]]];
-        let results = make_arrayed_results(&["L"], &[2], &loop_data);
-        let denoms = [vec![10.0_f64], vec![10.0_f64]];
-        let denom_refs: Vec<&[f64]> = denoms.iter().map(|d| d.as_slice()).collect();
-
-        let agg = compute_rel_loop_score_argmax_abs(&results, "L", 2, &denom_refs)
-            .expect("L must have a series");
-        assert_eq!(agg, vec![0.4]);
-    }
-
-    /// Absent loop returns `None`, matching the streaming-helper contract.
-    #[test]
-    fn argmax_abs_absent_loop_returns_none() {
-        let results = make_arrayed_results(&["L"], &[2], &[vec![vec![1.0, 2.0]]]);
-        let denoms = [vec![10.0_f64], vec![10.0]];
-        let denom_refs: Vec<&[f64]> = denoms.iter().map(|d| d.as_slice()).collect();
-        assert!(compute_rel_loop_score_argmax_abs(&results, "missing", 2, &denom_refs).is_none());
     }
 
     /// `LoopElementIndex` for a scalar loop reports empty dimensions
@@ -2965,221 +1942,6 @@ mod tests {
         assert!(index.contains_key("r1"));
     }
 
-    /// SAFEDIV-0 propagates per element: an element with zero denom at a
-    /// given step contributes a 0 rel-score for that element at that step.
-    /// If every element's denom is zero, the aggregator returns 0.
-    #[test]
-    fn argmax_abs_safediv_zero_per_element() {
-        // step 0: both elements have denom 0 -> both rel = 0 -> agg = 0.
-        // step 1: element 0 has denom 0 (rel=0); element 1 has denom 10
-        //         and slot value -7 -> rel = -0.7, dominant.
-        let loop_data = vec![vec![vec![5.0, 5.0], vec![5.0, -7.0]]];
-        let results = make_arrayed_results(&["L"], &[2], &loop_data);
-        let denoms = [
-            vec![0.0_f64, 0.0],  // element 0
-            vec![0.0_f64, 10.0], // element 1
-        ];
-        let denom_refs: Vec<&[f64]> = denoms.iter().map(|d| d.as_slice()).collect();
-
-        let agg = compute_rel_loop_score_argmax_abs(&results, "L", 2, &denom_refs)
-            .expect("L must have a series");
-        assert_eq!(agg.len(), 2);
-        // step 0: all elements safe-div to 0 -> agg = 0.
-        assert_eq!(agg[0], 0.0);
-        // step 1: only element 1 is non-zero, signed value -0.7.
-        assert!((agg[1] - (-0.7)).abs() < 1e-12, "got {}", agg[1]);
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(128))]
-
-        /// For any small random model, `compute_rel_loop_scores` must
-        /// agree with the reference SAFEDIV formula to within 1e-10.
-        /// Generators:
-        ///   - 1..=6 loops, assigned to 1..=3 partitions.
-        ///   - 1..=10 timesteps.
-        ///   - loop_score samples in [-100, 100].
-        #[test]
-        fn matches_reference_formula(
-            num_loops in 1usize..=6,
-            num_partitions in 1usize..=3,
-            num_steps in 1usize..=10,
-            raw_values in prop::collection::vec(
-                prop::collection::vec(-100.0_f64..=100.0_f64, 1..=10),
-                1..=6,
-            ),
-            raw_partitions in prop::collection::vec(0usize..=2, 1..=6),
-        ) {
-            let num_loops = num_loops.min(raw_values.len()).min(raw_partitions.len());
-            let num_steps = num_steps.min(raw_values[0].len());
-            let num_partitions = num_partitions.max(1);
-
-            // Build per-loop series with uniform step count.
-            let series: Vec<Vec<f64>> = (0..num_loops)
-                .map(|i| raw_values[i].iter().copied().take(num_steps).collect())
-                .collect();
-            for s in &series {
-                prop_assume!(s.len() == num_steps);
-            }
-
-            let loop_ids: Vec<String> = (0..num_loops).map(|i| format!("L{i}")).collect();
-            // Scalar-loop shape: one slot per loop (the slot-0 convenience
-            // view ignores anything beyond slot 0 anyway).
-            let loop_partitions: IndexMap<String, Vec<Option<usize>>> = loop_ids
-                .iter()
-                .enumerate()
-                .map(|(i, id)| (id.clone(), vec![Some(raw_partitions[i] % num_partitions)]))
-                .collect();
-
-            // Build Results matching the series.
-            let pair_refs: Vec<(&str, &[f64])> = loop_ids
-                .iter()
-                .zip(series.iter())
-                .map(|(id, s)| (id.as_str(), s.as_slice()))
-                .collect();
-            let results = make_results_for_loops(&pair_refs);
-
-            let scored = compute_rel_loop_scores(&results, &loop_partitions);
-            let expected = reference_rel_loop_scores(&loop_ids, &loop_partitions, &series);
-
-            for (i, id) in loop_ids.iter().enumerate() {
-                let actual_series = scored.get(id).expect("every loop has a series");
-                prop_assert_eq!(actual_series.len(), num_steps);
-                for t in 0..num_steps {
-                    let a = actual_series[t];
-                    let e = expected[i][t];
-                    // Both NaN counts as a match (shouldn't occur given
-                    // the finite generator range, but safeguard anyway).
-                    if a.is_nan() && e.is_nan() {
-                        continue;
-                    }
-                    prop_assert!(
-                        (a - e).abs() <= 1e-10,
-                        "loop {} t={}: actual={} expected={}", id, t, a, e
-                    );
-                }
-            }
-        }
-
-        /// `compute_rel_loop_scores_per_element` must match the naive
-        /// per-`(partition, slot)` reference for arbitrary multi-slot
-        /// partition vectors -- coupled (all entries the same `Some(p)`),
-        /// uncoupled (distinct `Some(p)` per slot), `None`-laced, and
-        /// scalar.  This is the regression net for the GH #487 bucket
-        /// grouping: the optimized BTreeMap-grid implementation and the
-        /// scan-all-loops reference are computed independently, so any
-        /// divergence in the broadcast stride, the slot gating, or the
-        /// SAFEDIV-0 handling shows up here.
-        ///
-        /// Per-loop `spec[i] = (kind, len, base, vals)` builds the
-        /// partition vector:
-        ///   - kind 0: scalar `[Some(base)]`.
-        ///   - kind 1: scalar `[None]`.
-        ///   - kind 2: coupled arrayed `[Some(base); len]`.
-        ///   - kind 3: uncoupled arrayed `[Some(base), Some(base+1), ...]`
-        ///     (distinct consecutive partitions).
-        ///   - kind 4: `None`-laced arrayed -- `vals[k]` chooses
-        ///     `Some(vals[k])` or `None` per slot.
-        /// Partition indices stay in a small pool (so coupling across
-        /// *different* loops actually happens); lengths stay tiny so 128
-        /// cases run in well under a second on a debug build.
-        #[test]
-        fn per_element_matches_naive_reference(
-            specs in prop::collection::vec(
-                (
-                    0usize..=4,                            // kind
-                    1usize..=3,                            // arrayed length
-                    0usize..=3,                            // base partition
-                    prop::collection::vec(0usize..=4, 3), // per-slot None/Some chooser (>=4 => None)
-                ),
-                1..=4,
-            ),
-            num_steps in 1usize..=4,
-            // Flat pool of loop_score samples; sliced per (loop, slot, step).
-            // Includes 0.0 so the SAFEDIV-0 path is exercised.
-            raw_vals in prop::collection::vec(-50.0_f64..=50.0_f64, 1..=300),
-        ) {
-            let n = specs.len();
-            let loop_ids: Vec<String> = (0..n).map(|i| format!("L{i}")).collect();
-
-            // Materialize each loop's per-slot partition vector.
-            let slots: Vec<Vec<Option<usize>>> = specs
-                .iter()
-                .map(|(kind, len, base, vals)| match kind {
-                    0 => vec![Some(*base)],
-                    1 => vec![None],
-                    2 => vec![Some(*base); *len],
-                    3 => (0..*len).map(|k| Some(*base + k)).collect(),
-                    _ => (0..*len)
-                        .map(|k| {
-                            let v = vals[k % vals.len()];
-                            if v >= 4 { None } else { Some(v) }
-                        })
-                        .collect(),
-                })
-                .collect();
-            let n_slots: Vec<usize> = slots.iter().map(|v| v.len().max(1)).collect();
-
-            // Build per-(loop, step, slot) loop_score data from the flat
-            // pool, advancing a single cursor so successive slots get
-            // distinct samples.  `series[i][step][slot]`.
-            let mut cursor = 0usize;
-            let mut series: Vec<Vec<Vec<f64>>> = Vec::with_capacity(n);
-            for &ns in &n_slots {
-                let mut per_step = Vec::with_capacity(num_steps);
-                for _ in 0..num_steps {
-                    let mut per_slot = Vec::with_capacity(ns);
-                    for _ in 0..ns {
-                        per_slot.push(raw_vals[cursor % raw_vals.len()]);
-                        cursor += 1;
-                    }
-                    per_step.push(per_slot);
-                }
-                series.push(per_step);
-            }
-
-            let results = make_arrayed_results(
-                &loop_ids.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                &n_slots,
-                &series,
-            );
-            let loop_partitions: IndexMap<String, Vec<Option<usize>>> = loop_ids
-                .iter()
-                .zip(slots.iter())
-                .map(|(id, v)| (id.clone(), v.clone()))
-                .collect();
-
-            let actual = compute_rel_loop_scores_per_element(&results, &loop_partitions);
-            let expected =
-                reference_rel_loop_scores_per_element(&loop_ids, &slots, &series, num_steps);
-
-            for (i, id) in loop_ids.iter().enumerate() {
-                let a = actual.get(id).expect("every loop has a series");
-                let e = &expected[i];
-                prop_assert_eq!(
-                    a.len(),
-                    e.len(),
-                    "loop {}: series length {} vs reference {}",
-                    id,
-                    a.len(),
-                    e.len()
-                );
-                for (idx, (&av, &ev)) in a.iter().zip(e.iter()).enumerate() {
-                    if av.is_nan() && ev.is_nan() {
-                        continue;
-                    }
-                    // The two paths sum the same floats in the same order
-                    // (sorted-loop-id member lists; ids are `L{i}`, i < 4),
-                    // so the result is bit-identical, not merely close.
-                    prop_assert_eq!(
-                        av, ev,
-                        "loop {} flat-index {}: actual {} vs reference {}", id, idx, av, ev
-                    );
-                }
-            }
-        }
-    }
-
     // --- Raw per-element loop scores (GH #998) ---------------------------
 
     #[test]
@@ -3234,7 +1996,7 @@ mod tests {
 
     #[test]
     fn raw_loop_score_out_of_range_element_is_zero_fill() {
-        // Matches the relative helper's convention (`effective_slot`): an
+        // `effective_slot`'s convention: an
         // ARRAYED loop queried past its own slot count yields zeros, not a
         // read of a neighboring loop's column -- while a SCALAR loop
         // broadcasts any element index to its single slot.
